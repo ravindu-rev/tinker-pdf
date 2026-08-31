@@ -49,6 +49,7 @@
 //! *decreasing* y in a format whose origin is the top left.
 
 use tinker_pdf_font::Sfnt;
+use tinker_pdf_shape::bidi::{BaseDirection, Paragraph};
 
 use super::font::Font;
 use super::markup::{self, Budget, Node, Trouble};
@@ -188,6 +189,21 @@ pub struct Placed {
     pub x: f64,
     /// How far off the baseline it sits, positive up the page.
     pub rise: f64,
+    /// What the pen moved by after this glyph, in the element's units.
+    ///
+    /// Carried rather than recomputed because 12.1.3 lets a mapping **state**
+    /// an advance that is not the font's, and reordering a run has to move the
+    /// pen by the advance the file asked for and not by the one the `hmtx`
+    /// happens to hold.
+    pub advance: f64,
+    /// The index in `UnicodeString`'s code units of the first code unit of the
+    /// cluster this glyph belongs to.
+    ///
+    /// Every glyph of a cluster carries the cluster's start, not its own
+    /// position: 12.1.3's cluster is the unit that reorders, because the
+    /// glyphs inside one are a single character's shaping and reversing them
+    /// would take a two-glyph 'ﻻ' apart.
+    pub unit: usize,
 }
 
 /// Why a `Glyphs` run did not become a run of glyphs.
@@ -215,6 +231,10 @@ impl From<RunError> for Trouble {
 /// numbers here are displacements along the baseline and nothing has to be
 /// added twice.
 ///
+/// `rtl` is 12.1's `BidiLevel` reduced to its parity. It reorders the run by
+/// UAX #9 and puts the origin at the run's **right** edge, so an odd-level
+/// run answers displacements in `[-width, 0]` — see [`reorder`].
+///
 /// # Errors
 /// [`RunError::Indices`] for a run that does not describe glyphs, and
 /// [`RunError::Exhausted`] when the document's glyph total is spent.
@@ -223,6 +243,7 @@ pub fn run(
     font: &Font,
     em: f64,
     budget: &mut Budget,
+    rtl: bool,
 ) -> Result<Vec<Placed>, RunError> {
     let units = unicode_string(node.attr("UnicodeString"));
     let mappings = match node.attr("Indices") {
@@ -266,9 +287,13 @@ pub fn run(
     // glyphs that mapping promised.
     let mut owed = 0usize;
 
+    // The code unit the cluster now open began at. Every glyph of a cluster
+    // carries it, so a reordering pass can move the cluster as one thing.
+    let mut cluster_at = 0usize;
     for (which, mapping) in mappings.iter().enumerate() {
         let last = which + 1 == mappings.len();
         let text = if mapping.cluster.is_some() || owed == 0 {
+            cluster_at = at;
             let cluster = mapping.cluster.unwrap_or(Cluster {
                 code_units: 1,
                 glyphs: 1,
@@ -303,7 +328,7 @@ pub fn run(
             owed -= 1;
             String::new()
         };
-        place(&mut out, &mut pen, *mapping, text, &metrics);
+        place(&mut out, &mut pen, *mapping, text, &metrics, cluster_at);
     }
     if owed != 0 {
         // A cluster promising more glyphs than the list holds is the same
@@ -320,11 +345,134 @@ pub fn run(
             .map_err(|_| RunError::Exhausted)?;
     }
     while at < units.len() {
+        let unit = at;
         let text = take(&units, &mut at, 1);
-        place(&mut out, &mut pen, Mapping::default(), text, &metrics);
+        place(&mut out, &mut pen, Mapping::default(), text, &metrics, unit);
     }
 
+    if rtl {
+        reorder(&mut out, &units);
+    }
     Ok(out)
+}
+
+/// UAX #9's rule L2 over one `Glyphs` run, and 12.1's right-to-left origin.
+///
+/// # Why the algorithm and not a reversal
+///
+/// A run whose `BidiLevel` is odd is right to left *as a whole*, and if its
+/// text were uniformly right to left then L2 would be exactly a reversal. It
+/// need not be: 12.1 states one level per run and the characters inside it
+/// still resolve levels of their own — European digits inside Arabic go up two
+/// levels by W2 and I2 and are drawn **left to right** inside a run that is
+/// drawn right to left. A build that reversed the glyph list would render
+/// `123` as `321` in every Arabic price in the document, which is a wrong
+/// picture that reads as a correct one.
+///
+/// So the text is run through the real algorithm with the base direction the
+/// level's parity states, and the visual order that comes back is the order
+/// the clusters are laid in.
+///
+/// # The origin is the run's right edge
+///
+/// 12.1.2 puts an odd-level run's origin at its **right**, so after the pen
+/// has been re-accumulated left to right the whole run is shifted back by its
+/// own width. That is what makes `extent` answer a negative low and a zero
+/// high, and what puts the box in the right place with no second rule.
+///
+/// # What reorders is the cluster
+///
+/// A cluster is one character's shaping, so its glyphs stay in the order the
+/// file wrote them and only the clusters move. Reversing inside a cluster
+/// would take a two-glyph ligature apart.
+fn reorder(out: &mut Vec<Placed>, units: &[u16]) {
+    if out.is_empty() {
+        return;
+    }
+    let order = visual_order(out, units);
+
+    // The offsets 12.1.3's `uOffset` put on each glyph, recovered as the gap
+    // between where the glyph sits and where the logical pen was: they are the
+    // file's and travel with the glyph, while the pen's own accumulation is
+    // the run's and is rebuilt.
+    let mut pen = 0.0f64;
+    let offsets: Vec<f64> = out
+        .iter()
+        .map(|glyph| {
+            let offset = glyph.x - pen;
+            pen += glyph.advance;
+            offset
+        })
+        .collect();
+    let width = pen;
+
+    let mut placed: Vec<Placed> = Vec::with_capacity(out.len());
+    let mut pen = 0.0f64;
+    for &at in &order {
+        let mut glyph = out[at].clone();
+        // Shifted by the run's whole width, which is 12.1.2's right-hand
+        // origin: the run ends at zero and grows to the left of it.
+        glyph.x = pen + offsets[at] - width;
+        pen += glyph.advance;
+        placed.push(glyph);
+    }
+    *out = placed;
+}
+
+/// The glyphs of a run in the order they are drawn, left to right.
+fn visual_order(out: &[Placed], units: &[u16]) -> Vec<usize> {
+    if units.is_empty() {
+        // No text to run UAX #9 over — an `Indices`-only run. There is nothing
+        // that could resolve to a level of its own, so the run is uniform at
+        // the level 12.1 stated and L2 on a uniform odd level is exactly a
+        // reversal.
+        return (0..out.len()).rev().collect();
+    }
+    // `UnicodeString` is UTF-16 and UAX #9 is defined on characters, so the
+    // two indices are not the same one: a non-BMP character is two code units
+    // and one character. Lossy for `take`'s own reason — a lone surrogate is a
+    // code unit this string may hold and no character — and it becomes one
+    // replacement character, so the mapping stays total either way.
+    let text = String::from_utf16_lossy(units);
+    let mut unit_to_char = vec![0usize; units.len() + 1];
+    let mut unit = 0usize;
+    let mut characters = 0usize;
+    for (index, character) in text.chars().enumerate() {
+        for _ in 0..character.len_utf16() {
+            if let Some(slot) = unit_to_char.get_mut(unit) {
+                *slot = index;
+            }
+            unit += 1;
+        }
+        characters = index + 1;
+    }
+    for slot in unit_to_char.iter_mut().skip(unit) {
+        *slot = characters;
+    }
+
+    let paragraph = Paragraph::new(&text, BaseDirection::RightToLeft);
+    let line = paragraph.line(0..paragraph.len());
+    // Where each character ended up. A character rule X9 removed is in no
+    // visual order at all and keeps `usize::MAX`, which sorts it to the end —
+    // an embedding control is not a glyph anybody drew.
+    let mut rank = vec![usize::MAX; characters + 1];
+    for (position, &character) in line.visual_order().iter().enumerate() {
+        if let Some(slot) = rank.get_mut(character) {
+            *slot = position;
+        }
+    }
+
+    let mut order: Vec<usize> = (0..out.len()).collect();
+    // Stable, which is what keeps a cluster's glyphs in the order the file
+    // wrote them: every glyph of one cluster carries the same rank.
+    order.sort_by_key(|&at| {
+        let character = unit_to_char
+            .get(out[at].unit)
+            .copied()
+            .unwrap_or(characters);
+        rank.get(character).copied().unwrap_or(usize::MAX)
+    });
+    order
 }
 
 /// What the font says, held together so the placement reads as one rule.
@@ -359,6 +507,7 @@ fn place(
     mapping: Mapping,
     text: String,
     metrics: &Metrics<'_, '_>,
+    unit: usize,
 ) {
     let id = match mapping.index {
         Some(id) => id,
@@ -383,6 +532,8 @@ fn place(
         text,
         x: *pen + u,
         rise: v,
+        advance,
+        unit,
     });
     *pen += advance;
 }

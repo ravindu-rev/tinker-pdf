@@ -371,7 +371,7 @@ refusal table.
 - **XPS** ([features/xps.md](features/xps.md)): a `ContextColor` naming
   an ICC profile; JPEG XR **reaching the page** — the decoder is built and
   `xps/image.rs` still refuses the format at the element, which is the same
-  shape TIFF was in before it was wired; `IsSideways` and odd `BidiLevel`.
+  shape TIFF was in before it was wired.
 
 ## How this file changes
 

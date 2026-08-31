@@ -735,15 +735,6 @@ pub enum XpsElementDefect {
     /// which is the geometry rule: a run at an origin this reader invented is
     /// text in the wrong place.
     GlyphsUnreadable,
-    /// `IsSideways="true"` (12.1). **Not painted**, and refused by name rather
-    /// than drawn upright: rotated glyphs drawn the other way round are a
-    /// different picture at the same place.
-    GlyphsSidewaysUnsupported,
-    /// A `BidiLevel` that is odd, which is 12.1's right-to-left run.
-    /// **Not painted**, because the origin of a right-to-left run is the
-    /// *right* edge of it and drawing it left to right puts the text
-    /// somewhere it is not.
-    GlyphsBidiUnsupported,
     /// A `StyleSimulations` other than `None` (12.1). The run **is painted**,
     /// at exactly the glyphs, widths and positions the file states, without
     /// the synthetic slant or weight — which is the paint-unreadable side of
@@ -801,12 +792,6 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::GlyphsFontUnreadable => "a font part this engine cannot read",
             XpsElementDefect::GlyphsIndicesUnreadable => "`Indices` that is not 12.1.3's grammar",
             XpsElementDefect::GlyphsUnreadable => "a `Glyphs` stating no usable origin or em size",
-            XpsElementDefect::GlyphsSidewaysUnsupported => {
-                "an `IsSideways` run, which is not drawn"
-            }
-            XpsElementDefect::GlyphsBidiUnsupported => {
-                "a right-to-left `BidiLevel`, which is not drawn"
-            }
             XpsElementDefect::GlyphsStyleSimulated => {
                 "a `StyleSimulations` this build does not simulate"
             }
