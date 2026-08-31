@@ -359,7 +359,9 @@ refusal table.
   ancestor's padding box, §9.6.1's `fixed` on every page, and
   `css-position-3` §3.4's `sticky`, which with no scrollport is
   `relative` by the specification's own words. `z-index` orders them,
-  §9.9.1.
+  §9.9.1. `display: inline-block` is a real atomic inline box, §9.2.2:
+  its own formatting context at §10.3.9's shrink-to-fit width, placed
+  on a line whole, aligned on §10.8.1's **last** line box.
   **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
   and reach the page, against seven committed files from three encoders
   with no code in common ([features/fonts.md](features/fonts.md)).

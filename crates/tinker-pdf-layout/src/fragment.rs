@@ -714,6 +714,20 @@ fn emit(
                     run.y += baseline;
                     out.runs.push(run);
                 }
+                // §9.2.2's atomic boxes, each a flow of its own hung from this
+                // line's baseline. Its runs keep their own reading-order
+                // stamps, so an `inline-block` reads where it was written.
+                for placed in &line.boxes {
+                    emit(
+                        &placed.items,
+                        &placed.blocks,
+                        0,
+                        placed.items.len(),
+                        baseline + placed.dy,
+                        Cutting::NONE,
+                        out,
+                    );
+                }
             }
             // A band is a flow of its own at the band's origin, and it is cut
             // by height where this one is cut by index -- so it has its own
@@ -778,6 +792,20 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
                     // where the two become one number on a page.
                     run.y += baseline;
                     out.runs.push(run);
+                }
+                // The same atomic boxes, drawn the same way: one function
+                // for a band and one for the column, and neither of them
+                // gets to forget an `inline-block`.
+                for placed in &line.boxes {
+                    emit(
+                        &placed.items,
+                        &placed.blocks,
+                        0,
+                        placed.items.len(),
+                        baseline + placed.dy,
+                        Cutting::NONE,
+                        out,
+                    );
                 }
             }
             // A band inside a band is atomic here for a line box's reason:

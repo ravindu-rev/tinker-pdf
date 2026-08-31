@@ -1643,31 +1643,48 @@ fn a_float_with_no_width_is_shrunk_to_fit() {
 /// is plausible and wrong is the failure this whole plan is organised against.
 #[test]
 fn an_unimplemented_property_is_named_rather_than_approximated() {
-    let mut style = block();
-    style.display = Display::InlineBlock;
-    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("a")])]);
+    // `column-span: all` rather than `display: inline-block`, which used to
+    // stand here and is now built. The claim is about the **shape** and not
+    // about either property: a value this build does not implement reaches the
+    // caller by name instead of being approximated into something plausible.
+    let mut spanning = block();
+    spanning.column_span = ColumnSpan::All;
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            vec![BoxNode::element(spanning, vec![text("a")])],
+        )],
+    );
     let laid = run(&tree, 200.0, 400.0);
     assert!(laid
         .warnings
         .iter()
-        .any(|(w, _)| *w == Warning::InlineBlockAsInline));
+        .any(|(w, _)| *w == Warning::ColumnSpanAsNone));
 }
 
 /// A warning is counted, not repeated — ruling 10's shape and
 /// `tinker_pdf_css::parser::Report`'s.
 #[test]
 fn warnings_are_deduplicated_with_a_count() {
-    let mut style = block();
-    style.display = Display::InlineBlock;
+    let mut spanning = block();
+    spanning.column_span = ColumnSpan::All;
     let children: Vec<BoxNode> = (0..5)
-        .map(|_| BoxNode::element(style.clone(), vec![text("a")]))
+        .map(|_| BoxNode::element(spanning.clone(), vec![text("a")]))
         .collect();
-    let laid = run(&BoxNode::element(block(), children), 200.0, 400.0);
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            children,
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
     let entry = laid
         .warnings
         .iter()
-        .find(|(w, _)| *w == Warning::InlineBlockAsInline)
-        .expect("the display value was named");
+        .find(|(w, _)| *w == Warning::ColumnSpanAsNone)
+        .expect("the value was named");
     assert_eq!(entry.1, 5);
 }
 
@@ -3123,6 +3140,189 @@ fn a_line_taller_than_a_page_inside_a_band_still_says_so() {
         laid.warnings
     );
     assert_eq!(laid.text(), "x", "and the letter is still on a page");
+}
+
+// ---- CSS 2.2 §9.2.2, the atomic inline-level box ---------------------------
+
+/// An `inline-block` at a stated width, holding the given text.
+fn inline_block(width: Option<f64>, body: &str) -> BoxNode {
+    let mut style = block();
+    style.display = Display::InlineBlock;
+    if let Some(width) = width {
+        style.width = Size::Length(LengthPercentage::Px(width));
+    }
+    BoxNode::element(style, vec![text(body)])
+}
+
+/// §9.2.2: an atomic inline box takes **its own** width on the line, and the
+/// text after it starts past that width and not past its letters.
+///
+/// A hundred-point `inline-block` holding one ten-point letter: the letter is
+/// at ten and the text after the box is at a hundred and ten. A build that
+/// poured its text into the line puts that text at twenty, and the page is a
+/// paragraph with a hole in the middle of it that nothing names.
+#[test]
+fn an_inline_block_takes_its_own_width_on_the_line() {
+    let tree = BoxNode::element(
+        block(),
+        vec![text("x"), inline_block(Some(100.0), "a"), text("y")],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 10.0, 110.0]);
+    assert_eq!(
+        laid.text(),
+        "xay",
+        "and the replacement character is not text"
+    );
+}
+
+/// §10.3.9: with `width: auto` the width is **shrink-to-fit**, which is a
+/// float's own rule.
+#[test]
+fn an_auto_width_inline_block_shrinks_to_fit() {
+    let tree = BoxNode::element(
+        block(),
+        vec![text("x"), inline_block(None, "abc"), text("y")],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    // Three ten-point letters is thirty points of box, so the text after it
+    // starts at forty.
+    assert_eq!(xs(&laid, 0), vec![0.0, 10.0, 40.0]);
+}
+
+/// §10.8.1: an inline-block's baseline is the baseline of its **last** line
+/// box.
+///
+/// The last and not the first, and the fixture is built so the two differ. A
+/// forty-point strut holds the line's own baseline at thirty-six whatever the
+/// box does; the box is two ten-point lines, twenty-four tall, with baselines
+/// at nine and twenty-one of its own. Aligned on its last, its first line lands
+/// at twenty-four and its second **on** the paragraph's baseline. Aligned on
+/// its first, the whole box drops twelve points and its second line hangs below
+/// the line it is on — which is what every book with a two-line inline caption
+/// looks like in a build that read the wrong sentence.
+#[test]
+fn an_inline_blocks_baseline_is_its_last_line() {
+    let mut big = block();
+    big.font_size = 40.0;
+    let mut inner = block();
+    inner.display = Display::InlineBlock;
+    let box_of_two = BoxNode::element(inner, vec![para("a"), para("b")]);
+    let tree = BoxNode::element(big, vec![BoxNode::text(base(), "x"), box_of_two]);
+    let laid = run(&tree, 400.0, 400.0);
+    let ys = baselines(&laid, 0);
+    assert_eq!(ys.len(), 3, "{ys:?}");
+    // "a", "b", then the paragraph's own "x" — the box's runs were stamped
+    // inside it and read before the piece that holds it.
+    assert!(
+        close(ys[0], 36.0),
+        "the paragraph own baseline moved: {ys:?}"
+    );
+    assert!(close(ys[1], 24.0), "{ys:?}");
+    assert!(
+        close(ys[2], 36.0),
+        "the box last line is not on the paragraph baseline: {ys:?}"
+    );
+}
+
+/// §9.2.2: it is **atomic** — the whole box moves to the next line rather than
+/// breaking inside itself.
+///
+/// A hundred-point measure, eighty points of text, a forty-point box: the box
+/// does not fit beside the text, so all of it goes to line two. A build that
+/// set its content inline would put the first of its letters at eighty and the
+/// second on the next line, splitting a box across a line break, which is the
+/// one thing "atomic" forbids.
+#[test]
+fn an_inline_block_moves_to_the_next_line_whole() {
+    let tree = BoxNode::element(
+        block(),
+        vec![text("xxxxxxxx "), inline_block(Some(40.0), "ab")],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    let ys = baselines(&laid, 0);
+    let x = xs(&laid, 0);
+    assert_eq!(ys.len(), 2, "{ys:?}");
+    assert!(close(ys[0], 9.0), "{ys:?}");
+    assert!(close(ys[1], 21.0), "the box did not move whole: {ys:?}");
+    assert!(
+        close(x[1], 0.0),
+        "the box did not start the second line: {x:?}"
+    );
+    assert_eq!(conservable(&laid.text()), conservable("xxxxxxxx ab"));
+}
+
+/// §16.2: the line's **width** counts the box, which is what `text-align`
+/// aligns against.
+///
+/// A build that placed the box and did not add its width to the line's total
+/// gets every left-aligned page right and every centred or right-aligned one
+/// wrong by the width of the box. Two hundred points of measure, a
+/// hundred-point box and one ten-point letter: right-aligned, the letter sits
+/// at ninety and the box at a hundred. Forget the box and the line is ten
+/// points long, the letter goes to a hundred and ninety, and the box runs off
+/// the page.
+#[test]
+fn an_inline_blocks_width_is_part_of_the_line_it_is_aligned_on() {
+    let mut right = block();
+    right.text_align = TextAlign::Right;
+    let tree = BoxNode::element(right, vec![text("x"), inline_block(Some(100.0), "a")]);
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(close(x[0], 90.0), "{x:?}");
+    assert!(close(x[1], 100.0), "{x:?}");
+}
+
+/// A line that is **moved** takes its boxes with it.
+///
+/// A line box is moved horizontally whenever it is inside something placed
+/// beside something else — a table cell, a float, a flex item, a column — and
+/// there are four such places. The box on it is a flow of its own, so a build
+/// that moved the runs and not the boxes leaves every `inline-block` at the
+/// left edge of the page: the second column of a two-column container puts its
+/// text at a hundred and its `inline-block` at zero.
+#[test]
+fn an_inline_block_moves_with_the_line_that_holds_it() {
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(0.0)),
+            vec![
+                para("a"),
+                BoxNode::element(block(), vec![inline_block(Some(30.0), "b")]),
+            ],
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x.len(), 2, "{x:?}");
+    assert!(close(x[0], 0.0), "{x:?}");
+    assert!(
+        close(x[1], 100.0),
+        "the box stayed at the paragraph's origin: {x:?}"
+    );
+}
+
+/// And its height makes the line taller, which is the half a build that
+/// ignored `height` on an `inline-block` lost.
+#[test]
+fn an_inline_blocks_height_makes_its_line_taller() {
+    let mut style = block();
+    style.display = Display::InlineBlock;
+    style.height = Size::Length(LengthPercentage::Px(40.0));
+    let tall = BoxNode::element(style, vec![text("a")]);
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(tinted(block()), vec![text("x"), tall])],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    // Nine points over the baseline and thirty-one under it: the box's own
+    // baseline is its one line's, nine from its top, and it is forty tall.
+    assert!(
+        close(laid.pages[0].boxes[0].height, 40.0),
+        "{}",
+        laid.pages[0].boxes[0].height
+    );
 }
 
 // ---- CSS 2.2 §9.4.3 and §9.6, the four positions that are not static -------

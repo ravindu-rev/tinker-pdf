@@ -149,6 +149,9 @@ pub(crate) struct LineBox {
     pub baseline: f64,
     /// The runs on it, `x` already absolute and `y` relative to the baseline.
     pub runs: Vec<TextRun>,
+    /// The atomic inline boxes on it, §9.2.2, `x` already absolute and `dy`
+    /// relative to the baseline.
+    pub boxes: Vec<InlineBox>,
     /// Which line of its block container this is, counting from zero.
     pub index_in_block: usize,
     /// How many lines that block container has in total. Patched once the
@@ -666,10 +669,55 @@ struct FlexItem {
 struct Piece {
     text: String,
     style: Consumed,
+    /// The box this piece **is**, where it is not text at all.
+    ///
+    /// CSS 2.2 §9.2.2's atomic inline-level box: `display: inline-block`. Its
+    /// `text` is one U+FFFC OBJECT REPLACEMENT CHARACTER, which is what gives
+    /// it a position in the string the line breaker works over and a width the
+    /// measure can be asked for — and which never becomes a glyph, so text
+    /// conservation never sees it.
+    atomic: Option<Atomic>,
     /// The [`BoxNode::anchor`] of the node this piece's text came from.
     anchor: Option<u32>,
     /// Its position in document order. See [`Builder::sequence`].
     order: usize,
+}
+
+/// An atomic inline-level box, CSS 2.2 §9.2.2.
+///
+/// **Its own formatting context, placed on a line.** An `inline-block` is laid
+/// out once, at its own shrink-to-fit width, and then set on the line as a
+/// single unit that cannot be broken — which is the whole of what "atomic"
+/// means and the whole of the difference from what this build did before, which
+/// was to pour its text into the line and lose its width, its height and its
+/// vertical margins.
+#[derive(Clone, Debug)]
+pub(crate) struct Atomic {
+    /// Its own flow, at `x = 0` and `y = 0` until the line places it.
+    pub items: Vec<Item>,
+    /// Its own block records, indexing those items.
+    pub blocks: Vec<BlockRecord>,
+    /// The **margin-box** width, which is what it takes on the line.
+    pub width: f64,
+    /// The margin-box height.
+    pub height: f64,
+    /// From the margin-box top to the baseline it sits on.
+    ///
+    /// §10.8.1: an inline-block's baseline is *"the baseline of its last line
+    /// box"*, and its bottom margin edge where it has none — a box holding one
+    /// picture and no text sits on the line rather than hanging from it.
+    pub baseline: f64,
+}
+
+/// One atomic inline box, placed on a line.
+#[derive(Clone, Debug)]
+pub(crate) struct InlineBox {
+    /// Its own flow, already moved to its `x` on the line.
+    pub items: Vec<Item>,
+    /// Its records, likewise.
+    pub blocks: Vec<BlockRecord>,
+    /// From the line's baseline to the box's **top**.
+    pub dy: f64,
 }
 
 /// Lays a tree out into one continuous column.
@@ -1171,6 +1219,7 @@ impl<M: Metrics> Builder<'_, M> {
                     style: style.clone(),
                     anchor: node.anchor,
                     order: self.order(),
+                    atomic: None,
                 });
                 self.lines(&pieces, style, block, content_x, content_width)
             }
@@ -1335,11 +1384,12 @@ impl<M: Metrics> Builder<'_, M> {
         }
         self.budget.spend_box()?;
         if style.display == Display::InlineBlock {
-            // Here rather than beside the block builder, which is where it was
-            // until milestone 10 and where it could not fire: an
-            // `inline-block` is not block-level, so it arrives in an inline
-            // formatting context and is set as text.
-            self.warn(Warning::InlineBlockAsInline);
+            // §9.2.2: an atomic inline-level box. Here rather than beside the
+            // block builder for the reason the warning that used to stand here
+            // gave: an `inline-block` is not block-level, so it arrives in an
+            // inline formatting context — and this is where that context can
+            // give it a place on a line instead of pouring its text into one.
+            return self.atomic_inline(node, &style, out, depth, content_width);
         }
         match &node.content {
             Content::Text(source) => {
@@ -1350,6 +1400,7 @@ impl<M: Metrics> Builder<'_, M> {
                         style,
                         anchor: node.anchor,
                         order: self.order(),
+                        atomic: None,
                     });
                 }
             }
@@ -1614,6 +1665,68 @@ impl<M: Metrics> Builder<'_, M> {
         Ok(())
     }
 
+    /// One `display: inline-block` box, CSS 2.2 §9.2.2.
+    ///
+    /// **Laid out once, in a formatting context of its own, and then set on the
+    /// line as one thing.** §10.3.9 gives it a float's width — shrink-to-fit
+    /// where `width` is `auto` — which is why it is a float's own function; and
+    /// §9.4.2 makes its inside a block formatting context, which is what
+    /// `sublayout` already produces.
+    ///
+    /// Its piece's text is one **U+FFFC OBJECT REPLACEMENT CHARACTER**. That is
+    /// not a placeholder for the box's text: it is the box's position in the
+    /// string the line breaker works over, so the breaker can put a line end
+    /// beside it and the measure can be asked what it costs. It never becomes a
+    /// glyph — [`Builder::line`] gives an atomic span an [`InlineBox`] and no
+    /// run at all — so text conservation never sees it, and the box's own runs
+    /// carry their own reading-order stamps.
+    fn atomic_inline(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        out: &mut Vec<Piece>,
+        depth: usize,
+        containing: f64,
+    ) -> Result<(), Refusal> {
+        let width = self.float_width(node, style, containing, depth, false, false)?;
+        let sub = self.sublayout(node, width, depth, false)?;
+        // §10.8.1: *"the baseline of the last line box in the normal flow"*,
+        // and the bottom margin edge where there is none. The **last** and not
+        // the first, which is the difference between a two-line inline-block
+        // sitting on the line and hanging from it.
+        let baseline = last_baseline(&sub).unwrap_or(sub.height);
+        // A float inside an inline-block belongs to the inline-block's own
+        // formatting context — §9.4.2 makes it one — so it is folded into the
+        // box rather than escaping to the paragraph's.
+        let mut items = sub.items;
+        let mut blocks = sub.blocks;
+        for float in sub.floats {
+            let base = items.len();
+            for mut record in float.blocks {
+                if let Some(first) = record.first {
+                    record.first = Some(first + base);
+                    record.last += base;
+                }
+                blocks.push(record);
+            }
+            items.extend(float.items);
+        }
+        out.push(Piece {
+            text: "\u{FFFC}".to_string(),
+            style: style.clone(),
+            anchor: node.anchor,
+            order: self.order(),
+            atomic: Some(Atomic {
+                items,
+                blocks,
+                width,
+                height: sub.height,
+                baseline,
+            }),
+        });
+        Ok(())
+    }
+
     /// §10.3.5: a float's used width, shrink-to-fit where `width` is `auto`.
     ///
     /// *"min(max(preferred minimum width, available width), preferred width)"*,
@@ -1700,6 +1813,12 @@ impl<M: Metrics> Builder<'_, M> {
                     ItemKind::Line(line) => {
                         for run in &line.runs {
                             *width = width.max(run.x + run.width);
+                        }
+                        // An atomic box's own text is inside it, so a trial
+                        // that did not look would measure a paragraph holding
+                        // an `inline-block` as the width of the words beside it.
+                        for placed in &line.boxes {
+                            extend(&placed.items, width);
                         }
                     }
                     ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
@@ -3449,6 +3568,14 @@ impl<M: Metrics> Builder<'_, M> {
             if lo >= hi {
                 continue;
             }
+            // An atomic box costs its own width and no glyph at all: the
+            // U+FFFC in the string is its position, not its ink. A build that
+            // measured the character would give a two-inch figure the width of
+            // one replacement glyph and overflow every line holding one.
+            if let Some(atomic) = &pieces[*index].atomic {
+                total += atomic.width;
+                continue;
+            }
             let style = &pieces[*index].style;
             let slice = &content[lo..hi];
             total += self.advance_of(slice, &style.font());
@@ -3552,6 +3679,9 @@ impl<M: Metrics> Builder<'_, M> {
         // documents as relative to the baseline, and the two that do not are
         // decided below.
         let mut aligned: Vec<(VerticalAlign, f64, f64)> = Vec::new();
+        // §9.2.2's atomic boxes, gathered beside the runs and given their `x`
+        // in the same pass that gives the runs theirs.
+        let mut boxes: Vec<(usize, InlineBox)> = Vec::new();
         let mut width = 0.0;
         for (span_start, span_end, index) in spans {
             let lo = (*span_start).max(start);
@@ -3561,13 +3691,29 @@ impl<M: Metrics> Builder<'_, M> {
             }
             let style = &pieces[*index].style;
             let font = style.font();
+            // §9.2.2: an atomic box's extent either side of the baseline is
+            // the box's own, not a font's — which is why the two `over`/`under`
+            // are read from it and every one of §10.8.1's eight values then
+            // works on it unchanged.
+            let atomic = pieces[*index].atomic.as_ref();
             let vertical = self.metrics.vertical(&font);
             let leading = (style.line_height - vertical.height()) / 2.0;
             // The inline box's own extent either side of **its** baseline,
             // which is the content area plus §10.8.1's half-leading and is
             // what every one of the eight values is stated against.
-            let over = vertical.ascent + leading;
-            let under = vertical.descent + leading;
+            let (over, under) = match atomic {
+                Some(atomic) => (atomic.baseline, atomic.height - atomic.baseline),
+                None => (vertical.ascent + leading, vertical.descent + leading),
+            };
+            // §10.8.1's `text-top` and `text-bottom` are stated against the
+            // **content area**, which is the font's box and not the inline
+            // box: the half-leading is part of the line's height and not part
+            // of the letters. An atomic box has no such distinction — its
+            // margin box is all there is — so for it the two pairs are one.
+            let (face_over, face_under) = match atomic {
+                Some(_) => (over, under),
+                None => (vertical.ascent, vertical.descent),
+            };
             // Positive is **down**, because that is the direction this module's
             // `y` runs. §10.8.1 states its lengths the other way up -- a
             // positive `vertical-align` length *raises* the box -- so the one
@@ -3581,13 +3727,12 @@ impl<M: Metrics> Builder<'_, M> {
                 // build flattens an inline subtree into spans rather than
                 // nesting boxes -- so the parent's content area is the strut's,
                 // which is exactly what §10.8.1's strut is.
-                VerticalAlign::TextTop => vertical.ascent - strut.ascent,
-                VerticalAlign::TextBottom => strut.descent - vertical.descent,
+                VerticalAlign::TextTop => face_over - strut.ascent,
+                VerticalAlign::TextBottom => strut.descent - face_under,
                 // *"the vertical midpoint of the box with the baseline of the
                 // parent box plus half the x-height of the parent"*.
                 VerticalAlign::Middle => {
-                    -(X_HEIGHT * container.font_size) / 2.0
-                        - (vertical.descent - vertical.ascent) / 2.0
+                    -(X_HEIGHT * container.font_size) / 2.0 - (face_under - face_over) / 2.0
                 }
                 VerticalAlign::Length(LengthPercentage::Px(px)) => -px,
                 // A percentage is of this element's own `line-height` and
@@ -3605,6 +3750,40 @@ impl<M: Metrics> Builder<'_, M> {
                 below = below.max(under + shift);
             }
             aligned.push((style.vertical_align, over, under));
+            // An atomic box is placed, not set: no run, no glyph, and a width
+            // that is the box's. Its `x` is filled in by the alignment pass
+            // below, in the same order the runs are.
+            if let Some(atomic) = atomic {
+                boxes.push((
+                    runs.len(),
+                    InlineBox {
+                        items: atomic.items.clone(),
+                        blocks: atomic.blocks.clone(),
+                        dy: shift - atomic.baseline,
+                    },
+                ));
+                runs.push(TextRun {
+                    x: 0.0,
+                    y: shift,
+                    width: atomic.width,
+                    text: String::new(),
+                    font_size: style.font_size,
+                    families: style.families.clone(),
+                    weight: style.font_weight,
+                    style: style.font_style,
+                    variant: style.font_variant,
+                    color: style.color,
+                    decoration: style.text_decoration,
+                    painted: false,
+                    letter_spacing: 0.0,
+                    word_spacing: 0.0,
+                    generated: true,
+                    anchor: pieces[*index].anchor,
+                    order: pieces[*index].order,
+                });
+                width += atomic.width;
+                continue;
+            }
             let text = content[lo..hi].to_string();
             let advance = self.advance_of(&text, &font)
                 + style.letter_spacing * text.chars().count() as f64
@@ -3681,10 +3860,25 @@ impl<M: Metrics> Builder<'_, M> {
             offset += run.width;
         }
 
+        // The placeholder runs carry the `x` the alignment pass computed, so
+        // the boxes take it from them and the placeholders go. One pass and not
+        // two, which is what keeps a box and the text beside it from ever
+        // disagreeing about where the line starts.
+        let mut boxes: Vec<InlineBox> = boxes
+            .into_iter()
+            .map(|(at, mut placed)| {
+                translate(&mut placed.items, &mut placed.blocks, runs[at].x, 0.0);
+                placed
+            })
+            .collect();
+        boxes.shrink_to_fit();
+        runs.retain(|run| !(run.generated && run.text.is_empty()));
+
         let height = above + below;
         let line = LineBox {
             baseline: above,
             runs,
+            boxes,
             index_in_block,
             lines_in_block: 0,
             orphans: container.orphans,
@@ -4199,6 +4393,31 @@ fn anonymous_flex_item(parent: &ComputedStyle, run: Vec<BoxNode>) -> BoxNode {
 /// box — which §8.3 answers by synthesising a baseline from the box's cross-end
 /// edge. That is the caller's fallback and not this function's, because the
 /// box's size is the caller's to know.
+/// The distance from a sub-flow's top to its **last** baseline.
+///
+/// CSS 2.2 §10.8.1's rule for an `inline-block`, and the last rather than the
+/// first is the whole of it: a two-line inline-block aligned on its first
+/// baseline **hangs** from the line it is on, with its second line below the
+/// paragraph's, and every book that puts a two-line caption inline looks
+/// broken in a way nothing names.
+fn last_baseline(sub: &Sublayout) -> Option<f64> {
+    let mut found = None;
+    for item in &sub.items {
+        match &item.kind {
+            ItemKind::Line(line) => found = Some(item.y + line.baseline),
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                for inner in &band.items {
+                    if let ItemKind::Line(line) = &inner.kind {
+                        found = Some(item.y + inner.y + line.baseline);
+                    }
+                }
+            }
+            ItemKind::Margin(_) | ItemKind::Edge => {}
+        }
+    }
+    found
+}
+
 fn first_baseline(sub: &Sublayout) -> Option<f64> {
     for item in &sub.items {
         match &item.kind {
@@ -4316,6 +4535,10 @@ fn shift(items: &mut [Item], dx: f64, dy: f64) {
                     run.x += dx;
                     run.y += dy;
                 }
+                for placed in &mut line.boxes {
+                    translate(&mut placed.items, &mut placed.blocks, dx, 0.0);
+                    placed.dy += dy;
+                }
             }
             ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
                 shift(&mut band.items, dx, dy);
@@ -4336,6 +4559,9 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
             ItemKind::Line(line) => {
                 for run in &mut line.runs {
                     run.x += dx;
+                }
+                for placed in &mut line.boxes {
+                    translate(&mut placed.items, &mut placed.blocks, dx, 0.0);
                 }
             }
             // A band's items are already relative to the band, so only the
