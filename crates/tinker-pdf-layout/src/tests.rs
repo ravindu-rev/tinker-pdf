@@ -12,7 +12,7 @@
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, ColumnCount,
-    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, Inset,
+    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, Gap, Inset,
     JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize,
     OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TextAlign,
     VerticalAlign, Visibility, WhiteSpace, ZIndex,
@@ -5126,11 +5126,11 @@ fn a_flex_line_always_takes_one_item() {
         },
     ];
     assert_eq!(
-        flex::lines(&items, 100.0, FlexWrap::Wrap),
+        flex::lines(&items, 100.0, FlexWrap::Wrap, 0.0),
         vec![(0, 1), (1, 2)]
     );
     assert_eq!(
-        flex::lines(&items, 100.0, FlexWrap::NoWrap),
+        flex::lines(&items, 100.0, FlexWrap::NoWrap, 0.0),
         vec![(0, 2)],
         "and `nowrap` is one line whatever it costs"
     );
@@ -5392,6 +5392,149 @@ fn a_max_width_clamps_a_column_containers_cross_size() {
         close(x[0], 90.0),
         "a twenty-point item centred in two hundred points starts at ninety: {x:?}"
     );
+}
+
+// ---- `css-align-3` §8.1, the gap between flex items ------------------------
+
+/// A flex container with the two gaps stated.
+fn gapped(direction: FlexDirection, wrap: FlexWrap, column: f64, row: f64) -> ComputedStyle {
+    let mut style = flex_container(direction, wrap);
+    style.column_gap = Gap::Length(LengthPercentage::Px(column));
+    style.row_gap = Gap::Length(LengthPercentage::Px(row));
+    style
+}
+
+/// §8.1: `column-gap` separates the **items** of a row container, and it goes
+/// between them and not after the last.
+///
+/// Three fifty-point items and a twenty-point gap: the second starts at
+/// seventy and the third at a hundred and forty. A build that added a gap after
+/// the last one would put the same items in the same places and only be wrong
+/// about how much room they took, which is why the wrapping fixture below
+/// exists as well.
+#[test]
+fn a_column_gap_separates_a_row_containers_items() {
+    let tree = BoxNode::element(
+        gapped(FlexDirection::Row, FlexWrap::NoWrap, 20.0, 0.0),
+        vec![
+            flex_item("a", 0.0, 0.0, basis(50.0)),
+            flex_item("b", 0.0, 0.0, basis(50.0)),
+            flex_item("c", 0.0, 0.0, basis(50.0)),
+        ],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![0.0, 70.0, 140.0]);
+}
+
+/// §8.1's axis mapping: in a **column** container it is `row-gap` that
+/// separates the items, because `row-gap` is the block-axis gap and a column
+/// container's main axis is the block axis.
+///
+/// The same declaration on the same items in the other direction. A build that
+/// read `column-gap` as "the gap between flex items" gets every row container
+/// right and every column container wrong, and no fixture written in one
+/// direction can tell.
+#[test]
+fn a_column_containers_items_are_separated_by_the_row_gap() {
+    let tree = BoxNode::element(
+        gapped(FlexDirection::Column, FlexWrap::NoWrap, 99.0, 20.0),
+        vec![para("a"), para("b")],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // Twelve-point lines: the second item's baseline is twelve plus twenty of
+    // gap below the first's.
+    assert!(close(ys[1] - ys[0], 32.0), "{ys:?}");
+}
+
+/// §9.3 step 5: the gap is part of what a line has to **fit**, so it decides
+/// where the container wraps.
+///
+/// Two fifty-point items in a hundred-and-ten-point container: with no gap
+/// they share a line, and with a twenty-point gap they cannot — a hundred and
+/// twenty is more than a hundred and ten. A build that collected lines without
+/// the gaps keeps them on one line and then overflows by exactly the gap it
+/// forgot.
+#[test]
+fn the_gap_decides_where_a_flex_container_wraps() {
+    let laid_out = |gap: f64| {
+        let tree = BoxNode::element(
+            gapped(FlexDirection::Row, FlexWrap::Wrap, gap, 0.0),
+            vec![
+                flex_item("a", 0.0, 0.0, basis(50.0)),
+                flex_item("b", 0.0, 0.0, basis(50.0)),
+            ],
+        );
+        let laid = run(&tree, 110.0, 400.0);
+        baselines(&laid, 0)
+    };
+    let together = laid_out(0.0);
+    assert!(close(together[0], together[1]), "{together:?}");
+    let apart = laid_out(20.0);
+    assert!(
+        !close(apart[0], apart[1]),
+        "the gap did not push the second item onto its own line: {apart:?}"
+    );
+}
+
+/// §9.7: the gaps are **not free space**, so a `flex-grow` item does not grow
+/// into them.
+///
+/// Two items of no basis at all in a two-hundred-point container with a
+/// twenty-point gap: a hundred and eighty points to share, ninety each, and the
+/// second starts at a hundred and ten. A build that gave §9.7 the whole
+/// container makes them a hundred each, and the line is twenty points too long.
+#[test]
+fn a_growing_item_does_not_grow_into_the_gap() {
+    let tree = BoxNode::element(
+        gapped(FlexDirection::Row, FlexWrap::NoWrap, 20.0, 0.0),
+        vec![
+            flex_item("a", 1.0, 0.0, basis(0.0)),
+            flex_item("b", 1.0, 0.0, basis(0.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let x = xs(&laid, 0);
+    assert!(close(x[0], 0.0), "{x:?}");
+    assert!(close(x[1], 110.0), "{x:?}");
+}
+
+/// §8.2: and `justify-content` measures its free space against a line that
+/// includes the gaps.
+///
+/// Two fifty-point items, a twenty-point gap and a two-hundred-point
+/// container: the line is a hundred and twenty long, eighty is free, and
+/// centring puts the first item at forty. A build that left the gap out of the
+/// line's length centres a hundred points and starts at fifty.
+#[test]
+fn justify_content_counts_the_gap_in_the_lines_length() {
+    let mut style = gapped(FlexDirection::Row, FlexWrap::NoWrap, 20.0, 0.0);
+    style.justify_content = JustifyContent::Center;
+    let tree = BoxNode::element(
+        style,
+        vec![
+            flex_item("a", 0.0, 0.0, basis(50.0)),
+            flex_item("b", 0.0, 0.0, basis(50.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(xs(&laid, 0), vec![40.0, 110.0]);
+}
+
+/// §8.1: and `row-gap` separates the **lines** of a row container.
+#[test]
+fn a_row_gap_separates_a_row_containers_lines() {
+    let tree = BoxNode::element(
+        gapped(FlexDirection::Row, FlexWrap::Wrap, 0.0, 20.0),
+        vec![
+            flex_item("a", 0.0, 0.0, basis(120.0)),
+            flex_item("b", 0.0, 0.0, basis(120.0)),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let ys = baselines(&laid, 0);
+    // Two lines of twelve points with twenty between them.
+    assert!(close(ys[1] - ys[0], 32.0), "{ys:?}");
 }
 
 /// §4: a run of child text becomes an anonymous flex item, and a run that is

@@ -2603,6 +2603,25 @@ impl<M: Metrics> Builder<'_, M> {
             (stated_height, Some(content_width))
         };
 
+        // `css-align-3` §8.1's two gaps, sorted onto the two axes — and the
+        // mapping is the **axis** and not the direction: `column-gap` is always
+        // the inline-axis gap, so it separates the *items* of a row container
+        // and the *lines* of a column one, and `row-gap` is the other way. A
+        // build that read `column-gap` as "the gap between flex items" gets
+        // every row container right and every column container wrong.
+        //
+        // A percentage is of the container's own content box in that axis, and
+        // its block size is `auto` until its content is laid out — so a
+        // percentage `row-gap` here resolves against nothing and is zero, which
+        // is §8.1's answer for an indefinite size rather than a guess.
+        let inline_gap = style.gap_px(style.column_gap, content_width);
+        let block_gap = style.gap_px(style.row_gap, stated_height.unwrap_or(0.0));
+        let (main_gap, cross_gap) = if row {
+            (inline_gap, block_gap)
+        } else {
+            (block_gap, inline_gap)
+        };
+
         // ---- steps 1 and 2: the items, sized along the main axis ------------
         let mut items: Vec<FlexItem> = Vec::with_capacity(boxes.len());
         let mut cross_inner: Vec<f64> = Vec::with_capacity(boxes.len());
@@ -2773,10 +2792,13 @@ impl<M: Metrics> Builder<'_, M> {
         // using the sum of the hypothetical sizes as the measure produces.
         let total_hypothetical: f64 = sizes.iter().map(flex::Item::outer_hypothetical).sum();
         let available_main = container_main_definite.unwrap_or(total_hypothetical);
-        let ranges = flex::lines(&sizes, available_main, wrap);
+        let ranges = flex::lines(&sizes, available_main, wrap, main_gap);
         let mut used_main = vec![0.0f64; sizes.len()];
         for &(from, to) in &ranges {
-            for (offset, size) in flex::resolve(&sizes[from..to], available_main)
+            // §9.7 distributes what is left **after** the gaps: they are not
+            // free space, and an item that grew into one would close it.
+            let room = available_main - gaps_between(to - from, main_gap);
+            for (offset, size) in flex::resolve(&sizes[from..to], room)
                 .into_iter()
                 .enumerate()
             {
@@ -2853,7 +2875,8 @@ impl<M: Metrics> Builder<'_, M> {
         // container's cross size is definite, which is §8.4's *"has no effect
         // on a single-line flex container"* arriving as arithmetic rather than
         // as a special case.
-        let lines_total: f64 = line_cross.iter().sum();
+        let lines_total: f64 =
+            line_cross.iter().sum::<f64>() + gaps_between(ranges.len(), cross_gap);
         let container_cross = container_cross_definite.unwrap_or(lines_total);
         let (lead, gap, extra) = flex::align_content(
             style.align_content,
@@ -2906,7 +2929,8 @@ impl<M: Metrics> Builder<'_, M> {
         for (line, &(from, to)) in ranges.iter().enumerate() {
             let used: f64 = (from..to)
                 .map(|position| used_main[position] + sizes[position].extra)
-                .sum();
+                .sum::<f64>()
+                + gaps_between(to - from, main_gap);
             // §9 has no `overflow` in it: a line whose items do not fit is
             // drawn where they were put. Saying so is the difference between a
             // known gap and a figure that quietly runs off the page.
@@ -2921,7 +2945,7 @@ impl<M: Metrics> Builder<'_, M> {
                 let outer = used_main[position] + sizes[position].extra;
                 main_at[at] =
                     flex::main_position(style.flex_direction, running, outer, available_main);
-                running += outer + between;
+                running += outer + between + main_gap;
                 let inside = flex::align(
                     items[at].align,
                     line_cross[line],
@@ -2933,7 +2957,7 @@ impl<M: Metrics> Builder<'_, M> {
                     flex::cross_position(wrap, inside, outer_cross[at], line_cross[line]);
             }
             line_top[line] = flex::cross_position(wrap, logical, line_cross[line], container_cross);
-            logical += line_cross[line] + gap;
+            logical += line_cross[line] + gap + cross_gap;
         }
 
         if row {
@@ -4372,6 +4396,17 @@ fn tallest(items: &[Item], starts: &[usize]) -> f64 {
         height = height.max(bottom - items[from].y);
     }
     height
+}
+
+/// `css-align-3` §8.1: what `count` things cost in gaps.
+///
+/// A gap goes **between** two things and not after the last, so `n` of them
+/// cost `n - 1` gaps and one of them costs none. Written once, because the
+/// off-by-one is the whole of what this property gets wrong: five places need
+/// the number and four of them would look right with `count * gap` on any
+/// fixture where the container was wide enough to hide it.
+fn gaps_between(count: usize, gap: f64) -> f64 {
+    count.saturating_sub(1) as f64 * gap
 }
 
 /// §4's anonymous block container around a run of text.

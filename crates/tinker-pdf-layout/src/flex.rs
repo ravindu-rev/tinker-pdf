@@ -124,8 +124,14 @@ pub fn ordered(orders: &[i32]) -> Vec<usize> {
 /// wording is *"if the very first uncollected item wouldn't fit, collect just
 /// it into the line"*, and a build without that clause loops forever on an
 /// item wider than its container.
+///
+/// **The gap is part of what a line has to fit.** `css-align-3` §8.1's gap
+/// goes between two items and not after the last, so a line of `n` items costs
+/// `n - 1` of them — and a build that collected lines without counting the gaps
+/// wraps one item too late and then overflows the container by exactly the gaps
+/// it forgot.
 #[must_use]
-pub fn lines(items: &[Item], available: f64, wrap: FlexWrap) -> Vec<(usize, usize)> {
+pub fn lines(items: &[Item], available: f64, wrap: FlexWrap, gap: f64) -> Vec<(usize, usize)> {
     if items.is_empty() {
         return Vec::new();
     }
@@ -137,10 +143,13 @@ pub fn lines(items: &[Item], available: f64, wrap: FlexWrap) -> Vec<(usize, usiz
     let mut used = 0.0f64;
     for (at, item) in items.iter().enumerate() {
         let outer = item.outer_hypothetical();
-        if at > start && used + outer > available + EPSILON {
+        let joined = if at > start { gap } else { 0.0 };
+        if at > start && used + joined + outer > available + EPSILON {
             out.push((start, at));
             start = at;
             used = 0.0;
+        } else {
+            used += joined;
         }
         used += outer;
     }

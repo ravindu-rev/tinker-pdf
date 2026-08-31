@@ -356,9 +356,8 @@ refusal table.
   for an engine that reads no font directories; **no book in the corpus
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
-  the pinned float reading-order defect; `row-gap`/`column-gap`
-  between flex items; SVG content documents; pseudo-elements (parsed,
-  no box generated). `min`/`max`
+  the pinned float reading-order defect; SVG content documents;
+  pseudo-elements (parsed, no box generated). `min`/`max`
   sizing is built, less one half of §10.7: a `max-height` shorter than
   its content is named (`MaxHeightAsAuto`) rather than obeyed.
   `vertical-align` is built, §10.8.1 and §17.5.3 both. Multi-column is
@@ -372,6 +371,9 @@ refusal table.
   §9.9.1. `display: inline-block` is a real atomic inline box, §9.2.2:
   its own formatting context at §10.3.9's shrink-to-fit width, placed
   on a line whole, aligned on §10.8.1's **last** line box.
+  `css-align-3` §8.1's `row-gap` and `column-gap` are built for flex
+  containers, on the axis each names rather than the direction the
+  container runs in.
   **`css-cascade-5` §7.1's five explicit defaulting keywords are
   closed** — `inherit`, `initial`, `unset`, `revert` and `revert-layer`,
   on all eighty-three longhands and all sixteen shorthands. Closing them
