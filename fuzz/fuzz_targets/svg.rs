@@ -60,6 +60,9 @@
 //! - **Nothing is past a limit that refused nothing.** A scene came back, so
 //!   every ceiling held; the node count is checked against the one that bounds
 //!   it rather than assumed.
+//! - **A text run's font size is a number.** It reaches a `Tf` operator, and an
+//!   infinity there is a content stream a reader refuses outright — which is a
+//!   worse failure than a page that looks wrong, not a better one.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
@@ -163,6 +166,30 @@ fn numbers(scene: &Scene) -> Vec<f64> {
             Node::Image { rect, matrix, .. } => {
                 out.extend_from_slice(rect);
                 out.extend_from_slice(matrix);
+            }
+            Node::Text {
+                anchor,
+                matrix,
+                font,
+                fill,
+                fill_opacity,
+                stroke,
+                ..
+            } => {
+                if let Some(anchor) = anchor {
+                    out.extend_from_slice(anchor);
+                }
+                out.extend_from_slice(matrix);
+                // The size reaches a `Tf` operator, where an infinity is a
+                // content stream a reader refuses rather than a page that
+                // looks wrong — which is worse, not better.
+                out.push(font.size);
+                sweep_paint(fill, &mut out);
+                out.push(*fill_opacity);
+                if let Some(stroke) = stroke {
+                    sweep_paint(&stroke.paint, &mut out);
+                    out.push(stroke.width);
+                }
             }
             _ => {}
         }

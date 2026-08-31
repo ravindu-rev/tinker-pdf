@@ -45,7 +45,7 @@ use tinker_pdf_css::tokenizer::{tokenize, Token};
 use tinker_pdf_css::{Budget, Element as CssElement, Refusal as CssRefusal};
 
 use crate::document::{Node, Tree};
-use crate::{Colour, FillRule, LineCap, LineJoin};
+use crate::{Colour, FillRule, LineCap, LineJoin, TextAnchor};
 
 // ---- the element side of a selector match ------------------------------------
 
@@ -382,6 +382,22 @@ pub struct Style {
     pub stop_opacity: f64,
     /// §14.3's `clip-path`, as the bare fragment name it referenced.
     pub clip_path: Option<String>,
+    /// `font-family`, in the author's order, generics left in.
+    pub families: Vec<String>,
+    /// `font-size`, in user units, already resolved through `em` and `%`.
+    ///
+    /// Resolved on the way down rather than carried specified, and this is the
+    /// one place this crate can do what `tinker-pdf-css` deliberately cannot:
+    /// an `em` here is relative to the **parent's** computed size, and because
+    /// a style is resolved from its parent's resolved style, the parent's size
+    /// is sitting in this field when the child's declaration is applied.
+    pub font_size: f64,
+    /// `font-weight`, as a number in `[100, 900]`.
+    pub font_weight: u16,
+    /// Whether `font-style` is `italic` or `oblique`.
+    pub font_italic: bool,
+    /// §10.9's `text-anchor`.
+    pub text_anchor: TextAnchor,
 }
 
 impl Default for Style {
@@ -412,13 +428,23 @@ impl Default for Style {
             },
             stop_opacity: 1.0,
             clip_path: None,
+            // §10.10's initial `font-family` is the user agent's, and CSS 2.1
+            // §15.7 makes the initial `font-size` `medium`. The first is the
+            // caller's to decide and is named rather than guessed: an empty
+            // family list means *"whatever you have"*, which is exactly what a
+            // reading system answers.
+            families: Vec::new(),
+            font_size: 16.0,
+            font_weight: 400,
+            font_italic: false,
+            text_anchor: TextAnchor::Start,
         }
     }
 }
 
 /// The properties this build reads, so a presentation attribute that is not one
 /// is left alone rather than read as a property nobody consumes.
-pub const PROPERTIES: [&str; 18] = [
+pub const PROPERTIES: [&str; 23] = [
     "fill",
     "fill-rule",
     "fill-opacity",
@@ -437,6 +463,11 @@ pub const PROPERTIES: [&str; 18] = [
     "stop-color",
     "stop-opacity",
     "clip-path",
+    "font-family",
+    "font-size",
+    "font-weight",
+    "font-style",
+    "text-anchor",
 ];
 
 /// What resolving one declaration did.
@@ -633,6 +664,41 @@ impl Style {
                 }
                 None => false,
             },
+            "font-family" => match families(&significant) {
+                Some(list) => {
+                    self.families = list;
+                    true
+                }
+                None => false,
+            },
+            "font-size" => match font_size(&significant, self.font_size) {
+                Some(value) if value > 0.0 => {
+                    self.font_size = value;
+                    true
+                }
+                _ => false,
+            },
+            "font-weight" => match weight(&significant, self.font_weight) {
+                Some(value) => {
+                    self.font_weight = value;
+                    true
+                }
+                None => false,
+            },
+            "font-style" => match word().as_deref() {
+                Some("normal") => set(&mut self.font_italic, false),
+                // `css-fonts-4` §5.2 makes an italic and an oblique acceptable
+                // matches for each other, and no caller in this repository has
+                // both for one family — so they are one question here.
+                Some("italic" | "oblique") => set(&mut self.font_italic, true),
+                _ => false,
+            },
+            "text-anchor" => match word().as_deref() {
+                Some("start") => set(&mut self.text_anchor, TextAnchor::Start),
+                Some("middle") => set(&mut self.text_anchor, TextAnchor::Middle),
+                Some("end") => set(&mut self.text_anchor, TextAnchor::End),
+                _ => false,
+            },
             "visibility" => match word().as_deref() {
                 Some("visible") => set(&mut self.visible, true),
                 // §11.5's `collapse` is `hidden` for everything that is not a
@@ -772,6 +838,110 @@ fn length(values: &[&ComponentValue]) -> Option<f64> {
         ComponentValue::Token(Token::Dimension { value, unit }) => {
             crate::document::length(&format!("{value}{unit}"), None)
         }
+        _ => None,
+    }
+}
+
+/// §10.10's `font-family`: a comma-separated list of names.
+///
+/// A quoted name is one family however many spaces it holds, and an unquoted
+/// one is *"a sequence of identifiers"* joined by single spaces — which is
+/// `css-fonts-4` §2.2's rule and the reason `font-family: Times New Roman`
+/// with no quotes is one family and not three.
+fn families(values: &[&ComponentValue]) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for value in values {
+        match value {
+            ComponentValue::Token(Token::Comma) => {
+                if !current.is_empty() {
+                    out.push(current.join(" "));
+                    current.clear();
+                }
+            }
+            ComponentValue::Token(Token::Str(name) | Token::Ident(name)) => {
+                current.push(name.clone());
+            }
+            _ => return None,
+        }
+    }
+    if !current.is_empty() {
+        out.push(current.join(" "));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// §10.10's `font-size`, against the **parent's** computed size.
+///
+/// `em`, `ex` and a percentage are all relative to it, which is why the basis
+/// is a parameter: [`crate::document::length`] resolves an `em` against the
+/// initial sixteen because the lengths *it* reads are on the root, and
+/// `font-size` is the one property where that is the wrong answer.
+fn font_size(values: &[&ComponentValue], parent: f64) -> Option<f64> {
+    if values.len() != 1 {
+        return None;
+    }
+    let finite = |value: f64| value.is_finite().then_some(value);
+    match values[0] {
+        ComponentValue::Token(Token::Number { value, .. }) if value.is_finite() => Some(*value),
+        ComponentValue::Token(Token::Percentage(percent)) => finite(parent * percent / 100.0),
+        ComponentValue::Token(Token::Dimension { value, unit }) => {
+            let lower = unit.to_ascii_lowercase();
+            match lower.as_str() {
+                "em" => finite(value * parent),
+                // CSS 2.1 §4.3.2: half an `em` where the face does not say,
+                // and no face is visible from here.
+                "ex" => finite(value * parent / 2.0),
+                _ => crate::document::length(&format!("{value}{lower}"), None),
+            }
+        }
+        // CSS 2.1 §15.7's absolute keywords, on the specification's own 1.2
+        // ratio from `medium`. Written out rather than computed from a ratio,
+        // so a reader can check each against the table.
+        ComponentValue::Token(Token::Ident(word)) => match word.to_ascii_lowercase().as_str() {
+            "xx-small" => Some(9.0),
+            "x-small" => Some(10.0),
+            "small" => Some(13.0),
+            "medium" => Some(16.0),
+            "large" => Some(18.0),
+            "x-large" => Some(24.0),
+            "xx-large" => Some(32.0),
+            "larger" => finite(parent * 1.2),
+            "smaller" => finite(parent / 1.2),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `css-fonts-4` §2.2's `font-weight`.
+fn weight(values: &[&ComponentValue], parent: u16) -> Option<u16> {
+    if values.len() != 1 {
+        return None;
+    }
+    match values[0] {
+        ComponentValue::Token(Token::Number { value, .. }) if *value >= 1.0 && *value <= 1000.0 => {
+            Some(*value as u16)
+        }
+        ComponentValue::Token(Token::Ident(word)) => match word.to_ascii_lowercase().as_str() {
+            "normal" => Some(400),
+            "bold" => Some(700),
+            // §2.2's relative keywords are a **table** rather than an addition,
+            // and the difference shows at the ends: `bolder` than 900 is still
+            // 900, and a build that added a hundred would ask for a weight no
+            // face has.
+            "bolder" => Some(match parent {
+                0..=300 => 400,
+                301..=500 => 700,
+                _ => 900,
+            }),
+            "lighter" => Some(match parent {
+                0..=500 => 100,
+                501..=700 => 400,
+                _ => 700,
+            }),
+            _ => None,
+        },
         _ => None,
     }
 }

@@ -440,7 +440,7 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
     }
     // A corpus that emptied itself would pass every assertion above.
     assert!(
-        seen >= 17,
+        seen >= 18,
         "only {seen} seeds were read from {}",
         dir.display()
     );
