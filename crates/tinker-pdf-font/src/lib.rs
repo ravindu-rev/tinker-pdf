@@ -17,6 +17,7 @@ mod predefined;
 pub mod sfnt;
 pub mod subset;
 pub mod type1;
+pub mod woff;
 
 pub use base14::Standard14;
 pub use cff::Cff;
@@ -29,3 +30,4 @@ pub use outline::{Outline, Segment};
 pub use sfnt::Sfnt;
 pub use subset::{glyphs_for, subset};
 pub use type1::Type1;
+pub use woff::{packaging, Packaging, WoffError};

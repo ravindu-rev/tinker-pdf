@@ -7,7 +7,7 @@
 //! of quietly becoming decoration.
 
 use super::writer::{wrap, Codestream};
-use crate::jxr::{jxr_decode, JxrError, JxrRefusal};
+use crate::jxr::{jxr_decode, JxrError, JxrRefusal, JxrWarning};
 use crate::Limits;
 
 fn limits() -> Limits {
@@ -20,21 +20,6 @@ fn refusal_of(c: Codestream, guid_tail: u8) -> JxrRefusal {
         Err(JxrError::Unsupported(r)) => r,
         other => panic!("expected a named refusal, got {other:?}"),
     }
-}
-
-#[test]
-fn frequency_mode_is_refused_by_name() {
-    assert_eq!(
-        refusal_of(
-            Codestream {
-                frequency_mode: true,
-                index_table: true,
-                ..Codestream::default()
-            },
-            0x0D
-        ),
-        JxrRefusal::FrequencyMode
-    );
 }
 
 #[test]
@@ -52,10 +37,15 @@ fn an_interleaved_alpha_image_plane_is_refused_by_name() {
 }
 
 #[test]
-fn a_separate_alpha_image_plane_is_refused_by_name() {
-    // A.3.2: ALPHA_OFFSET points at a second CODED_IMAGE( ). Dropping it
-    // would return an opaque image where the file said transparent, so it is
-    // refused rather than ignored.
+fn an_unreadable_separate_alpha_plane_leaves_an_opaque_image_and_says_so() {
+    // A.3.2: ALPHA_OFFSET points at a second CODED_IMAGE( ). This one points
+    // at a single byte, which is not one.
+    //
+    // Ruling 2: an unreadable alpha plane costs *transparency*, not the
+    // picture, so the image decodes opaque, `complete` is false, and
+    // JxrWarning::AlphaPlaneDropped says which of the two it was. Refusing
+    // the whole image would lose an illustration over a channel the caller
+    // may not even use.
     let codestream = Codestream::default().build();
     let mut file = wrap(&codestream, 0x0F);
     // Rewrite IMAGE_BYTE_COUNT's entry (the fifth, tag 0xBCC1) into
@@ -101,9 +91,27 @@ fn a_separate_alpha_image_plane_is_refused_by_name() {
     fix(&mut final_file, 10 + 8);
     fix(&mut final_file, 10 + 12 * 3 + 8);
 
-    assert_eq!(
-        jxr_decode(&final_file, &limits()),
-        Err(JxrError::Unsupported(JxrRefusal::SeparateAlphaPlane))
+    let image = jxr_decode(&final_file, &limits()).expect("the picture survives");
+    assert!(
+        image.warnings.contains(&JxrWarning::AlphaPlaneDropped),
+        "the leniency must be named (ruling 10), not silent: {:?}",
+        image.warnings
+    );
+    assert!(
+        !image.complete,
+        "a dropped alpha plane is not a whole decode"
+    );
+    assert!(image.format.channels.has_alpha(), "32bppBGRA has alpha");
+    // Every alpha sample is the ceiling, which is what "opaque" means at this
+    // depth — and is exactly what a caller sees when the plane is absent, so
+    // the warning is the only thing that distinguishes the two.
+    let channels = usize::from(image.channels());
+    assert!(
+        image
+            .data
+            .chunks_exact(channels)
+            .all(|px| px[channels - 1] == 0xFF),
+        "the fallback must be opaque"
     );
 }
 
@@ -251,17 +259,5 @@ fn a_reserved_overlap_mode_refuses_rather_than_choosing_one() {
     assert_eq!(
         jxr_decode(&file, &limits()),
         Err(JxrError::ReservedValue("OVERLAP_MODE"))
-    );
-}
-
-#[test]
-fn the_coefficient_layers_are_refused_by_name_until_they_land() {
-    // The milestone that decodes 8.7 deletes this test along with the
-    // variant. Until then a build that reads headers and nothing else says
-    // so, rather than returning a blank raster that reads as a successful
-    // decode of a blank image.
-    assert_eq!(
-        refusal_of(Codestream::default(), 0x0D),
-        JxrRefusal::CoefficientLayers
     );
 }

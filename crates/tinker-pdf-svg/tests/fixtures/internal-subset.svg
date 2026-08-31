@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The same declaration with an internal subset, and the subset is billion
+     laughs. tinker-pdf-xml refuses at the `[` with nothing inside it read, so
+     the entity table below is never built and the expansion never begins. -->
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [
+  <!ENTITY a "aaaaaaaaaa">
+  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+  <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+  <!ENTITY d "&c;&c;&c;&c;&c;&c;&c;&c;&c;&c;">
+]>
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+  <desc>&d;</desc>
+</svg>

@@ -145,18 +145,12 @@ fn the_comparison_is_total() {
 fn equal_names_break_on_directory_position() {
     // Slice order: b.jpg, a.jpg(#7), a.jpg(#2). Directory order for the tie is
     // 2 before 7, which is the reverse of how the slice holds them.
-    let entries: Vec<Entry> = [("b.jpg", 9usize), ("a.jpg", 7), ("a.jpg", 2)]
+    let entries: Vec<Listing> = [("b.jpg", 9usize), ("a.jpg", 7), ("a.jpg", 2)]
         .iter()
-        .map(|(name, index)| Entry {
+        .map(|(name, index)| Listing {
             name: (*name).to_string(),
-            method: tinker_pdf_zip::Method::Stored,
-            crc: Some(0),
-            compressed_size: 0,
-            uncompressed_size: 0,
-            encrypted: false,
-            streamed: false,
-            header_offset: 0,
             index: *index,
+            directory: false,
         })
         .collect();
     // Both `a.jpg` records come first, the one written earlier in the

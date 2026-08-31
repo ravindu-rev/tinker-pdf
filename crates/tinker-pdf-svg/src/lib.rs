@@ -38,11 +38,30 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod document;
+pub mod gradient;
 pub mod path;
+pub mod scene;
+pub mod shape;
+pub mod style;
 pub mod transform;
 
 #[cfg(test)]
 mod tests;
+
+/// Reads a document: bytes and a viewport in, a [`Scene`] out.
+///
+/// `viewport` is the box the document is being placed in, in user units. It is
+/// what a percentage on the root resolves against and what a root that states
+/// no size of its own falls back to; `None` is [`scene::DEFAULT_VIEWPORT`].
+///
+/// # Errors
+/// [`Refusal`], whose six variants are the whole of what produces no picture
+/// at all. Everything else is a [`Scene`] with [`Scene::warnings`] on it.
+pub fn read(bytes: &[u8], viewport: Option<(f64, f64)>, limits: &Limits) -> Result<Scene, Refusal> {
+    let tree = document::read(bytes, limits)?;
+    scene::build(&tree, viewport, limits)
+}
 
 /// How much work one document may cost.
 ///
@@ -54,7 +73,14 @@ mod tests;
 pub struct Limits {
     /// Element nesting, which `<g>` and `<svg>` both add to.
     pub max_depth: usize,
-    /// Nodes in the finished scene.
+    /// Elements read, **and** nodes in the finished scene.
+    ///
+    /// One number for two things that a `<use>` makes different — an expansion
+    /// draws an element that is already in the tree, so a scene may hold more
+    /// nodes than the document has elements. They share a cap because a caller
+    /// tuning one and not the other would be tuning half a bound, and because
+    /// what the number stands for is the same either way: how much of one
+    /// picture a consumer has agreed to hold.
     pub max_nodes: usize,
     /// Path commands across the whole document, so that one `d` attribute
     /// cannot be the document.
@@ -62,6 +88,14 @@ pub struct Limits {
     /// `<use>` expansions, which are the one place an SVG can grow
     /// multiplicatively.
     pub max_uses: usize,
+    /// Distinct [`Warning`]s one scene may carry.
+    ///
+    /// Warnings are deduplicated, so this fires only on a document with that
+    /// many **different** things to say — which one with half a million
+    /// distinct unknown element names has, and which no drawing does. Without
+    /// it, [`Warning::ElementUnknown`] would let a file choose how much memory
+    /// its own diagnostics cost.
+    pub max_warnings: usize,
 }
 
 impl Limits {
@@ -71,6 +105,7 @@ impl Limits {
         max_nodes: 65_536,
         max_segments: 1 << 20,
         max_uses: 4_096,
+        max_warnings: 256,
     };
 }
 
@@ -100,6 +135,14 @@ pub enum Refusal {
     TooManySegments,
     /// Past [`Limits::max_uses`], or a `<use>` that reaches itself.
     TooManyUses,
+    /// Selector matching crossed `tinker-pdf-css`'s own budget.
+    ///
+    /// Named apart from the four above because it is a different half of the
+    /// reader and a caller can act on the difference: a document with a million
+    /// path segments is [`Refusal::TooManySegments`] and one with a million
+    /// selector matches is this. `tinker_pdf::epub::SpineDefect` draws the same
+    /// line between `NotStyled` and `NotFragmented`, for the same reason.
+    TooMuchStyle,
 }
 
 /// Something the picture asked for that this build did not draw.
@@ -114,10 +157,26 @@ pub enum Warning {
     FilterUnsupported,
     /// `<mask>` and `mask=`.
     MaskUnsupported,
-    /// `<clipPath>` and `clip-path=`.
+    /// A `clip-path` naming something this build cannot turn into an outline.
+    ///
+    /// **Not the element**: a `<clipPath>` full of shapes is drawn as a clip
+    /// since milestone 4. This is the reference that names no `<clipPath>` at
+    /// all, or one whose children are `<use>` or `<text>` — geometry that
+    /// exists somewhere else. The element is drawn **unclipped**, which is
+    /// ruling 2's answer and the one that keeps a picture rather than losing
+    /// it; the alternative reading of §14.3.1 would clip everything away.
     ClipPathUnsupported,
     /// `<pattern>` used as a paint.
     PatternUnsupported,
+    /// `<marker>`, and the three properties that name one.
+    ///
+    /// §11.6's vertex decorations: an arrowhead is a whole second rendering of
+    /// a referenced subtree at every vertex, rotated to the path's tangent
+    /// there. Named rather than folded into [`Warning::ElementUnknown`],
+    /// because a `<marker>` is SVG this build declines rather than a
+    /// vocabulary it does not read — and thirty-two of them are in the fetched
+    /// corpus, every one on a path that also fills.
+    MarkerUnsupported,
     /// `<foreignObject>`, whose content is a different document language.
     ForeignObjectUnsupported,
     /// SMIL — `<animate>`, `<set>`, `<animateTransform>` and relatives. A
@@ -135,6 +194,31 @@ pub enum Warning {
     },
     /// A `<use>` whose `href` names nothing in the document.
     UseUnresolved,
+    /// A `fill` or `stroke` of `url(#name)` naming nothing this build can
+    /// paint with. The paint's own fallback stands, or `none` when it stated
+    /// none — which is §13.2's answer and not an invention here.
+    PaintServerUnresolved,
+    /// A non-unit `opacity` on something that draws more than once.
+    ///
+    /// §14.5 makes `opacity` a **group** operation: the subtree is composited
+    /// once and the result is faded. This build multiplies it into each
+    /// descendant's own fill and stroke alpha instead, which is *exact* for a
+    /// single shape painted one way and **too dark where two of them overlap**.
+    /// Reported only where it is observable — a lone filled shape at 60 % is
+    /// not a warning, because there is nothing wrong with it.
+    GroupOpacityFlattened,
+    /// An at-rule in a `<style>` element — `@media`, `@import`, `@font-face`.
+    /// Skipped by the CSS specification's own recovery, and named.
+    AtRuleIgnored,
+    /// §13.2.3's `spreadMethod` of `reflect` or `repeat`.
+    ///
+    /// `pad` is drawn instead, which is the initial value and the one every
+    /// gradient in the fetched corpus uses. The other two tile the stop list
+    /// outside the axis, and doing it honestly means a stitching function over
+    /// a repeated domain rather than a wider axis with more stops on it — an
+    /// approximation with a chosen number of repeats would be a gradient that
+    /// is right in the middle and wrong at the edges.
+    SpreadMethodUnsupported,
 }
 
 /// A colour, as three components in `[0, 1]`.
@@ -167,27 +251,61 @@ pub enum Paint {
     None,
     /// A flat colour.
     Solid(Colour),
-    /// `<linearGradient>`, with its coordinates already resolved into the
-    /// space the path is stated in.
+    /// `<linearGradient>`.
+    ///
+    /// The geometry is in **gradient space** and `matrix` maps that space into
+    /// the scene's. It is not baked into the two points, and the reason is a
+    /// skew: a linear gradient's iso-lines are perpendicular to its axis *in
+    /// its own space*, and an affine transform that is not a similarity does
+    /// not keep them perpendicular. Two transformed endpoints cannot say that,
+    /// and neither can PDF's axial shading — which is why 8.7.4.5.5 puts a
+    /// `/Matrix` on the pattern rather than on the shading's coordinates.
+    /// §13.2.3's `gradientUnits` and `gradientTransform` both land here.
     Linear {
-        /// Start point.
+        /// Start point, in gradient space.
         from: [f64; 2],
-        /// End point.
+        /// End point, in gradient space.
         to: [f64; 2],
+        /// Gradient space to the scene's.
+        matrix: [f64; 6],
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
     },
-    /// `<radialGradient>`, likewise resolved.
+    /// `<radialGradient>`, on the same terms.
+    ///
+    /// One circle and a focal point, which is §13.2.3's shape and maps onto
+    /// 8.7.4.5.4's two circles with the first one's radius at zero. An
+    /// `objectBoundingBox` gradient on a shape that is not square is an
+    /// **ellipse**, and it is `matrix` that makes it one.
     Radial {
-        /// Centre.
+        /// Centre, in gradient space.
         centre: [f64; 2],
-        /// Radius.
+        /// Radius, in gradient space.
         radius: f64,
         /// Focal point, which SVG allows to differ from the centre.
         focus: [f64; 2],
+        /// Gradient space to the scene's.
+        matrix: [f64; 6],
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
     },
+}
+
+/// §14.3's clipping path, as geometry.
+///
+/// The **union** of the shapes a `<clipPath>` holds, as one outline of several
+/// subpaths, already in the scene's space. A union rather than a list because
+/// §14.3.5 says a clipping path is *"the union of the silhouettes"* of its
+/// children — a consumer handed a list would have to intersect them, which is
+/// the opposite operation and would clip away everything two children did not
+/// share.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clip {
+    /// The outline.
+    pub outline: path::Outline,
+    /// `clip-rule`, which is a **separate property** from `fill-rule`: one
+    /// shape used as a clip and as a fill can want two different rules.
+    pub rule: FillRule,
 }
 
 /// SVG 1.1 §11.3's `fill-rule`.
@@ -260,7 +378,16 @@ pub enum Node {
         /// `fill-opacity`, in `[0, 1]`.
         fill_opacity: f64,
         /// How the outline is drawn, if at all.
-        stroke: Option<Stroke>,
+        ///
+        /// **Boxed**, and it is a size decision rather than a taste one: a
+        /// [`Stroke`] carries its own [`Paint`], which for a gradient is a
+        /// `Vec` of stops and a matrix, and most shapes in a real drawing only
+        /// fill. Inline it made this variant three times the size of
+        /// [`Node::Image`] and every node in a ten-thousand-node scene paid
+        /// for it.
+        stroke: Option<Box<Stroke>>,
+        /// §14.3's clip, or `None` for a node that is not clipped.
+        clip: Option<Clip>,
     },
     /// An `<image>`, carried **unresolved**.
     ///
@@ -271,10 +398,22 @@ pub enum Node {
     Image {
         /// The `href`, verbatim.
         href: String,
-        /// Where it goes, as `x y width height` after transforms.
+        /// Where it goes, as `x y width height`, in the element's **own** user
+        /// space — the space `matrix` maps out of.
         rect: [f64; 4],
-        /// The matrix mapping the unit image into `rect`'s space.
+        /// The matrix from that space into the scene's, every ancestor's
+        /// transform and every viewport composed in.
         matrix: [f64; 6],
+        /// `preserveAspectRatio`, verbatim, or `None` for §7.8's initial
+        /// `xMidYMid meet`.
+        ///
+        /// **Carried unresolved for the reason `href` is.** Fitting an image
+        /// into `rect` needs the image's *intrinsic* size, which is inside
+        /// bytes this crate never sees. The caller that decoded it passes both
+        /// to [`transform::view_box`], which is where the grammar already
+        /// lives — so the string travels and the reading of it does not
+        /// happen twice.
+        preserve: Option<String>,
     },
 }
 

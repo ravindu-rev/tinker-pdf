@@ -138,6 +138,47 @@ text drawn with it, the program could not be rebuilt, or the rebuild came out
 no smaller than the face. That last one is common: 212 of the fetched corpora's
 441 CFF faces are already producer-made subsets with nothing left to remove.
 
+**WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2018]). `woff.rs` unpacks
+both to the sfnt inside them; nothing else in the crate knows they exist, and
+`Sfnt::parse` is what reads what comes out. The two are not variations on each
+other and the code does not pretend they are.
+
+WOFF 1.0 is a **repackaging**: each table zlib-compressed on its own, the
+directory recording the original length and the original checksum. Undoing it
+is inflate — `tinker-pdf-filters`' own, not a second one — plus a directory
+rebuilt in ascending tag order, which §5 requires in as many words. The tables
+themselves go back in the **physical order the container recorded**, which is
+the only surviving record of the order the original font had them in, and is
+the difference between reproducing the producer's file and producing an
+equivalent one. `origChecksum` is verified for every table even though §5 puts
+that on the producer: it is the one end-to-end integrity check either container
+carries, it costs one pass over bytes already in cache, and a face that fails
+it is one this engine would rather decline by name. `head` is checksummed with
+`checkSumAdjustment` taken as zero, which is the sfnt rule neither WOFF
+restates and which every producer follows because it copies the value out of a
+real directory.
+
+WOFF 2.0 is a **re-encoding**. One Brotli stream carries every table
+concatenated; `glyf` is taken apart into seven substreams and its contours
+re-encoded as triplets; `loca` is not stored at all and falls out of the `glyf`
+reconstruction; `hmtx` may have had its left side bearings deleted on the
+grounds that they equal the glyph bounding boxes. All of that is reversed here,
+along with §3.1's two variable-width integer codings — `255UInt16`, whose
+encoding is deliberately not unique, and `UIntBase128`, whose two forbidden
+spellings are both refused — §4.1's table of 63 known tags, and §4.2's font
+collections. §5 says the result "may produce binary results that are different
+from the original data", so byte identity is not the property claimed for it.
+
+Both are bounded by a caller-supplied ceiling that is **not advisory**: a WOFF2
+directory states its lengths in `UIntBase128`, which reaches 2^32 − 1 in five
+bytes, so a forty-byte file can ask for four gigabytes. Metadata and private
+data blocks are located and skipped, never parsed — the metadata block is XML,
+and reading it would give this crate an opinion about markup that ruling 8 says
+it may not have.
+
+[W3C REC 2012]: https://www.w3.org/TR/WOFF/
+[W3C REC 2018]: https://www.w3.org/TR/WOFF2/
+
 ## API
 
 Everything reaches callers through the facade (ruling 11). Reading:
@@ -527,6 +568,41 @@ could show was right.
 
 ## Verified
 
+- `crates/tinker-pdf-font/tests/woff_fixtures.rs` — 12 tests, **the WOFF
+  decoders against seven committed files**, in `crates/tinker-pdf-font/tests/woff/`,
+  written on 2026-08-31 by `make-fixtures.py` from `cargo xtask synth-face` —
+  a face this project owns, which is why they can exist at all: OFL-1.1
+  reserves the name of every face the corpus vendors, and no producer in the
+  corpus tooling emits a web font. Five packings by **three encoders with
+  no code in common** — fontTools 4.63.0, `ttf2woff` 3.0.0, and
+  `wawoff2` 2.0.1,
+  which is Google's reference C++ encoder built to WebAssembly. fontTools
+  **generated** these files and adjudicates nothing (ruling 13): no program
+  runs at test time, and every assertion compares this build against the
+  source face committed beside the containers. `tests/woff/PROVENANCE.tsv`
+  records all of that per file — producer, version, the face it was made
+  from, the day, and ruling 13's two halves — and a test holds it to the
+  directory in both directions, because a record nothing checks stops being
+  true the first time a fixture is regenerated.
+  The claim is **identical glyph outlines through `Sfnt`** over all 263
+  glyphs — 230 that draw and 33 that do not, asserted by number — plus
+  identical `cmap` answers, identical advances, and a `head` whose
+  `checkSumAdjustment` this build recomputed correctly. For WOFF 1.0 from the
+  producer that preserved the table order it is **byte identity** with the
+  source face. Nine counted injections.
+- `crates/tinker-pdf-font/src/woff/tests.rs` — 18 tests over the parts no
+  committed file reaches: §3.1's three legal spellings of 506, `UIntBase128`'s
+  two forbidden ones, the known-tag table, an unknown tag carried through, the
+  three tables whose legal transform versions differ, and the ceiling refused
+  before a byte is decompressed. 22 counted injections, and one deliberate
+  **non**-refusal — WOFF 2.0 §3.2 says a decoder "MUST NOT reject" a file for
+  a non-zero reserved field or a `totalSfntSize` that disagrees, where WOFF 1.0
+  §3 and §4 say it MUST reject both.
+- `crates/tinker-pdf-font/tests/woff_seeds.rs` and
+  `fuzz/fuzz_targets/woff.rs` — thirteen seeds, replayed on stable because a
+  seed corpus nothing reads stops describing the parser. Five must decode and
+  eight must be refused, both asserted by number; 8 509 prefixes and 11 988
+  single-byte flips reach an answer rather than a panic (ruling 1).
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect.
 - `crates/tinker-pdf-font/src/cff_subset/tests.rs` — 21 tests over fonts built

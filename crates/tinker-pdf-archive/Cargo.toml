@@ -1,0 +1,28 @@
+[package]
+name = "tinker-pdf-archive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The archive containers that are not ZIP, hand-rolled: tar (ustar, GNU long names, PAX), 7z (LZMA, LZMA2, BCJ) and RAR 5. No PDF types"
+
+[dependencies]
+# CRC-32 and raw DEFLATE, and nothing else from anywhere. The same edge
+# `tinker-pdf-zip` takes and for two of the same three reasons:
+#
+# - **CRC-32.** Both 7z and RAR record a per-file CRC-32 in the archive's own
+#   header, and this crate's whole verification argument is that it checks
+#   them: a wrong window, a wrong Huffman table or an ignored solid flag fails
+#   the format's own check rather than needing an oracle. It is the same
+#   reflected `0xEDB8_8320` polynomial `zip` and PNG already share, and a
+#   second copy of a sixty-line table is how two of them start disagreeing.
+# - **Raw DEFLATE.** 7z method `040108` is RFC 1951 with no wrapper, exactly as
+#   ZIP method 8 is, so `inflate_raw` is free here and a second inflater would
+#   not be.
+#
+# What this crate does **not** take from `filters` is an image codec: nothing
+# here has ever seen a picture. The third leaf-to-leaf edge of this shape, and
+# the argument is `xtask`'s tenth DAG amendment.
+tinker-pdf-filters = { workspace = true }

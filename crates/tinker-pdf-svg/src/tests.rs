@@ -346,6 +346,11 @@ fn an_outline_of_moves_alone_is_empty() {
 /// The assertions are the target's own, minus the ones that need libFuzzer:
 /// the first byte is the control byte, the rest is the text, nothing escapes
 /// that is not a finite number, and an outline begins with a move.
+///
+/// **Since milestone 1 it drives the document surface too.** A seed that is
+/// markup rather than path data parses to nothing here on the geometry half —
+/// which is what the `if let Ok` arms are for — and a suite that stopped there
+/// would be a corpus of documents proving something about a path parser.
 #[test]
 fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -407,11 +412,35 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
                 }
             }
         }
+        // The document surface, over the same bytes and before the UTF-8 gate
+        // the geometry half needs: `read` decides the encoding itself.
+        let limits = crate::Limits::DEFAULT;
+        if let Ok(scene) = crate::read(body, Some((100.0, 50.0)), &limits) {
+            assert!(
+                scene.size.0.is_finite() && scene.size.1.is_finite(),
+                "{name}: a scene's size is not numbers"
+            );
+            assert!(
+                scene.warnings.len() <= limits.max_warnings,
+                "{name}: past the warning cap"
+            );
+            for (at, warning) in scene.warnings.iter().enumerate() {
+                assert!(
+                    !scene.warnings[..at].contains(warning),
+                    "{name}: {warning:?} was reported twice"
+                );
+            }
+            assert_eq!(
+                crate::read(body, Some((100.0, 50.0)), &limits).ok(),
+                Some(scene),
+                "{name}: reading a document is not deterministic"
+            );
+        }
         seen += 1;
     }
     // A corpus that emptied itself would pass every assertion above.
     assert!(
-        seen >= 7,
+        seen >= 17,
         "only {seen} seeds were read from {}",
         dir.display()
     );

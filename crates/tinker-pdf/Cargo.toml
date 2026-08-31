@@ -37,6 +37,13 @@ tinker-pdf-raster = { workspace = true }
 tinker-pdf-filters = { workspace = true }
 tinker-pdf-color = { workspace = true }
 tinker-pdf-zip = { workspace = true }
+# Tier 4's W-ARCHIVE lane: `src/cbz.rs` reads a `.cbt`, a `.cb7` and a `.cbr`
+# through it. A second archive crate rather than four more modules in
+# `tinker-pdf-zip`, because that crate's `Archive::read` hands a stored entry
+# back **borrowed** and a 7z solid block cannot -- the argument is
+# `crates/tinker-pdf-archive/src/lib.rs`'s header and `xtask`'s tenth DAG
+# amendment.
+tinker-pdf-archive = { workspace = true }
 # Gap 30 milestone 3: `src/xps/opc.rs` reads `[Content_Types].xml` and every
 # `.rels` part through it, which is what milestone 2's manifest comment said
 # would happen here. `xtask dag` already allowed `tinker-pdf -> tinker-pdf-xml`,

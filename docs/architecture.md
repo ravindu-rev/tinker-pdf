@@ -1,7 +1,7 @@
 # Architecture
 
 tinker-pdf is a from-scratch, pure-Rust document engine: a workspace of
-fifteen crates in which every byte of logic is this repository's own — the
+eighteen crates in which every byte of logic is this repository's own — the
 inflate, the image codecs, the crypto, the font parsers, the rasterizer, the
 XML parser, the CSS engine, the layout engine, and the transcendental math
 they all share. `#![forbid(unsafe_code)]` holds in every engine crate, and
@@ -40,6 +40,7 @@ tinker-pdf-math ────→ tinker-pdf-color ──┐
               └─────→ tinker-pdf-raster ─┼───────────────────────────────┐
 tinker-pdf-filters ─┬─→ tinker-pdf-font ─┤                               ↓
                     ├─→ tinker-pdf-zip ──┼───────────────────────────────┤
+                    ├─→ tinker-pdf-archive ─────────────────────────────────┤
 tinker-pdf-crypto ──┴─→ tinker-pdf-cos ──┴─→ tinker-pdf-content ─→ tinker-pdf-render ─→ tinker-pdf ─→ tinker-pdf-ffi
               └─────→ tinker-pdf-pki ──────────────────────────────────────────────────→ tinker-pdf
 tinker-pdf-font ────→ tinker-pdf-shape    (no consumer yet: milestone 6 of design/shaping.md)
@@ -51,24 +52,38 @@ tools: pdfcmp (no engine deps) · tpdf (depends on facade)
 ```
 
 **Thirteen leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
-`math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape`, `svg` — are
+`math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape`, `svg`, `archive` — are
 bytes-in/values-out with zero PDF types (ruling 8 defines a leaf; the
-definition binds, not the list).
+definition binds, not the list). `archive` is **appended** rather than filed
+next to `zip`: the ordinals in `xtask`'s `ALLOWED` table are positions in this
+list, so inserting into the middle of it silently renumbers eight comments.
 This is the property that makes each one independently fuzzable: a fuzz
 target hands `tinker-pdf-font` a byte slice and expects a value or a
 structured error, with no COS machinery in the corpus or the crash triage.
 It also means a leaf is tested against its own spec (DEFLATE against
 RFC 1951, CFF against Adobe TN 5176) without a PDF in sight.
 
-Five leaf-to-leaf edges exist, each pointing from a higher layer down:
+Eight leaf-to-leaf edges exist, each pointing from a higher layer down:
 `font → filters` (the CMap asset pipeline), `zip → filters` (raw DEFLATE
-and CRC-32), `layout → css` (computed styles in, boxes out),
+and CRC-32), `archive → filters` (the same two, for the same two reasons —
+7z method 040108 *is* RFC 1951, and 7z and RAR both record a per-file
+CRC-32), `layout → css` (computed styles in, boxes out),
 `pki → crypto` (RFC 5280's key identifier is a SHA-1, and DER stays out of
 the cipher crate because the two fail differently — a wrong number caught by
-published vectors, against a panic or an overread on untrusted structure), and
+published vectors, against a panic or an overread on untrusted structure),
 `shape → font` (`Sfnt` parses the table directory, and the OpenType Layout
 tables are read in `shape` because `font`'s charter is the tables *metrics*
-need — a lookup is not a metric).
+need — a lookup is not a metric), and `svg → xml` and `svg → css` (an SVG
+*is* XML, and its presentation attributes, `style=""` and `<style>` are all
+CSS values).
+
+**An edge into `math` is not counted here**, which is why that list is eight
+and not eleven: `color → math`, `raster → math` and `svg → math` exist and
+always have. `tinker-pdf-math` is the bottom of the graph rather than a peer —
+`xtask`'s `ALLOWED` table calls the row above it *“nothing internal beyond the
+maths”* — so depending on it is the baseline every leaf starts from and not a
+coupling anyone has to argue for. This paragraph read *five* until tier 4 and
+had not been recounted when `tinker-pdf-svg` landed with two of them.
 
 **Three** more edges point down *out* of a non-leaf, and they are listed
 here because the first of them used to be counted among the leaf-to-leaf
@@ -154,6 +169,7 @@ Source lines are `src/` including inline test modules, as of August 2026.
 | `tinker-pdf-color` | colour spaces and functions | 1 100 | [rendering](features/rendering.md) | — |
 | `tinker-pdf-math` | pinned transcendentals, `no_std` | 900 | [determinism](features/determinism.md) | — |
 | `tinker-pdf-zip` | ZIP reader | 3 000 | [cbz](features/cbz.md) | `zip_archive` |
+| `tinker-pdf-archive` | the containers that are not ZIP: tar, 7z, RAR | 3 500 | [cbz](features/cbz.md), [design/comic-archives.md](design/comic-archives.md) | `tar`, `sevenz` |
 | `tinker-pdf-xml` | XML pull parser | 4 100 | [xps](features/xps.md) | `xml` |
 | `tinker-pdf-css` | CSS engine | 10 800 | [epub](features/epub.md) | `css` |
 | `tinker-pdf-svg` | SVG geometry and paint | 1 500 | [epub](features/epub.md) | `svg` |
@@ -166,6 +182,46 @@ third: `oracle-diff`, the external-renderer harness of retired ruling 9, was
 deleted with the last oracle it could have driven. `xtask` holds the workspace police
 (`dag`, `libm`, `oracles`, `vendor`, `versions`, `check`) and the release,
 corpus and packaging machinery.
+
+### `tinker-pdf-archive`: why a second archive crate, and why no trait
+
+The comic path reads four containers now, and the three that are not ZIP live
+in their own leaf rather than in `tinker-pdf-zip`. The argument is a
+measurement, not a taste, and it is worth stating here because the obvious
+shape — one archive crate with a `trait Container` over all four — is the one
+this rejects.
+
+`tinker_pdf_zip::Archive::read` returns a `Cow` and hands a **stored entry back
+borrowed**, copied nowhere. That crate's own suite pins it with the reason
+attached: *the moment this copies, a 3.6 GB peak comes back* — the comic path
+places image bytes into a PDF stream verbatim, so a copy per entry is a copy of
+the whole archive, and a 200-page scan is the size at which that stops being a
+detail. tar keeps the property and strengthens it: every entry is a contiguous
+range of the input, so its `read` returns a plain `&[u8]`.
+
+**7z cannot have it.** A solid block decodes many files from one LZMA stream,
+so no range of the input is any one file and the read must return owned bytes.
+A trait over all four would have to return the weakest of the four signatures,
+which deletes the exact property that ZIP test exists to hold — in the crate
+that has it, to give four unrelated readers one name. `tinker-pdf-zip`'s
+charter is also recorded twice as APPNOTE 6.3.10 and nothing else (below, and
+ruling 8's own example), and a crate whose charter names one specification is
+not where three more go.
+
+So: **one crate, three modules, three error enums, three entry types, and no
+trait over them.** What tar, 7z and RAR share is a negative — the archive
+containers that are not ZIP — which is weaker than `filters`' "decoders" and is
+honestly weaker. It is still real, and it buys one node and one edge instead of
+three of each. Where the four converge is the facade, which is where they have
+to: deciding what a *page* is needs document types, and a leaf may not have
+them.
+
+What the new crate wanted and did not take: `tinker-pdf-crypto`, for the
+AES-256 that 7z and RAR 5 both offer. Encrypted archives are refused by name in
+both, so the edge would have bought a refusal a comparison of two bytes already
+gives. And `tinker-pdf-math`, which nothing here needs — an LZMA range decoder
+and a Huffman table are integer arithmetic end to end, which is also what makes
+ruling 4 free in this crate rather than something it has to be careful about.
 
 ## Error model
 

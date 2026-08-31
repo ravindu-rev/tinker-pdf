@@ -221,10 +221,19 @@ decode but nothing checks is worth more written down than counted as done.
 | # | Deliverable | Exit criteria (concrete, testable) | Size |
 |---|---|---|---|
 | 1 | Fixtures, Annex A container, clause 8 header layers | `make-fixtures.ps1` beside the fixtures; an `#[ignore]`d test authors the rasters and a second writes the fuzz seeds; headers parse for every fixture with the *reported geometry* asserted; every refusal reachable by test; `fuzz_jxr` and its committed corpus land; `deny.toml` rows added | M |
-| 2 | 8.7's coefficient layers plus 8.8-8.12's adaptation, spatial mode | The lossless identity holds bit-identically for the single-tile fixtures | XL |
-| 3 | 9.5-9.9: prediction, dequantization, the PCT, and the POT in all three modes | The identity holds for the multi-tile, multi-macroblock fixtures; **the seam property holds for all three overlap modes and its injection fires**, counted | L |
-| 4 | Frequency mode, the remaining pixel formats, the separate alpha plane, 9.10's colour pipeline | The identity holds across every fixtured format; the monotonicity property holds | L |
-| 5 | The refusal table and the docs | `docs/features/filters.md` gains JPEG XR with its refusals **and its unadjudicated list**; this document's As-built section records what actually landed | S |
+| 2 | 8.7 to 8.12's coefficient layers and 9.4 to 9.8's remapping, prediction and dequantization, in **both** spatial and frequency mode | **Every packet of every fixture is consumed to exactly the byte 8.5.3's index table predicts**, and no tile is dropped; the code tables' structural properties (prefix-free, complete, one value per code) hold, each with a counted injection | XL |
+| 3 | 9.9.2, 9.9.5 and 9.9.7: the photo core transform | The forward and inverse PCT **round-trip bit-exactly** on random input, which is checkable because T.832's transform is a reversible integer lifting structure; `cargo xtask libm` stays green | M |
+| 4 | 9.9.3, 9.9.6 and 9.9.8: the photo overlap transform, all three modes | **The seam property holds for all three overlap modes and its injection fires**, counted | L |
+| 5 | 9.10's output formatting: the colour transforms, the bit depths, the separate alpha plane | **The lossless identity holds bit-identically across every fixture**; the monotonicity property holds | L |
+| 6 | The XPS arm, the refusal table and the docs | `crates/tinker-pdf/src/xps/image.rs`'s `Kind::JpegXr` draws; `docs/features/filters.md` gains JPEG XR with its refusals **and its unadjudicated list**; this document's As-built section records what actually landed | M |
+
+**Why milestone 2's exit criterion is not the lossless identity**, which the
+first draft of this table said it was: the identity compares *pixels*, and
+there are no pixels until 9.9 runs. A coefficient decoder has to be provable
+on its own or it is not a milestone boundary at all. 8.5.3's index table
+supplies that proof and needs no oracle — it is the codestream's own statement
+about where each packet ends, and a decoder that has lost synchronisation
+cannot land on it by accident.
 
 ## Dependencies
 
@@ -238,15 +247,18 @@ decode but nothing checks is worth more written down than counted as done.
 - `fuzz/fuzz_targets/jxr.rs` and `fuzz/corpus/jxr/`, whose seeds are written
   from the fixtures by an `#[ignore]`d test in the crate that owns them, so
   the two cannot drift.
-- `crates/tinker-pdf/src/xps/image.rs`'s `Kind::JpegXr` is the eventual
-  consumer. **That wiring is a separate item and is not part of this one**;
-  this design ends at a decoder that exists and is trustworthy.
+- `crates/tinker-pdf/src/xps/image.rs`'s `Kind::JpegXr` is the consumer, and
+  it is milestone 6 above. The decoder is a leaf-crate concern and the arm a
+  `tinker-pdf` one, so they are separate commits — but the row in
+  `docs/ROADMAP.md` closes only when an image actually decodes **and draws**,
+  which is why the wiring is a milestone rather than a footnote.
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
 | **No conformance bitstreams and no oracle.** T.832's are not freely licensed and ruling 13 rules out diffing against another decoder | The lossless identity above, over rasters this repository authors. It is a total check on the configurations it covers, and `docs/features/filters.md` names the ones it does not. **Not closed** |
+| **Thirty code tables transcribed by hand.** Tables 51 to 91 are pure data, and one wrong bit decodes most symbols correctly and then desynchronises | Three structural properties over every table — prefix-free, **complete**, one value per code — plus a `read_vlc` round trip, each with a counted injection. Not theoretical: the completeness check caught Table 52's code table 0 transcribed with its last two rows transposed, and caught it only once the exception it had been granted was taken away |
 | **A shared misreading.** If the platform encoder and this decoder read a clause the same wrong way, the identity holds and both are wrong | Named rather than mitigated. It is the residual of ruling 9's retired argument — "where the second reader is wrong, both engines agree and both are wrong" — one format over. What bounds it is that the decoder is transcribed from T.832's own pseudocode rather than inferred from the encoder's behaviour, so a shared error would have to be a shared *misreading of the same text*, not a shared convention. **Not closed** |
 | A wrong decode looks like a photograph: the inverse transform is a smoothing operator over a lapped basis, so wrong coefficients give a soft plausible picture rather than noise | Every unimplemented capability is refused by name and reached by a test in `src/jxr/tests/refusals.rs`; nothing is defaulted past. The same stance `jpx/mod.rs` takes, and sharper here because the lapped basis hides the seam a block transform would show |
 | The overlap filter is the defect most likely to survive, because it is wrong only near block edges | The seam property, on lossy ramps, at all three overlap modes — plus a counted injection, so a property that has stopped firing fails a test rather than passing quietly |
@@ -278,3 +290,229 @@ and `HorizontalTileSlices` counts slices rather than extra slices. Both had
 the same shape — a knob that does nothing looks exactly like a knob that
 worked — which is why the fixture assertions in `src/jxr/tests/fixtures.rs`
 now check that the settings reached the codestream.
+
+**Milestone 2.** Landed. Clause 8.7 to 8.12's entropy layers and clause 9.4 to
+9.8's remapping, prediction and dequantization decode, in **both** spatial and
+frequency mode. 9.9's sample reconstruction is outstanding and refused by name
+as `JxrRefusal::SampleReconstruction`, so a build that holds every transform
+coefficient and cannot yet turn them into samples says so, rather than
+returning the coefficients as a picture — which is what they would look like,
+the inverse transform being a smoothing operator over a lapped basis.
+
+Four findings, each of which changed how the work could be checked.
+
+**The index table is an oracle-free total check on the entropy decoder, and it
+was not in the original evidence design.** 8.5.3 states where every packet
+begins, so the next larger entry states where this one must end. The entropy
+layer is a chain of stateful decisions — adaptive VLC table selection,
+adaptive scan reordering, coefficient normalization, CBPHP prediction — and
+any one of them being wrong desynchronises the bit reader, which then goes on
+decoding plausible-looking symbols and finishes somewhere else. All **45
+packets across all 21 fixtures** now end on exactly the predicted byte. That
+is first-party in the strictest sense: the codestream is compared against its
+own statement about itself, not against another program's opinion of the
+picture.
+
+**A test with an exception list is a test that has been talked out of
+firing.** The check that every code table is a *complete* prefix code was
+written with one exception — Table 52's code table 0, which appeared to leave
+one leaf unassigned. The exception was wrong: that table's last two rows had
+been transcribed in the wrong order, and the "missing leaf" was the symptom,
+not a property of the standard. Removing the exception and re-reading the
+Recommendation found it. The exception list is empty and must stay empty.
+
+**Predicted injection counts are worth nothing; measured ones are the point.**
+Two of the six counted injections in `src/jxr/tests/coefficients.rs` were
+written with a guessed number and both guesses were wrong — 8 against a
+measured 24, and 2 against a measured 1. The second is the interesting one:
+conflating 8.8.4.5's two discriminants diverges on only one of five adaptation
+steps, because they usually agree. In a decoder whose state carries forward, a
+divergence that rare is not a small bug.
+
+**No whole-image `MBBuffer` exists.** 9.9.4's combination maps each HP
+coefficient to a fixed position in the sample plane, so the HP half of it runs
+at parse time and the per-macroblock buffer is a 256-entry array. Frequency
+mode would otherwise have forced a whole-image copy, because 8.7.9's FLEXBITS
+packet is a pass of its own after the HIGHPASS pass; it is instead read
+through a **second reader stepped alongside the first**, which works because
+8.7.19.1 walks a tile's macroblocks in exactly the order 8.7.18.2 does. That
+the two stay in step is checked by asserting the FLEXBITS packet also ends on
+its predicted byte, *separately* from the HIGHPASS one — if they drifted apart
+the highpass packet would still end correctly and only the picture would be
+wrong.
+
+**Milestone 3.** Landed: 9.9.2, 9.9.5 and 9.9.7's photo core transform, and
+9.9.4's coefficient combination. The overlap filter and 9.10's output
+formatting remain, so `JxrRefusal::SampleReconstruction` still fires.
+
+**One reading of the Recommendation had to be settled by measurement.**
+9.9.7.2's NOTE says "the inverse of `T2x2Th( )` is two successive applications
+of `T2x2Th`, operating on variables of the array `iCoeff[ ]` with the same
+value of `valRound`". Taken literally that makes the operator order three. It
+is not: two applications are the **identity**, so the operator is an
+involution and its inverse is one application. Measured over 20 000 random
+vectors at both values of `valRound`, and then pinned in
+`src/jxr/tests/transform.rs`. The distinction is not academic — building the
+forward operator on the literal reading gives something that is wrong
+everywhere, looks principled, and makes the round-trip evidence fail with no
+indication why.
+
+**The round trip is real evidence only because the forward direction is
+derived independently.** It is not a mirror of the inverse: each of 9.9.7's
+lifting steps is reversed from the clause's own text. Four injections applied
+to the inverse alone are caught on 256, 130, 256 and 256 of 256 vectors. The
+130 is `valRound`, which changes a result only when a parity works out.
+
+**What the transform's own evidence does not reach, by name.** A slip
+*mirrored* into both directions passes everything in that file, and the count
+is recorded as a zero: a bijection composed with its own inverse is the
+identity whatever the bijection is. The DC-flatness property, which is the
+only one derived from what the transform *means* rather than from its
+structure, catches one of the four injections and is blind to three — a
+DC-only block is degenerate, so most lifting positions carry zero through it.
+So the transform's own evidence is **necessary and not sufficient**, and the
+check that closes this stage is the lossless identity in milestone 5.
+
+**Milestone 4.** Landed: 9.9.3, 9.9.6 and 9.9.8's photo overlap transform, all
+three values of `OVERLAP_MODE`. 9.10's output formatting remains, so the
+refusal is now `JxrRefusal::OutputFormatting`.
+
+**The two levels turned out to be one geometry at two scales.** The
+Recommendation writes 9.9.3's first-level filter and 9.9.6's second-level
+filter as two long, unrelated-looking pseudocode functions — one indexed by
+macroblock and coefficient, the other by sample. Reading `MbDCLP[x][y][i][j]`
+as a sample at `(4x + j % 4, 4y + j / 4)` of a DC plane makes every one of
+9.9.3.2's index quadruples identical to 9.9.6's, with tile boundaries at
+`4 * LeftMBIndexOfTile[ ]` rather than `16 *`. Interior, all four edges, all
+four corners and all seven soft-tile cases line up. So there is one filter,
+called at scale 4 and at scale 16, and a transcription slip cannot hide in one
+level and not the other.
+
+**One index in the Recommendation does not line up, and this build departs
+from its text.** 9.9.3.2's "right edge for soft tiles" block reads
+`MbDCLP[x][y+1][i][4]` where its own non-soft counterpart reads `[3]` and
+where the geometry requires `[3]`: the filter runs down a single column, `[3]`
+is at `(4x + 3, 4y + 4)` and `[4]` is at `(4x, 4y + 5)` — a different column.
+This build implements `[3]`. **No fixture reaches that path**, so the choice
+is unadjudicated either way; it is listed below and in
+`docs/features/xps.md`.
+
+**The seam property is strongly discriminating, and the numbers are worth
+recording.** On a lossy ramp, the largest second difference at block-edge
+columns against the largest inside blocks:
+
+| Fixture | `OVERLAP_MODE` | Filtered | Second-level filter disabled |
+| --- | ---: | ---: | ---: |
+| `seam0` | 0 | 15 / 16 | 15 / 16 |
+| `seam1` | 1 | 23 / 31 | **90** / 33 |
+| `seam2` | 2 | 22 / 33 | **93** / 33 |
+
+With the filter correct the edge figure is *lower* than the interior one, so
+the ramp is genuinely smooth across the boundaries rather than merely no worse
+there. Disabled, the edge figure roughly quadruples while the interior figure
+does not move — the signature of a seam and of nothing else. The injection is
+counted at 2 of the 2 filtered modes, and `seam0`'s zero is a check in its own
+right: it says `OVERLAP_MODE` is being honoured rather than the filter applied
+unconditionally.
+
+**Milestone 5.** Landed: 9.10's output formatting — the colour transform, the
+bias, the scaling, the post-scaling, the clip and the crop — plus A.3.2's
+separate alpha image plane. **`jxr_decode` returns a raster.** Frequency mode
+stops being refused, because milestone 2 already decoded it.
+
+**The lossless identity holds bit-exactly on all fifteen lossless fixtures**:
+eight pixel formats, all three overlap modes, both tiled layouts, both
+frequency-mode files, and both alpha formats. Zero bytes differ.
+
+Two findings, and the first is the most consequential thing in this document.
+
+### `WmpBitmapEncoder.Lossless` does nothing, and the primary evidence leg was vacuous
+
+`make-fixtures.ps1` set `$enc.Lossless = $true` and left `QualityLevel`
+unset for the lossless rows. The codec ignored it and encoded at its default
+QP of **10**. So every fixture the manifest called lossless was quantized, and
+the lossless identity — the leg the whole evidence design rests on — was
+comparing a decode against an encode that could never match it. It would have
+failed forever, for a reason that looks exactly like a decoder bug.
+
+It nearly was read as one. The decode was within ±3 of the source, which is
+precisely the shape a rounding error in a lifting step takes, and the first
+two hours went into the transform. What settled it was dumping `DC_QP` and
+finding 10 where lossless requires the quantizer to be the identity.
+
+`QualityLevel = 1` is what actually produces a lossless file, and the script
+now sets it for every row. Measured rather than assumed: the same 48 × 32 grey
+raster is **1016 bytes** at `Lossless` alone and decodes to within ±3, and
+**1378 bytes** at `QualityLevel = 1` and decodes **bit-exact**.
+
+This is the **third** silently-ignored encoder knob this fixture set has
+found, after `ImageQualityLevel` and the tile-slice counting. All three have
+the same shape and the same remedy: assert that the setting reached the
+codestream, because a knob that does nothing looks exactly like a knob that
+worked. The two earlier findings cost a fixture set each; this one cost the
+evidence design, and it is the reason
+`src/jxr/tests/fixtures.rs`'s assertions exist.
+
+### A scalar that had to be an array, and only frequency mode could show it
+
+9.6.1.3's `MBDCMode` was held in a single field, written by the DC decode and
+read by the LP decode. In spatial mode those are adjacent within one
+macroblock and a scalar is correct. In frequency mode 8.7.1 decodes **every**
+tile's DC band before **any** tile's LP band, so the LP decode read the DC
+mode of a different macroblock entirely.
+
+Every spatial fixture passed. Both frequency fixtures failed. That asymmetry
+is the argument for the fixture set carrying both codestream layouts rather
+than the one that is easier to produce — the bug is invisible in thirteen of
+fifteen files.
+
+### An unreadable alpha plane degrades rather than refusing
+
+A.3.2's separate alpha plane is a second, complete `CODED_IMAGE( )`. When it
+cannot be decoded the image is returned **opaque**, with
+`JxrWarning::AlphaPlaneDropped` and `complete` false, rather than refused
+(ruling 2): a damaged alpha channel costs transparency, not the picture, and
+a page that loses its illustration over a channel the caller may not use is
+the worse outcome. The warning is what distinguishes that from a file with no
+alpha plane at all, which produces the identical bytes.
+
+### Decoded but unadjudicated
+
+Configurations this decoder will happily decode and **nothing here checks**.
+Named rather than counted as covered, the treatment `docs/features/fonts.md`
+gives shaped-but-unverified scripts.
+
+- **The quantised lossy path in general.** This is the big one. The lossless
+  identity pins the reversible transform and the QP-1 dequantization case and
+  says *nothing* about 9.8's `QuantMap( )` at any other quantizer. The seam
+  property is a *relative* comparison within one image, so a filter wrong by a
+  constant everywhere passes it. The transform round trip is blind to an error
+  mirrored into both directions. And the monotonicity property only orders
+  three error totals — it would not notice an error of a few least significant
+  bits. A decoder that is exactly right losslessly and wrong at every other
+  quantizer passes everything in this repository.
+
+  There is no fourth leg available and there will not be. Ruling 13: WIC
+  generates a fixture and never judges an output, so "decode it with something
+  else and compare" is not a check this project can make.
+- **The first-level overlap filter across a soft tile boundary.** Needs a
+  multi-tile image at `OVERLAP_MODE` 2, and both tiled fixtures were encoded
+  at mode 1. This is also the one path where 9.9.3.2's text disagrees with its
+  own geometry, and where this build follows the geometry.
+- **`HARD_TILING_FLAG`.** WIC does not expose it, so only the soft-tile path
+  has a fixture and both settings cannot be produced here.
+- **`SHIFT_BITS`.** 8.4.13 reads it for BD16, and every BD16 fixture carries
+  zero, so 9.10.5's `iBias >> SHIFT_BITS` and 9.10.7.2's `sample <<
+  SHIFT_BITS` are exercised only at the value where they do nothing.
+- **`TRIM_FLEXBITS`.** 8.3.15's flag is clear in every fixture, so the trim in
+  8.7.19.2 is only ever zero.
+- **More than one QP per tile.** `NUM_LP_QPS_MINUS1` and `NUM_HP_QPS_MINUS1`
+  are non-zero in no fixture, so 8.7.10.10's `DECODE_QP_INDEX( )` and 9.7.2.2's
+  per-macroblock QP selection are reached only in their one-QP form.
+- **A damaged codestream's *values*.** The fuzz target proves a damaged file
+  does not panic and that a dropped tile is reported; it does not check that
+  what survives is what a conformant decoder would produce.
+
+Everything else in `docs/features/filters.md`'s refusal table is refused by
+name and reached by a test, which is a different thing from unadjudicated: a
+refusal is a decision, and this list is where decisions are absent.

@@ -101,12 +101,21 @@ const ZIPS: &[&str] = &[
     "winrar.cbz",
 ];
 
-/// The three that are not, each recognised and refused by name.
-const NOT_ZIPS: &[(&str, Container)] = &[
-    ("7z-lzma2.cb7", Container::SevenZip),
+/// The containers that are not ZIPs and **are** read, with the sniff that
+/// recognises each.
+///
+/// They join `ZIPS` in the cross-producer identity below rather than getting a
+/// check of their own: what is worth asserting about a `.cbt` is not that it
+/// opens, it is that it opens as *the same five pictures* a `.cbz` of the same
+/// pages does.
+const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-tar.cbt", Container::Tar),
-    ("winrar-rar5.cbr", Container::Rar),
+    ("7z-lzma2.cb7", Container::SevenZip),
 ];
+
+/// The containers this build recognises and still does not read, each refused
+/// by name.
+const NOT_READ: &[(&str, Container)] = &[("winrar-rar5.cbr", Container::Rar)];
 
 fn read(name: &str) -> Vec<u8> {
     let path = corpus().join(name);
@@ -208,13 +217,21 @@ fn every_real_archive_opens_and_pages_in_natural_order() {
     }
 }
 
-/// **Five ZIP writers, one reader, one comic.**
+/// **Every container this build reads, one reader, one comic.**
 ///
 /// One real archive proves this reader opens one real archive. The relation
-/// between five costs nothing more to ask and proves more: the archives share
+/// across several costs nothing more to ask and proves more: the archives share
 /// no code, they disagree about which entries to store and which to deflate,
 /// and two of them deflate entries to *more* bytes than they started with — and
 /// every page still has to come back as the same picture at the same size.
+///
+/// **This is the exit criterion for every container decoder in
+/// `docs/design/comic-archives.md`, and it needs no oracle.** The `.cbt`
+/// beside the five ZIPs holds the *same five pages*, put there by a different
+/// program before any decoder for it existed, so a decoder is right exactly
+/// when the rasters it produces are byte-identical to the ones the
+/// already-trusted ZIP path produces. A new container joins `READ_CONTAINERS`
+/// and is held to the same sentence rather than getting a check of its own.
 ///
 /// Nothing outside this repository renders anything here. Both sides of the
 /// comparison are this engine reading two files, which is the shape
@@ -222,6 +239,11 @@ fn every_real_archive_opens_and_pages_in_natural_order() {
 /// two reads needs no ground truth and can be asked of everything at once.
 #[test]
 fn five_zip_writers_produce_the_same_five_pictures() {
+    let others: Vec<&str> = ZIPS[1..]
+        .iter()
+        .copied()
+        .chain(READ_CONTAINERS.iter().map(|(name, _)| *name))
+        .collect();
     let first = Document::open(read(ZIPS[0])).expect("the first archive opens");
     for index in 0..PAGES.len() as u32 {
         let reference = first
@@ -240,7 +262,7 @@ fn five_zip_writers_produce_the_same_five_pictures() {
             "page {index} of {} drew ink rather than nothing",
             ZIPS[0]
         );
-        for name in &ZIPS[1..] {
+        for name in &others {
             let document = Document::open(read(name)).unwrap_or_else(|e| panic!("{name}: {e:?}"));
             let bitmap = document
                 .page(index)
@@ -261,16 +283,24 @@ fn five_zip_writers_produce_the_same_five_pictures() {
     }
 }
 
-/// The three containers this build recognises and does not read, each refused
-/// **by name** rather than as "this is not a PDF".
+/// The containers this build recognises and **still** does not read, each
+/// refused by name rather than as "this is not a PDF".
 ///
 /// They hold the same five pages as the five ZIPs beside them, and that is why
 /// they are committed before any decoder exists: when one arrives, the pictures
 /// it produces have something already in the tree to be compared against, put
-/// there by a different program.
+/// there by a different program. `7z-tar.cbt` and then `7z-lzma2.cb7` left this
+/// list in the commit that gave each a reader and joined `READ_CONTAINERS`,
+/// which is the only way a row here is allowed to move.
 #[test]
 fn the_containers_this_build_does_not_read_are_refused_by_name() {
-    for (name, container) in NOT_ZIPS {
+    assert!(
+        !NOT_READ.is_empty(),
+        "a sweep with nothing to sweep is a sweep that does not run; when the \
+         last container gains a reader, delete this test rather than leaving it \
+         green over an empty list"
+    );
+    for (name, container) in NOT_READ {
         let bytes = read(name);
         assert_eq!(
             cbz::container(&bytes),
@@ -281,6 +311,84 @@ fn the_containers_this_build_does_not_read_are_refused_by_name() {
             Err(OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)) => {}
             other => panic!("{name}: expected NotAZip, got {other:?}"),
         }
+    }
+}
+
+/// **The `.cbt` a real archiver wrote opens, and its pages are its entries'
+/// own pictures.**
+///
+/// The order assertion is the one that matters and it is not free: 7-Zip packs
+/// the five pages as `page1, page10, page11, page2, page3` — deliberately not
+/// the reading order — so a reader that trusted the archive's own header order,
+/// or sorted lexicographically, pages the comic 1, 10, 11, 2, 3 with every page
+/// present and nothing anywhere saying so. tar has no central directory to
+/// re-order things behind, which makes this the strictest form of that check in
+/// the corpus.
+#[test]
+fn the_tar_a_real_archiver_wrote_pages_in_natural_order() {
+    let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
+    let document = Document::open(read("7z-tar.cbt")).expect("the .cbt opens");
+    let report = document.archive().expect("a synthesised document");
+    let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(order, want, "the .cbt's page order");
+    assert!(
+        report.pages().iter().all(|page| page.defect.is_none()),
+        "every page is its entry's own picture rather than a placeholder"
+    );
+    assert!(
+        report.warnings().is_empty(),
+        "7-Zip's tar is not a damaged one: {:?}",
+        report.warnings()
+    );
+    for (index, (page, width, height)) in PAGES.iter().enumerate() {
+        let bitmap = document
+            .page(index as u32)
+            .unwrap_or_else(|| panic!("page {index}"))
+            .render(&RenderOptions::default());
+        assert_eq!(
+            (bitmap.width, bitmap.height),
+            (*width, *height),
+            "{page} is one image pixel to one PDF point"
+        );
+    }
+}
+
+/// **The `.cb7` a real archiver wrote opens, and the archive's own CRC-32 is
+/// what says its decompressor is right.**
+///
+/// This is the assertion tier 4's largest piece rests on. `7z-lzma2.cb7` was
+/// written by 7-Zip with `-m0=LZMA2` before this engine had an LZMA decoder,
+/// and it records a CRC-32 per file in its own header. So a wrong window, a
+/// mis-set probability array or an ignored LZMA2 dictionary reset fails the
+/// *format's* check inside `sevenz::Archive::read` and becomes a placeholder
+/// page — which means "every page is its entry's own picture" below is a
+/// statement about the decompressor and not only about the container.
+///
+/// It also exercises the part of the format that surprises: this archive's
+/// **header is itself compressed**, with plain LZMA rather than the LZMA2 its
+/// data uses, so listing these five names at all requires the other decoder.
+#[test]
+fn the_7z_a_real_archiver_wrote_pages_in_natural_order() {
+    let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
+    let document = Document::open(read("7z-lzma2.cb7")).expect("the .cb7 opens");
+    let report = document.archive().expect("a synthesised document");
+    let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(order, want, "the .cb7's page order");
+    assert!(
+        report.pages().iter().all(|page| page.defect.is_none()),
+        "every page is its entry's own picture rather than a placeholder: {:?}",
+        report.pages().iter().map(|p| p.defect).collect::<Vec<_>>()
+    );
+    for (index, (page, width, height)) in PAGES.iter().enumerate() {
+        let bitmap = document
+            .page(index as u32)
+            .unwrap_or_else(|| panic!("page {index}"))
+            .render(&RenderOptions::default());
+        assert_eq!(
+            (bitmap.width, bitmap.height),
+            (*width, *height),
+            "{page} is one image pixel to one PDF point"
+        );
     }
 }
 

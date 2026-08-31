@@ -551,3 +551,58 @@ impl Consumed {
         }
     }
 }
+
+/// CSS 2.2 §10.4's and §10.7's `min-width`/`min-height` as a used length.
+///
+/// `None` where the value is `auto`, which is not zero and is not the caller's
+/// to guess: `css-sizing-3` §5.1 leaves `auto` to the formatting context, and
+/// the two contexts in this crate answer differently — a block box's automatic
+/// minimum is zero (CSS 2.2 §10.4's own initial value) and a flex item's is
+/// `css-flexbox-1` §4.5's min-content size. A helper that returned zero would
+/// let every flex item shrink below its longest word, and the page would look
+/// like a page.
+///
+/// `None` also where the value is a percentage and `containing` is `None`,
+/// which is §10.5's rule for a percentage against an indefinite size: it
+/// behaves as `auto`.
+#[must_use]
+pub fn min_length(min: MinSize, containing: Option<f64>) -> Option<f64> {
+    match min {
+        MinSize::Auto => None,
+        MinSize::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+        MinSize::Length(LengthPercentage::Percent(percent)) => {
+            containing.map(|size| (size * percent / 100.0).max(0.0))
+        }
+    }
+}
+
+/// The same for `max-width`/`max-height`, where `None` means `none`.
+#[must_use]
+pub fn max_length(max: MaxSize, containing: Option<f64>) -> Option<f64> {
+    match max {
+        MaxSize::None => None,
+        MaxSize::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+        MaxSize::Length(LengthPercentage::Percent(percent)) => {
+            containing.map(|size| (size * percent / 100.0).max(0.0))
+        }
+    }
+}
+
+/// CSS 2.2 §10.4's two extra passes, as one function.
+///
+/// **The order is the algorithm and it is not a `clamp`.** §10.4 applies
+/// `max-width` first and `min-width` second, so a `min-width` larger than the
+/// `max-width` **wins** — which `f64::clamp` does not express and which
+/// `min(max).max(min)` does. It is also the case `clamp` panics on, so writing
+/// it this way is ruling 1 as well as §10.4.
+#[must_use]
+pub fn clamp_size(tentative: f64, min: Option<f64>, max: Option<f64>) -> f64 {
+    let mut used = tentative;
+    if let Some(max) = max {
+        used = used.min(max);
+    }
+    if let Some(min) = min {
+        used = used.max(min);
+    }
+    used
+}

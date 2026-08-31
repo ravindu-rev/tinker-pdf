@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- §5.7's `<image>`, carried unresolved: the reference, the rectangle in the
+     element's own space, the matrix out of that space, and the
+     `preserveAspectRatio` string that only a caller holding the decoded image
+     can act on. This is `sample-svg-in-spine.epub`'s p002, p005 and p006
+     reduced to their shape. -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="100%" height="100%" viewBox="0 0 1100 1700">
+  <g transform="translate(100, 50)">
+    <image width="1100" height="1700" xlink:href="flyer.jpg"
+           preserveAspectRatio="xMinYMin slice"/>
+  </g>
+</svg>
