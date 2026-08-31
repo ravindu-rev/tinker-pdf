@@ -372,3 +372,64 @@ structure, catches one of the four injections and is blind to three — a
 DC-only block is degenerate, so most lifting positions carry zero through it.
 So the transform's own evidence is **necessary and not sufficient**, and the
 check that closes this stage is the lossless identity in milestone 5.
+
+**Milestone 4.** Landed: 9.9.3, 9.9.6 and 9.9.8's photo overlap transform, all
+three values of `OVERLAP_MODE`. 9.10's output formatting remains, so the
+refusal is now `JxrRefusal::OutputFormatting`.
+
+**The two levels turned out to be one geometry at two scales.** The
+Recommendation writes 9.9.3's first-level filter and 9.9.6's second-level
+filter as two long, unrelated-looking pseudocode functions — one indexed by
+macroblock and coefficient, the other by sample. Reading `MbDCLP[x][y][i][j]`
+as a sample at `(4x + j % 4, 4y + j / 4)` of a DC plane makes every one of
+9.9.3.2's index quadruples identical to 9.9.6's, with tile boundaries at
+`4 * LeftMBIndexOfTile[ ]` rather than `16 *`. Interior, all four edges, all
+four corners and all seven soft-tile cases line up. So there is one filter,
+called at scale 4 and at scale 16, and a transcription slip cannot hide in one
+level and not the other.
+
+**One index in the Recommendation does not line up, and this build departs
+from its text.** 9.9.3.2's "right edge for soft tiles" block reads
+`MbDCLP[x][y+1][i][4]` where its own non-soft counterpart reads `[3]` and
+where the geometry requires `[3]`: the filter runs down a single column, `[3]`
+is at `(4x + 3, 4y + 4)` and `[4]` is at `(4x, 4y + 5)` — a different column.
+This build implements `[3]`. **No fixture reaches that path**, so the choice
+is unadjudicated either way; it is listed below and in
+`docs/features/xps.md`.
+
+**The seam property is strongly discriminating, and the numbers are worth
+recording.** On a lossy ramp, the largest second difference at block-edge
+columns against the largest inside blocks:
+
+| Fixture | `OVERLAP_MODE` | Filtered | Second-level filter disabled |
+| --- | ---: | ---: | ---: |
+| `seam0` | 0 | 15 / 16 | 15 / 16 |
+| `seam1` | 1 | 23 / 31 | **90** / 33 |
+| `seam2` | 2 | 22 / 33 | **93** / 33 |
+
+With the filter correct the edge figure is *lower* than the interior one, so
+the ramp is genuinely smooth across the boundaries rather than merely no worse
+there. Disabled, the edge figure roughly quadruples while the interior figure
+does not move — the signature of a seam and of nothing else. The injection is
+counted at 2 of the 2 filtered modes, and `seam0`'s zero is a check in its own
+right: it says `OVERLAP_MODE` is being honoured rather than the filter applied
+unconditionally.
+
+### Decoded but unadjudicated, so far
+
+Named here rather than counted as covered:
+
+- **The first-level overlap filter across a soft tile boundary.** Needs a
+  multi-tile image at `OVERLAP_MODE` 2; both tiled fixtures were encoded at
+  mode 1. This is also the path where 9.9.3.2's text disagrees with its own
+  geometry.
+- **`HARD_TILING_FLAG`.** WIC does not expose it, so only the soft-tile path
+  has a fixture at all and both settings cannot be produced here.
+- **The quantised lossy path in general.** The lossless identity pins the
+  reversible transform and the QP-1 dequantization case and says nothing
+  about 9.8's `QuantMap( )` at other quantizers; the seam property is a
+  *relative* comparison within one image, so it would pass a filter that is
+  wrong by a constant everywhere; and the transform round trip is blind to a
+  mirrored error. Ruling 13 is why there is no fourth leg: WIC generates a
+  fixture and never judges an output, so "decode it with something else and
+  compare" is not available and will not become available.

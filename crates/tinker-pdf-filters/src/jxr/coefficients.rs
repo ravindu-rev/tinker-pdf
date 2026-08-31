@@ -80,20 +80,15 @@ pub(crate) struct Planes {
     pub(crate) height: u32,
 }
 
-/// Decodes the primary image plane's coefficient layers and runs as much of
-/// 9.9's sample reconstruction as exists.
+/// Decodes the primary image plane's coefficient layers and reconstructs its
+/// samples.
 ///
-/// **This stops short of pixels.** Clause 8's entropy layers, clause 9.4 to
-/// 9.8's remapping, prediction and dequantization, and 9.9.2, 9.9.4 and
-/// 9.9.5's two levels of inverse transform all run — but 9.9.3 and 9.9.6's
-/// overlap filtering and 9.10's output formatting are outstanding, so the
-/// result is refused by name rather than returned as a raster.
-///
-/// It would look like a raster. That is the whole reason for the refusal: the
-/// inverse transform is a smoothing operator over a lapped basis, so its
-/// output without the overlap filter is a soft, plausible picture with faint
-/// seams at the block edges — which is exactly what a human skimming a page
-/// does not see.
+/// **This stops short of pixels.** All of clause 8 and all of clause 9.4 to
+/// 9.9 run: the samples are reconstructed, in the internal colour format and
+/// the extended geometry. What is outstanding is 9.10's output formatting —
+/// the colour transform back to RGB or grey, the bias, the bit depths and the
+/// crop — so the result is refused by name rather than returned as a raster
+/// whose numbers mean something other than what the file said.
 pub(crate) fn decode_image(
     r: &mut BitReader<'_>,
     h: &CodedImageHeaders,
@@ -103,7 +98,7 @@ pub(crate) fn decode_image(
     let mut d = PlaneDecoder::new(&g)?;
     d.parse_tiles(r, h, &h.primary, warnings)?;
     d.reconstruct();
-    Err(JxrError::Unsupported(JxrRefusal::SampleReconstruction))
+    Err(JxrError::Unsupported(JxrRefusal::OutputFormatting))
 }
 
 // --- 8.8: adaptive VLC code table selection -----------------------------
@@ -506,13 +501,9 @@ pub(crate) struct PlaneGeometry {
     pub(crate) mb_height: usize,
     pub(crate) ext_width: usize,
     pub(crate) ext_height: usize,
-    /// 8.3.10's `OVERLAP_MODE` and 8.3.4's `HARD_TILING_FLAG`. Both are
-    /// read by 9.9.3 and 9.9.6, which land with the overlap filter; they are
-    /// carried here rather than re-derived there because the geometry a
-    /// filter needs is one struct or three.
-    #[allow(dead_code)] // The milestone that lands 9.9.3 and 9.9.6 reads them.
+    /// 8.3.10's `OVERLAP_MODE` and 8.3.4's `HARD_TILING_FLAG`, both read by
+    /// 9.9.3 and 9.9.6.
     pub(crate) overlap_mode: u8,
-    #[allow(dead_code)] // The milestone that lands 9.9.3 and 9.9.6 reads them.
     pub(crate) hard_tiling: bool,
     pub(crate) trim_flexbits_flag: bool,
     pub(crate) num_tile_cols: usize,
@@ -2298,26 +2289,66 @@ impl PlaneDecoder<'_> {
         }
     }
 
-    /// 9.9.1's `SampleReconstruction( )`, as far as it exists.
+    /// 9.9.1's `SampleReconstruction( )`.
     ///
     /// The HP half of 9.9.4's combination already happened at parse time —
     /// see [`Self::decode_hp`] — so what remains is the first level's
     /// transform over `MbDCLP`, the DC and LP half of the combination, and
     /// the second level's transform over the sample plane.
     ///
-    /// **9.9.3 and 9.9.6's overlap filtering is not here yet.** The clause
-    /// puts the first-level filter between the two transforms and the
-    /// second-level filter after both, so the milestone that lands them
-    /// inserts two calls into this function and changes nothing else.
+    /// 8.3.10's `OVERLAP_MODE` selects how much of 9.9.3 and 9.9.6 runs: 0
+    /// neither, 1 the second level only, 2 both. The clause puts the
+    /// first-level filter *between* the two transforms and the second-level
+    /// filter after both, and that ordering is load-bearing — the overlap
+    /// filter is what makes the transform lapped, and applying it on the
+    /// wrong side of a transform is a picture with seams rather than one
+    /// without.
+    /// [`Self::reconstruct`] with 9.9.6's second-level filter optionally
+    /// suppressed, so that `overlap::tests` can run its counted injection
+    /// against a real codestream rather than a synthetic one.
+    #[cfg(test)]
+    pub(crate) fn reconstruct_for_test(&mut self, disable_second_level: bool) {
+        self.reconstruct_inner(disable_second_level);
+    }
+
     fn reconstruct(&mut self) {
+        self.reconstruct_inner(false);
+    }
+
+    fn reconstruct_inner(&mut self, disable_second_level: bool) {
         let components = self.g.components;
         let scaled = self.g.scaled;
         let mb_count = self.g.mb_width * self.g.mb_height;
         let (width, height) = (self.g.ext_width, self.g.ext_height);
+        let geometry = self.geometry();
         super::transform::first_level(&mut self.dclp, components, scaled, mb_count);
+        if self.g.overlap_mode == 2 {
+            super::overlap::first_level(&mut self.dclp, &geometry);
+        }
         self.combine_dclp();
         for plane in &mut self.plane {
             super::transform::second_level(plane, width, height);
+        }
+        if self.g.overlap_mode != 0 && !disable_second_level {
+            for plane in &mut self.plane {
+                super::overlap::second_level(plane, &geometry);
+            }
+        }
+    }
+
+    /// The tile and macroblock layout the overlap filters index by.
+    fn geometry(&self) -> super::overlap::Geometry {
+        super::overlap::Geometry {
+            components: self.g.components,
+            mb_width: self.g.mb_width,
+            mb_height: self.g.mb_height,
+            ext_width: self.g.ext_width,
+            ext_height: self.g.ext_height,
+            hard_tiling: self.g.hard_tiling,
+            left_mb_of_tile: self.g.left_mb_of_tile.clone(),
+            top_mb_of_tile: self.g.top_mb_of_tile.clone(),
+            num_tile_cols: self.g.num_tile_cols,
+            num_tile_rows: self.g.num_tile_rows,
         }
     }
 
