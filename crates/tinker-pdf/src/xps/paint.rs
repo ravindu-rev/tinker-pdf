@@ -1103,21 +1103,24 @@ impl State<'_> {
                 return Ok(());
             }
         };
-        match node
+        // 12.1's `BidiLevel`. Only the **parity** is a fact about this run:
+        // every odd level reads right to left and every even one left to
+        // right, and the number itself is the producer's record of how deeply
+        // the run was embedded in a paragraph this element does not carry. A
+        // level that is not a number refuses the run for `IsSideways`'s
+        // reason — the two answers put the same glyphs at opposite ends of the
+        // origin.
+        let rtl = match node
             .attr("BidiLevel")
             .map(|text| text.trim().parse::<u32>())
         {
-            None => {}
-            Some(Ok(level)) if level % 2 == 0 => {}
-            Some(Ok(_)) => {
-                self.warn(XpsElementDefect::GlyphsBidiUnsupported);
-                return Ok(());
-            }
+            None => false,
+            Some(Ok(level)) => level % 2 == 1,
             Some(Err(_)) => {
                 self.warn(XpsElementDefect::GlyphsUnreadable);
                 return Ok(());
             }
-        }
+        };
         if node
             .attr("StyleSimulations")
             .is_some_and(|value| value.trim() != "None")
@@ -1138,7 +1141,7 @@ impl State<'_> {
             }
         };
 
-        let placed = match glyphs::run(node, font, em, budget) {
+        let placed = match glyphs::run(node, font, em, budget, rtl) {
             Ok(placed) => placed,
             Err(RunError::Exhausted) => return Err(Trouble::Exhausted),
             Err(RunError::Indices) => {
