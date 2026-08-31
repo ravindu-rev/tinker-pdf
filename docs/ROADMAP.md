@@ -331,9 +331,20 @@ opened. Scripts with no conformance fixture stay listed by name in
 
 Decision items, not commitments: **OCR** (if ever, as a host seam like
 `FontProvider`, not an in-engine engine) and **container writing** (CBZ,
-XPS and EPUB are read-only conversions today). Named permanent non-goal:
-**XFA** — removed in ISO 32000-2; stated so it is a decision rather than
-an omission.
+XPS and EPUB are read-only conversions today). Named permanent non-goals: **XFA**
+— removed in ISO 32000-2; stated so it is a decision rather than an
+omission — and **RAR's compression**, which is not the same shape as the
+rest of tier 4 and is recorded here rather than deleted. The RAR 5
+archive format is published and is read
+([features/cbz.md](features/cbz.md)); the compression under it never has
+been, and the only description of it is a decoder whose licence bars
+deriving a compatible implementation, which `deny.toml` already records.
+So a `.cbr` is read as far as a published document goes and no further:
+a stored entry is a page, a compressed one is a placeholder naming its
+method by number. **RAR 4** stops earlier still and for a second reason
+— no producer on this machine can write one, so under
+[ruling 13](rulings.md) there would be nothing first-party to hold a
+decoder to.
 
 ## Tier 4 — container depth
 
