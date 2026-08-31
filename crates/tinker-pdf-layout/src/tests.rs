@@ -13,8 +13,8 @@ use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, Display,
     FlexDirection, FlexWrap, Float, JustifyContent, LengthPercentage, LineHeight, ListStyleType,
-    MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size, TextAlign,
-    Visibility, WhiteSpace,
+    MarginValue, MaxSize, MinSize, OverflowWrap, PageBreak, PageBreakInside, Side, Sides, Size,
+    TextAlign, Visibility, WhiteSpace,
 };
 
 use crate::flex;
@@ -3004,24 +3004,318 @@ fn a_rowspan_keeps_its_rows_on_one_page() {
     assert_eq!(laid.text(), "abcde");
 }
 
-/// A band taller than a page is drawn where it is and **says so**, which is
-/// the staged half of table fragmentation named rather than left silent.
+/// `css-break-3` §3.1's class-3 break: a band taller than a page is **cut**,
+/// and every cell of it continues on the next page at the same height.
+///
+/// The arithmetic is the file's own. A forty-point line holds four ten-point
+/// characters and breaks at a space, so `"a b c d ..."` wraps to `"a b"`,
+/// `"c d"`, ... — thirteen lines of twelve points, a hundred and fifty-six
+/// points of cell against a thirty-point page. That is seven pages, and what
+/// this asserts is that it is more than one and that the twenty-six letters
+/// are still all there, in order, once.
 #[test]
-fn a_row_taller_than_a_page_is_drawn_and_says_so() {
-    let tall = cell_of("a b c d e f g h i j k l m n o p q r s t u v w x y z");
-    let tree = table_of(vec![row_of(vec![tall])]);
+fn a_band_taller_than_a_page_is_cut_at_a_line_box() {
+    let body = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+    let tree = table_of(vec![row_of(vec![cell_of(body)])]);
     let laid = run(&tree, 40.0, 30.0);
     assert!(
-        laid.warnings
-            .iter()
-            .any(|(warning, _)| *warning == Warning::TableRowTallerThanPage),
-        "{:?}",
-        laid.warnings
+        laid.pages.len() > 1,
+        "the band was drawn on one page rather than cut: {} pages",
+        laid.pages.len()
     );
     assert_eq!(
         conservable(&laid.text()),
-        conservable("a b c d e f g h i j k l m n o p q r s t u v w x y z"),
-        "and nothing was lost by overflowing"
+        conservable(body),
+        "the cut lost or repeated a character"
+    );
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::TableRowTallerThanPage),
+        "a band that was cut is not a band that overflowed: {:?}",
+        laid.warnings
+    );
+    // No line box straddles a page: every line of a page is inside it. A cut
+    // taken anywhere but the top of an item that did not fit would put half a
+    // line on each of two pages, which reads as a page of text either way.
+    for (at, page) in laid.pages.iter().enumerate() {
+        for glyph in &page.runs {
+            assert!(
+                glyph.y >= 0.0 && glyph.y <= 30.0,
+                "a run of page {at} sits at {} on a thirty-point page",
+                glyph.y
+            );
+        }
+    }
+}
+
+/// And the row's own background is cut with it: one fragment per page, each
+/// no taller than the page, and the heights add up to the row.
+///
+/// CSS 2.2 §17.5.1's row layer, `css-break-3` §4's fragment. A build that cut
+/// the text and not the decoration draws the whole row's background on **every**
+/// page of it, starting above the top margin on all but the first.
+#[test]
+fn a_cut_band_paints_one_row_fragment_per_page() {
+    let body = "a b c d e f g h i j k l m n o p q r s t u v w x y z";
+    let mut row = styled(Display::TableRow);
+    row.background_color = Color {
+        r: 9,
+        g: 9,
+        b: 9,
+        a: 255,
+    };
+    let tree = table_of(vec![BoxNode::element(row, vec![cell_of(body)])]);
+    let laid = run(&tree, 40.0, 30.0);
+    let mut total = 0.0;
+    let mut fragments = 0usize;
+    for (at, page) in laid.pages.iter().enumerate() {
+        for fragment in &page.boxes {
+            if fragment.background.r != 9 {
+                continue;
+            }
+            fragments += 1;
+            total += fragment.height;
+            assert!(
+                fragment.y >= -1e-9,
+                "page {at} paints the row from {}, above its own top edge",
+                fragment.y
+            );
+            assert!(
+                fragment.y + fragment.height <= 30.0 + 1e-9,
+                "page {at} paints the row to {}, past its own bottom edge",
+                fragment.y + fragment.height
+            );
+        }
+    }
+    assert!(
+        fragments > 1,
+        "the row was painted as one fragment rather than one per page"
+    );
+    assert!(
+        close(total, 13.0 * 12.0),
+        "the fragments come to {total} and the row is {} tall",
+        13.0 * 12.0
+    );
+}
+
+/// The narrowed warning: what overflows a page now is one box **inside** a
+/// band that is itself taller than a page, which no cut can avoid.
+///
+/// A line box is atomic, so a font big enough that one line is taller than the
+/// page has no cut position anywhere. The band is drawn, the page overflows,
+/// and `TableRowTallerThanPage` is what says so — the same variant, a smaller
+/// claim.
+#[test]
+fn a_line_taller_than_a_page_inside_a_band_still_says_so() {
+    let mut huge = base();
+    huge.font_size = 60.0;
+    let cell = BoxNode::element(styled(Display::TableCell), vec![BoxNode::text(huge, "x")]);
+    let tree = table_of(vec![row_of(vec![cell])]);
+    let laid = run(&tree, 400.0, 30.0);
+    assert!(
+        laid.warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::TableRowTallerThanPage),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.text(), "x", "and the letter is still on a page");
+}
+
+// ---- CSS 2.2 §10.4 and §10.7, the min/max clamps ---------------------------
+//
+// Every number below is the file's own arithmetic. A two-hundred-point
+// containing block, a ten-point font, one point of advance per point.
+
+/// Shorthands for the two sizing properties, so a fixture reads as the
+/// declaration it stands for.
+fn min_px(value: f64) -> MinSize {
+    MinSize::Length(LengthPercentage::Px(value))
+}
+
+fn max_px(value: f64) -> MaxSize {
+    MaxSize::Length(LengthPercentage::Px(value))
+}
+
+/// The width of the first painted box on a page, which is what the clamp moves.
+fn first_width(laid: &Layout, page: usize) -> f64 {
+    laid.pages[page].boxes[0].width
+}
+
+fn tinted(mut style: ComputedStyle) -> ComputedStyle {
+    style.background_color = Color {
+        r: 1,
+        g: 2,
+        b: 3,
+        a: 255,
+    };
+    style
+}
+
+/// §10.4: `max-width` narrows an `auto` width, and `min-width` widens it.
+///
+/// An `auto` width fills the two-hundred-point containing block; a
+/// `max-width: 80px` makes the used width eighty, and a `min-width: 150px` on
+/// a box whose `width: 40px` would have been forty makes it a hundred and
+/// fifty. Two boxes and not one, because a build that clamped one way and not
+/// the other passes every fixture written for the other.
+#[test]
+fn a_max_width_narrows_a_box_and_a_min_width_widens_one() {
+    let mut narrowed = tinted(block());
+    narrowed.max_width = max_px(80.0);
+    let mut widened = tinted(block());
+    widened.width = Size::Length(LengthPercentage::Px(40.0));
+    widened.min_width = min_px(150.0);
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            BoxNode::element(narrowed, vec![text("x")]),
+            BoxNode::element(widened, vec![text("y")]),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let widths: Vec<f64> = laid.pages[0].boxes.iter().map(|b| b.width).collect();
+    assert_eq!(widths, vec![80.0, 150.0]);
+}
+
+/// §10.4 **is not `clamp`**: the maximum is applied first and the minimum
+/// second, so a `min-width` larger than the `max-width` wins.
+///
+/// This is the clause a build gets wrong by reaching for the obvious library
+/// function — which would also panic on the pair, and ruling 1 says never.
+#[test]
+fn a_min_width_larger_than_the_max_width_wins() {
+    let mut style = tinted(block());
+    style.min_width = min_px(150.0);
+    style.max_width = max_px(50.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(first_width(&laid, 0), 150.0);
+}
+
+/// `css-ui-3` §5.1: `box-sizing: border-box` measures the **min/max**
+/// properties from the border box too, not only `width`.
+///
+/// The fixture has a border and a padding, because on a box with neither the
+/// two readings give the same answer — the same shape `box_sizing_is_the_
+/// difference_between_a_hundred_and_a_hundred_and_thirty` has.
+#[test]
+fn box_sizing_measures_the_max_width_from_the_border_box_as_well() {
+    let make = |sizing: BoxSizing| {
+        let mut style = tinted(block());
+        style.box_sizing = sizing;
+        style.padding = Sides::all(LengthPercentage::Px(10.0));
+        style.border_width = Sides::all(5.0);
+        style.border_style = Sides::all(BorderStyle::Solid);
+        style.max_width = max_px(100.0);
+        let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+        first_width(&run(&tree, 200.0, 400.0), 0)
+    };
+    // The painted fragment is the border box either way. `content-box` reads
+    // the hundred as the content and adds thirty; `border-box` reads it as the
+    // whole and the content is seventy.
+    assert_eq!(make(BoxSizing::ContentBox), 130.0);
+    assert_eq!(make(BoxSizing::BorderBox), 100.0);
+}
+
+/// §10.4: a percentage `max-width` is a percentage of the containing block.
+#[test]
+fn a_percentage_max_width_is_of_the_containing_block() {
+    let mut style = tinted(block());
+    style.max_width = MaxSize::Length(LengthPercentage::Percent(25.0));
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(first_width(&laid, 0), 50.0);
+}
+
+/// §10.3.3: two `auto` margins centre a box the **clamp** made narrow, not
+/// only one the book gave a `width`.
+///
+/// §10.4's second pass runs *"as if `width` were the clamped value"*, and by
+/// then it is not `auto`. A build that keyed the centring on the declared
+/// `width` alone leaves every `max-width`-narrowed figure hard against the
+/// left margin, which is a page that looks deliberate.
+#[test]
+fn a_max_width_narrowed_box_with_auto_margins_is_centred() {
+    let mut style = tinted(block());
+    style.max_width = max_px(100.0);
+    style.margin.left = MarginValue::Auto;
+    style.margin.right = MarginValue::Auto;
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.pages[0].boxes[0].x, 50.0);
+    assert_eq!(first_width(&laid, 0), 100.0);
+}
+
+/// §10.7: `min-height` pads the flow out to it, exactly as `height` does.
+#[test]
+fn a_min_height_pads_the_flow_out_to_it() {
+    let mut style = tinted(block());
+    style.min_height = min_px(100.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    // One line of twelve points, padded out to a hundred.
+    assert_eq!(laid.pages[0].boxes[0].height, 100.0);
+}
+
+/// §10.7: a `max-height` **taller** than the content clamps a `height` that
+/// would have padded past it.
+#[test]
+fn a_max_height_clamps_the_height_it_would_have_padded_to() {
+    let mut style = tinted(block());
+    style.height = Size::Length(LengthPercentage::Px(200.0));
+    style.max_height = max_px(100.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.pages[0].boxes[0].height, 100.0);
+}
+
+/// And a `max-height` **shorter** than the content is named rather than half
+/// honoured.
+///
+/// This module's flow is one column whose `y` never goes backwards, so by the
+/// time a box's height is known its items are emitted and there is no negative
+/// edge to shorten it with. The box is its content's height and the
+/// declaration did nothing — which is [`Warning::MaxHeightAsAuto`]'s whole
+/// sentence, and `InlineBlockAsInline`'s shape.
+#[test]
+fn a_max_height_shorter_than_the_content_says_so() {
+    let mut style = tinted(block());
+    style.max_height = max_px(6.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert!(
+        laid.warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::MaxHeightAsAuto),
+        "{:?}",
+        laid.warnings
+    );
+    assert_eq!(laid.pages[0].boxes[0].height, 12.0, "and it is its content");
+}
+
+/// §10.5: a percentage `min-height` against a containing block whose height is
+/// `auto` behaves as `auto`, so it pads nothing.
+///
+/// The same sentence `height` already obeys. A build that resolved it against
+/// the page instead makes every `min-height: 100%` book one screen per
+/// paragraph.
+#[test]
+fn a_percentage_min_height_against_an_auto_height_is_auto() {
+    let mut style = tinted(block());
+    style.min_height = MinSize::Length(LengthPercentage::Percent(100.0));
+    let tree = BoxNode::element(block(), vec![BoxNode::element(style, vec![text("x")])]);
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(laid.pages[0].boxes[0].height, 12.0);
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::MaxHeightAsAuto),
+        "an `auto` minimum is not a maximum that did nothing: {:?}",
+        laid.warnings
     );
 }
 
@@ -3772,6 +4066,7 @@ fn the_flexible_length_resolution_redistributes_after_a_minimum_bites() {
             base: 100.0,
             hypothetical: 100.0,
             min: 90.0,
+            max: f64::INFINITY,
             extra: 0.0,
         },
         flex::Item {
@@ -3780,6 +4075,7 @@ fn the_flexible_length_resolution_redistributes_after_a_minimum_bites() {
             base: 100.0,
             hypothetical: 100.0,
             min: 0.0,
+            max: f64::INFINITY,
             extra: 0.0,
         },
     ];
@@ -3800,6 +4096,7 @@ fn flex_factors_below_one_leave_the_rest_of_the_space_empty() {
         base: 0.0,
         hypothetical: 0.0,
         min: 0.0,
+        max: f64::INFINITY,
         extra: 0.0,
     }];
     let used = flex::resolve(&items, 200.0);
@@ -3819,6 +4116,7 @@ fn a_flex_line_always_takes_one_item() {
             base: 500.0,
             hypothetical: 500.0,
             min: 0.0,
+            max: f64::INFINITY,
             extra: 0.0,
         },
         flex::Item {
@@ -3827,6 +4125,7 @@ fn a_flex_line_always_takes_one_item() {
             base: 500.0,
             hypothetical: 500.0,
             min: 0.0,
+            max: f64::INFINITY,
             extra: 0.0,
         },
     ];
@@ -3873,10 +4172,14 @@ fn a_flex_container_conserves_its_text() {
     assert_eq!(laid.text(), "onetwothreefour");
 }
 
-/// A flex container taller than a page is drawn where it is and **says so**,
-/// which is the same staged half a table row has.
+/// A flex line taller than a page is **cut**, which is the same class-3 break
+/// a table band gets and the reason the two are one payload.
+///
+/// Six paragraphs of one twelve-point line each is seventy-two points of
+/// column container against a thirty-point page: two lines a page, three
+/// pages, and the letters in order.
 #[test]
-fn a_flex_line_taller_than_a_page_is_named() {
+fn a_flex_line_taller_than_a_page_is_cut() {
     let tree = BoxNode::element(
         flex_container(FlexDirection::Column, FlexWrap::NoWrap),
         vec![
@@ -3890,12 +4193,26 @@ fn a_flex_line_taller_than_a_page_is_named() {
     );
     let laid = run(&tree, 200.0, 30.0);
     assert!(
-        laid.warnings
-            .contains(&(Warning::FlexLineTallerThanPage, 1)),
-        "{:?}",
+        laid.pages.len() > 1,
+        "the line was drawn on one page rather than cut: {} pages",
+        laid.pages.len()
+    );
+    assert!(
+        !laid
+            .warnings
+            .iter()
+            .any(|(w, _)| *w == Warning::FlexLineTallerThanPage),
+        "a line that was cut is not a line that overflowed: {:?}",
         laid.warnings
     );
     assert_eq!(laid.text(), "abcdef");
+    let per_page: Vec<String> = (0..laid.pages.len())
+        .map(|at| page_text(&laid, at))
+        .collect();
+    assert!(
+        per_page.iter().all(|page| !page.is_empty()),
+        "the cut left a page with nothing on it: {per_page:?}"
+    );
 }
 
 /// A row container of several lines **can** be broken between two of them,
@@ -3921,6 +4238,164 @@ fn a_row_container_breaks_between_its_lines() {
         laid.warnings
     );
     assert_eq!(laid.text(), "abc");
+}
+
+/// A flex item with one property tweaked, so a clause can be a fixture without
+/// a second constructor per property.
+fn tweaked_item(
+    body: &str,
+    grow: f64,
+    shrink: f64,
+    basis_value: Size,
+    tweak: impl FnOnce(&mut ComputedStyle),
+) -> BoxNode {
+    let mut style = block();
+    style.flex_grow = grow;
+    style.flex_shrink = shrink;
+    style.flex_basis = basis_value;
+    tweak(&mut style);
+    BoxNode::element(style, vec![text(body)])
+}
+
+/// `css-flexbox-1` §9.7 step 4d: a `max-width` stops a `flex-grow` item, and
+/// the space it refused goes to the other one.
+///
+/// Two items of a hundred points of basis in a three-hundred-point container:
+/// a hundred points of free space, shared equally by `flex-grow: 1` each, and
+/// both would be a hundred and fifty. A `max-width: 120px` on the first freezes
+/// it at a hundred and twenty and §9.7's **loop** — not a division — gives the
+/// other the thirty it gave back, so it is a hundred and eighty.
+#[test]
+fn a_max_width_freezes_a_growing_item_and_the_rest_absorbs_it() {
+    let capped = tweaked_item("a", 1.0, 1.0, basis(100.0), |style| {
+        style.max_width = max_px(120.0);
+    });
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+        vec![capped, flex_item("b", 1.0, 1.0, basis(100.0))],
+    );
+    let laid = run(&tree, 300.0, 400.0);
+    let x = xs(&laid, 0);
+    assert_eq!(x.len(), 2, "{x:?}");
+    assert!(close(x[0], 0.0), "{x:?}");
+    assert!(
+        close(x[1], 120.0),
+        "the capped item did not stop at its maximum: {x:?}"
+    );
+}
+
+/// §4.5: a **stated** `min-width` replaces the automatic minimum rather than
+/// losing to it.
+///
+/// §4.5 applies to `min-width: auto` and to nothing else. The automatic
+/// minimum of an item holding `"wide"` is forty points — its longest word —
+/// and a `min-width: 10px` says the item may be ten. A build that took the
+/// larger of the two could never make a flex item narrower than a word,
+/// however small a minimum the book wrote.
+#[test]
+fn a_stated_min_width_replaces_the_automatic_minimum() {
+    let make = |minimum: MinSize| {
+        let item = tweaked_item("wide", 0.0, 1.0, basis(100.0), |style| {
+            style.min_width = minimum;
+        });
+        let tree = BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+            vec![item, flex_item("b", 0.0, 1.0, basis(100.0))],
+        );
+        let laid = run(&tree, 60.0, 400.0);
+        xs(&laid, 0)[1]
+    };
+    // Two hundred points of basis into sixty: a hundred and forty to shrink
+    // away, shared equally by the scaled factors, so both items want thirty.
+    // `"wide"` is forty points of automatic minimum and **does** bite at
+    // thirty: the first item freezes at forty and §9.7's loop gives the second
+    // what is left, which is twenty. So the second item's left edge is at
+    // forty.
+    //
+    // A stated `min-width: 10px` is smaller than the automatic minimum, and
+    // the whole clause is that it **replaces** it rather than losing to it: no
+    // minimum bites, both items are thirty, and the second starts at thirty. A
+    // build that took the larger of the two gives forty for both values, which
+    // is why the fixture is a minimum below the automatic one and not above it.
+    assert!(
+        close(make(MinSize::Auto), 40.0),
+        "the automatic minimum did not bite: {}",
+        make(MinSize::Auto)
+    );
+    assert!(
+        close(make(min_px(10.0)), 30.0),
+        "a stated minimum smaller than the automatic one did not replace it: {}",
+        make(min_px(10.0))
+    );
+}
+
+/// §9.2 step 4 and §9.3 step 5: the **hypothetical** main size is what lines
+/// are collected against, so a `max-width` decides how many lines there are.
+///
+/// Three items of a hundred points of basis, each capped at fifty, in a
+/// two-hundred-and-fifty-point container. Clamped, the hypothetical sizes are
+/// fifty and a hundred and fifty fits one line. Unclamped they are a hundred,
+/// two fit and the third wraps — and every item still ends up fifty wide,
+/// because §9.7 step 4d clamps them anyway. The sizes are right and the book
+/// has a line break in it that nothing asked for, which is why this clause
+/// needs a fixture of its own.
+#[test]
+fn a_max_width_decides_how_many_flex_lines_there_are() {
+    let capped = || {
+        tweaked_item("x", 0.0, 0.0, basis(100.0), |style| {
+            style.max_width = max_px(50.0);
+        })
+    };
+    let tree = BoxNode::element(
+        flex_container(FlexDirection::Row, FlexWrap::Wrap),
+        vec![capped(), capped(), capped()],
+    );
+    let laid = run(&tree, 250.0, 400.0);
+    let ys = baselines(&laid, 0);
+    assert_eq!(ys.len(), 3, "{ys:?}");
+    assert!(
+        close(ys[0], ys[1]) && close(ys[1], ys[2]),
+        "the items wrapped onto more than one line: {ys:?}"
+    );
+}
+
+/// §9.4 step 11: a column container's item is stretched across the cross axis
+/// *"clamped by the used min and max cross sizes"* — which for a column
+/// container is `max-width`.
+///
+/// The axis mapping is the clause: `max-width` is a **cross** maximum here and
+/// a main one in a row container, and a build that read it on the main axis of
+/// both honours half the books.
+/// **What this asserts is where the item sits, not how wide it is.** A flex
+/// item is laid out again through the ordinary block path, which clamps its
+/// width a second time — so a build that skipped the clamp *here* still paints
+/// a box of the right width, and a fixture that only measured the width would
+/// pass with this step missing entirely. What such a build gets wrong is the
+/// item's **cross size as §8.3 sees it**, which is the number the alignment is
+/// computed against: `align-items: center` then centres a hundred and seventy
+/// points of box that is drawn twenty wide, and the paragraph starts fifteen
+/// points from the left of a two-hundred-point page instead of ninety.
+#[test]
+fn a_max_width_clamps_a_column_containers_cross_size() {
+    let mut container = flex_container(FlexDirection::Column, FlexWrap::NoWrap);
+    container.align_items = AlignItems::Center;
+    let mut item = tinted(block());
+    item.max_width = max_px(20.0);
+    let tree = BoxNode::element(
+        container,
+        vec![BoxNode::element(item, vec![text("aa bb cc dd ee ff")])],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    assert_eq!(
+        first_width(&laid, 0),
+        20.0,
+        "the stretch ran past the maximum"
+    );
+    let x = xs(&laid, 0);
+    assert!(
+        close(x[0], 90.0),
+        "a twenty-point item centred in two hundred points starts at ninety: {x:?}"
+    );
 }
 
 /// §4: a run of child text becomes an anonymous flex item, and a run that is
@@ -4361,6 +4836,7 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
                 base: 0.0,
                 hypothetical: 50.0,
                 min: 50.0,
+                max: f64::INFINITY,
                 extra: 0.0,
             },
             flex::Item {
@@ -4369,6 +4845,7 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
                 base: 0.0,
                 hypothetical: 0.0,
                 min: 0.0,
+                max: f64::INFINITY,
                 extra: 0.0,
             },
         ],
@@ -4390,6 +4867,7 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
                 base: 50.0,
                 hypothetical: 90.0,
                 min: 90.0,
+                max: f64::INFINITY,
                 extra: 0.0,
             },
             flex::Item {
@@ -4398,6 +4876,7 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
                 base: 100.0,
                 hypothetical: 100.0,
                 min: 0.0,
+                max: f64::INFINITY,
                 extra: 0.0,
             },
         ],

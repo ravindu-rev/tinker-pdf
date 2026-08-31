@@ -729,6 +729,20 @@ pub enum Warning {
     /// is one line whatever its length, so this is the warning a long
     /// `flex-direction: column` raises.
     FlexLineTallerThanPage,
+    /// A `max-height` shorter than the content, which did **not** shorten the
+    /// box. CSS 2.2 §10.7.
+    ///
+    /// §10.7's clamp is one sentence and its two halves land differently here.
+    /// `min-height` is padding, which [`flow`] already does for `height`.
+    /// `max-height` makes a box shorter, and by the time it is known this
+    /// module has emitted the items the content came to -- the flow is one
+    /// column whose `y` never goes backwards, and there is no negative edge.
+    /// So the clamp is applied to the padding, which is its whole effect on a
+    /// box whose content fits, and this is raised on the box whose content does
+    /// not. **The box is its content's height and the declaration did nothing**,
+    /// which is `InlineBlockAsInline`'s shape: what was done, named, rather
+    /// than a property quietly half-honoured.
+    MaxHeightAsAuto,
     /// `display: table-column` or `table-column-group` carrying a `width`,
     /// which this build reads, beside anything else on it, which it does not:
     /// a column box's background and borders are §17.5.1's two rendering
@@ -761,6 +775,9 @@ impl fmt::Display for Warning {
             }
             Warning::ColumnBoxNotPainted => {
                 f.write_str("a table column box's background and borders are not painted")
+            }
+            Warning::MaxHeightAsAuto => {
+                f.write_str("a max-height shorter than the content did not shorten the box")
             }
             Warning::InlineFlexAsBlock => {
                 f.write_str("display: inline-flex is laid out as a block-level flex container")
