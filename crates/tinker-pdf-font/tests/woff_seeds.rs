@@ -32,11 +32,11 @@ const LIMIT: usize = 1 << 20;
 
 /// The five seeds that are a real encoder's output and must decode.
 const CONTAINERS: [&str; 5] = [
-    "synthetic-1.woff",
-    "synthetic-1-ttf2woff.woff",
-    "synthetic-1.woff2",
-    "synthetic-1-wawoff2.woff2",
-    "synthetic-1-aligned-hmtx.woff2",
+    "synthetic-2.woff",
+    "synthetic-2-ttf2woff.woff",
+    "synthetic-2.woff2",
+    "synthetic-2-wawoff2.woff2",
+    "synthetic-2-aligned-hmtx.woff2",
 ];
 
 fn seeds() -> Option<Vec<(String, Vec<u8>)>> {

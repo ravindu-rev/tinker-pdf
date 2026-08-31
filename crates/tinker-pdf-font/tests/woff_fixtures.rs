@@ -15,13 +15,13 @@
 //!
 //! | file | producer | version |
 //! | --- | --- | --- |
-//! | `synthetic-1.ttf` | `xtask synth-face` + `make-fixtures.py` | `synthetic-1` |
-//! | `synthetic-1.woff` | fontTools `flavor="woff"` | 4.63.0 |
-//! | `synthetic-1-ttf2woff.woff` | `ttf2woff` (JavaScript, pako) | 3.0.0 |
-//! | `synthetic-1.woff2` | fontTools `flavor="woff2"` | 4.63.0 |
-//! | `synthetic-1-wawoff2.woff2` | `wawoff2`, Google's reference C++ encoder built to wasm | 2.0.1 |
-//! | `synthetic-1-aligned.ttf` | the same face, every `lsb` equal to its `xMin` | `synthetic-1` |
-//! | `synthetic-1-aligned-hmtx.woff2` | fontTools, `hmtx` transform 1 asked for | 4.63.0 |
+//! | `synthetic-2.ttf` | `xtask synth-face` + `make-fixtures.py` | `synthetic-2` |
+//! | `synthetic-2.woff` | fontTools `flavor="woff"` | 4.63.0 |
+//! | `synthetic-2-ttf2woff.woff` | `ttf2woff` (JavaScript, pako) | 3.0.0 |
+//! | `synthetic-2.woff2` | fontTools `flavor="woff2"` | 4.63.0 |
+//! | `synthetic-2-wawoff2.woff2` | `wawoff2`, Google's reference C++ encoder built to wasm | 2.0.1 |
+//! | `synthetic-2-aligned.ttf` | the same face, every `lsb` equal to its `xMin` | `synthetic-2` |
+//! | `synthetic-2-aligned-hmtx.woff2` | fontTools, `hmtx` transform 1 asked for | 4.63.0 |
 //!
 //! **fontTools generated these files and does not adjudicate them.** Ruling 13
 //! bars a third party from deciding whether a document was read correctly; it
@@ -29,7 +29,7 @@
 //! `tests/brotli/`'s forty Node streams and `tests/epub/`'s nine producer
 //! books already are. Nothing in this file spawns a program, and no reference
 //! decoder is consulted. Every assertion here is this build against
-//! **`synthetic-1.ttf`, committed beside the containers** — if fontTools and
+//! **`synthetic-2.ttf`, committed beside the containers** — if fontTools and
 //! this build disagreed about what a container held, the source face is what
 //! would settle it.
 //!
@@ -46,7 +46,7 @@
 //! **WOFF 1.0** is a repackaging: each table deflated on its own, the
 //! directory recording the original length and checksum. Reconstruction is
 //! lossless by construction, so the assertion for it is byte identity against
-//! `synthetic-1.ttf` — but only against a producer that kept the input's
+//! `synthetic-2.ttf` — but only against a producer that kept the input's
 //! table order, because that order is the only record of where the tables sat
 //! and the WOFF directory itself is sorted by tag. fontTools keeps it and
 //! `ttf2woff` sorts, so the byte-identity claim is made for one of the two and
@@ -85,7 +85,7 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn source() -> Vec<u8> {
-    fixture("synthetic-1.ttf")
+    fixture("synthetic-2.ttf")
 }
 
 /// One committed container.
@@ -93,7 +93,7 @@ struct Container {
     file: &'static str,
     producer: &'static str,
     packing: Packaging,
-    /// Whether unpacking it reproduces `synthetic-1.ttf` **byte for byte**.
+    /// Whether unpacking it reproduces `synthetic-2.ttf` **byte for byte**.
     ///
     /// A property of the producer and not only of the format. WOFF 1.0's
     /// reconstruction is lossless, but "the original font" it reconstructs is
@@ -110,19 +110,19 @@ struct Container {
 /// The four containers.
 const CONTAINERS: [Container; 4] = [
     Container {
-        file: "synthetic-1.woff",
+        file: "synthetic-2.woff",
         producer: "fontTools 4.63.0",
         packing: Packaging::Woff,
         byte_identical: true,
     },
     Container {
-        file: "synthetic-1-ttf2woff.woff",
+        file: "synthetic-2-ttf2woff.woff",
         producer: "ttf2woff 3.0.0",
         packing: Packaging::Woff,
         byte_identical: false,
     },
     Container {
-        file: "synthetic-1.woff2",
+        file: "synthetic-2.woff2",
         producer: "fontTools 4.63.0",
         packing: Packaging::Woff2,
         // §5: a WOFF2 "may produce binary results that are different from the
@@ -130,7 +130,7 @@ const CONTAINERS: [Container; 4] = [
         byte_identical: false,
     },
     Container {
-        file: "synthetic-1-wawoff2.woff2",
+        file: "synthetic-2-wawoff2.woff2",
         producer: "wawoff2 2.0.1",
         packing: Packaging::Woff2,
         byte_identical: false,
@@ -505,7 +505,7 @@ fn injections() {
 
     // 2. §3: "This MUST be set to zero. If this field is non-zero, a
     //    conforming user agent MUST reject the file."
-    let mut woff = fixture("synthetic-1.woff");
+    let mut woff = fixture("synthetic-2.woff");
     woff[14] = 0x01;
     assert!(
         matches!(decode(&woff, ROOMY), Err(WoffError::Malformed(_))),
@@ -514,7 +514,7 @@ fn injections() {
     caught += 1;
 
     // 3. §5: compLength greater than origLength is invalid outright.
-    let mut woff = fixture("synthetic-1.woff");
+    let mut woff = fixture("synthetic-2.woff");
     let entry = 44; // the first table directory entry
     let orig = u32::from_be_bytes([
         woff[entry + 12],
@@ -531,7 +531,7 @@ fn injections() {
 
     // 4. §4: "If this value is incorrect, a conforming user agent MUST reject
     //    the file as invalid."
-    let mut woff = fixture("synthetic-1.woff");
+    let mut woff = fixture("synthetic-2.woff");
     let total = u32::from_be_bytes([woff[16], woff[17], woff[18], woff[19]]);
     woff[16..20].copy_from_slice(&(total + 4).to_be_bytes());
     assert!(
@@ -543,7 +543,7 @@ fn injections() {
     // 5. A table that no longer sums to what the directory recorded. The
     //    checksum is the one end-to-end integrity check either container
     //    carries, so its own test is not optional.
-    let mut woff = fixture("synthetic-1.woff");
+    let mut woff = fixture("synthetic-2.woff");
     let sum = u32::from_be_bytes([
         woff[entry + 16],
         woff[entry + 17],
@@ -558,7 +558,7 @@ fn injections() {
     caught += 1;
 
     // 6. A compressed table whose bytes are not a zlib stream.
-    let mut woff = fixture("synthetic-1.woff");
+    let mut woff = fixture("synthetic-2.woff");
     let offset = u32::from_be_bytes([
         woff[entry + 4],
         woff[entry + 5],
@@ -579,7 +579,7 @@ fn injections() {
     //    unknown transformation version number the entire font MUST be
     //    rejected." The first directory entry of the WOFF2 fixture is `OS/2`,
     //    whose only legal version is 0.
-    let mut woff2 = fixture("synthetic-1.woff2");
+    let mut woff2 = fixture("synthetic-2.woff2");
     woff2[48] |= 0b0100_0000;
     assert!(
         matches!(
@@ -591,7 +591,7 @@ fn injections() {
     caught += 1;
 
     // 8. A download that stopped. Truncated, not Malformed.
-    let woff2 = fixture("synthetic-1.woff2");
+    let woff2 = fixture("synthetic-2.woff2");
     let short = &woff2[..woff2.len() - 200];
     assert!(
         matches!(
@@ -631,17 +631,17 @@ fn injections() {
 /// of them equals its glyph's `xMin`, so reversing it means reading the bounds
 /// back out of the `glyf` that was itself just reconstructed. It is the one
 /// place where two reverses are chained, and nothing else here reaches it:
-/// `synthetic-1.ttf` has one glyph in seven whose bearing disagrees, so no
+/// `synthetic-2.ttf` has one glyph in seven whose bearing disagrees, so no
 /// encoder may apply the transform to it, and neither does.
 ///
-/// `synthetic-1-aligned.ttf` is that face with the bearings aligned and
-/// `synthetic-1-aligned-hmtx.woff2` is fontTools packing it with the transform
+/// `synthetic-2-aligned.ttf` is that face with the bearings aligned and
+/// `synthetic-2-aligned-hmtx.woff2` is fontTools packing it with the transform
 /// asked for by name. Same outlines, same advances, and the bearings come back
 /// from the bounding boxes.
 #[test]
 fn the_hmtx_transform_reverses() {
-    let src = fixture("synthetic-1-aligned.ttf");
-    let packed = fixture("synthetic-1-aligned-hmtx.woff2");
+    let src = fixture("synthetic-2-aligned.ttf");
+    let packed = fixture("synthetic-2-aligned-hmtx.woff2");
     let out = decode(&packed, ROOMY).expect("the aligned WOFF2 decodes");
     assert_eq!(out.len(), src.len(), "the aligned face's length");
 

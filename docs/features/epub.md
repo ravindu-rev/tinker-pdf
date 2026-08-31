@@ -212,7 +212,7 @@ postdate the tool's removal under ruling 13, so
   WOFF 1.0 side is packed in the test itself, every table **stored** rather
   than deflated, because there is no zlib encoder in this tree and §5's own
   signal for a stored table is `compLength == origLength`; the WOFF 2.0 side
-  is the committed `synthetic-1.woff2`, Brotli and transformed `glyf` and all.
+  is the committed `synthetic-2.woff2`, Brotli and transformed `glyf` and all.
   What is embedded is asserted to be the sfnt **byte for byte** and not the
   container, which is the one claim every other test here would pass without:
   9.9 gives font programs `/FontFile2` and `/FontFile3` and neither has a

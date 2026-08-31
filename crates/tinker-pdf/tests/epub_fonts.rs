@@ -865,7 +865,7 @@ fn an_embedded_face_removes_the_overflow_ceiling_and_the_warning() {
 /// the file.
 ///
 /// It covers U+0020..U+00FF, so a book set in ASCII finds every glyph.
-const WOFF2_FIXTURE: &[u8] = include_bytes!("../../tinker-pdf-font/tests/woff/synthetic-1.woff2");
+const WOFF2_FIXTURE: &[u8] = include_bytes!("../../tinker-pdf-font/tests/woff/synthetic-2.woff2");
 
 /// **A WOFF and a WOFF2 both reach the page, and neither the hint nor the
 /// signature stops them any more.**
