@@ -55,7 +55,9 @@ because a `-sys` crate's manifest says whatever its author typed.
   streams; a reader that walked it as a chain would hand back a quarter of a
   file.
 - **RAR 5 compression methods 1–5**, and **RAR 4 entirely.** Both have a
-  section of their own below, because both are decisions rather than omissions.
+  section of their own below, because both are decisions rather than omissions,
+  and the first of them is a *permanent* non-goal rather than a staged one —
+  which is not what this document said in its first draft.
 - **A trait over the three readers.** The next section is why.
 
 ## Design
@@ -251,35 +253,69 @@ checked inside `read` rather than asserted beside it. The archive's header is
 LZMA-compressed, so listing it at all exercises the second front end.
 *Row: loses CB7.*
 
-**3. RAR 5, container and store. Done, and it does not close the row.**
+**3. RAR 5, container and store. Done. It closes the row, in the shape a
+non-goal closes one.**
 Exit criterion, met: `winrar-rar5.cbr` opens, lists its six records in the
 order it holds them, and hands back the four stored pages with their recorded
 CRC-32s matching and their rasters identical to the ZIP's. Every header's own
 CRC-32 is checked before its fields are believed. RAR 4 is refused by its own
 signature.
-Exit criterion, **not** met and not claimed: `page3.jpg` is method 3, so the
-archive is not five pictures and does not join `READ_CONTAINERS`.
+`page3.jpg` is method 3, so the archive is not five pictures and does not join
+`READ_CONTAINERS` — and under milestone 5 below it never will, so the
+cross-producer identity is not the criterion this container is held to. What it
+*is* held to is `the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`:
+five pages in reading order, four of them byte-identical to the ZIP's, and the
+fifth a placeholder naming its method.
 *Row: CBR leaves the archive-level table; a page-level row naming the
-compression methods and a RAR 4 row take its place.*
+compression methods and a RAR 4 row take its place, both as non-goals.*
 
 **4. This document.** Owed by the roadmap; lands with the decoders.
 
 **Not scheduled, and listed so it is a decision rather than a gap:**
 
-**5. RAR 5's compression algorithm — LZSS, its Huffman tables and its filter
-chain.** This is what closes the CBR row, and it is the one piece of the lane
-that is scoped and unwritten.
+**5. RAR 5's compression algorithm. Not scheduled, and not schedulable here.**
 
-The fixture already exists and is committed: `page3.jpg` inside
-`winrar-rar5.cbr`, method 3, 169 bytes unpacked, with its own recorded CRC-32
-— and the same picture sits in five ZIPs beside it, so the decoder is
-adjudicated twice over, by the format's checksum and by the cross-container
-identity. No new corpus work is needed and no producer has to be run.
+This was listed as a milestone in the first draft of this document, on the
+strength of the fixture: `page3.jpg` inside `winrar-rar5.cbr` is method 3, 169
+bytes unpacked, with its own recorded CRC-32, and the same picture sits in five
+ZIPs beside it — so a decoder would be adjudicated twice over and no producer
+would have to be run. That part is true and is why it looked like work.
 
-Exit criterion: `winrar-rar5.cbr` joins `READ_CONTAINERS` and
+It is not work this repository can do, and the blocker is not the fixture. It
+is that **there is nothing to hand-roll from.**
+
+CONTRIBUTING rule 1 says every decoder here is written from the format, and
+every other decoder in this workspace names the document it was written from:
+DEFLATE from RFC 1951, CFF from Adobe TN 5176, tar from POSIX 1003.1, the 7z
+container from `7zFormat.txt`. **RAR has no such document for its
+compression.** RARLAB publishes a RAR 5.0 *archive format* note, and that note
+is exactly what the `rar` module was written from — the signature, the `vint`,
+the header chain, the file records, the flag words. It stops at the data area.
+The compression algorithm has never been specified publicly.
+
+What exists instead is one implementation, RARLAB's `unrar`, which every RAR
+reader in the world is a copy or a wrapper of. `deny.toml` already records this
+repository's position on it, in the entry that denies the `unrar` crates: its
+licence forbids using the source to write a compatible compressor, *"a
+restriction this repository's dual MIT/Apache-2.0 grant cannot pass on"*, and
+the RAR reader here is *"written from the published format note and from the
+committed fixture, and nothing of unrar is vendored, linked or read."* Writing
+the decompressor would mean transcribing that source from memory or from a
+copy, which is the one thing that entry says will not happen.
+
+So RAR 5 compression joins **encryption** in the non-goals: named, permanent,
+and refused with the reason attached rather than left as a debt that a future
+milestone quietly never reaches. The row in
+[features/cbz.md](../features/cbz.md) says which method it refused, so a user
+can re-pack with `-m0` and open the result — which is a real answer, and the
+best one available under rule 1.
+
+**What would change this:** a published specification of RAR's compression, or
+a clean-room description not derived from `unrar`. Neither exists today. If one
+appears, the fixture is already committed and the exit criterion is already
+written: `winrar-rar5.cbr` joins `READ_CONTAINERS` and
 `five_zip_writers_produce_the_same_five_pictures` passes over it with no
-placeholder — at which point the compression row leaves
-[features/cbz.md](../features/cbz.md) and only the RAR 4 row remains.
+placeholder.
 
 ## Risks
 

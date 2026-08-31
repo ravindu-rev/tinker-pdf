@@ -106,13 +106,22 @@ are the ZIP's own pictures, and one placeholder that names its method — ruling
 `.cbr` is deliberately **not** in `cbz_real.rs`'s `READ_CONTAINERS` for exactly
 that reason.
 
-The decompressor is scoped work rather than blocked work: `page3.jpg` is 169
-bytes with its own recorded CRC-32 and the same picture sits in five ZIPs
-beside it, so it adjudicates a decoder twice over.
-[design/comic-archives.md](../design/comic-archives.md)'s milestone 5 is that
-piece. **RAR 4 is refused by its own signature**, separately from "not a RAR",
-and stays refused: WinRAR 7.20 here has no `-ma` switch and cannot write one,
-so a decoder would have nothing first-party to be held to (ruling 13).
+**The compression is a named non-goal rather than a debt**, and the reason is
+not the fixture — `page3.jpg` is 169 bytes with its own recorded CRC-32 and the
+same picture sits in five ZIPs beside it, so it would adjudicate a decoder
+twice over. The reason is that there is nothing to write one *from*. Every
+decoder in this workspace names the document it was hand-rolled from
+(CONTRIBUTING rule 1); RARLAB's published RAR 5.0 note specifies the archive
+format and stops at the data area, and the compression has never been specified
+publicly. The only description is `unrar`'s source, whose licence `deny.toml`
+already records this repository will not derive from. So it is refused the way
+encryption is: by name, permanently, with the method number attached so a user
+can re-pack with `-m0`.
+
+**RAR 4 is refused by its own signature**, separately from "not a RAR": WinRAR
+7.20 here has no `-ma` switch and cannot write one, so a decoder would have
+nothing first-party to be held to (ruling 13). See
+[design/comic-archives.md](../design/comic-archives.md) for both arguments.
 
 **Pass-through is the design.** A non-interlaced PNG of colour type 0, 2 or 3
 passes through verbatim: its IDAT *is* a `/FlateDecode` stream with
@@ -287,7 +296,7 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
 | A RAR 4 | `ArchiveRefusal::NotAZip` (leaf: `rar::Error::Rar4`) | recognised by its own signature and refused as *that version*; no producer here can write one, so a decoder would be unadjudicated (ruling 13) | [design/comic-archives.md](../design/comic-archives.md) |
-| A RAR entry compressed with methods 1–5 | `PageDefect::RarEntryRefused` | placeholder page naming the method; the decompressor is unwritten, and `page3.jpg` in the committed `.cbr` is the fixture that would adjudicate it | [design/comic-archives.md](../design/comic-archives.md) |
+| A RAR entry compressed with methods 1–5 | `PageDefect::RarEntryRefused` | placeholder page naming the method. A **non-goal, not a debt**: RAR's compression has no published specification and the only implementation's licence bars deriving from it, so there is nothing rule 1 permits writing it from | [design/comic-archives.md](../design/comic-archives.md) |
 | A solid RAR entry | `PageDefect::RarEntryRefused` | its dictionary is the entry before it, and this build decompresses neither | — |
 | An encrypted RAR, or one volume of a set | `ArchiveRefusal::Encrypted` / `MultiDisk` | named non-goals; the fragment that happens to be here is not the archive | — |
 | A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `030401` is PPMd — so a host can say what to re-pack without | — |
