@@ -123,8 +123,14 @@ at all: the pages are PNG and JPEG, so a single wrong byte is a raster that
 fails to decode or renders differently.
 
 A new container joins `READ_CONTAINERS` and is held to that same sentence
-rather than getting a check of its own. A container leaves `NOT_READ` only in
-the commit that gives it a reader.
+rather than getting a check of its own, in the commit that gives it a reader.
+
+**`winrar-rar5.cbr` is the one that cannot join it**, and rather than weaken the
+criterion for everyone it sits in a third list, `PARTLY_READ`, with its own
+check: five pages in reading order, four byte-identical to the ZIP's, and the
+fifth a placeholder naming the method that made it one. Filing it under either
+of the other two lists would be a claim this lane has not earned — "refused" is
+false, and "read" is what the exit criterion means.
 
 ### What adjudicates each decoder, which is not the same in the three
 
@@ -269,9 +275,9 @@ fifth a placeholder naming its method.
 *Row: CBR leaves the archive-level table; a page-level row naming the
 compression methods and a RAR 4 row take its place, both as non-goals.*
 
-**4. This document.** Owed by the roadmap; lands with the decoders.
-
-**Not scheduled, and listed so it is a decision rather than a gap:**
+**4. This document. Done**, and it landed with the decoders rather than after
+them — three modules already linked to it, and a design doc that arrives after
+the design is a report.
 
 **5. RAR 5's compression algorithm. Not scheduled, and not schedulable here.**
 
@@ -375,9 +381,26 @@ once rather than once per page, and it is the one place this lane spends more
 than `tinker-pdf-zip` would.
 
 **Doc drift about what is actually verified.** The uncomfortable sentence in
-this document is that `.cbr` support is a container with a store path and the
-compression is unwritten. It is easy for that to decay into "RAR is done" as
-the rows move. The mitigation is structural: the refusal row does not vanish
-when RAR lands, it changes shape, and `NOT_READ` in `cbz_real.rs` asserts it is
-non-empty so that a sweep with nothing to sweep fails rather than passing
-green.
+this document is that `.cbr` support is a container with a store path and that
+the compression will not be written. It is easy for that to decay into "RAR is
+done" as the rows move — and this lane has already watched a related sentence
+decay twice, once when the first draft claimed the fixture stored every entry
+and once when it rescheduled the algorithm as work.
+
+The mitigation is structural rather than editorial. `winrar-rar5.cbr` is in
+`PARTLY_READ` and not in `READ_CONTAINERS`, so it is held to
+`the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`
+— which asserts the placeholder **by name and by method number**, and fails if
+`page3.jpg` ever silently starts or stops being one. Closing the row later
+means deleting that test, which is a visible act in a diff, where letting a
+claim drift is not.
+
+**A count nobody re-measures.** The counted-injection tables in this lane were
+measured three times and were wrong the first two, in two different ways: a
+`error: test failed` line read as a build break, and then inline
+`test … FAILED` lines counted by regex when libtest interleaves them across
+parallel threads. The third measurement parses the per-binary `test result:`
+summary and passes `--no-fail-fast`, because a plain `cargo test` stops at the
+first failing binary and reports the count from whichever ran first. Any future
+table here should be produced the same way; the numbers are not reproducible by
+eye.
