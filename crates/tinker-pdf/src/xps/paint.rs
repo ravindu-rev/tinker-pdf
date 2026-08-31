@@ -1092,17 +1092,17 @@ impl State<'_> {
             return Ok(());
         };
 
-        match node.attr("IsSideways").map(markup::boolean) {
-            None | Some(Some(false)) => {}
-            Some(Some(true)) => {
-                self.warn(XpsElementDefect::GlyphsSidewaysUnsupported);
-                return Ok(());
-            }
+        // 12.1's `IsSideways`. A value that is not 12.1's boolean refuses the
+        // run for `Opacity`'s reason: neither `true` nor `false` is a safe
+        // guess, and both draw the same glyphs a quarter turn apart.
+        let sideways = match node.attr("IsSideways").map(markup::boolean) {
+            None | Some(Some(false)) => false,
+            Some(Some(true)) => true,
             Some(None) => {
                 self.warn(XpsElementDefect::GlyphsUnreadable);
                 return Ok(());
             }
-        }
+        };
         match node
             .attr("BidiLevel")
             .map(|text| text.trim().parse::<u32>())
@@ -1160,7 +1160,15 @@ impl State<'_> {
         // thing is: 14.3's overlap test, and the box a
         // `RelativeToBoundingBox` brush is stated in fractions of.
         let (low, high) = glyphs::extent(&placed, font, em);
-        let bbox = [origin_x + low, origin_y - em, origin_x + high, origin_y];
+        // A sideways run's baseline runs **down** the page and its glyphs
+        // stand out to the right of it, so the run's advance is its height and
+        // the em is its width — the upright box with its two axes exchanged,
+        // which is what exchanging the axes of the text matrix does to it.
+        let bbox = if sideways {
+            [origin_x, origin_y + low, origin_x + em, origin_y + high]
+        } else {
+            [origin_x + low, origin_y - em, origin_x + high, origin_y]
+        };
 
         // 14.3's mask, over the box the run occupies, and refused for `path`'s
         // reason where it will not read.
@@ -1255,7 +1263,24 @@ impl State<'_> {
         // increasing **downward** — and a text matrix that did not undo it
         // would draw every glyph upside down at exactly the right place, which
         // is the most plausible wrong picture in this whole milestone.
-        let matrix = [1.0, 0.0, 0.0, -1.0, origin_x, origin_y];
+        //
+        // 12.1's `IsSideways` is the *same* matrix with its two axes
+        // exchanged, and that is the whole of the feature. A glyph advances
+        // along text-space `x` and stands along text-space `y`, so a matrix
+        // sending `x` to page-down and `y` to page-right turns every glyph a
+        // quarter turn and runs the baseline down the page at once — one
+        // number pair moved, rather than a second layout path and a per-glyph
+        // rotation that no single `Tj` could carry anyway.
+        //
+        // Both matrices have determinant −1, which is not a mirror: the
+        // upright one already carries 18.1's flip, and the sideways one
+        // carries the same flip and the quarter turn. A build that reached for
+        // a positive determinant here would draw the run backwards.
+        let matrix = if sideways {
+            [0.0, 1.0, 1.0, 0.0, origin_x, origin_y]
+        } else {
+            [1.0, 0.0, 0.0, -1.0, origin_x, origin_y]
+        };
         if !self
             .builder
             .glyph_run(&mut out, &font.resource, em, matrix, &run)

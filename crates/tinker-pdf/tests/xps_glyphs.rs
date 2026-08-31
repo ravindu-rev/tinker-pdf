@@ -945,31 +945,109 @@ fn a_unicode_string_escaped_with_braces_draws_the_text_and_not_the_braces() {
 
 // ---- 12.1's three attributes that are never ignored ---------------------
 
-/// **`IsSideways` is refused by name rather than drawn upright**, and a run
-/// that says `false` — or says nothing — draws.
+/// **`IsSideways` turns the run a quarter turn and runs it down the page**,
+/// and a run that says `false` — or says nothing — is unchanged.
 ///
-/// Both halves, because a build that refused every `IsSideways` attribute
-/// would satisfy the first on its own, and every real producer writes the
-/// attribute out with its default value.
+/// Both halves, because a build that treated every `IsSideways` attribute as
+/// sideways would satisfy the first on its own, and every real producer writes
+/// the attribute out with its default value.
+///
+/// # The assertion is the text matrix, and it has to be
+///
+/// 12.1's sideways run is one `Tm` away from an upright one: a glyph advances
+/// along text-space `x` and stands along text-space `y`, so exchanging the two
+/// axes turns every glyph a quarter turn *and* runs the baseline down the page
+/// at once. The glyph array is identical either way — same glyphs, same
+/// advances, same order — so a test that read the `TJ` and not the `Tm` would
+/// pass with the feature deleted.
 #[test]
-fn is_sideways_is_refused_by_name_rather_than_drawn_upright() {
-    assert_eq!(
-        run_defects(r#"IsSideways="true" UnicodeString="A""#),
-        [XpsElementDefect::GlyphsSidewaysUnsupported]
+fn is_sideways_turns_the_run_and_runs_it_down_the_page() {
+    let upright = drawn(r#"UnicodeString="A""#);
+    let sideways = drawn(r#"IsSideways="true" UnicodeString="A""#);
+    assert_eq!(run_defects(r#"IsSideways="true" UnicodeString="A""#), []);
+
+    assert!(
+        upright.contains("1 0 0 -1 "),
+        "upright keeps 18.1's flip and nothing else: {upright}"
     );
     assert!(
-        !drawn(r#"IsSideways="true" UnicodeString="A""#).contains("TJ"),
-        "and nothing is drawn"
+        sideways.contains("0 1 1 0 "),
+        "sideways exchanges the axes: {sideways}"
     );
-    assert_eq!(run_defects(r#"IsSideways="false" UnicodeString="A""#), []);
     assert_eq!(
-        array(&drawn(r#"IsSideways="false" UnicodeString="A""#)),
-        "[<0001>]"
+        array(&sideways),
+        array(&upright),
+        "the glyphs and their advances are the run's own and do not change"
     );
+
+    // The default, in both spellings a producer writes it.
+    assert_eq!(run_defects(r#"IsSideways="false" UnicodeString="A""#), []);
+    assert!(drawn(r#"IsSideways="false" UnicodeString="A""#).contains("1 0 0 -1 "));
+    assert!(upright.contains("1 0 0 -1 "));
+
     assert_eq!(
         run_defects(r#"IsSideways="sideways" UnicodeString="A""#),
         [XpsElementDefect::GlyphsUnreadable],
         "and a value that is not a boolean is a different thing about the file"
+    );
+}
+
+/// A sideways run's **box** turns with it, which is its second consequence.
+///
+/// The matrix decides where the glyphs are drawn; the box decides what a
+/// `RelativeToBoundingBox` brush is a fraction of and whether 14.3's overlap
+/// test fires. They are two independent consequences of one attribute, and a
+/// build that turned the matrix and left the box upright would draw the run
+/// correctly and paint it out of the wrong rectangle — which is exactly the
+/// shape "when a thing has two independent consequences, a test for one of
+/// them is not a test" names.
+///
+/// Four glyphs rather than one, so "the two axes were exchanged" and "the box
+/// happens to be square" are told apart: a one-glyph run of a hundred-unit em
+/// is very nearly square already.
+#[test]
+fn a_sideways_runs_box_turns_with_it() {
+    // A `RelativeToBoundingBox` gradient reads the box back out: the shading's
+    // coordinates are the box's own, so two runs whose boxes differ are two
+    // different documents.
+    let with_gradient = |extra: &str| {
+        let body = format!(
+            r##"<Glyphs OriginX="10" OriginY="100" FontRenderingEmSize="100" FontUri="{}" {extra}>
+                  <Glyphs.Fill>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1"
+                                         MappingMode="RelativeToBoundingBox">
+                      <LinearGradientBrush.GradientStops>
+                        <GradientStop Color="#FF000000" Offset="0" />
+                        <GradientStop Color="#FFFFFFFF" Offset="1" />
+                      </LinearGradientBrush.GradientStops>
+                    </LinearGradientBrush>
+                  </Glyphs.Fill>
+                </Glyphs>"##,
+            font_uri("odttf")
+        );
+        let bytes = obfuscated(&body);
+        let document = open(&bytes).unwrap_or_else(|e| panic!("{extra}: {e:?}"));
+        let out = document.editor().save(&Default::default());
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let upright = with_gradient(r#"UnicodeString="AAAA""#);
+    let sideways = with_gradient(r#"IsSideways="true" UnicodeString="AAAA""#);
+
+    // 8.7.4.5.5's pattern `/Matrix` carries the box: its two scales are the
+    // box's width and height in points, and 18.1's 0.75 is already in them.
+    // The run is four glyphs of a hundred-unit em, so upright it is 200 units
+    // along the baseline by 100 across — 150 by 75 points — and sideways it is
+    // exactly those two numbers exchanged. Read as a whole matrix rather than
+    // as "the two differ", because the two differ anyway: the *text* matrix is
+    // not the same either, and a build that turned the glyphs and left the box
+    // upright would still produce two different documents.
+    assert!(
+        upright.contains("/Matrix [150 0 0 -75 "),
+        "upright: 200 units of baseline by one em across: {upright}"
+    );
+    assert!(
+        sideways.contains("/Matrix [75 0 0 -150 "),
+        "sideways: the same box with its two axes exchanged: {sideways}"
     );
 }
 

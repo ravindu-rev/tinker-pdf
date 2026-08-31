@@ -73,7 +73,11 @@ key is the part's GUID, sixteen bytes reversed, XORed over the first 32
 bytes; the de-obfuscated program is asserted byte-for-byte against a real
 file's known sfnt header. Because XPS addresses every glyph by index, the
 writer gained Type 0 / CIDFontType2 with `/Identity-H` for this format.
-Bold and italic simulation (`StyleSimulations`) is reported, not applied.
+12.1's `IsSideways` turns the run a quarter turn and runs its baseline
+**down** the page, which is 18.1's own text matrix with its two axes
+exchanged — the glyphs, their advances and their order are unchanged, and
+the box the run occupies turns with it. Bold and italic simulation
+(`StyleSimulations`) is reported, not applied.
 
 **Images** pass through. A PNG or JPEG resource part reaches the page as
 the bytes it is ([creation](creation.md), `ImageData::Compressed`); a page
@@ -118,7 +122,6 @@ the page synthesis.
 | JPEG XR, or an image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | 9.1.5.1's format has no decoder here, and it is refused *before* either rule decides what the part is, so a drawn format can never reach that loop; a part neither the content type nor the magic bytes name is not one to guess at | [ROADMAP.md](../ROADMAP.md) |
 | A content type and magic bytes that disagree about two formats this build draws | *(none — the bytes win, unnamed)* | a decoder reads bytes, so the bytes decide; `Images::get` returns a `Result`, so the only channel out is a refusal and a leniency has nowhere to go. Ruling 10 wants it named and this does not name it — pinned by `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing` | [rulings](../rulings.md) ruling 10 |
 | `{ColorConvertedBitmap …}` naming an ICC profile | `XpsElementDefect::ImageProfileUnsupported` | no ICC pipeline, and the syntax has nowhere to put an sRGB fallback, so the picture is refused rather than drawn in colours the file did not ask for | [rendering](rendering.md) |
-| `IsSideways` glyph runs | `XpsElementDefect::GlyphsSidewaysUnsupported` | vertical-rotated runs not laid out | — |
 | Odd `BidiLevel` (right-to-left runs) | `XpsElementDefect::GlyphsBidiUnsupported` | no bidi reordering | [ROADMAP.md](../ROADMAP.md) (shaping) |
 | `StyleSimulations` | `XpsElementDefect::GlyphsStyleSimulated` | reported; glyphs drawn unsimulated | — |
 | Gradient stops with differing alphas; a `ColorInterpolationMode` this build does not interpolate in | `XpsElementDefect::BrushApproximated` | the brush reached the page and not exactly — one constant alpha cannot express per-stop alphas — and the approximation is named | — |

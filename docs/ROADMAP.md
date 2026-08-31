@@ -350,7 +350,7 @@ refusal table.
 - **XPS** ([features/xps.md](features/xps.md)): a `ContextColor` naming
   an ICC profile; JPEG XR **reaching the page** — the decoder is built and
   `xps/image.rs` still refuses the format at the element, which is the same
-  shape TIFF was in before it was wired; `IsSideways` and odd `BidiLevel`.
+  shape TIFF was in before it was wired; odd `BidiLevel`.
 - **CBZ** ([features/cbz.md](features/cbz.md)): CBR, CB7 and CBT, sized
   honestly — each means a hand-rolled decompressor, and **RAR 4 has no
   fixture this machine can produce**, so it closes as decoded-but-
