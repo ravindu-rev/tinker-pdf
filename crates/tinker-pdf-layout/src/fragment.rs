@@ -317,6 +317,9 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
                     &mut built,
                     top,
                     options.height,
+                    // The next page carries on inside this same band, so its
+                    // column begins exactly where this slice ended.
+                    flow.items[at].y + end,
                     &mut warnings,
                 );
                 order(&mut built);
@@ -361,6 +364,13 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             Cutting::NONE
         };
         let mut built = page(&flow, cursor, cut.end, top, rest);
+        // Where the next page's column begins -- and **infinity on the last
+        // one**, because there is no next column for a float to belong to and
+        // a float below the last line still belongs to the book.
+        let reach = flow
+            .items
+            .get(cut.next)
+            .map_or(f64::INFINITY, |item| item.y);
         outside(
             &flow,
             &mut floats,
@@ -368,6 +378,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             &mut built,
             top,
             options.height,
+            reach,
             &mut warnings,
         );
         order(&mut built);
@@ -400,6 +411,12 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             &mut built,
             top,
             options.height,
+            // **Everything.** The column has run out, so there is no next one
+            // for a float to belong to instead -- and holding one back here
+            // would be a loop that never ends rather than a page that is
+            // wrong: these pages exist only to finish the floats, and a float
+            // that is never started never finishes.
+            f64::INFINITY,
             &mut warnings,
         );
         order(&mut built);
@@ -446,10 +463,11 @@ fn outside(
     out: &mut Page,
     top: f64,
     height: f64,
+    reach: f64,
     warnings: &mut Vec<(Warning, usize)>,
 ) {
-    beside(&flow.floats, floats, out, top, height, warnings);
-    beside(&flow.positioned, placed, out, top, height, warnings);
+    beside(&flow.floats, floats, out, top, height, reach, warnings);
+    beside(&flow.positioned, placed, out, top, height, reach, warnings);
     // **§9.6.1's paged answer, in one loop.** *"In the case of paged media,
     // fixed boxes are repeated on every page, and are fixed with respect to the
     // page box."* Their own cursors are not kept, because a box that is drawn
@@ -481,6 +499,7 @@ fn beside(
     out: &mut Page,
     top: f64,
     height: f64,
+    reach: f64,
     warnings: &mut Vec<(Warning, usize)>,
 ) {
     for (float, cursor) in records.iter().zip(cursors.iter_mut()) {
@@ -489,7 +508,19 @@ fn beside(
         }
         let start = cursor.next;
         if !cursor.started {
-            if float.items[start].y >= top + height - EPSILON {
+            // **A page's floats are the ones beside the column it holds**, and
+            // that is not the same as the ones within a page height of its top.
+            // The two agree until a page ends early -- which is what a forced
+            // break does, and what `page-break-before: always` on a chapter
+            // heading does on nearly every page of a real book. Then
+            // `top + height` reaches past the break into the next page's
+            // column and draws a float that belongs over there: before the
+            // heading it was written after, on the page before its own.
+            //
+            // `reach` is where the next page's column begins, so this asks the
+            // question §9.5 asks -- is this float beside *this* content -- and
+            // not the one the page box happens to answer.
+            if float.items[start].y >= reach - EPSILON {
                 // It begins on a page that has not been reached yet.
                 continue;
             }

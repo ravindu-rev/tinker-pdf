@@ -513,10 +513,29 @@ struct NotConserved {
 /// the reader does. **Both numbers**, so a build that fixed one direction and
 /// broke the other fails here.
 const NOT_CONSERVED: &[NotConserved] = &[
+    // **Halved, and the half that went has a name.** `fragment::beside` decided
+    // which floats a page draws by asking whether the float's static position
+    // was within `top + page height` of that page's top. That is the right
+    // question only when a page is as tall as the page box, and a page ended by
+    // a *forced break* is not: `page-break-before: always` on a chapter heading
+    // ends a page anywhere, and the reach ran past the break into the next
+    // page's column. The gloss was drawn on the page before its own and read
+    // before the heading it was written after. `epub_float_order.rs` holds that
+    // shape as a book this repository builds, so the fix does not depend on a
+    // corpus anyone has to fetch.
+    //
+    // What is left is 2 182 characters of a defect no ordering of one page's
+    // runs can repair. §9.5.1 places a float **below** text that follows it in
+    // the source whenever `clear` pushes it under the float before it, and this
+    // book's glosses clear each other all the way down a chapter. Inside one
+    // page that costs nothing -- the runs are sorted by their reading-order
+    // stamp, so a gloss reads where it was written whatever its `y`. Across a
+    // page boundary it cannot be paid: the gloss's box is on the next page, its
+    // text is its box's, and there is no third place to put it.
     NotConserved {
         name: "pg16328-beowulf.epub",
-        extra: 4_560,
-        missing: 4_560,
+        extra: 2_182,
+        missing: 2_182,
         because: Why::Reordered,
     },
     NotConserved {
@@ -538,32 +557,12 @@ const NOT_CONSERVED: &[NotConserved] = &[
     // spellings of that book carry it; only the OTF one reaches this, because
     // the WOFF one's face does not de-obfuscate to a readable table and its
     // text takes the `NoGlyphs` route instead.
-    NotConserved {
-        name: "sample-wasteland-otf-obf.epub",
-        extra: 3,
-        missing: 3,
-        because: Why::Reordered,
-    },
-    // **The same three characters, and that is the point of the row.** This is
-    // the WOFF spelling of the book above, and the two now diverge *identically*
-    // — `Extra` at 5 981 and `Missing` at 6 027, both the line number `170` in
-    // the margin, which comes out before the line it numbers rather than after.
-    //
-    // It could not have been pinned before, and its absence was not an
-    // oversight: until WOFF was implemented this book's face did not unpack, so
-    // it fell back to no face at all and its text took the `NoGlyphs` route
-    // instead of being set. Now that WOFF reaches the page it renders exactly
-    // as its OTF twin does, including the float reordering, and a pair of books
-    // that are one book in two font spellings finally measures as one.
-    //
-    // Which is also what makes this row evidence rather than an allowance: if
-    // the two ever stop agreeing, one of them is wrong about the face.
-    NotConserved {
-        name: "sample-wasteland-woff-obf.epub",
-        extra: 3,
-        missing: 3,
-        because: Why::Reordered,
-    },
+    // **Both Waste Land spellings were here and both conserve exactly now.**
+    // Three characters each, the marginal line number `170` coming out before
+    // the line it numbers -- and it was the same forced-break reach every time:
+    // that book sets its line numbers as right floats and its section headings
+    // force a page. Their rows are deleted rather than zeroed, because a pinned
+    // book with nothing pinned about it is a row that outlives its reason.
 ];
 
 // ---- the route --------------------------------------------------------------
