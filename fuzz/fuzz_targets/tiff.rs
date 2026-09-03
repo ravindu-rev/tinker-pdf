@@ -41,6 +41,23 @@
 //!   going to decode, and it is what the pass-through indexes with.
 //! - **A lower ceiling never turns a refusal into a panic, and never turns a
 //!   refusal into a different picture.**
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a successful scan promised the
+//! segments its own geometry needs, a palette image carries a table, the two
+//! entry points agree, and the ceiling held. None of them asks whether the
+//! numbers are the ones the input actually describes, so a decode that is
+//! well-formed and *wrong* passes this target exactly as a correct one does.
+//!
+//! Correctness lives in `crates/tinker-pdf-filters/tests/vectors.rs` and this
+//! crate's own decoder tests, which compare decoded strips against known
+//! bytes.
+//!
+//! This is the shape `brotli` records at length, and the difference is worth
+//! keeping in view: there, nothing in the tree can supply the missing check
+//! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
+//! a second decoder. Here the check exists, and it is somewhere else.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

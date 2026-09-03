@@ -299,6 +299,18 @@ pub fn survey(root: &Path) -> Result<Vec<Target>, Vec<String>> {
         let source =
             std::fs::read_to_string(targets_dir.join(format!("{name}.rs"))).unwrap_or_default();
         let prefix = control_prefix(&source);
+        // Ruling 10's shape, applied to the fuzz layer: a target that cannot
+        // see a whole class of defect has to say so, or a clean run gets read
+        // as a correct decoder. Fourteen of these assert nothing beyond "it
+        // did not panic" and thirteen more assert only structural invariants;
+        // every one of the thirty-nine now carries a section saying which it
+        // is and where correctness actually lives. This keeps that true for
+        // the next one.
+        if !source.contains("//! # What this target ") {
+            problems.push(format!(
+                "fuzz/fuzz_targets/{name}.rs: no `# What this target ...` section, so nothing says what a green run does not prove"
+            ));
+        }
         let dir = corpus_dir.join(name);
         let files = seeds_in(&dir);
         if files.is_empty() {

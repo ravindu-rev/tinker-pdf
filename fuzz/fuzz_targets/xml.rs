@@ -59,6 +59,19 @@
 //! - **Nothing decoded is longer than what it was decoded from.** The structural
 //!   half of the answer to entity expansion, asserted on every text run rather
 //!   than argued in a comment.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a name past the cap is refused
+//! rather than kept, a namespace declaration is not reported as an attribute,
+//! and nesting past the depth cap is not produced. None of them asks whether
+//! the result is the one the input describes, so an answer that is well-
+//! formed and *wrong* passes exactly as a correct one does.
+//!
+//! A document parsed into the wrong elements, or with attribute values mis-
+//! unescaped, satisfies all three. Correctness lives in `crates/tinker-pdf-
+//! xml`'s own tests and, end to end, wherever XML reaches a page: the XPS and
+//! EPUB suites.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

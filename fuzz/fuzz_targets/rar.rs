@@ -30,6 +30,18 @@
 //!   checkable by address.
 //! - **Every listed entry answers, one way or the other.**
 //! - **The entry list does not change under reading.**
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a name past the cap is refused,
+//! and a read returns bytes inside the archive. None of them asks whether the
+//! result is the one the input describes, so an answer that is well-formed
+//! and *wrong* passes exactly as a correct one does.
+//!
+//! Same blind spot as `tar`, and worse here: `docs/features/cbz.md` records
+//! that RAR 4 has no fixture this machine can produce, so part of this
+//! decoder is decoded-but-unadjudicated by name. What coverage there is lives
+//! in `crates/tinker-pdf-archive`'s own tests.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

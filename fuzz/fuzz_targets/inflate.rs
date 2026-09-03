@@ -1,5 +1,18 @@
 //! Own inflate. Truncated and corrupt streams are the normal case in real
 //! files, so decoding part of one and warning is correct; panicking is not.
+//! # What this target cannot find, and what covers it instead
+//!
+//! The three assertions here are **structural**: the output stayed under its
+//! ceiling, `end` indexes inside the caller's own slice, and a result is
+//! never both capped and complete. The last two matter because a ZIP entry's
+//! consumer slices with `end` to find a data descriptor, so an out-of-range
+//! value is a panic in the caller rather than here.
+//!
+//! None of them looks at the bytes. A DEFLATE stream decoded with a wrong
+//! distance code produces the wrong output at the right length and passes.
+//! Correctness lives in `crates/tinker-pdf-filters/tests/vectors.rs`, which
+//! holds genuine zlib output and compares what comes back.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

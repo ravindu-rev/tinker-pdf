@@ -52,6 +52,19 @@
 //!   resolves to a deeper one and must be stopped by the depth cap. A build
 //!   with either guard missing does not fail an assertion here — it hangs, and
 //!   libFuzzer's `-timeout` is what turns that into a finding.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: parsing is deterministic, a
+//! warning is recorded once rather than zero or twice, and the caps hold.
+//! None of them asks whether the result is the one the input describes, so an
+//! answer that is well-formed and *wrong* passes exactly as a correct one
+//! does.
+//!
+//! A cascade that resolved every declaration to the wrong value is perfectly
+//! deterministic. Correctness lives in `crates/tinker-pdf-css`'s own tests
+//! and, end to end, in the EPUB reftests under `crates/tinker-
+//! pdf/tests/epub_reftest.rs`, which compare rendered pages.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

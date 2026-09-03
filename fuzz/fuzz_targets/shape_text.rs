@@ -50,6 +50,25 @@
 //!   ligature there is nothing left but the cluster to say which characters
 //!   went into it.
 
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a paragraph resolves as many
+//! characters as it was given, no embedding level passes X1's maximum,
+//! reordering is a permutation, and a visual order names only characters the
+//! paragraph has. None of them asks whether the numbers are the ones the
+//! input actually describes, so a decode that is well-formed and *wrong*
+//! passes this target exactly as a correct one does.
+//!
+//! Those are strong invariants and still not correctness: a bidi
+//! implementation that resolved every level to the wrong *value* satisfies
+//! all four. Correctness lives in `crates/tinker-pdf-
+//! shape/tests/bidi_conformance.rs`, which runs the Unicode conformance data.
+//!
+//! This is the shape `brotli` records at length, and the difference is worth
+//! keeping in view: there, nothing in the tree can supply the missing check
+//! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
+//! a second decoder. Here the check exists, and it is somewhere else.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

@@ -28,6 +28,23 @@
 //! that silently dropped the glyphs a page draws is the defect that reaches a
 //! reader as a blank page.
 
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: whatever the subsetter emits
+//! parses again, every glyph asked for is still at the id it was asked for,
+//! and subsetting twice gives the same bytes. None of them asks whether the
+//! result is the one the input describes, so an answer that is well-formed
+//! and *wrong* passes exactly as a correct one does.
+//!
+//! Those are unusually strong for a fuzz target — this is the one target here
+//! that fuzzes a *writer*, and a round trip through a parser is real
+//! evidence. The residual is that the parser is **this repository's own**: a
+//! misreading of the CFF specification shared by the writer and the reader
+//! would round-trip perfectly and produce a font that draws the wrong glyphs
+//! everywhere else. `crates/tinker-pdf/tests/cff_subset_census.rs` is what
+//! covers that, by checking a rebuilt face against what a conformant consumer
+//! accepts.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

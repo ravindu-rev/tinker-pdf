@@ -42,6 +42,17 @@
 //!   makes a real question rather than a formality.
 //! - **Reading twice gives the same bytes.** Determinism (ruling 4), and the
 //!   cache is exactly the thing that could break it.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a name past the cap is refused,
+//! and reading an entry twice gives the same answer. None of them asks
+//! whether the result is the one the input describes, so an answer that is
+//! well-formed and *wrong* passes exactly as a correct one does.
+//!
+//! Determinism is not correctness: a reader that consistently returned the
+//! wrong member passes. Correctness lives in `crates/tinker-pdf-archive`'s
+//! own tests and in `crates/tinker-pdf/tests/cbz_real.rs`.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

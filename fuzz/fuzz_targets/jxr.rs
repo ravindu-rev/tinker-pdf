@@ -32,6 +32,25 @@
 //!   tiles cannot turn leniency into an allocation attack.
 //! - a failure is a `JxrError`, which is a closed enum of decisions — there
 //!   is no "unknown error" arm for a caller to have to guess at.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: the raster is the size its own
+//! geometry implies, the ceiling held, the depth is 8 or 16, and no warning
+//! was recorded twice. None of them asks whether the numbers are the ones the
+//! input actually describes, so a decode that is well-formed and *wrong*
+//! passes this target exactly as a correct one does.
+//!
+//! Correctness lives in `crates/tinker-pdf-filters/tests/jxr_fixtures.rs`,
+//! whose lossless identity is bit-exact against rasters this repository
+//! authored — the one check in this tree that would catch a wrong JPEG XR
+//! decode, which is otherwise a soft plausible picture with faint seams at
+//! the block edges.
+//!
+//! This is the shape `brotli` records at length, and the difference is worth
+//! keeping in view: there, nothing in the tree can supply the missing check
+//! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
+//! a second decoder. Here the check exists, and it is somewhere else.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

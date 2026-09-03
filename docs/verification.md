@@ -170,27 +170,45 @@ one.
 
 ### What a green fuzz run does not mean
 
-**Fourteen of the thirty-nine targets assert nothing beyond "it did not panic,
-hang, or exhaust memory."** They call the decoder and discard the result with
-`let _ =`, so a decode that returned the *wrong answer* passes exactly as a
-correct one does:
+**Not one of the thirty-nine targets checks that a decode is right.** They
+divide into two shapes, and both are now written into every target's own
+header under a `# What this target ...` heading — which `xtask fuzz` requires,
+so a new target cannot land without one.
 
+**Fourteen assert nothing beyond "it did not panic, hang, or exhaust
+memory."** They call the decoder and discard the result with `let _ =`:
 `ascii_filters`, `cff`, `cmap`, `content_tokenizer`, `cos_document`,
 `cos_object`, `icc_profile`, `jpeg`, `lzw`, `render_page`, `sfnt`,
-`signatures`, `truetype`, `type1`.
+`signatures`, `truetype`, `type1`. A green run over `render_page` is the
+single easiest result in this repository to mistake for more than it is.
 
-That is a legitimate design — ruling 1 is about panics, and these are the
-crash net for the parts no other target reaches — but it is worth stating
-plainly, because a green run over `render_page` is the single easiest result
-in this repository to mistake for more than it is. **Each of those fourteen
-now says so in its own header**, names what a wrong answer would look like,
-and points at the tests where correctness for that decoder actually lives.
+**The other twenty-five assert only structural or self-consistent
+properties** — a ceiling held, a geometry agrees with its own sample count, a
+name past a cap was refused, parsing twice gave the same answer, a reordering
+was a permutation. Every one of those is satisfied by a decoder that is
+*consistently wrong*. Three are worth singling out:
 
-The precedent is `brotli`, which asserts only *self-consistency* — that a
-roomier ceiling does not change the answer — and therefore could not have
-found the ring-buffer defect that a decoded-bytes comparison found on the
-first try. A target that cannot see a whole class of defect should admit it,
-so that a clean run is not read as a correct decoder.
+- **`shape` and `shape_text`** lean on determinism, and a shaper that is
+  consistently wrong is perfectly deterministic.
+- **`crypt` and `crypt_ciphers`** lean on a round trip, which proves the
+  cipher is an involution and not that it is RC4 or AES. A self-inverse but
+  wrong key schedule passes while producing documents no other reader opens.
+- **`pki_cms`** enforces X.690's clauses about encoding and nothing about what
+  the encoding says — and for a signature reader, a wrong answer reported
+  confidently is worse than a refusal.
+
+`cff_subset` is the strongest of the thirty-nine and still not exempt: it
+fuzzes a *writer*, and its round trip goes through **this repository's own**
+parser, so a misreading of the CFF specification shared by writer and reader
+round-trips perfectly and draws the wrong glyphs everywhere else.
+
+The precedent for all of this is `brotli`, which asserts only
+self-consistency and therefore could not have found the ring-buffer defect
+that a decoded-bytes comparison found on the first try. `brotli` is also the
+one case where the missing check **cannot** be supplied from anywhere in the
+tree: `CONTRIBUTING.md` rule 1 leaves no encoder to round-trip against and
+ruling 13 bars asking another decoder. Everywhere else the check exists and
+is somewhere else, and each header now names where.
 
 Short runs on
 every commit over committed seed corpora; a bounded nightly job runs

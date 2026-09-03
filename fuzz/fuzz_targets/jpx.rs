@@ -27,6 +27,25 @@
 //!   that the milestone which makes it succeed cannot make it succeed wrongly.
 //! - the warning set stays deduplicated, so a stream of a million bad markers
 //!   cannot turn leniency into an allocation attack.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: the samples are the size the
+//! geometry implies, the ceiling held, the precision is 8 or 16, and a
+//! refusal is the named capability with a warning attached. None of them asks
+//! whether the numbers are the ones the input actually describes, so a decode
+//! that is well-formed and *wrong* passes this target exactly as a correct
+//! one does.
+//!
+//! Correctness lives in `crates/tinker-pdf-filters/tests/jpx_reference.rs`.
+//! That matters more than usual for this codec: a wrong JPEG 2000 decode is a
+//! plausible photograph, not noise, so a structural check cannot distinguish
+//! it from a good one by looking.
+//!
+//! This is the shape `brotli` records at length, and the difference is worth
+//! keeping in view: there, nothing in the tree can supply the missing check
+//! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
+//! a second decoder. Here the check exists, and it is somewhere else.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

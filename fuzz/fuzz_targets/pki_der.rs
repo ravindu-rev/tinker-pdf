@@ -65,6 +65,19 @@
 //!   would make chain building depend on which copy of a name it happened to
 //!   hold.
 
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: every node starts where the
+//! cursor was, no value is larger than the encoding holding it, and X.690's
+//! clauses about constructed and indefinite forms are enforced. None of them
+//! asks whether the result is the one the input describes, so an answer that
+//! is well-formed and *wrong* passes exactly as a correct one does.
+//!
+//! Those are conformance checks about the *encoding*, not about what it says.
+//! A parser that read the right structure and returned the wrong OID or the
+//! wrong serial number passes. Correctness lives in `crates/tinker-pdf-pki`'s
+//! own tests and in `crates/tinker-pdf/tests/certificates.rs`.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
