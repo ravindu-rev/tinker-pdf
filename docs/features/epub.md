@@ -140,7 +140,9 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
-| SVG content documents in the spine | `SpineDefect::SvgContentDocument` | placeholder page; no SVG renderer | [ROADMAP.md](../ROADMAP.md) |
+| Inside an SVG content document: `<filter>`, `<mask>`, `<pattern>` as a paint, `<marker>`, `<foreignObject>`, SMIL animation, `<script>`, `<textPath>`/`<tref>`/`<altGlyph>`, and `spreadMethod` other than `pad` | `ArchiveWarning::Svg { item, warning }` | the document draws; each of these is a subsystem this build declines, named per document and deduplicated by the crate that met it. §14.5's group `opacity` is **flattened** into each descendant's alpha — exact for a shape painted one way, too dark where a fill and a stroke overlap, so `GroupOpacityFlattened` fires only where it shows | [design/svg.md](../design/svg.md) |
+| An `<image>` inside an SVG whose reference does not resolve, or whose bytes are neither JPEG nor PNG | `ArchiveWarning::SvgImageUnresolved { item, images }` | those two are embedded through the same `ImageData` path `cbz.rs` uses; anything else is counted per page rather than drawn as nothing | [design/svg.md](../design/svg.md) |
+| An SVG content document that produced no picture at all | `SpineDefect::SvgUnreadable(tinker_pdf_svg::Refusal)` | six named causes — not XML, not an `<svg>` root, a `<use>` that reaches its own ancestor, or one of four ceilings — and the refusal travels, so a caller can tell a bomb from a truncated file | [design/svg.md](../design/svg.md) |
 | `position: fixed` — **not a refusal, a stated answer** | — | CSS 2.2 §9.6.1: *"in the case of paged media, fixed boxes are repeated on every page, and are fixed with respect to the page box"*. So a fixed box is positioned against the page box and drawn on every page of the document. That is the specification's own paged answer, not a degradation of the screen behaviour, and it is what a stylesheet asking for a running header meant | — |
 | `position: sticky` — **also a stated answer** | — | `css-position-3` §3.4: a sticky box is offset by how far its nearest scrollport has scrolled, clamped to its containing block. A paginated document has no scrollport, so that distance is zero on every page and §3.4's own words are that it is then *"the same as `relative`"*. The value of a parameter this medium does not have, rather than a gap | — |
 | `column-span: all` | `tinker_pdf_layout::Warning::ColumnSpanAsNone` | `css-multicol-1` §6: a spanning box interrupts the columns and resumes them below itself, which is three column sets where this build has one. The box is laid out in the column it fell in, counted per box | [ROADMAP.md](../ROADMAP.md) |
@@ -160,6 +162,33 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 | Page box or font size the caller passed that cannot be used | `ArchiveWarning::UnusableOption(BookOptionDefect::{PageWidth, PageHeight, FontSize})` | the default is laid out instead and the caller is told which number was thrown away — a warning, not a refusal, because it is a claim about the caller, not the file | — |
 | Encrypted resources, missing rootfile, unreadable package document, unsupported package version, empty spine, a book that could not be paginated | `ArchiveRefusal::{EncryptedResources, RootfileMissing, UnreadablePackageDocument, UnsupportedPackageVersion, EmptySpine, UnpaginatedBook, UnreadableContainer}` | refused at open, by name | [cbz](cbz.md) |
 | Scripting, MathML layout, media overlays | `ArchiveWarning::UnimplementedFeature` | declared in `properties`, reported, content rendered as its fallback text | — |
+
+**SVG in the spine, as built.** Tier 4's SVG lane closed the row that used to
+stand here — *"placeholder page; no SVG renderer"* — and the three rows above
+are what is left of it. `sample-svg-in-spine.epub`'s six spine items are six
+pages that draw: an Illustrator cover of 339 gradient-filled paths under a
+58-class `<style>` element, two Inkscape drawings, and three pages that are one
+`<image>` and nothing else.
+`the_six_svg_spine_items_draw_rather_than_placehold` renders all six and asserts
+each is more than one colour, because a build that read every SVG and wrote a
+blank page would satisfy every count in this file.
+
+What that reader is, precisely: SVG 1.1's §8.3 path data, §7's transforms and
+viewports, §9's seven basic shapes, §11's painting from all three of §6.4's
+sources, §13.2's gradients including `xlink:href` inheritance between paint
+servers, §14.3's clipping, §5.6's `<use>` with the bomb refused by name, §5.7's
+`<image>`, and §10's text — the last through the same `css-fonts-4` §5.3 matcher
+and the same shaper that set the rest of the book, because SVG text and XHTML
+text in one book must not resolve `serif` two different ways.
+
+**One thing that half-worked and was found by a test rather than by reading.**
+`DocumentBuilder::begin_page` snapshots the document's resource set, so a
+pattern, an `/ExtGState` or an image registered while *drawing* is invisible to
+the page naming it: the gradient, the transparency or the photograph is silently
+gone while every solid stroke still draws. The corpus test passed anyway,
+because that cover strokes its paths black. `epub::svg::Registry` is the
+ordering made into a type — `draw` takes a `&Registry` and cannot register
+anything.
 
 **Corpus caveats, stated**: the committed set now holds a fixed-layout book
 from a real producer (KCC 11.0.1, `rendition:layout: pre-paginated`) and two

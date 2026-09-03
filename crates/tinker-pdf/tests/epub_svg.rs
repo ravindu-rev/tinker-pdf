@@ -20,7 +20,31 @@
 //!
 //! | Defect injected | Tests that failed |
 //! | --- | ---: |
-//! | *(measured below)* | |
+//! | **the registry is built after `begin_page`** | **4** |
+//! | the SVG branch never runs and every item placeholders | 11 |
+//! | `place_text` advances the pen twice | 1 |
+//! | the placement stretches to fill instead of fitting | 1 |
+//! | the clip is not applied | 1 |
+//! | a gradient's `/Matrix` is not composed with the page mapping | 1 |
+//! | an `<image>` is not fitted by `preserveAspectRatio` | 1 |
+//! | an unresolved `<image>` is not counted | 1 |
+//! | `text-anchor`'s shift is not applied | 2 |
+//!
+//! The first row is the one this file exists for. **It was a real defect, not
+//! a hypothetical**: `begin_page` snapshots the document's resource set, so the
+//! first draft — which registered while drawing — wrote pages naming patterns,
+//! ext-gstates and images that were not in them. The gradient, the transparency
+//! and the photograph were silently gone; the fetched-corpus test passed
+//! throughout, because `cover.svg` strokes its 339 paths black and a page with
+//! strokes and no fills still has more than one colour.
+//!
+//! Three of these fired **zero** the first time and each was a hole in a
+//! fixture: the fit test had only a scene *wider* than the page, where both
+//! scales agree; the image-fit test sampled a row above the scene entirely,
+//! which nothing can ever ink; and there was no gradient test at all, in a file
+//! about the format whose corpus is almost nothing but gradients. The
+//! gradient-matrix row needed one more correction after that — a *horizontal*
+//! axis cannot see a y-flip, because the flip touches one coordinate.
 
 mod cbz_support;
 mod epub_support;
@@ -170,15 +194,77 @@ fn an_svg_spine_item_draws_instead_of_placeholding() {
 /// against a shape somebody can measure.
 #[test]
 fn a_scene_is_fitted_to_the_page_rather_than_stretched() {
+    // **Both directions, because a fit that took one axis is right on half the
+    // documents there are.** A drawing wider than the page and one taller than
+    // it disagree about which scale wins, and a build that always divided by
+    // the width would pass the first and overflow the second.
+    let band = |markup: &str| -> (u8, u8, u8) {
+        let doc = Document::open_with(book(markup, &[]), &OpenOptions::at_page(200.0, 200.0))
+            .expect("the book opens");
+        let bitmap = doc
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        let components = bitmap.components();
+        let width = bitmap.width as usize;
+        let height = bitmap.height as usize;
+        let at = |x: usize, y: usize| bitmap.data[(y * width + x) * components];
+        (
+            at(width / 2, 2),
+            at(width / 2, height / 2),
+            at(2, height / 2),
+        )
+    };
+
+    // Two-to-one on a square page: a band across the middle, white above.
+    let (top, middle, left) = band(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100">
+              <rect x="0" y="0" width="200" height="100" fill="#000000"/>
+            </svg>"##,
+    );
+    assert!(middle < 0x40, "the middle of the page is inked");
+    assert!(top > 0xC0, "and the top is not");
+    assert!(left < 0x40, "the drawing reaches the left edge");
+
+    // One-to-two on the same page: a band down the middle, white at the left.
+    let (top, middle, left) = band(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="200" viewBox="0 0 100 200">
+              <rect x="0" y="0" width="100" height="200" fill="#000000"/>
+            </svg>"##,
+    );
+    assert!(middle < 0x40, "the middle of the page is inked");
+    assert!(top < 0x40, "the drawing reaches the top edge");
+    assert!(
+        left > 0xC0,
+        "and the left is white, because the height is what had to fit"
+    );
+}
+
+/// **A gradient reaches the page as a gradient.**
+///
+/// `cover.svg` in the fetched corpus is 339 paths filled from sixteen
+/// `<linearGradient>`s, so this is the feature that book *is*. It is also the
+/// one the resource-ordering defect dropped in silence: a `/Pattern` registered
+/// after `begin_page` is named by an operator no reader can resolve, the fill
+/// simply does not happen, and the page still has ink on it from every stroke.
+/// So the assertion is on a **ramp** — three sample points across the shape
+/// that are ordered light to dark — rather than on the presence of ink.
+#[test]
+fn a_gradient_fills_a_shape_as_a_ramp() {
     let doc = Document::open_with(
         book(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100">
-                 <rect x="0" y="0" width="200" height="100" fill="#000000"/>
-               </svg>"##,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+                  <defs>
+                    <linearGradient id="ramp" gradientUnits="userSpaceOnUse"
+                                    x1="0" y1="0" x2="200" y2="0">
+                      <stop offset="0" stop-color="#ffffff"/>
+                      <stop offset="1" stop-color="#000000"/>
+                    </linearGradient>
+                  </defs>
+                  <rect x="0" y="0" width="200" height="200" fill="url(#ramp)"/>
+                </svg>"##,
             &[],
         ),
-        // A square page and a two-to-one drawing: the ink must be a band across
-        // the middle.
         &OpenOptions::at_page(200.0, 200.0),
     )
     .expect("the book opens");
@@ -187,17 +273,68 @@ fn a_scene_is_fitted_to_the_page_rather_than_stretched() {
         .expect("a page")
         .render(&RenderOptions::default());
     let components = bitmap.components();
-    let row = |y: usize| -> u8 {
-        let at = (y * bitmap.width as usize + bitmap.width as usize / 2) * components;
-        bitmap.data[at]
-    };
-    let height = bitmap.height as usize;
-    assert!(row(height / 2) < 0x40, "the middle of the page is inked");
+    let width = bitmap.width as usize;
+    let row = bitmap.height as usize / 2;
+    let at = |x: usize| bitmap.data[(row * width + x) * components];
+    let (left, centre, right) = (at(width / 8), at(width / 2), at(width - width / 8));
     assert!(
-        row(2) > 0xC0,
-        "and the top is not, because the drawing is half as tall as the page"
+        left > centre && centre > right,
+        "the ramp runs light to dark across the shape: {left}, {centre}, {right}"
     );
-    assert!(row(height - 3) > 0xC0, "nor the bottom");
+    assert!(
+        left > 0xC0 && right < 0x40,
+        "and it reaches both stops: {left} to {right}"
+    );
+}
+
+/// A gradient's `/Matrix` is composed with the page mapping.
+///
+/// 8.7.3.1 makes pattern space the page's **default** coordinate system, which
+/// the `cm` carrying the y-flip and the fit does not reach — so the mapping has
+/// to be written into the pattern too.
+///
+/// **The axis is vertical, and that is the whole design of the test.** SVG's
+/// `y` grows downward and a PDF page's grows upward, so a build that left the
+/// mapping out draws this ramp *upside down* — light at the foot of the page
+/// where the document said light at the head. A horizontal axis cannot see it
+/// at all, because the flip touches only one coordinate, and the first draft of
+/// this test used one and caught nothing.
+#[test]
+fn a_gradients_matrix_carries_the_page_mapping() {
+    let doc = Document::open_with(
+        book(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+                  <defs>
+                    <linearGradient id="down" gradientUnits="userSpaceOnUse"
+                                    x1="0" y1="0" x2="0" y2="200">
+                      <stop offset="0" stop-color="#ffffff"/>
+                      <stop offset="1" stop-color="#000000"/>
+                    </linearGradient>
+                  </defs>
+                  <rect x="0" y="0" width="200" height="200" fill="url(#down)"/>
+                </svg>"##,
+            &[],
+        ),
+        &OpenOptions::at_page(200.0, 200.0),
+    )
+    .expect("the book opens");
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let components = bitmap.components();
+    let width = bitmap.width as usize;
+    let height = bitmap.height as usize;
+    let at = |y: usize| bitmap.data[(y * width + width / 2) * components];
+    let (top, bottom) = (at(height / 8), at(height - height / 8));
+    assert!(
+        top > bottom,
+        "the first stop is at the *top* of the page, because SVG's y grows          downward and the page's grows up: {top} at the head against {bottom}          at the foot"
+    );
+    assert!(
+        top > 0xC0 && bottom < 0x40,
+        "and it reaches both stops: {top} to {bottom}"
+    );
 }
 
 // ---- what travels out ------------------------------------------------------------
@@ -344,11 +481,18 @@ fn an_image_is_fitted_by_its_own_proportions() {
     let components = bitmap.components();
     let width = bitmap.width as usize;
     let at = |x: usize, y: usize| bitmap.data[(y * width + x) * components];
-    let height = bitmap.height as usize;
-    assert!(at(width / 2, height / 2) < 0x40, "the middle is inked");
+    // **Sampled inside the scene, which is the correction the injection matrix
+    // asked for.** A 100-unit square scene on a 432-by-648 page is scaled by
+    // 4.32 and centred, so it occupies rows 108 to 540 and *nothing* above row
+    // 108 can ever be inked — the first draft sampled row 81 and passed
+    // whatever the fit did. A two-to-one picture under `xMidYMid meet` fills
+    // the box's width and half its height, centred: user y from 25 to 75, which
+    // is rows 216 to 432.
+    assert!(at(width / 2, 324) < 0x40, "the middle of the box is inked");
     assert!(
-        at(width / 2, height / 8) > 0xC0,
-        "and the top of the box is not, because the picture is half as tall as it is wide"
+        at(width / 2, 150) > 0xC0,
+        "and the top of the box is not, because the picture is half as tall \
+         as it is wide"
     );
 }
 

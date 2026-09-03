@@ -186,3 +186,61 @@ memory its own diagnostics cost.
 | Scope is large enough that a partial landing is likely | Milestones are commit boundaries and each ends at a testable claim. A build that reads geometry and refuses paint by name is a legitimate stopping point; one that draws shapes nothing checks is not |
 
 ## As built
+
+All seven milestones landed. `crates/tinker-pdf-svg/` is 4 900 lines over nine
+files, `crates/tinker-pdf/src/epub/svg.rs` is the writer, and
+`sample-svg-in-spine.epub`'s six spine items are six pages that draw.
+
+**What the counted-injection matrices found that reading did not.** Eight
+tables, 98 injections, and eleven of them fired **zero** the first time —
+every one a hole in a fixture rather than in the code:
+
+- §7.9's nested-viewport rebasing had no coordinates to move at milestone 1;
+  `tests/shapes.rs` closed it.
+- `Walk::push`'s scene-node cap could not fire until a `<use>` made a scene hold
+  more nodes than the document has elements; `tests/reuse.rs` closed it.
+- Every gradient in the fixture stated its own geometry, so the `xlink:href`
+  chain walk for *attributes* was never exercised.
+- Every `<clipPath>` sat inside a `<defs>`, so "a clipPath draws nothing where
+  it stands" was being proved by `<defs>`.
+- The `xlink:href` cycle guard was **two rules** — a `contains` check and a
+  length cap — and removing the first fired nothing. It is one rule now.
+- Both `UseUnresolved` arms were asserted together, so either could go silent.
+- The only multi-word `font-family` in the text fixture was a *quoted* one,
+  which is a single token.
+- No `<tspan>` carried a `transform`, so composing one was proved by the
+  `<text>` above it.
+- The page-fit test had only a scene *wider* than the page, where both scales
+  agree; the image-fit test sampled a row above the scene entirely, which
+  nothing can ever ink; and `epub_svg.rs` had **no gradient test at all**, in a
+  file about the format whose corpus is almost nothing but gradients. That last
+  one needed a second correction: a *horizontal* gradient cannot see a y-flip,
+  because the flip touches one coordinate.
+
+**Two defects the tests found in the writer, both of which drew a plausible
+page.** `DocumentBuilder::begin_page` snapshots the resource set, so patterns,
+`/ExtGState`s and images registered *while drawing* were named by operators no
+reader could resolve — every gradient and every transparency silently gone,
+with the corpus test still green because that cover strokes its paths black.
+`epub::svg::Registry` is now the ordering as a type. And `place_text` added the
+running pen *and* a per-chunk offset, setting the second run of a chunk two
+words along.
+
+**What is refused is what this document said it would be**, less one addition:
+`<marker>` earned a warning of its own at milestone 1, because thirty-two of
+them are in the fetched corpus and `ElementUnknown` would have called a real
+SVG element a foreign vocabulary. The narrowed rows are in
+[features/epub.md](../features/epub.md).
+
+**What this cannot reach**, stated rather than absorbed: nothing outside this
+repository adjudicates a rendering (ruling 13), so every expected value here is
+arithmetic from a clause or an identity checkable without the code — an arc ends
+where the command says, a quadratic raised to a cubic passes through the same
+midpoint, four `M`s of Times-Roman are 4 × 0.889 em. Whether the whole page is
+what the author saw is not something this suite asks.
+
+One more limit worth naming: `bundled-fonts` is off by default, so the standard
+14 have no outlines in a default build and base-14 text — a chapter's prose as
+much as an SVG's label — renders as nothing. Text *placement* is therefore held
+against the text matrix in the operators rather than against ink, which is a
+stronger claim and not a test of that feature flag.
