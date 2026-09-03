@@ -138,8 +138,8 @@ exceed it routinely — declared in one place,
 
 ## Verified
 
-As of August 2026, `cargo test --workspace` runs 2 963 tests (0 failed,
-8 ignored, Windows x86_64), and the parts that cover opening are named
+As of September 2026, `cargo test --workspace` runs 4 394 tests (0 failed,
+43 ignored, Windows x86_64), and the parts that cover opening are named
 ([verification](../verification.md)):
 
 - **`crates/tinker-pdf-cos/tests/corrupt.rs`** — the ladder on damage built

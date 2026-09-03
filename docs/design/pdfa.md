@@ -300,7 +300,7 @@ a document that embeds a font program leaves the font and colour counters at
 zero. The counter is not vacuous: it records the one XML parse a syntax sweep
 genuinely needs, the flavour claim, so the mechanism fires on nearly every
 document in the corpus. Injecting a font rule into the syntax group fails four
-of the workspace's 3 375 tests.
+of the workspace's 4 394 tests.
 
 ## What milestones 5 and 6 actually measured
 

@@ -498,6 +498,6 @@ properties are asserted on each: no panic (ruling 1), and that a run never
 spends more budget than it was given, which is how a bounded interpreter is
 kept bounded rather than believed bounded.
 
-All of it rides in the workspace suite: 3 851 passed, 0 failed, 35 ignored across 156 suites
+All of it rides in the workspace suite: 4 394 passed, 0 failed, 43 ignored across 199 suites
 (`x86_64-pc-windows-msvc`, 30 August 2026) —
 [verification](../verification.md).

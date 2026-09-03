@@ -51,7 +51,7 @@ tinker-pdf-svg ─────→ tinker-pdf-xml, tinker-pdf-css, tinker-pdf-mat
 tools: pdfcmp (no engine deps) · tpdf (depends on facade)
 ```
 
-**Thirteen leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
+**Fourteen leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
 `math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape`, `svg`, `archive` — are
 bytes-in/values-out with zero PDF types (ruling 8 defines a leaf; the
 definition binds, not the list). `archive` is **appended** rather than filed
