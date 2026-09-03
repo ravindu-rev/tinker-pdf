@@ -356,8 +356,12 @@ refusal table.
   for an engine that reads no font directories; **no book in the corpus
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
-  the pinned float reading-order defect, whose mechanism is now measured
-  and written down in the row that names it. **SVG content documents
+  the float reading-order defect, **halved**: the forced-break half is
+  closed and held by a book this repository builds, taking both Waste
+  Land spellings to exact conservation and `pg16328-beowulf.epub` from
+  4 560 characters to 2 182. What remains is a float that `clear` puts
+  below the text following it, across a page boundary, where no
+  ordering of one page's runs can reach it. **SVG content documents
   draw** since the SVG lane ([design/svg.md](design/svg.md)); what is
   left of that row is *inside* one — filters, masks, patterns as a paint,
   markers, `foreignObject`, SMIL, scripting, text on a path, and
