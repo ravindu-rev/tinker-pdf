@@ -361,7 +361,9 @@ refusal table.
   Land spellings to exact conservation and `pg16328-beowulf.epub` from
   4 560 characters to 2 182. What remains is a float that `clear` puts
   below the text following it, across a page boundary, where no
-  ordering of one page's runs can reach it. **SVG content documents
+  ordering of one page's runs can reach it — measured, not assumed:
+  three candidate fixes were built and none moved the figure, and
+  the row that names it records which and why. **SVG content documents
   draw** since the SVG lane ([design/svg.md](design/svg.md)); what is
   left of that row is *inside* one — filters, masks, patterns as a paint,
   markers, `foreignObject`, SMIL, scripting, text on a path, and
