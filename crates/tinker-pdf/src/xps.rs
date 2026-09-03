@@ -130,6 +130,7 @@ mod image;
 pub mod markup;
 pub mod opc;
 pub mod paint;
+pub mod profiles;
 pub mod resources;
 
 use std::collections::HashMap;
@@ -305,6 +306,22 @@ pub const MAX_XPS_GLYPHS: usize = 1 << 21;
 /// Reachable: `a_static_resource_chain_past_the_depth_cap_is_named`, against
 /// `tinker_pdf_xml::limits::MAX_XML_TOKENS` entries one dictionary could hold.
 pub const MAX_XPS_RESOURCE_DEPTH: usize = 16;
+
+/// The most colour components a `ContextColor` may state.
+///
+/// **Fifteen**, which is ICC.1's own ceiling: the `nCLR` colour space
+/// signatures run `2CLR` through `FCLR`, and `F` is fifteen. A `ContextColor`
+/// naming more components than any profile can have is not a colour whose
+/// profile this build happens not to hold — it is markup that cannot be true,
+/// so it is [`brush::BrushError::Syntax`] and not a narrowing.
+///
+/// The cap is here rather than left to the XML reader's own bounds because the
+/// component list is one attribute value: `tinker_pdf_xml` bounds how long an
+/// attribute may be, and that bound is tens of thousands of characters — long
+/// enough to ask for a great many `f64`s out of one small element.
+///
+/// Reachable: `a_context_color_with_more_channels_than_icc_allows_is_syntax`.
+pub const MAX_XPS_COLOUR_CHANNELS: usize = 15;
 
 /// How deep a `VisualBrush` may nest inside another one.
 ///
@@ -678,15 +695,25 @@ pub enum XpsElementDefect {
     /// [`MAX_XPS_RESOURCE_DEPTH`], and a `VisualBrush` nest deeper than
     /// [`MAX_XPS_VISUAL_DEPTH`].
     BrushTooDeep,
-    /// A brush this build does not paint: a `ContextColor` naming an ICC
-    /// profile. **Painted grey.**
+    /// A `ContextColor` (15.2.5) whose ICC profile part is missing, is not a
+    /// profile, or names a data colour space ICC.1 does not.
     ///
-    /// Three things this used to name and no longer does, because all three
-    /// are painted now: an `ImageBrush`; a gradient asked to stroke or to fill
-    /// text — which needed 8.7.4.5.5's shading pattern, and the writer had no
-    /// API for it; and a `VisualBrush` (15.4), whose cell is a subtree of
-    /// markup and so needed the drawing walk re-entered from inside a brush.
-    BrushUnsupported,
+    /// **Painted**, in 8.6.5.5's default-`/Alternate` reading of the
+    /// components — one channel is grey, three are RGB, four are CMYK. That
+    /// fallback is not this build's invention: it is what a PDF reader does
+    /// with an `/ICCBased` stream it cannot use, and 15.2.5's syntax carries
+    /// no sRGB fallback of its own to prefer over it.
+    ColourProfileUnresolved,
+    /// A `ContextColor` whose profile takes a number of components PDF's
+    /// `/ICCBased` cannot state.
+    ///
+    /// Table 66 permits **1, 3 or 4** and no others, and ICC.1's `nCLR` family
+    /// runs to fifteen. PDF's other n-channel space, `/DeviceN`, needs a tint
+    /// transform into an alternate space that only *evaluating* the profile
+    /// could supply — so this is a **narrowing** and is named as one, and the
+    /// element takes the placeholder grey rather than a colour picked by
+    /// dropping components.
+    ColourProfileChannels,
     /// A colour or a gradient that is not 15's syntax. **Painted grey.**
     BrushUnreadable,
     /// The brush reached the page and not exactly: gradient stops whose alphas
@@ -775,7 +802,12 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::BrushUnresolved => "a `{StaticResource}` naming no resource",
             XpsElementDefect::BrushCyclic => "a brush that reaches itself",
             XpsElementDefect::BrushTooDeep => "a brush nested past the depth cap",
-            XpsElementDefect::BrushUnsupported => "a brush this build does not paint",
+            XpsElementDefect::ColourProfileUnresolved => {
+                "a `ContextColor` whose profile part is not a profile"
+            }
+            XpsElementDefect::ColourProfileChannels => {
+                "a colour profile with a channel count `/ICCBased` cannot state"
+            }
             XpsElementDefect::BrushUnreadable => "a colour or gradient that is not 15's syntax",
             XpsElementDefect::BrushApproximated => "a brush that reached the page approximately",
             XpsElementDefect::ResourceDictionaryUnresolved => {
@@ -1214,6 +1246,10 @@ fn synthesise(
     // so two pages may spell one dictionary two ways and it is still one
     // dictionary — read once and answered from a table.
     let mut remotes = resources::Remotes::default();
+    // And one profile table, for the reason the images have one: a PDF
+    // resource name has to be unique across a document, and two pages naming
+    // one `/CS0` for two different profiles would be one profile.
+    let mut profiles = profiles::Profiles::default();
     // Painted **once per part**, for the reason milestone 4 built its own
     // caches: a `FixedDocument` may show one page part four thousand times,
     // and `Source::new` walks every character of a part before it yields an
@@ -1252,6 +1288,12 @@ fn synthesise(
                 if let Err(Trouble::Exhausted) = remotes.load(package, part, limits, &mut budget) {
                     return Err(ArchiveRefusal::TooLarge);
                 }
+                // 15.2.5's ICC profiles, in a fourth pass and before the walk
+                // for the same reason. See `profiles::Profiles::load`.
+                if let Err(Trouble::Exhausted) = profiles.load(package, part, &mut builder, limits)
+                {
+                    return Err(ArchiveRefusal::TooLarge);
+                }
                 let drawn = match package.read_part(part) {
                     Ok(bytes) => painter.page(
                         &mut builder,
@@ -1261,6 +1303,7 @@ fn synthesise(
                             fonts: &fonts,
                             images: &images,
                             remotes: &remotes,
+                            profiles: &profiles,
                             page: (width, height),
                             xml: &limits.xml,
                         },

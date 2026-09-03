@@ -47,10 +47,45 @@ const SPREAD_COPIES: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Colour {
     /// Red, green and blue, each from zero to one.
+    ///
+    /// For a `ContextColor` this is 8.6.5.5's default-`/Alternate` reading of
+    /// the components — see [`ContextColour`]. Every other form states it
+    /// directly.
     pub rgb: [f64; 3],
     /// Alpha, from zero to one. 15.2.4's `#RRGGBB` form has none and means
     /// one.
     pub alpha: f64,
+}
+
+/// 15.2.5's `ContextColor <uri> a,c1,…,cn`, parsed and not resolved.
+///
+/// # Why this is a [`Paint`] and not a field on [`Colour`]
+///
+/// A `ContextColor` becomes a PDF `/ICCBased` colour space, and a colour space
+/// is a property of the **operator that sets a colour**, not of a number. A
+/// gradient *stop* cannot have one at all: 8.7.4.5's shading states one space
+/// for the whole function and a stop is not free to pick its own. So a stop
+/// reads [`Colour::rgb`] — the default-`/Alternate` reading — and the gradient
+/// says it approximated, while a `SolidColorBrush` carries the components
+/// verbatim through here and loses nothing.
+///
+/// The part is carried unresolved for [`Paint::Image`]'s reason: reading it
+/// needs the package, and this module is pure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextColour {
+    /// The profile part, verbatim. Resolved against the fixed page's own name.
+    pub profile: String,
+    /// The components, in the profile's own space, in the order stated.
+    ///
+    /// One to [`super::MAX_XPS_COLOUR_CHANNELS`] of them. The alpha is **not**
+    /// among them: 15.2.5 puts it first in the list and it is a coverage, not
+    /// a colour component, so it is lifted into [`Colour::alpha`] where every
+    /// other form keeps it.
+    pub components: Vec<f64>,
+    /// 8.6.5.5's default-`/Alternate` reading of those components, for the
+    /// callers that cannot name a colour space and for a profile part that is
+    /// not there.
+    pub fallback: [f64; 3],
 }
 
 /// Why a brush did not become paint.
@@ -59,17 +94,20 @@ pub struct Colour {
 /// names and a reader of the report has to be able to tell "this file says
 /// something I cannot read" from "this file says something this build does not
 /// draw yet".
+/// One variant, and it used to be two.
+///
+/// The second was `Unsupported` — "it is a brush and this build does not paint
+/// it" — and nothing produces it any more. An `ImageBrush` became a tiling
+/// pattern, a gradient learned to stroke and to set text through a shading
+/// pattern, a `VisualBrush` became a pattern whose cell is a drawing, and a
+/// `ContextColor` became an `/ICCBased` colour space. What is left is the
+/// file being wrong rather than this build being short, so the distinction
+/// the two names carried no longer exists and keeping it would be a refusal
+/// with nothing behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrushError {
     /// The markup is not 15's brush syntax.
     Syntax,
-    /// It is a brush and this build does not paint it: a `VisualBrush` (15.4),
-    /// or a `ContextColor` naming an ICC profile (a non-goal of the whole
-    /// plan, because 15.2.5's syntax has nowhere to put an sRGB fallback).
-    ///
-    /// An `ImageBrush` was here and is not: it is painted, through a tiling
-    /// pattern.
-    Unsupported,
 }
 
 /// What an element paints with.
@@ -77,6 +115,11 @@ pub enum BrushError {
 pub enum Paint {
     /// A colour, as `r g b`.
     Solid([f64; 3]),
+    /// 15.2.5's `ContextColor`: components in a profile's own space, which
+    /// becomes a PDF `/ICCBased` colour space carrying that same profile.
+    ///
+    /// A translation and not a conversion — see [`ContextColour`].
+    Context(Box<ContextColour>),
     /// A gradient, and the matrix mapping its own space into the element's.
     Gradient {
         /// The shading, ready for [`tinker_pdf_cos::DocumentBuilder::add_shading`].
@@ -227,14 +270,18 @@ impl Brush {
 ///
 /// # Errors
 /// [`BrushError::Syntax`] for anything that is not 15.2.4's grammar,
-/// [`BrushError::Unsupported`] for `ContextColor`.
+/// A `ContextColor` answers 8.6.5.5's default-`/Alternate` reading of its
+/// components; the colour space it also names is [`from_attribute`]'s to
+/// carry, because a number cannot hold one.
 pub fn colour(text: &str) -> Result<Colour, BrushError> {
     let text = text.trim();
-    // 15.2.5's `ContextColor <uri> a,c1,…` carries a profile part and channel
-    // values and **no sRGB fallback**, so there is no cheap approximation to
-    // take: the shape degrades under ruling 2 rather than being guessed at.
-    if text.starts_with("ContextColor") {
-        return Err(BrushError::Unsupported);
+    // 15.2.5's `ContextColor` is a colour like any other **here**: what it
+    // adds is a colour space, and a colour space belongs to the operator that
+    // sets a colour rather than to the number. `colour` answers the number —
+    // 8.6.5.5's default-`/Alternate` reading of it — and the callers that can
+    // name a space call `context_colour` for the rest.
+    if let Some(rest) = text.strip_prefix("ContextColor") {
+        return context_colour(rest).map(|(colour, _)| colour);
     }
     if let Some(values) = text.strip_prefix("sc#") {
         return sc_rgb(values);
@@ -277,6 +324,100 @@ pub fn colour(text: &str) -> Result<Colour, BrushError> {
     }
 }
 
+/// 15.2.5's `ContextColor <uri> a,c1,…,cn`.
+///
+/// # There is no sRGB fallback in the syntax, and one is not invented
+///
+/// 15.2.5 states a profile part, an alpha and the components — and **nothing
+/// else**. A consumer without the profile has the numbers and no statement
+/// about what they mean, so this build does not guess at a colour: it hands
+/// the components to the PDF unchanged inside an `/ICCBased` space carrying
+/// the same profile, and the reader does the colour management. That is a
+/// translation rather than a conversion, and it is exact.
+///
+/// The `rgb` filled in here is **not** that answer. It is the reading PDF
+/// itself gives an `/ICCBased` space whose stream a reader cannot use: 8.6.5.5
+/// says such a space falls back to `/Alternate`, and that `/Alternate`
+/// defaults by component count to `DeviceGray`, `DeviceRGB` or `DeviceCMYK`.
+/// So the fallback is not invented here either — it is the one PDF already
+/// specifies for exactly this situation, and it is only ever reached where a
+/// colour space cannot be named at all (a gradient stop) or where the part is
+/// missing.
+pub fn context_colour(rest: &str) -> Result<(Colour, ContextColour), BrushError> {
+    // A profile URI has to be separated from the keyword by whitespace;
+    // `ContextColorx` is not a `ContextColor` and `#ContextColor` is not a
+    // colour at all.
+    if !rest.starts_with([' ', '\t', '\r', '\n']) {
+        return Err(BrushError::Syntax);
+    }
+    let rest = rest.trim_start();
+    let (profile, values) = rest
+        .split_once(char::is_whitespace)
+        .ok_or(BrushError::Syntax)?;
+    if profile.is_empty() {
+        return Err(BrushError::Syntax);
+    }
+    let numbers = markup::numbers(values).ok_or(BrushError::Syntax)?;
+    // 15.2.5 puts the alpha first and always states it, so a list of one is an
+    // alpha and no colour.
+    let (alpha, components) = numbers.split_first().ok_or(BrushError::Syntax)?;
+    if components.is_empty() || components.len() > super::MAX_XPS_COLOUR_CHANNELS {
+        return Err(BrushError::Syntax);
+    }
+    if !components.iter().all(|value| value.is_finite()) {
+        return Err(BrushError::Syntax);
+    }
+    let fallback = device_reading(components);
+    Ok((
+        Colour {
+            rgb: fallback,
+            alpha: alpha.clamp(0.0, 1.0),
+        },
+        ContextColour {
+            profile: profile.to_string(),
+            components: components.to_vec(),
+            fallback,
+        },
+    ))
+}
+
+/// 8.6.5.5's default `/Alternate` for an `/ICCBased` space of `n` components,
+/// evaluated.
+///
+/// This is what a PDF reader does with a profile it cannot use, and it is
+/// reached here for the two cases where an `/ICCBased` space cannot be named:
+/// a gradient stop, and a profile part that is not in the package. Nothing
+/// about it is this build's invention — the *rule* is PDF's and the numbers
+/// are the file's.
+///
+/// A component count that is none of one, three or four has no default
+/// alternate at all, and PDF has no colour space for it that does not need a
+/// tint transform this build would have to invent. It answers mid-grey and the
+/// caller names the narrowing.
+fn device_reading(components: &[f64]) -> [f64; 3] {
+    let at = |index: usize| {
+        components
+            .get(index)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    };
+    match components.len() {
+        1 => [at(0); 3],
+        3 => [at(0), at(1), at(2)],
+        // 8.6.4.4's subtractive reading, which is the one `DeviceCMYK` states.
+        4 => {
+            let k = at(3);
+            [
+                1.0 - (at(0) + k).min(1.0),
+                1.0 - (at(1) + k).min(1.0),
+                1.0 - (at(2) + k).min(1.0),
+            ]
+        }
+        _ => [crate::cbz::PLACEHOLDER_GREY; 3],
+    }
+}
+
 /// 15.2.4's `sc#` form: three or four **scRGB** components as reals.
 ///
 /// scRGB is linear-light and its components legitimately run outside `[0, 1]`,
@@ -316,6 +457,25 @@ fn srgb_transfer(linear: f64) -> f64 {
 /// # Errors
 /// As [`colour`].
 pub fn from_attribute(text: &str) -> Result<Brush, BrushError> {
+    tinted(text)
+}
+
+/// A colour as a brush, carrying its colour space where it has one.
+///
+/// The one place `ContextColor` differs from every other 15.2.4 colour, and it
+/// is deliberately not inside [`colour`]: `colour` answers a *number*, which is
+/// what a gradient stop and a mask need, and this answers a **paint**, which is
+/// what an element that can name a colour space needs.
+fn tinted(text: &str) -> Result<Brush, BrushError> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("ContextColor") {
+        let (colour, context) = context_colour(rest)?;
+        return Ok(Brush {
+            paint: Paint::Context(Box::new(context)),
+            alpha: colour.alpha,
+            approximated: false,
+        });
+    }
     colour(text).map(Brush::solid)
 }
 
@@ -329,14 +489,15 @@ pub fn from_attribute(text: &str) -> Result<Brush, BrushError> {
 ///
 /// # Errors
 /// [`BrushError::Syntax`] for markup that is not 15's, and
-/// [`BrushError::Unsupported`] for a brush kind this milestone does not paint.
+/// Every failure is [`BrushError::Syntax`]: there is no brush in section 15
+/// this build declines to paint.
 pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
     if !node.xps {
         return Err(BrushError::Syntax);
     }
     match node.local.as_str() {
         "SolidColorBrush" => {
-            let mut brush = Brush::solid(colour(node.attr("Color").ok_or(BrushError::Syntax)?)?);
+            let mut brush = tinted(node.attr("Color").ok_or(BrushError::Syntax)?)?;
             brush.alpha *= opacity_of(node)?;
             Ok(brush)
         }
@@ -647,6 +808,15 @@ fn spread_of(node: &Node) -> Result<Spread, BrushError> {
 struct Stop {
     offset: f64,
     colour: Colour,
+    /// Whether the stop stated a `ContextColor`.
+    ///
+    /// 8.7.4.5's shading names **one** colour space for the whole function, so
+    /// a stop cannot carry a space of its own the way a solid fill can: it
+    /// takes 8.6.5.5's default-`/Alternate` reading and the gradient says it
+    /// approximated. Recorded here rather than inferred from the colour,
+    /// because the reading is a perfectly ordinary RGB triple once it is made
+    /// and nothing about the number remembers where it came from.
+    contextual: bool,
 }
 
 /// 15.4.2's stop list, from either spelling of the property element.
@@ -657,12 +827,14 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
         if !stop.xps || stop.local != "GradientStop" {
             return Ok(());
         }
-        let colour = colour(stop.attr("Color").ok_or(BrushError::Syntax)?)?;
+        let text = stop.attr("Color").ok_or(BrushError::Syntax)?;
+        let colour = colour(text)?;
         let offset = markup::number(stop.attr("Offset").ok_or(BrushError::Syntax)?)
             .ok_or(BrushError::Syntax)?;
         out.push(Stop {
             offset: offset.clamp(0.0, 1.0),
             colour,
+            contextual: text.trim_start().starts_with("ContextColor"),
         });
         Ok(())
     };
@@ -691,6 +863,11 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Bru
     let approximated = stops
         .iter()
         .any(|stop| stop.colour.alpha != stops[0].colour.alpha)
+        // A `ContextColor` stop, which cannot carry its own colour space into
+        // a shading — see `Stop::contextual`. Named rather than left silent,
+        // because the same colour on a solid fill *is* exact and a reader
+        // comparing the two is entitled to know which one lost something.
+        || stops.iter().any(|stop| stop.contextual)
         // 15.4's `ScRgbLinearInterpolation` interpolates in linear light and
         // this writer interpolates in the shading's own `/DeviceRGB`, which is
         // sRGB. The endpoints are right and the middle is not, so it is

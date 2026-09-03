@@ -974,20 +974,38 @@ fn a_relative_gradient_is_stated_in_fractions_of_the_shape_it_fills() {
     );
 }
 
-/// **A `ContextColor` is not painted black.**
+/// **A `ContextColor` whose profile part is missing still paints**, and says
+/// which thing was missing.
 ///
-/// 15.2.5 carries a profile part URI and channel floats and **no sRGB
-/// fallback**, so there is no cheap approximation available. Gap 07's headline
-/// defect was a gradient-stroked rule painting solid black silently, and black
-/// is a plausible colour where the placeholder grey is not.
+/// *Amended.* This used to assert `BrushUnsupported` — "a brush this build
+/// does not paint" — and that was the truth for several milestones. The brush
+/// is painted now, so what is left in this fixture is a `ContextColor` whose
+/// `/Resources/p.icc` names no part of this package, and the answer is
+/// `ColourProfileUnresolved`: a different sentence about a different fault.
+///
+/// The colour is **not** the placeholder grey, and that is the point. 15.2.5
+/// carries no sRGB fallback, but the four components are in the markup and PDF
+/// already says what to do with an `/ICCBased` space whose profile a reader
+/// cannot use — 8.6.5.5 falls back to `/Alternate`, which defaults by count to
+/// `DeviceCMYK` here. So the fallback is not invented: the *rule* is PDF's and
+/// the numbers are the file's. Painting grey would throw away four numbers the
+/// file supplied.
 #[test]
-fn a_context_colour_is_the_placeholder_grey_and_not_black() {
+fn a_context_colour_with_no_profile_part_paints_its_alternate_reading() {
     let body =
         r##"<Path Fill="ContextColor /Resources/p.icc 1.0,0.1,0.2,0.3,0.4" Data="M0,0L10,0Z" />"##;
-    assert_eq!(body_defects(body), [XpsElementDefect::BrushUnsupported]);
+    assert_eq!(
+        body_defects(body),
+        [XpsElementDefect::ColourProfileUnresolved]
+    );
     let content = drawn(body);
-    assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "four components are not nothing: {content}"
+    );
     assert!(!content.contains("0 0 0 rg"), "{content}");
+    // 8.6.4.4's subtractive reading of `0.1,0.2,0.3` under a `K` of `0.4`.
+    assert!(content.contains("0.5 0.4 0.3 rg"), "{content}");
 }
 
 /// A colour that is not 15.2.4's syntax is grey and named, and the shape is

@@ -63,7 +63,8 @@ use tinker_pdf_cos::{
 use tinker_pdf_xml::{Doctype, Event, Limits as XmlLimits, Source};
 
 use super::brush::{
-    self, Brush, BrushError, ImageTile, Mask, Paint, Placement, TileMode, Units, VisualTile,
+    self, Brush, BrushError, ContextColour, ImageTile, Mask, Paint, Placement, TileMode, Units,
+    VisualTile,
 };
 use super::font::Fonts;
 use super::geometry::{self, Geometry, GeometryError};
@@ -71,6 +72,7 @@ use super::glyphs::{self, RunError};
 use super::image::Images;
 use super::markup::{self, Budget, Node, Trouble};
 use super::opc::PartName;
+use super::profiles::Profiles;
 use super::resources::Remotes;
 use super::{XpsElementDefect, UNITS_TO_POINTS};
 use crate::cbz::PLACEHOLDER_GREY;
@@ -197,6 +199,9 @@ pub struct Surroundings<'a> {
     /// The remote resource dictionaries
     /// [`super::resources::Remotes::load`] read for this part.
     pub remotes: &'a Remotes,
+    /// The ICC profiles [`super::profiles::Profiles::load`] placed for this
+    /// part.
+    pub profiles: &'a Profiles,
     /// The page's own size, in XPS units.
     ///
     /// Needed for one thing and it is not the geometry: a tiling pattern's
@@ -447,6 +452,27 @@ impl State<'_> {
     fn warn(&mut self, defect: XpsElementDefect) {
         if !self.defects.contains(&defect) {
             self.defects.push(defect);
+        }
+    }
+
+    /// Writes a `ContextColor`'s colour, and names what it could not honour.
+    ///
+    /// 15.2.5's colour becomes an `/ICCBased` space carrying the very profile
+    /// the file named, so the components reach the reader unchanged and this
+    /// build converts nothing. Where the profile is not there, is not a
+    /// profile, or takes a channel count Table 66 cannot state, the element
+    /// still paints — in 8.6.5.5's own default-`/Alternate` reading, which is
+    /// what a reader does with an `/ICCBased` stream it cannot use.
+    fn context(&mut self, out: &mut Vec<u8>, tint: &ContextColour, stroking: bool) {
+        match self.around.profiles.get(self.around.part, &tint.profile) {
+            Ok(placed) => {
+                let (space, channels) = (placed.resource.clone(), placed.channels);
+                context_colour_operators(out, &space, &tint.components, channels.into(), stroking);
+            }
+            Err(defect) => {
+                self.warn(defect);
+                markup::op(out, &tint.fallback, if stroking { "RG" } else { "rg" });
+            }
         }
     }
 
@@ -750,10 +776,7 @@ impl State<'_> {
         let mut mask_gs = None;
         if let Some(brush) = &done.mask {
             let read = brush::mask_from_node(brush, inner_box)
-                .map_err(|error| match error {
-                    BrushError::Unsupported => XpsElementDefect::BrushUnsupported,
-                    BrushError::Syntax => XpsElementDefect::BrushUnreadable,
-                })
+                .map_err(|BrushError::Syntax| XpsElementDefect::BrushUnreadable)
                 .map_err(Refused::Brush)
                 .and_then(|mask| self.mask_gstate(&mask, inner_box, budget));
             match read {
@@ -959,6 +982,12 @@ impl State<'_> {
 
         if let Some(brush) = fill {
             match brush.paint {
+                Paint::Context(tint) => {
+                    self.context(&mut out, &tint, false);
+                    data.emit(&mut out, true);
+                    out.extend_from_slice(data.fill_operator().as_bytes());
+                    out.push(b'\n');
+                }
                 Paint::Solid(rgb) => {
                     markup::op(&mut out, &rgb, "rg");
                     data.emit(&mut out, true);
@@ -1227,6 +1256,7 @@ impl State<'_> {
         // `sh` over a clip on a `Path`.
         let ctm = self.in_force(scopes, transform);
         match &fill.paint {
+            Paint::Context(tint) => self.context(&mut out, tint, false),
             Paint::Solid(rgb) => markup::op(&mut out, rgb, "rg"),
             Paint::Gradient { shading, matrix } => match self.gradient(shading, *matrix, ctm) {
                 Some(name) => fill_pattern_colour(&mut out, &name),
@@ -1696,6 +1726,7 @@ impl State<'_> {
             markup::op(out, &[limit], "M");
         }
         match &brush.paint {
+            Paint::Context(tint) => self.context(out, tint, true),
             Paint::Solid(rgb) => markup::op(out, rgb, "RG"),
             Paint::Gradient { shading, matrix } => match self.gradient(shading, *matrix, ctm) {
                 Some(name) => stroke_with_pattern(out, &name),
@@ -1747,7 +1778,6 @@ impl State<'_> {
                 attrs: vec![("Color".to_string(), value.to_string())],
                 children: Vec::new(),
             }),
-            Err(BrushError::Unsupported) => Err(XpsElementDefect::BrushUnsupported),
             Err(BrushError::Syntax) => Err(XpsElementDefect::BrushUnreadable),
         }
     }
@@ -1767,7 +1797,6 @@ impl State<'_> {
         let named = |defect: XpsElementDefect| Some(Err(defect));
         let from_node = |node: &Node| match brush::mask_from_node(node, bbox) {
             Ok(mask) => Some(Ok(mask)),
-            Err(BrushError::Unsupported) => named(XpsElementDefect::BrushUnsupported),
             Err(BrushError::Syntax) => named(XpsElementDefect::BrushUnreadable),
         };
 
@@ -1870,9 +1899,9 @@ impl State<'_> {
                         self.visual(tile, Some(bbox), markup::IDENTITY, budget)?
                     }
                     // `brush::mask_from_node` sends only the two tiling
-                    // brushes here; the other two carry their alpha somewhere
-                    // a constant or a shading can hold it.
-                    Paint::Solid(_) | Paint::Gradient { .. } => {
+                    // brushes here; the rest carry their alpha somewhere a
+                    // constant or a shading can hold it.
+                    Paint::Solid(_) | Paint::Gradient { .. } | Paint::Context(_) => {
                         return Err(Refused::Brush(XpsElementDefect::BrushUnreadable))
                     }
                 };
@@ -1978,7 +2007,6 @@ impl State<'_> {
             return match reference(value) {
                 None => match brush::from_attribute(value) {
                     Ok(brush) => Some(brush),
-                    Err(BrushError::Unsupported) => grey(XpsElementDefect::BrushUnsupported, self),
                     Err(BrushError::Syntax) => grey(XpsElementDefect::BrushUnreadable, self),
                 },
                 Some(key) => match self.lookup(key) {
@@ -2006,14 +2034,6 @@ impl State<'_> {
                     self.warn(XpsElementDefect::BrushApproximated);
                 }
                 Some(brush)
-            }
-            Err(BrushError::Unsupported) => {
-                self.warn(XpsElementDefect::BrushUnsupported);
-                Some(Brush {
-                    paint: Paint::Solid([PLACEHOLDER_GREY; 3]),
-                    alpha: 1.0,
-                    approximated: false,
-                })
             }
             Err(BrushError::Syntax) => {
                 self.warn(XpsElementDefect::BrushUnreadable);
@@ -2093,6 +2113,31 @@ fn fill_pattern_colour(out: &mut Vec<u8>, name: &[u8]) {
     out.extend_from_slice(b"/Pattern cs /");
     out.extend_from_slice(name);
     out.extend_from_slice(b" scn\n");
+}
+
+/// Sets a colour in a named `/ICCBased` space: `/CS0 cs c1 … cn scn`.
+///
+/// Written together for `fill_pattern_colour`'s reason, and with **exactly**
+/// the number of operands the space declares: 8.6.5.5's `/N` says how many
+/// `scn` takes, so a `ContextColor` stating four components against a
+/// three-channel profile is padded or truncated here rather than left to a
+/// reader to guess at. `stroking` picks Table 74's capitals.
+fn context_colour_operators(
+    out: &mut Vec<u8>,
+    space: &[u8],
+    components: &[f64],
+    channels: usize,
+    stroking: bool,
+) {
+    out.push(b'/');
+    out.extend_from_slice(space);
+    out.extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
+    for at in 0..channels {
+        let value = components.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        out.extend_from_slice(markup::num(value).as_bytes());
+        out.push(b' ');
+    }
+    out.extend_from_slice(if stroking { b"SCN\n" } else { b"scn\n" });
 }
 
 /// The same pair for the **stroking** colour, which Table 74 spells in capitals.

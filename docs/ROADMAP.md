@@ -368,10 +368,13 @@ refusal table.
   **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
   and reach the page, against seven committed files from three encoders
   with no code in common ([features/fonts.md](features/fonts.md)).
-- **XPS** ([features/xps.md](features/xps.md)): a `ContextColor` naming
-  an ICC profile; JPEG XR **reaching the page** — the decoder is built and
-  `xps/image.rs` still refuses the format at the element, which is the same
-  shape TIFF was in before it was wired.
+- **XPS** ([features/xps.md](features/xps.md)): JPEG XR **reaching the
+  page** — the decoder is built and `xps/image.rs` still refuses the format
+  at the element, which is the same shape TIFF was in before it was wired.
+  `ContextColor` is done and carries one narrowing that is named rather
+  than owed: a profile of two, or of five to fifteen, channels has no
+  `/ICCBased` spelling at all, and the `/DeviceN` that could hold one needs
+  a tint transform only evaluating the profile would supply.
 
 ## How this file changes
 

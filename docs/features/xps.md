@@ -52,7 +52,10 @@ in both spellings real producers emit (`M0,0L200,0` and `M 0,0 L 200,0`);
 dictionaries with `{StaticResource}` lookup bounded against cycles and
 depth — in the page and in 14.2.4's **separate part**, whose `Source`
 chain is bounded the same two ways and read in a pass before the drawing
-walk; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
+walk; 15.2.5's `ContextColor`, whose ICC profile is embedded **verbatim**
+as an `/ICCBased` colour space and whose components reach the content
+stream unchanged, so the reader does the colour management and this build
+converts nothing; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
 `RadialGradientBrush`, `ImageBrush` and `VisualBrush` with `TileMode`
 (through a PDF tiling pattern, whose cell is a picture for the one and a
 **drawing** for the other) — with colours in both the eight- and
@@ -125,10 +128,12 @@ the page synthesis.
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
-| A `ContextColor` naming an ICC profile | `XpsElementDefect::BrushUnsupported` | no ICC pipeline, and 15.2.4's syntax has nowhere to put an sRGB fallback; painted grey and named | [rendering](rendering.md) |
+| A `ContextColor` whose profile takes a channel count `/ICCBased` cannot state | `XpsElementDefect::ColourProfileChannels` | Table 66 permits **1, 3 or 4** components and ICC.1's `nCLR` family runs to fifteen; `/DeviceN` would need a tint transform only *evaluating* the profile could supply, which is the colour engine this build does not have. **Painted grey**, rather than in a colour picked by dropping components | [colour](colour.md) |
+| A `ContextColor` whose profile part is missing, is not a profile, or names a data space ICC.1 does not | `XpsElementDefect::ColourProfileUnresolved` | **Still painted**, in 8.6.5.5's default-`/Alternate` reading of the components — one channel grey, three RGB, four CMYK. Not an invention: that is what a reader does with an `/ICCBased` stream it cannot use, and the numbers are the file's | [colour](colour.md) |
+| A `ContextColor` in a **gradient stop** | `XpsElementDefect::BrushApproximated` | 8.7.4.5's shading names one colour space for the whole function, so a stop cannot carry one of its own; it takes the same alternate reading and the brush says it reached the page and not exactly | — |
 | JPEG XR, or an image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | 9.1.5.1's format has no decoder here, and it is refused *before* either rule decides what the part is, so a drawn format can never reach that loop; a part neither the content type nor the magic bytes name is not one to guess at | [ROADMAP.md](../ROADMAP.md) |
 | A content type and magic bytes that disagree about two formats this build draws | *(none — the bytes win, unnamed)* | a decoder reads bytes, so the bytes decide; `Images::get` returns a `Result`, so the only channel out is a refusal and a leniency has nowhere to go. Ruling 10 wants it named and this does not name it — pinned by `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing` | [rulings](../rulings.md) ruling 10 |
-| `{ColorConvertedBitmap …}` naming an ICC profile | `XpsElementDefect::ImageProfileUnsupported` | no ICC pipeline, and the syntax has nowhere to put an sRGB fallback, so the picture is refused rather than drawn in colours the file did not ask for | [rendering](rendering.md) |
+| `{ColorConvertedBitmap …}` naming an ICC profile | `XpsElementDefect::ImageProfileUnsupported` | *not* for want of an ICC pipeline — a `ContextColor` embeds its profile as an `/ICCBased` space — but because 8.9.5's image dictionary takes a `/ColorSpace` and this writer's `add_image` states only the three device families, so there is nowhere to put the profile. The picture is refused rather than drawn in colours the file did not ask for | [colour](colour.md) |
 | `StyleSimulations` | `XpsElementDefect::GlyphsStyleSimulated` | reported; glyphs drawn unsimulated | — |
 | Gradient stops with differing alphas; a `ColorInterpolationMode` this build does not interpolate in | `XpsElementDefect::BrushApproximated` | the brush reached the page and not exactly — one constant alpha cannot express per-stop alphas — and the approximation is named | — |
 | Unknown element | `XpsElementDefect::ElementUnknown` | drawn around, never silently skipped | — |

@@ -696,6 +696,7 @@ struct ResourceSet {
     ext_gstates: Vec<(Vec<u8>, ObjRef)>,
     shadings: Vec<(Vec<u8>, ObjRef)>,
     patterns: Vec<(Vec<u8>, ObjRef)>,
+    color_spaces: Vec<(Vec<u8>, ObjRef)>,
 }
 
 impl ResourceSet {
@@ -719,6 +720,7 @@ impl ResourceSet {
             (b"ExtGState", &self.ext_gstates),
             (b"Shading", &self.shadings),
             (b"Pattern", &self.patterns),
+            (b"ColorSpace", &self.color_spaces),
         ] {
             if entries.is_empty() {
                 continue;
@@ -3055,6 +3057,57 @@ impl DocumentBuilder {
             },
         );
         self.resources.patterns.push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Registers an `/ICCBased` colour space under a resource name (8.6.5.5).
+    ///
+    /// The profile goes into the file **verbatim**, as the stream the space
+    /// points at, and the reader does the colour management. That is what
+    /// makes an ICC-tagged colour a translation rather than a conversion:
+    /// nothing here evaluates a profile, so nothing here can be wrong about
+    /// one.
+    ///
+    /// `components` is 8.6.5.5's `/N`, and Table 66 permits **only 1, 3 or 4**
+    /// — a profile with any other channel count has no `/ICCBased` spelling at
+    /// all, and this returns `false` rather than writing a space no reader may
+    /// accept. It is the caller's job to name that narrowing; a silent
+    /// substitution here would be a colour the file did not ask for.
+    ///
+    /// `/Alternate` is deliberately absent. 8.6.5.5 defaults it by `/N` to
+    /// `DeviceGray`, `DeviceRGB` or `DeviceCMYK`, which is exactly what a
+    /// caller with no better information would have written — and writing the
+    /// default out would say it twice and invite the two to disagree.
+    ///
+    /// Returns false for an empty profile, which is not a profile, and for a
+    /// component count Table 66 does not allow.
+    pub fn add_icc_color_space(&mut self, resource: &[u8], profile: &[u8], components: u8) -> bool {
+        if profile.is_empty() || !matches!(components, 1 | 3 | 4) {
+            return false;
+        }
+        let mut dict = Dict::new();
+        dict.insert(self.names.intern(b"N"), Object::Int(i64::from(components)));
+        let stream = self.allocate();
+        self.objects.insert_stream(
+            stream.num,
+            StreamData {
+                dict,
+                data: profile.to_vec(),
+            },
+        );
+
+        // 8.6.5.5's space is the two-element array `[/ICCBased stream]`, and it
+        // is written as an indirect object so one profile serves every page
+        // that names it rather than being copied into each `/Resources`.
+        let space = self.allocate();
+        self.objects.insert(
+            space.num,
+            Object::Array(vec![
+                Object::Name(self.names.intern(b"ICCBased")),
+                Object::Ref(stream),
+            ]),
+        );
+        self.resources.color_spaces.push((resource.to_vec(), space));
         true
     }
 
