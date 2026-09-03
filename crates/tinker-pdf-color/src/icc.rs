@@ -236,6 +236,75 @@ pub struct Profile {
     pub model: Model,
 }
 
+/// The data colour space signature of a profile, read from the **header** and
+/// nothing else.
+///
+/// ICC.1 §7.2 puts the signature at offset 16 and `acsp` at offset 36, both
+/// inside the fixed 128-byte header, so this needs neither the tag table nor a
+/// transform. That is the whole reason it exists next to [`Profile::parse`]
+/// rather than behind it: `parse` refuses a profile it cannot build a
+/// transform out of — a CMYK profile with no `A2B*` LUT is
+/// [`IccError::UnsupportedSpace`] — and a caller that only wants to *embed*
+/// the profile and let a PDF reader do the colour management needs the channel
+/// count from a profile this build could never transform.
+///
+/// `None` for anything too short to hold a header, or whose `acsp` is absent.
+#[must_use]
+pub fn data_space(bytes: &[u8]) -> Option<[u8; 4]> {
+    if bytes.len() < 128 || bytes.get(36..40)? != b"acsp" {
+        return None;
+    }
+    bytes.get(16..20)?.try_into().ok()
+}
+
+/// How many components a data colour space signature takes (ICC.1 §7.2.6).
+///
+/// The two families are read differently: the named spaces are a table, and
+/// the `nCLR` family spells its own count in the first character — `2CLR`
+/// through `FCLR`, hexadecimal, so `F` is fifteen. Nothing here guesses; a
+/// signature this does not hold answers `None` rather than a plausible three.
+#[must_use]
+pub fn channels(space: [u8; 4]) -> Option<u8> {
+    Some(match &space {
+        b"GRAY" => 1,
+        b"CMY " => 3,
+        b"CMYK" => 4,
+        // Every three-component space ICC.1 names. They differ in what the
+        // three numbers *mean* and not in how many there are, which is all
+        // this answers.
+        b"RGB " | b"XYZ " | b"Lab " | b"Luv " | b"YCbr" | b"Yxy " | b"HSV " | b"HLS " => 3,
+        // §7.2.6's `nCLR`: the count is the first character in hex.
+        [digit, b'C', b'L', b'R'] => {
+            let count = char::from(*digit).to_digit(16)?;
+            if !(2..=15).contains(&count) {
+                return None;
+            }
+            u8::try_from(count).ok()?
+        }
+        _ => return None,
+    })
+}
+
+impl Profile {
+    /// How many components the profile's **data** colour space takes.
+    ///
+    /// ICC.1 §7.2.6 states the signature and the count together, and the two
+    /// families are read differently: the named spaces are a table, and the
+    /// `nCLR` family spells its own count in the first character — `2CLR`
+    /// through `FCLR`, hexadecimal, so `F` is fifteen. Nothing here guesses
+    /// from the tag data; a signature this table does not hold answers `None`
+    /// rather than a plausible three.
+    ///
+    /// The count is a fact about the *space*, not about whether this build can
+    /// transform it, which is why it is here and not on [`Model`]: a caller
+    /// embedding the profile in a PDF `/ICCBased` space needs the number and
+    /// never evaluates the profile at all.
+    #[must_use]
+    pub fn channels(&self) -> Option<u8> {
+        channels(self.space)
+    }
+}
+
 /// What kind of transform a profile's tags describe.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Model {

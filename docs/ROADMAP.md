@@ -384,14 +384,21 @@ refusal table.
   **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
   and reach the page, against seven committed files from three encoders
   with no code in common ([features/fonts.md](features/fonts.md)).
-- **XPS** ([features/xps.md](features/xps.md)): a `ContextColor` naming
-  an ICC profile. **JPEG XR is closed** — 9.1.5.1's format decodes and
-  draws, so all four of 9.1.5's image formats reach the page. Fifteen
-  fixtures decode bit-for-bit to rasters this repository authored; what
-  the three first-party evidence legs do *not* reach is listed by name in
+- **XPS** ([features/xps.md](features/xps.md)): **nothing owed.** JPEG XR
+  is closed — 9.1.5.1's format decodes and draws, so all four of 9.1.5's
+  image formats reach the page. Fifteen fixtures decode bit-for-bit to
+  rasters this repository authored; what the three first-party evidence
+  legs do *not* reach is listed by name in
   [features/xps.md](features/xps.md) and
   [design/jpeg-xr.md](design/jpeg-xr.md), the largest of it being the
   quantised lossy path, which ruling 13 leaves without an oracle.
+  `ContextColor` is closed with it — the profile is embedded **verbatim**
+  as an `/ICCBased` space and the components reach the content stream
+  unchanged, so the reader does the colour management and this build
+  converts nothing. Three narrowings are named rather than owed, the
+  widest being a profile whose channel count `/ICCBased` cannot state:
+  Table 66 permits 1, 3 or 4 components and ICC.1's `nCLR` family runs to
+  fifteen.
 
 ## How this file changes
 
