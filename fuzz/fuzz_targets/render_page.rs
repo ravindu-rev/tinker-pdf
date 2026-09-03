@@ -3,6 +3,23 @@
 //! The slowest target and the broadest. It is the one that finds panics in
 //! the parts no leaf target covers — colour spaces, shadings, resource
 //! lookups — because those are only reachable through a document.
+//!
+//! # What this target checks, and what it does not
+//!
+//! **Only that the code did not panic, hang, or exhaust memory.** Six calls,
+//! every one discarded. A page that rendered blank, upside down, in the wrong
+//! colours, or with the wrong glyphs passes. So a run that returned the
+//! *wrong* answer passes this target exactly as a correct one does, and a
+//! green `cargo fuzz` here is evidence about ruling 1 and about nothing else.
+//!
+//! That is worth writing down rather than leaving implied. Correctness lives
+//! in the rendered comparisons under `crates/tinker-pdf/tests/` and in the
+//! corpus ratchet. This is the broadest target in the tree and the one whose
+//! green run is most easily mistaken for more than it is.
+//!
+//! Recorded because the same shape has already cost this repository once: the
+//! `brotli` target asserts only self-consistency and could not have found the
+//! ring-buffer defect that a decoded-bytes comparison found immediately.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

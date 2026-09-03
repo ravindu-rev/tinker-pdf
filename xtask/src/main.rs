@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
-use xtask::{corpus, fetch, parity, release, repo_root, version};
+use xtask::{corpus, fetch, fuzzaudit, parity, release, repo_root, version};
 
 const USAGE: &str = "\
 xtask — repository chores
@@ -100,6 +100,7 @@ fn main() -> ExitCode {
         "oracles" => report("oracles", check_oracles()),
         "vendor" => report("vendor", check_vendor()),
         "conflicts" => report("conflicts", check_conflicts()),
+        "fuzz" => report("fuzz", fuzzaudit::run(&repo_root(), rest).map(|_| ())),
         "versions" => report("versions", version::check(&repo_root())),
         "check" => {
             let dag = check_dag();
@@ -108,12 +109,14 @@ fn main() -> ExitCode {
             let vendor = check_vendor();
             let versions = version::check(&repo_root());
             let conflicts = check_conflicts();
+            let fuzz = fuzzaudit::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
             problems.extend(vendor.err().unwrap_or_default());
             problems.extend(versions.err().unwrap_or_default());
             problems.extend(conflicts.err().unwrap_or_default());
+            problems.extend(fuzz.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {

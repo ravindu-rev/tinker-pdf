@@ -6,6 +6,24 @@
 //! its executions somewhere else. Digesting each signature is included because
 //! the span arithmetic — `checked_add`, `try_from`, the slice that must not be
 //! taken when a span runs past the end — is the part ruling 1 is about.
+//!
+//! # What this target checks, and what it does not
+//!
+//! **Only that the code did not panic, hang, or exhaust memory.** Seven
+//! calls, every one discarded. A signature reported as covering the wrong
+//! byte ranges, or as valid when it is not, passes here. So a run that
+//! returned the *wrong* answer passes this target exactly as a correct one
+//! does, and a green `cargo fuzz` here is evidence about ruling 1 and about
+//! nothing else.
+//!
+//! That is worth writing down rather than leaving implied. Correctness lives
+//! in `crates/tinker-pdf/tests/signatures.rs` and `certification.rs`. The
+//! distinction matters more than usual for this one: a validity answer nobody
+//! checks is worse than none.
+//!
+//! Recorded because the same shape has already cost this repository once: the
+//! `brotli` target asserts only self-consistency and could not have found the
+//! ring-buffer defect that a decoded-bytes comparison found immediately.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
