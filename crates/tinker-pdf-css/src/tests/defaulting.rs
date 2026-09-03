@@ -390,18 +390,41 @@ fn a_rollback_that_lands_on_another_rollback_keeps_going() {
 fn every_implemented_name_is_defaultable() {
     let mut longhands = 0usize;
     let mut shorthands = 0usize;
+    let mut exceptions = 0usize;
     for name in IMPLEMENTED_NAMES {
         if Longhand::from_name(name).is_some() {
             longhands += 1;
         } else if DEFAULTABLE_SHORTHANDS.iter().any(|(n, _)| n == name) {
             shorthands += 1;
+        } else if *name == "content" {
+            // **The one exception, and it is stated rather than swept up.**
+            // `content` is implemented and is not a `Property`: CSS 2.1 §12.2
+            // applies it to `::before` and `::after` only, so it has no
+            // `ComputedStyle` field — which means there is nothing for
+            // `inherit` to read and nothing for `copy_computed` to write.
+            // `property::parse_content` refuses all five keywords by name, and
+            // this asserts that it does, so it is an exception with a test
+            // rather than a hole with a comment.
+            for keyword in ["inherit", "initial", "unset", "revert", "revert-layer"] {
+                let parsed = sheet(&format!("p {{ content: {keyword} }}"));
+                assert_eq!(
+                    parsed.rules[0].declarations[0].declaration,
+                    Declaration::Unsupported {
+                        property: "content",
+                        value: keyword.to_owned(),
+                    },
+                    "content: {keyword}"
+                );
+            }
+            exceptions += 1;
         } else {
             panic!("`{name}: inherit` names a property nothing here can default");
         }
     }
     assert_eq!(longhands, 83, "eighty-three longhands");
     assert_eq!(shorthands, 16, "sixteen shorthands");
-    assert_eq!(longhands + shorthands, IMPLEMENTED_NAMES.len());
+    assert_eq!(exceptions, 1, "`content`, and nothing else");
+    assert_eq!(longhands + shorthands + exceptions, IMPLEMENTED_NAMES.len());
 
     // And the other direction: nothing in the tables is a name the parser does
     // not know, which would be a keyword accepted on a property that does not

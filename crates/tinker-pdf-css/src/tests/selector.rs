@@ -402,27 +402,67 @@ fn the_structural_pseudo_classes() {
     assert!(!hits("p:only-child", &nodes, 1));
 }
 
-/// A rule whose subject is a pseudo-element matches **nothing**, and warns by
-/// name.
+/// **Two of the four pseudo-elements generate a box; two are still named.**
 ///
-/// The plausible wrong answer is to apply it to the originating element, which
-/// would colour a paragraph red for `p::before { color: red }` — a book that
-/// renders beautifully and is wrong.
+/// This asserted that all four matched nothing and all four warned. Two of them
+/// now do something, and the shape of what is left is the point: a `::before`
+/// rule is honoured and reports nothing, while `::first-line` and
+/// `::first-letter` still report by name.
+///
+/// The originating element is still **not** styled by any of the four, and that
+/// is the assertion worth keeping from the old test: `p::before { color: red }`
+/// colouring the paragraph is the plausible wrong answer, and it stays wrong
+/// whether or not a box is generated. What changed is which door says so —
+/// `selector::matches` still says no, and `matches_originating` now says yes to
+/// the same selector against the same element, because the two are asking about
+/// different subjects.
 #[test]
-fn a_pseudo_element_matches_nothing_and_is_named() {
+fn two_pseudo_elements_generate_a_box_and_two_are_named() {
     let nodes = tree(&[("p", None)]);
-    assert!(!hits("p::before", &nodes, 0));
-    assert!(hits("p", &nodes, 0));
-    let parsed = sheet("p::before { color: red }");
-    assert_eq!(
-        parsed.report.warnings,
-        vec![(Warning::PseudoElementUnsupported("::before"), 1)]
-    );
-    assert_eq!(
-        parsed.rules.len(),
-        1,
-        "the rule parses; it just matches none"
-    );
+
+    for source in ["p::before", "p::after"] {
+        let parsed = sheet(&format!("{source} {{ content: \"x\" }}"));
+        assert_eq!(
+            parsed.report.warnings,
+            vec![],
+            "{source} generates a box, so there is nothing to report"
+        );
+        assert_eq!(parsed.rules.len(), 1, "{source} parses");
+    }
+
+    for (source, name) in [
+        ("p::first-line", "::first-line"),
+        ("p::first-letter", "::first-letter"),
+    ] {
+        let parsed = sheet(&format!("{source} {{ color: red }}"));
+        assert_eq!(
+            parsed.report.warnings,
+            vec![(Warning::PseudoElementUnsupported(name), 1)],
+            "{source}"
+        );
+        assert_eq!(
+            parsed.rules.len(),
+            1,
+            "the rule parses; it just does nothing"
+        );
+    }
+
+    // None of the four styles the element it is attached to.
+    let mut budget = Budget::new(&Limits::DEFAULT);
+    for source in ["p::before", "p::after", "p::first-line", "p::first-letter"] {
+        assert!(
+            !hits(source, &nodes, 0),
+            "{source} matched the element itself"
+        );
+        let parsed = sheet(&format!("{source} {{ color: red }}"));
+        let selector = &parsed.rules[0].selectors[0];
+        assert!(
+            crate::selector::matches_originating(selector, &nodes, 0, &mut budget)
+                .expect("under the cap"),
+            "{source} does not name this element as its originating one"
+        );
+    }
+    assert!(hits("p", &nodes, 0), "the bare type selector still matches");
 }
 
 /// A pseudo-class naming a state this document does not have never matches,

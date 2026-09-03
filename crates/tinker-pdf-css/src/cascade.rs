@@ -49,7 +49,7 @@
 use crate::longhand::Longhand;
 use crate::parser::{Declared, LayerPart, Report, StyleRule, Stylesheet};
 use crate::property::*;
-use crate::selector::{self, Index, Specificity};
+use crate::selector::{self, Index, PseudoElement, Specificity};
 use crate::{Budget, Element, Limits, Refusal};
 
 /// Where a declaration came from, `css-cascade-5` §6.2.
@@ -691,6 +691,81 @@ pub struct StyleTree {
     /// declaration: *"`float`, unimplemented, affected 412 elements"* is a
     /// sentence a host can show, and four hundred identical warnings is not.
     pub report: Report,
+    /// The generated boxes, one entry per element, parallel to `styles`.
+    ///
+    /// Parallel rather than sparse because the consumer walks the element tree
+    /// and asks about every element it reaches; a map would turn a hot loop
+    /// into a lookup for the sake of a book that has none. `Generated::default`
+    /// is two `None`s and costs two words.
+    pub generated: Vec<Generated>,
+}
+
+impl StyleTree {
+    /// The box `which` generated for `element`, if any rule generated one.
+    ///
+    /// **This is the whole door between the cascade and box generation, and
+    /// there is deliberately only one.** `tinker-pdf-layout` has no selector
+    /// engine and is never going to have one -- it takes a box tree and lays it
+    /// out -- so the box has to exist before layout sees anything, which means
+    /// `epub::read::build` has to be able to ask this question while it walks
+    /// the DOM. Everything a generated box needs is on the far side of this
+    /// call: the style, already inherited from the originating element, and the
+    /// text, with `attr()` already resolved.
+    ///
+    /// Returns `None` for `::first-line` and `::first-letter`, which generate
+    /// nothing here and are counted by
+    /// [`crate::Warning::PseudoElementUnsupported`].
+    #[must_use]
+    pub fn pseudo(&self, element: usize, which: PseudoElement) -> Option<&PseudoBox> {
+        let generated = self.generated.get(element)?;
+        match which {
+            PseudoElement::Before => generated.before.as_ref(),
+            PseudoElement::After => generated.after.as_ref(),
+            PseudoElement::FirstLine | PseudoElement::FirstLetter => None,
+        }
+    }
+}
+
+/// What a generated box is computed against.
+///
+/// Three references that always travel together, bundled because they do: the
+/// originating element's computed style (§12.1 inherits from it *and* resolves
+/// `inherit` against it), the initial style `initial` reads, and the root font
+/// size `rem` needs.
+struct Generating<'a> {
+    origin_style: &'a ComputedStyle,
+    initial: &'a ComputedStyle,
+    root_font_size: f64,
+}
+
+/// A box `::before` or `::after` generated, and everything needed to lay it
+/// out.
+///
+/// Only ever produced when `content` cascaded to something other than `none`.
+/// CSS 2.1 §12.2 makes that the condition for the box existing at all, so an
+/// `Option<PseudoBox>` and "does this element have a `::before`" are the same
+/// question, and there is no state where a box exists with nothing in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PseudoBox {
+    /// The generated box's own computed style. Inherited from the
+    /// **originating element**, per §12.1, and not from its parent.
+    pub style: ComputedStyle,
+    /// The text to lay out, with every `attr()` already resolved.
+    ///
+    /// A `String` and not a value tree: `attr()` needs the originating element
+    /// and the cascade is the last place that has one, so resolving it here is
+    /// what keeps `epub::read` from needing a DOM lookup it has no business
+    /// doing.
+    pub text: String,
+}
+
+/// The two pseudo-elements an element can generate a box for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Generated {
+    /// `::before`, laid out ahead of the element's own children.
+    pub before: Option<PseudoBox>,
+    /// `::after`, laid out behind them.
+    pub after: Option<PseudoBox>,
 }
 
 /// One sheet and where in the cascade it sits.
@@ -757,6 +832,7 @@ pub fn cascade_from<E: Element>(
     let matcher = Matcher::build(sheets);
     let mut report = Report::default();
     let mut styles: Vec<ComputedStyle> = Vec::with_capacity(elements.len());
+    let mut generated: Vec<Generated> = Vec::with_capacity(elements.len());
     let mut root_font_size = initial.font_size;
 
     for index in 0..elements.len() {
@@ -777,10 +853,40 @@ pub fn cascade_from<E: Element>(
         if elements[index].parent().is_none() {
             root_font_size = style.font_size;
         }
+        // After the element's own style and not before: §12.1 inherits the
+        // generated box from the originating element's **computed** style, so
+        // there is nothing to inherit from until this line has run.
+        let generating = Generating {
+            origin_style: &style,
+            initial,
+            root_font_size,
+        };
+        generated.push(Generated {
+            before: matcher.pseudo_winners(
+                elements,
+                index,
+                PseudoElement::Before,
+                &generating,
+                &mut report,
+                budget,
+            )?,
+            after: matcher.pseudo_winners(
+                elements,
+                index,
+                PseudoElement::After,
+                &generating,
+                &mut report,
+                budget,
+            )?,
+        });
         styles.push(style);
     }
 
-    Ok(StyleTree { styles, report })
+    Ok(StyleTree {
+        styles,
+        report,
+        generated,
+    })
 }
 
 /// What the cascade decided for one property, before it is written down.
@@ -1131,6 +1237,146 @@ impl<'a> Matcher<'a> {
     /// laziness: a `style=""` attribute is parsed inside this function and its
     /// declarations do not outlive it, so a borrowed return would tie every
     /// element's style to a vector that dies at the end of the call.
+    /// The declarations that reach `element`'s `which` box, cascaded.
+    ///
+    /// The same sort as [`Matcher::winners`] over a different candidate set:
+    /// selectors whose trailing pseudo-element is `which` and whose subject is
+    /// this element. `selector::matches` says no to every one of those --
+    /// deliberately, so `p::before { color: red }` does not colour the
+    /// paragraph -- so this asks `selector::matches_originating` instead, which
+    /// is the same matching with a different subject.
+    ///
+    /// Inline `style=""` is not consulted. There is no syntax for a
+    /// pseudo-element in an attribute, so a `style=""` declaration cannot
+    /// address one; including them would give every generated box the
+    /// element's own inline styles, which is §6.1 criterion 3 applied to
+    /// something it was not written about.
+    ///
+    /// Returns `None` unless `content` cascaded to something. §12.2 makes that
+    /// the condition for the box existing, and the style of a box that does not
+    /// exist is not a thing worth computing.
+    fn pseudo_winners<E: Element>(
+        &self,
+        elements: &[E],
+        at: usize,
+        which: PseudoElement,
+        from: &Generating<'_>,
+        report: &mut Report,
+        budget: &mut Budget,
+    ) -> Result<Option<PseudoBox>, Refusal> {
+        let mut matched: Vec<(CascadeKey, Origin, &Declared)> = Vec::new();
+        for handle in self.index.candidates(&elements[at]) {
+            let (rule_at, selector_at) = self.selectors[handle];
+            let placed = &self.rules[rule_at];
+            let selector = &placed.rule.selectors[selector_at];
+            if selector.pseudo_element != Some(which) {
+                continue;
+            }
+            if !selector::matches_originating(selector, elements, at, budget)? {
+                continue;
+            }
+            for declared in &placed.rule.declarations {
+                matched.push((
+                    CascadeKey {
+                        rank: rank(placed.origin, declared.important),
+                        attached: false,
+                        layer: if declared.important {
+                            placed.layer_important
+                        } else {
+                            placed.layer
+                        },
+                        specificity: selector.specificity,
+                        order: placed.order,
+                    },
+                    placed.origin,
+                    declared,
+                ));
+            }
+        }
+        if matched.is_empty() {
+            return Ok(None);
+        }
+        matched.sort_by_key(|(key, _, _)| *key);
+
+        // The gaps are counted **before** the early return below, and that
+        // ordering is the whole of it. `Matcher::winners` walks the same rules
+        // but reaches them through `selector::matches`, which says no to every
+        // pseudo-element selector — so a `content: url(a.png)` or a
+        // `float: left` inside `p::before` is a gap no other pass can see. And
+        // the commonest such rule is one whose `content` this build refused,
+        // which is exactly the rule that generates no box: counting after the
+        // return reported none of them. This file's own test caught it.
+        for (_, _, declared) in &matched {
+            match &declared.declaration {
+                crate::property::Declaration::Unsupported { property, .. } => {
+                    note(&mut report.unsupported, property);
+                }
+                crate::property::Declaration::Unknown { property } => {
+                    note_owned(&mut report.unknown, property);
+                }
+                _ => {}
+            }
+        }
+
+        // `content` next: a box whose content is `none` is not generated, and
+        // computing a style for it would be work with nothing to show for it.
+        let mut content: Option<&ContentValue> = None;
+        for (_, _, declared) in &matched {
+            if let crate::property::Declaration::Content(value) = &declared.declaration {
+                content = Some(value);
+            }
+        }
+        let items = match content {
+            Some(ContentValue::Items(items)) => items,
+            // No `content` at all, or `content: none`. §12.2: no box.
+            _ => return Ok(None),
+        };
+
+        let mut text = String::new();
+        for item in items {
+            match item {
+                ContentItem::Text(literal) => text.push_str(literal),
+                // §2.4: an attribute the element does not carry contributes the
+                // empty string, which is the specification's own answer and not
+                // a fallback invented here.
+                ContentItem::Attr(name) => {
+                    text.push_str(elements[at].attribute(name).unwrap_or(""));
+                }
+            }
+        }
+
+        let mut winners: Vec<(Longhand, usize)> = Vec::new();
+        for (index, (_, _, declared)) in matched.iter().enumerate() {
+            match &declared.declaration {
+                crate::property::Declaration::Known(property) => {
+                    note_winner(&mut winners, property.longhand(), index);
+                }
+                crate::property::Declaration::Defaulted { longhand, .. } => {
+                    note_winner(&mut winners, *longhand, index);
+                }
+                _ => {}
+            }
+        }
+        let resolved: Vec<Winner> = winners
+            .into_iter()
+            .map(|(longhand, index)| resolve_rollbacks(longhand, index, &matched))
+            .collect();
+
+        // §12.1: a generated box inherits from its **originating element**, not
+        // from that element's parent. So the parent for both inheritance and
+        // `inherit` is `origin_style`, and `em` resolves against the originating
+        // element's font size, which is what `inherit_from` carries over.
+        let mut style = ComputedStyle::inherit_from(from.origin_style);
+        apply_winners(
+            &resolved,
+            &mut style,
+            from.origin_style,
+            from.initial,
+            from.root_font_size,
+        );
+        Ok(Some(PseudoBox { style, text }))
+    }
+
     fn winners<E: Element>(
         &self,
         elements: &[E],
@@ -1206,6 +1452,11 @@ impl<'a> Matcher<'a> {
                 crate::property::Declaration::Defaulted { longhand, .. } => {
                     note_winner(&mut winners, *longhand, index);
                 }
+                // §12.2 applies `content` to `::before` and `::after` only, so
+                // one that reached an ordinary element is a declaration that
+                // legitimately does nothing. Not counted, because it is not
+                // this build's gap; `pseudo_winners` is where it is read.
+                crate::property::Declaration::Content(_) => {}
                 // Counted **here**, where it is known to have reached an
                 // element, rather than only at parse time. A `float: left` in
                 // a rule that matches nothing is not a gap this book noticed.

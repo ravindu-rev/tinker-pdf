@@ -356,9 +356,16 @@ refusal table.
   for an engine that reads no font directories; **no book in the corpus
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
-  the pinned float reading-order defect; SVG content documents;
-  pseudo-elements (parsed, no box generated). `min`/`max`
-  sizing is built, less one half of §10.7: a `max-height` shorter than
+  the pinned float reading-order defect; SVG content documents.
+  **`::before` and `::after` are closed** — they generate real boxes,
+  from strings, `attr()` and any concatenation of the two, through
+  `StyleTree::pseudo` called from `epub::read::build`, because layout has
+  no selector engine and the box must exist before layout sees anything.
+  Three `content` families stay refused **by name and counted**
+  (`url()`, the counter functions, and the quote keywords, each for a
+  reason of its own), and `::first-line`/`::first-letter` stay refused
+  because both select part of an already laid out box and so mean a
+  second pass. `min`/`max` sizing is built, less one half of §10.7: a `max-height` shorter than
   its content is named (`MaxHeightAsAuto`) rather than obeyed.
   `vertical-align` is built, §10.8.1 and §17.5.3 both. Multi-column is
   built — §3.4's geometry, §4's balance, §5's rule — less §6's

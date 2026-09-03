@@ -1095,6 +1095,16 @@ fn declarations_from(
                     });
                 }
             }
+            // `content` is one declaration and stays one: it has no longhands
+            // and no `ComputedStyle` field, and the pseudo-element cascade is
+            // the only thing that reads it.
+            property::Parsed::Content(value) => {
+                budget.spend_declaration()?;
+                out.push(Declared {
+                    declaration: Declaration::Content(value),
+                    important,
+                });
+            }
             property::Parsed::Unsupported { property, value } => {
                 budget.spend_declaration()?;
                 report.note_unsupported(property);

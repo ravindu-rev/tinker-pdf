@@ -1029,12 +1029,33 @@ fn parse_attribute(inner: &[ComponentValue]) -> Result<AttributeSelector, Invali
 }
 
 /// The warnings a parsed selector list owes: one per pseudo-class naming a
-/// state this document does not have, and one per pseudo-element, each named.
+/// state this document does not have, and one per pseudo-element that still
+/// generates no box.
+///
+/// **Two of the four left this list when `::before` and `::after` gained
+/// boxes.** The arms are written out rather than swept up with a `_` for the
+/// reason [`collect_stateless`] is: a pseudo-element added to the enum without
+/// a decision about whether it warns does not compile.
 pub fn warnings(selectors: &[Selector]) -> Vec<Warning> {
     let mut out = Vec::new();
     for selector in selectors {
-        if let Some(element) = selector.pseudo_element {
-            out.push(Warning::PseudoElementUnsupported(element.name()));
+        match selector.pseudo_element {
+            // Generated, by `cascade::Matcher::pseudo_winners` and
+            // `epub::read::build`. A rule naming one is honoured, so there is
+            // nothing to report.
+            Some(PseudoElement::Before | PseudoElement::After) => {}
+            // Still no box. `::first-line` and `::first-letter` are not
+            // generated content at all: they select a *part of* an already laid
+            // out box, so honouring either means laying the box out, finding
+            // where the first line broke or where the first typographic letter
+            // unit ended, and restyling that range — which is a second layout
+            // pass this engine does not have. Named rather than approximated:
+            // applying `::first-letter` to the first `char` would be wrong on
+            // every quotation mark, every combining mark and every `fi`.
+            Some(other @ (PseudoElement::FirstLine | PseudoElement::FirstLetter)) => {
+                out.push(Warning::PseudoElementUnsupported(other.name()));
+            }
+            None => {}
         }
         for compound in &selector.compounds {
             collect_stateless(&compound.pseudo_classes, &mut out);
@@ -1121,6 +1142,32 @@ pub fn matches<E: Element>(
     if selector.pseudo_element.is_some() {
         return Ok(false);
     }
+    matches_originating(selector, elements, index, budget)
+}
+
+/// Whether `index` is the **originating element** of this selector, which is
+/// the question [`matches`] asks with the pseudo-element ignored.
+///
+/// `selectors-4` §7.1 is explicit that a pseudo-element is not a thing the
+/// document tree contains: `p::before` selects a box generated *for* a `p`, and
+/// the `p` is its originating element. So the matching is identical and only
+/// the subject differs, which is why this is one function with two doors rather
+/// than two implementations that could drift.
+///
+/// The caller decides what to do with the answer. [`matches`] uses it for the
+/// element itself and says no when a pseudo-element is present;
+/// `cascade::Matcher::pseudo_winners` uses it for the generated box and says no
+/// when one is *not*.
+///
+/// # Errors
+///
+/// [`Refusal`] when the budget runs out, exactly as [`matches`] does.
+pub fn matches_originating<E: Element>(
+    selector: &Selector,
+    elements: &[E],
+    index: usize,
+    budget: &mut Budget,
+) -> Result<bool, Refusal> {
     match_from(
         selector,
         selector.compounds.len() - 1,
