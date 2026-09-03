@@ -292,10 +292,19 @@ fn an_unusable_page_box_is_replaced_and_named_rather_than_refused() {
 /// not tell a working placeholder from a build that greyed everything; now the
 /// same fixture has one page of each, and asserting only the grey one would
 /// pass on a build that never laid anything out.
+///
+/// **Amended again by Tier 4's SVG lane**, and the fixture is *better* for it
+/// rather than merely still valid. The item declared `image/svg+xml` holds
+/// XHTML, so it now reaches the SVG reader and is refused by that reader's own
+/// name — `Refusal::NotAnSvg` — instead of being refused by the spine for
+/// having a media type nobody read. The grey page is still grey, and what it
+/// now proves is that a mislabelled item is named rather than laid out as
+/// though its markup were something else.
 #[test]
 fn a_page_that_will_not_read_is_grey_and_a_page_that_reads_is_not() {
-    // Two itemrefs: one an SVG content document, which is a named non-goal and
-    // stays a placeholder at every milestone, and one an ordinary chapter.
+    // Two itemrefs: one declared an SVG content document and holding XHTML,
+    // which the SVG reader refuses at the root element, and one an ordinary
+    // chapter.
     let doc = Document::open(book_with(&package(
         concat!(
             r#"<item id="drawing" href="text/ch2.xhtml" media-type="image/svg+xml"/>"#,
@@ -342,8 +351,12 @@ fn a_page_that_will_not_read_is_grey_and_a_page_that_reads_is_not() {
     // that is not.
     assert_eq!(
         spine_defects(&doc),
-        [(0, SpineDefect::SvgContentDocument)],
-        "a placeholder is named and a chapter is not"
+        [(
+            0,
+            SpineDefect::SvgUnreadable(tinker_pdf_svg::Refusal::NotAnSvg)
+        )],
+        "a placeholder is named — by the reader that refused it — and a \
+         chapter is not"
     );
 }
 
@@ -370,7 +383,9 @@ fn an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place() {
         r#"<item id="remote" href="http://example.invalid/a.xhtml" media-type="application/xhtml+xml"/>"#,
         // A core media type that is not a content document, with no fallback.
         r#"<item id="picture" href="text/ch2.xhtml" media-type="image/png"/>"#,
-        // An SVG content document: a named non-goal rather than a defect.
+        // Declared an SVG content document and holding XHTML: the SVG reader
+        // refuses it at the root element rather than the spine refusing it for
+        // its media type.
         r#"<item id="drawing" href="text/ch2.xhtml" media-type="image/svg+xml"/>"#
     );
 
@@ -382,7 +397,10 @@ fn an_unresolved_spine_item_still_makes_a_page_and_keeps_its_place() {
             "picture",
             SpineDefect::Fallback(tinker_pdf::epub::package::FallbackDefect::NoFallback),
         ),
-        ("drawing", SpineDefect::SvgContentDocument),
+        (
+            "drawing",
+            SpineDefect::SvgUnreadable(tinker_pdf_svg::Refusal::NotAnSvg),
+        ),
     ] {
         let spine =
             format!(r#"<itemref idref="c1"/><itemref idref="{idref}"/><itemref idref="c3"/>"#);

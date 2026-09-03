@@ -58,6 +58,12 @@ tinker-pdf-xml = { workspace = true }
 tinker-pdf-css = { workspace = true }
 tinker-pdf-layout = { workspace = true }
 tinker-pdf-shape = { workspace = true }
+# The SVG lane, milestone 7: `src/epub/svg.rs` turns a `tinker_pdf_svg::Scene`
+# into content-stream operators, which is what makes an SVG spine item a page
+# that draws instead of a grey rectangle. The edge points **down** like every
+# other on this row -- that crate takes bytes and a limits struct and returns
+# plain structs, and knows nothing about a PDF, a page or a spine.
+tinker-pdf-svg = { workspace = true }
 # Signatures milestone 3: `tests/cms_census.rs` reads the CMS blob out of every
 # signed document in the fetched corpora and parses it, which is the only way
 # to find out what real producers emit rather than what the specification says

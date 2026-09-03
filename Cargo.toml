@@ -75,6 +75,7 @@ tinker-pdf-crypto = { path = "crates/tinker-pdf-crypto", version = "0.0.1" }
 tinker-pdf-pki = { path = "crates/tinker-pdf-pki", version = "0.0.1" }
 tinker-pdf-font = { path = "crates/tinker-pdf-font", version = "0.0.1", default-features = false }
 tinker-pdf-shape = { path = "crates/tinker-pdf-shape", version = "0.0.1" }
+tinker-pdf-svg = { path = "crates/tinker-pdf-svg", version = "0.0.1" }
 tinker-pdf-color = { path = "crates/tinker-pdf-color", version = "0.0.1" }
 tinker-pdf-math = { path = "crates/tinker-pdf-math", version = "0.0.1" }
 tinker-pdf-raster = { path = "crates/tinker-pdf-raster", version = "0.0.1" }

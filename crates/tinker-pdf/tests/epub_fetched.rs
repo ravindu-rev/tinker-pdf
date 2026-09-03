@@ -34,8 +34,7 @@ use epub_support::{
     mimetype_verdict, named_references, numeric_references, read_at, todays_answer, Doctype,
     TodaysAnswer, RESERVED_META_INF,
 };
-use tinker_pdf::epub::SpineDefect;
-use tinker_pdf::{ArchiveWarning, Document};
+use tinker_pdf::{ArchiveWarning, Document, RenderOptions};
 use tinker_pdf_xml::{
     Doctype as XmlDoctype, Error as XmlError, Limits as XmlLimits, Reader as XmlReader,
     Source as XmlSource, Warning as XmlWarning,
@@ -251,10 +250,17 @@ const FETCHED_SPINES: &[(&str, u32)] = &[
 /// **every page nothing named carries text**. A build that quietly stopped
 /// laying out would fail the second half rather than passing a test about the
 /// first.
+///
+/// **Amended by Tier 4's SVG lane, and the six are gone from this side of it.**
+/// They are pages that draw now, so no `SpinePage` warning names them and
+/// `spine_defects` is empty across the whole corpus — which makes the `panic!`
+/// arm below a total assertion rather than a list with one exception in it.
+/// The six moved to `the_six_svg_spine_items_draw_rather_than_placehold`, which
+/// checks ink rather than absence: a page with no warning and no drawing would
+/// pass here and fail there, which is why both exist.
 #[test]
 fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
     let books = fetched!("the placeholder sweep");
-    let mut svg = 0usize;
     let mut read = 0usize;
     let mut blank = Vec::new();
     for (name, bytes) in &books {
@@ -266,10 +272,10 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
                 continue;
             };
             named[*page as usize] = true;
-            match defect {
-                SpineDefect::SvgContentDocument => svg += 1,
-                other => panic!("{name} page {page}: {other:?}"),
-            }
+            // **No exceptions left.** Every spine item in the fetched corpus
+            // either lays out or draws; a defect here is a book this build has
+            // stopped reading.
+            panic!("{name} page {page}: {defect:?}");
         }
         for (page, said) in named.iter().enumerate() {
             if *said {
@@ -289,15 +295,14 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
             }
         }
     }
-    println!("  {read} pages of text and {svg} SVG spine items");
-    assert_eq!(svg, 6, "the six SVG spine items are one book's");
+    println!("  {read} pages of text, {} with none", blank.len());
     // A page with no text and no defect is the shape this test exists to find.
-    // Some are real — a cover whose only content is an `<img>`, which this
-    // build does not draw until milestone 9 — so the number is bounded rather
-    // than zero, and it is bounded tightly enough that a build which stopped
-    // laying out could not hide inside it.
+    // Some are real — a cover whose only content is an `<img>`, and since the
+    // SVG lane the six drawn SVG pages, which carry no characters at all — so
+    // the number is bounded rather than zero, and it is bounded tightly enough
+    // that a build which stopped laying out could not hide inside it.
     assert!(
-        blank.len() <= 40,
+        blank.len() <= 46,
         "{} pages have neither text nor a reason: {blank:?}",
         blank.len()
     );
@@ -859,4 +864,65 @@ fn bump(counts: &mut Vec<(&'static str, usize)>, key: &'static str) {
         Some((_, n)) => *n += 1,
         None => counts.push((key, 1)),
     }
+}
+
+/// **The six SVG spine items draw.**
+///
+/// This is the SVG lane's exit criterion, and it is deliberately a claim about
+/// *ink* rather than about the absence of a warning. The test above can only
+/// say that nothing named these pages as placeholders; a build that read every
+/// SVG, produced an empty scene and wrote a blank page would satisfy it
+/// completely. So this one renders each of the six and counts distinct greys:
+/// a page that drew nothing is one colour, and a page that drew is not.
+///
+/// The book is `sample-svg-in-spine.epub`, whose six items are exactly the
+/// spread of what an SVG spine item is in the wild: a cover of three hundred
+/// and thirty-nine gradient-filled paths from Illustrator, two Inkscape
+/// drawings, and three pages that are one `<image>` and nothing else. The last
+/// three are the reason `<image>` is resolved against the container at all —
+/// without it, half this book would be blank and the row in
+/// `docs/features/epub.md` would still be true.
+#[test]
+fn the_six_svg_spine_items_draw_rather_than_placehold() {
+    let books = fetched!("the SVG spine sweep");
+    let Some((_, bytes)) = books
+        .iter()
+        .find(|(name, _)| name == "sample-svg-in-spine.epub")
+    else {
+        panic!("the corpus manifest lists sample-svg-in-spine.epub");
+    };
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    assert_eq!(doc.page_count(), 6, "one page per spine itemref");
+
+    let mut drawn = 0usize;
+    for page in 0..doc.page_count() {
+        // A twelfth of an inch to the point: enough that a hairline still
+        // lands on a pixel, small enough that six pages of a hundred and forty
+        // kilobytes of path data is a test rather than a wait.
+        let bitmap = doc.page(page).expect("a page").render(&RenderOptions {
+            scale: 0.25,
+            ..RenderOptions::default()
+        });
+        let components = bitmap.components();
+        let mut greys: Vec<u8> = bitmap
+            .data
+            .chunks_exact(components)
+            .map(|pixel| pixel[0])
+            .collect();
+        greys.sort_unstable();
+        greys.dedup();
+        assert!(
+            greys.len() > 1,
+            "page {page} is one flat colour ({greys:?}), which is a page that \
+             drew nothing reported as a page that drew"
+        );
+        assert_ne!(
+            greys,
+            [0xBF],
+            "page {page} is the placeholder grey, which this lane exists to remove"
+        );
+        drawn += 1;
+    }
+    println!("  {drawn} SVG spine items drew");
+    assert_eq!(drawn, 6);
 }
