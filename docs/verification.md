@@ -108,28 +108,65 @@ those is listed by name in `xtask/src/fuzzaudit.rs`'s `UNSIGNED` table with
 the reason. **A target in neither table fails the audit**, so a new corpus
 cannot be silently unchecked.
 
-`unsignatured` is not the same as unmeasured. Eight of them are replayed by
-`crates/tinker-pdf-filters/tests/fuzz_seeds.rs`, which counts how many seeds
-reach a successful decode and refuses a corpus that reaches none:
+`unsignatured` is not the same as unmeasured. Fourteen corpora are replayed
+by two harnesses that count how many seeds reach the code under test and
+refuse a corpus that reaches none —
+`crates/tinker-pdf-filters/tests/fuzz_seeds.rs` and
+`crates/tinker-pdf-font/tests/fuzz_seeds.rs`:
 
-| Corpus | Seeds | Reach the decoder |
-| --- | ---: | ---: |
-| `ascii_filters` | 6 | 6 |
-| `brotli` | 46 | 46 |
-| `ccitt` | 12 | 12 |
-| `inflate` | 4 | 4 |
-| `jpeg` | 4 | 4 |
-| `lzw` | 3 | 3 |
-| `png` | 5 | 5 |
-| `tiff` | 6 | 6 |
+| Corpus | Seeds | Reach the code | Note |
+| --- | ---: | ---: | --- |
+| `ascii_filters` | 6 | 6 | |
+| `brotli` | 46 | 46 | |
+| `ccitt` | 12 | 12 | |
+| `cff` | 4 | 4 | |
+| `cff_subset` | 4 | 4 | |
+| `cmap` | 12 | 12 | |
+| `inflate` | 4 | 4 | |
+| `jpeg` | 4 | 4 | |
+| `lzw` | 3 | 3 | |
+| `png` | 5 | 5 | |
+| `sfnt` | 5 | 5 | |
+| `tiff` | 6 | 6 | |
+| `truetype` | 4 | 4 | **only 1 carries an outline table** |
+| `type1` | 2 | 1 | one negative seed, deliberately |
 
-`css`, `svg` and `xml` were checked by hand the same way and every seed
-carries its knob byte; `layout`, `crypt_ciphers`, `shape` and `shape_text` are
-structured generators whose bodies are consumed as fields rather than parsed
-as a format, so there is no signature and no reachability question of that
-shape. Two seeds look wrong and are not: `shape/gdef-every-structure` and
+Two of those rows are worth reading rather than skimming.
+
+**`truetype`**: all four seeds parse, and three of them — `directory-only`,
+`curvy-truncated` and `cmap12-glyph-id-overflow` — carry neither `glyf` nor
+`CFF `. That target's own header calls composite-glyph recursion "the
+interesting part", and exactly **one** seed reaches it. Not the jxr defect,
+and a real coverage gap: the fuzzer has one starting point for the half of the
+target that matters most.
+
+**`type1`**: one of two seeds is `truncated-eexec.pfb`, which does not parse
+on purpose. That is healthy — a corpus needs its refusal cases — and it is why
+these harnesses assert "at least one seed reaches" rather than "every seed
+reaches". The stronger rule was tried first and was simply false: it failed on
+that seed and on `cmap12-glyph-id-overflow.ttf`, both of which are exactly
+what their names say.
+
+`css`, `svg` and `xml` were checked by eye — every seed's body begins with
+`<`, `@`, `.`, `*` or a path command, so the knob byte is present — and `svg`
+has a replay of its own in `crates/tinker-pdf-svg/src/tests.rs`. They cannot
+be checked mechanically: a rule requiring the body to be valid UTF-8 was
+written, fired on `xml/utf16` (a UTF-16 document, which XML permits) and
+`css/repeated-class` (raw `0xFF` bytes, on purpose, to drive recovery), and
+was **removed rather than given an exception list**. `xtask/src/fuzzaudit.rs`
+records why.
+
+`crypt`, `crypt_ciphers`, `form_script`, `layout`, `render_page` and
+`signatures` are structured generators: the body is carved into fields rather
+than parsed as a format, so every seed reaches the code by construction and
+there is no reachability question of this shape to ask. `cos_document`,
+`cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
+by the signature check above or have no gate to fail at.
+
+Two seeds look wrong and are not: `shape/gdef-every-structure` and
 `shape_text/bidi-brackets` carry no readable face, and both targets have a
-second path — `Layout::from_tables` and the bidi walk — that runs without one.
+second path — `Layout::from_tables` and the bidi walk — that runs without
+one.
 
 ### What a green fuzz run does not mean
 

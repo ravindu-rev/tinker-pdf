@@ -117,6 +117,18 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
 /// silently unaudited, which is the shape of defect this whole file exists to
 /// stop. Each of these is genuinely unsignatured — a raw coded stream, a
 /// structured generator, or text — so there is nothing to look for.
+///
+/// **The text corpora cannot be audited mechanically at all**, and an attempt
+/// was made and removed rather than kept. Requiring the body to be valid
+/// UTF-8 sounds like a weak version of the signature check; it is not, because
+/// it fires on legitimate seeds. `xml/utf16` is a UTF-16 document, which XML
+/// permits, and `css/repeated-class` carries raw `0xFF` bytes on purpose to
+/// drive the parser's recovery. Keeping the rule would have meant an exception
+/// list, and a check with an exception list is a check that has been talked
+/// out of firing. `css`, `svg` and `xml` were verified by eye instead — every
+/// seed's body starts with `<`, `@`, `.`, `*` or a path command, so the knob
+/// byte is present — and `svg` has a replay in
+/// `crates/tinker-pdf-svg/src/tests.rs` that restates the target's own split.
 const UNSIGNED: &[(&str, &str)] = &[
     (
         "ascii_filters",
