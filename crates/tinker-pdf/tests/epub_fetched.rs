@@ -362,7 +362,9 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
 /// to**, which is what keeps this exception from covering a book that lost text
 /// for some other reason. Once the aligner loses synchronisation on the first
 /// dropped run it counts the remainder wholesale, which is why 3 474 missing
-/// glyphs are reported as 4 464 missing and 3 872 extra.
+/// glyphs are reported as 4 464 missing and 3 883 extra — 3 872 of them the
+/// lost synchronisation, and eleven the `::before` and `::after` boxes this
+/// book's stylesheet generates, which are on the page and not in the markup.
 #[test]
 fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     let books = fetched!("text conservation");
@@ -476,7 +478,14 @@ const NOT_CONSERVED: &[NotConserved] = &[
     },
     NotConserved {
         name: "sample-internallinks.epub",
-        extra: 3_872,
+        // 3 872 until `::before` and `::after` began generating boxes; the
+        // extra eleven are generated content, which is *by definition* on the
+        // page and not in the source markup. Five declarations produce them
+        // here: four `#` before an internal link, and a left quote.
+        // The missing figure does not move, and that is what says this is
+        // generated content rather than lost text - a defect in the glyph
+        // path would move both.
+        extra: 3_883,
         missing: 4_464,
         because: Why::NoGlyphs,
     },
