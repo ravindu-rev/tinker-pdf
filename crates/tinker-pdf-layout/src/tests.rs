@@ -3820,28 +3820,52 @@ fn column_span_all_is_named_on_the_child_that_asked_for_it() {
     assert_eq!(laid.text(), "abc", "and it is still on the page");
 }
 
-/// A container taller than a page is **cut**, which it gets for nothing: it is
-/// an `Abreast` and the page cutter already cuts those at one height across
-/// every column.
+/// A container taller than a page becomes **several column sets**, stacked —
+/// and is never cut across pages.
+///
+/// It looked for nothing at first: a container is an `Abreast` and the page
+/// cutter already cuts those at one height across every column. That geometry
+/// is even right — it is what a multi-column container looks like over two
+/// pages. **The reading order is not.** Cutting at one height puts the top of
+/// column one and the top of column two on the same page and the bottoms of
+/// both on the next, so the book reads *across* the columns instead of down
+/// them, and a page's runs are sorted by a stamp that cannot repair it.
+///
+/// So the column height is capped at the page's and the container becomes one
+/// band per page-worth of content. Each is short enough to be **moved** whole
+/// rather than divided, which is what `css-break-3` §5 makes of a
+/// multi-column container across a fragmentainer boundary anyway.
 #[test]
-fn a_multi_column_container_taller_than_a_page_is_cut() {
+fn a_multi_column_container_taller_than_a_page_becomes_several_sets() {
     let many: Vec<BoxNode> = "abcdefghij".chars().map(|c| para(&c.to_string())).collect();
     let tree = BoxNode::element(
         block(),
         vec![BoxNode::element(multicol(Some(2), None, Some(0.0)), many)],
     );
-    // Ten lines balanced into two columns is sixty points; a thirty-point page
-    // takes two of them.
+    // Ten twelve-point lines is a hundred and twenty points of content; a
+    // thirty-point page holds two columns of two lines each, so the container
+    // is three sets and takes three pages.
     let laid = run(&tree, 200.0, 30.0);
     assert!(laid.pages.len() > 1, "{} pages", laid.pages.len());
-    assert_eq!(conservable(&laid.text()), conservable("abcdefghij"));
     assert!(
         !laid
             .warnings
             .iter()
             .any(|(w, _)| *w == Warning::ColumnTallerThanPage),
-        "a container that was cut is not one that overflowed: {:?}",
+        "a container that was moved is not one that overflowed: {:?}",
         laid.warnings
+    );
+    // **The claim, and it is per page.** Reading the pages in order and each
+    // page in reading order gives the document back. A build that cut one set
+    // across two pages gives `abcfghde...`: the tops of both columns, then the
+    // bottoms of both.
+    let read: String = (0..laid.pages.len())
+        .map(|at| page_text(&laid, at))
+        .collect();
+    assert_eq!(
+        conservable(&read),
+        conservable("abcdefghij"),
+        "the book reads across its columns instead of down them"
     );
 }
 

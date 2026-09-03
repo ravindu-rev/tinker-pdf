@@ -130,4 +130,9 @@ done
 } >MANIFEST.tsv
 
 echo "epub-corpus: fetched $(ls -1 ./*.epub | wc -l | tr -d ' ') books into $dest"
-echo "epub-corpus: set TINKER_EPUB_CORPUS=$dest to run the tests over them"
+abs=$(cd "$dest" && pwd)
+echo "epub-corpus: set TINKER_EPUB_CORPUS=$abs to run the tests over them"
+echo "epub-corpus: the path must be ABSOLUTE -- a test binary runs from its"
+echo "epub-corpus: crate directory, so a relative one resolves under"
+echo "epub-corpus: crates/tinker-pdf/ and every sweep silently skips."
+echo "epub-corpus: set TINKER_EPUB_CORPUS_REQUIRED=1 to make a skip a failure."

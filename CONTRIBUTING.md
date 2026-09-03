@@ -116,6 +116,29 @@ test that runs, a corpus number, a counted injection — and a design doc when
 the item is large. Build to the exit criteria and treat a design doc's milestone
 table as the commit boundary set.
 
+**Two ways a counted injection lies, and both have happened here.**
+
+A campaign reports how many assertions fire when a defect is put back, *including
+when the answer is zero*, because a plausible break that fires nothing means the
+suite does not test what it claims. That only works if the harness is measuring
+what it thinks it is:
+
+- **`--no-fail-fast` belongs before `-p`, not after `--`.** Everything after
+  `--` goes to the *test binary*, which does not know the flag and rejects it —
+  so the run produces no `failures:` block, a harness that scrapes for one finds
+  nothing, and every injection reports zero. A whole six-defect campaign read as
+  six zeros for this reason before anybody noticed the shape of the answer.
+  Write `cargo test --no-fail-fast -p <crate>`.
+- **A campaign whose subject can skip must force it to run.** An oracle that
+  needs a fetched corpus or an external file exits 0 when it is absent, so an
+  injection against it fires nothing and reads as a suite that does not care.
+  Set whatever the suite's own "required" switch is — for the EPUB corpus that
+  is `TINKER_EPUB_CORPUS_REQUIRED=1`, and the path it is given must be
+  absolute, because a test binary's working directory is its crate root.
+
+A row of zeros is a result about the harness at least as often as about the
+suite. Check the instrument before believing it.
+
 Warnings are data, not log lines: every leniency the engine performs emits a
 typed, object-addressed warning (ruling 10), so "it opened" and "it opened
 cleanly" stay distinguishable. Nothing in a library crate prints.

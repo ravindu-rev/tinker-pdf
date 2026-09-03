@@ -209,6 +209,24 @@ exactly like a pass, and that matters more here than for any oracle before it:
 the corpus is not in the repository, so a test over it can fail to run for a
 second reason as well as the first, and both look like a green tick.
 
+**Two things about that, both learned the hard way.**
+
+`TINKER_EPUB_CORPUS` **must be an absolute path.** A test binary's working
+directory is its *crate* root, not the workspace root, so the
+`TINKER_EPUB_CORPUS=target/epub-corpus` that this file and the fetch script both
+used to suggest resolves to `crates/tinker-pdf/target/epub-corpus`, finds
+nothing, prints twelve `SKIPPED` lines and exits 0 in a hundredth of a second.
+That is not hypothetical: this suite skipped for most of one session, across
+every lane, and a stale pin and two unrecorded re-baselines accumulated behind
+it. The fetch script now prints the absolute path and says so; `corpus()`
+refuses a relative one outright under the flag below.
+
+And `TINKER_EPUB_CORPUS_REQUIRED=1` turns a skip into a **failure**. The banner
+was the only signal, and a banner is not a gate — one line in a wall of build
+output reads exactly like a test that ran. It is opt-in so that a contributor
+with no network can still run `cargo test`, and CI sets it, so a job that means
+to measure twenty books cannot go green over none.
+
 The fourteen samples are chosen by what each is the only example of, not by
 size: `wasteland-otf-obf` and `wasteland-woff-obf` are milestone 9's only real
 input for the two font obfuscations, `regime-anticancer-arabic` is the RTL
