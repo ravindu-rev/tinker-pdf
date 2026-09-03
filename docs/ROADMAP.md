@@ -356,9 +356,10 @@ refusal table.
   for an engine that reads no font directories; **no book in the corpus
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
-  the pinned float reading-order defect. **SVG content documents draw**
-  since the SVG lane ([design/svg.md](design/svg.md)); what is left of
-  that row is *inside* one — filters, masks, patterns as a paint,
+  the pinned float reading-order defect, whose mechanism is now measured
+  and written down in the row that names it. **SVG content documents
+  draw** since the SVG lane ([design/svg.md](design/svg.md)); what is
+  left of that row is *inside* one — filters, masks, patterns as a paint,
   markers, `foreignObject`, SMIL, scripting, text on a path, and
   `spreadMethod` other than `pad`, each named through
   `ArchiveWarning::Svg`, plus an `<image>` whose bytes are neither JPEG
