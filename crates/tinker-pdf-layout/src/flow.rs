@@ -2431,114 +2431,156 @@ impl<M: Metrics> Builder<'_, M> {
         if sub.items.is_empty() {
             return Ok(());
         }
+        let Sublayout {
+            items: inner,
+            blocks: records,
+            floats: inner_floats,
+            height: inner_height,
+        } = sub;
+
         // §4: `balance` is the shortest height that still fits; `auto` fills
         // each column in turn, and a container with no stated height has no
         // bottom for the first column to reach — so all of it is the first
         // column, which is exactly what asking for the content's own height
         // produces rather than a special case.
+        //
+        // **And both are capped at the page.** [`crate::fragment`]'s slicer
+        // cuts a band at one height across every column of it, which is right
+        // for a table row and wrong for a column set: it puts the top of
+        // column one and the top of column two on one page and the bottoms of
+        // both on the next, so the book reads *across* the columns instead of
+        // down them. The geometry it draws is right — that is what a
+        // multi-column container looks like over two pages — and the reading
+        // order is not, and a page's runs are sorted by a stamp that cannot
+        // repair it.
+        //
+        // So the slicer is never handed a band it has to cut. A container
+        // taller than a page becomes **several bands** stacked down the flow,
+        // one column set each, and each is short enough to be moved whole to
+        // the next page rather than divided. That is also what `css-break-3`
+        // §5 makes of a multi-column container across a fragmentainer
+        // boundary, so the cure and the specification are one sentence.
+        let ceiling = self.page.1.max(EPSILON);
         let target = match style.column_fill {
-            ColumnFill::Balance => balance(&sub.items, count),
-            ColumnFill::Auto => sub.height,
-        };
-        let starts = fill_columns(&sub.items, target);
+            ColumnFill::Balance => balance(&inner, count),
+            ColumnFill::Auto => inner_height,
+        }
+        .min(ceiling);
+        let starts = fill_columns(&inner, target);
 
-        let mut band = Abreast {
-            items: Vec::new(),
-            blocks: Vec::new(),
-        };
-        // The rules first, so a column's own backgrounds are drawn over them
-        // rather than under. Their spacers are `Edge` items: nothing to read,
-        // divisible by the page cutter, and the anchor a `BlockRecord` needs
-        // for its height — the same device a table row's spacer is.
-        let rules = if style.column_rule_width > 0.0 && style.column_rule_color.a != 0 {
-            starts.len().saturating_sub(1)
-        } else {
-            0
-        };
-        let mut height = 0.0f64;
-        let mut ranges: Vec<(usize, usize, f64)> = Vec::new();
+        // Every column's half-open range of items and its own top, in document
+        // order — which is the order the sets are emitted in and therefore the
+        // order the book reads in.
+        let mut ranges: Vec<(usize, usize, f64)> = Vec::with_capacity(starts.len());
         for (column, &from) in starts.iter().enumerate() {
-            let to = starts.get(column + 1).copied().unwrap_or(sub.items.len());
-            let top = sub.items[from].y;
-            let bottom = sub.items[to - 1].y + sub.items[to - 1].height;
-            height = height.max(bottom - top);
-            ranges.push((from, to, top));
-        }
-        for rule in 0..rules {
-            let spacer = band.items.len();
-            band.items.push(Item {
-                y: 0.0,
-                height,
-                kind: ItemKind::Edge,
-            });
-            // §5.1: *"the column rule is drawn in the middle of the gap"*, so
-            // it is centred in the gap and not laid against either column.
-            let gap_left = content_x + (rule + 1) as f64 * width + rule as f64 * gap;
-            band.blocks.push(BlockRecord {
-                x: gap_left + (gap - style.column_rule_width) / 2.0,
-                width: style.column_rule_width,
-                first: Some(spacer),
-                last: spacer + 1,
-                background: style.column_rule_color,
-                border_width: Sides::all(0.0),
-                border_style: Sides::all(BorderStyle::None),
-                border_color: Sides::all(Color::TRANSPARENT),
-                painted: true,
-                dy: 0.0,
-            });
-        }
-        for (column, &(from, to, top)) in ranges.iter().enumerate() {
-            let base = band.items.len();
-            let dx = content_x + column as f64 * (width + gap);
-            let mut slice: Vec<Item> = sub.items[from..to].to_vec();
-            let mut records: Vec<BlockRecord> = Vec::new();
-            // A box that spans a column boundary is two fragments, which is the
-            // page cutter's own rule met one level down: its record is clipped
-            // to the slice and copied into each column it reaches.
-            for record in &sub.blocks {
-                let Some(first) = record.first else {
-                    continue;
-                };
-                let lo = first.max(from);
-                let hi = record.last.min(to);
-                if lo >= hi {
-                    continue;
-                }
-                let mut copy = record.clone();
-                copy.first = Some(lo - from + base);
-                copy.last = hi - from + base;
-                records.push(copy);
-            }
-            translate(&mut slice, &mut records, dx, -top);
-            band.items.append(&mut slice);
-            band.blocks.append(&mut records);
+            let to = starts.get(column + 1).copied().unwrap_or(inner.len());
+            ranges.push((from, to, inner[from].y));
         }
         // A float inside a column stays inside it: its formatting context is
         // the container's own flow, so it belongs to the column its top fell
         // in and there is nothing for the page cutter to carry forward. The
-        // same sentence a cell's float already carries.
-        for float in sub.floats {
+        // same sentence a cell's float already carries. Decided once, here,
+        // because each column belongs to exactly one set below.
+        let mut per_column: Vec<Vec<FloatRecord>> = (0..ranges.len()).map(|_| Vec::new()).collect();
+        for float in inner_floats {
             let column = ranges
                 .iter()
                 .rposition(|(_, _, top)| float.top + EPSILON >= *top)
                 .unwrap_or(0);
-            let (_, _, top) = ranges[column];
-            let dx = content_x + column as f64 * (width + gap);
-            let mut float = float;
-            translate(&mut float.items, &mut float.blocks, dx, -top);
-            let base = band.items.len();
-            for mut record in float.blocks {
-                if let Some(first) = record.first {
-                    record.first = Some(first + base);
-                    record.last += base;
-                }
-                band.blocks.push(record);
+            if let Some(slot) = per_column.get_mut(column) {
+                slot.push(float);
             }
-            band.items.extend(float.items);
         }
 
         self.commit_margin();
-        self.emit(height, ItemKind::Columns(Box::new(band)), true);
+        for (set, chunk) in ranges.chunks(count).enumerate() {
+            let mut band = Abreast {
+                items: Vec::new(),
+                blocks: Vec::new(),
+            };
+            let mut height = 0.0f64;
+            for &(_, to, top) in chunk {
+                let tail = &inner[to - 1];
+                height = height.max(tail.y + tail.height - top);
+            }
+            // The rules first, so a column's own backgrounds are drawn over
+            // them rather than under. Their spacers are `Edge` items: nothing
+            // to read, divisible by the page cutter, and the anchor a
+            // `BlockRecord` needs for its height — the same device a table
+            // row's spacer is. One fewer than the set has columns, because a
+            // rule goes **between** two of them.
+            let ruled = style.column_rule_width > 0.0 && style.column_rule_color.a != 0;
+            let rules = if ruled {
+                chunk.len().saturating_sub(1)
+            } else {
+                0
+            };
+            for rule in 0..rules {
+                let spacer = band.items.len();
+                band.items.push(Item {
+                    y: 0.0,
+                    height,
+                    kind: ItemKind::Edge,
+                });
+                // §5.1: *"the column rule is drawn in the middle of the gap"*,
+                // so it is centred in the gap and not laid against either
+                // column.
+                let gap_left = content_x + (rule + 1) as f64 * width + rule as f64 * gap;
+                band.blocks.push(BlockRecord {
+                    x: gap_left + (gap - style.column_rule_width) / 2.0,
+                    width: style.column_rule_width,
+                    first: Some(spacer),
+                    last: spacer + 1,
+                    background: style.column_rule_color,
+                    border_width: Sides::all(0.0),
+                    border_style: Sides::all(BorderStyle::None),
+                    border_color: Sides::all(Color::TRANSPARENT),
+                    painted: true,
+                    dy: 0.0,
+                });
+            }
+            for (at, &(from, to, top)) in chunk.iter().enumerate() {
+                let base = band.items.len();
+                let dx = content_x + at as f64 * (width + gap);
+                let mut slice: Vec<Item> = inner[from..to].to_vec();
+                let mut copies: Vec<BlockRecord> = Vec::new();
+                // A box that spans a column boundary is two fragments, which is
+                // the page cutter's own rule met one level down: its record is
+                // clipped to the slice and copied into each column it reaches.
+                for record in &records {
+                    let Some(first) = record.first else {
+                        continue;
+                    };
+                    let lo = first.max(from);
+                    let hi = record.last.min(to);
+                    if lo >= hi {
+                        continue;
+                    }
+                    let mut copy = record.clone();
+                    copy.first = Some(lo - from + base);
+                    copy.last = hi - from + base;
+                    copies.push(copy);
+                }
+                translate(&mut slice, &mut copies, dx, -top);
+                band.items.append(&mut slice);
+                band.blocks.append(&mut copies);
+
+                let column = set * count + at;
+                for mut float in std::mem::take(&mut per_column[column]) {
+                    translate(&mut float.items, &mut float.blocks, dx, -top);
+                    let float_base = band.items.len();
+                    for mut record in float.blocks {
+                        if let Some(first) = record.first {
+                            record.first = Some(first + float_base);
+                            record.last += float_base;
+                        }
+                        band.blocks.push(record);
+                    }
+                    band.items.extend(float.items);
+                }
+            }
+            self.emit(height, ItemKind::Columns(Box::new(band)), true);
+        }
         Ok(())
     }
 

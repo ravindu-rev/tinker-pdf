@@ -413,6 +413,10 @@ jobs:
       - name: Read the fetched corpus
         env:
           TINKER_EPUB_CORPUS: ${{ github.workspace }}/target/epub-corpus
+          # A skip exits 0 and reads exactly like a pass, and the banner
+          # grep below only catches it if the output is what it expects.
+          # This makes the absence of a corpus a test failure instead.
+          TINKER_EPUB_CORPUS_REQUIRED: "1"
         run: |
           set -o pipefail
           cargo test -p tinker-pdf --test epub_fetched -- --nocapture \

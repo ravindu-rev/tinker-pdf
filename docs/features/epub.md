@@ -257,7 +257,11 @@ postdate the tool's removal under ruling 13, so
   path here paints a replaced element. **Twenty more are fetched**,
   never committed (Project Gutenberg's trademark licence and `epub3-samples`'
   CC-BY-SA are both barred by this repository's own no-copyleft gate), and
-  `epub_fetched.rs` prints `epub-corpus: RAN` / `SKIPPED` so the CI job goes
+  `epub_fetched.rs` needs `TINKER_EPUB_CORPUS` set to an **absolute** path
+  — a test binary runs from its crate directory, so a relative one resolves
+  under `crates/tinker-pdf/` and every sweep skips while passing — and
+  `TINKER_EPUB_CORPUS_REQUIRED=1` makes a skip a failure. It prints
+  `epub-corpus: RAN` / `SKIPPED` so the CI job goes
   red on a skip. `INVENTORY.tsv` is recomputed through `tinker-pdf-zip` on
   every `cargo test`; `CONSERVATION.tsv` is a ratchet, re-measured by
   `epub_conservation.rs`.

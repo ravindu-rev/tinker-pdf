@@ -46,13 +46,50 @@ const RAN: &str = "epub-corpus: RAN";
 /// Printed once per test that could not. CI greps for it too, and fails.
 const SKIPPED: &str = "epub-corpus: SKIPPED";
 
+/// Turns a skip into a failure, for a caller that means to have run this.
+///
+/// **The banner was the only signal, and a banner is not a gate.** A skipped
+/// sweep prints one line, passes, and exits zero; twelve of them in a wall of
+/// build output read exactly like twelve tests that ran. That is not a
+/// hypothetical — this suite skipped for most of a session, in every lane, and
+/// a stale pin and two unrecorded re-baselines accumulated behind it before
+/// anybody noticed.
+///
+/// So `TINKER_EPUB_CORPUS_REQUIRED=1` makes the absence of a corpus a
+/// **failure** rather than a skip. It is opt-in because a contributor with no
+/// network still has to be able to run `cargo test`, and it is what CI sets:
+/// a job that means to measure twenty books cannot then go green over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_EPUB_CORPUS_REQUIRED").is_some_and(|value| value != "0")
+}
+
 /// The fetched corpus, or `None`.
 ///
 /// A directory that exists **and holds at least one `.epub`**, rather than a
 /// directory that exists: an interrupted fetch leaves an empty directory, and a
 /// sweep over nothing passes.
+///
+/// # The relative-path trap
+///
+/// **`TINKER_EPUB_CORPUS` must be absolute.** A test binary's working directory
+/// is its *crate* root, not the workspace root, so the
+/// `TINKER_EPUB_CORPUS=target/epub-corpus` that this repository's own
+/// documentation and fetch script both printed resolves to
+/// `crates/tinker-pdf/target/epub-corpus`, which does not exist. Every sweep
+/// then skipped and every one of them passed. The script now prints the
+/// absolute path it wrote to, and this is the second place that says so.
 fn corpus() -> Option<Vec<(String, Vec<u8>)>> {
-    let dir = PathBuf::from(std::env::var_os("TINKER_EPUB_CORPUS")?);
+    let set = std::env::var_os("TINKER_EPUB_CORPUS");
+    if let Some(dir) = &set {
+        let path = PathBuf::from(dir);
+        assert!(
+            path.is_absolute() || !required(),
+            "TINKER_EPUB_CORPUS is {path:?}, which is relative: a test binary's \
+             working directory is its crate root, so a relative path resolves \
+             under crates/tinker-pdf/ and finds nothing. Pass an absolute path."
+        );
+    }
+    let dir = PathBuf::from(set?);
     let mut books: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
         .ok()?
         .filter_map(Result::ok)
@@ -87,9 +124,15 @@ macro_rules! fetched {
             }
             None => {
                 println!(
-                    "{} {} -- TINKER_EPUB_CORPUS is unset or holds no .epub; run \
-                     crates/tinker-pdf/tests/epub/fetch-corpus.sh",
+                    "{} {} -- TINKER_EPUB_CORPUS is unset, relative, or holds no \
+                     .epub; run crates/tinker-pdf/tests/epub/fetch-corpus.sh and \
+                     pass the **absolute** path it prints",
                     SKIPPED, $what
+                );
+                assert!(
+                    !required(),
+                    "TINKER_EPUB_CORPUS_REQUIRED is set and there is no corpus to \
+                     read: this sweep would have skipped and passed"
                 );
                 return;
             }
@@ -497,6 +540,26 @@ const NOT_CONSERVED: &[NotConserved] = &[
     // text takes the `NoGlyphs` route instead.
     NotConserved {
         name: "sample-wasteland-otf-obf.epub",
+        extra: 3,
+        missing: 3,
+        because: Why::Reordered,
+    },
+    // **The same three characters, and that is the point of the row.** This is
+    // the WOFF spelling of the book above, and the two now diverge *identically*
+    // — `Extra` at 5 981 and `Missing` at 6 027, both the line number `170` in
+    // the margin, which comes out before the line it numbers rather than after.
+    //
+    // It could not have been pinned before, and its absence was not an
+    // oversight: until WOFF was implemented this book's face did not unpack, so
+    // it fell back to no face at all and its text took the `NoGlyphs` route
+    // instead of being set. Now that WOFF reaches the page it renders exactly
+    // as its OTF twin does, including the float reordering, and a pair of books
+    // that are one book in two font spellings finally measures as one.
+    //
+    // Which is also what makes this row evidence rather than an allowance: if
+    // the two ever stop agreeing, one of them is wrong about the face.
+    NotConserved {
+        name: "sample-wasteland-woff-obf.epub",
         extra: 3,
         missing: 3,
         because: Why::Reordered,
