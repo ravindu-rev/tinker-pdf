@@ -706,6 +706,13 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-xml",
             "tinker-pdf-css",
             "tinker-pdf-layout",
+            // Tier 4's SVG lane, milestone 7. `src/epub/svg.rs` turns a
+            // `Scene` into content-stream operators, which is what makes an
+            // SVG spine item a page that draws. The edge goes down into a
+            // leaf, which ruling 8 allows without argument — and it is the
+            // facade rather than the leaf that knows what a PDF operator is,
+            // which is the whole reason the seam is here.
+            "tinker-pdf-svg",
             // Signatures milestone 3. The facade is where a signature verdict
             // is assembled (milestone 6), so it is the one crate that must be
             // able to turn a `/Contents` blob into a `SignedData` — and the

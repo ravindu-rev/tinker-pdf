@@ -92,6 +92,7 @@ pub mod ocf;
 pub mod package;
 pub mod paint;
 pub mod read;
+pub mod svg;
 pub mod typeface;
 pub mod xhtml;
 
@@ -107,6 +108,7 @@ use tinker_pdf_layout::{
     layout_with, Budget as LayoutBudget, Limits as LayoutLimits, Options as LayoutOptions,
     Page as LayoutPage, Warning as LayoutWarning,
 };
+use tinker_pdf_svg::Limits as SvgLimits;
 use tinker_pdf_xml::Limits as XmlLimits;
 use tinker_pdf_zip::{limits as zip_limits, Archive};
 
@@ -310,6 +312,12 @@ pub struct Limits {
     pub css: CssLimits,
     /// What layout and fragmentation are allowed to spend, per book.
     pub layout: LayoutLimits,
+    /// What one SVG content document may cost (Tier 4's SVG lane).
+    ///
+    /// Held whole for `css`'s reason exactly: `tinker_pdf_svg::Limits` already
+    /// says what each of its five numbers bounds, and a copy of that reasoning
+    /// in a second struct is a copy that goes out of date.
+    pub svg: SvgLimits,
 }
 
 impl Limits {
@@ -322,6 +330,7 @@ impl Limits {
         xml: XmlLimits::DEFAULT,
         css: CssLimits::DEFAULT,
         layout: LayoutLimits::DEFAULT,
+        svg: SvgLimits::DEFAULT,
     };
 }
 
@@ -547,13 +556,15 @@ pub enum SpineDefect {
     /// package document being wrong, and a path naming no entry is the
     /// container missing a file.
     ResourceMissing,
-    /// The item is an SVG content document (§6.2).
+    /// An SVG content document (§6.2) that would not read at all.
     ///
-    /// A named non-goal rather than a defect in the book: this build reads no
-    /// SVG, and six spine items in the fetched corpus are one. Named separately
-    /// from [`SpineDefect::NotLaidOut`] because milestone 8 removes that one and
-    /// leaves this one standing.
-    SvgContentDocument,
+    /// **Not "this build reads no SVG"** — it does, since Tier 4's SVG lane.
+    /// This is one of `tinker_pdf_svg::Refusal`'s six: markup that is not XML,
+    /// a root that is not an `<svg>`, a `<use>` that reaches its own ancestor,
+    /// or one of the four ceilings. The refusal travels so a caller can tell a
+    /// bomb from a truncated file, which is ruling 10 applied to the one place
+    /// an SVG produces no picture at all.
+    SvgUnreadable(tinker_pdf_svg::Refusal),
     /// §3.5.1's fallback chain does not reach an EPUB content document.
     Fallback(FallbackDefect),
     /// The cascade refused the document: one of `tinker-pdf-css`'s caps fired.
@@ -670,6 +681,14 @@ struct Chapter {
     defect: Option<SpineDefect>,
     /// The element tree and its computed styles.
     reading: Option<read::Reading>,
+    /// An SVG content document's display list, for a spine item that is one.
+    ///
+    /// Beside `reading` rather than inside it, because the two are different
+    /// readers of different languages: a chapter has one or the other and never
+    /// both, and a build that made an SVG pretend to be a `Reading` would have
+    /// to answer `dom`, `census` and `font_faces` for a document with no
+    /// elements a cascade has ever heard of.
+    svg: Option<tinker_pdf_svg::Scene>,
     /// The pages this chapter's text needed, or empty for a placeholder.
     pages: Vec<LayoutPage>,
     /// The index of this chapter's first page in the whole document.
@@ -840,10 +859,41 @@ pub fn synthesise(
     let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
     let mut declared: Vec<FontFace> = Vec::new();
     for itemref in package.spine() {
-        let (name, path, mut defect) = plan_page(book, package, &itemref.idref);
+        let (name, path, mut defect, is_svg) = plan_page(book, package, &itemref.idref);
         let fixed = itemref.layout(book_layout) == RenditionLayout::PrePaginated;
         let mut reading = None;
-        if defect.is_none() {
+        let mut scene = None;
+        if defect.is_none() && is_svg {
+            // §6.2's other content-document language. The viewport handed in is
+            // the caller's page **in CSS pixels**, because that is the unit an
+            // SVG's own lengths are in — a root that says `width="100%"` is
+            // asking for the box it was placed in, and this is that box.
+            let source = path.clone().unwrap_or_default();
+            let bytes = book
+                .index_of(&source)
+                .and_then(|index| book.read(index).ok().map(<[u8]>::to_vec));
+            match bytes {
+                None => defect = Some(SpineDefect::ResourceMissing),
+                Some(bytes) => {
+                    let box_ = (
+                        layout.page.0 / read::PX_TO_PT,
+                        layout.page.1 / read::PX_TO_PT,
+                    );
+                    match tinker_pdf_svg::read(&bytes, Some(box_), &limits.svg) {
+                        Err(refusal) => defect = Some(SpineDefect::SvgUnreadable(refusal)),
+                        Ok(read) => {
+                            for warning in &read.warnings {
+                                warnings.push(ArchiveWarning::Svg {
+                                    item: name.clone(),
+                                    warning: warning.clone(),
+                                });
+                            }
+                            scene = Some(read);
+                        }
+                    }
+                }
+            }
+        } else if defect.is_none() {
             let source = path.clone().unwrap_or_default();
             let bytes = book
                 .index_of(&source)
@@ -900,7 +950,18 @@ pub fn synthesise(
         // pre-paginated item that states none is named rather than silently
         // laid into the caller's.
         let mut frame = reflowable_frame;
-        if fixed {
+        // An SVG **is** its own viewport (§7.2), so a pre-paginated one never
+        // reaches `FixedLayoutWithoutViewport`: there is no `<meta>` to look
+        // for and nothing was left unsaid. Its page is the size its root
+        // states, in points.
+        if let Some(read) = &scene {
+            if fixed {
+                frame = Frame {
+                    page: (read.size.0 * read::PX_TO_PT, read.size.1 * read::PX_TO_PT),
+                    margin: 0.0,
+                };
+            }
+        } else if fixed {
             match reading.as_ref().and_then(|read| read.viewport) {
                 Some(view) => {
                     frame = Frame {
@@ -924,6 +985,7 @@ pub fn synthesise(
             path,
             defect,
             reading,
+            svg: scene,
             pages: Vec::new(),
             first_page: 0,
         });
@@ -1025,6 +1087,14 @@ pub fn synthesise(
                 }
             }
         }
+        // An SVG's characters need codes on the same terms and in the same
+        // pass: a PDF's font resources belong to the document rather than to a
+        // page, and a character outside `WinAnsiEncoding` needs a code chosen
+        // before anything is drawn. Doing it here rather than at the drawing is
+        // what makes SVG text and book text share one encoding decision.
+        if let Some(scene) = &chapter.svg {
+            svg::note(scene, &mut fonts);
+        }
     }
 
     // ---- what the caller is told, before any of it is drawn ----------------
@@ -1085,9 +1155,58 @@ pub fn synthesise(
             });
             continue;
         }
+        // §6.2's other content-document language, drawn rather than paginated:
+        // an SVG is one page by construction, because it has no line boxes to
+        // break and no overflow to carry.
+        if let Some(scene) = &chapter.svg {
+            let (page_width, page_height) = chapter.frame.page;
+            let placement = svg::Placement {
+                page: (page_width, page_height),
+                entry_limit: zip_limits::MAX_ZIP_ENTRY_BYTES,
+            };
+            let source = chapter.path.clone().unwrap_or_default();
+            // **Registered before the page is begun, and that ordering is the
+            // whole of it.** `begin_page` snapshots the document's resource
+            // set, so a pattern, an `/ExtGState` or an image added afterwards is
+            // invisible to the page that names it — the operator is written,
+            // the reader cannot resolve the name, and the gradient, the
+            // transparency or the photograph is silently gone while every solid
+            // stroke still draws. `svg::Registry` is that ordering as a type.
+            let registry = svg::register(&mut builder, scene, placement, |href: &str| {
+                // §5.7's reference, resolved against the container the document
+                // was read from — the caller's job, and the reason the leaf
+                // crate carries the href unread.
+                let target = resolve_reference(&source, href.split('#').next()?, limits).ok()?;
+                let index = book.index_of(&target)?;
+                book.read(index).ok().map(<[u8]>::to_vec)
+            });
+            let mut page = builder.begin_page(page_width, page_height);
+            let drawn = svg::draw(
+                &mut builder,
+                &mut page,
+                scene,
+                &registry,
+                placement,
+                &fonts,
+                &metrics,
+            );
+            unwritable_runs += drawn.refused;
+            if drawn.images_unresolved > 0 {
+                warnings.push(ArchiveWarning::SvgImageUnresolved {
+                    item: chapter.name.clone(),
+                    images: drawn.images_unresolved,
+                });
+            }
+            builder.push_page(page);
+            pages.push(PageOrigin {
+                name: chapter.name.clone(),
+                defect: None,
+            });
+            continue;
+        }
         // A content document whose text fitted nowhere — a cover whose only
-        // content is an SVG, which four of the six committed books have — still
-        // gets its page, for the same reason a placeholder does.
+        // content is an `<img>` — still gets its page, for the same reason a
+        // placeholder does.
         if chapter.pages.is_empty() {
             let (page_width, page_height) = chapter.frame.page;
             builder.add_page(page_width, page_height, |_| {});
@@ -1404,9 +1523,14 @@ fn plan_page(
     book: &ocf::Ocf<'_>,
     package: &Package,
     idref: &str,
-) -> (String, Option<String>, Option<SpineDefect>) {
+) -> (String, Option<String>, Option<SpineDefect>, bool) {
     let Some(item) = package.item_by_id(idref) else {
-        return (idref.to_owned(), None, Some(SpineDefect::IdrefUnresolved));
+        return (
+            idref.to_owned(),
+            None,
+            Some(SpineDefect::IdrefUnresolved),
+            false,
+        );
     };
     // §3.5.1 before §4.2.5: which resource a spine item stands for is decided by
     // the fallback chain, and the *terminus* is the file that would be read.
@@ -1414,21 +1538,37 @@ fn plan_page(
     // would report the wrong name.
     let target = match package.content_document(item) {
         Ok(target) => target,
-        Err(defect) => return (item.href.clone(), None, Some(SpineDefect::Fallback(defect))),
+        Err(defect) => {
+            return (
+                item.href.clone(),
+                None,
+                Some(SpineDefect::Fallback(defect)),
+                false,
+            )
+        }
     };
     let Some(path) = target.path.as_deref() else {
-        return (target.href.clone(), None, Some(SpineDefect::HrefUnusable));
+        return (
+            target.href.clone(),
+            None,
+            Some(SpineDefect::HrefUnusable),
+            false,
+        );
     };
     if book.index_of(path).is_none() {
-        return (path.to_owned(), None, Some(SpineDefect::ResourceMissing));
+        return (
+            path.to_owned(),
+            None,
+            Some(SpineDefect::ResourceMissing),
+            false,
+        );
     }
-    // An SVG content document (§6.2) is a named non-goal: this build reads no
-    // SVG, six spine items in the fetched corpus are one, and laying one out as
-    // though its markup were XHTML would set the `<title>` and the `<desc>` as
-    // body text. It keeps its page and its position.
-    let defect = matches!(target.core, Some(package::CoreMediaType::Svg))
-        .then_some(SpineDefect::SvgContentDocument);
-    (path.to_owned(), Some(path.to_owned()), defect)
+    // An SVG content document (§6.2) takes the other reader. It is a fact
+    // about the item rather than a defect: laying its markup out as though it
+    // were XHTML would set the `<title>` and the `<desc>` as body text, which
+    // is what made it a refusal until Tier 4's SVG lane.
+    let svg = matches!(target.core, Some(package::CoreMediaType::Svg));
+    (path.to_owned(), Some(path.to_owned()), None, svg)
 }
 
 #[cfg(test)]

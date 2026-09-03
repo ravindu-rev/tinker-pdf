@@ -119,7 +119,7 @@ impl Default for Limits {
 ///
 /// Distinct from [`Warning`], which is a picture that reached the caller with
 /// something missing. A `Refusal` means there is no picture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Refusal {
     /// The bytes are not well-formed XML, or the parser refused them — which

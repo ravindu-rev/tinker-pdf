@@ -555,6 +555,7 @@ dependencies = [
  "tinker-pdf-raster",
  "tinker-pdf-render",
  "tinker-pdf-shape",
+ "tinker-pdf-svg",
  "tinker-pdf-xml",
  "tinker-pdf-zip",
 ]

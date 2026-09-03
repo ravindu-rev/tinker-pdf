@@ -761,6 +761,34 @@ pub enum ArchiveWarning {
         /// Which failure.
         defect: crate::epub::xhtml::MarkupDefect,
     },
+    /// What an SVG content document asked for that this build did not draw
+    /// (Tier 4's SVG lane, milestone 7).
+    ///
+    /// Carried verbatim from `tinker_pdf_svg::Warning`, deduplicated **per
+    /// document** by the crate that produced it — so a cover with four hundred
+    /// `<animate>` elements is one sentence and not four hundred. The item is
+    /// named because a book has many of them and *"a filter was not drawn"* is
+    /// not something a host can act on.
+    Svg {
+        /// The container path of the SVG content document.
+        item: String,
+        /// What it asked for.
+        warning: tinker_pdf_svg::Warning,
+    },
+    /// An `<image>` inside an SVG content document whose reference this build
+    /// did not resolve into a picture, with the number of them on that page.
+    ///
+    /// Distinct from [`ArchiveWarning::Svg`] because the two blame different
+    /// halves: that one is a capability this build does not have, and this one
+    /// is a reference that named nothing the container holds, or bytes in a
+    /// format this build does not decode. A page short of a photograph is a
+    /// page a host should be told about either way.
+    SvgImageUnresolved {
+        /// The container path of the SVG content document.
+        item: String,
+        /// How many references on that page did not resolve.
+        images: usize,
+    },
     /// A CSS property this build does not implement, and **how many elements
     /// it reached** (gap 31, milestone 8).
     ///
