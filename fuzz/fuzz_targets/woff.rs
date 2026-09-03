@@ -19,6 +19,18 @@
 //! The seeds are `fuzz/corpus/woff/`, and
 //! `crates/tinker-pdf-font/tests/woff_seeds.rs` replays them on stable so the
 //! corpus does not quietly stop describing the parser.
+//! # What this target cannot find, and what covers it instead
+//!
+//! The one assertion here is that the sniffer and the decoder agree about
+//! whether a container is WOFF at all. Nothing checks that the sfnt which
+//! comes out is the sfnt that went in — a table decompressed to the wrong
+//! bytes, or a WOFF2 transform reversed wrongly, yields a face that parses
+//! and draws the wrong glyphs.
+//!
+//! Correctness lives in `crates/tinker-pdf-font/tests/woff_seeds.rs` and the
+//! font crate's own tests, which unpack the seven committed files from three
+//! encoders and compare the sfnt inside.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

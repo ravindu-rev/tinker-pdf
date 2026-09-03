@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 pub mod corpus;
 pub mod face;
 pub mod fetch;
+pub mod fuzzaudit;
 pub mod json;
 pub mod lock;
 pub mod parity;

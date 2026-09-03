@@ -31,6 +31,20 @@
 //!   the entry list is never `NoSuchEntry`.
 //! - **The entry list does not change under reading.** A caller enumerates
 //!   pages once and reads them in any order.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a name past the cap is refused
+//! rather than kept, and a read returns bytes that lie inside the archive.
+//! None of them asks whether the result is the one the input describes, so an
+//! answer that is well-formed and *wrong* passes exactly as a correct one
+//! does.
+//!
+//! Nothing checks that the bytes are the *entry's*. A reader that returned
+//! the wrong member, or the right member at the wrong offset, satisfies both.
+//! Correctness lives in `crates/tinker-pdf-archive`'s own tests and in
+//! `crates/tinker-pdf/tests/cbz_real.rs`, which opens committed archives and
+//! compares what comes out.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

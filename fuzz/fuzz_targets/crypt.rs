@@ -74,6 +74,19 @@
 //!   7.6.4.3.3 stated as bytes. What this does *not* check is whether the
 //!   derived key is the **right** one — that is a known-answer question, and
 //!   no fuzzer has an answer to compare against.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a key that came back is a key
+//! that matched, `/Identity` passes bytes through, and RC4 applied twice
+//! returns the plaintext. None of them asks whether the result is the one the
+//! input describes, so an answer that is well-formed and *wrong* passes
+//! exactly as a correct one does.
+//!
+//! The round trip is real evidence that the cipher is an involution and no
+//! evidence that it is **RC4**: a wrong key schedule that is still self-
+//! inverse satisfies it. Correctness lives in `crates/tinker-pdf-crypto`'s
+//! own tests against published test vectors.
+//!
 #![no_main]
 use std::sync::OnceLock;
 

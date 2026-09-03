@@ -56,6 +56,25 @@
 //! - **Every accessor answers rather than panicking**, for every glyph, on
 //!   every coverage and class-definition table the face carries.
 
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: shaping the same input twice
+//! gives the same answer, `lookups_for` returns a sorted list without
+//! repeats, clusters do not go backwards, and the glyph ceiling is refused
+//! rather than exceeded. None of them asks whether the numbers are the ones
+//! the input actually describes, so a decode that is well-formed and *wrong*
+//! passes this target exactly as a correct one does.
+//!
+//! Determinism is the weakest of those and the easiest to misread: a shaper
+//! that is consistently wrong is perfectly deterministic. Correctness lives
+//! in `crates/tinker-pdf-shape/tests/aots.rs`, `text_rendering.rs` and
+//! `fingerprints.rs`, which compare the glyphs that come out.
+//!
+//! This is the shape `brotli` records at length, and the difference is worth
+//! keeping in view: there, nothing in the tree can supply the missing check
+//! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
+//! a second decoder. Here the check exists, and it is somewhere else.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

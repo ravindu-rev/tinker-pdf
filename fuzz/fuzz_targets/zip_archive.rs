@@ -32,6 +32,17 @@
 //!   at a guessed length.
 //! - **The entry list does not change under reading.** A caller enumerates
 //!   pages once and reads them in any order.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a name past the cap is refused,
+//! and recovery never happens silently. None of them asks whether the result
+//! is the one the input describes, so an answer that is well-formed and
+//! *wrong* passes exactly as a correct one does.
+//!
+//! Nothing checks the extracted bytes. Correctness lives in `crates/tinker-
+//! pdf-zip`'s own tests and in `crates/tinker-pdf/tests/cbz_real.rs` and
+//! `epub_ocf.rs`, which open real containers.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

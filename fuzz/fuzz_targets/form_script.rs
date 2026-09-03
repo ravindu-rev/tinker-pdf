@@ -25,6 +25,17 @@
 //! action reads members — `event.change`, the selection, `event.willCommit` —
 //! that no calculate action ever touches, and the budget has to hold across
 //! those paths too.
+//! # What this target cannot find, and what covers it instead
+//!
+//! The assertions here are about the **budget**: a run that overran it is a
+//! bug, and `OutOfSteps` with budget left is a different bug. Both are ruling
+//! 1's concern rather than the language's.
+//!
+//! Nothing checks what a script *computed*. A calculate action that returned
+//! the wrong number sets the wrong field value and passes this target, which
+//! for a form that totals a column of figures is the whole point of the
+//! feature. Correctness lives in `crates/tinker-pdf`'s form tests.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

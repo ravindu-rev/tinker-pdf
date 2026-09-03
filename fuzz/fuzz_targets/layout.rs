@@ -43,6 +43,18 @@
 //!   warning set is built in a hash map before it is sorted.
 //! - **UAX #14's own shape.** Break opportunities are strictly increasing, land
 //!   on character boundaries, and end at the end of the text.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a book lays out into at least one
+//! page and every run's x, y and width is a finite number. None of them asks
+//! whether the result is the one the input describes, so an answer that is
+//! well-formed and *wrong* passes exactly as a correct one does.
+//!
+//! Finite is a long way from right: a layout that put every line in the same
+//! place satisfies it. Correctness lives in `crates/tinker-pdf-
+//! layout/tests/uax14_conformance.rs` for line breaking and in the EPUB
+//! reftests for the rest.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

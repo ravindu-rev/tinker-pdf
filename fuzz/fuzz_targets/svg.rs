@@ -63,6 +63,19 @@
 //! - **A text run's font size is a number.** It reaches a `Tf` operator, and an
 //!   infinity there is a content stream a reader refuses outright — which is a
 //!   worse failure than a page that looks wrong, not a better one.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a scene carries only finite
+//! numbers, the node cap holds, a warning is reported once, and reading a
+//! document is deterministic. None of them asks whether the result is the one
+//! the input describes, so an answer that is well-formed and *wrong* passes
+//! exactly as a correct one does.
+//!
+//! A path parsed to the wrong coordinates is finite, capped, warned about
+//! once and deterministic. Correctness lives in `crates/tinker-pdf-
+//! svg/tests/` — `shapes.rs`, `paint.rs`, `gradients.rs`, `text.rs` and
+//! `reuse.rs` — which compare the scene that comes out.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

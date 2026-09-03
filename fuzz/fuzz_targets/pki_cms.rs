@@ -71,6 +71,20 @@
 //! the walker to BER could have quietly broken, and it is checked on every
 //! input that produces a signer with signed attributes.
 
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: every parsed node lies inside the
+//! input, a detached `EncapContentInfo` has no content, and the clauses about
+//! BER `signedAttrs` and empty `SET SIZE (1..MAX)` are enforced. None of them
+//! asks whether the result is the one the input describes, so an answer that
+//! is well-formed and *wrong* passes exactly as a correct one does.
+//!
+//! A structurally valid `SignedData` whose digest or signer was read wrongly
+//! passes all of it — and for a signature reader, a wrong answer reported
+//! confidently is worse than a refusal. Correctness lives in `crates/tinker-
+//! pdf-pki/tests/enveloped.rs` and in `crates/tinker-
+//! pdf/tests/certification.rs`.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
