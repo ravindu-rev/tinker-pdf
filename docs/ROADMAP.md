@@ -349,76 +349,107 @@ decoder to.
 ## Tier 4 — container depth
 
 Debts each container format recorded about itself, in its feature doc's
-refusal table.
+refusal table. **Forms, CBZ and XPS have left it entirely, and EPUB keeps one
+row.** What follows records what each settled, because a row that simply
+disappeared would take its evidence with it — and in this tier the evidence
+includes six diagnoses that turned out to be wrong, which is the part worth
+keeping.
 
-- **EPUB** ([features/epub.md](features/epub.md)): `local()` sources,
-  which name a face installed on the reading system and are permanent
-  for an engine that reads no font directories; **no book in the corpus
-  carries a web font**, so the `@font-face` WOFF path is held against
-  containers this repository packs rather than one a producer shipped;
-  the float reading-order defect, **halved**: the forced-break half is
-  closed and held by a book this repository builds, taking both Waste
-  Land spellings to exact conservation and `pg16328-beowulf.epub` from
-  4 560 characters to 2 182. What remains is a float that `clear` puts
-  below the text following it, across a page boundary, where no
-  ordering of one page's runs can reach it — measured, not assumed:
-  three candidate fixes were built and none moved the figure, and
-  the row that names it records which and why. **SVG content documents
-  draw** since the SVG lane ([design/svg.md](design/svg.md)); what is
-  left of that row is *inside* one — filters, masks, patterns as a paint,
-  markers, `foreignObject`, SMIL, scripting, text on a path, and
-  `spreadMethod` other than `pad`, each named through
-  `ArchiveWarning::Svg`, plus an `<image>` whose bytes are neither JPEG
-  nor PNG.
-  **`::before` and `::after` are closed** — they generate real boxes,
-  from strings, `attr()` and any concatenation of the two, through
-  `StyleTree::pseudo` called from `epub::read::build`, because layout has
-  no selector engine and the box must exist before layout sees anything.
-  Three `content` families stay refused **by name and counted**
-  (`url()`, the counter functions, and the quote keywords, each for a
-  reason of its own), and `::first-line`/`::first-letter` stay refused
-  because both select part of an already laid out box and so mean a
-  second pass. `min`/`max` sizing is built, less one half of §10.7: a `max-height` shorter than
-  its content is named (`MaxHeightAsAuto`) rather than obeyed.
-  `vertical-align` is built, §10.8.1 and §17.5.3 both. Multi-column is
-  built — §3.4's geometry, §4's balance, §5's rule — less §6's
-  `column-span: all`, which is named. Non-static `position` is built,
-  all four values: §9.4.3's `relative` as an offset applied to the ink,
-  §9.6's `absolute` out of flow against the nearest positioned
-  ancestor's padding box, §9.6.1's `fixed` on every page, and
-  `css-position-3` §3.4's `sticky`, which with no scrollport is
-  `relative` by the specification's own words. `z-index` orders them,
-  §9.9.1. `display: inline-block` is a real atomic inline box, §9.2.2:
-  its own formatting context at §10.3.9's shrink-to-fit width, placed
-  on a line whole, aligned on §10.8.1's **last** line box.
-  `css-align-3` §8.1's `row-gap` and `column-gap` are built for flex
-  containers, on the axis each names rather than the direction the
-  container runs in.
-  **`css-cascade-5` §7.1's five explicit defaulting keywords are
-  closed** — `inherit`, `initial`, `unset`, `revert` and `revert-layer`,
-  on all eighty-three longhands and all sixteen shorthands. Closing them
-  emptied both calibre books' census: `vertical-align: inherit` and
-  `text-align: inherit` were their whole remaining gap, so a calibre
-  book now has nothing in it this build does not read
-  ([features/epub.md](features/epub.md)).
-  **WOFF and WOFF2 are closed** — both unpack to the sfnt inside them
-  and reach the page, against seven committed files from three encoders
-  with no code in common ([features/fonts.md](features/fonts.md)).
-- **XPS** ([features/xps.md](features/xps.md)): **nothing owed.** JPEG XR
-  is closed — 9.1.5.1's format decodes and draws, so all four of 9.1.5's
-  image formats reach the page. Fifteen fixtures decode bit-for-bit to
-  rasters this repository authored; what the three first-party evidence
-  legs do *not* reach is listed by name in
-  [features/xps.md](features/xps.md) and
-  [design/jpeg-xr.md](design/jpeg-xr.md), the largest of it being the
-  quantised lossy path, which ruling 13 leaves without an oracle.
-  `ContextColor` is closed with it — the profile is embedded **verbatim**
-  as an `/ICCBased` space and the components reach the content stream
-  unchanged, so the reader does the colour management and this build
-  converts nothing. Three narrowings are named rather than owed, the
-  widest being a profile whose channel count `/ICCBased` cannot state:
-  Table 66 permits 1, 3 or 4 components and ICC.1's `nCLR` family runs to
-  fifteen.
+**Forms and CBZ have left this list.** Which scripts run is a policy with an
+explicit type, and a comic archive is now four containers rather than one:
+`.cbz`, `.cbt` and `.cb7` all reduce to the same five pictures as the ZIPs
+written by four independent archivers, byte for byte, which is a stronger
+exit criterion than any of them rendering. tar, 7z, LZMA and LZMA2 are
+hand-rolled under CONTRIBUTING rule 1, and 7z's own per-substream CRC-32
+fails a subtly wrong decompressor on the archive's own terms before the
+identity check is reached.
+
+**XPS has left this list.** `VisualBrush` is a nested page painted into a
+tiling-pattern cell under a depth cap; a remote resource dictionary is a part
+whose `Source` chain is bounded the same two ways as an in-page one;
+`IsSideways` is the text matrix with its axes exchanged; an odd `BidiLevel`
+reorders by UAX #9 rather than by reversing; JPEG XR decodes and draws, so all
+four of 9.1.5's image formats reach the page; and `ContextColor` embeds its
+profile **verbatim** as an `/ICCBased` space, so the reader does the colour
+management and this build converts nothing.
+
+**EPUB keeps one row**, and it is the float reading-order defect. Everything
+else closed: WOFF and WOFF2 unpack to the sfnt inside them, table rows and
+flex lines fragment, `min`/`max` sizing, `vertical-align`, multi-column,
+all four non-static `position` values, `inline-block`, flex `row-gap` and
+`column-gap`, `css-cascade-5` §7.1's five defaulting keywords on all
+eighty-three longhands, `::before` and `::after` generating real boxes, and
+SVG content documents drawing rather than standing in as placeholders.
+`local()` is permanent rather than owed — it names a face installed on the
+reading system, and this engine reads no font directories by policy, which is
+an operating-system dependency `wasm32-unknown-unknown` does not have.
+
+Six things are worth carrying forward rather than filing away.
+
+- **Three of this tier's own entries were wrong about why an item was
+  blocked, and each was wrong in the flattering direction.** JPEG XR was
+  recorded as a built decoder needing only wiring; `coefficients.rs` was
+  twenty-nine lines ending in a refusal and nothing in the module produced a
+  pixel, so wiring it would have shipped a blank page reporting success. CBR
+  was recorded as blocked on a fixture this machine cannot produce; the
+  fixture exists, and the real blocker is that RAR 5's **compression** has
+  never been publicly specified — it is now a named permanent non-goal beside
+  XFA rather than a debt. WOFF was recorded as blocked by OFL-1.1's
+  reserved-name clause; that clause bars repacking a *vendored* face and says
+  nothing about the one `cargo xtask synth-face` writes, and a packer was
+  already installed.
+- **A decoder already in the tree was wrong, and nothing in the repository
+  could have found it.** RFC 7932 §4 says a distance symbol 0 is not pushed
+  to the ring buffer of last distances; this Brotli decoder pushed it. Every
+  byte of the offending command decodes correctly and the damage lands one
+  command later, which is why forty committed reference streams missed it. It
+  was found by a WOFF2 that fontTools packed. The fuzz target could not have
+  found it **at any budget**: it asserts only self-consistency, and the defect
+  produced right-length, non-panicking, deterministic output from a valid
+  stream. Nothing in-tree can say what a Brotli stream *means* — rule 1 leaves
+  no encoder to round-trip against and ruling 13 bars a second decoder — and
+  that admission is now in the target's own header.
+- **None of the thirty-nine fuzz targets checks that a decode is right.**
+  Fourteen assert nothing beyond not panicking; the other twenty-five assert
+  structural or self-consistent properties that a consistently wrong decoder
+  satisfies — a deterministic shaper that is wrong, a cipher that is an
+  involution but not AES, a subsetter round-tripped through this repository's
+  own parser. Two corpora were worse than that: `jxr`'s forty-two seeds
+  produced **zero** decodes and `jpx`'s produced fourteen of twenty-five,
+  because both targets eat a control byte the seeds were not written to
+  carry. Both are fixed and measured, every target now names what a green run
+  does not prove, and `cargo xtask fuzz` refuses one that does not.
+- **The fetched EPUB corpus skipped silently for most of this tier.** A
+  relative `TINKER_EPUB_CORPUS` resolves against the crate directory rather
+  than the workspace root, so the invocation printed by the fetch script
+  itself found nothing, reported twelve `SKIPPED` lines, and exited 0 with
+  twelve tests "passed" in no time at all. CI was never affected — it used an
+  absolute path — so the trap lived entirely in the advice humans read.
+  `TINKER_EPUB_CORPUS_REQUIRED=1` now turns a skip into a failure and refuses
+  a relative path with the reason.
+- **Two defects were invisible because the test that should have caught them
+  passed for an unrelated reason.** `ImageTile.transform` was parsed, filled
+  and never read, so an `ImageBrush` with a `Transform` drew unrotated and
+  unscaled and said nothing. And `DocumentBuilder::begin_page` snapshots the
+  document's resource set, so an SVG page that registered patterns and images
+  *while* drawing named resources it did not have — silently breaking
+  gradients and transparency while the fetched-corpus test stayed green,
+  because `cover.svg` strokes its paths black and a page with strokes and no
+  fills still has more than one colour.
+- **The float row's remainder is measured rather than estimated, and the
+  measurement corrected two earlier guesses.** The forced-break half is
+  closed: `fragment::beside` asked whether a float was within a page height
+  of the top, which is the right question only when the page is as tall as
+  the page box. Both Waste Land spellings now conserve exactly and their
+  `Why::Reordered` rows are deleted rather than zeroed; `pg16328-beowulf.epub`
+  goes from 4 560 characters to 2 182; and the shape is reproduced by a book
+  this repository builds, over a swept page box whose floor is chosen rather
+  than round. Of the remaining 2 182: the `FloatRecord` change this row used
+  to point at as the way in was built and moved **nothing**, because moving
+  the page *decision* does not move the *drawing* — a glyph is only on the
+  page it is drawn on. Removing the push instead gives 136 966, sixty times
+  worse. What is left needs a float's glyphs on a different page from its
+  box, which a PDF's text layer cannot express.
 
 ## How this file changes
 
