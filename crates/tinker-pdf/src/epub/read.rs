@@ -36,11 +36,12 @@
 
 use std::cell::RefCell;
 
-use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, StyleTree};
+use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, StyleTree};
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::parser::Stylesheet;
 use tinker_pdf_css::property::Display;
+use tinker_pdf_css::selector::PseudoElement;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
 };
@@ -477,6 +478,14 @@ fn build(dom: &Dom, styles: &StyleTree, at: usize) -> BoxNode {
     let node: &Node = &dom.nodes[at];
     let anchor = u32::try_from(at).unwrap_or(u32::MAX);
     let mut children = Vec::with_capacity(node.children.len());
+    // CSS 2.1 §12.1: `::before` is the first child of its originating element
+    // and `::after` is the last. **Inside**, not beside — a `::before` on a
+    // `<p>` is inside the paragraph's borders and shares its line box, and a
+    // build that put the box next to the element would give it the parent's
+    // width and its own line.
+    if let Some(generated) = styles.pseudo(at, PseudoElement::Before) {
+        children.push(pseudo_box(generated, anchor));
+    }
     for child in &node.children {
         match child {
             Child::Element(index) => children.push(build(dom, styles, *index)),
@@ -484,6 +493,9 @@ fn build(dom: &Dom, styles: &StyleTree, at: usize) -> BoxNode {
                 children.push(BoxNode::text(inline_box(&style), text.clone()).with_anchor(anchor));
             }
         }
+    }
+    if let Some(generated) = styles.pseudo(at, PseudoElement::After) {
+        children.push(pseudo_box(generated, anchor));
     }
     // An element with no children at all still has to be a `Children(vec![])`
     // rather than a `Text("")`: an empty `<p>` generates a block box with its
@@ -497,6 +509,44 @@ fn build(dom: &Dom, styles: &StyleTree, at: usize) -> BoxNode {
             node,
             &styles.styles.get(at).map_or(Display::Inline, |s| s.display),
         ),
+    }
+}
+
+/// One `::before` or `::after` box, as `epub::read` builds every other box.
+///
+/// # It anchors to the originating element, and that is a decision
+///
+/// The anchor is what text extraction and the conservation harness use to say
+/// *where on the page this text came from*, and a generated box has no source
+/// node to point at — it is text the document does not contain. Anchoring it to
+/// the element that generated it is the only honest answer available: it is
+/// where a reader would say the text is, and it keeps every downstream
+/// consumer's "which element is this" question answerable.
+///
+/// It does **not** make the text conserved. `epub_conservation.rs` compares the
+/// page against the source markup and counts anything on the page that is not
+/// in the source as `extra`; generated content is exactly that, by definition,
+/// and the harness is right to say so. No committed book generates any, so no
+/// recorded figure moves — `epub_pseudo.rs` is where that interaction is pinned
+/// rather than left to be discovered by the first book that uses one.
+///
+/// # Two boxes and not one
+///
+/// The generated box wraps a text box, which is the same shape `build` gives an
+/// element with one text child. That is what lets `display` decide: the outer
+/// box carries the pseudo-element's own computed style, so `content: "x";
+/// display: block` is a block box and the default `display: inline` is not, and
+/// neither case is special-cased here.
+fn pseudo_box(generated: &PseudoBox, anchor: u32) -> BoxNode {
+    let inner =
+        BoxNode::text(inline_box(&generated.style), generated.text.clone()).with_anchor(anchor);
+    BoxNode {
+        style: generated.style.clone(),
+        content: Content::Children(vec![inner]),
+        anchor: Some(anchor),
+        // A generated box is never a table cell: `cell_span` reads `colspan`
+        // and `rowspan` off a source element, and this box has none.
+        span: CellSpan::ONE,
     }
 }
 

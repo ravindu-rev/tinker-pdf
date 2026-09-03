@@ -1499,6 +1499,14 @@ pub enum Declaration {
         /// Which keyword.
         keyword: Defaulting,
     },
+    /// `content`, on whatever selector carried it.
+    ///
+    /// Kept even when the selector has no pseudo-element. CSS 2.1 §12.2 makes
+    /// `content` apply to `::before` and `::after` only, so `p { content: "x" }`
+    /// is a declaration that legitimately does nothing -- which is not the same
+    /// as one this build cannot read, and reporting it as a gap would be
+    /// reporting a gap this build does not have.
+    Content(ContentValue),
     /// A name no CSS specification this build cites defines: a typo, a vendor
     /// extension, or a custom property.
     Unknown {
@@ -1534,6 +1542,9 @@ pub enum Parsed {
         /// Which of the five.
         keyword: Defaulting,
     },
+    /// `content`, which is cascaded on its own because it is not a
+    /// [`Property`]. See [`ContentValue`].
+    Content(ContentValue),
     /// Not a name this build cites.
     Unknown,
     /// A property this build **does** implement, whose value is not valid CSS
@@ -1571,7 +1582,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "clip",
     "clip-path",
     "color-scheme",
-    "content",
     "counter-increment",
     "counter-reset",
     "cursor",
@@ -1635,6 +1645,12 @@ pub fn parse_declaration(name: &str, values: &[ComponentValue]) -> Parsed {
     let significant: Vec<&ComponentValue> = values.iter().filter(|v| !v.is_whitespace()).collect();
     if significant.is_empty() {
         return Parsed::Invalid;
+    }
+    // Before the defaulting branch, because `content` is the one implemented
+    // name with no `ComputedStyle` field and therefore nothing for §7.1's
+    // keywords to read or write. [`parse_content`] refuses them by name.
+    if name == "content" {
+        return parse_content(values, &significant);
     }
     // `inherit`, `initial`, `unset`, `revert` and `revert-layer` are
     // `css-cascade-5` §7.1's explicit defaulting keywords, valid on **every**
@@ -1866,6 +1882,112 @@ pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
         ],
     ),
 ];
+
+/// `css-content-3` §2's `content`, to the part a paginated reader needs.
+///
+/// # It is not a [`Property`], and that is the design rather than an omission
+///
+/// Every other implemented property is a `Property` variant with a field in
+/// `ComputedStyle`, because every other one is a thing a *box* has. `content`
+/// is not: CSS 2.1 §12.2 applies it to `::before` and `::after` and to nothing
+/// else, so a field on `ComputedStyle` would sit unread on every element in
+/// every book, and `tinker-pdf-layout`'s `style::consume` would have to
+/// destructure a field that means nothing to it.
+///
+/// So it is cascaded on its own, in `cascade::Matcher::pseudo_winners`, and
+/// what comes out is a `String` rather than a value: `attr()` needs the
+/// originating element, the cascade has it, and nothing downstream should have
+/// to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContentValue {
+    /// `normal` on a pseudo-element computes to `none` (§2.1), and `none`
+    /// generates no box. One variant for both, because they differ only on
+    /// elements that are not pseudo-elements, where neither does anything.
+    None,
+    /// A list to concatenate, in order.
+    Items(Vec<ContentItem>),
+}
+
+/// One piece of a `content` value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContentItem {
+    /// A quoted string, with its escapes already resolved.
+    Text(String),
+    /// `attr(name)`: the originating element's attribute, or the empty string
+    /// when it has none -- which is §2.4's own fallback and not a guess.
+    Attr(String),
+}
+
+/// What this build reads inside `content`, and what it refuses.
+///
+/// Refused **by name**, as `Unsupported { property: "content", value }`, so a
+/// book that asks for one is counted rather than silently given an empty box:
+///
+/// * `<image>` / `url()` -- generated content that is a replaced element. The
+///   box would need a size before the image is fetched, which is a different
+///   layout question from the one this closes.
+/// * `counter()` / `counters()` -- these need `counter-reset` and
+///   `counter-increment`, a scoped counter tree, and §4's nesting rules. None
+///   of the three is here, and a `counter()` resolved to nothing would number
+///   every list item zero.
+/// * `open-quote` / `close-quote` / `no-open-quote` / `no-close-quote` -- these
+///   read the `quotes` property, which is still in [`UNSUPPORTED_PROPERTIES`]
+///   and which pandoc writes. Guessing `"` would be wrong in every language
+///   that does not use it.
+///
+/// The five §7.1 defaulting keywords are refused here too, and for a reason
+/// worth stating: `content` has no `ComputedStyle` field, so there is nothing
+/// for `inherit` to read and nothing for `copy_computed` to write. A build that
+/// accepted them would have to invent a storage location for a value that has
+/// none.
+fn parse_content(values: &[ComponentValue], significant: &[&ComponentValue]) -> Parsed {
+    let refuse = || Parsed::Unsupported {
+        property: "content",
+        value: serialize(values),
+    };
+    if significant.len() == 1 {
+        if let Some(Token::Ident(word)) = significant[0].token() {
+            let lower = word.to_ascii_lowercase();
+            if lower == "none" || lower == "normal" {
+                return Parsed::Content(ContentValue::None);
+            }
+            if Defaulting::from_name(&lower).is_some() {
+                return refuse();
+            }
+        }
+    }
+
+    let mut items = Vec::new();
+    for value in significant {
+        match value {
+            ComponentValue::Token(Token::Str(text)) => {
+                items.push(ContentItem::Text(text.clone()));
+            }
+            ComponentValue::Function { name, arguments } if name.eq_ignore_ascii_case("attr") => {
+                let inner: Vec<&ComponentValue> =
+                    arguments.iter().filter(|v| !v.is_whitespace()).collect();
+                match inner.as_slice() {
+                    [ComponentValue::Token(Token::Ident(attribute))] => {
+                        items.push(ContentItem::Attr(attribute.to_ascii_lowercase()));
+                    }
+                    // §2.4 allows a type and a fallback; neither is read here,
+                    // and a build that ignored them would take `attr(x px, 1)`
+                    // for `attr(x)` and put a number where a length belongs.
+                    _ => return refuse(),
+                }
+            }
+            // Every other component value is one of the three refusals above,
+            // or something no specification this build cites defines.
+            _ => return refuse(),
+        }
+    }
+    if items.is_empty() {
+        // `content:` with nothing after it is not §2's grammar at all, and
+        // §5.4.4 discards it as it discards any malformed declaration.
+        return Parsed::Invalid;
+    }
+    Parsed::Content(ContentValue::Items(items))
+}
 
 /// Reading a value that is supposed to be a length, three ways.
 ///
@@ -2270,6 +2392,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "column-span",
     "column-width",
     "columns",
+    "content",
     "display",
     "flex",
     "flex-basis",
