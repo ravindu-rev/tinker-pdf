@@ -8,25 +8,43 @@ and a pin plus a checksum reproduces the set without this project becoming a
 distributor. The reasoning is
 [`docs/verification.md`](../docs/verification.md).
 
-## The per-file timeout is marginal for three files
+## The metamorphic relations are declined on a wall clock, so the bar moves with load
 
-`corpus-run`'s default is **20 seconds of wall clock per file**, and three
-files in the fetched set sit close enough to it that they flip with machine
-load: two in `qpdf` and one in `verapdf`. When they flip, the ratchet reports
-what looks like an engine regression — fewer files passed, and the metamorphic
-relations "asked of" a smaller denominator, which the comparator refuses on
-purpose because declining the hard files is not a better rate.
+`corpus-run --check` can report what reads exactly like an engine regression
+when nothing about the engine has changed: fewer files passed, and `crop`,
+`dpi` and `rotate` *asked of* a smaller denominator, which the comparator
+refuses on purpose because declining the hard files is not a better rate.
 
-Measured 31 August 2026, same commit, same corpus: under load, 606/637 `qpdf`
-with 2 timed out; idle at `--timeout 120`, every bar held and `verapdf` read
-2907/2907 rather than 2906.
+**The cause is `META_BUDGET_MS` in `tools/tpdf`, not the per-file timeout.** A
+file that has already spent more than 3 100 ms of wall clock opening and
+rendering has all three relations skipped, for a good reason written down at
+the site: the relations re-render the first page and two of them save and
+reopen the document, and on a slow file that extra work used to run the
+runner's own timeout out and turn three pdf.js files that had always passed
+into timeouts. Declining is the right answer. What makes it awkward is that
+3 100 ms is *wall clock*, so how many files cross it depends on what else the
+machine is doing.
 
-**That better number is not recorded, and should not be.** It is reachable only
-at a timeout the default run does not use, so recording it would set a bar that
-an ordinary `--check` cannot clear. The comparator already says this in its own
-output — *"a file near the limit flips when the machine is busy; re-run before
-believing this is the engine"* — and that sentence is the right response to a
-ratchet failure whose whole shortfall is accounted for by timeouts.
+Measured on one commit, 31 August 2026: under load, `qpdf` 606/637 with two
+timed out; idle at `--timeout 120`, every bar held and `verapdf` read 2907/2907
+rather than 2906. Measured again on 4 September with the machine idle and the
+same flag: **zero files timed out anywhere, every outcome count equal to or
+better than the record, and the relation denominators still down** — five in
+`pdfjs`, two in `qpdf`. That last run is what rules the timeout out as the
+explanation and points at the budget instead.
+
+Two consequences worth keeping:
+
+- **A shortfall accounted for entirely by declined relations is not evidence
+  about the engine.** Re-run idle before believing it. The comparator says as
+  much in its own output when timeouts explain the gap; when they do not, this
+  is the next thing to check.
+- **A better number measured at a non-default timeout is not recorded.** The
+  2907 above is reachable only with headroom the default run does not have, so
+  recording it would set a bar an ordinary `--check` cannot clear.
+
+An earlier version of this note blamed the per-file timeout alone. That was
+wrong, and the run with zero timeouts is what disproved it.
 
 ## Licences
 
