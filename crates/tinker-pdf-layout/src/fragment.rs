@@ -507,7 +507,7 @@ fn beside(
             // instead, and the fixture named for the push passed. The
             // injection campaign is what said so — see the plan's milestone 10
             // note.
-            //ic **And an absolutely positioned box is never pushed.** The
+            // **And an absolutely positioned box is never pushed.** The
             // push moves a box to the next page, which is the one thing
             // `position: absolute` forbids: where the box is is the whole of
             // what the declaration said. So a positioned box that does not fit

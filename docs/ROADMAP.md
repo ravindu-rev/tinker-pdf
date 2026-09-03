@@ -356,7 +356,8 @@ refusal table.
   for an engine that reads no font directories; **no book in the corpus
   carries a web font**, so the `@font-face` WOFF path is held against
   containers this repository packs rather than one a producer shipped;
-  the pinned float reading-order defect; SVG content documents.
+  the pinned float reading-order defect, whose mechanism is now
+  measured and written down in the row that names it; SVG content documents.
   **`::before` and `::after` are closed** — they generate real boxes,
   from strings, `attr()` and any concatenation of the two, through
   `StyleTree::pseudo` called from `epub::read::build`, because layout has
