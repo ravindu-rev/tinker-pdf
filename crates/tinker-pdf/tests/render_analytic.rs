@@ -39,28 +39,30 @@
 //! misreading shared by both is invisible here — `docs/verification.md` says so
 //! in its own voice, and that is the property the retired oracles had.
 
-use tinker_pdf::{BlendMode, DeviceSpace, DocumentBuilder, ExtGState, Function, ImageData, Shading};
+use tinker_pdf::{BlendMode, DocumentBuilder, ExtGState};
 
 mod render_support;
-use render_support::{byte, centre, pixel, render, SIZE};
+use render_support::{
+    axial_page, blend_cell_origin, blend_grid_page, byte, centre, image_page, ink, pixel,
+    radial_page, render, AXIAL_AXIS, AXIAL_STOPS, BLEND_BACKDROPS, BLEND_CELL, BLEND_SOURCE,
+    CHECKER, MODES, RADIAL_CENTRE, RADIAL_R0, RADIAL_R1, RADIAL_STOPS, SIZE,
+};
 
-/// 11.3.5.2's twelve separable modes, which are the ones with a closed form
-/// over one channel. The four non-separable ones need all three at once and are
-/// a different claim.
-const MODES: [BlendMode; 12] = [
-    BlendMode::Normal,
-    BlendMode::Multiply,
-    BlendMode::Screen,
-    BlendMode::Overlay,
-    BlendMode::Darken,
-    BlendMode::Lighten,
-    BlendMode::ColorDodge,
-    BlendMode::ColorBurn,
-    BlendMode::HardLight,
-    BlendMode::SoftLight,
-    BlendMode::Difference,
-    BlendMode::Exclusion,
-];
+/// Asserts a fixture drew enough to be evidence about anything.
+///
+/// The floor is roughly half of what the page paints today, which is
+/// `determinism.rs`'s convention and is set so an ordinary rendering change
+/// leaves it alone while a fixture that has stopped drawing trips it. These
+/// four pages are enrolled as fingerprints, so the floor guards the hash as
+/// well as the formula: a blank page hashes perfectly stably.
+#[track_caller]
+fn drew(bitmap: &tinker_pdf::Bitmap, least: usize, what: &str) {
+    let drawn = ink(bitmap);
+    assert!(
+        drawn >= least,
+        "the {what} fixture painted {drawn} pixels, fewer than the {least} it          is supposed to: it is measuring less than it claims"
+    );
+}
 
 // ---- shadings ---------------------------------------------------------------
 
@@ -72,32 +74,11 @@ const MODES: [BlendMode; 12] = [
 /// mistakes needs a slope to show.
 #[test]
 fn an_axial_shading_is_the_parametric_equation_at_every_pixel() {
-    const C0: [f64; 3] = [1.0, 0.0, 0.0];
-    const C1: [f64; 3] = [0.0, 0.0, 1.0];
-    // From the bottom left to the top right of the page.
-    const AXIS: [f64; 4] = [0.0, 0.0, SIZE, SIZE];
+    let (c0, c1) = AXIAL_STOPS;
+    const AXIS: [f64; 4] = AXIAL_AXIS;
 
-    let mut builder = DocumentBuilder::new();
-    assert!(builder.add_shading(
-        b"Sh0",
-        &Shading::Axial {
-            color_space: DeviceSpace::Rgb,
-            coords: AXIS,
-            function: Function::Exponential {
-                domain: [0.0, 1.0],
-                c0: C0.to_vec(),
-                c1: C1.to_vec(),
-                n: 1.0,
-            },
-            extend: (true, true),
-        }
-    ));
-    builder.add_page(SIZE, SIZE, |page| {
-        page.raw(format!("q 0 0 {SIZE} {SIZE} re W n").as_bytes());
-        assert!(page.shading(b"Sh0"));
-        page.raw(b"Q");
-    });
-    let bitmap = render(builder.finish());
+    let bitmap = render(axial_page());
+    drew(&bitmap, 128, "axial shading");
 
     // 8.7.4.5.3: `t` is the projection of the point onto the axis, as a
     // fraction of the axis's own length, clamped by `/Extend`.
@@ -108,9 +89,9 @@ fn an_axial_shading_is_the_parametric_equation_at_every_pixel() {
             let (px, py) = centre(x, y);
             let t = (((px - AXIS[0]) * dx + (py - AXIS[1]) * dy) / length_squared).clamp(0.0, 1.0);
             let wanted = (
-                byte(C0[0] + t * (C1[0] - C0[0])),
-                byte(C0[1] + t * (C1[1] - C0[1])),
-                byte(C0[2] + t * (C1[2] - C0[2])),
+                byte(c0[0] + t * (c1[0] - c0[0])),
+                byte(c0[1] + t * (c1[1] - c0[1])),
+                byte(c0[2] + t * (c1[2] - c0[2])),
             );
             assert_eq!(pixel(&bitmap, x, y), wanted, "pixel ({x}, {y}), t = {t}");
         }
@@ -125,33 +106,13 @@ fn an_axial_shading_is_the_parametric_equation_at_every_pixel() {
 /// draws a gradient that is plausible and is not a circle.
 #[test]
 fn a_radial_shading_is_the_distance_between_its_two_circles() {
-    const C0: [f64; 3] = [1.0, 1.0, 1.0];
-    const C1: [f64; 3] = [0.0, 0.0, 0.0];
-    const CENTRE: (f64, f64) = (SIZE / 2.0, SIZE / 2.0);
-    const R0: f64 = 1.0;
-    const R1: f64 = 7.0;
+    let (c0, c1) = RADIAL_STOPS;
+    const CENTRE: (f64, f64) = RADIAL_CENTRE;
+    const R0: f64 = RADIAL_R0;
+    const R1: f64 = RADIAL_R1;
 
-    let mut builder = DocumentBuilder::new();
-    assert!(builder.add_shading(
-        b"Sh0",
-        &Shading::Radial {
-            color_space: DeviceSpace::Rgb,
-            coords: [CENTRE.0, CENTRE.1, R0, CENTRE.0, CENTRE.1, R1],
-            function: Function::Exponential {
-                domain: [0.0, 1.0],
-                c0: C0.to_vec(),
-                c1: C1.to_vec(),
-                n: 1.0,
-            },
-            extend: (true, true),
-        }
-    ));
-    builder.add_page(SIZE, SIZE, |page| {
-        page.raw(format!("q 0 0 {SIZE} {SIZE} re W n").as_bytes());
-        assert!(page.shading(b"Sh0"));
-        page.raw(b"Q");
-    });
-    let bitmap = render(builder.finish());
+    let bitmap = render(radial_page());
+    drew(&bitmap, 100, "radial shading");
 
     for y in 0..bitmap.height {
         for x in 0..bitmap.width {
@@ -159,9 +120,9 @@ fn a_radial_shading_is_the_distance_between_its_two_circles() {
             let distance = ((px - CENTRE.0).powi(2) + (py - CENTRE.1).powi(2)).sqrt();
             let t = ((distance - R0) / (R1 - R0)).clamp(0.0, 1.0);
             let wanted = (
-                byte(C0[0] + t * (C1[0] - C0[0])),
-                byte(C0[1] + t * (C1[1] - C0[1])),
-                byte(C0[2] + t * (C1[2] - C0[2])),
+                byte(c0[0] + t * (c1[0] - c0[0])),
+                byte(c0[1] + t * (c1[1] - c0[1])),
+                byte(c0[2] + t * (c1[2] - c0[2])),
             );
             assert_eq!(pixel(&bitmap, x, y), wanted, "pixel ({x}, {y}), t = {t}");
         }
@@ -362,6 +323,49 @@ fn the_twelve_separable_modes_are_not_one_expression() {
     );
 }
 
+/// The same twelve expressions, laid out as one page rather than as a hundred
+/// and eight documents.
+///
+/// The fixture above is the right shape for an expression and the wrong shape
+/// for a fingerprint: a hash per document would be a hundred and eight of them,
+/// and a hash of any one would cover a twelfth of one mode. This page carries
+/// every mode over both backdrops, so `determinism.rs` can enrol the lot with
+/// one hash — and this test is what keeps that hash a measurement rather than a
+/// baseline, by holding every cell to the clause the same way.
+#[test]
+fn the_blend_grid_is_the_same_twelve_expressions_laid_out_as_a_picture() {
+    let bitmap = render(blend_grid_page());
+    drew(&bitmap, 800, "blend grid");
+
+    let half = BLEND_CELL / 2.0;
+    for (index, mode) in MODES.iter().enumerate() {
+        let (x, y) = blend_cell_origin(index);
+        for (which, backdrop) in BLEND_BACKDROPS.iter().enumerate() {
+            // The centre of this half, converted to the row a bitmap counts
+            // downward from the top.
+            let px = x + which as f64 * half + half / 2.0;
+            let py = y + BLEND_CELL / 2.0;
+            let column = px as u32;
+            let row = (f64::from(bitmap.height) - py) as u32;
+
+            let painted = f64::from(byte(*backdrop)) / 255.0;
+            let laid = f64::from(byte(BLEND_SOURCE)) / 255.0;
+            let wanted = byte(blend(*mode, painted, laid));
+            let (got, green, blue) = pixel(&bitmap, column, row);
+            assert_eq!(
+                (got, green, blue),
+                (got, got, got),
+                "{mode:?}: a grey backdrop and a grey source are grey"
+            );
+            let off = i32::from(got) - i32::from(wanted);
+            assert!(
+                off.abs() <= 1,
+                "{mode:?} of {BLEND_SOURCE} over {backdrop} at ({column}, {row}):                  the page says {got} and the clause says {wanted}"
+            );
+        }
+    }
+}
+
 // ---- image sampling ---------------------------------------------------------
 
 /// **An image scaled by a whole number is that many pixels of each sample.**
@@ -376,24 +380,10 @@ fn the_twelve_separable_modes_are_not_one_expression() {
 /// that is a different claim from *the samples arrived*.
 #[test]
 fn an_image_scaled_by_a_whole_number_is_blocks_of_its_samples() {
-    // A two-by-two checker: black, white / white, black, row-major from the
-    // top, which is the order 8.9.5.2 states.
-    const SAMPLES: [[u8; 3]; 4] = [[0, 0, 0], [255, 255, 255], [255, 255, 255], [0, 0, 0]];
-    let data: Vec<u8> = SAMPLES.iter().flatten().copied().collect();
+    const SAMPLES: [[u8; 3]; 4] = CHECKER;
 
-    let mut builder = DocumentBuilder::new();
-    assert!(builder.add_image(
-        b"Im0",
-        &ImageData::Rgb8 {
-            width: 2,
-            height: 2,
-            data: &data,
-        }
-    ));
-    builder.add_page(SIZE, SIZE, |page| {
-        page.image(b"Im0", 0.0, 0.0, SIZE, SIZE);
-    });
-    let bitmap = render(builder.finish());
+    let bitmap = render(image_page());
+    drew(&bitmap, 64, "image");
 
     let half = (SIZE / 2.0) as u32;
     for y in 0..bitmap.height {

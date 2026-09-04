@@ -266,10 +266,13 @@ ordinary test (`crates/tinker-pdf/tests/hostile_input.rs`).
 ## Determinism, fingerprinted
 
 Ruling 4's contract — same bytes, same options, bit-identical output on
-every target — is proven by **15 committed render fingerprints and 3
+every target — is proven by **19 committed render fingerprints and 3
 document byte-hashes** in `crates/tinker-pdf/tests/determinism.rs`. Each
 fixture carries an ink floor and an `UnreadableFont` guard, so a fixture
-that draws nothing fails rather than becoming a baseline. Details, and
+that draws nothing fails rather than becoming a baseline. Four of the
+nineteen are the analytic tier's own pages, hashed through the same builders
+`render_analytic.rs` evaluates them with, so the page a formula adjudicates
+and the page a hash covers are one document. Details, and
 which targets are measured versus claimed, are in
 [features/determinism.md](features/determinism.md).
 

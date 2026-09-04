@@ -59,9 +59,11 @@
 use std::sync::Arc;
 
 use tinker_pdf::{
-    Bitmap, Document, DocumentBuilder, OpenOptions, RenderOptions, RenderWarning,
-    SimpleFontProvider,
+    Document, DocumentBuilder, OpenOptions, RenderOptions, RenderWarning, SimpleFontProvider,
 };
+
+mod render_support;
+use render_support::{axial_page, blend_grid_page, image_page as analytic_image_page, ink, radial_page};
 
 /// How a fixture's document is opened, and which of its pages is hashed.
 ///
@@ -102,15 +104,6 @@ struct Fixture {
     /// that "the fingerprints did not move" cannot again be evidence about a
     /// path the fixture never exercised.
     least_ink: usize,
-}
-
-/// Pixels that are not the white the page started as.
-fn ink(bitmap: &Bitmap) -> usize {
-    bitmap
-        .data
-        .chunks_exact(bitmap.components())
-        .filter(|pixel| pixel.iter().any(|value| *value != 255))
-        .count()
 }
 
 /// The face every reflowable fixture here is set in.
@@ -2189,6 +2182,38 @@ const GOLDEN: &[Fixture] = &[
         },
         least_ink: 22_000,
     },
+    // ---- the analytic pages (milestone 2 of design/render-verification.md) --
+    //
+    // `render_analytic.rs` holds each of these four to the equation ISO 32000
+    // publishes for it, per pixel, over the whole page. What it cannot say is
+    // that the same page comes out the same on wasm32 and on x86_64 — that is
+    // this file's claim, and these are the fixtures where the two tiers meet:
+    // the bytes hashed here are the bytes that file evaluates, through
+    // `render_support`, rather than a second page built to look like them.
+    Fixture {
+        name: "analytic_axial",
+        build: axial_page,
+        open: Open::Closed,
+        least_ink: 128,
+    },
+    Fixture {
+        name: "analytic_radial",
+        build: radial_page,
+        open: Open::Closed,
+        least_ink: 100,
+    },
+    Fixture {
+        name: "analytic_blend",
+        build: blend_grid_page,
+        open: Open::Closed,
+        least_ink: 800,
+    },
+    Fixture {
+        name: "analytic_image",
+        build: analytic_image_page,
+        open: Open::Closed,
+        least_ink: 64,
+    },
 ];
 
 #[test]
@@ -2349,6 +2374,26 @@ fn rendering_is_stable_across_targets() {
         (
             "epub",
             "601b099fe7ff948adda1e1d8649c383cc7f8e9a999e64b9d7cda7d1a2c745b3e",
+        ),
+        // Enrolled with the analytic tier's own pages (milestone 2). Their
+        // right answer is an equation `render_analytic.rs` evaluates per pixel;
+        // what a hash adds is that the equation comes out the same on every
+        // target.
+        (
+            "analytic_axial",
+            "487f59336860e7edeb1854aa566de4a5964f14d2ba67c464b990dee393e1f8a1",
+        ),
+        (
+            "analytic_radial",
+            "8966418e8e900c6aca4de8682702e615d5e68ea066cb3bc2c25352a535943204",
+        ),
+        (
+            "analytic_blend",
+            "e1d056a15ae8cb7f18fd1524dfcc419893f4a5283c2f56b3f7307380aee43560",
+        ),
+        (
+            "analytic_image",
+            "37360b0c61ca919d525b75922112580518965e5f4ad12d52ce75953f46061872",
         ),
     ];
     assert_eq!(

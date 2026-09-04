@@ -46,11 +46,22 @@ enforced by the suite below.
 
 ## Verified
 
-`crates/tinker-pdf/tests/determinism.rs` commits **15 render
+`crates/tinker-pdf/tests/determinism.rs` commits **19 render
 fingerprints** — `text`, `curves`, `shading`, `pattern`, `optional`,
 `image`, `jbig2`, `jpx`, `blend`, `transparency`, `tiling`, `mesh`, `cbz`,
-`xps`, `epub` — each a hash of rendered pixels plus the page dimensions and
-ink counts it is computed from. Every fixture asserts a minimum ink count
+`xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
+`analytic_image` — each a hash of rendered pixels plus the page dimensions and
+ink counts it is computed from.
+
+The last four arrived with milestone 2 of
+[design/render-verification.md](../design/render-verification.md) and are a
+different kind of fixture from the fifteen before them: their pixels have a
+**closed-form right answer**, which `crates/tinker-pdf/tests/render_analytic.rs`
+evaluates per pixel over the whole page. Both files build the page through the
+same function in `tests/render_support/`, so the document the equation
+adjudicates and the document the hash covers cannot drift apart — and what the
+hash adds is the one thing the equation cannot say, that the same arithmetic
+comes out the same on every target. Every fixture asserts a minimum ink count
 and the absence of `UnreadableFont` before it is hashed, so a fixture that
 draws nothing fails on the day it is added rather than becoming a baseline.
 
