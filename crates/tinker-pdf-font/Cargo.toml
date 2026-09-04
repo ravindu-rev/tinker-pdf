@@ -32,7 +32,7 @@ default = ["cmap-predefined"]
 # registry name still splits its strings correctly from the always-compiled
 # codespace table -- it just reports an approximate mapping instead of
 # inventing CIDs.
-cmap-predefined = ["dep:tinker-pdf-filters"]
+cmap-predefined = []
 # The twelve Liberation faces, embedded with `include_bytes!`. Off by default,
 # and the default is the interesting half: a host with faces of its own should
 # not carry 4.2 MB of ours, and `FontProvider` is the better answer wherever
@@ -48,7 +48,16 @@ bundled-fonts = []
 # Inflating the compiled tables. A sibling leaf crate with no dependencies of
 # its own, so this is not a third-party dependency and cannot cycle; plan 05's
 # "needs the filters phase ... for the bundled-asset pipeline" is this edge.
-tinker-pdf-filters = { workspace = true, optional = true }
+#
+# **Not optional**, and it was until `src/woff.rs` landed. That module is
+# `pub mod woff;` with no `cfg` on it and it decompresses table directories
+# with `flate_decode` and `brotli_decode`, so the crate does not compile at
+# all without this dependency — while `cmap-predefined` is a default feature,
+# which hid it from every build that took the defaults. `cargo build -p
+# tinker-pdf-shape` did not: the workspace entry for this crate sets
+# `default-features = false`, so the shape crate's own `cargo test` failed to
+# build until this line lost its `optional`.
+tinker-pdf-filters = { workspace = true }
 
 [build-dependencies]
 # The same crate's deflate encoder, at build time. A build-dependency never
