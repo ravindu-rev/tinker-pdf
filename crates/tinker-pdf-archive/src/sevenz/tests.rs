@@ -68,6 +68,50 @@
 //! replays and both `.cb7` corpus checks. It is the 7z equivalent of tar's
 //! `advance`: the one defect that is about *the walk* rather than about one
 //! field, and the one the corpus is therefore strongest against.
+//!
+//! # Injection, counted again — what `7z-nonsolid.cb7` and `7z-dictreset.cb7` bought
+//!
+//! The table above was measured when `7z-lzma2.cb7` was the only `.cb7` here,
+//! and what it could not say is how much of the decoder that one fixture
+//! *misses*. `-m0=LZMA2` writes the simplest shape the format allows — one
+//! folder, one chunk — so `read_header`'s folder walk and
+//! `lzma::decode_lzma2`'s chunk loop were each entered exactly once by every
+//! archive in the tree.
+//!
+//! Four defects, measured twice by the same method: **before** is the tree as
+//! it stood with the two new archives absent from every test, **after** is
+//! them read. Same command, same parse of the per-binary `test result:` lines,
+//! `--no-fail-fast` before `-p` both times, and a control run in each
+//! configuration that came back **0**.
+//!
+//! | Injected | Before | After |
+//! | --- | ---: | ---: |
+//! | `decode_lzma2` ignores the dictionary-reset bit of the control byte | **1** | **4** |
+//! | the folder walk stops after folder 0 | **0** | **3** |
+//! | a distance-slot decode off by one (`spec_pos`' base offset) | **2** | **3** |
+//! | `MOVE_BITS` 1/16 instead of 1/32 | **2** | **3** |
+//!
+//! **The second row is the whole argument, and it came back zero.** A reader
+//! that walks one folder and stops hands every entry after the first a slot
+//! that does not exist, and until `7z-nonsolid.cb7` existed *nothing in this
+//! workspace could tell* — every fixture, hand-built and committed alike, had
+//! exactly one folder, and one folder is all a walk that stops after the first
+//! one needs. It is the `an LZMA2 dictionary reset not resetting the literal
+//! context` row of the table above happening a second time, for the same
+//! reason: a defect in the second iteration of a loop no input iterates twice.
+//!
+//! **The `MOVE_BITS` row reproduces the older table exactly**, which is what
+//! makes the rest of this one worth reading: 1/16 instead of 1/32 was recorded
+//! as **2** there and measures **2** here in the before column. The method did
+//! not change, the tree did. Its third catch is
+//! `the_two_cb7s_added_for_coverage_have_the_structure_they_are_named_for`,
+//! which reads every entry of both new archives and so is held to their
+//! recorded CRC-32s like the corpus tests are.
+//!
+//! What none of these four rows measures is a *second producer*. All three
+//! `.cb7`s were written by 7-Zip 26.02, so a misreading of the format shared
+//! between that writer and this reader would survive every one of them.
+//! `docs/design/comic-archives.md` records that as unmet rather than closed.
 
 use super::*;
 
@@ -803,4 +847,187 @@ fn write_the_fuzz_seeds() {
     ] {
         std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
     }
+}
+
+// ---- The corpus `.cb7`s, and the shapes they were made to have --------------
+
+/// One `.cb7` of the comic corpus, read from `crates/tinker-pdf/tests/cbz/`.
+///
+/// This is the one place in this file that reaches outside the crate, and it
+/// is deliberate: everything else here is a hand-built Copy-coder archive
+/// because the container can be exercised without an encoder, and *nothing*
+/// hand-built can say how many folders 7-Zip decided to write. The claim below
+/// is about the committed bytes of a real archiver's output, so it has to read
+/// them.
+fn corpus_cb7(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tinker-pdf/tests/cbz")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// What one LZMA2 stream's chunk framing asked for.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Framing {
+    /// Chunks before the terminating zero byte.
+    chunks: usize,
+    /// Of those, the ones stored rather than range-coded (control `01`/`02`).
+    uncompressed: usize,
+    /// Chunks that asked for the dictionary to restart — control `01`, and a
+    /// compressed chunk whose reset field is `3`.
+    dict_resets: usize,
+}
+
+/// Walks LZMA2's chunk headers and counts what they asked for.
+///
+/// A second reading of the framing [`crate::lzma::decode_lzma2`] already walks,
+/// and that is the point rather than a duplication to be regretted: it is a
+/// *census* and not a decode, it shares no state with the decoder, and it
+/// checks itself — a mis-read chunk header would leave `at` somewhere other
+/// than the end of the packed stream, which the caller asserts. What it buys
+/// is a fixture named `7z-dictreset.cb7` that cannot quietly stop having
+/// dictionary resets.
+fn framing(input: &[u8]) -> Framing {
+    let mut f = Framing::default();
+    let mut at = 0usize;
+    let byte = |at: usize| -> usize { *input.get(at).expect("inside the packed stream") as usize };
+    let be16 = |at: usize| -> usize { (byte(at) << 8) | byte(at + 1) };
+    loop {
+        let control = byte(at);
+        at += 1;
+        if control == 0 {
+            break;
+        }
+        f.chunks += 1;
+        if control < 3 {
+            f.uncompressed += 1;
+            if control == 1 {
+                f.dict_resets += 1;
+            }
+            at += 2 + be16(at) + 1;
+            continue;
+        }
+        assert!(control >= 0x80, "an LZMA2 control byte the format defines");
+        let packed = be16(at + 2) + 1;
+        at += 4;
+        let reset = (control >> 5) & 3;
+        if reset >= 2 {
+            at += 1;
+        }
+        if reset == 3 {
+            f.dict_resets += 1;
+        }
+        at += packed;
+    }
+    assert_eq!(
+        at,
+        input.len(),
+        "the census walked the whole packed stream and stopped exactly at its end"
+    );
+    f
+}
+
+/// **The two `.cb7`s added for coverage have the structure they are named for.**
+///
+/// `7z-lzma2.cb7` is what a desktop archiver writes by default, and what it
+/// writes is *one* folder holding *one* LZMA2 chunk: the folder walk in
+/// [`super::decode_folder`] and the chunk loop in
+/// [`crate::lzma::decode_lzma2`] each run exactly once, so neither loop's
+/// second iteration was reached by any committed archive. `-ms=off` and
+/// `-m0=LZMA2:d8k:c8k` are how 7-Zip was asked for the other two shapes, and
+/// **this test exists because a flag is not evidence.** `-m0=LZMA2:d64k` over
+/// these same five pages measured one chunk, not several — the dictionary size
+/// does not split a solid block, the LZMA2 block size does — and a fixture
+/// called `7z-dictreset.cb7` holding a single chunk would be worse than no
+/// fixture, because the name would be doing the arguing.
+///
+/// So the numbers here are measured off the committed bytes by this
+/// repository's own reader, and they are asserted rather than printed: a
+/// regeneration that lost either shape fails here, in the crate that cares,
+/// rather than passing quietly in `cbz_real.rs` where the pictures would still
+/// come out right.
+#[test]
+fn the_two_cb7s_added_for_coverage_have_the_structure_they_are_named_for() {
+    // The default: one solid folder, one chunk. The baseline the other two are
+    // a departure from, asserted so that the departure means something.
+    let bytes = corpus_cb7("7z-lzma2.cb7");
+    let solid = open(&bytes);
+    assert_eq!(solid.folders.len(), 1, "7z-lzma2.cb7: folders");
+    let folder = solid.folders.first().expect("the one folder");
+    assert_eq!(
+        framing(packed_of(&bytes, folder)),
+        Framing {
+            chunks: 1,
+            uncompressed: 0,
+            dict_resets: 1,
+        },
+        "7z-lzma2.cb7: one chunk, and its dictionary reset is the one at offset zero"
+    );
+
+    // `-ms=off`: one folder per file, so `decode_folder` is called five times
+    // with five different coder setups and five different pack offsets, and
+    // `Archive::read`'s folder cache is asked for a folder it does not hold.
+    let bytes = corpus_cb7("7z-nonsolid.cb7");
+    let mut nonsolid = open(&bytes);
+    assert_eq!(nonsolid.folders.len(), 5, "7z-nonsolid.cb7: folders");
+    let sizes: Vec<u64> = nonsolid.folders.iter().map(Folder::unpack_size).collect();
+    assert_eq!(
+        sizes,
+        vec![4521, 4154, 4455, 5184, 169],
+        "7z-nonsolid.cb7: one folder per page, each the size of its own page"
+    );
+    for (index, folder) in nonsolid.folders.iter().enumerate() {
+        assert_eq!(
+            folder.substreams.len(),
+            1,
+            "7z-nonsolid.cb7: folder {index} holds one file"
+        );
+    }
+    // Read them back to front, so the cache is missed on every entry and the
+    // walk cannot be right by only ever visiting folder 0.
+    for index in (0..nonsolid.entries.len()).rev() {
+        let data = nonsolid
+            .read(index)
+            .unwrap_or_else(|e| panic!("7z-nonsolid.cb7: entry {index}: {e}"));
+        assert_eq!(
+            data.len() as u64,
+            nonsolid.entries[index].size,
+            "7z-nonsolid.cb7: entry {index} is its recorded length"
+        );
+    }
+
+    // `-m0=LZMA2:d8k:c8k`: one folder, three LZMA2 chunks, each opening with a
+    // dictionary reset — two of them mid-stream, at output offsets 8 192 and
+    // 16 384, which are inside `page10.png` and inside `page2.png` rather than
+    // on any page boundary.
+    let bytes = corpus_cb7("7z-dictreset.cb7");
+    let mut chunked = open(&bytes);
+    assert_eq!(chunked.folders.len(), 1, "7z-dictreset.cb7: folders");
+    let folder = chunked.folders.first().expect("the one folder");
+    assert_eq!(
+        framing(packed_of(&bytes, folder)),
+        Framing {
+            chunks: 3,
+            uncompressed: 0,
+            dict_resets: 3,
+        },
+        "7z-dictreset.cb7: three range-coded chunks, three dictionary resets"
+    );
+    assert_eq!(
+        folder.substreams.len(),
+        5,
+        "7z-dictreset.cb7: the five pages are still one solid block"
+    );
+    for index in 0..chunked.entries.len() {
+        chunked
+            .read(index)
+            .unwrap_or_else(|e| panic!("7z-dictreset.cb7: entry {index}: {e}"));
+    }
+}
+
+/// A folder's packed bytes, which is what the LZMA2 framing lives in.
+fn packed_of<'a>(bytes: &'a [u8], folder: &Folder) -> &'a [u8] {
+    bytes
+        .get(folder.packed_at..folder.packed_at + folder.packed_len)
+        .expect("a folder's packed range is inside the file")
 }
