@@ -49,7 +49,9 @@ placeholder-plus-warning contract of rulings 2 and 10 in
 - **Bounds** in the `crates/tinker-pdf/tests/bounds_ledger.rs` style: symbol
   count, total dictionary pixel budget, and text-instance count, each a named
   constant checked before allocation (the `packed_size` pattern) and each a
-  ledger row measured against real OCR output rather than guessed.
+  ledger row. The scope said "measured against real OCR output rather than
+  guessed"; the corpus turned out to hold none, so the rows are stated
+  estimates that say so — the note under milestone 7 is the record.
 
 ## Non-goals
 
@@ -258,7 +260,7 @@ refinement as well and are unlocked by neither stage alone — which is the
 overlap the census exists to show and the reason it counts *files* rather than
 segments.
 
-### What a bound has to clear, and why milestone 7 cannot measure it here
+### What a bound has to clear, and why milestone 7 measures an estimate
 
 Milestone 7 asks for `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_BYTES` and
 `MAX_JBIG2_TEXT_INSTANCES` as ledger rows "each measured against a real
@@ -280,21 +282,50 @@ exercise one placement variant each. That is why they were so useful for
 milestone 4's REFCORNER and SBDSOFFSET coverage, and it is exactly why they are
 useless as a yardstick.
 
-So milestone 7's exit criterion cannot be met as written, and saying so is
+So milestone 7's exit criterion could not be met as written, and saying so was
 better than quietly satisfying it against files that would let any cap through.
-The rows must be **arithmetic about a plausible file, written down so it can be
-argued with** — which is what `bounds_ledger.rs`'s own header says its comic
+The rows had to be **arithmetic about a plausible file, written down so it can
+be argued with** — which is what `bounds_ledger.rs`'s own header says its comic
 and document yardsticks already are — rather than a measurement dressed up as
 one. The arithmetic to argue with: a 300 dpi A4 text page reduces to a few
 hundred distinct glyph bitmaps and a few thousand placements, so a 200-page
 document sharing one global dictionary reaches the low tens of thousands of
 symbols and the low thousands of instances per region.
 
-Getting a real measurement needs a file this repository does not have. Adding
-one means either committing OCR output — which `corpus/README.md`'s licensing
-position rules out for the same reason it rules out committing any corpus — or
-fetching a corpus that carries some. Neither is milestone 7's business to
-decide, so the rows land as stated estimates and the gap is named here.
+**Landed on that footing, 4 September 2026.** The three caps are `pub` and are
+rows 38, 39 and 40 of `bounds_ledger.rs`'s forty, each with a `**This cap**`
+table in its own doc comment and a clock-free `#[test]` in `jbig2.rs` that
+fires it by name. The second cap is `MAX_JBIG2_SYMBOL_PIXELS` rather than the
+`MAX_JBIG2_SYMBOL_BYTES` this section first named it: what the decoder charges
+is pixels, and a byte figure would have to pick a packing.
+
+| | `MAX_JBIG2_SYMBOLS` | `MAX_JBIG2_SYMBOL_PIXELS` | `MAX_JBIG2_TEXT_INSTANCES` |
+| --- | ---: | ---: | ---: |
+| The most any fixture in this repository spends | 3 | 72 | 5 |
+| The most any file in the corpus spends | 11 | — | 9 |
+| A 200-page bilevel scan sharing one global dictionary | 20 000 | 25 000 000 | 4 000 per region |
+| A 300-page reflowable book | 0 | 0 | 0 |
+| The cap | 100 000 | 67 108 864 | 4 194 304 |
+
+Two things in that table are the reason it is worth reading rather than
+skimming. The **estimate is in the published figure**: each row's `published`
+string is `100 000 (estimate)` and its siblings, and
+`every_bound_publishes_the_number_it_is` grew a fourth suffix to parse it, so
+a reader of the ledger cannot mistake the third line of the table for the
+first two. And the comic and fixed-document columns hold **a file neither of
+those formats is** — a CBZ page is a JPEG or a PNG, an XPS image is PNG, JPEG,
+TIFF or JPEG XR, and nothing in either path decodes JBIG2 — because the honest
+zero would leave the only two "does this cap refuse a real file" checks saying
+nothing at all about these three rows. `SCAN_SYMBOLS` in `bounds_ledger.rs`
+carries that notice beside the number.
+
+Getting the real measurement still needs a file this repository does not have.
+Adding one means either committing OCR output — which `corpus/README.md`'s
+licensing position rules out for the same reason it rules out committing any
+corpus — or fetching a corpus that carries some. That is **tier 0's
+production-corpus row**, which names this measurement as one of the things
+waiting on it; it was never milestone 7's to decide, and it is no longer a
+roadmap row of its own pretending to be blocked work.
 
 ### Milestone 5 landed, and the route to it is the point
 
@@ -618,7 +649,7 @@ Annex H test and were all wrong, so "it decodes and looks like a picture" is
 exactly as weak as this paragraph always said it was.
 
 | 6 | Huffman variants: Annex B tables, type-53 custom tables, 7.4.3.1.7 symbol IDs, MMR collective bitmaps via `T6Rows` | H.1's Huffman-coded page decodes pixel-identical to its arithmetic twin; an over-subscribed custom table refuses with an asserted warning | M |
-| 7 | Bounds and fuzz hardening | `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_BYTES`, `MAX_JBIG2_TEXT_INSTANCES` rows in `bounds_ledger.rs`, each measured against a real `jbig2enc`/OCRmyPDF output and none refusing it; a recorded fuzz session over the extended seeds with zero crashes | S |
+| 7 | Bounds and fuzz hardening | **Done**, with the exit criterion corrected rather than met: the three rows are in `bounds_ledger.rs` (the second as `MAX_JBIG2_SYMBOL_PIXELS`, which is what the decoder charges) and none refuses a real scan, but the yardstick is stated arithmetic and the rows publish the word **estimate** — the corpus holds no real OCR JBIG2 to measure against, and that measurement now waits on tier 0's production corpus. See the note above | S |
 | 8 | Corpus closure and docs | `cargo xtask corpus-run` shows `Capability::Jbig2` hit-rate ~0 in `ratchet.json`; every JBIG2-bearing corpus file renders without a placeholder warning, counted; one JBIG2 fingerprint in `determinism.rs`; the symbol/text refusal rows leave [../features/filters.md](../features/filters.md) | S |
 
 ### What Annex H.1 cannot adjudicate, and when it can

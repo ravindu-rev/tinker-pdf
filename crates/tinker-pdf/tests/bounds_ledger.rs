@@ -1,5 +1,43 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 4 September 2026, tier 1's two ledger rows.* **Five more rows, and
+//! the first three in this table that publish a number as an estimate.**
+//!
+//! The table goes from thirty-five to **forty**, and the five are the first
+//! here that belong to no container format: `MAX_ICC_TAGS` and `MAX_ICC_BYTES`
+//! bound a colour profile, and `MAX_JBIG2_SYMBOLS`,
+//! `MAX_JBIG2_SYMBOL_PIXELS` and `MAX_JBIG2_TEXT_INSTANCES` bound a PDF image
+//! filter. All five fired and were proved to fire before this milestone; what
+//! they had no answer for is the question this file asks — *is the number in
+//! the code the number in the ledger, does the cap sit under what its own
+//! inputs can ask for, and does it clear the thing the format is for.*
+//!
+//! Two of the five arrive with the discipline unchanged. `MAX_ICC_BYTES` clears
+//! the corpus's largest profile — 718 672 bytes, measured over every `acsp`
+//! stream in all 4 594 files — by 2.9x, and `MAX_ICC_TAGS` clears the busiest
+//! at eighteen tags by a factor of fifty-seven. Both were already exercised,
+//! but inside **one** shared refusal test among ten assertions, and the rule
+//! that each bound names a test that fires *it* is what makes a rename fail
+//! here rather than quietly leave a cap unproven; so each has its own now.
+//!
+//! The other three are the interesting half, and they are why
+//! [`every_bound_publishes_the_number_it_is`] learned a fourth suffix.
+//! `docs/design/jbig2-symbol-text.md` took the measurement its milestone 7
+//! asked for — every `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` in all
+//! 102 JBIG2-bearing corpus files — and found **8**, **11** and **9**. Nothing
+//! in a hundred files exceeds twenty of anything, because every one of them is
+//! a synthetic fixture built to exercise one placement variant: **the corpus
+//! holds no real OCR JBIG2 at all**, and a cap calibrated against it would
+//! admit anything. So those three rows' yardsticks are arithmetic, they say
+//! `(estimate)` in the number they publish, and the measurement milestone 7
+//! wanted is now a dependency of tier 0's production-corpus row rather than a
+//! row of its own claiming to be blocked.
+//!
+//! Saying `estimate` out loud costs one line in the parser and buys the thing
+//! this file exists for: a stated estimate that reads like a measurement is
+//! how `MAX_JPX_WORK` survived. `SCAN_SYMBOLS` carries the arithmetic and the
+//! one place where a column in this table holds a file its own format does not.
+//!
 //! *Amended, 22 August 2026, gap 31 milestone 13.* **No new row, and a third
 //! yardstick on every one of the thirty-four — which found two caps set below a
 //! real book.**
@@ -281,8 +319,11 @@ use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
 };
+use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
-use tinker_pdf_filters::MAX_PNG_SAMPLES;
+use tinker_pdf_filters::{
+    MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES,
+};
 use tinker_pdf_layout::limits as layout_limits;
 use tinker_pdf_xml::limits as xml_limits;
 
@@ -309,6 +350,12 @@ const XPS: &str = include_str!("../src/xps.rs");
 const XPS_TESTS: &str = include_str!("xps_opc.rs");
 const XPS_MARKUP_TESTS: &str = include_str!("xps_markup.rs");
 const XPS_GLYPH_TESTS: &str = include_str!("xps_glyphs.rs");
+/// One `include_str!` where the others are two, because these two crates keep
+/// their tests in the file that declares the constants rather than in a
+/// separate module — so `declared_in` and the `fires_in` source are the same
+/// text, and there is nowhere for a ledger and its firing test to drift apart.
+const ICC: &str = include_str!("../../tinker-pdf-color/src/icc.rs");
+const JBIG2: &str = include_str!("../../tinker-pdf-filters/src/jbig2.rs");
 
 /// One bound, as its own ledger publishes it.
 struct Bound {
@@ -333,13 +380,14 @@ struct Bound {
     /// The most gap 31's yardstick spends: **a 300-page reflowable book**.
     ///
     /// The third yardstick, and unlike the first two it is not an estimate.
-    /// Sixteen of these thirty-four rows are figures a real book can be
+    /// Sixteen of these forty rows are figures a real book can be
     /// *measured* against, and
     /// [`the_book_yardstick_is_not_below_a_real_book`] measures every book in
     /// both corpora against them on every run — the committed six always, the
     /// fetched twenty when `TINKER_EPUB_CORPUS` names them. Each of those
     /// sixteen is the largest figure any of the twenty-six actually spends,
-    /// rounded up; the other eighteen carry a derivation in their own comment.
+    /// rounded up; the other twenty-four carry a derivation in their own
+    /// comment.
     ///
     /// **Not an `Option`, and no row opts out.** Gap 30's milestone 9 had to go
     /// back and fill in seven `None`s that had stood for seven milestones, and
@@ -382,6 +430,51 @@ const BOOK_ENTRIES: u128 = BOOK_SPINE_ITEMS + 24 + 4 + 8;
 /// is the most any book in either corpus spends and a yardstick is a plausible
 /// book rather than the corpus.
 const BOOK_PATH_LEN: u128 = 90;
+
+/// **The three JBIG2 rows' yardstick, and the one place in this table where a
+/// column carries a file its own format does not hold.**
+///
+/// The other thirty-seven rows bound something a comic archive, an XPS package
+/// or an EPUB is made of. These three bound a *PDF image filter*, and none of
+/// the three container formats reaches it: a CBZ page is a JPEG or a PNG, an
+/// XPS image is PNG, JPEG, TIFF or JPEG XR, and a book's pictures are the same
+/// again — nothing in any of those paths decodes JBIG2. So the honest figure
+/// for [`Bound::comic`] and [`Bound::document`] on these three rows is zero,
+/// and a zero would make [`no_bound_refuses_a_two_hundred_page_comic`] and
+/// [`no_bound_refuses_a_dense_fixed_document`] say **nothing** about the only
+/// three rows the roadmap added them for.
+///
+/// What those two columns carry instead is the 200-page document this bound is
+/// actually for — **a bilevel scan sharing one global dictionary** — at gap
+/// 29's and gap 30's own scale, and this comment is the notice that it is not
+/// a comic and not an XPS package. [`Bound::book`] stays a zero, because a
+/// book's format really does settle the question.
+///
+/// It is **arithmetic rather than a measurement**, and that is not a lowered
+/// bar: gap 29's comic and gap 30's fixed document are estimates too, and this
+/// file's header says why that is the honest kind of number to write down.
+/// What it replaces is worse. `docs/design/jbig2-symbol-text.md` took the
+/// measurement milestone 7 asked for — `SDNUMNEWSYMS`, `SDNUMEXSYMS` and
+/// `SBNUMINSTANCES` off the segment headers of all 102 JBIG2-bearing corpus
+/// files — and found **8**, **11** and **9**. Every one of those files is a
+/// synthetic fixture built to exercise one placement variant, so a cap
+/// calibrated on them would admit anything; the three `published` strings say
+/// **estimate** out loud for exactly that reason.
+///
+/// The arithmetic, from that document: a 300 dpi A4 text page reduces to a few
+/// hundred distinct glyph bitmaps and a few thousand placements, so 200 pages
+/// against one shared dictionary reach the low tens of thousands of symbols
+/// and the low thousands of instances per region.
+const SCAN_SYMBOLS: u128 = 20_000;
+
+/// [`SCAN_SYMBOLS`]'s glyphs, at what one occupies: a 25 x 50 box, which is
+/// roughly a 10-point glyph at 300 dpi.
+const SCAN_SYMBOL_PIXELS: u128 = SCAN_SYMBOLS * 25 * 50;
+
+/// One **page** of [`SCAN_SYMBOLS`]'s document, because `SBNUMINSTANCES` is a
+/// text region's own count and a page carries one region or a few. A dense A4
+/// text page sets a few thousand characters.
+const SCAN_TEXT_INSTANCES: u128 = 4_000;
 
 fn ledger() -> Vec<Bound> {
     vec![
@@ -1299,6 +1392,142 @@ fn ledger() -> Vec<Bound> {
             declared_in: LAYOUT_LIMITS,
             fires_in: ("a_book_past_the_page_cap_is_refused_by_name", LAYOUT_TESTS),
         },
+        Bound {
+            name: "MAX_ICC_TAGS",
+            cap: MAX_ICC_TAGS as u128,
+            published: "1 024",
+            // The busiest of the six `.icc` seeds `fuzz/corpus/icc_profile/`
+            // commits, which the `icc_profile` target hands straight to
+            // `Profile::parse`. No `.pdf` or `.xps` fixture in this repository
+            // embeds a profile at all — measured, not assumed.
+            fixtures: 7,
+            // **Zero, and it is a fact about the format rather than an
+            // absence.** Nothing in this engine reads a PNG `iCCP` chunk or a
+            // JPEG `APP2` profile — there is no such code in
+            // `tinker-pdf-filters` — so a comic page carries its profile past
+            // this parser without it ever being opened.
+            comic: 0,
+            // **Eighteen**, the busiest profile in the corpus, measured by
+            // reading the count at offset 128 off every `acsp` stream in all
+            // 4 594 files. A fixed document reaches this cap for real: 15.2.5's
+            // `ContextColor` names a profile part, `xps::profiles` embeds it
+            // verbatim as an `/ICCBased` space, and rendering the synthesised
+            // document hands it to `Profile::parse` like any other.
+            document: 18,
+            // A book's pictures are PNG, JPEG, GIF or SVG and its stylesheets
+            // name sRGB by keyword; there is no `/ICCBased` anywhere in the
+            // reflowable path. The comic's zero, for the comic's reason.
+            book: 0,
+            // The count is a 32-bit field at offset 128, and it is read
+            // *before* the `12 * count` bytes it describes — so a 132-byte
+            // profile asks for a 51 GiB tag table and is refused for it.
+            reachable: 1 << 32,
+            reachable_because: "a 32-bit tag count, checked before the table it describes",
+            declared_in: ICC,
+            fires_in: (
+                "a_tag_count_past_the_cap_is_refused_before_the_table_is_walked",
+                ICC,
+            ),
+        },
+        Bound {
+            name: "MAX_ICC_BYTES",
+            cap: MAX_ICC_BYTES as u128,
+            published: "2 MiB",
+            // `srgb-para-curve.icc`, the largest of the six committed seeds.
+            fixtures: 392,
+            comic: 0,
+            // **718 672 bytes**, the largest profile in the corpus — a printer
+            // profile carrying a full set of lookup tables — measured over the
+            // same sweep as the row above. It is the figure the roadmap row
+            // that asked for these two rows names, and the margin over it is
+            // 2.9x.
+            document: 718_672,
+            book: 0,
+            // A profile arrives as a decoded stream, so what stands in front of
+            // this cap is the ceiling on one of those. Sixty-four times the
+            // cap, which is what makes the cap a cap.
+            reachable: tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128,
+            reachable_because: "`MAX_DECODED_STREAM`: 128 MiB of decoded stream may arrive",
+            declared_in: ICC,
+            fires_in: (
+                "a_profile_past_the_byte_cap_is_refused_before_its_signature_is_read",
+                ICC,
+            ),
+        },
+        Bound {
+            name: "MAX_JBIG2_SYMBOLS",
+            cap: MAX_JBIG2_SYMBOLS as u128,
+            // **`estimate` is in the published string on purpose**, and it is
+            // the one thing these three rows say that the other thirty-seven
+            // do not. See `SCAN_SYMBOLS`.
+            published: "100 000 (estimate)",
+            // Annex H's own dictionary, which is every committed JBIG2 fixture
+            // worth counting: `SDNUMEXSYMS` 3 at most, `SDNUMNEWSYMS` 2.
+            // Measured by walking the segment headers of all 22 seeds in
+            // `fuzz/corpus/jbig2/`.
+            fixtures: 3,
+            comic: SCAN_SYMBOLS,
+            document: SCAN_SYMBOLS,
+            // An EPUB carries no JBIG2: its pictures are PNG, JPEG, GIF or SVG
+            // and there is no PDF image filter anywhere in the reflowable path.
+            book: 0,
+            // `SDNUMNEWSYMS` is a 32-bit field at 7.4.3.1.5, read straight off
+            // the segment header, so twelve bytes may ask for four billion.
+            reachable: 1 << 32,
+            reachable_because: "`SDNUMNEWSYMS`, a 32-bit field read off the segment header",
+            declared_in: JBIG2,
+            fires_in: (
+                "a_dictionary_declaring_more_symbols_than_the_cap_is_refused_by_name",
+                JBIG2,
+            ),
+        },
+        Bound {
+            name: "MAX_JBIG2_SYMBOL_PIXELS",
+            cap: MAX_JBIG2_SYMBOL_PIXELS as u128,
+            published: "67 108 864 (estimate)",
+            // Annex H's two six-by-six symbols, decoded and measured rather
+            // than read off a header — this cap is the one of the three that
+            // accumulates rather than reading a field.
+            fixtures: 72,
+            comic: SCAN_SYMBOL_PIXELS,
+            document: SCAN_SYMBOL_PIXELS,
+            book: 0,
+            // **One symbol.** Width and height each accumulate from Annex B
+            // deltas whose tables carry 32-bit ranges and are refused only
+            // above `u32::MAX`, so a single symbol may be charged
+            // `u32::MAX` squared before a second is read. The only row in this
+            // table whose ceiling is the square of a *field width* rather than
+            // of another cap.
+            reachable: (u32::MAX as u128) * (u32::MAX as u128),
+            reachable_because: "one symbol's width times its height, each clamped at `u32::MAX`",
+            declared_in: JBIG2,
+            fires_in: (
+                "a_dictionary_past_the_symbol_pixel_cap_is_refused_before_it_allocates",
+                JBIG2,
+            ),
+        },
+        Bound {
+            name: "MAX_JBIG2_TEXT_INSTANCES",
+            cap: MAX_JBIG2_TEXT_INSTANCES as u128,
+            published: "4 194 304 (estimate)",
+            // The largest `SBNUMINSTANCES` in the 22 committed seeds, from the
+            // same header walk as the symbol row.
+            fixtures: 5,
+            comic: SCAN_TEXT_INSTANCES,
+            document: SCAN_TEXT_INSTANCES,
+            book: 0,
+            // `SBNUMINSTANCES` is a 32-bit field at 7.4.4.5, checked before a
+            // symbol is placed and before the region bitmap is made, so
+            // twenty-three bytes may ask for four billion composites.
+            reachable: 1 << 32,
+            reachable_because:
+                "`SBNUMINSTANCES`, a 32-bit field checked before the first placement",
+            declared_in: JBIG2,
+            fires_in: (
+                "a_text_region_declaring_more_instances_than_the_cap_is_refused_by_name",
+                JBIG2,
+            ),
+        },
     ]
 }
 
@@ -1308,8 +1537,10 @@ fn ledger() -> Vec<Bound> {
 /// 6 adds three; gap 31's milestone 3 adds one, its milestone 4 adds three, its
 /// milestone 6 adds eight, its milestone 7 adds four and its milestone 10 adds
 /// the one milestone 7 argued would arrive with the multi-pass layout; tier 4's
-/// W-ARCHIVE milestone 1 adds the one `ComicInfo.xml` needs. All thirty-five
-/// are here, and a bound added without a row fails this.
+/// W-ARCHIVE milestone 1 adds the one `ComicInfo.xml` needs; and tier 1's two
+/// ledger rows add the five that were fired but unrecorded — ICC's two and
+/// JBIG2's three. All **forty** are here, and a bound added without a row
+/// fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -1351,6 +1582,11 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_LINE_BREAK_WORK",
             "MAX_LAYOUT_WORK",
             "MAX_LAYOUT_PAGES",
+            "MAX_ICC_TAGS",
+            "MAX_ICC_BYTES",
+            "MAX_JBIG2_SYMBOLS",
+            "MAX_JBIG2_SYMBOL_PIXELS",
+            "MAX_JBIG2_TEXT_INSTANCES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -1456,7 +1692,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 35, "the ledger is thirty-five rows");
+    assert_eq!(measured, 40, "the ledger is forty rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -1488,7 +1724,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 35, "the ledger is thirty-five rows");
+    assert_eq!(ledger().len(), 40, "the ledger is forty rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -1694,7 +1930,19 @@ fn every_bound_publishes_the_number_it_is() {
     // The published renderings are the values, not decoration: every one of
     // them parses back to the constant it names.
     for bound in ledger() {
-        let published = bound.published.replace(' ', "");
+        // `(estimate)` joined the suffixes with tier 1's JBIG2 row, and it is
+        // the only one that is not a unit. Three caps bound a format no file in
+        // the corpus carries a real example of — the census found `SDNUMEXSYMS`
+        // 11 across 102 files that are all synthetic — so their yardsticks are
+        // arithmetic, and the roadmap's exit criterion is that the ledger
+        // **say so** rather than let a stated estimate read as a measurement.
+        // Stripped before the digits are parsed and not after, because
+        // `100000(estimate)` is not a number.
+        let published = bound
+            .published
+            .strip_suffix(" (estimate)")
+            .unwrap_or(bound.published);
+        let published = published.replace(' ', "");
         // `KiB` joined `MiB` and `GiB` in tier 4: `MAX_COMIC_INFO_BYTES` is the
         // first cap here small enough to be published in kibibytes, and a
         // ledger that had to write `65 536` to satisfy this check would be
@@ -1756,6 +2004,10 @@ fn every_bound_names_a_test_that_exists() {
     // `fires_in` and left out here is a file where a clock could be introduced
     // without this sweep noticing, which is half of the fifth check absent for
     // exactly one bound.
+    // `ICC` and `JBIG2` joined it with tier 1's two ledger rows, and they are
+    // the first entries here that are also a `declared_in`: those two crates
+    // keep their tests beside their constants, so one `include_str!` is both
+    // the ledger and the proof.
     for source in [
         ZIP_TESTS,
         PNG_TESTS,
@@ -1766,6 +2018,9 @@ fn every_bound_names_a_test_that_exists() {
         XPS_GLYPH_TESTS,
         EPUB_TESTS,
         CSS_BOUNDS_TESTS,
+        LAYOUT_TESTS,
+        ICC,
+        JBIG2,
     ] {
         assert!(
             !source.contains("Instant::now"),

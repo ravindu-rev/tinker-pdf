@@ -14,8 +14,9 @@ roadmap named both gaps and pointed them here, and the entry has since left
 it; the exit it recorded is that ICC profiles drive conversion and that
 known-answer tables computed from the specification's own equations hold
 ([render-verification](render-verification.md)). What is still open of this
-design — the refused profiles and the two ledger rows — is listed in the
-[roadmap](../ROADMAP.md) on its own.
+design — the refused profiles — is listed in the [roadmap](../ROADMAP.md) on
+its own; the two ledger rows closed on 4 September 2026 and the note below
+records what they measured.
 
 ## Scope
 
@@ -115,8 +116,9 @@ Two more numbers the milestones need. The device classes are `mntr` 2 428,
 `prtr` 316, `scnr` 5; the data spaces are RGB 2 286, GRAY 323, CMYK 138, Lab 2.
 And the versions are **v2 2 739, v4 9, v5 2** — so v2 is not a legacy case to
 tolerate, it is the case, and v4's structural additions are worth exactly nine
-files. The largest profile in the corpus is **718 672 bytes**, which is the
-figure the profile-size bound in `bounds_ledger.rs` has to clear.
+files. The largest profile in the corpus is **718 672 bytes** and the busiest declares
+**eighteen** tags, which are the two figures the ICC rows of
+`bounds_ledger.rs` have to clear.
 
 ### Stage 1: transparency-group colour spaces
 
@@ -237,8 +239,11 @@ fallback — now accompanied by a ruling-10 warning naming the object and
 the refusal (bad signature, unsupported tag, dimension over bounds) — for
 any profile the parser declines. The `ri` operator and `/Intent` select
 the compiled table set. Two new rows land in
-`crates/tinker-pdf/tests/bounds_ledger.rs`: maximum accepted profile size
-and maximum CLUT grid volume, measured against real embedded profiles.
+`crates/tinker-pdf/tests/bounds_ledger.rs`, measured against real embedded
+profiles. They landed as maximum accepted profile size and maximum **tag
+count** rather than maximum CLUT grid volume: `MAX_CLUT_ENTRIES` refuses by
+name and is reachable, but the yardstick that would give it a row is a grid
+volume, and the corpus census counts tags and bytes.
 
 ### Verification
 
@@ -278,7 +283,7 @@ and maximum CLUT grid volume, measured against real embedded profiles.
 | --- | --- | --- | --- |
 | 1 | `Group.space` resolved: form `/Group /CS` and page-level `/Group` read | Unit tests in resources.rs resolve `/CS` on both; a page-group fixture renders through `open_group` (asserted via its committed fingerprint changing when the page `/Group` is removed from the fixture) | S |
 | 2 | Group-space compositing: `CmykA8` buffers, complemented separable blends, `convert` at the three boundaries | The fixture pairs' fingerprints are committed and asserted unequal; injection (composite in RGB regardless) turns the suite red; `Lab` group `/CS` yields the typed warning | M |
-| 3 | `icc::Profile::parse` | **Done.** Header, tag table, `curv`/`para`/`XYZ` tags, ten typed refusals each reachable by a test; `icc_profile` fuzz target landed with it. Two changes from the plan: `chad` is not read (a matrix profile's columns are already adapted, so applying it again would adapt twice), and the two `bounds_ledger.rs` rows are **not** added — see the note below | M |
+| 3 | `icc::Profile::parse` | **Done.** Header, tag table, `curv`/`para`/`XYZ` tags, ten typed refusals each reachable by a test; `icc_profile` fuzz target landed with it. Two changes from the plan: `chad` is not read (a matrix profile's columns are already adapted, so applying it again would adapt twice), and the two `bounds_ledger.rs` rows arrived later, on 4 September 2026, rather than with the parser — see the note below | M |
 | 4 | `Transform` for matrix/TRC profiles | **Done.** Compiled 4 096-entry tables, an s15.16 matrix that is the profile's columns already multiplied by XYZ-to-sRGB, integer evaluation; `cargo xtask libm` passes. The sRGB round trip holds within one level, and grey profiles ride the same path with one curve | M |
 | 5 | LUT profiles | **Done** for v2 mft1 and mft2, which a second census found to be 415 of the corpus 418 A2B tags — 409 mft2, 6 mft1, and 408 of them four channels to three. v4 mAB is three tags and refused by name. The grid is multilinear over its axes in integers, and both the v2 legacy Lab encoding and XYZ are read | L |
 | 6 | `ColorSpace::Icc` wired | **Done**, except rendering intents, which stay parsed and discarded. No ICCBased fingerprint was committed and none was needed: no existing fixture names an `ICCBased` space, so nothing moved, and the facade tests assert pixels directly. The fallback is asserted rather than warned — see the note below | M |
@@ -324,15 +329,52 @@ distinguishable; a profile that could not be read makes no page less correct
 than it was yesterday. The refusal is a typed `IccError` the caller matches on,
 and the corpus number is the report.
 
-**No `bounds_ledger.rs` rows.** `MAX_ICC_TAGS` and `MAX_ICC_BYTES` exist and
-fire, but the ledger's contract is heavier than a constant: each row publishes
-its figure in a markdown table in the constant's own doc, names a test that
-fires it without a clock, and clears three yardsticks. `MAX_ICC_BYTES` clears
-the corpus's largest profile (718 672 bytes) by a factor of nearly three, which
-is the measurement that matters and is recorded above; the ledger rows are a
-separate piece of work with its own discipline, and claiming them here without
-doing it would be the dressing-up milestone 7 of the JBIG2 plan was corrected
-for.
+**The two `bounds_ledger.rs` rows, landed 4 September 2026.** They were
+declined when milestone 3 shipped, in these words: the ledger's contract is
+heavier than a constant — each row publishes its figure in a markdown table in
+the constant's own doc, names a test that fires it without a clock, and clears
+three yardsticks — and claiming it without doing it would be the dressing-up
+milestone 7 of the JBIG2 plan was corrected for. That was right, and the work
+has since been done rather than the claim withdrawn.
+
+`MAX_ICC_TAGS` and `MAX_ICC_BYTES` are rows 36 and 37 of forty. Both carry the
+table, both name a dedicated `#[test]` in `icc.rs` — `Profile::parse`'s
+refusals were already exercised, but inside **one** shared test among ten
+assertions, and a bound whose proof is one assertion in a test named after
+something else is a bound a rename can silently unprove. What the rows add
+beyond the refusal is the ordering each cap depends on: the byte cap fires
+before the `acsp` signature is read, and the tag cap before the `12 * count`
+table it describes is walked, so a 132-byte profile declaring four billion tags
+is refused rather than indexed into.
+
+The five figures per row, measured rather than recalled:
+
+| | `MAX_ICC_TAGS` | `MAX_ICC_BYTES` |
+| --- | ---: | ---: |
+| The most any fixture in this repository spends | 7 | 392 |
+| A 200-page comic archive | 0 | 0 |
+| A dense fixed document | 18 | 718 672 |
+| A 300-page reflowable book | 0 | 0 |
+| The cap | 1 024 | 2 MiB |
+
+The two zeros are facts about those formats rather than absences of
+measurement, and they have one cause: **nothing in this engine reads a PNG
+`iCCP` chunk or a JPEG `APP2` profile**, so a comic page and a book picture
+carry their profiles past this parser without them ever being opened. A fixed
+document is different, and the reason is worth recording because it is not
+obvious from `xps/profiles.rs`, which reads only §7.2's header through
+`icc::data_space` and never calls `Profile::parse` at all: a `ContextColor`
+profile part is embedded **verbatim** into the synthesised PDF as an
+`/ICCBased` space, and it is *rendering that document* — `Resources`'s
+`ICCBased` arm — that hands it to the parser. So the XPS route reaches these
+caps by the ordinary PDF road, one pass later than it looks.
+
+The document column's two numbers are the corpus's own, over every `acsp`
+stream in all 4 594 files: the largest profile is **718 672 bytes** and the
+busiest declares **eighteen** tags. The margins are 2.9x and 57x. Eighteen
+corrects the "declares seventeen" this document and the constant both carried;
+the census that produced seventeen counted profiles the parser *accepts*, and a
+cap is spent by profiles it is handed.
 
 **`chad` is not read.** The plan lists it. A matrix profile's `rXYZ`/`gXYZ`/
 `bXYZ` columns are already relative to the D50 connection space — that is what
@@ -358,7 +400,7 @@ recover the *unadapted* primaries, which nothing here does.
 | Risk | Mitigation |
 | --- | --- |
 | A platform transcendental sneaks into per-pixel evaluation and rendering diverges across targets | Evaluation is integer/fixed-point by construction; `cargo xtask libm` fails the build on any transcendental in `tinker-pdf-color`; the committed fingerprints are measured on all four targets |
-| Hostile profiles: absurd tag counts, CLUT grids sized to exhaust memory, overlapping tag data | Ruling 1 discipline — the `icc_profile` fuzz target lands with the parser; profile size and CLUT volume are measured rows in `bounds_ledger.rs`; over-bounds is a typed refusal to `Approximated`, never an allocation |
+| Hostile profiles: absurd tag counts, CLUT grids sized to exhaust memory, overlapping tag data | Ruling 1 discipline — the `icc_profile` fuzz target lands with the parser; profile size and tag count are measured rows in `bounds_ledger.rs` and CLUT volume is a named refusal without one; over-bounds is a typed refusal to `Approximated`, never an allocation |
 | CMYK group buffers (5 bytes/pixel) inflate memory on group-heavy pages | Buffers are already bounded to the group's device-space extent and `MAX_GROUP_BUFFERS` caps the count; the existing decline-and-warn path (`GroupBudgetSpent`) absorbs the excess |
 | Non-separable blends in CMYK groups are an approximation and a reviewer mistakes it for a bug | The conversion is a named, warned limit on the type and in this doc; the fixture for it commits the approximated fingerprint so any silent change is caught |
 | Every colour-touching fingerprint churns when the CMM lands | Expected and staged: milestone 6 re-records fingerprints in its own PR with before/after renders attached, the discipline `corpus/ratchet.json` updates already follow |
