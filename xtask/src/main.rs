@@ -69,7 +69,7 @@ bindings-parity options:
 
 corpus-run options:
   --corpus NAME   only this one; repeatable
-  --timeout N     seconds per file before the child is killed (default 20)
+  --timeout N     seconds per file before the child is killed (default 60)
   --dpi D         render resolution (default 72)
   --fonts PATH    a face, or directory of faces, for documents embedding none
   --fonts synthetic

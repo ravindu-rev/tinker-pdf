@@ -6,7 +6,7 @@ fingerprint, render quality is a perceptual budget, coverage of the real
 world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
-Numbers on this page were measured in August 2026, except the suite total, the fuzz sessions and the corpus attributions below, which are 4 September 2026. `cargo test --workspace`
+Numbers on this page were measured in August 2026, except the suite total, the fuzz sessions and the corpus attributions below, which are 4-5 September 2026. `cargo test --workspace`
 is **4 446 passed, 0 failed, 45 ignored** across 204 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
@@ -283,7 +283,7 @@ clean result at 8/s is not filed as the same evidence as a clean result at
 
 Four of those figures are new. `pki_der`, `pki_cms`, `shape` and `signatures`
 were the four targets with no session at all — they counted toward the target
-list and not toward the executions — and each got one on **4 September 2026**,
+list and not toward the executions — and each got one on **4-5 September 2026**,
 600 seconds asked for apiece, one core, `rustlang/rust:nightly` with rustc
 1.100.0-nightly (a69a63265 2026-09-03) and cargo-fuzz 0.13.2, run in Docker on
 `x86_64-unknown-linux-gnu` because libFuzzer does not build for
@@ -445,17 +445,22 @@ signal is worth stating — one unit of work longer than the stall window is
 silent for the same reason a hang is, so what the runner claims honestly is
 *made no observable progress for half its budget*.
 
-**The pdf.js pass bar is load-sensitive, and here is which files and why.**
-Measuring the corpus per file: `freeculture.pdf` takes 20 122 ms and
-`tiling-pattern-box.pdf` 20 010 ms against the 20-second limit, and the
-next slowest file in that corpus is 13 138 ms. Two files sit within a
-factor of two of the limit and nothing else is close, so a run competing
-with a build for the machine flips one or both, `passed` falls from 963,
-and the strict and metamorphic rows fall with it because those two files
-drop out of every denominator. It arrived twice looking like an engine that
-had stopped rendering before it was measured rather than assumed.
+**The pdf.js pass bar was load-sensitive, and here is which files and why it
+is not any more.** Measuring the corpus per file: `freeculture.pdf` takes
+20 122 ms and `tiling-pattern-box.pdf` 20 010 ms against what was a 20-second
+limit, and the next slowest file in that corpus is 13 138 ms. Two files sat
+within a factor of two of the limit and nothing else was close, so a run
+competing with a build for the machine flipped one or both, `passed` fell from
+963, and the strict and metamorphic rows fell with it because those two files
+dropped out of every denominator. It arrived three times looking like an engine
+that had stopped rendering.
 
-**Measured again on 4 September 2026, and the bar still could not be
+The limit is **sixty seconds** since 4-5 September 2026, taken together with
+deleting the metamorphic budget gate below, and the two files clear it by a
+factor of three. That is a real change to what the pass rate means and it is
+argued where it was made rather than here.
+
+**Measured again on 4-5 September 2026, and the bar still could not be
 reproduced here.** Two `--fonts synthetic` runs on an otherwise idle desktop
 gave 961 and 960 against the recorded 963, with the same two files timing out
 and, on one run, one of them *stalling* rather than timing out. The degradation
@@ -509,19 +514,26 @@ and the runner fails the run when that and the `--fonts` setting disagree, in
 either direction.
 
 The fourth axis is the metamorphic one, and its denominator is worth being
-honest about. A relation is not asked of a file that has already spent much of
-the runner's budget opening and rendering, because the relations cost roughly
-that again twice over and a timeout would move the *pass* rate — a different
-measurement that was here first. That gate is a **clock**, and a clock deciding
-a ratcheted number means a file near the line can be asked on one run and
-declined on the next: one run recorded `dpi` at 572 of 579 and the next at 572
-of 580. Nothing deterministic replaces it — `qpdf/numeric-and-string-2.pdf` is
-16 KB with 22 objects and takes 4.9 seconds, while files a hundred times its
-size take a tenth of that — so the line is **sited** instead: every corpus file
-between one and six seconds was timed, and 3 100 ms is the middle of the widest
-gap in that distribution, 2 885 ms below and 3 385 ms above. The per-file
-report carries each document's `cost` — bytes, objects and first-page pixels —
-which is the measurement that settled it.
+honest about. **A relation used to be declined for a file that had already
+spent much of the runner's budget opening and rendering**, because the relations
+cost roughly that again twice over and a timeout would move the *pass* rate — a
+different measurement that was here first. That gate was a **clock**, and a
+clock deciding a ratcheted number meant a file near the line could be asked on
+one run and declined on the next: one run recorded `dpi` at 572 of 579 and the
+next at 572 of 580. The nightly failed on exactly that for a week.
+
+Nothing deterministic could replace it, which was measured rather than assumed —
+`qpdf/numeric-and-string-2.pdf` is 16 KB with 22 objects and was declined at
+6.3 s, while its sibling `numeric-and-string-1.pdf`, 18 KB and 15 objects, was
+admitted at 8.9 s. So on **4-5 September 2026 the gate was deleted and the
+per-file timeout raised to sixty seconds**, which the deleted comment had
+considered and rejected because a longer timeout changes what the pass rate
+means. It does, and the change was measured first: the whole corpus in 95
+seconds, nothing timing out anywhere, and every one of the twelve
+corpus-and-relation counts up or equal. What declines a relation now is a
+property of the document, so `compared` is a function of the corpus rather than
+of the machine. The per-file report still carries each document's `cost` —
+bytes, objects and first-page pixels — because it is what ruled a cost gate out.
 
 The third axis is ruling 13's, and it is about the **writer** rather than the
 reader: every file this engine read cleanly is rewritten in memory and the

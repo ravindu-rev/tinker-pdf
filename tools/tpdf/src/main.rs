@@ -976,34 +976,6 @@ const DPI_BUDGET: f64 = 0.02;
 /// already carries for the same class of reason.
 const ROTATE_BUDGET: f64 = 0.02;
 
-/// How long a file may already have taken before its relations are skipped.
-///
-/// The relations cost roughly what opening and rendering the first page cost,
-/// twice over, so a file already well into the corpus runner's twenty-second
-/// budget is one where asking them risks the timeout — and a timeout would
-/// move the *pass* rate, which is a measurement this one must not disturb.
-///
-/// **This is a clock, and a clock decides a number the ratchet compares.**
-/// That is worth saying plainly rather than burying: `compared` is the
-/// denominator of the metamorphic rate, so a file sitting near this line can
-/// be asked on one run and declined on the next, and the bar moves by one file
-/// for no reason anybody changed. It happened: a run recorded `dpi` at 572 of
-/// 579 and the next said 572 of 580.
-///
-/// Nothing deterministic replaces it. The `cost` line beside this reports the
-/// three properties of a document that ought to bound the work — bytes,
-/// objects and first-page pixels — and measured against the corpus they do
-/// not: `qpdf/numeric-and-string-2.pdf` is 16 KB with 22 objects and takes 4.9
-/// seconds, while files a hundred times its size take a tenth of that.
-///
-/// So the line is **sited** rather than chosen: 3 100 ms is the middle of the
-/// widest gap in the measured distribution. Every corpus file between one and
-/// six seconds was timed (4 525 files, 72 dpi, August 2026); the slowest
-/// admitted is 2 885 ms and the fastest declined is 3 385 ms, so the nearest
-/// file either side is 7 % away rather than the 3 % that two seconds gave.
-/// Moving this number re-records the bar, which is a commit somebody reviews.
-const META_BUDGET_MS: u64 = 3_100;
-
 /// A share of a page's pixels, for a relation's report.
 #[allow(
     clippy::cast_precision_loss,
@@ -1050,32 +1022,39 @@ impl Relation {
 ///
 /// Only the first page. Every relation costs at least one extra render and the
 /// rotation and crop ones cost a save and a reopen as well, so asking every
-/// page of a four-thousand-file corpus would turn a twenty-second timeout into
-/// the thing being measured.
-fn metamorphic(
-    doc: &Document,
-    options: &Options,
-    fonts: Option<&Arc<SimpleFontProvider>>,
-    spent: std::time::Duration,
-) {
-    // **The relations may not cost the file its outcome**, and this line is
-    // there because they did. Each one re-renders the first page and two of
-    // them save and reopen the document, so on a slow file the extra work ran
-    // the corpus runner's twenty-second timeout out: the first recorded run
-    // turned three pdf.js files that had always passed into timeouts, and
-    // wrote that in as the new bar.
-    //
-    // A file that has already spent this much of its budget opening and
-    // rendering is one whose relations are *not asked*, which the record says
-    // in its own words. The alternative — a longer timeout — would change what
-    // the pass rate means, and the pass rate is a different measurement that
-    // was here first.
-    if spent > std::time::Duration::from_millis(META_BUDGET_MS) {
-        for name in ["rotate", "crop", "dpi"] {
-            Relation::Skipped("the file spent its budget opening and rendering").print(name);
-        }
-        return;
-    }
+/// page of a four-thousand-file corpus would turn the timeout into the thing
+/// being measured. Asking the first page of every file costs 95 seconds over
+/// 4 525 of them, which is what made deleting the budget gate affordable.
+///
+/// **There used to be a clock here, and deleting it is what this comment is
+/// for.** `META_BUDGET_MS` declined the relations for any file that had
+/// already spent 3 100 ms opening and rendering, on the reasoning that the
+/// extra work risked the runner's twenty-second timeout and a timeout would
+/// move the *pass* rate. The cost of that was stated in the same comment and
+/// then paid every night: `compared` is the denominator of a ratcheted rate,
+/// so a file near the line was asked on one run and declined on the next, and
+/// the nightly corpus job failed for a week on ten regressions that were all
+/// denominators moving under load rather than the engine changing.
+///
+/// Nothing deterministic could replace it, and that was measured rather than
+/// assumed — `qpdf/numeric-and-string-2.pdf` is 16 KB with 22 objects and was
+/// declined at 6.3 s, while its sibling `numeric-and-string-1.pdf`, 18 KB and
+/// 15 objects, was admitted at 8.9 s. Cost does not predict time here.
+///
+/// So the gate is gone and the timeout is sixty seconds instead, which the old
+/// comment considered and rejected because *"a longer timeout would change what
+/// the pass rate means"*. It does, and the change was measured before it was
+/// taken (4 525 files, 72 dpi, 4-5 September 2026): the whole corpus runs in
+/// **95 seconds**, nothing times out, and every one of the twelve
+/// corpus-and-relation counts goes **up or stays equal** — pdf.js `rotate` 838
+/// compared to 840, `dpi` 944 to 948, veraPDF's ten-thousand-page
+/// implementation-limit fixture finishing for the first time. The pass rate did
+/// not fall; it rose by one.
+///
+/// What is left declining a relation is a property of the document — no pages,
+/// encrypted, opened with a warning, a page too large to render twice — so
+/// `compared` is a function of the corpus and not of the machine.
+fn metamorphic(doc: &Document, options: &Options, fonts: Option<&Arc<SimpleFontProvider>>) {
     if doc.page_count() == 0 {
         for name in ["rotate", "crop", "dpi"] {
             Relation::Skipped("the document has no pages").print(name);
@@ -1530,8 +1509,14 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     }
 
     // What this document costs to work on, as properties of the document.
-    // Read by nothing yet; measured so the metamorphic gate can stop being a
-    // clock. See `META_BUDGET_MS`.
+    //
+    // Reported rather than acted on. It was measured so that the metamorphic
+    // gate could stop being a clock, and the measurement said it could not:
+    // bytes, objects and pixels do not predict the time a file takes, which is
+    // why the gate was deleted rather than replaced. The three numbers stay
+    // because a per-file report of what a corpus costs is worth having on its
+    // own, and because the next reader deserves the evidence rather than the
+    // conclusion.
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let objects = doc.cos().xref().len();
     let pixels = doc.page(0).map_or(0u64, |page| {
@@ -1549,7 +1534,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
 
     println!("phase strict");
     strict(&doc);
-    metamorphic(&doc, options, fonts, started.elapsed());
+    metamorphic(&doc, options, fonts);
 
     for (kind, count) in &kinds {
         println!("warn {kind} {count}");

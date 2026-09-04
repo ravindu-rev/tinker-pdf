@@ -12,16 +12,16 @@
       "degraded": 146,
       "metamorphic": {
         "crop": {
-          "compared": 829,
-          "held": 791
+          "compared": 831,
+          "held": 793
         },
         "dpi": {
-          "compared": 944,
-          "held": 914
+          "compared": 948,
+          "held": 918
         },
         "rotate": {
-          "compared": 838,
-          "held": 676
+          "compared": 840,
+          "held": 678
         }
       },
       "name": "pdfjs",
@@ -51,28 +51,28 @@
       "degraded": 39,
       "metamorphic": {
         "crop": {
-          "compared": 2885,
-          "held": 2885
+          "compared": 2886,
+          "held": 2886
         },
         "dpi": {
-          "compared": 2906,
-          "held": 2884
+          "compared": 2907,
+          "held": 2885
         },
         "rotate": {
-          "compared": 2888,
-          "held": 2865
+          "compared": 2889,
+          "held": 2866
         }
       },
       "name": "verapdf",
       "outcomes": {
         "crashed": 0,
         "failed": 0,
-        "passed": 2906,
-        "timed_out": 1
+        "passed": 2907,
+        "timed_out": 0
       },
-      "passed": 2906,
-      "strict_clean": 2890,
-      "strict_eligible": 2890,
+      "passed": 2907,
+      "strict_clean": 2891,
+      "strict_eligible": 2891,
       "tagged": {
         "elements": 3521,
         "files": 589,
@@ -89,16 +89,16 @@
       "degraded": 110,
       "metamorphic": {
         "crop": {
-          "compared": 471,
-          "held": 464
+          "compared": 472,
+          "held": 465
         },
         "dpi": {
-          "compared": 582,
-          "held": 582
+          "compared": 583,
+          "held": 583
         },
         "rotate": {
-          "compared": 479,
-          "held": 479
+          "compared": 480,
+          "held": 480
         }
       },
       "name": "qpdf",
@@ -160,7 +160,7 @@
   "schema": 2,
   "settings": {
     "dpi": 72,
-    "fonts": "synthetic-1",
-    "timeout_seconds": 20
+    "fonts": "synthetic-2",
+    "timeout_seconds": 60
   }
 }

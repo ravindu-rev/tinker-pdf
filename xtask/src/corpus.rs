@@ -116,6 +116,15 @@ pub struct RunArgs {
     /// Only these corpora, by lock name. Empty means all of them.
     pub only: Vec<String>,
     /// The per-file timeout.
+    ///
+    /// Sixty seconds since 4-5 September 2026, up from twenty. The metamorphic
+    /// relations used to be declined for any file that had already spent
+    /// 3 100 ms, precisely so that the extra work could not run twenty seconds
+    /// out — and that clock decided a ratcheted denominator, so the nightly
+    /// failed for a week on counts that moved with the runner's load. Deleting
+    /// the gate means the relations are always asked, which needs the room.
+    /// Measured before it was taken: the whole corpus in 95 seconds, nothing
+    /// timing out, every relation count up or equal.
     pub timeout: Duration,
     /// Render resolution.
     pub dpi: f64,
@@ -141,7 +150,7 @@ impl Default for RunArgs {
     fn default() -> RunArgs {
         RunArgs {
             only: Vec::new(),
-            timeout: Duration::from_secs(20),
+            timeout: Duration::from_secs(60),
             // 72 dpi: one device pixel per point. The question this run asks
             // is whether a bitmap comes back at all, and asking it four times
             // over at 150 costs hours across four thousand files without

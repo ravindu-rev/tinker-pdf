@@ -24,12 +24,12 @@ its two font-bearing siblings:
 | Measure | Value |
 | --- | ---: |
 | Corpus files (pdf.js 974, veraPDF 2 907, qpdf 637, PDF Association 7) | 4 525 |
-| Render every page | 4 484 |
-| Do not (pdf.js 11, veraPDF 1 timeout, qpdf 29) | 41 |
+| Render every page | 4 485 |
+| Do not (pdf.js 11 password-refused, qpdf 29: 25 password-refused, 4 headerless) | 40 |
 | Rendered with something reported, no faces / synthetic face / bundled faces | 929 / 299 / 330 |
-| `rotate` held of asked | 4 030 of 4 211 |
-| `crop` held of asked | 4 148 of 4 191 |
-| `dpi` held of asked | 4 388 of 4 439 |
+| `rotate` held of asked | 4 034 of 4 215 |
+| `crop` held of asked | 4 152 of 4 195 |
+| `dpi` held of asked | 4 394 of 4 445 |
 
 The suite stands at 4 446 passed, 0 failed, 45 ignored as
 [verification.md](verification.md) records it, measured 4 September 2026.
@@ -85,7 +85,6 @@ of reason — it is a licence limit, and it is under Named non-goals below.
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
 | The nine reviewed goldens have not been reviewed. The mechanism is done — `render_goldens.rs` parses each `.ppm`'s header, refuses a field that is absent, blank or whitespace, re-renders every family and compares byte for byte, and holds a size ceiling so reviewing one stays a real act — and `UNREVIEWED` lists all nine families because no person has read them | `UNREVIEWED` in `crates/tinker-pdf/tests/render_goldens.rs`, counted; the three injections on the mechanism are each caught by exactly the check written for them | a person reads each golden against the clause its header names, their name and the date replace `unreviewed` in that header, and `UNREVIEWED` empties | S, and it is a reading rather than work |
-| `corpus/ratchet-fonts.json` is recorded under `synthetic-1` and the face has been `synthetic-2` since 31 August 2026, so `--fonts synthetic --check` refuses before it compares anything. The re-record is measured and **not committed**: this machine cannot reproduce the recorded pdf.js pass count. Two runs on 4 September 2026 gave 961 and 960 against a recorded 963, with `freeculture.pdf` and `tiling-pattern-box.pdf` — the two files [verification.md](verification.md) already names as sitting within a factor of two of the twenty-second limit — timing out. Degradation, which is what the fonts bar is *for*, improved: 299 to 298 | `xtask/src/face.rs`; `grep synthetic corpus/ratchet-fonts.json`; the two runs above | a `--fonts synthetic --record` run whose pass counts hold at 963, on a machine quiet enough to produce them; or a recorded decision to lower that floor, which is a review rather than a run | S, blocked on a quiet machine |
 | The thirty-six corpus files refused for a password are abstentions rather than measurements. Each is attributed and the passwords are stated upstream — eight qpdf fixtures carry theirs in their own filenames — so a `corpus/passwords.tsv` read by the runner would turn them into measurements | [verification.md](verification.md), "The forty-one that do not render every page" | a decision: opening them moves `passed` from 4 484 toward ~4 520 and re-records every ratchet baseline, `degraded`, `strict_eligible` and all three metamorphic denominators with it | a decision, then S |
 | Metamorphic residue: the largest class is attributed and the tail is not. A **tiling pattern** is the one construct of seven that fails the `dpi` relation at all — 27 % of a page where a rectangle, diagonal edges, a transparency group, a shading, an image off the sample grid and text each move zero — because the renderer rasterises a cell once and blits it at *rounded* device offsets, and a rounding is a function of the grid. In the corpus it is 25 of the 51 `dpi` failures, 13 of 43 `crop` and 17 of 181 `rotate`, against a base rate of 2.2-2.4 % among the thousands of files that held each relation. What is left unexplained is 26 `dpi`, 30 `crop` and 164 `rotate` files carrying no pattern | `crates/tinker-pdf/tests/metamorphic_classes.rs`, whose six zeros are asserted and whose census is above | the remainder attributed the same way — from a witness rather than a guess — in a successor to [design/image-edges.md](design/image-edges.md), or fixed. `dpi` on every file is a stated non-goal there | M |
 
