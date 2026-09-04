@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tinker_pdf::{
     Bitmap, CosDocument, Dict, Document, LadderLevel, ObjRef, Object, Page, RenderOptions,
@@ -24,7 +25,8 @@ tpdf — inspect and convert PDFs with the tinker-pdf engine
 usage:
   tpdf info    <file.pdf> [--password P]
   tpdf text    <file.pdf> [--page N] [--password P]
-  tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--no-annotations]
+  tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--jobs N]
+                                    [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
@@ -37,6 +39,7 @@ options:
   --stream     with --object, write that object's stream data to stdout
   --raw        with --stream, before the filters rather than after
   --dpi D      resolution for render (default 150)
+  --jobs N     render N pages at once (default 1)
   --out DIR    where render writes its PNMs
   --fonts PATH a face, or a directory of faces, for documents that embed none
   --fonts bundled
@@ -45,6 +48,15 @@ options:
   --quiet      only report failures
   --strict     with check, also validate against ISO 32000 strictly
   --pdfa       with check, also validate against ISO 19005 (PDF/A)
+
+`--jobs` is the one flag that is meant to change nothing but the clock. A
+`Document` is `Send + Sync` and the pages of one are independent — each
+writes its own file — so `render` walks them on a pool of threads. The pool
+lives here and not in the library: the engine spawns no thread on any
+target, so who renders on what is the caller's business, and this is a
+caller. Every page's output is buffered and printed in page order after the
+join, so `--jobs 8` and `--jobs 1` write the same bytes to the same files
+and to stdout. The default is 1.
 
 `check` opens each file and reports its warnings, exiting non-zero if any
 file failed to open at all. It never renders, so it is the fast pass over a
@@ -127,6 +139,12 @@ struct Options {
     page: Option<u32>,
     object: Option<u32>,
     dpi: f64,
+    /// How many pages `render` draws at once.
+    ///
+    /// **One by default**, so nothing about an existing invocation changes
+    /// unless it is asked for — not the wall time, not the number of threads
+    /// in the process, and not one byte of the output either way.
+    jobs: usize,
     out: Option<String>,
     fonts: Option<String>,
     password: Option<String>,
@@ -159,6 +177,7 @@ impl Options {
             page: None,
             object: None,
             dpi: 150.0,
+            jobs: 1,
             out: None,
             fonts: None,
             password: None,
@@ -203,6 +222,18 @@ impl Options {
                         return Err(format!("`--dpi {raw}` is not a resolution"));
                     }
                     options.dpi = d;
+                }
+                // Zero is refused rather than clamped: `--jobs 0` is a person
+                // asking for something, and a run that silently did the
+                // opposite of what the number said would be the wrong kind of
+                // forgiving. Same spelling as `cargo xtask corpus-run`'s.
+                "--jobs" => {
+                    let raw = value()?;
+                    options.jobs = raw
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| format!("`--jobs {raw}` is not a positive number"))?;
                 }
                 "--object" => {
                     let raw = value()?;
@@ -484,25 +515,106 @@ fn render(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "page".to_string());
 
-    for index in options.pages(doc) {
-        let Some(page) = doc.page(index) else {
-            continue;
-        };
-        let bitmap = page.render(&RenderOptions {
-            annotations: options.annotations,
-            ..RenderOptions::at_dpi(options.dpi)
-        });
-
-        let out = format!("{dir}/{stem}-{:04}.pnm", index + 1);
-        write_pnm(&out, &bitmap)?;
-        if !options.quiet {
-            println!("{out} {}x{}", bitmap.width, bitmap.height);
-            for warning in &bitmap.warnings {
-                println!("  {warning:?}");
+    // One page that will not write reports itself and the rest still render,
+    // which is `run`'s policy over files applied to pages. A `?` here used to
+    // abandon every page after the first failed write, and the pages are
+    // independent: a full disk on page 3 is no reason to have nothing for
+    // pages 4 onwards.
+    let mut failed = 0usize;
+    for report in render_pages(options, dir, &stem, doc) {
+        match report {
+            Ok(lines) => {
+                if !options.quiet {
+                    print!("{lines}");
+                }
+            }
+            Err(message) => {
+                eprintln!("tpdf: {message}");
+                failed += 1;
             }
         }
     }
-    Ok(())
+
+    match failed {
+        0 => Ok(()),
+        1 => Err("1 page failed".to_string()),
+        n => Err(format!("{n} pages failed")),
+    }
+}
+
+/// Renders the pages `--jobs` at a time and returns what each one has to say,
+/// in page order, whether or not it succeeded.
+///
+/// **The threads are here and not in the library.** `Document` is
+/// `Send + Sync` and `Document::page` hands back an owned `Page` — it clones
+/// an `Arc` rather than borrowing — so a worker needs one shared `&Document`
+/// and a page index and no lifetime work at all. What the engine will not do
+/// is spawn: it owns no runtime, on any target, wasm included, so the pool
+/// belongs to whoever is calling. See the Concurrency section of
+/// `docs/architecture.md`.
+///
+/// **Ordered afterwards**, for the reason `xtask`'s corpus pool sorts its own
+/// results: output that moves between runs is not diffable. Each worker
+/// buffers its page's lines and this hands them back sorted by the position
+/// they were claimed from the queue, so `--jobs 8` and `--jobs 1` print the
+/// same bytes. A `--jobs` that reordered stdout would be a flag that changes
+/// the answer, and this one is only allowed to change the clock.
+fn render_pages(
+    options: &Options,
+    dir: &str,
+    stem: &str,
+    doc: &Document,
+) -> Vec<Result<String, String>> {
+    let pages = options.pages(doc);
+    let next = AtomicUsize::new(0);
+    let reports: Mutex<Vec<(usize, Result<String, String>)>> =
+        Mutex::new(Vec::with_capacity(pages.len()));
+
+    std::thread::scope(|scope| {
+        // Scoped, so the workers borrow the document and the queue rather
+        // than being handed clones of either: a clone per thread would prove
+        // only that a `Document` can be *sent*, and what is being relied on
+        // here is that one can be *shared*.
+        for _ in 0..options.jobs.max(1) {
+            let (next, reports, pages) = (&next, &reports, &pages);
+            scope.spawn(move || {
+                loop {
+                    let slot = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&index) = pages.get(slot) else {
+                        return;
+                    };
+                    // A page the document will not hand back is skipped
+                    // silently, as it was serially: `pages()` counts what the
+                    // catalog claims, and a page tree that stops short is
+                    // already a warning on the document.
+                    let Some(page) = doc.page(index) else {
+                        continue;
+                    };
+                    let bitmap = page.render(&RenderOptions {
+                        annotations: options.annotations,
+                        ..RenderOptions::at_dpi(options.dpi)
+                    });
+
+                    let out = format!("{dir}/{stem}-{:04}.pnm", index + 1);
+                    let report = write_pnm(&out, &bitmap).map(|()| {
+                        let mut lines = format!("{out} {}x{}\n", bitmap.width, bitmap.height);
+                        for warning in &bitmap.warnings {
+                            lines.push_str(&format!("  {warning:?}\n"));
+                        }
+                        lines
+                    });
+                    reports
+                        .lock()
+                        .expect("the reports lock")
+                        .push((slot, report));
+                }
+            });
+        }
+    });
+
+    let mut reports = reports.into_inner().expect("the reports lock");
+    reports.sort_by_key(|(slot, _)| *slot);
+    reports.into_iter().map(|(_, report)| report).collect()
 }
 
 /// Writes a binary PNM, which needs no encoder and which every image tool
@@ -1846,6 +1958,178 @@ mod tests {
             page.text(b"F0", 12.0, 10.0, 50.0, "hello");
         });
         Document::open(builder.finish()).expect("it opens")
+    }
+
+    /// A document of `count` pages, each doing a different amount of work.
+    ///
+    /// Unequal on purpose: a pool over pages that all cost the same tends to
+    /// finish them in order anyway, and a test that cannot tell completion
+    /// order from page order cannot catch a `render` that prints in the first.
+    fn many_pages(count: u32) -> Document {
+        let mut builder = DocumentBuilder::new();
+        for page_number in 0..count {
+            builder.add_page(60.0, 40.0, |page| {
+                for n in 0..=page_number {
+                    page.fill_rect(f64::from(n % 24), 1.0, 2.0, 2.0, 0.25);
+                }
+            });
+        }
+        Document::open(builder.finish()).expect("it opens")
+    }
+
+    /// An empty directory of this test's own, named after it.
+    fn scratch(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("tpdf-render-{name}"));
+        // Emptied rather than reused: a file left by an earlier run would make
+        // "the page after the failure was written" true for the wrong reason.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir.to_string_lossy().replace('\\', "/")
+    }
+
+    fn render_options(dir: &str, jobs: &str) -> Options {
+        Options::parse(&[
+            "--out".to_string(),
+            dir.to_string(),
+            "--jobs".to_string(),
+            jobs.to_string(),
+            "doc.pdf".to_string(),
+        ])
+        .expect("parses")
+    }
+
+    /// `--jobs` changes the clock and nothing else.
+    ///
+    /// The pool's whole contract: `--jobs 8` renders the same pages to the
+    /// same files and prints the same bytes as `--jobs 1`. Workers finish in
+    /// whatever order the scheduler gives them, so the lines are buffered per
+    /// page and ordered by page afterwards — the same reason `xtask`'s corpus
+    /// pool sorts its results, that output which moves between runs is not
+    /// diffable.
+    ///
+    /// Repeated, because one pooled run finishing in page order by luck is not
+    /// evidence that it always would.
+    #[test]
+    fn jobs_changes_the_clock_and_not_one_byte_of_the_output() {
+        let doc = many_pages(48);
+        let dir = scratch("identical-output");
+
+        let serial = render_pages(&render_options(&dir, "1"), &dir, "doc", &doc);
+        assert_eq!(serial.len(), 48);
+        assert!(
+            serial.iter().all(Result::is_ok),
+            "the serial baseline must itself succeed: {serial:?}"
+        );
+        // Page order absolutely, not merely stably: the first line names page
+        // one and the last names page forty-eight.
+        assert!(
+            serial[0].as_ref().expect("page 1").contains("doc-0001.pnm"),
+            "{:?}",
+            serial[0]
+        );
+        assert!(
+            serial[47]
+                .as_ref()
+                .expect("page 48")
+                .contains("doc-0048.pnm"),
+            "{:?}",
+            serial[47]
+        );
+
+        for attempt in 0..5 {
+            let pooled = render_pages(&render_options(&dir, "8"), &dir, "doc", &doc);
+            assert_eq!(
+                serial, pooled,
+                "attempt {attempt}: `--jobs 8` must print exactly what `--jobs 1` printed"
+            );
+        }
+    }
+
+    /// One job unless asked, and a job count of zero is refused.
+    ///
+    /// The default matters as much as the parse: an existing invocation must
+    /// not start spawning threads because a flag it never passes was added.
+    /// Zero is an error rather than a clamp because `--jobs 0` is somebody
+    /// asking for something, and a run that quietly did the opposite would be
+    /// the wrong kind of forgiving.
+    #[test]
+    fn jobs_defaults_to_one_and_refuses_a_zero() {
+        let unasked = Options::parse(&["a.pdf".to_string()]).expect("parses");
+        assert_eq!(unasked.jobs, 1, "no flag, no threads");
+
+        let asked = Options::parse(&["--jobs".to_string(), "4".to_string(), "a.pdf".to_string()])
+            .expect("parses");
+        assert_eq!(asked.jobs, 4);
+
+        for raw in ["0", "-1", "some", ""] {
+            let refused =
+                Options::parse(&["--jobs".to_string(), raw.to_string(), "a.pdf".to_string()]);
+            assert_eq!(
+                refused.err().as_deref(),
+                Some(format!("`--jobs {raw}` is not a positive number").as_str()),
+                "`--jobs {raw}` must be refused"
+            );
+        }
+    }
+
+    /// A page that will not write is counted, and every other page still runs.
+    ///
+    /// `run`'s policy over files, applied to pages. Rendering used to `?` on
+    /// the first failed write and abandon the rest, which turns one full disk
+    /// into a directory missing everything after it — and the pages are
+    /// independent, each writing its own file.
+    ///
+    /// At **one** job as well as several, and that is not a formality: a
+    /// worker that gives up on the queue when its own page fails is invisible
+    /// at three jobs, because the other two drain the queue behind it. One
+    /// worker is the only arrangement in which giving up loses pages, so it is
+    /// the one that has to be checked.
+    #[test]
+    fn a_page_that_will_not_write_is_counted_and_the_rest_still_render() {
+        for jobs in ["1", "3"] {
+            let doc = many_pages(4);
+            let dir = scratch(&format!("write-failure-{jobs}"));
+            // A directory standing exactly where page two's file must go: no
+            // `write` on any platform goes through one, which is the cheap
+            // stand-in for the full disk this policy exists for.
+            std::fs::create_dir_all(format!("{dir}/doc-0002.pnm")).expect("the blocking directory");
+
+            let options = render_options(&dir, jobs);
+            let reports = render_pages(&options, &dir, "doc", &doc);
+            assert_eq!(
+                reports.len(),
+                4,
+                "--jobs {jobs}: every page is accounted for"
+            );
+            assert!(
+                reports[1].is_err(),
+                "--jobs {jobs}: page 2 cannot write: {:?}",
+                reports[1]
+            );
+            for (slot, report) in reports.iter().enumerate() {
+                if slot == 1 {
+                    continue;
+                }
+                assert!(
+                    report.is_ok(),
+                    "--jobs {jobs}: page {} still renders: {report:?}",
+                    slot + 1
+                );
+            }
+            assert!(
+                Path::new(&format!("{dir}/doc-0004.pnm")).exists(),
+                "--jobs {jobs}: the pages after the failure were still written"
+            );
+
+            // And the count reaches the exit code rather than being printed
+            // and forgotten: `run` turns this into a failed file, and `main`
+            // into a 1.
+            assert_eq!(
+                render(&options, "doc.pdf", &doc).err().as_deref(),
+                Some("1 page failed"),
+                "--jobs {jobs}: the failure must be counted, not swallowed"
+            );
+        }
     }
 
     /// `--pdfa` is off unless it is asked for, and asking for it does not

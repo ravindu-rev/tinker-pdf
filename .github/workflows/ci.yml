@@ -92,7 +92,7 @@ jobs:
       # The examples are ordinary cargo targets, so the clippy line above
       # already compiles them. This *runs* them, because an example that
       # compiles and draws nothing is the same green tick as one that works
-      # — the hazard verification.md names, applied to the six programs
+      # — the hazard verification.md names, applied to the seven programs
       # that are the documented end-to-end usage of this library.
       #
       # Each runs with no arguments against a committed fixture, so no
@@ -101,7 +101,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          for example in open render extract edit create convert; do
+          for example in open render extract edit create convert parallel; do
             echo "::group::$example"
             cargo run -p tinker-pdf --example "$example" \
               2>&1 | tee "example-$example.log"
@@ -119,6 +119,7 @@ jobs:
           grep -q 'the original, untouched' example-edit.log
           grep -q 'read back page 1 says' example-create.log
           grep -q 'as a document' example-convert.log
+          grep -q 'byte-identical to the serial render' example-parallel.log
       - run: cargo run -p xtask -- check
 
   fuzz-targets:

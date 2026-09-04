@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the suite total, the fuzz sessions and the corpus attributions below, which are 4-5 September 2026. `cargo test --workspace`
-is **4 446 passed, 0 failed, 45 ignored** across 204 suites on
+is **4 449 passed, 0 failed, 45 ignored** across 204 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -1002,13 +1002,13 @@ cargo bench -p tinker-pdf -- --save-baseline before
 cargo bench -p tinker-pdf -- --baseline before
 ```
 
-## Six examples, run rather than compiled
+## Seven examples, run rather than compiled
 
 `crates/tinker-pdf/examples/` is the documented end-to-end usage: open, render,
-extract, edit, create, convert. Each runs with no arguments against a committed
-fixture, so trying one needs no corpus and no download.
+extract, edit, create, convert, parallel. Each runs with no arguments against a
+committed fixture, so trying one needs no corpus and no download.
 
-CI **runs all six and greps each one's output**, which is the same rule as
+CI **runs all seven and greps each one's output**, which is the same rule as
 everywhere else on this page: `cargo clippy --all-targets` already compiles
 them, and a program that compiles and prints nothing is indistinguishable from
 one that works. The greps assert content — `the original, untouched` from the

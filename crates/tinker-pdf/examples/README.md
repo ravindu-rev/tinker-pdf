@@ -1,6 +1,6 @@
 # Examples
 
-Six programs, one per thing this engine is for. Each runs with **no
+Seven programs, one per thing this engine is for. Each runs with **no
 arguments** — it resolves a committed fixture through `CARGO_MANIFEST_DIR`, so
 it works from any directory — and each takes an optional path to run against
 something of your own:
@@ -18,6 +18,7 @@ cargo run -p tinker-pdf --example open -- some-file.pdf
 | `edit` | rotating and cropping a page, saved incrementally |
 | `create` | a document built from nothing |
 | `convert` | an EPUB, XPS or comic archive read as a document |
+| `parallel` | every page rendered on threads the *caller* owns, checked against the serial render |
 
 They are ordinary cargo examples, so `cargo clippy --workspace --all-targets`
 compiles them and CI runs every one of them and checks its output. An example
