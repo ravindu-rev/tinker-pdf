@@ -592,3 +592,13 @@ gives shaped-but-unverified scripts.
 Everything else in `docs/features/filters.md`'s refusal table is refused by
 name and reached by a test, which is a different thing from unadjudicated: a
 refusal is a decision, and this list is where decisions are absent.
+
+**This list is a limit, not a backlog.** It was a tier-1 roadmap row whose
+exit criterion read "none — this list cannot shrink by testing", which is not
+an exit criterion and so was not a row; `docs/ROADMAP.md` carries it under
+Named non-goals now, among the hard limits. The distinction that section
+draws matters here, because JPEG XR appears on both of its lists for
+different reasons: **encoding** is a scope choice under ruling 8 and a future
+evidence could reopen it, and *this* is a licence — ruling 13 bars a second
+decoder from adjudicating an output, so nothing but T.832's own conformance
+bitstreams would close it and those are not freely licensed.

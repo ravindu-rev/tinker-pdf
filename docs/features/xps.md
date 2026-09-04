@@ -156,6 +156,11 @@ something else and compare" is not a check this project can make. The full
 reasoning, and the evidence that *is* available, is in
 [design/jpeg-xr.md](../design/jpeg-xr.md).
 
+So it is a **limit and not owed work**, and it is listed as one under
+[ROADMAP](../ROADMAP.md)'s Named non-goals rather than as a row. One thing
+would close it and this repository cannot supply it: T.832's own conformance
+bitstreams, which are not freely licensed.
+
 | What decodes unchecked | Why nothing checks it |
 | --- | --- |
 | **The quantised lossy path, in general** | The lossless identity pins ITU-T T.832 9.8's dequantization at QP 1 and says nothing about `QuantMap( )` at any other quantizer. The seam property is a *relative* comparison within one image, so a filter wrong by a constant everywhere passes it. The transform round trip is blind to an error mirrored into both directions. Monotonicity only orders three error totals. A decoder exactly right losslessly and wrong at every other quantizer passes everything here |
