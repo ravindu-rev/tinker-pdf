@@ -78,6 +78,58 @@
 //! wrong serial number passes. Correctness lives in `crates/tinker-pdf-pki`'s
 //! own tests and in `crates/tinker-pdf/tests/certificates.rs`.
 //!
+//! # The first session, and the open defect it found
+//!
+//! **4 September 2026: 33 072 executions at 33 072 a second, and a crash
+//! inside the first second of mutation.** The corpus went from 12 seeds to
+//! 753 before it stopped. `rustlang/rust:nightly`, rustc 1.100.0-nightly
+//! (a69a63265 2026-09-03), cargo-fuzz 0.13.2, one core, on
+//! `x86_64-unknown-linux-gnu` in Docker because libFuzzer does not build for
+//! `x86_64-pc-windows-msvc`. The session was asked for 600 seconds and did
+//! not get to use them, which is the strongest form a first session can take.
+//!
+//! **This is an open ruling 1 blocker. It is not fixed.** The assertion that
+//! fired is the one this header calls the property `cms.rs` refuses a BER
+//! `signedAttrs` on: *"a subtree called definite holds an indefinite node"*.
+//! `cargo fuzz tmin` took the input from 88 bytes to 42, and it is small
+//! enough to write down rather than carry as a file — `fuzz/artifacts/` is
+//! gitignored on the reasoning that a crash input gets minimised and lands as
+//! a test, and the test is what this lane could not write:
+//!
+//! ```text
+//! 30 27 31 13 30 6c 65 20 01 10 00 00 ff ff ff ff
+//! ff 43 41 ff ff 30 24 30 80 30 80 02 03 00 00 05
+//! 00 00 01 00 00 00 00 00 00 01
+//! ```
+//!
+//! It reproduces deterministically on stable and on MSVC, on the third pass
+//! below — the one that allows indefinite lengths — against the outermost
+//! node. The mechanism is that the two readings of these bytes disagree:
+//!
+//! - **`require_definite_lengths` sweeps `raw` linearly**, and descends into
+//!   a constructed node by stepping past its header alone. That is deliberate
+//!   and is what lets one pass see every nested node. But the descent does
+//!   **not** re-bound itself by the node it descended into, so an inner node
+//!   over-claiming its length walks out the far end of its parent. Here the
+//!   `31 13` SET ends at offset 23; the sweep descends into it, meets a
+//!   `30 6c` claiming 108 bytes, descends again, and reaches an `01 10`
+//!   primitive whose 16-byte value swallows offsets 8 to 25 — the `30 80`
+//!   sitting at 23. The sweep never sees the indefinite length and says the
+//!   subtree is definite.
+//! - **`children()` reads structurally**, takes `31 13` whole, and arrives at
+//!   offset 23 to find the indefinite-length `30 80` the sweep stepped over.
+//!
+//! So the harness is right and the crate is wrong, which is the opposite of
+//! the other assertion-versus-crate case this repository has recorded. What
+//! it means is stated rather than left implied: RFC 5652 §5.4 digests the DER
+//! of `signedAttrs`, and `require_definite_lengths` is the whole of what
+//! stands between a BER `signedAttrs` and a digest nobody can explain. An
+//! attacker who can choose those bytes can make the gate say yes.
+//!
+//! Not fixed here because the lane that ran the session was a measurement
+//! lane, and a fix to this method wants its own commit, its own regression
+//! test in `crates/tinker-pdf-pki`, and this input as a committed seed.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

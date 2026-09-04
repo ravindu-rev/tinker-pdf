@@ -268,19 +268,71 @@ This sentence read 24 and omitted `icc_profile` until the signature work
 counted them, so the number was wrong in the direction that flatters — which
 is the direction worth checking. The fuzz job reads its matrix off the
 directory precisely so that a target nobody runs cannot exist; nothing was
-checking this paragraph against that directory. The four newest — `pki_der`,
-`pki_cms`, `shape` and `signatures` — have had no libFuzzer session yet, so
-they count toward the target list and not toward the executions below. Each
-has a committed seed corpus replayed on stable by an ordinary test, which is
-weaker than a session and is not counted as one.
+checking this paragraph against that directory.
 
-Every target has had a real session: **186 159 981 recorded executions**,
-two crashes — one a real lexer defect (fixed, both inputs committed as
-seeds), one the crate being right and the harness's assertion wrong. The
-per-target numbers are recorded beside the results because coverage is
-uneven by design: a hardened password hash runs at 8 executions a second
-where an ASCII filter runs at 61 795, and a clean result at 8/s is not
-filed as the same evidence as a clean result at 61 795/s.
+Every target has had a real session: **246 595 030 recorded executions**,
+three crashes and one timeout. Two of the crashes are old and closed — one a
+real lexer defect (fixed, both inputs committed as seeds), one the crate being
+right and the harness's assertion wrong. The third crash and the timeout are
+from September 2026 and **both are open**; they are described below. The
+per-target numbers are recorded beside the results because coverage is uneven
+by design: a hardened password hash runs at 8 executions a second where an
+ASCII filter runs at 61 795, and a clean result at 8/s is not filed as the
+same evidence as a clean result at 61 795/s.
+
+Four of those figures are new. `pki_der`, `pki_cms`, `shape` and `signatures`
+were the four targets with no session at all — they counted toward the target
+list and not toward the executions — and each got one on **4 September 2026**,
+600 seconds asked for apiece, one core, `rustlang/rust:nightly` with rustc
+1.100.0-nightly (a69a63265 2026-09-03) and cargo-fuzz 0.13.2, run in Docker on
+`x86_64-unknown-linux-gnu` because libFuzzer does not build for
+`x86_64-pc-windows-msvc`:
+
+| Target | Seconds | Executions | Exec/s | Corpus | Result |
+| --- | ---: | ---: | ---: | --- | --- |
+| `pki_der` | 1 | 33 072 | 33 072 | 12 → 753 | **crash** |
+| `pki_cms` | 601 | 58 453 573 | 97 260 | 10 → 1 476 | clean |
+| `shape` | 78 | 24 115 | 309 | 8 → 893 | **timeout** |
+| `signatures` | 601 | 1 924 289 | 3 201 | 5 → 3 572 | clean |
+
+The seconds are libFuzzer's own fuzzing clock, which starts after the seed
+corpus is loaded and has one-second granularity — so `pki_der`'s 1 is a real
+measurement and not a rounding of nothing, and the wall clock for that run was
+101 seconds, most of it the first `cargo fuzz` build.
+
+**Two of the four ended on a finding rather than on the clock, and both are
+open.** They are named here rather than in a footnote because ruling 1 makes
+each a release blocker, and each target's own header carries the detail:
+
+- **`pki_der` crashed inside its first second**, on the assertion that a
+  subtree `require_definite_lengths` calls definite holds no indefinite node.
+  The crate is wrong and the harness is right, which is the opposite of the
+  earlier case on this page. The sweep descends into a constructed node
+  without re-bounding itself by that node's declared end, so an inner node
+  over-claiming its length makes it step straight over an indefinite-length
+  sibling and report the subtree as definite. That method is the whole of what
+  keeps a BER `signedAttrs` out of a digest. Minimised to 42 bytes, written
+  out verbatim in `fuzz/fuzz_targets/pki_der.rs`.
+- **`shape` timed out** — ruling 1's middle clause, not its first — with one
+  input taking over 28 seconds against a limit of 25. Minimised to 1 158
+  bytes. Measured on the host: the face path costs microseconds because the
+  parsed face has no `GSUB` or `GPOS` at all; every second of it is the
+  second pass, which reads the same bytes *as* a lookup list, finds 174
+  lookups, and shapes three glyphs through them twice.
+
+The two clean results are not the same evidence as each other, which is this
+page's standing point about rates: `pki_cms` at 97 260 a second is the fastest
+target in the tree and 58 million executions is real coverage, while
+`signatures` at 3 201 bought about two orders of magnitude less per second.
+Both grew their corpora sharply — `signatures` from 5 seeds to 3 572 — which
+says more about how little the committed seeds were covering than about the
+sessions.
+
+Each of the four also has a committed seed corpus replayed on stable by an
+ordinary test. That is weaker than a session, was never counted as one, and
+the `pki_der` crash is the demonstration: the replay had been green on every
+commit for as long as the corpus existed, and one second of mutation found a
+defect in the method the CMS digest path depends on.
 
 Fuzzers need nightly, so a **hostile-input sweep runs on stable on every
 commit**: seeded xorshift mutation of the real fixtures, driven as an
