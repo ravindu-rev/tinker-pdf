@@ -34,9 +34,45 @@ its two font-bearing siblings:
 The suite stands at 4 403 passed, 0 failed, 43 ignored as
 [verification.md](verification.md) records it, dated August 2026.
 
+## What "best" means here
+
+The target is not a list of features but a set of axes, each with a number
+that can only move one way. A capability the field offers and this engine
+lacks is a row in tier 5. An axis nobody measures is a row in tier 0, and it
+comes first, because a claim with no ratchet behind it is the kind this
+repository has already caught itself making. Nothing below names another
+engine: a capability is described on its own terms, and "the field" means
+what a reader of PDFs is entitled to expect.
+
+| Axis | Measured today | What gives it a ratchet |
+| --- | --- | --- |
+| Correctness on documents nobody here wrote | 4 525 files from three readers' test suites and one association's examples — every one written to test a reader | tier 0: a corpus of documents real producers emitted for readers |
+| Speed | six criterion operations, weekly, reporting and not gating; no committed number anywhere | tier 0: a baseline from a named machine, compared inside a band that machine's own swing set |
+| Memory | 35 input-derived caps in `bounds_ledger.rs`; no peak measurement anywhere | tier 0: peak RSS per corpus file, recorded and ratcheted |
+| Fidelity | arithmetic fixtures, metamorphic relations, committed fingerprints | tier 1's differential pairs and reviewed goldens; tier 0's decision on dated outside measurements |
+| Capability coverage | tiers 2 to 5 of this file | each row's exit criterion |
+| Footprint | 2.03 MB of wasm, 1.40 MB gzipped, gated at 2.5 MB in `release.yml` | already ratcheted |
+| Surface | 123 C functions; four bindings, none projecting the whole facade; eight CLI subcommands, every one read-only | tier 3's bindings row; tier 5's CLI and bindings rows |
+| Maturity | version 0.0.1, nothing published, one release run watched | tier 3's packages row |
+
+## Tier 0 — measure what is not measured
+
+These come before any new feature, with tier 1. Each row is an axis the
+field judges an engine on and this repository has no number for, so a claim
+about it today would be the kind of claim ruling 13 exists to prevent.
+
+| Item | Evidence | Exit criterion | Size |
+| --- | --- | --- | --- |
+| **A corpus of production documents.** `corpus/corpora.lock` pins three readers' test suites and one association's seven examples; every file in the run was written to exercise a reader, and a reader that passes its own kind's tests has not met the world | the measurements table above; `corpus/corpora.lock` | a fourth class of entry in the lockfile — documents real producers emitted for readers, such as a sample of a public government-document set, fetched and pinned and never committed, with its licence in `corpus/README.md` like the others' — run nightly under its own ratchet row, and every failure attributed by producer | M |
+| **Speed has no ratchet.** `bench.yml` runs six operations weekly and reports; `benches/engine.rs` commits no number; `corpus/report.json` records per-file `millis` and `corpus/ratchet.json` deliberately does not | `.github/workflows/bench.yml`, `crates/tinker-pdf/benches/engine.rs` | a baseline committed from a named machine, with that machine's run-to-run swing measured first so the band is a number rather than a guess; the weekly job compares against it with `--baseline` and fails outside the band; per-corpus wall time recorded beside the pass rate under the same discipline | M |
+| **Memory has no measurement.** Thirty-five caps are properties of inputs and none of a process; the two largest runtime bounds, `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`, are not ledger rows; the only peak-memory tests are `#[ignore]`d and need an outside watcher | `crates/tinker-pdf/tests/bounds_ledger.rs`, `epub_memory.rs`, `xps_memory.rs` | the corpus runner records each child's peak resident set in `report.json` and the per-corpus maximum in `ratchet.json` as a `<=` band; the two caps get ledger rows with clock-free firing tests | M |
+| **Nothing renders pages in parallel.** `Document` is `Send + Sync`, proven by a four-thread test, and the library spawns no thread by policy, which is right for wasm; but no API, example or CLI flag uses it, so the property is unexercised | `crates/tinker-pdf/tests/tinker_parity.rs`, `docs/architecture.md` | `tpdf render --jobs N` and an example under `crates/tinker-pdf/examples/` drive a thread pool over pages; the facade stays thread-free and the decision is recorded | S |
+| **No vectorisation anywhere.** No `std::arch`, no feature detection, no portable SIMD; every inner loop is scalar. Ruling 4 permits integer SIMD, since integer arithmetic is exact on every target | `grep -rn 'std::arch\|simd' crates` finds nothing | a measured speedup on the six benchmarks with every fingerprint unchanged on all four targets | M |
+| **Fidelity against the world — a decision.** Ruling 13 bars any outside program from adjudicating a page, and rules that the committed output of a tool run once is a dated measurement rather than a check — the precedent the signature interop and the epubcheck record already set | [verification.md](verification.md), [design/signatures.md](design/signatures.md) | a recorded decision on whether a one-time dated visual measurement against outside viewers is admissible under that precedent. Until it is taken, tier 1's reviewed goldens are the only first-party answer | decision |
+
 ## Tier 1 — prove correctness
 
-These come before any new feature. Ruling 13 says the engine agreeing with
+These come before any new feature, with tier 0. Ruling 13 says the engine agreeing with
 itself is the only kind of proof this repository will have, which raises the
 bar on what the checks must be: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and
@@ -134,7 +170,7 @@ refusal table.
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
 | **EPUB: an `<img>` never becomes a box.** A fixed-layout comic from a real producer (KCC 11.0.1, `kcc-fixed-layout.epub`) reaches this build as correctly sized, correctly clipped, entirely blank pages, and the same is true of every `<img>` in a reflowable book — only an SVG `<image>` draws. Whether any warning names the dropped picture is to be checked first; if none does, that is a ruling 10 gap closed in the same change | `crates/tinker-pdf/tests/epub_fixed_layout.rs` pins the blank pages and says the test that paints a replaced element must come and delete it; [features/epub.md](features/epub.md) | the fixed-layout book's pages are more than one colour; a reflowable `<img>` is a replaced box with its intrinsic size; the pin deleted | M |
-| **EPUB CSS: seventy properties known and unimplemented**, each reported as `UnimplementedProperty` with an element count, against 83 longhands implemented. The ones that change a paged output: `transform`, `opacity`, `overflow`, `box-shadow`, `text-shadow`, `border-radius`, the `background-*` image family, `list-style-*`, `counter-reset` and `counter-increment`, `quotes`, `text-transform`, `writing-mode`, `direction`, `unicode-bidi`, `hyphens`, `break-*`, `page`, `outline`, `clip-path`, `filter`, `mix-blend-mode`, `grid*`, `font-feature-settings`, `font-kerning` | `UNSUPPORTED_PROPERTIES` in `crates/tinker-pdf-css/src/property.rs`, counted; the census there measured 84 distinct names across the fetched corpus's 53 stylesheets and 42 across the committed 8 | scheduled by the fetched corpus's `UnimplementedProperty` counts, highest first; each landing deletes its name from the table | L — `design/epub-layout.md` is owed before the first L-sized slice |
+| **EPUB CSS: seventy properties known and unimplemented**, each reported as `UnimplementedProperty` with an element count, against 83 longhands implemented. The ones that change a paged output: `transform`, `opacity`, `overflow`, `box-shadow`, `text-shadow`, `border-radius`, the `background-*` image family, `list-style-*`, `counter-reset` and `counter-increment`, `quotes`, `text-transform`, `writing-mode`, `direction`, `unicode-bidi`, `hyphens`, `break-*`, `page`, `outline`, `clip-path`, `filter`, `mix-blend-mode`, `grid*`, `font-feature-settings`, `font-kerning`; and custom properties, which none of the committed books declares | `UNSUPPORTED_PROPERTIES` in `crates/tinker-pdf-css/src/property.rs`, counted; the census there measured 84 distinct names across the fetched corpus's 53 stylesheets and 42 across the committed 8 | scheduled by the fetched corpus's `UnimplementedProperty` counts, highest first; each landing deletes its name from the table | L — `design/epub-layout.md` is owed before the first L-sized slice |
 | EPUB layout refusals, each a typed warning in `tinker-pdf-layout`: `column-span: all` laid out as `none`; `max-height` shorter than its content treated as `auto`; an atomic box taller than a page inside a table band, a flex line or a column, drawn where it starts; `inline-flex` as a block-level container; a block inside an inline laid out as a block; a table column's background and border never painted; anonymous row generation; `::first-line` and `::first-letter` parsed with no box; `content: url()`, `counter()`, `counters()` and the quote keywords generating nothing, and `quotes` itself; `:nth-child(An+B of S)` dropped; `@page` and `@supports` skipped | [features/epub.md](features/epub.md) | each row's warning stops firing on a reftest pair in `epub_reftest.rs` | S–M each |
 | EPUB text set in a standard-14 fallback face loses characters past a simple font's 256 codes — 224 outside `WinAnsiEncoding` — counted as `UnrepresentedCharacters`. Whether an embedded face is exempt is to be verified: the comment predates `@font-face` | `crates/tinker-pdf/src/epub.rs` pushes the warning | a CID-keyed path for fallback text; the conservation harness unchanged | M |
 | EPUB features tallied and not implemented: MathML layout (one fetched book has 71 `mathml` items), media overlays, `switch`, `remote-resources`; and a font provider attached after open cannot re-paginate, since advances decided the line breaks at open | [features/epub.md](features/epub.md) | MathML and overlays are decisions to take against corpus counts; re-pagination is a design question before it is work | decisions |
@@ -146,10 +182,116 @@ refusal table.
 | JPEG XR's named refusals: fixed-point, half-float and float pixel formats; the packed sub-byte depths; CMYK, CMYKDIRECT, NCOMPONENT and RGBE; an unknown pixel-format GUID; the interleaved alpha plane; YUV420, YUV422 and YUVK; a windowed origin | [features/filters.md](features/filters.md), each reached by `jxr/tests/refusals.rs`; the platform encoder cannot emit most of them | a fixture from a real encoder per row | unscheduled |
 | Fonts on write: a CID-keyed CFF under `add_cid_font` is refused; Symbol and ZapfDingbats have no bundled equivalent and are unreadable when nothing embeds them; WOFF2 table transforms this build does not read are refused by name | [features/fonts.md](features/fonts.md) | by evidence | S each |
 
+## Tier 5 — capabilities the field expects
+
+Every row here was checked absent or partial in source on 4 September 2026,
+by grep against the facade, the two write surfaces, the CLI and the four
+bindings, never against a doc alone. None has corpus evidence, because a
+capability an engine lacks leaves no trace in a corpus run; the groups are
+ordered by how much of the field uses them, which is a judgement and is
+labelled as one. **Every L and XL row is owed a design doc before it is
+scheduled, and none exists yet.** Where a row reverses a non-goal a feature
+or design doc states, the reversal is a decision taken here and the doc
+changes in the commit that schedules it.
+
+### Output
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| PNG output from `Bitmap` and from `tpdf render` | `tpdf render` writes binary PNM; no PNG encoder; the deflate encoder exists (`filters/deflate.rs`, fixed Huffman and stored blocks) | `Bitmap::to_png`; `tpdf render` writes `.png`; every PngSuite file round-trips through this reader | S |
+| Image encoders: JPEG; CCITT G4; JBIG2 generic region | decoders only, and the writer never re-encodes image bytes by contract | a baseline JPEG encoder held to this decoder and a published DCT vector set; a G4 encoder held to the T.4/T.6 coder the TIFF tests already carry; a JBIG2 encoder promoted from the test-only `MqEncoder` | M; S; M |
+| Region and tile rendering on the facade | `RenderOptions` carries scale, format, cancel and annotations, and no clip; ruling 5's translated viewport is the mechanism and is already pinned byte-equal | `RenderOptions::region`; a tile byte-equal to the full-page subregion | S |
+| CMYK page output; a premultiplied-alpha option; an anti-aliasing switch | `CmykA8` is internal to transparency groups; alpha is straight only; no quality knob | each a `RenderOptions` field with its own fingerprint; the switch changes no determinism claim | S each |
+| A form XObject or an annotation rendered on its own | pages only | `Page::render_form`, `Page::render_annotation` | S |
+| A retained page — a display list replayed at any scale | every render re-interprets the content stream; `tinker-pdf-svg`'s `Scene` is the shape | a recording `Device`; a replay byte-equal to a direct render at every scale the fingerprints use | M |
+| PDF to SVG | SVG is input only | a `Device` that writes SVG 1.1, held by reading its output back through `tinker-pdf-svg` | M |
+| PostScript and PCL output | none | decision: print pipelines are the only consumer | decision |
+
+### Text
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| Word segmentation and word boxes | glyph, line and block quads; no word | `TextLine::words()` on UAX #29 boundaries, whose tables the shaper's UCD already carries | S |
+| Structured text serialisation — JSON, XML, HTML — with fonts, sizes and boxes | the model exists and nothing serialises it; no serde in the tree and none wanted | hand-written writers, so zero third-party logic crates stays true; `tpdf text --json`; the font name carried on the span | M |
+| Search options: case-sensitive, whole word, diacritic-insensitive; regular expressions | literal and case-insensitive, one argument | an options struct for the first three; regular expressions are a decision, since the tree has no regex engine and links none | S; decision |
+| Inferred reading order for untagged pages — columns, running heads, footnotes — labelled as inferred | geometric line and block order; inference is a named refusal so a guess is never mistaken for the file's own order | an opt-in `ReadingOrder::Inferred` that is never the default, held to the 717 tagged corpus files by inferring with the tree hidden and scoring against it | L |
+| Table reconstruction from geometry | none | opt-in, same discipline, held to the `/Table` elements the corpus carries | L |
+| Hyphen rejoining at line ends | never, unless the producer wrote `/ActualText` | opt-in on `plain_text`: a soft hyphen always, a hard hyphen at a line end followed by a lower-case start; counted | S |
+| Annotation contents and popups in extraction | field values only | `Page::annotations()` below exposes `/Contents`, `/T` and `/M` | S |
+
+### Images and fonts
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| Image extraction with decoded samples and colour space | raw streams through `Document::cos()` only | `Page::images()` yielding decoded `ImageData` and its space; `tpdf images` | M |
+| Font listing and extraction | the machinery exists one crate down and ruling 11 keeps it off the facade | `Document::fonts()` — name, type, embedded or not, subset tag, program bytes; `tpdf fonts` | S |
+| A CJK fallback face | none bundled or fetched; the 202 predefined CMaps extract CJK text, and nothing draws it without a host face | an OFL face behind `bundled-fonts` — `deny.toml` already admits OFL-1.1 — kept out of the wasm default so the 2.5 MB gate holds | M |
+| Hinting | outlines are unhinted by design | decision: an autohinter is L and a fidelity question ruling 13 cannot adjudicate; stem darkening is S and measurable as stem width at small pixel sizes; revisit with a corpus of small-text scans | decision |
+
+### Document operations
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| Page labels; embedded files; an outline; `/Info` and XMP; a caller-supplied XMP packet; viewer preferences; trim and art boxes — each **on `DocumentEditor`** | page labels and attachments read only; outline and `/Info` on the builder only; XMP generated only for archival; viewer preferences, trim and art boxes neither read nor written | a typed setter for each, read back by this reader | S each |
+| Named destinations on write | deliberately absent: a name is a destination only once the catalog carries a `/Names /Dests` tree | write the tree; ruling 6 still holds, and a named destination is never collapsed | S |
+| Optional content: a facade reader, and writing groups and configurations | the reader is internal; nothing is written | `Document::layers()`; `DocumentBuilder::add_layer`; the editor toggles a default configuration | M |
+| Watermark and stamp on existing pages | `append_content` is the primitive; nothing registers a resource on an existing page | `DocumentEditor::add_resource` and `stamp(page, form)` | M |
+| Font subsetting on rewrite | build-side only; a rewrite copies every program untouched | glyph usage from the interpreter — the `ContentFilter` path redaction already walks — drives `cff_subset` and a TrueType subsetter on rewrite | M |
+| Image recompression and downsampling on rewrite | never, by contract | an opt-in `WriteOptions::images` once the encoders above exist; original bytes untouched by default | M |
+| Stream deduplication | declined until content hashing exists | SHA-256 over decoded bytes plus dictionary equality — identical means identical, since a wrong merge silently swaps two fonts | S |
+| Sanitise: strip JavaScript, actions, embedded files, metadata | scripts are reported, nothing is stripped | `DocumentEditor::sanitise(Sanitise)` with a typed report of what left | S |
+| Encryption on save below R6 — R4 with AES-128, RC4 — for readers that stop at 1.6 | R6 only | decision: the readers that need it are the whole reason | decision |
+
+### Annotations and forms
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| A typed annotation model for every subtype | links and widgets only; no `Page::annotations()` | the model over 12.5.6's subtypes; every corpus annotation read and the refused ones counted by subtype | M |
+| AcroForm field creation | signature fields only | `DocumentEditor::add_field` for text, check box, radio and choice, with an appearance | M |
+| FDF and XFDF import and export | absent | both directions, held to the field tree this reader builds | S |
+| ECMAScript for forms beyond the subset | a deliberate subset under `ScriptPolicy` | decision: a full engine is XL and [design/form-script-policy.md](design/form-script-policy.md) argues against running document code by default; grow the subset by the corpus count of refused constructs instead | decision |
+
+### Signatures
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| A visible signature appearance | an invisible field only; the type says drawing one is a separate capability | an `/AP` from name, date, reason and an optional image, through the appearance synthesis annotations already use | S |
+| Timestamps: creating one through a host seam, validating the token | tokens are located and handed out as opaque DER | a `Timestamper` seam like `Signer`, since the engine performs no I/O; validation held to a published token | M |
+| Long-term validation: `/DSS` and `/VRI` | absent | written from host-supplied CRL and OCSP bytes | M |
+| Public-key encryption on write | a non-goal because the engine would have to choose a certificate — and the caller can supply one | `Encryption::PublicKey { recipients }` sealing with caller-supplied certificates, held to the OpenSSL envelopes this reader already parses | M |
+
+### Standards
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| PDF/UA validation | a measured abstention: 29 of 239 non-conforming fixtures caught, 210 abstained | a rule group that decides the decidable clauses and abstains by name on the rest | L |
+| PDF/X validation and writing | a `GTS_PDFX` intent is tolerated and never checked | an ISO 15930 rule group; the archival profile grows a PDF/X flavour | L |
+| PDF/E | absent | decision | decision |
+| PDF 2.0: associated files, page-level output intents, namespaced structure types, the UTF-8 string type | encryption is the only 2.0 delta implemented | each read and written, and its row in [pdf20-deltas.md](pdf20-deltas.md) moved | S to M |
+
+### Formats
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| A standalone SVG, a bare image, a loose HTML or XHTML file, each as a document | each refused as not-a-PDF, though the reader for each exists | `Document::open` sniffs and opens them | S each |
+| HTML and CSS to PDF as a creation API | the cascade, the layout engine and the painter exist and are wired only inside the EPUB pipeline | `DocumentBuilder::from_html(markup, stylesheet, page box)`, held by the EPUB reftests | M |
+| Markdown; FB2 | absent | a hand-written Markdown reader onto the HTML path; FB2 is XML onto the same | S; M |
+| MOBI; DOCX | absent | decision: a DOCX layout engine is a word processor | decision |
+| Writing EPUB, XPS and CBZ | a decision item already | unchanged | decision |
+
+### Surface
+
+| Item | Today | Exit criterion | Size |
+| --- | --- | --- | --- |
+| A user-facing CLI | eight subcommands, all read-only; the write half of the library is unreachable from it | merge, split, rotate, images, fonts, encrypt, decrypt, sign, attach, stamp, sanitise — each a wrapper over the facade with no logic of its own (ruling 11) | M |
+| Java, Swift, Go and Ruby bindings | none | each over the C ABI in the .NET pattern, with the smoke and parity scripts; which first is a decision | M each |
+
 ## Named non-goals
 
-Decisions, kept in one place so none is mistaken for an omission. Each is
-stated at length in the feature or design doc it names.
+Decisions, kept in one place so none is mistaken for an omission. Two kinds,
+and the difference matters under the goal this file now states.
+
+**Hard limits, for a reason outside this repository's power.**
 
 - **XFA** — removed in ISO 32000-2 ([features/forms.md](features/forms.md)).
 - **RAR's compression**, which has no published specification and one
@@ -157,40 +299,46 @@ stated at length in the feature or design doc it names.
   producer here can write, so a decoder would be unadjudicated under ruling
   13 ([features/cbz.md](features/cbz.md),
   [design/comic-archives.md](design/comic-archives.md)).
-- **`local()` font sources** — this engine reads no font directories, by
-  policy; `wasm32-unknown-unknown` has none
+- **A bundled sRGB profile** — the ICC's own carry no SPDX identifier, and
+  which device an archival document's colours are for is the caller's
+  statement ([design/pdfa.md](design/pdfa.md)).
+- **Font directories** — `wasm32-unknown-unknown` has none, so `local()` is
+  the host's to answer through `FontProvider`
   ([features/epub.md](features/epub.md)).
-- **Shaping while reading a PDF** — `TJ` arrays are honoured as written;
-  and **hinting** — outlines are unhinted by design
+- **The four properties that left with the oracles** — a reader nobody here
+  wrote accepting this engine's output, a second reading of an XPS package,
+  a reference CSS implementation, an arbiter for an EPUB disagreement. Ruling
+  13 retires them and [verification.md](verification.md) names them.
+
+**Decisions this repository took and keeps, each revisitable by a row above
+if the field's evidence asks.**
+
+- **Shaping while reading a PDF** — `TJ` arrays are honoured as written
   ([features/fonts.md](features/fonts.md)).
 - **Encryption inside archives** — ZipCrypto, AES in ZIP, 7z and RAR — and
   **multi-volume or sparse entries**
   ([design/comic-archives.md](design/comic-archives.md)).
 - **EPUB scripting, `META-INF/signatures.xml`, real resource encryption**
-  (this engine holds no key) and **CSS custom properties**
-  ([features/epub.md](features/epub.md)).
-- **Signing keys in the engine, revocation fetching, a bundled root store,
-  visible seal generation** ([design/signatures.md](design/signatures.md));
-  and **no callback into host code across the C ABI**, which is why
-  `save_signed` and `Signer` are not projected
-  ([design/bindings-write.md](design/bindings-write.md)).
-- **JPEG 2000 Part 2** (ISO/IEC 15444-2) — a marker Table A.2 does not
-  define is refused as unknown rather than measured past
-  ([features/filters.md](features/filters.md)).
-- **Writing a public-key-encrypted document; recipient shapes other than
-  key transport** ([design/pubsec.md](design/pubsec.md)).
-- **A bundled sRGB profile** — the ICC's own carry no SPDX identifier, and
-  which device an archival document's colours are for is the caller's
-  statement ([design/pdfa.md](design/pdfa.md)).
+  (this engine holds no key) ([features/epub.md](features/epub.md)).
+- **Signing keys in the engine, revocation fetching, a bundled root store**
+  ([design/signatures.md](design/signatures.md)); and **no callback into
+  host code across the C ABI**, which is why `save_signed` and `Signer` are
+  not projected ([design/bindings-write.md](design/bindings-write.md)).
+- **Recipient shapes other than key transport** in public-key envelopes
+  ([design/pubsec.md](design/pubsec.md)).
 - **JPEG XR encoding**, and applying the container's orientation transform,
   which T.832 leaves to an application this crate is not (ruling 8)
   ([design/jpeg-xr.md](design/jpeg-xr.md)).
-- **SVG `<switch>` conditional processing, and writing SVG**
-  ([design/svg.md](design/svg.md)).
-- **The four properties that left with the oracles** — a reader nobody here
-  wrote accepting this engine's output, a second reading of an XPS package,
-  a reference CSS implementation, an arbiter for an EPUB disagreement. Ruling
-  13 retires them and [verification.md](verification.md) names them.
+- **JPEG 2000 Part 2** (ISO/IEC 15444-2) — a marker Table A.2 does not
+  define is refused as unknown rather than measured past
+  ([features/filters.md](features/filters.md)).
+- **SVG `<switch>` conditional processing** ([design/svg.md](design/svg.md)).
+
+Six things the docs called non-goals are rows in tier 5 now, because the
+field offers each and the reason given was a scope choice rather than a
+limit: hinting, a visible signature appearance, timestamp creation, writing
+a public-key-encrypted document, image encoders, and inferred reading order
+for untagged pages. Each row says so.
 
 ## How this file changes
 
