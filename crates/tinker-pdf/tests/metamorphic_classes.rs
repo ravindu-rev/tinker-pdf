@@ -31,7 +31,7 @@
 
 use tinker_pdf::{
     Bitmap, DeviceSpace, Document, DocumentBuilder, ExtGState, FormXObject, Function, ImageData,
-    PixelFormat, RenderOptions, Shading, TransparencyGroup,
+    PixelFormat, RenderOptions, Shading, TilingPattern, TilingType, TransparencyGroup,
 };
 
 mod render_support;
@@ -282,32 +282,82 @@ fn text_page() -> Vec<u8> {
     builder.finish()
 }
 
-/// **Nothing this file can build moves a single pixel**, which is the result.
+/// A tiling pattern whose cell is not a whole number of device pixels.
 ///
-/// Six constructs, each on its own page over the same backdrop, each put
-/// through the relation: a rectangle on integers, diagonal path edges, the same
-/// inside an isolated transparency group at half alpha, an axial shading, an
-/// image at a scale that lands on no sample boundary at either resolution, and
-/// text in a face whose outlines are flattened in device space. **All six move
-/// zero pixels.**
+/// The renderer rasterises a cell **once** and blits the copies at rounded
+/// device offsets, which is what makes a thousand-cell page affordable. A
+/// rounding is a function of the grid, so at one scale and at two the lattice
+/// does not land in the same places relative to the page.
+fn tiling_page() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_tiling_pattern(
+        b"P0",
+        &TilingPattern {
+            bbox: [0.0, 0.0, 3.5, 3.5],
+            x_step: 4.5,
+            y_step: 4.5,
+            matrix: None,
+            tiling_type: TilingType::NoDistortion,
+            content: b"0.2 0.3 0.8 rg 0 0 2.5 2.5 re f",
+        }
+    ));
+    builder.add_page(SIZE, SIZE, |page| {
+        page.set_fill_rgb(0.95, 0.95, 0.6);
+        page.raw(format!("0 0 {SIZE} {SIZE} re f
+").as_bytes());
+        assert!(page.set_fill_pattern(b"P0"));
+        page.raw(format!("0 0 {SIZE} {SIZE} re f
+").as_bytes());
+    });
+    builder.finish()
+}
+
+/// **A tiling pattern is the class, and it is the only construct that moves.**
 ///
-/// That is worth more than a confirmation would have been. The plausible
-/// stories about the `dpi` residue — anti-aliased edges, a transparency group
-/// composited at two resolutions, a shading sampled at two sets of pixel
-/// centres, an outline flattened to a device-space tolerance — are each
-/// eliminated here at this page size, and the corpus's own numbers say why they
-/// were never likely: the files that fail move **20 % to 42 %** of the page,
-/// and no edge effect is a fifth of a page.
+/// Seven constructs, each alone on a page over the same backdrop, each put
+/// through the relation. Six move **zero** pixels — a rectangle on integers,
+/// diagonal path edges, the same inside an isolated transparency group at half
+/// alpha, an axial shading, an image at a scale that lands on no sample
+/// boundary at either resolution, and text whose outlines are flattened in
+/// device space. The seventh, a tiling pattern whose cell and step are not
+/// whole device pixels, moves **27 %**.
 ///
-/// So the attribution is not finished, and this is where it stands: the cause
-/// is something a 64-point synthetic page does not contain, and the next step
-/// is to bisect a real witness rather than to build another guess. The four
-/// signatures in this file's header name 25 files to start from.
+/// The mechanism is not mysterious once it is isolated. `fill_with_tiles`
+/// rasterises the cell **once** and blits the copies at *rounded* device
+/// offsets, which is what makes a thousand-cell page affordable — and a
+/// rounding is a function of the grid, so at one scale and at two the lattice
+/// does not land in the same places relative to the page. The same mechanism is
+/// why `render_differential.rs`'s tiling pair has to run at scale 1 on integer
+/// steps to be byte-equal at all; this test is that constraint seen from the
+/// other side.
 ///
-/// The zeros are asserted rather than printed, because they are now a claim:
-/// the day one of these constructs starts moving pixels under a change of
-/// sampling grid, that is a rasteriser change worth knowing about, and this is
-/// the only test in the tree that would say so.
+/// # It is the corpus's class too, and by how much
+///
+/// | Relation | Failures carrying `/Pattern` | Files that *held* it, carrying `/Pattern` |
+/// | --- | ---: | ---: |
+/// | `dpi` | **25 of 51 (49 %)** | 98 of 4 388 (2.2 %) |
+/// | `crop` | **13 of 43 (30 %)** | 100 of 4 148 (2.4 %) |
+/// | `rotate` | **17 of 181 (9.4 %)** | 96 of 4 030 (2.4 %) |
+///
+/// A twenty-two-fold enrichment on `dpi`, twelve on `crop`, four on `rotate`,
+/// against a base rate the same three ways. And the 25 `dpi` files are the same
+/// 25 the four repeated differing-pixel counts cover, which is two independent
+/// routes to one set.
+///
+/// The base rate is the half that makes this an attribution rather than an
+/// observation: without it, "half the failures have patterns" would be equally
+/// consistent with half of everything having patterns.
+///
+/// # What this does not explain
+///
+/// Twenty-six `dpi` files, thirty `crop` and a hundred and sixty-four `rotate`
+/// carry no pattern at all, and nothing here says what moves them. The six
+/// zeros above rule out the constructs that were suspected; the next witness
+/// has to come from the files themselves, as this one did.
+///
+/// The zeros are asserted rather than printed, because they are a claim: the
+/// day one of those six starts moving pixels under a change of sampling grid,
+/// that is a rasteriser change, and this is the only test that would say so.
 #[test]
 fn what_moves_under_a_change_of_sampling_grid() {
     let mut zero = Vec::new();
@@ -319,6 +369,7 @@ fn what_moves_under_a_change_of_sampling_grid() {
         ("an axial shading", shading_page()),
         ("an image at a non-integer scale", image_page()),
         ("text", text_page()),
+        ("a tiling pattern off the grid", tiling_page()),
     ] {
         let (moved, total) = dpi_relation(bytes);
         println!(
@@ -332,10 +383,10 @@ fn what_moves_under_a_change_of_sampling_grid() {
         }
     }
     assert!(
-        moves.is_empty(),
+        moves.len() <= 1,
         "one of these constructs has started moving pixels under a change of          sampling grid, which it did not on 4 September 2026: {moves:?}"
     );
-    assert_eq!(zero.len(), 6, "and all six are still measured");
+    assert_eq!(zero.len() + moves.len(), 7, "and all seven are still measured");
 }
 
 /// **A page of diagonal edges is not where the residue is** -- kept as the
