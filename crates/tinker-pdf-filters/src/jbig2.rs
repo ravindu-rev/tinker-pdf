@@ -2693,6 +2693,13 @@ fn refine_template(rtemplate: u8, at: [(i8, i8); 2]) -> RefineTemplate<'static> 
 
 /// 6.4.11 and 6.5.8.2.2's reference offset, which is the same arithmetic in
 /// both: the size difference is split evenly and the coded offset added.
+///
+/// `div_euclid` rather than `/`, because the difference is signed and the split
+/// has to floor: −1 halves to −1, not to 0. Annex H page 3 refuses to decode
+/// under either alternative — the coded offset alone, or a truncating `/2` —
+/// which is what pins this on the 6.4.11 road; the dictionary road is pinned by
+/// `a_refined_symbol_that_is_not_its_reference_s_size_pins_6_5_8_2_2`, because
+/// no corpus file reaches 6.5.8.2.2 at a size difference at all.
 fn refinement_offset(target: i64, reference: u32, coded: i32) -> i64 {
     (target - i64::from(reference)).div_euclid(2) + i64::from(coded)
 }
@@ -3861,6 +3868,292 @@ mod tests {
 
         data.extend(encoder.flush());
         data
+    }
+
+    /// The encoder's side of 6.3, written the way [`encode_arithmetic`] is:
+    /// contexts come off the finished target rather than off a half-built one.
+    ///
+    /// That is the same thing here because every *destination-layer* position
+    /// either template names — `REFINE_0_HERE`, `REFINE_1_HERE` and
+    /// `NOMINAL_REFINE_AT[0]` — is causal, so a decoder holds exactly these
+    /// values by the time it forms the context. The reference layer is fully
+    /// known to both sides from the start.
+    fn encode_refinement(
+        encoder: &mut MqEncoder,
+        base: usize,
+        template: &RefineTemplate<'_>,
+        reference: &Bitmap,
+        (dx, dy): (i32, i32),
+        source: &Bitmap,
+    ) {
+        for y in 0..source.height {
+            for x in 0..source.width {
+                let cx =
+                    refinement_context(source, reference, dx, dy, template, x as i32, y as i32);
+                encoder.encode_at(base + cx, source.get(x as i32, y as i32) as u8);
+            }
+        }
+    }
+
+    /// 6.4.11's and 6.5.8.2.2's reference offset, **written from the clause
+    /// rather than called out of the decoder**.
+    ///
+    /// [`refinement_offset`] is what is under test; an encoder that called it
+    /// would move with it under injection and the round trip would prove that
+    /// two copies of one mistake agree. This is the same shape of separation
+    /// [`INT_RANGES`] keeps from [`decode_int`], and it is what makes the
+    /// fixture below tell three arithmetics apart.
+    fn split_offset(target: u32, reference: u32, coded: i32) -> i32 {
+        let difference = i64::from(target) - i64::from(reference);
+        // Floor division: -1 halves to -1, not to 0.
+        let half = if difference >= 0 {
+            difference / 2
+        } else {
+            -((-difference + 1) / 2)
+        };
+        (half + i64::from(coded)) as i32
+    }
+
+    /// One new symbol of a refining dictionary, for
+    /// [`symbol_dictionary_refining`].
+    struct Refined<'a> {
+        /// Which symbol of the pool it refines — imported symbols first.
+        id: u32,
+        /// 6.5.8.2.2's `RDX` and `RDY`, coded through IARDX and IARDY.
+        rdx: i32,
+        rdy: i32,
+        /// The picture the refinement decodes to. Its width and height are
+        /// the height class's, **not** the reference's: 6.5.8.2.2 has no
+        /// `RDW` or `RDH`, so a symbol that is not its reference's size is
+        /// spelled by the class rather than by a delta.
+        rows: &'a [&'a str],
+    }
+
+    /// Encodes an **arithmetic refining** symbol dictionary (7.4.3.1 with
+    /// `SDREFAGG` set), every new symbol of which is one instance of 6.5.8.2.2.
+    ///
+    /// The mirror of the `refagg` arm of [`symbol_dictionary`]. Each symbol is
+    /// given its own height class, because on this road the class is what
+    /// carries the symbol's size, and a size that differs from the reference's
+    /// is the whole point of the fixture that uses this.
+    ///
+    /// One `MqEncoder` array with a base per procedure, as
+    /// [`symbol_dictionary_with_exports`] lays one out — and **one refinement
+    /// base for the whole dictionary**, which is 6.5.8.1's rule and the reason
+    /// more than one refined symbol is worth coding here.
+    fn symbol_dictionary_refining(imported: &[Bitmap], symbols: &[Refined<'_>]) -> Vec<u8> {
+        let num_new = symbols.len();
+        let mut data = Vec::new();
+        // 7.4.3.1.1: arithmetic, SDREFAGG, generic template 0, refinement
+        // template 0.
+        data.extend_from_slice(&0x0002u16.to_be_bytes());
+        // 7.4.3.1.2's generic AT pairs are read on the arithmetic road whether
+        // or not a generic region is ever coded, so they are here even though
+        // every symbol below is refined.
+        for (dx, dy) in NOMINAL_AT[0] {
+            data.push(dx as u8);
+            data.push(dy as u8);
+        }
+        // 7.4.3.1.3's refinement pair, present because SDREFAGG is set and
+        // SDRTEMPLATE is zero.
+        for (dx, dy) in NOMINAL_REFINE_AT {
+            data.push(dx as u8);
+            data.push(dy as u8);
+        }
+        data.extend_from_slice(&(num_new as u32).to_be_bytes()); // SDNUMEXSYMS
+        data.extend_from_slice(&(num_new as u32).to_be_bytes()); // SDNUMNEWSYMS
+
+        // 6.5.8.2.3: as wide as the whole dictionary needs, imported included.
+        let code_len = symbol_code_length(imported.len() + num_new);
+        let template = refine_template(0, NOMINAL_REFINE_AT);
+        let (iadh, iadw, iaai, iardx, iardy, iaex) = (
+            0,
+            INT_CONTEXTS,
+            INT_CONTEXTS * 2,
+            INT_CONTEXTS * 3,
+            INT_CONTEXTS * 4,
+            INT_CONTEXTS * 5,
+        );
+        let iaid = INT_CONTEXTS * 6;
+        let refine = iaid + iaid_contexts(code_len);
+        let mut encoder = MqEncoder::new(refine + (1usize << template.bits()));
+        let mut prevs = [1usize; 6];
+
+        let mut pool: Vec<Bitmap> = imported.to_vec();
+        let mut height = 0i64;
+        for symbol in symbols {
+            let target = bitmap_from(symbol.rows);
+            let delta = i64::from(target.height) - height;
+            encode_int_at(&mut encoder, iadh, &mut prevs[0], Some(delta as i32));
+            height = i64::from(target.height);
+            // A class of one, so the first width delta is the whole width.
+            encode_int_at(&mut encoder, iadw, &mut prevs[1], Some(target.width as i32));
+            // 6.5.8.2: one instance, which is 6.5.8.2.2's plain refinement.
+            encode_int_at(&mut encoder, iaai, &mut prevs[2], Some(1));
+            let mut prev = 1usize;
+            for bit in (0..code_len).rev() {
+                let d = ((symbol.id >> bit) & 1) as u8;
+                encoder.encode_at(iaid + prev, d);
+                prev = (prev << 1) | usize::from(d);
+            }
+            encode_int_at(&mut encoder, iardx, &mut prevs[3], Some(symbol.rdx));
+            encode_int_at(&mut encoder, iardy, &mut prevs[4], Some(symbol.rdy));
+
+            let reference = pool.get(symbol.id as usize).expect("the reference exists");
+            let dx = split_offset(target.width, reference.width, symbol.rdx);
+            let dy = split_offset(target.height, reference.height, symbol.rdy);
+            encode_refinement(
+                &mut encoder,
+                refine,
+                &template,
+                reference,
+                (dx, dy),
+                &target,
+            );
+            // OOB ends the height class.
+            encode_int_at(&mut encoder, iadw, &mut prevs[1], None);
+            pool.push(target);
+        }
+
+        // 6.5.10: skip the imported symbols, export every new one.
+        encode_int_at(
+            &mut encoder,
+            iaex,
+            &mut prevs[5],
+            Some(imported.len() as i32),
+        );
+        encode_int_at(&mut encoder, iaex, &mut prevs[5], Some(num_new as i32));
+
+        data.extend(encoder.flush());
+        data
+    }
+
+    /// A segment built in memory rather than parsed out of a stream, for the
+    /// dictionary tests that call [`symbol_dictionary`] directly.
+    fn dictionary_segment<'a>(number: u32, referred: &[u32], data: &'a [u8]) -> Segment<'a> {
+        Segment {
+            number,
+            kind: kind::SYMBOL_DICTIONARY,
+            referred: referred.to_vec(),
+            page: 1,
+            data,
+        }
+    }
+
+    /// A six-by-six letter with ink on both edges of neither axis, so a
+    /// reference read one column out is a different picture on every row.
+    #[rustfmt::skip]
+    const REFERENCE_LETTER: [&str; 6] = [
+        "####..",
+        "#...#.",
+        "#...#.",
+        "####..",
+        "#..#..",
+        "#...#.",
+    ];
+
+    /// [`REFERENCE_LETTER`] moved one column right inside an eight-wide frame:
+    /// the picture 6.5.8.2.2's offset predicts exactly when the size
+    /// difference is split before `RDX` is added.
+    #[rustfmt::skip]
+    const WIDER_BY_TWO: [&str; 6] = [
+        ".####...",
+        ".#...#..",
+        ".#...#..",
+        ".####...",
+        ".#..#...",
+        ".#...#..",
+    ];
+
+    /// [`REFERENCE_LETTER`] with its first column cut away and a blank row
+    /// under it: five wide against a six-wide reference, so the size
+    /// difference is **odd and negative** and the two ways of halving it —
+    /// `div_euclid(2)` and `/2` — disagree.
+    #[rustfmt::skip]
+    const NARROWER_BY_ONE: [&str; 7] = [
+        "###..",
+        "...#.",
+        "...#.",
+        "###..",
+        "..#..",
+        "...#.",
+        ".....",
+    ];
+
+    /// **6.5.8.2.2's reference offset, pinned by symbols that are not their
+    /// reference's size.**
+    ///
+    /// Two readings of the clause were live until this fixture existed: the
+    /// one [`refinement_offset`] implements — *split the size difference, then
+    /// add `RDX`* — and `RDX` alone. They coincide whenever the refined symbol
+    /// is its reference's size, which is true of Annex H's refining dictionary
+    /// and of every corpus file that reaches this road, so nothing in the tree
+    /// could tell them apart.
+    ///
+    /// Here `RDX` and `RDY` are both zero and the sizes carry the whole offset,
+    /// so the split term *is* the answer: 1 for the eight-wide symbol and −1
+    /// for the five-wide one. Under `RDX` alone both would be zero, and under
+    /// a truncating `/2` the negative one would be zero — three arithmetics,
+    /// three different reference positions, one of which is asserted.
+    ///
+    /// **The assertion is the picture and it has to be.** A refinement whose
+    /// reference sits one column out desynchronises the MQ decoder within a
+    /// row or two and everything after it is noise, which is the symptom
+    /// `docs/design/jbig2-symbol-text.md` records three separate defects
+    /// producing. A count, a size or a warning would not distinguish them.
+    ///
+    /// What this cannot do is adjudicate the clause: the encoder above shares
+    /// one reading with the decoder, so the round trip proves the reading is
+    /// *load-bearing*, not that it is T.88's. Before it, changing
+    /// [`refinement_offset`] to either of the other two broke no test.
+    ///
+    /// Two refined symbols in a row rather than one, because 6.5.8.1's shared
+    /// refinement states have nothing to carry across a dictionary that
+    /// refines once.
+    #[test]
+    fn a_refined_symbol_that_is_not_its_reference_s_size_pins_6_5_8_2_2() {
+        let class: [&[&str]; 1] = [&REFERENCE_LETTER];
+        let classes: [&[&[&str]]; 1] = [&class];
+        let base = symbol_dictionary_data(&classes, 0);
+        let imported = symbol_dictionary(
+            &dictionary_segment(1, &[], &base),
+            &[],
+            1 << 20,
+            &mut Vec::new(),
+        )
+        .expect("the reference dictionary decodes");
+        assert_eq!(bitmap_rows(&imported[0]), REFERENCE_LETTER);
+
+        let refining = symbol_dictionary_refining(
+            &imported,
+            &[
+                Refined {
+                    id: 0,
+                    rdx: 0,
+                    rdy: 0,
+                    rows: &WIDER_BY_TWO,
+                },
+                Refined {
+                    id: 0,
+                    rdx: 0,
+                    rdy: 0,
+                    rows: &NARROWER_BY_ONE,
+                },
+            ],
+        );
+        let mut warnings = Vec::new();
+        let exported = symbol_dictionary(
+            &dictionary_segment(2, &[1], &refining),
+            &imported,
+            1 << 20,
+            &mut warnings,
+        )
+        .expect("the refining dictionary decodes");
+
+        assert_eq!(exported.len(), 2, "both new symbols, and neither import");
+        assert_eq!(bitmap_rows(&exported[0]), WIDER_BY_TWO);
+        assert_eq!(bitmap_rows(&exported[1]), NARROWER_BY_ONE);
+        assert!(warnings.is_empty(), "the dictionary warned: {warnings:?}");
     }
 
     /// One symbol instance for [`text_region_segment`].

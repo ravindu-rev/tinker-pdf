@@ -383,14 +383,47 @@ whole difference between this section and the one it replaced is noticing that.
   `bitmap-refine.pdf` shape — code a region, then refine it — had nothing to
   refine against.
 
+#### 6.5.8.2.2's reference offset, and what a fixture there can and cannot say
+
+`refinement_offset` implements one of two readings of the clause: **split the
+size difference, then add `RDX`** — the same arithmetic 6.4.11 uses, which is
+why one function serves both roads. The other reading is `RDX` alone. The two
+coincide exactly when the refined symbol is its reference's size, which is true
+of Annex H's refining dictionary and of every corpus file that reaches that
+road, so nothing in the tree could choose between them on the dictionary road
+and this section said so.
+
+`a_refined_symbol_that_is_not_its_reference_s_size_pins_6_5_8_2_2` is the fixture
+that can. It refines one 6 by 6 symbol into an 8 by 6 and then into a 5 by 7,
+both at `RDX = RDY = 0`, so the split term *is* the offset: 1 for the wider
+symbol and −1 for the narrower. Three arithmetics put the reference in three
+different places there — the split, `RDX` alone, and a truncating `/2`, which
+parts company with `div_euclid` only when the difference is negative and odd —
+and the assertion is the two decoded pictures, because a reference one column
+out desynchronises the coder and everything after it is noise rather than a
+slightly wrong picture.
+
+**What that is worth, stated exactly.** The encoder is in this repository, so a
+round trip cannot say which reading is T.88's. `split_offset` in the test module
+is written out separately from `refinement_offset` precisely so that an
+injection into the decoder is not silently mirrored by the encoder — the same
+separation `INT_RANGES` keeps from `decode_int`, and without it the fixture
+passes under every reading and proves nothing. What it buys is that the choice
+is now **load-bearing** where it was not: before it, changing `refinement_offset`
+to either alternative broke nothing on the dictionary road at all.
+
+The counted table below is the measurement, and it also shows where the
+standard's own datastream does bear on the question. Under `RDX` alone, Annex H
+page 3's *text region* stops decoding altogether — the published stream refuses,
+because a reference in the wrong place desynchronises the coder the integer
+decoders share and the counts then fail — and under a truncating `/2` it fails
+as well. So 6.4.11's arithmetic was adjudicated by published data all along;
+what was unpinned was **6.5.8.2.2 sharing it**, on a road no fixture reached at
+a size difference. That is the narrower and true statement, and the fixture is
+what closes it.
+
 #### What is still not pinned, stated rather than absorbed
 
-- **6.5.8.2.2's reference offset.** The dictionary road shares
-  `refinement_offset` with 6.4.11, so it splits the size difference before
-  adding `RDX`. Annex H's refinement is of a symbol the same size as its
-  reference, where that term is zero, and no corpus file exercises the
-  dictionary road at a different size. Both readings agree on every fixture
-  in tree, so the fixture cannot choose between them.
 - **Huffman refinement, half built.** 6.4.11's envelope — `RI` as one plain
   bit, the four deltas through a selected table, `BMSIZE`, byte alignment, and
   an arithmetic sub-stream the bit reader steps over — is **done for text
@@ -480,16 +513,18 @@ assertions that fail. `filters` is `cargo test -p tinker-pdf-filters jbig2`;
 | 6.4.11: the sub-stream is not byte-aligned | **0** | **0** | **0** |
 | B.14 or B.15, any line but the one-bit code for zero | **0** | **0** | **0** |
 | 6.5.8.1: 6.3's states reset per symbol, Huffman dictionary | 0 | 2 | 2 |
-| the same, arithmetic dictionary | **0** | **0** | **0** |
+| the same, arithmetic dictionary | 1 | **0** | 1 |
+| 6.5.8.2.2's reference offset: `RDX` alone | 2 | **0** | 2 |
+| 6.5.8.2.2's reference offset: `/2` rather than `div_euclid(2)` | 2 | **0** | 2 |
 
-The arithmetic row's zeros are the same shape of gap as the two below it, and
-worth naming: Annex H's refining dictionary decodes one symbol through
-6.5.8.2.2 and one through 6.5.8.2.1, so the *first* refinement is the only one
-that road ever takes on its own — a reset it cannot notice, because there is
-nothing yet to carry. The rule is held on the Huffman road instead, by a file
-that refines four symbols in a row.
+The arithmetic dictionary's row was 0 in both columns until the offset fixture
+above, and why is worth naming: Annex H's refining dictionary decodes one symbol
+through 6.5.8.2.2 and one through 6.5.8.2.1, so the *first* refinement is the
+only one that road ever takes on its own — a reset it cannot notice, because
+there is nothing yet to carry. The new fixture refines two symbols in a row for
+exactly that reason, and the row is 1 rather than 0 because of it.
 
-**Three rows are caught by nothing at all**, and they are the most
+**Two rows are still caught by nothing at all**, and they are the most
 useful lines in the table: they are what turned a claim that the corpus
 adjudicated B.14 and B.15 into the narrower and true claim that it adjudicates
 6.4.11's envelope. Both fixtures happen to sit on a byte boundary and code
