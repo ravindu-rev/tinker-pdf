@@ -40,6 +40,23 @@
 //! no full-page goldens here — "hundreds of kilobytes of binary per page that
 //! no reviewer can assess" — and `a_golden_stays_small_enough_to_review` is
 //! that sentence as an assertion rather than as prose.
+//!
+//! # The injections that were counted
+//!
+//! Over the whole workspace, 4 413 tests. Each of the three ways this tier can
+//! be hollowed out is caught by exactly the check written for it, and by
+//! nothing else — which is what says the three are three rather than one.
+//!
+//! | Injected | Caught by the workspace | Of which here |
+//! | --- | ---: | ---: |
+//! | a golden's `reviewer` line blanked | 1 | 1 |
+//! | the page changed so the golden no longer matches | 1 | 1 |
+//! | `read_header` accepting a blank field | 1 | 1 |
+//!
+//! Two more land here from elsewhere: a tiling lattice stepped by its `/BBox`
+//! and a Type 3 `/FontMatrix` applied in the wrong order each move a golden as
+//! well as their own fixture, which is the regression half of what a golden is
+//! for.
 
 use std::path::{Path, PathBuf};
 

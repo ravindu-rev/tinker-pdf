@@ -27,6 +27,14 @@
 //! | `Overlay` not swapping its arguments (11.3.5.2) | **1** | **1** |
 //! | an axial shading measuring distance rather than projection | 9 | 1 |
 //! | a shading sampled at the pixel corner rather than its centre | 2 | 1 |
+//! | a fixture's page clipped away, so it draws nothing | 4 | 2 |
+//!
+//! The last row arrived with the ink floors, and it is the one that says what a
+//! floor is for: with the page clipped to nothing, the two shading fixtures
+//! fail on their floors and the determinism fingerprints fail on the hash. Both
+//! halves are needed — the hash alone would report a *changed* page rather than
+//! an empty one, which is exactly how a blank fixture sat in that file for
+//! months looking like evidence.
 //!
 //! `Overlay` is the row worth reading: swapping its two arguments back is a
 //! change no other assertion in 2 939 sees. It draws a plausible picture, it is

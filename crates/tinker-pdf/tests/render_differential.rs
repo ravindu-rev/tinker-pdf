@@ -35,6 +35,27 @@
 //!
 //! Each of those is a constraint on the *fixture*, not a tolerance on the
 //! comparison: there is no budget here and there is not meant to be one.
+//!
+//! # The injections that were counted
+//!
+//! Over the whole workspace, 4 413 tests, `--no-fail-fast` before `-p`. The
+//! second column is how many of the first are the four pairs above.
+//!
+//! | Injected | Caught by the workspace | Of which here |
+//! | --- | ---: | ---: |
+//! | a tiling lattice stepped by its `/BBox` rather than by `/XStep` | 11 | 1 |
+//! | a shading pattern sampled through the CTM rather than its own `/Matrix` | 3 | 1 |
+//! | a form's `/BBox` not clipping | 3 | 1 |
+//! | a Type 3 `/FontMatrix` applied after the text matrix rather than inside it | 4 | 1 |
+//! | a tile blitted at `floor` rather than `round` | **1** | **0** |
+//!
+//! The last row is the honest one. That defect is invisible here **by
+//! construction**: every lattice offset in the tiling fixture is an integer,
+//! because that is the condition under which a blit and a direct paint are
+//! entitled to be byte-equal at all. Only the determinism fingerprint sees it,
+//! and it sees it the way a fingerprint sees everything — a pixel moved, with
+//! no opinion about whether it should have. A pair that could catch it would be
+//! a pair with a budget, and a budget is what this file exists not to have.
 
 use tinker_pdf::{
     DeviceSpace, DocumentBuilder, FormXObject, Function, Shading, ShadingPattern, TilingPattern,
