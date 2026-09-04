@@ -529,10 +529,27 @@ struct MaskFrame {
 /// Past the bound, images composite one at a time exactly as they did before
 /// runs existed: abutting ones conflate again. That is a quality loss and not
 /// a correctness one, and it is bounded memory rather than a page that will
-/// not render (ruling 1). It is not a `bounds_ledger.rs` row for
-/// [`MAX_PAGE_PIXELS`]'s reason: both are properties of the scale the caller
-/// asked for rather than counts read out of a document, and that ledger
-/// measures documents.
+/// not render (ruling 1).
+///
+/// **It is still not a `bounds_ledger.rs` row, and the reason it used to give
+/// is no longer available.** That reason was that this and [`MAX_PAGE_PIXELS`]
+/// are both properties of the scale the caller asked for rather than counts
+/// read out of a document, and that ledger measures documents. Tier 0's memory
+/// row put `MAX_PAGE_PIXELS` in that table and amended its `Bound` contract to
+/// admit a caller-parameterised cap, so the premise is now false and the
+/// conclusion drawn from it proves nothing.
+///
+/// The reason that survives is the one that file's header already makes twice
+/// — for `MAX_EPUB_PAGES` at gap 31's milestone 4, and for `MAX_LAYOUT_WORK`
+/// at its milestone 7: **a cap set under another cap, over a quantity that
+/// other cap has already bounded, is the other cap wearing a second name.** A
+/// run buffers part of one page; a page is already bounded by
+/// [`MAX_PAGE_PIXELS`]; and this number is literally a quarter of it. Nothing
+/// unbounded becomes bounded here, and what changes past the threshold is how
+/// the same bounded memory is spent rather than how much of it there is — so
+/// `every_bound_can_fire`, which asks whether a cap sits under what its own
+/// inputs can allocate, would be asking a question this constant does not
+/// answer.
 const MAX_IMAGE_RUN_PIXELS: u64 = MAX_PAGE_PIXELS / 4;
 
 /// A mask's identity: where it is and whose coverage it holds.
@@ -2878,6 +2895,52 @@ pub fn page_view_transform(crop: (f64, f64, f64, f64), rotation: u16, scale: f64
 /// allocation no machine can serve. A failed allocation **aborts** the process
 /// rather than unwinding, so it cannot be caught and reported afterwards —
 /// which makes this the one place it has to be prevented rather than handled.
+///
+/// | | Pixels, at 150 dpi |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 67 108 864 |
+/// | A 200-page comic, whose largest page is a 2000 x 3000 scan | 26 043 750 |
+/// | A dense 200-page fixed document, US Letter at 612 x 792 pt | 2 103 750 |
+/// | A 300-page reflowable book, at `epub::DEFAULT_PAGE`'s 432 x 648 pt | 1 215 000 |
+/// | **This cap** | **67 108 864** |
+///
+/// The fixture figure is the cap itself and is allowed, because this bound
+/// **degrades rather than refuses**: `an_absurd_page_box_is_clamped_rather_than_allocated`
+/// asks [`page_pixels`] for `1e9 x 1e9` and gets a canvas under the cap, and
+/// `an_enormous_page_is_scaled_rather_than_cropped` renders a 20 000-point
+/// page at scale 4 and gets [`RenderWarning::PageScaledDown`]. Nothing here
+/// ever allocates more than this number, so the most any fixture *spends* is
+/// this number.
+///
+/// **Those three yardsticks are undefined without a resolution, so one is
+/// fixed: 150 dpi.** A page's pixel count is its box in points times the
+/// square of the caller's scale, which makes this the row in
+/// `bounds_ledger.rs` whose columns are a property of the *ask* as much as of
+/// the file — and a column that did not name the ask would be three numbers
+/// nobody could check.
+///
+/// 150 rather than either neighbour, and both neighbours are wrong for a
+/// stated reason. **72 dpi** is `RenderOptions::default()`, one device pixel
+/// per point, and it is the floor; a yardstick that takes the floor measures
+/// nothing. **300 dpi** is what two rows of that table already use, and it is
+/// right where they use it, because their input is a scan — but
+/// `tinker_pdf::cbz::synthesise` makes one image pixel exactly one PDF point,
+/// so a 2000 x 3000 comic page is a 2000 x 3000 *point* box, 27.8 by 41.7
+/// inches, and asking 300 dpi of it asks to upsample a scan four-fold. That
+/// crosses this cap at **241 dpi**, and the crossing is written down here
+/// rather than left to be rediscovered: past it the page is scaled to fit and
+/// says so, which is a degradation under ruling 2 rather than a refusal, and
+/// makes this the one row in that table whose over-yardstick behaviour is a
+/// warning instead of a `Refused`.
+///
+/// **150 dpi** is `tpdf render`'s own default — the resolution a caller who
+/// does not choose gets from this engine's front end — and twice the library's
+/// floor. All three yardsticks clear the cap at it: by 2.6x, 32x and 55x.
+///
+/// Reachable: [`page_pixels`] rounds each side outward and clamps each at
+/// `u32::MAX`, so four tokens of `/MediaBox` and any finite scale may ask for
+/// `u32::MAX` squared — 18 446 744 065 119 617 025 pixels, 275 billion times
+/// this cap.
 pub const MAX_PAGE_PIXELS: u64 = 1 << 26;
 
 /// The pixel size of a page at a given scale.

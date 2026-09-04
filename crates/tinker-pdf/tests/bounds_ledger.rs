@@ -1,5 +1,51 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 5 September 2026, tier 0's memory row.* **Two more rows, and the
+//! first amendment to what a [`Bound`] is allowed to be.**
+//!
+//! The table goes from forty to **forty-two**, and the two are
+//! `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`: the largest allocation this
+//! engine makes for one page, and the largest one it makes for one stream.
+//! Neither is new, neither was ever quiet, and both had a clock-free firing
+//! test before this milestone. What neither had is the arithmetic this file
+//! exists for — *is the number in the code the number in the ledger, does the
+//! cap sit under what its own inputs can ask for, and does it clear the thing
+//! the format is for.*
+//!
+//! **Admitting them cost the contract an amendment, and that is the
+//! interesting half.** `tinker-pdf-render` carried a recorded decision saying
+//! the opposite of this milestone. Of `MAX_IMAGE_RUN_PIXELS` it read: *"it is
+//! not a `bounds_ledger.rs` row for `MAX_PAGE_PIXELS`'s reason: both are
+//! properties of the scale the caller asked for rather than counts read out of
+//! a document, and that ledger measures documents."* That was an accurate
+//! description of the table as it stood and a wrong rule, and the way to tell
+//! is what it exempts: the largest allocation in the engine, from the one
+//! check that would have caught `MAX_JPX_WORK`. `/MediaBox [0 0 1e9 1e9]` is
+//! four tokens read out of a document whatever scale multiplies them. So
+//! [`Bound`]'s contract now admits a **caller-parameterised** cap on one
+//! condition — the parameter is fixed and written into the row, because a
+//! yardstick that depends on an unstated number is not a yardstick.
+//! `MAX_PAGE_PIXELS`'s three columns are at 150 dpi and its own ledger argues
+//! the dpi rather than assuming it.
+//!
+//! `MAX_DECODED_STREAM` is the other kind of hole. It had no `reachable` and
+//! could not have had one, because the sentence standing in front of it was
+//! *"a 1 KB flate stream can legally expand without bound"* — and a cap with
+//! no ceiling in front of it is a cap nobody can check, which is gap 18a
+//! milestone 8's failure written as prose instead of as a constant. DEFLATE's
+//! expansion is bounded: **1 032:1**, from RFC 1951's 258-byte longest match
+//! costing two bits under a degenerate Huffman tree. The row's ceiling is that
+//! ratio against an input of at most `u32::MAX` bytes — the narrowest target
+//! this engine builds for, taken on purpose — and it clears the cap by
+//! thirty-three thousand.
+//!
+//! And the direction that must be checked in both: `MAX_IMAGE_RUN_PIXELS` is
+//! **still** not a row, and its comment now says so for a reason that
+//! survives the amendment. A cap set under another cap, over a quantity that
+//! other cap has already bounded, is the other cap wearing a second name —
+//! which is the argument this header already makes for `MAX_EPUB_PAGES` at gap
+//! 31's milestone 4 and for `MAX_LAYOUT_WORK` at its milestone 7.
+//!
 //! *Amended, 4 September 2026, tier 1's two ledger rows.* **Five more rows, and
 //! the first three in this table that publish a number as an estimate.**
 //!
@@ -356,8 +402,34 @@ const XPS_GLYPH_TESTS: &str = include_str!("xps_glyphs.rs");
 /// text, and there is nowhere for a ledger and its firing test to drift apart.
 const ICC: &str = include_str!("../../tinker-pdf-color/src/icc.rs");
 const JBIG2: &str = include_str!("../../tinker-pdf-filters/src/jbig2.rs");
+/// Tier 0's memory row: the two runtime bounds, and the two sources that prove
+/// them. `RENDER` is the first `declared_in` here that is a whole crate root
+/// rather than a `limits.rs` — [`tinker_pdf_render::MAX_PAGE_PIXELS`] is
+/// declared beside the function that spends it, which is where a cap belongs
+/// by this table's own rule.
+const RENDER: &str = include_str!("../../tinker-pdf-render/src/lib.rs");
+const PAGE_GEOMETRY_TESTS: &str = include_str!("page_geometry.rs");
+const COS_LIMITS: &str = include_str!("../../tinker-pdf-cos/src/limits.rs");
+const INLINE_IMAGE_TESTS: &str = include_str!("inline_images.rs");
 
 /// One bound, as its own ledger publishes it.
+///
+/// **What is allowed to be one — amended by tier 0's memory row.** Until then
+/// every row here capped a count read out of a document, and
+/// `tinker-pdf-render` had written that pattern down as a *rule* and used it
+/// to keep the page ceiling out. The rule is now the thing the pattern was
+/// evidence for: **a cap belongs in this table when a hostile input can reach
+/// it and an honest one must not.** That admits a cap the *caller*
+/// parameterises, on one condition — the parameter is fixed and written into
+/// the row. [`Bound::comic`], [`Bound::document`] and [`Bound::book`] are a
+/// yardstick each, and a yardstick that depends on an unstated number is not
+/// one; `MAX_PAGE_PIXELS`'s three are at a dpi its own ledger names and
+/// argues for.
+///
+/// It does **not** admit a cap set under another cap over a quantity that
+/// other cap has already bounded — `MAX_IMAGE_RUN_PIXELS` is a quarter of
+/// `MAX_PAGE_PIXELS` and stays out — for the reason this file's header gives
+/// twice already: that is the other cap wearing a second name.
 struct Bound {
     /// The constant's name, as written in the code.
     name: &'static str,
@@ -380,13 +452,13 @@ struct Bound {
     /// The most gap 31's yardstick spends: **a 300-page reflowable book**.
     ///
     /// The third yardstick, and unlike the first two it is not an estimate.
-    /// Sixteen of these forty rows are figures a real book can be
+    /// Sixteen of these forty-two rows are figures a real book can be
     /// *measured* against, and
     /// [`the_book_yardstick_is_not_below_a_real_book`] measures every book in
     /// both corpora against them on every run — the committed six always, the
     /// fetched twenty when `TINKER_EPUB_CORPUS` names them. Each of those
     /// sixteen is the largest figure any of the twenty-six actually spends,
-    /// rounded up; the other twenty-four carry a derivation in their own
+    /// rounded up; the other twenty-six carry a derivation in their own
     /// comment.
     ///
     /// **Not an `Option`, and no row opts out.** Gap 30's milestone 9 had to go
@@ -1528,6 +1600,111 @@ fn ledger() -> Vec<Bound> {
                 JBIG2,
             ),
         },
+        // ---- tier 0, the memory row ------------------------------------
+        //
+        // The two largest runtime bounds, and the first two rows here that a
+        // *process* spends rather than a document. See the header amendment
+        // for what admitting them cost the `Bound` contract.
+        Bound {
+            name: "MAX_PAGE_PIXELS",
+            cap: tinker_pdf_render::MAX_PAGE_PIXELS as u128,
+            published: "67 108 864",
+            // The cap itself, and allowed for `MAX_CBZ_PAGES`'s reason: this
+            // bound **degrades rather than refuses**, so the fixture that
+            // proves it fires asks `page_pixels` for `1e9 x 1e9` — 10^18
+            // pixels — and gets a canvas of at most the cap. Nothing here can
+            // allocate past it, so the most any fixture spends *is* it.
+            fixtures: tinker_pdf_render::MAX_PAGE_PIXELS as u128,
+            // Every figure below is at **150 dpi**, and the dpi is not a
+            // detail: a page's pixel count is its box in points times the
+            // square of the caller's scale, so this is the only row in the
+            // table whose columns are a property of the ask as well as of the
+            // file. `tinker-pdf-render`'s own ledger argues the number —
+            // briefly, 72 dpi is the floor and measures nothing, 300 dpi asks
+            // to upsample a comic scan four-fold and crosses this cap at 241,
+            // and 150 is `tpdf render`'s own default.
+            //
+            // A 200-page comic's largest page is a 2000 x 3000 scan, and
+            // `cbz::synthesise` makes one image pixel one PDF point, so the
+            // box is 2000 x 3000 pt: 4 167 x 6 250 device pixels.
+            comic: 4_167 * 6_250,
+            // A fixed page is US Letter — ECMA-388's units are 1/96 inch and
+            // 816 x 1056 of them is 612 x 792 pt — which is 1 275 x 1 650
+            // device pixels. The same sheet `MAX_PNG_SAMPLES` measures its own
+            // yardstick against, at the same dpi, reached by two paths.
+            document: 1_275 * 1_650,
+            // `epub::DEFAULT_PAGE` is 432 x 648 pt, a 6 x 9 inch trade
+            // paperback, and it is the box every book in both corpora is
+            // actually laid out at: 900 x 1 350 device pixels. Not a zero and
+            // not an estimate — a book has a page, and this engine chooses it.
+            book: 900 * 1_350,
+            // `page_pixels` rounds each side outward and clamps each at
+            // `u32::MAX`, and the area is their product before the clamp to
+            // the cap. The second row in this table whose ceiling is the
+            // square of a field width rather than of another cap.
+            reachable: (u32::MAX as u128) * (u32::MAX as u128),
+            reachable_because: "a page box times any finite scale, each side clamped at `u32::MAX`",
+            declared_in: RENDER,
+            // The warning rather than the clamp, and both exist: `RENDER`'s own
+            // `an_absurd_page_box_is_clamped_rather_than_allocated` proves the
+            // canvas is bounded, and this one proves the *transform* was
+            // bounded with it and that the caller is told. A cap that silently
+            // cropped three quarters of the sheet would satisfy the first and
+            // is the defect this row is a record of.
+            fires_in: (
+                "an_enormous_page_is_scaled_rather_than_cropped",
+                PAGE_GEOMETRY_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_DECODED_STREAM",
+            cap: tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128,
+            published: "128 MiB",
+            // The cap, for `MAX_PAGE_PIXELS`'s reason one row up: the fixture
+            // that proves it fires builds a zlib bomb of `cap + 1024` and the
+            // decode stops at `cap`, so `cap` bytes is the most any fixture
+            // produces.
+            fixtures: tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128,
+            // One stream each rather than a document's worth, because one
+            // `stream_decoded` call is what this cap bounds. All three formats
+            // are synthesised into a PDF and read back through
+            // `tinker-pdf-cos`, and the largest single stream each holds is an
+            // image.
+            //
+            // A 2000 x 3000 16-bit RGBA page, which is
+            // `MAX_ZIP_ENTRY_BYTES`'s own comic figure arriving here as
+            // decoded samples instead of as a ZIP entry.
+            comic: 48_000_000,
+            // A full-page 300 dpi RGBA scan, 2 550 x 3 300 x 4 — the figure
+            // `MAX_PNG_SAMPLES` publishes for the same document, because the
+            // samples that cap counts are the bytes this one counts.
+            document: 2_550 * 3_300 * 4,
+            // And the same plate, for `MAX_PNG_SAMPLES`'s stated reason: an
+            // illustrated book and a report carry the same picture.
+            book: 2_550 * 3_300 * 4,
+            // **The field width this row had none of.** `limits.rs` used to
+            // say a 1 KB flate stream expands *without bound*, which is a cap
+            // with no ceiling to be compared against. DEFLATE's expansion is
+            // bounded at 1 032:1 — RFC 1951's 258-byte longest match, costing
+            // two bits under a degenerate dynamic Huffman tree, is 258 * 8 / 2
+            // bytes out per byte in — and the input is a subslice of the
+            // document buffer, at most `u32::MAX` bytes on the 32-bit targets
+            // this engine builds for. The narrowest target is taken on
+            // purpose: a cap that fires under the tightest ceiling fires under
+            // every looser one.
+            reachable: (u32::MAX as u128) * 1_032,
+            reachable_because:
+                "`u32::MAX` bytes of input on a 32-bit target, at DEFLATE's maximum 1 032:1",
+            declared_in: COS_LIMITS,
+            // Clock-free and both directions in one test, which is why it is
+            // this one rather than a refusal test: a stream at three quarters
+            // of the ceiling must come back **whole**, or the ceiling is lower
+            // than it claims, and one past it must be capped and say so.
+            fires_in: (
+                "an_inline_image_decodes_under_the_shared_ceiling",
+                INLINE_IMAGE_TESTS,
+            ),
+        },
     ]
 }
 
@@ -1537,10 +1714,11 @@ fn ledger() -> Vec<Bound> {
 /// 6 adds three; gap 31's milestone 3 adds one, its milestone 4 adds three, its
 /// milestone 6 adds eight, its milestone 7 adds four and its milestone 10 adds
 /// the one milestone 7 argued would arrive with the multi-pass layout; tier 4's
-/// W-ARCHIVE milestone 1 adds the one `ComicInfo.xml` needs; and tier 1's two
+/// W-ARCHIVE milestone 1 adds the one `ComicInfo.xml` needs; tier 1's two
 /// ledger rows add the five that were fired but unrecorded — ICC's two and
-/// JBIG2's three. All **forty** are here, and a bound added without a row
-/// fails this.
+/// JBIG2's three; and tier 0's memory row adds the two largest **runtime**
+/// bounds, `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`. All **forty-two** are
+/// here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -1587,6 +1765,8 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_JBIG2_SYMBOLS",
             "MAX_JBIG2_SYMBOL_PIXELS",
             "MAX_JBIG2_TEXT_INSTANCES",
+            "MAX_PAGE_PIXELS",
+            "MAX_DECODED_STREAM",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -1692,7 +1872,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 40, "the ledger is forty rows");
+    assert_eq!(measured, 42, "the ledger is forty-two rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -1724,7 +1904,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 40, "the ledger is forty rows");
+    assert_eq!(ledger().len(), 42, "the ledger is forty-two rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -2008,6 +2188,11 @@ fn every_bound_names_a_test_that_exists() {
     // the first entries here that are also a `declared_in`: those two crates
     // keep their tests beside their constants, so one `include_str!` is both
     // the ledger and the proof.
+    // `PAGE_GEOMETRY_TESTS` and `INLINE_IMAGE_TESTS` joined it with tier 0's
+    // memory row, and they are the entries this rule was most needed for: the
+    // roadmap row that added them says in as many words that the only
+    // peak-memory tests in this repository are `#[ignore]`d and wanted a
+    // clock. Neither of these does, and this is what keeps it that way.
     for source in [
         ZIP_TESTS,
         PNG_TESTS,
@@ -2021,6 +2206,8 @@ fn every_bound_names_a_test_that_exists() {
         LAYOUT_TESTS,
         ICC,
         JBIG2,
+        PAGE_GEOMETRY_TESTS,
+        INLINE_IMAGE_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),

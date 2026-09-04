@@ -64,9 +64,42 @@ pub const MAX_RESOLVE_DEPTH: u32 = 32;
 /// `/Encrypt` dictionary; nothing legitimate stacks deeper than a handful.
 pub const MAX_LOAD_DEPTH: usize = 64;
 
-/// Ceiling on the bytes one `stream_decoded` call produces. A 1 KB flate
-/// stream can legally expand without bound, so the cap is what keeps a
-/// decompression bomb costing bounded memory.
+/// Ceiling on the bytes one `stream_decoded` call produces. A flate stream
+/// expands by as much as 1 032 to 1, so what a decode costs is a property of
+/// the file's arithmetic rather than of its length, and this cap is what keeps
+/// a decompression bomb costing bounded memory.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 134 217 728 |
+/// | A 200-page comic, whose largest page is a 2000 x 3000 16-bit RGBA scan | 48 000 000 |
+/// | A dense 200-page fixed document, whose largest stream is a full-page 300 dpi RGBA image | 33 660 000 |
+/// | A 300-page reflowable book, whose largest stream is the same plate | 33 660 000 |
+/// | **This cap** | **128 MiB** |
+///
+/// The fixture figure is the cap itself and is allowed:
+/// `an_inline_image_decodes_under_the_shared_ceiling` builds a zlib bomb of
+/// `cap + 1024` and the decode stops at `cap` with
+/// `filters::Warning::OutputCapHit`, so the most any fixture *produces* is
+/// this number. The three yardsticks are one stream each rather than a
+/// document's worth, because that is what this cap bounds — every one of the
+/// three formats is synthesised into a PDF and read back through this crate,
+/// and the largest single stream each of them holds is an image.
+///
+/// Reachable, and this is the row that needed the number written down. The
+/// sentence above used to read *"a 1 KB flate stream can legally expand
+/// without bound"*, which is a cap with no ceiling in front of it to be
+/// compared against — gap 18a milestone 8's failure, and the thing
+/// `bounds_ledger.rs`'s `every_bound_can_fire` exists to catch. DEFLATE's
+/// expansion **is** bounded, at **1 032:1**: RFC 1951's longest match is 258
+/// bytes, and under a degenerate dynamic Huffman tree — one literal/length
+/// code and one distance code, one bit each — that match costs two bits, so
+/// `258 * 8 / 2` is 1 032 bytes out per byte in. The input is a subslice of
+/// the document buffer, which on the 32-bit targets this engine builds for
+/// (`wasm32-unknown-unknown` and `wasm32-wasip1`) is at most `u32::MAX` bytes.
+/// The narrowest target is taken deliberately: a cap that fires under the
+/// tightest ceiling fires under every looser one. `4 294 967 295 * 1 032` is
+/// 4 432 406 248 440 bytes, thirty-three thousand times this cap.
 pub const MAX_DECODED_STREAM: usize = 128 << 20;
 
 /// Bytes at the end of the buffer searched for `startxref` first (7.5.5).
