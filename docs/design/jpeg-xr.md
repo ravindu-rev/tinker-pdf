@@ -249,8 +249,9 @@ cannot land on it by accident.
   the two cannot drift.
 - `crates/tinker-pdf/src/xps/image.rs`'s `Kind::JpegXr` is the consumer, and
   it is milestone 6 above. The decoder is a leaf-crate concern and the arm a
-  `tinker-pdf` one, so they are separate commits — but the row in
-  `docs/ROADMAP.md` closes only when an image actually decodes **and draws**,
+  `tinker-pdf` one, so they are separate commits — but the row
+  `docs/ROADMAP.md` carried closed only when an image actually decoded **and
+  drew**,
   which is why the wiring is a milestone rather than a footnote.
 
 ## Risks
@@ -480,7 +481,7 @@ alpha plane at all, which produces the identical bytes.
 `Kind::JpegXr` arm, `crates/tinker-pdf-cos/src/jxr_embed.rs`, and the docs.
 **A JPEG XR in an XPS package decodes and draws**, so all four of ISO/IEC
 29500-2 9.1.5's image formats reach the page and `docs/ROADMAP.md`'s Tier 4
-XPS row loses its JPEG XR entry.
+XPS row lost its JPEG XR entry.
 
 **The wiring was mostly a deletion.** `image.rs` carried a loop that refused
 JPEG XR *before* either identification rule had decided what the part was, so

@@ -37,10 +37,11 @@
 //! that dropped it would lose a stylesheet.
 //!
 //! **An element outside the XHTML namespace is kept**, and that is a decision
-//! rather than an omission. Two of the six committed books wrap their cover in
-//! an SVG `<image>`; this build draws no SVG (a named non-goal), and the
-//! elements carry no text, so keeping them costs a handful of nodes and keeps
-//! the tree a faithful record of the document. What it must not do is let an
+//! rather than an omission. Two of the committed books wrap their cover in an
+//! SVG `<image>`; whether that draws is `epub::svg`'s question and not this
+//! reader's, and the elements carry no text, so keeping them costs a handful
+//! of nodes and keeps the tree a faithful record of the document. What it must
+//! not do is let an
 //! SVG `<title>` be matched by this build's UA rule for HTML's `<title>` — see
 //! [`Node::local_name`], which reports the local name and
 //! [`Node::is_html`], which is what the tree walk keys the UA vocabulary on.

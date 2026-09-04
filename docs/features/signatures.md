@@ -127,7 +127,6 @@ certify.
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
 | A signature with no signed attributes | `Unchecked::NoSignedAttributes` | the signature is then over the content directly, and guessing at what that content is would be a verdict about the wrong bytes | RFC 5652 §5.4 |
 | Visible signature appearance generation | none — a signed field keeps whatever appearance the caller set | drawing seals is not signature work | [forms](forms.md) |
-| The public-key **security handler** (`/Adobe.PubSec`, 7.6.5) | `AuthError::UnsupportedHandler` | related ASN.1, different feature — and zero corpus files ask for it | [encryption](encryption.md) |
 
 ## Verified
 

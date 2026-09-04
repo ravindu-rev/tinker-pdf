@@ -5,7 +5,9 @@ When this is done, a caller holding a byte *source* rather than a byte
 requests (RFC 9110) — will open a document and render page one before most
 of the file has been read, with a byte counter proving it: for a linearized
 file (ISO 32000-1 Annex F) not one read touches the tail. The
-[roadmap](../ROADMAP.md) names this gap and its unusual advantage: the
+roadmap named this gap and its unusual advantage (the item has since closed,
+and the hint-table gap below is what the [roadmap](../ROADMAP.md) still
+carries): the
 reader's spec-complete counterpart is already in-tree, because the writer
 produces Annex F output whose hint tables are read back bit-for-bit by this
 repository's own tests. The reader is also what closes an old gap in that

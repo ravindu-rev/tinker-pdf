@@ -2264,12 +2264,12 @@ fn understood(kind: u8) -> bool {
 /// picture that will be missing from the page. Only the second kind is worth
 /// a warning naming a lineage.
 ///
-/// An **intermediate** generic region (type 36) is here rather than in
-/// [`understood`] even though its bits decode perfectly well. 7.4.6.1 says an
-/// intermediate result goes to an auxiliary buffer for a later segment to
-/// refer to, and the only thing that refers to one is a refinement region,
-/// which this build refuses. Compositing it onto the page would draw a
-/// working buffer as if it were finished content.
+/// Intermediate regions (types 4, 36 and 40) are in [`understood`] rather
+/// than here: 7.4.6.1 sends an intermediate result to an auxiliary buffer for
+/// a later segment to refer to, and a refinement region that refers to one
+/// reads it from that buffer instead of from the page. What is listed here is
+/// what no path reproduces — the halftone lineage, custom tables and colour
+/// palettes.
 fn carries_content(kind: u8) -> bool {
     matches!(
         kind,

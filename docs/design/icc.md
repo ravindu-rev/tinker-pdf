@@ -10,10 +10,12 @@ parsing and transform evaluation in the `tinker-pdf-color` leaf, no
 third-party colour engine — and transparency-group colour spaces honoured
 in compositing (ISO 32000-1 11.4.7, 11.6.6), including the page-level
 `/Group` that `Page::render` does not read today. The
-[roadmap](../ROADMAP.md) names both gaps and points them here; the exit it
-records is that ICC profiles drive conversion and that known-answer tables
-computed from the specification's own equations hold
-([render-verification](render-verification.md)).
+roadmap named both gaps and pointed them here, and the entry has since left
+it; the exit it recorded is that ICC profiles drive conversion and that
+known-answer tables computed from the specification's own equations hold
+([render-verification](render-verification.md)). What is still open of this
+design — the refused profiles and the two ledger rows — is listed in the
+[roadmap](../ROADMAP.md) on its own.
 
 ## Scope
 

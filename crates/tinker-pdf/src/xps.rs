@@ -771,13 +771,13 @@ pub enum XpsElementDefect {
     /// An `ImageSource` that resolves to no part in the package, or to one the
     /// package does not hold.
     ImageUnresolved,
-    /// 9.1.5's TIFF or 9.1.5.1's JPEG XR. This engine has neither decoder, and
-    /// the refusal is at the **element** so the rest of the page still draws --
-    /// a report whose every page failed because one picture did would be worse
-    /// than the missing picture.
-    ///
-    /// Also the answer when neither the content type nor the magic bytes name a
-    /// format at all: a part nobody has identified is not one to guess at.
+    /// A part neither the content type nor the magic bytes identify as one of
+    /// 9.1.5's four formats -- PNG, JPEG, TIFF and 9.1.5.1's JPEG XR all decode
+    /// and draw now, so this is the answer only for a part nobody has
+    /// identified, which is not one to guess at. The refusal is at the
+    /// **element** so the rest of the page still draws -- a report whose every
+    /// page failed because one picture did would be worse than the missing
+    /// picture.
     ImageFormatUnsupported,
     /// The part is a format this build draws and its bytes will not decode.
     ImageUnreadable,

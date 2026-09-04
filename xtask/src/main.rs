@@ -906,15 +906,16 @@ fn check_libm() -> Result<(), Vec<String>> {
 ///   bytes this repository then verifies against its own SHA-256; `cargo`
 ///   builds and publishes; the child the corpus runner spawns is a workspace
 ///   binary built from the same revision.
-/// - **A debt, with a milestone against it.** The XPS render comparison, the
-///   browser and epubcheck. Each is an oracle of retired ruling 9, still
-///   running because ruling 13's order is fixed: nothing is deleted before the
-///   first-party check replacing it exists and has been injection-counted.
-///   Each row names the step of the roadmap's first-party-verification item
-///   that removes it. The four qpdf tests left in step 3 with the strict
-///   validator, and `xps_mutool.rs` left in step 4 with the conservation
-///   suite — every one of their rows leaving in the same commit as the test it
-///   allowed, which is the half of this check that catches a stale allowance.
+/// - **A debt, with a milestone against it.** None remain. The XPS render
+///   comparison, the browser and epubcheck were oracles of retired ruling 9,
+///   kept until ruling 13's order was met: nothing deleted before the
+///   first-party check replacing it existed and had been injection-counted.
+///   Each row named the roadmap step that removed it. The four qpdf tests left
+///   in step 3 with the strict validator, `xps_mutool.rs` in step 4 with the
+///   conservation suite, the browser and epubcheck in step 5 — every row
+///   leaving in the same commit as the test it allowed, which is the half of
+///   this check that catches a stale allowance. The `DEBT (step N)` spelling
+///   stays legal so that a future oracle cannot be filed as a fact of life.
 ///
 /// The check runs both ways. A file that spawns something and is not here is
 /// a build failure — that is the boundary. And a row here whose file no

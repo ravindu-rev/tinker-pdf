@@ -4,7 +4,8 @@ When this is done, the symbol-dictionary-plus-text-region lineage of ITU-T T.88 
 what `jbig2enc` and OCR pipelines emit, and therefore most JBIG2 in circulation —
 decodes through the same `crates/tinker-pdf-filters/src/jbig2.rs` module that
 already owns the generic-region lineage, and the engine's highest-reachability
-refusal (103 files in the pdf.js corpus, per [../ROADMAP.md](../ROADMAP.md) Tier 2)
+refusal (103 files in the pdf.js corpus, the count the [roadmap](../ROADMAP.md)'s
+Tier 2 carried when this was written)
 goes to approximately zero in `corpus/ratchet.json`. What still refuses — refinement
 initially, halftone permanently for now — refuses for a *narrower named reason*
 than today's single `Warning::Jbig2SegmentSkipped`, keeping the

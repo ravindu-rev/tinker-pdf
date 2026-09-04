@@ -153,7 +153,6 @@ Some(Encryption { .. })` or `linearize: true` on a `Rewrite`
 | Linearizing a document with no catalog or no pages | none — `linearize` returns no layout and the ordinary rewrite is emitted | there is no first page to put first, and a file claiming `/Linearized` falsely is worse than an ordinary one | Annex F |
 | `object_streams` under `linearize` | none — ignored when linearization succeeds | packing page one's objects into a container with everything else is the opposite of the layout's point | 7.5.7 |
 | Re-compressing a stream that declares a `/Filter` | none — handed through untouched, asserted in both directions | the dictionary is the only signal the bytes are already encoded; wrapping them again yields a stream no reader can undo | [filters](filters.md) |
-| Signing | `SignaturePlaceholder` exists as a record of where `/Contents` and `/ByteRange` would be patched; nothing produces or fills one | CMS production and everything cryptographic is unbuilt; the byte-identical prefix is the foundation it will stand on (12.8.1) | [ROADMAP](../ROADMAP.md) Tier 3 |
 
 ## Verified
 
@@ -206,8 +205,8 @@ workspace suite: 4 403 passed, 0 failed, 43 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md).
 
 **And it runs at scale.** Every corpus file this engine reads cleanly is
-rewritten in memory and the rewrite is validated, which is 4 225
-documents nobody here authored: all 4 225 of those rewrites carry no
+rewritten in memory and the rewrite is validated, which is 4 224
+documents nobody here authored: all 4 224 of those rewrites carry no
 structural defect at all, and `corpus/ratchet.json` holds the rate. That pass
 is what found the three defects this writer had and no other check could see,
 because this engine's own reader repairs all three in silence: no trailer

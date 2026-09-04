@@ -287,11 +287,11 @@ timeout):
 
 | Corpus | Files | Rendered every page | Failed | Timed out | Rewrites that validate |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| pdf.js | 974 | 963 | 11 | 0 | 842 of 842 |
+| pdf.js | 974 | 963 | 11 | 0 | 841 of 841 |
 | veraPDF | 2 907 | 2 906 | 0 | 1 | 2 890 of 2 890 |
 | qpdf | 637 | 608 | 29 | 0 | 487 of 487 |
 | PDF Association | 7 | 7 | 0 | 0 | 6 of 6 |
-| **Total** | **4 525** | **4 484 (99.1 %)** | 40 | 1 | **4 225 of 4 225** |
+| **Total** | **4 525** | **4 484 (99.1 %)** | 40 | 1 | **4 224 of 4 224** |
 
 **Not one crash.** Ruling 1 held against thousands of files nobody here
 authored, which is worth more than the fuzzers, because these are documents
@@ -325,26 +325,29 @@ slowdown in exactly these two files. What changed is the message:
 accounted for by timeouts, so the next reader is told to re-run rather than
 to go looking for a rendering bug.
 
-The second axis — 973 files
-(21.5 %) rendering *with something reported* — is measured without font faces,
+The second axis — 929 files
+(20.5 %) rendering *with something reported* — is measured without font faces,
 and there are now two more bars that say what that costs.
 `corpus/ratchet-fonts.json` is the same 4 525 files with a synthesised face
-supplied and reports **343 (7.6 %)**; `corpus/ratchet-bundled.json` is the
+supplied and reports **299 (6.6 %)**; `corpus/ratchet-bundled.json` is the
 same files with the twelve Liberation faces the `bundled-fonts` feature ships
-and reports **374 (8.3 %)**. So roughly **two thirds of all reported degradation
+and reports **330 (7.3 %)**. So roughly **two thirds of all reported degradation
 was the absence of a face** rather than a defect in the engine.
 
-The no-faces figure was 1 045 until August 2026, and what moved it was a form
-XObject's own `/Resources` being consulted at last
-([features/rendering.md](features/rendering.md)): seventy-two files stopped
-drawing a placeholder where a form named an image, a colour space or a font the
-page had never heard of.
+The no-faces figure was 1 045 until August 2026. Seventy-two files left it
+when a form XObject's own `/Resources` was consulted at last
+([features/rendering.md](features/rendering.md)) and stopped drawing a
+placeholder where a form named an image, a colour space or a font the page had
+never heard of; the rest of the way to 929 was ICC profiles being read and
+image edges being drawn soft, each re-recorded in `corpus/ratchet.json` by the
+commit that earned it.
 
 The synthetic face is one this repository writes for itself (`cargo xtask
 synth-face`) — every glyph from 32 up a filled box — so it answers *was a face
 available* and nothing more, needs no licence and no download, and is the same
-bytes on every machine. That it scores 27 files *better* than the real faces is
-the interesting part: every one of the 27 is a symbolic font that the bundled
+bytes on every machine. That it scores *better* than the real faces — 27 files
+when it was measured, 31 on the recorded bars — is the interesting part: every
+one of the 27 was a symbolic font that the bundled
 set declines and one all-purpose face answered with squares, so the synthetic
 bar flatters itself by exactly that much
 ([features/fonts.md](features/fonts.md)).
@@ -379,8 +382,8 @@ the header, the cross-reference sections, the offsets, the stream extents, the
 trailer — because a rewrite copies the page tree, the annotations and the
 resource dictionaries from its source, and a backwards `/Rect` in somebody's
 2003 invoice belongs to the invoice. A file this engine could not read cleanly
-is not eligible and is counted as neither: 4 225 of the 4 525 were rewritten
-and every one of those 4 225 validates. What the semantic tier found in the
+is not eligible and is counted as neither: 4 224 of the 4 525 were rewritten
+and every one of those 4 224 validates. What the semantic tier found in the
 same rewrites — outline counts that disagree with their own trees, backwards
 annotation rectangles, malformed `/W` arrays — is listed per file and per rule
 in `corpus/report.json`, and belongs to the documents.
@@ -416,8 +419,8 @@ each was asked of beside how many it held on:
 | Relation | Asked of | Held |
 | --- | ---: | ---: |
 | `rotate` | 4211 | 4030 |
-| `crop` | 4191 | 4147 |
-| `dpi` | 4439 | 4376 |
+| `crop` | 4191 | 4148 |
+| `dpi` | 4439 | 4388 |
 
 All three moved up in August 2026 when image edges stopped being quantised to
 whole device pixels and a run of abutting images stopped conflating
@@ -477,9 +480,12 @@ files that had always passed into timeouts — and `--record` wrote that
 regression in as the new bar, which is exactly what a ratchet exists to prevent;
 the relations are now bounded so the pass rate they must not disturb is
 undisturbed. And `pdfjs/test/pdfs/bug1980958.pdf`, 219 bytes and a 10 × 10 page,
-has a **rewrite that does not come back**: three minutes in, the rotation
-relation had not returned, where the same file renders in under two seconds. It
-is a roadmap item now.
+had a **rewrite that did not come back**: three minutes in, the rotation
+relation had not returned, where the same file renders in under two seconds.
+Its last object is numbered 2 147 483 647, and a rewrite that walked the
+numbering range rather than the objects made two thousand million lookups; the
+writer now enumerates the cross-reference table's own entries
+([features/writing.md](features/writing.md)).
 
 **The honest limit of the corpus run**: it measures whether a bitmap came
 back, not whether it is the right bitmap. Nothing here compares a page this

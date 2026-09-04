@@ -194,7 +194,7 @@ smoke gates now include the write legs, so a package that ships a read-only
 - The strict structural validator ([verification.md](../verification.md))
   for the validation leg.
 - [docs/features/bindings.md](../features/bindings.md) (referenced by
-  `tinker-pdf-ffi/src/lib.rs` today) grows alongside; roadmap placement in
+  `tinker-pdf-ffi/src/lib.rs` today) grows alongside; the projections still owed are listed in
   [ROADMAP.md](../ROADMAP.md).
 
 ## Risks

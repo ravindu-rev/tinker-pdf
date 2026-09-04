@@ -9,8 +9,10 @@ text, actual text, language, artifact exclusion — built over the **same**
 today a never-crash bar ([../verification.md](../verification.md)), graduates
 to a structure bar: counts of elements found, MCIDs matched and orphans left
 are ratcheted in `corpus/ratchet.json`, and the PDF/UA (ISO 14289-1) cases in
-that corpus are measured against the checks this design implements. This is the
-roadmap's "Tagged PDF and accessibility" row ([../ROADMAP.md](../ROADMAP.md)).
+that corpus are measured against the checks this design implements. This was the
+roadmap's "Tagged PDF and accessibility" row; it has left
+[../ROADMAP.md](../ROADMAP.md), which now carries only the writing gaps this
+design names as future work.
 
 ## Scope
 

@@ -6,9 +6,9 @@ offset and refused by name — `ArchiveRefusal::NotAZip` — with the refusal ro
 in [features/cbz.md](../features/cbz.md) reading *"three more decompressors,
 two of them encumbered, and none of them a page"*.
 
-This is the design for making them pages. It is owed by
-[ROADMAP.md](../ROADMAP.md)'s tier-4 CBZ item, which says a design doc arrives
-with the decoders.
+This is the design for making them pages. It was owed by the roadmap's
+tier-4 CBZ item, which said a design doc arrives with the decoders; that item
+has since left [ROADMAP.md](../ROADMAP.md).
 
 ## Scope
 
@@ -254,7 +254,7 @@ is not the same thing as the criterion being met.
 
 Each is one commit, and the commit that makes a criterion green is the same
 commit that edits the refusal row in [features/cbz.md](../features/cbz.md) and
-narrows the tier-4 CBZ entry in [ROADMAP.md](../ROADMAP.md).
+narrowed the tier-4 CBZ entry in [ROADMAP.md](../ROADMAP.md) until it left.
 
 **1. tar. Done.**
 Exit criterion: `7z-tar.cbt` joins `READ_CONTAINERS` in `cbz_real.rs` and

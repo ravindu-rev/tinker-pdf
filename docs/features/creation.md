@@ -121,9 +121,8 @@ byte-deterministic XMP packet and the header version its part requires.
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| CFF / OpenType-CFF subsetting | a CFF face embeds whole | charstring subsetting with subroutine renumbering is not written | [ROADMAP.md](../ROADMAP.md) |
 | Any image encoder but deflate | `Rgb8`/`Gray8` are deflated; JPEG and PNG-IDAT pass through; nothing is encoded to JPEG, CCITT, JBIG2 or JPX | the engine decodes those codecs; it does not write them | [filters](filters.md) |
-| Text shaping | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | no GSUB/GPOS; a stated non-goal now reopened | [ROADMAP.md](../ROADMAP.md), [fonts](fonts.md) |
+| Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS and neither will: `glyph_run` is the shaped entry point, through `tinker-pdf-shape` | [fonts](fonts.md), [design/shaping.md](../design/shaping.md) |
 | Non-device colour spaces on write | `DeviceSpace` only (`/DeviceGray`, `/DeviceRGB`, `/DeviceCMYK`) | no CIE, ICC, `/Separation` or `/DeviceN` writer | — |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
 | `ImageData::Compressed` from outside the workspace | `CompressedImage`, `ImageColorSpace`, `ImageFilter` and `SoftMask` are not re-exported by the facade, so the variant cannot be constructed by an external caller | the container formats use it internally; the facade re-export is owed and not yet on the roadmap | — |

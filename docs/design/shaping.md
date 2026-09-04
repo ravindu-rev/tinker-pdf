@@ -24,8 +24,9 @@ engine.
   `text_appearance` builds in `crates/tinker-pdf-cos/src/fill.rs`, and
   EPUB layout, where `Metrics::advance` is per character and a sum over a
   run. An Arabic or Devanagari EPUB cannot paginate legibly today. The
-  [ROADMAP](../ROADMAP.md) Tier 3 entry overturns the non-goal; this doc
-  is its design.
+  roadmap entry that overturned the non-goal has left the
+  [ROADMAP](../ROADMAP.md); this doc is its design, and milestone 5's
+  remainder is what the roadmap still carries.
 - **A new leaf crate, `tinker-pdf-shape`**, under ruling 8
   ([rulings.md](../rulings.md)): face bytes and plain text in, positioned
   glyph runs out; no COS types, no PDF or CSS vocabulary in its API.
@@ -174,15 +175,16 @@ capability lands, rather than implied by a percentage.
   new machinery).
 - The determinism fingerprint suite and CI legs
   ([features/determinism.md](../features/determinism.md)) — milestone 2
-  extends them, the macOS/wasm legs must be observed first (Tier 1).
+  extends them, and all four legs are measured rather than claimed.
 - The conformance-fixture discipline of
   [verification.md](../verification.md): a fixture carries its own expected
   output, and a suite whose case count can shrink silently is not a suite —
   so the counts are asserted.
-- EPUB `@font-face` currently refuses WOFF/WOFF2 by name
-  ([features/epub.md](../features/epub.md)); real Arabic EPUBs often ship
-  WOFF, so milestone 6's fixture uses a raw sfnt face until that Tier 4
-  row closes — the two items are independent but meet in the demo.
+- EPUB `@font-face` refused WOFF/WOFF2 by name when this was written, and
+  real Arabic EPUBs often ship WOFF, so milestone 6's fixture uses a raw
+  sfnt face; both containers unpack now
+  ([features/epub.md](../features/epub.md)), and the fixture stays as it is
+  because the two items are independent and only meet in the demo.
 
 ## Risks
 

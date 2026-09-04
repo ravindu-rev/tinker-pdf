@@ -7,8 +7,10 @@ the 2 907-file veraPDF corpus — today purely a never-crash bar
 agreement rate is ratcheted like every other corpus number, and
 `DocumentBuilder` gains an archival profile that either produces a file this
 engine's own validator accepts with zero findings, or refuses at build time
-with an error naming the clause it could not satisfy. The [roadmap](../ROADMAP.md) Tier 3 item this
-implements says exactly that: the corpus "graduates to a conformance bar."
+with an error naming the clause it could not satisfy. The roadmap item this
+implemented said exactly that — the corpus "graduates to a conformance bar" —
+and has left the [roadmap](../ROADMAP.md), which now carries the staged rules
+and Level A validation from this design and nothing else of it.
 
 ## Scope
 

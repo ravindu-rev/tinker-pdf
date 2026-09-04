@@ -628,5 +628,6 @@ packaging commands.
   Chromium and checks the ink's bounding box is the shape of a line of
   text rather than a smear or a stray pixel.
 - The release workflow asserts the `abi3` wheel tag and greps the `.nupkg`
-  for all three RIDs; every Linux and macOS leg of it is written and
-  unobserved ([ROADMAP.md](../ROADMAP.md) Tier 1).
+  for all three RIDs, and it has run end to end once, on a tag, on 24 August
+  2026: every Linux and macOS leg green and nothing published
+  ([verification](../verification.md)).
