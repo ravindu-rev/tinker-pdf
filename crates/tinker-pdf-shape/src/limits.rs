@@ -63,13 +63,22 @@ pub struct Limits {
     /// silently applied.
     pub max_context_length: usize,
 
-    /// How many lookup applications one run of the lookup list may attempt.
+    /// How many **subtables** one run of the lookup list may search.
     ///
     /// This is the ceiling that bounds work relative to the caller's budget
-    /// rather than relative to whatever the font happens to be. It counts
-    /// every attempt — a subtable consulted and refused costs the same as one
-    /// that substituted — because a font whose coverage tables never match is
-    /// exactly as expensive to run as one whose coverage tables always do.
+    /// rather than relative to whatever the font happens to be. A subtable
+    /// consulted and refused costs the same as one that substituted, because
+    /// a font whose coverage tables never match is exactly as expensive to
+    /// run as one whose coverage tables always do.
+    ///
+    /// **The subtable and not the attempt**, and the distinction is the whole
+    /// value of the number. A lookup's `subTableCount` is a 16-bit field the
+    /// font writes, and applying a lookup at one position searches every one
+    /// of them until one applies; a ceiling counting attempts would leave the
+    /// font choosing what each attempt cost. `apply_at` therefore charges one
+    /// per subtable, with the attempt's own charge paying for the first — so
+    /// a lookup with a single subtable, which is nearly every lookup in every
+    /// shipped face, costs exactly one as it always has.
     pub max_operations: u32,
 
     /// How long the buffer may grow.
