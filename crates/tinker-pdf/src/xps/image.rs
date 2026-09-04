@@ -270,10 +270,12 @@ impl Images {
         // What remains is the ordinary agreement between the two rules, and
         // the one case where they disagree.
         let (kind, lenience) = match (declared, actual) {
-            // They agree, or only one of them spoke. Silence from one rule is
-            // not disagreement with it: 7.2.3.5 lets a part carry no resolved
-            // content type, and three of 9.1.5's four formats share a two-byte
-            // prefix with something that is not an image at all.
+            // They agree, or only one of them spoke — and silence from a rule
+            // is not disagreement with it. A part 7.2.3.5 resolved to no
+            // content type has one witness, and so has one whose first bytes
+            // are no signature `from_magic` knows; a single witness is
+            // believed, because the alternative is refusing every part that
+            // one of the two rules happens not to cover.
             (Some(a), Some(b)) if a == b => (a, None),
             (Some(a), None) => (a, None),
             (None, Some(b)) => (b, None),

@@ -794,8 +794,9 @@ pub enum XpsElementDefect {
     /// reads bytes, so a `.tiff` re-declared `image/png` is still a TIFF and
     /// refusing it would lose a picture the package plainly holds. What is lost
     /// is the producer's statement about the part, and that is the leniency —
-    /// so it is named here, once per part rather than once per use, and a
-    /// reader repairing the package is told which of the two rules was ignored.
+    /// so it is named, and a reader repairing the package is told which of the
+    /// two rules was ignored. Like every other variant here it is deduplicated
+    /// per page, so a page that mis-declares two parts reports it once.
     ///
     /// Not reported where only one rule spoke: a part with no content type, or
     /// one whose bytes match no signature, is *silence* from that rule and not
