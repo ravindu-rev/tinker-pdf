@@ -1921,13 +1921,14 @@ mod tests {
     #[test]
     fn coverage_names_the_groups_that_ran() {
         // The list grows as the milestones land — `fonts` joined it at
-        // milestone 5 — and this assertion is written to *notice* that rather
-        // than to pin it: a group that quietly appeared here would be a group
-        // this tool started claiming to have run without anybody deciding it
-        // should.
+        // milestone 5 and `structure` when the strict validator was joined
+        // under ISO 19005's clauses — and this assertion is written to
+        // *notice* that rather than to pin it: a group that quietly appeared
+        // here would be a group this tool started claiming to have run without
+        // anybody deciding it should. It has noticed twice now.
         assert_eq!(
             tinker_pdf::PdfACoverage::IMPLEMENTED.to_string(),
-            "metadata, syntax, fonts, colour"
+            "metadata, syntax, structure, fonts, colour"
         );
         assert_eq!(
             tinker_pdf::PdfACoverage::default().to_string(),
