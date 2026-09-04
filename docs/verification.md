@@ -388,6 +388,48 @@ timeout):
 | PDF Association | 7 | 7 | 0 | 0 | 6 of 6 |
 | **Total** | **4 525** | **4 484 (99.1 %)** | 40 | 1 | **4 224 of 4 224** |
 
+**The forty-one that do not render every page, attributed.** Forty of them are
+failures and one is a timeout, and none is a page this engine drew wrongly:
+
+| Class | Files | What it is |
+| --- | ---: | --- |
+| A user password this run does not supply | 36 | 11 pdf.js, 25 qpdf |
+| No PDF header at all | 4 | qpdf `bad1.pdf`, `issue-141b.pdf`, `issue-263.pdf`, `issue-335b.pdf` |
+| Declined on the clock | 1 | veraPDF `isartor-6-1-12-t01-fail-a.pdf` |
+
+**The thirty-six are the runner's limitation, not the engine's.** `tpdf` tries
+the empty password and nothing else, which is right for a tool and wrong for a
+census: the fixtures are encryption tests, and their passwords are stated
+upstream. Eight of the qpdf files carry theirs *in their own names* —
+`enc-R2,V1,U=view,O=master.pdf` has the user password `view`,
+`enc-XI-R6,V5,U=wwwww,O=wwwww.pdf` has `wwwww` — and qpdf's own
+`qtest/*.test` scripts name the rest, `c-r2.pdf` with `user1`,
+`nontrivial-crypt-filter.pdf` with `asdfqwer`, `short-O-U.pdf` with
+`19723102477`. `check-encryption.test` settles `20-pages.pdf` outright: with no
+password `--requires-password` exits 0, meaning a password other than the one
+supplied is required, and with `user` it exits 3, meaning that one works. So
+the engine is refusing exactly what it should refuse.
+
+Closing this properly is a **decision with a cost**, recorded rather than
+taken: a `corpus/passwords.tsv` read by the runner would open all thirty-six
+and make them measurements instead of abstentions, and it would move `passed`
+from 4 484 toward roughly 4 520 — which re-records every ratchet baseline,
+`degraded`, `strict_eligible` and all three metamorphic denominators with it.
+Reading an upstream test script for a password is an *input*, which ruling 13
+admits; re-recording six committed bars is a judgement about when.
+
+**The four have no header.** `bad1.pdf` begins `oops`, `issue-263.pdf` begins
+`%PDFn`, `issue-141b.pdf` runs the version into the first object, and
+`issue-335b.pdf` starts with a byte above 127 followed by `startxref`. Each is
+a deliberately damaged fixture in qpdf's own suite — `bad1.pdf` is driven by
+`qpdf-ctest` as a bad file by name — and `NotAPdf` is the answer.
+
+**The one timeout is a ten-thousand-page implementation-limit fixture.** The
+runner stopped it at page 4 153 of 10 000 against a twenty-second budget. It is
+a file built to be too large, and it is declined rather than failed; raising the
+budget for it would hide a real slowdown in the two pdf.js files below that sit
+within a factor of two of the same limit.
+
 **Not one crash.** Ruling 1 held against thousands of files nobody here
 authored, which is worth more than the fuzzers, because these are documents
 real producers emitted rather than mutations. A crash is one of four states the
