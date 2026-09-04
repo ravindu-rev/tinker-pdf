@@ -85,6 +85,29 @@
 //! pdf-pki/tests/enveloped.rs` and in `crates/tinker-
 //! pdf/tests/certification.rs`.
 //!
+//! # The first session
+//!
+//! **4 September 2026: 58 453 573 executions in 601 seconds — 97 260 a
+//! second — and nothing found.** The corpus went from 10 seeds to 1 476.
+//! `rustlang/rust:nightly`, rustc 1.100.0-nightly (a69a63265 2026-09-03),
+//! cargo-fuzz 0.13.2, one core, on `x86_64-unknown-linux-gnu` in Docker
+//! because libFuzzer does not build for `x86_64-pc-windows-msvc`.
+//!
+//! The rate is the reason this result carries weight. `crypt`'s first session
+//! managed 8 a second and a clean run at that rate says almost nothing; at
+//! 97 260 this is the fastest target in the tree and 58 million executions is
+//! real coverage of the DER walker underneath.
+//!
+//! What it is *not* is evidence about the assertions above being the right
+//! ones. The sibling `pki_der` session found a defect in
+//! `require_definite_lengths` on the same day, in its first second — and this
+//! target leans on that method for the one property that keeps a BER
+//! `signedAttrs` out of a digest. A clean 58 million here did not reach it,
+//! because reaching it needs a `SignedData` well-formed enough to produce a
+//! signer with signed attributes, and mutation from ten seeds does not get
+//! there often. That is the gap to close next, and it is a seed-corpus
+//! problem rather than a session-length one.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

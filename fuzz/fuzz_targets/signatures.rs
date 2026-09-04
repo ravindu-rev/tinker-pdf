@@ -24,6 +24,25 @@
 //! Recorded because the same shape has already cost this repository once: the
 //! `brotli` target asserts only self-consistency and could not have found the
 //! ring-buffer defect that a decoded-bytes comparison found immediately.
+//!
+//! # The first session
+//!
+//! **4 September 2026: 1 924 289 executions in 601 seconds — 3 201 a second —
+//! and nothing found.** The corpus went from 5 seeds to 3 572, which is the
+//! largest proportional growth of the four targets run that day and says the
+//! five it started from were nowhere near covering the field arithmetic.
+//! `rustlang/rust:nightly`, rustc 1.100.0-nightly (a69a63265 2026-09-03),
+//! cargo-fuzz 0.13.2, one core, on `x86_64-unknown-linux-gnu` in Docker
+//! because libFuzzer does not build for `x86_64-pc-windows-msvc`.
+//!
+//! 3 201 a second is the second-slowest of the four and two orders of
+//! magnitude under `pki_cms`'s 97 260, so this result is weaker evidence than
+//! the raw execution count suggests — which is exactly the distinction
+//! `docs/verification.md` draws and the reason the rate is recorded beside
+//! the count rather than left to be inferred.
+//!
+//! Nothing here was minimised or committed, because nothing fired. That is
+//! the result, and a stated zero beats a line nobody wrote down.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

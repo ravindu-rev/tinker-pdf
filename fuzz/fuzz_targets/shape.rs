@@ -75,6 +75,61 @@
 //! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
 //! a second decoder. Here the check exists, and it is somewhere else.
 //!
+//! # The first session, and the open hang it found
+//!
+//! **4 September 2026: 24 115 executions in 78 seconds — 309 a second — and
+//! a timeout.** The corpus went from 8 seeds to 893 before it stopped.
+//! `rustlang/rust:nightly`, rustc 1.100.0-nightly (a69a63265 2026-09-03),
+//! cargo-fuzz 0.13.2, one core, on `x86_64-unknown-linux-gnu` in Docker
+//! because libFuzzer does not build for `x86_64-pc-windows-msvc`. The session
+//! was asked for 600 seconds and used 78.
+//!
+//! **This is an open ruling 1 blocker. It is not fixed.** Ruling 1's property
+//! is "did not panic, hang, or exhaust memory", and this is the middle one: a
+//! single 2 743-byte input ran for more than 28 seconds against a `-timeout`
+//! of 25, on a target whose median execution takes about three milliseconds.
+//! `cargo fuzz tmin` reduced it to **1 158 bytes**, sha256
+//! `bc9832fe15aab8c359f56bcde6c63f5ba59854ee25e719ee9614381f819d3b9a`, and
+//! could go no further; every minimisation step has to wait out the timeout,
+//! which is why it stopped there rather than at something small enough to
+//! paste into this header the way `pki_der`'s 42 bytes are.
+//!
+//! Where the time goes was then measured directly, on the host, in release
+//! and without the sanitizer instrumentation the fuzz build carries. **The
+//! whole input costs 3.37 seconds there**, and it is not spread out:
+//!
+//! - `Sfnt::parse` takes 3.1 µs and succeeds, but `Layout::parse` off the
+//!   parsed face finds **neither `GSUB` nor `GPOS`**, so pass 1 — the face
+//!   path, all three scripts — costs single-digit microseconds in total. It
+//!   contributes nothing.
+//! - **Pass 2 is all of it.** `Layout::from_tables(face, face, face)` reads
+//!   the same 1 150 bytes *as* a lookup list and finds **174 lookups**;
+//!   `substitute` over them takes 1.55 s and `position` 1.82 s. And the
+//!   target runs `shape` twice there to compare the results, so the input
+//!   costs about twice that per execution. The container's instrumented build
+//!   is the rest of the distance to 28 seconds.
+//!
+//! Only **three glyphs** are being shaped, and the two control bytes decode
+//! to the loosest ceilings the knobs offer: `max_operations` 500 000 and
+//! `max_glyphs` 65 536, with `max_context_length` 64.
+//!
+//! One structural fact, read from `apply.rs` rather than inferred: the
+//! operation budget is per shaping run — `Runner::new` sets `ops: 0` once per
+//! `substitute` or `position` — and `apply_at` charges exactly **one**
+//! operation and then loops `for sub in 0..lookup.len()` over every subtable
+//! of the lookup. So the budget bounds the number of *attempts* and not the
+//! work each attempt does, while the subtable count is the input's to choose.
+//! 500 000 attempts at the ~3 µs each this input makes them cost is the 1.55
+//! seconds measured.
+//!
+//! That is the mechanism the numbers point at, and it is written as what it
+//! is: the timings, the lookup count and the budget's scope are measured or
+//! read; that this is *the* fix is not yet established.
+//!
+//! 309 executions a second is also the slowest of the four targets run that
+//! day — `pki_cms` managed 97 260 — so even the 78 seconds bought less than
+//! the count suggests, and a full session here is owed once the hang is gone.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

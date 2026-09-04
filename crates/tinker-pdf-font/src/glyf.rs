@@ -443,16 +443,35 @@ mod tests {
 
     /// Builds a font with `head`, `loca` and `glyf` around one simple glyph.
     fn font_with_glyph(glyph_data: &[u8]) -> Vec<u8> {
+        font_with_glyphs(&[glyph_data])
+    }
+
+    /// The same, for a `glyf` holding several glyphs.
+    ///
+    /// A composite needs this: a component is a **glyph id into this same
+    /// table**, so a one-glyph font can only build a composite that refers to
+    /// itself, which is the recursion guard's case and not the format's.
+    fn font_with_glyphs(glyphs: &[&[u8]]) -> Vec<u8> {
         let mut head = vec![0u8; 54];
         head[18..20].copy_from_slice(&1000u16.to_be_bytes());
         head[50..52].copy_from_slice(&1i16.to_be_bytes()); // long loca
 
         let mut loca = Vec::new();
+        let mut glyf: Vec<u8> = Vec::new();
         loca.extend_from_slice(&0u32.to_be_bytes());
-        loca.extend_from_slice(&(glyph_data.len() as u32).to_be_bytes());
+        for glyph in glyphs {
+            glyf.extend_from_slice(glyph);
+            // Two-align the next glyph's start, as a real producer does. The
+            // pad byte lands at the tail of the range just recorded, where no
+            // reader of a well-formed glyph ever gets to it.
+            if glyf.len() % 2 != 0 {
+                glyf.push(0);
+            }
+            loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+        }
 
         let tables: [(&[u8; 4], &[u8]); 3] =
-            [(b"head", &head), (b"loca", &loca), (b"glyf", glyph_data)];
+            [(b"head", &head), (b"loca", &loca), (b"glyf", &glyf)];
 
         let mut out = Vec::new();
         out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
@@ -629,5 +648,197 @@ mod tests {
         if let Some(sfnt) = Sfnt::parse(&data) {
             let _ = outline(&sfnt, 0);
         }
+    }
+
+    /// A quadratic bowl: two consecutive off-curve points, so the reader has
+    /// to imply the on-curve midpoint between them. [`triangle`] never takes
+    /// that branch — every one of its points is on the curve.
+    fn curve() -> Vec<u8> {
+        let mut g = Vec::new();
+        g.extend_from_slice(&1i16.to_be_bytes()); // numberOfContours
+        g.extend_from_slice(&0i16.to_be_bytes()); // xMin
+        g.extend_from_slice(&0i16.to_be_bytes()); // yMin
+        g.extend_from_slice(&200i16.to_be_bytes()); // xMax
+        g.extend_from_slice(&150i16.to_be_bytes()); // yMax
+        g.extend_from_slice(&3u16.to_be_bytes()); // endPtsOfContours[0]
+        g.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
+                                                  // On, off, off, on: the middle pair implies a midpoint.
+        g.extend_from_slice(&[0x01, 0x00, 0x00, 0x01]);
+        for dx in [0i16, 50, 100, 50] {
+            g.extend_from_slice(&dx.to_be_bytes());
+        }
+        for dy in [0i16, 150, 0, -150] {
+            g.extend_from_slice(&dy.to_be_bytes());
+        }
+        g
+    }
+
+    /// Two contours in the compact encodings: the REPEAT run-length on the
+    /// flags and one-byte coordinate deltas.
+    ///
+    /// That is how a real font stores most of its points, and it is a
+    /// different path through [`simple`] from either glyph above — both of
+    /// those spell every flag out and take every delta as a signed word.
+    fn compact_contours() -> Vec<u8> {
+        let mut g = Vec::new();
+        g.extend_from_slice(&2i16.to_be_bytes()); // numberOfContours
+        g.extend_from_slice(&[0; 8]); // bounding box, unread
+        g.extend_from_slice(&2u16.to_be_bytes()); // endPtsOfContours[0]
+        g.extend_from_slice(&5u16.to_be_bytes()); // endPtsOfContours[1]
+        g.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
+
+        // ON|X_SHORT|Y_SHORT|REPEAT|X_POSITIVE|Y_POSITIVE, then the same with
+        // Y_POSITIVE cleared so the second contour walks back down. Each
+        // repeat byte of 2 stands for three points.
+        g.extend_from_slice(&[0x3F, 2, 0x1F, 2]);
+        g.extend_from_slice(&[30; 6]); // x deltas, all positive
+        g.extend_from_slice(&[30; 6]); // y deltas: +30 then -30, by the flag
+        g
+    }
+
+    /// One component record: the flags, the glyph it draws, its two arguments
+    /// at the width the flags choose, and whatever transform follows them.
+    fn component(flags: u16, index: u16, arg1: i16, arg2: i16, transform: &[i16]) -> Vec<u8> {
+        let mut g = Vec::new();
+        g.extend_from_slice(&flags.to_be_bytes());
+        g.extend_from_slice(&index.to_be_bytes());
+        if flags & 0x0001 != 0 {
+            // ARG_1_AND_2_ARE_WORDS.
+            g.extend_from_slice(&arg1.to_be_bytes());
+            g.extend_from_slice(&arg2.to_be_bytes());
+        } else {
+            g.push(arg1 as i8 as u8);
+            g.push(arg2 as i8 as u8);
+        }
+        for value in transform {
+            g.extend_from_slice(&value.to_be_bytes());
+        }
+        g
+    }
+
+    /// A composite glyph: `numberOfContours` of -1, an unread bounding box,
+    /// then the component records back to back.
+    fn composite_glyph(components: &[Vec<u8>]) -> Vec<u8> {
+        let mut g = Vec::new();
+        g.extend_from_slice(&(-1i16).to_be_bytes());
+        g.extend_from_slice(&[0; 8]);
+        for record in components {
+            g.extend_from_slice(record);
+        }
+        g
+    }
+
+    /// A quarter turn in F2Dot14, where 16384 is 1.0.
+    const TURN: [i16; 4] = [0, 16384, -16384, 0];
+
+    /// `fuzz/corpus/truetype/simple-contours.ttf`: three glyphs that between
+    /// them take every branch of [`simple`] — spelled-out flags with word
+    /// deltas, an implied midpoint, and the REPEAT and short-vector
+    /// encodings across two contours.
+    fn simple_contours_seed() -> Vec<u8> {
+        font_with_glyphs(&[&triangle(), &curve(), &compact_contours()])
+    }
+
+    /// `fuzz/corpus/truetype/composite-transforms.ttf`: glyph 2 is a
+    /// composite whose five components use every component encoding
+    /// [`composite`] reads.
+    ///
+    /// The last one is the pair easiest to get wrong and rarest in the wild:
+    /// byte-wide arguments, and `ARGS_ARE_XY_VALUES` **clear**, so the
+    /// arguments are point indices to match rather than an offset.
+    fn composite_transforms_seed() -> Vec<u8> {
+        let glyph = composite_glyph(&[
+            // WORDS|XY|MORE: a plain offset, no transform.
+            component(0x0023, 0, 200, 0, &[]),
+            // WORDS|XY|WE_HAVE_A_SCALE|MORE: one scale for both axes.
+            component(0x002B, 1, 0, 400, &[8192]),
+            // WORDS|XY|WE_HAVE_AN_X_AND_Y_SCALE|MORE.
+            component(0x0063, 0, 500, 0, &[24576, 8192]),
+            // WORDS|XY|WE_HAVE_A_TWO_BY_TWO|MORE.
+            component(0x00A3, 1, 0, -300, &TURN),
+            // Nothing set: byte arguments, point matching, and no
+            // MORE_COMPONENTS, which is what ends the record list.
+            component(0x0000, 0, 1, 2, &[]),
+        ]);
+        font_with_glyphs(&[&triangle(), &curve(), &glyph])
+    }
+
+    /// `fuzz/corpus/truetype/composite-nested.ttf`: a composite of a
+    /// composite of a composite, which is the recursion the target's own
+    /// header calls the interesting part.
+    ///
+    /// Glyph 3 draws glyph 2, which draws glyph 1 twice, which draws the
+    /// triangle at glyph 0 — four levels of the eight [`MAX_COMPONENT_DEPTH`]
+    /// allows, so the seed exercises the recursion rather than the guard that
+    /// stops it.
+    fn composite_nested_seed() -> Vec<u8> {
+        // Glyph 1: the triangle at unit scale, stated as a scale so the
+        // F2Dot14 path runs at every level.
+        let one = composite_glyph(&[component(0x000B, 0, 0, 0, &[16384])]);
+        // Glyph 2: glyph 1 twice, the second one turned.
+        let two = composite_glyph(&[
+            component(0x0023, 1, 0, 0, &[]),
+            component(0x0083, 1, 300, 0, &TURN),
+        ]);
+        // Glyph 3: glyph 2, lifted.
+        let three = composite_glyph(&[component(0x0003, 2, 0, 200, &[])]);
+        font_with_glyphs(&[&triangle(), &one, &two, &three])
+    }
+
+    /// Writes the three `glyf`-bearing seeds in `fuzz/corpus/truetype/`, so
+    /// the seeds and the fixtures cannot drift apart.
+    ///
+    /// Run with `--ignored` when a fixture changes; the corpus is committed,
+    /// and a run that rewrites it is a diff to look at rather than to apply
+    /// blindly.
+    #[test]
+    #[ignore = "writes into fuzz/corpus/truetype, which is committed"]
+    fn write_the_fuzz_seeds() {
+        let base =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/truetype");
+        for (name, bytes) in [
+            ("simple-contours.ttf", simple_contours_seed()),
+            ("composite-transforms.ttf", composite_transforms_seed()),
+            ("composite-nested.ttf", composite_nested_seed()),
+        ] {
+            std::fs::write(base.join(name), bytes).expect("the corpus directory is there");
+        }
+    }
+
+    /// The fixtures draw, which is the half `fuzz_seeds.rs` cannot check.
+    ///
+    /// That test counts the seeds **on disk**; this holds the fixtures that
+    /// write them to what they claim, so a fixture edited into a refusal
+    /// fails here rather than being written out as a seed reaching nothing.
+    #[test]
+    fn the_written_seeds_draw_what_they_claim_to() {
+        let data = simple_contours_seed();
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        for glyph in 0..3 {
+            let drawn = outline(&sfnt, glyph).expect("a result");
+            assert!(
+                !drawn.is_empty(),
+                "simple-contours glyph {glyph} drew nothing"
+            );
+        }
+
+        let data = composite_transforms_seed();
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        let assembled = outline(&sfnt, 2).expect("a result");
+        let one_component = outline(&sfnt, 0).expect("a result");
+        assert!(
+            assembled.segments.len() > one_component.segments.len(),
+            "the composite drew no more than one of its five components"
+        );
+
+        let data = composite_nested_seed();
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        let deep = outline(&sfnt, 3).expect("a result");
+        let shallow = outline(&sfnt, 1).expect("a result");
+        assert!(!shallow.is_empty(), "the innermost composite drew nothing");
+        assert!(
+            deep.segments.len() > shallow.segments.len(),
+            "four levels of nesting drew no more than one"
+        );
     }
 }
