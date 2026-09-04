@@ -455,6 +455,17 @@ and the strict and metamorphic rows fall with it because those two files
 drop out of every denominator. It arrived twice looking like an engine that
 had stopped rendering before it was measured rather than assumed.
 
+**Measured again on 4 September 2026, and the bar still could not be
+reproduced here.** Two `--fonts synthetic` runs on an otherwise idle desktop
+gave 961 and 960 against the recorded 963, with the same two files timing out
+and, on one run, one of them *stalling* rather than timing out. The degradation
+count — which is the whole purpose of the synthetic bar — moved the right way,
+299 to 298. So the re-record that `corpus/ratchet-fonts.json`'s `synthetic-1`
+tag needs was taken and **not committed**: `--record` rewrites the pass counts
+along with everything else, and writing 961 where 963 stands lowers a ratchet
+floor. Lowering one is a reviewed decision, and a lane cannot take it by
+running a command.
+
 The bar is not lowered for it — a re-run on an idle machine gives 963 — and
 the timeout is not raised, because a longer limit would hide a real
 slowdown in exactly these two files. What changed is the message:
