@@ -383,76 +383,136 @@ whole difference between this section and the one it replaced is noticing that.
   `bitmap-refine.pdf` shape — code a region, then refine it — had nothing to
   refine against.
 
+#### 6.5.8.2.2's reference offset, and what a fixture there can and cannot say
+
+`refinement_offset` implements one of two readings of the clause: **split the
+size difference, then add `RDX`** — the same arithmetic 6.4.11 uses, which is
+why one function serves both roads. The other reading is `RDX` alone. The two
+coincide exactly when the refined symbol is its reference's size, which is true
+of Annex H's refining dictionary and of every corpus file that reaches that
+road, so nothing in the tree could choose between them on the dictionary road
+and this section said so.
+
+`a_refined_symbol_that_is_not_its_reference_s_size_pins_6_5_8_2_2` is the fixture
+that can. It refines one 6 by 6 symbol into an 8 by 6 and then into a 5 by 7,
+both at `RDX = RDY = 0`, so the split term *is* the offset: 1 for the wider
+symbol and −1 for the narrower. Three arithmetics put the reference in three
+different places there — the split, `RDX` alone, and a truncating `/2`, which
+parts company with `div_euclid` only when the difference is negative and odd —
+and the assertion is the two decoded pictures, because a reference one column
+out desynchronises the coder and everything after it is noise rather than a
+slightly wrong picture.
+
+**What that is worth, stated exactly.** The encoder is in this repository, so a
+round trip cannot say which reading is T.88's. `split_offset` in the test module
+is written out separately from `refinement_offset` precisely so that an
+injection into the decoder is not silently mirrored by the encoder — the same
+separation `INT_RANGES` keeps from `decode_int`, and without it the fixture
+passes under every reading and proves nothing. What it buys is that the choice
+is now **load-bearing** where it was not: before it, changing `refinement_offset`
+to either alternative broke nothing on the dictionary road at all.
+
+The counted table below is the measurement, and it also shows where the
+standard's own datastream does bear on the question. Under `RDX` alone, Annex H
+page 3's *text region* stops decoding altogether — the published stream refuses,
+because a reference in the wrong place desynchronises the coder the integer
+decoders share and the counts then fail — and under a truncating `/2` it fails
+as well. So 6.4.11's arithmetic was adjudicated by published data all along;
+what was unpinned was **6.5.8.2.2 sharing it**, on a road no fixture reached at
+a size difference. That is the narrower and true statement, and the fixture is
+what closes it.
+
+#### Huffman refinement, and the tables it reads
+
+6.4.11's envelope — `RI` as one plain bit, the four deltas through a selected
+table, `BMSIZE`, byte alignment, and an arithmetic sub-stream the bit reader
+steps over — is done for text regions, and **the dictionary road (`SDHUFF` with
+`SDREFAGG`) decodes too**, through both 6.5.8.2.2's single refinement and
+6.5.8.2.1's aggregate. `bitmap-symbol-texthuffrefine.pdf` selects B.14 and
+`bitmap-symbol-texthuffrefineB15.pdf` selects B.15; those and all three
+`symhuff*` files reproduce the unrefined picture with 0 pixels different.
+
+**But the corpus adjudicates the envelope, not the tables**, and it took counted
+injection to notice. Every one of those files codes every delta as zero, so the
+only line either table exercised was its one-bit code for 0: changing a prefix
+length or a range low anywhere else broke nothing in the tree. This is the same
+trap as the five refinement templates that agreed with each other, met a second
+time and caught by a different tool. Both roads therefore **refused** a non-zero
+delta rather than decode through the unverified part — a refusal instead of a
+picture, which is this module's standing trade.
+
+Three fixtures lift that refusal, and each codes one picture two ways:
+
+- `a_huffman_text_region_refines_through_b14_with_non_zero_deltas` selects B.14
+  with `(RDW, RDH, RDX, RDY) = (2, 1, −1, −2)` — all four of its three-bit
+  lines — and compares the page against the same picture placed by an
+  *arithmetic* dictionary and region: 0 pixels different, over two roads that
+  share almost no code.
+- `a_huffman_text_region_refines_through_b15_with_non_zero_deltas` does the
+  same through B.15, whose lines carry an offset inside a range as well as a
+  prefix.
+- `a_huffman_dictionary_refines_at_every_non_zero_line_of_b15` walks B.15
+  outwards — a one-bit range, then two, three and four either side of zero,
+  then the two open-ended lines at ±31 — refining once per pair and comparing
+  each against the same symbol coded plainly.
+
+Both text-region fixtures place their instance at (2, 3) rather than at the
+origin so the bit reader is **not** on a byte boundary when `BMSIZE` has been
+read. 6.4.11's alignment before the sub-stream is then a fact they depend on;
+its injection row read 0 before and does not now.
+
+**What none of this does is make the reconstruction right.** The tables are
+still reconstructed and no fixture in a repository that also wrote the encoder
+can adjudicate them. What changed is that they are load-bearing. The test module
+carries **its own B.14 and B.15**, generated from the shape the clause states —
+five values with the code for zero at one bit; symmetric ranges doubling
+outwards — rather than called out of `table_b14` and `table_b15`. Without that
+separation an injection moves both sides of the round trip together and the row
+reads 0, which is exactly what the first run of the campaign below showed.
+
+What still refuses: clause 7.4.13's custom tables (selector 3), and a delta that
+sizes an instance to nothing.
+`a_refining_huffman_region_still_refuses_what_it_cannot_read` asserts both by
+name, because lifting a guard is only safe if what it happened to cover is still
+covered by something narrower.
+
+#### The entry this replaces was wrong, and how it was wrong is the point
+
+It said the blocker was a defect in 6.5.9's Huffman collective path, on two
+observations. Both were misreadings:
+
+- *"Two symbols of identical width inside one height class."* 6.5.5
+  accumulates `SYMWIDTH` by a delta that may be **zero**, so two symbols of
+  the same width in one class is ordinary — and the arithmetic encoding of
+  the same picture, which has always decoded at 0 pixels different, exports
+  two identical 30 by 30 symbols itself. The observation was true and meant
+  nothing.
+- *"A symbol with no ink at all."* Deliberate. That class's collective bitmap
+  really is blank across its right-hand 59 columns, because the symbol exists
+  **to be refined into content** — which is precisely what the fixture is
+  testing.
+
+The actual defect was in the refinement road after all, and it was one line:
+**6.3's adaptive states were reset for every symbol.** 6.5.8.1 says a
+dictionary carries one set of states from one symbol to the next, and that is
+as true of refinement as of the generic procedure — the *coder* restarts at
+each byte-aligned sub-stream because the stream does, but the statistics do
+not. Resetting them decodes the first refined symbol correctly and every one
+after it as noise.
+
+#### Three bugs, one symptom
+
+That is the third distinct defect in this lineage to present as *"the
+refinement context template must be wrong"*: first `SBSYMCODELEN` sized
+against the symbols decoded so far, then the five candidate templates that
+agreed with each other on a thirty-six-decision fixture, and now these reset
+states. **The symptom is not diagnostic.** A desynchronised arithmetic
+decoder produces noise whatever pushed it out of step, and every one of the
+three was found by a picture rather than by reasoning about the template —
+which is the argument for keeping a fixture that renders a whole page
+wherever a decoder has an internal state a header cannot check.
+
 #### What is still not pinned, stated rather than absorbed
-
-- **6.5.8.2.2's reference offset.** The dictionary road shares
-  `refinement_offset` with 6.4.11, so it splits the size difference before
-  adding `RDX`. Annex H's refinement is of a symbol the same size as its
-  reference, where that term is zero, and no corpus file exercises the
-  dictionary road at a different size. Both readings agree on every fixture
-  in tree, so the fixture cannot choose between them.
-- **Huffman refinement, half built.** 6.4.11's envelope — `RI` as one plain
-  bit, the four deltas through a selected table, `BMSIZE`, byte alignment, and
-  an arithmetic sub-stream the bit reader steps over — is **done for text
-  regions**, and with it tables **B.14 and B.15**.
-  `bitmap-symbol-texthuffrefine.pdf` selects B.14 and
-  `bitmap-symbol-texthuffrefineB15.pdf` selects B.15, and both reproduce the
-  unrefined picture with 0 pixels different.
-
-  **But that adjudicates the envelope, not the tables**, and it took counted
-  injection to notice. Both files code every delta as zero, so the only line
-  either table exercises is its one-bit code for 0: changing a prefix length,
-  a range low or a range length anywhere else in either table breaks nothing
-  in the tree. This is the same trap as the five refinement templates that
-  agreed with each other, met a second time and caught by a different tool —
-  a fixture that passes under most values of an unknown says nothing about
-  that unknown.
-
-  So the reconstruction is not trusted past its evidence. The zero line being
-  one bit makes "is this delta zero" a single-bit question no error elsewhere
-  can affect, and `text_region_procedure` **refuses the segment if any delta
-  is non-zero**. That costs nothing measurable — no corpus file has one — and
-  it turns an unverified table into a refusal rather than a picture.
-
-  **The dictionary road (`SDHUFF` with `SDREFAGG`) decodes too**, through both
-  6.5.8.2.2's single refinement and 6.5.8.2.1's aggregate, and all three
-  `symhuff*` corpus files reproduce the picture with 0 pixels different.
-
-  #### The entry this replaces was wrong, and how it was wrong is the point
-
-  It said the blocker was a defect in 6.5.9's Huffman collective path, on two
-  observations. Both were misreadings:
-
-  - *"Two symbols of identical width inside one height class."* 6.5.5
-    accumulates `SYMWIDTH` by a delta that may be **zero**, so two symbols of
-    the same width in one class is ordinary — and the arithmetic encoding of
-    the same picture, which has always decoded at 0 pixels different, exports
-    two identical 30 by 30 symbols itself. The observation was true and meant
-    nothing.
-  - *"A symbol with no ink at all."* Deliberate. That class's collective bitmap
-    really is blank across its right-hand 59 columns, because the symbol exists
-    **to be refined into content** — which is precisely what the fixture is
-    testing.
-
-  The actual defect was in the refinement road after all, and it was one line:
-  **6.3's adaptive states were reset for every symbol.** 6.5.8.1 says a
-  dictionary carries one set of states from one symbol to the next, and that is
-  as true of refinement as of the generic procedure — the *coder* restarts at
-  each byte-aligned sub-stream because the stream does, but the statistics do
-  not. Resetting them decodes the first refined symbol correctly and every one
-  after it as noise.
-
-  #### Three bugs, one symptom
-
-  That is the third distinct defect in this lineage to present as *"the
-  refinement context template must be wrong"*: first `SBSYMCODELEN` sized
-  against the symbols decoded so far, then the five candidate templates that
-  agreed with each other on a thirty-six-decision fixture, and now these reset
-  states. **The symptom is not diagnostic.** A desynchronised arithmetic
-  decoder produces noise whatever pushed it out of step, and every one of the
-  three was found by a picture rather than by reasoning about the template —
-  which is the argument for keeping a fixture that renders a whole page
-  wherever a decoder has an internal state a header cannot check.
 
 - **Custom code tables (clause 7.4.13, type 53)** are the other half of the
   Huffman refinement files: five of the eight refining Huffman text regions
@@ -461,50 +521,68 @@ whole difference between this section and the one it replaced is noticing that.
 
 #### Counted injection, and what it says about where the evidence lives
 
-Each row is one fact perturbed and the whole JBIG2 suite re-run, counting
-assertions that fail. `filters` is `cargo test -p tinker-pdf-filters jbig2`;
-`corpus` is `jbig2_refinement.rs`, which is `#[ignore]` and runs from
-[`corpus.yml`](../../.github/workflows/corpus.yml).
+Each row is one fact perturbed, the tree rebuilt, and the JBIG2 suite re-run.
+The unit is **failing tests**, which is what the two commands report and what
+anyone re-running this can check without reading output. `filters` is
+`cargo test --no-fail-fast -p tinker-pdf-filters jbig2`; `corpus` is
+`cargo test --no-fail-fast -p tinker-pdf --test jbig2_refinement -- --ignored`,
+which runs from [`corpus.yml`](../../.github/workflows/corpus.yml). The corpus
+column tops out at 1 because only one of that file's two tests reaches a
+refinement at all — the other is the ground truth those variants are compared
+against.
+
+Every row below was re-measured on 4 September 2026, because adding a fixture
+changes other rows' counts and a carried number is a defect. The numbers the
+table held before did not reproduce.
 
 | perturbation | filters | corpus | total |
 | --- | ---: | ---: | ---: |
-| template 0, one reference position moved | 3 | 2 | 5 |
-| template 0, one destination position moved | 3 | 2 | 5 |
-| template 1, one reference position moved | 2 | 2 | 4 |
-| 6.3.5.6's TPGRON slot, template 0, off by one | **0** | 2 | 2 |
-| 6.3.5.6's TPGRON slot, template 1, off by one | **0** | 2 | 2 |
-| `SBSYMCODELEN` sized against the symbols so far | 3 | 0 | 3 |
-| an intermediate text region composited after all | **0** | 2 | 2 |
-| 6.4.11: `RI` read through a table rather than as one bit | 0 | 2 | 2 |
-| 6.4.11: the reader does not step over `BMSIZE` | 0 | 2 | 2 |
-| 6.4.11: the sub-stream is not byte-aligned | **0** | **0** | **0** |
-| B.14 or B.15, any line but the one-bit code for zero | **0** | **0** | **0** |
-| 6.5.8.1: 6.3's states reset per symbol, Huffman dictionary | 0 | 2 | 2 |
-| the same, arithmetic dictionary | **0** | **0** | **0** |
+| template 0, one reference position moved | **0** | 1 | 1 |
+| template 0, one destination position moved | **0** | 1 | 1 |
+| template 1, one reference position moved | 1 | 1 | 2 |
+| 6.3.5.6's TPGRON slot, template 0, off by one | **0** | 1 | 1 |
+| 6.3.5.6's TPGRON slot, template 1, off by one | **0** | 1 | 1 |
+| `SBSYMCODELEN` sized against the symbols so far | 3 | **0** | 3 |
+| an intermediate text region composited after all | **0** | 1 | 1 |
+| 6.4.11: `RI` read through a table rather than as one bit | 3 | 1 | 4 |
+| 6.4.11: the reader does not step over `BMSIZE` | 1 | 1 | 2 |
+| 6.4.11: the sub-stream is not byte-aligned | 2 | 1 | 3 |
+| 6.5.8.2.2 over Huffman: the sub-stream is not byte-aligned | 1 | 1 | 2 |
+| B.14, one line's prefix length | 1 | **0** | 1 |
+| B.15, one line's range low | 2 | **0** | 2 |
+| 6.5.8.1: 6.3's states reset per symbol, Huffman dictionary | **0** | 1 | 1 |
+| the same, arithmetic dictionary | 1 | **0** | 1 |
+| 6.5.8.2.2's reference offset: `RDX` alone | 4 | **0** | 4 |
+| 6.5.8.2.2's reference offset: `/2` rather than `div_euclid(2)` | 3 | **0** | 3 |
 
-The arithmetic row's zeros are the same shape of gap as the two below it, and
-worth naming: Annex H's refining dictionary decodes one symbol through
-6.5.8.2.2 and one through 6.5.8.2.1, so the *first* refinement is the only one
-that road ever takes on its own — a reset it cannot notice, because there is
-nothing yet to carry. The rule is held on the Huffman road instead, by a file
-that refines four symbols in a row.
+**No row reads zero in both columns any more.** Three did when this table was
+first written — the alignment, the tables, and the arithmetic dictionary's
+shared states — and closing them is what the two fixtures above were for. The
+zeros that remain are all one-sided, and each says something:
 
-**Three rows are caught by nothing at all**, and they are the most
-useful lines in the table: they are what turned a claim that the corpus
-adjudicated B.14 and B.15 into the narrower and true claim that it adjudicates
-6.4.11's envelope. Both fixtures happen to sit on a byte boundary and code
-every delta as zero, so neither the alignment nor any table line past the zero
-code is exercised. The refusal of non-zero deltas above exists because of these
-two rows; the alignment is left in because it is what the clause says and
-nothing depends on a guess about it.
+- **The template rows are held by the corpus alone**, template 0's included, and
+  that is not a gap. It is this document's own finding from the other direction:
+  Annex H page 3's dictionary refines a single 6 by 6 symbol, thirty-six coded
+  decisions, and five distinct templates decode it into the same legible line of
+  text. A template perturbation that page cannot notice is exactly what "thirty-
+  six decisions is not enough information" predicts. The whole-picture corpus
+  fixture is the instrument for these, by construction.
+- **The B.14 and B.15 rows are held by `filters` alone**, because no corpus file
+  codes a non-zero delta — which is why the tables were refused rather than
+  decoded until now, and why the fixtures that lift the refusal had to be built
+  from the `MqEncoder` and a bit writer rather than found.
+- **The reference-offset rows are held by `filters` alone too, but not only by
+  the new fixture.** Under `RDX` alone, Annex H page 3's text region stops
+  decoding altogether, and under a truncating `/2` it fails as well. So 6.4.11's
+  arithmetic is adjudicated by the standard's own datastream; what was unpinned
+  was 6.5.8.2.2 sharing it.
+- **`SBSYMCODELEN` and the arithmetic dictionary's shared states are held by
+  `filters` alone**, which is ordinary: both are dictionary facts, and the
+  corpus's refinement variants reach the dictionary road through one file.
 
-**Three more are caught by nothing except the corpus gate**, and those zeros
-matter too. Annex H carries no
-refinement region segment at all, so it cannot exercise TPGRON, and it carries
-no intermediate region, so it cannot notice one being drawn. That is why
-`corpus.yml` runs those assertions explicitly rather than leaving them to a
-`--ignored` nobody passes: without that step three of these facts would be held
-by a comment.
+The corpus column's ones are why `corpus.yml` runs those assertions explicitly
+rather than leaving them to a `--ignored` nobody passes: without that step, six
+of these facts would be held by a comment.
 
 ### Milestone 5 has an anchor, and it is better than the round trip
 
