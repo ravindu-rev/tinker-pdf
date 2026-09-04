@@ -306,10 +306,29 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 
         eprintln!("corpus-run: {} — {} files", corpus.name, files.len());
         let results = run_files(&child, &dir, &files, args.timeout, args.jobs);
-        reports.push(CorpusReport {
+        let report = CorpusReport {
             name: corpus.name.clone(),
             files: results,
-        });
+        };
+        // **A corpus nobody could measure the memory of is an incomplete run.**
+        // The child reads its own high-water mark on Linux and Windows and
+        // omits the line everywhere else, so a corpus where not one child
+        // reported a peak is a platform that cannot answer rather than a
+        // corpus that costs nothing. Saying so in `limits` is what makes
+        // `ratchet::compare` refuse: without it the maximum would be a silent
+        // zero, and a band of zero bytes is one nothing can sit under.
+        //
+        // Not one child rather than every child, because a file that crashed
+        // wrote no record at all and would otherwise make every real run
+        // incomplete over a failure the pass rate already counts.
+        if report.total() > 0 && report.peak().files == 0 {
+            limits.push(format!(
+                "`{}` has no memory measurement: not one child reported a peak \
+                 resident set, which is a platform `tpdf` cannot read one on",
+                corpus.name
+            ));
+        }
+        reports.push(report);
     }
 
     let run = Run {

@@ -136,6 +136,32 @@ impl CorpusReport {
         out
     }
 
+    /// The largest peak resident set any child in this corpus reached, and how
+    /// many children reported one at all.
+    ///
+    /// **A maximum rather than a sum or a mean**, and the reason is what the
+    /// number is for: the question memory asks is "what is the most this
+    /// engine ever needed for one file", because that is what decides whether
+    /// a machine can run it. A mean is dominated by the four thousand small
+    /// files and would not move if one file started needing a gigabyte; a sum
+    /// over a corpus of independent processes is not a quantity at all.
+    ///
+    /// The count beside it is the denominator, and it is recorded for
+    /// [`CorpusReport::strict_eligible`]'s reason: a maximum taken over fewer
+    /// children is a different measurement, and a run where the measurement
+    /// stopped happening must not read as a run that got smaller.
+    pub fn peak(&self) -> crate::ratchet::PeakBar {
+        let mut out = crate::ratchet::PeakBar::default();
+        for file in &self.files {
+            let Some(peak) = file.peak else {
+                continue;
+            };
+            out.files += 1;
+            out.bytes = out.bytes.max(peak);
+        }
+        out
+    }
+
     /// How many files each metamorphic relation was **asked** of, by name.
     ///
     /// Asked and held are two counts and both are recorded, for the reason the
@@ -299,6 +325,14 @@ impl Run {
                                 ),
                             ));
                         }
+                        // Per file, because the per-corpus maximum is one
+                        // number and the file that set it is the only thing
+                        // anybody can act on. Omitted where the child did not
+                        // measure, so a reader can tell a platform that says
+                        // nothing from one that says a small number.
+                        if let Some(peak) = file.peak {
+                            fields.push(("peak", Json::count(peak)));
+                        }
                         if file.cost != crate::runner::Cost::default() {
                             fields.push((
                                 "cost",
@@ -414,7 +448,7 @@ impl Run {
             .corpora
             .iter()
             .map(|corpus| {
-                Json::object([
+                let mut fields = vec![
                     ("name", Json::string(&corpus.name)),
                     ("total", Json::count(corpus.total())),
                     ("passed", Json::count(corpus.passed())),
@@ -472,7 +506,28 @@ impl Run {
                             ("orphans", Json::count(tagged.orphans)),
                         ])
                     }),
-                ])
+                ];
+                // The sixth axis: the most memory any one child needed.
+                //
+                // Written only where something measured it. A run on a
+                // platform whose `tpdf` reads no high-water mark is already
+                // incomplete and can never be a bar, so writing
+                // `{"bytes": 0}` would put a ceiling nothing can clear into a
+                // file nothing can compare against — two ways of being wrong
+                // where an absent key is the honest one: this bar carries no
+                // memory measurement, exactly as the three bars recorded
+                // before the measurement existed do.
+                let peak = corpus.peak();
+                if peak.files > 0 {
+                    fields.push((
+                        "peak",
+                        Json::object([
+                            ("bytes", Json::count(peak.bytes)),
+                            ("files", Json::count(peak.files)),
+                        ]),
+                    ));
+                }
+                Json::object(fields)
             })
             .collect();
 
@@ -510,6 +565,22 @@ impl Run {
                 // non-terminating rewrite sit in the corpus unnoticed.
                 outcomes.get("stalled").copied().unwrap_or(0),
             ));
+            // The sixth axis, on its own line for the strict pass's reason: it
+            // is a maximum over children rather than a count of files, and
+            // putting a peak in the same row as a pass rate would invite it to
+            // be read as one more file column. A corpus nothing measured says
+            // so in words, because a blank would read as zero bytes.
+            let peak = corpus.peak();
+            lines.push(if peak.files == 0 {
+                format!("{:<14} no child reported a peak resident set", "  peak")
+            } else {
+                format!(
+                    "{:<14} {:>6} MiB  the largest peak resident set of {} children",
+                    "  peak",
+                    peak.bytes / (1 << 20),
+                    peak.files
+                )
+            });
         }
         lines.push(format!(
             "{:<14} {:>6} files  {:>6} passed",
@@ -606,6 +677,7 @@ mod tests {
             cost: crate::runner::Cost::default(),
             bundled_faces: false,
             tagged: None,
+            peak: None,
             pages: 1,
             rendered: 1,
             warnings: warnings
@@ -695,6 +767,36 @@ mod tests {
         let hits = run().corpora[0].capabilities();
         assert_eq!(hits["jbig2"], 1);
         assert_eq!(hits["jpx"], 1);
+    }
+
+    /// The peak is a per-file number in the report and a per-corpus **maximum**
+    /// in the ratchet, and they answer different questions. The report's is a
+    /// lead — which file needed it — and the ratchet's is the band.
+    #[test]
+    fn the_peak_is_per_file_in_one_document_and_a_maximum_in_the_other() {
+        let mut run = run();
+        run.corpora[0].files[0].peak = Some(21_000_000);
+        run.corpora[0].files[1].peak = Some(120_000_000);
+
+        let report = run.to_report_json().to_pretty();
+        assert!(report.contains("\"peak\": 21000000"), "{report}");
+        assert!(report.contains("\"peak\": 120000000"), "{report}");
+
+        // A maximum and not a sum: 141 000 000 is what a total would say, and
+        // the question memory asks is what one file needs at once.
+        let ratchet = run.to_ratchet_json("n").to_pretty();
+        assert!(ratchet.contains("\"bytes\": 120000000"), "{ratchet}");
+        assert!(!ratchet.contains("141000000"), "{ratchet}");
+    }
+
+    /// And a corpus nothing measured writes no band at all rather than a band
+    /// of zero bytes, which is a ceiling nothing could sit under. Such a run
+    /// is incomplete anyway — `corpus::run` says so in `limits` — and this is
+    /// the half that keeps the file itself honest.
+    #[test]
+    fn a_corpus_nothing_measured_writes_no_band() {
+        let ratchet = run().to_ratchet_json("n").to_pretty();
+        assert!(!ratchet.contains("\"peak\""), "{ratchet}");
     }
 
     #[test]
