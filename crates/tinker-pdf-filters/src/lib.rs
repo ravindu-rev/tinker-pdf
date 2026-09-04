@@ -52,7 +52,10 @@ pub use ccitt::{decode as ccitt_decode, CcittParams, T6Rows};
 pub use crc32::{crc32, Crc32};
 pub use deflate::{deflate, zlib_compress};
 pub use inflate::{inflate_raw, RawInflated};
-pub use jbig2::{decode as jbig2_decode, Jbig2Params};
+pub use jbig2::{
+    decode as jbig2_decode, Jbig2Params, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PIXELS,
+    MAX_JBIG2_TEXT_INSTANCES,
+};
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use jpx::{jpx_decode, JpxColour, JpxImage};
 pub use jxr::{

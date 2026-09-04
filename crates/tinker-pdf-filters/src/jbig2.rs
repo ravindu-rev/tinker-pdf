@@ -920,18 +920,62 @@ impl ArithContexts {
 /// The most symbols one dictionary may export or decode.
 ///
 /// `SDNUMNEWSYMS` and `SDNUMEXSYMS` are 32-bit and attacker-controlled, and
-/// each new symbol is an allocation. Measured against real OCR output at
-/// milestone 7 of `docs/design/jbig2-symbol-text.md`; until then it is a
-/// ceiling rather than a ledger row, and it is generous enough that no page of
-/// text approaches it (ruling 1).
-const MAX_JBIG2_SYMBOLS: u32 = 100_000;
+/// each new symbol is an allocation.
+///
+/// | | Symbols |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 3 |
+/// | The most any file in the corpus spends | 11 |
+/// | A 200-page bilevel scan sharing one global dictionary | 20 000 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **100 000 (estimate)** |
+///
+/// **The third figure is arithmetic and the ledger says so.** Milestone 7 of
+/// `docs/design/jbig2-symbol-text.md` asked for a measurement against a real
+/// `jbig2enc`/OCRmyPDF file and the census taken to make it found the corpus's
+/// largest `SDNUMEXSYMS` is **11** across 102 JBIG2-bearing files — every one
+/// of them a synthetic fixture built to exercise one placement variant. A cap
+/// calibrated on that would let anything through, so the number here is
+/// argued instead: a 300 dpi A4 text page reduces to a few hundred distinct
+/// glyph bitmaps, and 200 pages of them saturate a shared dictionary in the
+/// low tens of thousands. That is the same currency
+/// `crates/tinker-pdf/tests/bounds_ledger.rs`'s comic and fixed-document
+/// yardsticks are already in — *arithmetic about a plausible file, written
+/// down so it can be argued with* — and the word **estimate** is in the
+/// published figure so a reader cannot mistake it for the other kind.
+///
+/// Reachable: `SDNUMNEWSYMS` is a 32-bit field at 7.4.3.1.5, read straight off
+/// the segment header, so **twelve bytes of dictionary data** may ask for
+/// 4 294 967 295 symbols — which
+/// `a_dictionary_declaring_more_symbols_than_the_cap_is_refused_by_name`
+/// builds.
+pub const MAX_JBIG2_SYMBOLS: u32 = 100_000;
 
 /// The most pixels one dictionary's symbols may occupy in total.
 ///
 /// A per-symbol bound is not a work bound once the count branches: ten thousand
 /// symbols of a thousand pixels each is a bitmap nobody asked for, and every
 /// one of them is individually reasonable.
-const MAX_JBIG2_SYMBOL_PIXELS: u64 = 1 << 26;
+///
+/// | | Pixels |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 72 — Annex H's two six-by-six symbols |
+/// | A 200-page bilevel scan sharing one global dictionary | 25 000 000 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **67 108 864 (estimate)** |
+///
+/// The second figure is [`MAX_JBIG2_SYMBOLS`]'s estimate carried through: 20 000
+/// glyph bitmaps at a 25 x 50 box, which is roughly what a 10-point glyph
+/// occupies at 300 dpi. The margin over it is 2.7x — the same order as
+/// [`crate::MAX_PNG_SAMPLES`]'s over a comic page, and the same `1 << 26`.
+///
+/// Reachable: a symbol's width and height each accumulate from Annex B deltas
+/// whose tables carry 32-bit ranges, and each is refused only above
+/// `u32::MAX`, so **one** symbol may ask for 18 446 744 065 119 617 025 pixels
+/// before a second is read — which
+/// `a_dictionary_past_the_symbol_pixel_cap_is_refused_before_it_allocates`
+/// builds, in two.
+pub const MAX_JBIG2_SYMBOL_PIXELS: u64 = 1 << 26;
 
 /// **Clause 6.5.9: a symbol dictionary, Huffman-coded.**
 ///
@@ -1513,7 +1557,27 @@ fn symbol_dictionary(
 /// `SBNUMINSTANCES` is 32-bit and each instance is a composite over the region,
 /// so the count is work rather than memory and a per-instance bound would not
 /// bound it.
-const MAX_JBIG2_TEXT_INSTANCES: u32 = 1 << 22;
+///
+/// | | Instances |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 5 |
+/// | The most any file in the corpus spends | 9 |
+/// | One page of a 200-page bilevel scan | 4 000 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **4 194 304 (estimate)** |
+///
+/// The third figure is per **region**, which is what this cap is: `spent` here
+/// is one text region's own and a page carries one or a few. A dense 300 dpi A4
+/// text page sets a few thousand characters, so the estimate is a page's worth
+/// and not a document's — [`MAX_JBIG2_SYMBOLS`] carries the argument, and the
+/// word **estimate** is in the published figure for its reason.
+///
+/// Reachable: `SBNUMINSTANCES` is a 32-bit field at 7.4.4.5, checked before a
+/// symbol is placed, so **twenty-three bytes of region data** may ask for
+/// 4 294 967 295 placements — which
+/// `a_text_region_declaring_more_instances_than_the_cap_is_refused_by_name`
+/// builds.
+pub const MAX_JBIG2_TEXT_INSTANCES: u32 = 1 << 22;
 
 /// The tables a Huffman text region reads its coordinates through (7.4.4.1.2).
 struct RefineTables {
@@ -4549,6 +4613,229 @@ mod tests {
         assert!(
             warnings.contains(&Warning::Jbig2SymbolLimitHit),
             "{warnings:?}"
+        );
+    }
+
+    /// A symbol dictionary segment carrying nothing but a header.
+    ///
+    /// Template 1 rather than 0 so 7.4.3.1.2 asks for one AT pair instead of
+    /// four, which is what makes the whole thing twelve bytes: two of flags,
+    /// two of AT, and the two 32-bit counts the caps are read from.
+    fn dictionary_header(num_ex: u32, num_new: u32) -> Vec<u8> {
+        let mut data = Vec::new();
+        // 7.4.3.1.1: arithmetic, no refinement, no retained context, template 1.
+        data.extend_from_slice(&(1u16 << 10).to_be_bytes());
+        data.extend_from_slice(&[2, -1i8 as u8]); // the nominal AT pair
+        data.extend_from_slice(&num_ex.to_be_bytes());
+        data.extend_from_slice(&num_new.to_be_bytes());
+        data
+    }
+
+    /// **[`MAX_JBIG2_SYMBOLS`] fires, and it fires off the header.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving
+    /// this cap. `SDNUMNEWSYMS` and `SDNUMEXSYMS` are 32-bit fields at
+    /// 7.4.3.1.4 and 7.4.3.1.5 and nothing behind them is read first, so a
+    /// twelve-byte segment reaches the refusal — which is the point: the
+    /// allocation the cap exists to prevent is one `Vec` per symbol, and a
+    /// build that sized it from the count before checking would have asked for
+    /// four billion of them here.
+    ///
+    /// Both fields are charged, not just the new one, because 6.5.10's export
+    /// runs are counted against `SDNUMEXSYMS` and a dictionary may export more
+    /// than it decoded — it re-exports what it imported.
+    ///
+    /// No clock. The assertion is the named warning.
+    #[test]
+    fn a_dictionary_declaring_more_symbols_than_the_cap_is_refused_by_name() {
+        for (num_ex, num_new) in [
+            (2, MAX_JBIG2_SYMBOLS + 1),
+            (MAX_JBIG2_SYMBOLS + 1, 2),
+            (u32::MAX, u32::MAX),
+        ] {
+            let data = dictionary_header(num_ex, num_new);
+            assert_eq!(data.len(), 12, "the whole segment is twelve bytes");
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data: &data,
+            };
+            let mut warnings = Vec::new();
+            assert!(
+                symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none(),
+                "{num_ex}/{num_new} was not refused"
+            );
+            assert!(
+                warnings.contains(&Warning::Jbig2SymbolLimitHit),
+                "{num_ex}/{num_new}: {warnings:?}"
+            );
+        }
+    }
+
+    /// **[`MAX_JBIG2_SYMBOL_PIXELS`] fires, before a bitmap is allocated.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving
+    /// this cap, and it is the interesting one of the three: the count caps
+    /// read a field, and this one accumulates.
+    ///
+    /// The Huffman road (6.5.9) is where it is easiest to say so in bytes.
+    /// Table B.4's last line carries a 32-bit range over a low of 76 and B.2's
+    /// carries one over 75, so two Annex B codes state a height class 8 192
+    /// tall holding one symbol 8 193 wide — 67 117 056 pixels, past the cap by
+    /// eight thousand — in a segment small enough to read. **Nothing is
+    /// allocated**: on this road the widths are collected first and the
+    /// collective bitmap is read afterwards, so the charge lands before
+    /// `Bitmap::new` is reached at all, which is what "a permit is what has
+    /// been promised" means here.
+    ///
+    /// The symbol is well under [`MAX_JBIG2_SYMBOLS`] and each of its
+    /// dimensions is well under `u32::MAX`, so what refuses it is this cap and
+    /// not one of the two standing beside it. The pair one step below the cap
+    /// proves the other direction.
+    ///
+    /// No clock. The assertion is the named warning.
+    #[test]
+    fn a_dictionary_past_the_symbol_pixel_cap_is_refused_before_it_allocates() {
+        // A Huffman dictionary: DH over B.4, DW over B.2, no refinement, no
+        // custom tables. 7.4.3.1.2's AT pair does not exist on this road.
+        let dictionary = |height: i32, width: i32| {
+            let mut data = Vec::new();
+            data.extend_from_slice(&1u16.to_be_bytes());
+            data.extend_from_slice(&4u32.to_be_bytes()); // SDNUMEXSYMS
+            data.extend_from_slice(&4u32.to_be_bytes()); // SDNUMNEWSYMS
+            let mut writer = BitWriter::new();
+            write_huff(&mut writer, &table_b4(), height);
+            write_huff(&mut writer, &table_b2(), width);
+            write_huff_oob(&mut writer, &table_b2());
+            data.extend(writer.finish());
+            data
+        };
+        let refused = |data: &[u8]| {
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data,
+            };
+            let mut warnings = Vec::new();
+            let out = symbol_dictionary(&segment, &[], 1 << 20, &mut warnings);
+            (
+                out.is_none() && warnings.contains(&Warning::Jbig2SymbolLimitHit),
+                warnings,
+            )
+        };
+
+        // 8 192 x 8 193 is 67 117 056, which is 8 192 past the cap.
+        let over = dictionary(8_192, 8_193);
+        assert!(
+            u64::from(8_192u32) * u64::from(8_193u32) > MAX_JBIG2_SYMBOL_PIXELS,
+            "the fixture has to be over the cap to prove anything"
+        );
+        let (fired, warnings) = refused(&over);
+        assert!(
+            fired,
+            "a symbol past the pixel cap was not refused: {warnings:?}"
+        );
+
+        // And one pixel column narrower is 67 108 864 exactly, which is the cap
+        // and not past it — so the dictionary gets as far as reading a
+        // collective bitmap that is not there, and refuses for that instead.
+        let at = dictionary(8_192, 8_192);
+        assert_eq!(
+            u64::from(8_192u32) * u64::from(8_192u32),
+            MAX_JBIG2_SYMBOL_PIXELS,
+            "8 192 squared is the cap, which is what makes this the boundary"
+        );
+        let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
+            kind: kind::SYMBOL_DICTIONARY,
+            page: 1,
+            data: &at,
+        };
+        let mut warnings = Vec::new();
+        assert!(
+            symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none(),
+            "a truncated collective bitmap is still not a dictionary"
+        );
+        assert!(
+            !warnings.contains(&Warning::Jbig2SymbolLimitHit),
+            "exactly at the cap is admitted, and this warning says it was not: \
+             {warnings:?}"
+        );
+    }
+
+    /// **[`MAX_JBIG2_TEXT_INSTANCES`] fires, and it fires off the header.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving
+    /// this cap. `SBNUMINSTANCES` is a 32-bit field at 7.4.4.5 and the check
+    /// sits **before** 6.4.5's placement loop and before the region bitmap is
+    /// made, so twenty-three bytes reach it: seventeen of region information,
+    /// two of flags, four of count.
+    ///
+    /// It also sits before the empty-dictionary check below it, which is why
+    /// this fixture can refer to no dictionary at all and still prove the cap
+    /// rather than proving `Jbig2SegmentSkipped`.
+    ///
+    /// No clock. The assertion is the named warning.
+    #[test]
+    fn a_text_region_declaring_more_instances_than_the_cap_is_refused_by_name() {
+        let region = |instances: u32| {
+            let mut data = Vec::new();
+            // 7.4.1: the region segment information field.
+            data.extend_from_slice(&64u32.to_be_bytes()); // width
+            data.extend_from_slice(&64u32.to_be_bytes()); // height
+            data.extend_from_slice(&0u32.to_be_bytes()); // x
+            data.extend_from_slice(&0u32.to_be_bytes()); // y
+            data.push(0); // external combination operator: OR
+                          // 7.4.4.1.1: arithmetic, one strip, TOPLEFT, OR, no offset.
+            data.extend_from_slice(&0u16.to_be_bytes());
+            data.extend_from_slice(&instances.to_be_bytes());
+            data
+        };
+
+        for instances in [MAX_JBIG2_TEXT_INSTANCES + 1, u32::MAX] {
+            let data = region(instances);
+            assert_eq!(data.len(), 23, "the whole segment is twenty-three bytes");
+            let segment = Segment {
+                number: 2,
+                referred: Vec::new(),
+                kind: kind::IMMEDIATE_TEXT_REGION,
+                page: 1,
+                data: &data,
+            };
+            let mut warnings = Vec::new();
+            assert!(
+                text_region(&segment, &[], 1 << 20, &mut warnings).is_none(),
+                "{instances} was not refused"
+            );
+            assert!(
+                warnings.contains(&Warning::Jbig2SymbolLimitHit),
+                "{instances}: {warnings:?}"
+            );
+        }
+
+        // And the cap itself is admitted to the check below it, so the
+        // constant is the boundary rather than one under it: with no
+        // dictionary behind it this region is skipped, by that check's own
+        // name and not this one's.
+        let data = region(MAX_JBIG2_TEXT_INSTANCES);
+        let segment = Segment {
+            number: 2,
+            referred: Vec::new(),
+            kind: kind::IMMEDIATE_TEXT_REGION,
+            page: 1,
+            data: &data,
+        };
+        let mut warnings = Vec::new();
+        assert!(text_region(&segment, &[], 1 << 20, &mut warnings).is_none());
+        assert_eq!(
+            warnings,
+            vec![Warning::Jbig2SegmentSkipped],
+            "exactly at the cap is admitted"
         );
     }
 

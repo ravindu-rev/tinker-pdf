@@ -845,11 +845,15 @@ been.**
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in
-`crates/tinker-pdf/tests/bounds_ledger.rs` — **37 rows**, each measured against
-a real book, comic or document rather than guessed. The ledger also asserts
-that no bound is proved by a clock — `Instant::now` is banned from every source
-a row names as firing it — so the caps are properties of inputs, not of
-machines.
+`crates/tinker-pdf/tests/bounds_ledger.rs` — **40 rows**, each carrying a
+figure for a real book, comic and document rather than a guess. Thirty-seven
+of those figures are measurements or arithmetic about a plausible file; the
+three JBIG2 rows publish the word **estimate** in the number itself, because
+the corpus holds no real OCR JBIG2 to measure against and a row that reads
+like a measurement when it is not is the failure this file exists to prevent.
+The ledger also asserts that no bound is proved by a clock — `Instant::now` is
+banned from every source a row names as firing it — so the caps are properties
+of inputs, not of machines.
 
 ## Injection: assertions are counted, not assumed
 
