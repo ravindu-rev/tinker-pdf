@@ -147,6 +147,15 @@ pub struct FileResult {
     /// of can be a function of the corpus rather than of the machine. Zero
     /// from a child that did not say.
     pub cost: Cost,
+    /// The child's peak resident set in bytes, or `None` where it did not say.
+    ///
+    /// Measured **by the child, of itself**, and `None` carries that fact
+    /// rather than hiding it. Two things produce a `None` and both must stay
+    /// visible: a platform whose `tpdf` cannot read a high-water mark, which
+    /// makes the run incomplete; and a child that died before it could print
+    /// the line, which is already a crash. A zero would merge them into a
+    /// measurement, and a measurement of zero is a ceiling nothing can exceed.
+    pub peak: Option<u64>,
     /// What the structure tree walk found, or `None` where the document has
     /// no `/StructTreeRoot` this engine could read.
     ///
@@ -296,6 +305,10 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         metamorphic: BTreeMap::new(),
         bundled_faces: false,
         cost: Cost::default(),
+        // A child that wrote no record measured no peak. `None` rather than a
+        // zero for the reason the field carries: this file is already counted
+        // as a crash, and a zero here would be a measurement.
+        peak: None,
         // A child that wrote no record did not look at a structure tree, and
         // `None` is the same answer as "there was none". They aggregate the
         // same way, and the file is already counted as failed.
@@ -493,7 +506,14 @@ fn hash(text: &str) -> u64 {
 /// Version 4 adds the `signature` capability: reading a signature produces no
 /// warning when it succeeds, so a count is the only thing that can say whether
 /// the reader is still finding them all.
-pub const PROBE_VERSION: u32 = 5;
+///
+/// Version 6 adds `peak`, the child's own peak resident set. An unknown key is
+/// ordinarily ignored, so a new key alone would not need a bump — but this one
+/// is *required*: a corpus where no child reports a peak makes the run
+/// incomplete. Without the bump, running against a version-5 binary would look
+/// like a platform that cannot measure memory rather than like a `tpdf` nobody
+/// rebuilt, and `corpus.rs`'s handshake exists precisely to name the second.
+pub const PROBE_VERSION: u32 = 6;
 
 /// Reads a child's record, or `None` if it is not complete.
 ///
@@ -520,6 +540,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut metamorphic: BTreeMap<String, MetaVerdict> = BTreeMap::new();
     let mut cost = Cost::default();
     let mut bundled_faces = false;
+    let mut peak: Option<u64> = None;
     let mut tagged: Option<Tagged> = None;
 
     for line in text.lines() {
@@ -553,6 +574,10 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                     bundled_faces = true;
                 }
             }
+            // Unparseable stays `None` rather than becoming a zero: the whole
+            // value of the field is that "not measured" and "measured as
+            // nothing" are different answers.
+            "peak" => peak = rest.trim().parse::<u64>().ok(),
             "cost" => {
                 let mut rest = rest.split_whitespace();
                 while let (Some(field), Some(value)) = (rest.next(), rest.next()) {
@@ -702,6 +727,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         metamorphic,
         bundled_faces,
         cost,
+        peak,
         tagged,
     })
 }
@@ -710,7 +736,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "probe 5\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
+    const GOOD: &str = "probe 6\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
                         cap jbig2\nrendered 3\nstrict eligible\nstrict structure 0\n\
                         strict semantics 2\nstrict kind annot-rect-unordered 2\n\
                         warn render:UnreadableFont 2\nms 40\ndone\n";
@@ -730,7 +756,7 @@ mod tests {
     #[test]
     fn the_structure_counts_read_off_both_lines() {
         let text = record(&[
-            "probe 5",
+            "probe 6",
             "opened yes",
             "pages 1",
             "tagged tree yes elements 12 content 5 objects 2",
@@ -751,6 +777,33 @@ mod tests {
         assert_eq!(tagged.unmarked, 7);
     }
 
+    /// The peak is read where the child printed one, and stays `None` where it
+    /// did not -- which is the whole distinction the field exists for. A child
+    /// on a platform with no high-water mark to read omits the line, and that
+    /// omission becomes a `limits` entry rather than a peak of zero bytes.
+    #[test]
+    fn a_peak_is_a_measurement_and_its_absence_is_not_a_zero() {
+        let lines = ["probe 6", "opened yes", "pages 1", "rendered 1", "ms 5"];
+        let mut with = lines.to_vec();
+        with.push("peak 21069824");
+        with.push("done");
+        assert_eq!(
+            parse_record(&record(&with)).expect("complete").peak,
+            Some(21_069_824)
+        );
+
+        let mut without = lines.to_vec();
+        without.push("done");
+        assert_eq!(parse_record(&record(&without)).expect("complete").peak, None);
+
+        // And a line that is not a number is an absence too, never a zero: a
+        // child that garbled its own measurement did not measure nothing.
+        let mut broken = lines.to_vec();
+        broken.push("peak lots");
+        broken.push("done");
+        assert_eq!(parse_record(&record(&broken)).expect("complete").peak, None);
+    }
+
     /// `tree no` is a measurement -- this engine looked and found no structure
     /// tree -- and it reads as `None`, which is the same value a corpus of
     /// untagged files produces. The distinction that matters is against a
@@ -759,7 +812,7 @@ mod tests {
     #[test]
     fn a_document_with_no_structure_tree_reads_as_none() {
         let text = record(&[
-            "probe 5",
+            "probe 6",
             "opened yes",
             "pages 1",
             "tagged tree no",
@@ -776,7 +829,7 @@ mod tests {
     #[test]
     fn a_char_count_without_a_tree_invents_nothing() {
         let text = record(&[
-            "probe 5",
+            "probe 6",
             "opened yes",
             "pages 1",
             "tagged chars matched 40 orphans 0 unmarked 0",
@@ -846,22 +899,22 @@ mod tests {
     fn a_record_without_its_sentinel_is_not_a_record() {
         let truncated = GOOD.replace("done\n", "");
         assert!(parse_record(&truncated).is_none());
-        let cut = "probe 5\nopened yes\npages 3\nrendered 1\n";
+        let cut = "probe 6\nopened yes\npages 3\nrendered 1\n";
         assert!(parse_record(cut).is_none());
     }
 
     #[test]
     fn a_record_in_an_unknown_format_is_refused() {
-        assert!(parse_record(&GOOD.replace("probe 5", "probe 7")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 6", "probe 8")).is_none());
         // And the version the strict pass replaced: a record without that
         // pass means something else by the same keys.
-        assert!(parse_record(&GOOD.replace("probe 5", "probe 1")).is_none());
-        assert!(parse_record(&GOOD.replace("probe 5\n", "")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 6", "probe 1")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 6\n", "")).is_none());
     }
 
     #[test]
     fn a_file_that_would_not_open_is_a_failure_and_not_a_crash() {
-        let text = "probe 5\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
+        let text = "probe 6\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("not a PDF")),
@@ -874,7 +927,7 @@ mod tests {
     /// passed; it is degraded, which is the other number.
     #[test]
     fn a_degraded_page_passed() {
-        let text = "probe 5\nopened yes\npages 1\nrendered 1\n\
+        let text = "probe 6\nopened yes\npages 1\nrendered 1\n\
                     warn render:UnsupportedImage(JBIG2Decode) 1\ncap jbig2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert_eq!(result.outcome, Outcome::Passed);
@@ -883,7 +936,7 @@ mod tests {
 
     #[test]
     fn a_page_that_produced_nothing_did_not_pass() {
-        let text = "probe 5\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
+        let text = "probe 6\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("2 of 4")),
@@ -897,7 +950,7 @@ mod tests {
     #[test]
     fn a_metamorphic_verdict_reads_its_three_states() {
         let text = concat!(
-            "probe 5\n",
+            "probe 6\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",
@@ -935,7 +988,7 @@ mod tests {
     #[test]
     fn an_unknown_metamorphic_verdict_is_not_a_hold() {
         let text = concat!(
-            "probe 5\n",
+            "probe 6\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",

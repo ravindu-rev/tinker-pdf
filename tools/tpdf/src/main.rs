@@ -1454,7 +1454,13 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
 /// The record's format version, bumped when a reader would misread the old
 /// shape. The runner refuses a record whose version it does not know rather
 /// than reading the fields it recognises and inventing the rest.
-const PROBE_VERSION: u32 = 5;
+///
+/// Version 6 adds `peak`: the child's own peak resident set. It is a bump
+/// rather than a quiet new key because the runner *requires* the measurement —
+/// a record without it makes the run incomplete — so a runner that read an
+/// older child's record would call every corpus unmeasurable rather than
+/// naming the stale binary.
+const PROBE_VERSION: u32 = 6;
 
 /// The `--fonts` value meaning "whatever faces this build carries".
 const BUNDLED: &str = "bundled";
@@ -1465,6 +1471,116 @@ const BUNDLED: &str = "bundled";
 /// child did not have. It is a `cfg`, so it is the compiler's answer rather
 /// than a flag anybody can pass.
 const BUNDLED_FACES: bool = cfg!(feature = "bundled-fonts");
+
+/// This process's peak resident set in bytes, or `None` where the platform
+/// will not say.
+///
+/// **Measured in the child rather than by a watcher over it**, which is the
+/// whole reason this is here and not in `xtask`. A parent that samples a
+/// child's memory sees whatever the scheduler let it see: a page allocated and
+/// released between two samples is invisible, and the figure a run records
+/// depends on how busy the machine was — which is the same defect as a timing
+/// assertion, in a number that is supposed to outlive the machine. Both
+/// branches below read a **high-water mark the kernel maintains**, so the
+/// answer is the same however often anybody asks for it.
+///
+/// Where neither branch applies the caller omits the line rather than printing
+/// a zero. The runner turns that omission into a `limits` entry, so a run that
+/// could not measure says so and is refused as a bar; a silent zero would be a
+/// ceiling nothing could ever exceed.
+fn peak_bytes() -> Option<u64> {
+    // Linux: a file read, and no FFI at all. `VmHWM` is the peak resident set
+    // size the kernel has tracked since exec (`fs/proc/task_mmu.c`), written
+    // in what the file calls `kB` and means KiB.
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                let kib: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                return Some(kib * 1024);
+            }
+        }
+        None
+    }
+
+    // Windows: `PeakWorkingSetSize` out of `PROCESS_MEMORY_COUNTERS`, which is
+    // the same high-water mark under another name.
+    //
+    // **Hand-written rather than a `windows-sys` dependency**, and the reason
+    // is this repository's own: `xtask`'s manifest says of its single
+    // dependency "the one dependency, and it is a sibling rather than a third
+    // party", and `tpdf` depends on nothing but `tinker-pdf`. Fifteen lines of
+    // declaration against a crate graph is not a close call in a workspace
+    // whose premise is that it implements its own primitives. `deny.toml` does
+    // not forbid `windows-sys` — it is already in the graph under
+    // `tempfile`/`proptest` — so this is a choice rather than a workaround.
+    //
+    // This is the workspace's only `unsafe`. Every library crate carries
+    // `#![forbid(unsafe_code)]`; the debug CLI does not, and the engine stays
+    // as it was.
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+
+        /// `PROCESS_MEMORY_COUNTERS`, psapi.h. `#[repr(C)]` and the field
+        /// order **are** the ABI; the names are ours. `cb` is the struct's own
+        /// size, which is how this API versions itself: a caller that passes a
+        /// smaller `cb` than the callee knows about gets the prefix it asked
+        /// for, so an older Windows cannot overrun this allocation.
+        #[repr(C)]
+        #[derive(Default)]
+        struct ProcessMemoryCounters {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+
+        // `K32GetProcessMemoryInfo` rather than psapi's `GetProcessMemoryInfo`:
+        // the K32 name is exported from kernel32.dll itself on Windows 7 and
+        // later, so no second import library is needed and there is no
+        // psapi/psapi_version split to get wrong.
+        #[link(name = "kernel32")]
+        extern "system" {
+            /// A pseudo-handle to the calling process. It needs no closing.
+            fn GetCurrentProcess() -> *mut c_void;
+            fn K32GetProcessMemoryInfo(
+                process: *mut c_void,
+                counters: *mut ProcessMemoryCounters,
+                cb: u32,
+            ) -> i32;
+        }
+
+        let mut counters = ProcessMemoryCounters {
+            cb: u32::try_from(std::mem::size_of::<ProcessMemoryCounters>()).ok()?,
+            ..Default::default()
+        };
+        // Safe because the pointer is to a live, fully initialised local of
+        // exactly the type and size named in `cb`, the handle is the process
+        // pseudo-handle, and the callee writes no further than `cb` bytes.
+        let ok = unsafe {
+            K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) != 0
+        };
+        // A zero return is a failure and is reported as "no measurement",
+        // never as a peak of zero.
+        ok.then_some(counters.peak_working_set_size as u64)
+    }
+
+    // Everywhere else — macOS and the two wasm targets among them — there is
+    // no answer this build is willing to invent, and the runner is told by the
+    // absence of the line rather than by a number that means nothing.
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
+}
 
 /// What the structure join reached, summed over the pages the probe rendered.
 ///
@@ -1535,6 +1651,9 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
             // file did not open" is a different fact from "this build does not
             // run the pass".
             println!("strict ineligible the file did not open");
+            if let Some(peak) = peak_bytes() {
+                println!("peak {peak}");
+            }
             println!("ms {}", started.elapsed().as_millis());
             println!("done");
             return;
@@ -1650,6 +1769,17 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
 
     for (kind, count) in &kinds {
         println!("warn {kind} {count}");
+    }
+    // Last of the measurements and after every phase, so it is the peak of the
+    // whole file's work rather than of the part that had run when it was
+    // asked. One file per process is what makes this a per-file number at all:
+    // the runner spawns a child per path, so nothing another file allocated is
+    // in this high-water mark.
+    //
+    // Omitted where the platform will not say. See [`peak_bytes`] for why that
+    // is an omission rather than a zero.
+    if let Some(peak) = peak_bytes() {
+        println!("peak {peak}");
     }
     println!("ms {}", started.elapsed().as_millis());
     println!("done");

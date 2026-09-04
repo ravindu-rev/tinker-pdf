@@ -79,6 +79,51 @@ pub struct Bar {
     /// absent metamorphic relation is: a bar that predates a measurement
     /// cannot be regressed against.
     pub tagged: Option<TaggedBar>,
+    /// The most memory any one child needed, or `None` in a bar recorded
+    /// before the measurement existed — which is the three bars committed
+    /// today.
+    ///
+    /// `None` for [`Bar::tagged`]'s reason, and it is what keeps `SCHEMA` at 2:
+    /// a bar that predates a measurement cannot be regressed against, so an
+    /// absent key is an improvement rather than a refusal and no committed
+    /// file has to be rewritten to stay readable.
+    pub peak: Option<PeakBar>,
+}
+
+/// The peak-memory bar for one corpus.
+///
+/// **The only absolute band in this file, and the only `<=`.** Every other
+/// axis here is a rate compared by cross-multiplication, because a count
+/// compared against a count changes meaning when the corpus grows.
+///
+/// A maximum does not. Adding a file can only raise it if that file genuinely
+/// costs more than anything already in the corpus, and *that is the thing
+/// being ratcheted* — "no file in this corpus ever needs more than N bytes" is
+/// a statement about the engine that a larger corpus can only make harder to
+/// satisfy, never easier. It is precisely the opposite of the orphan ceiling
+/// [`compare`] argues against three comparisons up: a ceiling on orphans is
+/// regressed by reading *more* text, so it punishes the run for doing more
+/// work, whereas nothing about reading more files raises the memory one file
+/// needs.
+///
+/// So there is no epsilon and no cross-multiplication: `bytes_now <=
+/// bytes_before` is exact integer arithmetic and means what it says.
+///
+/// **What it does not remove is the measurement's own swing, and whoever
+/// records the band should know the size of it.** Two consecutive runs of one
+/// release binary over the same 974 `pdfjs` files gave 924 033 024 and
+/// 923 512 832 bytes — 520 192 apart, 0.06 %. A high-water mark is not a clock
+/// and does not depend on how busy the machine was, but it does depend on what
+/// the allocator asked the kernel for, so a band recorded at exactly the
+/// largest figure ever seen has no room for that. Record it from a complete
+/// run and expect the next one to sit within a megabyte either side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeakBar {
+    /// The largest peak resident set any child reached, in bytes.
+    pub bytes: u64,
+    /// How many children reported one, which is the maximum's denominator: a
+    /// maximum taken over fewer children is a different measurement.
+    pub files: u64,
 }
 
 /// The structure-tree bar for one corpus.
@@ -416,6 +461,55 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                 }
             }
         }
+
+        // The sixth axis (tier 0's memory row): the most memory any one child
+        // needed. See [`PeakBar`] for why this one is an absolute `<=` where
+        // every other axis in this file is a ratio.
+        let now_peak = corpus.peak();
+        match bar.peak {
+            // No bar, and nothing measured either. Said rather than passed
+            // over, because a corpus whose children report no peak is a run
+            // that is already incomplete — `corpus::run` puts that in
+            // `limits`, and the refusal at the top of this function is what
+            // actually stops it. This note is how a reader learns which of the
+            // two silences they are looking at.
+            None if now_peak.files == 0 => out.notes.push(format!(
+                "{}: no child reported a peak resident set, and there is no recorded bar",
+                bar.name
+            )),
+            None => out.improvements.push(format!(
+                "{}: the largest peak resident set is {} bytes over {} children — new, with no recorded bar",
+                bar.name, now_peak.bytes, now_peak.files
+            )),
+            Some(before) => {
+                if now_peak.files == 0 {
+                    out.regressions.push(format!(
+                        "{}: no child reported a peak resident set at all, against a bar of {} bytes over {} children",
+                        bar.name, before.bytes, before.files
+                    ));
+                } else if now_peak.bytes > before.bytes {
+                    out.regressions.push(format!(
+                        "{}: the largest peak resident set is {} bytes, above the recorded band of {} bytes",
+                        bar.name, now_peak.bytes, before.bytes
+                    ));
+                } else if now_peak.bytes < before.bytes {
+                    out.improvements.push(format!(
+                        "{}: the largest peak resident set is {} bytes, down from {}",
+                        bar.name, now_peak.bytes, before.bytes
+                    ));
+                }
+                // And the denominator, for the strict pass's reason: a
+                // maximum over half as many children is a smaller maximum
+                // without the engine having improved. A ratio, because this
+                // one *is* a share of the corpus.
+                if !holds(before.files, bar.total, now_peak.files, total) {
+                    out.regressions.push(format!(
+                        "{}: {}/{total} children reported a peak resident set, down from {}/{}; a maximum over fewer children is not a smaller maximum",
+                        bar.name, now_peak.files, before.files, bar.total
+                    ));
+                }
+            }
+        }
     }
 
     for corpus in &now.corpora {
@@ -543,6 +637,52 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
                 Some(tagged)
             }
         };
+        let peak = match entry.get("peak") {
+            // Absent is a bar recorded before the measurement existed, which
+            // is every bar committed today. `SCHEMA` stays 2 for exactly this:
+            // no committed file has to be rewritten to stay readable, and none
+            // of them can be regressed against on an axis they never measured.
+            None => None,
+            Some(object) => {
+                let read = |key: &str| -> Result<u64, String> {
+                    object
+                        .get(key)
+                        .and_then(Json::as_u64)
+                        .ok_or_else(|| format!("`{name}`'s `peak` has no whole-number `{key}`"))
+                };
+                let peak = PeakBar {
+                    bytes: read("bytes")?,
+                    files: read("files")?,
+                };
+                if peak.files > total {
+                    return Err(format!(
+                        "`{name}` records a peak resident set over {} children out of {total}, which cannot be",
+                        peak.files
+                    ));
+                }
+                // Refused at the *bar* rather than only compared against, for
+                // the reason a tagged bar of zero elements is: a band of zero
+                // bytes over children that reported something is a ceiling
+                // nothing can sit under, so every future run would regress
+                // against it and the message would name memory rather than
+                // the ratchet that was written wrong.
+                if peak.files > 0 && peak.bytes == 0 {
+                    return Err(format!(
+                        "`{name}` records {} children reporting a peak resident set of zero bytes, which is a band nothing can sit under",
+                        peak.files
+                    ));
+                }
+                // And the mirror: a band with no children behind it is not a
+                // measurement, so it must not be read as one.
+                if peak.files == 0 {
+                    return Err(format!(
+                        "`{name}` records a peak resident set of {} bytes over no children at all",
+                        peak.bytes
+                    ));
+                }
+                Some(peak)
+            }
+        };
         if bars.iter().any(|b: &Bar| b.name == name) {
             return Err(format!("`{name}` appears twice in the ratchet"));
         }
@@ -555,6 +695,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             strict_clean,
             metamorphic,
             tagged,
+            peak,
         });
     }
     if bars.is_empty() {
@@ -604,6 +745,7 @@ mod tests {
                 },
                 metamorphic: BTreeMap::new(),
                 tagged: None,
+                peak: None,
             });
         }
         out
@@ -699,6 +841,7 @@ mod tests {
                 strict_clean: total,
                 metamorphic: BTreeMap::new(),
                 tagged: None,
+                peak: None,
             }],
             complete: true,
             fonts: "none".to_string(),
@@ -868,6 +1011,149 @@ mod tests {
             "tagged":{"files":6,"elements":0,"matched":0,"orphans":0}}]}"#;
         let error = parse(text).expect_err("a floor of zero is not a floor");
         assert!(error.contains("no structure elements at all"), "{error}");
+    }
+
+    /// A run where the given files each reached the given peak.
+    fn peak_run(name: &str, children: u64, bytes: u64) -> Run {
+        let mut run = run(name, 10, 0, 0);
+        for (index, file) in run.corpora[0].files.iter_mut().enumerate() {
+            if (index as u64) < children {
+                // Descending, so the maximum is the first file's rather than
+                // whichever one the helper happened to write last: a test that
+                // could pass by reading a sum or a mean is not testing a
+                // maximum.
+                file.peak = Some(bytes - index as u64);
+            }
+        }
+        run
+    }
+
+    fn peak_bar(name: &str, peak: PeakBar) -> Ratchet {
+        let mut committed = bar(name, 10, 10, 0);
+        committed.bars[0].peak = Some(peak);
+        committed
+    }
+
+    /// **The band, and the direction it is a band in.** A run whose largest
+    /// child needs more than the recorded maximum has regressed; one that
+    /// needs the same amount has not, which is what makes it a `<=` rather
+    /// than a `<`; and one that needs less is an improvement.
+    #[test]
+    fn a_child_that_needs_more_memory_than_the_band_is_a_regression() {
+        let committed = peak_bar(
+            "verapdf",
+            PeakBar {
+                bytes: 200_000_000,
+                files: 10,
+            },
+        );
+
+        let worse = compare(&committed, &peak_run("verapdf", 10, 200_000_001), false);
+        assert!(worse.failed(), "{worse:#?}");
+        assert!(
+            worse.regressions[0].contains("above the recorded band"),
+            "{:?}",
+            worse.regressions
+        );
+
+        // Exactly the band is not a regression. An absolute maximum compared
+        // with `<` would fail a run that changed nothing.
+        let level = compare(&committed, &peak_run("verapdf", 10, 200_000_000), true);
+        assert!(!level.failed(), "{level:#?}");
+
+        let better = compare(&committed, &peak_run("verapdf", 10, 100_000_000), false);
+        assert!(!better.failed(), "{better:#?}");
+        assert!(
+            better
+                .improvements
+                .iter()
+                .any(|i| i.contains("down from 200000000")),
+            "{:?}",
+            better.improvements
+        );
+    }
+
+    /// And the denominator, which is the trick the maximum would otherwise be
+    /// open to: a run where the measurement stopped happening on most children
+    /// reports a smaller maximum without the engine having improved at all.
+    #[test]
+    fn a_maximum_over_fewer_children_is_not_a_smaller_maximum() {
+        let committed = peak_bar(
+            "verapdf",
+            PeakBar {
+                bytes: 200_000_000,
+                files: 10,
+            },
+        );
+
+        let thinned = compare(&committed, &peak_run("verapdf", 2, 100_000_000), false);
+        assert!(thinned.failed(), "{thinned:#?}");
+        assert!(
+            thinned.regressions.iter().any(|r| r
+                .contains("2/10 children reported a peak resident set")),
+            "{:?}",
+            thinned.regressions
+        );
+
+        // And none at all is its own message, for the reason the tagged axis
+        // separates "no tree anywhere" from "fewer trees": a build that stopped
+        // measuring is a different fix from one that measures less.
+        let silent = compare(&committed, &peak_run("verapdf", 0, 0), false);
+        assert!(silent.failed(), "{silent:#?}");
+        assert!(
+            silent
+                .regressions
+                .iter()
+                .any(|r| r.contains("no child reported a peak resident set at all")),
+            "{:?}",
+            silent.regressions
+        );
+    }
+
+    /// The three bars committed today have no `peak` key, and they must go on
+    /// parsing and go on being compared against. A bar that predates a
+    /// measurement cannot be regressed against, which is the same rule the
+    /// structure walk arrived under and the reason `SCHEMA` stays 2.
+    #[test]
+    fn a_bar_recorded_before_the_measurement_still_parses_and_still_holds() {
+        let text = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"verapdf","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10}]}"#;
+        let committed = parse(text).expect("a bar with no peak key is still a bar");
+        assert_eq!(committed.bars[0].peak, None);
+
+        let out = compare(&committed, &peak_run("verapdf", 10, 200_000_000), true);
+        assert!(!out.failed(), "{out:#?}");
+        assert!(
+            out.improvements
+                .iter()
+                .any(|i| i.contains("new, with no recorded bar")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    /// A band of zero bytes over children that reported something is the
+    /// mirror of a structure floor of zero elements: nothing can sit under it,
+    /// so every run afterwards would regress and the message would blame the
+    /// engine for a ratchet written wrong. Refused when the file is read.
+    #[test]
+    fn a_committed_band_of_zero_bytes_is_refused_at_the_ratchet() {
+        let text = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"verapdf","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10,
+            "peak":{"bytes":0,"files":6}}]}"#;
+        let error = parse(text).expect_err("a band of zero is not a band");
+        assert!(error.contains("a band nothing can sit under"), "{error}");
+
+        // And the mirror: a figure with no children behind it was measured by
+        // nobody, so it is not a measurement.
+        let empty = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"verapdf","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10,
+            "peak":{"bytes":200000000,"files":0}}]}"#;
+        let error = parse(empty).expect_err("no children is no measurement");
+        assert!(error.contains("over no children at all"), "{error}");
     }
 
     /// Ruling 13's axis: a rewrite that stops validating is a regression, and
