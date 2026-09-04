@@ -1316,6 +1316,24 @@ pub struct PageBuilder {
 struct TaggedNode {
     /// The structure type, which is also the content stream's tag.
     tag: Vec<u8>,
+    /// What the caller calls this element, if it named it.
+    ///
+    /// **The whole of what makes an element able to cross a page.** Two
+    /// `tagged_keyed` calls on two pages with the same key are two halves of
+    /// **one** element -- a paragraph broken across a page break, or a float
+    /// whose box was drawn a page away from where it reads -- and are merged
+    /// at `finish`. `None` is an anonymous element, which never merges with
+    /// anything and is what [`PageBuilder::tagged`] produces.
+    key: Option<u64>,
+    /// Where this element reads, which is **not** its key.
+    ///
+    /// The two are separate because they answer different questions and cannot
+    /// be the same number: the key has to be equal on every page the element
+    /// appears on, or its halves do not merge, and the position has to ascend
+    /// with the document, or the halves merge into the wrong place. An element
+    /// met again on a later page keeps the **earliest** position it was given,
+    /// because that is where it reads.
+    order: u64,
     kids: Vec<TaggedKid>,
 }
 
@@ -1327,7 +1345,18 @@ struct TaggedNode {
 /// a child element is a subtree, and a writer that flattened them would have
 /// to guess which it meant on the way back.
 enum TaggedKid {
-    Content(u32),
+    /// A marked-content sequence on the page that opened it, and where it
+    /// sits in the **document's** order.
+    ///
+    /// The order is the caller's, not the page's: once elements can merge
+    /// across pages their kids arrive in page order, and page order is not
+    /// reading order for the one case this exists to fix. A stable sort by it
+    /// leaves everything the caller did not distinguish in the order it was
+    /// drawn.
+    Content {
+        mcid: u32,
+        order: u64,
+    },
     Element(TaggedNode),
 }
 
@@ -1386,6 +1415,44 @@ impl PageBuilder {
     /// refused (ruling 2). The reader caps its own walk at the same depth, so
     /// an element written below it is one this engine could not read back.
     pub fn tagged(&mut self, tag: &[u8], draw: impl FnOnce(&mut PageBuilder)) {
+        // An anonymous element has no position of its own; a stable sort
+        // then leaves every one of them exactly where it was drawn, which
+        // is what a caller that names nothing had before any of this.
+        self.tag_with(tag, None, 0, draw);
+    }
+
+    /// The same, for an element the caller can **name**.
+    ///
+    /// Two calls with one key, on any two pages, are two halves of one
+    /// structure element: 14.7.2 Table 323 lets an element's kids name
+    /// different pages, which is what a paragraph broken across a page break
+    /// is and what a float whose box landed a page from where it reads needs.
+    /// `finish` merges them and writes the kids on other pages as `/MCR`
+    /// dictionaries carrying their own `/Pg`.
+    ///
+    /// The key is also the **order** the element takes among its siblings, so
+    /// a caller whose keys ascend in document order gets a tree in document
+    /// order however the pages fell. Nothing here checks that they ascend: a
+    /// key is the caller's statement about its own document, the way
+    /// [`crate::PageBuilder::tagged`]'s nesting already is.
+    pub fn tagged_keyed(
+        &mut self,
+        tag: &[u8],
+        key: u64,
+        order: u64,
+        draw: impl FnOnce(&mut PageBuilder),
+    ) {
+        self.tag_with(tag, Some(key), order, draw);
+    }
+
+    /// Where the two forms meet.
+    fn tag_with(
+        &mut self,
+        tag: &[u8],
+        key: Option<u64>,
+        order: u64,
+        draw: impl FnOnce(&mut PageBuilder),
+    ) {
         if self.tag_stack.len() >= MAX_TAG_DEPTH {
             draw(self);
             return;
@@ -1402,7 +1469,17 @@ impl PageBuilder {
         let mcid = self.open_marked(tag);
         self.tag_stack.push(TaggedNode {
             tag: tag.to_vec(),
-            kids: vec![TaggedKid::Content(mcid)],
+            key,
+            order,
+            // **The element's own first sequence is seeded from `order`**, and
+            // that is why no separate "say where this content sits" call is
+            // needed: `tagged_keyed` is called once per page, with the position
+            // of the first run drawn on *that* page, so a merged element's text
+            // already carries where it was written rather than which page it
+            // landed on. A `mark_order` method existed here and was deleted
+            // when its counted injection fired zero twice, against a fixture
+            // written specifically to catch it.
+            kids: vec![TaggedKid::Content { mcid, order }],
         });
         draw(self);
         self.close_marked();
@@ -1424,11 +1501,21 @@ impl PageBuilder {
         // to it. If nothing is, `close_marked` takes the reopening back.
         if let Some(tag) = resume {
             let mcid = self.open_marked(&tag);
-            self.tag_stack
-                .last_mut()
-                .expect("resume implies a parent")
+            let parent = self.tag_stack.last_mut().expect("resume implies a parent");
+            // The resumption reads **after** the child that interrupted it, so
+            // it takes an order past the child's rather than the parent's own.
+            // Without this a paragraph's second half sorts back in front of the
+            // span that split it.
+            let order = parent
                 .kids
-                .push(TaggedKid::Content(mcid));
+                .iter()
+                .map(|kid| match kid {
+                    TaggedKid::Content { order, .. } => *order,
+                    TaggedKid::Element(child) => child.order,
+                })
+                .max()
+                .unwrap_or(0);
+            parent.kids.push(TaggedKid::Content { mcid, order });
         }
     }
 
@@ -4053,38 +4140,64 @@ impl DocumentBuilder {
         true
     }
 
-    /// Writes one page's structure elements and returns the refs a parent
+    /// Writes the merged structure elements and returns the refs a parent
     /// should list as its kids.
     ///
-    /// `claims` is indexed by marked-content id and filled with the element
-    /// that opened each one, which is the `/ParentTree` entry 14.7.4.4 asks
-    /// for: the same relation as `/K`, stored the other way round, so a
+    /// `claims` is indexed by page and then by marked-content id, and filled
+    /// with the element that opened each one — the `/ParentTree` entry 14.7.4.4
+    /// asks for: the same relation as `/K`, stored the other way round, so a
     /// consumer holding an id can find its element without walking the tree.
     /// Both directions are written from the same walk so they cannot disagree.
+    ///
+    /// **An element's kids may name different pages**, which is 14.7.2 Table
+    /// 323's own model and what this builder used to be unable to express. So
+    /// `/Pg` is the element's **default** page — the page of its first content
+    /// kid — and a kid on any other page is written as an `/MCR` dictionary
+    /// carrying its own `/Pg`. An element with no content of its own inherits
+    /// nothing and states no `/Pg`, because it has no default to give.
     fn write_struct_elements(
         &mut self,
-        nodes: &[TaggedNode],
+        arena: &[Merged],
+        kids_of: &[MergedKid],
         parent: ObjRef,
-        page: ObjRef,
-        claims: &mut [Option<ObjRef>],
+        pages: &[ObjRef],
+        claims: &mut [Vec<Option<ObjRef>>],
     ) -> Vec<Object> {
-        let mut out = Vec::with_capacity(nodes.len());
-        for node in nodes {
+        let mut out = Vec::new();
+        for kid in kids_of {
+            let MergedKid::Element(at) = kid else {
+                continue;
+            };
+            let node = &arena[*at];
             let reference = self.allocate();
-            let mut kids = Vec::with_capacity(node.kids.len());
+            // The default page: the first content this element holds anywhere
+            // under it, in the order the sort left them.
+            let default = default_page(arena, *at);
+            let mut written = Vec::with_capacity(node.kids.len());
             for kid in &node.kids {
                 match kid {
-                    TaggedKid::Content(mcid) => {
-                        kids.push(Object::Int(i64::from(*mcid)));
-                        if let Some(slot) = claims.get_mut(*mcid as usize) {
-                            *slot = Some(reference);
+                    MergedKid::Content { page, mcid, .. } => {
+                        if let Some(slots) = claims.get_mut(*page) {
+                            if let Some(slot) = slots.get_mut(*mcid as usize) {
+                                *slot = Some(reference);
+                            }
+                        }
+                        if Some(*page) == default {
+                            written.push(Object::Int(i64::from(*mcid)));
+                        } else {
+                            let mut mcr = Dict::new();
+                            mcr.insert(Name::TYPE, Object::Name(self.names.intern(b"MCR")));
+                            mcr.insert(self.names.intern(b"Pg"), Object::Ref(pages[*page]));
+                            mcr.insert(self.names.intern(b"MCID"), Object::Int(i64::from(*mcid)));
+                            written.push(Object::Dict(mcr));
                         }
                     }
-                    TaggedKid::Element(child) => {
-                        kids.extend(self.write_struct_elements(
-                            std::slice::from_ref(child),
+                    MergedKid::Element(_) => {
+                        written.extend(self.write_struct_elements(
+                            arena,
+                            std::slice::from_ref(kid),
                             reference,
-                            page,
+                            pages,
                             claims,
                         ));
                     }
@@ -4098,13 +4211,10 @@ impl DocumentBuilder {
                 Object::Name(self.names.intern(&node.tag)),
             );
             element.insert(self.names.intern(b"P"), Object::Ref(parent));
-            // On every element rather than only where it is needed. 14.7.2
-            // Table 323 makes `/Pg` the page a marked-content kid lives on,
-            // and this builder never writes an element whose content is on a
-            // page other than its own — so writing it everywhere is both true
-            // and one less thing for a reader to inherit.
-            element.insert(self.names.intern(b"Pg"), Object::Ref(page));
-            element.insert(self.names.intern(b"K"), Object::Array(kids));
+            if let Some(page) = default {
+                element.insert(self.names.intern(b"Pg"), Object::Ref(pages[page]));
+            }
+            element.insert(self.names.intern(b"K"), Object::Array(written));
             self.objects.insert(reference.num, Object::Dict(element));
             out.push(Object::Ref(reference));
         }
@@ -4171,10 +4281,11 @@ impl DocumentBuilder {
         } else {
             None
         };
-        let mut parent_tree: Vec<Vec<Object>> = Vec::new();
-        let mut struct_kids: Vec<Object> = Vec::new();
+        // Which pages carry tagged content, in page order; their position
+        // here is their `/StructParents` key.
+        let mut tagged_pages: Vec<usize> = Vec::new();
 
-        for (page, reference) in pages.iter().zip(page_refs.iter()) {
+        for (at, (page, reference)) in pages.iter().zip(page_refs.iter()).enumerate() {
             let content_ref = self.allocate();
             self.objects.insert_stream(
                 content_ref.num,
@@ -4252,30 +4363,13 @@ impl DocumentBuilder {
             // the reason `/CropBox` is written only when there is one: a
             // `/StructParents` naming an empty `/Nums` entry is a statement
             // where its absence is not.
-            if let Some(root) = struct_root {
-                if !page.tag_roots.is_empty() {
-                    let key = parent_tree.len() as i64;
-                    let mut claims: Vec<Option<ObjRef>> = vec![None; page.next_mcid as usize];
-                    let kids =
-                        self.write_struct_elements(&page.tag_roots, root, *reference, &mut claims);
-                    parent_tree.push(
-                        claims
-                            .into_iter()
-                            .map(|claim| match claim {
-                                Some(reference) => Object::Ref(reference),
-                                // An id no element claims cannot happen from
-                                // this builder — `tagged` opens both together
-                                // — so a null here is a defect in this writer
-                                // rather than in the caller's document. It is
-                                // written rather than skipped so the array
-                                // stays indexed by id.
-                                None => Object::Null,
-                            })
-                            .collect(),
-                    );
-                    struct_kids.extend(kids);
-                    dict.insert(self.names.intern(b"StructParents"), Object::Int(key));
-                }
+            // **The key only.** The elements themselves are written after
+            // every page has one, because an element may now hold content from
+            // more than one page and cannot be written until they all exist.
+            if struct_root.is_some() && !page.tag_roots.is_empty() {
+                let key = tagged_pages.len() as i64;
+                tagged_pages.push(at);
+                dict.insert(self.names.intern(b"StructParents"), Object::Int(key));
             }
 
             self.objects.insert(reference.num, Object::Dict(dict));
@@ -4377,6 +4471,49 @@ impl DocumentBuilder {
         // nothing it would not otherwise have.
         if let Some(root) = struct_root {
             let document = self.allocate();
+
+            // **One tree for the document, folded out of the pages' nodes.**
+            // Elements the caller named are merged across every page they were
+            // opened on, then every kid list is put into the caller's order —
+            // which is the source document's, and is not page order the moment
+            // anything was drawn on a page other than the one it reads on.
+            let mut arena: Vec<Merged> = Vec::new();
+            let mut roots: Vec<MergedKid> = Vec::new();
+            for (at, page) in pages.iter().enumerate() {
+                for node in &page.tag_roots {
+                    absorb(&mut arena, &mut roots, node, at);
+                }
+            }
+            order_kids(&mut arena);
+            roots.sort_by_key(|kid| kid.order(&arena));
+
+            // One claims array per **page**, not per element: `/ParentTree` is
+            // indexed by the page's `/StructParents` key and then by the id,
+            // and an id now belongs to an element that may be owned anywhere.
+            let mut claims: Vec<Vec<Option<ObjRef>>> = pages
+                .iter()
+                .map(|page| vec![None; page.next_mcid as usize])
+                .collect();
+            let struct_kids =
+                self.write_struct_elements(&arena, &roots, document, &page_refs, &mut claims);
+            let parent_tree: Vec<Vec<Object>> = tagged_pages
+                .iter()
+                .map(|at| {
+                    claims[*at]
+                        .iter()
+                        .map(|claim| match claim {
+                            Some(reference) => Object::Ref(*reference),
+                            // An id no element claims cannot happen from this
+                            // builder — `tagged` opens both together — so a
+                            // null here is a defect in this writer rather than
+                            // in the caller's document. It is written rather
+                            // than skipped so the array stays indexed by id.
+                            None => Object::Null,
+                        })
+                        .collect()
+                })
+                .collect();
+
             let mut element = Dict::new();
             element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
             element.insert(
@@ -4868,6 +5005,125 @@ fn archival_packet(profile: &ArchivalProfile, info: &Dict, names: &NameTable) ->
 
     out.push_str("</rdf:RDF>\n</x:xmpmeta>\n<?xpacket end=\"w\"?>");
     out.into_bytes()
+}
+
+/// One element of the merged, **document-level** tree.
+///
+/// The per-page [`TaggedNode`]s are folded into these at `finish`: nodes that
+/// share a key and a parent are one element, however many pages they were
+/// opened on. Kids are held as indices into one arena rather than by value,
+/// because merging appends to a node already in the tree.
+struct Merged {
+    tag: Vec<u8>,
+    key: Option<u64>,
+    /// The **earliest** position any of its halves was given.
+    order: u64,
+    kids: Vec<MergedKid>,
+}
+
+/// A merged element's kid: a sequence on a **named** page, or a child.
+enum MergedKid {
+    Content { page: usize, mcid: u32, order: u64 },
+    Element(usize),
+}
+
+impl MergedKid {
+    /// Where this kid reads, which is what the sort below orders by.
+    fn order(&self, arena: &[Merged]) -> u64 {
+        match self {
+            MergedKid::Content { order, .. } => *order,
+            MergedKid::Element(at) => arena[*at].order,
+        }
+    }
+}
+
+/// Folds one page's nodes into the document tree.
+///
+/// `siblings` is the kid list the nodes join — the root list, or a merged
+/// element's own kids. A node with a key finds the sibling that shares it and
+/// appends to it; a node without one is always new, which is what keeps
+/// [`PageBuilder::tagged`]'s anonymous elements per page.
+fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedNode, page: usize) {
+    let existing = node.key.and_then(|key| {
+        siblings.iter().find_map(|kid| match kid {
+            MergedKid::Element(at) if arena[*at].key == Some(key) => Some(*at),
+            _ => None,
+        })
+    });
+    let at = match existing {
+        Some(at) => {
+            // The element reads where its **first** half did: a paragraph
+            // continued onto a later page did not move, and a float met early
+            // and drawn late did not either.
+            arena[at].order = arena[at].order.min(node.order);
+            at
+        }
+        None => {
+            arena.push(Merged {
+                tag: node.tag.clone(),
+                key: node.key,
+                order: node.order,
+                kids: Vec::new(),
+            });
+            let at = arena.len() - 1;
+            siblings.push(MergedKid::Element(at));
+            at
+        }
+    };
+    for kid in &node.kids {
+        match kid {
+            TaggedKid::Content { mcid, order } => {
+                arena[at].kids.push(MergedKid::Content {
+                    page,
+                    mcid: *mcid,
+                    order: *order,
+                });
+            }
+            TaggedKid::Element(child) => {
+                // Taken out and put back so the arena and the kid list can be
+                // borrowed at once. Nothing else can reach this node in
+                // between: `absorb` is the only walker.
+                let mut kids = std::mem::take(&mut arena[at].kids);
+                absorb(arena, &mut kids, child, page);
+                arena[at].kids = kids;
+            }
+        }
+    }
+}
+
+/// The page an element states as its `/Pg`: where its first content sits.
+///
+/// 14.7.2 Table 323 makes `/Pg` a **default** for kids that do not name a page
+/// of their own, so the one that costs fewest `/MCR` dictionaries is the one
+/// most of its content is on — and the first is a good enough proxy for that
+/// while being stable, which matters more. An element with no content anywhere
+/// beneath it has no default to give and states none.
+fn default_page(arena: &[Merged], at: usize) -> Option<usize> {
+    for kid in &arena[at].kids {
+        match kid {
+            MergedKid::Content { page, .. } => return Some(*page),
+            MergedKid::Element(child) => {
+                if let Some(page) = default_page(arena, *child) {
+                    return Some(page);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Sorts every element's kids into the document's order.
+///
+/// **Stable**, and that is the whole contract with the caller: kids it gave
+/// the same order keep the order they were drawn in, and only the ones it
+/// distinguished move. A caller that names nothing gets exactly what the
+/// per-page builder gave it.
+fn order_kids(arena: &mut [Merged]) {
+    for at in 0..arena.len() {
+        let mut kids = std::mem::take(&mut arena[at].kids);
+        kids.sort_by_key(|kid| kid.order(arena));
+        arena[at].kids = kids;
+    }
 }
 
 #[cfg(test)]

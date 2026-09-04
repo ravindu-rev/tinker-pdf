@@ -1988,6 +1988,14 @@ fn epub_book() -> Vec<u8> {
 /// the *same* value, because they are the same bytes, and the 600x800 box to
 /// its own. A structure tree that had touched the page content would have
 /// moved a raster fingerprint too, and none of them shifted.
+///
+/// They moved a **second** time, in the same three places and again with no
+/// raster movement, when the tree became document-level: an element's kids may
+/// now name different pages, so a paragraph broken across a page break is one
+/// `/P` rather than two and a kid on another page is written as an `/MCR`
+/// dictionary. That is what closed the float reading-order row -- Beowulf
+/// conserves exactly in logical order where content order still shows 2 182 --
+/// and it changes which objects the file holds without changing one glyph.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
     // 9600, 3600 and 3230 pixels.
@@ -2774,7 +2782,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "ed6ba37cf042a20c6181da799ea15da466340f1ee938e322ad41dbe61fc00ecb",
+        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2860,12 +2868,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "ed6ba37cf042a20c6181da799ea15da466340f1ee938e322ad41dbe61fc00ecb",
+        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "4f2013c30778d1f9f023a18db7be70c28fe65840a2261430a2a04c73b082d719",
+        "51748067f1d7534bebe50bf891a591e2fc36618f3b76e0daaf149774ad1f9901",
         "the book at 600 x 800 is not the bytes it was"
     );
 
