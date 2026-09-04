@@ -22,8 +22,11 @@
 //!
 //! **Grow.** Multiple substitution replaces one glyph with up to 65 535, and
 //! a feature may run it repeatedly. [`Limits::max_glyphs`] bounds the buffer
-//! and [`Limits::max_operations`] bounds the attempts, and the two are
-//! separate because a font can exhaust either without touching the other.
+//! and [`Limits::max_operations`] bounds the subtables searched, and the two
+//! are separate because a font can exhaust either without touching the other.
+//! The unit is the *subtable* rather than the attempt for the reason
+//! [`Runner::apply_at`] gives: `subTableCount` is the font's to choose, so a
+//! ceiling counting attempts leaves it choosing what each attempt costs.
 //!
 //! # Skipping is not a filter on the output
 //!
@@ -472,12 +475,44 @@ impl<'a, 'g> Runner<'a, 'g> {
         }
     }
 
+    /// Charges one operation against [`Limits::max_operations`], and says
+    /// whether there was one left to charge.
+    ///
+    /// The refusal is recorded once per table by [`Runner::warn`], so a
+    /// ceiling reached a hundred thousand times is still one warning.
+    fn spend(&mut self) -> bool {
+        self.ops = self.ops.saturating_add(1);
+        if self.ops > self.limits.max_operations {
+            self.warn(Warning::OperationBudgetExceeded { table: self.table });
+            return false;
+        }
+        true
+    }
+
     /// Tries every subtable of one lookup at one position.
     ///
     /// The first that applies wins and the rest are not consulted, which is
     /// the specification's rule and not an optimisation: subtables of one
     /// lookup are alternatives, and a face relies on the earlier ones
     /// shadowing the later.
+    ///
+    /// # What the operation budget counts, and why it is the subtable
+    ///
+    /// A lookup's `subTableCount` is a 16-bit field the *font* writes, and
+    /// every subtable in it is resolved through any extension indirection and
+    /// searched until one applies. So charging once for the attempt and then
+    /// looping over the subtables would leave [`Limits::max_operations`]
+    /// bounding how many times a lookup was *tried* while the font chose what
+    /// each try cost — which is not a bound at all.
+    ///
+    /// `fuzz/corpus/shape/lookup-list-subtable-storm` is what that reads like
+    /// from the outside: 1 158 bytes, three glyphs, no `GSUB` or `GPOS` in the
+    /// face at all, and seconds of work out of a ceiling of half a million
+    /// that was never reached. The unit is therefore the subtable, with the
+    /// attempt's own charge paying for the first of them — so a lookup with
+    /// one subtable, which is nearly every lookup in every shipped face,
+    /// costs exactly what it has always cost and no well-formed face's
+    /// accounting moves.
     pub(crate) fn apply_at(
         &mut self,
         buffer: &mut Buffer,
@@ -487,12 +522,13 @@ impl<'a, 'g> Runner<'a, 'g> {
         at: usize,
         depth: u32,
     ) -> Option<usize> {
-        self.ops = self.ops.saturating_add(1);
-        if self.ops > self.limits.max_operations {
-            self.warn(Warning::OperationBudgetExceeded { table: self.table });
+        if !self.spend() {
             return None;
         }
         for sub in 0..lookup.len() {
+            if sub > 0 && !self.spend() {
+                return None;
+            }
             let Some((kind, data)) = self.resolve(lookup, sub, index) else {
                 continue;
             };

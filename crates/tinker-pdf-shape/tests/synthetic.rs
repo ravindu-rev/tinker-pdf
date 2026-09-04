@@ -683,6 +683,100 @@ fn the_operation_budget_stops_the_run() {
 }
 
 #[test]
+fn the_operation_budget_counts_subtables_and_not_only_attempts() {
+    // Eight subtables, none of which covers the glyphs in the run, so every
+    // one of them is searched and none applies. `subTableCount` is a 16-bit
+    // field the font writes, so this is the cheap half of a lookup list that
+    // can make one attempt cost sixty-five thousand searches.
+    let never: Vec<Vec<u8>> = (0..8).map(|_| single_subst(&[(9, 10)])).collect();
+    let gsub = layout_table(&[lookup(1, 0, &never, None)], None);
+    let limits = Limits {
+        max_operations: 4,
+        ..Limits::DEFAULT
+    };
+    let (glyphs, warnings) = substitute_with(None, &gsub, &[1, 1, 1], limits);
+    assert_eq!(glyphs, vec![1, 1, 1], "no subtable covers glyph 1");
+    assert!(
+        warnings.contains(&Warning::OperationBudgetExceeded { table: Table::Gsub }),
+        "a ceiling that counted only attempts would see three operations \
+         here and stop nothing: got {warnings:?}"
+    );
+}
+
+/// `fuzz/corpus/shape/lookup-list-subtable-storm`, the input the first `shape`
+/// session timed out on: 1 158 bytes that cost more than 28 seconds against
+/// libFuzzer's 25-second limit.
+///
+/// **There is no clock in this test, deliberately.** A test that asserted
+/// "it finished in under a second" would pass on a fast machine with the
+/// defect still present and fail on a loaded one with it fixed, which is why
+/// `crates/tinker-pdf/tests/bounds_ledger.rs` refuses `Instant::now` for
+/// exactly this class of assertion. What is asserted instead is the thing
+/// that actually changed: the ceiling is reached and *says so*, and the call
+/// returns. Before the fix it was never reached at all — the budget bounded
+/// how many times a lookup was tried while the font chose what each try cost.
+#[test]
+fn the_lookup_list_storm_reaches_the_operation_ceiling_and_returns() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus/shape/lookup-list-subtable-storm");
+    let bytes = std::fs::read(&path).expect("the seed is committed");
+    assert_eq!(bytes.len(), 1_158, "the minimised input, verbatim");
+
+    // What the seed's two control bytes — `ef 1b` — decode to in the target:
+    // three glyphs, and the loosest ceilings any of the knobs offer.
+    let limits = Limits {
+        max_nesting_depth: 3,
+        max_extension_depth: 3,
+        max_context_length: 64,
+        max_operations: 500_000,
+        max_glyphs: 65_536,
+    };
+    let glyphs = [1u16, 1, 1];
+    let face = &bytes[2 + glyphs.len() * 2..];
+
+    // The face parses and carries no layout table at all, so the whole cost
+    // is the second pass: the same bytes read *as* a lookup list.
+    let sfnt = tinker_pdf_font::Sfnt::parse(face).expect("a readable directory");
+    let by_directory = Layout::parse(&sfnt);
+    assert!(by_directory.gsub().is_none() && by_directory.gpos().is_none());
+
+    let layout = Layout::from_tables(Some(face), Some(face), Some(face));
+    let features = [
+        Tag::new(b"test"),
+        Tag::new(b"liga"),
+        Tag::new(b"ccmp"),
+        Tag::new(b"kern"),
+        Tag::new(b"mark"),
+        Tag::new(b"mkmk"),
+    ];
+    // Both tables over one buffer, in that order, which is what the target
+    // does and what makes `GPOS`'s share of the cost what it is: `GSUB` grows
+    // the run before `GPOS` walks it.
+    let gsub = layout.gsub().expect("the bytes read as a lookup list");
+    let gpos = layout.gpos().expect("and as the other one");
+    let substitutions = gsub.lookups_for(Tag::new(b"latn"), None, &features);
+    let positionings = gpos.lookups_for(Tag::new(b"latn"), None, &features);
+    assert_eq!(substitutions.len(), 174, "the lookups the features select");
+    assert_eq!(positionings.len(), 174);
+
+    let mut buffer = Buffer::from_glyphs(&glyphs);
+    let mut warnings = layout.substitute(&mut buffer, &substitutions, limits);
+    warnings.extend(layout.position(&mut buffer, &positionings, limits, MarkWidths::ZeroByGdef));
+
+    for table in [Table::Gsub, Table::Gpos] {
+        assert!(
+            warnings.contains(&Warning::OperationBudgetExceeded { table }),
+            "{table:?}: the ceiling has to be what stops this, and it has to \
+             say so: got {warnings:?}"
+        );
+    }
+    assert!(
+        buffer.len() <= limits.max_glyphs,
+        "the glyph ceiling was exceeded rather than refused"
+    );
+}
+
+#[test]
 fn a_lookup_of_an_unknown_type_is_named_rather_than_ignored() {
     let gsub = layout_table(&[lookup(11, 0, &[u16s(&[1, 0])], None)], None);
     let (glyphs, warnings) = substitute(None, &gsub, &[1]);
@@ -994,7 +1088,9 @@ fn every_fuzz_seed_shapes_without_panicking() {
         }
         count += 1;
     }
-    assert_eq!(count, 8, "the seed corpus changed size");
+    // Eight written by `write_the_fuzz_seeds` above, and one the first
+    // `shape` session found: `lookup-list-subtable-storm`.
+    assert_eq!(count, 9, "the seed corpus changed size");
 }
 
 // --- positioning, end to end on a hand-built GPOS -----------------------
