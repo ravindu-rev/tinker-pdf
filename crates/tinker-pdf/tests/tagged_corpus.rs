@@ -148,6 +148,9 @@ fn kind(warning: &StructureWarning) -> &'static str {
         StructureWarning::UnreadableKid { .. } => "unreadable-kid",
         StructureWarning::RoleMapLoop { .. } => "role-map-loop",
         StructureWarning::ParentTreeDisagreement { .. } => "parent-tree-disagreement",
+        StructureWarning::ContentStreamNotAStream { .. } => "content-stream-not-a-stream",
+        StructureWarning::StreamOwnerWithoutStream { .. } => "stream-owner-without-stream",
+        StructureWarning::ContentStreamAssumed { .. } => "content-stream-assumed",
     }
 }
 

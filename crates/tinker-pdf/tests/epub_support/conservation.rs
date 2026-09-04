@@ -782,15 +782,25 @@ pub fn logical_text(doc: &Document) -> Vec<String> {
     // One map per page, from marked-content id to the characters shown inside
     // it. Built once: a book of eight hundred pages is eight hundred content
     // streams and re-interpreting one per structure kid is quadratic.
-    let mut per_page: Vec<BTreeMap<u32, String>> = Vec::with_capacity(doc.page_count() as usize);
+    //
+    // Keyed on 14.7.4.2's whole identifier — the stream the `BDC` was written
+    // in and the number within it — because that is what a `/K` content kid
+    // names. This writer puts everything in the page's own stream, so every
+    // key here has a stream of 0; keying on the number alone would still work
+    // for that and would stop working the moment it did not.
+    let mut per_page: Vec<BTreeMap<(u64, u32), String>> =
+        Vec::with_capacity(doc.page_count() as usize);
     for at in 0..doc.page_count() {
-        let mut by_id: BTreeMap<u32, String> = BTreeMap::new();
+        let mut by_id: BTreeMap<(u64, u32), String> = BTreeMap::new();
         let page = doc.page(at).expect("a page in range");
         for block in &page.text().blocks {
             for line in &block.lines {
                 for character in &line.chars {
                     if let Some(mcid) = character.mcid {
-                        by_id.entry(mcid).or_default().push_str(&character.text);
+                        by_id
+                            .entry((character.stream, mcid))
+                            .or_default()
+                            .push_str(&character.text);
                     }
                 }
             }
@@ -802,10 +812,21 @@ pub fn logical_text(doc: &Document) -> Vec<String> {
     let mut stack: Vec<&StructKid> = tree.kids.iter().rev().collect();
     while let Some(kid) = stack.pop() {
         match kid {
-            StructKid::Content { page, mcid } => {
+            StructKid::Content {
+                page,
+                mcid,
+                stream,
+                stream_owner: _,
+            } => {
+                // 14.7.4.2: no `/Stm` is the page's own content stream, which
+                // is where this writer puts every sequence it numbers.
+                let key = (
+                    stream.map_or(0, |r| (u64::from(r.num) << 16) | u64::from(r.gen)),
+                    *mcid,
+                );
                 if let Some(text) = page
                     .and_then(|page| per_page.get(page as usize))
-                    .and_then(|by_id| by_id.get(mcid))
+                    .and_then(|by_id| by_id.get(&key))
                 {
                     out.push_str(text);
                 }

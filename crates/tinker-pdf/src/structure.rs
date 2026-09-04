@@ -145,6 +145,50 @@ pub enum StructureWarning {
         /// How many the page's `/ParentTree` entry accounts for.
         parent_tree: usize,
     },
+    /// 14.7.4.2: an `/MCR`'s `/Stm` does not name a content stream, so the
+    /// reference says nothing about which stream its `/MCID` was numbered in.
+    ///
+    /// Read as though `/Stm` were absent — the page's own content stream,
+    /// which is what the entry means when it is missing. Silently taking the
+    /// value as an identity anyway would key the reference on an object that
+    /// holds no content, and the sequence would then be findable nowhere.
+    ContentStreamNotAStream {
+        /// The element whose `/K` held the `/MCR`, when it could be named.
+        element: Option<ObjRef>,
+        /// What `/Stm` named, when it named an object at all. `None` when the
+        /// value was not even a reference — a stream is always indirect
+        /// (7.3.8), so a direct one names nothing.
+        stream: Option<ObjRef>,
+    },
+    /// 14.7.4.2: an `/MCR` carries `/StmOwn` without the `/Stm` it qualifies,
+    /// which Table 324 says it shall be used only with.
+    ///
+    /// The owner is dropped and the reference read as naming the page's own
+    /// content stream. An owner with no stream identifies nothing on its own:
+    /// it says which object owns a stream that was never named.
+    StreamOwnerWithoutStream {
+        /// The element whose `/K` held the `/MCR`, when it could be named.
+        element: Option<ObjRef>,
+        /// What `/StmOwn` named.
+        owner: ObjRef,
+    },
+    /// 14.7.4.2: an `/MCR` named no `/Stm`, so it names the page's own
+    /// content stream — and the page's own stream carries no such `/MCID`.
+    /// Exactly one other stream drawn on the page does, and the reference was
+    /// resolved against that one.
+    ///
+    /// A producer that puts tagged content in a form XObject and omits `/Stm`
+    /// is writing something 14.7.4.2 does not define, and the alternative to
+    /// this leniency is that its content becomes orphaned. It is only taken
+    /// where the answer is unambiguous: two streams numbering a sequence the
+    /// same way is exactly the collision `/Stm` exists to resolve, and
+    /// guessing between them would put a paragraph under the wrong element.
+    ContentStreamAssumed {
+        /// Zero-based page index.
+        page: u32,
+        /// The `/MCID` the reference named.
+        mcid: u32,
+    },
 }
 
 /// One kid of a structure element — the three shapes 14.7.4 gives, never
@@ -178,6 +222,23 @@ pub enum StructKid {
         page: Option<u32>,
         /// The `/MCID`.
         mcid: u32,
+        /// `/Stm`: the content stream the sequence resides in, when it is not
+        /// the page's own (14.7.4.2 Table 324).
+        ///
+        /// `None` is the ordinary case and means the page's own content
+        /// stream, which is what the entry's absence says. It is kept as an
+        /// absence rather than as a resolved page-stream reference because a
+        /// page's `/Contents` may be an array of streams whose `/MCID`s are
+        /// numbered across the concatenation — there is no single object to
+        /// point at.
+        stream: Option<ObjRef>,
+        /// `/StmOwn`: the object that owns the stream `/Stm` names — an
+        /// annotation whose appearance it is, typically (14.7.4.2 Table 324).
+        ///
+        /// It is part of the identity and not a note: one appearance stream
+        /// may be shared by several annotations, and then `/Stm` alone does
+        /// not say which of them drew the sequence.
+        stream_owner: Option<ObjRef>,
     },
     /// A whole object as a content item: an annotation, an XObject
     /// (14.7.4.3's `/OBJR`).
@@ -292,6 +353,7 @@ impl StructureTree {
             page,
             claimed: BTreeSet::new(),
             nodes: Vec::new(),
+            warnings: Vec::new(),
         };
         join.kids(&self.kids, None, 0, false);
 
@@ -301,7 +363,12 @@ impl StructureTree {
             for character in &line.chars {
                 match character.mcid {
                     None => unmarked += 1,
-                    Some(mcid) if claimed.contains(&mcid) => matched += 1,
+                    // 14.7.4.2: the identifier is the pair. A character
+                    // matched on its number alone would be claimed by an
+                    // element that named a different stream's sequence — two
+                    // forms each writing `/MCID 0` is the whole of the
+                    // difference.
+                    Some(mcid) if claimed.contains(&(0, character.stream, mcid)) => matched += 1,
                     Some(_) => orphans += 1,
                 }
             }
@@ -311,13 +378,19 @@ impl StructureTree {
         // way round, so it is a second opinion about how many marked sequences
         // this page has. The `/K` walk has already produced the answer; this
         // only reports when the file disagrees with itself.
-        let mut warnings = Vec::new();
+        //
+        // Counted as **distinct `/MCID`s**, which is what a `/ParentTree`
+        // entry is an array of: 14.7.4.4 indexes it by identifier, so a page
+        // whose sequences live in two streams has one slot for both and the
+        // key's stream half is not part of the comparison.
+        let mut warnings = join.warnings;
+        let distinct: BTreeSet<u32> = claimed.iter().map(|(_, _, mcid)| *mcid).collect();
         if let Some(key) = self.struct_parents.get(&index) {
             if let Some(declared) = self.parent_tree.get(key) {
-                if *declared != claimed.len() {
+                if *declared != distinct.len() {
                     warnings.push(StructureWarning::ParentTreeDisagreement {
                         page: index,
-                        walk: claimed.len(),
+                        walk: distinct.len(),
                         parent_tree: *declared,
                     });
                 }
@@ -629,7 +702,12 @@ impl Walk<'_> {
         // well as before it, so an indirect integer — legal by 7.3.10, and
         // what an incremental update leaves behind — is not lost.
         if let Some(mcid) = resolved.as_int().and_then(|n| u32::try_from(n).ok()) {
-            return Some(StructKid::Content { page, mcid });
+            return Some(StructKid::Content {
+                page,
+                mcid,
+                stream: None,
+                stream_owner: None,
+            });
         }
 
         let Some(dict) = resolved.as_dict() else {
@@ -645,7 +723,10 @@ impl Walk<'_> {
             .map(|n| n.to_vec());
 
         match kind.as_deref() {
-            // 14.7.4.2: an `/MCR` names a sequence, with a `/Pg` of its own.
+            // 14.7.4.2: an `/MCR` names a sequence, with a `/Pg` of its own —
+            // and a `/Stm` and `/StmOwn` naming which *stream* it was
+            // numbered in, without which two forms on one page that both
+            // write `/MCID 0` are indistinguishable.
             Some(b"MCR") => {
                 let mcid = self
                     .doc
@@ -653,7 +734,13 @@ impl Walk<'_> {
                     .as_int()
                     .and_then(|n| u32::try_from(n).ok())?;
                 let page = self.page_of(dict).or(page);
-                Some(StructKid::Content { page, mcid })
+                let (stream, stream_owner) = self.stream_of(dict, parent);
+                Some(StructKid::Content {
+                    page,
+                    mcid,
+                    stream,
+                    stream_owner,
+                })
             }
             // 14.7.4.3: an `/OBJR` names a whole object as a content item.
             Some(b"OBJR") => {
@@ -753,6 +840,57 @@ impl Walk<'_> {
         self.pages.get(&reference).copied()
     }
 
+    /// An `/MCR`'s `/Stm` and `/StmOwn` (14.7.4.2 Table 324).
+    ///
+    /// `/Stm` names the content stream the sequence resides in, and is
+    /// present only when that is not the page's own — so `None` is both the
+    /// ordinary case and the meaning of the entry's absence. `/StmOwn` names
+    /// the object owning that stream, and Table 324 permits it only beside a
+    /// `/Stm`.
+    ///
+    /// A stream is always an indirect object (7.3.8), so a direct value in
+    /// either slot names nothing that could be a stream. Both refusals are
+    /// leniencies and both are reported (ruling 10): a reference silently
+    /// keyed on an object that holds no content is a sequence that is
+    /// findable nowhere, which reads as tagging that stops working rather
+    /// than as a file that says something impossible.
+    fn stream_of(
+        &mut self,
+        dict: &Dict,
+        parent: Option<ObjRef>,
+    ) -> (Option<ObjRef>, Option<ObjRef>) {
+        let stream = match dict.get(self.doc.intern(b"Stm")) {
+            None | Some(Object::Null) => None,
+            Some(value) => {
+                let reference = value.as_objref();
+                let is_stream = reference
+                    .and_then(|r| self.doc.get(r).ok())
+                    .is_some_and(|object| object.as_stream().is_some());
+                if is_stream {
+                    reference
+                } else {
+                    self.warn(StructureWarning::ContentStreamNotAStream {
+                        element: parent,
+                        stream: reference,
+                    });
+                    None
+                }
+            }
+        };
+
+        let owner = dict.get_ref(self.doc.intern(b"StmOwn"));
+        match (stream, owner) {
+            (None, Some(owner)) => {
+                self.warn(StructureWarning::StreamOwnerWithoutStream {
+                    element: parent,
+                    owner,
+                });
+                (None, None)
+            }
+            (stream, owner) => (stream, owner),
+        }
+    }
+
     /// 14.7.3: `/RoleMap` rewrites a type name until it reaches one it does
     /// not mention.
     ///
@@ -818,14 +956,42 @@ fn collect_elements<'a>(kids: &'a [StructKid], out: &mut Vec<&'a StructElement>)
 // The join
 // ---------------------------------------------------------------------------
 
-/// Every character of a page, grouped by the `/MCID` in force when it was
-/// shown.
-fn chars_by_mcid(page: &TextPage) -> BTreeMap<u32, Vec<TextChar>> {
-    let mut out: BTreeMap<u32, Vec<TextChar>> = BTreeMap::new();
+/// An object reference as the integer both halves of the join key on.
+///
+/// `tinker-pdf-content` may not hold a COS type (ruling 8), so the identity a
+/// [`TextChar`] carries is a plain integer; this is the single place that
+/// says what the integer means, so the interpreter's stamp and the structure
+/// tree's `/Stm` cannot come to pack it differently. Both numbers, because
+/// 7.3.10 makes `num gen` the reference and a regenerated object reuses the
+/// number.
+///
+/// **Zero is never a real reference**, which is what lets it stand for the
+/// page's own content stream: 7.5.4 reserves object 0 for the head of the
+/// cross-reference table's free list, so no object is numbered 0.
+pub(crate) fn stream_id(reference: ObjRef) -> u64 {
+    (u64::from(reference.num) << 16) | u64::from(reference.gen)
+}
+
+/// The identity of one marked-content sequence (14.7.4.2).
+///
+/// `(owner, stream, mcid)` — the object owning the stream, the stream, and
+/// the number within it. Extraction stamps an owner of `0` on everything it
+/// draws, because page text extraction runs the page's content and the forms
+/// it invokes and never an annotation's appearance; a reference naming a
+/// `/StmOwn` therefore names content this page's text does not hold, and says
+/// so by failing to match rather than by matching whatever else shares its
+/// number.
+type SequenceKey = (u64, u64, u32);
+
+/// Every character of a page, grouped by the sequence it was shown in.
+fn chars_by_mcid(page: &TextPage) -> BTreeMap<SequenceKey, Vec<TextChar>> {
+    let mut out: BTreeMap<SequenceKey, Vec<TextChar>> = BTreeMap::new();
     for line in page.lines() {
         for character in &line.chars {
             if let Some(mcid) = character.mcid {
-                out.entry(mcid).or_default().push(character.clone());
+                out.entry((0, character.stream, mcid))
+                    .or_default()
+                    .push(character.clone());
             }
         }
     }
@@ -853,12 +1019,16 @@ struct Join<'a> {
     /// and to an unknown one otherwise; claiming it on every page of a long
     /// document would report the same paragraph on all of them.
     unpaged_is_here: bool,
-    by_mcid: BTreeMap<u32, Vec<TextChar>>,
+    by_mcid: BTreeMap<SequenceKey, Vec<TextChar>>,
     page: &'a TextPage,
-    /// Every `/MCID` on this page some element claimed, whether or not the
+    /// Every sequence on this page some element claimed, whether or not the
     /// claim produced a node.
-    claimed: BTreeSet<u32>,
+    claimed: BTreeSet<SequenceKey>,
     nodes: Vec<StructuredNode>,
+    /// What the join had to tolerate, deduplicated and capped the way
+    /// [`Walk::warn`] does it — an `/MCR` per paragraph is an honest page, so
+    /// a per-reference leniency has to be bounded like every other.
+    warnings: Vec<StructureWarning>,
 }
 
 impl Join<'_> {
@@ -882,8 +1052,13 @@ impl Join<'_> {
 
         for kid in kids {
             match kid {
-                StructKid::Content { page, mcid } => {
-                    self.content(*page, *mcid, suppressed, &mut run);
+                StructKid::Content {
+                    page,
+                    mcid,
+                    stream,
+                    stream_owner,
+                } => {
+                    self.content(*page, *mcid, *stream, *stream_owner, suppressed, &mut run);
                 }
                 // 14.7.4.3: an object has no glyphs in this page's stream.
                 StructKid::Object(_) => {}
@@ -903,12 +1078,72 @@ impl Join<'_> {
         }
     }
 
-    fn content(&mut self, page: Option<u32>, mcid: u32, suppressed: bool, run: &mut Run) {
+    fn warn(&mut self, warning: StructureWarning) {
+        if self.warnings.len() < MAX_STRUCTURE_WARNINGS && !self.warnings.contains(&warning) {
+            self.warnings.push(warning);
+        }
+    }
+
+    /// Which sequence on this page a content reference names (14.7.4.2).
+    ///
+    /// The stated key first, and only then a leniency — and the leniency is
+    /// gated on `/Stm` being **absent**. A producer that named a stream made
+    /// a statement about which one, and a stated stream this page's text does
+    /// not hold is a reference to content that is not here; overriding it
+    /// would hand the sequence to whatever else happened to share its number,
+    /// which is the collision the entry exists to prevent. A producer that
+    /// named none said only "the page's own", and a page whose tagged content
+    /// sits in a form XObject is the shape that omits it — so where exactly
+    /// one stream on the page carries the identifier, that is not a guess
+    /// between candidates but the only reading there is.
+    fn resolve(&mut self, mcid: u32, stream: Option<ObjRef>, owner: Option<ObjRef>) -> SequenceKey {
+        let stated = (
+            owner.map_or(0, stream_id),
+            stream.map_or(0, stream_id),
+            mcid,
+        );
+        if stream.is_some() || self.by_mcid.contains_key(&stated) {
+            return stated;
+        }
+
+        let mut only = None;
+        for key in self.by_mcid.keys() {
+            if key.2 == mcid {
+                if only.is_some() {
+                    // Two streams number a sequence the same way and the file
+                    // did not say which. Left where the file left it.
+                    return stated;
+                }
+                only = Some(*key);
+            }
+        }
+        match only {
+            Some(key) => {
+                self.warn(StructureWarning::ContentStreamAssumed {
+                    page: self.index,
+                    mcid,
+                });
+                key
+            }
+            None => stated,
+        }
+    }
+
+    fn content(
+        &mut self,
+        page: Option<u32>,
+        mcid: u32,
+        stream: Option<ObjRef>,
+        owner: Option<ObjRef>,
+        suppressed: bool,
+        run: &mut Run,
+    ) {
         let here = page == Some(self.index) || (page.is_none() && self.unpaged_is_here);
         if !here {
             return;
         }
-        self.claimed.insert(mcid);
+        let key = self.resolve(mcid, stream, owner);
+        self.claimed.insert(key);
         if suppressed {
             return;
         }
@@ -917,14 +1152,14 @@ impl Join<'_> {
         if let Some(actual) = self
             .page
             .mcid_props
-            .get(&mcid)
+            .get(&(key.1, key.2))
             .and_then(|p| p.actual_text.clone())
         {
             run.text.push_str(&actual);
             run.replaced = true;
             return;
         }
-        for character in self.by_mcid.get(&mcid).into_iter().flatten() {
+        for character in self.by_mcid.get(&key).into_iter().flatten() {
             run.text.push_str(&character.text);
             run.chars.push(character.clone());
         }
@@ -975,8 +1210,8 @@ impl Join<'_> {
             let from_list = run
                 .chars
                 .first()
-                .and_then(|c| c.mcid)
-                .and_then(|mcid| self.page.mcid_props.get(&mcid));
+                .and_then(|c| c.mcid.map(|mcid| (c.stream, mcid)))
+                .and_then(|key| self.page.mcid_props.get(&key));
             (
                 element
                     .alt
@@ -1103,11 +1338,17 @@ trailer\n<< /Size 400 /Root 1 0 R >>\n%%EOF\n"
             [
                 StructKid::Content {
                     page: Some(0),
-                    mcid: 0
+                    mcid: 0,
+                    // 14.7.4.2: a bare integer kid names the page's own
+                    // content stream, which is what both absences say.
+                    stream: None,
+                    stream_owner: None,
                 },
                 StructKid::Content {
                     page: Some(0),
-                    mcid: 1
+                    mcid: 1,
+                    stream: None,
+                    stream_owner: None,
                 }
             ]
         ));

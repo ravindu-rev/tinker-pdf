@@ -1258,6 +1258,11 @@ impl FontSource for PageResources {
             alt: text(b"Alt"),
             lang: text(b"Lang"),
             expansion: text(b"E"),
+            // 14.7.4.2's stream half of the identifier is not in the property
+            // list and cannot be: it is which stream the `BDC` was written
+            // in, which only the interpreter knows. It stamps this on the way
+            // past.
+            stream: 0,
         };
         // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
         // private dictionary: every one of them reaches here and says nothing
@@ -1564,6 +1569,11 @@ impl PageResources {
             matrix,
             bbox,
             group,
+            // 14.7.4.2: the stream's own identity, which is the half of a
+            // marked-content identifier the `/MCID` does not carry. Both
+            // routes into a form arrive here, so the `/XObject` table and a
+            // soft mask's `/G` cannot come to disagree about it.
+            stream: crate::structure::stream_id(reference),
         })
     }
 
