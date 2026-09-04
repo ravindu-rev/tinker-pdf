@@ -14,6 +14,12 @@
 *.jp2 binary
 *.pgm binary
 
+# The reviewed goldens (design/render-verification.md milestone 6). Binary PPMs
+# whose `#` comment header carries the review — family, clause, reviewer, date —
+# so a normalised line ending inside one is both a different picture and a
+# damaged record of who read it.
+*.ppm binary
+
 # The XPS corpus (gap 30 milestone 1, and Tier 4's second producer). These are
 # OPC packages -- ZIPs -- so `text=auto` would leave them alone anyway; they are
 # named because the reason not to touch them is stronger than "it found a NUL".
