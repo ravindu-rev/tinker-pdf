@@ -1002,6 +1002,42 @@ cargo bench -p tinker-pdf -- --save-baseline before
 cargo bench -p tinker-pdf -- --baseline before
 ```
 
+**The comparison is `cargo xtask bench-check --machine NAME`, and it exists
+because criterion's own cannot fail.** `cargo bench -- --baseline` compares
+perfectly well and **never exits non-zero when it loses**: the only failure path
+in 0.5.1 is a *missing* baseline directory, and a regression prints
+"Performance has regressed" and exits 0. So the weekly job was reporting rather
+than gating, which is what the roadmap's speed row said. `bench-check` reads
+criterion's own `estimates.json` — its numbers, not a second timing — and holds
+each operation to a committed figure and a band.
+
+**And the weekly job had never passed at all.** Its guard read `time:+\[`,
+which is `time` followed by one-or-more colons and a bracket; criterion prints
+`time:` and then three spaces. The only scheduled run, 31 August 2026, printed
+all six figures and exited 1 on that line. It counts six matches now.
+
+**No baseline is committed yet, and the reason is a measurement.** A band has to
+be above the machine's own swing or it fails on the machine rather than on the
+code, so `bench-check` refuses an entry that carries no measured swing. This
+desktop was measured twice, five runs each, with nothing else compiling:
+
+| Operation | Widest spread over five runs |
+| --- | ---: |
+| rewrite a document | 32 % |
+| open a 3-page document | 46 % |
+| paginate a book | 57 % |
+| extract a page of text | 93 % |
+| render text at 150 dpi | 105 % |
+| a full-page axial shading | **259 %** |
+
+A band above 259 % would admit any regression anybody could write. **So this
+machine cannot be the named machine**, and saying so is the measurement the row
+asked for rather than a failure to do it. The named machine has to be the
+weekly runner, which has one dated observation — 31 August, six figures, no
+spread — and needs several runs before a band is a number. `bench-check`
+reports and does not fail for a machine with no entry, so the job is useful
+today and becomes a gate the day `ubuntu-latest` has one.
+
 ## Seven examples, run rather than compiled
 
 `crates/tinker-pdf/examples/` is the documented end-to-end usage: open, render,
