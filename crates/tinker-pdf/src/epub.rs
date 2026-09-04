@@ -1142,7 +1142,7 @@ pub fn synthesise(
 
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
     let mut unwritable_runs = 0usize;
-    for chapter in &chapters {
+    for (spine_at, chapter) in chapters.iter().enumerate() {
         if let Some(defect) = chapter.defect {
             let page = u32::try_from(chapter.first_page).unwrap_or(u32::MAX);
             warnings.push(ArchiveWarning::SpinePage { page, defect });
@@ -1245,6 +1245,11 @@ pub fn synthesise(
                 &chapter_frame,
                 &fonts,
                 chapter.reading.as_ref().map(|reading| &reading.dom),
+                // **A base per content document.** Both an element index and a
+                // reading-order stamp restart at every spine item, so two
+                // chapters would otherwise name the same element and sort into
+                // each other.
+                (spine_at as u64) << 32,
             );
             if clip {
                 page.raw(b"Q");

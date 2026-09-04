@@ -448,16 +448,16 @@ Six things are worth carrying forward rather than filing away.
   to point at as the way in was built and moved **nothing**, because moving
   the page *decision* does not move the *drawing* — a glyph is only on the
   page it is drawn on. Removing the push instead gives 136 966, sixty times
-  worse. What is left needs a float's glyphs on a different page from its
-  box, which a PDF's **content stream** cannot express — and ISO 32000 §14.8
-  says the content stream is not where reading order lives, so the fourth
-  attempt was a real one: EPUB output now carries a full structure tree, and
-  extraction in **logical** order gives Beowulf the same **2 182**. A
-  structure element's marked-content kids live on the page their `BDC` was
-  written on and each page's roots are wrapped separately, so logical order
-  is page order and then reading order — already what content order is here.
-  Closing it needs a structure element whose kids span pages, which
-  `PageBuilder` builds per page and cannot express.
+  worse. A fourth emitted a structure tree **per page**, which reproduces
+  page order and measured the same 2 182. **The fifth closed it.** A
+  structure element's kids may name different pages (§14.7.2 Table 323), so
+  the tree is now built for the document rather than for each page: a
+  paragraph broken across a break is one `/P`, and a float sits where it was
+  written with its marked content written as an `/MCR` carrying the page its
+  glyphs are on. Beowulf conserves **exactly** in logical order, and
+  nineteen of the twenty fetched books do. The content-order figure stays
+  pinned at 2 182 because it remains true of an extractor that ignores the
+  tree — which is what §14.8 says to do when there is none.
 - **EPUB output is a tagged PDF**, which came out of that attempt and is
   worth having on its own: `/MarkInfo`, `/StructTreeRoot`, a `/ParentTree`,
   `/StructParents` per page and an `/MCID` around every run, with logical

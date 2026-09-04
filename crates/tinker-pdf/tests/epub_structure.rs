@@ -43,9 +43,11 @@
 //!   file. The annotation itself is still written.
 //! - **No table `/Headers`, `/Scope` or `/Summary`**, so a `<th>` is a `/TH`
 //!   with no association to the cells it heads.
-//! - **No cross-page structure elements**, which is the one that matters for
-//!   the float row and is measured in
-//!   [`logical_order_does_not_repair_a_float_across_a_page`].
+//!
+//! Cross-page structure elements **are** written — an element's kids carry
+//! their own `/Pg` where they are not on its default page, which is 14.7.2
+//! Table 323's own model — and that is what closes the float reading-order
+//! row: see [`a_float_reads_where_it_was_written_even_across_a_page`].
 
 #[path = "epub_support/mod.rs"]
 mod epub_support;
@@ -238,36 +240,75 @@ fn logical_order_conserves_the_source_exactly() {
     }
 }
 
-/// **And where it does not help: a float whose box is on another page.**
+/// A paragraph that **breaks after an inline child** still reads in order.
 ///
-/// This is the measurement the float row turns on, and it is negative. A
-/// structure element's marked-content kids live on the page their `BDC` was
-/// written on, and `DocumentBuilder` wraps each page's roots in one
-/// `/Document` in page order — so logical order is page order, then reading
-/// order within a page. That is *already* what content order is here, and the
-/// two agree to the character.
+/// The case that needs a marked sequence to carry its own position rather than
+/// its element's. A `<p>` holding an `<em>` becomes three kids — text, the
+/// span, text — and the second run of text is a *resumption*, which takes a
+/// position past the child that interrupted it. When the paragraph then breaks
+/// across a page, the resumption on the far side is a different sequence again:
+/// give it the element's position and it sorts back in front of the `<em>` that
+/// preceded it, and the page reads "one two FOUR three".
 ///
-/// Repairing it needs a structure element whose kids span pages, so a chapter
-/// can be one subtree with its floats in source position whatever page their
-/// glyphs are on. `PageBuilder` builds its roots per page and cannot express
-/// that; its own documentation says so.
+/// Swept rather than fixed, because which page the break lands on is the whole
+/// variable and one height is one coincidence.
 #[test]
-fn logical_order_does_not_repair_a_float_across_a_page() {
+fn a_paragraph_broken_after_an_inline_child_reads_in_order() {
+    let bytes = book(
+        "p { margin: 0 }",
+        "<p>alpha bravo <em>CHARLIE</em> delta echo foxtrot golf hotel india          juliett kilo lima mike november oscar papa quebec romeo sierra</p>",
+    );
+    for tenths in 3..=14 {
+        let height = f64::from(tenths) * 20.0;
+        let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(220.0, height))
+            .expect("a book");
+        let verdict = conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            verdict.holds(),
+            "at a {height}-point page the paragraph read out of order:              {} extra, {} missing, {:?}",
+            verdict.extra,
+            verdict.missing,
+            verdict.divergences
+        );
+    }
+}
+
+/// **A float whose box is on another page still reads where it was written.**
+///
+/// This is the one the float row turned on, through five attempts. §9.5.1
+/// places a float by geometry, so `clear` can push its box a page past the
+/// text it was written among; three fixes tried to move the box or the page it
+/// was drawn on and could not, because a glyph is only on the page it is drawn
+/// on. A fourth emitted a structure tree per page, which reproduced page order
+/// and measured no change at all.
+///
+/// A structure element's kids may name **different pages** — 14.7.2 Table 323
+/// — so one element can hold the gloss's marked content wherever its glyphs
+/// landed and still sit in the source's order among its siblings. That is what
+/// the writer now emits and what this asserts.
+///
+/// Content order still differs, and is asserted to differ: an untagged
+/// extractor sees the geometry and there is nothing here to hide that.
+#[test]
+fn a_float_reads_where_it_was_written_even_across_a_page() {
     let bytes = book(
         "h2 { page-break-before: always; margin: 0 } p { margin: 0 } \
          span.side { display: block; float: right; clear: right; width: 40% }",
-        "<p>opening</p><h2>ONE</h2><span class=\"side\">gloss one</span>\
+        "<p>opening</p><h2>ONE</h2><span class=\"side\">gloss</span>\
          <p>a</p><p>b</p><p>c</p>",
     );
-    let doc =
-        Document::open_with(bytes.clone(), &OpenOptions::at_page(200.0, 60.0)).expect("a book");
-    let logical = conservation_in_logical_order(&bytes, &doc);
-    let content = epub_support::conservation::conservation(&bytes, &doc);
-    assert_eq!(
-        (logical.extra, logical.missing),
-        (content.extra, content.missing),
-        "logical order and content order have stopped agreeing, which would \
-         mean a structure element now spans pages — a good change, and one \
-         that has to rewrite this test and the float row together"
-    );
+    for tenths in 6..=16 {
+        let height = f64::from(tenths) * 10.0;
+        let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(200.0, height))
+            .expect("a book");
+        let logical = conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            logical.holds(),
+            "at a {height}-point page the float moved in logical order: \
+             {} extra, {} missing, {:?}",
+            logical.extra,
+            logical.missing,
+            logical.divergences
+        );
+    }
 }

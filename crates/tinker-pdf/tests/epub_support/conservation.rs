@@ -46,7 +46,9 @@
 //! stream that can survive a layout engine at all. Every other character is
 //! compared exactly, in order, and duplication is an error.
 
-use tinker_pdf::Document;
+use std::collections::BTreeMap;
+
+use tinker_pdf::{Document, StructKid};
 use tinker_pdf_zip::{Archive, Limits};
 
 // ---- the source side --------------------------------------------------------
@@ -759,32 +761,68 @@ pub fn conservation(book: &[u8], doc: &Document) -> Verdict {
     compare(&spine_text(book), &paginated_text(doc))
 }
 
-/// Every page's text in **logical** order: ISO 32000 14.8's structure tree
-/// rather than the content stream.
+/// Every character of the document in **logical** order: ISO 32000 §14.8's
+/// structure tree, walked once for the whole book.
 ///
-/// The two differ exactly where a box was drawn somewhere other than where it
-/// reads — a float, above all. A page with no structure falls back to flat
-/// extraction rather than contributing nothing, so an untagged book measures
-/// as it always did instead of as empty.
+/// **Once for the book and not once per page**, which is the whole point. A
+/// per-page walk concatenated in page order can only ever reproduce page
+/// order, so it would measure the content stream's answer however good the
+/// tree was — the mistake that made the first measurement of this look like a
+/// negative result.
+///
+/// Each marked-content id is resolved to the text drawn under it on the page
+/// that owns it, and the tree is walked in `/K` order, so what comes out is
+/// the order the *document* states rather than the order the glyphs were laid
+/// down in.
 #[must_use]
-pub fn structured_pages(doc: &Document) -> Vec<String> {
-    (0..doc.page_count())
-        .map(|at| {
-            let page = doc.page(at).expect("a page in range");
-            match page.structured_text() {
-                Some(structured) => structured
-                    .nodes
-                    .iter()
-                    .map(|node| node.text.as_str())
-                    .collect::<String>(),
-                None => page.text().plain_text(),
+pub fn logical_text(doc: &Document) -> Vec<String> {
+    let Some(tree) = doc.structure() else {
+        return paginated_text(doc);
+    };
+    // One map per page, from marked-content id to the characters shown inside
+    // it. Built once: a book of eight hundred pages is eight hundred content
+    // streams and re-interpreting one per structure kid is quadratic.
+    let mut per_page: Vec<BTreeMap<u32, String>> = Vec::with_capacity(doc.page_count() as usize);
+    for at in 0..doc.page_count() {
+        let mut by_id: BTreeMap<u32, String> = BTreeMap::new();
+        let page = doc.page(at).expect("a page in range");
+        for block in &page.text().blocks {
+            for line in &block.lines {
+                for character in &line.chars {
+                    if let Some(mcid) = character.mcid {
+                        by_id.entry(mcid).or_default().push_str(&character.text);
+                    }
+                }
             }
-        })
-        .collect()
+        }
+        per_page.push(by_id);
+    }
+
+    let mut out = String::new();
+    let mut stack: Vec<&StructKid> = tree.kids.iter().rev().collect();
+    while let Some(kid) = stack.pop() {
+        match kid {
+            StructKid::Content { page, mcid } => {
+                if let Some(text) = page
+                    .and_then(|page| per_page.get(page as usize))
+                    .and_then(|by_id| by_id.get(mcid))
+                {
+                    out.push_str(text);
+                }
+            }
+            StructKid::Element(element) => {
+                for inner in element.kids.iter().rev() {
+                    stack.push(inner);
+                }
+            }
+            StructKid::Object(_) => {}
+        }
+    }
+    vec![out]
 }
 
 /// The same verdict, against logical order.
 #[must_use]
 pub fn conservation_in_logical_order(book: &[u8], doc: &Document) -> Verdict {
-    compare(&spine_text(book), &structured_pages(doc))
+    compare(&spine_text(book), &logical_text(doc))
 }

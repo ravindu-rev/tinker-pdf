@@ -28,7 +28,7 @@ mod epub_support;
 
 use std::path::PathBuf;
 
-use epub_support::conservation::{conservation, spine_text};
+use epub_support::conservation::{conservation, conservation_in_logical_order, spine_text};
 use epub_support::{
     classify_doctype, css_properties, doctype_shape, entries, is_content_document, is_stylesheet,
     mimetype_verdict, named_references, numeric_references, read_at, todays_answer, Doctype,
@@ -476,6 +476,57 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     assert!(
         source > 1_000_000,
         "the harness read {source} characters out of twenty books, which is not twenty books"
+    );
+}
+
+/// **Every book conserves exactly in logical order, including the pinned one.**
+///
+/// `NOT_CONSERVED` above is a statement about **content-stream** order, which
+/// is what an untagged extractor sees and what §14.8 calls the fallback when
+/// there is no structure tree. This is the same twenty books read the way the
+/// specification says reading order is defined — the `/StructTreeRoot` these
+/// documents now carry — and there is nothing pinned about it: every character
+/// of every book, in source order, exactly once.
+///
+/// The two together are the whole claim, and neither is redundant. Beowulf's
+/// 2 182 stays pinned above because it is true of a reader that ignores the
+/// tree, and it is *more* interesting now that a reader which uses the tree
+/// sees a perfect book, not less.
+///
+/// **Beowulf is the load-bearing one** and the reason is worth stating: its
+/// marginal glosses are floats that `clear` pushes a page past the text they
+/// were written among, so its content order and its logical order genuinely
+/// differ. A build that emitted a tree per page — which is what this engine
+/// did first — reproduces page order and measures 2 182 here too.
+#[test]
+fn every_fetched_book_conserves_exactly_in_logical_order() {
+    let books = fetched!("logical-order conservation");
+    let mut checked = 0usize;
+    for (name, bytes) in &books {
+        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        // The book with no glyphs cannot conserve in any order: its characters
+        // were never set, which the row above says by name. Reading order is
+        // not what it is missing.
+        if NOT_CONSERVED
+            .iter()
+            .any(|book| book.name == *name && book.because == Why::NoGlyphs)
+        {
+            continue;
+        }
+        let verdict = conservation_in_logical_order(bytes, &doc);
+        assert!(
+            verdict.holds(),
+            "{name} does not conserve in logical order: {} extra, {} missing, {:?}",
+            verdict.extra,
+            verdict.missing,
+            verdict.divergences
+        );
+        checked += 1;
+    }
+    println!("  {checked} books conserve exactly in logical order");
+    assert!(
+        checked > 15,
+        "only {checked} books were read, which is not the corpus"
     );
 }
 

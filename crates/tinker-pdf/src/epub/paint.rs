@@ -926,6 +926,7 @@ pub fn draw_page(
     frame: &Frame,
     fonts: &Fonts<'_>,
     dom: Option<&Dom>,
+    chapter: u64,
 ) -> usize {
     let mut refused = 0usize;
     for fragment in &laid.boxes {
@@ -962,6 +963,7 @@ pub fn draw_page(
         frame,
         fonts,
         dom,
+        chapter,
         &drawn,
         &chains,
         0,
@@ -1045,6 +1047,7 @@ fn tag_runs(
     frame: &Frame,
     fonts: &Fonts<'_>,
     dom: &Dom,
+    chapter: u64,
     runs: &[&TextRun],
     chains: &[Vec<usize>],
     level: usize,
@@ -1066,13 +1069,23 @@ fn tag_runs(
         }
         let tag = structure_type(&dom.nodes[element].name);
         let (slice, tails) = (&runs[at..end], &chains[at..end]);
-        page.tagged(tag.as_bytes(), |page| {
+        // **The key is the element and the order is the reading position**,
+        // and they are two numbers because they answer two questions. The key
+        // has to be the same on every page this element appears on or its
+        // halves never merge, so it is the element's own index. The order has
+        // to ascend with the document or the halves merge into the wrong
+        // place, so it is the reading-order stamp of the first run under it —
+        // which for a float is where it was *met*, not where its box landed.
+        let key = chapter + element as u64;
+        let order = chapter + runs[at].order as u64;
+        page.tagged_keyed(tag.as_bytes(), key, order, |page| {
             tag_runs(
                 builder,
                 page,
                 frame,
                 fonts,
                 dom,
+                chapter,
                 slice,
                 tails,
                 level + 1,
