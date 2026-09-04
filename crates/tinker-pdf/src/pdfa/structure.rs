@@ -84,7 +84,9 @@ pub(super) fn rules(
         out.push(Raw {
             rule,
             object: defect.object,
-            kind: FindingKind::Structural { defect: defect.kind },
+            kind: FindingKind::Structural {
+                defect: defect.kind,
+            },
         });
     }
 }
@@ -129,8 +131,9 @@ fn clause_of(kind: DefectKind) -> Option<ClauseTable> {
         | DefectKind::ObjStmOffsetOutOfRange { .. } => Some(clauses::INDIRECT_OBJECTS),
 
         // Stream objects: `/Length` against where `endstream` actually is.
-        DefectKind::StreamLengthUnresolved
-        | DefectKind::StreamLengthNotExact { .. } => Some(clauses::STREAM_OBJECTS),
+        DefectKind::StreamLengthUnresolved | DefectKind::StreamLengthNotExact { .. } => {
+            Some(clauses::STREAM_OBJECTS)
+        }
 
         // Measured against the corpus and refused a clause, each for a reason
         // of its own. Between them the first two account for 48 of the 52

@@ -206,8 +206,10 @@ fn path_fill_page() -> Vec<u8> {
             let verb = if index == 0 { "m" } else { "l" };
             path.push_str(&format!("{} {} {verb} ", cx + dx * r, cy + dy * r));
         }
-        path.push_str("h
-");
+        path.push_str(
+            "h
+",
+        );
         path
     };
     page(&format!(
@@ -596,7 +598,10 @@ fn every_operator_family_has_a_reviewed_golden() {
         let header = read_header(&bytes).unwrap_or_else(|e| {
             panic!("{}: its header is refused: {e:?}", family.name);
         });
-        assert_eq!(header.family, family.name, "the header names its own family");
+        assert_eq!(
+            header.family, family.name,
+            "the header names its own family"
+        );
         assert_eq!(header.clause, family.clause, "the header names its clause");
         assert!(
             UNREVIEWED.contains(&family.name) || header.reviewer != "unreviewed",

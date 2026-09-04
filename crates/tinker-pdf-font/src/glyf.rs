@@ -470,8 +470,7 @@ mod tests {
             loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
         }
 
-        let tables: [(&[u8; 4], &[u8]); 3] =
-            [(b"head", &head), (b"loca", &loca), (b"glyf", &glyf)];
+        let tables: [(&[u8; 4], &[u8]); 3] = [(b"head", &head), (b"loca", &loca), (b"glyf", &glyf)];
 
         let mut out = Vec::new();
         out.extend_from_slice(&0x0001_0000u32.to_be_bytes());

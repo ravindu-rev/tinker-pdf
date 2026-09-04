@@ -252,10 +252,7 @@ pub const BLEND_SOURCE: f64 = 0.5;
 /// order PDF's upward axis would give.
 pub fn blend_cell_origin(index: usize) -> (f64, f64) {
     let (column, row) = (index % 4, index / 4);
-    (
-        column as f64 * BLEND_CELL,
-        (2 - row) as f64 * BLEND_CELL,
-    )
+    (column as f64 * BLEND_CELL, (2 - row) as f64 * BLEND_CELL)
 }
 
 /// One page carrying all twelve separable modes over two backdrops each.
@@ -586,4 +583,3 @@ fn cmap() -> Vec<u8> {
     cmap.extend_from_slice(&sub);
     cmap
 }
-

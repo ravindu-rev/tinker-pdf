@@ -198,11 +198,18 @@ fn rectangle_page() -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
     builder.add_page(SIZE, SIZE, |page| {
         page.set_fill_rgb(0.95, 0.95, 0.6);
-        page.raw(format!("0 0 {SIZE} {SIZE} re f
-").as_bytes());
+        page.raw(
+            format!(
+                "0 0 {SIZE} {SIZE} re f
+"
+            )
+            .as_bytes(),
+        );
         page.set_fill_rgb(0.2, 0.4, 0.9);
-        page.raw(b"8 8 32 32 re f
-");
+        page.raw(
+            b"8 8 32 32 re f
+",
+        );
     });
     builder.finish()
 }
@@ -255,8 +262,13 @@ fn image_page() -> Vec<u8> {
     ));
     builder.add_page(SIZE, SIZE, |page| {
         page.set_fill_rgb(0.95, 0.95, 0.6);
-        page.raw(format!("0 0 {SIZE} {SIZE} re f
-").as_bytes());
+        page.raw(
+            format!(
+                "0 0 {SIZE} {SIZE} re f
+"
+            )
+            .as_bytes(),
+        );
         // 37 points over five samples: 7.4 device pixels a sample at one
         // scale and 14.8 at two, so neither grid lands on a sample boundary.
         page.image(b"Im0", 9.0, 9.0, 37.0, 37.0);
@@ -273,8 +285,13 @@ fn text_page() -> Vec<u8> {
     assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
     builder.add_page(SIZE, SIZE, |page| {
         page.set_fill_rgb(0.95, 0.95, 0.6);
-        page.raw(format!("0 0 {SIZE} {SIZE} re f
-").as_bytes());
+        page.raw(
+            format!(
+                "0 0 {SIZE} {SIZE} re f
+"
+            )
+            .as_bytes(),
+        );
         page.set_fill_rgb(0.1, 0.1, 0.1);
         page.text(b"F0", 13.0, 4.0, 40.0, "Abcde");
         page.text(b"F0", 9.0, 4.0, 20.0, "fghijkl");
@@ -303,11 +320,21 @@ fn tiling_page() -> Vec<u8> {
     ));
     builder.add_page(SIZE, SIZE, |page| {
         page.set_fill_rgb(0.95, 0.95, 0.6);
-        page.raw(format!("0 0 {SIZE} {SIZE} re f
-").as_bytes());
+        page.raw(
+            format!(
+                "0 0 {SIZE} {SIZE} re f
+"
+            )
+            .as_bytes(),
+        );
         assert!(page.set_fill_pattern(b"P0"));
-        page.raw(format!("0 0 {SIZE} {SIZE} re f
-").as_bytes());
+        page.raw(
+            format!(
+                "0 0 {SIZE} {SIZE} re f
+"
+            )
+            .as_bytes(),
+        );
     });
     builder.finish()
 }
@@ -386,7 +413,11 @@ fn what_moves_under_a_change_of_sampling_grid() {
         moves.len() <= 1,
         "one of these constructs has started moving pixels under a change of          sampling grid, which it did not on 4 September 2026: {moves:?}"
     );
-    assert_eq!(zero.len() + moves.len(), 7, "and all seven are still measured");
+    assert_eq!(
+        zero.len() + moves.len(),
+        7,
+        "and all seven are still measured"
+    );
 }
 
 /// **A page of diagonal edges is not where the residue is** -- kept as the

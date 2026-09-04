@@ -88,7 +88,9 @@ xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
         out.extend_from_slice(b"\nendobj\n");
     }
     let xref_at = out.len();
-    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
     for entry in offsets.iter().skip(1) {
         out.extend_from_slice(format!("{entry:010} 00000 n \n").as_bytes());
     }
@@ -112,7 +114,12 @@ fn damage(mut bytes: Vec<u8>, from: &[u8], to: &[u8]) -> Vec<u8> {
     let at = bytes
         .windows(from.len())
         .position(|window| window == from)
-        .unwrap_or_else(|| panic!("the fixture does not contain {:?}", String::from_utf8_lossy(from)));
+        .unwrap_or_else(|| {
+            panic!(
+                "the fixture does not contain {:?}",
+                String::from_utf8_lossy(from)
+            )
+        });
     bytes[at..at + from.len()].copy_from_slice(to);
     bytes
 }
@@ -245,10 +252,10 @@ fn a_syntax_only_sweep_does_not_run_the_structural_group() {
         .validate_pdfa_with(PdfACoverage::SYNTAX);
     assert!(!verdict.coverage.structure, "the group did not run");
     assert!(
-        !verdict.findings.iter().any(|finding| matches!(
-            finding.kind,
-            FindingKind::Structural { .. }
-        )),
+        !verdict
+            .findings
+            .iter()
+            .any(|finding| matches!(finding.kind, FindingKind::Structural { .. })),
         "and reported nothing from it: {:#?}",
         verdict.findings
     );

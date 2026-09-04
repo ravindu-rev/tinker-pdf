@@ -140,7 +140,11 @@ fn a_tiling_pattern_draws_what_its_cells_unrolled_draw() {
     let written = render(by_hand.finish());
 
     both_drew(&built, &written, 42, "a tiling pattern");
-    same_picture(built, written, "a tiling pattern against its unrolled cells");
+    same_picture(
+        built,
+        written,
+        "a tiling pattern against its unrolled cells",
+    );
 }
 
 // ---- form XObjects ----------------------------------------------------------
@@ -196,7 +200,11 @@ fn a_form_xobject_draws_what_its_operators_inlined_draw() {
     let written = render(by_hand.finish());
 
     both_drew(&built, &written, 32, "a form XObject");
-    same_picture(built, written, "a form XObject against its inlined operators");
+    same_picture(
+        built,
+        written,
+        "a form XObject against its inlined operators",
+    );
 }
 
 // ---- shading patterns -------------------------------------------------------
