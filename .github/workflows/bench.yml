@@ -51,7 +51,30 @@ jobs:
           # target that compiled and measured nothing exits 0. Six operations
           # are named in `benches/engine.rs`; if none of them reported a time,
           # this job proved nothing.
-          grep -Eq 'time:+\[' bench.log
+          #
+          # This guard read `time:+\[` until 5 September 2026, which is `time`
+          # followed by one-or-more colons and then a bracket. Criterion prints
+          # `time:` and then *three spaces*, so the pattern could not match and
+          # this job had never once passed: the only scheduled run, on 31
+          # August, printed all six figures and then exited 1 here. A guard
+          # against a silent pass that fails on every run is worse than none,
+          # because it teaches a reader to ignore the job.
+          #
+          # Six, counted, rather than one-or-more: the point is that every
+          # operation reported, not that the file is not empty.
+          test "$(grep -Ec 'time: +\[' bench.log)" -eq 6
+
+      # Criterion compares against a saved baseline and never exits non-zero
+      # when it loses -- the only failure path in 0.5.1 is a *missing* baseline
+      # directory. So the comparison this repository ratchets on is one it
+      # owns, reading criterion's own estimates against a committed figure and
+      # a band measured on the machine that recorded it.
+      #
+      # A machine with no entry is reported and not failed, the way a corpus
+      # with no recorded bar is, so this step is useful on a runner nobody has
+      # recorded yet.
+      - name: Hold it to the baseline
+        run: cargo run -p xtask -- bench-check --machine ubuntu-latest
 
       - name: Keep the numbers
         if: always()

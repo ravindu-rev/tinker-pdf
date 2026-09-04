@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
-use xtask::{corpus, fetch, fuzzaudit, parity, release, repo_root, version};
+use xtask::{bench, corpus, fetch, fuzzaudit, parity, release, repo_root, version};
 
 const USAGE: &str = "\
 xtask — repository chores
@@ -66,6 +66,7 @@ bindings-parity options:
                                          fetch and verify the pinned corpora
   cargo xtask corpus-licences [--check]  the corpus lock's licence table
   cargo xtask corpus-run [options]       open and render every corpus file
+  cargo xtask bench-check --machine NAME  hold `cargo bench` to the committed baseline
 
 corpus-run options:
   --corpus NAME   only this one; repeatable
@@ -141,6 +142,7 @@ fn main() -> ExitCode {
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
         "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
+        "bench-check" => one("bench-check", bench::run(&repo_root(), rest)),
         "synth-face" => one("synth-face", synth_face(rest)),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
