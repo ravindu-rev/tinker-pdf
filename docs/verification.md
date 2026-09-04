@@ -6,8 +6,8 @@ fingerprint, render quality is a perceptual budget, coverage of the real
 world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
-Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **4 403 passed, 0 failed, 43 ignored** across 200 suites on
+Numbers on this page were measured in August 2026, except the suite total, the fuzz sessions and the corpus attributions below, which are 4 September 2026. `cargo test --workspace`
+is **4 446 passed, 0 failed, 45 ignored** across 204 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and

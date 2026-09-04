@@ -31,8 +31,8 @@ its two font-bearing siblings:
 | `crop` held of asked | 4 148 of 4 191 |
 | `dpi` held of asked | 4 388 of 4 439 |
 
-The suite stands at 4 403 passed, 0 failed, 43 ignored as
-[verification.md](verification.md) records it, dated August 2026.
+The suite stands at 4 446 passed, 0 failed, 45 ignored as
+[verification.md](verification.md) records it, measured 4 September 2026.
 
 ## What "best" means here
 
