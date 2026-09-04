@@ -135,6 +135,13 @@ what it thinks it is:
   Set whatever the suite's own "required" switch is — for the EPUB corpus that
   is `TINKER_EPUB_CORPUS_REQUIRED=1`, and the path it is given must be
   absolute, because a test binary's working directory is its crate root.
+- **A campaign that dies mid-run leaves the source injected.** The harness
+  mutates a file in place and restores it, so an interruption between those
+  two steps leaves a deliberate defect in the tree looking like ordinary
+  work. One campaign here crashed on a Windows codepage decode after four
+  injections and lost two counts. Check `git status` and re-run the suite
+  before trusting anything a partial campaign reported, and treat a count
+  from a run that did not finish as absent rather than as zero.
 
 A row of zeros is a result about the harness at least as often as about the
 suite. Check the instrument before believing it.

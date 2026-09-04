@@ -377,5 +377,5 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take,
   and `fuzz_targets/tiff.rs` the one a scanned comic reaches. Three of the 32
   targets.
-- The whole workspace: `cargo test --workspace` is 4 394 passed, 0 failed,
-  43 ignored across 199 suites (Windows x86_64, as of September 2026).
+- The whole workspace: `cargo test --workspace` is 4 403 passed, 0 failed,
+  43 ignored across 200 suites (Windows x86_64, as of September 2026).

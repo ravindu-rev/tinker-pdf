@@ -32,7 +32,7 @@ with nothing but `rustup`, on Windows, macOS, Linux and
 
 ## Measured, not claimed
 
-As of September 2026: **4 394 tests** (0 failed) across 199 suites; corpus of
+As of September 2026: **4 403 tests** (0 failed) across 200 suites; corpus of
 **4 525** documents with **4 484 rendering every page and zero crashes**, and
 **4 225 of 4 225** rewrites of them validating against ISO 32000 read
 strictly;
