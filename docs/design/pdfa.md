@@ -331,6 +331,28 @@ and `StartxrefNotASection` fires on one `pass` file, which is not enough to
 tell that file's defect from a reading of Annex F. All five are refused a
 clause, each with its count and its reason in `pdfa/structure.rs`.
 
+**Counted injections, and one of them is a zero.** Each mapping was removed in
+turn and the census re-run; the unit is the bar, because these rules change a
+number rather than a verdict.
+
+| Injected | The bar, of 2 371 | False positives | The census failed |
+| --- | ---: | ---: | --- |
+| none (control) | 1 211 | 1 | no |
+| the indirect-object mapping removed | 1 204 | 1 | no |
+| the stream-extent mapping removed | 1 208 | 1 | **yes**, on a ledger row |
+| the group left out of `IMPLEMENTED` | 1 201 | 1 | **yes** |
+| the corpus root left at the fetch directory | **0/0** | — | **yes**, on the new assertion |
+| **the cross-reference mapping removed** | **1 211** | 1 | no |
+
+The last row is the one to read. Removing 6.1.4's mapping outright changes the
+bar by nothing: not one of the 2 371 files reaches it, so a rule that ran and a
+rule that did not would have measured the same, and `CONTRIBUTING.md` is
+explicit that a guard which catches nothing when its defect is injected is not
+a guard. `tests/pdfa_structure.rs` is what closes it — three documents built
+here with exactly one thing wrong in their bytes, each with the undamaged twin
+that keeps "it reported something" from passing for "it reported this", and a
+fourth test proving the group stays off in a syntax-only sweep.
+
 **The census itself was measuring nothing, and had been.** `suite_of` takes the
 first path component of a file relative to the corpus root and asks whether it
 names a PDF/A suite; rooted at `corpus/files`, that component is `verapdf`,
