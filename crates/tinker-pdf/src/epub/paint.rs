@@ -74,6 +74,7 @@ use tinker_pdf_shape::shape::itemize;
 
 use super::read::PX_TO_PT;
 use super::typeface::FaceSet;
+use super::xhtml::Dom;
 // `Placed` and not `tinker_pdf_layout::metrics::PlacedGlyph`, which is
 // imported above under that name and is a different thing: layout's is a
 // measurement and this one is a position on a page.
@@ -924,31 +925,211 @@ pub fn draw_page(
     laid: &LayoutPage,
     frame: &Frame,
     fonts: &Fonts<'_>,
+    dom: Option<&Dom>,
 ) -> usize {
     let mut refused = 0usize;
     for fragment in &laid.boxes {
         draw_box(page, fragment, frame);
     }
-    for run in &laid.runs {
-        if !run.painted {
-            continue;
+    // 14.7's structure tree, when the caller has the element tree the runs
+    // came from. Every run carries the index of the element that wrote it, so
+    // the tree this builds is the **document's** tree and not a description of
+    // the page: the order is source order, which is what `TextRun::order`
+    // already sorted these runs into.
+    let Some(dom) = dom else {
+        for run in &laid.runs {
+            if !run.painted {
+                continue;
+            }
+            refused += artifact_or_run(builder, page, run, frame, fonts);
         }
-        // 14.8.2.2: a list marker is *"a graphics object that is not part of
-        // the author's original content"*, which is what 14.8.2 calls an
-        // artifact and what `TextRun::generated` already says one crate down.
-        // Marking it is what lets a bullet be **drawn and not extracted**, and
-        // it is the only reason text conservation can stay an equality: a
-        // marker on the page and not in the spine would be one extra character
-        // per list item, on every book with a list in it.
-        if run.generated {
-            page.raw(b"/Artifact BMC");
-        }
-        refused += draw_run(builder, page, run, frame, fonts);
-        if run.generated {
-            page.raw(b"EMC");
-        }
+        return refused;
+    };
+
+    let drawn: Vec<&TextRun> = laid.runs.iter().filter(|run| run.painted).collect();
+    let chains: Vec<Vec<usize>> = drawn
+        .iter()
+        .map(|run| match run.generated {
+            // An artifact belongs to no element: 14.8.2.2 puts it outside the
+            // structure entirely, which is `/Artifact` and not a tag.
+            true => Vec::new(),
+            false => ancestry(dom, run.anchor),
+        })
+        .collect();
+    tag_runs(
+        builder,
+        page,
+        frame,
+        fonts,
+        dom,
+        &drawn,
+        &chains,
+        0,
+        &mut refused,
+    );
+    refused
+}
+
+/// One run, marked as an artifact where it is one.
+fn artifact_or_run(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    run: &TextRun,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+) -> usize {
+    // 14.8.2.2: a list marker is *"a graphics object that is not part of
+    // the author's original content"*, which is what 14.8.2 calls an
+    // artifact and what `TextRun::generated` already says one crate down.
+    // Marking it is what lets a bullet be **drawn and not extracted**, and
+    // it is the only reason text conservation can stay an equality: a
+    // marker on the page and not in the spine would be one extra character
+    // per list item, on every book with a list in it.
+    if run.generated {
+        page.raw(b"/Artifact BMC");
+    }
+    let refused = draw_run(builder, page, run, frame, fonts);
+    if run.generated {
+        page.raw(b"EMC");
     }
     refused
+}
+
+/// The element chain a run sits under, outermost first.
+///
+/// From the run's own element up to — but not including — `<body>`, then
+/// reversed. `<body>` is left out because [`DocumentBuilder`] already wraps
+/// every page's roots in a `/Document`, and a `/Sect` per page under it that
+/// meant "this chapter's body" would be a level that says nothing.
+///
+/// An element with no anchor gets an empty chain and is drawn untagged rather
+/// than guessed at, which is the same refusal the reader makes: this build
+/// does not invent structure (`docs/design/tagged-pdf.md`).
+fn ancestry(dom: &Dom, anchor: Option<u32>) -> Vec<usize> {
+    let Some(anchor) = anchor else {
+        return Vec::new();
+    };
+    let mut at = anchor as usize;
+    if at >= dom.nodes.len() {
+        return Vec::new();
+    }
+    let body = dom.body();
+    let mut chain = Vec::new();
+    loop {
+        if Some(at) == body {
+            break;
+        }
+        chain.push(at);
+        match dom.nodes[at].parent {
+            // `parent` is always less than the node's own index, so this
+            // terminates without a visited set.
+            Some(parent) => at = parent,
+            None => break,
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+/// Draws a run of runs, opening one structure element per level they share.
+///
+/// **Grouped rather than one element per run.** Consecutive runs of one
+/// paragraph share its whole chain, and opening a `/P` for each of them would
+/// make a paragraph of three runs three paragraphs. The runs arrive in reading
+/// order — `fragment::order` sorted them — so equal chains are adjacent and a
+/// partition by the level's element is all the grouping there is to do.
+#[allow(clippy::too_many_arguments)]
+fn tag_runs(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+    dom: &Dom,
+    runs: &[&TextRun],
+    chains: &[Vec<usize>],
+    level: usize,
+    refused: &mut usize,
+) {
+    let mut at = 0usize;
+    while at < runs.len() {
+        // A run whose chain has run out belongs to the element opened around
+        // it, so it is drawn here rather than descended into.
+        if chains[at].len() <= level {
+            *refused += artifact_or_run(builder, page, runs[at], frame, fonts);
+            at += 1;
+            continue;
+        }
+        let element = chains[at][level];
+        let mut end = at + 1;
+        while end < runs.len() && chains[end].get(level) == Some(&element) {
+            end += 1;
+        }
+        let tag = structure_type(&dom.nodes[element].name);
+        let (slice, tails) = (&runs[at..end], &chains[at..end]);
+        page.tagged(tag.as_bytes(), |page| {
+            tag_runs(
+                builder,
+                page,
+                frame,
+                fonts,
+                dom,
+                slice,
+                tails,
+                level + 1,
+                refused,
+            );
+        });
+        at = end;
+    }
+}
+
+/// ISO 32000 Table 333's standard structure type for an XHTML element.
+///
+/// **Every arm returns a standard type, which is why no `/RoleMap` is
+/// written.** 14.7.3's role map exists to say what a non-standard tag means;
+/// a producer that only ever emits standard tags has nothing to declare, and
+/// a role map mapping `/P` to `/P` is the loop the reader counts as a warning.
+/// The cost is that the XHTML element name is not recoverable from the PDF —
+/// `<em>` and `<strong>` are both `/Span` — which is named in the refusal
+/// table rather than hidden.
+fn structure_type(name: &str) -> &'static str {
+    match name {
+        "p" => "P",
+        "h1" => "H1",
+        "h2" => "H2",
+        "h3" => "H3",
+        "h4" => "H4",
+        "h5" => "H5",
+        "h6" => "H6",
+        "ul" | "ol" | "dl" => "L",
+        "li" | "dt" | "dd" => "LI",
+        "table" => "Table",
+        "thead" => "THead",
+        "tbody" => "TBody",
+        "tfoot" => "TFoot",
+        "tr" => "TR",
+        "td" => "TD",
+        "th" => "TH",
+        "caption" | "figcaption" => "Caption",
+        "blockquote" => "BlockQuote",
+        "code" | "kbd" | "samp" | "var" | "pre" => "Code",
+        "sub" => "Sub",
+        "figure" => "Figure",
+        "section" | "article" | "nav" | "aside" | "header" | "footer" | "main" => "Sect",
+        // **`<a>` is a `/Span` and not a `/Link`**, which is a refusal rather
+        // than an oversight. 14.8.4.4.2 requires a `/Link` element to contain
+        // an `/OBJR` referencing the link annotation it stands for, and this
+        // writer cannot emit one; a bare `/Link` would claim an association to
+        // assistive technology that is not in the file. The annotation itself
+        // is still written and still works.
+        //
+        // §14.8.4.2's two inline defaults. Anything block-level this build
+        // does not name is a `/Div` and anything else is a `/Span`, which is
+        // what a reader does with an unknown tag anyway — and is honest,
+        // because the alternative is inventing a type from a class attribute.
+        "div" | "body" | "html" | "form" | "fieldset" => "Div",
+        _ => "Span",
+    }
 }
 
 fn set_fill(page: &mut PageBuilder, colour: Color) {

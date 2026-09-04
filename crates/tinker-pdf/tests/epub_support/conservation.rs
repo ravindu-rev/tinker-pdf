@@ -758,3 +758,33 @@ fn run_matches(s: &[char], i: usize, p: &[char], j: usize) -> bool {
 pub fn conservation(book: &[u8], doc: &Document) -> Verdict {
     compare(&spine_text(book), &paginated_text(doc))
 }
+
+/// Every page's text in **logical** order: ISO 32000 14.8's structure tree
+/// rather than the content stream.
+///
+/// The two differ exactly where a box was drawn somewhere other than where it
+/// reads — a float, above all. A page with no structure falls back to flat
+/// extraction rather than contributing nothing, so an untagged book measures
+/// as it always did instead of as empty.
+#[must_use]
+pub fn structured_pages(doc: &Document) -> Vec<String> {
+    (0..doc.page_count())
+        .map(|at| {
+            let page = doc.page(at).expect("a page in range");
+            match page.structured_text() {
+                Some(structured) => structured
+                    .nodes
+                    .iter()
+                    .map(|node| node.text.as_str())
+                    .collect::<String>(),
+                None => page.text().plain_text(),
+            }
+        })
+        .collect()
+}
+
+/// The same verdict, against logical order.
+#[must_use]
+pub fn conservation_in_logical_order(book: &[u8], doc: &Document) -> Verdict {
+    compare(&spine_text(book), &structured_pages(doc))
+}
