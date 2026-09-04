@@ -105,9 +105,18 @@ const ZIPS: &[&str] = &[
 /// check of their own: what is worth asserting about a `.cbt` is not that it
 /// opens, it is that it opens as *the same five pictures* a `.cbz` of the same
 /// pages does.
+/// The three `.cb7`s are one producer asked for three *shapes* rather than
+/// three producers, and the difference is stated here because it is the row's
+/// own caveat: `-m0=LZMA2` writes one folder holding one LZMA2 chunk, so the
+/// folder walk and the chunk loop each ran exactly once for every committed
+/// archive until `-ms=off` and `-m0=LZMA2:d8k:c8k` were added.
+/// `the_two_cb7s_added_for_coverage_have_the_structure_they_are_named_for` in
+/// `tinker-pdf-archive` asserts that they really hold those shapes.
 const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-tar.cbt", Container::Tar),
     ("7z-lzma2.cb7", Container::SevenZip),
+    ("7z-nonsolid.cb7", Container::SevenZip),
+    ("7z-dictreset.cb7", Container::SevenZip),
 ];
 
 /// The containers that open but do **not** produce all five pages, and what
@@ -430,28 +439,57 @@ fn the_tar_a_real_archiver_wrote_pages_in_natural_order() {
 /// It also exercises the part of the format that surprises: this archive's
 /// **header is itself compressed**, with plain LZMA rather than the LZMA2 its
 /// data uses, so listing these five names at all requires the other decoder.
+///
+/// # Three of them, because one shape is not the format
+///
+/// `-m0=LZMA2` is what a desktop archiver writes and it writes the *simplest*
+/// thing the format allows: one folder, holding one LZMA2 chunk. So for as
+/// long as it was the only `.cb7` here, `decode_folder`'s walk and
+/// `decode_lzma2`'s chunk loop were each entered exactly once by every
+/// committed archive, and the second iteration of either was reached by
+/// nothing. The other two ask the same producer for the two shapes that make
+/// those loops run:
+///
+/// - `7z-nonsolid.cb7` (`-ms=off`) is **five folders**, one per page, so the
+///   walk runs past folder 0 five times over five different pack offsets;
+/// - `7z-dictreset.cb7` (`-m0=LZMA2:d8k:c8k`) is one folder holding **three
+///   LZMA2 chunks**, each opening with a dictionary reset — two of them
+///   mid-stream, at output offsets that fall inside a page rather than between
+///   two.
+///
+/// The structure is asserted where it can be, in
+/// `the_two_cb7s_added_for_coverage_have_the_structure_they_are_named_for`,
+/// because a flag is a request and not a result. What is asserted *here* is
+/// the thing that matters: whatever shape the folders and chunks take, the
+/// five pictures come back, adjudicated by the archive's own CRC-32.
 #[test]
 fn the_7z_a_real_archiver_wrote_pages_in_natural_order() {
     let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
-    let document = Document::open(read("7z-lzma2.cb7")).expect("the .cb7 opens");
-    let report = document.archive().expect("a synthesised document");
-    let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(order, want, "the .cb7's page order");
-    assert!(
-        report.pages().iter().all(|page| page.defect.is_none()),
-        "every page is its entry's own picture rather than a placeholder: {:?}",
-        report.pages().iter().map(|p| p.defect).collect::<Vec<_>>()
-    );
-    for (index, (page, width, height)) in PAGES.iter().enumerate() {
-        let bitmap = document
-            .page(index as u32)
-            .unwrap_or_else(|| panic!("page {index}"))
-            .render(&RenderOptions::default());
-        assert_eq!(
-            (bitmap.width, bitmap.height),
-            (*width, *height),
-            "{page} is one image pixel to one PDF point"
+    for name in READ_CONTAINERS
+        .iter()
+        .filter(|(_, kind)| *kind == Container::SevenZip)
+        .map(|(name, _)| *name)
+    {
+        let document = Document::open(read(name)).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let report = document.archive().expect("a synthesised document");
+        let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(order, want, "{name}: page order");
+        assert!(
+            report.pages().iter().all(|page| page.defect.is_none()),
+            "{name}: every page is its entry's own picture rather than a placeholder: {:?}",
+            report.pages().iter().map(|p| p.defect).collect::<Vec<_>>()
         );
+        for (index, (page, width, height)) in PAGES.iter().enumerate() {
+            let bitmap = document
+                .page(index as u32)
+                .unwrap_or_else(|| panic!("{name}: page {index}"))
+                .render(&RenderOptions::default());
+            assert_eq!(
+                (bitmap.width, bitmap.height),
+                (*width, *height),
+                "{name}: {page} is one image pixel to one PDF point"
+            );
+        }
     }
 }
 

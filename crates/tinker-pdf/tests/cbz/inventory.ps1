@@ -8,11 +8,15 @@
 # `tinker-pdf-zip` on every `cargo test`, so it cannot drift either. Two
 # independent readers, .NET's and ours, have to agree about every row.
 #
-# The three non-ZIP containers -- `.cb7`, `.cbt`, `.cbr` -- are not here.
-# .NET reads none of them, and this build reads none of them either; README.md
-# carries their sizes and hashes instead.
+# The five non-ZIP containers -- three `.cb7`, one `.cbt`, one `.cbr` -- are not
+# here. .NET reads none of them, so there is no second reader to disagree with;
+# README.md carries their sizes and hashes instead, and what this build makes of
+# them is asserted in `cbz_real.rs` and in `tinker-pdf-archive`'s own suite.
 #
-#   powershell -NoProfile -ExecutionPolicy Bypass -File crates\tinker-pdf\tests\cbz\inventory.ps1
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File crates\tinker-pdf\tests\cbz\inventory.ps1
+#
+# `pwsh` 7 and not Windows PowerShell 5.1: `ZipArchiveEntry.Crc32` arrived in
+# .NET 7, and 5.1 leaves that column empty rather than failing.
 
 param([string]$Dir = $PSScriptRoot)
 

@@ -338,13 +338,67 @@ placeholder.
 
 **A decompressor that is subtly wrong and passes.** The mitigation is the
 per-file CRC-32, and it is a real one — but it is only as good as the coverage
-of the *paths* the fixture takes. `7z-lzma2.cb7` is one solid LZMA2 block of
-five images; it never exercises a multi-folder archive, a BCJ filter chain, or
-an LZMA2 stream with more than one dictionary reset. The unit tests cover the
-container's grammar with the Copy coder and the arithmetic coder with a
-first-party range *encoder*, and the gap between those two is the residual
-risk: **matches and distances are exercised only by the one fixture.** Named
-here rather than left implicit.
+of the *paths* the fixture takes. This risk was written when `7z-lzma2.cb7` was
+the only `.cb7` here, and what it said was that one solid LZMA2 block of five
+images never exercises a multi-folder archive, a BCJ filter chain, or an LZMA2
+stream with more than one dictionary reset — so **matches and distances were
+exercised only by the one fixture.** Two of those three are now closed and the
+third has moved rather than been met; this section is the record of which is
+which.
+
+**Two more `.cb7`s, from the same producer, for the two loops that never ran
+twice.** `-m0=LZMA2` is what a desktop archiver writes by default and the
+default is the *simplest* thing the format allows: one folder holding one LZMA2
+chunk, so `decode_folder`'s walk and `decode_lzma2`'s chunk loop were each
+entered exactly once by every committed archive.
+
+- `7z-nonsolid.cb7` (`-ms=off`) is **five folders**, one per page: the walk runs
+  past folder 0 over five different pack offsets and the folder cache is asked
+  for a folder it does not hold.
+- `7z-dictreset.cb7` (`-m0=LZMA2:d8k:c8k`) is one folder of **three LZMA2
+  chunks**, each opening with a dictionary reset — two of them mid-stream, at
+  output offsets 8 192 and 16 384, which fall inside a page rather than between
+  two.
+
+Both structures are asserted, not assumed:
+`the_two_cb7s_added_for_coverage_have_the_structure_they_are_named_for` opens
+the committed bytes with this crate's own reader and holds each file to its
+folder count and its chunk count. That check paid for itself at once — the
+obvious flag, `-m0=LZMA2:d64k`, measured **one** chunk over these five pages,
+because a dictionary size does not split a solid block and the LZMA2 block size
+(`c`) does. A fixture named for a shape it does not have is worse than no
+fixture, since the name would be doing the arguing.
+
+**What is not closed: a second real archiver.** The gap this risk names has two
+halves, and the fixtures above close only one of them. Five folders and three
+chunks buy coverage of *this decoder's* loops. They buy nothing against a
+misreading of the format shared between writer and reader, because there is
+still only one writer: 7-Zip 26.02 wrote all three `.cb7`s. **This machine
+cannot supply a second 7z writer** — `py7zr` is not installed and no other is
+available — so the clause is recorded as unmet rather than redefined into the
+part that was achievable, exactly as `tests/cbz/README.md` records RAR 4 and
+`tests/xps/README.md` records the printer route neither could use. A `.cb7` from
+any second implementation would close it and the exit criterion is already
+written: the file joins `READ_CONTAINERS` and
+`five_zip_writers_produce_the_same_five_pictures` passes over it.
+
+**What is not a gap in this decoder at all: BCJ.** A BCJ filter chain was named
+in the same breath as the other two and it does not belong there. `-mf=BCJ`
+writes coder id `03030103`, which is outside the allow-list `sevenz.rs`
+enforces at open, so such an archive is **refused before any coder runs** — a
+fixture for it would test nothing about the LZMA decoder and would sit in the
+tree waiting for a capability. That is a capability row, and it is in
+[ROADMAP.md](../ROADMAP.md)'s tier-4 archive entry beside PPMd and bzip2, where
+the fixture arrives with the decoder rather than ahead of it. This is the one
+place in this corpus where "the fixture before the reader" is *not* the right
+move, and the difference is that a refused-at-open archive proves nothing about
+the coder it would have run. BCJ2 stays refused by `Error::NotAChain` by
+design: four input streams is not a chain.
+
+The residual risk after all of that is unchanged in kind and smaller in size:
+the unit tests cover the container's grammar with the Copy coder and the
+arithmetic coder with a first-party range *encoder*, and the gap between those
+two is still bridged by fixtures a single producer wrote.
 
 **A shared misunderstanding between the encoder and decoder in
 `lzma/tests.rs`.** The round trip closes only over literals, and both halves
@@ -366,6 +420,30 @@ All five decoder defects landed the same way: `five_zip_writers_produce_the_same
 and `the_7z_a_real_archiver_wrote_pages_in_natural_order`, twice each, and no
 unit test anywhere. The corpus is not a nice-to-have beside the unit tests here;
 for the decompressor it is the only instrument.
+
+**A second campaign, when the two later `.cb7`s landed, measured what a fixture
+is worth in the sharpest form this lane has.** Four defects, counted the same
+way and twice over — *before* is the tree with those two archives absent from
+every test, *after* is them read, and a control run in each configuration came
+back 0.
+
+| Injected | Before | After |
+| --- | ---: | ---: |
+| `decode_lzma2` ignores the dictionary-reset bit of the control byte | **1** | **4** |
+| the folder walk stops after folder 0 | **0** | **3** |
+| a distance-slot decode off by one | **2** | **3** |
+| `MOVE_BITS` 1/16 instead of 1/32 | **2** | **3** |
+
+The last row is the check on the method rather than a result: `MOVE_BITS` was
+recorded as **2** in the first campaign and measures **2** again in the before
+column, so the difference in the other rows is the tree changing and not the
+counting. And the second row is the reason this row existed at all — **zero**.
+A reader that walks one folder and stops hands every entry after the first a
+slot that does not exist, and no fixture in this repository, hand-built or
+committed, could tell: every one of them had exactly one folder, and one folder
+is all such a walk needs to look right. It is the dictionary-reset row of the
+first campaign repeating itself for the same reason — a defect in the second
+iteration of a loop that no input iterated twice.
 
 **Hostile input, in three new parsers at once.** Every one of these formats is
 a length-prefixed structure walk over bytes a stranger wrote, and a comic

@@ -17,10 +17,20 @@
 //!   named rather than papered over.
 //! - **Matches, distances, the length coder and LZMA2's compressed chunks**
 //!   are *not* reachable from an encoder this small, and they are adjudicated
-//!   by `7z-lzma2.cb7`'s own CRC-32 in `crates/tinker-pdf/tests/cbz_real.rs` —
+//!   by the `.cb7`s' own CRC-32s in `crates/tinker-pdf/tests/cbz_real.rs` —
 //!   the format checking the decompression, which is what ruling 13 asks for.
-//!   That fixture was written by 7-Zip before this decoder existed, and its
+//!   `7z-lzma2.cb7` was written by 7-Zip before this decoder existed, and its
 //!   five pages must come back byte-identical to the five a ZIP produces.
+//!
+//!   There are **three** of them and the other two were added because one was
+//!   not enough: `-m0=LZMA2` writes the simplest shape the format allows — one
+//!   folder, one chunk — so `decode_lzma2`'s loop ran exactly once for every
+//!   committed archive and a defect in its second iteration was unreachable.
+//!   `7z-dictreset.cb7` (`-m0=LZMA2:d8k:c8k`) is three chunks with a
+//!   dictionary reset each, two of them mid-stream; `7z-nonsolid.cb7`
+//!   (`-ms=off`) is five folders, so the front end is entered five times.
+//!   What none of the three buys is a second *writer* — all are 7-Zip 26.02 —
+//!   which `docs/design/comic-archives.md` records as unmet.
 //!
 //! The LZMA2 *framing* is a third case and is fully checkable here: an
 //! uncompressed chunk needs no range coder at all, so the control-byte

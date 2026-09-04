@@ -299,7 +299,7 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | A RAR entry compressed with methods 1–5 | `PageDefect::RarEntryRefused` | placeholder page naming the method. A **non-goal, not a debt**: RAR's compression has no published specification and the only implementation's licence bars deriving from it, so there is nothing rule 1 permits writing it from | [design/comic-archives.md](../design/comic-archives.md) |
 | A solid RAR entry | `PageDefect::RarEntryRefused` | its dictionary is the entry before it, and this build decompresses neither | — |
 | An encrypted RAR, or one volume of a set | `ArchiveRefusal::Encrypted` / `MultiDisk` | named non-goals; the fragment that happens to be here is not the archive | — |
-| A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `030401` is PPMd — so a host can say what to re-pack without | — |
+| A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `030401` is PPMd and `03030103` is the BCJ x86 filter, which `-mf=BCJ` puts in front of LZMA2 — so a host can say what to re-pack without | — |
 | A 7z folder that is not a chain of coders | `ArchiveRefusal::NotAZip` | BCJ2 takes four input streams; a reader that walked it as a chain would hand back a quarter of a file | — |
 | An encrypted 7z | `ArchiveRefusal::Encrypted` | AES-256 is a named non-goal, as it is for ZIP | — |
 | A 7z entry whose recorded CRC-32 does not match | `PageDefect::SevenZipEntryRefused` | placeholder page; **this is the check that adjudicates the LZMA decoder**, so it is never tolerated | — |
@@ -353,9 +353,15 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   what to deflate, must give this reader the same five pictures at the same
   sizes. It is a relation between two reads rather than an oracle — nothing
   outside this repository renders any of it ([verification](../verification.md)).
-  The `.cb7`, `.cbt` and `.cbr` beside them hold the *same five pages* and are
-  held to `ArchiveRefusal::NotAZip`, so a decoder that arrives later has
-  something to be compared against that was put there before it existed.
+  The five non-ZIPs beside them hold the *same five pages*: three `.cb7` and
+  the `.cbt` join that identity, so nine archives must give the same pictures,
+  and the `.cbr` does not — it is four fifths of a comic and is held to
+  `PageDefect::RarEntryRefused` naming its method instead. The three `.cb7`s
+  are one producer asked for three **shapes** — one solid folder, five folders
+  (`-ms=off`), and three LZMA2 chunks with a dictionary reset each
+  (`-m0=LZMA2:d8k:c8k`) — because the default shape makes the folder walk and
+  the chunk loop each run exactly once. `tests/cbz/README.md` records what that
+  still does not buy: a second 7z *writer*, which this machine cannot produce.
 - `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
   archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 28 unit tests over
   ordering, classification and the `ComicInfo.xml` mapping, which is asserted

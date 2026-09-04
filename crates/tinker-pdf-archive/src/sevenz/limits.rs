@@ -21,7 +21,7 @@
 ///
 /// | | Entries |
 /// | --- | --- |
-/// | The most any fixture here spends | 5 (`7z-lzma2.cb7`) |
+/// | The most any fixture here spends | 5 (each of the three `.cb7`s) |
 /// | A 200-page comic (200 pages, a `ComicInfo.xml`, a directory entry) | 202 |
 /// | **This cap** | **16 384** |
 ///
@@ -39,12 +39,14 @@ pub const MAX_7Z_ENTRIES: usize = 16_384;
 /// The most folders — decompression units — one archive may hold.
 ///
 /// A folder is a solid block. One is the normal case and is what `-m0=LZMA2`
-/// writes; a writer using `-ms=off` writes one per file, which is where the
-/// second column comes from.
+/// writes; a writer using `-ms=off` writes one per file, and the first column
+/// stopped being 1 when `7z-nonsolid.cb7` was added for exactly that reason —
+/// with one folder in every fixture, the walk in `decode_folder` was entered
+/// once and never continued.
 ///
 /// | | Folders |
 /// | --- | --- |
-/// | The most any fixture here spends | 1 (`7z-lzma2.cb7`) |
+/// | The most any fixture here spends | 5 (`7z-nonsolid.cb7`, one per page) |
 /// | A 200-page comic written non-solid | 200 |
 /// | **This cap** | **4 096** |
 ///
@@ -65,7 +67,7 @@ pub const MAX_7Z_FOLDERS: usize = 4_096;
 ///
 /// | | Coders |
 /// | --- | --- |
-/// | The most any fixture here spends | 1 (`7z-lzma2.cb7`) |
+/// | The most any fixture here spends | 1 (every `.cb7` here — no fixture has a filter, and one written with `-mf=BCJ` would be refused by the coder allow-list before it counted) |
 /// | `-mf=BCJ -m0=LZMA2` with a delta filter | 3 |
 /// | **This cap** | **32** |
 ///
@@ -86,7 +88,7 @@ pub const MAX_7Z_CODERS: usize = 32;
 ///
 /// | | Bytes |
 /// | --- | --- |
-/// | The most any fixture here spends | 18 483 (`7z-lzma2.cb7`, all five pages in one solid block) |
+/// | The most any fixture here spends | 18 483 (`7z-lzma2.cb7` and `7z-dictreset.cb7`, all five pages in one solid block; `7z-nonsolid.cb7`'s largest folder is 5 184, because splitting the block is what lowers this number) |
 /// | A 200-page scanned comic, solid | ~600 MB |
 /// | **This cap** | **1 GiB** |
 ///

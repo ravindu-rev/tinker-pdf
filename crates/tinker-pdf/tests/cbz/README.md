@@ -23,12 +23,12 @@ implementation's idea of a ZIP over content nobody else owns.
 
 ## What produced them
 
-Eight archives, five of them ZIPs, from four independent implementations on the
+Ten archives, five of them ZIPs, from four independent implementations on the
 machine described below.
 
 | Producer | Files | What it is |
 | --- | --- | --- |
-| **7-Zip 26.02** (x64) | `7z-*.cbz`, `7z-lzma2.cb7`, `7z-tar.cbt` | ip7z/7zip, LGPL-2.1-or-later with an unRAR restriction. Driven from `make-corpus.ps1`. Writes ZIP at two compression levels, 7z and tar. |
+| **7-Zip 26.02** (x64) | `7z-*.cbz`, `7z-lzma2.cb7`, `7z-nonsolid.cb7`, `7z-dictreset.cb7`, `7z-tar.cbt` | ip7z/7zip, LGPL-2.1-or-later with an unRAR restriction. Driven from `make-corpus.ps1`. Writes ZIP at two compression levels, 7z in three shapes and tar. |
 | **WinRAR 7.20** (x64, trial) | `winrar.cbz`, `winrar-rar5.cbr` | RARLAB, proprietary. `WinRAR.exe a -afzip` writes the ZIP; `Rar.exe` writes the RAR. The trial adds no comment or watermark to an archive — the nag is on the console. |
 | **.NET `System.IO.Compression`** | `pwsh.cbz` | Through PowerShell's `Compress-Archive`. Microsoft's ZIP writer, and the one most Windows software reaches for. |
 | **CPython 3.12 `zipfile`** | `python.cbz` | The standard library's writer, and the one most tooling that touches comics is written against. |
@@ -70,8 +70,12 @@ rerunning a producer.
 
 ## What is committed
 
-183 776 bytes. `sha256` is the first sixteen hex digits, enough to tell a file
-from a regeneration of it.
+191 755 bytes, which is the sum of the Bytes column below and nothing else —
+the pages in `source/` are another 18 483 and the four text files here are not
+counted at all. (The figure that stood here before the two later `.cb7`s landed
+was 183 776, which was the sum of nothing: the eight archives it described came
+to 155 074. Re-measured rather than carried.) `sha256` is the first sixteen hex
+digits, enough to tell a file from a regeneration of it.
 
 | File | Bytes | Producer | What it demonstrates | sha256 |
 | --- | ---: | --- | --- | --- |
@@ -81,11 +85,13 @@ from a regeneration of it.
 | `pwsh.cbz` | 18 879 | .NET `System.IO.Compression` | The second finding: **deflates every entry, including the three it makes larger** | `944a422eb61cd0fa` |
 | `python.cbz` | 18 879 | CPython 3.12 `zipfile` | A fourth implementation doing the same, so the finding is not one library's quirk | `48bd76da17bc6a61` |
 | `7z-lzma2.cb7` | 17 663 | 7-Zip `-t7z -m0=LZMA2` | A CB7 holding the same five pages, in one solid LZMA2 block under an **LZMA-compressed header**. Read since tier 4 | `f211476cb9b199d9` |
+| `7z-nonsolid.cb7` | 18 608 | 7-Zip `-t7z -m0=LZMA2 -ms=off` | The same five pages in **five folders**, one per page: the folder walk runs past folder 0 and sets a coder up five times | `6a10817c1df4905f` |
+| `7z-dictreset.cb7` | 18 073 | 7-Zip `-t7z -m0=LZMA2:d8k:c8k` | The same five pages in one folder of **three LZMA2 chunks**, each opening with a dictionary reset — two of them mid-stream | `7e9caaa4ff5fc706` |
 | `7z-tar.cbt` | 23 552 | 7-Zip `-ttar` | A CBT holding the same five pages, in GNU's tar dialect. Read since tier 4 | `97911001905ea8b5` |
 | `winrar-rar5.cbr` | 18 860 | `Rar.exe` (RAR 5) | A CBR holding the same five pages, and the fifth finding below: **four stored, one compressed with method 3**, plus a `QO` service record. Container read since tier 4; the compressed entry is a placeholder page | `b8f7d4de4b0933a1` |
 
-**The three non-ZIPs were committed while all three were still refused, and
-on purpose.** They hold the *same five pages* as the five ZIPs, so the day a
+**The first three non-ZIPs were committed while all three were still refused,
+and on purpose.** They hold the *same five pages* as the five ZIPs, so the day a
 decoder for one of them existed, the pictures it produced had something already
 in the tree to be compared against — put there by a different program, before
 the decoder was written. That is gap 30's structural lesson applied one format
@@ -93,10 +99,15 @@ further out: the fixture arrives before the reader, not after it.
 
 It paid off exactly as intended. Tier 4's `tinker-pdf-archive` read all three
 containers against these files and nothing else, with no oracle anywhere: the
-`.cbt` and the `.cb7` now join the five ZIPs in
+`.cbt` and `7z-lzma2.cb7` now join the five ZIPs in
 `cbz_real.rs`'s cross-producer identity, and the `.cb7`'s own recorded CRC-32
 is what adjudicates a hand-rolled LZMA decoder. The `.cbr` is the one that has
 not closed, for the reason in finding 5 below.
+
+**`7z-nonsolid.cb7` and `7z-dictreset.cb7` arrived later and for the opposite
+reason: the decoder was already here and the fixture that adjudicated it only
+ever asked it one question.** See *Three `.cb7`s, and the one thing this
+directory still cannot buy* below.
 
 ## The pages
 
@@ -120,8 +131,9 @@ measured against archives this repository did not write.
 
 ## What these files showed, that the hand-built fixtures never did
 
-Five things. The first two change what a reader must tolerate; the third is a
-gap in coverage this corpus **does not** close and the doc says so.
+Six things. The first two change what a reader must tolerate; the third is a
+gap in coverage this corpus **does not** close and the doc says so. (There were
+six all along; two of them were both numbered 5.)
 
 1. **A real archive mixes compression methods per entry.** 7-Zip and WinRAR
    both stored `page1.png`, `page10.png` and `page11.png` and deflated
@@ -171,23 +183,87 @@ gap in coverage this corpus **does not** close and the doc says so.
    the plan had it blocked on a producer this machine cannot run. See
    `docs/design/comic-archives.md`, milestone 5.
 
-5. **No real archiver tripped a single `ZipWarning`.** All five took
+6. **No real archiver tripped a single `ZipWarning`.** All five took
    `Route::CentralDirectory` with an empty warning list. The leniency ladder in
    `tinker-pdf-zip` is built for damaged and unusual archives, and this corpus
    says plainly that it is *not* what ordinary tools produce — so the ladder's
    value rests on the hand-built fixtures, which stay exactly where they are.
    The two corpora answer different questions and neither replaces the other.
 
+## Three `.cb7`s, and the one thing this directory still cannot buy
+
+`7z-lzma2.cb7` is the file that adjudicates a hand-rolled LZMA decoder, and for
+a while it was the only one. What it is, though, is what a desktop archiver
+writes by default — and the default is the **simplest** thing the format allows:
+one folder, holding one LZMA2 chunk. So `decode_folder`'s walk over folders and
+`decode_lzma2`'s loop over chunks were each entered exactly once by every
+archive in this directory, and the second iteration of either was reached by
+nothing at all. `docs/design/comic-archives.md` had named that as the residual
+risk in as many words.
+
+Two more archives from the same producer close two thirds of it:
+
+- **`7z-nonsolid.cb7`** (`-ms=off`) is five folders, one per page. The walk runs
+  past folder 0, a coder is set up five times over five different pack offsets,
+  and `Archive::read`'s folder cache is asked for a folder it does not hold.
+- **`7z-dictreset.cb7`** (`-m0=LZMA2:d8k:c8k`) is one folder of three LZMA2
+  chunks, each opening with a dictionary reset — two of them mid-stream, at
+  output offsets 8 192 and 16 384, which fall *inside* `page10.png` and
+  *inside* `page2.png` rather than on any page boundary.
+
+**The flags were checked against what came out.**
+`the_two_cb7s_added_for_coverage_have_the_structure_they_are_named_for`, in
+`tinker-pdf-archive`'s `sevenz/tests.rs`, opens both files with this
+repository's own reader and asserts the folder count and the chunk count, so a
+regeneration that quietly lost either shape fails a test rather than leaving a
+name to do the arguing. That check earned itself immediately: the obvious flag,
+`-m0=LZMA2:d64k`, measured **one** chunk over these five pages. A dictionary
+size does not split a solid block; the LZMA2 *block* size (`c`) does, and `d8k`
+is set beside it only so the dictionary cannot outlive the block it belongs to.
+
+### What is still missing, and why it is not here
+
+**A second real archiver's 7z.** The row that asked for these two fixtures asked
+for a *second archiver*, and this machine cannot supply one. 7-Zip 26.02 is the
+same program that wrote `7z-lzma2.cb7`, so all three `.cb7`s are one
+implementation asked for three shapes — which buys coverage of this decoder's
+loops and buys **nothing** against a shared misreading of the format, because
+there is only one writer to misread it. `py7zr` is not installed here and no
+other 7z writer is. This is the same shape as the RAR 4 note above: recorded,
+with the reason, rather than quietly redefined into something that was
+achievable. A `.cb7` from any second writer would close it, and the exit
+criterion is already written — the file joins `READ_CONTAINERS` and
+`five_zip_writers_produce_the_same_five_pictures` passes over it.
+
+**A BCJ filter chain**, which the same row also named, is deliberately absent
+and is not the same kind of gap. `-mf=BCJ` writes coder id `03030103`, which is
+outside the allow-list in `sevenz.rs` and would be **refused at open** — so a
+BCJ fixture would not test the decoder that exists, it would sit in the tree
+waiting for the capability that does not. That belongs with the work that adds
+it, in tier 4's archive row, where the same argument already parks PPMd and
+bzip2. BCJ2 stays refused by `Error::NotAChain` by design: it takes four input
+streams and is not a chain.
+
 ## The scripts
 
-`make-corpus.ps1` writes the eight archives and prints a hash for each;
-`inventory.ps1` regenerates `INVENTORY.tsv` from them through .NET's reader.
-Neither runs in CI — they are how these files were obtained.
+`make-corpus.ps1` writes the ten archives and prints a hash for each;
+`inventory.ps1` regenerates `INVENTORY.tsv` from the five ZIPs through .NET's
+reader. Neither runs in CI — they are how these files were obtained.
 
 ```
 cargo test -p tinker-pdf --test cbz_real -- --ignored write_the_source_pages
 pwsh -NoProfile -File crates\tinker-pdf\tests\cbz\make-corpus.ps1
 pwsh -NoProfile -File crates\tinker-pdf\tests\cbz\inventory.ps1
+```
+
+`make-corpus.ps1 -Only <names>` writes a subset, and it is not a convenience:
+a whole run stamps every archive with the source files' current modification
+times, so regenerating the directory to add one fixture would change the bytes
+and the hash of every file already in it. The two later `.cb7`s were obtained
+with
+
+```
+pwsh -NoProfile -File crates\tinker-pdf\tests\cbz\make-corpus.ps1 -Only 7z-nonsolid.cb7,7z-dictreset.cb7
 ```
 
 **pwsh 7, not Windows PowerShell 5.1**, for two reasons that both bite:
@@ -217,8 +293,23 @@ is no way back.
   having: five implementations that share no code, disagree about what to
   store and what to deflate, and lay their directories out differently, must
   still give this reader the same five pictures at the same five sizes.
-  Nothing outside this repository renders any of it.
-- `the_containers_this_build_does_not_read_are_refused_by_name` holds the
-  `.cb7`, `.cbt` and `.cbr` to `ArchiveRefusal::NotAZip` and to the
-  fixed-position sniff, so "this is a CBR and I do not read CBR" stays a
-  different sentence from "this is not a PDF".
+  Nothing outside this repository renders any of it. It runs over **nine**
+  archives now rather than five — the four non-ZIPs this build reads join it
+  rather than getting a check of their own, because what is worth asserting
+  about a `.cbt` or a `.cb7` is not that it opens, it is that it opens as *the
+  same pictures* a `.cbz` of the same pages does.
+- `the_tar_a_real_archiver_wrote_pages_in_natural_order` and
+  `the_7z_a_real_archiver_wrote_pages_in_natural_order` add the order
+  assertion for the two containers with no central directory to re-order
+  things behind; the `.cb7` one runs over all three `.cb7`s.
+- `the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`
+  is the one that holds `winrar-rar5.cbr` to four pictures and one placeholder
+  **named by method number**, which is what stops the CBR row closing quietly.
+
+`crates/tinker-pdf-archive/src/sevenz/tests.rs`:
+
+- `the_two_cb7s_added_for_coverage_have_the_structure_they_are_named_for`
+  asserts the folder count and the LZMA2 chunk count of the three `.cb7`s
+  against the committed bytes, so `7z-nonsolid.cb7` cannot stop being
+  multi-folder and `7z-dictreset.cb7` cannot stop having dictionary resets
+  without a test going red.
