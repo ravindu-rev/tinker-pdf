@@ -51,6 +51,7 @@ use crate::Document;
 mod colour;
 mod content;
 mod fonts;
+mod structure;
 mod syntax;
 mod xmp;
 
@@ -143,6 +144,23 @@ pub(crate) mod clauses {
         one: "6.1.3",
         two_three: "6.1.3",
         four: "6.1.2",
+    };
+
+    /// The cross-reference table's own syntax: the subsection headers, the
+    /// twenty-byte entries, and the `trailer` keyword a classic table ends
+    /// with. Numbered 6.1.4 in every part.
+    pub(crate) const CROSS_REFERENCE: ClauseTable = ClauseTable {
+        one: "6.1.4",
+        two_three: "6.1.4",
+        four: "6.1.4",
+    };
+
+    /// Indirect objects and their framing. Parts 2 and 3 renumber it, part 4
+    /// puts it back.
+    pub(crate) const INDIRECT_OBJECTS: ClauseTable = ClauseTable {
+        one: "6.1.8",
+        two_three: "6.1.9",
+        four: "6.1.8",
     };
 
     /// Stream objects, including the external-file keys.
@@ -355,10 +373,13 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.1.8",
-        rule: "indirect objects: the EOL markers around `obj`, `endobj`, \
-               `stream` and `endstream`",
-        because: "the same reason — the parser has consumed the whitespace by \
-                  the time an object exists to have a rule applied to it",
+        rule: "indirect objects: the EOL markers around obj, endobj, \
+                stream and endstream",
+        because: "the parser has consumed the whitespace by the time an object \
+                   exists to have a rule applied to it. The object's header is \
+                   checked now, since the structure group reports the strict \
+                   validator holding every cross-reference entry to the byte it \
+                   names; what is left is the whitespace around it",
     },
     StagedRule {
         clause: "6.1.12",
@@ -535,23 +556,26 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.1.4",
-        rule: "the cross-reference table's own syntax: subsection header \
-                spacing, the prohibition on a cross-reference stream in a \
-                part 1 file, and hybrid-reference files",
-        because: "the reader merges every revision's table into one \
-                   before a rule could see how any of them was spelled. \
-                   Catching this needs the per-section bytes, which the \
-                   strict structural validator in tinker-pdf-cos already \
-                   walks and this group does not",
+        rule: "what is left of the cross-reference table's own syntax: \
+                subsection header spacing, the prohibition on a \
+                cross-reference stream in a part 1 file, and \
+                hybrid-reference files",
+        because: "the structure group joined the strict validator, so the \
+                   per-section bytes are read now and the twenty-byte entry, the \
+                   subsection header and the trailer keyword are rules that run. \
+                   These three are not among them: the first is a spelling the \
+                   strict tier tolerates, and the other two are about which kind \
+                   of table a part permits rather than about how one is written",
     },
     StagedRule {
         clause: "6.1.7",
-        rule: "stream objects: the EOL after the stream keyword, the \
-                endstream keyword's own EOL, and Length against the \
-                actual byte count",
-        because: "the same reason as 6.1.8 - the parser has resolved the \
-                   extent and consumed the whitespace by the time a \
-                   stream object exists to have a rule applied to it",
+        rule: "stream objects: the EOL after the stream keyword and the \
+                endstream keyword's own EOL",
+        because: "Length against the actual byte count is a rule now: the \
+                   structure group reports the strict validator's \
+                   StreamLengthNotExact under this clause, and part 4's row in \
+                   the ledger closed on it. The two EOL markers are still the \
+                   parser's, consumed by the time a stream object exists",
     },
     StagedRule {
         clause: "6.1.9",
@@ -686,6 +710,8 @@ pub enum RuleGroup {
     Metadata,
     /// The COS document, which every group has.
     Syntax,
+    /// A second parse of the whole file with the leniency ladder off.
+    Structure,
     /// `tinker-pdf-font`.
     Fonts,
     /// `tinker-pdf-color`.
@@ -712,6 +738,7 @@ pub(crate) struct Machinery {
     metadata: Cell<u32>,
     fonts: Cell<u32>,
     colour: Cell<u32>,
+    structure: Cell<u32>,
 }
 
 impl Machinery {
@@ -730,6 +757,7 @@ impl Machinery {
         let (counter, enabled) = match group {
             RuleGroup::Metadata => (&self.metadata, self.groups.metadata),
             RuleGroup::Syntax => return self.groups.syntax,
+            RuleGroup::Structure => (&self.structure, self.groups.structure),
             RuleGroup::Fonts => (&self.fonts, self.groups.fonts),
             RuleGroup::Colour => (&self.colour, self.groups.colour),
         };
@@ -1083,6 +1111,19 @@ pub enum FindingKind {
         declared: String,
     },
 
+    // ---- the structural group --------------------------------------------
+    /// A defect the **strict structural validator** found in the bytes, under
+    /// the ISO 19005 clause it belongs to.
+    ///
+    /// Carried as the strict validator's own kind rather than flattened to a
+    /// string, so a caller can match it exhaustively and so the two validators
+    /// cannot drift apart in their names for one defect. It is already on the
+    /// facade, behind [`crate::Document::validate`].
+    Structural {
+        /// What the strict validator called it.
+        defect: tinker_pdf_cos::DefectKind,
+    },
+
     // ---- the colour group (milestone 5) ----------------------------------
     /// `/OutputIntents` is not an array of dictionaries, or an entry is
     /// missing a key its clause requires (6.2.2 / 6.2.3).
@@ -1170,6 +1211,14 @@ pub struct Coverage {
     pub metadata: bool,
     /// File structure: encryption, version, filters, actions, annotations.
     pub syntax: bool,
+    /// The strict structural validator, joined under ISO 19005's clauses.
+    ///
+    /// Its own flag rather than part of `syntax` because it **parses the file a
+    /// second time** with the leniency ladder off, which is the most expensive
+    /// thing here after the font group. The design doc requires a syntax-only
+    /// sweep over the corpus to build no machinery it did not ask for, and a
+    /// second parse is machinery.
+    pub structure: bool,
     /// Fonts: embedding, widths, Unicode mapping.
     pub fonts: bool,
     /// Colour: output intents and device spaces.
@@ -1187,6 +1236,7 @@ impl core::fmt::Display for Coverage {
         for (ran, name) in [
             (self.metadata, "metadata"),
             (self.syntax, "syntax"),
+            (self.structure, "structure"),
             (self.fonts, "fonts"),
             (self.colour, "colour"),
         ] {
@@ -1215,6 +1265,7 @@ impl Coverage {
     pub const IMPLEMENTED: Coverage = Coverage {
         metadata: true,
         syntax: true,
+        structure: true,
         fonts: true,
         colour: true,
     };
@@ -1227,6 +1278,7 @@ impl Coverage {
     pub const FONTS: Coverage = Coverage {
         metadata: false,
         syntax: false,
+        structure: false,
         fonts: true,
         colour: false,
     };
@@ -1248,6 +1300,7 @@ impl Coverage {
     pub const SYNTAX: Coverage = Coverage {
         metadata: false,
         syntax: true,
+        structure: false,
         fonts: false,
         colour: false,
     };
@@ -1256,6 +1309,20 @@ impl Coverage {
     pub const METADATA: Coverage = Coverage {
         metadata: true,
         syntax: false,
+        structure: false,
+        fonts: false,
+        colour: false,
+    };
+
+    /// The strict structural validator alone.
+    ///
+    /// The whole file parsed a second time with the ladder off, and nothing
+    /// else — the sweep that answers "is this file laid out the way ISO 19005
+    /// requires" without asking what it says.
+    pub const STRUCTURE: Coverage = Coverage {
+        metadata: false,
+        syntax: false,
+        structure: true,
         fonts: false,
         colour: false,
     };
@@ -1264,7 +1331,7 @@ impl Coverage {
     /// finding list means the file conforms.
     #[must_use]
     pub fn is_complete(self) -> bool {
-        self.metadata && self.syntax && self.fonts && self.colour
+        self.metadata && self.syntax && self.structure && self.fonts && self.colour
     }
 }
 
@@ -1333,6 +1400,13 @@ pub(crate) fn validate_counting(
         raw.push(Raw::file(clauses::ENCRYPTION, FindingKind::Encrypted));
     }
     syntax::rules(&document.inner, &machinery, flavour, &mut raw);
+    // Guarded at the call site for the same reason the font group is: a second
+    // parse of the whole file is exactly the machinery the laziness
+    // requirement is about, and `reach` records the ask whether or not it is
+    // granted.
+    if groups.structure {
+        structure::rules(&document.inner, &machinery, flavour, &mut raw);
+    }
     // Guarded at the call site rather than inside, and that is the laziness
     // requirement rather than a style: [`Machinery::reach`] records the *ask*
     // whether or not it is granted, so a group whose entry point is called
@@ -1359,6 +1433,7 @@ pub(crate) fn validate_counting(
         coverage: Coverage {
             metadata: groups.metadata,
             syntax: groups.syntax,
+            structure: groups.structure,
             fonts: groups.fonts,
             colour: groups.colour,
         },
@@ -1715,6 +1790,7 @@ mod tests {
         assert!(Coverage {
             metadata: true,
             syntax: true,
+            structure: true,
             fonts: true,
             colour: true
         }

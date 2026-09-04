@@ -121,8 +121,8 @@ make no PDF/A claim, and scoring them would measure the measurement:
 | | files | agree |
 | --- | --- | --- |
 | annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 371 |
-| **total** | **2 371** | **1 201** |
+| annotated `-fail-` | 1 540 | 381 |
+| **total** | **2 371** | **1 211** |
 
 The single disagreement on the `pass` side is a **reading**, recorded as one:
 ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
@@ -161,19 +161,37 @@ against the table its fixture passed, so a clause this build reads wrongly is
 read wrongly in both directions and the pair agrees with itself.
 
 The corpus is where that asymmetry breaks, and only for files somebody else
-made. It is why "1 201 of 2 371" is the honest measure of how much of ISO
+made. It is why "1 211 of 2 371" is the honest measure of how much of ISO
 19005 this build understands, and why a document the writer produces is
 reported as *"this validator and the structural one find nothing"* rather than
 as *"it conforms"*.
 
-Two more limits worth naming rather than discovering:
+One limit closed and one still open, both worth naming rather than
+discovering:
 
 - **A defect that exists only in the bytes is invisible to a rule engine that
-  reads the object graph.** Implementation limits, hexadecimal string syntax,
-  the EOL markers around `obj` and `stream`, cross-reference subsection
-  spelling — the reader has normalised all of it away by the time an object
-  exists to apply a rule to. The strict structural validator already walks
-  those bytes, and joining the two is the honest way to close that family.
+  reads the object graph** — and the readable half of that family is closed.
+  `PdfACoverage::structure` runs the strict structural validator and reports
+  its **structure tier** under ISO 19005's own clauses: the cross-reference
+  table's per-section spelling under 6.1.4, an indirect object's framing under
+  6.1.8, and `/Length` against where `endstream` actually is under 6.1.7. It is
+  a group of its own, and off in `PdfACoverage::SYNTAX`, because it parses the
+  file a second time with the leniency ladder off — which is machinery a
+  syntax-only sweep must not build.
+
+  What it deliberately does **not** report is as much the point. A repair is a
+  statement about this reader rather than about the file. ISO 19005 requires no
+  linearization at all. The header and the trailer already have rules in the
+  syntax group, and one defect reported twice under one clause is worse than
+  once. And five kinds more were mapped and then unmapped **against the
+  corpus**: `StreamDoesNotDecode` and `FreeHeadMissing` between them accounted
+  for 48 of the 52 false positives the first draft added, and a join that
+  closes by adding false positives has closed nothing. The bar moved from
+  1 201 to 1 211 with the false-positive count unchanged at one.
+
+  What is still staged here is what nothing in the tree reads: hexadecimal
+  string syntax, and the EOL markers around `obj` and `stream`. Implementation
+  limits are staged for a different reason and keep their own row.
 - **Level A is written but not validated.** The writer claims it by tagging
   and refuses the ways of getting it wrong; the validator's structure-tree
   rules are staged, so a level A file this build reports nothing about has had

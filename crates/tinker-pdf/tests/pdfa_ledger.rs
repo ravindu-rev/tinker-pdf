@@ -248,16 +248,56 @@ fn the_committed_ledger_is_complete() {
 
 // ---- the census -----------------------------------------------------------
 
+/// Whether the absence of a corpus is a failure rather than a skip.
+///
+/// **A banner is not a gate.** A skipped census prints one line, passes and
+/// exits zero, which in a wall of build output reads exactly like a census that
+/// ran — and `epub_fetched.rs` records what that cost when it happened there: a
+/// suite skipped for most of a session, in every lane, and a stale pin and two
+/// unrecorded re-baselines accumulated behind it.
+///
+/// It matters more here than anywhere, because this file is the **instrument**
+/// the PDF/A work is measured with. `CONTRIBUTING.md` names a campaign whose
+/// subject can skip as one of the two ways a counted injection lies: every
+/// injection against a census that found no corpus reports zero, and a row of
+/// zeros reads as a suite that does not care rather than as a harness that did
+/// not run.
+///
+/// Opt-in, because a contributor with no network still has to be able to run
+/// `cargo test`; set in CI and set by anyone counting an injection here.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
+}
+
+/// The veraPDF corpus's own root, which is **not** `corpus/files`.
+///
+/// This distinction is the whole measurement, and getting it wrong made the
+/// bar read `0/0` for as long as it did. [`suite_of`] takes the first
+/// component of a file's path relative to this root and asks whether it names
+/// a PDF/A suite; rooted at `corpus/files`, that first component is `verapdf`,
+/// which names no suite, so **every one of the 2 896 annotated files was
+/// excluded as a test of some other standard** and the census passed over
+/// nothing while printing a plausible page of output.
+///
+/// So the root is the corpus directory itself, and `corpus/files/verapdf` is
+/// tried before `corpus/files` for a `TINKER_CORPUS` that names the fetch
+/// directory rather than the corpus. `a_census_that_measured_nothing_is_a
+/// _failure` is what stops the same thing happening the next way round.
 fn corpus_root() -> Option<PathBuf> {
+    let candidate = |path: PathBuf| -> Option<PathBuf> {
+        if path.join("verapdf").is_dir() {
+            return Some(path.join("verapdf"));
+        }
+        path.is_dir().then_some(path)
+    };
     if let Ok(path) = std::env::var("TINKER_CORPUS") {
-        let path = PathBuf::from(path);
-        return path.is_dir().then_some(path);
+        return candidate(PathBuf::from(path));
     }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/files")
         .canonicalize()
         .ok()
-        .filter(|path| path.is_dir())
+        .and_then(candidate)
 }
 
 fn pdfs_under(root: &Path, into: &mut Vec<PathBuf>) {
@@ -393,6 +433,10 @@ impl Tally {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn agreement_with_the_corpus_annotations_per_clause_group() {
     let Some(root) = corpus_root() else {
+        assert!(
+            !required(),
+            "TINKER_CORPUS_REQUIRED is set and there is no corpus at TINKER_CORPUS:              this census would have passed over nothing"
+        );
         println!("SKIPPED (no corpus; set TINKER_CORPUS to the fetched corpus/files)");
         return;
     };
@@ -534,6 +578,16 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
         bar.fail_disagreed
     );
 
+    // A census that excluded everything is not a census. The bar read `0/0`
+    // for as long as the root was `corpus/files` rather than the corpus, and
+    // it printed this whole page while doing it -- which is exactly the shape
+    // `docs/verification.md` calls out: a check that can be absent is red, not
+    // green, and a plausible page of output is the worst kind of absent.
+    assert!(
+        bar.total() > 0,
+        "the bar is empty: every annotated file was excluded, so the root is not the corpus own root -- see corpus_root"
+    );
+
     println!(
         "\nnot tests of PDF/A, reported and excluded from the bar — a fixture \
          for another standard makes no PDF/A claim, so judging it against \
@@ -639,6 +693,10 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn a_syntax_only_sweep_over_the_whole_corpus() {
     let Some(root) = corpus_root() else {
+        assert!(
+            !required(),
+            "TINKER_CORPUS_REQUIRED is set and there is no corpus at TINKER_CORPUS:              this census would have passed over nothing"
+        );
         println!("SKIPPED (no corpus; set TINKER_CORPUS to the fetched corpus/files)");
         return;
     };

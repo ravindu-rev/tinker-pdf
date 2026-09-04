@@ -304,6 +304,42 @@ genuinely needs, the flavour claim, so the mechanism fires on nearly every
 document in the corpus. Injecting a font rule into the syntax group fails four
 of the workspace's 4 403 tests.
 
+## What the structural join measured
+
+*Recorded 4 September 2026, tier 1 of the roadmap.* Same corpus, same
+2 371-file bar.
+
+**1 211 of 2 371 agree, against 1 201 before, with the false-positive count
+unchanged at one.** The join reports the strict validator's structure tier
+under ISO 19005's clauses; what it took to keep that second number still is the
+part worth recording.
+
+| | files | agreed before | agreed after |
+| --- | --- | --- | --- |
+| annotated `-pass-` | 831 | 830 | 830 |
+| annotated `-fail-` | 1 540 | 371 | 381 |
+| **total** | **2 371** | **1 201** | **1 211** |
+
+The first draft mapped every structural defect kind it could name and scored
+**1 206** with **53** false positives against the recorded one. Two kinds
+accounted for 48 of the 52 new ones: `StreamDoesNotDecode`, which is a
+statement about how forgiving this reader has to be rather than about what the
+standard requires, and `FreeHeadMissing`, which is a *classic table's* concept
+that a file with a cross-reference stream cannot satisfy and parts 2 to 4 do
+not ask it to. `EntryPastSize` (two files) is 7.5.5's instruction to a reader,
+and `StartxrefNotASection` fires on one `pass` file, which is not enough to
+tell that file's defect from a reading of Annex F. All five are refused a
+clause, each with its count and its reason in `pdfa/structure.rs`.
+
+**The census itself was measuring nothing, and had been.** `suite_of` takes the
+first path component of a file relative to the corpus root and asks whether it
+names a PDF/A suite; rooted at `corpus/files`, that component is `verapdf`,
+which names none — so every one of the 2 896 annotated files was excluded as a
+test of some other standard, the bar printed `0/0`, and a full page of
+plausible output came with it. The root now finds the corpus inside a fetch
+directory, and an empty bar is an assertion rather than a printed zero. The
+`1 201` above was reproduced by switching the new group off, not carried.
+
 ## What milestones 5 and 6 actually measured
 
 *Recorded August 2026, at the commit that landed the writer profile.* Same

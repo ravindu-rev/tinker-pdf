@@ -143,8 +143,19 @@ impl Fixture {
         }
         let xref_at = out.len() as u64;
         out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", highest + 1).as_bytes());
+        // 7.5.4: an object number the file does not define is a **free**
+        // entry, not an in-use one pointing at offset zero. Writing `n` for
+        // a gap names the file header as an object header, which the strict
+        // structural validator reports as `ObjectHeaderAbsent` -- and it was
+        // right: these fixtures number their objects sparsely, so every one
+        // of them carried two such entries until the PDF/A group learned to
+        // ask it.
         for entry in offsets.iter().skip(1) {
-            out.extend_from_slice(format!("{entry:010} 00000 n \n").as_bytes());
+            if *entry == 0 {
+                out.extend_from_slice(b"0000000000 65535 f \n");
+            } else {
+                out.extend_from_slice(format!("{entry:010} 00000 n \n").as_bytes());
+            }
         }
         out.extend_from_slice(
             format!(
