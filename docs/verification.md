@@ -855,6 +855,23 @@ files committed once, with the commands, the tool version and the date in
 its header. It was described here and in its own name as an oracle, and it
 was not one.
 
+**Whether a picture may be compared against an outside viewer, decided.**
+*5 September 2026, ruling 13's amendment.* The first of the four properties
+below is the one a person keeps reaching for: nobody here knows what those
+4 525 pages should look like, and a screenshot from a viewer somebody else
+wrote would say. The decision is that such a comparison is **admissible as an
+input and never as a check** — the standing `jpx_reference.rs`'s committed
+decodes and `tests/epub/EPUBCHECK.tsv`'s verdicts already have. It may be
+recorded with the tool, its version, the command and the date; it may be read
+by a person and cited in a document; it may not be re-run, may not gate a
+build, and may not be called a test.
+
+What that buys is small and real: a dated measurement is evidence about one
+day, it decays visibly, and nobody has to trust it tomorrow. What it does not
+buy is the property below, which stays gone. Tier 1's reviewed goldens remain
+the only first-party answer to "is this the picture the clause describes", and
+they are worth exactly what the review that produced them was worth.
+
 **What does not come back.** Four properties leave this suite with the
 oracles, and no first-party mechanism returns them:
 

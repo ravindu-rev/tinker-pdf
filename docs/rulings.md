@@ -163,6 +163,24 @@ living in one feature's head.
     gap is manageable; a suite that has quietly stopped proving something
     is not.
 
+    **Amended 5 September 2026, on the question the roadmap's tier 0 asked:
+    is a one-time visual comparison against an outside viewer admissible?**
+    Yes, as an input, and never as a check. It is the same standing the
+    committed JPEG 2000 decodes already have in `jpx_reference.rs` and the
+    epubcheck verdicts have in `tests/epub/EPUBCHECK.tsv`: bytes a program
+    produced once, on a named day, recorded with the tool, its version and
+    the command. Such a record may be cited in a document and read by a
+    person. It may not be re-run, it may not gate anything, and it may not
+    be called a test — the moment it decides a build, an implementation this
+    project does not own has said whether the output is right.
+
+    The distinction is not a loophole and it is worth stating why it holds.
+    A dated measurement is *evidence about one day*, and it decays: nobody
+    re-runs it, so it cannot silently start disagreeing, and a reader sees
+    its date. A check is *evidence about now*, and a check this project does
+    not own is one it cannot answer for on the day it breaks. The two
+    failure modes are different enough to be worth different words.
+
 ## How to add a ruling
 
 State it in one bold sentence, name the features it binds, give the reason
