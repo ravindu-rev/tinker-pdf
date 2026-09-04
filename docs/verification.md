@@ -845,10 +845,11 @@ been.**
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in
-`crates/tinker-pdf/tests/bounds_ledger.rs` — 34 rows, each measured against
+`crates/tinker-pdf/tests/bounds_ledger.rs` — **37 rows**, each measured against
 a real book, comic or document rather than guessed. The ledger also asserts
-that no bound is proved by a clock (`Instant::now` is banned from the
-file), so the caps are properties of inputs, not of machines.
+that no bound is proved by a clock — `Instant::now` is banned from every source
+a row names as firing it — so the caps are properties of inputs, not of
+machines.
 
 ## Injection: assertions are counted, not assumed
 

@@ -99,15 +99,49 @@ pub enum IccError {
 /// The most tags a profile may declare.
 ///
 /// The tag table is `12 * count` bytes and the count is a 32-bit field, so it
-/// is checked before the table is walked (ruling 1). The corpus's busiest
-/// profile declares seventeen.
+/// is checked before the table is walked (ruling 1).
+///
+/// | | Tags |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 7 |
+/// | A 200-page comic archive | 0 |
+/// | The busiest profile in the corpus, reached as an XPS `ContextColor` part | 18 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **1 024** |
+///
+/// The two zeros are facts about those formats rather than absences of
+/// measurement, and both have the same cause: nothing in this engine reads a
+/// PNG `iCCP` chunk or a JPEG `APP2` profile, so a comic page and a book
+/// picture carry their profiles past this parser without opening them. A fixed
+/// document does not, because 15.2.5's `ContextColor` names a profile part,
+/// `xps::profiles` embeds it verbatim as an `/ICCBased` space, and rendering
+/// the synthesised document hands it to [`Profile::parse`] like any other.
+///
+/// Reachable: the count is a 32-bit field at offset 128 and it is read before
+/// the table it describes, so **132 bytes** may declare 4 294 967 295 tags —
+/// which is the whole reason the check sits where it does, and what
+/// `a_tag_count_past_the_cap_is_refused_before_the_table_is_walked` builds.
 pub const MAX_ICC_TAGS: u32 = 1024;
 
 /// The most bytes a profile may be.
 ///
-/// The largest in the corpus is 718 672, a printer profile carrying a full set
-/// of lookup tables; this is the next power of two above it, which leaves the
-/// bound clearing the thing the format is for by better than a factor of two.
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 392 |
+/// | A 200-page comic archive | 0 |
+/// | The largest profile in the corpus: a printer profile carrying a full set of lookup tables | 718 672 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **2 MiB** |
+///
+/// The next power of two above the corpus's largest, which leaves the bound
+/// clearing the thing the format is for by better than a factor of two. The
+/// two zeros are [`MAX_ICC_TAGS`]'s, for its reason.
+///
+/// Reachable: a profile arrives as a decoded stream, and
+/// `tinker_pdf_cos::limits::MAX_DECODED_STREAM` bounds one of those at 128 MiB
+/// — sixty-four times this cap, so the cap is a cap.
+/// `a_profile_past_the_byte_cap_is_refused_before_its_signature_is_read` builds
+/// one past it.
 pub const MAX_ICC_BYTES: usize = 1 << 21;
 
 /// A tone reproduction curve.
@@ -1228,6 +1262,106 @@ mod tests {
         };
         assert_eq!(g, 563.0 / 256.0, "u8Fixed8 quantises to 1/256");
         assert!((g - 2.2).abs() < 1.0 / 256.0);
+    }
+
+    /// §7.2's 128-byte header and a tag count, and nothing behind them: the
+    /// smallest thing [`Profile::parse`] will read a count out of.
+    ///
+    /// The declared size at offset 0 is 132 as well, so a refusal from one of
+    /// these is the tag count's and not [`IccError::SizeMismatch`] standing in
+    /// front of it.
+    fn header_declaring(tags: u32) -> Vec<u8> {
+        let mut out = matrix_profile()[..132].to_vec();
+        out[0..4].copy_from_slice(&132u32.to_be_bytes());
+        out[128..132].copy_from_slice(&tags.to_be_bytes());
+        out
+    }
+
+    /// **[`MAX_ICC_BYTES`] fires, and it fires before anything else does.**
+    ///
+    /// The row `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving this
+    /// cap. It is a separate test from
+    /// [`every_refusal_is_reachable_and_named`], which also builds an
+    /// over-large profile among its ten: the ledger asks each bound to name
+    /// **one** test that fires **it**, so that a test deleted or renamed fails
+    /// the sweep rather than quietly leaving a cap unproven behind nine other
+    /// assertions.
+    ///
+    /// What it adds beyond the refusal is the **order**. The bytes here are all
+    /// zero, so there is no `acsp` at offset 36 and no 132-byte header either;
+    /// a build that measured the profile after reading its signature would
+    /// answer [`IccError::NotAProfile`] or [`IccError::TooShort`] and would
+    /// have looked at a 2 MiB allocation first. Ruling 1: the size is checked
+    /// before the bytes are.
+    ///
+    /// No clock. The assertion is the typed refusal.
+    #[test]
+    fn a_profile_past_the_byte_cap_is_refused_before_its_signature_is_read() {
+        let over = vec![0u8; MAX_ICC_BYTES + 1];
+        assert_eq!(
+            Profile::parse(&over),
+            Err(IccError::TooLarge),
+            "a profile one byte past the cap is refused by name"
+        );
+
+        // And exactly at the cap it is *not* this refusal: the same zeros get
+        // past the size check and fail on the signature instead, which is what
+        // makes the boundary the constant's own rather than an approximation
+        // of it.
+        let at = vec![0u8; MAX_ICC_BYTES];
+        assert_eq!(
+            Profile::parse(&at),
+            Err(IccError::NotAProfile),
+            "a profile exactly at the cap is admitted to the signature check"
+        );
+    }
+
+    /// **[`MAX_ICC_TAGS`] fires, and it fires before the table is walked.**
+    ///
+    /// The row `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving this
+    /// cap, separate from [`every_refusal_is_reachable_and_named`] for the
+    /// reason recorded on the test above.
+    ///
+    /// The second half is the one worth having. A 132-byte profile — a header
+    /// and a count, and nothing behind it — declares 4 294 967 295 tags, and
+    /// the tag table it describes would be 51 GiB. Nothing is allocated,
+    /// because the count is checked where it is read; a build that walked
+    /// first and counted afterwards would answer [`IccError::TooShort`] here,
+    /// forty-eight bytes into a table that does not exist.
+    ///
+    /// No clock. The assertion is the typed refusal.
+    #[test]
+    fn a_tag_count_past_the_cap_is_refused_before_the_table_is_walked() {
+        let mut many = matrix_profile();
+        many[128..132].copy_from_slice(&(MAX_ICC_TAGS + 1).to_be_bytes());
+        assert_eq!(
+            Profile::parse(&many),
+            Err(IccError::TooLarge),
+            "one tag past the cap is refused by name"
+        );
+
+        // The reachability the ledger records: the field is 32 bits wide and
+        // the header it sits in is 132 bytes long. The declared size at offset
+        // 0 is rewritten to match, so what refuses this is the count and not
+        // §7.2's own size disagreeing with the stream.
+        let header_only = header_declaring(u32::MAX);
+        assert_eq!(header_only.len(), 132, "and that is all it takes");
+        assert_eq!(
+            Profile::parse(&header_only),
+            Err(IccError::TooLarge),
+            "132 bytes may declare four billion tags, and are refused for it \
+             rather than walked"
+        );
+
+        // And the cap itself is admitted to the walk, so the constant is the
+        // boundary and not one below it: the table is not there, so this is
+        // `TooShort` rather than `TooLarge`.
+        let at = header_declaring(MAX_ICC_TAGS);
+        assert_eq!(
+            Profile::parse(&at),
+            Err(IccError::TooShort),
+            "a count exactly at the cap is walked rather than refused"
+        );
     }
 
     /// **Every refusal is reachable and named**, which is the half of a
