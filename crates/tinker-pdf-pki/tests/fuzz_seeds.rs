@@ -1,7 +1,8 @@
 //! The committed `pki_der` and `pki_cms` fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/pki_der/` and `fuzz/corpus/pki_cms/` are twenty-two inputs
-//! written from the fixtures in this crate, and the targets that consume them
+//! `fuzz/corpus/pki_der/` and `fuzz/corpus/pki_cms/` are twenty-three inputs —
+//! twenty-two written from the fixtures in this crate and one the first
+//! `pki_der` session found — and the targets that consume them
 //! need nightly and a sanitizer runtime. So the seeds were only ever exercised
 //! when somebody ran `cargo fuzz`, which is not on every commit — and a seed
 //! corpus nothing reads is a corpus that stops describing the parser without
@@ -100,8 +101,19 @@ fn walk(name: &str, data: &[u8], limits: Limits) -> usize {
                 "{name}: an indefinite node not ending in its terminator"
             );
         }
+        // Where the sweep says a subtree is definite, no node in it may say
+        // otherwise, read the other way — the property `cms.rs` refuses a BER
+        // `signedAttrs` on, and the one the first session's crash was.
         if node.require_definite_lengths(&budget).is_ok() {
             assert!(!node.is_indefinite(), "{name}");
+            if let Ok(mut inner) = node.children(&budget) {
+                while let Ok(child) = inner.read() {
+                    assert!(
+                        !child.is_indefinite(),
+                        "{name}: a subtree called definite holds an indefinite node"
+                    );
+                }
+            }
         }
         if let Some(parent) = parent {
             assert!(
@@ -251,6 +263,21 @@ fn each_indefinite_length_seed_reaches_its_own_answer() {
         read(&deep, Limits::new(64, 4_096).allowing_indefinite_lengths()),
         Ok(0..160),
         "and the same bytes read under ceilings that admit forty levels"
+    );
+
+    // The one seed here that a session found rather than a fixture wrote. Its
+    // whole point is the verdict: a sweep bounded only by the outermost node
+    // steps over the `30 80` at offset 23 and calls the subtree definite,
+    // which is a BER `signedAttrs` inside RFC 5652 §5.4's digest.
+    let stepped_over = find("sweep-over-an-indefinite-sibling");
+    let budget = Budget::new(ber);
+    let mut cursor = Cursor::new(&stepped_over, &budget);
+    let outer = cursor.read().expect("the outermost SEQUENCE parses");
+    assert_eq!(
+        outer.require_definite_lengths(&budget),
+        Err(DerError::IndefiniteLength),
+        "the subtree holds an indefinite-length node that a flat sweep can \
+         walk straight past"
     );
 }
 

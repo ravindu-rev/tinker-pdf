@@ -835,12 +835,26 @@ impl<'a> Tlv<'a> {
     /// the absence of one. Each step charges the [`Budget`], so the work is
     /// bounded by the ceiling the rest of the parse spends against.
     ///
+    /// **What the flat sweep alone cannot see, and what supplies it.** Holding
+    /// no stack means holding no record of where the node just descended into
+    /// was supposed to stop, so on its own the sweep is bounded only by *this*
+    /// node's end: a child over-claiming its length steps clean over whatever
+    /// follows it inside its own parent — including a sibling carrying the one
+    /// form this method exists to find, which is then never read at all. So
+    /// every constructed node is checked before it is descended into: its
+    /// immediate children must fill its content exactly, end to end, and none
+    /// of them may carry the form. A subtree whose children tile their parent at
+    /// every level cannot hold a node reaching past an ancestor, which is what
+    /// makes the sweep's positions the real node boundaries rather than
+    /// whatever the arithmetic happened to land on.
+    ///
     /// # Errors
     ///
     /// [`DerError::IndefiniteLength`] for the form itself, at any depth;
     /// otherwise whatever reading a header refused
-    /// ([`DerError::LengthOverrun`] for a length that leaves this node's own
-    /// bytes, which the enclosing parse would already have refused).
+    /// ([`DerError::LengthOverrun`] for a length that leaves the node that
+    /// holds it, which is a refusal here even where the enclosing parse never
+    /// descended far enough to meet it).
     pub fn require_definite_lengths(&self, budget: &Budget) -> Result<(), DerError> {
         if self.indefinite {
             return Err(DerError::IndefiniteLength);
@@ -853,9 +867,11 @@ impl<'a> Tlv<'a> {
         }
         let end = self.raw.len();
         let mut at = self.header_len();
+        // The outermost level, which no descent below will re-check.
+        require_children_tile(self.raw, at, end)?;
         while at < end {
             budget.charge()?;
-            let rest = self.raw.get(at..).ok_or(DerError::LengthOverrun)?;
+            let rest = self.raw.get(at..end).ok_or(DerError::LengthOverrun)?;
             let (_class, constructed, _tag, after_tag) = read_tag(rest)?;
             // Read with the form *allowed*, so that meeting one is refused
             // here by name rather than refused by the length reader for the
@@ -864,8 +880,19 @@ impl<'a> Tlv<'a> {
             let step = match length {
                 Length::Indefinite => return Err(DerError::IndefiniteLength),
                 // Into a constructed node: its children are the octets that
-                // follow its header, and they are the next thing swept.
-                Length::Definite(_) if constructed => after_length,
+                // follow its header, and they are the next thing swept — but
+                // only once they are known to stop where this node stops.
+                Length::Definite(length) if constructed => {
+                    let content = at
+                        .checked_add(after_length)
+                        .ok_or(DerError::LengthOverrun)?;
+                    let stop = content.checked_add(length).ok_or(DerError::LengthOverrun)?;
+                    if stop > end {
+                        return Err(DerError::LengthOverrun);
+                    }
+                    require_children_tile(self.raw, content, stop)?;
+                    after_length
+                }
                 Length::Definite(length) => after_length
                     .checked_add(length)
                     .ok_or(DerError::LengthOverrun)?,
@@ -1679,6 +1706,59 @@ fn read_length(
     Ok((Length::Definite(length), end))
 }
 
+/// Checks that the immediate children of a definite-length constructed node
+/// fill its content exactly, and that none of them carries §8.1.3.6's
+/// indefinite length.
+///
+/// `data` is the enclosing node's own `raw`; `from` is the offset of its first
+/// content octet within it and `to` one past its last. Every child is stepped
+/// over by its *whole* declared width, so landing on `to` exactly is the
+/// property being checked: a child ending past it is
+/// [`DerError::LengthOverrun`], and one stopping short leaves bytes the next
+/// step reads as a header, so the walk either lands or refuses.
+///
+/// # Why this exists and what depends on it
+///
+/// [`Tlv::require_definite_lengths`] sweeps a subtree flat, holding no stack
+/// and therefore no record of where the node it descended into was supposed to
+/// stop. Without this check a child that over-claims its length walks out the
+/// far end of its parent and over whatever sits behind it, so an
+/// indefinite-length node one position further on is stepped over rather than
+/// read — and the sweep reports a subtree as definite that is not one. That is
+/// not a parser nicety: it is the whole of what keeps a BER `signedAttrs` out
+/// of the digest RFC 5652 §5.4 computes a signature over.
+///
+/// The check is deliberately one level deep. Applied to every constructed node
+/// as the sweep meets it, one level at a time is the whole invariant by
+/// induction, and it costs nothing extra to charge for: every node is the
+/// child of exactly one node, so across a whole sweep this reads each header
+/// once against the once-per-node the sweep already charges the [`Budget`]
+/// for.
+fn require_children_tile(data: &[u8], from: usize, to: usize) -> Result<(), DerError> {
+    let mut at = from;
+    while at < to {
+        // Bounded by `to` rather than by the buffer, so that a child's own
+        // *header* cannot be read out of the bytes behind its parent.
+        let rest = data.get(at..to).ok_or(DerError::LengthOverrun)?;
+        let (_class, _constructed, _tag, after_tag) = read_tag(rest)?;
+        // Allowed, so that meeting one is named here rather than refused by
+        // the length reader for the unrelated reason that a parse did not opt
+        // in — a child of this node is inside the subtree §5.4 digests.
+        let (length, after_length) = read_length(rest, after_tag, true)?;
+        let width = match length {
+            Length::Indefinite => return Err(DerError::IndefiniteLength),
+            Length::Definite(length) => after_length
+                .checked_add(length)
+                .ok_or(DerError::LengthOverrun)?,
+        };
+        at = at.checked_add(width).ok_or(DerError::LengthOverrun)?;
+        if at > to {
+            return Err(DerError::LengthOverrun);
+        }
+    }
+    Ok(())
+}
+
 /// Finds where an indefinite-length node's content stops, by walking what is
 /// inside it (§8.1.5).
 ///
@@ -2242,6 +2322,86 @@ pub(crate) mod tests {
             Ok(()),
             "content that looks like an encoding is still content"
         );
+    }
+
+    /// The first `pki_der` session's crash, 4 September 2026, reduced by
+    /// `cargo fuzz tmin` to these 42 bytes and committed as
+    /// `fuzz/corpus/pki_der/sweep-over-an-indefinite-sibling`.
+    ///
+    /// The defect was not a panic in this crate: it was the *answer*. The
+    /// harness asserts that a subtree the sweep calls definite holds no
+    /// indefinite node, read a second way, and the two readings disagreed —
+    /// which for the one method standing between a BER `signedAttrs` and RFC
+    /// 5652 §5.4's digest is worse than a crash would have been.
+    #[test]
+    fn a_child_over_claiming_its_length_cannot_step_over_an_indefinite_node() {
+        let data = unhex(
+            "30 27 31 13 30 6c 65 20 01 10 00 00 ff ff ff ff \
+             ff 43 41 ff ff 30 24 30 80 30 80 02 03 00 00 05 \
+             00 00 01 00 00 00 00 00 00 01",
+        );
+        assert_eq!(data.len(), 42, "the minimised input, verbatim");
+
+        // `fuzz/fuzz_targets/pki_der.rs`'s own ceilings, on the pass it
+        // reproduced on: the one that allows X.690 §8.1.3.6's form.
+        let budget = Budget::new(Limits::new(12, 4_096).allowing_indefinite_lengths());
+        let mut cursor = Cursor::new(&data, &budget);
+        let outer = cursor.read().expect("the outermost SEQUENCE parses");
+
+        assert_eq!(
+            outer.require_definite_lengths(&budget),
+            Err(DerError::IndefiniteLength),
+            "the subtree holds two indefinite-length nodes"
+        );
+
+        // And the refusal names the right thing rather than merely refusing:
+        // read structurally, the SET ends at 23 and the node beginning there
+        // is the one the sweep used to walk over. The `01 10` inside the SET
+        // claims sixteen content octets, which reach offset 26 — past the SET
+        // that holds it, past the `30 80`, and into what follows.
+        let mut children = outer.children(&budget).expect("constructed");
+        let set = children.read().expect("the SET");
+        assert_eq!(set.range(), 2..23);
+        assert!(!set.is_indefinite());
+        let hidden = children.read().expect("the node the sweep stepped over");
+        assert_eq!(hidden.range(), 23..38);
+        assert!(
+            hidden.is_indefinite(),
+            "the node whose form the sweep has to see"
+        );
+    }
+
+    #[test]
+    fn a_child_may_not_declare_more_bytes_than_its_parent_holds() {
+        let budget = Budget::new(BER);
+
+        // The same defect one level further in, where the check that catches
+        // it is the one made on descending rather than the one made on this
+        // node: `04 02` reaches past the SEQUENCE holding it and over the
+        // `30 80` that is that SEQUENCE's own next sibling.
+        let data = unhex("30 0C 30 0A 30 02 04 02 30 80 00 00 05 00");
+        let tlv = one_ber(&data).expect("a SEQUENCE");
+        assert_eq!(
+            tlv.require_definite_lengths(&budget),
+            Err(DerError::IndefiniteLength)
+        );
+
+        // An over-claim with nothing hidden behind it is still a refusal:
+        // the inner SEQUENCE says five content octets where two remain, and
+        // a sweep bounded only by the outermost node would step past it into
+        // the `00 00` and call the subtree well formed.
+        let data = unhex("30 04 30 05 00 00");
+        let tlv = one_ber(&data).expect("a SEQUENCE");
+        assert_eq!(
+            tlv.require_definite_lengths(&budget),
+            Err(DerError::LengthOverrun)
+        );
+
+        // A child that stops short of its parent is not a refusal by itself —
+        // the bytes left over are the next child, and here they are one.
+        let data = unhex("30 06 30 00 04 02 00 00");
+        let tlv = one_ber(&data).expect("a SEQUENCE");
+        assert_eq!(tlv.require_definite_lengths(&budget), Ok(()));
     }
 
     #[test]
