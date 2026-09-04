@@ -135,6 +135,17 @@ pub struct Image {
     pub px: (f64, f64),
     /// Dots per inch, horizontally and vertically, defaulting to 13.4.1's 96.
     pub dpi: (f64, f64),
+    /// What this part reached the document **approximately**, if anything.
+    ///
+    /// The success channel for ruling 10, and it exists because `place_one`
+    /// returns `Result<Image, XpsElementDefect>`: a refusal has the `Err` side
+    /// and a leniency had nowhere to go, so a disagreement between 7.2.3.5's
+    /// content type and the magic bytes was resolved silently. It rides here
+    /// instead and `paint.rs`'s `State::tile` pushes it into the page's
+    /// defects, where `warn` deduplicates it — this is set once per *part* and
+    /// read once per *use*, so a page tiling one picture forty times says it
+    /// once.
+    pub lenience: Option<XpsElementDefect>,
 }
 
 impl Image {
@@ -256,39 +267,37 @@ impl Images {
         // the same reason. There is now no format 9.1.5 admits that this
         // function declines before looking.
         //
-        // What remains is the ordinary agreement between the two rules.
-        let kind = match (declared, actual) {
-            // They agree, or only one of them spoke.
-            (Some(a), Some(b)) if a == b => a,
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
+        // What remains is the ordinary agreement between the two rules, and
+        // the one case where they disagree.
+        let (kind, lenience) = match (declared, actual) {
+            // They agree, or only one of them spoke. Silence from one rule is
+            // not disagreement with it: 7.2.3.5 lets a part carry no resolved
+            // content type, and three of 9.1.5's four formats share a two-byte
+            // prefix with something that is not an image at all.
+            (Some(a), Some(b)) if a == b => (a, None),
+            (Some(a), None) => (a, None),
+            (None, Some(b)) => (b, None),
             // They disagree about two formats this build can draw. The bytes
-            // win, because a decoder reads bytes.
+            // win, because a decoder reads bytes — and the leniency is named,
+            // which is ruling 10 and is what this arm owed for three
+            // milestones.
             //
-            // **And nothing says so, which ruling 10 wants and this does not
-            // give.** The channel is the problem rather than the will: this
-            // function returns `Result<Image, XpsElementDefect>`, so the only
-            // thing it can report is a *refusal*, and a leniency has nowhere
-            // to go. The comment here once claimed the disagreement was named;
-            // it never was.
+            // **The name rides the success side**, on `Image::lenience`, for
+            // the reason the gap existed at all: this function returns
+            // `Result<Image, XpsElementDefect>`, so its `Err` is a *refusal*
+            // and a leniency reported there would lose the picture. The push
+            // into the page's defects is `paint.rs`'s `State::tile`.
             //
-            // **This arm has got steadily more reachable, and is now fully
-            // ordinary.** It was nearly dead when TIFF and JPEG XR were both
-            // refused above, so only PNG-versus-JPEG could arrive. Wiring TIFF
-            // made it ordinary for three formats. Wiring JPEG XR — and
-            // deleting the loop that used to refuse it — makes every one of
-            // 9.1.5's four formats reachable on both sides of the
-            // disagreement, so there are now twelve ordered pairs that take
-            // this arm where there were two.
-            //
-            // Closing it needs a leniency variant on `XpsElementDefect` and a
-            // push into `paint.rs`'s `defects`, which is a change to two files
-            // this commit deliberately does not touch. Pinned meanwhile by
-            // `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing`
-            // in `tests/xps_images.rs`, and carried as a row in
-            // `docs/features/xps.md` so that it is a known debt rather than a
-            // surprise.
-            (Some(_), Some(b)) => b,
+            // **This arm is fully ordinary now.** It was nearly dead when TIFF
+            // and JPEG XR were both refused before the two rules were
+            // compared, so only PNG-versus-JPEG could arrive. Wiring TIFF made
+            // it ordinary for three formats. Wiring JPEG XR — and deleting the
+            // loop that used to refuse it — makes every one of 9.1.5's four
+            // formats reachable on both sides, so twelve ordered pairs take it
+            // where two did. Pinned by
+            // `a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named`
+            // in `tests/xps_images.rs`.
+            (Some(_), Some(b)) => (b, Some(XpsElementDefect::ImageMediaTypeMismatch)),
             (None, None) => return Err(XpsElementDefect::ImageFormatUnsupported),
         };
 
@@ -303,6 +312,7 @@ impl Images {
                     resource,
                     px: (f64::from(w), f64::from(h)),
                     dpi: jfif_dpi(bytes).unwrap_or((DEFAULT_DPI, DEFAULT_DPI)),
+                    lenience,
                 }
             }
             Kind::Png => {
@@ -318,6 +328,7 @@ impl Images {
                     resource,
                     px: (f64::from(w), f64::from(h)),
                     dpi: phys_dpi(bytes).unwrap_or((DEFAULT_DPI, DEFAULT_DPI)),
+                    lenience,
                 }
             }
             // 9.1.5's TIFF. Most of one reaches the page as its own bytes:
@@ -342,6 +353,7 @@ impl Images {
                     resource,
                     px: (f64::from(w), f64::from(h)),
                     dpi,
+                    lenience,
                 }
             }
             // 9.1.5.1's JPEG XR, the format OPC recommends and nothing
@@ -371,6 +383,7 @@ impl Images {
                     resource,
                     px: (f64::from(w), f64::from(h)),
                     dpi,
+                    lenience,
                 }
             }
         };

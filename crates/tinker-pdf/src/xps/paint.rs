@@ -1412,6 +1412,20 @@ impl State<'_> {
         let image = self.around.images.get(self.around.part, &tile.source)?;
         let resource = image.resource.clone();
         let source = image.units();
+        // The other channel out of `Images::get`, and the one a `Result` has
+        // no room for: the picture *arrived*, and not exactly as the package
+        // described it. Today that is 7.2.3.5's content type disagreeing with
+        // the magic bytes, which `Images::place_one` resolves in favour of the
+        // bytes because a decoder reads bytes.
+        //
+        // Said here rather than in `place_one` because `place_one` runs once
+        // per part and this runs once per *use*, and `warn` deduplicates: a
+        // page whose one mis-declared picture tiles forty times says it once,
+        // and a page that never uses the part says nothing at all.
+        let lenience = image.lenience;
+        if let Some(defect) = lenience {
+            self.warn(defect);
+        }
         let placed = Placed::of(&tile.placement, source, bbox)?;
 
         // The cell's content: the image drawn once per reflection. 8.9.5.2 puts

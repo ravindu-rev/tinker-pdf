@@ -786,6 +786,23 @@ pub enum XpsElementDefect {
     /// sRGB fallback -- so the picture is refused rather than drawn in colours
     /// the file did not ask for.
     ImageProfileUnsupported,
+    /// 7.2.3.5's content type and the part's magic bytes name **two different**
+    /// formats of 9.1.5's four, and the bytes decided.
+    ///
+    /// The picture **is drawn**, which is what makes this the image side of
+    /// [`XpsElementDefect::BrushApproximated`] rather than a refusal: a decoder
+    /// reads bytes, so a `.tiff` re-declared `image/png` is still a TIFF and
+    /// refusing it would lose a picture the package plainly holds. What is lost
+    /// is the producer's statement about the part, and that is the leniency —
+    /// so it is named here, once per part rather than once per use, and a
+    /// reader repairing the package is told which of the two rules was ignored.
+    ///
+    /// Not reported where only one rule spoke: a part with no content type, or
+    /// one whose bytes match no signature, is *silence* from that rule and not
+    /// disagreement with it. Not reported either where the bytes then failed to
+    /// decode — that is [`XpsElementDefect::ImageUnreadable`], and a leniency
+    /// about a picture nobody drew would be a fact about nothing.
+    ImageMediaTypeMismatch,
     /// Markup this build does not draw: an element from another vocabulary, a
     /// property element nothing here reads, a dictionary entry with no
     /// `x:Key`.
@@ -833,6 +850,9 @@ impl core::fmt::Display for XpsElementDefect {
             }
             XpsElementDefect::ImageUnreadable => "an image whose bytes will not decode",
             XpsElementDefect::ImageProfileUnsupported => "an image behind a colour profile",
+            XpsElementDefect::ImageMediaTypeMismatch => {
+                "an image drawn from its bytes, against its content type"
+            }
             XpsElementDefect::ElementUnknown => "markup this build does not draw",
         })
     }
