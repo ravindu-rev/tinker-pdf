@@ -1238,7 +1238,14 @@ pub fn synthesise(
             if clip {
                 page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
             }
-            unwritable_runs += draw_page(&mut builder, &mut page, laid, &chapter_frame, &fonts);
+            unwritable_runs += draw_page(
+                &mut builder,
+                &mut page,
+                laid,
+                &chapter_frame,
+                &fonts,
+                chapter.reading.as_ref().map(|reading| &reading.dom),
+            );
             if clip {
                 page.raw(b"Q");
             }

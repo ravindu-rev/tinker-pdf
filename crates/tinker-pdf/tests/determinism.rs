@@ -1973,6 +1973,21 @@ fn epub_book() -> Vec<u8> {
 /// Every entry is a claim that this page renders to these exact bytes on
 /// every supported target. Changing one is a deliberate act; see the module
 /// documentation for which of the two failures you are looking at.
+///
+/// # The book hash moved once, deliberately
+///
+/// `352adfa4…` became `ed6ba37c…` when EPUB output gained a **structure
+/// tree**: `/MarkInfo`, `/StructTreeRoot`, a `/ParentTree`, `/StructParents`
+/// on every page, and a `BDC`/`EMC` pair around every run. None of that is on
+/// a rendered page — the raster fingerprints did not move and could not have —
+/// which is exactly the class of change this hash exists to catch, and the
+/// same reason milestone 5's annotations are named above it.
+///
+/// **Three hashes moved and no raster one did**, which is the shape that says
+/// it was one change: the synthesised book and the 432x648 page box moved to
+/// the *same* value, because they are the same bytes, and the 600x800 box to
+/// its own. A structure tree that had touched the page content would have
+/// moved a raster fingerprint too, and none of them shifted.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
     // 9600, 3600 and 3230 pixels.
@@ -2759,7 +2774,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "352adfa42ef1e3e4bd44d7b939523232453289986de083f0c4594886f4d360fb",
+        "ed6ba37cf042a20c6181da799ea15da466340f1ee938e322ad41dbe61fc00ecb",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2845,12 +2860,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "352adfa42ef1e3e4bd44d7b939523232453289986de083f0c4594886f4d360fb",
+        "ed6ba37cf042a20c6181da799ea15da466340f1ee938e322ad41dbe61fc00ecb",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "7bfc3ef059ba6e2c1233f2e9cc0e23f2db572dca82e69e23f2f0b2d312f46e9b",
+        "4f2013c30778d1f9f023a18db7be70c28fe65840a2261430a2a04c73b082d719",
         "the book at 600 x 800 is not the bytes it was"
     );
 

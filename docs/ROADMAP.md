@@ -449,7 +449,23 @@ Six things are worth carrying forward rather than filing away.
   the page *decision* does not move the *drawing* — a glyph is only on the
   page it is drawn on. Removing the push instead gives 136 966, sixty times
   worse. What is left needs a float's glyphs on a different page from its
-  box, which a PDF's text layer cannot express.
+  box, which a PDF's **content stream** cannot express — and ISO 32000 §14.8
+  says the content stream is not where reading order lives, so the fourth
+  attempt was a real one: EPUB output now carries a full structure tree, and
+  extraction in **logical** order gives Beowulf the same **2 182**. A
+  structure element's marked-content kids live on the page their `BDC` was
+  written on and each page's roots are wrapped separately, so logical order
+  is page order and then reading order — already what content order is here.
+  Closing it needs a structure element whose kids span pages, which
+  `PageBuilder` builds per page and cannot express.
+- **EPUB output is a tagged PDF**, which came out of that attempt and is
+  worth having on its own: `/MarkInfo`, `/StructTreeRoot`, a `/ParentTree`,
+  `/StructParents` per page and an `/MCID` around every run, with logical
+  order taken from the source document's own element tree. Held against the
+  **source XHTML** rather than against this engine's own reader, at nine page
+  boxes. Its non-goals — PDF/UA, `/Alt`, `/Lang`, `/RoleMap`, `<a>` as a
+  `/Link`, table `/Headers` — are named in
+  [features/epub.md](features/epub.md) rather than absent.
 
 ## How this file changes
 
