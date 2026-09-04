@@ -38,6 +38,17 @@ pub struct MarkedProps {
     pub lang: Option<String>,
     /// `/E`: what an abbreviation stands for (14.9.5).
     pub expansion: Option<String>,
+    /// Which content stream the `BDC` that opened this sequence was written
+    /// in: a form XObject's packed indirect reference, or `0` for the page's
+    /// own stream.
+    ///
+    /// **Not read from the property list.** 14.7.4.2 numbers marked-content
+    /// sequences within a content stream, so `/MCID 0` in one form and
+    /// `/MCID 0` in another are two sequences and not one; the identifier
+    /// alone cannot say which. Only the interpreter knows which stream it is
+    /// running, so it stamps this on the way past — which is why it is the
+    /// one field here a producer did not write.
+    pub stream: u64,
 }
 
 impl MarkedProps {
@@ -47,6 +58,11 @@ impl MarkedProps {
     /// the same as a `BDC` with no list at all to a producer, but it is to
     /// every consumer here — so the two are collapsed at the seam rather
     /// than at each device.
+    ///
+    /// [`MarkedProps::stream`] is deliberately not one of the fields checked:
+    /// it is stamped by the interpreter *after* this decides whether the list
+    /// was worth keeping, and counting it would make every `BDC` in a form
+    /// non-empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.mcid.is_none()

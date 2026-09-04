@@ -143,6 +143,15 @@ Three properties are worth stating because each was a decision:
 - **Orphans are counted, not appended.** A character carrying an `/MCID`
   no element claims is reported as a number, not silently added to the end
   where it would look like reading order.
+- **A content item is identified by its stream and its number, never by
+  the number alone.** 14.7.4.2 numbers marked-content sequences *within a
+  content stream*, so `/MCID 0` in one form XObject and `/MCID 0` in
+  another are two sequences; `/MCR /Stm` says which, `/StmOwn` says which
+  object owns that stream, and both are read. An `/MCR` naming no `/Stm`
+  means the page's own content stream, which is what almost every one of
+  them is. Without the pair, two forms on one page with overlapping ids
+  give every element both sequences — a page that says everything twice
+  while `matched`, `orphans` and `unmarked` all still look right.
 
 Element types are kept **twice** — `raw_type` as the file wrote it and
 `standard_type` after `/RoleMap` — because a consumer that wants to know a
@@ -170,8 +179,11 @@ architecture rather than public API; see [architecture](../architecture.md).
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
 | Text shaping — Arabic joining, ligature substitution, bidi reordering | — | `TextLine::rtl` reports the dominant direction and reorders nothing; shaping is staged as its own work | [ROADMAP](../ROADMAP.md) |
 | Reading order for an **untagged** document | — | `plain_text()` orders lines and blocks geometrically and always has; a structure tree is read when the document carries one, and never invented when it does not | 14.8 |
-| `/MCR /Stm` and `/StmOwn` — a marked-content reference naming a stream other than the page's | — | `/MCID` and `/Pg` are read and these are not, so two form XObjects on one page with overlapping ids would collide; six orphans across 717 tagged corpus files says it is not biting, which is not the same as shown safe | 14.7.4.2 |
-| `/ActualText` on a property list carrying no `/MCID` | — | the map is `/MCID`-keyed, so it reaches no consumer | 14.9.4 |
+| An `/MCR` whose `/Stm` does not name a content stream | `StructureWarning::ContentStreamNotAStream { element, stream }` | a stream is always indirect (7.3.8), so the value names nothing that could hold a sequence; read as though `/Stm` were absent rather than keyed on an object with no content, which would make the sequence findable nowhere | 14.7.4.2 |
+| An `/MCR` carrying `/StmOwn` without the `/Stm` it qualifies | `StructureWarning::StreamOwnerWithoutStream { element, owner }` | Table 324 permits the owner only beside a stream; an owner alone names the owner of a stream nobody named, so it is dropped | 14.7.4.2 |
+| An `/MCR` with no `/Stm` whose `/MCID` is in no page-stream sequence but in exactly one other stream on the page | `StructureWarning::ContentStreamAssumed { page, mcid }` | a producer that tags content inside a form and omits `/Stm` writes something 14.7.4.2 does not define; where one reading exists it is taken and named, and where two streams share the identifier it is refused, because that is the collision `/Stm` exists to resolve | 14.7.4.2 |
+| A marked-content sequence in a stream `/StmOwn` says another object owns — an annotation's `/AP` | — | page text extraction runs the page's stream and the forms it invokes, never an annotation's appearance, so such a reference matches nothing here rather than taking whatever else shares its number; extracting appearance-stream text is separate work | 14.7.4.2, 12.5.5 |
+| `/ActualText` on a property list carrying no `/MCID` | — | the map is keyed by `(stream, /MCID)`, so a list with no identifier reaches no consumer | 14.9.4 |
 | `/Alt`, `/ActualText`, `/E` and `/Lang` on **written** structure elements | — | `PageBuilder::tagged` writes the type and the content, not the 14.9 properties; an empty element is therefore dropped rather than kept, since an empty `Figure` carrying `/Alt` is the case that would want one | 14.9 |
 
 The rendering side of a hidden layer is reported too —

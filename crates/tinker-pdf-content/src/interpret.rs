@@ -40,6 +40,24 @@ pub struct Form {
     pub bbox: Option<[f64; 4]>,
     /// `/Group` with `/S /Transparency` (11.6.6), when the form is one.
     pub group: Option<Group>,
+    /// The form's own indirect reference, packed as `num << 16 | gen`, and
+    /// `0` when the caller reached the stream without one.
+    ///
+    /// 14.7.4.2 numbers marked-content sequences **within a content stream**,
+    /// so an `/MCID` only identifies a sequence beside the stream it was
+    /// written in: two forms on one page may each write `/MCID 0`, and a
+    /// structure join keyed on the identifier alone hands both sequences to
+    /// both elements. This is the other half of that key, and it travels with
+    /// the content for the same reason [`Form::bbox`] does — adding it as a
+    /// field forced every implementor to supply it rather than inherit a
+    /// defaulted accessor that would have compiled everywhere and silently
+    /// gone on collapsing the pair.
+    ///
+    /// A plain integer, not a COS reference: ruling 8 keeps object types out
+    /// of this crate, and an identity is all a device needs. Packing rather
+    /// than the object number alone because 7.3.10 makes `num gen` the
+    /// reference, and a regenerated object reuses the number.
+    pub stream: u64,
 }
 
 /// A transparency group XObject's attributes (11.6.6).
@@ -517,6 +535,7 @@ pub fn interpret<D: Device, F: FontSource>(
         pending_clip: None,
         marked: 0,
         marked_over_cap: 0,
+        streams: Vec::new(),
     };
     interp.run(content);
     // 14.6.2: a stream may end with scopes still open, and a device left
@@ -543,6 +562,15 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     /// Scopes refused by [`MAX_MARKED_CONTENT_DEPTH`], so that an `EMC`
     /// closes the one it belongs to rather than an outer one.
     marked_over_cap: u32,
+    /// The form XObject streams being run, innermost last (14.7.4.2).
+    ///
+    /// Empty while the page's own content stream is running, which is why
+    /// [`Interpreter::stream`] reads an empty stack as `0`. A form whose
+    /// [`Form::stream`] is `0` — one the resource layer reached without a
+    /// reference — pushes nothing, so its content keeps the identity of the
+    /// stream that invoked it: that is the old behaviour, kept for the case
+    /// where there is no better answer rather than asserted as one.
+    streams: Vec<u64>,
 }
 
 impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
@@ -1090,7 +1118,14 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     Properties::Inline(props) => (None, Some(props.clone())),
                     Properties::None => (None, None),
                 };
-                let props = props.filter(|p| !p.is_empty());
+                // 14.7.4.2: the sequence resides in the stream its `BDC` was
+                // written in, and only the interpreter knows which that is.
+                // Stamped after `is_empty`, so a list holding nothing but the
+                // stream identity is still no list at all.
+                let props = props.filter(|p| !p.is_empty()).map(|mut props| {
+                    props.stream = self.stream();
+                    props
+                });
                 self.open_marked_content(&tag, layer, props.as_ref());
             }
             // 14.6.1: `BMC` has a tag and no property list, so it can name
@@ -1217,6 +1252,17 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             }
         }
         None
+    }
+
+    /// Which content stream is being run (14.7.4.2).
+    ///
+    /// The **innermost** form, not the outermost: 14.7.4.2 puts a sequence in
+    /// the stream its `BDC` was written in, and a form invoked from inside
+    /// another form writes its own. Reporting the outer one would give two
+    /// nested forms one identity and put the collision this key exists to
+    /// break back exactly where it was.
+    fn stream(&self) -> u64 {
+        self.streams.last().copied().unwrap_or(0)
     }
 
     /// Opens a marked-content scope and tells the device whether to paint
@@ -1375,6 +1421,15 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         // starts at zero here and is emptied below.
         let saved_marked = std::mem::replace(&mut self.marked, 0);
         let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
+        // 14.7.4.2: an `/MCID` numbers a sequence within *this* stream, so
+        // the form's own identity is what the sequences it opens are keyed
+        // on. A form the resource layer reached without a reference pushes
+        // nothing and keeps the caller's identity, which is the answer this
+        // engine gave before there was a stack at all.
+        let pushed_stream = form.stream != 0;
+        if pushed_stream {
+            self.streams.push(form.stream);
+        }
 
         let combined = form.matrix.then(&self.gs.ctm);
         if combined.is_finite() {
@@ -1418,6 +1473,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.close_open_marked_content();
         if grouped {
             self.device.end_group();
+        }
+        if pushed_stream {
+            self.streams.pop();
         }
         self.marked = saved_marked;
         self.marked_over_cap = saved_over_cap;
@@ -1485,6 +1543,12 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         let saved_line = self.line_matrix;
         let saved_marked = std::mem::replace(&mut self.marked, 0);
         let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
+        // 11.6.5.2's `/G` is a form XObject like any other, so 14.7.4.2's
+        // per-stream numbering applies to it the same way.
+        let pushed_stream = mask.form.stream != 0;
+        if pushed_stream {
+            self.streams.push(mask.form.stream);
+        }
 
         // 8.10.2's `/Matrix`, composed onto the CTM at the `gs`.
         let combined = mask.form.matrix.then(&self.gs.ctm);
@@ -1516,6 +1580,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             self.device.end_soft_mask();
         }
 
+        if pushed_stream {
+            self.streams.pop();
+        }
         self.marked = saved_marked;
         self.marked_over_cap = saved_over_cap;
         self.gs = saved_gs;
@@ -1901,6 +1968,7 @@ mod tests {
                 matrix: Matrix::IDENTITY,
                 bbox: None,
                 group: self.group,
+                stream: 0,
             })
         }
         fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
@@ -2420,6 +2488,30 @@ mod tests {
             .collect()
     }
 
+    /// 14.7.4.2: a marked sequence carries the stream its `BDC` was written
+    /// in, and a nested form's is its own rather than its caller's.
+    ///
+    /// Three sequences all numbered 0 — the page's, a form's, and a form that
+    /// form invokes — which without the stream identity are one sequence
+    /// numbered three times. The stack has to unwind too: the identity is a
+    /// property of where the `BDC` is, so a form that has returned must not
+    /// leave its own on the next sequence its caller opens.
+    #[test]
+    fn a_marked_sequence_carries_the_stream_its_bdc_was_written_in() {
+        let props = props_of(b"/P << /MCID 0 >> BDC 0 0 2 2 re f EMC /OuterFrm Do");
+
+        let sequences: Vec<(u64, Option<u32>)> = props
+            .iter()
+            .map(|p| p.as_ref().map_or((0, None), |p| (p.stream, p.mcid)))
+            .collect();
+        assert_eq!(
+            sequences,
+            vec![(0, Some(0)), (0x3_0000, Some(0)), (0x4_0000, Some(0))],
+            "the page's own stream is 0, and the innermost form is the one \
+             that wrote the sequence"
+        );
+    }
+
     /// The common form: `/P << /MCID 3 >> BDC`.
     ///
     /// 14.7.4.2 puts `/MCID` in the property list, and 7.8.2 flattens that
@@ -2717,6 +2809,7 @@ mod tests {
                     matrix: Matrix::IDENTITY,
                     bbox: None,
                     group: None,
+                    stream: 0x1_0000,
                 }),
                 // A well-behaved form, used to test the `/OC` on the XObject
                 // itself rather than anything in its content.
@@ -2725,6 +2818,24 @@ mod tests {
                     matrix: Matrix::IDENTITY,
                     bbox: None,
                     group: None,
+                    stream: 0x2_0000,
+                }),
+                // One form invoking another, each numbering a sequence 0.
+                // 14.7.4.2 numbers within a stream, so the two are different
+                // sequences and only the stream identity says so.
+                b"OuterFrm" => Some(Form {
+                    content: b"/P << /MCID 0 >> BDC 0 0 5 5 re f EMC /InnerFrm Do".to_vec(),
+                    matrix: Matrix::IDENTITY,
+                    bbox: None,
+                    group: None,
+                    stream: 0x3_0000,
+                }),
+                b"InnerFrm" => Some(Form {
+                    content: b"/P << /MCID 0 >> BDC 0 0 5 5 re f EMC".to_vec(),
+                    matrix: Matrix::IDENTITY,
+                    bbox: None,
+                    group: None,
+                    stream: 0x4_0000,
                 }),
                 _ => None,
             }

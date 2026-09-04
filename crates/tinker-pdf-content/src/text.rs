@@ -81,6 +81,22 @@ pub struct TextChar {
     /// they are content no structure element ever claimed, and
     /// `Page::structured_text` counts the two apart.
     pub mcid: Option<u32>,
+    /// Which content stream the sequence carrying [`TextChar::mcid`] was
+    /// opened in: a form XObject's packed indirect reference, or `0` for the
+    /// page's own stream.
+    ///
+    /// 14.7.4.2 numbers marked-content sequences within a content stream, so
+    /// this is half of the identifier and not decoration: a page invoking two
+    /// forms that each write `/MCID 0` has two sequences numbered 0, and a
+    /// structure join keyed on the number alone gives every element both.
+    ///
+    /// Taken from the enclosing `BDC` rather than from where the glyph was
+    /// drawn, which is the same distinction [`TextChar::mcid`] draws: a `BDC`
+    /// in the page's stream whose scope encloses a `Do` owns the form's
+    /// glyphs, and the sequence still resides in the page's stream.
+    ///
+    /// `0` whenever [`TextChar::mcid`] is `None`, where it means nothing.
+    pub stream: u64,
 }
 
 /// Which way a line runs.
@@ -128,8 +144,15 @@ pub struct TextBlock {
 pub struct TextPage {
     /// The blocks, in reading order.
     pub blocks: Vec<TextBlock>,
-    /// The 14.9 values each marked sequence's property list carried, by
-    /// `/MCID`.
+    /// The 14.9 values each marked sequence's property list carried, keyed by
+    /// the pair 14.7.4.2 identifies a sequence with: the content stream the
+    /// `BDC` was written in — a form XObject's packed indirect reference, or
+    /// `0` for the page's own — and the `/MCID`.
+    ///
+    /// Keyed on the pair and not on the `/MCID` alone for the reason
+    /// [`TextChar::stream`] exists: two forms on one page may each number a
+    /// sequence 0, and a map keyed on the number would give whichever drew
+    /// first its `/ActualText` to both.
     ///
     /// 14.9 lets `/ActualText`, `/Alt`, `/Lang` and `/E` sit on a *property
     /// list* as well as on a structure element, and a producer that writes
@@ -143,7 +166,7 @@ pub struct TextPage {
     /// makes an `/MCID` unique within its content stream, so a repeat is a
     /// malformation, and letting the later one overwrite would make what a
     /// page says depend on how far down its own damage sits.
-    pub mcid_props: BTreeMap<u32, MarkedProps>,
+    pub mcid_props: BTreeMap<(u64, u32), MarkedProps>,
     /// What extraction had to tolerate.
     ///
     /// Ruling 2 applies to text as much as to pixels: a page whose font could
@@ -288,9 +311,13 @@ pub struct TextDevice {
     /// is wanted per glyph. A stack answers that in one lookup; scanning the
     /// scope stack backwards answers it in as many as the nesting is deep,
     /// on the hottest path in extraction.
-    mcids: Vec<u32>,
-    /// The 14.9 values seen per `/MCID`, first writer winning.
-    mcid_props: BTreeMap<u32, MarkedProps>,
+    /// Paired with the stream each `BDC` was written in, because 14.7.4.2
+    /// numbers sequences *within* a stream: `/MCID 0` in one form XObject and
+    /// `/MCID 0` in another are two sequences, and the identifier alone
+    /// cannot say which one a glyph belongs to.
+    mcids: Vec<(u64, u32)>,
+    /// The 14.9 values seen per sequence, first writer winning.
+    mcid_props: BTreeMap<(u64, u32), MarkedProps>,
 }
 
 /// One open marked-content scope.
@@ -497,18 +524,18 @@ impl Device for TextDevice {
         // extraction cannot find — rather than what it is, which is content
         // 14.8.2.2 excludes. The glyphs are still dropped; only the
         // bookkeeping is honest about why.
-        let mcid = props.and_then(|p| p.mcid);
-        if let Some(mcid) = mcid {
-            self.mcids.push(mcid);
+        let key = props.and_then(|p| p.mcid.map(|mcid| (p.stream, mcid)));
+        if let Some(key) = key {
+            self.mcids.push(key);
             if let Some(props) = props.filter(|p| p.mcid.is_some()) {
                 if self.mcid_props.len() < MAX_MCID_PROPS {
-                    self.mcid_props.entry(mcid).or_insert_with(|| props.clone());
+                    self.mcid_props.entry(key).or_insert_with(|| props.clone());
                 }
             }
         }
         self.scopes.push(Scope {
             artifact,
-            carried_mcid: mcid.is_some(),
+            carried_mcid: key.is_some(),
         });
         if artifact {
             // A line may not straddle the boundary: the artifact's glyphs are
@@ -660,7 +687,8 @@ impl Device for TextDevice {
                 quad,
                 size,
                 origin,
-                mcid: self.mcids.last().copied(),
+                mcid: self.mcids.last().map(|(_, mcid)| *mcid),
+                stream: self.mcids.last().map_or(0, |(stream, _)| *stream),
             });
         }
     }
