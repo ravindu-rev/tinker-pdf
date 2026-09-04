@@ -29,19 +29,13 @@ use std::collections::BTreeMap;
 
 use tinker_pdf::{
     Bitmap, BlendMode, DeviceSpace, Document, DocumentBuilder, ExtGState, FormXObject, Function,
-    Glyph, MaskKind, PlacedGlyph, RenderOptions, Shading, StateMask, TilingPattern, TilingType,
-    TransparencyGroup,
+    Glyph, MaskKind, PlacedGlyph, Shading, StateMask, TilingPattern, TilingType, TransparencyGroup,
 };
 
-// ---- the two ways a picture gets made -----------------------------------
+mod render_support;
+use render_support::{render, same_picture};
 
-fn render(bytes: Vec<u8>) -> Bitmap {
-    Document::open(bytes)
-        .expect("it opens")
-        .page(0)
-        .expect("a page")
-        .render(&RenderOptions::default())
-}
+// ---- the two ways a picture gets made -----------------------------------
 
 /// A 60 x 60 page written by hand, in the shape `tests/transparency_groups.rs`
 /// established: object 5 upward is whatever the fixture needs.
@@ -70,38 +64,6 @@ fn at(bitmap: &Bitmap, ux: f64, uy: f64) -> (u8, u8, u8) {
     let base = (y as usize) * bitmap.stride + (x as usize) * bitmap.components();
     let p = bitmap.data.get(base..base + 3).unwrap_or(&[255, 255, 255]);
     (p[0], p[1], p[2])
-}
-
-/// Asserts two documents draw the same picture, pixel for pixel.
-fn same_picture(built: Bitmap, written: Bitmap, what: &str) {
-    assert_eq!(
-        (built.width, built.height),
-        (written.width, written.height),
-        "{what}: different sizes"
-    );
-    if built.data == written.data {
-        return;
-    }
-    let differing = built
-        .data
-        .iter()
-        .zip(written.data.iter())
-        .filter(|(a, b)| a != b)
-        .count();
-    let first = built
-        .data
-        .iter()
-        .zip(written.data.iter())
-        .position(|(a, b)| a != b)
-        .unwrap_or(0);
-    panic!(
-        "{what}: the built document and the hand-written one drew different \
-         pictures -- {differing} of {} bytes differ, first at {first} \
-         ({} against {})",
-        built.data.len(),
-        built.data.get(first).copied().unwrap_or(0),
-        written.data.get(first).copied().unwrap_or(0),
-    );
 }
 
 // ---- /ExtGState ----------------------------------------------------------

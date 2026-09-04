@@ -39,13 +39,10 @@
 //! misreading shared by both is invisible here — `docs/verification.md` says so
 //! in its own voice, and that is the property the retired oracles had.
 
-use tinker_pdf::{
-    BlendMode, DeviceSpace, Document, DocumentBuilder, ExtGState, Function, ImageData,
-    RenderOptions, Shading,
-};
+use tinker_pdf::{BlendMode, DeviceSpace, DocumentBuilder, ExtGState, Function, ImageData, Shading};
 
-/// The page every fixture draws into, in points and in pixels alike.
-const SIZE: f64 = 16.0;
+mod render_support;
+use render_support::{byte, centre, pixel, render, SIZE};
 
 /// 11.3.5.2's twelve separable modes, which are the ones with a closed form
 /// over one channel. The four non-separable ones need all three at once and are
@@ -64,35 +61,6 @@ const MODES: [BlendMode; 12] = [
     BlendMode::Difference,
     BlendMode::Exclusion,
 ];
-
-fn render(bytes: Vec<u8>) -> tinker_pdf::Bitmap {
-    Document::open(bytes)
-        .expect("the document opens")
-        .page(0)
-        .expect("a page")
-        .render(&RenderOptions::default())
-}
-
-fn pixel(bitmap: &tinker_pdf::Bitmap, x: u32, y: u32) -> (u8, u8, u8) {
-    let at = (y as usize) * bitmap.stride + (x as usize) * bitmap.components();
-    let p = bitmap.data.get(at..at + 3).expect("three components");
-    (p[0], p[1], p[2])
-}
-
-/// A component, as the page carries it.
-fn byte(value: f64) -> u8 {
-    (value.clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
-/// Where a pixel is sampled, in the page's own space.
-///
-/// `y` is flipped because a bitmap's rows run down and PDF user space runs up,
-/// which is the one conversion every expectation here needs and the one a
-/// fixture that got it wrong would still find plausible — a gradient upside
-/// down is a gradient.
-fn centre(x: u32, y: u32) -> (f64, f64) {
-    (f64::from(x) + 0.5, SIZE - f64::from(y) - 0.5)
-}
 
 // ---- shadings ---------------------------------------------------------------
 
