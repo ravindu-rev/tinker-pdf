@@ -225,19 +225,36 @@ fn path_fill_page() -> Vec<u8> {
 
 /// 8.4.3.3-8.4.3.6: line width, the three joins, the three caps and a dash.
 ///
-/// Three strokes down the page, each a chevron so a join is drawn, with the
-/// join and cap style changing per row; the fourth is dashed, which is the one
-/// place a phase is visible.
+/// **Three narrow wedges side by side, and the narrowness is the whole point.**
+/// The first draft stacked three shallow chevrons and its header claimed the
+/// apex was where they differed. Measured, all three apexes were identical --
+/// 5 rows below the arm, 6 pixels wide at the tip -- because at a 112 degree
+/// corner and 4 points of width, a miter runs 4/sin(56 deg) = 4.8 against a
+/// bevel's 4, and four fifths of a point is less than a pixel at 72 dpi. The
+/// picture was distinguishing the three by their *caps* while the header
+/// pointed at the join.
+///
+/// A 25 degree corner separates them: a miter runs 3/sin(12.6 deg) = 13.8
+/// points past the corner where a bevel cuts it flat, which is eleven pixels
+/// of difference and impossible to mistake. The miter limit is 10 by default
+/// and this ratio is 4.6, so the miter is kept rather than silently becoming a
+/// bevel -- which is itself worth pinning, since a limit set below 4.6 would
+/// turn the first wedge into the third.
 fn path_stroke_page() -> Vec<u8> {
-    let mut content = String::from("0 0 0 RG 4 w\n");
-    for (row, (join, cap)) in [(0u32, 0u32), (1, 1), (2, 2)].into_iter().enumerate() {
-        let y = 40.0 - row as f64 * 12.0;
+    let mut content = String::from("0 0 0 RG 3 w\n");
+    for (index, (join, cap)) in [(0u32, 0u32), (1, 1), (2, 2)].into_iter().enumerate() {
+        let cx = 9.0 + index as f64 * 15.0;
         content.push_str(&format!(
-            "{join} j {cap} J\n6 {y} m 18 {} l 30 {y} l S\n",
-            y - 8.0
+            "{join} j {cap} J{}{} 42 m {cx} 24 l {} 42 l S{}",
+            " ",
+            cx - 4.0,
+            cx + 4.0,
+            "\n"
         ));
     }
-    content.push_str("[4 3] 1 d 1 w 0.8 0 0 RG\n36 4 m 36 44 l S\n");
+    // A dash with a phase, along the foot: it must start part-way through its
+    // first gap rather than at a dash.
+    content.push_str("[5 3] 2 d 2 w 0.8 0 0 RG 3 8 m 45 8 l S");
     page(&content)
 }
 
