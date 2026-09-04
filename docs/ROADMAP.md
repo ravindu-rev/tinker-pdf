@@ -349,11 +349,11 @@ decoder to.
 ## Tier 4 — container depth
 
 Debts each container format recorded about itself, in its feature doc's
-refusal table. **Forms, CBZ and XPS have left it entirely, and EPUB keeps one
-row.** What follows records what each settled, because a row that simply
-disappeared would take its evidence with it — and in this tier the evidence
-includes six diagnoses that turned out to be wrong, which is the part worth
-keeping.
+refusal table. **All four formats have left it.** What follows records what
+each settled, because a row that simply disappeared would take its evidence
+with it — and in this tier the evidence includes several diagnoses that turned
+out to be wrong, including three the tier had written down about itself, which
+is the part worth keeping.
 
 **Forms and CBZ have left this list.** Which scripts run is a policy with an
 explicit type, and a comic archive is now four containers rather than one:
@@ -373,18 +373,22 @@ four of 9.1.5's image formats reach the page; and `ContextColor` embeds its
 profile **verbatim** as an `/ICCBased` space, so the reader does the colour
 management and this build converts nothing.
 
-**EPUB keeps one row**, and it is the float reading-order defect. Everything
-else closed: WOFF and WOFF2 unpack to the sfnt inside them, table rows and
+**EPUB has left this list too.** WOFF and WOFF2 unpack to the sfnt inside them, table rows and
 flex lines fragment, `min`/`max` sizing, `vertical-align`, multi-column,
 all four non-static `position` values, `inline-block`, flex `row-gap` and
 `column-gap`, `css-cascade-5` §7.1's five defaulting keywords on all
 eighty-three longhands, `::before` and `::after` generating real boxes, and
 SVG content documents drawing rather than standing in as placeholders.
-`local()` is permanent rather than owed — it names a face installed on the
-reading system, and this engine reads no font directories by policy, which is
-an operating-system dependency `wasm32-unknown-unknown` does not have.
+The float reading-order row is no longer a defect but a statement about two
+orders, both measured: the content stream of `pg16328-beowulf.epub` genuinely
+reads 2 182 characters out of source order and that figure stays pinned, while
+the same book conserves **exactly** in logical order now that a structure
+element's kids may name their own page. `local()` is permanent rather than
+owed — it names a face installed on the reading system, and this engine reads
+no font directories by policy, which is an operating-system dependency
+`wasm32-unknown-unknown` does not have.
 
-Six things are worth carrying forward rather than filing away.
+Seven things are worth carrying forward rather than filing away.
 
 - **Three of this tier's own entries were wrong about why an item was
   blocked, and each was wrong in the flattering direction.** JPEG XR was
