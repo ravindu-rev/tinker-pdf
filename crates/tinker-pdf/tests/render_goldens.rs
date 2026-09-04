@@ -270,7 +270,16 @@ fn text_page() -> Vec<u8> {
     builder.add_page(SIZE, SIZE, |page| {
         page.text(b"F0", 11.0, 4.0, 34.0, "Abc");
         page.raw(b"BT /F0 11 Tf 50 Tz 4 20 Td (Abc) Tj ET\n");
-        page.raw(b"BT /F0 11 Tf 1 Tr 0.6 w 0.8 0 0 RG 4 6 Td 3 Ts (Abc) Tj ET\n");
+        // **`100 Tz` first, and it is not decoration.** 9.3.1 makes horizontal
+        // scaling a text *state* parameter, which lives in the graphics state
+        // and survives `ET` -- so without it the third line inherits the
+        // second's 50 and comes out half width as well as stroked. The first
+        // draft of this golden did exactly that: the line measured 12 pixels
+        // wide against the plain line's 20, so the picture was testing two
+        // things at once while the header claimed one. The engine was right
+        // and the fixture was not, which is the failure a reviewed golden
+        // exists to catch, and the first one it caught.
+        page.raw(b"BT /F0 11 Tf 100 Tz 1 Tr 0.6 w 0.8 0 0 RG 4 6 Td 3 Ts (Abc) Tj ET\n");
     });
     builder.finish()
 }

@@ -1089,8 +1089,10 @@ mod tests {
         let thinned = compare(&committed, &peak_run("verapdf", 2, 100_000_000), false);
         assert!(thinned.failed(), "{thinned:#?}");
         assert!(
-            thinned.regressions.iter().any(|r| r
-                .contains("2/10 children reported a peak resident set")),
+            thinned
+                .regressions
+                .iter()
+                .any(|r| r.contains("2/10 children reported a peak resident set")),
             "{:?}",
             thinned.regressions
         );

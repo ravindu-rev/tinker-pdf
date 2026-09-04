@@ -794,7 +794,10 @@ mod tests {
 
         let mut without = lines.to_vec();
         without.push("done");
-        assert_eq!(parse_record(&record(&without)).expect("complete").peak, None);
+        assert_eq!(
+            parse_record(&record(&without)).expect("complete").peak,
+            None
+        );
 
         // And a line that is not a number is an absence too, never a zero: a
         // child that garbled its own measurement did not measure nothing.
