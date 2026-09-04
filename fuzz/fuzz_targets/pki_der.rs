@@ -78,7 +78,7 @@
 //! wrong serial number passes. Correctness lives in `crates/tinker-pdf-pki`'s
 //! own tests and in `crates/tinker-pdf/tests/certificates.rs`.
 //!
-//! # The first session, and the open defect it found
+//! # The first session, the defect it found, and the session after the fix
 //!
 //! **4 September 2026: 33 072 executions at 33 072 a second, and a crash
 //! inside the first second of mutation.** The corpus went from 12 seeds to
@@ -88,13 +88,15 @@
 //! `x86_64-pc-windows-msvc`. The session was asked for 600 seconds and did
 //! not get to use them, which is the strongest form a first session can take.
 //!
-//! **This is an open ruling 1 blocker. It is not fixed.** The assertion that
-//! fired is the one this header calls the property `cms.rs` refuses a BER
-//! `signedAttrs` on: *"a subtree called definite holds an indefinite node"*.
-//! `cargo fuzz tmin` took the input from 88 bytes to 42, and it is small
-//! enough to write down rather than carry as a file — `fuzz/artifacts/` is
-//! gitignored on the reasoning that a crash input gets minimised and lands as
-//! a test, and the test is what this lane could not write:
+//! **Fixed, and the session re-run to completion.** The mechanism is written
+//! out below because it is worth keeping: the crate was wrong in a way that
+//! looked like nothing. The assertion that fired is the one this header calls
+//! the property `cms.rs` refuses a BER `signedAttrs` on: *"a subtree called
+//! definite holds an indefinite node"*. `cargo fuzz tmin` took the input from
+//! 88 bytes to 42, and it is small enough to write down as well as carry as a
+//! file — it is committed as
+//! `fuzz/corpus/pki_der/sweep-over-an-indefinite-sibling` and asserted in
+//! `crates/tinker-pdf-pki/src/der.rs` and its `tests/fuzz_seeds.rs`:
 //!
 //! ```text
 //! 30 27 31 13 30 6c 65 20 01 10 00 00 ff ff ff ff
@@ -102,33 +104,47 @@
 //! 00 00 01 00 00 00 00 00 00 01
 //! ```
 //!
-//! It reproduces deterministically on stable and on MSVC, on the third pass
+//! It reproduced deterministically on stable and on MSVC, on the third pass
 //! below — the one that allows indefinite lengths — against the outermost
-//! node. The mechanism is that the two readings of these bytes disagree:
+//! node, which is why a regression test could be written on stable for a
+//! crash only nightly could find. The mechanism was that the two readings of
+//! these bytes disagreed:
 //!
-//! - **`require_definite_lengths` sweeps `raw` linearly**, and descends into
+//! - **`require_definite_lengths` swept `raw` linearly**, and descended into
 //!   a constructed node by stepping past its header alone. That is deliberate
-//!   and is what lets one pass see every nested node. But the descent does
+//!   and is what lets one pass see every nested node. But the descent did
 //!   **not** re-bound itself by the node it descended into, so an inner node
-//!   over-claiming its length walks out the far end of its parent. Here the
-//!   `31 13` SET ends at offset 23; the sweep descends into it, meets a
-//!   `30 6c` claiming 108 bytes, descends again, and reaches an `01 10`
+//!   over-claiming its length walked out the far end of its parent. Here the
+//!   `31 13` SET ends at offset 23; the sweep descended into it, met a
+//!   `30 6c` claiming 108 bytes, descended again, and reached an `01 10`
 //!   primitive whose 16-byte value swallows offsets 8 to 25 — the `30 80`
-//!   sitting at 23. The sweep never sees the indefinite length and says the
-//!   subtree is definite.
+//!   sitting at 23. The sweep never saw the indefinite length and said the
+//!   subtree was definite.
 //! - **`children()` reads structurally**, takes `31 13` whole, and arrives at
 //!   offset 23 to find the indefinite-length `30 80` the sweep stepped over.
 //!
-//! So the harness is right and the crate is wrong, which is the opposite of
+//! So the harness was right and the crate was wrong, which is the opposite of
 //! the other assertion-versus-crate case this repository has recorded. What
 //! it means is stated rather than left implied: RFC 5652 §5.4 digests the DER
 //! of `signedAttrs`, and `require_definite_lengths` is the whole of what
 //! stands between a BER `signedAttrs` and a digest nobody can explain. An
-//! attacker who can choose those bytes can make the gate say yes.
+//! attacker who could choose those bytes could make the gate say yes.
 //!
-//! Not fixed here because the lane that ran the session was a measurement
-//! lane, and a fix to this method wants its own commit, its own regression
-//! test in `crates/tinker-pdf-pki`, and this input as a committed seed.
+//! The sweep stays flat — no stack to overflow, nothing allocated — and what
+//! it gained is a one-level check applied to every constructed node before it
+//! is descended into: the node's immediate children must fill its content
+//! exactly, and none of them may carry the form. A subtree whose children
+//! tile their parent at every level cannot hold a node reaching past an
+//! ancestor. The verdict for these 42 bytes is now `IndefiniteLength`.
+//!
+//! **The re-run, 4 September 2026: 5 113 813 executions in 601 seconds —
+//! 8 508 a second — and clean.** The corpus went from 13 seeds to 1 975,
+//! 10 224 of them new; peak RSS 501 MB and a slowest unit under a second.
+//! Same image and toolchain as the session above, one core. The rate is a
+//! quarter of the first session's because that one measured a single second
+//! against twelve seeds: a corpus two orders of magnitude larger is replayed
+//! before every mutation, and it is the 5.1 million runs rather than the rate
+//! that this session is evidence of.
 //!
 #![no_main]
 use libfuzzer_sys::fuzz_target;

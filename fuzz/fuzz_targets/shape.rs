@@ -75,7 +75,7 @@
 //! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
 //! a second decoder. Here the check exists, and it is somewhere else.
 //!
-//! # The first session, and the open hang it found
+//! # The first session, the hang it found, and the session after the fix
 //!
 //! **4 September 2026: 24 115 executions in 78 seconds — 309 a second — and
 //! a timeout.** The corpus went from 8 seeds to 893 before it stopped.
@@ -84,15 +84,16 @@
 //! because libFuzzer does not build for `x86_64-pc-windows-msvc`. The session
 //! was asked for 600 seconds and used 78.
 //!
-//! **This is an open ruling 1 blocker. It is not fixed.** Ruling 1's property
-//! is "did not panic, hang, or exhaust memory", and this is the middle one: a
+//! **Fixed, and the session re-run to completion.** Ruling 1's property is
+//! "did not panic, hang, or exhaust memory", and this was the middle one: a
 //! single 2 743-byte input ran for more than 28 seconds against a `-timeout`
 //! of 25, on a target whose median execution takes about three milliseconds.
 //! `cargo fuzz tmin` reduced it to **1 158 bytes**, sha256
 //! `bc9832fe15aab8c359f56bcde6c63f5ba59854ee25e719ee9614381f819d3b9a`, and
 //! could go no further; every minimisation step has to wait out the timeout,
 //! which is why it stopped there rather than at something small enough to
-//! paste into this header the way `pki_der`'s 42 bytes are.
+//! paste into this header the way `pki_der`'s 42 bytes are. It is committed
+//! instead, as `fuzz/corpus/shape/lookup-list-subtable-storm`.
 //!
 //! Where the time goes was then measured directly, on the host, in release
 //! and without the sanitizer instrumentation the fuzz build carries. **The
@@ -113,22 +114,47 @@
 //! to the loosest ceilings the knobs offer: `max_operations` 500 000 and
 //! `max_glyphs` 65 536, with `max_context_length` 64.
 //!
-//! One structural fact, read from `apply.rs` rather than inferred: the
-//! operation budget is per shaping run — `Runner::new` sets `ops: 0` once per
-//! `substitute` or `position` — and `apply_at` charges exactly **one**
-//! operation and then loops `for sub in 0..lookup.len()` over every subtable
-//! of the lookup. So the budget bounds the number of *attempts* and not the
-//! work each attempt does, while the subtable count is the input's to choose.
-//! 500 000 attempts at the ~3 µs each this input makes them cost is the 1.55
-//! seconds measured.
+//! One structural fact, read from `apply.rs` rather than inferred, and it was
+//! the whole of it: the operation budget is per shaping run — `Runner::new`
+//! sets `ops: 0` once per `substitute` or `position` — and `apply_at` charged
+//! exactly **one** operation and then looped `for sub in 0..lookup.len()`
+//! over every subtable of the lookup. So the budget bounded the number of
+//! *attempts* and not the work each attempt did, while `subTableCount` is a
+//! 16-bit field the input chooses. On this input the ceiling of half a
+//! million was never reached at all: the run finished in its own time, having
+//! grown three glyphs to 9 201.
 //!
-//! That is the mechanism the numbers point at, and it is written as what it
-//! is: the timings, the lookup count and the budget's scope are measured or
-//! read; that this is *the* fix is not yet established.
+//! The fix is that the unit is the **subtable** — what is actually resolved
+//! through any extension indirection and searched — with the attempt's own
+//! charge paying for the first of them, so a lookup with one subtable costs
+//! exactly one as before and no well-formed face's accounting moves. Measured
+//! the same way on the machine that made the fix — where the *unfixed* code
+//! costs 2.81 s for one pass rather than the 3.37 s above, which is what a
+//! differently loaded host measures — the same input now costs **2.63 ms**.
+//! It records `OperationBudgetExceeded` for both tables where it previously
+//! recorded neither, and is driven by
+//! `the_lookup_list_storm_reaches_the_operation_ceiling_and_returns` in
+//! `crates/tinker-pdf-shape/tests/synthetic.rs` — with no clock in it, for
+//! the reason `crates/tinker-pdf/tests/bounds_ledger.rs` gives.
 //!
-//! 309 executions a second is also the slowest of the four targets run that
-//! day — `pki_cms` managed 97 260 — so even the 78 seconds bought less than
-//! the count suggests, and a full session here is owed once the hang is gone.
+//! **The re-run, 4 September 2026: 24 586 executions in 601 seconds — 40 a
+//! second — and clean.** No artifact, and `slowest_unit_time_sec` 0 against
+//! the same `-timeout=25`, so nothing came within a second of the limit that
+//! stopped the first session. The corpus went from 9 seeds to 1 017, 1 275
+//! units added; peak RSS 506 MB. Same image and toolchain as above, one core.
+//!
+//! **40 a second is the slowest rate this repository has recorded, and it is
+//! the fix showing up in the number rather than a second defect.** The first
+//! session managed 309 because it spent 78 seconds and then stopped on one
+//! input; this one spent the whole budget on a corpus that grew to a thousand
+//! mutated lookup lists, and every one of those now runs *to* its ceiling
+//! instead of running until somebody gives up. Half a million subtable
+//! searches, over two tables, two runs and three scripts, is real work — tens
+//! of milliseconds an execution under the sanitizer. So the ceiling is doing
+//! what it is for, and whether half a million is the right number for a
+//! shaping run is a separate question this session does not answer: ruling 3
+//! says a ceiling moves on evidence, and the evidence here is that no input
+//! reached a second, not that the ceiling is tight.
 //!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
