@@ -142,6 +142,76 @@ fn the_sfnt_seeds_reach_the_directory_walk() {
     report("sfnt", files.len(), reached, &missed);
 }
 
+/// Whether a face's `glyf` holds a **composite** glyph, which is a
+/// `numberOfContours` below zero at some glyph's start.
+///
+/// Read off the tables here rather than asked of the crate, because the crate
+/// has nothing to ask. `glyf::outline` returns an `Outline`, and a composite
+/// and the simple glyph it assembles are the same `Outline` by the time it
+/// does — that is the whole point of the function. So "the corpus reaches the
+/// recursion" is not a question the public API can answer, and a test that
+/// wants it answered has to open `loca` itself.
+fn carries_a_composite(font: &Sfnt<'_>) -> bool {
+    let (Some(head), Some(loca), Some(glyf)) = (
+        font.table(u32::from_be_bytes(*b"head")),
+        font.table(u32::from_be_bytes(*b"loca")),
+        font.table(u32::from_be_bytes(*b"glyf")),
+    ) else {
+        return false;
+    };
+    let Some(format) = head.get(50..52) else {
+        return false;
+    };
+    // head.indexToLocFormat: 0 means 16-bit offsets stored halved.
+    let long = i16::from_be_bytes([format[0], format[1]]) != 0;
+    let width = if long { 4 } else { 2 };
+
+    // A seed corpus, not a hostile input — but the ceiling costs nothing and
+    // this test may not be the thing that hangs on a bad `loca`.
+    for glyph in 0..4096usize {
+        let Some(pair) = loca.get(glyph * width..glyph * width + width * 2) else {
+            return false; // Past the last glyph.
+        };
+        let (start, end) = if long {
+            (
+                u32::from_be_bytes([pair[0], pair[1], pair[2], pair[3]]) as usize,
+                u32::from_be_bytes([pair[4], pair[5], pair[6], pair[7]]) as usize,
+            )
+        } else {
+            (
+                usize::from(u16::from_be_bytes([pair[0], pair[1]])) * 2,
+                usize::from(u16::from_be_bytes([pair[2], pair[3]])) * 2,
+            )
+        };
+        if end <= start {
+            continue; // An empty range: a space.
+        }
+        if let Some(header) = glyf.get(start..start + 2) {
+            if i16::from_be_bytes([header[0], header[1]]) < 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The floor on `truetype` seeds carrying an outline table.
+///
+/// Four is what the corpus holds, so this is a ratchet rather than a wish:
+/// the number was measured when the three written seeds landed, and a seed
+/// deleted or quietly stopped parsing takes it below the floor. It sat at
+/// **one** before that, which is the coverage gap this constant replaced —
+/// `docs/verification.md` carried the sentence and nothing enforced it.
+const TRUETYPE_OUTLINED: usize = 4;
+
+/// The floor on `truetype` seeds carrying a **composite** glyph.
+///
+/// The target's own header calls composite recursion "the interesting part",
+/// and before `composite-transforms.ttf` and `composite-nested.ttf` were
+/// written the corpus reached it from a single starting point. A floor of one
+/// would let either of them go without the count moving, so it is two.
+const TRUETYPE_COMPOSITE: usize = 2;
+
 #[test]
 fn the_truetype_seeds_reach_the_outlines() {
     let Some(files) = seeds("truetype") else {
@@ -150,6 +220,8 @@ fn the_truetype_seeds_reach_the_outlines() {
     };
     let (mut reached, mut missed) = (0, Vec::new());
     let mut outlineless: Vec<String> = Vec::new();
+    let mut outlined: Vec<String> = Vec::new();
+    let mut composite: Vec<String> = Vec::new();
     for (label, data) in &files {
         match Sfnt::parse(data) {
             Some(font) => {
@@ -161,6 +233,11 @@ fn the_truetype_seeds_reach_the_outlines() {
                     // a `cmap`-only face on purpose, and the target's
                     // `glyph_for_char` half is real code that it reaches.
                     outlineless.push(label.clone());
+                } else {
+                    outlined.push(label.clone());
+                    if carries_a_composite(&font) {
+                        composite.push(label.clone());
+                    }
                 }
             }
             None => missed.push(label.clone()),
@@ -169,6 +246,29 @@ fn the_truetype_seeds_reach_the_outlines() {
     if !outlineless.is_empty() {
         println!("  truetype: {outlineless:?} carry no outline table, by design");
     }
+    println!("  truetype: {outlined:?} carry one, of which {composite:?} are composite");
+
+    // The count, not the reach. `report` below asks whether the corpus parses
+    // at all; these ask whether it reaches the half of the target that the
+    // target's own header says is the half worth reaching.
+    assert!(
+        outlined.len() >= TRUETYPE_OUTLINED,
+        "fuzz/corpus/truetype: {} of {} seeds carry an outline table, floor is \
+         {TRUETYPE_OUTLINED} — {outlined:?}. A seed was deleted, or one stopped \
+         parsing and is now reaching the directory walk and nothing else.",
+        outlined.len(),
+        files.len()
+    );
+    assert!(
+        composite.len() >= TRUETYPE_COMPOSITE,
+        "fuzz/corpus/truetype: {} seeds carry a composite glyph, floor is \
+         {TRUETYPE_COMPOSITE} — {composite:?}. Composite recursion is what this \
+         target's header calls the interesting part, and the fuzzer is now \
+         starting from fewer places in it. `glyf.rs`'s `write_the_fuzz_seeds` \
+         writes them.",
+        composite.len()
+    );
+
     report("truetype", files.len(), reached, &missed);
 }
 
