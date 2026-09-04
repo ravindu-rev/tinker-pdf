@@ -79,7 +79,8 @@ transcribed from the standards' own annexes, published conformance data, and
 thousands of documents nobody here authored. What this tier cannot contain is
 stated once: the four properties that left with the oracles
 ([verification.md](verification.md), "What does not come back") do not return
-and are not rows.
+and are not rows. Neither is JPEG XR's unadjudicated list, for the same kind
+of reason — it is a licence limit, and it is under Named non-goals below.
 
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
@@ -88,11 +89,9 @@ and are not rows.
 | Forty-one corpus files do not render every page, and none is attributed by class | the table above | each named in [verification.md](verification.md) with its reason — a refused capability, a timeout, a deliberately damaged fixture — or fixed; the ratchet moves | M |
 | Metamorphic residue: 181 files fail `rotate`, 43 `crop`, 51 `dpi`. Only the anti-aliased-image-edge class is attributed | [design/image-edges.md](design/image-edges.md) attributes that one; the rest are counted and unexplained | the remainder attributed by class, in that document or a successor, or fixed. `dpi` on every file is a stated non-goal there | M |
 | Two open ruling 1 blockers, both found by the first sessions on 4 September 2026 and neither fixed: `pki_der` crashes on `require_definite_lengths` calling a subtree definite when it holds an indefinite node — the method that keeps a BER `signedAttrs` out of a digest — and `shape` hangs, one input taking 28 s against a 25 s limit | [verification.md](verification.md); the headers of `fuzz/fuzz_targets/pki_der.rs` and `shape.rs`, which carry the reproducers and the measurements | each fixed, with the minimised input a regression test in the owning crate and a committed seed, and the target's session re-run to completion | M |
-| XPS: a part whose content type and magic bytes disagree draws the bytes and says nothing — a ruling 10 gap, and wiring JPEG XR widened it from two ordered pairs to twelve | [features/xps.md](features/xps.md) carries the row; `a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing` pins it; [design/jpeg-xr.md](design/jpeg-xr.md) names the fix — a leniency variant on `XpsElementDefect` pushed into `paint.rs`'s defects | the pinning test asserts the named leniency instead of the silence | S |
 | `/MCR /Stm` and `/StmOwn` are not read, so two form XObjects on one page with overlapping marked-content ids would collide | six orphans across 717 tagged corpus files says it is not biting, which is not shown safe ([features/content-and-text.md](features/content-and-text.md)) | a `/Stm`-keyed lookup in `structure.rs`; a fixture with two forms sharing ids; the orphan count unchanged or lower | S |
 | JBIG2 bounds: the three `bounds_ledger.rs` rows for symbol counts, symbol bytes and text instances are stated estimates, because no real OCR producer's JBIG2 is in the corpus to measure against | [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md), milestone 7: "cannot be met as written" | measured against a real producer's output once one is in a corpus; until then the ledger rows say "estimate" | S, blocked on a fixture |
 | `MAX_ICC_TAGS` and `MAX_ICC_BYTES` fire and have no `bounds_ledger.rs` rows; the corpus's largest profile is 718 672 bytes | [design/icc.md](design/icc.md) declines to claim them; `grep -i icc crates/tinker-pdf/tests/bounds_ledger.rs` finds none | two rows, each with a clock-free test that fires it | S |
-| JPEG XR decodes with nothing adjudicating it: the quantised lossy path past QP 1, the first-level overlap filter across a soft tile boundary, `HARD_TILING_FLAG`, `SHIFT_BITS`, `TRIM_FLEXBITS`, more than one QP per tile, and a damaged codestream's surviving values | [features/xps.md](features/xps.md) "Decoded but unadjudicated"; [design/jpeg-xr.md](design/jpeg-xr.md) | **none — this list cannot shrink by testing.** Under ruling 13 no second decoder may adjudicate, and T.832's conformance bitstreams are not freely licensed. It stays listed as unadjudicated, not as owed work | — |
 
 ## Tier 2 — close the named refusals, by measured reachability
 
@@ -302,6 +301,21 @@ and the difference matters under the goal this file now states.
   wrote accepting this engine's output, a second reading of an XPS package,
   a reference CSS implementation, an arbiter for an EPUB disagreement. Ruling
   13 retires them and [verification.md](verification.md) names them.
+- **JPEG XR's unadjudicated list** — the quantised lossy path past QP 1, the
+  first-level overlap filter across a soft tile boundary, `HARD_TILING_FLAG`,
+  `SHIFT_BITS`, `TRIM_FLEXBITS`, more than one QP per tile, and a damaged
+  codestream's surviving values. All of it **decodes**; nothing here checks
+  that the result is *right*, and no amount of testing shrinks the list.
+  Ruling 13 bars a second decoder from adjudicating an output, so the only
+  thing that could close it is T.832's own conformance bitstreams, and those
+  are not freely licensed. It can shrink if that changes and by nothing this
+  repository can do meanwhile, which is why it is a limit and not a row.
+  [features/xps.md](features/xps.md) and
+  [features/filters.md](features/filters.md) carry the list;
+  [design/jpeg-xr.md](design/jpeg-xr.md) carries the reasoning and the three
+  first-party evidence legs that stand in an oracle's place. **Not the same
+  as JPEG XR encoding below**, which is a scope choice under ruling 8 and
+  could be revisited on evidence: this one could not.
 
 **Decisions this repository took and keeps, each revisitable by a row above
 if the field's evidence asks.**
@@ -336,8 +350,11 @@ for untagged pages. Each row says so.
 ## How this file changes
 
 An item leaves this file when its exit criterion is green, and its feature
-doc's refusal table loses the matching row in the same commit. An item
-enters with evidence attached — a corpus number, a named refusal, an owed
+doc's refusal table loses the matching row in the same commit. There is one
+other way out and it is not a shortcut: an item whose exit criterion can
+never go green is not work this file is tracking, it is a **limit**, and it
+moves to Named non-goals with the reason it cannot close. An item enters
+with evidence attached — a corpus number, a named refusal, an owed
 assertion — or it does not enter. Design docs in [design/](design/) carry
 scope, non-goals, design, milestones with concrete exit criteria, and
 risks, in that order.

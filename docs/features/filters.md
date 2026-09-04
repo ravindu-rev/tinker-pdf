@@ -297,6 +297,10 @@ in [design/jpeg-xr.md](../design/jpeg-xr.md) and
 [features/xps.md](xps.md); the largest single gap is the **quantised lossy
 path**, which the lossless identity does not touch at any quantizer but 1.
 
+The list is a **limit rather than owed work** — [ROADMAP](../ROADMAP.md)
+carries it under Named non-goals for that reason. Only T.832's own
+conformance bitstreams would shrink it, and they are not freely licensed.
+
 Every JPX refusal also returns `FilterError::Unsupported(Capability::Jpx)`;
 the warning names the reason, because the refusal is an `Err` and ruling 10
 wants the reason to survive it.

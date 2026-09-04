@@ -16,7 +16,7 @@
 //! Five milestones running have found the same defect shape, stated in gap 30
 //! milestone 5's progress section as one rule: *when a thing has two
 //! independent consequences, a test for one of them is not a test.* This file
-//! has four such pairs and each gets two tests:
+//! has five such pairs and each gets two tests:
 //!
 //! - `Viewbox` and `Viewport` are two rectangles in two spaces, and swapping
 //!   them is a defect no single-rectangle assertion sees.
@@ -25,6 +25,10 @@
 //!   part is a TIFF, and gap 30 milestone 3's survivor was exactly this shape.
 //! - a refused image has two consequences: it is named, **and** the rest of the
 //!   page still draws.
+//! - a **lenient** image has two as well: the disagreement between the two
+//!   identification rules is named, **and** it is named once however many
+//!   times the page uses the part — which is `State::warn`'s deduplication and
+//!   is invisible to any package that draws its picture once.
 
 mod xps_support;
 
@@ -717,7 +721,14 @@ fn a_tiff_named_by_its_magic_bytes_is_drawn() {
         None,
     );
 
-    assert_eq!(defects(&bytes), [], "a TIFF this build reads owes nothing");
+    // The two rules disagree here, so the leniency is owed — and it is the
+    // *only* thing owed, which is the assertion that matters: a TIFF this
+    // build reads is drawn, and nothing else about it is degraded.
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "the bytes decided, and said so; a TIFF this build reads owes nothing else"
+    );
     let content = stream(&bytes);
     assert!(
         !content.contains("0.749 0.749 0.749 rg"),
@@ -755,21 +766,29 @@ fn a_tiff_that_is_only_a_header_is_unreadable_rather_than_unsupported() {
     );
 }
 
-/// **A content type and magic bytes that disagree draw the bytes, and nothing
-/// says so.** Pinned because it is a hole, not because it is right.
+/// **A content type and magic bytes that disagree draw the bytes, and say so.**
 ///
 /// `Images::place_one` resolves the disagreement in favour of the bytes — a
-/// decoder reads bytes — and its comment has always claimed the leniency is
-/// named. It is not: `Images::get` returns `Result<&Image, XpsElementDefect>`,
-/// so the only channel out of that function is a *refusal*, and a leniency has
-/// nowhere to go. Ruling 10 wants it named.
+/// decoder reads bytes — and ruling 10 wants the leniency that follows to be
+/// named. It was not, for three milestones, and the reason was the channel
+/// rather than the will: `Images::get` returns
+/// `Result<&Image, XpsElementDefect>`, so the only thing it could report was a
+/// *refusal*, and a refusal here would lose a picture the package plainly
+/// holds. The leniency rides the **success** side instead, on
+/// `Image::lenience`, and `State::tile` pushes it into the page's defects.
 ///
-/// It mattered less when the arm was nearly unreachable: TIFF and JPEG XR were
-/// refused before the two rules were compared, so only a PNG-versus-JPEG
-/// disagreement could reach it. Wiring the TIFF decoder made it ordinary, which
-/// is why the gap is pinned here rather than left in a comment.
+/// This test carried the hole under a different name until then. It is renamed
+/// rather than replaced, because the fixture is the same fixture and the two
+/// halves it asserts are still the two halves that matter: the picture the
+/// **bytes** describe is drawn, and the disagreement is **reported**.
+///
+/// The direction is deliberate. Here the content type says TIFF and only the
+/// bytes say PNG, which is the mirror of
+/// `a_tiff_named_by_its_magic_bytes_is_drawn` — the same arm reached from the
+/// other side, so a build that named the disagreement in one direction only
+/// fails one of the two.
 #[test]
-fn a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing() {
+fn a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named() {
     // The bytes say PNG; only the content type says TIFF.
     let types =
         content_types_with(r#"<Override PartName="/Resources/i.png" ContentType="image/tiff" />"#);
@@ -782,13 +801,52 @@ fn a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing
 
     assert_eq!(
         defects(&bytes),
-        [],
-        "the disagreement is not reported, and it should be — see this test's name"
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "the disagreement is reported, exactly once and as itself"
     );
     let content = stream(&bytes);
     assert!(
         !content.contains("0.749 0.749 0.749 rg"),
         "the PNG the bytes describe is drawn: {content}"
+    );
+}
+
+/// **And it is said once, however many times the picture is used.**
+///
+/// The pair to the test above, and the reason it is a pair: the leniency is a
+/// fact about the *part* and is recorded where the part is placed, which runs
+/// once — but it is *read* in `State::tile`, which runs once per use. A build
+/// that pushed it without `warn`'s deduplication would report one
+/// mis-declared picture as many times as the page happened to draw it, which
+/// is the failure `Drawn::defects` exists to prevent.
+#[test]
+fn one_mis_declared_part_used_twice_is_named_once() {
+    let types =
+        content_types_with(r#"<Override PartName="/Resources/i.png" ContentType="image/tiff" />"#);
+    let body = r#"<Path Data="M0,0L100,0 100,100 0,100Z"><Path.Fill>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,100,50"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.Fill></Path>
+           <Path Data="M100,0L200,0 200,100 100,100Z"><Path.Fill>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,100,50"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.Fill></Path>"#;
+    let markup = format!(
+        r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
+    );
+    let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
+    let parts = with(parts, "[Content_Types].xml", &types);
+    let bytes = archive(before_content_types(parts, png_part()));
+
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "two uses of one mis-declared part, one report"
+    );
+    let content = stream(&bytes);
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "and both shapes carry the picture: {content}"
     );
 }
 
@@ -813,6 +871,13 @@ fn jpeg_xr(name: &str) -> Vec<u8> {
 /// deliberate — it exercises the identification rule *and* the decoder in one
 /// package, and it is the case the old pre-emptive refusal loop caught before
 /// either rule had spoken.
+///
+/// Which makes this package a *disagreement*, so it owes the leniency
+/// `ImageMediaTypeMismatch` names. The assertion is "exactly this and nothing
+/// else", which is a stronger claim than the `== []` it replaced: it says the
+/// decode succeeded, that the one thing degraded is the producer's statement
+/// about the part, and that nothing else about the picture was approximated.
+/// The sibling below carries the agreeing case, where nothing at all is owed.
 #[test]
 fn a_jpeg_xr_named_by_its_magic_bytes_is_drawn() {
     let bytes = package_with(
@@ -824,8 +889,8 @@ fn a_jpeg_xr_named_by_its_magic_bytes_is_drawn() {
 
     assert_eq!(
         defects(&bytes),
-        [],
-        "a JPEG XR this build reads owes nothing"
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "the bytes decided against the content type, and nothing else is owed"
     );
     let content = stream(&bytes);
     assert!(
@@ -846,6 +911,11 @@ fn a_jpeg_xr_named_by_its_magic_bytes_is_drawn() {
 /// decide anything: where the two rules disagree the bytes win, so a package
 /// naming the type over some other format's bytes would prove the opposite of
 /// what it looks like it proves.
+///
+/// It is also the **agreeing** half of the pair the test above opens: two
+/// rules that say the same thing owe nothing, so a build that reported
+/// `ImageMediaTypeMismatch` whenever both rules spoke — rather than only when
+/// they differ — fails here and passes there.
 #[test]
 fn the_jpeg_xr_content_type_is_recognised() {
     let types = content_types_with(
@@ -911,7 +981,15 @@ fn a_jpeg_xr_with_an_alpha_plane_reaches_the_page_with_a_soft_mask() {
         None,
     );
 
-    assert_eq!(defects(&bytes), []);
+    // The same disagreement `a_jpeg_xr_named_by_its_magic_bytes_is_drawn`
+    // carries — `.png` over JPEG XR bytes — and the same one leniency. The
+    // alpha plane is what this test is about, so the assertion is that the
+    // list has not grown: splitting out an `/SMask` degrades nothing.
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "the disagreement, and nothing the alpha plane added"
+    );
     let saved = saved(&bytes);
     assert!(
         saved.contains("/SMask"),

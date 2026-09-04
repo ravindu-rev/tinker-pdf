@@ -520,23 +520,37 @@ metadata rather than samples, so ruling 4's ban on floats *on the pixel path*
 is untouched. `JxrImage` and `Container` lose their `Eq` because of it, which
 is the honest consequence of carrying a float.
 
-**One thing ruling 10 wants is still not done, and it got worse.** When a
-part's content type and its magic bytes disagree, the bytes win and **nothing
-reports that they did**: `Images::place_one` returns
-`Result<Image, XpsElementDefect>`, so the only thing it can say is a
-*refusal*, and a leniency has nowhere to go. That arm was nearly dead when TIFF
-and JPEG XR were both refused in front of it — only PNG-versus-JPEG could
-arrive. Wiring TIFF made it ordinary for three formats; wiring JPEG XR makes
-all four reachable on both sides, so there are now **twelve** ordered pairs
-that take it where there were two.
+**The one thing ruling 10 wanted here is done, and wiring JPEG XR is what
+made it urgent.** When a part's content type and its magic bytes disagree, the
+bytes win — a decoder reads bytes — and for three milestones **nothing
+reported that they had**. That arm was nearly dead when TIFF and JPEG XR were
+both refused in front of it, since only PNG-versus-JPEG could arrive. Wiring
+TIFF made it ordinary for three formats; wiring JPEG XR made all four
+reachable on both sides, so **twelve** ordered pairs take it where two did.
 
-Closing it needs a leniency variant on `XpsElementDefect` (in `xps.rs`) and a
-push into `paint.rs`'s `defects` — two files another lane was editing when
-this landed, and a public enum variant that nothing ever produces would be
-worse than the honest gap. So the comment in `image.rs` says plainly that the
-disagreement is unnamed, `docs/features/xps.md` carries it as a row, and
-`a_content_type_that_disagrees_with_the_bytes_draws_the_bytes_and_says_nothing`
-pins the behaviour meanwhile. It is a known debt, not a surprise.
+The obstacle was the channel, not the will. `Images::place_one` returns
+`Result<Image, XpsElementDefect>`, so the only thing it could say was a
+*refusal* — and a refusal here would lose a picture the package plainly holds,
+which is the opposite of what the leniency is for. So the name rides the
+**success** side: `Image::lenience` carries an `Option<XpsElementDefect>`,
+`place_one` sets it to `ImageMediaTypeMismatch` on the disagreeing arm, and
+`paint.rs`'s `State::tile` pushes it into the page's defects. The asymmetry in
+where it is set and where it is read is deliberate: `place_one` runs once per
+*part* and `tile` once per *use*, and `State::warn` deduplicates — so a page
+tiling one mis-declared picture forty times says it once, and a package that
+never draws the part says nothing.
+
+Two cases stay silent, and both are the same rule: silence from one
+identification rule is not disagreement with it. A part with no resolved
+content type, or one whose bytes match no signature, has only one witness and
+is believed. And a disagreement whose bytes then fail to decode answers
+`ImageUnreadable` alone — the leniency is a fact about a picture that reached
+the page, and there is no picture.
+
+`a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named`
+pins the leniency from the PNG side and `a_tiff_named_by_its_magic_bytes_is_drawn`
+from the TIFF side; `one_mis_declared_part_used_twice_is_named_once` pins the
+deduplication, which no package that draws its picture once can see.
 
 ### Decoded but unadjudicated
 
@@ -578,3 +592,13 @@ gives shaped-but-unverified scripts.
 Everything else in `docs/features/filters.md`'s refusal table is refused by
 name and reached by a test, which is a different thing from unadjudicated: a
 refusal is a decision, and this list is where decisions are absent.
+
+**This list is a limit, not a backlog.** It was a tier-1 roadmap row whose
+exit criterion read "none — this list cannot shrink by testing", which is not
+an exit criterion and so was not a row; `docs/ROADMAP.md` carries it under
+Named non-goals now, among the hard limits. The distinction that section
+draws matters here, because JPEG XR appears on both of its lists for
+different reasons: **encoding** is a scope choice under ruling 8 and a future
+evidence could reopen it, and *this* is a licence — ruling 13 bars a second
+decoder from adjudicating an output, so nothing but T.832's own conformance
+bitstreams would close it and those are not freely licensed.
