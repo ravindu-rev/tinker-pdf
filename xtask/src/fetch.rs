@@ -199,19 +199,56 @@ fn extract(archive: &Path, into: &Path, corpus: &Corpus) -> Result<(), String> {
     }
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
 
-    let status = Command::new("tar")
-        .arg("-xzf")
-        .arg(archive)
-        .arg("-C")
-        .arg(into)
-        // Every codeload archive is one directory named `repo-commit`, which
-        // would otherwise have to be spelled inside every `subdir` in the lock
-        // and would change whenever a commit is re-pinned.
-        .arg("--strip-components=1")
-        .status()
-        .map_err(|e| format!("tar could not be run ({e})"))?;
+    // **Two unpackers, because GNU `tar` does not read zip.** The four forge
+    // corpora are `tar.gz`; the production corpus is a `.zip` published as an
+    // object, and `tar -xzf` on it fails with a message about a gzip header
+    // rather than one about the format. `unzip` ships on every runner image
+    // this project uses and on every developer platform it supports, and
+    // asking for it by name is the same posture as `curl` and `tar`: the
+    // program supplies bytes, it does not adjudicate anything.
+    let (program, args): (&str, Vec<&std::ffi::OsStr>) = match corpus.archive {
+        lock::Archive::CodeloadTarGz => (
+            "tar",
+            vec![
+                "-xzf".as_ref(),
+                archive.as_os_str(),
+                "-C".as_ref(),
+                into.as_os_str(),
+                // Every codeload archive is one directory named `repo-commit`,
+                // which would otherwise have to be spelled inside every
+                // `subdir` in the lock and would change whenever a commit is
+                // re-pinned.
+                "--strip-components=1".as_ref(),
+            ],
+        ),
+        // `-q` because a thousand-entry listing is not a log, and `-o` so a
+        // half-extracted directory from an interrupted run cannot stop at a
+        // prompt nobody is there to answer. There is no strip: a published
+        // object is not wrapped in a directory the way a forge archive is.
+        lock::Archive::Zip => (
+            "unzip",
+            vec![
+                "-q".as_ref(),
+                "-o".as_ref(),
+                archive.as_os_str(),
+                "-d".as_ref(),
+                into.as_os_str(),
+            ],
+        ),
+    };
+    let status = Command::new(program).args(&args).status().map_err(|e| {
+        format!(
+            "{program} could not be run ({e}). corpus-fetch invokes curl, tar \
+                 and unzip rather than linking an HTTPS client and two archive \
+                 readers; all three ship with every platform this project \
+                 supports, and CONTRIBUTING rule 1 is why they are not crates."
+        )
+    })?;
     if !status.success() {
-        return Err(format!("tar failed for {} ({status})", archive.display()));
+        return Err(format!(
+            "{program} failed for {} ({status})",
+            archive.display()
+        ));
     }
 
     let files = lock::files_dir(&PathBuf::from("."), corpus);
@@ -270,6 +307,8 @@ mod tests {
             name: "tampered".to_string(),
             url: "https://example.invalid/x.tar.gz".to_string(),
             commit: "0".repeat(40),
+            archive: lock::Archive::CodeloadTarGz,
+            timeout_seconds: None,
             sha256: pinned.clone(),
             subdir: String::new(),
             licence: "n/a".to_string(),

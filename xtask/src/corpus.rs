@@ -1,6 +1,6 @@
 //! The corpus sub-commands' command lines.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -117,15 +117,46 @@ pub struct RunArgs {
     pub only: Vec<String>,
     /// The per-file timeout.
     ///
-    /// Sixty seconds since 4-5 September 2026, up from twenty. The metamorphic
+    /// Sixty seconds from 4-5 September 2026, up from twenty. The metamorphic
     /// relations used to be declined for any file that had already spent
     /// 3 100 ms, precisely so that the extra work could not run twenty seconds
     /// out — and that clock decided a ratcheted denominator, so the nightly
     /// failed for a week on counts that moved with the runner's load. Deleting
     /// the gate means the relations are always asked, which needs the room.
-    /// Measured before it was taken: the whole corpus in 95 seconds, nothing
-    /// timing out, every relation count up or equal.
+    ///
+    /// **Three minutes from 6 September 2026, and this time the number is
+    /// sited on the whole distribution rather than on the two files that were
+    /// flipping.** Sixty was set against a corpus whose slowest file took
+    /// 20 s. It is now measured per corpus, on an idle machine, after the
+    /// rasteriser's row loop was fixed:
+    ///
+    /// | Corpus | Slowest file | What it is |
+    /// | --- | ---: | --- |
+    /// | `pdfjs` | 54 s | `issue16263.pdf` |
+    /// | `verapdf` | 48 s | the 10 000-page implementation-limit fixture |
+    /// | `qpdf` | 21 s | `numeric-and-string-2.pdf` |
+    /// | `pdfa-examples` | 0.2 s | |
+    /// | `safedocs` | 80 s | `0000231.pdf`, 4.5 MB off the open web |
+    ///
+    /// Two of those sat inside a factor of 1.25 of sixty seconds, which is
+    /// the hazard this repository has already been bitten by twice: a file
+    /// near the limit is passed on an idle run and killed on a busy one, the
+    /// pass rate moves, and every ratcheted count that file contributed to
+    /// moves with it. A limit has to clear the slowest *legitimate* file by
+    /// enough to survive a shared runner, and three minutes is between three
+    /// and nine times each of these.
+    ///
+    /// It is still a limit and still catches a hang: the stall detector fires
+    /// on a child that has written nothing for half its budget, and no file
+    /// measured here is silent for ninety seconds.
     pub timeout: Duration,
+    /// Whether the caller named `--timeout` on the command line.
+    ///
+    /// The distinction matters because a corpus may state its own in
+    /// `corpora.lock`, and the two have to be ordered. An explicit flag is an
+    /// *override* of the whole run and wins; the default is only a default,
+    /// and a corpus that states a timeout of its own beats it.
+    pub timeout_explicit: bool,
     /// Render resolution.
     pub dpi: f64,
     /// A face or directory of faces for documents that embed none.
@@ -150,7 +181,8 @@ impl Default for RunArgs {
     fn default() -> RunArgs {
         RunArgs {
             only: Vec::new(),
-            timeout: Duration::from_secs(60),
+            timeout: Duration::from_secs(180),
+            timeout_explicit: false,
             // 72 dpi: one device pixel per point. The question this run asks
             // is whether a bitmap comes back at all, and asking it four times
             // over at 150 costs hours across four thousand files without
@@ -191,6 +223,7 @@ impl RunArgs {
                         return Err("`--timeout 0` would kill every child instantly".to_string());
                     }
                     out.timeout = Duration::from_secs(seconds);
+                    out.timeout_explicit = true;
                 }
                 "--dpi" => {
                     let raw = value()?;
@@ -247,7 +280,44 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let (fonts, fonts_path) = resolve_fonts(root, &args)?;
     let child = resolve_child(&args, fonts_path.as_deref())?;
 
+    // **The sidecar is read before the run, and a defect in it stops the
+    // run.** Thirty-four files open only because of it, so a sidecar that
+    // will not parse is thirty-four failures the pass rate would carry
+    // without saying why — the same shape as the stale-binary check above.
+    let passwords_path = root.join(crate::passwords::PASSWORDS_PATH);
+    let passwords = match std::fs::read_to_string(&passwords_path) {
+        Ok(text) => crate::passwords::parse(&text)
+            .map_err(|e| format!("{}: {e}", crate::passwords::PASSWORDS_PATH))?,
+        // Absent is allowed: `--child` may name someone else's program and a
+        // checkout may be partial. It is recorded as a limit rather than
+        // passed over, because a run without it measures thirty-four files
+        // differently and a bar is a comparison between runs.
+        Err(_) => crate::passwords::Passwords::default(),
+    };
+    let known: Vec<String> = corpora.iter().map(|c| c.name.clone()).collect();
+    let stale = passwords.corpora_not_in(&known);
+    if !stale.is_empty() {
+        return Err(format!(
+            "{} names {} corpus this lockfile does not have ({}); a row that \
+             matches no corpus is silent, which is why it is refused here",
+            crate::passwords::PASSWORDS_PATH,
+            stale.len(),
+            stale
+                .iter()
+                .map(|row| format!("{}/{}", row.corpus, row.path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
     let mut limits: Vec<String> = Vec::new();
+    if passwords.rows().is_empty() {
+        limits.push(format!(
+            "no passwords were supplied: {} was not read, so every \
+             password-protected file is a failure rather than a measurement",
+            crate::passwords::PASSWORDS_PATH
+        ));
+    }
     if let Some(sample) = args.sample {
         limits.push(format!(
             "sampled: at most {sample} files per corpus were run, in path order"
@@ -304,8 +374,53 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             }
         }
 
-        eprintln!("corpus-run: {} — {} files", corpus.name, files.len());
-        let results = run_files(&child, &dir, &files, args.timeout, args.jobs);
+        // **The timeout this corpus is measured with.** A per-corpus value in
+        // the lock is a statement about the documents; `--timeout` on the
+        // command line is a statement about the run, so it wins.
+        let timeout = match (args.timeout_explicit, corpus.timeout_seconds) {
+            (false, Some(seconds)) => Duration::from_secs(seconds),
+            _ => args.timeout,
+        };
+        if timeout != args.timeout {
+            // Said out loud, because a pass rate measured at a different
+            // timeout is a different measurement and the log is where anybody
+            // reading a moved bar starts.
+            eprintln!(
+                "corpus-run: {} — {} files, {} s per file (its own, from the lock)",
+                corpus.name,
+                files.len(),
+                timeout.as_secs()
+            );
+        } else {
+            eprintln!("corpus-run: {} — {} files", corpus.name, files.len());
+        }
+        let for_corpus = passwords.for_corpus(&corpus.name);
+        let results = run_files(&child, &dir, &files, timeout, args.jobs, &for_corpus);
+
+        // **A sidecar row that matched no file is a stale row**, and a stale
+        // row is silent: the file it names was renamed or removed upstream,
+        // nothing is passed to any child, and the report shows only that some
+        // file failed for a password. On a sampled run it means nothing —
+        // most files were not run — so it is only looked for on a whole one.
+        if args.sample.is_none() {
+            let seen: BTreeSet<&str> = results.iter().map(|r| r.path.as_str()).collect();
+            let unmatched: Vec<&str> = for_corpus
+                .keys()
+                .copied()
+                .filter(|path| !seen.contains(path))
+                .collect();
+            if !unmatched.is_empty() {
+                limits.push(format!(
+                    "`{}` has {} password row(s) matching no file: {} — {} is \
+                     stale against this pin",
+                    corpus.name,
+                    unmatched.len(),
+                    unmatched.join(", "),
+                    crate::passwords::PASSWORDS_PATH
+                ));
+            }
+        }
+
         let report = CorpusReport {
             name: corpus.name.clone(),
             files: results,
@@ -371,6 +486,13 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
     println!();
     print!("{}", run.capability_table());
+    // Only when there is something to attribute: `producer_table` returns an
+    // empty string for a run where everything passed.
+    let attribution = run.producer_table();
+    if !attribution.is_empty() {
+        println!();
+        print!("{attribution}");
+    }
 
     if let Some(path) = &args.report {
         if let Some(parent) = path.parent() {
@@ -488,12 +610,16 @@ fn ratchet_note(run: &Run) -> String {
 /// job count far above the core count can time a slow file out that a serial
 /// run would not — which is why the default is the core count rather than
 /// something greedier.
+/// `passwords` maps a file's report path to the password to open it with, and
+/// is the corpus's own slice of `corpus/passwords.tsv`. A file with no row is
+/// run exactly as before.
 pub fn run_files(
     child: &Child,
     dir: &Path,
     files: &[PathBuf],
     timeout: Duration,
     jobs: usize,
+    passwords: &BTreeMap<&str, &str>,
 ) -> Vec<runner::FileResult> {
     let next = Arc::new(AtomicUsize::new(0));
     let results = Arc::new(Mutex::new(Vec::with_capacity(files.len())));
@@ -514,7 +640,13 @@ pub fn run_files(
                     .unwrap_or(file)
                     .to_string_lossy()
                     .replace('\\', "/");
-                let result = runner::run_one(child, file, &relative, timeout);
+                let extra = match passwords.get(relative.as_str()) {
+                    Some(password) => {
+                        vec!["--password".to_string(), (*password).to_string()]
+                    }
+                    None => Vec::new(),
+                };
+                let result = runner::run_one(child, file, &relative, timeout, &extra);
                 let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if finished % 250 == 0 {
                     eprintln!("corpus-run:   {finished}/{}", files.len());
@@ -722,6 +854,10 @@ mod tests {
         ])
         .expect("it parses");
         assert_eq!(args.timeout, Duration::from_secs(5));
+        assert!(
+            args.timeout_explicit,
+            "a `--timeout` on the command line overrides a corpus's own"
+        );
         assert_eq!(args.jobs, 2);
         assert_eq!(args.only, vec!["qpdf".to_string()]);
         assert!(args.strict);

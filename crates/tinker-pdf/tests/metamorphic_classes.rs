@@ -41,14 +41,44 @@
 //! case — 2.64 % for a page of text — which is `image-edges.md`'s class
 //! arriving for paths and glyphs rather than images.
 //!
-//! **And that is above the budget.** `ROTATE_BUDGET` is 2 %, raised from 1 %
-//! in August 2026 when image edges became soft, on two qpdf scans measuring
-//! 1.0 % hard and 1.7 % soft. A page of text on this rasteriser costs 2.64 %
-//! and a page of diagonals 2.81 %, so **a text-heavy page fails `rotate` for
-//! arithmetic reasons rather than for a defect**. Whether the answer is a
-//! wider budget, measured the way the last one was, or a permanent statement
-//! that the relation does not hold on glyph edges, is a decision rather than a
-//! measurement — and it is the roadmap's, not this file's.
+//! **And two percent was out by a factor of four.** `ROTATE_BUDGET` was 2%,
+//! raised from 1% in August 2026 on two qpdf scans measuring 1.0% hard and
+//! 1.7% soft. The figures above are 2.64% and 2.81% — over it, which is what
+//! the roadmap row said. What the row could not know is that **those figures
+//! are properties of these fixtures rather than of these constructs**: the
+//! pages are 64 points square with the construct in a corner, and a budget is
+//! a share of a page.
+//!
+//! Measured on pages the construct covers, at sizes a document has
+//! (`where_the_rotate_budget_goes`, which re-measures every figure it prints):
+//!
+//! | Page | `rotate` |
+//! | --- | ---: |
+//! | two triangles in a corner of 64 pt | 2.81 % |
+//! | the same two triangles on 595 pt | 0.03 % |
+//! | 11-point text filling 200 pt | 7.74 % |
+//! | 11-point text filling 595 pt | **8.77 %** |
+//! | 11-point text filling 842 pt | **8.74 %** |
+//! | diagonal edges covering 595 pt | 23.52 % |
+//!
+//! **A page of text costs 8.8%, and stays there as the page grows** — the
+//! corner fixture's cost fell with page size because its shapes stayed put,
+//! and a document's text does not. So the budget is **10%** from 5 September
+//! 2026: above the widest legitimate construct measured, below the tiling
+//! class at 22% and far below a rotation applied to the geometry and not the
+//! clip.
+//!
+//! It costs signal, and the cost is paid rather than waved away: 181 corpus
+//! files broke at 2% and 15 break at 10%. The same measurement is therefore
+//! judged a second time at 3% and recorded as **`rotate-tight`**, a relation
+//! the ratchet holds and no run fails on, so the 107 files between the two
+//! lines stay counted.
+//!
+//! **And one limitation no budget removes.** A page saturated with diagonal
+//! edge costs 23.5% at 595 points, which is the tiling class's own range. At
+//! no budget does this relation separate a saturated vector page from a
+//! lattice rounded wrongly, and the test asserts that rather than leaving it
+//! to be rediscovered.
 //!
 //! # What the corpus said first
 //!
@@ -93,6 +123,11 @@ use render_support::curvy_font;
 
 /// The relation's own budget, from `tools/tpdf/src/main.rs`.
 const DPI_BUDGET: f64 = 0.02;
+/// And the quarter turn's, which this file's own measurement moved from 2%
+/// to 10%.
+const ROTATE_BUDGET: f64 = 0.10;
+/// The line the same measurement is watched against, which decides nothing.
+const ROTATE_WATCH: f64 = 0.03;
 /// And its own per-channel tolerance.
 const CHANNEL_TOLERANCE: i32 = 8;
 
@@ -166,12 +201,48 @@ const SHAPES: &str = "0.2 0.4 0.9 rg 8 8 m 40 8 l 24 44 l h f \
 
 /// The page without the construct: the same two shapes, drawn plainly.
 fn plain_page() -> Vec<u8> {
+    plain_page_at(SIZE)
+}
+
+/// The same page at any size, for the one question a fixed size cannot
+/// answer: whether 64 points is the worst case or a special one.
+///
+/// The shapes keep their coordinates, so a larger page is the same amount of
+/// edge over more pixels. That is the point: the budget is a *share* of a
+/// page, and this construct's cost in pixels does not grow with the page.
+fn plain_page_at(size: f64) -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
-    builder.add_page(SIZE, SIZE, |page| {
+    builder.add_page(size, size, |page| {
         page.set_fill_rgb(0.95, 0.95, 0.6);
-        page.raw(format!("0 0 {SIZE} {SIZE} re f\n").as_bytes());
+        page.raw(format!("0 0 {size} {size} re f\n").as_bytes());
         page.raw(SHAPES.as_bytes());
     });
+    builder.finish()
+}
+
+/// Diagonal edges over a *whole* page, at any size.
+///
+/// **This is the fair worst case, and that is why it is here.**
+/// `plain_page_at` draws two triangles whose coordinates are fixed, so
+/// enlarging the page only dilutes them, and a budget sited on that would be
+/// sited on a page mostly empty. A document whose whole page is diagonal
+/// edges — a map, a chart, a page of drawn figures — is denser at every size,
+/// and a budget either admits it or admits that the relation does not hold
+/// there.
+fn covered_page_at(size: f64) -> Vec<u8> {
+    let mut content = format!("0.95 0.95 0.6 rg 0 0 {size} {size} re f\n");
+    let step = size / 12.0;
+    for index in 0..12 {
+        let base = f64::from(index) * step;
+        content.push_str(&format!(
+            "0.2 0.4 0.9 rg {base:.3} 0 m {:.3} {:.3} l {:.3} {size:.3} l h f\n",
+            base + step * 0.87,
+            size * 0.5,
+            base + step * 0.31,
+        ));
+    }
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(size, size, |page| page.raw(content.as_bytes()));
     builder.finish()
 }
 
@@ -353,6 +424,40 @@ fn text_page() -> Vec<u8> {
     builder.finish()
 }
 
+/// A page *filled* with 11-point text, at any size.
+///
+/// The two-line fixture above is text in a corner; this is a document. Which
+/// matters for exactly one question — where a budget goes — because a share of
+/// a page is not a property of a construct until the construct covers the
+/// page.
+fn text_filled_page_at(size: f64) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.set_subset_fonts(false);
+    assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
+    builder.add_page(size, size, |page| {
+        page.set_fill_rgb(0.95, 0.95, 0.6);
+        page.raw(format!("0 0 {size} {size} re f\n").as_bytes());
+        page.set_fill_rgb(0.1, 0.1, 0.1);
+        // Enough characters to reach the right edge at any size, so that a
+        // larger page is *more text* rather than the same line with more
+        // margin. The first fixture's figures fell with page size for exactly
+        // that reason, which made them a measurement of the fixture.
+        let leading = 14.0;
+        let columns = (size / 6.0).ceil() as usize;
+        let line: String = "abcdefghijklmnopqrstuvwxyz"
+            .chars()
+            .cycle()
+            .take(columns)
+            .collect();
+        let mut y = size - leading;
+        while y > 4.0 {
+            page.text(b"F0", 11.0, 4.0, y, &line);
+            y -= leading;
+        }
+    });
+    builder.finish()
+}
+
 /// `tpdf probe`'s `rotate` relation, transcribed for the same reason.
 ///
 /// A quarter turn puts every mark on a different sampling grid, which is why
@@ -511,6 +616,133 @@ fn what_moves_under_a_quarter_turn() {
     assert!(
         !moves.is_empty(),
         "if a quarter turn moved nothing at all, 181 corpus files would not be          failing this relation"
+    );
+}
+
+/// **Where `ROTATE_BUDGET` goes, measured the way the last raise was.**
+///
+/// The last raise — one percent to two, August 2026 — did not pick a number.
+/// It named a class whose cost had changed (image edges became soft), ablated
+/// it on real files (1.0% hard against 1.7% soft), and put the line above what
+/// it measured. This is the same procedure for the class *this file* found,
+/// and it needs one thing the seven-construct sweep above cannot give.
+///
+/// **The sweep's pages are 64 points square with the construct in a corner,
+/// and a budget is a share of a page.** So the sweep's 2.81% for diagonals and
+/// 2.64% for text are measurements of those fixtures, not of those constructs,
+/// and the difference is not small: the same two triangles on a 595-point page
+/// cost 0.03%, and a page *filled* with 11-point text costs 8.77%. The first
+/// number falls with page size because the shapes stay where they are; the
+/// second does not, because a document's text grows with its page. Only the
+/// second is a property of a construct.
+///
+/// That is the measurement this test exists to keep, and the figures below are
+/// re-measured on every run rather than quoted.
+///
+/// **What it settles.** Two percent was not slightly tight. A page of text
+/// costs four times it, so every text-heavy document in the corpus was failing
+/// `rotate` for arithmetic — 181 files broke at two percent and 166 of them
+/// stop breaking at ten. Ten sits above the widest legitimate construct
+/// measured here and below the defects the relation is for: the tiling
+/// pattern's 22%, and a rotation applied to the geometry and not the clip,
+/// which moves whole regions.
+///
+/// **What it costs, and what pays for it.** A relation that breaks on 15 files
+/// where it broke on 181 sees less. The 107 files between three and ten
+/// percent are not defects — this file's own ablation is the reason for
+/// believing that — but they are a population whose size is worth watching.
+/// `ROTATE_WATCH` is that: the probe judges the same measurement a second time
+/// at three percent and records it as `rotate-tight`, which the ratchet holds
+/// like any other relation and which no run fails on.
+///
+/// **And the limitation, which no budget removes.** A page that is nothing but
+/// diagonal edge — twelve wedges spanning it — costs 23.5% at 595 points and
+/// 46.8% at 64, which is the same range as the tiling-pattern *defect* this
+/// file attributes at 22%. The two populations overlap, so at no budget does
+/// this relation separate a saturated vector page from a lattice rounded
+/// wrongly. That is asserted below rather than written down and forgotten: the
+/// day a rasteriser change makes a saturated page cheap, the assertion fails
+/// and this paragraph gets rewritten.
+#[test]
+fn where_the_rotate_budget_goes() {
+    // What the budget must admit: pages a producer emits. The construct in a
+    // corner is kept for continuity with the sweep above; the filled pages are
+    // the measurement.
+    let mut worst_document: f64 = 0.0;
+    for (name, bytes) in [
+        ("two triangles on 64 pt", plain_page_at(SIZE)),
+        ("two triangles on 595 pt", plain_page_at(595.0)),
+        ("text in a corner of 64 pt", text_page()),
+        ("text filling 200 pt", text_filled_page_at(200.0)),
+        ("text filling 595 pt", text_filled_page_at(595.0)),
+        ("text filling 842 pt", text_filled_page_at(842.0)),
+    ] {
+        let (moved, total) = rotate_relation(bytes);
+        let share_moved = share(moved, total);
+        println!(
+            "  {name:<34} {moved:>7} of {total:>7} ({:.2}%)",
+            share_moved * 100.0
+        );
+        worst_document = worst_document.max(share_moved);
+    }
+
+    // And what it cannot admit, which is stated rather than left to be
+    // discovered: a page that is nothing *but* diagonal edge.
+    let mut worst_saturated: f64 = 0.0;
+    for (name, bytes) in [
+        ("diagonal edges covering 64 pt", covered_page_at(SIZE)),
+        ("diagonal edges covering 200 pt", covered_page_at(200.0)),
+        ("diagonal edges covering 595 pt", covered_page_at(595.0)),
+    ] {
+        let (moved, total) = rotate_relation(bytes);
+        let share_moved = share(moved, total);
+        println!(
+            "  {name:<34} {moved:>7} of {total:>7} ({:.2}%)  [beyond any budget]",
+            share_moved * 100.0
+        );
+        worst_saturated = worst_saturated.max(share_moved);
+    }
+
+    assert!(
+        worst_document > ROTATE_WATCH,
+        "the class this budget was raised for costs {:.2}%, inside the watch \
+         line itself -- if this ever passes, the raise has no measurement \
+         behind it any more and the budget should go back down",
+        worst_document * 100.0
+    );
+    assert!(
+        worst_document <= ROTATE_BUDGET,
+        "a page of text costs {:.2}% and the budget admits {:.2}%; a budget \
+         below its own measured class fails documents on arithmetic, which is \
+         the thing it exists to prevent",
+        worst_document * 100.0,
+        ROTATE_BUDGET * 100.0
+    );
+    // The distance the original figure was chosen for, kept -- and measured
+    // rather than written as a constant, because a constant compared against a
+    // constant is a sentence about today's numbers that no run can falsify.
+    // The tiling class is the defect this relation must go on catching, so the
+    // budget has to sit below what that class actually costs.
+    let (tiling_moved, tiling_total) = rotate_relation(tiling_page());
+    let tiling = share(tiling_moved, tiling_total);
+    println!(
+        "  {:<34} {tiling_moved:>7} of {tiling_total:>7} ({:.2}%)  [the defect class]",
+        "a tiling pattern off the grid",
+        tiling * 100.0
+    );
+    assert!(
+        ROTATE_BUDGET < tiling,
+        "a budget of {:.2}% could not see the tiling class, which costs \
+         {:.2}% -- and that class is what this relation is for",
+        ROTATE_BUDGET * 100.0,
+        tiling * 100.0
+    );
+    assert!(
+        worst_saturated > ROTATE_BUDGET,
+        "a page saturated with diagonal edges costs {:.2}%, which is inside the \
+         budget -- if this ever passes, the limitation recorded above has gone \
+         away and the doc comment is wrong",
+        worst_saturated * 100.0
     );
 }
 

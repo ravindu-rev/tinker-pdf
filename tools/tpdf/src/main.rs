@@ -1086,7 +1086,86 @@ const DPI_BUDGET: f64 = 0.02;
 /// for — a misapplied rotation moves whole regions, tens of percent, and the
 /// one file at 14% is still caught — and it is the same figure `DPI_BUDGET`
 /// already carries for the same class of reason.
-const ROTATE_BUDGET: f64 = 0.02;
+///
+/// **Raised again to ten percent on 5 September 2026, and the reason is that
+/// the class was finally measured on a page rather than on a thumbnail.**
+///
+/// `crates/tinker-pdf/tests/metamorphic_classes.rs` puts seven constructs,
+/// each alone on a page, through this relation, and two of them move anything:
+/// a tiling pattern, which is a rounding of the lattice and a defect this
+/// budget must go on catching, and **anti-aliased edges that are not
+/// axis-aligned**, which is arithmetic. A quarter turn puts every mark on a
+/// transposed sampling grid; a rectangle on integers transposes exactly and a
+/// diagonal cannot.
+///
+/// The first figures for the second class were 2.81% for diagonals and 2.64%
+/// for text, and **both were fixture artefacts**: the pages are 64 points
+/// square with the construct in a corner, and a budget is a *share of a page*.
+/// Measured on pages the construct actually covers, and at sizes a document
+/// has:
+///
+/// | Page | `rotate` |
+/// | --- | ---: |
+/// | two triangles in a corner of 64 pt | 2.81% |
+/// | the same two triangles on 595 pt | 0.03% |
+/// | 11-point text filling 200 pt | 7.74% |
+/// | 11-point text filling 595 pt | **8.77%** |
+/// | 11-point text filling 842 pt | **8.74%** |
+/// | diagonal edges covering 595 pt | 23.52% |
+/// | a tiling pattern off the grid, 64 pt | 22.05% |
+///
+/// **A page of text costs 8.8% and the figure is stable across page sizes** —
+/// which the corner fixture could not show, because its cost fell with the
+/// page while a real document's text does not. So two percent was not
+/// slightly tight, it was out by a factor of four, and every text-heavy
+/// document in the corpus was failing this relation for arithmetic. That is
+/// the one thing a budget exists to prevent.
+///
+/// Ten percent is above the measured class and below the measured defects: the
+/// tiling class is 22%, and a rotation applied to the geometry and not to the
+/// clip moves whole regions. Fifteen corpus files still break it, from 10.9%
+/// to 75.4%.
+///
+/// **What this raise does not have, and the last one did: a gap to sit in.**
+/// One percent was sited where nothing sat — over 119 files the relation was
+/// exact on 83 and the worst was 14%. A whole-corpus run on 5 September, with
+/// every hold now carrying its own measurement, says that region is gone: of
+/// 4 032 files that hold, 109 hold above 1% and 47 above 1.5%, and of the 181
+/// that broke at two percent the smallest was 2.027% with no gap up to 4%. The
+/// ablated constructs still leave one — 8.8% for text against 22% for the
+/// pattern class — and that is the gap this figure sits in.
+///
+/// **And the cost is paid rather than waved away.** 166 files stop being
+/// reported by this relation, 107 of them between three and ten percent. That
+/// is why `ROTATE_WATCH` exists: the same measurement is judged a second time
+/// at three percent and recorded as its own relation, so the population that
+/// the wider budget stops failing is still counted and still ratcheted.
+const ROTATE_BUDGET: f64 = 0.10;
+
+/// The line the same measurement is *watched* against, which decides nothing.
+///
+/// **A budget wide enough to admit a page of text is too wide to see much,
+/// and this is what stops that being a loss.** At ten percent the relation
+/// breaks on 15 corpus files where two percent broke on 181, so 166 files
+/// stop being reported — and 107 of those sit between three and ten percent,
+/// which is a population worth knowing the size of even though no single one
+/// of them is a defect.
+///
+/// So the same `moved of total` is judged twice and reported under two names.
+/// `rotate` carries the budget and can fail a run; `rotate-tight` carries this
+/// and cannot, because the runner compares every relation it is given by name
+/// and the ratchet holds each one's count. A change that makes glyph edges
+/// noisier moves `rotate-tight` long before it moves `rotate`, and a change
+/// that turns the geometry without the clip moves both.
+///
+/// Three percent rather than the old two: two was below the constructs this
+/// engine's own ablation measures — 2.81% for a page of diagonals on the
+/// smallest page — so a watch line there would spend its life above the noise
+/// it is watching.
+const ROTATE_WATCH: f64 = 0.03;
+
+/// What the watched judgement is called in the record.
+const ROTATE_WATCH_NAME: &str = "rotate-tight";
 
 /// A share of a page's pixels, for a relation's report.
 #[allow(
@@ -1104,10 +1183,59 @@ fn share(moved: u64, total: u64) -> f64 {
 /// one measures nothing.
 const CHANNEL_TOLERANCE: i32 = 8;
 
+/// One relation's *measurement*, before a budget is applied to it.
+///
+/// Separated from [`Relation`] because one measurement now answers two
+/// questions. `rotate` is reported twice — once against the budget that
+/// decides pass or fail, and once against a tighter line that decides nothing
+/// and is watched — and rendering the page a second time to ask the second
+/// question would be a waste and a lie: two renders can differ.
+enum Measured {
+    /// `moved` pixels of `total` were not the transposition.
+    Moved(u64, u64),
+    /// The comparison could not be made at all — a turn that did not
+    /// transpose, a rewrite that would not reopen.
+    Broke(String),
+    /// It was not asked.
+    Skipped(&'static str),
+}
+
+impl Measured {
+    /// The verdict a budget draws from this measurement.
+    fn judged(&self, budget: f64) -> Relation {
+        match self {
+            Measured::Moved(moved, total) => {
+                if share(*moved, *total) <= budget {
+                    Relation::Held(*moved, *total)
+                } else {
+                    Relation::Broke(format!(
+                        "{moved} of {total} pixels ({:.1}%) are not the transposition, over a budget of {:.1}%",
+                        share(*moved, *total) * 100.0,
+                        budget * 100.0
+                    ))
+                }
+            }
+            Measured::Broke(detail) => Relation::Broke(detail.clone()),
+            Measured::Skipped(why) => Relation::Skipped(why),
+        }
+    }
+}
+
 /// One relation's verdict, in the record's own words.
 enum Relation {
-    /// The relation held.
-    Held,
+    /// The relation held, and this is how far it was from not holding:
+    /// the pixels that moved, of the pixels compared.
+    ///
+    /// **A hold carries its measurement because the budgets are sited from
+    /// the population and not from a principle.** `ROTATE_BUDGET`'s own
+    /// comment sites two percent against a distribution — exact on 83 files
+    /// of 119, 0.29 % at the ninetieth percentile — and that distribution
+    /// came from a run somebody instrumented by hand, because a record that
+    /// says only `held` throws the ninety-eight percent away and keeps the
+    /// tail. Re-siting a budget then has nothing to re-site against. Two
+    /// files that both held, one at 0 % and one at 1.9 %, are not the same
+    /// observation and the record now says so.
+    Held(u64, u64),
     /// It did not, and this is what was measured.
     Broke(String),
     /// It could not be asked — an empty page, a page too large to render
@@ -1118,7 +1246,7 @@ enum Relation {
 impl Relation {
     fn print(&self, name: &str) {
         match self {
-            Relation::Held => println!("meta {name} held"),
+            Relation::Held(moved, total) => println!("meta {name} held {moved} of {total}"),
             Relation::Broke(detail) => println!("meta {name} broke {}", one_line(detail)),
             Relation::Skipped(why) => println!("meta {name} skipped {why}"),
         }
@@ -1168,7 +1296,7 @@ impl Relation {
 /// `compared` is a function of the corpus and not of the machine.
 fn metamorphic(doc: &Document, options: &Options, fonts: Option<&Arc<SimpleFontProvider>>) {
     if doc.page_count() == 0 {
-        for name in ["rotate", "crop", "dpi"] {
+        for name in ["rotate", ROTATE_WATCH_NAME, "crop", "dpi"] {
             Relation::Skipped("the document has no pages").print(name);
         }
         return;
@@ -1185,7 +1313,7 @@ fn metamorphic(doc: &Document, options: &Options, fonts: Option<&Arc<SimpleFontP
     // A page that came back empty is a page the relations cannot speak about:
     // every one of them holds trivially over nothing.
     if base.width == 0 || base.height == 0 {
-        for name in ["rotate", "crop", "dpi"] {
+        for name in ["rotate", ROTATE_WATCH_NAME, "crop", "dpi"] {
             Relation::Skipped("the page rendered to nothing").print(name);
         }
         return;
@@ -1211,12 +1339,15 @@ fn metamorphic(doc: &Document, options: &Options, fonts: Option<&Arc<SimpleFontP
             // which is several seconds of silence on a large file — and is
             // where a rewrite that does not terminate stops.
             println!("phase meta-rotate");
-            rotation(doc, &base, &render, fonts).print("rotate");
+            let turned = rotation(doc, &base, &render, fonts);
+            turned.judged(ROTATE_BUDGET).print("rotate");
+            turned.judged(ROTATE_WATCH).print(ROTATE_WATCH_NAME);
             println!("phase meta-crop");
             cropping(doc, &page, &base, &render, fonts).print("crop");
         }
         Some(why) => {
             Relation::Skipped(why).print("rotate");
+            Relation::Skipped(why).print(ROTATE_WATCH_NAME);
             Relation::Skipped(why).print("crop");
         }
     }
@@ -1250,13 +1381,13 @@ fn rotation(
     base: &Bitmap,
     render: &RenderOptions,
     fonts: Option<&Arc<SimpleFontProvider>>,
-) -> Relation {
+) -> Measured {
     let mut editor = doc.editor();
     if !editor.rotate_page(0, 90) {
-        return Relation::Skipped("the page would not rotate");
+        return Measured::Skipped("the page would not rotate");
     }
     let Ok(turned) = Document::open(editor.save(&WriteOptions::default())) else {
-        return Relation::Skipped("the rotated document would not reopen");
+        return Measured::Skipped("the rotated document would not reopen");
     };
     // **With the same faces**, and this is not a detail. The relation compares
     // two renders of one document, so the two must be rendered under the same
@@ -1269,12 +1400,12 @@ fn rotation(
         None => turned,
     };
     let Some(page) = turned.page(0) else {
-        return Relation::Skipped("the rotated document lost its page");
+        return Measured::Skipped("the rotated document lost its page");
     };
     let rotated = page.render(render);
 
     if rotated.width != base.height || rotated.height != base.width {
-        return Relation::Broke(format!(
+        return Measured::Broke(format!(
             "{}x{} turned is {}x{} and not {}x{}",
             base.width, base.height, rotated.width, rotated.height, base.height, base.width
         ));
@@ -1288,16 +1419,7 @@ fn rotation(
             }
         }
     }
-    let total = u64::from(rotated.width) * u64::from(rotated.height);
-    if share(moved, total) <= ROTATE_BUDGET {
-        Relation::Held
-    } else {
-        Relation::Broke(format!(
-            "{moved} of {total} pixels ({:.1}%) are not the transposition, over a              budget of {:.1}%",
-            share(moved, total) * 100.0,
-            ROTATE_BUDGET * 100.0
-        ))
-    }
+    Measured::Moved(moved, u64::from(rotated.width) * u64::from(rotated.height))
 }
 
 /// **A cropped render is the sub-rectangle of the full one** (ruling 5's tile
@@ -1379,10 +1501,10 @@ fn cropping(
     // files of the pdf.js corpus this relation was exact on all 119. Rotation
     // and resolution both change the grid and both need a budget; this does
     // not, and giving it one would hide the only kind of defect it can see.
+    let total = u64::from(small.width) * u64::from(small.height);
     if moved == 0 {
-        Relation::Held
+        Relation::Held(0, total)
     } else {
-        let total = u64::from(small.width) * u64::from(small.height);
         Relation::Broke(format!(
             "{moved} of {total} pixels of the crop are not the page under it"
         ))
@@ -1439,7 +1561,7 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
         }
     }
     if share(moved, total) <= DPI_BUDGET {
-        Relation::Held
+        Relation::Held(moved, total)
     } else {
         Relation::Broke(format!(
             "{moved} of {total} pixels ({:.1}%) differ, over a budget of {:.1}%",
@@ -1665,6 +1787,28 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         println!("build bundled-fonts");
     }
     println!("ladder {:?}", doc.ladder_level());
+
+    // **Who wrote the file, when the file says.** The production corpus's
+    // whole argument is that its documents were emitted by real producers for
+    // real readers, and a failure there is worth nothing until it can be
+    // attributed to one of them: "eleven files fail" is a number, and "eleven
+    // files fail and nine of them came out of the same generator" is a lead.
+    //
+    // On one line, through `one_line`, and never omitted for being empty --
+    // `(none stated)` is a producer string too, and the commonest one after
+    // Adobe's in the SAFEDOCS sample. A file that states nothing is a
+    // population, not a gap in the data.
+    let producer = doc.metadata().producer.unwrap_or_default();
+    let producer = producer.trim();
+    println!(
+        "producer {}",
+        if producer.is_empty() {
+            "(none stated)".to_string()
+        } else {
+            one_line(producer)
+        }
+    );
+
     let pages = doc.page_count();
     println!("pages {pages}");
 

@@ -333,6 +333,13 @@ impl Run {
                         if let Some(peak) = file.peak {
                             fields.push(("peak", Json::count(peak)));
                         }
+                        // Who wrote the file. Per file for the same reason the
+                        // peak is: the per-corpus grouping below is a summary,
+                        // and the only thing anybody can act on is the row
+                        // naming a path and a producer together.
+                        if let Some(producer) = &file.producer {
+                            fields.push(("producer", Json::string(producer)));
+                        }
                         if file.cost != crate::runner::Cost::default() {
                             fields.push((
                                 "cost",
@@ -612,6 +619,70 @@ impl Run {
     }
 
     /// The capability hit-rate table, as markdown, for gaps 10, 17 and 18.
+    /// **Every file that did not pass, and who wrote it.**
+    ///
+    /// The production corpus's argument is that its documents were emitted by
+    /// real producers for real readers rather than written to test a reader,
+    /// and the roadmap's exit criterion for that row is that every failure be
+    /// *attributed by producer*. This is that attribution, and it is a table
+    /// rather than a ratchet on purpose: the count of failures is already
+    /// ratcheted, and what a person needs when the count moves is the name of
+    /// the tool whose output moved it.
+    ///
+    /// Two failures from one generator and two from two different ones are
+    /// the same number and completely different findings. The first is one
+    /// bug in one producer's output; the second is a bug here.
+    ///
+    /// Printed only when something did not pass, because a table of nothing
+    /// is noise in a green run's log.
+    pub fn producer_table(&self) -> String {
+        let mut rows: Vec<(String, String, String, &'static str)> = Vec::new();
+        for corpus in &self.corpora {
+            for file in &corpus.files {
+                if matches!(file.outcome, crate::runner::Outcome::Passed) {
+                    continue;
+                }
+                rows.push((
+                    // A record that never opened the file states no producer,
+                    // and that is its own row rather than a blank: it is the
+                    // answer for a file this engine could not read at all.
+                    file.producer
+                        .clone()
+                        .unwrap_or_else(|| "(unread: the file did not open)".to_string()),
+                    corpus.name.clone(),
+                    file.path.clone(),
+                    file.outcome.label(),
+                ));
+            }
+        }
+        if rows.is_empty() {
+            return String::new();
+        }
+        rows.sort();
+
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        for (producer, _, _, _) in &rows {
+            *counts.entry(producer.clone()).or_default() += 1;
+        }
+
+        let mut out = format!(
+            "{} file(s) did not pass, from {} distinct producer(s):\n\n",
+            rows.len(),
+            counts.len()
+        );
+        out.push_str("| Producer | Corpus | File | Outcome |\n| --- | --- | --- | --- |\n");
+        for (producer, corpus, path, outcome) in &rows {
+            // The pipe is the table's own separator and a producer string may
+            // contain one -- SAFEDOCS has several where a tool recorded two
+            // names joined by it -- so it is escaped rather than trusted.
+            out.push_str(&format!(
+                "| {} | `{corpus}` | `{path}` | {outcome} |\n",
+                producer.replace('|', "\\|")
+            ));
+        }
+        out
+    }
+
     pub fn capability_table(&self) -> String {
         let mut names: Vec<String> = Vec::new();
         for corpus in &self.corpora {
@@ -677,6 +748,7 @@ mod tests {
             cost: crate::runner::Cost::default(),
             bundled_faces: false,
             tagged: None,
+            producer: None,
             peak: None,
             pages: 1,
             rendered: 1,
