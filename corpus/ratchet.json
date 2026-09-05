@@ -4,34 +4,42 @@
     {
       "capabilities": {
         "iccbased": 80,
-        "jbig2": 103,
-        "jpx": 12,
+        "jbig2": 104,
+        "jpx": 13,
         "mesh-shading": 10,
         "signature": 9
       },
-      "degraded": 338,
+      "degraded": 345,
       "metamorphic": {
         "crop": {
-          "compared": 829,
-          "held": 792
+          "compared": 831,
+          "held": 794
         },
         "dpi": {
-          "compared": 944,
-          "held": 915
+          "compared": 959,
+          "held": 930
         },
         "rotate": {
-          "compared": 838,
-          "held": 681
+          "compared": 840,
+          "held": 825
+        },
+        "rotate-tight": {
+          "compared": 840,
+          "held": 729
         }
       },
       "name": "pdfjs",
       "outcomes": {
         "crashed": 0,
-        "failed": 11,
-        "passed": 963,
+        "failed": 0,
+        "passed": 974,
         "timed_out": 0
       },
-      "passed": 963,
+      "passed": 974,
+      "peak": {
+        "bytes": 923738112,
+        "files": 974
+      },
       "strict_clean": 841,
       "strict_eligible": 841,
       "tagged": {
@@ -51,28 +59,36 @@
       "degraded": 55,
       "metamorphic": {
         "crop": {
-          "compared": 2885,
-          "held": 2885
+          "compared": 2886,
+          "held": 2886
         },
         "dpi": {
-          "compared": 2906,
-          "held": 2884
+          "compared": 2907,
+          "held": 2885
         },
         "rotate": {
-          "compared": 2888,
-          "held": 2865
+          "compared": 2889,
+          "held": 2889
+        },
+        "rotate-tight": {
+          "compared": 2889,
+          "held": 2878
         }
       },
       "name": "verapdf",
       "outcomes": {
         "crashed": 0,
         "failed": 0,
-        "passed": 2906,
-        "timed_out": 1
+        "passed": 2907,
+        "timed_out": 0
       },
-      "passed": 2906,
-      "strict_clean": 2890,
-      "strict_eligible": 2890,
+      "passed": 2907,
+      "peak": {
+        "bytes": 55480320,
+        "files": 2907
+      },
+      "strict_clean": 2891,
+      "strict_eligible": 2891,
       "tagged": {
         "elements": 3521,
         "files": 589,
@@ -86,29 +102,37 @@
         "iccbased": 3,
         "signature": 2
       },
-      "degraded": 530,
+      "degraded": 553,
       "metamorphic": {
         "crop": {
-          "compared": 471,
-          "held": 465
+          "compared": 472,
+          "held": 466
         },
         "dpi": {
-          "compared": 582,
-          "held": 582
+          "compared": 606,
+          "held": 606
         },
         "rotate": {
-          "compared": 479,
-          "held": 479
+          "compared": 480,
+          "held": 480
+        },
+        "rotate-tight": {
+          "compared": 480,
+          "held": 480
         }
       },
       "name": "qpdf",
       "outcomes": {
         "crashed": 0,
-        "failed": 29,
-        "passed": 608,
+        "failed": 6,
+        "passed": 631,
         "timed_out": 0
       },
-      "passed": 608,
+      "passed": 631,
+      "peak": {
+        "bytes": 225947648,
+        "files": 637
+      },
       "strict_clean": 487,
       "strict_eligible": 487,
       "tagged": {
@@ -133,7 +157,11 @@
         },
         "rotate": {
           "compared": 6,
-          "held": 5
+          "held": 6
+        },
+        "rotate-tight": {
+          "compared": 6,
+          "held": 6
         }
       },
       "name": "pdfa-examples",
@@ -144,6 +172,10 @@
         "timed_out": 0
       },
       "passed": 7,
+      "peak": {
+        "bytes": 15011840,
+        "files": 7
+      },
       "strict_clean": 6,
       "strict_eligible": 6,
       "tagged": {
@@ -153,6 +185,55 @@
         "orphans": 0
       },
       "total": 7
+    },
+    {
+      "capabilities": {
+        "iccbased": 233,
+        "jbig2": 15,
+        "jpx": 19,
+        "mesh-shading": 7,
+        "signature": 7
+      },
+      "degraded": 483,
+      "metamorphic": {
+        "crop": {
+          "compared": 880,
+          "held": 777
+        },
+        "dpi": {
+          "compared": 978,
+          "held": 914
+        },
+        "rotate": {
+          "compared": 899,
+          "held": 798
+        },
+        "rotate-tight": {
+          "compared": 899,
+          "held": 490
+        }
+      },
+      "name": "safedocs",
+      "outcomes": {
+        "crashed": 0,
+        "failed": 3,
+        "passed": 997,
+        "timed_out": 0
+      },
+      "passed": 997,
+      "peak": {
+        "bytes": 511160320,
+        "files": 1000
+      },
+      "strict_clean": 899,
+      "strict_eligible": 899,
+      "tagged": {
+        "elements": 504699,
+        "files": 361,
+        "matched": 8444778,
+        "orphans": 174407
+      },
+      "total": 1000
     }
   ],
   "limits": [],
@@ -161,6 +242,6 @@
   "settings": {
     "dpi": 72,
     "fonts": "none",
-    "timeout_seconds": 20
+    "timeout_seconds": 180
   }
 }

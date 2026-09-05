@@ -73,7 +73,7 @@ decrypts nothing, with no error anywhere to say why.
 
 ## The evidence, and what it is not
 
-**No corpus file uses this handler.** Zero of 4 594. Ruling 3 schedules
+**No corpus file uses this handler.** Zero of 5 594, re-measured on 6 September 2026 after a thousand real-world documents were pinned. Ruling 3 schedules
 capabilities by corpus hit-rate, so this one was built because it was asked
 for and not because the evidence called for it — and the consequence is that
 its verification cannot be what the rest of this crate's is.

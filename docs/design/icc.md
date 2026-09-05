@@ -370,7 +370,7 @@ profile part is embedded **verbatim** into the synthesised PDF as an
 caps by the ordinary PDF road, one pass later than it looks.
 
 The document column's two numbers are the corpus's own, over every `acsp`
-stream in all 4 594 files: the largest profile is **718 672 bytes** and the
+stream in all 5 594 files: the largest profile is **718 672 bytes** and the
 busiest declares **eighteen** tags. The margins are 2.9x and 57x. Eighteen
 corrects the "declares seventeen" this document and the constant both carried;
 the census that produced seventeen counted profiles the parser *accepts*, and a

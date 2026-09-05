@@ -319,11 +319,20 @@ zero would leave the only two "does this cap refuse a real file" checks saying
 nothing at all about these three rows. `SCAN_SYMBOLS` in `bounds_ledger.rs`
 carries that notice beside the number.
 
-Getting the real measurement still needs a file this repository does not have.
-Adding one means either committing OCR output — which `corpus/README.md`'s
-licensing position rules out for the same reason it rules out committing any
-corpus — or fetching a corpus that carries some. That is **tier 0's
-production-corpus row**, which names this measurement as one of the things
+**Taken, 6 September 2026.** Tier 0's production-corpus row landed — the
+SafeDocs shard, a thousand documents off the open web, fetched and pinned and
+never committed — and it carries real OCR JBIG2. Over the 117 JBIG2-bearing
+files in the five corpora the largest dictionary exports **2 478 symbols**,
+declares 2 468 new ones and places **4 440 text instances**, against caps of
+100 000 and 4 194 304. So the rows are calibrated against real scans at last,
+with 40 and 944 times the headroom a real document has asked for, and the word
+"estimate" comes off them.
+
+The paragraph this replaces said the measurement needed a file this repository
+does not have, and that adding one meant either committing OCR output — which
+`corpus/README.md`'s licensing position rules out — or fetching a corpus that
+carries some. That is **tier 0's production-corpus row**, which named this
+measurement as one of the things
 waiting on it; it was never milestone 7's to decide, and it is no longer a
 roadmap row of its own pretending to be blocked work.
 
@@ -649,7 +658,7 @@ Annex H test and were all wrong, so "it decodes and looks like a picture" is
 exactly as weak as this paragraph always said it was.
 
 | 6 | Huffman variants: Annex B tables, type-53 custom tables, 7.4.3.1.7 symbol IDs, MMR collective bitmaps via `T6Rows` | H.1's Huffman-coded page decodes pixel-identical to its arithmetic twin; an over-subscribed custom table refuses with an asserted warning | M |
-| 7 | Bounds and fuzz hardening | **Done**, with the exit criterion corrected rather than met: the three rows are in `bounds_ledger.rs` (the second as `MAX_JBIG2_SYMBOL_PIXELS`, which is what the decoder charges) and none refuses a real scan, but the yardstick is stated arithmetic and the rows publish the word **estimate** — the corpus holds no real OCR JBIG2 to measure against, and that measurement now waits on tier 0's production corpus. See the note above | S |
+| 7 | Bounds and fuzz hardening | **Done**, with the exit criterion corrected rather than met: the three rows are in `bounds_ledger.rs` (the second as `MAX_JBIG2_SYMBOL_PIXELS`, which is what the decoder charges) and none refuses a real scan, and the yardstick was stated arithmetic until 6 September 2026, when tier 0's production corpus arrived with real OCR JBIG2: the largest dictionary in 117 JBIG2-bearing files exports **2 478 symbols** and places **4 440 text instances**, against caps of 100 000 and 4 194 304. See the note above | S |
 | 8 | Corpus closure and docs | `cargo xtask corpus-run` shows `Capability::Jbig2` hit-rate ~0 in `ratchet.json`; every JBIG2-bearing corpus file renders without a placeholder warning, counted; one JBIG2 fingerprint in `determinism.rs`; the symbol/text refusal rows leave [../features/filters.md](../features/filters.md) | S |
 
 ### What Annex H.1 cannot adjudicate, and when it can

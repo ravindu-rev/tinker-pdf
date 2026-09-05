@@ -3,7 +3,7 @@
 When this is done, a page will be checkable against something other than
 this engine's own opinion of it. Today it is not:
 [verification.md](../verification.md) states the limit — 4 403 tests prove
-the engine agrees with itself, the 4 525-file corpus run proves a bitmap
+the engine agrees with itself, the 5 525-file corpus run proves a bitmap
 came back, and nothing proves the bitmap is *right*.
 
 The design that used to sit here closed that by rendering the same page with
@@ -88,7 +88,7 @@ fixture that catches nothing when its defect is injected is not a fixture.
 ### 2. Metamorphic probes — breadth, over documents nobody here wrote
 
 Analytic fixtures are exact but narrow: they cover pages built to be
-provable. The corpus is the opposite — 4 525 real files with no known
+provable. The corpus is the opposite — 5 525 real files with no known
 answer. What can still be asserted there is a *relation between two renders*
 of the same file, which needs no ground truth at all:
 
@@ -168,7 +168,7 @@ quietly stopped proving something is not.
   defined in one place. No metric changes.
 - `xtask` plumbing: `ratchet::holds`, `report.rs` serialization,
   `runner.rs`'s per-file timeout discipline, `corpus.rs::pdfs_under`.
-- The four fetched corpora, which ruling 13 keeps: they are inputs, not
+- The five fetched corpora, which ruling 13 keeps: they are inputs, not
   adjudicators.
 - `crates/tinker-pdf/tests/determinism.rs` for the fingerprint mechanism the
   analytic fixtures reuse.

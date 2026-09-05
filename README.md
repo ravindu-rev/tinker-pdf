@@ -13,7 +13,7 @@ with nothing but `rustup`, on Windows, macOS, Linux and
 ## The guarantees
 
 - **It never panics on untrusted input.** Fuzz-enforced, release-gating:
-  24 fuzz targets, 186 million recorded executions, and a 4 525-file
+  24 fuzz targets, 186 million recorded executions, and a 5 525-file
   corpus of real-world documents opened without one crash.
   [docs/verification.md](docs/verification.md).
 - **It is deterministic.** The same bytes render to bit-identical output
@@ -32,8 +32,8 @@ with nothing but `rustup`, on Windows, macOS, Linux and
 
 ## Measured, not claimed
 
-As of September 2026: **4 403 tests** (0 failed) across 200 suites; corpus of
-**4 525** documents with **4 484 rendering every page and zero crashes**, and
+As of September 2026: **4 477 tests** (0 failed) across 204 suites; corpus of
+**5 525** documents with **5 516 rendering every page and zero crashes**, and
 **4 225 of 4 225** rewrites of them validating against ISO 32000 read
 strictly;
 all 202 Adobe CMaps compiled in; UAX #14 line breaking at

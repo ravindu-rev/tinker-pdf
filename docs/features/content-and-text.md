@@ -216,7 +216,7 @@ the 3 document byte-hashes. The `content_tokenizer` and `render_page` fuzz
 targets are among the 24 with committed seed corpora; `hostile_input.rs`
 sweeps the same shapes on stable. Nothing compares this extractor against
 another one: ruling 13 ended that, and the harness that could have driven one
-is deleted. Across the corpus, 4 484 of
-4 525 files rendered every page with 0 crashes, and `cargo test
+is deleted. Across the corpus, 5 516 of
+5 525 files rendered every page with 0 crashes, and `cargo test
 --workspace` stands at 4 403 passed / 0 failed / 43 ignored (Windows x86_64,
 as of August 2026).

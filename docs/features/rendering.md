@@ -26,7 +26,7 @@ profiles are the same with one curve. A printer profile carries a multi-dimensio
 instead — `mft1` or `mft2` at an `A2B*` tag, three stages of curve with an
 interpolated grid between them — and those are read too, in the v2 shape that
 is 99.3 % of them. Measured against the corpus's 2 750 real
-profiles: **2 744 compile, 99.8 %** — and 449 of the 4 525 files name an
+profiles: **3 227 compile, 99.8 %** — and 682 of the 5 525 files name an
 `ICCBased` space that paints through one, which the corpus report counts as
 `iccbased`. The six that do not compile are named: 3 a data space with no
 transform here, 2 a connection space this build cannot reach, and 1 v4's
@@ -114,7 +114,7 @@ never handed back in CMYK, because a `Bitmap` says how many components it has
 and nothing about what they mean.
 
 `/Lab` is the one still composited in RGB and reported by name: its components
-are not in the unit interval at all. Measured over the 4 525 corpus files,
+are not in the unit interval at all. Measured over the 5 525 corpus files,
 August 2026: **35 declare a `/DeviceCMYK` group and none declares `/Lab`**. ExtGState
 `/SMask` works in both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with
 `/BC` read in the mask group's own `/Group /CS` and defaulting to black
@@ -226,7 +226,7 @@ helpers `Page::render` composes.
 - Fuzzing: `render_page` among the 24 fuzz targets renders whole hostile
   documents; `crates/tinker-pdf/tests/hostile_input.rs` replays the sweep on
   stable.
-- Corpus, as of August 2026: 4 525 files, 4 484 rendered every page, zero
+- Corpus, as of September 2026: 5 525 files, 5 516 rendered every page, zero
   crashes.
 - The workspace stands at 4 403 passed / 0 failed / 43 ignored
   (Windows x86_64, August 2026). See [verification](../verification.md).

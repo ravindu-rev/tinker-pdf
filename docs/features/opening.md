@@ -165,7 +165,7 @@ As of September 2026, `cargo test --workspace` runs 4 403 tests (0 failed,
   reachable from arbitrary bytes, plus a bounded page-tree walk) and
   `cos_object` are two of the 24 fuzz targets, run briefly in CI on every
   commit over committed seed corpora.
-- **Corpus** — 4 525 files, 4 484 of them rendered every page, 0 crashes
+- **Corpus** — 5 525 files, 5 516 of them rendered every page, 0 crashes
   (August 2026), in the ratcheted corpus run
   ([verification](../verification.md)); the canonical fixtures in
   `crates/tinker-pdf-cos/tests/document.rs` are mutool-written and must open

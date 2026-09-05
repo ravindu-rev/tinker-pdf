@@ -205,8 +205,8 @@ workspace suite: 4 403 passed, 0 failed, 43 ignored (Windows x86_64,
 August 2026) — [verification](../verification.md).
 
 **And it runs at scale.** Every corpus file this engine reads cleanly is
-rewritten in memory and the rewrite is validated, which is 4 224
-documents nobody here authored: all 4 224 of those rewrites carry no
+rewritten in memory and the rewrite is validated, which is 5 124
+documents nobody here authored: all 5 124 of those rewrites carry no
 structural defect at all, and `corpus/ratchet.json` holds the rate. That pass
 is what found the three defects this writer had and no other check could see,
 because this engine's own reader repairs all three in silence: no trailer

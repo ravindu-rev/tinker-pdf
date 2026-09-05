@@ -135,8 +135,10 @@ down is embedded whole — larger and correct (ruling 2) — and
 `DocumentBuilder::finish_reporting` returns an `EmbeddedWhole` naming the
 resource and one of three `SubsetRefusal` reasons: the font claimed none of the
 text drawn with it, the program could not be rebuilt, or the rebuild came out
-no smaller than the face. That last one is common: 212 of the fetched corpora's
-441 CFF faces are already producer-made subsets with nothing left to remove.
+no smaller than the face. That last one is common, and the production corpus
+made it commoner: **1 936 of the fetched corpora's 3 313 CFF faces** are
+already producer-made subsets with nothing left to remove, against 212 of 441
+before a thousand real-world documents were pinned.
 
 **WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2018]). `woff.rs` unpacks
 both to the sfnt inside them; nothing else in the crate knows they exist, and
@@ -214,18 +216,19 @@ own defects: every such file counts as *rendered with something reported*, and
 `corpus/ratchet.json` said so in its own note without being able to say how
 much.
 
-Both numbers now exist. `corpus/ratchet-fonts.json` is the same 4 525 files
+Both numbers now exist. `corpus/ratchet-fonts.json` is the same 5 525 files
 measured with a face supplied — the one `cargo xtask synth-face` writes, whose
 every glyph from 32 up is a filled box, so it answers *was a face available*
 and nothing else:
 
 | Corpus | Files | No faces | Synthetic face | Bundled faces |
 | --- | ---: | ---: | ---: | ---: |
-| pdf.js | 974 | 382 | 190 | 199 |
+| pdf.js | 974 | 345 | 149 | 158 |
 | veraPDF | 2 907 | 55 | 39 | 39 |
-| qpdf | 637 | 530 | 110 | 132 |
+| qpdf | 637 | 553 | 113 | 135 |
 | PDF Association | 7 | 6 | 4 | 4 |
-| **Total** | **4 525** | **973 (21.5 %)** | **343 (7.6 %)** | **374 (8.3 %)** |
+| SafeDocs | 1 000 | 483 | 184 | 189 |
+| **Total** | **5 525** | **1442 (26.1 %)** | **489 (8.9 %)** | **525 (9.5 %)** |
 
 Three bars, in three files, and `corpus-run` refuses to compare any of them
 against another. The last column is the faces this project now ships
@@ -239,7 +242,7 @@ one all-purpose face silently answered with squares. The synthetic bar was
 flattering itself on those files, and the difference between the two columns is
 exactly the size of that flattery.
 
-**630 of the 973 — 65 % — were the absence of a face**, and in qpdf's corpus it
+**953 of the 1442 — 66 % — were the absence of a face**, and in qpdf's corpus it
 is four fifths of them. The synthetic face exists so the measurement can
 be reproduced anywhere: no licence, no download, the same bytes on every
 machine forever, and no dependence on what a runner image happens to ship.
@@ -619,9 +622,9 @@ could show was right.
   tag, the Table 126 descriptor entry for each of the three shapes, `/W` from
   the original program, and each `SubsetRefusal` reported by name.
 - `crates/tinker-pdf/tests/cff_subset_census.rs` — every CFF face in the
-  fetched corpora cut to nine glyphs: 297 files, 441 faces (222 CID-keyed, 200
-  bare simple, 19 `OpenType/CFF`), 439 rebuilt and 2 refused, 14.5 MB of font
-  program down to 1.49 MB, and **zero divergences** — every retained glyph's
+  fetched corpora cut to nine glyphs: 480 files, 3 313 faces (551 CID-keyed,
+  2 735 bare simple, 27 `OpenType/CFF`), 3 311 rebuilt and 2 refused, 25.3 MB
+  of font program down to 5.05 MB, and **zero divergences** — every retained glyph's
   outline, advance and font matrix, every glyph's name, every CID's glyph and
   every one of the 256 codes identical to the original's.
 - **Counted injection over the CFF subsetter** (`docs/verification.md`'s house
@@ -674,6 +677,6 @@ could show was right.
   read as a pass ([determinism](determinism.md)); the `epub` fixture renders
   through `SimpleFontProvider`, covering the provider path.
 - The whole workspace stands at 4 403 passed / 0 failed / 43 ignored
-  (Windows x86_64, August 2026), and the corpus run — 4 525 files, 4 484
+  (Windows x86_64, August 2026), and the corpus run — 5 525 files, 5 516
   rendered every page, 0 crashes — exercises real embedded fonts of every
   kind here. See [verification](../verification.md).

@@ -1,12 +1,48 @@
 # Test corpora
 
 External corpora are FETCHED, never committed. [`corpora.lock`](corpora.lock)
-pins each one by upstream commit *and* by archive checksum; CI restores from a
-cache keyed on that file. Nothing from any corpus enters git — size aside,
-redistribution rights are per-file murky in every real-world PDF collection,
-and a pin plus a checksum reproduces the set without this project becoming a
-distributor. The reasoning is
+pins each one by archive checksum, and the four fetched from a forge by
+upstream commit as well; CI restores from a cache keyed on that file. Nothing
+from any corpus enters git — size aside, redistribution rights are per-file
+murky in every real-world PDF collection, and a pin plus a checksum reproduces
+the set without this project becoming a distributor. The reasoning is
 [`docs/verification.md`](../docs/verification.md).
+
+## The fifth corpus is not a test suite
+
+*Added 5-6 September 2026.*
+
+The other four were written to exercise a reader: pdf.js's fixtures are bugs
+somebody reported, veraPDF's are one clause each, qpdf's are torture. **A
+reader that passes its own kind's tests has not met the world**, and that is
+the gap `[safedocs]` closes — one shard of the DARPA SafeDocs
+`CC-MAIN-2021-31-PDF-UNTRUNCATED` collection, a thousand PDFs a crawler found
+on the open web in July 2021 and the programme refetched untruncated.
+
+**Why a whole shard rather than a selection.** The plan was 300 files chosen
+for producer diversity. Reading the shard's own `pdfinfo` metadata makes that
+pointless: its 1 000 files carry **462 distinct `/Producer` strings**, the
+largest single group is 68 files of Adobe PDF Library 15.0, and 58 state no
+producer at all. Selecting 300 would have reached 300 distinct producers and
+thrown away 700 real documents to do it.
+
+**One pin, and it is stated rather than glossed.** There is no repository
+behind a published object, so there is no commit and `archive = zip` says so.
+The `sha256` is the whole guarantee: if those bytes ever change, every fetch
+fails loudly and a person decides what happened. That is weaker than the two
+pins the forge entries carry, and a `zip` entry's corpus is only as
+reproducible as its host.
+
+**It has its own timeout, and that is a property of the documents.** The four
+fixture corpora are small files; this one's median is 288 KB and its slowest
+file takes 80 seconds. `timeout = 240` in the lock is three times that.
+
+**And it found something on its first run.** Fourteen of its files could not be
+rendered inside a minute and two could not be rendered inside seven — until
+the rasteriser's row loop was measured and fixed, after which the worst of them
+takes 80 seconds and none times out. A page of a real Word document at 144 dpi
+went from 11 380 ms to 1 245 ms. No fixture corpus had said anything about
+that, because no fixture corpus contains a page like it.
 
 ## The metamorphic relations were declined on a wall clock, and are not any more
 
@@ -64,9 +100,10 @@ Generated from the lock by `cargo run -p xtask -- corpus-licences`, and checked
 against this file by `--check` in CI, so a corpus cannot be added without its
 terms reaching the file a person reads.
 
-| Corpus | What it exercises | Upstream licence | Redistributed here? |
-| --- | --- | --- | --- |
-| `pdfjs` | decades of real-world breakage, reported by users of a browser's viewer | Apache-2.0 (the project); the fixtures are third-party and mixed, and upstream itself links rather than stores many of them | **no** — fetched, never committed |
-| `verapdf` | atomic spec-conformance cases for PDF/A, PDF/UA, ISO 32000-1 and ISO 32000-2 | CC-BY-4.0 | **no** — fetched, never committed |
-| `qpdf` | cross-reference, object-stream, linearization and encryption torture | Apache-2.0 | **no** — fetched, never committed |
-| `pdfa-examples` | PDF 2.0 features shown deliberately: UTF-8 strings, page-level output intents, incremental saves | CC-BY-SA-4.0 | **no** — fetched, never committed |
+| Corpus | What it exercises | Upstream licence | Pinned by | Redistributed here? |
+| --- | --- | --- | --- | --- |
+| `pdfjs` | decades of real-world breakage, reported by users of a browser's viewer | Apache-2.0 (the project); the fixtures are third-party and mixed, and upstream itself links rather than stores many of them | commit and sha256 | **no** — fetched, never committed |
+| `verapdf` | atomic spec-conformance cases for PDF/A, PDF/UA, ISO 32000-1 and ISO 32000-2 | CC-BY-4.0 | commit and sha256 | **no** — fetched, never committed |
+| `qpdf` | cross-reference, object-stream, linearization and encryption torture | Apache-2.0 | commit and sha256 | **no** — fetched, never committed |
+| `pdfa-examples` | PDF 2.0 features shown deliberately: UTF-8 strings, page-level output intents, incremental saves | CC-BY-SA-4.0 | commit and sha256 | **no** — fetched, never committed |
+| `safedocs` | real-world documents nobody wrote to test a reader: 1 000 files from a 2021 web crawl, spanning 462 distinct /Producer strings | per-file and unstated: these are documents found on the open web, each under whatever terms its own publisher set. The collection is distributed by digitalcorpora.org under the DARPA SafeDocs programme and Common Crawl's terms of use (commoncrawl.org/terms-of-use) cover the crawl it came from | sha256 alone (no repository) | **no** — fetched, never committed |

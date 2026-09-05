@@ -43,7 +43,7 @@ compares — the certificate's identity rather than either side's rendering of i
 Three things the corpus said that this design had not.
 
 **A signature is not always the `/V` of a field.** 12.7.4.5 says it is, and a reader that
-believes only that finds 13 of the 18 signatures in the fetched corpora. The other five are
+believes only that finds 22 of the 27 signatures in the fetched corpora. The other five are
 reachable only through the catalog's `/Perms` (12.8.4): three files carry a `/UR3` usage-rights
 signature and no signature field at all, and one has a `/FT /Sig` annotation in a document with
 no `/AcroForm`. So the inventory walks both roots and every entry records which one found it —
@@ -168,8 +168,9 @@ rule costs this corpus nothing today, and `cms.rs` holds it up with a fixture ra
 with the corpus.
 
 **Four more signatures verify, and that is the evidence the scan is right.** The census now
-reports **18 of 18 blobs parsed, 0 refused**, 20 signers, 41 certificates all parsing, and
-**19 signatures verifying over the §5.4 re-encoding — up from 15 — with 0 verifying over the
+reports **27 of 27 blobs parsed, 0 refused**, 34 signers, 71 certificates all parsing, and
+**33 signatures verifying over the §5.4 re-encoding — 19 of them before the production corpus
+was pinned, and 15 before BER indefinite lengths were read — with 0 verifying over the
 stored `[0]` bytes.** Each of the four BER blobs is among the four new ones. A parser that
 found the wrong end-of-contents pair would still produce a structure; it would not produce a
 `signedAttrs` whose digest matches a signature a real signer made with a real key. That is

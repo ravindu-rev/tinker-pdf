@@ -23,16 +23,17 @@ its two font-bearing siblings:
 
 | Measure | Value |
 | --- | ---: |
-| Corpus files (pdf.js 974, veraPDF 2 907, qpdf 637, PDF Association 7) | 4 525 |
-| Render every page | 4 485 |
-| Do not (pdf.js 11 password-refused, qpdf 29: 25 password-refused, 4 headerless) | 40 |
-| Rendered with something reported, no faces / synthetic face / bundled faces | 929 / 299 / 330 |
-| `rotate` held of asked | 4 034 of 4 215 |
-| `crop` held of asked | 4 152 of 4 195 |
-| `dpi` held of asked | 4 394 of 4 445 |
+| Corpus files (pdf.js 974, veraPDF 2 907, qpdf 637, PDF Association 7, SafeDocs 1 000) | 5 525 |
+| Render every page | 5 516 |
+| Do not (6 qpdf, 3 SafeDocs; every one a file that would not open) | 9 |
+| Rendered with something reported, no faces / synthetic face / bundled faces | 1 442 / 489 / 525 |
+| `rotate` held of asked | 4 998 of 5 114 |
+| `rotate-tight` held of asked | 4 583 of 5 114 |
+| `crop` held of asked | 4 929 of 5 075 |
+| `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 4 449 passed, 0 failed, 45 ignored as
-[verification.md](verification.md) records it, measured 5 September 2026.
+The suite stands at 4 477 passed, 0 failed, 45 ignored as
+[verification.md](verification.md) records it, measured 6 September 2026.
 
 ## What "best" means here
 
@@ -46,9 +47,9 @@ what a reader of PDFs is entitled to expect.
 
 | Axis | Measured today | What gives it a ratchet |
 | --- | --- | --- |
-| Correctness on documents nobody here wrote | 4 525 files from three readers' test suites and one association's examples — every one written to test a reader | tier 0: a corpus of documents real producers emitted for readers |
-| Speed | six criterion operations, weekly, reporting and not gating; no committed number anywhere | tier 0: a baseline from a named machine, compared inside a band that machine's own swing set |
-| Memory | 42 caps in `bounds_ledger.rs`, two of them the runtime bounds a *process* spends; every corpus child measures its own peak resident set, `report.json` carries it per file and `ratchet.json` bands the per-corpus maximum with a `<=` | ratcheted; the three committed bars take the band at their next `--record` |
+| Correctness on documents nobody here wrote | 5 525 files: three readers' test suites, one association's examples, and **1 000 documents a crawler found on the open web** spanning 462 distinct `/Producer` strings | **ratcheted**; `corpus/corpora.lock`'s fifth entry, run nightly, every failure attributed by producer |
+| Speed | seven criterion operations, weekly, reporting and not gating; no committed number anywhere | tier 0: a baseline from a named machine, compared inside a band that machine's own swing set |
+| Memory | 42 caps in `bounds_ledger.rs`, two of them the runtime bounds a *process* spends; every corpus child measures its own peak resident set, `report.json` carries it per file and `ratchet.json` bands the per-corpus maximum within a **measured 2 % tolerance** — a high-water mark swings 0.06 % to 0.76 % between two runs of one binary, and an exact band failed on that within a day of being recorded | ratcheted, over five corpora |
 | Fidelity | arithmetic fixtures, metamorphic relations, committed fingerprints | tier 1's differential pairs and reviewed goldens; tier 0's decision on dated outside measurements |
 | Capability coverage | tiers 2 to 5 of this file | each row's exit criterion |
 | Footprint | 2.03 MB of wasm, 1.40 MB gzipped, gated at 2.5 MB in `release.yml` | already ratcheted |
@@ -61,11 +62,34 @@ These come before any new feature, with tier 1. Each row is an axis the
 field judges an engine on and this repository has no number for, so a claim
 about it today would be the kind of claim ruling 13 exists to prevent.
 
+**Two of the four rows closed on 5-6 September 2026 and one of them paid for
+itself immediately.** The production-corpus row is closed: `corpus/corpora.lock`
+pins the DARPA SafeDocs shard, a thousand documents a crawler found on the open
+web, spanning 462 distinct `/Producer` strings — and its first run said fourteen
+of them could not be rendered inside a minute. That was not the corpus and not
+the timeout: it was two loops in the rasteriser indexing with a bounds check per
+pixel, which cost **9× on a page of a real Word document** and which no fixture
+corpus had ever said a word about. Fixing it closed the vectorisation row in the
+same measurement, with every fingerprint unchanged on every target
+([verification.md](verification.md), "The rasteriser's row loop").
+
+What the production corpus refuses is three files of a thousand, and not one is
+a page this engine drew wrongly: one is genuinely encrypted, and two are HTML
+pages the crawler saved under a `.pdf` name.
+
+**And it settled the measurement three ledger rows were waiting on.**
+`MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_PIXELS` and `MAX_JBIG2_TEXT_INSTANCES`
+published the word "estimate" because the largest `SDNUMEXSYMS` anywhere in the
+corpus was **11**, every one of them synthetic, so a cap calibrated on them
+would have admitted anything. Over 117 JBIG2-bearing files including the
+production corpus's, the largest is **2 478 exported symbols, 2 468 new ones
+and 4 440 text instances** — real OCR output, from documents scanned by people.
+The caps stand at 100 000 symbols and 4 194 304 instances, which is 40 and 944
+times what a real document has asked for.
+
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
-| **A corpus of production documents.** `corpus/corpora.lock` pins three readers' test suites and one association's seven examples; every file in the run was written to exercise a reader, and a reader that passes its own kind's tests has not met the world | the measurements table above; `corpus/corpora.lock` | a fourth class of entry in the lockfile — documents real producers emitted for readers, such as a sample of a public government-document set, fetched and pinned and never committed, with its licence in `corpus/README.md` like the others' — run nightly under its own ratchet row, and every failure attributed by producer. **Three measurements wait on this row**, and JBIG2's is the sharpest: `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_PIXELS` and `MAX_JBIG2_TEXT_INSTANCES` are ledger rows whose yardstick is stated arithmetic and which publish the word "estimate", because the corpus's largest `SDNUMEXSYMS` across 102 JBIG2-bearing files is **11** — every one of them synthetic, so a cap calibrated on them would admit anything ([design/jbig2-symbol-text.md](design/jbig2-symbol-text.md)) | M |
 | **Speed has no ratchet, and the machine to record one on is not this one.** The comparison exists — `cargo xtask bench-check --machine NAME` reads criterion's own estimates and fails outside a band, because `cargo bench -- --baseline` never exits non-zero when it loses — and the weekly job's guard is fixed, having never once matched criterion's output since it was written. What is missing is the baseline: a band must sit above its machine's measured swing, and this desktop was measured twice at five runs each with nothing else compiling and swings from 32 % to **259 %**. A band above 259 % admits any regression anybody could write | `xtask/src/bench.rs`, which refuses an entry carrying no measured swing; the two five-run measurements in [verification.md](verification.md) | several `bench.yml` runs on `ubuntu-latest` — it has one dated observation, 31 August, six figures and no spread — then that machine's swing recorded, a band set above it, and the entry committed. `bench-check` reports and does not fail for a machine with no entry, so the job is useful meanwhile | S, blocked on runs of a machine nobody owns |
-| **No vectorisation anywhere.** No `std::arch`, no feature detection, no portable SIMD; every inner loop is scalar. Ruling 4 permits integer SIMD, since integer arithmetic is exact on every target | `grep -rn 'std::arch\|simd' crates` finds nothing | a measured speedup on the six benchmarks with every fingerprint unchanged on all four targets | M |
 
 ## Tier 1 — prove correctness
 
@@ -79,11 +103,33 @@ stated once: the four properties that left with the oracles
 and are not rows. Neither is JPEG XR's unadjudicated list, for the same kind
 of reason — it is a licence limit, and it is under Named non-goals below.
 
+**Two rows closed on 5-6 September 2026, both by taking a decision that had
+been recorded and deferred.**
+
+The **thirty-six password-refused files** are measurements now:
+[corpus/passwords.tsv](../corpus/passwords.tsv) carries 34 rows, each quoted to
+the upstream line that states it, two marked `derived` because no upstream file
+names them, and one carrying a SASLprep-normalised form with the gap that
+requires it named rather than hidden. Two files stay refused and neither is a
+password: one misspells its key length as `/Wength 128`, and one is 91 bytes of
+qpdf's own fuzzer output with `/O` and `/U` both empty.
+
+**`ROTATE_BUDGET` is 10 %**, and the measurement that raised it also corrected
+the measurement that prompted the row. The 2.64 % and 2.81 % this row used to
+quote were properties of the *fixtures* — 64-point pages with the construct in a
+corner. On pages the construct covers, a page of 11-point text costs **8.77 %**
+and stays there as the page grows, so two percent was out by a factor of four
+and every text-heavy document was failing the relation for arithmetic. Ten sits
+above that and below the tiling class at 22 %. It costs signal — 181 corpus
+failures become 15 — so the same measurement is judged again at 3 % and recorded
+as its own relation, `rotate-tight`, which the ratchet holds and no run fails
+on. One limitation is asserted rather than left to be rediscovered: a page
+saturated with diagonal edge costs 23.5 %, which is the defect class's own
+range, so no budget separates those two populations.
+
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
 | The nine reviewed goldens have not been reviewed. The mechanism is done — `render_goldens.rs` parses each `.ppm`'s header, refuses a field that is absent, blank or whitespace, re-renders every family and compares byte for byte, and holds a size ceiling so reviewing one stays a real act — and `UNREVIEWED` lists all nine families because no person has read them | `UNREVIEWED` in `crates/tinker-pdf/tests/render_goldens.rs`, counted; the three injections on the mechanism are each caught by exactly the check written for them | a person reads each golden against the clause its header names, their name and the date replace `unreviewed` in that header, and `UNREVIEWED` empties | S, and it is a reading rather than work |
-| The thirty-six corpus files refused for a password are abstentions rather than measurements. Each is attributed and the passwords are stated upstream — eight qpdf fixtures carry theirs in their own filenames — so a `corpus/passwords.tsv` read by the runner would turn them into measurements | [verification.md](verification.md), "The forty-one that do not render every page" | a decision: opening them moves `passed` from 4 484 toward ~4 520 and re-records every ratchet baseline, `degraded`, `strict_eligible` and all three metamorphic denominators with it | a decision, then S |
-| Metamorphic residue: attributed to two classes, and one of them says a budget is too tight. Seven constructs put through all three relations: a **tiling pattern** fails all three (27 % `dpi`, 22 % `rotate`, 2.05 % `crop`) because its lattice is placed relative to the page and blitted at rounded device offsets; **anti-aliased edges that are not axis-aligned** fail `rotate` alone, at 2.81 % for diagonal paths and **2.64 % for a page of text** against a `ROTATE_BUDGET` of 2 %. Nothing else moves anything. The corpus agrees: `/Pattern` appears in 25 of 51 `dpi` failures and 13 of 43 `crop` against a 2.2-2.4 % base rate, and 121 of `rotate`'s 181 sit in the 2-5 % bucket where glyphs and diagonals sit | `crates/tinker-pdf/tests/metamorphic_classes.rs`, whose table is measured and whose zeros are asserted | a decision on `ROTATE_BUDGET`, since a text-heavy page now fails that relation for arithmetic rather than for a defect: either a wider budget measured the way the 1 % to 2 % raise was, or a recorded statement that the relation does not hold across glyph edges | a decision, then S |
 
 ## Tier 2 — close the named refusals, by measured reachability
 
@@ -98,11 +144,11 @@ count, and says so rather than guessing one.
 | JBIG2 custom Huffman tables (7.4.13, segment type 53) | 21 segments in 6 files; 5 of the 8 refining Huffman text regions in the corpus select one. `Warning::Jbig2VariantSkipped` | the 6 decode; an over-subscribed table still refuses with an asserted warning | S |
 | JBIG2 transposed text regions (`TRANSPOSED` = 1) | 4 files; the flag is parsed and the region returns `None` | the 4 decode; a fixture coded both ways at 0 pixels different | S |
 | JBIG2 retained bitmap-coding contexts (7.4.2) | 1 file: three segments consuming, two retaining — below ruling 3's line, named with its count | stays a named refusal with a reachability test until the count moves | S, unscheduled |
-| The aggregate: 30 of the 103 JBIG2-bearing corpus files still report a JBIG2 warning, from 65 before the symbol lineage | [features/filters.md](features/filters.md) | the number, re-measured after each row above | — |
+| The aggregate: **34 of the 119** JBIG2-bearing corpus files still report a JBIG2 warning. It was 30 of 103 before the production corpus was pinned, and 65 of 103 before the symbol lineage; the sixteen new JBIG2-bearing files are real-world documents and four of them report something | [features/filters.md](features/filters.md) | the number, re-measured after each row above | — |
 | ICC profiles this build cannot make a transform of: the `A2B*` tables of a v4 `mAB` profile (three tags in the corpus), a connection space other than XYZ, a data space with no transform here. All fall back to 8.6.5.5's alternate-space reading as `ColorSpace::Approximated`, and `CalRGB` and `CalGray` are approximated the same way | 143 of the corpus's 2 750 profiles, in 131 files ([features/rendering.md](features/rendering.md), [design/icc.md](design/icc.md)) | the `iccbased` count in the corpus report moves; what is still refused is refused by name with its count | M ([design/icc.md](design/icc.md)) |
 | A transparency group declared in `/Lab` composites in RGB and is named; grey, RGB and CMYK groups composite in their own space | `RenderWarning::UnsupportedGroupSpace`; no corpus count is recorded | a Lab-group fixture composites in Lab, or the row keeps a count that says why not | S |
 | JPEG arithmetic coding, and JPEG precision other than eight bits | `Capability::JpegArithmetic`, `Capability::Jpeg12Bit`; **no corpus count recorded** | a count first, from a corpus run that keeps per-file warnings; then a fixture from a real encoder | M each |
-| JPX: the RGN, POC, PPM, PPT and CRG markers, the `BYPASS` and `TERMALL` code-block styles, component precision above 16 bits, tile-parts out of order | 3 of the 19 readable corpus JPX files refuse — one on a budget and two deliberately non-conformant veraPDF fixtures — so nothing here is reached by a real document | unscheduled under ruling 3; the rows stay named in [features/filters.md](features/filters.md) | — |
+| JPX: the RGN, POC, PPM, PPT and CRG markers, the `BYPASS` and `TERMALL` code-block styles, component precision above 16 bits, tile-parts out of order | **5 of the 39** JPX-bearing corpus files report something, up from 3 of 19 before the production corpus doubled the population — one on a budget and two deliberately non-conformant veraPDF fixtures — so nothing here is reached by a real document | unscheduled under ruling 3; the rows stay named in [features/filters.md](features/filters.md) | — |
 | `cmap` subtable format 13, and a Macintosh `cmap` in a non-Roman encoding | [features/fonts.md](features/fonts.md); no count recorded | a count first | S |
 
 ## Tier 3 — capabilities absent today

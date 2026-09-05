@@ -946,7 +946,10 @@ const SPAWNERS: &[(&str, &str)] = &[
     ),
     (
         "xtask/src/fetch.rs",
-        "PERMANENT: `curl` and `tar` fetch and unpack the pinned corpora. \
+        "PERMANENT: `curl`, `tar` and `unzip` fetch and unpack the pinned \
+         corpora -- `unzip` since 6 September 2026, because the \
+         production corpus is published as a `.zip` and GNU tar does \
+         not read one. \
          Supplying, not adjudicating — and nothing fetched is trusted: the \
          archive is verified against this project's own SHA-256 before it is \
          unpacked",

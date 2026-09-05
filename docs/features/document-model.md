@@ -163,7 +163,7 @@ As of September 2026, in the workspace suite of 4 403 passing tests:
 - The `cos_document` fuzz target — one of the 24 — walks the page tree and
   reads content bytes after every successful open, so a document that opens
   and then panics on use counts as a crash. The corpus run backs it at
-  scale: 4 525 files, 4 484 rendered every page, 0 crashes (August 2026).
+  scale: 5 525 files, 5 516 rendered every page, 0 crashes (September 2026).
 
 The document byte-hashes in [determinism](determinism.md) pin the writing
 half: a synthesised document's outline, links and page tree are part of the

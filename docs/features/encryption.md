@@ -139,7 +139,7 @@ engine holds no key material to do. The envelope is CMS `EnvelopedData` and is
 parsed by `tinker-pdf-pki`; the file key is the digest 7.6.5 describes over the
 unsealed seed and every `/Recipients` string in file order.
 
-**It has no corpus behind it at all — zero of 4 594 files use this handler**,
+**It has no corpus behind it at all — zero of 5 594 files use this handler**,
 and no tool available here produces one, qpdf included. So the evidence splits:
 the envelope parsing is checked against structures **OpenSSL produced**, which
 is real interop, and the key derivation on top is checked against a second

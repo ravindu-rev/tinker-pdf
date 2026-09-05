@@ -247,7 +247,7 @@ tiny pattern over a long line cannot generate millions of pieces.
   `crates/tinker-pdf/tests/`.
 - **Fuzzing**: the `render_page` target (one of the 24) drives whole
   documents through the interpreter into this rasterizer under ruling 1;
-  the corpus run renders every page of 4 484 of 4 525 files with 0 crashes
+  the corpus run renders every page of 5 516 of 5 525 files with 0 crashes
   ([verification](../verification.md)).
 - **Cost regression**: `a_small_fill_on_a_large_page_stays_small` (in
   `crates/tinker-pdf-render/src/lib.rs`) asserts on mask pixels *asked for*

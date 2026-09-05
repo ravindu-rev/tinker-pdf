@@ -22,8 +22,8 @@ single flag can say that.
 ## What it does
 
 **Finding them.** `Document::signatures()` walks two roots. 12.7.4.5 says a
-signature is the `/V` of a `/FT /Sig` field, and believing only that finds 13
-of the 18 signatures in the fetched corpora; the other five are reachable only
+signature is the `/V` of a `/FT /Sig` field, and believing only that finds 22
+of the 27 signatures in the fetched corpora; the other five are reachable only
 through the catalog's `/Perms` (12.8.4). Each entry records which root found
 it, because a `/UR3` usage-rights signature grants a reader capabilities and
 makes no claim about the document's content.
@@ -57,7 +57,7 @@ bytes occur constantly inside real content and searching for them produces a
 different well-formed reading of the same bytes. `signedAttrs` is held to DER
 regardless, because that is what gets digested.
 
-All 41 X.509 certificates in the corpus parse.
+All 71 X.509 certificates in the corpus parse.
 
 **The verdict.** `Document::verify_signatures(&anchors, at)` returns one
 `Verdict` per signature: the coverage, whether the CMS could be read, whether
@@ -147,9 +147,13 @@ The inner loops read only low limbs, so it rode through an entire modular
 exponentiation invisibly and would have surfaced as a *valid signature
 reported invalid*, intermittently. All 360 CAVP vectors passed before the fix.
 
-**The corpus adjudicates the parts it can.** Over the 18 signatures:
-**12 CMS blobs parse, 11 signatures verify** against the key in their own
-certificate, **0 fail**, 7 document digests match and **4 differ**. The four
+**The corpus adjudicates the parts it can.** Over the 27 signatures:
+**21 CMS blobs parse, 20 signatures verify** against the key in their own
+certificate, **0 fail**, 16 document digests match and **4 differ**. Nine of
+those signatures arrived on 6 September 2026 with the production corpus —
+documents signed by people rather than by a test suite, including a Romanian
+qualified signature on `safedocs/0000020.pdf` that verifies against the key in
+its own certificate. The four
 that differ are veraPDF's permission fixtures, and the cause is in the bytes:
 three of them, of different sizes, carry the byte-identical CMS blob. A
 signature cannot cover three documents.
@@ -159,7 +163,7 @@ The six remaining are the ones whose `/ByteRange` does not bracket their
 a parser, because reading a CMS the coverage classifier will not vouch for is
 a verdict about the wrong bytes.
 
-All 41 certificates across those blobs parse, and 15 of them are held to
+All 71 certificates across those blobs parse, and 17 of them are held to
 values OpenSSL produced once and this repository committed
 (`tests/signature_support/certificates.tsv`) — serial octets, validity window,
 SubjectPublicKeyInfo digest and both common names.

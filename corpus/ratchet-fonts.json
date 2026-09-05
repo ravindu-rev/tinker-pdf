@@ -4,34 +4,42 @@
     {
       "capabilities": {
         "iccbased": 80,
-        "jbig2": 103,
-        "jpx": 12,
+        "jbig2": 104,
+        "jpx": 13,
         "mesh-shading": 10,
         "signature": 9
       },
-      "degraded": 146,
+      "degraded": 149,
       "metamorphic": {
         "crop": {
           "compared": 831,
           "held": 793
         },
         "dpi": {
-          "compared": 948,
-          "held": 918
+          "compared": 959,
+          "held": 929
         },
         "rotate": {
           "compared": 840,
-          "held": 678
+          "held": 823
+        },
+        "rotate-tight": {
+          "compared": 840,
+          "held": 725
         }
       },
       "name": "pdfjs",
       "outcomes": {
         "crashed": 0,
-        "failed": 11,
-        "passed": 963,
+        "failed": 0,
+        "passed": 974,
         "timed_out": 0
       },
-      "passed": 963,
+      "passed": 974,
+      "peak": {
+        "bytes": 923496448,
+        "files": 974
+      },
       "strict_clean": 841,
       "strict_eligible": 841,
       "tagged": {
@@ -60,7 +68,11 @@
         },
         "rotate": {
           "compared": 2889,
-          "held": 2866
+          "held": 2889
+        },
+        "rotate-tight": {
+          "compared": 2889,
+          "held": 2878
         }
       },
       "name": "verapdf",
@@ -71,6 +83,10 @@
         "timed_out": 0
       },
       "passed": 2907,
+      "peak": {
+        "bytes": 55582720,
+        "files": 2907
+      },
       "strict_clean": 2891,
       "strict_eligible": 2891,
       "tagged": {
@@ -86,17 +102,21 @@
         "iccbased": 3,
         "signature": 2
       },
-      "degraded": 110,
+      "degraded": 113,
       "metamorphic": {
         "crop": {
           "compared": 472,
           "held": 465
         },
         "dpi": {
-          "compared": 583,
-          "held": 583
+          "compared": 606,
+          "held": 606
         },
         "rotate": {
+          "compared": 480,
+          "held": 480
+        },
+        "rotate-tight": {
           "compared": 480,
           "held": 480
         }
@@ -104,11 +124,15 @@
       "name": "qpdf",
       "outcomes": {
         "crashed": 0,
-        "failed": 29,
-        "passed": 608,
+        "failed": 6,
+        "passed": 631,
         "timed_out": 0
       },
-      "passed": 608,
+      "passed": 631,
+      "peak": {
+        "bytes": 226021376,
+        "files": 637
+      },
       "strict_clean": 487,
       "strict_eligible": 487,
       "tagged": {
@@ -133,7 +157,11 @@
         },
         "rotate": {
           "compared": 6,
-          "held": 5
+          "held": 6
+        },
+        "rotate-tight": {
+          "compared": 6,
+          "held": 6
         }
       },
       "name": "pdfa-examples",
@@ -144,6 +172,10 @@
         "timed_out": 0
       },
       "passed": 7,
+      "peak": {
+        "bytes": 15122432,
+        "files": 7
+      },
       "strict_clean": 6,
       "strict_eligible": 6,
       "tagged": {
@@ -153,6 +185,55 @@
         "orphans": 0
       },
       "total": 7
+    },
+    {
+      "capabilities": {
+        "iccbased": 233,
+        "jbig2": 15,
+        "jpx": 19,
+        "mesh-shading": 7,
+        "signature": 7
+      },
+      "degraded": 184,
+      "metamorphic": {
+        "crop": {
+          "compared": 880,
+          "held": 774
+        },
+        "dpi": {
+          "compared": 978,
+          "held": 869
+        },
+        "rotate": {
+          "compared": 899,
+          "held": 790
+        },
+        "rotate-tight": {
+          "compared": 899,
+          "held": 430
+        }
+      },
+      "name": "safedocs",
+      "outcomes": {
+        "crashed": 0,
+        "failed": 3,
+        "passed": 997,
+        "timed_out": 0
+      },
+      "passed": 997,
+      "peak": {
+        "bytes": 511025152,
+        "files": 1000
+      },
+      "strict_clean": 899,
+      "strict_eligible": 899,
+      "tagged": {
+        "elements": 504699,
+        "files": 361,
+        "matched": 8444778,
+        "orphans": 174407
+      },
+      "total": 1000
     }
   ],
   "limits": [],
@@ -161,6 +242,6 @@
   "settings": {
     "dpi": 72,
     "fonts": "synthetic-2",
-    "timeout_seconds": 60
+    "timeout_seconds": 180
   }
 }

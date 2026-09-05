@@ -179,7 +179,7 @@ whose file has stopped spawning fails too, so an allowance cannot outlive
 the thing it allowed.
 
 **Every row is `PERMANENT`, and none of them adjudicates a document.** What is
-left spawns `rustc` to prove a type refuses a state, `curl` and `tar` to fetch
+left spawns `rustc` to prove a type refuses a state, `curl`, `tar` and `unzip` to fetch
 corpora this repository then verifies against its own SHA-256, `cargo` to build
 and publish, and the corpus child, which is a workspace binary built from the
 same revision. The four qpdf rows left with the strict validator, the mutool row
