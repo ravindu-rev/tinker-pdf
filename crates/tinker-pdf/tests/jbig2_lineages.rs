@@ -99,6 +99,59 @@ const UNKNOWN_LENGTH: [(&str, &str); 1] = [(
     "a segment whose length is 0xFFFFFFFF, ended by the row terminator",
 )];
 
+/// Clauses 6.6 and 6.7: the halftone lineage.
+///
+/// Thirteen of the sixteen declare the *lossless* region type (23), so they can
+/// be held to the picture exactly. The two `10bpp` files are type 22 and the
+/// refining one is an intermediate region plus a type 42, so all three are
+/// listed here too and any of them that is not lossless will say so by failing
+/// rather than by being left out.
+const HALFTONE: [(&str, &str); 16] = [
+    ("bitmap-halftone.pdf", "the plain case"),
+    ("bitmap-halftone-template1.pdf", "grey-scale template 1"),
+    ("bitmap-halftone-template2.pdf", "grey-scale template 2"),
+    ("bitmap-halftone-template3.pdf", "grey-scale template 3"),
+    (
+        "bitmap-halftone-grid.pdf",
+        "a grid vector that is not axis-aligned",
+    ),
+    (
+        "bitmap-halftone-composite.pdf",
+        "a combination operator other than OR",
+    ),
+    (
+        "bitmap-composite-and-xnor-halftone.pdf",
+        "AND and XNOR as the cell operator",
+    ),
+    (
+        "bitmap-composite-or-xor-replace-halftone.pdf",
+        "OR, XOR and REPLACE, beside a generic region",
+    ),
+    ("bitmap-halftone-skip-grid.pdf", "6.6.5.1's HENABLESKIP"),
+    (
+        "bitmap-halftone-skip-grid-template1.pdf",
+        "skip with grey-scale template 1",
+    ),
+    (
+        "bitmap-halftone-skip-grid-template2.pdf",
+        "skip with grey-scale template 2",
+    ),
+    (
+        "bitmap-halftone-skip-grid-template3.pdf",
+        "skip with grey-scale template 3",
+    ),
+    (
+        "bitmap-halftone-skip-dummy.pdf",
+        "HENABLESKIP where nothing is actually skipped",
+    ),
+    ("bitmap-halftone-10bpp.pdf", "ten bitplanes"),
+    ("bitmap-halftone-10bpp-mmr.pdf", "ten bitplanes, MMR-coded"),
+    (
+        "bitmap-halftone-refine.pdf",
+        "an intermediate halftone region refined by a type 42 segment",
+    ),
+];
+
 fn corpus(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/files/pdfjs/test/pdfs")
@@ -268,4 +321,17 @@ fn every_custom_code_table_file_reproduces_the_standard_picture() {
 #[ignore = "reads the fetched corpus"]
 fn an_unknown_length_segment_reproduces_the_declared_picture() {
     every_variant_reproduces("7.2.7 unknown data length", &UNKNOWN_LENGTH);
+}
+
+/// **Every halftone file draws the picture the corpus codes without one.**
+///
+/// The third lineage, and the one with the most places to be subtly wrong: the
+/// grid vector is 8.8 fixed point and may be sheared, the grey values are Gray
+/// coded across bitplanes that share one coder, and 6.6.5.1's skip decides
+/// which cells are coded at all. Every one of those produces *a* picture when
+/// it is wrong, which is why the assertion is zero pixels against a whole one.
+#[test]
+#[ignore = "reads the fetched corpus"]
+fn every_halftone_file_reproduces_the_generic_picture() {
+    every_variant_reproduces("halftone regions and pattern dictionaries", &HALFTONE);
 }

@@ -323,6 +323,11 @@ pub enum Jbig2Refusal {
     GenericRegionNotMmr,
     /// A text region with instances to place and no symbols behind them.
     TextRegionWithoutSymbols,
+    /// A pattern dictionary whose patterns are zero wide or zero high.
+    PatternDictionaryEmpty,
+    /// A halftone region with no pattern dictionary behind it. Every cell of
+    /// the grid names a pattern, so there is nothing to stamp.
+    HalftoneWithoutPatterns,
     /// The data ended inside something that was still being read.
     Truncated,
 
@@ -336,6 +341,10 @@ pub enum Jbig2Refusal {
     GenericRegionRefused,
     /// A refinement region segment refused; likewise.
     RefinementRegionRefused,
+    /// A pattern dictionary segment refused; likewise.
+    PatternDictionaryRefused,
+    /// A halftone region segment refused; likewise.
+    HalftoneRegionRefused,
 
     /// No region was composited onto the page: the whole-stream refusal.
     NoRegion,
@@ -358,10 +367,14 @@ impl Jbig2Refusal {
             | Self::CollectiveBitmapNotMmr
             | Self::GenericRegionNotMmr
             | Self::TextRegionWithoutSymbols
+            | Self::PatternDictionaryEmpty
+            | Self::HalftoneWithoutPatterns
             | Self::SymbolDictionaryRefused
             | Self::TextRegionRefused
             | Self::GenericRegionRefused
             | Self::RefinementRegionRefused
+            | Self::PatternDictionaryRefused
+            | Self::HalftoneRegionRefused
             | Self::NoRegion => Warning::Jbig2SegmentSkipped,
 
             Self::HuffmanDhSelector
@@ -413,6 +426,8 @@ impl Jbig2Refusal {
                 | Self::CollectiveBitmapNotMmr
                 | Self::GenericRegionNotMmr
                 | Self::TextRegionWithoutSymbols
+                | Self::PatternDictionaryEmpty
+                | Self::HalftoneWithoutPatterns
                 | Self::Truncated
         )
     }
@@ -1685,7 +1700,7 @@ fn symbol_dictionary(
             note(warnings, Jbig2Refusal::Truncated);
             return None;
         };
-        *slot = (dx, dy);
+        *slot = (i32::from(dx), i32::from(dy));
     }
 
     // 7.4.3.1.3: and the refinement pair after them, present only for an
@@ -1833,7 +1848,15 @@ fn symbol_dictionary(
                 // 6.5.8.1: the generic procedure, over the dictionary's own
                 // coder and context set. TPGDON is off for a symbol — 6.5.8.1
                 // says so, and a symbol is too short for it to pay anyway.
-                decode_generic_into(&mut coder, &mut generic, template, false, &at, &mut symbol);
+                decode_generic_into(
+                    &mut coder,
+                    &mut generic,
+                    template,
+                    false,
+                    &at,
+                    None,
+                    &mut symbol,
+                );
             }
             pool.push(symbol);
         }
@@ -2789,6 +2812,361 @@ fn composite_signed(into: &mut Bitmap, source: &Bitmap, x: i64, y: i64, op: u8) 
 /// Everything else is skipped **and recorded**, which is what keeps the
 /// refusal honest: the skip is not silent, and it is not sufficient on its
 /// own — a page that ends with no region on it refuses regardless.
+/// **Clause 6.7: a pattern dictionary (segment type 16).**
+///
+/// A halftone region does not code pixels. It codes, per cell of a grid, which
+/// *pattern* to stamp there — and this is where the patterns come from. The
+/// dictionary is one bitmap with every pattern side by side, `GRAYMAX + 1` of
+/// them each `HDPW` wide, decoded by the ordinary generic procedure and then
+/// sliced.
+///
+/// 6.7.5 fixes the adaptive pixels rather than reading them, and the first is
+/// `(-HDPW, 0)`: one whole pattern to the left, so the context of a pixel sees
+/// the same pixel of the previous pattern. That is the one place in this
+/// module where an adaptive offset does not fit a signed byte, and it is why
+/// the generic template's `at` is a coordinate pair rather than the two bytes
+/// 7.4.6.3 reads them from.
+///
+/// No cap of its own: the collective bitmap is `(GRAYMAX + 1) × HDPW` by
+/// `HDPH`, and `Bitmap::new` refuses it against the caller's ceiling before a
+/// byte is allocated — which is the same guard every other region here has.
+fn pattern_dictionary(
+    segment: &Segment<'_>,
+    ceiling: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<Vec<Bitmap>> {
+    let mut reader = Reader::new(segment.data);
+    // 7.4.5.1.1: bit 0 is HDMMR, bits 1 and 2 the template.
+    let Some(flags) = reader.u8() else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let mmr = flags & 0x01 != 0;
+    let template = (flags >> 1) & 0x03;
+    let (Some(width), Some(height), Some(graymax)) = (reader.u8(), reader.u8(), reader.u32())
+    else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let (width, height) = (u32::from(width), u32::from(height));
+    if width == 0 || height == 0 {
+        note(warnings, Jbig2Refusal::PatternDictionaryEmpty);
+        return None;
+    }
+    let count = graymax.checked_add(1)?;
+    let Some(collective_width) = count.checked_mul(width) else {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    };
+
+    let Some(mut collective) = Bitmap::new(collective_width, height, ceiling) else {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    };
+    if mmr {
+        if !decode_mmr(reader.rest(), &mut collective, warnings) {
+            note(warnings, Jbig2Refusal::CollectiveBitmapNotMmr);
+            return None;
+        }
+    } else {
+        // 6.7.5's fixed adaptive pixels.
+        let at = [(-(width as i32), 0), (-3, -1), (2, -2), (-2, -2)];
+        decode_arithmetic(reader.rest(), template, false, &at, None, &mut collective);
+    }
+
+    // 6.7.5 step 4: pattern `i` is the columns `[i × HDPW, (i + 1) × HDPW)`.
+    let mut patterns = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let mut pattern = Bitmap::new(width, height, ceiling)?;
+        let left = index.checked_mul(width)?;
+        for y in 0..height {
+            for x in 0..width {
+                pattern.set(x, y, collective.get((left + x) as i32, y as i32));
+            }
+        }
+        patterns.push(pattern);
+    }
+    Some(patterns)
+}
+
+/// How Annex C's bitplanes are coded: the three parameters 6.6 hands down and
+/// that are never meaningful apart.
+struct GreyCoding<'a> {
+    mmr: bool,
+    template: u8,
+    /// 6.6.5.1's `HSKIP`, when the region asked for one.
+    skip: Option<&'a Bitmap>,
+}
+
+/// **Annex C: a grey-scale image, as Gray-coded bitplanes.**
+///
+/// The value at each cell is not coded directly. `GSBPP` bitplanes are, most
+/// significant first, and each plane after the first is exclusive-ored with the
+/// one above it — a Gray code, so that neighbouring values differ in one plane
+/// and the generic decoder's context sees a smooth picture rather than the
+/// carries of ordinary binary.
+///
+/// Every plane goes through the same coder and the same adaptive state, which
+/// is 6.5.8.1's rule met again in a different clause: restarting between planes
+/// decodes the first correctly and the rest as noise.
+fn grey_scale_image(
+    data: &[u8],
+    coding: GreyCoding<'_>,
+    planes: u32,
+    width: u32,
+    height: u32,
+    ceiling: usize,
+) -> Option<Vec<u32>> {
+    let GreyCoding {
+        mmr,
+        template,
+        skip,
+    } = coding;
+    if planes == 0 {
+        // One pattern, so every cell names it and no plane is coded at all.
+        return Some(vec![0; (width as usize).checked_mul(height as usize)?]);
+    }
+    // C.5's adaptive pixels, fixed by the clause like 6.7.5's.
+    let at = [
+        (if template <= 1 { 3 } else { 2 }, -1),
+        (-3, -1),
+        (2, -2),
+        (-2, -2),
+    ];
+
+    let mut decoded: Vec<Bitmap> = Vec::with_capacity(planes as usize);
+    if mmr {
+        // C.5: one MMR stream carries every plane in turn, each ended by
+        // T.6's EOFB. `T6Rows` reads rows rather than a whole bitmap, so the
+        // planes are pulled from one reader and the terminator stepped over
+        // between them.
+        let mut at_bit = 0usize;
+        for _ in 0..planes {
+            let mut plane = Bitmap::new(width, height, ceiling)?;
+            let mut rows = crate::T6Rows::new(data, at_bit, width);
+            let stride = plane.stride;
+            for y in 0..height {
+                let start = (y as usize) * stride;
+                let Some(row) = plane.bits.get_mut(start..start + stride) else {
+                    break;
+                };
+                if !rows.next_row(row) {
+                    break;
+                }
+            }
+            at_bit = skip_eofb(data, rows.bit_position());
+            decoded.push(plane);
+        }
+    } else {
+        let mut coder = MqDecoder::new(data);
+        let mut contexts = MqContexts::new(1 << template_bits(template));
+        for _ in 0..planes {
+            let mut plane = Bitmap::new(width, height, ceiling)?;
+            decode_generic_into(
+                &mut coder,
+                &mut contexts,
+                template,
+                false,
+                &at,
+                skip,
+                &mut plane,
+            );
+            decoded.push(plane);
+        }
+    }
+
+    // C.5 step 3: each plane below the top is the exclusive-or of what was
+    // decoded and the plane above it, and the value is their weighted sum.
+    for index in 1..decoded.len() {
+        for y in 0..height {
+            for x in 0..width {
+                let above = decoded[index - 1].get(x as i32, y as i32);
+                let here = decoded[index].get(x as i32, y as i32);
+                decoded[index].set(x, y, here ^ above);
+            }
+        }
+    }
+    let mut values = vec![0u32; (width as usize).checked_mul(height as usize)?];
+    for (index, plane) in decoded.iter().enumerate() {
+        // The first plane decoded is the most significant.
+        let shift = (planes as usize).checked_sub(index + 1)? as u32;
+        for y in 0..height {
+            for x in 0..width {
+                let at = (y as usize) * (width as usize) + x as usize;
+                values[at] |= plane.get(x as i32, y as i32) << shift;
+            }
+        }
+    }
+    Some(values)
+}
+
+/// T.6's end-of-facsimile-block, if one sits at `from`, stepped over.
+///
+/// Twenty-four bits, `000000000001` twice. A plane that ended exactly on it
+/// leaves the next plane starting after it; a stream that does not carry one
+/// is left where it was, because Annex C's own note allows an encoder to omit
+/// the terminator after the last plane.
+fn skip_eofb(data: &[u8], from: usize) -> usize {
+    let bit = |at: usize| -> u32 {
+        data.get(at / 8)
+            .copied()
+            .map_or(0, |byte| u32::from(byte >> (7 - (at % 8))) & 1)
+    };
+    if from + 24 > data.len() * 8 {
+        return from;
+    }
+    for offset in 0..24 {
+        let expected = u32::from(offset == 11 || offset == 23);
+        if bit(from + offset) != expected {
+            return from;
+        }
+    }
+    // 6.2.6: MMR data is byte aligned, so the plane after the terminator
+    // begins on the next byte rather than on the next bit.
+    (from + 24).div_ceil(8) * 8
+}
+
+/// **Clause 6.6: a halftone region (segment types 20, 22 and 23).**
+///
+/// The third lineage, after generic regions and symbol/text. A halftone region
+/// codes a *grid* of grey values and stamps a pattern from its dictionary at
+/// each cell, which is how a scanner's dithered photograph is coded compactly:
+/// the picture is a lattice of known shapes, and only which shape goes where
+/// has to be sent.
+///
+/// The grid is not axis-aligned. `HRX` and `HRY` are a vector in 8.8 fixed
+/// point, so the lattice can be rotated and sheared, and the two coordinates
+/// below are 6.6.5.2's own expressions rather than a simplification of them.
+fn halftone_region(
+    segment: &Segment<'_>,
+    patterns: &[Bitmap],
+    ceiling: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<(RegionInfo, Bitmap)> {
+    let mut reader = Reader::new(segment.data);
+    let Some(info) = RegionInfo::read(&mut reader) else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    // 7.4.5.1.1: HMMR, HTEMPLATE, HENABLESKIP, HCOMBOP, HDEFPIXEL.
+    let Some(flags) = reader.u8() else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let mmr = flags & 0x01 != 0;
+    let template = (flags >> 1) & 0x03;
+    let enable_skip = flags & 0x08 != 0;
+    let comb_op = (flags >> 4) & 0x07;
+    let default_pixel = flags & 0x80 != 0;
+
+    let (Some(grid_width), Some(grid_height), Some(grid_x), Some(grid_y)) =
+        (reader.u32(), reader.u32(), reader.u32(), reader.u32())
+    else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let (Some(step_x), Some(step_y)) = (reader.u16(), reader.u16()) else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let (grid_x, grid_y) = (grid_x as i32, grid_y as i32);
+
+    if patterns.is_empty() {
+        note(warnings, Jbig2Refusal::HalftoneWithoutPatterns);
+        return None;
+    }
+    let Some(mut region) = Bitmap::new(info.width, info.height, ceiling) else {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    };
+    if default_pixel {
+        region.fill_black();
+    }
+    // The grid is bounded by the same ceiling the region is: one grey value
+    // per cell, and a cell is at least one pattern's worth of compositing.
+    if Bitmap::new(grid_width, grid_height, ceiling).is_none() {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    }
+
+    // 6.6.5.2's placement, shared by the skip computation and the drawing so
+    // the two cannot disagree about where a cell lands.
+    let pattern_width = i64::from(patterns[0].width);
+    let pattern_height = i64::from(patterns[0].height);
+    let place = |m: u32, n: u32| -> (i64, i64) {
+        let (m, n) = (i64::from(m), i64::from(n));
+        let x = i64::from(grid_x) + m * i64::from(step_y) + n * i64::from(step_x);
+        let y = i64::from(grid_y) + m * i64::from(step_x) - n * i64::from(step_y);
+        (x >> 8, y >> 8)
+    };
+
+    // 6.6.5.1: a cell whose pattern would fall entirely outside the region is
+    // not coded at all, which is what makes a skewed grid cheap at its corners.
+    let skip = if enable_skip {
+        let mut map = Bitmap::new(grid_width, grid_height, ceiling)?;
+        for m in 0..grid_height {
+            for n in 0..grid_width {
+                let (x, y) = place(m, n);
+                let outside = x + pattern_width <= 0
+                    || x >= i64::from(region.width)
+                    || y + pattern_height <= 0
+                    || y >= i64::from(region.height);
+                if outside {
+                    map.set(n, m, 1);
+                }
+            }
+        }
+        Some(map)
+    } else {
+        None
+    };
+
+    // 6.6.5: as many planes as the pattern count needs.
+    let planes = bits_for(patterns.len());
+    let values = grey_scale_image(
+        reader.rest(),
+        GreyCoding {
+            mmr,
+            template,
+            skip: skip.as_ref(),
+        },
+        planes,
+        grid_width,
+        grid_height,
+        ceiling,
+    )?;
+
+    for m in 0..grid_height {
+        for n in 0..grid_width {
+            if skip
+                .as_ref()
+                .is_some_and(|map| map.get(n as i32, m as i32) == 1)
+            {
+                continue;
+            }
+            let at = (m as usize) * (grid_width as usize) + n as usize;
+            let value = *values.get(at)? as usize;
+            // C.5's values are bounded by the plane count rather than by the
+            // dictionary, so a grid may name a pattern that does not exist.
+            // The last one is the standard's own answer for that.
+            let pattern = patterns.get(value).unwrap_or(patterns.last()?);
+            let (x, y) = place(m, n);
+            composite_signed(&mut region, pattern, x, y, comb_op);
+        }
+    }
+
+    Some((info, region))
+}
+
+/// How many bits a count needs, which is 6.6.5's `HBPP`.
+fn bits_for(count: usize) -> u32 {
+    let mut bits = 0u32;
+    while bits < 32 && (1usize << bits) < count {
+        bits += 1;
+    }
+    bits
+}
+
 fn understood(kind: u8) -> bool {
     matches!(
         kind,
@@ -2808,6 +3186,10 @@ fn understood(kind: u8) -> bool {
             | kind::END_OF_FILE
             | kind::PROFILES
             | kind::TABLES
+            | kind::PATTERN_DICTIONARY
+            | kind::INTERMEDIATE_HALFTONE_REGION
+            | kind::IMMEDIATE_HALFTONE_REGION
+            | kind::IMMEDIATE_LOSSLESS_HALFTONE_REGION
             | kind::EXTENSION
     )
 }
@@ -2827,14 +3209,7 @@ fn understood(kind: u8) -> bool {
 /// what no path reproduces — the halftone lineage, custom tables and colour
 /// palettes.
 fn carries_content(kind: u8) -> bool {
-    matches!(
-        kind,
-        kind::PATTERN_DICTIONARY
-            | kind::INTERMEDIATE_HALFTONE_REGION
-            | kind::IMMEDIATE_HALFTONE_REGION
-            | kind::IMMEDIATE_LOSSLESS_HALFTONE_REGION
-            | kind::COLOUR_PALETTE
-    )
+    matches!(kind, kind::COLOUR_PALETTE)
 }
 
 /// Bytes a packed 1-bpp bitmap of these dimensions occupies, or `None` if it
@@ -3008,7 +3383,7 @@ impl RegionInfo {
 /// a default the wire format leans on — it is the answer to "what did the
 /// figure in the standard show", and having it here is what lets a test say
 /// that a custom AT pixel actually changed something.
-const NOMINAL_AT: [[(i8, i8); 4]; 4] = [
+const NOMINAL_AT: [[(i32, i32); 4]; 4] = [
     [(3, -1), (-3, -1), (2, -2), (-2, -2)],
     [(3, -1), (0, 0), (0, 0), (0, 0)],
     [(2, -1), (0, 0), (0, 0), (0, 0)],
@@ -3259,9 +3634,9 @@ fn refinement_offset(target: i64, reference: u32, coded: i32) -> i64 {
     (target - i64::from(reference)).div_euclid(2) + i64::from(coded)
 }
 
-fn context(bitmap: &Bitmap, template: u8, at: &[(i8, i8); 4], x: i32, y: i32) -> usize {
+fn context(bitmap: &Bitmap, template: u8, at: &[(i32, i32); 4], x: i32, y: i32) -> usize {
     let p = |dx: i32, dy: i32| bitmap.get(x + dx, y + dy);
-    let a = |i: usize| bitmap.get(x + i32::from(at[i].0), y + i32::from(at[i].1));
+    let a = |i: usize| bitmap.get(x + at[i].0, y + at[i].1);
     let value = match template {
         0 => {
             (a(3) << 15)
@@ -3337,12 +3712,13 @@ fn decode_arithmetic(
     data: &[u8],
     template: u8,
     tpgdon: bool,
-    at: &[(i8, i8); 4],
+    at: &[(i32, i32); 4],
+    skip: Option<&Bitmap>,
     into: &mut Bitmap,
 ) {
     let mut coder = MqDecoder::new(data);
     let mut contexts = MqContexts::new(1 << template_bits(template));
-    decode_generic_into(&mut coder, &mut contexts, template, tpgdon, at, into);
+    decode_generic_into(&mut coder, &mut contexts, template, tpgdon, at, skip, into);
 }
 
 /// 6.2.5.7's row loop, over a coder and a context set the **caller** owns.
@@ -3358,7 +3734,8 @@ fn decode_generic_into(
     contexts: &mut MqContexts,
     template: u8,
     tpgdon: bool,
-    at: &[(i8, i8); 4],
+    at: &[(i32, i32); 4],
+    skip: Option<&Bitmap>,
     into: &mut Bitmap,
 ) {
     let mut ltp = 0u8;
@@ -3376,6 +3753,14 @@ fn decode_generic_into(
             }
         }
         for x in 0..into.width {
+            // 6.2.5.7's USESKIP: a pixel the caller has already decided is
+            // outside anything is not coded at all, so it is set to zero and
+            // the coder is not asked. Halftone's 6.6.5.1 is the only caller
+            // that supplies one.
+            if skip.is_some_and(|map| map.get(x as i32, y as i32) == 1) {
+                into.set(x, y, 0);
+                continue;
+            }
             let cx = context(into, template, at, x as i32, y as i32);
             let pixel = coder.decode_at(contexts, cx);
             into.set(x, y, u32::from(pixel));
@@ -3420,7 +3805,7 @@ fn generic_region(
                 note(warnings, Jbig2Refusal::Truncated);
                 return None;
             };
-            *slot = (dx, dy);
+            *slot = (i32::from(dx), i32::from(dy));
         }
     }
 
@@ -3450,7 +3835,7 @@ fn generic_region(
             return None;
         }
     } else {
-        decode_arithmetic(reader.rest(), template, tpgdon, &at, &mut bitmap);
+        decode_arithmetic(reader.rest(), template, tpgdon, &at, None, &mut bitmap);
     }
     Some((info, bitmap))
 }
@@ -3548,6 +3933,7 @@ pub fn decode_attributed(
         intermediate: BTreeMap::new(),
         symbols: BTreeMap::new(),
         tables: BTreeMap::new(),
+        patterns: BTreeMap::new(),
         seen: BTreeSet::new(),
         refused: BTreeSet::new(),
         bitmap,
@@ -3585,6 +3971,13 @@ pub fn decode_attributed(
             }
             kind::SYMBOL_DICTIONARY => page.read_symbols(segment, max_output, warnings),
             kind::TABLES => page.read_table(segment),
+            kind::PATTERN_DICTIONARY => page.read_patterns(segment, max_output, warnings),
+            kind::INTERMEDIATE_HALFTONE_REGION => {
+                page.draw_halftone(segment, max_output, true, warnings);
+            }
+            kind::IMMEDIATE_HALFTONE_REGION | kind::IMMEDIATE_LOSSLESS_HALFTONE_REGION => {
+                page.draw_halftone(segment, max_output, false, warnings);
+            }
             kind::INTERMEDIATE_TEXT_REGION => {
                 page.draw_text(segment, max_output, true, warnings);
             }
@@ -3686,6 +4079,12 @@ struct Page {
     /// handed to its selectors *in reference order*, so anything that iterates
     /// has to do so the same way on every target (ruling 4).
     tables: BTreeMap<u32, HuffTable>,
+    /// What each pattern dictionary (6.7) declared, by its segment number.
+    ///
+    /// A halftone region's patterns are its referred-to dictionaries', in
+    /// reference order, for the same reason a text region's symbols are: the
+    /// grey values index across the concatenation.
+    patterns: BTreeMap<u32, Vec<Bitmap>>,
     /// Every segment number this stream has offered, whatever its type.
     ///
     /// A text region refers to its dictionaries *and* to its custom tables, and
@@ -3947,6 +4346,65 @@ impl Page {
         if let Some(table) = custom_table(segment.data) {
             self.tables.insert(segment.number, table);
         }
+    }
+
+    /// **6.7: a pattern dictionary**, kept for the regions that refer to it.
+    fn read_patterns(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
+        match pattern_dictionary(segment, ceiling, warnings) {
+            Some(patterns) => {
+                self.patterns.insert(segment.number, patterns);
+            }
+            None => {
+                self.refused.insert(segment.number);
+                note(warnings, Jbig2Refusal::PatternDictionaryRefused);
+            }
+        }
+    }
+
+    /// **6.6: a halftone region**, stamped from its referred-to dictionaries.
+    ///
+    /// The dangling check is 7.4.3's, met a second time: the grey values index
+    /// across the concatenation of every dictionary the region refers to, so a
+    /// missing one does not cost its own patterns -- it renumbers all of them
+    /// and every cell stamps a different shape in the right place.
+    fn draw_halftone(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        intermediate: bool,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
+        let dangling = |number: &u32| {
+            !self.patterns.contains_key(number)
+                && (self.refused.contains(number) || !self.seen.contains(number))
+        };
+        if segment.referred.iter().any(dangling) {
+            note(warnings, Jbig2Refusal::DanglingReference);
+            return;
+        }
+        let mut patterns = Vec::new();
+        for number in &segment.referred {
+            if let Some(declared) = self.patterns.get(number) {
+                patterns.extend(declared.iter().cloned());
+            }
+        }
+        let Some((info, region)) = halftone_region(segment, &patterns, ceiling, warnings) else {
+            note(warnings, Jbig2Refusal::HalftoneRegionRefused);
+            return;
+        };
+        if intermediate {
+            // 7.4.6.1, as for every other region kind: it waits to be referred
+            // to rather than being drawn.
+            self.intermediate.insert(segment.number, region);
+            return;
+        }
+        self.bitmap.composite(&region, info.x, info.y, info.op);
+        self.regions += 1;
     }
 
     /// The custom tables this segment refers to, **in reference order**.
@@ -4351,6 +4809,35 @@ mod tests {
             .collect()
     }
 
+    /// The generic region of one of Annex H's pages, decoded **on its own**.
+    ///
+    /// This used to be a window cut out of the finished page, and that was a
+    /// dependence on the rest of the page being skipped rather than a property
+    /// of the region. It held until the halftone lineage landed and drew a grey
+    /// ramp inside the frame -- at which point three tests failed and the
+    /// picture they were pinning had not changed at all.
+    ///
+    /// The same trap this file has already recorded twice: a whole-page
+    /// comparison that passes because both sides are blank, and a fixture that
+    /// agrees with five different templates. Comparing the segment the annex
+    /// publishes a bitmap *for* is what the assertion always meant.
+    fn annex_h_generic_region(page: &[u8]) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let segments = segments(page, &mut warnings);
+        let segment = segments
+            .iter()
+            .find(|segment| {
+                matches!(
+                    segment.kind,
+                    kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
+                )
+            })
+            .expect("the page carries a generic region");
+        let (_, bitmap) =
+            generic_region(segment, 1 << 20, &mut warnings).expect("the region decodes");
+        picture(&bitmap.bits, bitmap.width, bitmap.height)
+    }
+
     /// A picture with something in it for every template to get wrong.
     ///
     /// Forty by twenty-four, and deliberately awkward: a diagonal, solid
@@ -4393,7 +4880,7 @@ mod tests {
     /// Distance from the nominal set is the point. A decoder that read the
     /// AT bytes but ignored them, or never read them at all, forms different
     /// contexts from the encoder here and the picture does not come back.
-    const CUSTOM_AT: [(i8, i8); 4] = [(-5, 0), (4, -1), (-4, -2), (5, -2)];
+    const CUSTOM_AT: [(i32, i32); 4] = [(-5, 0), (4, -1), (-4, -2), (5, -2)];
 
     fn bitmap_from(rows: &[&str]) -> Bitmap {
         let height = rows.len() as u32;
@@ -5464,7 +5951,7 @@ mod tests {
         source: &Bitmap,
         template: u8,
         tpgdon: bool,
-        at: &[(i8, i8); 4],
+        at: &[(i32, i32); 4],
     ) -> Vec<u8> {
         let mut encoder = MqEncoder::new(1 << template_bits(template));
         let mut ltp = 0u8;
@@ -5491,7 +5978,7 @@ mod tests {
         rows: &[&str],
         template: u8,
         tpgdon: bool,
-        at: [(i8, i8); 4],
+        at: [(i32, i32); 4],
     ) -> Vec<u8> {
         let source = bitmap_from(rows);
         let mut data = Vec::new();
@@ -5515,7 +6002,7 @@ mod tests {
         stream
     }
 
-    fn round_trip(rows: &[&str], template: u8, tpgdon: bool, at: [(i8, i8); 4]) -> Vec<String> {
+    fn round_trip(rows: &[&str], template: u8, tpgdon: bool, at: [(i32, i32); 4]) -> Vec<String> {
         let stream = generic_region_stream(rows, template, tpgdon, at);
         let mut warnings = Vec::new();
         let params = Jbig2Params {
@@ -5914,6 +6401,7 @@ mod tests {
             intermediate: BTreeMap::new(),
             symbols: BTreeMap::new(),
             tables: BTreeMap::new(),
+            patterns: BTreeMap::new(),
             seen: BTreeSet::new(),
             refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
@@ -5943,6 +6431,7 @@ mod tests {
             intermediate: BTreeMap::new(),
             symbols: BTreeMap::new(),
             tables: BTreeMap::new(),
+            patterns: BTreeMap::new(),
             seen: BTreeSet::new(),
             refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
@@ -6045,11 +6534,13 @@ mod tests {
             .expect("the page carries a generic region, so it is not refused");
 
         let page = picture(&bits, 64, 56);
-        assert_eq!(region_window(&page), ANNEX_H_REGION);
+        assert_eq!(annex_h_generic_region(&ANNEX_H[PAGE_2]), ANNEX_H_REGION);
 
-        // And nothing outside the region was touched: the rest of Annex H.1's
-        // page is a text region and a halftone region, neither of which this
-        // build draws.
+        // And nothing outside the region was touched. The halftone region on
+        // this page now draws -- inside the frame, which is why the assertion
+        // above is against the region's own decode -- but the text region is
+        // still missing, because it refers to a dictionary that belongs to
+        // page 1.
         assert!(
             page[0..11].iter().all(|row| !row.contains('#')),
             "a region composited above the coordinates its segment named"
@@ -6059,9 +6550,9 @@ mod tests {
             "a region composited left of the coordinates its segment named"
         );
         assert!(
-            warnings.contains(&Warning::Jbig2SegmentSkipped),
-            "the symbol dictionary, text region and halftone region on this \
-             page are all missing from it, and ruling 10 wants that recorded"
+            warnings.contains(&Warning::Jbig2VariantSkipped),
+            "the text region on this page refers to page 1's dictionary and is \
+             missing from it, and ruling 10 wants that recorded"
         );
     }
 
@@ -6175,13 +6666,14 @@ mod tests {
         let arithmetic = decode(&ANNEX_H[PAGE_2], &shared, 1 << 20, &mut arithmetic_warnings)
             .expect("page 2 carries an arithmetically coded one");
 
+        let _ = (&mmr, &arithmetic);
         assert_eq!(
-            region_window(&picture(&mmr, 64, 56)),
+            annex_h_generic_region(&ANNEX_H[PAGE_1]),
             ANNEX_H_REGION,
             "the MMR region does not match the annex's published picture"
         );
         assert_eq!(
-            region_window(&picture(&arithmetic, 64, 56)),
+            annex_h_generic_region(&ANNEX_H[PAGE_2]),
             ANNEX_H_REGION,
             "the arithmetic region does not match the annex's published picture"
         );
@@ -6204,11 +6696,12 @@ mod tests {
             height: 56,
         };
         let bits = decode(&ANNEX_H, &params, 1 << 20, &mut warnings).expect("page 1 decodes");
-        assert_eq!(region_window(&picture(&bits, 64, 56)), ANNEX_H_REGION);
-        assert!(
-            warnings.contains(&Warning::Jbig2SegmentSkipped),
-            "pages 2 and 3, and this page's text and halftone regions, are \
-             all missing from the result"
+        let page = picture(&bits, 64, 56);
+        assert_eq!(annex_h_generic_region(&ANNEX_H[PAGE_1]), ANNEX_H_REGION);
+        assert_eq!(
+            region_window(&page)[0],
+            ANNEX_H_REGION[0],
+            "the frame's first row is on the page where 7.4.1 puts it"
         );
     }
 

@@ -2026,7 +2026,7 @@ fn rendering_is_stable_across_targets() {
         // only the filter crate's own tests standing in front of it.
         (
             "jbig2",
-            "183bb295fa31b620a48b3d10cd1e5850180fc3a016e47630c166c334446aa3e9",
+            "2b430170b06618741ae1c6051f3fce687f716bc2655488a8cdf0956d173127c7",
         ),
         // Added August 2026 with gap 10. Nothing above draws a mesh, so the
         // whole of 8.7.4.5.5 to 8.7.4.5.8 -- the packed vertex stream, the

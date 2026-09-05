@@ -78,6 +78,18 @@ and all four reference corners. What a dictionary exports is keyed by segment
 number, and a region's symbols are the concatenation of its referred-to
 dictionaries' exports *in reference order* (7.4.3).
 
+**Halftone regions and pattern dictionaries decode** (6.6, 6.7, Annex C), the
+third lineage. A halftone region does not code pixels: it codes a grid of grey
+values and stamps a pattern from its dictionary at each cell, which is how a
+dithered photograph is coded compactly. The dictionary is one collective bitmap
+with every pattern side by side, and the grid is Gray-coded across bitplanes
+that share one coder and one context set — 6.5.8.1's rule met again in another
+clause. `HRX` and `HRY` are an 8.8 fixed-point vector, so the lattice may be
+sheared, and 6.6.5.1's `HENABLESKIP` leaves the cells that fall outside the
+region uncoded. All four grey-scale templates, both codings and the skip path
+decode; the MMR variant carries every plane in one datastream, each ended by
+T.6's EOFB and **byte aligned** after it (6.2.6).
+
 **Refinement (6.3) decodes too**, in all three of the shapes T.88 gives it:
 6.5.8.2.2's single refinement and 6.5.8.2.1's aggregate inside a symbol
 dictionary — where an aggregate symbol is itself a text region — 6.4.11's
@@ -252,7 +264,6 @@ make both enums wrong.
 | --- | --- | --- | --- |
 | JBIG2 retained bitmap-coding contexts (7.4.2), and a selector naming a custom table the segment did not refer to | `Warning::Jbig2VariantSkipped` | Variants of a segment this build *does* decode, named apart from a segment type it does not, so a file needing one is distinguishable from one needing a lineage nobody has started. **SDHUFF, SBHUFF, SDREFAGG, SBREFINE, segment types 40/42/43, `TRANSPOSED` and clause 7.4.13's custom code tables have all left this row.** What is left is a retained context, which is one corpus file and below ruling 3's line. **The whole symbol lineage decodes otherwise** — arithmetic and Huffman, with and without refinement, in either combination, either placement orientation, standard tables or the file's own, and a non-zero refinement delta through **B.14 and B.15** on both the text region's road and the dictionary's | [ROADMAP](../ROADMAP.md) |
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | T.88 7.4.3 |
-| JBIG2 halftone regions and pattern dictionaries (6.6, 6.7; types 16, 20, 22, 23) | `Warning::Jbig2SegmentSkipped` | A third lineage; 16 corpus files carry it and nothing else | [ROADMAP](../ROADMAP.md) |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPX markers RGN, POC, PPM, PPT, CRG (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it | [ROADMAP](../ROADMAP.md) |
