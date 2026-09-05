@@ -1080,9 +1080,9 @@ been.**
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in
-`crates/tinker-pdf/tests/bounds_ledger.rs` — **40 rows**, each carrying a
-figure for a real book, comic and document rather than a guess. Thirty-seven
-of those figures are measurements or arithmetic about a plausible file; the
+`crates/tinker-pdf/tests/bounds_ledger.rs` — **43 rows**, each carrying a
+figure for a real book, comic and document rather than a guess. Forty of
+those figures are measurements or arithmetic about a plausible file; the
 three JBIG2 rows publish the word **estimate** in the number itself, because
 the corpus holds no real OCR JBIG2 to measure against and a row that reads
 like a measurement when it is not is the failure this file exists to prevent.

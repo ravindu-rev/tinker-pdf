@@ -256,8 +256,6 @@ pub enum Jbig2Refusal {
     TextTableSelector,
     /// 6.4.11 over the Huffman road with no refinement tables selected.
     RefinementTablesAbsent,
-    /// 6.4.5's `TRANSPOSED` = 1.
-    Transposed,
     /// 7.4.3: a text region whose referred-to dictionary is absent or was
     /// refused. Refused *whole*, because the numbering is shared and drawing
     /// it renumbered produces a page that looks like text and says something
@@ -298,6 +296,15 @@ pub enum Jbig2Refusal {
     SymbolIndexOutOfRange,
     /// 6.5.8.2.1's fixed-width symbol code could not be built for the pool.
     SymbolCodeUnbuildable,
+    /// A selector asked for clause 7.4.13's custom table and the segment
+    /// referred to fewer Tables segments than its selectors need.
+    ///
+    /// 7.4.3.1.6 and 7.4.4.1.2 hand the referred-to tables out by *position*,
+    /// so a segment one short does not lose the last selector's table -- every
+    /// selector after the gap takes the wrong one, which decodes to a
+    /// plausible wrong picture. Refused whole, for `DanglingReference`'s
+    /// reason.
+    CustomTableMissing,
 
     // --- data that would not decode as what it claims to be ---
     /// 6.5.9's collective bitmap yielded not one T.6 row, so it is not MMR
@@ -356,8 +363,8 @@ impl Jbig2Refusal {
             | Self::RetainedContext
             | Self::TextTableSelector
             | Self::RefinementTablesAbsent
-            | Self::Transposed
-            | Self::DanglingReference => Warning::Jbig2VariantSkipped,
+            | Self::DanglingReference
+            | Self::CustomTableMissing => Warning::Jbig2VariantSkipped,
 
             Self::SymbolCountCap
             | Self::SymbolPixelCap
@@ -395,6 +402,7 @@ impl Jbig2Refusal {
                 | Self::ExportCountMismatch
                 | Self::SymbolIndexOutOfRange
                 | Self::SymbolCodeUnbuildable
+                | Self::CustomTableMissing
                 | Self::CollectiveBitmapNotMmr
                 | Self::GenericRegionNotMmr
                 | Self::TextRegionWithoutSymbols
@@ -791,6 +799,11 @@ enum HuffValue {
 }
 
 /// An Annex B table with its prefix codes assigned.
+///
+/// `Clone` because clause 7.4.13's tables are owned by the page and handed to
+/// whichever selector asks for one, and two selectors of one segment may name
+/// the same referred-to table.
+#[derive(Clone)]
 struct HuffTable {
     lines: Vec<HuffLine>,
     /// The prefix code of each line, in the same order.
@@ -1208,14 +1221,18 @@ fn symbol_dictionary_huffman(
     flags: u16,
     reader: &mut Reader<'_>,
     imported: &[Bitmap],
+    custom: &mut CustomTables<'_>,
     ceiling: usize,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<Vec<Bitmap>> {
-    // 7.4.3.1.1 bits 2 to 7 pick the tables. A selector of 3 means the segment
-    // brought its own (clause 7.4.13), which nothing here reads yet.
+    // 7.4.3.1.1 bits 2 to 7 pick the tables, and 7.4.3.1.6 says a selector
+    // asking for a custom one takes the next referred-to Tables segment in
+    // reference order -- so these four are read in the clause's own order and
+    // the cursor is only advanced by the ones that ask.
     let dh = match (flags >> 2) & 0x0003 {
         0 => table_b4(),
         1 => table_b5(),
+        3 => custom.take(warnings)?,
         _ => {
             note(warnings, Jbig2Refusal::HuffmanDhSelector);
             return None;
@@ -1224,15 +1241,25 @@ fn symbol_dictionary_huffman(
     let dw = match (flags >> 4) & 0x0003 {
         0 => table_b2(),
         1 => table_b3(),
+        3 => custom.take(warnings)?,
         _ => {
             note(warnings, Jbig2Refusal::HuffmanDwSelector);
             return None;
         }
     };
-    if (flags >> 6) & 0x0001 != 0 || (flags >> 7) & 0x0001 != 0 {
-        note(warnings, Jbig2Refusal::HuffmanBmSizeOrAggInstSelector);
-        return None;
-    }
+    // Bit 6 is `SDHUFFBMSIZE` and bit 7 `SDHUFFAGGINST`, each one bit: B.1 or
+    // the next custom table. The export runs of 6.5.10 are always B.1, which
+    // is why `sizes` stays separate from both.
+    let bm_size = if (flags >> 6) & 0x0001 == 0 {
+        table_b1()
+    } else {
+        custom.take(warnings)?
+    };
+    let agg_inst = if (flags >> 7) & 0x0001 == 0 {
+        table_b1()
+    } else {
+        custom.take(warnings)?
+    };
     let sizes = table_b1();
     let refagg = flags & 0x0002 != 0;
     let rtemplate = ((flags >> 12) & 0x0001) as u8;
@@ -1322,7 +1349,7 @@ fn symbol_dictionary_huffman(
             // 6.5.8.2 over Huffman: the symbol is refined one at a time rather
             // than sliced out of a collective bitmap, so this height class
             // never reaches 6.5.9's shared read below.
-            let instances = sizes.value(&mut bits)?;
+            let instances = agg_inst.value(&mut bits)?;
             if instances <= 0 || instances as u32 > MAX_JBIG2_TEXT_INSTANCES {
                 note(warnings, Jbig2Refusal::AggregateInstanceCap);
                 return None;
@@ -1339,7 +1366,7 @@ fn symbol_dictionary_huffman(
                 let id = bits.bits(code_len)? as usize;
                 let rdx = offsets.value(&mut bits)?;
                 let rdy = offsets.value(&mut bits)?;
-                let bmsize = sizes.value(&mut bits)?;
+                let bmsize = bm_size.value(&mut bits)?;
                 if bmsize < 0 {
                     return None;
                 }
@@ -1441,7 +1468,7 @@ fn symbol_dictionary_huffman(
         // uncompressed, one row of `total` bits padded to a byte; anything
         // else is that many bytes of MMR, which is the same T.6 decoder a fax
         // and a generic region already use.
-        let bmsize = sizes.value(&mut bits)?;
+        let bmsize = bm_size.value(&mut bits)?;
         if bmsize < 0 {
             return None;
         }
@@ -1543,9 +1570,11 @@ fn symbol_dictionary_huffman(
 fn symbol_dictionary(
     segment: &Segment<'_>,
     imported: &[Bitmap],
+    tables: &[&HuffTable],
     ceiling: usize,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<Vec<Bitmap>> {
+    let mut custom = CustomTables::new(tables);
     let mut reader = Reader::new(segment.data);
     // 7.4.3.1.1.
     let flags = reader.u16()?;
@@ -1570,7 +1599,14 @@ fn symbol_dictionary(
         // whole height class arrives as one *collective* bitmap and the
         // symbols are sliced out of it by the widths just read, so it is a
         // different loop rather than a different decoder inside the same one.
-        return symbol_dictionary_huffman(flags, &mut reader, imported, ceiling, warnings);
+        return symbol_dictionary_huffman(
+            flags,
+            &mut reader,
+            imported,
+            &mut custom,
+            ceiling,
+            warnings,
+        );
     }
 
     // 7.4.3.1.2: four AT pairs for template 0, one for the others. Reading the
@@ -1827,47 +1863,61 @@ impl TextTables {
     fn select(
         selectors: u16,
         refine: bool,
+        custom: &mut CustomTables<'_>,
         warnings: &mut Vec<Jbig2Refusal>,
     ) -> Option<TextTables> {
         let refuse = |warnings: &mut Vec<Jbig2Refusal>| {
             note(warnings, Jbig2Refusal::TextTableSelector);
             None
         };
+        // 7.4.4.1.2 lists the selectors in this order and 7.4.13 hands out the
+        // referred-to Tables segments in it, so the reads below are ordered by
+        // the clause rather than by convenience: moving one moves which table
+        // every selector after it gets.
         let fs = match selectors & 0x0003 {
             0 => table_b6(),
             1 => table_b7(),
+            3 => custom.take(warnings)?,
             _ => return refuse(warnings),
         };
         let ds = match (selectors >> 2) & 0x0003 {
             0 => table_b8(),
             1 => table_b9(),
             2 => table_b10(),
-            _ => return refuse(warnings),
+            _ => custom.take(warnings)?,
         };
         let dt = match (selectors >> 4) & 0x0003 {
             0 => table_b11(),
             1 => table_b12(),
             2 => table_b13(),
-            _ => return refuse(warnings),
+            _ => custom.take(warnings)?,
         };
-        // 7.4.4.1.2's bits 6 to 14. Only a refining region reads them, and a
-        // selector of 3 is clause 7.4.13's custom table — a separate refusal,
-        // and the reason three of the corpus's eight Huffman refining regions
-        // stay refused after this one lands.
+        // 7.4.4.1.2's bits 6 to 14, read only by a refining region. Value 2 is
+        // reserved and stays refused; 3 is a custom table.
         let refine = if refine {
-            let table = |shift: u32| match (selectors >> shift) & 0x0003 {
-                0 => Some(table_b14()),
-                1 => Some(table_b15()),
-                _ => None,
+            let table = |shift: u32,
+                         custom: &mut CustomTables<'_>,
+                         warnings: &mut Vec<Jbig2Refusal>|
+             -> Option<HuffTable> {
+                match (selectors >> shift) & 0x0003 {
+                    0 => Some(table_b14()),
+                    1 => Some(table_b15()),
+                    3 => custom.take(warnings),
+                    _ => None,
+                }
             };
-            let (Some(rdw), Some(rdh), Some(rdx), Some(rdy)) =
-                (table(6), table(8), table(10), table(12))
-            else {
+            let (Some(rdw), Some(rdh), Some(rdx), Some(rdy)) = (
+                table(6, custom, warnings),
+                table(8, custom, warnings),
+                table(10, custom, warnings),
+                table(12, custom, warnings),
+            ) else {
                 return refuse(warnings);
             };
-            let rsize = match (selectors >> 14) & 0x0001 {
-                0 => table_b1(),
-                _ => return refuse(warnings),
+            let rsize = if (selectors >> 14) & 0x0001 == 0 {
+                table_b1()
+            } else {
+                custom.take(warnings)?
             };
             Some(RefineTables {
                 rdw,
@@ -2052,6 +2102,138 @@ fn table_b15() -> HuffTable {
         HuffLine::lower(6, -31),
         HuffLine::normal(6, 32, 31),
     ])
+}
+
+/// The most lines one clause 7.4.13 code table may declare.
+///
+/// A custom table's lines are read from a bitstream until the running range low
+/// reaches `HTHIGH`, and both bounds are 32-bit fields the file chooses. A
+/// table declaring `HTLOW = i32::MIN`, `HTHIGH = i32::MAX` and a range length
+/// of zero asks for four billion lines out of nine bytes of header — so the
+/// loop is bounded before it allocates, the `packed_size` pattern of every
+/// other count in this module.
+///
+/// | | Lines |
+/// | --- | --- |
+/// | The widest of Annex B's own fifteen (B.9, B.10) | 22 |
+/// | The most any fixture in this repository spends | 22 |
+/// | The most any file in the corpus spends | 22 |
+/// | A 200-page bilevel scan | 22 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **4 096** |
+///
+/// The yardsticks are not a measurement of custom tables and say so: a code
+/// table's size is a property of the *format* rather than of the document, and
+/// Annex B's own fifteen are the population — the standard's widest has 22
+/// lines, and a custom table exists to be narrower and more specific than a
+/// standard one, not wider. So the cap is 186 times the widest table anybody
+/// has published, which is the same order of headroom the three rows beside it
+/// carry. A comic and a book spend zero for their reason: no CBZ or EPUB path
+/// decodes JBIG2 at all.
+///
+/// Reachable: `HTLOW` and `HTHIGH` are 32-bit fields at 7.4.13, and a range
+/// length of zero advances the running low by one, so **nine bytes of header**
+/// may ask for 4 294 967 295 lines — which
+/// `a_custom_table_declaring_more_lines_than_the_cap_is_refused` builds.
+pub const MAX_JBIG2_TABLE_LINES: usize = 4096;
+
+/// **Clause 7.4.13: a code table the file brought with it.**
+///
+/// Annex B's fifteen are built into this module; a Tables segment carries a
+/// sixteenth, written out as an explicit list of ranges. The shape is a header
+/// of three fields and then a bitstream of prefix and range lengths:
+///
+/// - one flags byte: `HTOOB` in bit 0, `HTPS − 1` in bits 1 to 3, `HTRS − 1`
+///   in bits 4 to 6, where `HTPS` and `HTRS` are how many bits each prefix
+///   length and each range length occupy;
+/// - `HTLOW` and `HTHIGH`, the bounds of the ranges the table names;
+/// - then a line per range, walking `HTLOW` upwards by `2^RANGELEN` until
+///   `HTHIGH` is reached, and finally the lower range, the upper range and —
+///   if `HTOOB` — the out-of-band line.
+///
+/// The result goes through [`HuffTable::new`] exactly as Annex B's do, because
+/// B.3's canonical assignment is the same procedure for a custom table as for
+/// a standard one. That is the whole reason [`HuffLine`] is general enough to
+/// hold one without a second representation: a table from a segment and a
+/// table from a constant are the same thing by the time anybody decodes with
+/// it.
+fn custom_table(data: &[u8]) -> Option<HuffTable> {
+    let mut reader = Reader::new(data);
+    let flags = reader.u8()?;
+    let has_oob = flags & 0x01 != 0;
+    let prefix_size = u32::from((flags >> 1) & 0x07) + 1;
+    let range_size = u32::from((flags >> 4) & 0x07) + 1;
+    let low = reader.u32()? as i32;
+    let high = reader.u32()? as i32;
+    // An empty or inverted span names no ranges at all, so the lower and upper
+    // lines would meet with nothing between them. Refused rather than read as
+    // a table of two lines, because it is a header that cannot describe one.
+    if high <= low {
+        return None;
+    }
+
+    let mut bits = BitReader::new(reader.rest());
+    let mut lines = Vec::new();
+    let mut current = i64::from(low);
+    let top = i64::from(high);
+    while current < top {
+        if lines.len() >= MAX_JBIG2_TABLE_LINES {
+            return None;
+        }
+        let prefix_len = u8::try_from(bits.bits(prefix_size)?).ok()?;
+        let range_len = u8::try_from(bits.bits(range_size)?).ok()?;
+        lines.push(HuffLine::normal(
+            prefix_len,
+            range_len,
+            i32::try_from(current).ok()?,
+        ));
+        // `1 << 62` is already past every 32-bit span, so the shift is clamped
+        // rather than checked: a range length of 200 is a table that covers
+        // everything left in one line, not an overflow.
+        current = current.checked_add(1i64 << u32::from(range_len).min(62))?;
+    }
+
+    // B.5's three trailing lines, in the order the clause writes them.
+    let lower = u8::try_from(bits.bits(prefix_size)?).ok()?;
+    lines.push(HuffLine::lower(lower, low.checked_sub(1)?));
+    let upper = u8::try_from(bits.bits(prefix_size)?).ok()?;
+    lines.push(HuffLine::normal(upper, 32, high));
+    if has_oob {
+        let oob = u8::try_from(bits.bits(prefix_size)?).ok()?;
+        lines.push(HuffLine::oob(oob));
+    }
+    Some(HuffTable::new(lines))
+}
+
+/// How many custom tables a run of selectors will consume, and which.
+///
+/// 7.4.3.1.6 and 7.4.4.1.2 both say the same thing in different words: a
+/// segment's referred-to Tables segments are handed out **in reference order**
+/// to the selectors that ask for one, in the fixed order the clause lists the
+/// selectors. So the reader is a cursor over the referred tables rather than a
+/// lookup, and a selector that does not ask for a custom table does not
+/// advance it.
+struct CustomTables<'a> {
+    tables: &'a [&'a HuffTable],
+    next: usize,
+}
+
+impl<'a> CustomTables<'a> {
+    const fn new(tables: &'a [&'a HuffTable]) -> CustomTables<'a> {
+        CustomTables { tables, next: 0 }
+    }
+
+    /// The next referred-to table, or `None` if the segment referred to fewer
+    /// than its selectors ask for — which is a file that cannot be decoded
+    /// rather than one this build declines.
+    fn take(&mut self, warnings: &mut Vec<Jbig2Refusal>) -> Option<HuffTable> {
+        let Some(table) = self.tables.get(self.next) else {
+            note(warnings, Jbig2Refusal::CustomTableMissing);
+            return None;
+        };
+        self.next += 1;
+        Some((*table).clone())
+    }
 }
 
 /// Table B.13, a strip's vertical coordinate at the coarsest resolution.
@@ -2376,9 +2558,11 @@ fn text_region_procedure(
 fn text_region(
     segment: &Segment<'_>,
     symbols: &[Bitmap],
+    tables: &[&HuffTable],
     ceiling: usize,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
+    let mut custom = CustomTables::new(tables);
     let mut reader = Reader::new(segment.data);
     let info = RegionInfo::read(&mut reader)?;
     // 7.4.4.1.1.
@@ -2446,7 +2630,7 @@ fn text_region(
     // then carries the symbol-ID code lengths of 7.4.3.1.7 before its data.
     let mut huffman = None;
     if let Some(selectors) = selectors {
-        let tables = TextTables::select(selectors, refine, warnings)?;
+        let tables = TextTables::select(selectors, refine, &mut custom, warnings)?;
         let mut bits = BitReader::new(reader.rest());
         let Some(symbol_codes) = symbol_id_codes(&mut bits, symbols.len()) else {
             note(warnings, Jbig2Refusal::Truncated);
@@ -2557,6 +2741,7 @@ fn understood(kind: u8) -> bool {
             | kind::END_OF_STRIPE
             | kind::END_OF_FILE
             | kind::PROFILES
+            | kind::TABLES
             | kind::EXTENSION
     )
 }
@@ -2582,7 +2767,6 @@ fn carries_content(kind: u8) -> bool {
             | kind::INTERMEDIATE_HALFTONE_REGION
             | kind::IMMEDIATE_HALFTONE_REGION
             | kind::IMMEDIATE_LOSSLESS_HALFTONE_REGION
-            | kind::TABLES
             | kind::COLOUR_PALETTE
     )
 }
@@ -3285,6 +3469,7 @@ pub fn decode_attributed(
     let mut page = Page {
         intermediate: BTreeMap::new(),
         symbols: BTreeMap::new(),
+        tables: BTreeMap::new(),
         seen: BTreeSet::new(),
         refused: BTreeSet::new(),
         bitmap,
@@ -3321,6 +3506,7 @@ pub fn decode_attributed(
                 page.draw_refinement(segment, max_output, false, warnings);
             }
             kind::SYMBOL_DICTIONARY => page.read_symbols(segment, max_output, warnings),
+            kind::TABLES => page.read_table(segment),
             kind::INTERMEDIATE_TEXT_REGION => {
                 page.draw_text(segment, max_output, true, warnings);
             }
@@ -3416,6 +3602,12 @@ struct Page {
     /// reference order*, and anything that iterates has to do so the same way
     /// on every target (ruling 4).
     symbols: BTreeMap<u32, Vec<Bitmap>>,
+    /// What each Tables segment (7.4.13) declared, by its segment number.
+    ///
+    /// A `BTreeMap` for `symbols`' reason: the tables a segment refers to are
+    /// handed to its selectors *in reference order*, so anything that iterates
+    /// has to do so the same way on every target (ruling 4).
+    tables: BTreeMap<u32, HuffTable>,
     /// Every segment number this stream has offered, whatever its type.
     ///
     /// A text region refers to its dictionaries *and* to its custom tables, and
@@ -3588,7 +3780,8 @@ impl Page {
                 imported.extend(exports.iter().cloned());
             }
         }
-        match symbol_dictionary(segment, &imported, ceiling, warnings) {
+        let tables = self.referred_tables(segment);
+        match symbol_dictionary(segment, &imported, &tables, ceiling, warnings) {
             Some(exported) => {
                 self.symbols.insert(segment.number, exported);
             }
@@ -3641,7 +3834,9 @@ impl Page {
                 symbols.extend(exports.iter().cloned());
             }
         }
-        let Some((info, region)) = text_region(segment, &symbols, ceiling, warnings) else {
+        let tables = self.referred_tables(segment);
+        let Some((info, region)) = text_region(segment, &symbols, &tables, ceiling, warnings)
+        else {
             note(warnings, Jbig2Refusal::TextRegionRefused);
             return;
         };
@@ -3663,6 +3858,32 @@ impl Page {
     /// particular page — what a `/JBIG2Globals` stream carries — so it always
     /// matches; and until a page information segment has been seen there is
     /// nothing for a segment to disagree with.
+    /// **Clause 7.4.13: a Tables segment**, kept for whoever refers to it.
+    ///
+    /// A table that will not parse is simply not stored. That is not a silent
+    /// loss: the segment referring to it asks for one by position, gets `None`
+    /// from the cursor, and refuses -- so a malformed table costs the region
+    /// that wanted it and nothing else, which is the same bargain a refused
+    /// symbol dictionary strikes.
+    fn read_table(&mut self, segment: &Segment<'_>) {
+        if let Some(table) = custom_table(segment.data) {
+            self.tables.insert(segment.number, table);
+        }
+    }
+
+    /// The custom tables this segment refers to, **in reference order**.
+    ///
+    /// 7.4.3.1.6 and 7.4.4.1.2 both hand them out by position rather than by
+    /// number, so the order of `segment.referred` is load-bearing and is the
+    /// reason `read_segment` keeps that list at all.
+    fn referred_tables(&self, segment: &Segment<'_>) -> Vec<&HuffTable> {
+        segment
+            .referred
+            .iter()
+            .filter_map(|number| self.tables.get(number))
+            .collect()
+    }
+
     fn owns(&self, segment: &Segment<'_>) -> bool {
         segment.page == 0 || self.number.is_none_or(|n| n == segment.page)
     }
@@ -4463,6 +4684,7 @@ mod tests {
         let imported = symbol_dictionary(
             &dictionary_segment(1, &[], &base),
             &[],
+            &[],
             1 << 20,
             &mut Vec::new(),
         )
@@ -4490,6 +4712,7 @@ mod tests {
         let exported = symbol_dictionary(
             &dictionary_segment(2, &[1], &refining),
             &imported,
+            &[],
             1 << 20,
             &mut warnings,
         )
@@ -4775,7 +4998,7 @@ mod tests {
                 data: &data,
             };
             let mut warnings = Vec::new();
-            let exported = symbol_dictionary(&segment, &[], 1 << 20, &mut warnings)
+            let exported = symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings)
                 .unwrap_or_else(|| panic!("template {template} did not decode: {warnings:?}"));
 
             let expected: Vec<&[&str]> = classes.iter().flat_map(|c| c.iter().copied()).collect();
@@ -4829,7 +5052,7 @@ mod tests {
             data: &data,
         };
         let mut warnings = Vec::new();
-        let exported = symbol_dictionary(&segment, &imported, 1 << 20, &mut warnings)
+        let exported = symbol_dictionary(&segment, &imported, &[], 1 << 20, &mut warnings)
             .unwrap_or_else(|| panic!("it did not decode: {warnings:?}"));
 
         assert_eq!(exported.len(), 2, "two symbols were selected");
@@ -4855,15 +5078,18 @@ mod tests {
     /// like the refusal it replaced.
     #[test]
     fn the_variants_this_build_does_not_decode_refuse_by_their_own_name() {
-        // A consumed retained context, and a custom-table selector — clause
-        // 7.4.13's type 53 segments, which nothing reads yet. What has left
-        // this list is the whole of the symbol lineage: SDHUFF, SDREFAGG,
-        // both refinement templates, and SDHUFF together with SDREFAGG all
-        // decode now, so a dictionary is refused only for the two variants
-        // above.
+        // A consumed retained context, and a selector asking for a custom
+        // table the segment did not refer to. What has left this list is the
+        // whole of the symbol lineage: SDHUFF, SDREFAGG, both refinement
+        // templates, SDHUFF together with SDREFAGG, and now clause 7.4.13's
+        // custom tables -- so `0x000D`, a custom `SDHUFFDH` selector, is here
+        // for a different reason than it used to be. It no longer refuses
+        // *because the table cannot be read*; it refuses because this segment
+        // refers to no Tables segment, and 7.4.3.1.6 hands them out by
+        // position, so one short renumbers every selector after the gap.
         for (flags, expected) in [
             (0x0100u16, Jbig2Refusal::RetainedContext),
-            (0x000D, Jbig2Refusal::HuffmanDhSelector),
+            (0x000D, Jbig2Refusal::CustomTableMissing),
         ] {
             let mut data = Vec::new();
             data.extend_from_slice(&flags.to_be_bytes());
@@ -4879,7 +5105,7 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none(),
+                symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
                 "flags {flags:#06x} decoded"
             );
             assert_eq!(
@@ -4914,7 +5140,7 @@ mod tests {
             data: &data,
         };
         let mut warnings = Vec::new();
-        assert!(symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none());
+        assert!(symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
         assert!(
             warnings.contains(&Jbig2Refusal::ExportCountMismatch),
             "{warnings:?}"
@@ -4969,7 +5195,7 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none(),
+                symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
                 "{num_ex}/{num_new} was not refused"
             );
             assert!(
@@ -5026,7 +5252,7 @@ mod tests {
                 data,
             };
             let mut warnings = Vec::new();
-            let out = symbol_dictionary(&segment, &[], 1 << 20, &mut warnings);
+            let out = symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings);
             (
                 out.is_none() && warnings.contains(&Jbig2Refusal::SymbolPixelCap),
                 warnings,
@@ -5063,7 +5289,7 @@ mod tests {
         };
         let mut warnings = Vec::new();
         assert!(
-            symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none(),
+            symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
             "a truncated collective bitmap is still not a dictionary"
         );
         assert!(
@@ -5116,7 +5342,7 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                text_region(&segment, &[], 1 << 20, &mut warnings).is_none(),
+                text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
                 "{instances} was not refused"
             );
             assert!(
@@ -5138,7 +5364,7 @@ mod tests {
             data: &data,
         };
         let mut warnings = Vec::new();
-        assert!(text_region(&segment, &[], 1 << 20, &mut warnings).is_none());
+        assert!(text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
         assert_eq!(
             warnings,
             vec![Jbig2Refusal::TextRegionWithoutSymbols],
@@ -5599,6 +5825,7 @@ mod tests {
         let mut page = Page {
             intermediate: BTreeMap::new(),
             symbols: BTreeMap::new(),
+            tables: BTreeMap::new(),
             seen: BTreeSet::new(),
             refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
@@ -5626,6 +5853,7 @@ mod tests {
         let mut page = Page {
             intermediate: BTreeMap::new(),
             symbols: BTreeMap::new(),
+            tables: BTreeMap::new(),
             seen: BTreeSet::new(),
             refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
@@ -5790,7 +6018,7 @@ mod tests {
                 .find(|s| s.number == number)
                 .expect("the segment");
             let mut warnings = Vec::new();
-            let symbols = symbol_dictionary(segment, &[], 1 << 20, &mut warnings)
+            let symbols = symbol_dictionary(segment, &[], &[], 1 << 20, &mut warnings)
                 .expect("a symbol dictionary");
             assert!(warnings.is_empty(), "segment {number}: {warnings:?}");
             symbols
@@ -6213,10 +6441,10 @@ mod tests {
                 .find(|segment| segment.number == number)
                 .expect("segment")
         };
-        let imported = symbol_dictionary(dictionary(16), &[], 1 << 20, &mut Vec::new())
+        let imported = symbol_dictionary(dictionary(16), &[], &[], 1 << 20, &mut Vec::new())
             .expect("the shared dictionary decodes");
         let mut warnings = Vec::new();
-        let exported = symbol_dictionary(dictionary(17), &imported, 1 << 20, &mut warnings)
+        let exported = symbol_dictionary(dictionary(17), &imported, &[], 1 << 20, &mut warnings)
             .expect("the refining dictionary decodes");
 
         assert_eq!(exported.len(), 3, "one imported symbol and two new ones");
@@ -6708,6 +6936,7 @@ mod tests {
         let imported = symbol_dictionary(
             &dictionary_segment(1, &[], &symbol_dictionary_data(&classes, 0)),
             &[],
+            &[],
             1 << 20,
             &mut Vec::new(),
         )
@@ -6719,6 +6948,7 @@ mod tests {
         let plain_classes: [&[&[&str]]; 1] = [&plain_class];
         let plain = symbol_dictionary(
             &dictionary_segment(3, &[], &symbol_dictionary_data(&plain_classes, 0)),
+            &[],
             &[],
             1 << 20,
             &mut Vec::new(),
@@ -6741,6 +6971,7 @@ mod tests {
             let exported = symbol_dictionary(
                 &dictionary_segment(2, &[1], &refining),
                 &imported,
+                &[],
                 1 << 20,
                 &mut warnings,
             )
@@ -6779,7 +7010,7 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                text_region(&segment, &symbols, 1 << 20, &mut warnings).is_none(),
+                text_region(&segment, &symbols, &[], 1 << 20, &mut warnings).is_none(),
                 "the region decoded where it should have refused"
             );
             warnings
@@ -6948,5 +7179,41 @@ mod tests {
             assert_eq!(corner::is_left(corner), left, "corner {corner}");
             assert_eq!(corner::is_top(corner), top, "corner {corner}");
         }
+    }
+
+    /// **A custom table asking for more lines than the cap is refused before
+    /// it allocates.**
+    ///
+    /// `HTLOW` and `HTHIGH` are 32-bit fields and a range length of zero
+    /// advances the running low by one, so nine bytes of header name four
+    /// billion lines. The bit reader would run out long before that on a short
+    /// segment, which is exactly why the guard cannot be left to it: the
+    /// segment below is nine bytes of header and enough coded lines to prove
+    /// the loop stops on the cap rather than on the data.
+    #[test]
+    fn a_custom_table_declaring_more_lines_than_the_cap_is_refused() {
+        // HTPS = 1 bit, HTRS = 1 bit, no OOB: two bits per line, so the whole
+        // cap is reachable inside a kilobyte of segment.
+        let mut data = vec![0u8];
+        data.extend_from_slice(&0i32.to_be_bytes());
+        data.extend_from_slice(&i32::MAX.to_be_bytes());
+        // Every line reads prefix length 0 and range length 0, so the running
+        // low advances by one and the table never reaches `HTHIGH`.
+        data.extend(std::iter::repeat_n(0u8, MAX_JBIG2_TABLE_LINES));
+        assert!(
+            custom_table(&data).is_none(),
+            "a table naming two billion ranges was read rather than refused"
+        );
+
+        // And the same header with a span the lines actually cover is a table,
+        // so the refusal above is the cap rather than the shape.
+        let mut small = vec![0u8];
+        small.extend_from_slice(&0i32.to_be_bytes());
+        small.extend_from_slice(&4i32.to_be_bytes());
+        small.extend(std::iter::repeat_n(0u8, 8));
+        assert!(
+            custom_table(&small).is_some(),
+            "a four-value table was refused, so the cap is not what fired"
+        );
     }
 }

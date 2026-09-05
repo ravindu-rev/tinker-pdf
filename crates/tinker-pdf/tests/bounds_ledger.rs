@@ -468,7 +468,7 @@ struct Bound {
     /// The most gap 31's yardstick spends: **a 300-page reflowable book**.
     ///
     /// The third yardstick, and unlike the first two it is not an estimate.
-    /// Sixteen of these forty-two rows are figures a real book can be
+    /// Sixteen of these forty-three rows are figures a real book can be
     /// *measured* against, and
     /// [`the_book_yardstick_is_not_below_a_real_book`] measures every book in
     /// both corpora against them on every run — the committed six always, the
@@ -569,6 +569,14 @@ const SCAN_SYMBOL_PIXELS: u128 = SCAN_SYMBOLS * 25 * 50;
 /// text region's own count and a page carries one region or a few. A dense A4
 /// text page sets a few thousand characters.
 const SCAN_TEXT_INSTANCES: u128 = 4_000;
+
+/// The widest code table anybody has published: B.9 and B.10, at 22 lines.
+///
+/// Not a measurement of documents, and the row that uses it says so. A custom
+/// table exists to be *narrower* than a standard one — it names the ranges one
+/// encoder actually needs — so Annex B's own widest is the ceiling the
+/// population offers, and the cap clears it by 186 times.
+const TABLE_LINES: u128 = 22;
 
 fn ledger() -> Vec<Bound> {
     vec![
@@ -1622,6 +1630,32 @@ fn ledger() -> Vec<Bound> {
                 JBIG2,
             ),
         },
+        Bound {
+            name: "MAX_JBIG2_TABLE_LINES",
+            cap: tinker_pdf_filters::MAX_JBIG2_TABLE_LINES as u128,
+            published: "4 096",
+            // Annex B's own widest tables, B.9 and B.10, carry 22 lines each,
+            // and no custom table in the corpus exceeds them. A code table's
+            // size is a property of the format rather than of the document,
+            // which is why all four yardsticks are the same number: the
+            // population being cleared is the set of published tables, not the
+            // set of files.
+            fixtures: TABLE_LINES,
+            comic: 0,
+            document: TABLE_LINES,
+            book: 0,
+            // 7.4.13's `HTLOW` and `HTHIGH` are 32-bit, and a range length of
+            // zero advances the running low by one, so nine bytes of header
+            // name every value a table could.
+            reachable: 1 << 32,
+            reachable_because:
+                "`HTLOW` and `HTHIGH`, two 32-bit fields, walked by a range length of zero",
+            declared_in: JBIG2,
+            fires_in: (
+                "a_custom_table_declaring_more_lines_than_the_cap_is_refused",
+                JBIG2,
+            ),
+        },
         // ---- tier 0, the memory row ------------------------------------
         //
         // The two largest runtime bounds, and the first two rows here that a
@@ -1739,8 +1773,9 @@ fn ledger() -> Vec<Bound> {
 /// W-ARCHIVE milestone 1 adds the one `ComicInfo.xml` needs; tier 1's two
 /// ledger rows add the five that were fired but unrecorded — ICC's two and
 /// JBIG2's three; and tier 0's memory row adds the two largest **runtime**
-/// bounds, `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`. All **forty-two** are
-/// here, and a bound added without a row fails this.
+/// bounds, `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`; and Tier 2's custom
+/// code tables add `MAX_JBIG2_TABLE_LINES`. All **forty-three** are here, and
+/// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -1787,6 +1822,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_JBIG2_SYMBOLS",
             "MAX_JBIG2_SYMBOL_PIXELS",
             "MAX_JBIG2_TEXT_INSTANCES",
+            "MAX_JBIG2_TABLE_LINES",
             "MAX_PAGE_PIXELS",
             "MAX_DECODED_STREAM",
         ],
@@ -1894,7 +1930,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 42, "the ledger is forty-two rows");
+    assert_eq!(measured, 43, "the ledger is forty-three rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -1926,7 +1962,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 42, "the ledger is forty-two rows");
+    assert_eq!(ledger().len(), 43, "the ledger is forty-three rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

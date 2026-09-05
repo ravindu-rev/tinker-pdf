@@ -54,6 +54,40 @@ const TRANSPOSED: [(&str, &str); 4] = [
     ),
 ];
 
+/// Clause 7.4.13's custom code tables, and which selector each file drives.
+///
+/// The census counted 21 Tables segments in 6 files, and five of the six reach
+/// them through a *refining* Huffman text region -- which is the interesting
+/// half, because 7.4.4.1.2 hands the referred-to tables to the selectors by
+/// position, so a build that consumed them in the wrong order would take the
+/// right number of tables and give each one to the wrong field.
+const CUSTOM_TABLES: [(&str, &str); 6] = [
+    (
+        "bitmap-symbol-symhuffcustom-texthuffcustom.pdf",
+        "a custom table on the dictionary's SDHUFFDH and on the region's own selectors",
+    ),
+    (
+        "bitmap-symbol-texthuffrefinecustom.pdf",
+        "a refining region whose RDW/RDH/RDX/RDY come from custom tables",
+    ),
+    (
+        "bitmap-symbol-texthuffrefinecustomdims.pdf",
+        "custom tables for the refinement's two size deltas",
+    ),
+    (
+        "bitmap-symbol-texthuffrefinecustompos.pdf",
+        "custom tables for the refinement's two position deltas",
+    ),
+    (
+        "bitmap-symbol-texthuffrefinecustomposdims.pdf",
+        "custom tables for all four refinement deltas at once",
+    ),
+    (
+        "bitmap-symbol-texthuffrefinecustomsize.pdf",
+        "a custom SBHUFFRSIZE, the one selector that is a single bit",
+    ),
+];
+
 fn corpus(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/files/pdfjs/test/pdfs")
@@ -179,11 +213,7 @@ fn every_variant_reproduces(family: &str, variants: &[(&str, &str)]) {
             ));
         }
     }
-    assert!(
-        failures.is_empty(),
-        "{family}:\n{}",
-        failures.join("\n")
-    );
+    assert!(failures.is_empty(), "{family}:\n{}", failures.join("\n"));
     println!("jbig2-lineages: RAN {family}, {} variants", variants.len());
 }
 
@@ -199,4 +229,18 @@ fn every_variant_reproduces(family: &str, variants: &[(&str, &str)]) {
 #[ignore = "reads the fetched corpus"]
 fn every_transposed_text_region_reproduces_the_ordinary_picture() {
     every_variant_reproduces("transposed text regions", &TRANSPOSED);
+}
+
+/// **Every custom-code-table file draws the same picture as a standard one.**
+///
+/// This is what says the 7.4.13 reader is right, and it says something a round
+/// trip could not. The tables are handed to the selectors **by position** in
+/// the order the clause lists them, so a reader that consumed one too many or
+/// too few, or read `HTLOW` and `HTHIGH` the wrong way round, would still
+/// produce a table of the right shape and would place every symbol after the
+/// mistake somewhere else. Only a whole picture notices that.
+#[test]
+#[ignore = "reads the fetched corpus"]
+fn every_custom_code_table_file_reproduces_the_standard_picture() {
+    every_variant_reproduces("clause 7.4.13 custom code tables", &CUSTOM_TABLES);
 }
