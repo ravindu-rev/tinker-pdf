@@ -25,7 +25,11 @@ jobs:
     # files. The default six hours would let a hang burn a runner for an
     # afternoon before anyone noticed; the per-file timeout inside `corpus-run`
     # is the real guard, and this is the backstop behind it.
-    timeout-minutes: 60
+    # Raised from 60 on 5 September 2026: the production corpus adds a
+    # thousand real-world documents whose median is 288 KB against a fixture
+    # suite's few kilobytes, and it is measured at roughly the same wall clock
+    # as the other four corpora put together.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -39,6 +43,24 @@ jobs:
       # installed is worse than no measurement.
       - name: Build the runner and the child it spawns
         run: cargo build --release -p xtask -p tpdf
+
+      # `corpus/README.md` has claimed since it was written that "CI restores
+      # from a cache keyed on that file", and until 5 September 2026 there was
+      # no such step: every nightly refetched every archive. That was 266 MB a
+      # night and is 1.53 GB now that the production corpus is pinned, so the
+      # claim is made true rather than deleted.
+      #
+      # A stale or poisoned cache cannot do any harm here, and the reason is
+      # the lock rather than the cache: `corpus-fetch` hashes every archive it
+      # finds and refuses -- and deletes -- one whose sha256 is not the pinned
+      # one, before anything is extracted. So this is a speed-up over a
+      # correctness property that already holds, which is the only kind of
+      # cache worth having on a verification job.
+      - name: Restore the fetched corpora
+        uses: actions/cache@v4
+        with:
+          path: corpus/cache
+          key: corpora-${{ hashFiles('corpus/corpora.lock') }}
 
       - name: Fetch the pinned corpora
         run: cargo run --release -p xtask -- corpus-fetch
@@ -56,18 +78,33 @@ jobs:
           cargo test --release -p tinker-pdf --test jbig2_refinement \
             -- --ignored --nocapture
 
-      # The signature census asserts counts rather than pixels: 18 signatures
-      # across 17 files, of which 5 are reachable only through the catalog's
-      # `/Perms`. Those numbers are recorded against the corpora
-      # `corpus/corpora.lock` pins, and a reader that stopped finding one of
-      # them would otherwise pass every test in the tree.
-      - name: Hold the signature census
+      # **Every census, and the reason it is every census.** These assert
+      # counts rather than pixels -- 27 signatures across 24 files, 3 313 CFF
+      # faces, 2 495 files claiming a PDF/A part -- recorded against the
+      # corpora `corpus/corpora.lock` pins, so a reader that stopped finding
+      # one of them would otherwise pass every test in the tree.
+      #
+      # Four of the thirteen ran here until 6 September 2026 and nine did not,
+      # and the nine drifted: `pdfa_flavour` was eight files out and
+      # `certificates` two, against corpora whose pins had not moved. A census
+      # nobody runs is a sentence in a file, which is the thing this
+      # repository keeps catching itself doing. `--no-fail-fast` so one stale
+      # number does not hide the next.
+      - name: Hold every corpus census
         run: |
-          cargo test --release -p tinker-pdf --test signatures \
-            -- --ignored --nocapture
-          cargo test --release -p tinker-pdf --test cms_census \
-            -- --ignored --nocapture
-          cargo test --release -p tinker-pdf --test verdicts \
+          cargo test --release --no-fail-fast -p tinker-pdf \
+            --test certificates \
+            --test cff_subset_census \
+            --test cms_census \
+            --test icc_census \
+            --test jbig2_census \
+            --test pdfa_flavour \
+            --test pdfa_ledger \
+            --test pdfua \
+            --test signatures \
+            --test streaming_open \
+            --test tagged_corpus \
+            --test verdicts \
             -- --ignored --nocapture
 
       # `--check` compares against the committed bar and fails on a regression.
@@ -82,8 +119,17 @@ jobs:
       - name: Run the corpus and hold the bar
         run: |
           set -o pipefail
+          # No `--timeout`: the default is sixty seconds, raised from twenty
+          # on 5 September 2026 by the commit that deleted the metamorphic
+          # budget gate. That commit measured the change and argued it -- and
+          # then this workflow went on passing `--timeout 20` on all three
+          # runs, so the raise had never once taken effect where it was for.
+          # An override that silently contradicts a defaulted decision is
+          # worse than no default, so the flag is gone rather than updated:
+          # the number lives in `RunArgs::default` with its reasoning beside
+          # it, and this file cannot drift from it again.
           cargo run --release -p xtask -- corpus-run \
-            --timeout 20 --dpi 72 --report corpus/report.json --check \
+            --dpi 72 --report corpus/report.json --check \
             2>&1 | tee corpus-run.log
 
           # A corpus job whose corpora are missing exits 0 having measured
@@ -118,10 +164,14 @@ jobs:
       - name: Run the corpus with a face, and hold that bar too
         run: |
           set -o pipefail
-          cargo run --release -p xtask -- corpus-run             --timeout 20 --dpi 72 --fonts synthetic             --report corpus/report-fonts.json --check             2>&1 | tee corpus-fonts.log
+          cargo run --release -p xtask -- corpus-run \
+            --dpi 72 --fonts synthetic \
+            --report corpus/report-fonts.json --check \
+            2>&1 | tee corpus-fonts.log
 
           if grep -q 'INCOMPLETE' corpus-fonts.log; then
-            echo "::error::the with-faces corpus run did not describe the"                  "whole corpus, so it proves nothing about a regression"
+            echo "::error::the with-faces corpus run did not describe the" \
+                 "whole corpus, so it proves nothing about a regression"
             exit 1
           fi
           grep -Eq '^all +[1-9][0-9]* files' corpus-fonts.log
@@ -142,10 +192,14 @@ jobs:
       - name: Run the corpus with the bundled faces, and hold that bar too
         run: |
           set -o pipefail
-          cargo run --release -p xtask -- corpus-run             --timeout 20 --dpi 72 --fonts bundled             --report corpus/report-bundled.json --check             2>&1 | tee corpus-bundled.log
+          cargo run --release -p xtask -- corpus-run \
+            --dpi 72 --fonts bundled \
+            --report corpus/report-bundled.json --check \
+            2>&1 | tee corpus-bundled.log
 
           if grep -q 'INCOMPLETE' corpus-bundled.log; then
-            echo "::error::the bundled-faces corpus run did not describe the"                  "whole corpus, so it proves nothing about a regression"
+            echo "::error::the bundled-faces corpus run did not describe the" \
+                 "whole corpus, so it proves nothing about a regression"
             exit 1
           fi
           grep -Eq '^all +[1-9][0-9]* files' corpus-bundled.log

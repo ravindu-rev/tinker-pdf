@@ -413,17 +413,33 @@ fn census_of_the_corpus_cff_subsets() {
         CID_KEYED,
         "CID-keyed faces, which is what makes FDArray and FDSelect load-bearing"
     );
+    // An eighth until 6 September 2026, when the corpus gained a thousand
+    // documents off the open web and the ratio became **19 %**: 25 264 014
+    // bytes of font program become 5 046 791. Real-world faces are larger and
+    // more of them are already producer-made subsets that cannot shrink
+    // further -- 1 936 of 3 313, against 212 of 441 in the fixture corpora --
+    // so the smaller aggregate saving is the population's and not the
+    // subsetter's.
     assert!(
-        after_bytes * 8 < before_bytes,
-        "the surviving subsets were an eighth of the bytes when this was \
+        after_bytes * 4 < before_bytes,
+        "the surviving subsets were a fifth of the bytes when this was \
          written: {after_bytes} of {before_bytes}"
     );
 }
 
 // The numbers this stood at when it was written; see the assertions above.
-const CARRIERS: u32 = 297;
-const FACES: u32 = 441;
-const SUBSETTED: u32 = 439;
+//
+// **Re-recorded 6 September 2026 for a corpus that grew rather than a
+// subsetter that changed.** `corpus/corpora.lock` gained the SafeDocs shard --
+// a thousand documents nobody wrote to test a reader -- and it carries seven
+// times the CFF faces the four fixture corpora do. What did *not* move is the
+// assertion this file exists for: `divergences` is still empty, so every
+// retained glyph draws the same outline after subsetting as before. The four
+// fixture corpora alone still give 297 / 441 / 439 / 2 / 212 / 222, measured
+// by moving the shard out of `corpus/files` and running this again.
+const CARRIERS: u32 = 480;
+const FACES: u32 = 3313;
+const SUBSETTED: u32 = 3311;
 const DECLINED: u32 = 2;
-const NOT_SMALLER: usize = 212;
-const CID_KEYED: u32 = 222;
+const NOT_SMALLER: usize = 1936;
+const CID_KEYED: u32 = 551;

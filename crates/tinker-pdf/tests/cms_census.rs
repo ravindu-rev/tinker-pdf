@@ -751,15 +751,22 @@ fn census_of_the_corpus_cms_blobs() {
     // that produced it and checked against the file's own bytes.
 
     assert!(
-        candidates.len() >= 18,
-        "the fetched corpora carried 18 files naming /ByteRange; found {}",
+        candidates.len() >= 25,
+        "the fetched corpora carried 25 files naming /ByteRange; found {}",
         candidates.len()
     );
 
     // Pass 1. The gap route reaches two thirds of them, and the third it does
     // not reach is a property of those files rather than of this parser.
+    // **These numbers moved on 6 September 2026 because the corpus grew**, not
+    // because anything here changed: `corpus/corpora.lock` gained a fifth
+    // entry, the SafeDocs shard of a thousand documents off the open web, and
+    // real documents carry real signatures. The four fixture corpora still
+    // produce exactly the figures this file recorded before -- measured, by
+    // moving the shard out of `corpus/files` and running this again -- so the
+    // difference is nine signatures nobody wrote to test a reader.
     assert_eq!(
-        signatures_seen, 18,
+        signatures_seen, 27,
         "signatures, as `tests/signatures.rs` counts them"
     );
     assert_eq!(
@@ -768,9 +775,9 @@ fn census_of_the_corpus_cms_blobs() {
         "signatures whose `/ByteRange` gap holds no hexadecimal string, so \
          `Signature::contents` is empty: {signatures_with_no_bytes:?}"
     );
-    assert_eq!(supported.blobs, 12, "blobs the supported path handed over");
+    assert_eq!(supported.blobs, 21, "blobs the supported path handed over");
     assert_eq!(
-        supported.parsed, 12,
+        supported.parsed, 21,
         "and parsed — all of them, since `Limits::CMS` reads BER"
     );
     assert!(
@@ -779,11 +786,11 @@ fn census_of_the_corpus_cms_blobs() {
         supported.refused
     );
 
-    // Pass 2. Eighteen blobs — one per signature, which is the agreement
+    // Pass 2. Twenty-seven blobs — one per signature, which is the agreement
     // between an independent byte scan and the reader's own field walk that
     // makes either number worth anything.
-    assert_eq!(all.blobs, 18, "every `/Contents <…>` in the same files");
-    assert_eq!(all.parsed, 18, "and every one of them parses");
+    assert_eq!(all.blobs, 27, "every `/Contents <…>` in the same files");
+    assert_eq!(all.parsed, 27, "and every one of them parses");
     assert!(
         all.refused.is_empty(),
         "nothing in the corpus is refused: {:?}",
@@ -801,7 +808,7 @@ fn census_of_the_corpus_cms_blobs() {
             "pdfjs/test/pdfs/xfa_filled_imm1344e.pdf [1]".to_string(),
         ],
         "the blobs whose outermost SEQUENCE carries X.690 §8.1.3.6's \
-         indefinite length — 4 of 18, from Acrobat Distiller 5.0.5, Adobe \
+         indefinite length — 4 of 27, from Acrobat Distiller 5.0.5, Adobe \
          LiveCycle Designer ES 8.2 and 10.0, and LibreOffice 7.5"
     );
     assert_eq!(
@@ -811,10 +818,10 @@ fn census_of_the_corpus_cms_blobs() {
          than bytes that merely parsed"
     );
 
-    assert_eq!(all.detached, 17, "detached SignedData, tokens included");
-    assert_eq!(all.encapsulating, 3);
+    assert_eq!(all.detached, 26, "detached SignedData, tokens included");
+    assert_eq!(all.encapsulating, 8);
     assert_eq!(
-        all.signers, 20,
+        all.signers, 34,
         "one per blob, plus one per timestamp token"
     );
     assert_eq!(
@@ -822,26 +829,27 @@ fn census_of_the_corpus_cms_blobs() {
         "no corpus blob identifies its signer by key identifier, which is why \
          that arm is held up by a fixture in `cms.rs` alone"
     );
-    assert_eq!(all.issuer_and_serial, 20);
+    assert_eq!(all.issuer_and_serial, 34);
     assert_eq!(
         all.without_signed_attrs, 1,
         "`bug854315.pdf`'s outer signer has none at all, so §5.4's other half \
          is exercised by real data as well as by a fixture"
     );
-    assert_eq!(all.with_signed_attrs, 19);
+    assert_eq!(all.with_signed_attrs, 33);
     assert_eq!(
-        all.with_message_digest, 19,
+        all.with_message_digest, 33,
         "§5.3 requires one where there are any"
     );
     assert_eq!(
-        all.with_signing_certificate_v2, 1,
-        "`issue16553.pdf`'s — reachable only because that blob is one of the \
-         four BER ones, so reading the form is what put real evidence under \
-         the RFC 5035 decoder that had none"
+        all.with_signing_certificate_v2, 10,
+        "`issue16553.pdf`'s was the first — reachable only because that blob \
+         is one of the four BER ones, so reading the form is what put real \
+         evidence under the RFC 5035 decoder that had none. The other nine \
+         came with the production corpus, where the attribute is ordinary"
     );
-    assert_eq!(all.timestamp_tokens, 2);
+    assert_eq!(all.timestamp_tokens, 7);
     assert_eq!(
-        all.nested_tokens_parsed, 2,
+        all.nested_tokens_parsed, 7,
         "and each reads as a ContentInfo through this same parser"
     );
     assert_eq!(
@@ -850,10 +858,10 @@ fn census_of_the_corpus_cms_blobs() {
          path too"
     );
     assert_eq!(
-        all.non_x509_choices, 1,
+        all.non_x509_choices, 2,
         "`bug854315.pdf`'s timestamp token carries a `[1]` extended \
-         certificate, which is the only non-X.509 CertificateChoice in the \
-         corpus and the only real evidence that arm needs to exist"
+         certificate, and the production corpus brought a second — real \
+         evidence that arm needs to exist, from two independent sources"
     );
 
     // The certificate parser, on certificates nobody here transcribed.
@@ -863,9 +871,9 @@ fn census_of_the_corpus_cms_blobs() {
          here rather than tolerated: {:?}",
         all.certificate_failures
     );
-    assert_eq!(all.certificates_seen, 41, "X.509 certificates offered");
+    assert_eq!(all.certificates_seen, 71, "X.509 certificates offered");
     assert_eq!(
-        all.certificates_parsed, 41,
+        all.certificates_parsed, 71,
         "and all of them parsed — under `Limits::CERTIFICATE`, which does not \
          allow the indefinite length, so the twelve that arrived inside a BER \
          message were still held to RFC 5280 §4.1's DER"
@@ -878,10 +886,16 @@ fn census_of_the_corpus_cms_blobs() {
          attributes means the rule, the digest or the arithmetic is wrong: {:?}",
         all.not_verified
     );
+    // **Thirty-three, and fourteen of them arrived with the production
+    // corpus on 6 September 2026.** The four fixture corpora gave 19, from six
+    // producers written to test a reader; these come from documents signed by
+    // people, including qualified signatures issued under national schemes.
+    // Every one verifies over the §5.4 re-encoding with this engine's own RSA,
+    // and `not_verified` is still empty.
     assert_eq!(
-        all.verified, 19,
-        "real signatures, from six independent producers, verified over the \
-         §5.4 re-encoding using this engine's own RSA"
+        all.verified, 33,
+        "real signatures verified over the §5.4 re-encoding using this \
+         engine's own RSA"
     );
     assert_eq!(
         all.stored_tag_would_verify, 0,

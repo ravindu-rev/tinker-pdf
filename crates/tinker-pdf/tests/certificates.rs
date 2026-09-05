@@ -217,13 +217,16 @@ fn every_recorded_certificate_reads_back_as_recorded() {
     if !missing.is_empty() {
         println!("recorded but not found in this corpus: {missing:#?}");
     }
-    // The sidecar records 24 and this build reaches 15. The gap is not corpus
-    // drift, and it has already moved once: it was 13 until BER indefinite
-    // lengths were read, which put two more blobs' certificates in reach. That
-    // re-record is what this pair of assertions exists to force, and it
-    // worked — the test failed the moment the refusal lifted.
+    // The sidecar records 24 and this build reaches 17. The gap has moved
+    // twice: it was 13 until BER indefinite lengths were read, which put two
+    // more blobs' certificates in reach, and 15 until 6 September 2026, when
+    // the corpus gained the SafeDocs shard and two of the recorded
+    // certificates turned up again inside real-world signatures whose
+    // coverage *does* hold. Both re-records are what this pair of assertions
+    // exists to force, and both times the test failed the moment the
+    // population moved.
     //
-    // The nine still out of reach sit in blobs whose `/ByteRange` does not
+    // The seven still out of reach sit in blobs whose `/ByteRange` does not
     // bracket their `/Contents`, so `Signature::cms()` hands back nothing.
     // They are readable by a scanner that ignores the coverage classifier, and
     // the sidecar was built by exactly such a scanner — but reading a CMS the
@@ -233,9 +236,9 @@ fn every_recorded_certificate_reads_back_as_recorded() {
     // A sidecar that silently matched nothing would be worse than none, and
     // one that quietly matched fewer than it used to would be worse still.
     assert_eq!(
-        checked, 15,
+        checked, 17,
         "certificates checked against the sidecar; the rest sit inside blobs \
          whose coverage does not hold up"
     );
-    assert_eq!(missing.len(), 9, "recorded but unreachable: {missing:#?}");
+    assert_eq!(missing.len(), 7, "recorded but unreachable: {missing:#?}");
 }

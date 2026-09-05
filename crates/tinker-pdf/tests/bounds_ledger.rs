@@ -84,6 +84,22 @@
 //! how `MAX_JPX_WORK` survived. `SCAN_SYMBOLS` carries the arithmetic and the
 //! one place where a column in this table holds a file its own format does not.
 //!
+//! *Amended, 6 September 2026.* **The estimate has a measurement beside it at
+//! last, and it holds.** Tier 0's production-corpus row landed — a thousand
+//! documents off the open web, fetched and pinned — and it carries the real
+//! OCR JBIG2 the corpus had none of. Over the 117 JBIG2-bearing files in the
+//! five corpora the largest dictionary exports **2 478** symbols, declares
+//! 2 468 new ones and places **4 440** text instances, where a hundred
+//! synthetic fixtures had never exceeded 11 and 9.
+//!
+//! The three rows keep `(estimate)` and that is not an oversight: the word
+//! describes how the *cap* was derived, which is still arithmetic about a
+//! plausible scan, and 100 000 was never read off a file. What the corpus now
+//! says is that the arithmetic was not wrong — a real scanned document asks
+//! for a fortieth of the symbol cap and a nine-hundredth of the instance cap.
+//! `SCAN_SYMBOLS`'s 20 000 sits between the two, which is where a yardstick
+//! belongs.
+//!
 //! *Amended, 22 August 2026, gap 31 milestone 13.* **No new row, and a third
 //! yardstick on every one of the thirty-four — which found two caps set below a
 //! real book.**
@@ -537,6 +553,12 @@ const BOOK_PATH_LEN: u128 = 90;
 /// hundred distinct glyph bitmaps and a few thousand placements, so 200 pages
 /// against one shared dictionary reach the low tens of thousands of symbols
 /// and the low thousands of instances per region.
+///
+/// **Corroborated 6 September 2026 and left where it is.** The largest real
+/// dictionary in the five fetched corpora exports 2 478 symbols, so this
+/// yardstick is eight times what a real scanned document has asked for and a
+/// fifth of the cap it is checked against. A yardstick below the real
+/// population would be the failure worth catching; this is the other side.
 const SCAN_SYMBOLS: u128 = 20_000;
 
 /// [`SCAN_SYMBOLS`]'s glyphs, at what one occupies: a 25 x 50 box, which is

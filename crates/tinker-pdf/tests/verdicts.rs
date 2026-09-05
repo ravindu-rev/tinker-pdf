@@ -210,8 +210,15 @@ fn every_corpus_signature_gets_a_verdict() {
 
     // Recorded against the corpora `corpus/corpora.lock` pins. Every number
     // below was checked by hand against the files when it was written.
-    assert_eq!(tally.signatures, 18, "signatures found");
-    assert_eq!(tally.cms_read, 12, "blobs that parsed");
+    // **These numbers moved on 6 September 2026 because the corpus grew**, not
+    // because anything here changed: `corpus/corpora.lock` gained a fifth
+    // entry, the SafeDocs shard of a thousand documents off the open web, and
+    // real documents carry real signatures. The four fixture corpora still
+    // produce exactly the figures this file recorded before -- measured, by
+    // moving the shard out of `corpus/files` and running this again -- so the
+    // difference is nine signatures nobody wrote to test a reader.
+    assert_eq!(tally.signatures, 27, "signatures found");
+    assert_eq!(tally.cms_read, 21, "blobs that parsed");
     assert_eq!(
         tally.cms_absent, 6,
         "blobs the coverage classifier would not vouch for: a `/ByteRange` \
@@ -224,8 +231,13 @@ fn every_corpus_signature_gets_a_verdict() {
         "every blob the coverage classifier vouches for now parses; this was          3 until BER indefinite lengths were read, and those three files came          from two independent producer lineages"
     );
 
+    // Twenty of twenty-seven, and nine of those twenty arrived with the
+    // production corpus on 6 September 2026: real signatures on real
+    // documents, including a Romanian qualified signature on
+    // `safedocs/0000020.pdf` that verifies against the key in its own
+    // certificate. The fixture corpora alone still give 11.
     assert_eq!(
-        tally.signature_verified, 11,
+        tally.signature_verified, 20,
         "signatures that verify against the key in their own certificate"
     );
     assert_eq!(
@@ -253,7 +265,7 @@ fn every_corpus_signature_gets_a_verdict() {
         tally.digest_differs, 4,
         "veraPDF's permission fixtures share signatures between documents"
     );
-    assert_eq!(tally.digest_matches, 7, "documents that still hash right");
+    assert_eq!(tally.digest_matches, 16, "documents that still hash right");
 
     assert_eq!(
         tally.no_anchors, tally.cms_read,

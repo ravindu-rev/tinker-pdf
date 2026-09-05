@@ -399,8 +399,8 @@ fn census_of_the_corpus_signatures() {
     let candidates = files_naming_a_byte_range(&root);
     println!("RAN over {} files naming /ByteRange", candidates.len());
     assert!(
-        candidates.len() >= 18,
-        "the fetched corpora carried 18 when this was written; found {}",
+        candidates.len() >= 25,
+        "the fetched corpora carried 25 when this was written; found {}",
         candidates.len()
     );
 
@@ -505,18 +505,27 @@ fn census_of_the_corpus_signatures() {
     // result cannot read as a passing one. Each number was checked by hand
     // against the file's bytes when it was written:
     //
-    // - 18 signatures in 17 files. The eighteenth file naming `/ByteRange` is
-    //   qpdf's `bad-content.pdf`, which carries no `/Type /Sig`, no `/Perms`
-    //   and no CMS blob — it is deliberately not a signature.
+    // - 27 signatures in 24 files, of 25 naming `/ByteRange`. The file naming
+    //   one and carrying no signature is qpdf's `bad-content.pdf`, which has
+    //   no `/Type /Sig`, no `/Perms` and no CMS blob — it is deliberately not
+    //   a signature.
     // - 6 suspicious: two `/ByteRange`s that run past the end of a file edited
     //   after signing, three gaps that land in XMP or XFA rather than on a
     //   hexadecimal string, and one fuzzed file.
     //
     // Re-pinning a corpus moves these, and moving them is a deliberate act
     // with its own commit and its own reason.
-    assert_eq!(seen, 18, "signatures found across the fetched corpora");
-    assert_eq!(whole, 11, "signatures covering their whole file");
-    assert_eq!(revision, 1, "signatures over an earlier revision");
+    //
+    // **They moved on 6 September 2026, and the reason is worth keeping.** It
+    // was 18 signatures, 11 whole-file and 1 over a revision, until the corpus
+    // gained its fifth entry: the SafeDocs shard, a thousand documents off the
+    // open web. Nine of the nine new signatures are real-world ones, and four
+    // of them sign an *earlier revision* — a case the fixture corpora had
+    // exactly one of. Measured rather than assumed: moving the shard out of
+    // `corpus/files` and running this again reproduces 18/11/1/6 exactly.
+    assert_eq!(seen, 27, "signatures found across the fetched corpora");
+    assert_eq!(whole, 16, "signatures covering their whole file");
+    assert_eq!(revision, 5, "signatures over an earlier revision");
     assert_eq!(suspicious, 6, "signatures whose coverage does not hold up");
     assert_eq!(
         routes.get("/Perms /UR3").copied().unwrap_or_default(),

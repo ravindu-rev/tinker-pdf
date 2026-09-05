@@ -427,9 +427,19 @@ fn census_of_the_flavours_the_corpus_claims() {
     }
 
     // Recorded against the corpora `corpus/corpora.lock` pins.
-    assert_eq!(with_claim, 2466, "files declaring a PDF/A part");
+    //
+    // **Re-recorded 6 September 2026, and the move has two causes worth
+    // keeping apart.** Twenty-one of the twenty-nine are the production
+    // corpus: real documents claiming PDF/A, including two that name a part
+    // and no conformance level at all, which no fixture in the suite does
+    // except deliberately. The other eight are drift that predates this
+    // session -- the four fixture corpora alone now give 2 474 against the
+    // 2 466 recorded here, measured by moving the shard out of `corpus/files`
+    // and running this again. Nothing caught it because this census is not one
+    // of the four `corpus.yml` ran; all thirteen run there now.
+    assert_eq!(with_claim, 2495, "files declaring a PDF/A part");
     assert_eq!(
-        agreed, 2140,
+        agreed, 2148,
         "claims agreeing with the directory they sit in"
     );
 
