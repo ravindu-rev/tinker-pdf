@@ -538,11 +538,34 @@ mystery:
   narrow. The variation selectors are the exception and are already handled:
   `Shaper::map` *consumes* one, because a selector chooses a glyph.
 
-Two capabilities are refused rather than absent, and both are in
-`tinker-pdf-font` rather than here: a `cmap` of format 13, and a Macintosh
-`cmap` read in a non-Roman encoding. The corpus has a section for each
-(`CMAP-4`, `CMAP-3`) and `crates/tinker-pdf-shape/tests/text_rendering.rs`
-declines them by name with the fix each one wants.
+**A `cmap` of format 13 is read**, the many-to-one range format: the same
+groups as format 12 and the same glyph for every code in the range rather than
+an offset into a run. `CMAP-4` is what adjudicates it, and it is worth saying
+that no corpus document does — `crates/tinker-pdf/tests/cmap_census.rs` finds
+**zero** format 13 subtables across 7 905 distinct embedded faces, so this is a
+capability built against a published conformance fixture rather than against
+measured demand, on a decision the [roadmap](../ROADMAP.md) records.
+
+**A Macintosh subtable is not indexed by Unicode, and is no longer read as
+though it were.** Platform 1 is the classic Mac OS and its subtables are byte
+maps in a legacy encoding named by the subtable's `language` field. Below
+U+0080 every one of those encodings agrees with ASCII; above it they do not, so
+`glyph_for_char` returns `None` there rather than the wrong glyph. That is a
+refusal a caller can fall back from, where the previous silent mis-mapping was
+not. The census counts **28** faces carrying such a subtable and **none** that
+lacks a Unicode subtable beside it, so no corpus document loses a glyph to it.
+
+What would lift the refusal is the conversion table for the encoding the
+language field names, and this repository does not carry one: Apple's published
+mapping files disclaim warranty and grant no redistribution rights, so they
+have no SPDX identifier `deny.toml` allows and `cargo xtask vendor` would
+refuse them. That is the same limit as the bundled sRGB profile, and it is
+recorded in the [roadmap](../ROADMAP.md)'s named non-goals rather than left as
+owed work.
+
+The census also found a refusal nobody had counted: **25 subtables of format
+2**, the high-byte mapping the legacy CJK encodings use, which `lookup_cmap`
+does not cover.
 
 Two more are refused inside `tinker-pdf-shape`, for ruling 13's reason rather
 than for want of code: **Syriac's Alaph**, which selects `fin2`, `fin3` and

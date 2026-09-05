@@ -41,10 +41,10 @@
 //!   one — SHARAN-1, six words of Urdu set in Nasta‘līq;
 //! - milestone 5 on the sixteen Brahmic ones, SHBALI, SHKNDA and SHLANA.
 //!
-//! Twenty-six of the twenty-nine sections run; the three that do not are
+//! Twenty-seven of the twenty-nine sections run; the two that do not are
 //! declined **by name and with their reason** in
 //! [`the_sections_this_milestone_declines`], because a section that quietly
-//! did not run reads exactly like a section that passed. Of the twenty-six,
+//! did not run reads exactly like a section that passed. Of the twenty-seven,
 //! eleven reproduce every case and fifteen do not. Which is which, and how
 //! many cases each one gets, is [`PASSING`] — **read that before believing any
 //! other number in this file**, and
@@ -120,18 +120,16 @@ const DECLINED: &[(&str, &str)] = &[
     (
         "CMAP-3",
         "the face's only `cmap` subtable is (platform 1, encoding 0, language \
-         18) format 0, which is a *byte* map in the MacOS Turkish encoding. \
-         `tinker_pdf_font::Sfnt::glyph_for_char` hands a Macintosh subtable \
-         the Unicode scalar value, so everything above U+007F reaches the \
-         wrong glyph. Fixing it means reading the subtable's language field \
-         and vendoring Unicode's TURKISH.TXT, both inside `tinker-pdf-font`",
-    ),
-    (
-        "CMAP-4",
-        "the face's only `cmap` subtable is format 13, the many-to-one range \
-         format, which `tinker_pdf_font::Sfnt` does not read — it covers \
-         formats 0, 4, 6 and 12. Format 13 is five lines beside format 12 in \
-         that crate's `lookup_cmap`",
+         18) format 0, a *byte* map in the MacOS Turkish encoding. \
+         `tinker_pdf_font::Sfnt::glyph_for_char` no longer hands a Macintosh \
+         subtable the Unicode scalar value above U+007F — it returns `None`, \
+         so a caller can fall back instead of drawing a wrong glyph — but the \
+         section still needs the mapping itself. Apple's TURKISH.TXT carries a \
+         warranty disclaimer and no redistribution grant, so it has no SPDX \
+         identifier `deny.toml` allows and `cargo xtask vendor` would refuse \
+         it; `docs/features/fonts.md` records that as a limit beside the \
+         bundled sRGB profile, which this repository declines for the same \
+         reason",
     ),
     (
         "GPOS-5",
@@ -156,6 +154,7 @@ const DECLINED: &[(&str, &str)] = &[
 const EXPECTED: &[(&str, usize, usize)] = &[
     ("CMAP-1", 4, 3),
     ("CMAP-2", 2, 1),
+    ("CMAP-4", 4, 0),
     ("GPOS-1", 19, 19),
     ("GPOS-2", 3, 1),
     ("GPOS-3", 4, 3),
@@ -989,7 +988,7 @@ fn the_expected_glyph_names_resolve_except_the_ones_named_here() {
         "the set of expected glyph names this repository cannot resolve moved; \
          every one of them is a case comparing positions and not identity"
     );
-    assert_eq!(names, 1369, "the number of expected glyphs moved");
+    assert_eq!(names, 1373, "the number of expected glyphs moved");
 }
 
 #[test]
@@ -1074,7 +1073,7 @@ fn every_runnable_case_produces_what_the_fixture_says() {
         failures.len(),
         failures.join("\n")
     );
-    assert_eq!(ran, 387, "the number of cases that ran moved");
+    assert_eq!(ran, 391, "the number of cases that ran moved");
     let expected: Vec<(String, usize, char, i32)> = WITHIN_TOLERANCE
         .iter()
         .map(|(id, glyph, axis, by)| ((*id).to_string(), *glyph, *axis, *by))
@@ -1142,7 +1141,7 @@ fn the_sections_this_milestone_declines() {
     let declined: Vec<&str> = DECLINED.iter().map(|(section, _)| *section).collect();
     assert_eq!(
         declined,
-        vec!["CMAP-3", "CMAP-4", "GPOS-5"],
+        vec!["CMAP-3", "GPOS-5"],
         "the set of sections this milestone declines changed"
     );
     let mut skipped = 0usize;
@@ -1150,7 +1149,7 @@ fn the_sections_this_milestone_declines() {
         assert!(reason.len() > 80, "{section} is declined without a reason");
         skipped += parse(section).len();
     }
-    assert_eq!(skipped, 29, "the number of declined cases moved");
+    assert_eq!(skipped, 25, "the number of declined cases moved");
     // And the ones that do run, plus the one that is a crash test, plus the
     // declined ones, are the whole corpus.
     let ran: usize = runnable()
@@ -1292,6 +1291,15 @@ fn the_suite_covers_the_sections_it_claims_to() {
         "the per-section fixture counts moved"
     );
     for (section, all, discriminating) in EXPECTED {
+        if NOT_ABOUT_LOOKUPS.contains(section) {
+            assert_eq!(
+                *discriminating, 0,
+                "{section} is listed as testing the `cmap` rather than the \
+                 lookups, so it cannot have a discriminating case; if it has \
+                 one, it belongs under the rule below instead"
+            );
+            continue;
+        }
         assert!(
             *discriminating > 0,
             "{section} has {all} cases and not one of them would fail if the \
@@ -1299,3 +1307,19 @@ fn the_suite_covers_the_sections_it_claims_to() {
         );
     }
 }
+
+/// Sections whose subject is the `cmap` and not the lookup tables.
+///
+/// The discriminating count above is measured against the same text through the
+/// same `cmap` with **no lookups at all**, which is the right baseline for a
+/// GSUB or GPOS section and is no baseline whatever for a `cmap` one: both runs
+/// go through the character-to-glyph mapping, so they agree by construction
+/// however wrong that mapping is.
+///
+/// So CMAP-4 is exempted rather than left to read as covered. What discriminates
+/// *it* is that `tinker_pdf_font` reads a format 13 subtable at all — before it
+/// did, `lookup_cmap` returned `None` for every character in the face and the
+/// section was declined by name. The exemption is narrow on purpose: CMAP-1 and
+/// CMAP-2 are variation-selector sections and do reach the lookups, so they
+/// stay under the ordinary rule.
+const NOT_ABOUT_LOOKUPS: [&str; 1] = ["CMAP-4"];

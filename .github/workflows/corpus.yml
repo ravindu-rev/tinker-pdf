@@ -96,6 +96,7 @@ jobs:
           cargo test --release --no-fail-fast -p tinker-pdf \
             --test certificates \
             --test cff_subset_census \
+            --test cmap_census \
             --test cms_census \
             --test icc_census \
             --test jbig2_attribution \

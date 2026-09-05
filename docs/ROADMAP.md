@@ -157,7 +157,7 @@ the last row here.
 | A transparency group declared in `/Lab` composites in RGB and is named; grey, RGB and CMYK groups composite in their own space | `RenderWarning::UnsupportedGroupSpace`; no corpus count is recorded | a Lab-group fixture composites in Lab, or the row keeps a count that says why not | S |
 | JPEG arithmetic coding, and JPEG precision other than eight bits | `Capability::JpegArithmetic`, `Capability::Jpeg12Bit`; **no corpus count recorded** | a count first, from a corpus run that keeps per-file warnings; then a fixture from a real encoder | M each |
 | JPX: the RGN, POC, PPM, PPT and CRG markers, the `BYPASS` and `TERMALL` code-block styles, component precision above 16 bits, tile-parts out of order | **5 of the 39** JPX-bearing corpus files report something, up from 3 of 19 before the production corpus doubled the population — one on a budget and two deliberately non-conformant veraPDF fixtures — so nothing here is reached by a real document | unscheduled under ruling 3; the rows stay named in [features/filters.md](features/filters.md) | — |
-| `cmap` subtable format 13, and a Macintosh `cmap` in a non-Roman encoding | [features/fonts.md](features/fonts.md); no count recorded | a count first | S |
+| A `cmap` subtable of format 2, the high-byte mapping the legacy CJK encodings use | **25 subtables** across 7 905 distinct embedded faces (`crates/tinker-pdf/tests/cmap_census.rs`), found by the census the format 13 row asked for. `lookup_cmap` covers 0, 4, 6, 12 and 13 | how many of the 25 are a face's *only* subtable — that is the number that schedules it — then the format, or the row keeps the count | S |
 
 ## Tier 3 — capabilities absent today
 
@@ -340,6 +340,17 @@ and the difference matters under the goal this file now states.
 - **A bundled sRGB profile** — the ICC's own carry no SPDX identifier, and
   which device an archival document's colours are for is the caller's
   statement ([design/pdfa.md](design/pdfa.md)).
+- **The legacy Mac OS encoding tables**, and therefore a Macintosh `cmap`
+  subtable read in a non-Roman encoding. Apple's published mapping files
+  disclaim warranty and grant no redistribution rights, so they have no SPDX
+  identifier `deny.toml` allows and `cargo xtask vendor` refuses them — the
+  same limit as the sRGB profile above, reached from the other direction. It
+  costs nothing measurable: 28 of the corpus's 7 905 embedded faces carry such
+  a subtable and **every one of them carries a Unicode subtable beside it**,
+  which `glyph_for_char` prefers. What the engine owes and now does is refuse
+  rather than mis-map — above U+007F a Macintosh subtable returns nothing, so
+  a caller can fall back instead of drawing the wrong glyph
+  ([features/fonts.md](features/fonts.md)).
 - **Font directories** — `wasm32-unknown-unknown` has none, so `local()` is
   the host's to answer through `FontProvider`
   ([features/epub.md](features/epub.md)).

@@ -110,7 +110,7 @@ impl<'a> Sfnt<'a> {
 
         // 9.6.6.4 prefers (3,1) Windows Unicode BMP, then (3,0) symbol, then
         // (1,0) Macintosh Roman. (3,10) covers characters beyond the BMP.
-        let mut best: Option<(u32, usize)> = None;
+        let mut best: Option<(u32, u16, usize)> = None;
         for i in 0..count.min(64) {
             let at = 4 + i * 8;
             let (Some(platform), Some(encoding), Some(offset)) =
@@ -126,18 +126,35 @@ impl<'a> Sfnt<'a> {
                 (1, 0) => 1,
                 _ => 0,
             };
-            if score > 0 && best.is_none_or(|(b, _)| score > b) {
-                best = Some((score, offset as usize));
+            if score > 0 && best.is_none_or(|(b, _, _)| score > b) {
+                best = Some((score, platform, offset as usize));
             }
         }
 
-        let (score, offset) = best?;
+        let (score, platform, offset) = best?;
         let sub = cmap.get(offset..)?;
         let mut code = u32::from(c);
         // A (3,0) symbol subtable maps the F0xx private-use block, and
         // documents address it with the low byte (9.6.6.4).
         if score == 2 && code < 0x100 {
             code |= 0xF000;
+        }
+        // **A Macintosh subtable is not indexed by Unicode.** Platform 1 is the
+        // classic Mac OS, and its subtables are byte maps in one of the legacy
+        // Mac OS encodings — which one is named by the subtable's `language`
+        // field, one higher than the QuickDraw language code. Below U+0080
+        // every one of those encodings agrees with ASCII and with Unicode, so
+        // the byte *is* the scalar value; above it they do not, and handing the
+        // scalar to the byte map returns a glyph that is wrong rather than
+        // absent.
+        //
+        // `None` here rather than a wrong glyph, because a caller that gets
+        // nothing can fall back and a caller that gets the wrong glyph cannot
+        // tell. What would lift it is the vendored conversion table for the
+        // encoding the language field names, and `docs/features/fonts.md`
+        // records why this repository does not carry one.
+        if platform == 1 && code >= 0x80 {
+            return None;
         }
         lookup_cmap(sub, code)
     }
@@ -247,6 +264,31 @@ fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
                     return glyph
                         .checked_add(code - start)
                         .and_then(|id| u16::try_from(id).ok());
+                }
+            }
+            Some(0)
+        }
+        // Format 13: the same groups as format 12, read the same way, and the
+        // glyph is the *same* one for every code in the range rather than an
+        // offset into a run.
+        //
+        // It exists for the last-resort fonts, where thousands of code points
+        // all map to one box — writing that as format 12 would need a group per
+        // character. The two formats differing only in whether the offset is
+        // added is why this arm is beside that one and not somewhere else: a
+        // reader that treated 13 as 12 would return a different glyph for every
+        // character in the range, all but the first of them wrong.
+        13 => {
+            let groups = be32(sub, 12)? as usize;
+            for i in 0..groups.min(1 << 20) {
+                let at = 16 + i * 12;
+                let (Some(start), Some(end), Some(glyph)) =
+                    (be32(sub, at), be32(sub, at + 4), be32(sub, at + 8))
+                else {
+                    break;
+                };
+                if (start..=end).contains(&code) {
+                    return u16::try_from(glyph).ok();
                 }
             }
             Some(0)
