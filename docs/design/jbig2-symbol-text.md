@@ -159,7 +159,17 @@ So milestone 4 owes all four corners, the strip coordinate and SBDSOFFSET —
 multi-strip is the norm rather than the exception, and a build that assumed one
 strip would mis-place almost every symbol in the corpus. TRANSPOSED is the one
 placement variant thin enough to stage: four regions in four files, and it
-refuses by name until it is built.
+refused by name until it was built.
+
+**It is built.** The four files reproduce the corpus picture at 0 pixels
+different (`crates/tinker-pdf/tests/jbig2_lineages.rs`). What made it small is
+the symmetry: 6.4.5 advances the running coordinate past the symbol *before*
+drawing for two of the four corners and *after* it for the other two, and which
+two depends on `TRANSPOSED` — the right-hand pair when the strip runs across the
+region, the bottom pair when it runs down. Either way the edge the coordinate
+named on entry is where that side of the symbol lands, so the coordinate the
+strip advances is corner-independent in both modes and only the *other* one
+branches. One `composite_signed` serves both.
 
 **So refinement comes before Huffman, and milestones 5 and 6 are swapped from
 the order this document first proposed.** The expectation was

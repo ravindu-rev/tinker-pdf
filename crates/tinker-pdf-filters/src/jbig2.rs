@@ -1394,6 +1394,9 @@ fn symbol_dictionary_huffman(
                     strips: 1,
                     log_strips: 0,
                     corner: corner::TOPLEFT,
+                    // 6.5.8.2.1 fixes every one of the aggregate's
+                    // parameters; TRANSPOSED is one of them, and it is 0.
+                    transposed: false,
                     comb_op: 0,
                     ds_offset: 0,
                     refine: Some(refine_template(rtemplate, refine_at)),
@@ -1703,6 +1706,9 @@ fn symbol_dictionary(
                         strips: 1,
                         log_strips: 0,
                         corner: corner::TOPLEFT,
+                        // 6.5.8.2.1 fixes every one of the aggregate's
+                        // parameters; TRANSPOSED is one of them, and it is 0.
+                        transposed: false,
                         comb_op: 0,
                         ds_offset: 0,
                         refine: Some(refine_template(rtemplate, refine_at)),
@@ -1945,8 +1951,23 @@ fn symbol_id_codes(bits: &mut BitReader<'_>, symbols: usize) -> Option<HuffTable
 
 /// 7.4.4.1.1's REFCORNER values.
 mod corner {
+    pub const BOTTOMLEFT: u8 = 0;
     pub const TOPLEFT: u8 = 1;
+    pub const BOTTOMRIGHT: u8 = 2;
     pub const TOPRIGHT: u8 = 3;
+
+    /// Whether the coordinate names the symbol's left edge.
+    ///
+    /// Transposed placement branches on left-versus-right where the ordinary
+    /// one branches on top-versus-bottom, so both need the pair named.
+    pub const fn is_left(corner: u8) -> bool {
+        !matches!(corner, BOTTOMRIGHT | TOPRIGHT)
+    }
+
+    /// Whether the coordinate names the symbol's top edge.
+    pub const fn is_top(corner: u8) -> bool {
+        !matches!(corner, BOTTOMLEFT | BOTTOMRIGHT)
+    }
 }
 
 /// A fixed-width code of `width` bits over `count` values.
@@ -2084,6 +2105,9 @@ struct TextParams<'a> {
     strips: i64,
     log_strips: u32,
     corner: u8,
+    /// 6.4.5's `TRANSPOSED`: the strip runs down the region rather than
+    /// across it, so `S` is the vertical coordinate and `T` the horizontal.
+    transposed: bool,
     comb_op: u8,
     ds_offset: i32,
     refine: Option<RefineTemplate<'a>>,
@@ -2314,15 +2338,34 @@ fn text_region_procedure(
 
             let width = i64::from(symbol.width);
             let height = i64::from(symbol.height);
-            let x = cur_s;
-            let y = if params.corner == corner::TOPLEFT || params.corner == corner::TOPRIGHT {
-                t
+            // 6.4.5 steps 3 c) iii to xi. The running coordinate advances past
+            // the symbol *before* drawing for two of the four corners and
+            // *after* it for the other two, and which two depends on
+            // `TRANSPOSED` -- the right-hand pair when the strip runs across
+            // the region, the bottom pair when it runs down. Either way the
+            // edge `CURS` named on entry is where that side of the symbol
+            // lands, so the coordinate the strip advances is corner-
+            // independent and only the *other* one branches. That is the
+            // whole difference between the two modes, and it is why one
+            // `composite_signed` serves both.
+            let (x, y, advance) = if params.transposed {
+                let x = if corner::is_left(params.corner) {
+                    t
+                } else {
+                    t.checked_sub(width - 1)?
+                };
+                (x, cur_s, height)
             } else {
-                t.checked_sub(height - 1)?
+                let y = if corner::is_top(params.corner) {
+                    t
+                } else {
+                    t.checked_sub(height - 1)?
+                };
+                (cur_s, y, width)
             };
             composite_signed(region, symbol, x, y, params.comb_op);
 
-            cur_s = cur_s.checked_add(width - 1)?;
+            cur_s = cur_s.checked_add(advance - 1)?;
             placed += 1;
         }
     }
@@ -2357,15 +2400,6 @@ fn text_region(
         }
     };
     let rtemplate = ((flags >> 15) & 0x0001) as u8;
-
-    if transposed {
-        // Scheduled, and counted at four files. Refinement over Huffman is no
-        // longer refused here — 6.4.11's envelope is read below — but it is
-        // still refused for a *dictionary* that aggregates, in
-        // `symbol_dictionary`, for a reason recorded there.
-        note(warnings, Jbig2Refusal::Transposed);
-        return None;
-    }
 
     // 7.4.4.1.2 sits *before* 7.4.4.5, and reading them the other way round
     // makes the instance count the two flag bytes followed by half of itself.
@@ -2433,6 +2467,7 @@ fn text_region(
         strips,
         log_strips,
         corner,
+        transposed,
         comb_op,
         ds_offset,
         refine: template,
@@ -6884,5 +6919,34 @@ mod tests {
              its row comes out of this list and out of the roadmap in the same \
              commit"
         );
+    }
+
+    /// **6.4.5's four reference corners are Table 34's numbers**, and both
+    /// placement predicates agree with them.
+    ///
+    /// The two-bit field is read straight out of the flags, so a constant that
+    /// named the wrong number would place every symbol of that corner on the
+    /// wrong edge -- and the corpus census found all four in use, so none of
+    /// them is a branch nothing takes.
+    #[test]
+    fn the_four_reference_corners_are_table_34_s_numbers() {
+        assert_eq!(
+            [
+                corner::BOTTOMLEFT,
+                corner::TOPLEFT,
+                corner::BOTTOMRIGHT,
+                corner::TOPRIGHT
+            ],
+            [0, 1, 2, 3]
+        );
+        for (corner, left, top) in [
+            (corner::BOTTOMLEFT, true, false),
+            (corner::TOPLEFT, true, true),
+            (corner::BOTTOMRIGHT, false, false),
+            (corner::TOPRIGHT, false, true),
+        ] {
+            assert_eq!(corner::is_left(corner), left, "corner {corner}");
+            assert_eq!(corner::is_top(corner), top, "corner {corner}");
+        }
     }
 }
