@@ -106,17 +106,34 @@ pub struct Bar {
 /// work, whereas nothing about reading more files raises the memory one file
 /// needs.
 ///
-/// So there is no epsilon and no cross-multiplication: `bytes_now <=
-/// bytes_before` is exact integer arithmetic and means what it says.
+/// So there is no cross-multiplication: this is a maximum against a maximum,
+/// in exact integer arithmetic.
 ///
-/// **What it does not remove is the measurement's own swing, and whoever
-/// records the band should know the size of it.** Two consecutive runs of one
-/// release binary over the same 974 `pdfjs` files gave 924 033 024 and
-/// 923 512 832 bytes — 520 192 apart, 0.06 %. A high-water mark is not a clock
-/// and does not depend on how busy the machine was, but it does depend on what
-/// the allocator asked the kernel for, so a band recorded at exactly the
-/// largest figure ever seen has no room for that. Record it from a complete
-/// run and expect the next one to sit within a megabyte either side.
+/// **There is an epsilon, and it is two percent, because the measurement's own
+/// swing is not zero.** This comment used to say there was none, and told
+/// whoever recorded a band to "expect the next one to sit within a megabyte
+/// either side" — which is a swing described and then not allowed for. It cost
+/// exactly what that costs: on 6 September 2026 a `--check` run of the same
+/// release binary over the same files reported `verapdf` at 55 902 208 bytes
+/// against a band of 55 480 320, a regression of **421 888 bytes, 0.76 %**,
+/// with nothing changed between the two runs.
+///
+/// The two measurements this repository has of that swing are 0.06 % (two runs
+/// over 974 `pdfjs` files, 924 033 024 and 923 512 832 bytes) and 0.76 %. A
+/// high-water mark is not a clock and does not depend on how busy the machine
+/// was, but it does depend on what the allocator asked the kernel for, and
+/// where it asked. [`PEAK_TOLERANCE_PERCENT`] is set above both, and a band
+/// that admits two percent of a memory ceiling still refuses every regression
+/// anybody is going to write: the caps this ratchet is a backstop for are
+/// counted in megabytes, not in kilobytes.
+/// How far above a recorded peak a run may sit before it is a regression.
+///
+/// Measured rather than chosen: see [`PeakBar`]. Two percent is above both
+/// swings this repository has measured — 0.06 % and 0.76 % — and far below any
+/// regression worth reporting, since the allocations this backstops are
+/// bounded in megabytes.
+pub const PEAK_TOLERANCE_PERCENT: u64 = 2;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PeakBar {
     /// The largest peak resident set any child reached, in bytes.
@@ -487,9 +504,11 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                         "{}: no child reported a peak resident set at all, against a bar of {} bytes over {} children",
                         bar.name, before.bytes, before.files
                     ));
-                } else if now_peak.bytes > before.bytes {
+                } else if u128::from(now_peak.bytes) * 100
+                    > u128::from(before.bytes) * u128::from(100 + PEAK_TOLERANCE_PERCENT)
+                {
                     out.regressions.push(format!(
-                        "{}: the largest peak resident set is {} bytes, above the recorded band of {} bytes",
+                        "{}: the largest peak resident set is {} bytes, above the recorded band of {} bytes and its {PEAK_TOLERANCE_PERCENT} % tolerance",
                         bar.name, now_peak.bytes, before.bytes
                     ));
                 } else if now_peak.bytes < before.bytes {
@@ -745,6 +764,7 @@ mod tests {
                 },
                 metamorphic: BTreeMap::new(),
                 tagged: None,
+                producer: None,
                 peak: None,
             });
         }
@@ -1034,10 +1054,11 @@ mod tests {
         committed
     }
 
-    /// **The band, and the direction it is a band in.** A run whose largest
-    /// child needs more than the recorded maximum has regressed; one that
-    /// needs the same amount has not, which is what makes it a `<=` rather
-    /// than a `<`; and one that needs less is an improvement.
+    /// **The band, its tolerance, and the direction it is a band in.** A run
+    /// whose largest child needs more than the recorded maximum *plus its
+    /// measured tolerance* has regressed; one inside the tolerance has not,
+    /// which is what stops a high-water mark's own swing failing a build; and
+    /// one that needs less is an improvement.
     #[test]
     fn a_child_that_needs_more_memory_than_the_band_is_a_regression() {
         let committed = peak_bar(
@@ -1048,7 +1069,8 @@ mod tests {
             },
         );
 
-        let worse = compare(&committed, &peak_run("verapdf", 10, 200_000_001), false);
+        // Two percent of 200 MB is 4 MB, so this is a byte past the tolerance.
+        let worse = compare(&committed, &peak_run("verapdf", 10, 204_000_001), false);
         assert!(worse.failed(), "{worse:#?}");
         assert!(
             worse.regressions[0].contains("above the recorded band"),
@@ -1060,6 +1082,15 @@ mod tests {
         // with `<` would fail a run that changed nothing.
         let level = compare(&committed, &peak_run("verapdf", 10, 200_000_000), true);
         assert!(!level.failed(), "{level:#?}");
+
+        // And neither is the swing this tolerance was measured for: 0.76 % of
+        // the band, which is what a `--check` run of an unchanged binary
+        // actually produced on 6 September 2026.
+        let swung = compare(&committed, &peak_run("verapdf", 10, 201_520_000), true);
+        assert!(
+            !swung.failed(),
+            "a high-water mark's own swing must not fail a build: {swung:#?}"
+        );
 
         let better = compare(&committed, &peak_run("verapdf", 10, 100_000_000), false);
         assert!(!better.failed(), "{better:#?}");
