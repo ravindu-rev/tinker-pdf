@@ -53,8 +53,8 @@ pub use crc32::{crc32, Crc32};
 pub use deflate::{deflate, zlib_compress};
 pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{
-    decode as jbig2_decode, Jbig2Params, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PIXELS,
-    MAX_JBIG2_TEXT_INSTANCES,
+    decode as jbig2_decode, decode_attributed as jbig2_decode_attributed, Jbig2Params,
+    Jbig2Refusal, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES,
 };
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use jpx::{jpx_decode, JpxColour, JpxImage};

@@ -182,9 +182,224 @@ impl<'a> Reader<'a> {
 
 /// Records a leniency once. Same contract as the rest of the crate: one entry
 /// per condition per decode, not one per occurrence.
-fn note(warnings: &mut Vec<Warning>, warning: Warning) {
+fn note(refusals: &mut Vec<Jbig2Refusal>, refusal: Jbig2Refusal) {
+    if !refusals.contains(&refusal) {
+        refusals.push(refusal);
+    }
+}
+
+/// The same contract for the outward sink: one entry per condition per decode.
+///
+/// Two refusals can map to one [`Warning`] -- a cap and a malformed dimension
+/// are both `Jbig2SymbolLimitHit` -- so the deduplication has to happen again
+/// after the mapping, or a caller would see the same warning twice and the
+/// crate's stated contract would be broken by an internal distinction.
+fn note_warning(warnings: &mut Vec<Warning>, warning: Warning) {
     if !warnings.contains(&warning) {
         warnings.push(warning);
+    }
+}
+
+/// Why a JBIG2 stream, segment or region was refused.
+///
+/// The public surface of a refusal is [`FilterError::Unsupported`] plus one
+/// [`Warning`], because that is the whole degradation contract (ruling 2) and
+/// a caller draws the same placeholder for all of it. This type is the
+/// *reason* underneath, in the shape [`crate::JxrRefusal`] already uses: a
+/// closed list a test can assert against, so "every refusal this decoder
+/// performs is named" is checkable rather than claimed.
+///
+/// It exists because the four `Warning` variants are too coarse to schedule
+/// against. [`Warning::Jbig2SegmentSkipped`] alone covers the random-access
+/// organisation, an unknown segment data length, a segment type nobody has
+/// implemented, and a region whose callee already refused for a reason of its
+/// own — four different sentences to show a human, and four different answers
+/// to the question that decides a roadmap row: is this a capability this
+/// build lacks, or a file that is broken?
+///
+/// The mapping in [`Jbig2Refusal::warning`] is what keeps the outward
+/// behaviour unchanged by this type existing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Jbig2Refusal {
+    // --- file organisation and segment headers (clause 7.2, Annex D) ---
+    /// Annex D.1's random-access organisation — all headers, then all data.
+    /// It cannot appear in a PDF, and parsing it as sequential would read
+    /// data blocks as headers and invent segments the file does not have.
+    RandomAccessOrganisation,
+    /// 7.2.7's unknown data length (`0xFFFFFFFF`). Legal only for an
+    /// immediate generic region, and finding the end means scanning for a row
+    /// terminator that depends on the region's own coding, so nothing after
+    /// this segment can be located.
+    UnknownDataLength,
+    /// A segment type this build does not decode, carrying content. The type
+    /// number is carried, because a halftone region and a colour palette are
+    /// different sentences to show a human.
+    UnhandledSegmentType(u8),
+    /// 7.4.8: the page information segment's size disagrees with the size the
+    /// caller asked for. Recorded rather than repaired — the region segments
+    /// carry their own placement — and also what a stream pasted in from
+    /// another file looks like.
+    PageSizeDisagrees,
+
+    // --- coding variants, named apart from a lineage nobody has started ---
+    /// 7.4.3.1.1: the `SDHUFFDH` selector chose clause 7.4.13's custom table.
+    HuffmanDhSelector,
+    /// 7.4.3.1.1: the `SDHUFFDW` selector chose a custom table.
+    HuffmanDwSelector,
+    /// 7.4.3.1.1 bits 6 and 7: `SDHUFFBMSIZE` or `SDHUFFAGGINST` chose one.
+    HuffmanBmSizeOrAggInstSelector,
+    /// 7.4.2: a symbol dictionary that consumes a retained bitmap-coding
+    /// context from another segment.
+    RetainedContext,
+    /// 7.4.4.1.2: a text region's `SBHUFFFS`, `SBHUFFDS`, `SBHUFFDT` or
+    /// `SBHUFFRSIZE` selector chose a custom table.
+    TextTableSelector,
+    /// 6.4.11 over the Huffman road with no refinement tables selected.
+    RefinementTablesAbsent,
+    /// 6.4.5's `TRANSPOSED` = 1.
+    Transposed,
+    /// 7.4.3: a text region whose referred-to dictionary is absent or was
+    /// refused. Refused *whole*, because the numbering is shared and drawing
+    /// it renumbered produces a page that looks like text and says something
+    /// else.
+    DanglingReference,
+
+    // --- hardening caps: this build's number, rather than the file's fault ---
+    /// [`MAX_JBIG2_SYMBOLS`] would be spent by `SDNUMNEWSYMS`/`SDNUMEXSYMS`.
+    SymbolCountCap,
+    /// [`MAX_JBIG2_SYMBOL_PIXELS`] would be spent by one dictionary.
+    SymbolPixelCap,
+    /// 6.5.8.2's `REFAGGNINST` past [`MAX_JBIG2_TEXT_INSTANCES`].
+    AggregateInstanceCap,
+    /// 6.5.10's export-run loop ran longer than [`MAX_JBIG2_SYMBOLS`] turns.
+    ExportRunGuard,
+    /// 7.4.4.5's `SBNUMINSTANCES` past [`MAX_JBIG2_TEXT_INSTANCES`].
+    TextInstanceCap,
+    /// A region or page above the caller's output ceiling.
+    RegionTooLarge,
+
+    // --- the file contradicts itself: broken, rather than unsupported ---
+    /// A symbol's accumulated height is zero, negative or past `u32::MAX`.
+    SymbolHeightOutOfRange,
+    /// A symbol's accumulated width is zero, negative or past `u32::MAX`.
+    SymbolWidthOutOfRange,
+    /// 6.4.11's deltas size a refined instance to nothing or past `u32::MAX`.
+    RefinedSizeOutOfRange,
+    /// A dictionary produced more symbols than `SDNUMNEWSYMS` promised. The
+    /// header is what sized everything downstream.
+    MoreSymbolsThanDeclared,
+    /// A text region placed more instances than `SBNUMINSTANCES` promised.
+    MoreInstancesThanDeclared,
+    /// 6.5.10's export runs did not select `SDNUMEXSYMS` symbols. A text
+    /// region indexes against that count, so a disagreement is not a smaller
+    /// dictionary — it renumbers every symbol after the gap.
+    ExportCountMismatch,
+    /// A symbol identifier that no symbol in the pool answers to.
+    SymbolIndexOutOfRange,
+    /// 6.5.8.2.1's fixed-width symbol code could not be built for the pool.
+    SymbolCodeUnbuildable,
+
+    // --- data that would not decode as what it claims to be ---
+    /// 6.5.9's collective bitmap yielded not one T.6 row, so it is not MMR
+    /// data and the height class has no symbols in it.
+    CollectiveBitmapNotMmr,
+    /// 6.2.6: a generic region's MMR data yielded not one row. Compositing
+    /// the blank bitmap that was just sized would count as a region and turn
+    /// the refusal into a blank page reported as success.
+    GenericRegionNotMmr,
+    /// A text region with instances to place and no symbols behind them.
+    TextRegionWithoutSymbols,
+    /// The data ended inside something that was still being read.
+    Truncated,
+
+    // --- a callee refused, and the caller has nothing to add ---
+    /// A symbol dictionary segment refused; the reason is the refusal
+    /// recorded before this one.
+    SymbolDictionaryRefused,
+    /// A text region segment refused; the reason is the refusal before it.
+    TextRegionRefused,
+    /// A generic region segment refused; the reason is the refusal before it.
+    GenericRegionRefused,
+    /// A refinement region segment refused; likewise.
+    RefinementRegionRefused,
+
+    /// No region was composited onto the page: the whole-stream refusal.
+    NoRegion,
+}
+
+impl Jbig2Refusal {
+    /// The one typed leniency record this refusal leaves behind (ruling 10).
+    ///
+    /// Coarser than the refusal itself on purpose: [`Warning`] is a closed set
+    /// recorded at most once per decode, and a variant per condition would
+    /// make it neither. The grouping is the one this decoder has always
+    /// reported, so adding this type moved no corpus number.
+    #[must_use]
+    pub const fn warning(self) -> Warning {
+        match self {
+            Self::RandomAccessOrganisation
+            | Self::UnknownDataLength
+            | Self::UnhandledSegmentType(_)
+            | Self::PageSizeDisagrees
+            | Self::CollectiveBitmapNotMmr
+            | Self::GenericRegionNotMmr
+            | Self::TextRegionWithoutSymbols
+            | Self::SymbolDictionaryRefused
+            | Self::TextRegionRefused
+            | Self::GenericRegionRefused
+            | Self::RefinementRegionRefused
+            | Self::NoRegion => Warning::Jbig2SegmentSkipped,
+
+            Self::HuffmanDhSelector
+            | Self::HuffmanDwSelector
+            | Self::HuffmanBmSizeOrAggInstSelector
+            | Self::RetainedContext
+            | Self::TextTableSelector
+            | Self::RefinementTablesAbsent
+            | Self::Transposed
+            | Self::DanglingReference => Warning::Jbig2VariantSkipped,
+
+            Self::SymbolCountCap
+            | Self::SymbolPixelCap
+            | Self::AggregateInstanceCap
+            | Self::ExportRunGuard
+            | Self::TextInstanceCap
+            | Self::SymbolHeightOutOfRange
+            | Self::SymbolWidthOutOfRange
+            | Self::RefinedSizeOutOfRange
+            | Self::MoreSymbolsThanDeclared
+            | Self::MoreInstancesThanDeclared
+            | Self::ExportCountMismatch
+            | Self::SymbolIndexOutOfRange
+            | Self::SymbolCodeUnbuildable => Warning::Jbig2SymbolLimitHit,
+
+            Self::RegionTooLarge => Warning::Jbig2RegionTooLarge,
+            Self::Truncated => Warning::TruncatedInput,
+        }
+    }
+
+    /// Whether this refusal says the *file* is inconsistent, rather than that
+    /// this build is short of a capability.
+    ///
+    /// The distinction the coarse warning throws away, and the one that
+    /// decides whether a corpus file is a roadmap row or a bug report.
+    #[must_use]
+    pub const fn is_malformed(self) -> bool {
+        matches!(
+            self,
+            Self::SymbolHeightOutOfRange
+                | Self::SymbolWidthOutOfRange
+                | Self::RefinedSizeOutOfRange
+                | Self::MoreSymbolsThanDeclared
+                | Self::MoreInstancesThanDeclared
+                | Self::ExportCountMismatch
+                | Self::SymbolIndexOutOfRange
+                | Self::SymbolCodeUnbuildable
+                | Self::CollectiveBitmapNotMmr
+                | Self::GenericRegionNotMmr
+                | Self::TextRegionWithoutSymbols
+                | Self::Truncated
+        )
     }
 }
 
@@ -199,7 +414,7 @@ fn note(warnings: &mut Vec<Warning>, warning: Warning) {
 /// appear in a PDF and is not guessed at: it is recorded and the stream ends
 /// there, because parsing it as sequential would read data blocks as headers
 /// and invent segments that are not in the file.
-fn segments<'a>(data: &'a [u8], warnings: &mut Vec<Warning>) -> Vec<Segment<'a>> {
+fn segments<'a>(data: &'a [u8], warnings: &mut Vec<Jbig2Refusal>) -> Vec<Segment<'a>> {
     let mut reader = Reader::new(data);
     if data.starts_with(&FILE_HEADER) {
         let _ = reader.skip(FILE_HEADER.len());
@@ -207,7 +422,7 @@ fn segments<'a>(data: &'a [u8], warnings: &mut Vec<Warning>) -> Vec<Segment<'a>>
         // D.4.2 bit 0: 1 is sequential, 0 is random access. Bit 1: 0 means
         // the number of pages is known and follows as four bytes.
         if flags & 1 == 0 {
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::RandomAccessOrganisation);
             return Vec::new();
         }
         if flags & 2 == 0 {
@@ -232,7 +447,10 @@ fn segments<'a>(data: &'a [u8], warnings: &mut Vec<Warning>) -> Vec<Segment<'a>>
 }
 
 /// One segment header and its data (T.88 7.2).
-fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Option<Segment<'a>> {
+fn read_segment<'a>(
+    reader: &mut Reader<'a>,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<Segment<'a>> {
     let number = reader.u32()?;
     let flags = reader.u8()?;
     let kind = flags & 0x3F;
@@ -295,12 +513,12 @@ fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Opt
         // terminator that depends on the region's own coding. Nothing after
         // this segment can be located, so the stream ends here rather than
         // being guessed at.
-        note(warnings, Warning::Jbig2SegmentSkipped);
+        note(warnings, Jbig2Refusal::UnknownDataLength);
         return None;
     }
     let (data, whole) = reader.take(length as usize);
     if !whole {
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
     }
 
     Some(Segment {
@@ -991,7 +1209,7 @@ fn symbol_dictionary_huffman(
     reader: &mut Reader<'_>,
     imported: &[Bitmap],
     ceiling: usize,
-    warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<Vec<Bitmap>> {
     // 7.4.3.1.1 bits 2 to 7 pick the tables. A selector of 3 means the segment
     // brought its own (clause 7.4.13), which nothing here reads yet.
@@ -999,7 +1217,7 @@ fn symbol_dictionary_huffman(
         0 => table_b4(),
         1 => table_b5(),
         _ => {
-            note(warnings, Warning::Jbig2VariantSkipped);
+            note(warnings, Jbig2Refusal::HuffmanDhSelector);
             return None;
         }
     };
@@ -1007,12 +1225,12 @@ fn symbol_dictionary_huffman(
         0 => table_b2(),
         1 => table_b3(),
         _ => {
-            note(warnings, Warning::Jbig2VariantSkipped);
+            note(warnings, Jbig2Refusal::HuffmanDwSelector);
             return None;
         }
     };
     if (flags >> 6) & 0x0001 != 0 || (flags >> 7) & 0x0001 != 0 {
-        note(warnings, Warning::Jbig2VariantSkipped);
+        note(warnings, Jbig2Refusal::HuffmanBmSizeOrAggInstSelector);
         return None;
     }
     let sizes = table_b1();
@@ -1030,7 +1248,7 @@ fn symbol_dictionary_huffman(
     if refagg && rtemplate == 0 {
         for slot in &mut refine_at {
             let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
-                note(warnings, Warning::TruncatedInput);
+                note(warnings, Jbig2Refusal::Truncated);
                 return None;
             };
             *slot = (dx, dy);
@@ -1041,7 +1259,7 @@ fn symbol_dictionary_huffman(
     let num_ex = reader.u32()?;
     let num_new = reader.u32()?;
     if num_new > MAX_JBIG2_SYMBOLS || num_ex > MAX_JBIG2_SYMBOLS {
-        note(warnings, Warning::Jbig2SymbolLimitHit);
+        note(warnings, Jbig2Refusal::SymbolCountCap);
         return None;
     }
 
@@ -1070,7 +1288,7 @@ fn symbol_dictionary_huffman(
     while ((pool.len() - base) as u32) < num_new {
         height = height.checked_add(i64::from(dh.value(&mut bits)?))?;
         if height <= 0 || height > i64::from(u32::MAX) {
-            note(warnings, Warning::Jbig2SymbolLimitHit);
+            note(warnings, Jbig2Refusal::SymbolHeightOutOfRange);
             return None;
         }
 
@@ -1083,17 +1301,17 @@ fn symbol_dictionary_huffman(
         while let HuffValue::Value(delta) = dw.decode(&mut bits)? {
             width = width.checked_add(i64::from(delta))?;
             if width <= 0 || width > i64::from(u32::MAX) {
-                note(warnings, Warning::Jbig2SymbolLimitHit);
+                note(warnings, Jbig2Refusal::SymbolWidthOutOfRange);
                 return None;
             }
             if ((pool.len() - base) + widths.len()) as u64 >= u64::from(num_new) {
-                note(warnings, Warning::Jbig2SymbolLimitHit);
+                note(warnings, Jbig2Refusal::MoreSymbolsThanDeclared);
                 return None;
             }
             total = total.checked_add(width)?;
             spent = spent.checked_add((width as u64).checked_mul(height as u64)?)?;
             if spent > MAX_JBIG2_SYMBOL_PIXELS {
-                note(warnings, Warning::Jbig2SymbolLimitHit);
+                note(warnings, Jbig2Refusal::SymbolPixelCap);
                 return None;
             }
             if !refagg {
@@ -1106,11 +1324,11 @@ fn symbol_dictionary_huffman(
             // never reaches 6.5.9's shared read below.
             let instances = sizes.value(&mut bits)?;
             if instances <= 0 || instances as u32 > MAX_JBIG2_TEXT_INSTANCES {
-                note(warnings, Warning::Jbig2SymbolLimitHit);
+                note(warnings, Jbig2Refusal::AggregateInstanceCap);
                 return None;
             }
             let Some(mut symbol) = Bitmap::new(width as u32, height as u32, ceiling) else {
-                note(warnings, Warning::Jbig2RegionTooLarge);
+                note(warnings, Jbig2Refusal::RegionTooLarge);
                 return None;
             };
 
@@ -1129,11 +1347,11 @@ fn symbol_dictionary_huffman(
                 let start = bits.byte_position();
                 let end = start.checked_add(bmsize as usize)?;
                 let Some(bytes) = rest.get(start..end) else {
-                    note(warnings, Warning::TruncatedInput);
+                    note(warnings, Jbig2Refusal::Truncated);
                     return None;
                 };
                 let Some(reference) = pool.get(id) else {
-                    note(warnings, Warning::Jbig2SymbolLimitHit);
+                    note(warnings, Jbig2Refusal::SymbolIndexOutOfRange);
                     return None;
                 };
                 let dx = refinement_offset(width, reference.width, rdx);
@@ -1155,7 +1373,7 @@ fn symbol_dictionary_huffman(
                 // The tables are fixed by the clause rather than selected,
                 // which is why none of them comes from the segment header.
                 let Some(codes) = flat_code(code_len, pool.len().max(1)) else {
-                    note(warnings, Warning::Jbig2SymbolLimitHit);
+                    note(warnings, Jbig2Refusal::SymbolCodeUnbuildable);
                     return None;
                 };
                 let tables = TextTables {
@@ -1227,7 +1445,7 @@ fn symbol_dictionary_huffman(
         bits.align();
         let start = bits.byte_position();
         let Some(mut collective) = Bitmap::new(total as u32, height as u32, ceiling) else {
-            note(warnings, Warning::Jbig2RegionTooLarge);
+            note(warnings, Jbig2Refusal::RegionTooLarge);
             return None;
         };
         if bmsize == 0 {
@@ -1246,7 +1464,7 @@ fn symbol_dictionary_huffman(
             let end = start.checked_add(bmsize as usize)?;
             let raw = rest.get(start..end)?;
             if !decode_mmr(raw, &mut collective, warnings) {
-                note(warnings, Warning::Jbig2SegmentSkipped);
+                note(warnings, Jbig2Refusal::CollectiveBitmapNotMmr);
                 return None;
             }
             bits.at = end * 8;
@@ -1256,7 +1474,7 @@ fn symbol_dictionary_huffman(
         let mut x = 0u32;
         for w in widths {
             let Some(mut symbol) = Bitmap::new(w, height as u32, ceiling) else {
-                note(warnings, Warning::Jbig2RegionTooLarge);
+                note(warnings, Jbig2Refusal::RegionTooLarge);
                 return None;
             };
             for row in 0..height as u32 {
@@ -1279,7 +1497,7 @@ fn symbol_dictionary_huffman(
     while index < total {
         guard += 1;
         if guard > MAX_JBIG2_SYMBOLS {
-            note(warnings, Warning::Jbig2SymbolLimitHit);
+            note(warnings, Jbig2Refusal::ExportRunGuard);
             return None;
         }
         let run = sizes.value(&mut bits)?;
@@ -1301,7 +1519,7 @@ fn symbol_dictionary_huffman(
     }
 
     if exported.len() as u32 != num_ex {
-        note(warnings, Warning::Jbig2SymbolLimitHit);
+        note(warnings, Jbig2Refusal::ExportCountMismatch);
         return None;
     }
     Some(exported)
@@ -1323,7 +1541,7 @@ fn symbol_dictionary(
     segment: &Segment<'_>,
     imported: &[Bitmap],
     ceiling: usize,
-    warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<Vec<Bitmap>> {
     let mut reader = Reader::new(segment.data);
     // 7.4.3.1.1.
@@ -1341,7 +1559,7 @@ fn symbol_dictionary(
         // that needs another. Refinement itself is decoded now; what is
         // refused here is its Huffman road, which codes each refinement's
         // length in a field this decoder does not read.
-        note(warnings, Warning::Jbig2VariantSkipped);
+        note(warnings, Jbig2Refusal::RetainedContext);
         return None;
     }
     if huff {
@@ -1359,7 +1577,7 @@ fn symbol_dictionary(
     let pairs = if template == 0 { 4 } else { 1 };
     for slot in at.iter_mut().take(pairs) {
         let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
-            note(warnings, Warning::TruncatedInput);
+            note(warnings, Jbig2Refusal::Truncated);
             return None;
         };
         *slot = (dx, dy);
@@ -1372,7 +1590,7 @@ fn symbol_dictionary(
     if refagg && rtemplate == 0 {
         for slot in &mut refine_at {
             let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
-                note(warnings, Warning::TruncatedInput);
+                note(warnings, Jbig2Refusal::Truncated);
                 return None;
             };
             *slot = (dx, dy);
@@ -1383,7 +1601,7 @@ fn symbol_dictionary(
     let num_ex = reader.u32()?;
     let num_new = reader.u32()?;
     if num_new > MAX_JBIG2_SYMBOLS || num_ex > MAX_JBIG2_SYMBOLS {
-        note(warnings, Warning::Jbig2SymbolLimitHit);
+        note(warnings, Jbig2Refusal::SymbolCountCap);
         return None;
     }
 
@@ -1413,7 +1631,7 @@ fn symbol_dictionary(
         let delta = decode_int(&mut coder, &mut cx.iadh)?;
         height = height.checked_add(i64::from(delta))?;
         if height <= 0 || height > i64::from(u32::MAX) {
-            note(warnings, Warning::Jbig2SymbolLimitHit);
+            note(warnings, Jbig2Refusal::SymbolHeightOutOfRange);
             return None;
         }
 
@@ -1424,24 +1642,24 @@ fn symbol_dictionary(
         while let Some(delta) = decode_int(&mut coder, &mut cx.iadw) {
             width = width.checked_add(i64::from(delta))?;
             if width <= 0 || width > i64::from(u32::MAX) {
-                note(warnings, Warning::Jbig2SymbolLimitHit);
+                note(warnings, Jbig2Refusal::SymbolWidthOutOfRange);
                 return None;
             }
             if ((pool.len() - base) as u32) >= num_new {
                 // More symbols than the header promised. The header is what
                 // sized everything downstream, so this is a broken stream
                 // rather than a longer dictionary.
-                note(warnings, Warning::Jbig2SymbolLimitHit);
+                note(warnings, Jbig2Refusal::MoreSymbolsThanDeclared);
                 return None;
             }
 
             spent = spent.checked_add((width as u64).checked_mul(height as u64)?)?;
             if spent > MAX_JBIG2_SYMBOL_PIXELS {
-                note(warnings, Warning::Jbig2SymbolLimitHit);
+                note(warnings, Jbig2Refusal::SymbolPixelCap);
                 return None;
             }
             let Some(mut symbol) = Bitmap::new(width as u32, height as u32, ceiling) else {
-                note(warnings, Warning::Jbig2RegionTooLarge);
+                note(warnings, Jbig2Refusal::RegionTooLarge);
                 return None;
             };
 
@@ -1450,7 +1668,7 @@ fn symbol_dictionary(
                 // rather than coded from nothing.
                 let instances = decode_int(&mut coder, &mut cx.iaai)?;
                 if instances <= 0 || instances as u32 > MAX_JBIG2_TEXT_INSTANCES {
-                    note(warnings, Warning::Jbig2SymbolLimitHit);
+                    note(warnings, Jbig2Refusal::AggregateInstanceCap);
                     return None;
                 }
                 if instances == 1 {
@@ -1461,7 +1679,7 @@ fn symbol_dictionary(
                     let rdx = decode_int(&mut coder, &mut cx.iardx)?;
                     let rdy = decode_int(&mut coder, &mut cx.iardy)?;
                     let Some(reference) = pool.get(id) else {
-                        note(warnings, Warning::Jbig2SymbolLimitHit);
+                        note(warnings, Jbig2Refusal::SymbolIndexOutOfRange);
                         return None;
                     };
                     let dx = refinement_offset(width, reference.width, rdx);
@@ -1546,7 +1764,7 @@ fn symbol_dictionary(
     if exported.len() as u32 != num_ex {
         // The count the header promised is what a text region will index
         // against, so a disagreement is not a smaller dictionary.
-        note(warnings, Warning::Jbig2SymbolLimitHit);
+        note(warnings, Jbig2Refusal::ExportCountMismatch);
         return None;
     }
     Some(exported)
@@ -1600,9 +1818,13 @@ struct TextTables {
 impl TextTables {
     /// Picks them from the selector field, refusing the custom-table settings
     /// clause 7.4.13 defines and nothing here reads yet.
-    fn select(selectors: u16, refine: bool, warnings: &mut Vec<Warning>) -> Option<TextTables> {
-        let refuse = |warnings: &mut Vec<Warning>| {
-            note(warnings, Warning::Jbig2VariantSkipped);
+    fn select(
+        selectors: u16,
+        refine: bool,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) -> Option<TextTables> {
+        let refuse = |warnings: &mut Vec<Jbig2Refusal>| {
+            note(warnings, Jbig2Refusal::TextTableSelector);
             None
         };
         let fs = match selectors & 0x0003 {
@@ -1901,7 +2123,7 @@ fn text_region_procedure(
     huffman: &mut TextHuffman<'_>,
     ceiling: usize,
     region: &mut Bitmap,
-    warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<()> {
     // The two roads, each closing over its own reader. Everything below asks
     // these rather than either decoder, so the strip loop is 6.4.5 once.
@@ -1960,7 +2182,7 @@ fn text_region_procedure(
             if placed >= params.instances {
                 // More instances than the header promised, which is what sized
                 // the work; a longer region is a broken stream.
-                note(warnings, Warning::Jbig2SymbolLimitHit);
+                note(warnings, Jbig2Refusal::MoreInstancesThanDeclared);
                 return None;
             }
 
@@ -2008,7 +2230,7 @@ fn text_region_procedure(
                     let (rdw, rdh, rdx, rdy) = match huffman.as_mut() {
                         Some((tables, _, bits)) => {
                             let Some(tables) = tables.refine.as_ref() else {
-                                note(warnings, Warning::Jbig2VariantSkipped);
+                                note(warnings, Jbig2Refusal::RefinementTablesAbsent);
                                 return None;
                             };
                             let rdw = tables.rdw.value(bits)?;
@@ -2035,15 +2257,15 @@ fn text_region_procedure(
                     let width = i64::from(symbol.width).checked_add(i64::from(rdw))?;
                     let height = i64::from(symbol.height).checked_add(i64::from(rdh))?;
                     if width <= 0 || height <= 0 || width > i64::from(u32::MAX) {
-                        note(warnings, Warning::Jbig2SymbolLimitHit);
+                        note(warnings, Jbig2Refusal::RefinedSizeOutOfRange);
                         return None;
                     }
                     if height > i64::from(u32::MAX) {
-                        note(warnings, Warning::Jbig2SymbolLimitHit);
+                        note(warnings, Jbig2Refusal::RefinedSizeOutOfRange);
                         return None;
                     }
                     let Some(mut target) = Bitmap::new(width as u32, height as u32, ceiling) else {
-                        note(warnings, Warning::Jbig2RegionTooLarge);
+                        note(warnings, Jbig2Refusal::RegionTooLarge);
                         return None;
                     };
                     let dx = refinement_offset(width, symbol.width, rdx);
@@ -2056,7 +2278,7 @@ fn text_region_procedure(
                             // it was coded against the same states, and the
                             // reader resumes after it rather than inside it.
                             let Some(bytes) = source.and_then(|all| all.get(start..end)) else {
-                                note(warnings, Warning::TruncatedInput);
+                                note(warnings, Jbig2Refusal::Truncated);
                                 return None;
                             };
                             let mut sub = MqDecoder::new(bytes);
@@ -2112,7 +2334,7 @@ fn text_region(
     segment: &Segment<'_>,
     symbols: &[Bitmap],
     ceiling: usize,
-    warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
     let mut reader = Reader::new(segment.data);
     let info = RegionInfo::read(&mut reader)?;
@@ -2141,7 +2363,7 @@ fn text_region(
         // longer refused here — 6.4.11's envelope is read below — but it is
         // still refused for a *dictionary* that aggregates, in
         // `symbol_dictionary`, for a reason recorded there.
-        note(warnings, Warning::Jbig2VariantSkipped);
+        note(warnings, Jbig2Refusal::Transposed);
         return None;
     }
 
@@ -2155,7 +2377,7 @@ fn text_region(
     if refine && rtemplate == 0 {
         for slot in &mut rat {
             let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
-                note(warnings, Warning::TruncatedInput);
+                note(warnings, Jbig2Refusal::Truncated);
                 return None;
             };
             *slot = (dx, dy);
@@ -2165,13 +2387,13 @@ fn text_region(
     // 7.4.4.5.
     let instances = reader.u32()?;
     if instances > MAX_JBIG2_TEXT_INSTANCES {
-        note(warnings, Warning::Jbig2SymbolLimitHit);
+        note(warnings, Jbig2Refusal::TextInstanceCap);
         return None;
     }
     if symbols.is_empty() {
         // Every instance names a symbol; with no dictionary behind it there is
         // nothing to place, and an empty region is not a region.
-        note(warnings, Warning::Jbig2SegmentSkipped);
+        note(warnings, Jbig2Refusal::TextRegionWithoutSymbols);
         return None;
     }
 
@@ -2179,7 +2401,7 @@ fn text_region(
     let strips = 1i64 << log_strips;
 
     let Some(mut region) = Bitmap::new(info.width, info.height, ceiling) else {
-        note(warnings, Warning::Jbig2RegionTooLarge);
+        note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     };
     if default_pixel {
@@ -2193,7 +2415,7 @@ fn text_region(
         let tables = TextTables::select(selectors, refine, warnings)?;
         let mut bits = BitReader::new(reader.rest());
         let Some(symbol_codes) = symbol_id_codes(&mut bits, symbols.len()) else {
-            note(warnings, Warning::TruncatedInput);
+            note(warnings, Jbig2Refusal::Truncated);
             return None;
         };
         huffman = Some((tables, symbol_codes, bits));
@@ -2884,16 +3106,16 @@ fn decode_generic_into(
 fn generic_region(
     segment: &Segment<'_>,
     ceiling: usize,
-    warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
     let mut reader = Reader::new(segment.data);
     let Some(info) = RegionInfo::read(&mut reader) else {
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
         return None;
     };
     // 7.4.6.2. Bit 0 selects MMR, bits 1-2 the template, bit 3 TPGDON.
     let Some(flags) = reader.u8() else {
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
         return None;
     };
     let mmr = flags & 0x01 != 0;
@@ -2910,7 +3132,7 @@ fn generic_region(
         let pairs = if template == 0 { 4 } else { 1 };
         for slot in at.iter_mut().take(pairs) {
             let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
-                note(warnings, Warning::TruncatedInput);
+                note(warnings, Jbig2Refusal::Truncated);
                 return None;
             };
             *slot = (dx, dy);
@@ -2918,7 +3140,7 @@ fn generic_region(
     }
 
     let Some(mut bitmap) = Bitmap::new(info.width, info.height, ceiling) else {
-        note(warnings, Warning::Jbig2RegionTooLarge);
+        note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     };
     if mmr {
@@ -2927,7 +3149,7 @@ fn generic_region(
             // region here. Compositing the blank bitmap that was just sized
             // would count as a region and turn the refusal into a blank page
             // reported as success.
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::GenericRegionNotMmr);
             return None;
         }
     } else {
@@ -2950,7 +3172,7 @@ fn generic_region(
 /// than PDF's, precisely so this caller has nothing to convert.
 ///
 /// Returns whether any row decoded at all.
-fn decode_mmr(data: &[u8], into: &mut Bitmap, warnings: &mut Vec<Warning>) -> bool {
+fn decode_mmr(data: &[u8], into: &mut Bitmap, warnings: &mut Vec<Jbig2Refusal>) -> bool {
     let mut rows = crate::T6Rows::new(data, 0, into.width);
     let stride = into.stride;
     let mut decoded = 0u32;
@@ -2968,7 +3190,7 @@ fn decode_mmr(data: &[u8], into: &mut Bitmap, warnings: &mut Vec<Warning>) -> bo
         // A region whose coding ran out part way is still a region: the rows
         // that decoded are on the page and the rest stay white, which is the
         // same bargain the fax path strikes. Only "not one row" is a refusal.
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
     }
     decoded > 0
 }
@@ -2996,8 +3218,33 @@ pub fn decode(
     max_output: usize,
     warnings: &mut Vec<Warning>,
 ) -> Result<Vec<u8>, FilterError> {
+    let mut refusals = Vec::new();
+    let out = decode_attributed(data, params, max_output, &mut refusals);
+    for refusal in refusals {
+        note_warning(warnings, refusal.warning());
+    }
+    out
+}
+
+/// [`decode`], with the precise reason for every refusal it performed.
+///
+/// The same decode; the difference is the sink. [`decode`] maps each
+/// [`Jbig2Refusal`] to the one [`Warning`] its clause group reports, which is
+/// what a renderer acts on; this hands back the refusals themselves, which is
+/// what a corpus census needs to say *which* capability a file is waiting on.
+/// Without it a measurement can only report that four files were refused for
+/// something, which is the coarseness `Jbig2Refusal` exists to undo.
+///
+/// # Errors
+/// As [`decode`]: [`FilterError::Unsupported`] when no region was composited.
+pub fn decode_attributed(
+    data: &[u8],
+    params: &Jbig2Params<'_>,
+    max_output: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Result<Vec<u8>, FilterError> {
     let Some(bitmap) = Bitmap::new(params.width, params.height, max_output) else {
-        note(warnings, Warning::Jbig2RegionTooLarge);
+        note(warnings, Jbig2Refusal::RegionTooLarge);
         return Err(FilterError::Unsupported(Capability::Jbig2));
     };
     let mut page = Page {
@@ -3018,7 +3265,7 @@ pub fn decode(
     for segment in globals.iter().chain(own.iter()) {
         if !understood(segment.kind) {
             if carries_content(segment.kind) {
-                note(warnings, Warning::Jbig2SegmentSkipped);
+                note(warnings, Jbig2Refusal::UnhandledSegmentType(segment.kind));
             }
             continue;
         }
@@ -3051,7 +3298,7 @@ pub fn decode(
 
     if page.regions == 0 {
         // The refusal. Not polish, and not a fallback: see the module note.
-        note(warnings, Warning::Jbig2SegmentSkipped);
+        note(warnings, Jbig2Refusal::NoRegion);
         return Err(FilterError::Unsupported(Capability::Jbig2));
     }
     Ok(page.bitmap.bits)
@@ -3068,16 +3315,16 @@ fn refinement_region(
     segment: &Segment<'_>,
     reference: &Bitmap,
     ceiling: usize,
-    warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
     let mut reader = Reader::new(segment.data);
     let Some(info) = RegionInfo::read(&mut reader) else {
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
         return None;
     };
     // 7.4.7.2. Bit 0 selects the template, bit 1 TPGRON.
     let Some(flags) = reader.u8() else {
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
         return None;
     };
     let rtemplate = flags & 0x01;
@@ -3087,7 +3334,7 @@ fn refinement_region(
     if rtemplate == 0 {
         for slot in &mut at {
             let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
-                note(warnings, Warning::TruncatedInput);
+                note(warnings, Jbig2Refusal::Truncated);
                 return None;
             };
             *slot = (dx, dy);
@@ -3095,7 +3342,7 @@ fn refinement_region(
     }
     let template = refine_template(rtemplate, at);
     let Some(mut region) = Bitmap::new(info.width, info.height, ceiling) else {
-        note(warnings, Warning::Jbig2RegionTooLarge);
+        note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     };
     let mut coder = MqDecoder::new(reader.rest());
@@ -3169,15 +3416,15 @@ impl Page {
     /// writes `0xFFFFFFFF` for its height precisely because it does not yet
     /// know. What is taken from here is the default pixel value, which
     /// decides whether the page starts black.
-    fn begin(&mut self, segment: &Segment<'_>, warnings: &mut Vec<Warning>) {
+    fn begin(&mut self, segment: &Segment<'_>, warnings: &mut Vec<Jbig2Refusal>) {
         let mut reader = Reader::new(segment.data);
         let (Some(width), Some(height)) = (reader.u32(), reader.u32()) else {
-            note(warnings, Warning::TruncatedInput);
+            note(warnings, Jbig2Refusal::Truncated);
             return;
         };
         let _ = (reader.u32(), reader.u32()); // x and y resolution
         let Some(flags) = reader.u8() else {
-            note(warnings, Warning::TruncatedInput);
+            note(warnings, Jbig2Refusal::Truncated);
             return;
         };
         self.number = Some(segment.page);
@@ -3187,7 +3434,7 @@ impl Page {
             // composites at the coordinates it names. Worth recording,
             // because it is also what a stream pasted from another file looks
             // like.
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::PageSizeDisagrees);
         }
         // 7.4.8.5 bit 2: the value every pixel starts at. A scan of a mostly
         // black page is coded as black-by-default with white regions on it,
@@ -3204,7 +3451,12 @@ impl Page {
     /// decode — leaves the count alone, so a file whose only region could not
     /// be decoded still reaches the refusal instead of returning the blank
     /// page it was composited onto.
-    fn draw_generic(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+    fn draw_generic(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
         let Some((info, region)) = generic_region(segment, ceiling, warnings) else {
             return;
         };
@@ -3223,10 +3475,10 @@ impl Page {
         segment: &Segment<'_>,
         ceiling: usize,
         intermediate: bool,
-        warnings: &mut Vec<Warning>,
+        warnings: &mut Vec<Jbig2Refusal>,
     ) {
         let Some(box_) = RegionInfo::read(&mut Reader::new(segment.data)) else {
-            note(warnings, Warning::TruncatedInput);
+            note(warnings, Jbig2Refusal::Truncated);
             return;
         };
         // 6.3.2: the reference is a referred-to intermediate region if there
@@ -3244,14 +3496,14 @@ impl Page {
                     self.bitmap
                         .window(box_.x, box_.y, box_.width, box_.height, ceiling)
                 else {
-                    note(warnings, Warning::Jbig2RegionTooLarge);
+                    note(warnings, Jbig2Refusal::RegionTooLarge);
                     return;
                 };
                 window
             }
         };
         let Some((info, region)) = refinement_region(segment, &reference, ceiling, warnings) else {
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::RefinementRegionRefused);
             return;
         };
         if intermediate {
@@ -3265,9 +3517,14 @@ impl Page {
     }
 
     /// 7.4.6 for an *intermediate* generic region: decoded and kept, not drawn.
-    fn keep_generic(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+    fn keep_generic(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
         let Some((_, region)) = generic_region(segment, ceiling, warnings) else {
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::GenericRegionRefused);
             return;
         };
         self.intermediate.insert(segment.number, region);
@@ -3284,7 +3541,12 @@ impl Page {
     /// error here: it leaves the import list short, the export count then
     /// disagrees with the header, and the dictionary refuses by name rather
     /// than exporting symbols numbered against a list that was never built.
-    fn read_symbols(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+    fn read_symbols(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
         let mut imported = Vec::new();
         for number in &segment.referred {
             if let Some(exports) = self.symbols.get(number) {
@@ -3297,7 +3559,7 @@ impl Page {
             }
             None => {
                 self.refused.insert(segment.number);
-                note(warnings, Warning::Jbig2SegmentSkipped);
+                note(warnings, Jbig2Refusal::SymbolDictionaryRefused);
             }
         }
     }
@@ -3320,7 +3582,7 @@ impl Page {
         segment: &Segment<'_>,
         ceiling: usize,
         intermediate: bool,
-        warnings: &mut Vec<Warning>,
+        warnings: &mut Vec<Jbig2Refusal>,
     ) {
         let dangling = |number: &u32| {
             !self.symbols.contains_key(number)
@@ -3332,7 +3594,7 @@ impl Page {
             // own, so until the Huffman variant lands the numbering is short by
             // that dictionary's exports and every instance would draw the wrong
             // symbol. Named rather than attempted.
-            note(warnings, Warning::Jbig2VariantSkipped);
+            note(warnings, Jbig2Refusal::DanglingReference);
             return;
         }
         let mut symbols = Vec::new();
@@ -3345,7 +3607,7 @@ impl Page {
             }
         }
         let Some((info, region)) = text_region(segment, &symbols, ceiling, warnings) else {
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::TextRegionRefused);
             return;
         };
         if intermediate {
@@ -4564,7 +4826,10 @@ mod tests {
         // both refinement templates, and SDHUFF together with SDREFAGG all
         // decode now, so a dictionary is refused only for the two variants
         // above.
-        for flags in [0x0100u16, 0x000D] {
+        for (flags, expected) in [
+            (0x0100u16, Jbig2Refusal::RetainedContext),
+            (0x000D, Jbig2Refusal::HuffmanDhSelector),
+        ] {
             let mut data = Vec::new();
             data.extend_from_slice(&flags.to_be_bytes());
             data.extend_from_slice(&[0; 8]); // AT, template 0.
@@ -4584,8 +4849,13 @@ mod tests {
             );
             assert_eq!(
                 warnings,
-                vec![Warning::Jbig2VariantSkipped],
+                vec![expected],
                 "flags {flags:#06x} refused under the wrong name"
+            );
+            assert_eq!(
+                expected.warning(),
+                Warning::Jbig2VariantSkipped,
+                "flags {flags:#06x} reports the wrong warning outwardly"
             );
         }
     }
@@ -4611,7 +4881,7 @@ mod tests {
         let mut warnings = Vec::new();
         assert!(symbol_dictionary(&segment, &[], 1 << 20, &mut warnings).is_none());
         assert!(
-            warnings.contains(&Warning::Jbig2SymbolLimitHit),
+            warnings.contains(&Jbig2Refusal::ExportCountMismatch),
             "{warnings:?}"
         );
     }
@@ -4668,7 +4938,7 @@ mod tests {
                 "{num_ex}/{num_new} was not refused"
             );
             assert!(
-                warnings.contains(&Warning::Jbig2SymbolLimitHit),
+                warnings.contains(&Jbig2Refusal::SymbolCountCap),
                 "{num_ex}/{num_new}: {warnings:?}"
             );
         }
@@ -4723,7 +4993,7 @@ mod tests {
             let mut warnings = Vec::new();
             let out = symbol_dictionary(&segment, &[], 1 << 20, &mut warnings);
             (
-                out.is_none() && warnings.contains(&Warning::Jbig2SymbolLimitHit),
+                out.is_none() && warnings.contains(&Jbig2Refusal::SymbolPixelCap),
                 warnings,
             )
         };
@@ -4762,7 +5032,9 @@ mod tests {
             "a truncated collective bitmap is still not a dictionary"
         );
         assert!(
-            !warnings.contains(&Warning::Jbig2SymbolLimitHit),
+            !warnings
+                .iter()
+                .any(|r| r.warning() == Warning::Jbig2SymbolLimitHit),
             "exactly at the cap is admitted, and this warning says it was not: \
              {warnings:?}"
         );
@@ -4813,7 +5085,7 @@ mod tests {
                 "{instances} was not refused"
             );
             assert!(
-                warnings.contains(&Warning::Jbig2SymbolLimitHit),
+                warnings.contains(&Jbig2Refusal::TextInstanceCap),
                 "{instances}: {warnings:?}"
             );
         }
@@ -4834,7 +5106,7 @@ mod tests {
         assert!(text_region(&segment, &[], 1 << 20, &mut warnings).is_none());
         assert_eq!(
             warnings,
-            vec![Warning::Jbig2SegmentSkipped],
+            vec![Jbig2Refusal::TextRegionWithoutSymbols],
             "exactly at the cap is admitted"
         );
     }
@@ -5157,7 +5429,7 @@ mod tests {
 
         let mut warnings = Vec::new();
         assert!(segments(&stream, &mut warnings).is_empty());
-        assert_eq!(warnings, vec![Warning::Jbig2SegmentSkipped]);
+        assert_eq!(warnings, vec![Jbig2Refusal::RandomAccessOrganisation]);
     }
 
     #[test]
@@ -5218,7 +5490,7 @@ mod tests {
         let parsed = segments(&stream, &mut warnings);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].data, &[1, 2, 3]);
-        assert_eq!(warnings, vec![Warning::TruncatedInput]);
+        assert_eq!(warnings, vec![Jbig2Refusal::Truncated]);
     }
 
     #[test]
@@ -5229,7 +5501,7 @@ mod tests {
 
         let mut warnings = Vec::new();
         assert!(segments(&stream, &mut warnings).is_empty());
-        assert_eq!(warnings, vec![Warning::Jbig2SegmentSkipped]);
+        assert_eq!(warnings, vec![Jbig2Refusal::UnknownDataLength]);
     }
 
     /// The lineage this plan does not build, named rather than absorbed.
@@ -6496,7 +6768,7 @@ mod tests {
             *byte |= 0xC0;
         }
         assert!(
-            refuse(&region).contains(&Warning::Jbig2VariantSkipped),
+            refuse(&region).contains(&Jbig2Refusal::TextTableSelector),
             "a custom table is refused by name"
         );
 
@@ -6514,7 +6786,7 @@ mod tests {
             }),
         );
         assert!(
-            refuse(&region).contains(&Warning::Jbig2SymbolLimitHit),
+            refuse(&region).contains(&Jbig2Refusal::RefinedSizeOutOfRange),
             "an impossible refinement size is refused by name"
         );
     }
@@ -6534,5 +6806,83 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// **Which of Annex B's tables are complete prefix codes, and which are
+    /// not.**
+    ///
+    /// Annex B's tables are reconstructed here rather than transcribed — this
+    /// repository has no copy of T.88 — so the standing question is what holds
+    /// them to the standard. This is the one property that needs no copy of
+    /// it, and it is worth stating why it is decisive rather than suggestive.
+    ///
+    /// B.3 assigns canonical codes from the prefix lengths alone. Such a code
+    /// can decode every bit pattern if and only if the lengths satisfy Kraft's
+    /// equality, `sum(2^-len) == 1`. Below one, some patterns decode to
+    /// nothing: [`HuffTable::decode`] returns `None`, the caller's `?` gives up,
+    /// and the file is refused. Above one, two lines would share a code. A
+    /// table published by a standard for a general-purpose encoder is complete;
+    /// one of these that is not is a reconstruction defect, not a design.
+    ///
+    /// **Three of the fifteen are short, and they are pinned here rather than
+    /// silently tolerated.** The consequence is measured rather than guessed:
+    /// `bitmap-symbol-symhuffB5B3-texthuffB7B9B12.pdf` selects B.7 and B.12 and
+    /// is refused by this build with no reason recorded at all, which is what
+    /// sent anybody looking. `crates/tinker-pdf/tests/jbig2_attribution.rs`
+    /// is where that shows up as `TextRegionRefused` with nothing before it.
+    ///
+    /// Reconstructing the three is a roadmap item and not a guess: the
+    /// evidence that would settle them is the corpus coding one picture two
+    /// ways, the way the refinement templates were settled, and this file's
+    /// own history records what happens when a table is chosen because it
+    /// looks plausible instead.
+    ///
+    /// The sum is in units of `1 << 24` so the comparison is exact integer
+    /// arithmetic rather than a float with a tolerance.
+    #[test]
+    fn annex_b_tables_that_are_not_complete_prefix_codes_are_named() {
+        const UNIT: u64 = 1 << 24;
+        let tables: [(&str, HuffTable); 15] = [
+            ("B.1", table_b1()),
+            ("B.2", table_b2()),
+            ("B.3", table_b3()),
+            ("B.4", table_b4()),
+            ("B.5", table_b5()),
+            ("B.6", table_b6()),
+            ("B.7", table_b7()),
+            ("B.8", table_b8()),
+            ("B.9", table_b9()),
+            ("B.10", table_b10()),
+            ("B.11", table_b11()),
+            ("B.12", table_b12()),
+            ("B.13", table_b13()),
+            ("B.14", table_b14()),
+            ("B.15", table_b15()),
+        ];
+        let mut short: Vec<(&str, u64)> = Vec::new();
+        for (name, table) in &tables {
+            let sum: u64 = table
+                .lines
+                .iter()
+                .filter(|line| line.prefix_len > 0)
+                .map(|line| UNIT >> line.prefix_len)
+                .sum();
+            assert!(
+                sum <= UNIT,
+                "{name} is over-subscribed at {sum}/{UNIT}, so two lines share \
+                 a code and every value after the collision is wrong"
+            );
+            if sum != UNIT {
+                short.push((name, sum * 1_000_000 / UNIT));
+            }
+        }
+        // Parts per million of one, so the pin moves when a table does.
+        assert_eq!(
+            short,
+            vec![("B.7", 640_625), ("B.10", 945_312), ("B.12", 921_875)],
+            "the set of incomplete Annex B tables changed; if one was repaired \
+             its row comes out of this list and out of the roadmap in the same \
+             commit"
+        );
     }
 }
