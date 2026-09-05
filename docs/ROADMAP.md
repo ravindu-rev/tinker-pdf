@@ -133,16 +133,26 @@ range, so no budget separates those two populations.
 
 ## Tier 2 — close the named refusals, by measured reachability
 
-Ordered by corpus count. The JBIG2 counts are the August 2026 census
-(`crates/tinker-pdf/tests/jbig2_census.rs`, corpus-gated); `corpus/report.json`
-in the tree carries no per-file records, so a codec gate with no census has no
-count, and says so rather than guessing one.
+Ordered by corpus count. The JBIG2 counts are
+`crates/tinker-pdf/tests/jbig2_census.rs` and its sibling
+`jbig2_attribution.rs`, both corpus-gated and both run nightly.
+
+**What "no count recorded" means, stated properly.** `corpus/report.json` does
+carry a per-file `warnings` object — it is not in the tree because it is
+gitignored, being one run's artefact rather than a baseline. What is committed
+is `corpus/ratchet*.json`, and that carries `capabilities` and no warnings at
+all. So a refusal the capability scanner names gets a committed count for free
+and a refusal that surfaces only as a warning has none anywhere, which is the
+real split between the rows below that carry a number and the rows that do
+not. `xtask`'s `ratchet::compare` does not compare capabilities either, so even
+the counted rows' exit criteria are unenforced today; both are the subject of
+the last row here.
 
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
-| JBIG2 halftone regions and pattern dictionaries (T.88 6.6, 6.7; segment types 16, 20, 22, 23) — a third lineage after generic and symbol/text | 16 corpus files, 50 segments, and every one of the 16 carries halftone and nothing else — a sixth of the JBIG2 in the corpus. `Warning::Jbig2SegmentSkipped`; [design/jbig2-symbol-text.md](design/jbig2-symbol-text.md) names it as the roadmap item that work did not close | the 16 render with no placeholder; a picture coded halftone and coded generic decodes 0 pixels different, in the pattern of `jbig2_refinement.rs`, with fixtures from the test-only `MqEncoder`; the row leaves [features/filters.md](features/filters.md) | M. If it grows to L, `design/jbig2-halftone.md` first |
 | JBIG2 retained bitmap-coding contexts (7.4.2) | 1 file: three segments consuming, two retaining — below ruling 3's line, named with its count | stays a named refusal with a reachability test until the count moves | S, unscheduled |
-| The aggregate: **34 of the 119** JBIG2-bearing corpus files still report a JBIG2 warning. It was 30 of 103 before the production corpus was pinned, and 65 of 103 before the symbol lineage; the sixteen new JBIG2-bearing files are real-world documents and four of them report something | [features/filters.md](features/filters.md) | the number, re-measured after each row above | — |
+| The aggregate: **6 of the 118** JBIG2-bearing corpus files still report a refusal, down from 34. Halftone, custom code tables, transposed placement and 7.2.7's unknown data length have all left. What is left is one retained context (below ruling 3's line), one text region whose dictionary exports nothing, one file waiting on the three short Annex B tables, one truncated stream, and **two real documents** — `safedocs/0000231`, a 240-page scan refused with no reason recorded, and `safedocs/0000337`, 46 pages of real OCR whose refusals all have the signature of a desynchronised decoder rather than seven independent file defects | `jbig2_attribution.rs`, whose counts are pinned | the two real documents attributed to a defect or to the file; the number re-measured | S; the OCR document may be M |
+| **Three of Annex B's fifteen tables are not complete prefix codes**: B.7 at 0.640 of one, B.10 at 0.945, B.12 at 0.921 — and B.7's lower line is encoded as an upper line, which counts the wrong way. B.3 assigns canonical codes from prefix lengths alone, so below Kraft equality some bit patterns decode to nothing and the file is refused with no reason recorded | `annex_b_tables_that_are_not_complete_prefix_codes_are_named`, which pins all three; `bitmap-symbol-symhuffB5B3-texthuffB7B9B12.pdf` is the file | the three reconstructed and the pin emptied; adjudicated the way the refinement templates were, by the corpus coding one picture two ways, **not** by a table that looks plausible | M |
 | ICC profiles this build cannot make a transform of: the `A2B*` tables of a v4 `mAB` profile (three tags in the corpus), a connection space other than XYZ, a data space with no transform here. All fall back to 8.6.5.5's alternate-space reading as `ColorSpace::Approximated`, and `CalRGB` and `CalGray` are approximated the same way | 143 of the corpus's 2 750 profiles, in 131 files ([features/rendering.md](features/rendering.md), [design/icc.md](design/icc.md)) | the `iccbased` count in the corpus report moves; what is still refused is refused by name with its count | M ([design/icc.md](design/icc.md)) |
 | A transparency group declared in `/Lab` composites in RGB and is named; grey, RGB and CMYK groups composite in their own space | `RenderWarning::UnsupportedGroupSpace`; no corpus count is recorded | a Lab-group fixture composites in Lab, or the row keeps a count that says why not | S |
 | JPEG arithmetic coding, and JPEG precision other than eight bits | `Capability::JpegArithmetic`, `Capability::Jpeg12Bit`; **no corpus count recorded** | a count first, from a corpus run that keeps per-file warnings; then a fixture from a real encoder | M each |

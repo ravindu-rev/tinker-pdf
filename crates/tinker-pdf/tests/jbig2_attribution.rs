@@ -240,4 +240,55 @@ fn every_refused_jbig2_file_is_attributed() {
     }
 
     println!("\nfiles whose refusal says the *file* is broken: {malformed_files}");
+
+    // Pinned against `corpus/corpora.lock` as it stands, 6 September 2026, so a
+    // census nobody reads cannot drift. The four Tier 2 lineages — halftone,
+    // custom code tables, transposed placement and 7.2.7's unknown length —
+    // have all left this list, taking it from 34 files to six.
+    assert_eq!(bearing, BEARING, "the corpus's JBIG2 population moved");
+    assert_eq!(refused_files, REFUSED, "the refused count moved");
+    let named: Vec<(String, u32)> = ordered
+        .iter()
+        .map(|(name, count)| ((*name).clone(), **count))
+        .collect();
+    let expected: Vec<(String, u32)> = EXPECTED
+        .iter()
+        .map(|(name, count)| ((*name).to_string(), *count))
+        .collect();
+    assert_eq!(
+        named, expected,
+        "the reasons the corpus is refused for changed"
+    );
 }
+
+/// JBIG2-bearing files, as this census counts them.
+///
+/// Not the corpus report's 119: that walks the files `corpus-run` sees, and
+/// `corpora.lock`'s `subdir` narrows two of the five corpora. The denominators
+/// differ on purpose and both are right about their own population.
+const BEARING: u32 = 118;
+
+/// Files reporting any refusal. It was **34** before Tier 2's JBIG2 rows.
+const REFUSED: u32 = 6;
+
+/// Every reason the corpus is still refused for, most files first.
+///
+/// Three of the six say the *file* is broken rather than that this build is
+/// short of something, and a reader should be able to tell which from this list
+/// alone — that is what [`Jbig2Refusal::is_malformed`] is for.
+const EXPECTED: [(&str, u32); 14] = [
+    ("NoRegion", 5),
+    ("DanglingReference", 2),
+    ("SymbolDictionaryRefused", 2),
+    ("TextRegionRefused", 2),
+    ("AggregateInstanceCap", 1),
+    ("MoreInstancesThanDeclared", 1),
+    ("MoreSymbolsThanDeclared", 1),
+    ("RefinedSizeOutOfRange", 1),
+    ("RetainedContext", 1),
+    ("SymbolIndexOutOfRange", 1),
+    ("SymbolPixelCap", 1),
+    ("SymbolWidthOutOfRange", 1),
+    ("TextRegionWithoutSymbols", 1),
+    ("Truncated", 1),
+];

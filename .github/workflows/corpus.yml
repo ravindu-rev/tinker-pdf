@@ -75,7 +75,8 @@ jobs:
       # documentation rather than a gate.
       - name: Hold the fixtures the corpus adjudicates
         run: |
-          cargo test --release -p tinker-pdf --test jbig2_refinement \
+          cargo test --release --no-fail-fast -p tinker-pdf \
+            --test jbig2_refinement --test jbig2_lineages \
             -- --ignored --nocapture
 
       # **Every census, and the reason it is every census.** These assert
@@ -97,6 +98,7 @@ jobs:
             --test cff_subset_census \
             --test cms_census \
             --test icc_census \
+            --test jbig2_attribution \
             --test jbig2_census \
             --test pdfa_flavour \
             --test pdfa_ledger \

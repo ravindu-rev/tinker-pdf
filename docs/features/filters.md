@@ -124,16 +124,26 @@ place — a page that looks like text and says something else. T.88 Annex H.1's
 own page 2 is that case, its arithmetic text region referring to page 1's
 Huffman dictionary.
 
-Measured over the corpus's 103 JBIG2-bearing files in August 2026, counting
-files whose render reports any JBIG2 warning: **65 before this lineage landed,
-52 after the arithmetic variant, 49 after the Huffman one, and 35 after
-refinement, and 30 once the Huffman road followed it**, and none gained one. Those that remain are named in the table
-below with their own counts: the halftone lineage is the largest single one,
-and the rest are a retained context,
-and the half of Huffman refinement that goes through a symbol dictionary. Annex B's tables are reconstructed rather than transcribed, and
-what holds them to the standard is Annex H coding the same two symbols twice —
-once with `SDHUFF`, once through the MQ coder — which decode byte-identically
-([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)).
+Measured over the corpus's JBIG2-bearing files, counting those whose decode
+reports any refusal: **65 before this lineage landed, 52 after the arithmetic
+variant, 49 after the Huffman one, 35 after refinement, 30 once the Huffman road
+followed it, and 6 of 118 now** that transposed placement, clause 7.4.13's
+custom code tables, 7.2.7's unknown data length and the halftone lineage have
+all landed. None ever gained one.
+[`jbig2_attribution.rs`](../../crates/tinker-pdf/tests/jbig2_attribution.rs)
+names every one of the six and pins the counts.
+
+Annex B's tables are reconstructed rather than transcribed, and what holds them
+to the standard is Annex H coding the same two symbols twice — once with
+`SDHUFF`, once through the MQ coder — which decode byte-identically
+([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)). **Three of the
+fifteen are nonetheless short**: B.3 assigns canonical codes from prefix lengths
+alone, so a table decodes every input only if `sum(2^-len)` is one, and B.7,
+B.10 and B.12 sit at 0.640, 0.945 and 0.921 of it. A file selecting one of them
+is refused rather than mis-decoded, which is the trade this module makes
+everywhere; the three are pinned by
+`annex_b_tables_that_are_not_complete_prefix_codes_are_named` and are a roadmap
+row rather than a guess.
 
 Polarity is returned in JBIG2's own sense (1 = black, 6.2.2); the inversion
 belongs at the PDF boundary beside `/ImageMask` and `/Decode`. A file whose
