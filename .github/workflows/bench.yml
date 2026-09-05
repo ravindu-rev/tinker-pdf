@@ -48,7 +48,7 @@ jobs:
           set -o pipefail
           cargo bench -p tinker-pdf 2>&1 | tee bench.log
           # The same hazard as everywhere else in this repository: a bench
-          # target that compiled and measured nothing exits 0. Six operations
+          # target that compiled and measured nothing exits 0. Seven operations
           # are named in `benches/engine.rs`; if none of them reported a time,
           # this job proved nothing.
           #
@@ -60,9 +60,12 @@ jobs:
           # against a silent pass that fails on every run is worse than none,
           # because it teaches a reader to ignore the job.
           #
-          # Six, counted, rather than one-or-more: the point is that every
-          # operation reported, not that the file is not empty.
-          test "$(grep -Ec 'time: +\[' bench.log)" -eq 6
+          # Counted, rather than one-or-more: the point is that every
+          # operation reported, not that the file is not empty. Seven since
+          # 5 September 2026, when the rasteriser got a benchmark that enters
+          # it -- the other six do not, which is why the roadmap's
+          # vectorisation row had nothing to measure.
+          test "$(grep -Ec 'time: +\[' bench.log)" -eq 7
 
       # Criterion compares against a saved baseline and never exits non-zero
       # when it loses -- the only failure path in 0.5.1 is a *missing* baseline

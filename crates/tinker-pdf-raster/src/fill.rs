@@ -340,11 +340,20 @@ pub fn fill(
 
         // Each sub-scanline contributes at most 256 units of a pixel's width,
         // over SAMPLES rows: scale to 0..=255.
+        //
+        // **One bounds check for the row rather than one per pixel.** The
+        // arithmetic is unchanged -- `SAMPLES` is 16, so this is a shift, and
+        // the accumulator is `u16` whose largest value is 256 * 16 = 4 096,
+        // which divides and clamps identically in `u16` and in the `u32` this
+        // used to widen to. What changes is that the compiler can see a slice
+        // as long as the accumulator instead of an indexed `get_mut`, and a
+        // shift-and-saturate over a known trip count is a loop it will
+        // vectorise. Measured on a real document rather than assumed: see
+        // `docs/verification.md`.
         let base = (row as usize) * (width as usize);
-        for (col, total) in accumulator.iter().enumerate() {
-            let coverage = (u32::from(*total) / SAMPLES as u32).min(255) as u8;
-            if let Some(slot) = mask.data.get_mut(base + col) {
-                *slot = coverage;
+        if let Some(out) = mask.data.get_mut(base..base + accumulator.len()) {
+            for (slot, total) in out.iter_mut().zip(accumulator.iter()) {
+                *slot = (*total / SAMPLES as u16).min(255) as u8;
             }
         }
     }
@@ -419,8 +428,14 @@ fn add_span(accumulator: &mut [u16], x0: i32, width: u32, from: i64, to: i64) {
         let covered = 256 - (left % 256);
         *slot = slot.saturating_add(covered as u16);
     }
-    for col in (first + 1)..last {
-        if let Some(slot) = accumulator.get_mut(col) {
+    // The fully covered interior, as one slice rather than one bounds-checked
+    // index per pixel. `last` is clamped rather than trusted, because the
+    // indexed form silently skipped a column past the end and a slice range
+    // past the end would skip the whole run instead -- the same arithmetic,
+    // and a different answer on the one case that matters.
+    let to = last.min(accumulator.len());
+    if let Some(run) = accumulator.get_mut((first + 1).min(to)..to) {
+        for slot in run {
             *slot = slot.saturating_add(256);
         }
     }
