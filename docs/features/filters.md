@@ -59,7 +59,13 @@ differ (T.88 E.3.6 against T.800 Table D.7). Around it: clause 7 segment
 headers with their referred-to lists, the embedded organisation of D.3 with
 `/JBIG2Globals` read first, generic regions under templates 0–3 with AT pixels
 and typical prediction (TPGDON, 6.2.5.7), and MMR (6.2.6) through the same T.6
-decoder a fax uses.
+decoder a fax uses. 7.2.7's **unknown segment data length** is read too: a
+header may decline to say how long an immediate generic region is, and the end
+is then found by scanning for the row terminator the region's own coding uses —
+`FF AC` for the arithmetic coder, `00 00` for MMR — with the real row count in
+the four bytes after it. The scan starts past the adaptive pixels, because a
+nominal AT pair is the bytes `FF FE` and a template-0 region carries four of
+them.
 
 **Symbol dictionaries (6.5) and text regions (6.4) decode, arithmetically**:
 Annex A's integer procedures and A.3's symbol-index procedure over the shared

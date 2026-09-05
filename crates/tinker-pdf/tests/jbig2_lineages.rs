@@ -88,6 +88,17 @@ const CUSTOM_TABLES: [(&str, &str); 6] = [
     ),
 ];
 
+/// 7.2.7's unknown segment data length.
+///
+/// One fixture, and two real documents off the open web that the corpus report
+/// names -- so this is the rare Tier 2 row whose reachability is a *scanner*
+/// rather than a test suite. The picture is the same one, which is what makes
+/// it checkable here at all.
+const UNKNOWN_LENGTH: [(&str, &str); 1] = [(
+    "bitmap-initially-unknown-size.pdf",
+    "a segment whose length is 0xFFFFFFFF, ended by the row terminator",
+)];
+
 fn corpus(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/files/pdfjs/test/pdfs")
@@ -243,4 +254,18 @@ fn every_transposed_text_region_reproduces_the_ordinary_picture() {
 #[ignore = "reads the fetched corpus"]
 fn every_custom_code_table_file_reproduces_the_standard_picture() {
     every_variant_reproduces("clause 7.4.13 custom code tables", &CUSTOM_TABLES);
+}
+
+/// **A segment of unknown data length draws the same picture as one that
+/// declares its length.**
+///
+/// 7.2.7 gives the layout instead of a length, so the end is found by scanning
+/// for the row terminator and the height comes from the four bytes after it.
+/// Both of those are places to be off by a small amount and still produce a
+/// picture -- a height one row short, or a terminator found inside the
+/// adaptive pixels -- which is why the comparison is a whole page.
+#[test]
+#[ignore = "reads the fetched corpus"]
+fn an_unknown_length_segment_reproduces_the_declared_picture() {
+    every_variant_reproduces("7.2.7 unknown data length", &UNKNOWN_LENGTH);
 }

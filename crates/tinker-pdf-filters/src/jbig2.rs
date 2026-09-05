@@ -120,6 +120,13 @@ struct Segment<'a> {
     page: u32,
     /// 7.2.7 through 7.2.8: the segment's own data.
     data: &'a [u8],
+    /// 7.2.7: the header declared an unknown data length, so the extent above
+    /// was found by scanning for the row terminator rather than read.
+    ///
+    /// The consequence is not the length but the *height*: a segment whose
+    /// length is unknown carries a region whose height is unknown too, and the
+    /// real row count is the four bytes after the terminator.
+    unknown_length: bool,
 }
 
 /// A big-endian cursor that runs out rather than panicking.
@@ -516,13 +523,34 @@ fn read_segment<'a>(
 
     let length = reader.u32()?;
     if length == u32::MAX {
-        // 7.2.7: an unknown data length is legal only for an immediate
-        // generic region, and finding its end means scanning for a row
-        // terminator that depends on the region's own coding. Nothing after
-        // this segment can be located, so the stream ends here rather than
-        // being guessed at.
-        note(warnings, Jbig2Refusal::UnknownDataLength);
-        return None;
+        // 7.2.7: an unknown data length is legal only for an immediate generic
+        // region, and its end is found by scanning for the row terminator the
+        // region's own coding uses. Any other segment type saying this is a
+        // header nothing after it can be located from, so the stream ends
+        // there rather than being guessed at.
+        if !matches!(
+            kind,
+            kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
+        ) {
+            note(warnings, Jbig2Refusal::UnknownDataLength);
+            return None;
+        }
+        let Some(length) = unknown_length_extent(reader.rest()) else {
+            note(warnings, Jbig2Refusal::UnknownDataLength);
+            return None;
+        };
+        let (data, whole) = reader.take(length);
+        if !whole {
+            note(warnings, Jbig2Refusal::Truncated);
+        }
+        return Some(Segment {
+            number,
+            kind,
+            referred,
+            page,
+            data,
+            unknown_length: true,
+        });
     }
     let (data, whole) = reader.take(length as usize);
     if !whole {
@@ -535,7 +563,45 @@ fn read_segment<'a>(
         referred,
         page,
         data,
+        unknown_length: false,
     })
+}
+
+/// **7.2.7: where a segment of unknown data length ends.**
+///
+/// The clause gives the layout rather than a length: the region segment
+/// information field, the generic region flags, the adaptive pixels if the
+/// region is not MMR, then the coded data, then a two-byte terminator, then
+/// four bytes of row count. So the end is found by searching for the
+/// terminator — `FF AC` for the arithmetic coder and `00 00` for MMR — and
+/// taking six bytes more.
+///
+/// The search starts *after* the adaptive pixels rather than at the top of the
+/// segment, because a nominal AT pair of `(-1, -2)` is the bytes `FF FE` and a
+/// template-0 region carries four of them: beginning at zero would find a
+/// terminator inside the header of a perfectly ordinary region.
+///
+/// Returns the whole segment's length, including the row count, so the caller
+/// can hand the slice on unchanged.
+fn unknown_length_extent(data: &[u8]) -> Option<usize> {
+    // 17 bytes of region information, then the flags byte.
+    let flags = *data.get(17)?;
+    let mmr = flags & 0x01 != 0;
+    let template = (flags >> 1) & 0x03;
+    let mut at = 18;
+    if !mmr {
+        at += if template == 0 { 8 } else { 2 };
+    }
+    let terminator: [u8; 2] = if mmr { [0x00, 0x00] } else { [0xFF, 0xAC] };
+    let mut cursor = at;
+    while cursor + 2 <= data.len() {
+        if data[cursor..cursor + 2] == terminator {
+            // The terminator, then 7.2.7's four bytes of row count.
+            return cursor.checked_add(6);
+        }
+        cursor += 1;
+    }
+    None
 }
 
 /// # Annex A, ahead of its caller
@@ -3358,6 +3424,18 @@ fn generic_region(
         }
     }
 
+    // 7.2.7: a region whose segment length was unknown carries an unknown
+    // height too, and the real row count is the last four bytes of the
+    // segment. Reading it here rather than in `RegionInfo::read` keeps that
+    // structure a plain seventeen-byte field, which is what every other region
+    // type has.
+    let mut info = info;
+    if segment.unknown_length {
+        let tail = segment.data.len().checked_sub(4)?;
+        let rows = u32::from_be_bytes(segment.data.get(tail..)?.try_into().ok()?);
+        info.height = rows;
+    }
+
     let Some(mut bitmap) = Bitmap::new(info.width, info.height, ceiling) else {
         note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
@@ -4603,6 +4681,7 @@ mod tests {
             referred: referred.to_vec(),
             page: 1,
             data,
+            unknown_length: false,
         }
     }
 
@@ -4996,6 +5075,7 @@ mod tests {
                 kind: kind::SYMBOL_DICTIONARY,
                 page: 1,
                 data: &data,
+                unknown_length: false,
             };
             let mut warnings = Vec::new();
             let exported = symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings)
@@ -5050,6 +5130,7 @@ mod tests {
             kind: kind::SYMBOL_DICTIONARY,
             page: 1,
             data: &data,
+            unknown_length: false,
         };
         let mut warnings = Vec::new();
         let exported = symbol_dictionary(&segment, &imported, &[], 1 << 20, &mut warnings)
@@ -5102,6 +5183,7 @@ mod tests {
                 kind: kind::SYMBOL_DICTIONARY,
                 page: 1,
                 data: &data,
+                unknown_length: false,
             };
             let mut warnings = Vec::new();
             assert!(
@@ -5138,6 +5220,7 @@ mod tests {
             kind: kind::SYMBOL_DICTIONARY,
             page: 1,
             data: &data,
+            unknown_length: false,
         };
         let mut warnings = Vec::new();
         assert!(symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
@@ -5192,6 +5275,7 @@ mod tests {
                 kind: kind::SYMBOL_DICTIONARY,
                 page: 1,
                 data: &data,
+                unknown_length: false,
             };
             let mut warnings = Vec::new();
             assert!(
@@ -5250,6 +5334,7 @@ mod tests {
                 kind: kind::SYMBOL_DICTIONARY,
                 page: 1,
                 data,
+                unknown_length: false,
             };
             let mut warnings = Vec::new();
             let out = symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings);
@@ -5286,6 +5371,7 @@ mod tests {
             kind: kind::SYMBOL_DICTIONARY,
             page: 1,
             data: &at,
+            unknown_length: false,
         };
         let mut warnings = Vec::new();
         assert!(
@@ -5339,6 +5425,7 @@ mod tests {
                 kind: kind::IMMEDIATE_TEXT_REGION,
                 page: 1,
                 data: &data,
+                unknown_length: false,
             };
             let mut warnings = Vec::new();
             assert!(
@@ -5362,6 +5449,7 @@ mod tests {
             kind: kind::IMMEDIATE_TEXT_REGION,
             page: 1,
             data: &data,
+            unknown_length: false,
         };
         let mut warnings = Vec::new();
         assert!(text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
@@ -5839,6 +5927,7 @@ mod tests {
             kind: kind::PAGE_INFORMATION,
             page: 1,
             data: &data,
+            unknown_length: false,
         };
         let mut warnings = Vec::new();
         page.begin(&segment, &mut warnings);
@@ -5868,6 +5957,7 @@ mod tests {
                 kind: kind::PAGE_INFORMATION,
                 page: 1,
                 data: &data,
+                unknown_length: false,
             },
             &mut warnings,
         );
@@ -5877,6 +5967,7 @@ mod tests {
             kind: kind::IMMEDIATE_GENERIC_REGION,
             page: 2,
             data: &[],
+            unknown_length: false,
         };
         let globalish = Segment {
             number: 1,
@@ -5884,6 +5975,7 @@ mod tests {
             kind: kind::IMMEDIATE_GENERIC_REGION,
             page: 0,
             data: &[],
+            unknown_length: false,
         };
         assert!(!page.owns(&elsewhere));
         assert!(page.owns(&globalish));
@@ -7007,6 +7099,7 @@ mod tests {
                 referred: vec![1],
                 page: 1,
                 data,
+                unknown_length: false,
             };
             let mut warnings = Vec::new();
             assert!(
