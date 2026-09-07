@@ -418,6 +418,12 @@ pub(crate) struct TilePart<'a> {
 /// A parsed codestream: the main header and every tile-part in stream order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Codestream<'a> {
+    /// Which tiles declared more parts than arrived, so are left blank.
+    ///
+    /// Empty in a complete codestream. See [`check_tile_parts`]: a tile that
+    /// stops early costs pixels rather than meaning, and the caller reports it
+    /// as damage rather than refusing the image.
+    pub(crate) short_tiles: Vec<bool>,
     pub(crate) siz: Siz,
     pub(crate) cod: Cod,
     /// Per-component COC overrides from the main header.
@@ -654,9 +660,10 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
     let Some(qcd) = qcd else {
         return Err(Refusal::Structure("a codestream with no QCD marker"));
     };
-    check_tile_parts(&siz, &tile_parts)?;
+    let short_tiles = check_tile_parts(&siz, &tile_parts)?;
 
     Ok(Codestream {
+        short_tiles,
         siz,
         cod,
         coc,
@@ -1063,13 +1070,27 @@ fn tile_part<'a>(
     Ok(part)
 }
 
-/// A.4.2's rules about how tile-parts fit together.
+/// A.4.2's rules about how tile-parts fit together, and which tiles arrived
+/// whole.
 ///
-/// Out-of-order parts and a tile whose parts do not cover it are both on the
-/// refusal list, and both for the reason the whole list exists: a decoder
-/// that reassembles them in stream order regardless produces a picture, and
-/// the picture is wrong in a way that looks like compression.
-fn check_tile_parts(siz: &Siz, parts: &[TilePart<'_>]) -> Result<(), Refusal> {
+/// **Two different failures live here and they were treated as one.**
+///
+/// Parts *out of order*, or two of them disagreeing about `TNsot`, or one
+/// naming a tile outside the grid, are all a codestream contradicting itself.
+/// A decoder that reassembles them in stream order regardless produces a
+/// picture, and the picture is wrong in a way that looks like compression —
+/// which is what the whole refusal list exists to prevent.
+///
+/// A tile whose declared parts did not all *arrive* is a different thing: it
+/// is a file that stops early. That costs pixels rather than meaning, and this
+/// crate already draws that line — `JxrWarning::TileDroppedAsZero` is the same
+/// bargain in JPEG XR, and a fax row that will not decode is replicated rather
+/// than refused. Two documents off the open web are the reason it is drawn
+/// here too: both carry tiles that decode and one that stops, and refusing the
+/// image threw away the tiles that were whole.
+///
+/// Returns the tiles that are short, for the caller to leave blank.
+fn check_tile_parts(siz: &Siz, parts: &[TilePart<'_>]) -> Result<Vec<bool>, Refusal> {
     let tiles = usize::try_from(u64::from(siz.tiles_x) * u64::from(siz.tiles_y))
         .map_err(|_| Refusal::Budget("tiles"))?;
     let mut next = vec![0u32; tiles];
@@ -1094,21 +1115,25 @@ fn check_tile_parts(siz: &Siz, parts: &[TilePart<'_>]) -> Result<(), Refusal> {
             *total = Some(part.parts);
         }
     }
+    let mut short = vec![false; tiles];
+    let mut whole = 0usize;
     for (t, total) in declared.iter().enumerate() {
-        if let Some(total) = total {
-            if next[t] != u32::from(*total) {
-                return Err(Refusal::Structure("a tile whose parts do not cover it"));
-            }
-        }
-        // A.4.2: every tile in the grid is coded. A tile no part covers has
-        // no coefficients at all, and a decoder that leaves its samples at
-        // whatever the plane was initialised to draws a grey rectangle inside
-        // the picture and calls the decode a success. It is also what an
-        // early EOC produces, which is how a truncated file would otherwise
-        // arrive here looking complete.
-        if next[t] == 0 {
-            return Err(Refusal::Structure("a tile with no tile-parts"));
+        // A.4.2: every tile in the grid is coded, and a tile that declared `n`
+        // parts and got fewer is a file that stopped. Either way the tile has
+        // no complete set of coefficients, so it is marked rather than decoded
+        // — a decoder that read what arrived would draw a partial tile and
+        // call the decode a success.
+        let missing = next[t] == 0 || total.is_some_and(|n| next[t] != u32::from(n));
+        short[t] = missing;
+        if !missing {
+            whole += 1;
         }
     }
-    Ok(())
+    if whole == 0 {
+        // Nothing arrived whole, so there is no picture to degrade *to*. This
+        // is the refusal the note above is about: a page of grey rectangles
+        // reported as a successful decode is worse than the placeholder.
+        return Err(Refusal::Structure("a codestream with no complete tile"));
+    }
+    Ok(short)
 }

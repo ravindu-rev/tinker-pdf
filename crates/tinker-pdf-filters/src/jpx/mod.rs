@@ -197,7 +197,7 @@ pub(crate) const MAX_JPX_WORK: u64 = 3 << 30;
 /// either parsed or named in a refusal" is only checkable if the refusal
 /// carries the name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
+pub enum Refusal {
     /// A marker T.800 Table A.2 defines and this build does not decode:
     /// RGN, POC, PPM, PPT, CRG. Carries the marker's name.
     Marker(&'static str),
@@ -257,7 +257,8 @@ impl Refusal {
     /// Coarser than the refusal itself on purpose: [`Warning`] is a closed
     /// set recorded at most once per decode, and a variant per marker would
     /// make it neither.
-    pub(crate) const fn warning(self) -> Warning {
+    #[must_use]
+    pub const fn warning(self) -> Warning {
         match self {
             Self::Marker(_) => Warning::JpxMarkerUnsupported,
             Self::UnknownMarker(_) => Warning::JpxMarkerUnknown,
@@ -363,6 +364,14 @@ pub struct JpxImage {
     /// Interleaved samples, `components` per pixel, row-major, big-endian
     /// when `precision` is 16.
     pub samples: Vec<u8>,
+    /// Whether some tile declared more parts than the file carried, so its
+    /// samples are whatever the plane was initialised to rather than a decode.
+    ///
+    /// The picture keeps its shape and loses a rectangle of it — damage that
+    /// costs pixels, which this crate draws around and reports rather than
+    /// refusing (ruling 2). `check_tile_parts` is where the two are told
+    /// apart, and a codestream with *no* whole tile is still a refusal.
+    pub truncated: bool,
     /// What the codestream says its colour space is. `/ColorSpace` on the
     /// image dictionary overrides this when it is present.
     pub colour: JpxColour,
@@ -428,6 +437,7 @@ pub fn jpx_decode(
 ) -> Result<JpxImage, FilterError> {
     let mut clamped = false;
     let decoded = decode_inner(input, limits, &mut clamped);
+    let truncated = matches!(&decoded, Ok(image) if image.truncated);
     // Recorded whether the decode went on to succeed or not: E.1's clamp is a
     // leniency, and ruling 10 wants a leniency to survive the result it led
     // to rather than only the ones that failed.
@@ -435,7 +445,16 @@ pub fn jpx_decode(
         warnings.push(Warning::JpxCoefficientClamped);
     }
     match decoded {
-        Ok(image) => Ok(image),
+        Ok(image) => {
+            // A tile that stopped early is damage this decode drew around
+            // rather than refused, and ruling 10 wants it named on the way
+            // out — `Decoded::complete` is not reachable from here, so the
+            // warning is the whole record.
+            if truncated && !warnings.contains(&Warning::JpxTruncated) {
+                warnings.push(Warning::JpxTruncated);
+            }
+            Ok(image)
+        }
         Err(refusal) => {
             let w = refusal.warning();
             if !warnings.contains(&w) {
@@ -444,6 +463,24 @@ pub fn jpx_decode(
             Err(FilterError::Unsupported(Capability::Jpx))
         }
     }
+}
+
+/// [`jpx_decode`], with the precise reason for a refusal rather than the one
+/// [`Warning`] its class reports.
+///
+/// The same decode; the difference is what comes back. `Warning` is a closed
+/// set of seven, and `JpxStructureInvalid` alone covers every one of
+/// [`Refusal::Structure`]'s conditions — a tile-part naming a tile outside the
+/// grid, tile-parts out of order, two parts disagreeing about `TNsot`, a box
+/// shorter than its header, a marker in the wrong place. Those are different
+/// sentences to show a human and different answers to whether a file is worth
+/// a roadmap row, and a corpus census cannot tell them apart from the warning.
+///
+/// # Errors
+/// The [`Refusal`] the decode stopped on.
+pub fn jpx_decode_attributed(input: &[u8], limits: &Limits) -> Result<JpxImage, Refusal> {
+    let mut clamped = false;
+    decode_inner(input, limits, &mut clamped)
 }
 
 fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<JpxImage, Refusal> {
@@ -570,6 +607,7 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
         components: u8::try_from(stride).map_err(|_| Refusal::Budget("output colour channels"))?,
         precision,
         samples,
+        truncated: stream.short_tiles.iter().any(|short| *short),
         colour: header.map_or(JpxColour::Unstated, |h| h.colour),
         opacity: opacity.map(|samples| JpxOpacity {
             premultiplied: plan.premultiplied,

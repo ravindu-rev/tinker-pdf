@@ -58,7 +58,7 @@ pub use jbig2::{
     MAX_JBIG2_TEXT_INSTANCES,
 };
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
-pub use jpx::{jpx_decode, JpxColour, JpxImage};
+pub use jpx::{jpx_decode, jpx_decode_attributed, JpxColour, JpxImage, Refusal as JpxRefusal};
 pub use jxr::{
     jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,
 };

@@ -515,7 +515,13 @@ pub(crate) fn decode_tiles(stream: &Codestream<'_>) -> Result<Vec<Tile>, Refusal
         let t = u32::try_from(t).map_err(|_| Refusal::Budget("tiles"))?;
         let index = u16::try_from(t).map_err(|_| Refusal::Budget("tiles"))?;
         let mut tile = build_tile(stream, t, index, &mut budget)?;
-        read_tile_packets(stream, &mut tile, &mut budget)?;
+        // A tile whose declared parts did not all arrive has no complete set
+        // of coefficients. Its geometry is still built, so the picture keeps
+        // its shape and the tile stays at the value the plane was initialised
+        // to; only the packet read is skipped. See `check_tile_parts`.
+        if !stream.short_tiles.get(t as usize).copied().unwrap_or(false) {
+            read_tile_packets(stream, &mut tile, &mut budget)?;
+        }
         tiles.push(tile);
     }
     Ok(tiles)

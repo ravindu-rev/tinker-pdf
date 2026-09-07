@@ -860,10 +860,22 @@ fn an_rsiz_beyond_part_1_is_refused() {
     }
 }
 
-/// A.4.2's rules about tile-parts, each of which is on the refusal list
-/// because reassembling them in stream order regardless produces a picture.
+/// A.4.2's rules about tile-parts, and **the line between the two failures
+/// that live here**.
+///
+/// A codestream contradicting itself is refused: parts out of order, or an SOT
+/// naming a tile outside the grid, would both produce a picture if
+/// reassembled in stream order, and the picture would be wrong in a way that
+/// looks like compression.
+///
+/// A codestream that *stops early* is not the same thing. A tile short of its
+/// declared parts is a file that ended, which costs pixels rather than
+/// meaning — the same bargain `JxrWarning::TileDroppedAsZero` strikes and the
+/// one a fax row strikes. It is marked rather than refused, and only a
+/// codestream with no whole tile at all is a refusal, because a page of
+/// rectangles reported as a successful decode is worse than the placeholder.
 #[test]
-fn tile_parts_out_of_order_or_short_of_their_count_are_refused() {
+fn tile_parts_out_of_order_are_refused_and_short_ones_are_marked() {
     let spec = Spec::default();
 
     let mut bytes = spec.main_header();
@@ -875,20 +887,40 @@ fn tile_parts_out_of_order_or_short_of_their_count_are_refused() {
     );
 
     let mut bytes = spec.main_header();
-    bytes.extend_from_slice(&tile_part(0, 0, 3, &[], &[]));
-    bytes.extend_from_slice(&tile_part(0, 1, 3, &[], &[]));
-    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
-    assert_eq!(
-        parse(&bytes),
-        Err(Refusal::Structure("a tile whose parts do not cover it"))
-    );
-
-    let mut bytes = spec.main_header();
     bytes.extend_from_slice(&tile_part(1, 0, 1, &[], &[]));
     bytes.extend_from_slice(&marker::EOC.to_be_bytes());
     assert_eq!(
         parse(&bytes),
         Err(Refusal::Structure("an SOT naming a tile outside the grid"))
+    );
+
+    // One tile short of its three declared parts, and it is the only tile:
+    // nothing arrived whole, so there is no picture to degrade to.
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(0, 0, 3, &[], &[]));
+    bytes.extend_from_slice(&tile_part(0, 1, 3, &[], &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&bytes),
+        Err(Refusal::Structure("a codestream with no complete tile"))
+    );
+
+    // Two tiles, one whole and one short. The codestream parses, and the short
+    // one is marked for the caller to leave blank.
+    // A four-by-four image in two two-by-four tiles.
+    let spec = Spec {
+        xtsiz: 2,
+        ..Spec::default()
+    };
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&tile_part(1, 0, 3, &[], &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    let stream = parse(&bytes).expect("one whole tile is a picture");
+    assert_eq!(
+        stream.short_tiles,
+        vec![false, true],
+        "the second tile declared three parts and one arrived"
     );
 }
 

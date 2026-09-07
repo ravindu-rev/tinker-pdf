@@ -101,6 +101,7 @@ jobs:
             --test icc_census \
             --test jbig2_attribution \
             --test jbig2_census \
+            --test jpx_attribution \
             --test pdfa_flavour \
             --test pdfa_ledger \
             --test pdfua \
