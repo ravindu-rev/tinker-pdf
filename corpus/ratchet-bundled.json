@@ -9,7 +9,7 @@
         "mesh-shading": 10,
         "signature": 9
       },
-      "degraded": 131,
+      "degraded": 128,
       "metamorphic": {
         "crop": {
           "compared": 831,
@@ -37,7 +37,7 @@
       },
       "passed": 974,
       "peak": {
-        "bytes": 927367168,
+        "bytes": 926920704,
         "files": 974
       },
       "strict_clean": 841,
@@ -84,7 +84,7 @@
       },
       "passed": 2907,
       "peak": {
-        "bytes": 55898112,
+        "bytes": 55095296,
         "files": 2907
       },
       "strict_clean": 2891,
@@ -130,7 +130,7 @@
       },
       "passed": 631,
       "peak": {
-        "bytes": 229695488,
+        "bytes": 229629952,
         "files": 637
       },
       "strict_clean": 487,
@@ -173,7 +173,7 @@
       },
       "passed": 7,
       "peak": {
-        "bytes": 16064512,
+        "bytes": 16097280,
         "files": 7
       },
       "strict_clean": 6,
@@ -222,7 +222,7 @@
       },
       "passed": 997,
       "peak": {
-        "bytes": 515354624,
+        "bytes": 515219456,
         "files": 1000
       },
       "strict_clean": 899,

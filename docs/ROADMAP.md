@@ -133,13 +133,9 @@ range, so no budget separates those two populations.
 
 ## Tier 2 — close the named refusals, by measured reachability
 
-Ordered by corpus count. The JBIG2 counts are
-`crates/tinker-pdf/tests/jbig2_census.rs` and its sibling
-`jbig2_attribution.rs`, both corpus-gated and both run nightly.
-
 **What is left of this tier, stated plainly.** Every row that could be closed
-has been. The three below are held by the same wall, and it is worth naming
-because it is not a scheduling decision:
+has been; **two remain**, and they are held by the same wall rather than by a
+scheduling decision. Three walls, each checkable:
 
 - **Zero corpus reachability**, measured and pinned by a census that runs
   nightly — `jpeg_census.rs` walks 10 606 JPEG streams and finds no arithmetic
@@ -158,13 +154,19 @@ Annex B work is the argument for not proceeding without one: of four
 mis-transcribed tables, three were caught by an invariant this repository could
 state and the fourth passed every check it had.
 
-The first row below is a *measurement* rather than a debt: it is the number the
-JBIG2 rows were re-measured against, kept because it is the thing a reader
-should be able to check.
+**What the JBIG2 rows left behind, since it is the number this tier was
+measured by.** **1 of the 118** JBIG2-bearing corpus files still reports a
+refusal, down from 34, and it is `pdfjs/issue3371.pdf` — a stream that stops
+inside a segment, which `Jbig2Refusal::is_malformed` calls damage rather than a
+capability. Halftone, custom code tables, transposed placement, 7.2.7's unknown
+data length, a blank page, 7.4.2's retained bitmap-coding contexts, a text
+region that places nothing, 6.5.8.2.2's reference offset and four
+mis-transcribed Annex B tables have all left. `jbig2_attribution.rs` pins the
+count at one and names the file. **Every real-world document in five corpora
+decodes.**
 
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
-| The aggregate: **1 of the 118** JBIG2-bearing corpus files still reports a refusal, down from 34, and it is a **damaged file** rather than a capability — `pdfjs/issue3371.pdf` stops inside a segment. Halftone, custom code tables, transposed placement, 7.2.7's unknown data length, a blank page, 7.4.2's retained bitmap-coding contexts, a text region that places nothing, 6.5.8.2.2's reference offset and four mis-transcribed Annex B tables have all left | `jbig2_attribution.rs`, whose count is pinned at one and which names the file | **met**: what remains has no capability behind it | — |
 | **JPEG arithmetic coding** (SOF9, SOF10, SOF11, SOF13, SOF14, SOF15). Twelve-bit precision has landed and left this row, and so has a defect it uncovered: SOF3, SOF5, SOF6, SOF7 and the differential arithmetic frames were **skipped rather than refused** — stepped over as though they were a comment, so a lossless JPEG surfaced as a damaged file | `crates/tinker-pdf/tests/jpeg_census.rs` walks every `/DCTDecode` stream through the COS layer, so encrypted documents and object streams are seen: **688 files, 10 606 distinct streams, 10 603 frames, and every one of them is SOF0, SOF1 or SOF2 at eight bits**. Zero arithmetic, zero lossless, zero other precision. That is the largest population any census here measures | **three separate blockers, and they are the row.** (1) Zero corpus reachability. (2) T.81 is not obtainable: the ITU sells it, and the freely published W3C copy is a 1993 Distiller PDF whose Table D.3 — 113 states of the QM coder — extracts as digits with no field boundaries and whose decoder procedures are *figures*, so neither can be transcribed rather than guessed. (3) No arithmetic-JPEG encoder exists on this machine, so a fixture cannot be built either. Writing a 113-state probability table from memory and shipping it is precisely what the Annex B work above found the cost of | M, and not scheduled until one of the three moves |
 | **JPX: the RGN, POC, PPM, PPT and CRG markers, the `BYPASS` and `TERMALL` code-block styles, component precision above 16 bits** | **Zero corpus files reach any of them.** `jpx_attribution.rs` names every refusal in the 39 JPX-bearing files and not one is a coding capability: a ruling 1 budget, two deliberately non-conformant veraPDF `colr` fixtures, two `/JPXDecode` streams whose bytes are not JPEG 2000 at all, and two real documents that are truncated | **three blockers, and they are the same three the JPEG arithmetic row above carries.** (1) Zero corpus reachability. (2) **T.800 is not obtainable here**: ISO and the ITU both sell it, and the Final Committee Draft that used to be public at `jpeg.org` is gone — so `BYPASS` and `TERMALL` would mean writing B.10.7.2's rule for how many codeword segments a packet signals from memory, and RGN, POC, PPM and PPT likewise. (3) No JPEG 2000 encoder on this machine emits any of them; `opj_compress` is absent and Pillow's writer exposes none of these options, so a fixture cannot be built either. This is the *same* situation Annex B's tables were in, and that work has just measured what a plausible-looking guess costs: three of the four wrong tables were caught by an invariant, and the fourth passed every check this repository could state | unscheduled, and now for a stated reason rather than a counted one; the rows stay named in [features/filters.md](features/filters.md) |
 
