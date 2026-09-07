@@ -127,23 +127,34 @@ Huffman dictionary.
 Measured over the corpus's JBIG2-bearing files, counting those whose decode
 reports any refusal: **65 before this lineage landed, 52 after the arithmetic
 variant, 49 after the Huffman one, 35 after refinement, 30 once the Huffman road
-followed it, and 6 of 118 now** that transposed placement, clause 7.4.13's
-custom code tables, 7.2.7's unknown data length and the halftone lineage have
-all landed. None ever gained one.
+followed it, 6 once transposed placement, clause 7.4.13's custom code tables,
+7.2.7's unknown data length and the halftone lineage had landed, and **1 of
+118** now** that 7.4.2's retained contexts, 6.5.8.2.2's reference offset, an
+empty text region and Annex B's four mis-transcribed tables have followed. None
+ever gained one. The one that is left is `pdfjs/issue3371.pdf`, a stream that
+stops inside a segment — damage rather than a capability, and
+`Jbig2Refusal::is_malformed` says so.
 [`jbig2_attribution.rs`](../../crates/tinker-pdf/tests/jbig2_attribution.rs)
-names every one of the six and pins the counts.
+names it and pins the count.
 
-Annex B's tables are reconstructed rather than transcribed, and what holds them
-to the standard is Annex H coding the same two symbols twice — once with
-`SDHUFF`, once through the MQ coder — which decode byte-identically
-([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)). **Three of the
-fifteen are nonetheless short**: B.3 assigns canonical codes from prefix lengths
-alone, so a table decodes every input only if `sum(2^-len)` is one, and B.7,
-B.10 and B.12 sit at 0.640, 0.945 and 0.921 of it. A file selecting one of them
-is refused rather than mis-decoded, which is the trade this module makes
-everywhere; the three are pinned by
-`annex_b_tables_that_are_not_complete_prefix_codes_are_named` and are a roadmap
-row rather than a guess.
+Annex B's fifteen tables are **transcribed from ITU-T Rec. T.88 (02/2000)**,
+which is published free of charge. Until September 2026 they were
+*reconstructed* instead — the standard could not be fetched here — and four of
+the fifteen were wrong. Three were known wrong from inside this repository, by
+a property that needs no copy of it: B.3 assigns canonical codes from prefix
+lengths alone, so a table decodes every input only if `sum(2^-len)` is one, and
+B.7, B.10 and B.12 sat at 0.640, 0.945 and 0.921 of it. **B.15 summed to
+exactly one and was wrong anyway**, which is why the check that found the
+others could not have found it.
+
+What holds them now: the transcription, the standard's own printed Encoding
+column beside each line (`the_codes_b3_assigns_are_the_ones_the_standard_prints`),
+Annex H coding the same two symbols twice — once with `SDHUFF`, once through
+the MQ coder — which decode byte-identically, and
+[`jbig2_lineages.rs`](../../crates/tinker-pdf/tests/jbig2_lineages.rs), which
+requires every corpus file selecting one of them to draw the same picture as
+the files that do not
+([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)).
 
 Polarity is returned in JBIG2's own sense (1 = black, 6.2.2); the inversion
 belongs at the PDF boundary beside `/ImageMask` and `/Decode`. A file whose

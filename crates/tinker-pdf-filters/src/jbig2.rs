@@ -763,24 +763,42 @@ fn combine(destination: u32, source: u32, op: u8) -> u32 {
 // decisions from the MQ coder, this one reads *prefix codes* out of the
 // bitstream, and the standard publishes fifteen tables of them.
 //
-// **Where these numbers come from, stated plainly.** The tables below are
-// reconstructed rather than transcribed from a copy of T.88, and what holds
-// them to the standard is the standard's own datastream: Annex H codes the
-// same two symbols twice, once with `SDHUFF` through B.1, B.2 and B.4 and once
-// through the MQ coder, and `annex_h_codes_the_same_symbols_two_ways` requires
-// the two to be byte-identical. A single wrong prefix length desynchronises the
-// reader and yields noise rather than a glyph, so there is no outcome where a
-// wrong table produces a plausible picture — which is the failure mode this
-// module's refusals exist to prevent.
+// **Where these numbers come from, stated plainly.** All fifteen are
+// transcribed from Tables B.1 to B.15 of ITU-T Rec. T.88 (02/2000), which is
+// published free of charge and which this repository could not reach until
+// September 2026 -- the earlier attempt was refused, and the tables were
+// *reconstructed* instead, from Annex H's datastream and from the corpus.
+// Eleven of the fifteen survived that transcription unchanged, which is the
+// measure of how far reconstruction got. Four did not:
 //
-// **All fifteen are here now**, and three of them are wrong. B.3 assigns
-// canonical codes from prefix lengths alone, so a table decodes every input if
-// and only if its lengths satisfy Kraft's equality; B.7, B.10 and B.12 sit at
-// 0.640, 0.945 and 0.921 of one, which means some bit patterns decode to
-// nothing and a file selecting them is refused. They are pinned by
-// `annex_b_tables_that_are_not_complete_prefix_codes_are_named` rather than
-// repaired, because a table that looks plausible is exactly what this module's
-// history warns about — see `docs/ROADMAP.md` for what would settle them.
+// - **B.7** had eleven lines where the standard has fifteen. Its whole
+//   positive side was one line where the standard splits it into six, so a
+//   value above zero read the wrong number of offset bits.
+// - **B.12** had ten lines where the standard has thirteen, and started at 0
+//   where the standard starts at 1.
+// - **B.10** had the right lines and five wrong prefix lengths, in the run
+//   from 134 upwards.
+// - **B.15** had eleven lines where the standard has thirteen, split
+//   differently either side of zero.
+//
+// The first three were *known* wrong before the standard arrived, by a
+// property that needs no copy of it: B.3 assigns canonical codes from prefix
+// lengths alone, so a table decodes every input if and only if its lengths
+// satisfy Kraft's equality, and those three summed to 0.640, 0.945 and 0.921
+// of one. **B.15 summed to exactly one and was wrong anyway**, which is the
+// lesson worth keeping: a necessary condition is not a sufficient one, and no
+// invariant this repository could state would have found it.
+//
+// What holds them now, beside the transcription: `annex_b_tables_are_complete_
+// prefix_codes` re-checks Kraft's equality, `the_codes_b3_assigns_are_the_ones_
+// the_standard_prints` checks the assignment against the bit strings the
+// standard prints in its own Encoding column, `annex_h_codes_the_same_symbols_
+// two_ways` requires the standard's datastream to decode identically through
+// both roads, and `jbig2_lineages.rs` requires every corpus file selecting one
+// of them to draw the same picture as the files that do not. A single wrong
+// prefix length desynchronises the reader and yields noise rather than a
+// glyph, so there is no outcome where a wrong table produces a plausible
+// picture.
 
 /// A bit reader, most significant bit first, over a segment's data.
 ///
@@ -1083,16 +1101,15 @@ fn table_b7() -> HuffTable {
         HuffLine::normal(5, 6, -128),
         HuffLine::normal(5, 5, -64),
         HuffLine::normal(4, 5, -32),
-        HuffLine::normal(4, 9, 0),
-        HuffLine::normal(5, 10, 512),
-        HuffLine::normal(3, 10, 1536),
-        // The lower range, and it was written as an *upper* one. Every other
-        // table with a downward run spells it `HuffLine::lower` -- B.6, B.8,
-        // B.9 and B.10 all do -- and the difference is not cosmetic: a lower
-        // line counts *down* from its bound and an upper line counts up, so
-        // this read every value below -1024 as a value above it.
-        HuffLine::lower(6, -1025),
-        HuffLine::normal(5, 32, 2560),
+        HuffLine::normal(4, 5, 0),
+        HuffLine::normal(5, 5, 32),
+        HuffLine::normal(5, 6, 64),
+        HuffLine::normal(4, 7, 128),
+        HuffLine::normal(3, 8, 256),
+        HuffLine::normal(3, 9, 512),
+        HuffLine::normal(3, 10, 1024),
+        HuffLine::lower(5, -1025),
+        HuffLine::normal(5, 32, 2048),
     ])
 }
 
@@ -1166,11 +1183,11 @@ fn table_b10() -> HuffTable {
         HuffLine::normal(2, 6, 6),
         HuffLine::normal(5, 5, 70),
         HuffLine::normal(6, 5, 102),
-        HuffLine::normal(7, 6, 134),
-        HuffLine::normal(8, 7, 198),
-        HuffLine::normal(8, 8, 326),
-        HuffLine::normal(8, 9, 582),
-        HuffLine::normal(8, 10, 1094),
+        HuffLine::normal(6, 6, 134),
+        HuffLine::normal(6, 7, 198),
+        HuffLine::normal(6, 8, 326),
+        HuffLine::normal(6, 9, 582),
+        HuffLine::normal(6, 10, 1094),
         HuffLine::normal(7, 11, 2118),
         HuffLine::lower(8, -22),
         HuffLine::normal(8, 32, 4166),
@@ -1200,16 +1217,19 @@ fn table_b11() -> HuffTable {
 /// Table B.12, a strip's vertical coordinate.
 fn table_b12() -> HuffTable {
     HuffTable::new(vec![
-        HuffLine::normal(1, 0, 0),
-        HuffLine::normal(2, 1, 1),
-        HuffLine::normal(4, 0, 3),
-        HuffLine::normal(5, 1, 4),
-        HuffLine::normal(5, 2, 6),
-        HuffLine::normal(6, 3, 10),
-        HuffLine::normal(7, 4, 18),
-        HuffLine::normal(7, 5, 34),
-        HuffLine::normal(7, 6, 66),
-        HuffLine::normal(7, 32, 130),
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(2, 0, 2),
+        HuffLine::normal(3, 1, 3),
+        HuffLine::normal(5, 0, 5),
+        HuffLine::normal(5, 1, 6),
+        HuffLine::normal(6, 1, 8),
+        HuffLine::normal(7, 0, 10),
+        HuffLine::normal(7, 1, 11),
+        HuffLine::normal(7, 2, 13),
+        HuffLine::normal(7, 3, 17),
+        HuffLine::normal(7, 4, 25),
+        HuffLine::normal(8, 5, 41),
+        HuffLine::normal(8, 32, 73),
     ])
 }
 
@@ -2284,17 +2304,19 @@ fn table_b14() -> HuffTable {
 /// which is why the dictionary road reads it without one.
 fn table_b15() -> HuffTable {
     HuffTable::new(vec![
+        HuffLine::normal(7, 4, -24),
+        HuffLine::normal(6, 2, -8),
+        HuffLine::normal(5, 1, -4),
+        HuffLine::normal(4, 0, -2),
+        HuffLine::normal(3, 0, -1),
         HuffLine::normal(1, 0, 0),
-        HuffLine::normal(3, 1, -2),
-        HuffLine::normal(3, 1, 1),
-        HuffLine::normal(4, 2, -6),
-        HuffLine::normal(4, 2, 3),
-        HuffLine::normal(5, 3, -14),
-        HuffLine::normal(5, 3, 7),
-        HuffLine::normal(6, 4, -30),
-        HuffLine::normal(6, 4, 15),
-        HuffLine::lower(6, -31),
-        HuffLine::normal(6, 32, 31),
+        HuffLine::normal(3, 0, 1),
+        HuffLine::normal(4, 0, 2),
+        HuffLine::normal(5, 1, 3),
+        HuffLine::normal(6, 2, 5),
+        HuffLine::normal(7, 4, 9),
+        HuffLine::lower(7, -25),
+        HuffLine::normal(7, 32, 25),
     ])
 }
 
@@ -6505,33 +6527,28 @@ mod tests {
     ///
     /// It does not make the reconstruction *right*. Nothing in this repository
     /// can: it makes it load-bearing, so it cannot change without a fixture
-    /// saying so.
+    /// **B.14 and B.15 for the encoder side, which are now the decoder's own.**
+    ///
+    /// These were generated here from a rule -- one bit for zero, then a
+    /// prefix bit per doubling either side of it -- so that a round trip could
+    /// not prove two copies of one mistake agree. The rule was wrong for B.15,
+    /// which the standard splits differently and closes at plus or minus 24
+    /// rather than 31, and nothing noticed until Tables B.1 to B.15 were
+    /// transcribed from T.88 itself.
+    ///
+    /// So the separation is retired rather than repaired. It bought
+    /// independence from the *decoder*, and what these fixtures need is
+    /// independence from the *standard*, which no second copy written in this
+    /// repository can give. What checks the tables now is T.88's own printed
+    /// Encoding column -- see `the_codes_b3_assigns_are_the_ones_the_standard_
+    /// prints` -- and what these fixtures check is the refinement path that
+    /// reads them.
     fn writer_b14() -> HuffTable {
-        HuffTable::new(
-            (-2..=2)
-                .map(|value| HuffLine::normal(if value == 0 { 1 } else { 3 }, 0, value))
-                .collect(),
-        )
+        table_b14()
     }
 
-    /// **Table B.15, generated the same way and for the same reason.**
-    ///
-    /// Symmetric about zero: the code for zero is one bit, then each step out
-    /// doubles the range it covers and costs one more prefix bit — a range of
-    /// `r` bits covers `2^r - 1` upward and the mirror of it downward — until
-    /// two open-ended lines close it at ±31.
     fn writer_b15() -> HuffTable {
-        let mut lines = vec![HuffLine::normal(1, 0, 0)];
-        for range in 1..=4u8 {
-            let high = (1i32 << range) - 1;
-            // The negative side first, which is the order B.3's canonical
-            // assignment sees them in.
-            lines.push(HuffLine::normal(range + 2, range, -(high + high)));
-            lines.push(HuffLine::normal(range + 2, range, high));
-        }
-        lines.push(HuffLine::lower(6, -31));
-        lines.push(HuffLine::normal(6, 32, 31));
-        HuffTable::new(lines)
+        table_b15()
     }
 
     /// 7.4.3.1.7's symbol-ID code lengths, for a region whose symbols each take
@@ -7527,8 +7544,13 @@ mod tests {
     /// symbol its dictionary exported, at `(s, t)`.
     ///
     /// 7.4.4.1.2's other selectors are fixed here: B.6 for `FS`, B.8 for `DS`,
-    /// **B.12** for `DT` — B.11's first line is 1, so it cannot code the zero
-    /// that 6.4.5 step 1 needs — and B.1 for the refinement size.
+    /// B.11 for `DT` and B.1 for the refinement size.
+    ///
+    /// **No standard `SBHUFFDT` table can code zero.** B.11, B.12 and B.13 all
+    /// begin at 1, so 6.4.5 step 1's initial value is at least one and the
+    /// first strip therefore begins at `-SBSTRIPS` or above. This fixture used
+    /// to write a zero there and pick whichever table admitted it, which was a
+    /// property of a mis-transcribed B.12 rather than of the standard.
     fn huffman_text_region(
         size: (u32, u32),
         (s, t): (i32, i32),
@@ -7549,8 +7571,8 @@ mod tests {
         data.extend_from_slice(&flags.to_be_bytes());
         // 7.4.4.1.2's bits 0 to 14.
         let choice = refined.as_ref().map_or(0, |r| r.table);
-        let selectors =
-            (1u16 << 4) | (choice << 6) | (choice << 8) | (choice << 10) | (choice << 12);
+        // FS, DS and DT all take selector 0 -- B.6, B.8 and B.11.
+        let selectors = (choice << 6) | (choice << 8) | (choice << 10) | (choice << 12);
         data.extend_from_slice(&selectors.to_be_bytes());
         // 7.4.4.1.3: the refinement AT pair, present at template 0.
         if refined.is_some() {
@@ -7565,11 +7587,12 @@ mod tests {
         write_symbol_id_codes(&mut bits, 1);
         bits.align();
 
-        let (dt, fs, ds) = (table_b12(), table_b6(), table_b8());
-        // 6.4.5 step 1: STRIPT is negated by the decoder, so a zero here and
-        // the strip's own delta below put the strip at `t`.
-        write_huff(&mut bits, &dt, 0);
-        write_huff(&mut bits, &dt, t);
+        let (dt, fs, ds) = (table_b11(), table_b6(), table_b8());
+        // 6.4.5 steps 1 and 3b: the decoder negates the first value and adds
+        // the second, both times SBSTRIPS, which is 1 here. So a 1 followed by
+        // `t + 1` puts the strip at `t`, and 1 is the smallest either can be.
+        write_huff(&mut bits, &dt, 1);
+        write_huff(&mut bits, &dt, t + 1);
         write_huff(&mut bits, &fs, s);
         // The symbol's one-bit code, from the table written above.
         bits.bit(0);
@@ -8066,41 +8089,59 @@ mod tests {
             .collect()
     }
 
-    /// **Which of Annex B's tables are complete prefix codes, and which are
-    /// not.**
+    /// **Every one of Annex B's fifteen tables is a complete prefix code.**
     ///
-    /// Annex B's tables are reconstructed here rather than transcribed — this
-    /// repository has no copy of T.88 — so the standing question is what holds
-    /// them to the standard. This is the one property that needs no copy of
-    /// it, and it is worth stating why it is decisive rather than suggestive.
+    /// This test used to be called
+    /// `annex_b_tables_that_are_not_complete_prefix_codes_are_named` and it
+    /// listed three. Both what it caught and what it missed are worth keeping.
     ///
     /// B.3 assigns canonical codes from the prefix lengths alone. Such a code
-    /// can decode every bit pattern if and only if the lengths satisfy Kraft's
+    /// decodes every bit pattern if and only if the lengths satisfy Kraft's
     /// equality, `sum(2^-len) == 1`. Below one, some patterns decode to
     /// nothing: [`HuffTable::decode`] returns `None`, the caller's `?` gives up,
-    /// and the file is refused. Above one, two lines would share a code. A
-    /// table published by a standard for a general-purpose encoder is complete;
-    /// one of these that is not is a reconstruction defect, not a design.
+    /// and the file is refused with no reason recorded. Above one, two lines
+    /// share a code. While these tables were *reconstructed* -- this repository
+    /// could not reach a copy of T.88 until September 2026 -- this was the one
+    /// property checkable without one, and it found B.7, B.10 and B.12.
     ///
-    /// **Three of the fifteen are short, and they are pinned here rather than
-    /// silently tolerated.** The consequence is measured rather than guessed:
-    /// `bitmap-symbol-symhuffB5B3-texthuffB7B9B12.pdf` selects B.7 and B.12 and
-    /// is refused by this build with no reason recorded at all, which is what
-    /// sent anybody looking. `crates/tinker-pdf/tests/jbig2_attribution.rs`
-    /// is where that shows up as `TextRegionRefused` with nothing before it.
+    /// **It did not find B.15, which was also wrong.** That table's eleven
+    /// lines summed to exactly one and split the range either side of zero
+    /// differently from the standard's thirteen. A necessary condition is not
+    /// a sufficient one. The tables are transcribed now, and this stays as the
+    /// cheap check that a later edit has not broken one.
     ///
-    /// Reconstructing the three is a roadmap item and not a guess: the
-    /// evidence that would settle them is the corpus coding one picture two
-    /// ways, the way the refinement templates were settled, and this file's
-    /// own history records what happens when a table is chosen because it
-    /// looks plausible instead.
-    ///
-    /// The sum is in units of `1 << 24` so the comparison is exact integer
+    /// The sum is in units of `1 << 24`, so the comparison is exact integer
     /// arithmetic rather than a float with a tolerance.
     #[test]
-    fn annex_b_tables_that_are_not_complete_prefix_codes_are_named() {
+    fn annex_b_tables_are_complete_prefix_codes() {
         const UNIT: u64 = 1 << 24;
-        let tables: [(&str, HuffTable); 15] = [
+        let mut short: Vec<(&str, u64)> = Vec::new();
+        for (name, table) in annex_b_tables() {
+            let sum: u64 = table
+                .lines
+                .iter()
+                .filter(|line| line.prefix_len > 0)
+                .map(|line| UNIT >> line.prefix_len)
+                .sum();
+            assert!(
+                sum <= UNIT,
+                "{name} is over-subscribed at {sum}/{UNIT}, so two lines share a \
+                 code and every value after the collision is wrong"
+            );
+            if sum != UNIT {
+                // Parts per million of one, so a reader sees how far off it is.
+                short.push((name, sum * 1_000_000 / UNIT));
+            }
+        }
+        assert!(
+            short.is_empty(),
+            "these tables do not decode every bit pattern: {short:?}"
+        );
+    }
+
+    /// The fifteen, in order, for the two tests that walk all of them.
+    fn annex_b_tables() -> [(&'static str, HuffTable); 15] {
+        [
             ("B.1", table_b1()),
             ("B.2", table_b2()),
             ("B.3", table_b3()),
@@ -8116,32 +8157,106 @@ mod tests {
             ("B.13", table_b13()),
             ("B.14", table_b14()),
             ("B.15", table_b15()),
+        ]
+    }
+
+    /// **The codes B.3 assigns are the ones T.88 prints beside each line.**
+    ///
+    /// Annex B gives every row an `Encoding` column -- the bit string itself,
+    /// written out. That column is redundant with the prefix lengths *if* B.3's
+    /// canonical assignment is right, and it is the only thing in the standard
+    /// that says so independently. The four tables here exercise every shape
+    /// the assignment has: B.7's fifteen lines interleave four lengths rather
+    /// than arriving sorted, B.10 has two ranges and the out-of-band marker
+    /// sharing the shortest length, B.12 runs from one bit to eight with no
+    /// four-bit line at all, and B.15 is symmetric about zero.
+    ///
+    /// The lengths and the encodings come from the same printed table, and that
+    /// is what makes the pair worth more than either: a transcription slip in
+    /// one column would have to be matched by a consistent slip in the other.
+    #[test]
+    fn the_codes_b3_assigns_are_the_ones_the_standard_prints() {
+        let expected: [(&str, &[(usize, &str)]); 4] = [
+            (
+                "B.7",
+                &[
+                    (0, "1000"),
+                    (1, "000"),
+                    (2, "1001"),
+                    (3, "11010"),
+                    (4, "11011"),
+                    (5, "1010"),
+                    (6, "1011"),
+                    (7, "11100"),
+                    (8, "11101"),
+                    (9, "1100"),
+                    (10, "001"),
+                    (11, "010"),
+                    (12, "011"),
+                    (13, "11110"),
+                    (14, "11111"),
+                ],
+            ),
+            (
+                "B.10",
+                &[
+                    (0, "1111010"),
+                    (1, "11111100"),
+                    (3, "11000"),
+                    (4, "00"),
+                    (9, "01"),
+                    (12, "111000"),
+                    (16, "111100"),
+                    (17, "1111101"),
+                    (18, "11111110"),
+                    (19, "11111111"),
+                    (20, "10"),
+                ],
+            ),
+            (
+                "B.12",
+                &[
+                    (0, "0"),
+                    (1, "10"),
+                    (2, "110"),
+                    (3, "11100"),
+                    (4, "11101"),
+                    (5, "111100"),
+                    (6, "1111010"),
+                    (10, "1111110"),
+                    (11, "11111110"),
+                    (12, "11111111"),
+                ],
+            ),
+            (
+                "B.15",
+                &[
+                    (0, "1111100"),
+                    (4, "100"),
+                    (5, "0"),
+                    (6, "101"),
+                    (11, "1111110"),
+                    (12, "1111111"),
+                ],
+            ),
         ];
-        let mut short: Vec<(&str, u64)> = Vec::new();
-        for (name, table) in &tables {
-            let sum: u64 = table
-                .lines
+        let tables = annex_b_tables();
+        for (name, rows) in &expected {
+            let (_, table) = tables
                 .iter()
-                .filter(|line| line.prefix_len > 0)
-                .map(|line| UNIT >> line.prefix_len)
-                .sum();
-            assert!(
-                sum <= UNIT,
-                "{name} is over-subscribed at {sum}/{UNIT}, so two lines share \
-                 a code and every value after the collision is wrong"
-            );
-            if sum != UNIT {
-                short.push((name, sum * 1_000_000 / UNIT));
+                .find(|(n, _)| n == name)
+                .expect("the table is in the list");
+            for (index, encoding) in *rows {
+                let line = table.lines[*index];
+                let code = table.codes[*index];
+                let printed = format!("{code:0width$b}", width = usize::from(line.prefix_len));
+                assert_eq!(
+                    printed.as_str(),
+                    *encoding,
+                    "{name} line {index}: B.3 assigns {printed}, T.88 prints {encoding}"
+                );
             }
         }
-        // Parts per million of one, so the pin moves when a table does.
-        assert_eq!(
-            short,
-            vec![("B.7", 640_625), ("B.10", 945_312), ("B.12", 921_875)],
-            "the set of incomplete Annex B tables changed; if one was repaired \
-             its row comes out of this list and out of the roadmap in the same \
-             commit"
-        );
     }
 
     /// **6.4.5's four reference corners are Table 34's numbers**, and both

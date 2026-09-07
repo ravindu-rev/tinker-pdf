@@ -99,6 +99,41 @@ const UNKNOWN_LENGTH: [(&str, &str); 1] = [(
     "a segment whose length is 0xFFFFFFFF, ended by the row terminator",
 )];
 
+/// **Annex B's standard tables, as the corpus selects them.**
+///
+/// The Huffman symbol lineage coded with the *standard* tables rather than the
+/// file's own — the custom-table family below covers those. Four files, and
+/// between them they drive every `SBHUFFFS`, `SBHUFFDS` and `SBHUFFDT`
+/// selector the corpus uses: B.6 and B.7, B.8 and B.10, B.11, B.12 and B.13.
+///
+/// **Why this family exists at all.** Four of the fifteen tables were
+/// mis-transcribed, and only three of the four could be *known* wrong from
+/// inside this repository: they were not complete prefix codes, so some bit
+/// patterns decoded to nothing and the file was refused. The fourth, B.15, was
+/// complete and wrong, and the difference matters here — a table whose lines
+/// are wrong but whose lengths sum to one does not refuse. It assigns
+/// different codes to the same lines and draws a different picture. Until this
+/// family existed, "the file reported no warning" was all the corpus said
+/// about any of them, and that is not the same claim.
+const ANNEX_B_TABLES: [(&str, &str); 4] = [
+    (
+        "bitmap-symbol-symhuff-texthuff.pdf",
+        "the standard tables at every selector's default",
+    ),
+    (
+        "bitmap-symbol-symhuff-texthuffB10B13.pdf",
+        "SBHUFFDS through B.10 and SBHUFFDT through B.13",
+    ),
+    (
+        "bitmap-symbol-symhuffB5B3-texthuffB7B9B12.pdf",
+        "SDHUFFDH through B.5, SDHUFFDW through B.3, and the text          region through B.7, B.9 and B.12 — the file that refused until          the tables were transcribed from T.88 rather than reconstructed",
+    ),
+    (
+        "bitmap-symbol-symhuffuncompressed-texthuff.pdf",
+        "6.5.9's collective bitmap stored uncompressed rather than as MMR",
+    ),
+];
+
 /// Clause 7.4.2's retained bitmap-coding contexts.
 ///
 /// One file, and it is the whole reachability of the row: three of its symbol
@@ -335,6 +370,22 @@ fn every_custom_code_table_file_reproduces_the_standard_picture() {
 #[ignore = "reads the fetched corpus"]
 fn an_unknown_length_segment_reproduces_the_declared_picture() {
     every_variant_reproduces("7.2.7 unknown data length", &UNKNOWN_LENGTH);
+}
+
+/// **The standard Annex B tables decode to the picture, not merely without a
+/// warning.**
+///
+/// A prefix table with the wrong lengths assigns different codes to the same
+/// lines. Some bit patterns then decode to *a* value rather than to none, so
+/// the file completes and draws something else — which is why this assertion
+/// is the picture and why "no warning" was never evidence about the tables.
+///
+/// `bitmap-symbol-symhuffB5B3-texthuffB7B9B12.pdf` is deliberately absent: it
+/// is the file that does not decode, and it is the roadmap row.
+#[test]
+#[ignore = "reads the fetched corpus"]
+fn the_standard_annex_b_tables_reproduce_the_picture() {
+    every_variant_reproduces("Annex B standard tables", &ANNEX_B_TABLES);
 }
 
 /// **A dictionary that starts where another finished draws the same picture.**

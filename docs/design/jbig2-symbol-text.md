@@ -236,15 +236,19 @@ injection at the bottom of `jbig2.rs` already does.
 | 2 | Segment references + Annex A integer decoders | **Done.** `Segment` carries its number and referred-to list; `every_integer_range_and_oob_round_trips` covers all six A.2 fields at both ends and OOB, `the_symbol_index_procedure_round_trips_at_every_code_length` covers A.3 including `SBSYMCODELEN` zero; the committed fuzz seeds are replayed on stable by `tests/jbig2_seeds.rs` | M |
 | 3 | Symbol dictionary, arithmetic, SDREFAGG=0 | **Done**, with one exit criterion changed and the change stated: symbols round-trip pixel-for-pixel against an `MqEncoder`-built dictionary over three height classes and all four templates; 6.5.10's export runs select across imported and new symbols; the variants this build declines refuse under `Jbig2VariantSkipped`. Annex H.2's *published symbol bitmaps* are not in this repository — H.1's datastream is, its generic-region picture is, its symbol pictures are not — so the pixel-for-pixel claim is against a fixture this repository builds rather than against the standard. Milestone 4 recovers the standard's own adjudication: the annex's text region composites those symbols into a page, and that page can be compared with what H.1 publishes | M |
 | 4 | Text region, arithmetic (SBREFINE and TRANSPOSED refused by name) | **Done**, with the exit criterion changed and the change stated below: `a_text_region_places_its_symbols_where_6_4_5_computes` places symbols across two strips at the coordinates 6.4.5 computes, through a round trip; `a_text_region_whose_dictionary_refused_is_refused_by_name` holds a region whose referred-to dictionary is absent or refused to refusing **whole**; all four reference corners handled, SBDSOFFSET and multi-strip regions decoded. The annex's own page moves to milestone 6 | M |
-| 6 | Annex B Huffman: standard tables, 6.5.9's collective bitmaps, 7.4.3.1.7's symbol-ID codes | **Done.** `annex_h_codes_the_same_symbols_two_ways` holds the reconstructed tables to the annex's arithmetic twin; 44 to 47 files clean | M |
+| 6 | Annex B Huffman: standard tables, 6.5.9's collective bitmaps, 7.4.3.1.7's symbol-ID codes | **Done**, and the tables are now transcribed from T.88 rather than reconstructed — four of the fifteen were wrong, and the section below records which and how each was found. `annex_h_codes_the_same_symbols_two_ways` holds them to the annex's arithmetic twin, `the_codes_b3_assigns_are_the_ones_the_standard_prints` to the standard's own Encoding column, and `jbig2_lineages.rs` to the picture the corpus codes without them | M |
 | 5 | Clause 6.3 refinement + 6.5.8.2 aggregate + SBREFINE + segment types 40/42/43 — **ahead of Huffman, by milestone 1's census: 9 files against 5** | **Done**, and with the exit criterion changed twice; both changes stated above. The `MqEncoder` round trip was dropped for Annex H page 3, and Annex H alone was then found insufficient — the corpus's own ground truth is what settles the templates. Landed on: page 3 decodes into its refined text with no warning; all ten corpus refinement variants reproduce the unrefined picture with 0 pixels different; `a_relabelled_refinement_template_decodes_identically` pins the argument the templates rest on. Counted injection below | M |
 
 ### Milestone 6 landed, and what actually adjudicates it
 
-Annex B's tables are **reconstructed rather than transcribed** — this repository
-has no copy of T.88 — so the question is what holds them to the standard. Two
-things turned out to be true, and one thing that was expected to be turned out
-not to be.
+Annex B's tables were **reconstructed rather than transcribed** until September
+2026, because this repository had no copy of T.88 — an earlier attempt to fetch
+it was refused. So for the whole of that time the question was what holds them
+to the standard. Two things turned out to be true, one thing that was expected
+to be turned out not to be, and then the standard arrived and settled it. Both
+halves are kept below: the second says which tables were wrong, and the first
+says what the reconstruction *was* able to prove, which is the part that
+transfers to the next clause that has to be derived rather than read.
 
 **The dictionary has a real oracle.** Annex H codes the same two symbols twice:
 segment 2 carries them with `SDHUFF = 1`, through height classes, a collective
@@ -493,6 +497,58 @@ claimed a clause was pinned by a fixture that could not pin it, beside a
 paragraph explaining why it could not. Every real-world JBIG2 document in five
 corpora decodes now, and the one that did not is what found it.
 
+#### Four tables were wrong, and how each was found
+
+ITU-T Rec. T.88 (02/2000) is published free of charge. An attempt to fetch it
+early in this work was refused, the tables were reconstructed instead, and the
+attempt was recorded as a standing constraint rather than retried. It was
+retried on 8 September 2026 and succeeded — and the PDF was read with **this
+engine's own `tpdf text`**, which is the pleasant part of the story and also
+the only part that is luck.
+
+Eleven of the fifteen came through the transcription unchanged. That is the
+measure of how far reconstruction got, and it is not nothing: B.8 and B.9 have
+twenty-one and twenty-two lines each and both are exact. Four did not:
+
+| Table | What was wrong | Found by |
+| --- | --- | --- |
+| **B.7** | Eleven lines where the standard has fifteen. The whole positive side was one line, `0…511`, where the standard splits it into six — so any value above zero read the wrong number of offset bits | Kraft: 0.640 of one |
+| **B.12** | Ten lines where the standard has thirteen, and it started at 0 where the standard starts at 1 | Kraft: 0.921 |
+| **B.10** | The right twenty-one lines and five wrong prefix lengths, in the run from 134 upwards | Kraft: 0.945 |
+| **B.15** | Eleven lines where the standard has thirteen, split differently either side of zero and closing at ±31 rather than ±24 | **nothing** |
+
+**B.15 is the one worth dwelling on.** Its lengths summed to exactly one, so
+the completeness invariant — the one property of these tables that could be
+checked without a copy of the standard — passed it. It was generated from a
+rule that looked like the shape of the clause, and the rule was wrong. A
+necessary condition is not a sufficient one, and no invariant this repository
+could state would have caught it: the corpus files that select B.15 exercise
+its short codes, which the wrong table also got right.
+
+That is also why the test module's separately generated B.14 and B.15 are
+retired rather than repaired. They existed so an injection could not move both
+sides of a round trip at once, which was the right instinct while the tables
+were guesses. What they could never give is independence from the *standard*,
+and a second copy written in this repository is a second chance to make the
+same mistake — which is exactly what happened.
+
+**Two things that follow, both now in the tree.** The standard prints an
+`Encoding` column beside every line: the bit string itself. That column is
+redundant with the prefix lengths if and only if B.3's canonical assignment is
+right, so it is an independent check on the assignment *and* a second reading
+of the same table;
+`the_codes_b3_assigns_are_the_ones_the_standard_prints` asserts forty-two of
+them across B.7, B.10, B.12 and B.15. And `jbig2_lineages.rs` gained an
+`ANNEX_B_TABLES` family, because a table that is complete and wrong does not
+refuse — it draws a different picture, and only a whole picture can say so.
+
+**One clause fact fell out of it.** No standard `SBHUFFDT` table can code zero:
+B.11, B.12 and B.13 all begin at 1. So 6.4.5 step 1's initial delta is at least
+one and a Huffman text region's first strip begins at `-SBSTRIPS` or above. The
+Huffman refinement fixtures used to write a zero there and select whichever
+table admitted it, which was a property of the mis-transcribed B.12 rather than
+of the standard.
+
 #### Huffman refinement, and the tables it reads
 
 6.4.11's envelope — `RI` as one plain bit, the four deltas through a selected
@@ -532,14 +588,19 @@ origin so the bit reader is **not** on a byte boundary when `BMSIZE` has been
 read. 6.4.11's alignment before the sub-stream is then a fact they depend on;
 its injection row read 0 before and does not now.
 
-**What none of this does is make the reconstruction right.** The tables are
+**What none of this did was make the reconstruction right.** The tables were
 still reconstructed and no fixture in a repository that also wrote the encoder
-can adjudicate them. What changed is that they are load-bearing. The test module
-carries **its own B.14 and B.15**, generated from the shape the clause states —
-five values with the code for zero at one bit; symmetric ranges doubling
-outwards — rather than called out of `table_b14` and `table_b15`. Without that
-separation an injection moves both sides of the round trip together and the row
-reads 0, which is exactly what the first run of the campaign below showed.
+could adjudicate them. What it bought was that they became load-bearing: the
+test module carried **its own B.14 and B.15**, generated from the shape the
+clause seemed to state — five values with the code for zero at one bit;
+symmetric ranges doubling outwards — rather than called out of `table_b14` and
+`table_b15`, because without that separation an injection moves both sides of
+the round trip together and the row reads 0.
+
+**The separately generated B.15 was wrong**, and so was the decoder's. See
+"Four tables were wrong" below; the generator is retired and the two fixtures
+now read the transcribed tables, because what they are for is the refinement
+path, and what checks a table is the standard.
 
 What still refuses: clause 7.4.13's custom tables (selector 3), and a delta that
 sizes an instance to nothing.

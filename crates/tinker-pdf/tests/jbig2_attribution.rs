@@ -270,22 +270,15 @@ fn every_refused_jbig2_file_is_attributed() {
 const BEARING: u32 = 118;
 
 /// Files reporting any refusal. It was **34** before Tier 2's JBIG2 rows.
-const REFUSED: u32 = 2;
+const REFUSED: u32 = 1;
 
-/// Every reason the corpus is still refused for, most files first.
+/// Every reason the corpus is still refused for.
 ///
-/// Two files, and there is nothing else:
-///
-/// - `pdfjs/issue3371.pdf` — a stream that stops inside a segment. Damage, and
-///   [`Jbig2Refusal::is_malformed`] says so.
-/// - `pdfjs/bitmap-symbol-symhuffB5B3-texthuffB7B9B12.pdf` — the three Annex B
-///   tables that are not complete prefix codes. The last JBIG2 capability this
-///   build is short of, and the only refusal here that is this build's fault.
-///
-/// **Every real-world document in five corpora decodes.** What is left is one
-/// fixture that is deliberately broken and one that reaches a table nobody has
-/// reconstructed.
-const EXPECTED: [(&str, u32); 3] = [("NoRegion", 2), ("TextRegionRefused", 1), ("Truncated", 1)];
+/// **One file, and it is a damaged one.** `pdfjs/issue3371.pdf` is a stream
+/// that stops inside a segment; [`Jbig2Refusal::is_malformed`] says so, and
+/// there is no capability behind it to build. Every other JBIG2 image in five
+/// corpora — 117 files, fixtures and real scans alike — decodes.
+const EXPECTED: [(&str, u32); 2] = [("NoRegion", 1), ("Truncated", 1)];
 
 /// **One file, image by image** — the diagnostic behind the census above.
 ///
