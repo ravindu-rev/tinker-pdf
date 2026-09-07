@@ -563,9 +563,31 @@ refuse them. That is the same limit as the bundled sRGB profile, and it is
 recorded in the [roadmap](../ROADMAP.md)'s named non-goals rather than left as
 owed work.
 
-The census also found a refusal nobody had counted: **25 subtables of format
-2**, the high-byte mapping the legacy CJK encodings use, which `lookup_cmap`
-does not cover.
+**A `cmap` of format 2 is read**, the high-byte mapping the legacy CJK
+encodings use: a 256-entry key array says, for each first byte, which subheader
+reads the byte after it, with key 0 meaning the byte stands alone. That is how
+a mixed one- and two-byte encoding is written as one table.
+
+The census found it, and then found something the roadmap row had not asked
+about. It asked how many of the **25** subtables are a face's only one — the
+answer is none, on 13 faces — but the number that matters is the platform:
+
+| subtables | platform, encoding |
+| ---: | --- |
+| 10 | (3, 3), Windows PRC — GBK byte pairs |
+| 10 | (1, 25), Macintosh, Chinese simplified |
+| 1 | (1, 0), Macintosh Roman |
+| **2** | **(3, 1), Windows Unicode BMP** |
+| **2** | **(0, 3), Unicode BMP** |
+
+The first three are legacy byte maps, and reaching them from a `char` needs the
+same conversion table the Macintosh row above does not have. **The last four
+are not.** A format 2 subtable on a Unicode platform is indexed by the scalar
+value directly — the high byte selects the subheader and the low byte indexes
+within it, which works for the BMP as well as for GBK — and `glyph_for_char`
+scores (3, 1) and (0, 3) above everything but (3, 10). So it selected those
+four and then got nothing back, because `lookup_cmap` had no arm for the
+format. Those were lost glyphs on four subtables nobody had counted.
 
 Two more are refused inside `tinker-pdf-shape`, for ruling 13's reason rather
 than for want of code: **Syriac's Alaph**, which selects `fin2`, `fin3` and

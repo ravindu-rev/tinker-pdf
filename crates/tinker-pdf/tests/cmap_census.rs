@@ -178,6 +178,9 @@ fn census_of_the_corpus_cmap_subtables() {
     let mut format13_faces = 0u32;
     let mut mac_non_roman_faces = 0u32;
     let mut only_mac_non_roman = 0u32;
+    let mut format2_faces = 0u32;
+    let mut only_format2 = 0u32;
+    let mut format2_pairs: BTreeMap<(u16, u16), u32> = BTreeMap::new();
     let mut seen: BTreeSet<Vec<u8>> = BTreeSet::new();
 
     for path in &files {
@@ -204,6 +207,19 @@ fn census_of_the_corpus_cmap_subtables() {
             if subtables.iter().any(|(_, _, _, format)| *format == 13) {
                 format13_faces += 1;
             }
+            // Format 2, the high-byte mapping, and the number the roadmap row
+            // asked for: how many faces have nothing else to fall back on.
+            if subtables.iter().any(|(_, _, _, format)| *format == 2) {
+                format2_faces += 1;
+                for (platform, encoding, _, format) in &subtables {
+                    if *format == 2 {
+                        *format2_pairs.entry((*platform, *encoding)).or_default() += 1;
+                    }
+                }
+                if subtables.iter().all(|(_, _, _, format)| *format == 2) {
+                    only_format2 += 1;
+                }
+            }
             // A Macintosh subtable whose language names an encoding other than
             // Roman: the byte map is in a legacy encoding, and 0 or 1 is the
             // language-independent Roman case.
@@ -228,6 +244,11 @@ fn census_of_the_corpus_cmap_subtables() {
     println!("faces with a format 13 subtable            {format13_faces:>6}");
     println!("faces with a Macintosh non-Roman subtable  {mac_non_roman_faces:>6}");
     println!("  ...and no Unicode subtable beside it     {only_mac_non_roman:>6}");
+    println!("faces with a format 2 subtable             {format2_faces:>6}");
+    println!("  ...and no subtable of another format     {only_format2:>6}");
+    for ((platform, encoding), count) in &format2_pairs {
+        println!("      {count:>6}  format 2 at ({platform}, {encoding})");
+    }
 
     println!("\nsubtable format:");
     for (format, count) in &formats {
@@ -264,6 +285,14 @@ fn census_of_the_corpus_cmap_subtables() {
         FORMAT_2,
         "the format 2 count moved"
     );
+    assert_eq!(
+        format2_faces, FORMAT_2_FACES,
+        "the format 2 face count moved"
+    );
+    assert_eq!(
+        only_format2, ONLY_FORMAT_2,
+        "a face now carries a format 2 subtable and nothing else, which is the          case the roadmap row said would schedule it"
+    );
 }
 
 /// Distinct embedded font programs across the five corpora.
@@ -291,8 +320,40 @@ const MAC_NON_ROMAN: u32 = 28;
 
 /// Format 2, the high-byte mapping the legacy CJK encodings use.
 ///
-/// Twenty-five subtables, and `lookup_cmap` covers 0, 4, 6, 12 and 13 — so this
-/// is a refusal nobody had counted, found by pointing the instrument at the
-/// question the roadmap actually asked. Whether any of the twenty-five is a
-/// face's *only* subtable is the number that would schedule it.
+/// Twenty-five subtables, found by pointing the instrument at the question the
+/// roadmap actually asked, and `lookup_cmap` reads them now.
 const FORMAT_2: u32 = 25;
+
+/// The faces carrying one — fewer than the subtables, since a face may carry
+/// several.
+const FORMAT_2_FACES: u32 = 13;
+
+/// **Faces whose only subtable is format 2**, which is the number the roadmap
+/// row said would schedule it: none.
+///
+/// That number is not the interesting one, and this is the second time the
+/// question the roadmap asked turned out to be the wrong question — the
+/// Macintosh row above went the same way. The platform and encoding breakdown
+/// the census prints is where the answer is:
+///
+/// | subtables | platform, encoding | what the bytes are |
+/// | ---: | --- | --- |
+/// | 10 | (3, 3) | Windows PRC — GBK byte pairs |
+/// | 10 | (1, 25) | Macintosh, Chinese simplified |
+/// | 1 | (1, 0) | Macintosh Roman |
+/// | **2** | **(3, 1)** | **Windows Unicode BMP** |
+/// | **2** | **(0, 3)** | **Unicode BMP** |
+///
+/// The first three are legacy byte maps: reaching them from a `char` needs a
+/// conversion table this repository does not carry, and that is the same named
+/// non-goal as the Macintosh row's, recorded in `features/fonts.md`.
+///
+/// **The last four are not.** A format 2 subtable on a Unicode platform is
+/// indexed by the scalar value directly — the high byte selects the subheader
+/// and the low byte indexes within it, which works for the BMP as well as it
+/// does for GBK. `Sfnt::glyph_for_char` scores (3, 1) and (0, 3) above
+/// everything but (3, 10), so it *selected* those four and then got `None`
+/// from `lookup_cmap`, which had no arm for the format. Those were lost
+/// glyphs, on four subtables nobody had counted, and they are the reason this
+/// row was worth closing rather than keeping.
+const ONLY_FORMAT_2: u32 = 0;

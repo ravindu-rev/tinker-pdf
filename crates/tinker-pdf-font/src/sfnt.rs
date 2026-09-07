@@ -202,6 +202,64 @@ fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
             let byte = u8::try_from(code).ok()?;
             sub.get(6 + usize::from(byte)).map(|&g| u16::from(g))
         }
+        // Format 2: the high-byte mapping the legacy CJK encodings use.
+        //
+        // A 256-entry key array says, for each *first* byte, which subheader
+        // reads the byte after it — key 0 meaning "this byte is not a lead
+        // byte", which is how a mixed one- and two-byte encoding is written as
+        // one table. Subheader 0 is therefore the single-byte map and the rest
+        // are one per lead byte.
+        //
+        // **`code` here is a byte or a byte pair, not a scalar value.** That is
+        // the whole difficulty with this format and it is not this function's
+        // to solve: the bytes are in Shift-JIS, Big5, GBK or one of the
+        // Macintosh legacy encodings, named by the subtable's platform,
+        // encoding and language, and turning a Unicode scalar into one needs a
+        // conversion table this repository does not carry. See
+        // `Sfnt::glyph_for_char`, which is where that decision is recorded,
+        // and `features/fonts.md`, which records why. What is here is the
+        // format read correctly, so a caller holding real codes gets real
+        // glyphs.
+        2 => {
+            let keys = 6usize;
+            let headers = keys + 512;
+            if code > 0xFFFF {
+                return Some(0);
+            }
+            // The *first* byte selects the subheader, whether or not a second
+            // follows. Key 0 says the byte stands alone and subheader 0 reads
+            // it; anything else says it leads a pair, and the key is already
+            // the byte offset into the subheader array because each subheader
+            // is eight bytes wide.
+            let lead = if code < 0x100 { code } else { code >> 8 } as usize;
+            let key = usize::from(be16(sub, keys + lead * 2)?);
+            // A single byte that leads a pair is half a code, and a lead byte
+            // whose key is zero is not a lead byte. Both are "no glyph".
+            if (code < 0x100) != (key == 0) {
+                return Some(0);
+            }
+            let lo = (code & 0xFF) as usize;
+            let header = headers.checked_add(key)?;
+            let first = u32::from(be16(sub, header)?);
+            let count = u32::from(be16(sub, header + 2)?);
+            let delta = be16(sub, header + 4)?;
+            let range = usize::from(be16(sub, header + 6)?);
+            let byte = lo as u32;
+            if count == 0 || byte < first || byte >= first + count {
+                return Some(0);
+            }
+            // The offset is relative to its own slot, as in format 4.
+            let at = header
+                .checked_add(6)?
+                .checked_add(range)?
+                .checked_add((byte - first) as usize * 2)?;
+            let glyph = be16(sub, at)?;
+            Some(if glyph == 0 {
+                0
+            } else {
+                glyph.wrapping_add(delta)
+            })
+        }
         // Format 4: segmented, the ubiquitous BMP format.
         4 => {
             let code = u16::try_from(code).ok()?;
@@ -313,6 +371,74 @@ mod tests {
         out.extend_from_slice(&(table.len() as u32).to_be_bytes());
         out.extend_from_slice(table);
         out
+    }
+
+    /// **Format 2 reads a byte and a byte pair, and refuses the halves.**
+    ///
+    /// A hand-built subtable in the shape the legacy CJK encodings use: `0x41`
+    /// is a single-byte code, `0x81` leads a pair, and every other lead byte
+    /// maps nothing. The three cases that matter are the two lookups and the
+    /// two ways of getting half a code — a lead byte on its own, and a pair
+    /// whose first byte does not lead.
+    #[test]
+    fn a_format_2_subtable_reads_one_byte_and_two() {
+        let mut sub: Vec<u8> = Vec::new();
+        sub.extend_from_slice(&2u16.to_be_bytes()); // format
+        sub.extend_from_slice(&0u16.to_be_bytes()); // length, unread here
+        sub.extend_from_slice(&0u16.to_be_bytes()); // language
+                                                    // subHeaderKeys: 0 everywhere but 0x81, which names subheader 1 at
+                                                    // byte offset 8.
+        let mut keys = vec![0u8; 512];
+        keys[0x81 * 2 + 1] = 8;
+        sub.extend_from_slice(&keys);
+
+        // Subheader 0: the single-byte map, codes 0x41..0x42.
+        let headers = sub.len();
+        sub.extend_from_slice(&0x41u16.to_be_bytes()); // firstCode
+        sub.extend_from_slice(&2u16.to_be_bytes()); // entryCount
+        sub.extend_from_slice(&0u16.to_be_bytes()); // idDelta
+        sub.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset, patched
+                                                    // Subheader 1: the pair map, low bytes 0x40..0x41.
+        sub.extend_from_slice(&0x40u16.to_be_bytes());
+        sub.extend_from_slice(&2u16.to_be_bytes());
+        sub.extend_from_slice(&1000u16.to_be_bytes()); // idDelta
+        sub.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset, patched
+        let glyphs = sub.len();
+        for id in [7u16, 8, 1, 0] {
+            sub.extend_from_slice(&id.to_be_bytes());
+        }
+
+        // Each offset is measured from its own slot, as in format 4.
+        let patch = |sub: &mut Vec<u8>, at: usize, to: usize| {
+            let offset = (to - (at + 6)) as u16;
+            sub[at + 6..at + 8].copy_from_slice(&offset.to_be_bytes());
+        };
+        patch(&mut sub, headers, glyphs);
+        patch(&mut sub, headers + 8, glyphs + 4);
+
+        assert_eq!(lookup_cmap(&sub, 0x41), Some(7), "a single-byte code");
+        assert_eq!(lookup_cmap(&sub, 0x42), Some(8), "the next one");
+        assert_eq!(lookup_cmap(&sub, 0x43), Some(0), "past the run");
+        assert_eq!(
+            lookup_cmap(&sub, 0x8140),
+            Some(1001),
+            "a pair, and `idDelta` is added to the glyph the array holds"
+        );
+        assert_eq!(
+            lookup_cmap(&sub, 0x8141),
+            Some(0),
+            "a zero in the array stays zero rather than taking the delta"
+        );
+        assert_eq!(
+            lookup_cmap(&sub, 0x81),
+            Some(0),
+            "a lead byte on its own is half a code"
+        );
+        assert_eq!(
+            lookup_cmap(&sub, 0x4141),
+            Some(0),
+            "a pair whose first byte does not lead is not a code either"
+        );
     }
 
     #[test]
