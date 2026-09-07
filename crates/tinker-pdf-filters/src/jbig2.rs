@@ -3934,6 +3934,7 @@ pub fn decode_attributed(
         symbols: BTreeMap::new(),
         tables: BTreeMap::new(),
         patterns: BTreeMap::new(),
+        declared_content: false,
         seen: BTreeSet::new(),
         refused: BTreeSet::new(),
         bitmap,
@@ -3947,6 +3948,9 @@ pub fn decode_attributed(
     let globals = segments(params.globals, warnings);
     let own = segments(data, warnings);
     for segment in globals.iter().chain(own.iter()) {
+        if declares_content(segment.kind) {
+            page.declared_content = true;
+        }
         if !understood(segment.kind) {
             if carries_content(segment.kind) {
                 note(warnings, Jbig2Refusal::UnhandledSegmentType(segment.kind));
@@ -3990,10 +3994,52 @@ pub fn decode_attributed(
 
     if page.regions == 0 {
         // The refusal. Not polish, and not a fallback: see the module note.
-        note(warnings, Jbig2Refusal::NoRegion);
-        return Err(FilterError::Unsupported(Capability::Jbig2));
+        //
+        // **What it is aimed at, exactly.** The note's argument is about a
+        // stream that carries content this build could not draw — a symbol
+        // dictionary and a text region, once — which would otherwise decode its
+        // page information segment, find no region it understood, and hand back
+        // a blank white page reported as success.
+        //
+        // A stream that carries *no content segment at all* is a different
+        // thing. Its page information segment declares the size and the default
+        // pixel value, and that is the whole of what the file says the page is:
+        // 7.4.8.5's default pixel is the page, and a producer that emits one
+        // page information segment and nothing else has told us the page is
+        // blank rather than failed to tell us anything. `safedocs/0000231.pdf`
+        // is that file — a 240-page scan whose last page is empty, whose other
+        // 240 pages decode, and which was refused whole for its blank one.
+        //
+        // So the refusal needs both halves: nothing was drawn, *and* either
+        // something was offered that this build did not draw, or the page never
+        // declared itself. A refusal recorded anywhere in the stream is the
+        // first half; `page.number` being unset is the second.
+        if page.declared_content || page.number.is_none() || !warnings.is_empty() {
+            note(warnings, Jbig2Refusal::NoRegion);
+            return Err(FilterError::Unsupported(Capability::Jbig2));
+        }
     }
     Ok(page.bitmap.bits)
+}
+
+/// Whether a segment of this type is the page's *content* rather than its
+/// framing.
+///
+/// The page information segment, the end-of-page, end-of-stripe and end-of-file
+/// markers, the profiles segment and the extension segment all describe a page
+/// without putting anything on it. Everything else is something a producer put
+/// there and expects to see drawn — which is what makes the difference between
+/// a blank page and a page this build failed to draw.
+const fn declares_content(kind: u8) -> bool {
+    !matches!(
+        kind,
+        kind::PAGE_INFORMATION
+            | kind::END_OF_PAGE
+            | kind::END_OF_STRIPE
+            | kind::END_OF_FILE
+            | kind::PROFILES
+            | kind::EXTENSION
+    )
 }
 
 /// **One generic refinement region segment (T.88 7.4.7)**, decoded against a
@@ -4085,6 +4131,12 @@ struct Page {
     /// reference order, for the same reason a text region's symbols are: the
     /// grey values index across the concatenation.
     patterns: BTreeMap<u32, Vec<Bitmap>>,
+    /// Whether any segment offered content rather than framing.
+    ///
+    /// See the refusal at the end of [`decode`]: a page that was offered
+    /// something and drew nothing is a failure, and a page that was offered
+    /// nothing is blank.
+    declared_content: bool,
     /// Every segment number this stream has offered, whatever its type.
     ///
     /// A text region refers to its dictionaries *and* to its custom tables, and
@@ -6402,6 +6454,7 @@ mod tests {
             symbols: BTreeMap::new(),
             tables: BTreeMap::new(),
             patterns: BTreeMap::new(),
+            declared_content: false,
             seen: BTreeSet::new(),
             refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
@@ -6432,6 +6485,7 @@ mod tests {
             symbols: BTreeMap::new(),
             tables: BTreeMap::new(),
             patterns: BTreeMap::new(),
+            declared_content: false,
             seen: BTreeSet::new(),
             refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
@@ -7800,6 +7854,57 @@ mod tests {
         assert!(
             custom_table(&small).is_some(),
             "a four-value table was refused, so the cap is not what fired"
+        );
+    }
+
+    /// **A page that declares itself and carries no content is blank, and a
+    /// page that was offered content and drew none is refused.**
+    ///
+    /// The module note's refusal is aimed at the second: a stream whose symbol
+    /// dictionary and text region this build could not draw would otherwise
+    /// hand back a white page reported as success. It was aimed at the first as
+    /// well, and should not have been -- 7.4.8.5's default pixel value *is* the
+    /// page, so a producer that emits one page information segment and nothing
+    /// else has said the page is blank rather than failed to say anything.
+    ///
+    /// `safedocs/0000231.pdf` is why this matters outside a fixture: a 240-page
+    /// scan whose last page is empty, whose other 240 pages decode, and which
+    /// was refused whole for the blank one.
+    #[test]
+    fn a_page_that_carries_no_content_segment_is_blank_rather_than_refused() {
+        let params = Jbig2Params {
+            globals: &[],
+            width: 16,
+            height: 16,
+        };
+
+        // One page information segment, and nothing else.
+        let blank = header(0, kind::PAGE_INFORMATION, 1, &page_info(16, 16, 0));
+        let mut warnings = Vec::new();
+        let bits = decode(&blank, &params, 1 << 20, &mut warnings)
+            .expect("a declared blank page is what the file says it is");
+        assert_eq!(bits, vec![0u8; 2 * 16], "the default pixel value is white");
+        assert!(warnings.is_empty(), "and nothing was skipped: {warnings:?}");
+
+        // The same page, plus a content segment this build cannot draw. Now
+        // something *was* offered and nothing was drawn, which is the refusal.
+        let mut offered = blank.clone();
+        offered.extend(header(1, kind::COLOUR_PALETTE, 1, &[0; 4]));
+        let mut warnings = Vec::new();
+        assert_eq!(
+            decode(&offered, &params, 1 << 20, &mut warnings),
+            Err(FilterError::Unsupported(Capability::Jbig2)),
+            "a page offered content it could not draw is not a blank page"
+        );
+        assert!(warnings.contains(&Warning::Jbig2SegmentSkipped));
+
+        // And a stream with no page information segment at all says nothing,
+        // so there is no default pixel value to hand back.
+        let mut warnings = Vec::new();
+        assert_eq!(
+            decode(&[], &params, 1 << 20, &mut warnings),
+            Err(FilterError::Unsupported(Capability::Jbig2)),
+            "a stream that declares no page is not a blank page"
         );
     }
 }

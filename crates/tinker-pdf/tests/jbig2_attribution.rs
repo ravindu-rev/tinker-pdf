@@ -144,7 +144,7 @@ fn jbig2_images(bytes: Vec<u8>) -> Vec<(Vec<u8>, Vec<u8>, u32, u32)> {
 }
 
 /// The short name of a refusal, for a table a person reads.
-fn name(refusal: Jbig2Refusal) -> String {
+fn name_of(refusal: Jbig2Refusal) -> String {
     match refusal {
         Jbig2Refusal::UnhandledSegmentType(kind) => format!("UnhandledSegmentType({kind})"),
         other => format!("{other:?}"),
@@ -212,7 +212,7 @@ fn every_refused_jbig2_file_is_attributed() {
         if refusals.iter().any(|r| r.is_malformed()) {
             malformed_files += 1;
         }
-        let names: Vec<String> = refusals.iter().copied().map(name).collect();
+        let names: Vec<String> = refusals.iter().copied().map(name_of).collect();
         for one in &names {
             *by_refusal.entry(one.clone()).or_default() += 1;
         }
@@ -244,7 +244,8 @@ fn every_refused_jbig2_file_is_attributed() {
     // Pinned against `corpus/corpora.lock` as it stands, 6 September 2026, so a
     // census nobody reads cannot drift. The four Tier 2 lineages — halftone,
     // custom code tables, transposed placement and 7.2.7's unknown length —
-    // have all left this list, taking it from 34 files to six.
+    // have all left this list, and so has a 240-page scan that was refused
+    // whole for having one blank page. 34 files to five.
     assert_eq!(bearing, BEARING, "the corpus's JBIG2 population moved");
     assert_eq!(refused_files, REFUSED, "the refused count moved");
     let named: Vec<(String, u32)> = ordered
@@ -269,15 +270,15 @@ fn every_refused_jbig2_file_is_attributed() {
 const BEARING: u32 = 118;
 
 /// Files reporting any refusal. It was **34** before Tier 2's JBIG2 rows.
-const REFUSED: u32 = 6;
+const REFUSED: u32 = 5;
 
 /// Every reason the corpus is still refused for, most files first.
 ///
-/// Three of the six say the *file* is broken rather than that this build is
+/// Three of the five say the *file* is broken rather than that this build is
 /// short of something, and a reader should be able to tell which from this list
 /// alone — that is what [`Jbig2Refusal::is_malformed`] is for.
 const EXPECTED: [(&str, u32); 14] = [
-    ("NoRegion", 5),
+    ("NoRegion", 4),
     ("DanglingReference", 2),
     ("SymbolDictionaryRefused", 2),
     ("TextRegionRefused", 2),
@@ -292,3 +293,49 @@ const EXPECTED: [(&str, u32); 14] = [
     ("TextRegionWithoutSymbols", 1),
     ("Truncated", 1),
 ];
+
+/// **One file, image by image** — the diagnostic behind the census above.
+///
+/// `TINKER_JBIG2_FILE` names a path under the corpus root; every JBIG2 image in
+/// it is decoded on its own and reported with its size and its refusals. A
+/// file-level tally cannot say *which* of a 240-page scan's pages went wrong,
+/// and that is the question a real document's refusal always turns into.
+#[test]
+#[ignore = "diagnostic; set TINKER_JBIG2_FILE to a path under the corpus root"]
+fn one_file_image_by_image() {
+    let Some(root) = corpus_root() else {
+        println!("jbig2-one-file: SKIPPED (no corpus)");
+        return;
+    };
+    let Some(name) = std::env::var_os("TINKER_JBIG2_FILE") else {
+        println!("jbig2-one-file: SKIPPED (set TINKER_JBIG2_FILE)");
+        return;
+    };
+    let path = root.join(name.to_string_lossy().as_ref());
+    let bytes = std::fs::read(&path).expect("the file is readable");
+    let images = jbig2_images(bytes);
+    println!("jbig2-one-file: RAN over {} images", images.len());
+
+    let mut clean = 0u32;
+    for (index, (data, globals, width, height)) in images.iter().enumerate() {
+        let params = Jbig2Params {
+            globals,
+            width: *width,
+            height: *height,
+        };
+        let mut found = Vec::new();
+        let out = jbig2_decode_attributed(data, &params, CEILING, &mut found);
+        if found.is_empty() && out.is_ok() {
+            clean += 1;
+            continue;
+        }
+        let names: Vec<String> = found.iter().copied().map(name_of).collect();
+        println!(
+            "  image {index:>4}  {width}x{height}  {} bytes  {}  {}",
+            data.len(),
+            if out.is_ok() { "decoded" } else { "REFUSED" },
+            names.join(" ")
+        );
+    }
+    println!("\n{clean} of {} images decoded clean", images.len());
+}
