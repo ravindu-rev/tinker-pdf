@@ -1349,3 +1349,65 @@ fn a_page_asked_for_in_cmyk_comes_back_in_rgb() {
     assert_eq!(bitmap.format, tinker_pdf::PixelFormat::Rgba8);
     assert_eq!(bitmap.components(), 4);
 }
+
+/// **A non-separable blend inside a CMYK group is reported** (ruling 10).
+///
+/// 11.3.5.3's four modes reason about hue, saturation and luminosity, which ink
+/// quantities do not have, so a subtractive buffer converts its operands to
+/// light, blends there and converts back. That round trip is a leniency:
+/// `rgb_to_cmyk` produces one particular ink split, so a rich black arrives
+/// back as its pure-K equivalent — the same colour, and a different starting
+/// point for the next blend over it.
+///
+/// `tinker-pdf-raster`'s own comment has claimed since it was written that this
+/// was reported, and it was not: the variant it named did not exist. This is
+/// the assertion that makes the claim true, and the separable half is asserted
+/// beside it so the warning cannot become decoration that fires on everything.
+#[test]
+fn a_non_separable_blend_over_ink_is_named_and_a_separable_one_is_not() {
+    let saturation = render(blended_in_space(
+        "/DeviceCMYK",
+        "/Saturation",
+        "1",
+        "0.8 0.4 0.2 rg",
+        "0.3 0.6 0.9 rg",
+    ));
+    assert!(
+        saturation
+            .warnings
+            .contains(&RenderWarning::ApproximatedGroupBlend),
+        "a non-separable blend over ink went through 11.3.5.3's round trip \
+         without saying so: {:?}",
+        saturation.warnings
+    );
+
+    let multiply = render(blended_in_space(
+        "/DeviceCMYK",
+        "/Multiply",
+        "1",
+        "0.8 0.4 0.2 rg",
+        "0.3 0.6 0.9 rg",
+    ));
+    assert!(
+        !multiply
+            .warnings
+            .contains(&RenderWarning::ApproximatedGroupBlend),
+        "a separable blend needs no round trip and must not be reported: {:?}",
+        multiply.warnings
+    );
+
+    // And the same mode over an additive buffer is exact, so it is silent.
+    let rgb = render(blended_in_space(
+        "/DeviceRGB",
+        "/Saturation",
+        "1",
+        "0.8 0.4 0.2 rg",
+        "0.3 0.6 0.9 rg",
+    ));
+    assert!(
+        !rgb.warnings
+            .contains(&RenderWarning::ApproximatedGroupBlend),
+        "an RGB group blends non-separably without any conversion: {:?}",
+        rgb.warnings
+    );
+}

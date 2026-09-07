@@ -62,11 +62,18 @@ pub struct Form {
 
 /// A transparency group XObject's attributes (11.6.6).
 ///
-/// The group's colour space is deliberately absent. 11.6.6 lets `/CS` name
-/// the space the group's contents are composited in; this engine composites
-/// in RGB throughout, and changing that is a separate decision from making
-/// groups exist at all — recorded as a non-goal in the gap plan rather than
-/// half-answered here.
+/// 11.6.6 lets `/CS` name the space the group's contents are composited in,
+/// and [`Group::space`] below carries it: grey, RGB and CMYK groups each
+/// composite in their own, which is what `CmykA8` exists for. `/Lab` is the
+/// one that does not, and it is reported by name rather than silently
+/// composited in RGB.
+///
+/// This comment used to say the colour space was *deliberately absent* and
+/// that the engine composited in RGB throughout. That stopped being true when
+/// the field three lines below was added, and it stayed here — which is the
+/// direction of documentation drift that is hardest to catch, because a reader
+/// checking the claim against the struct sees the contradiction and a reader
+/// checking the struct against the claim does not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Group {
     /// `/I`: the group composites against a transparent backdrop rather than

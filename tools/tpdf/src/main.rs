@@ -2045,6 +2045,7 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
         W::HiddenOptionalContent { .. } => "HiddenOptionalContent".to_string(),
         W::GroupBudgetSpent { .. } => "GroupBudgetSpent".to_string(),
         W::UnsupportedGroupSpace { space } => format!("UnsupportedGroupSpace({space})"),
+        W::ApproximatedGroupBlend => "ApproximatedGroupBlend".to_string(),
         W::Cancelled => "Cancelled".to_string(),
     }
 }

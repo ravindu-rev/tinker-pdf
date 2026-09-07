@@ -25,15 +25,21 @@ nothing on the pixel path evaluates a transcendental and ruling 4 holds. Grey
 profiles are the same with one curve. A printer profile carries a multi-dimensional lookup table
 instead — `mft1` or `mft2` at an `A2B*` tag, three stages of curve with an
 interpolated grid between them — and those are read too, in the v2 shape that
-is 99.3 % of them. Measured against the corpus's 2 750 real
-profiles: **3 227 compile, 99.8 %** — and 682 of the 5 525 files name an
+is almost all of them. Measured against the corpus's **3 235** real profiles,
+September 2026: **3 227 compile, 99.8 %** — and 682 of the 5 525 files name an
 `ICCBased` space that paints through one, which the corpus report counts as
-`iccbased`. The six that do not compile are named: 3 a data space with no
-transform here, 2 a connection space this build cannot reach, and 1 v4's
-`mAB ` table. Those and the CIE spaces (CalRGB, CalGray)
-are `ColorSpace::Approximated` — read by component count, which is the
-alternate-space reading 8.6.5.5 permits, and the approximation is stated on
-the type rather than hidden. `[/Pattern base]` carries the underlying space
+`iccbased`. The eight that do not compile are named: 4 a connection space this
+build cannot reach, 3 a data space with no transform here, and 1 v4's `mAB `
+table. Those are `ColorSpace::Approximated` — read by component count, which is
+the alternate-space reading 8.6.5.5 permits, and the approximation is stated on
+the type rather than hidden.
+
+**`CalRGB` and `CalGray` are not that**, and this page said they were until it
+was checked against the code. They are aliased to `DeviceRGB` and `DeviceGray`
+outright, in `parse_space` and its two siblings, so `/WhitePoint`, `/Gamma`,
+`/Matrix` and `/BlackPoint` are never read and nothing on the type records that
+an approximation happened. The observable colours are the same as
+`Approximated`'s would be; what is missing is the record. `[/Pattern base]` carries the underlying space
 of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
 Initial colours follow 8.6.8 — CMYK starts at full black ink, not all zeros.
 Out-of-range components clamp rather than wrap.
@@ -114,8 +120,12 @@ never handed back in CMYK, because a `Bitmap` says how many components it has
 and nothing about what they mean.
 
 `/Lab` is the one still composited in RGB and reported by name: its components
-are not in the unit interval at all. Measured over the 5 525 corpus files,
-August 2026: **35 declare a `/DeviceCMYK` group and none declares `/Lab`**. ExtGState
+are not in the unit interval at all. **No corpus file declares one**: over the
+5 525 files of September 2026, `RenderWarning::UnsupportedGroupSpace` is
+reported zero times in all three recorded bars, which is the only figure here
+measured against the current corpus. The count of 35 `/DeviceCMYK` groups is an
+earlier measurement over a smaller corpus and is left attributed to it rather
+than restated as current. ExtGState
 `/SMask` works in both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with
 `/BC` read in the mask group's own `/Group /CS` and defaulting to black
 (fully masked, the default that does not invert every drop shadow), and
@@ -201,7 +211,8 @@ helpers `Page::render` composes.
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | Blending a group declared in `/Lab` | `RenderWarning::UnsupportedGroupSpace` | Its components are not in the unit interval, so 11.3.5's formulas have nothing to say about them; the group composites in RGB and is **named**. Grey, RGB and CMYK groups all composite in their own space now | [ROADMAP](../ROADMAP.md) |
-| An ICC profile this build cannot make a transform of | `ColorSpace::Approximated`, stated on the type | The `A2B*` lookup tables, a connection space other than XYZ, or a data space with no transform here — 143 of the corpus's 2 750 profiles. All three fall back to 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read. CalRGB and CalGray are still approximated | [ROADMAP](../ROADMAP.md) |
+| An ICC profile this build cannot make a transform of | `ColorSpace::Approximated`, stated on the type | A v4 `mAB ` table, a connection space other than XYZ, or a data space with no transform here — **8 of the corpus's 3 235 profiles**, September 2026. All three fall back to 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
+| `CalRGB` and `CalGray` | nothing — they are aliased to `DeviceRGB` and `DeviceGray` | 8.6.5.1 and 8.6.5.2's white point, gamma and matrix are not read, and unlike an ICC profile this build refuses, no type records that an approximation happened | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
 

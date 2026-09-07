@@ -443,3 +443,13 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check licenses bans sources
+
+      # The other half, and it had been claimed rather than run.
+      # `cargo deny` reads the *crate* graph and has nothing to say about a
+      # directory of fetched PDFs, so `corpus/README.md`'s licence table is
+      # what records their terms -- and that file said it was checked here
+      # when nothing checked it. `--check` regenerates the table from
+      # `corpus/corpora.lock` and fails on any difference, so a corpus cannot
+      # be added or repinned without its terms reaching the file a person
+      # reads.
+      - run: cargo run -p xtask -- corpus-licences --check

@@ -746,17 +746,23 @@ fn combine(destination: u32, source: u32, op: u8) -> u32 {
 // bitstream, and the standard publishes fifteen tables of them.
 //
 // **Where these numbers come from, stated plainly.** The tables below are
-// reconstructed rather than transcribed from a copy of T.88, and the check on
-// them is the standard's own datastream: Annex H.1 codes one picture twice, as
-// a Huffman page and an arithmetic page, and
-// `annex_h_codes_one_picture_twice_and_both_ways_agree` requires the two
-// decodes to be byte-identical over the whole page. A single wrong prefix
-// length desynchronises the reader and the pages differ, so there is no
-// outcome where a wrong table produces a plausible picture — which is the
-// failure mode this module's refusals exist to prevent. Only the six tables
-// that page reaches are here; the rest refuse by name until something needs
-// them, and the reachability census in `crates/tinker-pdf/tests/jbig2_census.rs`
-// is what would say when.
+// reconstructed rather than transcribed from a copy of T.88, and what holds
+// them to the standard is the standard's own datastream: Annex H codes the
+// same two symbols twice, once with `SDHUFF` through B.1, B.2 and B.4 and once
+// through the MQ coder, and `annex_h_codes_the_same_symbols_two_ways` requires
+// the two to be byte-identical. A single wrong prefix length desynchronises the
+// reader and yields noise rather than a glyph, so there is no outcome where a
+// wrong table produces a plausible picture — which is the failure mode this
+// module's refusals exist to prevent.
+//
+// **All fifteen are here now**, and three of them are wrong. B.3 assigns
+// canonical codes from prefix lengths alone, so a table decodes every input if
+// and only if its lengths satisfy Kraft's equality; B.7, B.10 and B.12 sit at
+// 0.640, 0.945 and 0.921 of one, which means some bit patterns decode to
+// nothing and a file selecting them is refused. They are pinned by
+// `annex_b_tables_that_are_not_complete_prefix_codes_are_named` rather than
+// repaired, because a table that looks plausible is exactly what this module's
+// history warns about — see `docs/ROADMAP.md` for what would settle them.
 
 /// A bit reader, most significant bit first, over a segment's data.
 ///
@@ -1671,12 +1677,18 @@ fn symbol_dictionary(
     let rtemplate = ((flags >> 12) & 0x0001) as u8;
 
     if context_used {
-        // Named rather than lumped in with "a segment type this build does not
-        // decode": these are variants of a segment it *does* decode, and the
-        // difference is what tells a file that needs one lineage from a file
-        // that needs another. Refinement itself is decoded now; what is
-        // refused here is its Huffman road, which codes each refinement's
-        // length in a field this decoder does not read.
+        // 7.4.2's used/retained flags: a dictionary that consumes the adaptive
+        // state another segment left behind. Named rather than lumped in with
+        // "a segment type this build does not decode", because it is a variant
+        // of a segment this build *does* decode and the difference is what
+        // tells a file needing one lineage from a file needing another.
+        //
+        // One corpus file uses it -- three segments consuming and two
+        // retaining -- which is below ruling 3's line, so it stays a named
+        // refusal with a reachability test until the count moves.
+        //
+        // (This comment used to describe the Huffman refinement road, which is
+        // a different condition entirely and has decoded since milestone 5.)
         note(warnings, Jbig2Refusal::RetainedContext);
         return None;
     }

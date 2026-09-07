@@ -91,6 +91,18 @@ pub enum RenderWarning {
         /// The space the group asked for.
         space: String,
     },
+    /// One of 11.3.5.3's four non-separable blend modes was applied inside a
+    /// `/DeviceCMYK` transparency group.
+    ///
+    /// Those modes reason about hue, saturation and luminosity, which ink
+    /// quantities do not have, so the operands convert to light, blend there,
+    /// and convert back. The round trip is not free: `rgb_to_cmyk` produces one
+    /// particular ink split, so a rich black arrives back as its pure-K
+    /// equivalent. The colour is the same and the *next* blend over it is not,
+    /// which is why ruling 10 wants it said rather than done quietly.
+    ///
+    /// Reported once per group, not once per pixel.
+    ApproximatedGroupBlend,
     /// An image used a codec that is not built in; a placeholder was drawn.
     UnsupportedImage {
         /// Which codec.
@@ -1104,6 +1116,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self.base = frame.base;
         self.clip = frame.clip;
         let soft = frame.soft;
+
+        // 11.3.5.3 over a subtractive buffer: reported once per group rather
+        // than once per pixel, which is what makes it a leniency record and not
+        // a log. The comment beside `blend` in `tinker-pdf-raster` has claimed
+        // since it was written that this was reported; until now it was not.
+        if buffer.approximated_blends() > 0 {
+            let warning = RenderWarning::ApproximatedGroupBlend;
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
 
         // 11.4.7.2. A no-op on an isolated group, which kept no backdrop.
         buffer.remove_backdrop();

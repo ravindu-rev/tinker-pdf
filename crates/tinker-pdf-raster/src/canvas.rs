@@ -173,6 +173,17 @@ pub struct Canvas {
     /// backdrop's alpha is zero and all of the arithmetic below collapses to
     /// what it was.
     backdrop: Option<Box<Canvas>>,
+    /// Whether a non-separable blend mode has been applied over a subtractive
+    /// buffer, which 11.3.5.3 cannot do without a round trip through light.
+    ///
+    /// A counter rather than nothing at all, because the round trip is a
+    /// *leniency* and ruling 10 says a leniency is named. `rgb_to_cmyk`
+    /// produces one particular ink split, so a rich black arrives back as its
+    /// pure-K equivalent: the colour is the same and the next blend over it is
+    /// not. The comment beside `blend` claimed this was reported and it was
+    /// not, which is why the flag exists on the buffer that can see it —
+    /// nothing lower down knows what a warning is (ruling 8).
+    approximated_blends: u32,
 }
 
 impl Canvas {
@@ -194,6 +205,7 @@ impl Canvas {
             stride,
             data: vec![0; len],
             backdrop: None,
+            approximated_blends: 0,
         };
         canvas.clear(background);
         canvas
@@ -281,6 +293,9 @@ impl Canvas {
             return;
         }
 
+        if mode.is_nonseparable() && self.format == PixelFormat::CmykA8 {
+            self.approximated_blends = self.approximated_blends.saturating_add(1);
+        }
         let components = self.format.components();
         let source = self.encode(color);
         let color_alpha = u32::from(color.a);
@@ -322,6 +337,17 @@ impl Canvas {
     /// An image is drawn by mapping device pixels back into its samples, so
     /// there is no coverage mask to go through — each pixel is decided
     /// individually and blended here.
+    /// How many non-separable blends over a subtractive buffer this canvas has
+    /// performed, and therefore how many went through 11.3.5.3's round trip.
+    ///
+    /// Zero on every additive buffer and on every canvas that never used one of
+    /// the four modes. A caller turns a non-zero count into the warning ruling
+    /// 10 asks for; nothing here knows what a warning is (ruling 8).
+    #[must_use]
+    pub const fn approximated_blends(&self) -> u32 {
+        self.approximated_blends
+    }
+
     pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color, alpha: f64) {
         self.blend_pixel_with(x, y, color, alpha, BlendMode::Normal);
     }
@@ -341,6 +367,9 @@ impl Canvas {
             return;
         }
 
+        if mode.is_nonseparable() && self.format == PixelFormat::CmykA8 {
+            self.approximated_blends = self.approximated_blends.saturating_add(1);
+        }
         let components = self.format.components();
         let source = self.encode(color);
         let base = (y as usize) * self.stride + (x as usize) * components;
@@ -415,7 +444,9 @@ impl Canvas {
         // The source rectangle, mapped into this canvas and clipped to it.
         let (x0, y0, x1, y1) = place(at, src.width, src.height, self.width, self.height);
         let components = self.format.components();
-
+        if mode.is_nonseparable() && self.format == PixelFormat::CmykA8 {
+            self.approximated_blends = self.approximated_blends.saturating_add(1);
+        }
         for row in y0..y1 {
             if row.wrapping_sub(y0) % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
                 return;
@@ -588,6 +619,7 @@ impl Canvas {
             stride: self.stride,
             data: self.data.clone(),
             backdrop: None,
+            approximated_blends: 0,
         }
     }
 
@@ -920,8 +952,10 @@ fn blend(
         // That round trip is not free: `rgb_to_cmyk` produces one particular
         // ink split, so a rich black arrives back as its pure-K equivalent.
         // The colour is the same and the *next* blend over it is not, which is
-        // why this is reported rather than done quietly — see
-        // `RenderWarning::ApproximatedGroupBlend`.
+        // why it is reported rather than done quietly — counted on the canvas
+        // as `approximated_blends` and turned into
+        // `RenderWarning::ApproximatedGroupBlend` when the group closes,
+        // because nothing this far down knows what a warning is (ruling 8).
         let (br, bg, bb) = cmyk_to_rgb(
             dst.first().copied().unwrap_or(0),
             dst.get(1).copied().unwrap_or(0),

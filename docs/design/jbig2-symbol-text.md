@@ -56,13 +56,22 @@ placeholder-plus-warning contract of rulings 2 and 10 in
 ## Non-goals
 
 - **Halftone regions and pattern dictionaries** (clauses 6.6, 6.7; segment
-  types 16, 20, 22, 23) — a third lineage, still out of scope, but **not for the
-  reason first given here.** "Near-zero corpus presence" was wrong: the census
-  finds 50 such segments across 16 files, and every one of those 16 carries
-  halftone *and nothing else*, so all sixteen still refuse under
-  `Jbig2SegmentSkipped` when all eight milestones below are done. That is a
-  sixth of the JBIG2 in the corpus, and it is a roadmap item this work does not
-  close rather than a lineage nobody emits.
+  types 16, 20, 22, 23) — a third lineage, out of scope *for this document's
+  work*, and **not for the reason first given here.** "Near-zero corpus
+  presence" was wrong: the census finds 50 such segments across 16 files, and
+  every one of those 16 carries halftone *and nothing else*, so all sixteen
+  still refused under `Jbig2SegmentSkipped` when all eight milestones below
+  were done. That is a sixth of the JBIG2 in the corpus, and it was a roadmap
+  item this work did not close rather than a lineage nobody emits.
+
+  **It is built now**, under Tier 2 rather than here, and the corpus
+  adjudicated it: all sixteen reproduce `bitmap-template1.pdf` at 0 pixels
+  different, across every grey-scale template, a sheared grid, four cell
+  operators, `HENABLESKIP`, ten bitplanes and an intermediate region refined by
+  a type 42 segment (`crates/tinker-pdf/tests/jbig2_lineages.rs`). The one real
+  correction was C.5's MMR road: every plane rides one datastream ended by
+  T.6's EOFB, and 6.2.6 byte aligns after it — without the alignment the second
+  plane starts one bit late and decodes nothing.
 - **Colour palette segments** (type 54) and the T.88 amendment features
   (EXTTEMPLATE, colour extension) — not emitted by any encoder the corpus sees.
 - **Retained bitmap-coding contexts across segments** (the used/retained flags
