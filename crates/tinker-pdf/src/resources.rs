@@ -251,6 +251,14 @@ fn group_space(space: tinker_pdf_color::ColorSpace) -> tinker_pdf_content::Group
     }
 }
 
+/// The D50 white point, and the default when a CIE-based space names none.
+///
+/// 8.6.5.1 and 8.6.5.2 make `/WhitePoint` required, so this is the answer for a
+/// dictionary that omits it or writes fewer than three numbers — a file that
+/// has not described a white point rather than one that described a different
+/// one.
+const WHITE_D50: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+
 impl PageResources {
     /// The font resource names that could not be resolved.
     #[must_use]
@@ -574,6 +582,9 @@ impl PageResources {
         // The device spaces may be named directly without appearing in
         // /ColorSpace at all.
         match name {
+            // A bare `/CalGray` or `/CalRGB` name carries no parameter
+            // dictionary at all, so there is no white point or gamma to read
+            // and the device space *is* the whole of what the file said.
             b"DeviceGray" | b"G" | b"CalGray" => return Some(ColorSpace::DeviceGray),
             b"DeviceRGB" | b"RGB" | b"CalRGB" => return Some(ColorSpace::DeviceRgb),
             b"DeviceCMYK" | b"CMYK" => return Some(ColorSpace::DeviceCmyk),
@@ -699,8 +710,48 @@ impl PageResources {
                     .and_then(|o| self.parse_space(o, depth + 1))
                     .map(Box::new),
             }),
-            b"CalGray" => Some(ColorSpace::DeviceGray),
-            b"CalRGB" => Some(ColorSpace::DeviceRgb),
+            // 8.6.5.1 and 8.6.5.2. These were aliased to the device spaces,
+            // which read neither the white point nor the gamma and left
+            // *nothing* recording that an approximation had happened — unlike
+            // an ICC profile this build refuses, where `Approximated` says so
+            // on the type.
+            b"CalGray" => {
+                let params = items.get(1).map(|o| self.doc.resolve(o));
+                let dict = params.as_ref().and_then(|p| p.as_dict());
+                let white = dict
+                    .and_then(|d| self.numbers(d, b"WhitePoint", 3))
+                    .map_or(WHITE_D50, |v| [v[0], v[1], v[2]]);
+                let gamma = dict
+                    .map(|d| self.doc.resolve_key(d, self.doc.intern(b"Gamma")))
+                    .and_then(|g| g.as_number())
+                    .unwrap_or(1.0);
+                Some(ColorSpace::CalGray { white, gamma })
+            }
+            b"CalRGB" => {
+                let params = items.get(1).map(|o| self.doc.resolve(o));
+                let dict = params.as_ref().and_then(|p| p.as_dict());
+                let white = dict
+                    .and_then(|d| self.numbers(d, b"WhitePoint", 3))
+                    .map_or(WHITE_D50, |v| [v[0], v[1], v[2]]);
+                let gamma = dict
+                    .and_then(|d| self.numbers(d, b"Gamma", 3))
+                    .map_or([1.0; 3], |v| [v[0], v[1], v[2]]);
+                let matrix = dict.and_then(|d| self.numbers(d, b"Matrix", 9)).map_or(
+                    // Table 65's default is the identity, which makes the
+                    // components XYZ directly.
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    |v| {
+                        let mut m = [0.0; 9];
+                        m.copy_from_slice(&v[..9]);
+                        m
+                    },
+                );
+                Some(ColorSpace::CalRgb {
+                    white,
+                    gamma,
+                    matrix,
+                })
+            }
             // 8.6.5.4: L runs 0..100 and a/b roughly -128..127. Aliasing Lab
             // to RGB clamps every component into 0..1, which renders almost
             // the whole space black.
@@ -720,6 +771,22 @@ impl PageResources {
             }
             _ => None,
         }
+    }
+
+    /// `count` numbers from a dictionary's array-valued key, or `None`.
+    ///
+    /// Shorter than `count` is `None` rather than a padded array: a
+    /// `/WhitePoint` of two numbers is a dictionary that does not describe a
+    /// white point, and the clause's default is a better answer than two of
+    /// its three axes.
+    fn numbers(&self, dict: &tinker_pdf_cos::Dict, key: &[u8], count: usize) -> Option<Vec<f64>> {
+        let value = self.doc.resolve_key(dict, self.doc.intern(key));
+        let values: Vec<f64> = value
+            .as_array()?
+            .iter()
+            .filter_map(|o| self.doc.resolve(o).as_number())
+            .collect();
+        (values.len() >= count).then_some(values)
     }
 
     /// Reads a shading dictionary, wherever it was found.

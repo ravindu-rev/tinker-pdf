@@ -1078,3 +1078,126 @@ fn two_profiles_differing_only_in_gamma_paint_differently() {
         "gamma 1.0 gave {linear} and gamma 2.2 gave {encoded}: the curve is not being read"
     );
 }
+
+/// A page whose only content fills a square in the given colour space.
+///
+/// `space` is written into `/ColorSpace /CS0` verbatim, so a caller states the
+/// whole array — which is the point for a CIE-based space, where the array's
+/// second element is the dictionary that carries the parameters.
+fn fill_in_space(space: &str, components: &str) -> tinker_pdf::Bitmap {
+    let content = format!("/CS0 cs {components} scn 0 0 40 40 re f");
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(
+        format!(
+            "%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+             2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+             3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+             /Resources << /ColorSpace << /CS0 {space} >> >> /Contents 4 0 R >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(
+        format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+            content.len() + 1
+        )
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(b"trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n");
+
+    tinker_pdf::Document::open(bytes)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default())
+}
+
+/// **A `/CalGray` gamma is read** (8.6.5.1), which is the assertion that fails
+/// if the space is aliased to `/DeviceGray`.
+///
+/// The same component through two different gammas must not produce the same
+/// grey. Aliasing satisfies every other property a test might check — the
+/// component count, the initial colour, black staying black — so this is the
+/// one that tells the two apart.
+#[test]
+fn a_cal_gray_reads_its_gamma_rather_than_aliasing_to_device_gray() {
+    let d50 = "0.9642 1.0 0.8249";
+    let linear = fill_in_space(
+        &format!("[/CalGray << /WhitePoint [{d50}] /Gamma 1.0 >>]"),
+        "0.5",
+    );
+    let steep = fill_in_space(
+        &format!("[/CalGray << /WhitePoint [{d50}] /Gamma 2.2 >>]"),
+        "0.5",
+    );
+    let flat = pixel(&linear, 20, 20);
+    let dark = pixel(&steep, 20, 20);
+    assert!(
+        dark.0 < flat.0,
+        "a gamma of 2.2 must darken 0.5 relative to a gamma of 1: \
+         {dark:?} against {flat:?}"
+    );
+
+    // And black and white are fixed points whatever the gamma, which is what
+    // says the curve is a gamma rather than an arbitrary shift.
+    let black = pixel(
+        &fill_in_space(
+            &format!("[/CalGray << /WhitePoint [{d50}] /Gamma 2.2 >>]"),
+            "0",
+        ),
+        20,
+        20,
+    );
+    let white = pixel(
+        &fill_in_space(
+            &format!("[/CalGray << /WhitePoint [{d50}] /Gamma 2.2 >>]"),
+            "1",
+        ),
+        20,
+        20,
+    );
+    assert!(black.0 < 12, "0 is black: {black:?}");
+    assert!(white.0 > 243, "1 is white: {white:?}");
+}
+
+/// **A `/CalRGB` matrix is read** (8.6.5.2), and Table 65 writes it column by
+/// column.
+///
+/// The matrix below is the identity with its *A* and *C* columns exchanged, so
+/// a pure A component lands on Z where the identity would put it on X. A build
+/// that read the nine numbers row-wise would swap a different pair and produce
+/// a different colour, and a build that ignored the matrix would produce red.
+#[test]
+fn a_cal_rgb_matrix_is_read_column_by_column() {
+    let d50 = "0.9642 1.0 0.8249";
+    let identity = fill_in_space(
+        &format!(
+            "[/CalRGB << /WhitePoint [{d50}] /Gamma [1 1 1] \
+             /Matrix [1 0 0  0 1 0  0 0 1] >>]"
+        ),
+        "1 0 0",
+    );
+    let swapped = fill_in_space(
+        &format!(
+            "[/CalRGB << /WhitePoint [{d50}] /Gamma [1 1 1] \
+             /Matrix [0 0 1  0 1 0  1 0 0] >>]"
+        ),
+        "1 0 0",
+    );
+    let straight = pixel(&identity, 20, 20);
+    let exchanged = pixel(&swapped, 20, 20);
+    assert_ne!(
+        straight, exchanged,
+        "exchanging the matrix's A and C columns must change the colour"
+    );
+    // X alone is a red-ish primary and Z alone a blue-ish one, whatever the
+    // adaptation: the assertion is the ordering, not an exact triple.
+    assert!(
+        straight.0 > straight.2,
+        "the identity puts A on X, which is the red axis: {straight:?}"
+    );
+    assert!(
+        exchanged.2 > exchanged.0,
+        "the exchange puts A on Z, which is the blue axis: {exchanged:?}"
+    );
+}

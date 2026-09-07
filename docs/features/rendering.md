@@ -34,12 +34,20 @@ table. Those are `ColorSpace::Approximated` — read by component count, which i
 the alternate-space reading 8.6.5.5 permits, and the approximation is stated on
 the type rather than hidden.
 
-**`CalRGB` and `CalGray` are not that**, and this page said they were until it
-was checked against the code. They are aliased to `DeviceRGB` and `DeviceGray`
-outright, in `parse_space` and its two siblings, so `/WhitePoint`, `/Gamma`,
-`/Matrix` and `/BlackPoint` are never read and nothing on the type records that
-an approximation happened. The observable colours are the same as
-`Approximated`'s would be; what is missing is the record. `[/Pattern base]` carries the underlying space
+**`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.1,
+8.6.5.2): the components go through `/Gamma`, `/Matrix` takes them into XYZ
+relative to `/WhitePoint`, and the white point is adapted to D50 before the
+sRGB matrix. They were aliased to `DeviceGray` and `DeviceRGB` until September
+2026, which read neither the white point nor the gamma and left *nothing*
+recording that an approximation had happened — unlike an ICC profile this build
+refuses, where `Approximated` says so on the type.
+
+The adaptation is **von Kries in XYZ**, scaling each axis by the ratio of the
+two whites, and not the Bradford transform baked into the profile path's
+matrix. Named rather than hidden: the two differ on saturated colours far from
+the neutral axis. A bare `/CalGray` or `/CalRGB` *name*, with no parameter
+dictionary behind it, is still the device space — there is nothing else the
+file has said. `[/Pattern base]` carries the underlying space
 of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
 Initial colours follow 8.6.8 — CMYK starts at full black ink, not all zeros.
 Out-of-range components clamp rather than wrap.

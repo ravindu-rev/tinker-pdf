@@ -75,6 +75,32 @@ pub enum ColorSpace {
         /// How many components.
         components: usize,
     },
+    /// **CIE-based grey (8.6.5.1).**
+    ///
+    /// One component through a gamma, scaled by a white point. Aliased to
+    /// [`ColorSpace::DeviceGray`] until now, which meant `/WhitePoint` and
+    /// `/Gamma` were never read and *nothing said so* — unlike an ICC profile
+    /// this build refuses, where [`ColorSpace::Approximated`] records the
+    /// approximation on the type.
+    CalGray {
+        /// `/WhitePoint`, the diffuse white the components are relative to.
+        white: [f64; 3],
+        /// `/Gamma`, defaulting to 1.
+        gamma: f64,
+    },
+    /// **CIE-based RGB (8.6.5.2).**
+    ///
+    /// Three components, each through its own gamma, then a 3×3 matrix into
+    /// XYZ relative to `/WhitePoint`.
+    CalRgb {
+        /// `/WhitePoint`.
+        white: [f64; 3],
+        /// `/Gamma`, defaulting to `[1, 1, 1]`.
+        gamma: [f64; 3],
+        /// `/Matrix`, column-major as Table 65 writes it —
+        /// `[XA YA ZA XB YB ZB XC YC ZC]` — defaulting to the identity.
+        matrix: [f64; 9],
+    },
     /// `/Lab`: CIE 1976 L*a*b* (8.6.5.4).
     ///
     /// Not an `Approximated`, because its components are not in 0..1: L runs
@@ -111,6 +137,8 @@ impl ColorSpace {
             ColorSpace::Icc { components, .. } => *components,
             ColorSpace::Approximated { components } => *components,
             ColorSpace::Lab { .. } => 3,
+            ColorSpace::CalGray { .. } => 1,
+            ColorSpace::CalRgb { .. } => 3,
             // 8.7.3.2: an uncoloured pattern's operands are counted in the
             // underlying space. A plain `/Pattern` takes none at all, and 1 is
             // the answer that keeps callers which size a buffer from this from
@@ -181,6 +209,30 @@ impl ColorSpace {
                 let converted = tint.eval(components);
                 alternate.to_rgb(&converted)
             }
+            ColorSpace::CalGray { white, gamma } => {
+                // 8.6.5.1: A^G scales the white point. `at` clamps to 0..1,
+                // which is this space's own range.
+                let a = math::pow(at(0), *gamma);
+                xyz_to_rgb([white[0] * a, white[1] * a, white[2] * a], *white)
+            }
+            ColorSpace::CalRgb {
+                white,
+                gamma,
+                matrix,
+            } => {
+                // 8.6.5.2: each component through its own gamma, then Table
+                // 65's matrix — which is written column by column, so the
+                // first three numbers are the *A* column and not the X row.
+                let a = math::pow(at(0), gamma[0]);
+                let b = math::pow(at(1), gamma[1]);
+                let c = math::pow(at(2), gamma[2]);
+                let xyz = [
+                    matrix[0] * a + matrix[3] * b + matrix[6] * c,
+                    matrix[1] * a + matrix[4] * b + matrix[7] * c,
+                    matrix[2] * a + matrix[5] * b + matrix[8] * c,
+                ];
+                xyz_to_rgb(xyz, *white)
+            }
             ColorSpace::Lab { range } => {
                 // Raw, not `at`: these components are not in 0..1, and
                 // clamping them there is precisely the bug this variant fixes.
@@ -243,6 +295,46 @@ pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
     [row(0), row(1), row(2)]
 }
 
+/// XYZ relative to `white`, as sRGB.
+///
+/// **The adaptation is von Kries in XYZ, and saying which one it is matters.**
+/// The matrix below takes XYZ relative to *D50*; a CIE-based space names its
+/// own white point and D65 is as common as D50 in the wild, so the two have to
+/// be reconciled. Scaling each axis by the ratio of the two whites is the
+/// simplest transform that maps one white exactly onto the other, and it is
+/// what 8.6.5.2's own note describes when it says the components are relative
+/// to the diffuse white.
+///
+/// It is not Bradford, which is what [`XYZ_D50_TO_SRGB`] already has baked in
+/// for the *profile* path, and the difference shows on saturated colours far
+/// from the neutral axis. Stated rather than hidden: a CIE-based space is a
+/// space a producer chose over an ICC profile, and this is the accuracy that
+/// choice buys.
+fn xyz_to_rgb(xyz: [f64; 3], white: [f64; 3]) -> (u8, u8, u8) {
+    const D50: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+    let scale = |v: f64, from: f64, to: f64| if from > 0.0 { v * to / from } else { v };
+    let adapted = [
+        scale(xyz[0], white[0], D50[0]),
+        scale(xyz[1], white[1], D50[1]),
+        scale(xyz[2], white[2], D50[2]),
+    ];
+    let [r, g, b] = xyz_d50_to_linear_srgb(adapted[0], adapted[1], adapted[2]);
+    (srgb_encode(r), srgb_encode(g), srgb_encode(b))
+}
+
+/// One linear-light channel as an sRGB byte (IEC 61966-2-1).
+fn srgb_encode(v: f64) -> u8 {
+    let v = v.clamp(0.0, 1.0);
+    // Linear near zero, so the gradient stays finite where a plain power
+    // would flatten.
+    let s = if v <= 0.003_130_8 {
+        12.92 * v
+    } else {
+        1.055 * math::pow(v, 1.0 / 2.4) - 0.055
+    };
+    byte(s)
+}
+
 /// CIE L*a*b* to sRGB, through XYZ (8.6.5.4).
 ///
 /// The white point is D50, which is what PDF's `/WhitePoint` defaults to and
@@ -274,18 +366,7 @@ pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
 
     let [r, g, bl] = xyz_d50_to_linear_srgb(x, y, z);
 
-    let encode = |v: f64| -> u8 {
-        let v = v.clamp(0.0, 1.0);
-        // The sRGB transfer function, linear near zero for the same reason.
-        let s = if v <= 0.003_130_8 {
-            12.92 * v
-        } else {
-            1.055 * math::pow(v, 1.0 / 2.4) - 0.055
-        };
-        byte(s)
-    };
-
-    (encode(r), encode(g), encode(bl))
+    (srgb_encode(r), srgb_encode(g), srgb_encode(bl))
 }
 
 #[cfg(test)]

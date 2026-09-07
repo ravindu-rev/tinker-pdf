@@ -37,7 +37,7 @@
       },
       "passed": 974,
       "peak": {
-        "bytes": 923951104,
+        "bytes": 924196864,
         "files": 974
       },
       "strict_clean": 841,
@@ -84,7 +84,7 @@
       },
       "passed": 2907,
       "peak": {
-        "bytes": 55099392,
+        "bytes": 55189504,
         "files": 2907
       },
       "strict_clean": 2891,
@@ -130,7 +130,7 @@
       },
       "passed": 631,
       "peak": {
-        "bytes": 226144256,
+        "bytes": 226111488,
         "files": 637
       },
       "strict_clean": 487,
@@ -173,7 +173,7 @@
       },
       "passed": 7,
       "peak": {
-        "bytes": 14897152,
+        "bytes": 15106048,
         "files": 7
       },
       "strict_clean": 6,
@@ -222,7 +222,7 @@
       },
       "passed": 997,
       "peak": {
-        "bytes": 511254528,
+        "bytes": 511193088,
         "files": 1000
       },
       "strict_clean": 899,
