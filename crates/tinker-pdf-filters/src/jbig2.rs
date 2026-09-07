@@ -1062,7 +1062,12 @@ fn table_b7() -> HuffTable {
         HuffLine::normal(4, 9, 0),
         HuffLine::normal(5, 10, 512),
         HuffLine::normal(3, 10, 1536),
-        HuffLine::normal(6, 32, -1025),
+        // The lower range, and it was written as an *upper* one. Every other
+        // table with a downward run spells it `HuffLine::lower` -- B.6, B.8,
+        // B.9 and B.10 all do -- and the difference is not cosmetic: a lower
+        // line counts *down* from its bound and an upper line counts up, so
+        // this read every value below -1024 as a value above it.
+        HuffLine::lower(6, -1025),
         HuffLine::normal(5, 32, 2560),
     ])
 }
