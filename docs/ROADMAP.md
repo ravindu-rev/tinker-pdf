@@ -26,13 +26,13 @@ its two font-bearing siblings:
 | Corpus files (pdf.js 974, veraPDF 2 907, qpdf 637, PDF Association 7, SafeDocs 1 000) | 5 525 |
 | Render every page | 5 516 |
 | Do not (6 qpdf, 3 SafeDocs; every one a file that would not open) | 9 |
-| Rendered with something reported, no faces / synthetic face / bundled faces | 1 442 / 489 / 525 |
+| Rendered with something reported, no faces / synthetic face / bundled faces | 1 412 / 459 / 495 |
 | `rotate` held of asked | 4 998 of 5 114 |
 | `rotate-tight` held of asked | 4 583 of 5 114 |
 | `crop` held of asked | 4 929 of 5 075 |
 | `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 4 477 passed, 0 failed, 45 ignored as
+The suite stands at 4 483 passed, 0 failed, 52 ignored as
 [verification.md](verification.md) records it, measured 6 September 2026.
 
 ## What "best" means here

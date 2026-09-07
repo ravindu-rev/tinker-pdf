@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the suite total, the fuzz sessions and the corpus attributions below, which are 5-6 September 2026. `cargo test --workspace`
-is **4 477 passed, 0 failed, 45 ignored** across 204 suites on
+is **4 483 passed, 0 failed, 52 ignored** across 207 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -501,12 +501,12 @@ slice would do. That is recorded under **the rasteriser's row loop** below. A
 timeout is a limit on how slow the engine is allowed to be; it is not a fix for
 being slow.
 
-The second axis — **1 442 files (26.1 %) rendering *with something reported***
+The second axis — **1 412 files (25.6 %) rendering *with something reported***
 — is measured without font faces, and there are two more bars that say what
 that costs. `corpus/ratchet-fonts.json` is the same 5 525 files with a
-synthesised face supplied and reports **489 (8.9 %)**;
+synthesised face supplied and reports **459 (8.3 %)**;
 `corpus/ratchet-bundled.json` is the same files with the twelve Liberation
-faces the `bundled-fonts` feature ships and reports **525 (9.5 %)**. So
+faces the `bundled-fonts` feature ships and reports **495 (9.0 %)**. So
 roughly **two thirds of all reported degradation was the absence of a face**
 rather than a defect in the engine.
 

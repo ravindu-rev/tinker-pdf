@@ -88,6 +88,21 @@ pub struct Bar {
     /// absent key is an improvement rather than a refusal and no committed
     /// file has to be rewritten to stay readable.
     pub peak: Option<PeakBar>,
+    /// How many files carried each capability the child's scanner names, or an
+    /// empty map in a bar recorded before this axis existed.
+    ///
+    /// **This one guards the measurement rather than the engine.** A
+    /// capability count is a property of the *corpus* — how many files name an
+    /// `ICCBased` space, carry a JBIG2 stream, hold a signature — so a run that
+    /// finds fewer of them than the bar did has not got worse at rendering,
+    /// it has stopped *seeing* them. That is the drift nine of this
+    /// repository's thirteen censuses were found in when the nightly first ran
+    /// them, and it is invisible to every other axis here: a scanner that
+    /// quietly stops recognising a filter name makes the pass rate go up.
+    ///
+    /// Empty is an improvement rather than a refusal, for [`Bar::tagged`]'s
+    /// reason.
+    pub capabilities: BTreeMap<String, u64>,
 }
 
 /// The peak-memory bar for one corpus.
@@ -411,6 +426,38 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
             }
         }
 
+        // Capabilities: a floor per name, and a floor for the reason above —
+        // this is the only axis that fails when the *scanner* regresses rather
+        // than the engine. Compared as absolute counts and not as rates,
+        // because a capability is carried by a file or it is not and the
+        // denominator is the same corpus on both sides; `total` is checked
+        // separately above.
+        let now_capabilities = corpus.capabilities();
+        for (capability, before_count) in &bar.capabilities {
+            let now_count = now_capabilities.get(capability).copied().unwrap_or(0);
+            if now_count < *before_count {
+                out.regressions.push(format!(
+                    "{}: {now_count} files carry `{capability}` and the bar is \
+                     {before_count} — the corpus did not change, so something \
+                     stopped recognising it",
+                    bar.name
+                ));
+            } else if now_count > *before_count {
+                out.improvements.push(format!(
+                    "{}: `{capability}` {before_count} to {now_count}",
+                    bar.name,
+                ));
+            }
+        }
+        for (capability, count) in &now_capabilities {
+            if !bar.capabilities.contains_key(capability) {
+                out.improvements.push(format!(
+                    "{}: `{capability}` is newly counted at {count}",
+                    bar.name
+                ));
+            }
+        }
+
         // The fifth axis (tagged PDF milestone 4): what the structure tree
         // walk reached. Three comparisons, because the three counts fail in
         // three different directions and one of them is not a floor.
@@ -622,6 +669,27 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
                  {strict_eligible} eligible of {total}, which cannot be"
             ));
         }
+        // Absent in a bar recorded before this axis: an empty map compares
+        // against nothing and refuses nothing.
+        let mut capabilities: BTreeMap<String, u64> = BTreeMap::new();
+        if let Some(object) = entry.get("capabilities") {
+            let Json::Object(members) = object else {
+                return Err(format!("`{name}`'s `capabilities` is not an object"));
+            };
+            for (capability, value) in members {
+                let count = value.as_u64().ok_or_else(|| {
+                    format!("`{name}`'s `capabilities.{capability}` is not a whole number")
+                })?;
+                if count > total {
+                    return Err(format!(
+                        "`{name}` says {count} files carry `{capability}` and the \
+                         corpus is {total} files"
+                    ));
+                }
+                capabilities.insert(capability.clone(), count);
+            }
+        }
+
         let tagged = match entry.get("tagged") {
             None => None,
             Some(object) => {
@@ -714,6 +782,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             strict_clean,
             metamorphic,
             tagged,
+            capabilities,
             peak,
         });
     }
@@ -861,6 +930,7 @@ mod tests {
                 strict_clean: total,
                 metamorphic: BTreeMap::new(),
                 tagged: None,
+                capabilities: BTreeMap::new(),
                 peak: None,
             }],
             complete: true,
@@ -1443,5 +1513,68 @@ mod tests {
         let read = parse(&text).expect("it still parses");
         assert!(!read.complete);
         assert!(compare(&read, &run("pdfjs", 970, 6, 0), false).failed());
+    }
+
+    /// **A capability the scanner stops seeing is a regression**, even though
+    /// every other number improves when it happens.
+    ///
+    /// This is the axis's whole reason. A capability count is a property of the
+    /// corpus rather than of the engine: the same thousand files carry the same
+    /// thousand `ICCBased` spaces whatever this build does with them. So a run
+    /// that finds fewer has not got worse at rendering — it has stopped looking
+    /// — and the pass rate goes *up*, because a file whose capability is not
+    /// recognised is a file whose capability cannot be reported as degraded.
+    #[test]
+    fn a_capability_the_scanner_stops_finding_is_a_regression() {
+        let mut committed = bar("pdfjs", 10, 10, 0);
+        committed.bars[0]
+            .capabilities
+            .insert("iccbased".to_string(), 4);
+
+        // The same ten files, all passing, with the capability seen twice.
+        let mut now = run("pdfjs", 10, 0, 0);
+        for file in now.corpora[0].files.iter_mut().take(2) {
+            file.capabilities.insert("iccbased".to_string());
+        }
+        let out = compare(&committed, &now, false);
+        assert!(out.failed(), "a scanner that lost two files did not fail");
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("stopped recognising it")),
+            "{:?}",
+            out.regressions
+        );
+
+        // And finding more of them is an improvement, not a refusal: the
+        // corpus grew, or the scanner learned a name.
+        let mut now = run("pdfjs", 10, 0, 0);
+        for file in now.corpora[0].files.iter_mut().take(6) {
+            file.capabilities.insert("iccbased".to_string());
+        }
+        let out = compare(&committed, &now, false);
+        assert!(!out.failed(), "{:?}", out.regressions);
+        assert!(
+            out.improvements.iter().any(|i| i.contains("iccbased")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    /// A bar recorded before this axis existed compares against nothing.
+    #[test]
+    fn a_bar_with_no_capabilities_refuses_nothing() {
+        let committed = bar("pdfjs", 10, 10, 0);
+        let mut now = run("pdfjs", 10, 0, 0);
+        now.corpora[0].files[0]
+            .capabilities
+            .insert("jbig2".to_string());
+        let out = compare(&committed, &now, false);
+        assert!(!out.failed(), "{:?}", out.regressions);
+        assert!(
+            out.improvements.iter().any(|i| i.contains("newly counted")),
+            "{:?}",
+            out.improvements
+        );
     }
 }
