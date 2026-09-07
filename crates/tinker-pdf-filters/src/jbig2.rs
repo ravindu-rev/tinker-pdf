@@ -255,9 +255,24 @@ pub enum Jbig2Refusal {
     HuffmanDwSelector,
     /// 7.4.3.1.1 bits 6 and 7: `SDHUFFBMSIZE` or `SDHUFFAGGINST` chose one.
     HuffmanBmSizeOrAggInstSelector,
-    /// 7.4.2: a symbol dictionary that consumes a retained bitmap-coding
-    /// context from another segment.
-    RetainedContext,
+    /// 7.4.2: a dictionary consuming a retained bitmap-coding context that
+    /// no segment it refers to left behind.
+    ///
+    /// The contexts themselves decode now. What is left is the file saying it
+    /// takes adaptive state from a segment that never retained any -- and
+    /// state that does not exist cannot be started from zero instead, because
+    /// the encoder's arithmetic decisions were made against it. A dictionary
+    /// decoded from the initial state would come out as noise that looks like
+    /// a picture.
+    RetainedContextMissing,
+    /// 7.4.2: a retained context of the wrong shape for the dictionary
+    /// consuming it.
+    ///
+    /// The array is indexed by a template's pixel neighbourhood, so its length
+    /// is `1 << template_bits(SDTEMPLATE)`. A dictionary at template 0 taking
+    /// a template 2 dictionary's contexts is reading 65 536 states out of
+    /// 1 024, which is a file contradicting itself rather than a capability.
+    RetainedContextMismatch,
     /// 7.4.4.1.2: a text region's `SBHUFFFS`, `SBHUFFDS`, `SBHUFFDT` or
     /// `SBHUFFRSIZE` selector chose a custom table.
     TextTableSelector,
@@ -380,7 +395,8 @@ impl Jbig2Refusal {
             Self::HuffmanDhSelector
             | Self::HuffmanDwSelector
             | Self::HuffmanBmSizeOrAggInstSelector
-            | Self::RetainedContext
+            | Self::RetainedContextMissing
+            | Self::RetainedContextMismatch
             | Self::TextTableSelector
             | Self::RefinementTablesAbsent
             | Self::DanglingReference
@@ -423,6 +439,8 @@ impl Jbig2Refusal {
                 | Self::SymbolIndexOutOfRange
                 | Self::SymbolCodeUnbuildable
                 | Self::CustomTableMissing
+                | Self::RetainedContextMissing
+                | Self::RetainedContextMismatch
                 | Self::CollectiveBitmapNotMmr
                 | Self::GenericRegionNotMmr
                 | Self::TextRegionWithoutSymbols
@@ -1195,6 +1213,28 @@ fn table_b12() -> HuffTable {
     ])
 }
 
+/// **7.4.2's retained bitmap-coding contexts**: the adaptive state one symbol
+/// dictionary leaves behind for another to start from.
+///
+/// A symbol dictionary's flags carry two bits (7.4.3.1.1): one says this
+/// dictionary *consumes* a context, the other says it *retains* one. A file
+/// that codes a page as a run of dictionaries can then let the second start
+/// where the first finished, which is worth a few per cent on a scan and is
+/// why real encoders emit it.
+///
+/// Both arrays are kept even when the retaining dictionary did not aggregate,
+/// because whether the *consumer* aggregates is not knowable here. A consumer
+/// whose refinement array is a different length gets a fresh one: the states
+/// it wants were never touched, so the initial state is not a degradation but
+/// the only thing they can be.
+#[derive(Clone)]
+struct RetainedContexts {
+    /// 6.5.8.1's generic contexts, `1 << template_bits(SDTEMPLATE)` of them.
+    generic: MqContexts,
+    /// 6.5.8.2's refinement contexts, sized by `SDRTEMPLATE`.
+    refine: MqContexts,
+}
+
 /// A.1's integer decoders and 6.3's refinement states, as one bundle.
 ///
 /// 6.5.8.2 is why this is a struct rather than a pile of locals: a symbol
@@ -1654,15 +1694,19 @@ fn symbol_dictionary_huffman(
 /// A dictionary that re-exports what it imported is ordinary, and a text region
 /// numbers its symbols across the whole exported run.
 ///
-/// `None` is the refusal, and the caller turns it into the named warning. What
-/// is refused here rather than decoded: the Huffman variant (SDHUFF), the
-/// refinement and aggregate variant (SDREFAGG), and a dictionary that consumes
-/// a retained context from another segment — all three are later milestones,
-/// and all three are counted in the corpus census that scheduled them.
+/// `None` is the refusal, and the caller turns it into the named warning.
+///
+/// `consumed` is 7.4.2's retained bitmap-coding context, from whichever
+/// referred-to segment left one; `retained` is where this dictionary leaves
+/// its own if its flags say it does. Both are `None` for a dictionary that
+/// neither takes nor gives, which is every dictionary in every fixture this
+/// file builds.
 fn symbol_dictionary(
     segment: &Segment<'_>,
     imported: &[Bitmap],
     tables: &[&HuffTable],
+    consumed: Option<&RetainedContexts>,
+    retained: &mut Option<RetainedContexts>,
     ceiling: usize,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<Vec<Bitmap>> {
@@ -1672,26 +1716,14 @@ fn symbol_dictionary(
     let flags = reader.u16()?;
     let huff = flags & 0x0001 != 0;
     let refagg = flags & 0x0002 != 0;
+    // 7.4.3.1.1 bits 8 and 9. Both are meaningless on the Huffman road --
+    // there are no arithmetic contexts to hand over -- so they are read here
+    // and acted on below, after the road has been chosen.
     let context_used = flags & 0x0100 != 0;
+    let context_retained = flags & 0x0200 != 0;
     let template = ((flags >> 10) & 0x0003) as u8;
     let rtemplate = ((flags >> 12) & 0x0001) as u8;
 
-    if context_used {
-        // 7.4.2's used/retained flags: a dictionary that consumes the adaptive
-        // state another segment left behind. Named rather than lumped in with
-        // "a segment type this build does not decode", because it is a variant
-        // of a segment this build *does* decode and the difference is what
-        // tells a file needing one lineage from a file needing another.
-        //
-        // One corpus file uses it -- three segments consuming and two
-        // retaining -- which is below ruling 3's line, so it stays a named
-        // refusal with a reachability test until the count moves.
-        //
-        // (This comment used to describe the Huffman refinement road, which is
-        // a different condition entirely and has decoded since milestone 5.)
-        note(warnings, Jbig2Refusal::RetainedContext);
-        return None;
-    }
     if huff {
         // 6.5.9: the Huffman variant does not code symbols one at a time. A
         // whole height class arrives as one *collective* bitmap and the
@@ -1754,6 +1786,29 @@ fn symbol_dictionary(
     let refine_bits = refine_layout.as_ref().map_or(0, RefineTemplate::bits);
     let mut cx = ArithContexts::new(code_len);
     let mut refine_contexts = MqContexts::new(refine_states(refine_bits));
+
+    if context_used {
+        // 7.4.2: start from what another dictionary left rather than from
+        // E.3.6's initial state. Cloned, never aliased -- a segment that
+        // retains may be consumed by several later ones, and each has to see
+        // the state as it was left rather than as the previous consumer
+        // finished with it.
+        let Some(kept) = consumed else {
+            note(warnings, Jbig2Refusal::RetainedContextMissing);
+            return None;
+        };
+        if kept.generic.len() != generic.len() {
+            note(warnings, Jbig2Refusal::RetainedContextMismatch);
+            return None;
+        }
+        generic = kept.generic.clone();
+        // The refinement half only carries when both dictionaries refined at
+        // the same template; see [`RetainedContexts`] for why a mismatch is
+        // the initial state rather than a refusal.
+        if kept.refine.len() == refine_contexts.len() {
+            refine_contexts = kept.refine.clone();
+        }
+    }
 
     // 6.5: imported and new symbols share one index space, so they share one
     // vector. `pool[..base]` is what came in and the rest is what this
@@ -1914,6 +1969,15 @@ fn symbol_dictionary(
         // against, so a disagreement is not a smaller dictionary.
         note(warnings, Jbig2Refusal::ExportCountMismatch);
         return None;
+    }
+    if context_retained {
+        // 7.4.2, and only on a dictionary that decoded: a refused one left its
+        // contexts somewhere between two symbols, and a later dictionary
+        // starting from there would decode noise rather than fail.
+        *retained = Some(RetainedContexts {
+            generic,
+            refine: refine_contexts,
+        });
     }
     Some(exported)
 }
@@ -3949,6 +4013,7 @@ pub fn decode_attributed(
     let mut page = Page {
         intermediate: BTreeMap::new(),
         symbols: BTreeMap::new(),
+        retained: BTreeMap::new(),
         tables: BTreeMap::new(),
         patterns: BTreeMap::new(),
         declared_content: false,
@@ -4136,6 +4201,14 @@ struct Page {
     /// reference order*, and anything that iterates has to do so the same way
     /// on every target (ruling 4).
     symbols: BTreeMap<u32, Vec<Bitmap>>,
+    /// 7.4.2's retained bitmap-coding contexts, by the segment number that
+    /// retained them.
+    ///
+    /// A `BTreeMap` for `symbols`' reason: which retained context a consuming
+    /// dictionary takes is decided by walking its referred-to list, and
+    /// anything that iterates has to do so the same way on every target
+    /// (ruling 4).
+    retained: BTreeMap<u32, RetainedContexts>,
     /// What each Tables segment (7.4.13) declared, by its segment number.
     ///
     /// A `BTreeMap` for `symbols`' reason: the tables a segment refers to are
@@ -4327,9 +4400,32 @@ impl Page {
             }
         }
         let tables = self.referred_tables(segment);
-        match symbol_dictionary(segment, &imported, &tables, ceiling, warnings) {
+        // 7.4.2: the context this dictionary consumes is the one the *last*
+        // segment it refers to retained. The referred-to list is in reference
+        // order and a dictionary may refer to several, only some of which
+        // retained; taking the last is what `bitmap-symbol-context-reuse.pdf`
+        // adjudicates -- three of its segments consume and two retain.
+        let consumed = segment
+            .referred
+            .iter()
+            .rev()
+            .find_map(|number| self.retained.get(number));
+        let mut retained = None;
+        let decoded = symbol_dictionary(
+            segment,
+            &imported,
+            &tables,
+            consumed,
+            &mut retained,
+            ceiling,
+            warnings,
+        );
+        match decoded {
             Some(exported) => {
                 self.symbols.insert(segment.number, exported);
+                if let Some(kept) = retained {
+                    self.retained.insert(segment.number, kept);
+                }
             }
             None => {
                 self.refused.insert(segment.number);
@@ -5320,6 +5416,8 @@ mod tests {
             &dictionary_segment(1, &[], &base),
             &[],
             &[],
+            None,
+            &mut None,
             1 << 20,
             &mut Vec::new(),
         )
@@ -5348,6 +5446,8 @@ mod tests {
             &dictionary_segment(2, &[1], &refining),
             &imported,
             &[],
+            None,
+            &mut None,
             1 << 20,
             &mut warnings,
         )
@@ -5634,8 +5734,9 @@ mod tests {
                 unknown_length: false,
             };
             let mut warnings = Vec::new();
-            let exported = symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings)
-                .unwrap_or_else(|| panic!("template {template} did not decode: {warnings:?}"));
+            let exported =
+                symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
+                    .unwrap_or_else(|| panic!("template {template} did not decode: {warnings:?}"));
 
             let expected: Vec<&[&str]> = classes.iter().flat_map(|c| c.iter().copied()).collect();
             assert_eq!(exported.len(), expected.len(), "template {template}");
@@ -5689,8 +5790,16 @@ mod tests {
             unknown_length: false,
         };
         let mut warnings = Vec::new();
-        let exported = symbol_dictionary(&segment, &imported, &[], 1 << 20, &mut warnings)
-            .unwrap_or_else(|| panic!("it did not decode: {warnings:?}"));
+        let exported = symbol_dictionary(
+            &segment,
+            &imported,
+            &[],
+            None,
+            &mut None,
+            1 << 20,
+            &mut warnings,
+        )
+        .unwrap_or_else(|| panic!("it did not decode: {warnings:?}"));
 
         assert_eq!(exported.len(), 2, "two symbols were selected");
         assert_eq!(
@@ -5715,17 +5824,17 @@ mod tests {
     /// like the refusal it replaced.
     #[test]
     fn the_variants_this_build_does_not_decode_refuse_by_their_own_name() {
-        // A consumed retained context, and a selector asking for a custom
-        // table the segment did not refer to. What has left this list is the
-        // whole of the symbol lineage: SDHUFF, SDREFAGG, both refinement
-        // templates, SDHUFF together with SDREFAGG, and now clause 7.4.13's
-        // custom tables -- so `0x000D`, a custom `SDHUFFDH` selector, is here
-        // for a different reason than it used to be. It no longer refuses
-        // *because the table cannot be read*; it refuses because this segment
-        // refers to no Tables segment, and 7.4.3.1.6 hands them out by
-        // position, so one short renumbers every selector after the gap.
+        // **Both rows are now a reference that does not resolve rather than a
+        // capability nobody built.** What has left this list is the whole of
+        // the symbol lineage: SDHUFF, SDREFAGG, both refinement templates,
+        // SDHUFF together with SDREFAGG, clause 7.4.13's custom tables and now
+        // 7.4.2's retained bitmap-coding contexts. So `0x0100` refuses here
+        // because this segment refers to nothing that retained a context, and
+        // `0x000D` because it refers to no Tables segment while 7.4.3.1.6
+        // hands them out by position -- one short renumbers every selector
+        // after the gap. Neither is a road this build has not walked.
         for (flags, expected) in [
-            (0x0100u16, Jbig2Refusal::RetainedContext),
+            (0x0100u16, Jbig2Refusal::RetainedContextMissing),
             (0x000D, Jbig2Refusal::CustomTableMissing),
         ] {
             let mut data = Vec::new();
@@ -5743,7 +5852,8 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
+                symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
+                    .is_none(),
                 "flags {flags:#06x} decoded"
             );
             assert_eq!(
@@ -5779,7 +5889,10 @@ mod tests {
             unknown_length: false,
         };
         let mut warnings = Vec::new();
-        assert!(symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
+        assert!(
+            symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
+                .is_none()
+        );
         assert!(
             warnings.contains(&Jbig2Refusal::ExportCountMismatch),
             "{warnings:?}"
@@ -5835,7 +5948,8 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
+                symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
+                    .is_none(),
                 "{num_ex}/{num_new} was not refused"
             );
             assert!(
@@ -5893,7 +6007,8 @@ mod tests {
                 unknown_length: false,
             };
             let mut warnings = Vec::new();
-            let out = symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings);
+            let out =
+                symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings);
             (
                 out.is_none() && warnings.contains(&Jbig2Refusal::SymbolPixelCap),
                 warnings,
@@ -5931,7 +6046,8 @@ mod tests {
         };
         let mut warnings = Vec::new();
         assert!(
-            symbol_dictionary(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
+            symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
+                .is_none(),
             "a truncated collective bitmap is still not a dictionary"
         );
         assert!(
@@ -6469,6 +6585,7 @@ mod tests {
         let mut page = Page {
             intermediate: BTreeMap::new(),
             symbols: BTreeMap::new(),
+            retained: BTreeMap::new(),
             tables: BTreeMap::new(),
             patterns: BTreeMap::new(),
             declared_content: false,
@@ -6500,6 +6617,7 @@ mod tests {
         let mut page = Page {
             intermediate: BTreeMap::new(),
             symbols: BTreeMap::new(),
+            retained: BTreeMap::new(),
             tables: BTreeMap::new(),
             patterns: BTreeMap::new(),
             declared_content: false,
@@ -6672,8 +6790,9 @@ mod tests {
                 .find(|s| s.number == number)
                 .expect("the segment");
             let mut warnings = Vec::new();
-            let symbols = symbol_dictionary(segment, &[], &[], 1 << 20, &mut warnings)
-                .expect("a symbol dictionary");
+            let symbols =
+                symbol_dictionary(segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
+                    .expect("a symbol dictionary");
             assert!(warnings.is_empty(), "segment {number}: {warnings:?}");
             symbols
         };
@@ -7097,11 +7216,27 @@ mod tests {
                 .find(|segment| segment.number == number)
                 .expect("segment")
         };
-        let imported = symbol_dictionary(dictionary(16), &[], &[], 1 << 20, &mut Vec::new())
-            .expect("the shared dictionary decodes");
+        let imported = symbol_dictionary(
+            dictionary(16),
+            &[],
+            &[],
+            None,
+            &mut None,
+            1 << 20,
+            &mut Vec::new(),
+        )
+        .expect("the shared dictionary decodes");
         let mut warnings = Vec::new();
-        let exported = symbol_dictionary(dictionary(17), &imported, &[], 1 << 20, &mut warnings)
-            .expect("the refining dictionary decodes");
+        let exported = symbol_dictionary(
+            dictionary(17),
+            &imported,
+            &[],
+            None,
+            &mut None,
+            1 << 20,
+            &mut warnings,
+        )
+        .expect("the refining dictionary decodes");
 
         assert_eq!(exported.len(), 3, "one imported symbol and two new ones");
         // The import, untouched.
@@ -7593,6 +7728,8 @@ mod tests {
             &dictionary_segment(1, &[], &symbol_dictionary_data(&classes, 0)),
             &[],
             &[],
+            None,
+            &mut None,
             1 << 20,
             &mut Vec::new(),
         )
@@ -7606,6 +7743,8 @@ mod tests {
             &dictionary_segment(3, &[], &symbol_dictionary_data(&plain_classes, 0)),
             &[],
             &[],
+            None,
+            &mut None,
             1 << 20,
             &mut Vec::new(),
         )
@@ -7628,6 +7767,8 @@ mod tests {
                 &dictionary_segment(2, &[1], &refining),
                 &imported,
                 &[],
+                None,
+                &mut None,
                 1 << 20,
                 &mut warnings,
             )

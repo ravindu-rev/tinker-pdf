@@ -99,6 +99,20 @@ const UNKNOWN_LENGTH: [(&str, &str); 1] = [(
     "a segment whose length is 0xFFFFFFFF, ended by the row terminator",
 )];
 
+/// Clause 7.4.2's retained bitmap-coding contexts.
+///
+/// One file, and it is the whole reachability of the row: three of its symbol
+/// dictionaries consume the adaptive state a previous one retained, and two
+/// retain. Nothing else in the corpus or in this repository's fixtures asks
+/// for it, which is why the assertion is against the picture rather than
+/// against the contexts themselves -- a consumer that started from E.3.6's
+/// initial state instead decodes symbols that are *nearly* right, so the only
+/// thing that separates the two readings is every pixel of the page.
+const RETAINED_CONTEXT: [(&str, &str); 1] = [(
+    "bitmap-symbol-context-reuse.pdf",
+    "three dictionaries consuming a retained context, two retaining one",
+)];
+
 /// Clauses 6.6 and 6.7: the halftone lineage.
 ///
 /// Thirteen of the sixteen declare the *lossless* region type (23), so they can
@@ -321,6 +335,28 @@ fn every_custom_code_table_file_reproduces_the_standard_picture() {
 #[ignore = "reads the fetched corpus"]
 fn an_unknown_length_segment_reproduces_the_declared_picture() {
     every_variant_reproduces("7.2.7 unknown data length", &UNKNOWN_LENGTH);
+}
+
+/// **A dictionary that starts where another finished draws the same picture.**
+///
+/// The adaptive contexts are a probability model, not data: a decoder reading
+/// the *same bits* through the wrong probabilities gets a different answer,
+/// and nothing about the bit stream says so. This file is the only thing in
+/// reach that asks.
+///
+/// It also settles a choice T.88 leaves to be read carefully: a dictionary
+/// referring to several segments that retained takes the **last** of them in
+/// reference order. Both wrong readings were run -- starting from E.3.6's
+/// initial state, and taking the first retainer instead of the last -- and
+/// this file catches each of them, in both cases by desynchronising the
+/// dictionary badly enough that its export count disagrees with its header
+/// rather than by drawing a wrong picture. That is luck rather than design:
+/// a probability model is wrong by degrees, and the assertion is against
+/// every pixel because a smaller desynchronisation would draw.
+#[test]
+#[ignore = "reads the fetched corpus"]
+fn a_retained_bitmap_coding_context_reproduces_the_standard_picture() {
+    every_variant_reproduces("7.4.2 retained contexts", &RETAINED_CONTEXT);
 }
 
 /// **Every halftone file draws the picture the corpus codes without one.**
