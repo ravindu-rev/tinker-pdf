@@ -134,8 +134,8 @@ Measured over the corpus's JBIG2-bearing files, counting those whose decode
 reports any refusal: **65 before this lineage landed, 52 after the arithmetic
 variant, 49 after the Huffman one, 35 after refinement, 30 once the Huffman road
 followed it, 6 once transposed placement, clause 7.4.13's custom code tables,
-7.2.7's unknown data length and the halftone lineage had landed, and **1 of
-118** now** that 7.4.2's retained contexts, 6.5.8.2.2's reference offset, an
+7.2.7's unknown data length and the halftone lineage had landed, and **1 of 118
+now** that 7.4.2's retained contexts, 6.5.8.2.2's reference offset, an
 empty text region and Annex B's four mis-transcribed tables have followed. None
 ever gained one. The one that is left is `pdfjs/issue3371.pdf`, a stream that
 stops inside a segment — damage rather than a capability, and
@@ -183,16 +183,22 @@ that decision stays outside the crate. The decoder's stance is that a wrong
 JPEG 2000 decode looks like a photograph — the inverse wavelet smooths wrong
 coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
-symbol) catch a mis-parse before any pixel exists. Measured against the
-corpus's nineteen readable JPX files as of August 2026: **16 decode and 3
-refuse by name**, and **none of the three is a code-block style**. One is a
-budget (`jpx-budget-spent`, a ruling 1 hardening limit rather than a
-capability gap) and two are veraPDF fixtures that are deliberately
-non-conformant. It was 15 and 4: the file that moved is `jp2k-resetprob.pdf`,
-whose only unusual bit is `RESET`. The fifteenth had been a case of its own —
-never asked for at all, because its image sits two form XObjects deep and a
-form's own `/Resources` were consulted nowhere; that one decodes now too
-([rendering](rendering.md)).
+symbol) catch a mis-parse before any pixel exists.
+
+**Measured over five corpora, September 2026**, by
+[`jpx_attribution.rs`](../../crates/tinker-pdf/tests/jpx_attribution.rs), which
+names the *internal* refusal rather than the coarse warning: **39 files carry a
+JPX stream and 5 report a refusal**, and **not one of the five is a coding
+capability**. One is a ruling 1 budget; two are veraPDF fixtures whose `colr`
+box is deliberately non-conformant; two are `/JPXDecode` streams whose bytes
+are not JPEG 2000 at all. Two further real documents are **truncated** — every
+tile short of its declared parts — and are drawn as far as they arrive rather
+than refused. So RGN, POC, PPM, PPT, CRG, `BYPASS`, `TERMALL` and precision
+above sixteen bits are reached by **zero** corpus files, fixture or real.
+
+That paragraph used to read "the corpus's nineteen readable JPX files as of
+August 2026: 16 decode and 3 refuse", which was a count over four corpora
+taken before the attribution existed, and a coarse one.
 
 **Container codecs, not `/Filter` names.** No PDF stream is a PNG file, but
 the archive formats need one, so the crate also exports a PNG decoder

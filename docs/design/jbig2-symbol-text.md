@@ -497,6 +497,39 @@ claimed a clause was pinned by a fixture that could not pin it, beside a
 paragraph explaining why it could not. Every real-world JBIG2 document in five
 corpora decodes now, and the one that did not is what found it.
 
+#### The refinement templates are right, and the standard says so now
+
+`docs/design/jbig2-symbol-text.md` has carried a warning since milestone 5 that
+**five distinct refinement templates decoded T.88 Annex H page 3 into the same
+legible line of text**, and that thirty-six coded decisions cannot tell them
+apart. The corpus settled them — ten refinement variants of one picture, held
+at 0 pixels — and the doc has said ever since that this is evidence rather than
+transcription.
+
+It is transcription now. T.88's Figures 12 and 13 were read on 8 September 2026,
+rendered from the fetched standard by `tpdf render`, and both match position for
+position:
+
+| | figure | this file |
+| --- | --- | --- |
+| Template 0, destination | `RA₁` at (−1, −1), then (0, −1), (1, −1), (−1, 0) | `NOMINAL_REFINE_AT[0]` + `REFINE_0_HERE` |
+| Template 0, reference | `RA₂` at (−1, −1), then the rest of the 3×3 | `NOMINAL_REFINE_AT[1]` + `REFINE_0_THERE` |
+| Template 1, destination | (−1, −1), (0, −1), (1, −1), (−1, 0) | `REFINE_1_HERE` |
+| Template 1, reference | a plus: (0, −1), (−1, 0), (0, 0), (1, 0), (0, 1), (1, 1) | `REFINE_1_THERE` |
+
+Thirteen pixels and ten, which is what the two figures are captioned. 6.3.5.2's
+edge rule — "all pixels lying outside the bounds of the actual bitmap or the
+reference bitmap have the value 0" — is `Bitmap::get`'s behaviour, and the
+alignment is `(X − GRREFERENCEDX, Y − GRREFERENCEDY)`, which is the *minus*
+`decode_refinement_into` uses.
+
+**The corpus was right**, and that is the finding: on the one clause where this
+module recorded that it had guessed five times and could not tell, the whole-
+picture instrument picked the same answer the standard prints. Beside the Annex
+B section below — where four transcriptions were wrong and one of them passed
+every check this repository could state — the pair is the argument for both
+instruments rather than either.
+
 #### Four tables were wrong, and how each was found
 
 ITU-T Rec. T.88 (02/2000) is published free of charge. An attempt to fetch it

@@ -3574,6 +3574,20 @@ const fn tpgdon_context(template: u8) -> usize {
 /// All are causal — the pixel being decoded is not written yet, so a position
 /// at or after it would read a zero that carries no information and would put
 /// this decoder out of step with any encoder.
+///
+/// **These four constants are now checked against T.88's own Figures 12 and
+/// 13**, read in September 2026 once the standard could be fetched. Both
+/// figures match position for position: Figure 12's left group is `RA₁` at
+/// (−1, −1) and these three; its right group is `RA₂` at (−1, −1) and
+/// [`REFINE_0_THERE`]'s eight, thirteen in all. Figure 13's left group is
+/// [`REFINE_1_HERE`]'s four and its right group is [`REFINE_1_THERE`]'s six
+/// in a plus shape, ten in all, and it has no adaptive pixels.
+///
+/// That is worth stating because `docs/design/jbig2-symbol-text.md` records
+/// **five** distinct templates that decoded Annex H page 3 into legible text
+/// and were all wrong, and because until the standard arrived the only thing
+/// holding these was the corpus coding one picture ten ways. The corpus was
+/// right.
 const REFINE_0_HERE: [(i8, i8); 3] = [(0, -1), (1, -1), (-1, 0)];
 
 /// The reference layer's fixed positions for template 0: its whole
