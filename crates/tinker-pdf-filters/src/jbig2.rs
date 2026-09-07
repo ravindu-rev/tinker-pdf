@@ -1513,8 +1513,9 @@ fn symbol_dictionary_huffman(
                     note(warnings, Jbig2Refusal::SymbolIndexOutOfRange);
                     return None;
                 };
-                let dx = refinement_offset(width, reference.width, rdx);
-                let dy = refinement_offset(height, reference.height, rdy);
+                // 6.5.8.2.2's offset is RDX and RDY themselves; see the
+                // arithmetic road's copy of this for what settled it.
+                let (dx, dy) = (i64::from(rdx), i64::from(rdy));
                 let mut coder = MqDecoder::new(bytes);
                 decode_refinement_into(
                     &mut coder,
@@ -1874,8 +1875,31 @@ fn symbol_dictionary(
                         note(warnings, Jbig2Refusal::SymbolIndexOutOfRange);
                         return None;
                     };
-                    let dx = refinement_offset(width, reference.width, rdx);
-                    let dy = refinement_offset(height, reference.height, rdy);
+                    // **6.5.8.2.2's reference offset is RDX and RDY, and not
+                    // 6.4.11's.** The text region's road splits the size
+                    // difference between the two edges and adds the coded
+                    // offset on top -- `refinement_offset` -- because a symbol
+                    // placed in a strip is being *centred* on the instance it
+                    // refines. Here there is no instance and no strip: the
+                    // dictionary is building a symbol out of another symbol,
+                    // and the offset is the whole of what was coded.
+                    //
+                    // The two readings agree whenever the refined symbol is
+                    // its reference's size, which is every fixture in this
+                    // repository and every pdf.js file that reaches this road
+                    // -- the difference is one pixel per unit of size
+                    // difference, so it is invisible until a real encoder
+                    // refines something into a different shape.
+                    // `safedocs/0000337.pdf` is that encoder: 46 pages of OCR
+                    // whose first refined symbol is 13 by 22 against a 10 by
+                    // 23 reference. Under the centred reading its first symbol
+                    // came out one column over and the dictionary lost step
+                    // inside its first height class, which then presented as
+                    // an out-of-range width, an impossible refinement size, a
+                    // symbol index past the pool and an aggregate instance
+                    // count over the cap -- five names for one displacement.
+                    let dx = i64::from(rdx);
+                    let dy = i64::from(rdy);
                     decode_refinement_into(
                         &mut coder,
                         &mut refine_contexts,
@@ -3711,15 +3735,22 @@ fn refine_template(rtemplate: u8, at: [(i8, i8); 2]) -> RefineTemplate<'static> 
     }
 }
 
-/// 6.4.11 and 6.5.8.2.2's reference offset, which is the same arithmetic in
-/// both: the size difference is split evenly and the coded offset added.
+/// **6.4.11's reference offset, and 6.4.11's alone**: the size difference is
+/// split evenly and the coded offset added.
 ///
 /// `div_euclid` rather than `/`, because the difference is signed and the split
 /// has to floor: −1 halves to −1, not to 0. Annex H page 3 refuses to decode
-/// under either alternative — the coded offset alone, or a truncating `/2` —
-/// which is what pins this on the 6.4.11 road; the dictionary road is pinned by
-/// `a_refined_symbol_that_is_not_its_reference_s_size_pins_6_5_8_2_2`, because
-/// no corpus file reaches 6.5.8.2.2 at a size difference at all.
+/// under either alternative — the coded offset alone, or a truncating `/2`.
+///
+/// **It used to be 6.5.8.2.2's too, and that was wrong.** A text region is
+/// *centring* a refined bitmap on the instance it replaces, so the size
+/// difference is shared between the two edges. A symbol dictionary refining
+/// one symbol into another is doing no such thing: there is no instance and no
+/// strip, and 6.5.8.2.2's offset is `RDX` and `RDY` as coded. The two agree
+/// whenever the refined symbol is its reference's size, which is every fixture
+/// in this repository and every pdf.js file that reaches the road —
+/// `safedocs/0000337.pdf` is the first thing in reach that refines a symbol
+/// into a different shape, and it is 46 pages of it.
 fn refinement_offset(target: i64, reference: u32, coded: i32) -> i64 {
     (target - i64::from(reference)).div_euclid(2) + i64::from(coded)
 }
@@ -5200,8 +5231,12 @@ mod tests {
         }
     }
 
-    /// 6.4.11's and 6.5.8.2.2's reference offset, **written from the clause
-    /// rather than called out of the decoder**.
+    /// **6.4.11's** reference offset, written from the clause rather than
+    /// called out of the decoder.
+    ///
+    /// It was 6.5.8.2.2's as well until `safedocs/0000337.pdf` said otherwise;
+    /// the dictionary encoders below now place a refined symbol at its coded
+    /// offset, and this stays for the text region's road.
     ///
     /// [`refinement_offset`] is what is under test; an encoder that called it
     /// would move with it under injection and the round trip would prove that
@@ -5305,8 +5340,8 @@ mod tests {
             encode_int_at(&mut encoder, iardy, &mut prevs[4], Some(symbol.rdy));
 
             let reference = pool.get(symbol.id as usize).expect("the reference exists");
-            let dx = split_offset(target.width, reference.width, symbol.rdx);
-            let dy = split_offset(target.height, reference.height, symbol.rdy);
+            // 6.5.8.2.2: the coded offset is the whole of it, unlike 6.4.11's.
+            let (dx, dy) = (symbol.rdx, symbol.rdy);
             encode_refinement(
                 &mut encoder,
                 refine,
@@ -5386,32 +5421,44 @@ mod tests {
         ".....",
     ];
 
-    /// **6.5.8.2.2's reference offset, pinned by symbols that are not their
-    /// reference's size.**
+    /// **6.5.8.2.2's reference offset is `RDX` and `RDY`, and this fixture
+    /// used to say otherwise.**
     ///
-    /// Two readings of the clause were live until this fixture existed: the
-    /// one [`refinement_offset`] implements — *split the size difference, then
-    /// add `RDX`* — and `RDX` alone. They coincide whenever the refined symbol
-    /// is its reference's size, which is true of Annex H's refining dictionary
-    /// and of every corpus file that reaches this road, so nothing in the tree
-    /// could tell them apart.
+    /// Two readings of the clause were live: the one [`refinement_offset`]
+    /// implements for 6.4.11 — *split the size difference, then add `RDX`* —
+    /// and `RDX` alone. They coincide whenever the refined symbol is its
+    /// reference's size, which is true of Annex H's refining dictionary and of
+    /// every pdf.js file that reaches this road, so nothing in the tree could
+    /// tell them apart and this fixture was built to.
     ///
-    /// Here `RDX` and `RDY` are both zero and the sizes carry the whole offset,
-    /// so the split term *is* the answer: 1 for the eight-wide symbol and −1
-    /// for the five-wide one. Under `RDX` alone both would be zero, and under
-    /// a truncating `/2` the negative one would be zero — three arithmetics,
-    /// three different reference positions, one of which is asserted.
+    /// It was built under the wrong one. The encoder above and the decoder
+    /// share a reading by construction, so a round trip can prove a reading is
+    /// *load-bearing* and never that it is T.88's, and the old comment here
+    /// said exactly that and then let the fixture stand as the pin anyway.
+    ///
+    /// **What settled it is a document.** `safedocs/0000337.pdf` is 46 pages of
+    /// real OCR whose first refined symbol is 13 by 22 against a 10 by 23
+    /// reference. Under the centred reading it came out one column over, the
+    /// dictionary lost step inside its first height class, and every page of
+    /// the file refused — presenting as an out-of-range width, an impossible
+    /// refinement size, a symbol index past the pool, more symbols than
+    /// declared and an aggregate instance count over the cap, five names for
+    /// one displacement. Under `RDX` alone all 46 decode.
+    ///
+    /// So what this test is *for* has changed with it. It is no longer the
+    /// adjudicator; it is the guard that keeps 6.4.11's arithmetic from
+    /// leaking back into 6.5.8.2.2, and it can do that because `RDX` and `RDY`
+    /// are both zero here while the sizes differ — one symbol eight wide
+    /// against a six-wide reference, one five wide. Under the centred reading
+    /// the references would sit at +1 and −1; under a truncating `/2` at +1
+    /// and 0. Three arithmetics, three reference positions, and the one this
+    /// asserts is the one a real encoder emits.
     ///
     /// **The assertion is the picture and it has to be.** A refinement whose
     /// reference sits one column out desynchronises the MQ decoder within a
     /// row or two and everything after it is noise, which is the symptom
     /// `docs/design/jbig2-symbol-text.md` records three separate defects
     /// producing. A count, a size or a warning would not distinguish them.
-    ///
-    /// What this cannot do is adjudicate the clause: the encoder above shares
-    /// one reading with the decoder, so the round trip proves the reading is
-    /// *load-bearing*, not that it is T.88's. Before it, changing
-    /// [`refinement_offset`] to either of the other two broke no test.
     ///
     /// Two refined symbols in a row rather than one, because 6.5.8.1's shared
     /// refinement states have nothing to carry across a dictionary that
@@ -5820,6 +5867,73 @@ mod tests {
             (exported[1].width, exported[1].height),
             (2, 2),
             "the second export is the first new symbol"
+        );
+    }
+
+    /// **A retained context of the wrong shape is refused, not quietly
+    /// dropped.**
+    ///
+    /// 7.4.2 lets a dictionary start from the adaptive state another left
+    /// behind, and the array is indexed by a template's pixel neighbourhood --
+    /// 65 536 states at template 0, 8 192 at template 1, 1 024 at 2 and 3. So
+    /// a consumer at one template and a retainer at another have nothing to
+    /// hand over.
+    ///
+    /// The tempting reading is to notice the mismatch and start fresh, which
+    /// costs nothing and produces a picture. It is the wrong one twice over:
+    /// the encoder made its decisions against *some* model and the initial
+    /// state is not it, so the symbols come out wrong; and a decoder that
+    /// degrades silently here leaves no record (ruling 10). Refused by name.
+    ///
+    /// This was a row reading zero in both columns of the counted table --
+    /// removing the check broke no test -- which is what that table is for.
+    #[test]
+    fn a_retained_context_of_the_wrong_shape_is_refused_by_name() {
+        // Template 1: 8 192 contexts, and one AT pair rather than four.
+        let mut data = Vec::new();
+        data.extend_from_slice(&(0x0100u16 | (1 << 10)).to_be_bytes());
+        data.extend_from_slice(&[2, -1i8 as u8]);
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        let segment = dictionary_segment(2, &[1], &data);
+
+        // A template 0 dictionary's contexts: sixteen bits, not thirteen.
+        let kept = RetainedContexts {
+            generic: MqContexts::new(1 << template_bits(0)),
+            refine: MqContexts::new(refine_states(0)),
+        };
+        let mut warnings = Vec::new();
+        assert!(symbol_dictionary(
+            &segment,
+            &[],
+            &[],
+            Some(&kept),
+            &mut None,
+            1 << 20,
+            &mut warnings
+        )
+        .is_none());
+        assert_eq!(warnings, vec![Jbig2Refusal::RetainedContextMismatch]);
+
+        // The same dictionary against a context of its own shape gets past
+        // this check, so the refusal above is the shape and not the road.
+        let matching = RetainedContexts {
+            generic: MqContexts::new(1 << template_bits(1)),
+            refine: MqContexts::new(refine_states(0)),
+        };
+        let mut warnings = Vec::new();
+        let _ = symbol_dictionary(
+            &segment,
+            &[],
+            &[],
+            Some(&matching),
+            &mut None,
+            1 << 20,
+            &mut warnings,
+        );
+        assert!(
+            !warnings.contains(&Jbig2Refusal::RetainedContextMismatch),
+            "{warnings:?}"
         );
     }
 
@@ -7745,9 +7859,15 @@ mod tests {
             .expect("the reference exists");
         let layout = refine_template(0, NOMINAL_REFINE_AT);
         let mut encoder = MqEncoder::new(1usize << layout.bits());
-        let dx = split_offset(target.width, reference.width, symbol.rdx);
-        let dy = split_offset(target.height, reference.height, symbol.rdy);
-        encode_refinement(&mut encoder, 0, &layout, reference, (dx, dy), &target);
+        // 6.5.8.2.2: the coded offset is the whole of it, unlike 6.4.11's.
+        encode_refinement(
+            &mut encoder,
+            0,
+            &layout,
+            reference,
+            (symbol.rdx, symbol.rdy),
+            &target,
+        );
         let sub = encoder.flush();
         write_huff(&mut bits, &sizes, sub.len() as i32);
         bits.extend(&sub);

@@ -270,35 +270,22 @@ fn every_refused_jbig2_file_is_attributed() {
 const BEARING: u32 = 118;
 
 /// Files reporting any refusal. It was **34** before Tier 2's JBIG2 rows.
-const REFUSED: u32 = 3;
+const REFUSED: u32 = 2;
 
 /// Every reason the corpus is still refused for, most files first.
 ///
-/// A reader should be able to tell a file that is broken from a build that is
-/// short of something out of this list alone — that is what
-/// [`Jbig2Refusal::is_malformed`] is for, and two of the three are broken.
+/// Two files, and there is nothing else:
 ///
-/// The three files, and there is nothing else:
-///
-/// - `pdfjs/issue3371.pdf` — a stream that stops inside a segment. Damage.
+/// - `pdfjs/issue3371.pdf` — a stream that stops inside a segment. Damage, and
+///   [`Jbig2Refusal::is_malformed`] says so.
 /// - `pdfjs/bitmap-symbol-symhuffB5B3-texthuffB7B9B12.pdf` — the three Annex B
-///   tables that are not complete prefix codes.
-/// - `safedocs/0000337.pdf` — 46 pages of real OCR, one desynchronisation
-///   inside the refinement/aggregate dictionary presenting seven ways.
-const EXPECTED: [(&str, u32); 12] = [
-    ("NoRegion", 3),
-    ("AggregateInstanceCap", 1),
-    ("DanglingReference", 1),
-    ("MoreInstancesThanDeclared", 1),
-    ("MoreSymbolsThanDeclared", 1),
-    ("RefinedSizeOutOfRange", 1),
-    ("SymbolDictionaryRefused", 1),
-    ("SymbolIndexOutOfRange", 1),
-    ("SymbolPixelCap", 1),
-    ("SymbolWidthOutOfRange", 1),
-    ("TextRegionRefused", 1),
-    ("Truncated", 1),
-];
+///   tables that are not complete prefix codes. The last JBIG2 capability this
+///   build is short of, and the only refusal here that is this build's fault.
+///
+/// **Every real-world document in five corpora decodes.** What is left is one
+/// fixture that is deliberately broken and one that reaches a table nobody has
+/// reconstructed.
+const EXPECTED: [(&str, u32); 3] = [("NoRegion", 2), ("TextRegionRefused", 1), ("Truncated", 1)];
 
 /// **One file, image by image** — the diagnostic behind the census above.
 ///

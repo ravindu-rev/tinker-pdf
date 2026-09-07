@@ -442,44 +442,56 @@ whole difference between this section and the one it replaced is noticing that.
   `bitmap-refine.pdf` shape — code a region, then refine it — had nothing to
   refine against.
 
-#### 6.5.8.2.2's reference offset, and what a fixture there can and cannot say
+#### 6.5.8.2.2's reference offset: the fixture was built on the wrong reading
 
-`refinement_offset` implements one of two readings of the clause: **split the
-size difference, then add `RDX`** — the same arithmetic 6.4.11 uses, which is
-why one function serves both roads. The other reading is `RDX` alone. The two
+`refinement_offset` implemented one of two readings of the clause on **both**
+roads: *split the size difference, then add `RDX`* — the arithmetic 6.4.11 uses,
+which is why one function served both. The other reading is `RDX` alone. The two
 coincide exactly when the refined symbol is its reference's size, which is true
-of Annex H's refining dictionary and of every corpus file that reaches that
-road, so nothing in the tree could choose between them on the dictionary road
-and this section said so.
+of Annex H's refining dictionary and of every pdf.js file that reaches the
+dictionary road, so nothing in the tree could choose between them there.
 
-`a_refined_symbol_that_is_not_its_reference_s_size_pins_6_5_8_2_2` is the fixture
-that can. It refines one 6 by 6 symbol into an 8 by 6 and then into a 5 by 7,
-both at `RDX = RDY = 0`, so the split term *is* the offset: 1 for the wider
-symbol and −1 for the narrower. Three arithmetics put the reference in three
-different places there — the split, `RDX` alone, and a truncating `/2`, which
-parts company with `div_euclid` only when the difference is negative and odd —
-and the assertion is the two decoded pictures, because a reference one column
-out desynchronises the coder and everything after it is noise rather than a
-slightly wrong picture.
+`a_refined_symbol_that_is_not_its_reference_s_size_pins_6_5_8_2_2` was written to
+be the thing that could: it refines one 6 by 6 symbol into an 8 by 6 and then
+into a 5 by 7, both at `RDX = RDY = 0`, so the split term *is* the offset.
+`split_offset` in the test module is written out separately from
+`refinement_offset` precisely so an injection into the decoder is not mirrored
+by the encoder — the same separation `INT_RANGES` keeps from `decode_int` — and
+without it the fixture would pass under every reading.
 
-**What that is worth, stated exactly.** The encoder is in this repository, so a
-round trip cannot say which reading is T.88's. `split_offset` in the test module
-is written out separately from `refinement_offset` precisely so that an
-injection into the decoder is not silently mirrored by the encoder — the same
-separation `INT_RANGES` keeps from `decode_int`, and without it the fixture
-passes under every reading and proves nothing. What it buys is that the choice
-is now **load-bearing** where it was not: before it, changing `refinement_offset`
-to either alternative broke nothing on the dictionary road at all.
+**It still could not adjudicate, and it was built on the wrong reading.** The
+old text here said the first half plainly and then let the fixture stand as the
+pin anyway, which is the whole failure mode: an encoder in this repository and a
+decoder in this repository agree by construction, so a round trip says a choice
+is *load-bearing*, never that it is T.88's.
 
-The counted table below is the measurement, and it also shows where the
-standard's own datastream does bear on the question. Under `RDX` alone, Annex H
-page 3's *text region* stops decoding altogether — the published stream refuses,
-because a reference in the wrong place desynchronises the coder the integer
-decoders share and the counts then fail — and under a truncating `/2` it fails
-as well. So 6.4.11's arithmetic was adjudicated by published data all along;
-what was unpinned was **6.5.8.2.2 sharing it**, on a road no fixture reached at
-a size difference. That is the narrower and true statement, and the fixture is
-what closes it.
+**What settled it is a document.** `safedocs/0000337.pdf` — 46 pages of real OCR,
+1 430 imported symbols, `SDREFAGG = 1` and `SDRTEMPLATE = 1` — refines symbols
+into different shapes, which nothing else in reach does. Its first refined
+symbol is 13 by 22 against a 10 by 23 reference. Under the centred reading it
+came out one column over, the dictionary lost step inside its first height class,
+and every page of the file refused: an out-of-range symbol width, an impossible
+refinement size, a symbol index past the pool, more symbols than declared and an
+aggregate instance count over the cap — **five names for one displacement**, which
+is the shape this document elsewhere predicts a wrong reference position takes.
+Under `RDX` alone all 46 pages decode with no warning.
+
+So the clause splits: 6.4.11 *centres* a refined bitmap on the instance it
+replaces and shares the size difference between the two edges; 6.5.8.2.2 is
+building a symbol out of another symbol, with no instance and no strip, and its
+offset is what was coded. `refinement_offset` is 6.4.11's alone now, on both the
+arithmetic and the Huffman dictionary roads, and both dictionary encoders in the
+test module place a refined symbol at `(RDX, RDY)`.
+
+The fixture keeps its place with a different job. It is no longer the
+adjudicator; it is the guard that stops 6.4.11's arithmetic leaking back, and it
+can still do that because the same three arithmetics put the reference in three
+different places there.
+
+**What this cost, stated plainly.** For as long as it stood, this document
+claimed a clause was pinned by a fixture that could not pin it, beside a
+paragraph explaining why it could not. Every real-world JBIG2 document in five
+corpora decodes now, and the one that did not is what found it.
 
 #### Huffman refinement, and the tables it reads
 
@@ -594,6 +606,15 @@ Every row below was re-measured on 4 September 2026, because adding a fixture
 changes other rows' counts and a carried number is a defect. The numbers the
 table held before did not reproduce.
 
+**The two reference-offset rows were re-measured again on 8 September 2026** and
+both moved down, for the reason the section above gives: 6.5.8.2.2 no longer
+shares 6.4.11's arithmetic, so the dictionary fixture is no longer a catcher for
+`div_euclid`, and the perturbation that used to be "`RDX` alone" is now its
+inverse. Neither is caught by `jbig2_refinement` at all. What catches the first
+is `jbig2_attribution`, whose refused-file count goes from **2 to 3** — and that
+is the only corpus test that does, because it is the only one that decodes a
+real scan rather than a fixture.
+
 | perturbation | filters | corpus | total |
 | --- | ---: | ---: | ---: |
 | template 0, one reference position moved | **0** | 1 | 1 |
@@ -611,8 +632,8 @@ table held before did not reproduce.
 | B.15, one line's range low | 2 | **0** | 2 |
 | 6.5.8.1: 6.3's states reset per symbol, Huffman dictionary | **0** | 1 | 1 |
 | the same, arithmetic dictionary | 1 | **0** | 1 |
-| 6.5.8.2.2's reference offset: `RDX` alone | 4 | **0** | 4 |
-| 6.5.8.2.2's reference offset: `/2` rather than `div_euclid(2)` | 3 | **0** | 3 |
+| 6.5.8.2.2's reference offset: 6.4.11's split rather than `RDX` | 1 | **0** | 1 |
+| 6.4.11's reference offset: `/2` rather than `div_euclid(2)` | 2 | **0** | 2 |
 
 **No row reads zero in both columns any more.** Three did when this table was
 first written — the alignment, the tables, and the arithmetic dictionary's
@@ -630,14 +651,47 @@ zeros that remain are all one-sided, and each says something:
   codes a non-zero delta — which is why the tables were refused rather than
   decoded until now, and why the fixtures that lift the refusal had to be built
   from the `MqEncoder` and a bit writer rather than found.
-- **The reference-offset rows are held by `filters` alone too, but not only by
-  the new fixture.** Under `RDX` alone, Annex H page 3's text region stops
-  decoding altogether, and under a truncating `/2` it fails as well. So 6.4.11's
-  arithmetic is adjudicated by the standard's own datastream; what was unpinned
-  was 6.5.8.2.2 sharing it.
+- **The reference-offset rows read zero in the corpus column and are not
+  unheld.** 6.4.11's arithmetic is adjudicated by the standard's own datastream:
+  under `RDX` alone Annex H page 3's text region stops decoding altogether, and
+  under a truncating `/2` it fails as well. 6.5.8.2.2's is adjudicated by a real
+  scan — `safedocs/0000337.pdf`, through `jbig2_attribution` rather than through
+  `jbig2_refinement`, which is why this column shows a zero the section above
+  explains rather than a gap.
 - **`SBSYMCODELEN` and the arithmetic dictionary's shared states are held by
   `filters` alone**, which is ordinary: both are dictionary facts, and the
   corpus's refinement variants reach the dictionary road through one file.
+
+#### Counted injection, September 2026: 7.4.2 and the two empty cases
+
+A second table rather than four more rows in the one above, because the corpus
+command is different and mixing two units in one column is how a table stops
+meaning anything. Here `filters` is the same
+`cargo test --no-fail-fast -p tinker-pdf-filters jbig2`, and `corpus` is
+`cargo test --no-fail-fast -p tinker-pdf --test jbig2_refinement --test
+jbig2_lineages -- --ignored` — `jbig2_lineages` is where the retained-context
+file lives and `jbig2_refinement` cannot see it.
+
+| perturbation | filters | corpus | total |
+| --- | ---: | ---: | ---: |
+| 7.4.2: the consumed context is ignored, and the dictionary starts from E.3.6 | **0** | 1 | 1 |
+| 7.4.2: the *first* referred-to retainer is taken rather than the last | **0** | 1 | 1 |
+| 7.4.2: a context of the wrong shape is dropped rather than refused | 1 | **0** | 1 |
+| 6.4: a text region that places nothing is refused rather than blank | 1 | **0** | 1 |
+
+The first two rows are the shape this whole document argues for and the reason
+`jbig2_lineages` exists: an adaptive context is a probability model, so a decoder
+that gets it wrong reads the same bits to a different answer and *no unit test
+can see it*. Only a whole picture can. Both were caught by
+`bitmap-symbol-context-reuse.pdf` — in each case by desynchronising the
+dictionary until its export count disagreed with its header rather than by
+drawing a wrong picture, which is luck rather than design and is why the
+assertion is still every pixel.
+
+The third row read **zero in both columns** when it was first measured: removing
+the shape check broke no test, because nothing in the tree paired a consumer
+with a retainer at a different template. That is exactly what this table is for,
+and `a_retained_context_of_the_wrong_shape_is_refused_by_name` closes it.
 
 The corpus column's ones are why `corpus.yml` runs those assertions explicitly
 rather than leaving them to a `--ignored` nobody passes: without that step, six
