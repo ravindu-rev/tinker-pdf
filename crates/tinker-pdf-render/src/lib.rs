@@ -86,11 +86,6 @@ pub enum RenderWarning {
     /// page still renders, and it says which group and which space.
     ///
     /// One- and three-component spaces are *not* reported, because for those
-    /// RGB is the same arithmetic rather than an approximation of it.
-    UnsupportedGroupSpace {
-        /// The space the group asked for.
-        space: String,
-    },
     /// One of 11.3.5.3's four non-separable blend modes was applied inside a
     /// `/DeviceCMYK` transparency group.
     ///
@@ -878,42 +873,6 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         );
     }
 
-    /// Reports the *page's* own group space (11.4.7).
-    ///
-    /// Public because a page-level group has no `Do` to arrive through: the
-    /// facade reads it off the page dictionary and hands it here. It reaches
-    /// the same reporting path as a form's group, so a document whose page and
-    /// whose forms both ask for CMYK says so once.
-    pub fn note_page_group_space(&mut self, space: tinker_pdf_content::GroupSpace) {
-        // The same predicate a form group uses: what is reported is a space
-        // this build cannot give a buffer of, not a space that differs from
-        // RGB. A page group in CMYK gets a CMYK page canvas and is converted
-        // for the caller at the end, so there is nothing to report; a page
-        // group in Lab still composites in RGB, and still says so.
-        if group_format(space).is_none() {
-            self.note_group_space(space);
-        }
-    }
-
-    /// Record that a group asked to be composited in a space this build does
-    /// not blend in, once per space rather than once per group.
-    ///
-    /// Once per space because a page that opens two hundred CMYK groups has
-    /// one problem, not two hundred, and a warning list is read by a person.
-    fn note_group_space(&mut self, space: tinker_pdf_content::GroupSpace) {
-        let named = space.name();
-        if self
-            .warnings
-            .iter()
-            .any(|w| matches!(w, RenderWarning::UnsupportedGroupSpace { space } if space == named))
-        {
-            return;
-        }
-        self.warnings.push(RenderWarning::UnsupportedGroupSpace {
-            space: named.to_string(),
-        });
-    }
-
     /// Record that the group budget declined one, for a single report at
     /// `finish`.
     fn note_group_budget(&mut self) {
@@ -971,24 +930,24 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
             PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
             PixelFormat::CmykA8 => PixelFormat::CmykA8,
+            PixelFormat::LabA8 => PixelFormat::LabA8,
         }
     }
 
     /// The buffer a transparency group declaring `space` composites in
-    /// (11.6.6), or `None` for a space this build does not blend in.
+    /// (11.6.6).
     ///
     /// Keyed by the shape of the space rather than by its identity, which is
-    /// all a blend formula needs: how many components, and whether they are
-    /// subtractive. `/Lab` is the `None`: its components are not in the unit
-    /// interval at all, so 11.3.5's formulas have nothing to say about them,
-    /// and the corpus asks for it zero times.
-    fn group_format_of(space: tinker_pdf_content::GroupSpace) -> Option<PixelFormat> {
-        match space {
-            tinker_pdf_content::GroupSpace::Gray => Some(PixelFormat::GrayA8),
-            tinker_pdf_content::GroupSpace::Rgb => Some(PixelFormat::Rgba8),
-            tinker_pdf_content::GroupSpace::Cmyk => Some(PixelFormat::CmykA8),
-            tinker_pdf_content::GroupSpace::Lab => None,
-        }
+    /// all a blend formula needs: how many components, whether they are
+    /// subtractive, and — for `/Lab` — whether they need encoding into 0..1
+    /// before 11.3.5's formulas can say anything about them at all.
+    ///
+    /// **Every space `GroupSpace` can name now has a buffer**, which is why
+    /// this returns a format rather than an `Option` and why
+    /// `RenderWarning::UnsupportedGroupSpace` no longer exists: a variant
+    /// nothing can reach is a claim rather than a check.
+    fn group_format_of(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
+        group_format(space)
     }
 
     fn open_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
@@ -1020,18 +979,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // holds that space's components. Where it declared none it inherits the
         // one it will be composited into, which is what "the group's colour
         // space is the one it is painted onto" comes to in practice.
-        //
-        // Reported before the depth and budget checks below, because a group
-        // declined for a budget is a group whose space was never honoured
-        // either, and those are different reasons to look at a page.
         let format = match group.space {
-            Some(space) => match Self::group_format_of(space) {
-                Some(format) => format,
-                None => {
-                    self.note_group_space(space);
-                    Self::alpha_format(self.canvas.format)
-                }
-            },
+            Some(space) => Self::group_format_of(space),
             None => Self::alpha_format(self.canvas.format),
         };
         let mut buffer = Canvas::new(width, height, format, Color::TRANSPARENT);
@@ -3050,12 +2999,12 @@ pub fn page_canvas_in(width_pt: f64, height_pt: f64, scale: f64, format: PixelFo
 /// The buffer a transparency group declaring `space` composites in (11.6.6),
 /// or `None` for a space this build does not blend in.
 #[must_use]
-pub fn group_format(space: tinker_pdf_content::GroupSpace) -> Option<PixelFormat> {
+pub fn group_format(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
     match space {
-        tinker_pdf_content::GroupSpace::Gray => Some(PixelFormat::GrayA8),
-        tinker_pdf_content::GroupSpace::Rgb => Some(PixelFormat::Rgba8),
-        tinker_pdf_content::GroupSpace::Cmyk => Some(PixelFormat::CmykA8),
-        tinker_pdf_content::GroupSpace::Lab => None,
+        tinker_pdf_content::GroupSpace::Gray => PixelFormat::GrayA8,
+        tinker_pdf_content::GroupSpace::Rgb => PixelFormat::Rgba8,
+        tinker_pdf_content::GroupSpace::Cmyk => PixelFormat::CmykA8,
+        tinker_pdf_content::GroupSpace::Lab => PixelFormat::LabA8,
     }
 }
 

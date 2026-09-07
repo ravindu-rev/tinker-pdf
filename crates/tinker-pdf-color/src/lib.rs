@@ -287,6 +287,19 @@ pub(crate) const XYZ_D50_TO_SRGB: [[f64; 3]; 3] = [
     [0.071_95, -0.228_988, 1.405_386],
 ];
 
+/// The inverse of [`XYZ_D50_TO_SRGB`], for the one direction that needs it.
+///
+/// **Computed from the matrix above rather than quoted beside it.** The values
+/// here were produced by inverting those, and the round trip is asserted in
+/// this module's tests — because two matrices that are meant to be inverses
+/// and are typed out independently are exactly the pair this file has already
+/// watched drift once.
+pub(crate) const SRGB_TO_XYZ_D50: [[f64; 3]; 3] = [
+    [0.436_035_143, 0.385_067_848, 0.143_066_613],
+    [0.222_481_132, 0.716_877_077, 0.060_610_132],
+    [0.013_926_979, 0.097_091_202, 0.714_099_436],
+];
+
 /// [`XYZ_D50_TO_SRGB`], applied.
 pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
     let row = |r: usize| {
@@ -335,11 +348,55 @@ fn srgb_encode(v: f64) -> u8 {
     byte(s)
 }
 
-/// CIE L*a*b* to sRGB, through XYZ (8.6.5.4).
+/// **An sRGB triple as CIE L*a*b*** (8.6.5.4), relative to D50.
 ///
-/// The white point is D50, which is what PDF's `/WhitePoint` defaults to and
-/// what almost every file that uses Lab declares. A document with a different
-/// one is converted slightly wrongly rather than not at all — visibly closer
+/// The inverse of [`lab_to_srgb`], and the direction nothing in this engine
+/// needed until a transparency group asked to composite in `/Lab`: a group
+/// buffer holds the space the group declared, so something has to put a colour
+/// *into* Lab as well as read one out.
+///
+/// `L` runs 0..100 and `a`/`b` roughly -128..127, which is why a Lab group
+/// cannot use the 0..1 buffers every other space does.
+#[must_use]
+pub fn srgb_to_lab(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+    let linear = |v: u8| -> f64 {
+        let v = f64::from(v) / 255.0;
+        // The inverse of the sRGB transfer function, linear near zero.
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            math::pow((v + 0.055) / 1.055, 2.4)
+        }
+    };
+    let (lr, lg, lb) = (linear(r), linear(g), linear(b));
+    let row = |i: usize| {
+        SRGB_TO_XYZ_D50[i][0] * lr + SRGB_TO_XYZ_D50[i][1] * lg + SRGB_TO_XYZ_D50[i][2] * lb
+    };
+    let (x, y, z) = (row(0), row(1), row(2));
+
+    // The forward piecewise cube root, linear near zero for the reason its
+    // inverse is: a plain cube root has an infinite gradient at the origin.
+    let f = |t: f64| -> f64 {
+        const DELTA: f64 = 6.0 / 29.0;
+        if t > DELTA * DELTA * DELTA {
+            math::cbrt(t)
+        } else {
+            t / (3.0 * DELTA * DELTA) + 4.0 / 29.0
+        }
+    };
+    let fx = f(x / WHITE[0]);
+    let fy = f(y / WHITE[1]);
+    let fz = f(z / WHITE[2]);
+    (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+}
+
+/// **A CIE L*a*b* triple as sRGB**, relative to D50.
+#[must_use]
+pub fn lab_to_srgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
+    lab_to_rgb(l, a, b)
+}
+
 /// than the alternative, which was rendering the whole space black.
 pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     // D50, normalized so Y is 1.
@@ -488,5 +545,57 @@ mod tests {
         // Too few components read as zero rather than panicking.
         assert_eq!(ColorSpace::DeviceRgb.to_rgb(&[]), (0, 0, 0));
         assert_eq!(ColorSpace::DeviceCmyk.to_rgb(&[0.5]), (128, 255, 255));
+    }
+
+    /// **The two XYZ matrices are inverses**, which is the only thing standing
+    /// between them and the drift this file has already had once.
+    ///
+    /// They are typed out separately because a matrix inverted at runtime would
+    /// put a division on a path ruling 4 wants exact; the assertion is what
+    /// makes that safe. A tolerance of 1e-6 is two orders below the precision
+    /// either matrix is written to.
+    #[test]
+    fn the_two_xyz_matrices_are_inverses() {
+        for (i, row) in XYZ_D50_TO_SRGB.iter().enumerate() {
+            for j in 0..3 {
+                let product: f64 = row
+                    .iter()
+                    .zip(SRGB_TO_XYZ_D50.iter())
+                    .map(|(a, b)| a * b[j])
+                    .sum();
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (product - expected).abs() < 1e-6,
+                    "row {i} column {j} is {product} and should be {expected}"
+                );
+            }
+        }
+    }
+
+    /// **Lab round-trips through sRGB**, which is what a group buffer needs:
+    /// a colour goes in, is blended, and comes back out.
+    #[test]
+    fn srgb_survives_a_trip_through_lab() {
+        for (r, g, b) in [
+            (0, 0, 0),
+            (255, 255, 255),
+            (128, 128, 128),
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (12, 200, 71),
+            (200, 40, 130),
+        ] {
+            let (l, a, bb) = srgb_to_lab(r, g, b);
+            let back = lab_to_srgb(l, a, bb);
+            for (before, after) in [(r, back.0), (g, back.1), (b, back.2)] {
+                assert!(
+                    before.abs_diff(after) <= 1,
+                    "{:?} came back as {back:?} through Lab {:?}",
+                    (r, g, b),
+                    (l, a, bb)
+                );
+            }
+        }
     }
 }

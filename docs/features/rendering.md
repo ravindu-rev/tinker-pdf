@@ -135,13 +135,23 @@ converted for the caller at the end, which is 11.4.7's own last step; a page is
 never handed back in CMYK, because a `Bitmap` says how many components it has
 and nothing about what they mean.
 
-`/Lab` is the one still composited in RGB and reported by name: its components
-are not in the unit interval at all. **No corpus file declares one**: over the
-5 525 files of September 2026, `RenderWarning::UnsupportedGroupSpace` is
-reported zero times in all three recorded bars, which is the only figure here
-measured against the current corpus. The count of 35 `/DeviceCMYK` groups is an
-earlier measurement over a smaller corpus and is left attributed to it rather
-than restated as current. ExtGState
+**`/Lab` composites in Lab too**, which was the last space that did not. Its
+components are not in the unit interval — `L*` runs 0..100 and `a`/`b` roughly
+−128..127 — so `LabA8` encodes them into bytes (`L/100`, `(a + 128)/255`,
+`(b + 128)/255`) and 11.3.5's separable formulas apply to *that*. The encoding
+is a choice the clause does not make, and it is stated on the format rather
+than buried: blending in the encoded domain is what makes a `/Lab` group
+composite in Lab rather than in RGB, and it is not the same as blending the
+unencoded values.
+
+Every space a group can declare now has a buffer, so
+`RenderWarning::UnsupportedGroupSpace` is gone — a variant nothing can reach is
+a claim rather than a check. **No corpus file declares a `/Lab` group**: over
+the 5 525 files of September 2026 it was reported zero times in all three
+recorded bars, so this capability is held by fixtures rather than by demand,
+which the [roadmap](../ROADMAP.md) records. The count of 35 `/DeviceCMYK`
+groups is an earlier measurement over a smaller corpus and is left attributed
+to it rather than restated as current. ExtGState
 `/SMask` works in both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with
 `/BC` read in the mask group's own `/Group /CS` and defaulting to black
 (fully masked, the default that does not invert every drop shadow), and
@@ -226,7 +236,6 @@ helpers `Page::render` composes.
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
-| Blending a group declared in `/Lab` | `RenderWarning::UnsupportedGroupSpace` | Its components are not in the unit interval, so 11.3.5's formulas have nothing to say about them; the group composites in RGB and is **named**. Grey, RGB and CMYK groups all composite in their own space now | [ROADMAP](../ROADMAP.md) |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified

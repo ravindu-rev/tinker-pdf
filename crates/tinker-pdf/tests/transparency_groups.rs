@@ -1049,54 +1049,49 @@ fn group_in_space(cs: Option<&str>, page_cs: Option<&str>) -> Vec<u8> {
     out
 }
 
-fn group_space_warnings(bytes: Vec<u8>) -> Vec<String> {
+/// The formats every declared group space composites in, as this build sees
+/// them.
+///
+/// Where this used to collect a warning, it now collects the *buffer*: every
+/// space `GroupSpace` can name has one, so there is nothing left to report and
+/// `RenderWarning::UnsupportedGroupSpace` is gone.
+fn group_space_formats(bytes: Vec<u8>) -> Vec<String> {
     let doc = Document::open(bytes).expect("it opens");
     let page = doc.page(0).expect("a page");
     let bitmap = page.render(&RenderOptions::at_dpi(72.0));
-    bitmap
-        .warnings
-        .iter()
-        .filter_map(|w| match w {
-            RenderWarning::UnsupportedGroupSpace { space } => Some(space.clone()),
-            _ => None,
-        })
-        .collect()
+    // The page comes back in RGB whatever the group composited in (11.4.7's
+    // last step), so what is asserted is that nothing was reported and the
+    // page still rendered.
+    bitmap.warnings.iter().map(|w| format!("{w:?}")).collect()
 }
 
-/// **A group declared in a space this build does not blend in says so**, and a
-/// group declared in one it does says nothing.
+/// **Every space a group can declare now has a buffer**, so none of them is
+/// reported.
 ///
-/// The pair is the assertion. A test that only checked the CMYK case would
-/// pass on a build that warned about every group, which would be a worse
-/// engine reporting a problem it does not have — and one that only checked the
-/// RGB case would pass on a build that never warned at all, which is the
-/// behaviour this replaces.
+/// This pair used to assert the opposite for `/Lab`: that its components are
+/// not in the unit interval, so it composited in RGB and said so. They still
+/// are not — `L*` runs 0..100 and `a`/`b` roughly -128..127 — and what changed
+/// is that `PixelFormat::LabA8` encodes them into bytes, which is what lets
+/// 11.3.5's formulas apply at all. The warning went with the gap: a variant
+/// nothing can reach is a claim rather than a check.
 ///
-/// Grey is on the quiet side deliberately: 11.3.5's separable formulas applied
-/// per channel to `R = G = B` are the same arithmetic as applied to one grey
-/// channel, so reporting it would be reporting an approximation that is not
-/// one.
+/// The assertion that matters is below it, in
+/// `a_lab_group_composites_in_lab_rather_than_in_rgb` — this one only says
+/// that no space is left over.
 #[test]
-fn a_group_space_this_build_cannot_blend_in_is_named_and_one_it_can_is_not() {
-    for quiet in [None, Some("/DeviceRGB"), Some("/DeviceGray")] {
+fn every_group_space_composites_without_a_complaint() {
+    for space in [
+        None,
+        Some("/DeviceRGB"),
+        Some("/DeviceGray"),
+        Some("/DeviceCMYK"),
+        Some("[/Lab << /WhitePoint [0.9505 1 1.089] >>]"),
+    ] {
         assert!(
-            group_space_warnings(group_in_space(quiet, None)).is_empty(),
-            "{quiet:?} blends as RGB and must not be reported"
+            group_space_formats(group_in_space(space, None)).is_empty(),
+            "{space:?} has a buffer of its own and must not be reported"
         );
     }
-
-    assert!(
-        group_space_warnings(group_in_space(Some("/DeviceCMYK"), None)).is_empty(),
-        "a CMYK form group composites in CMYK now, so there is nothing to report"
-    );
-    assert_eq!(
-        group_space_warnings(group_in_space(
-            Some("[/Lab << /WhitePoint [0.9505 1 1.089] >>]"),
-            None
-        )),
-        vec!["Lab".to_string()],
-        "Lab's components are not in the unit interval, so it still composites in RGB \n         and still says so"
-    );
 }
 
 /// A page whose own `/Group` declares `cs`, painting `backdrop` then `source`
@@ -1180,24 +1175,22 @@ fn a_page_level_group_decides_the_space_the_page_composites_in() {
     );
 }
 
-/// A space the page group asks for and this build cannot give it a buffer of
-/// is still reported, once.
+/// **A `/Lab` page group is honoured in both positions**, and reports nothing.
 ///
-/// `/Lab` is the only one left: its components are not in the unit interval, so
-/// 11.3.5's formulas have nothing to say about them. A scanned page can open
-/// hundreds of groups and a warning list is read by a person, so the report is
-/// per space rather than per group.
+/// The page group decides the format of the page *canvas* rather than of a
+/// buffer over it (11.4.7), so this is the one place a space has to survive
+/// being the whole page — and 11.4.7's last step converts it back for the
+/// caller, which is why the bitmap comes out RGB either way.
 #[test]
-fn a_space_the_page_group_cannot_have_is_reported_once() {
+fn a_lab_page_group_is_honoured_in_both_positions() {
     let lab = "[/Lab << /WhitePoint [0.9505 1 1.089] >>]";
-    assert_eq!(
-        group_space_warnings(group_in_space(Some(lab), Some(lab))),
-        vec!["Lab".to_string()],
-        "one line for a page group and a form group asking for the same space"
+    assert!(
+        group_space_formats(group_in_space(Some(lab), Some(lab))).is_empty(),
+        "a page group and a form group asking for Lab both have a buffer now"
     );
     assert!(
-        group_space_warnings(group_in_space(Some("/DeviceCMYK"), Some("/DeviceCMYK"))).is_empty(),
-        "CMYK is honoured in both positions now"
+        group_space_formats(group_in_space(Some("/DeviceCMYK"), Some("/DeviceCMYK"))).is_empty(),
+        "CMYK is honoured in both positions too"
     );
 }
 
@@ -1308,11 +1301,20 @@ fn an_opaque_multiply_is_the_same_in_either_space() {
     }
 }
 
-/// **A `/Lab` group is still composited in RGB**, and a build that quietly
-/// started blending over its components would be blending numbers that are not
-/// in the unit interval.
+/// **A `/Lab` group composites in Lab**, which is 11.4.7's requirement and was
+/// the last group space this build did not honour.
+///
+/// `/Difference` of white over black is the discriminating pair. In RGB it is
+/// `|1 - 0|` per channel, which is white. In Lab it is a difference of
+/// *lightness and two opponent axes*: white is `L = 100, a = b = 0` and black
+/// `L = 0, a = b = 0`, so the difference is `L = 100` with both opponent axes
+/// driven to their far end — a strongly coloured result, and nothing like
+/// white.
+///
+/// The assertion is therefore that the two differ. It used to be that they were
+/// equal, with a warning saying so; that was the fallback, not the space.
 #[test]
-fn a_lab_group_still_composites_in_rgb_and_says_so() {
+fn a_lab_group_composites_in_lab_rather_than_in_rgb() {
     let lab = centre(blended_in_space(
         "[/Lab << /WhitePoint [0.9505 1 1.089] >>]",
         "/Difference",
@@ -1327,7 +1329,38 @@ fn a_lab_group_still_composites_in_rgb_and_says_so() {
         "1 1 1 rg",
         "0 0 0 rg",
     ));
-    assert_eq!(lab, rgb, "a Lab group falls back to RGB compositing");
+    assert_ne!(
+        lab, rgb,
+        "a Lab group blending in Lab cannot agree with one blending in RGB on          a mode that reads every channel"
+    );
+
+    // And the space still round-trips: a group that paints one colour and
+    // blends nothing must come back as that colour, or the encoding is lossy
+    // in a way that would show on every Lab group ever written.
+    let plain = centre(blended_in_space(
+        "[/Lab << /WhitePoint [0.9505 1 1.089] >>]",
+        "/Normal",
+        "1",
+        "0.2 0.6 0.9 rg",
+        "0.2 0.6 0.9 rg",
+    ));
+    let direct = centre(blended_in_space(
+        "/DeviceRGB",
+        "/Normal",
+        "1",
+        "0.2 0.6 0.9 rg",
+        "0.2 0.6 0.9 rg",
+    ));
+    for (a, b) in [
+        (plain.0, direct.0),
+        (plain.1, direct.1),
+        (plain.2, direct.2),
+    ] {
+        assert!(
+            a.abs_diff(b) <= 3,
+            "a Lab group that blends nothing must return its own colour:              {plain:?} against {direct:?}"
+        );
+    }
 }
 
 /// **A page cannot come back in CMYK**, however it is asked for.

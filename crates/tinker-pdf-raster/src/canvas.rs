@@ -32,6 +32,24 @@ pub enum PixelFormat {
     /// says happen over ink. It is not offered as a page format: see
     /// `Page::render`.
     CmykA8,
+    /// Lightness, `a`, `b` and alpha.
+    ///
+    /// The one format whose components are not a quantity of anything: `L*`
+    /// runs 0..100 and `a`/`b` roughly -128..127, so unlike every other buffer
+    /// here they do not live in 0..1 and cannot be stored as though they did.
+    /// They are encoded into bytes — `L/100`, `(a + 128)/255`, `(b + 128)/255`
+    /// — which is what lets 11.3.5's separable formulas, written for additive
+    /// components in 0..1, apply to them at all.
+    ///
+    /// **That encoding is a choice and is stated here rather than buried.**
+    /// The clause gives no encoding for a Lab group's buffer; blending in the
+    /// encoded domain is what makes a `/Lab` group composite in Lab rather
+    /// than in RGB, which is the whole point of 11.4.7, and it is not the same
+    /// as blending the unencoded values.
+    ///
+    /// It exists for a group that declares `/Lab` as its `/Group /CS`. It is
+    /// not offered as a page format: see `Page::render`.
+    LabA8,
 }
 
 impl PixelFormat {
@@ -44,6 +62,7 @@ impl PixelFormat {
             PixelFormat::Rgb8 => 3,
             PixelFormat::Rgba8 => 4,
             PixelFormat::CmykA8 => 5,
+            PixelFormat::LabA8 => 4,
         }
     }
 
@@ -59,7 +78,9 @@ impl PixelFormat {
         // painting its own colours, and a non-isolated group counting its
         // backdrop twice. Four wrong pictures, no error.
         match self {
-            PixelFormat::GrayA8 | PixelFormat::Rgba8 | PixelFormat::CmykA8 => true,
+            PixelFormat::GrayA8 | PixelFormat::Rgba8 | PixelFormat::CmykA8 | PixelFormat::LabA8 => {
+                true
+            }
             PixelFormat::Gray8 | PixelFormat::Rgb8 => false,
         }
     }
@@ -270,6 +291,10 @@ impl Canvas {
             PixelFormat::CmykA8 => {
                 let (c, m, y, k) = rgb_to_cmyk(color.r, color.g, color.b);
                 [c, m, y, k, color.a]
+            }
+            PixelFormat::LabA8 => {
+                let (l, a, b) = lab_bytes(color);
+                [l, a, b, color.a, 0]
             }
         }
     }
@@ -771,6 +796,15 @@ impl Canvas {
                     a: *px.get(4)?,
                 }
             }
+            PixelFormat::LabA8 => {
+                let (r, g, b) = lab_colour(*px.first()?, *px.get(1)?, *px.get(2)?);
+                Color {
+                    r,
+                    g,
+                    b,
+                    a: *px.get(3)?,
+                }
+            }
         })
     }
 }
@@ -808,7 +842,35 @@ fn place(
 /// and the crate graph says a leaf takes bytes and plain values in.
 /// `the_two_crates_agree_on_the_device_relation` holds the copy to the
 /// original so it cannot drift.
-#[must_use]
+///
+/// **Lab is the exception, and deliberately.** Its conversion needs the two
+/// XYZ matrices, and `tinker-pdf-color` has already watched that pair drift
+/// when it existed in two places — so [`lab_bytes`] calls that crate rather
+/// than copying them. Ruling 8 admits a leaf-to-leaf edge; a duplicated
+/// constant is what it does not admit.
+///
+/// A colour as [`PixelFormat::LabA8`]'s three bytes.
+///
+/// `L*` is 0..100 and `a`/`b` roughly -128..127, and a byte is 0..255, so the
+/// encoding is `L/100`, `(a + 128)/255` and `(b + 128)/255` clamped. That is
+/// where a Lab group loses precision relative to the space itself — about a
+/// third of a unit of `L*` per step — and it is the price of blending with the
+/// same integer arithmetic every other buffer uses.
+fn lab_bytes(color: Color) -> (u8, u8, u8) {
+    let (l, a, b) = tinker_pdf_color::srgb_to_lab(color.r, color.g, color.b);
+    let byte = |v: f64| -> u8 { v.clamp(0.0, 255.0).round() as u8 };
+    (byte(l / 100.0 * 255.0), byte(a + 128.0), byte(b + 128.0))
+}
+
+/// The inverse of [`lab_bytes`].
+fn lab_colour(l: u8, a: u8, b: u8) -> (u8, u8, u8) {
+    tinker_pdf_color::lab_to_srgb(
+        f64::from(l) / 255.0 * 100.0,
+        f64::from(a) - 128.0,
+        f64::from(b) - 128.0,
+    )
+}
+
 pub fn cmyk_to_rgb(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
     let white = 255 - u32::from(k);
     let ink = |v: u8| mul255(255 - u32::from(v), white).min(255) as u8;
@@ -854,7 +916,7 @@ pub(crate) fn mul255(a: u32, b: u32) -> u32 {
 fn color_channels(format: PixelFormat) -> usize {
     match format {
         PixelFormat::Gray8 | PixelFormat::GrayA8 => 1,
-        PixelFormat::Rgb8 | PixelFormat::Rgba8 => 3,
+        PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::LabA8 => 3,
         PixelFormat::CmykA8 => 4,
     }
 }

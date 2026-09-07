@@ -1267,16 +1267,13 @@ impl Page {
         // is exactly those two steps.
         let page_space = resources.page_group_space(&self.inner);
         let canvas_format = page_space
-            .and_then(tinker_pdf_render::group_format)
+            .map(tinker_pdf_render::group_format)
             .unwrap_or(options.format);
         let canvas = tinker_pdf_render::page_canvas_in(w, h, applied, canvas_format);
 
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
-        }
-        if let Some(space) = page_space {
-            renderer.note_page_group_space(space);
         }
         interpret(&content, Matrix::IDENTITY, &mut renderer, &resources);
         if options.annotations {

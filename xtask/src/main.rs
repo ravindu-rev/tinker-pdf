@@ -627,7 +627,20 @@ const ALLOWED: &[(&str, &[&str])] = &[
         &["tinker-pdf-xml", "tinker-pdf-css", "tinker-pdf-math"],
     ),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
-    ("tinker-pdf-raster", &["tinker-pdf-math"]),
+    // The sixth leaf-to-leaf edge, and the fourteenth amendment. A `/Lab`
+    // transparency group composites in Lab (11.4.7), so `Canvas` needs a
+    // buffer whose components are `L*a*b*` and therefore needs to put an sRGB
+    // colour *into* that space and read one back out.
+    //
+    // The alternative was to copy the two XYZ matrices into this crate, and
+    // this repository has already watched that pair drift apart once when it
+    // existed in two places -- `tinker-pdf-color`'s own comment records it.
+    // Ruling 8 admits a leaf-to-leaf edge; a duplicated constant is what it
+    // does not admit.
+    (
+        "tinker-pdf-raster",
+        &["tinker-pdf-math", "tinker-pdf-color"],
+    ),
     // File syntax and the object model.
     (
         "tinker-pdf-cos",
