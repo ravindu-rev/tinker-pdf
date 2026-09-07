@@ -352,6 +352,15 @@ pub enum Model {
     },
     /// One curve and a white point: a grey profile.
     Grey {
+        /// Whether the curve's output is `L*` rather than `Y` — that is,
+        /// whether the connection space is `Lab` rather than `XYZ`.
+        ///
+        /// A grey profile has one axis and the connection space decides what
+        /// that axis *is*. Under XYZ the curve gives luminance directly; under
+        /// Lab it gives lightness, which is the same quantity seen through
+        /// 8.6.5.4's cube root — and a visibly different grey if the two are
+        /// confused.
+        lab: bool,
         /// `kTRC`.
         curve: Curve,
         /// `wtpt`, as `[X, Y, Z]`.
@@ -378,18 +387,39 @@ pub enum Model {
 pub struct Lut {
     inputs: usize,
     outputs: usize,
-    /// Grid points along each axis. Every axis has the same number, which is
-    /// `mft1`/`mft2`'s own restriction rather than one imposed here.
-    grid: usize,
-    /// One curve per input channel, sampled.
+    /// Grid points along each axis.
+    ///
+    /// `mft1` and `mft2` write one count for every axis and this is filled with
+    /// it repeated; `mAB ` writes one per channel and they may differ. Carrying
+    /// the vector either way is what lets one evaluator serve both.
+    grids: Vec<usize>,
+    /// One curve per input channel, sampled. `mAB `'s A curves.
     input_tables: Vec<Vec<u16>>,
-    /// `grid.pow(inputs)` entries of `outputs` values, the last axis fastest.
+    /// The product of `grids` entries of `outputs` values, the last axis
+    /// fastest. Empty when a v4 tag declares no grid at all.
     clut: Vec<u16>,
-    /// One curve per output channel, sampled.
+    /// One curve per output channel, sampled. `mAB `'s B curves, and the last
+    /// stage either way.
     output_tables: Vec<Vec<u16>>,
+    /// `mAB `'s M curves, between the grid and the matrix. `None` in a v2 tag,
+    /// which has no such stage.
+    m_tables: Option<Vec<Vec<u16>>>,
+    /// `mAB `'s 3×3 matrix and its three offsets, applied after the M curves.
+    ///
+    /// Not `mft2`'s matrix, which sits at a fixed offset and applies only when
+    /// the *input* is the connection space — at an `A2B*` tag it is not, which
+    /// is why the v2 reader steps over it.
+    matrix: Option<[f64; 12]>,
     /// Whether the connection space is `Lab` rather than `XYZ`.
     lab: bool,
 }
+
+/// The most input channels a lookup table may declare.
+///
+/// `mAB `'s CLUT header has room for sixteen grid counts, so sixteen is the
+/// format's own ceiling; the guard exists because the channel count is one byte
+/// and the grid product is what [`MAX_CLUT_ENTRIES`] bounds (ruling 1).
+const MAX_LUT_INPUTS: usize = 16;
 
 /// The most grid points an axis may declare, and the most entries a CLUT may
 /// hold.
@@ -421,47 +451,83 @@ impl Lut {
         }
 
         // Stage two: the grid. Multilinear over `inputs` axes, which is
-        // sixteen corners for the four-channel case the corpus is made of.
-        let last = self.grid - 1;
-        let mut base = Vec::with_capacity(self.inputs);
-        let mut frac = Vec::with_capacity(self.inputs);
-        for coordinate in &coords {
-            let scaled = f64::from(*coordinate) / 65535.0 * last as f64;
-            let floor = scaled.floor();
-            let index = (floor as usize).min(last.saturating_sub(1));
-            base.push(index);
-            frac.push(((scaled - index as f64) * 256.0).round().clamp(0.0, 256.0) as u64);
+        // sixteen corners for the four-channel case the corpus is made of, and
+        // each axis carries its own grid count because `mAB ` may say so.
+        let mut mid = [0u16; 3];
+        if self.clut.is_empty() {
+            // A v4 tag with no CLUT passes each channel straight through, which
+            // `read_mab` has already checked means as many outputs as inputs.
+            for (channel, slot) in mid.iter_mut().enumerate().take(self.outputs) {
+                *slot = coords.get(channel).copied().unwrap_or(0);
+            }
+        } else {
+            let mut base = Vec::with_capacity(self.inputs);
+            let mut frac = Vec::with_capacity(self.inputs);
+            for (axis, coordinate) in coords.iter().enumerate() {
+                let last = self.grids.get(axis).copied().unwrap_or(2) - 1;
+                let scaled = f64::from(*coordinate) / 65535.0 * last as f64;
+                let index = (scaled.floor() as usize).min(last.saturating_sub(1));
+                base.push(index);
+                frac.push(((scaled - index as f64) * 256.0).round().clamp(0.0, 256.0) as u64);
+            }
+            let corners = 1usize << self.inputs;
+            let mut mixed = [0u64; 3];
+            let mut total = 0u64;
+            for corner in 0..corners {
+                let mut weight = 1u64;
+                let mut offset = 0usize;
+                for axis in 0..self.inputs {
+                    let points = self.grids.get(axis).copied().unwrap_or(2);
+                    let last = points - 1;
+                    let high = corner & (1 << axis) != 0;
+                    let step = usize::from(high);
+                    weight *= if high { frac[axis] } else { 256 - frac[axis] };
+                    let index = (base[axis] + step).min(last);
+                    offset = offset * points + index;
+                }
+                if weight == 0 {
+                    continue;
+                }
+                total += weight;
+                for (channel, slot) in mixed.iter_mut().enumerate().take(self.outputs) {
+                    let at = offset * self.outputs + channel;
+                    *slot += weight * u64::from(self.clut.get(at).copied().unwrap_or(0));
+                }
+            }
+            let total = total.max(1);
+            for (channel, slot) in mid.iter_mut().enumerate().take(self.outputs) {
+                *slot = (mixed[channel] / total).min(65535) as u16;
+            }
         }
-        let corners = 1usize << self.inputs;
-        let mut mixed = [0u64; 3];
-        let mut total = 0u64;
-        for corner in 0..corners {
-            let mut weight = 1u64;
-            let mut offset = 0usize;
-            for axis in 0..self.inputs {
-                let high = corner & (1 << axis) != 0;
-                let step = if high { 1 } else { 0 };
-                weight *= if high { frac[axis] } else { 256 - frac[axis] };
-                let index = (base[axis] + step).min(last);
-                offset = offset * self.grid + index;
-            }
-            if weight == 0 {
-                continue;
-            }
-            total += weight;
-            for (channel, slot) in mixed.iter_mut().enumerate().take(self.outputs) {
-                let at = offset * self.outputs + channel;
-                *slot += weight * u64::from(self.clut.get(at).copied().unwrap_or(0));
-            }
-        }
-        let total = total.max(1);
 
-        // Stage three: each output channel back through its own curve.
+        // Stage three, v4 only: the M curves and then the matrix. Both are
+        // absent from every `mft1` and `mft2`, so this is a no-op there.
+        let mut values = [0.0f64; 3];
+        for (channel, slot) in values.iter_mut().enumerate().take(self.outputs) {
+            let raw = f64::from(mid[channel]) / 65535.0;
+            *slot = match &self.m_tables {
+                Some(tables) => match tables.get(channel) {
+                    Some(table) => f64::from(interpolate(table, raw)) / 65535.0,
+                    None => raw,
+                },
+                None => raw,
+            };
+        }
+        if let Some(m) = &self.matrix {
+            let (x, y, z) = (values[0], values[1], values[2]);
+            values = [
+                m[0] * x + m[1] * y + m[2] * z + m[9],
+                m[3] * x + m[4] * y + m[5] * z + m[10],
+                m[6] * x + m[7] * y + m[8] * z + m[11],
+            ];
+        }
+
+        // Stage four: each output channel back through its own curve.
         let mut out = [0.0f64; 3];
         for (channel, slot) in out.iter_mut().enumerate().take(self.outputs) {
-            let value = (mixed[channel] / total).min(65535) as u16;
+            let value = values[channel].clamp(0.0, 1.0);
             let table = &self.output_tables[channel];
-            *slot = f64::from(interpolate(table, f64::from(value) / 65535.0)) / 65535.0;
+            *slot = f64::from(interpolate(table, value)) / 65535.0;
         }
         out
     }
@@ -647,7 +713,15 @@ impl Profile {
                 model: Model::Lut(read_lut(tag, lab)?),
             });
         }
-        if &pcs != b"XYZ " {
+        // A matrix profile's columns *are* XYZ by construction, so one
+        // declaring any other connection space contradicts itself. A grey
+        // profile does not: its one curve produces whatever the connection
+        // space's achromatic axis is, `Y` under XYZ and `L*` under Lab, and
+        // both are ordinary.
+        if has_matrix && &pcs != b"XYZ " {
+            return Err(IccError::UnsupportedPcs);
+        }
+        if !has_matrix && &pcs != b"XYZ " && &pcs != b"Lab " {
             return Err(IccError::UnsupportedPcs);
         }
 
@@ -672,6 +746,7 @@ impl Profile {
                 return Err(IccError::UnsupportedSpace);
             }
             Model::Grey {
+                lab: &pcs == b"Lab ",
                 curve: read_curve(find(b"kTRC").ok_or(IccError::MissingTags)?)?,
                 white: read_xyz(find(b"wtpt").ok_or(IccError::MissingTags)?)?,
             }
@@ -697,9 +772,12 @@ fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
     let wide = match reader.sig(0).ok_or(IccError::MalformedTag)? {
         s if &s == b"mft2" => true,
         s if &s == b"mft1" => false,
-        // `mAB ` and `mBA ` are v4's, and a different structure: curves on both
-        // sides of the grid, each stage carrying its own offset. Three tags in
-        // the corpus against 415, so they are named rather than built.
+        // `mAB ` is v4's, and a different structure: five optional stages
+        // where v2 has three fixed ones, each carrying its own offset.
+        s if &s == b"mAB " => return read_mab(data, lab),
+        // `mBA ` is the *inverse* direction, and an `A2B*` tag never holds one:
+        // it would be a profile saying "here is how to get out of the
+        // connection space" at the entry that asks how to get in.
         _ => return Err(IccError::NeedsLut),
     };
 
@@ -770,12 +848,232 @@ fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
     Ok(Lut {
         inputs,
         outputs,
-        grid,
+        // One count for every axis, which is `mft1`/`mft2`'s own restriction.
+        grids: vec![grid; inputs],
         input_tables,
         clut,
         output_tables,
+        // v2 has neither stage; `mAB ` is where they come from.
+        m_tables: None,
+        matrix: None,
         lab,
     })
+}
+
+/// How many entries a curve sampled out of a v4 tag carries.
+///
+/// `mft1` and `mft2` hand over tables the file wrote; `mAB `'s stages are
+/// `curv` and `para` tags, which are functions rather than tables, so they are
+/// sampled to the same currency everything downstream already speaks. 1 024 is
+/// four times the eight-bit table `mft1` supplies and is exact for the
+/// identity, which is what most of these curves are.
+const V4_CURVE_ENTRIES: usize = 1024;
+
+/// One curve tag, and how many bytes it occupied.
+///
+/// `mAB `'s stages are runs of consecutive curves, so a reader has to know
+/// where each one ends: `curv` is twelve bytes plus two per entry and `para`
+/// twelve plus four per parameter, each padded to a four-byte boundary.
+fn read_curve_sized(data: &[u8], at: usize) -> Result<(Curve, usize), IccError> {
+    let tag = data.get(at..).ok_or(IccError::MalformedTag)?;
+    let reader = Reader { bytes: tag };
+    let signature = reader.sig(0).ok_or(IccError::MalformedTag)?;
+    let raw = match &signature {
+        b"curv" => 12 + 2 * reader.u32(8).ok_or(IccError::MalformedTag)? as usize,
+        b"para" => {
+            let function = reader.u16(8).ok_or(IccError::MalformedTag)?;
+            let count = match function {
+                0 => 1,
+                1 => 3,
+                2 => 4,
+                3 => 5,
+                4 => 7,
+                _ => return Err(IccError::MalformedTag),
+            };
+            12 + 4 * count
+        }
+        _ => return Err(IccError::MalformedTag),
+    };
+    let padded = raw.checked_next_multiple_of(4).ok_or(IccError::TooLarge)?;
+    if at.checked_add(padded).is_none_or(|end| end > data.len()) {
+        return Err(IccError::MalformedTag);
+    }
+    let curve = read_curve(tag.get(..raw).ok_or(IccError::MalformedTag)?)?;
+    Ok((curve, padded))
+}
+
+/// `count` consecutive curves at `at`, each sampled into a table.
+fn read_curve_run(data: &[u8], at: usize, count: usize) -> Result<Vec<Vec<u16>>, IccError> {
+    let mut tables = Vec::with_capacity(count);
+    let mut cursor = at;
+    for _ in 0..count {
+        let (curve, size) = read_curve_sized(data, cursor)?;
+        tables.push(sample_curve(&curve, V4_CURVE_ENTRIES));
+        cursor = cursor.checked_add(size).ok_or(IccError::TooLarge)?;
+    }
+    Ok(tables)
+}
+
+/// A curve as a table of `entries` samples, evenly spaced over `0..=1`.
+fn sample_curve(curve: &Curve, entries: usize) -> Vec<u16> {
+    (0..entries)
+        .map(|i| {
+            let x = i as f64 / (entries - 1) as f64;
+            let y = curve.eval(x).clamp(0.0, 1.0);
+            (y * 65535.0).round() as u16
+        })
+        .collect()
+}
+
+/// **ICC.1's `mAB ` (lutAtoBType): v4's A-to-B transform.**
+///
+/// Where `mft2` is three fixed stages, this is five optional ones, and the
+/// order they run in is not the order the header lists their offsets:
+///
+/// ```text
+///   A curves  ->  CLUT  ->  M curves  ->  matrix  ->  B curves
+/// ```
+///
+/// Any stage whose offset is zero is absent, and a tag may legitimately be B
+/// curves alone — a v4 profile writes a plain three-curve transform this way
+/// rather than as a matrix/TRC profile. The header's five offsets are, in
+/// order, B, matrix, M, CLUT, A: the *reverse* of the pipeline, because the
+/// type is named for the direction it converts and laid out for the direction
+/// it inverts.
+///
+/// Two things here that `mft2` does not have:
+///
+/// - **the grid may differ per axis.** `mft1` and `mft2` write one grid count
+///   for every input; `mAB `'s CLUT header writes sixteen bytes, one per
+///   channel. [`Lut::grids`] carries that, and the v2 reader fills it with the
+///   same number repeated so one evaluator serves both.
+/// - **the stages are functions, not tables.** They are `curv` and `para`
+///   tags, so they are sampled rather than read.
+fn read_mab(data: &[u8], lab: bool) -> Result<Lut, IccError> {
+    let reader = Reader { bytes: data };
+    let byte = |at: usize| data.get(at).copied().ok_or(IccError::MalformedTag);
+    let inputs = byte(8)? as usize;
+    let outputs = byte(9)? as usize;
+    if inputs == 0 || inputs > MAX_LUT_INPUTS {
+        return Err(IccError::MalformedTag);
+    }
+    // Three is what the connection space is, and what `to_rgb` reads.
+    if outputs != 3 {
+        return Err(IccError::UnsupportedSpace);
+    }
+
+    let offset = |at: usize| -> Result<usize, IccError> {
+        Ok(reader.u32(at).ok_or(IccError::MalformedTag)? as usize)
+    };
+    let (b_at, matrix_at, m_at, clut_at, a_at) = (
+        offset(12)?,
+        offset(16)?,
+        offset(20)?,
+        offset(24)?,
+        offset(28)?,
+    );
+
+    // The A curves are per *input* and the M and B curves per output.
+    let input_tables = if a_at == 0 {
+        (0..inputs)
+            .map(|_| sample_curve(&Curve::Identity, V4_CURVE_ENTRIES))
+            .collect()
+    } else {
+        read_curve_run(data, a_at, inputs)?
+    };
+
+    let (grids, clut) = if clut_at == 0 {
+        // No grid: every input passes straight through to the M stage, which
+        // only makes sense when there are as many of one as the other.
+        if inputs != outputs {
+            return Err(IccError::UnsupportedSpace);
+        }
+        (vec![2; inputs], Vec::new())
+    } else {
+        read_mab_clut(data, clut_at, inputs, outputs)?
+    };
+
+    let m_tables = if m_at == 0 {
+        None
+    } else {
+        Some(read_curve_run(data, m_at, outputs)?)
+    };
+    let matrix = if matrix_at == 0 {
+        None
+    } else {
+        let mut values = [0.0f64; 12];
+        for (index, slot) in values.iter_mut().enumerate() {
+            *slot = reader
+                .s15fixed16(matrix_at + index * 4)
+                .ok_or(IccError::MalformedTag)?;
+        }
+        Some(values)
+    };
+    let output_tables = if b_at == 0 {
+        // B is the one stage ICC.1 makes required; a tag without it describes
+        // no transform at all.
+        return Err(IccError::MalformedTag);
+    } else {
+        read_curve_run(data, b_at, outputs)?
+    };
+
+    Ok(Lut {
+        inputs,
+        outputs,
+        grids,
+        input_tables,
+        clut,
+        output_tables,
+        m_tables,
+        matrix,
+        lab,
+    })
+}
+
+/// `mAB `'s CLUT: sixteen grid counts, a precision byte, then the table.
+fn read_mab_clut(
+    data: &[u8],
+    at: usize,
+    inputs: usize,
+    outputs: usize,
+) -> Result<(Vec<usize>, Vec<u16>), IccError> {
+    let head = data.get(at..).ok_or(IccError::MalformedTag)?;
+    let mut grids = Vec::with_capacity(inputs);
+    let mut points: usize = 1;
+    for channel in 0..inputs {
+        let count = head.get(channel).copied().ok_or(IccError::MalformedTag)? as usize;
+        if count < 2 {
+            return Err(IccError::MalformedTag);
+        }
+        points = points.checked_mul(count).ok_or(IccError::TooLarge)?;
+        if points > MAX_CLUT_ENTRIES {
+            return Err(IccError::TooLarge);
+        }
+        grids.push(count);
+    }
+    let precision = head.get(16).copied().ok_or(IccError::MalformedTag)?;
+    let entries = points.checked_mul(outputs).ok_or(IccError::TooLarge)?;
+    if entries > MAX_CLUT_ENTRIES {
+        return Err(IccError::TooLarge);
+    }
+    let body = head.get(20..).ok_or(IccError::MalformedTag)?;
+    let clut = match precision {
+        1 => body
+            .get(..entries)
+            .ok_or(IccError::MalformedTag)?
+            .iter()
+            // Scaled to the sixteen-bit currency, as `mft1`'s tables are.
+            .map(|b| u16::from(*b) * 257)
+            .collect(),
+        2 => body
+            .get(..entries * 2)
+            .ok_or(IccError::MalformedTag)?
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect(),
+        _ => return Err(IccError::MalformedTag),
+    };
+    Ok((grids, clut))
 }
 
 /// An `XYZType` tag: a signature, four reserved bytes, then one `XYZNumber`.
@@ -913,13 +1211,32 @@ impl Transform {
                 inputs: lut.inputs,
                 lut: Some(lut.clone()),
             }),
-            Model::Grey { curve, .. } => {
+            Model::Grey { lab, curve, .. } => {
                 // A grey profile's single curve makes a luminance, and the
                 // three sRGB channels are that luminance: the white point does
                 // not enter, because the answer is achromatic by construction.
+                let mut table = compile_curve(curve);
+                if *lab {
+                    // Under a Lab connection space the curve gives `L*` rather
+                    // than `Y`, and the two differ by 8.6.5.4's cube root — a
+                    // mid grey is 0.18 of the light and 0.50 of the lightness.
+                    // Baked into the table rather than applied per pixel, so
+                    // the pixel path stays a lookup and a matrix multiply.
+                    for slot in &mut table {
+                        let l = f64::from(*slot) / 65535.0 * 100.0;
+                        let f = (l + 16.0) / 116.0;
+                        const DELTA: f64 = 6.0 / 29.0;
+                        let y = if f > DELTA {
+                            f * f * f
+                        } else {
+                            3.0 * DELTA * DELTA * (f - 4.0 / 29.0)
+                        };
+                        *slot = (y.clamp(0.0, 1.0) * 65535.0).round() as u16;
+                    }
+                }
                 let identity = [[fixed(1.0), 0, 0], [0, fixed(1.0), 0], [0, 0, fixed(1.0)]];
                 Some(Transform {
-                    curves: vec![compile_curve(curve)],
+                    curves: vec![table],
                     matrix: identity,
                     inputs: 1,
                     lut: None,
@@ -1454,7 +1771,7 @@ mod tests {
             &[(*b"kTRC", gamma(1.8)), (*b"wtpt", xyz(0.9642, 1.0, 0.8249))],
         );
         let parsed = Profile::parse(&profile).expect("a grey profile");
-        let Model::Grey { curve, white } = parsed.model else {
+        let Model::Grey { curve, white, .. } = parsed.model else {
             panic!("expected a grey model");
         };
         let Curve::Gamma(g) = curve else {
@@ -1902,13 +2219,66 @@ mod tests {
     /// v4's `mAB ` is refused by name: three tags in the corpus against 415,
     /// and a different structure rather than a variation of this one.
     #[test]
-    fn a_v4_lookup_table_is_refused_by_name() {
-        let mut tag = b"mAB ".to_vec();
-        tag.extend_from_slice(&[0; 28]);
+    fn a_v4_lookup_table_reads_and_its_inverse_is_refused_by_name() {
+        // An `mAB ` with every offset zero declares no B curves, and B is the
+        // one stage ICC.1 makes required -- a tag without it describes no
+        // transform at all.
+        let mut empty = b"mAB ".to_vec();
+        empty.extend_from_slice(&[0; 28]);
         assert_eq!(
-            Profile::parse(&lut_profile(b"CMYK", b"Lab ", tag)),
+            Profile::parse(&lut_profile(b"CMYK", b"Lab ", empty)),
+            Err(IccError::MalformedTag)
+        );
+
+        // `mBA ` is the *inverse* direction, and an `A2B*` tag never holds
+        // one: it would be a profile saying how to get out of the connection
+        // space at the entry that asks how to get in.
+        let mut inverse = b"mBA ".to_vec();
+        inverse.extend_from_slice(&[0; 28]);
+        assert_eq!(
+            Profile::parse(&lut_profile(b"CMYK", b"Lab ", inverse)),
             Err(IccError::NeedsLut)
         );
+
+        // And a tag that carries only its B curves is a transform: v4 writes a
+        // plain three-curve conversion this way rather than as matrix/TRC.
+        let profile = Profile::parse(&lut_profile(b"RGB ", b"XYZ ", mab_b_curves_only()))
+            .expect("B curves alone are a transform");
+        let transform = Transform::compile(&profile).expect("and it compiles");
+        // The curves below are the identity, so the connection space value is
+        // the input and white stays white.
+        let white = transform.apply(&[1.0, 1.0, 1.0]);
+        assert!(
+            white.0 > 200 && white.1 > 200 && white.2 > 200,
+            "an identity A-to-B must not darken white: {white:?}"
+        );
+    }
+
+    /// An `mAB ` whose only stage is three identity B curves.
+    fn mab_b_curves_only() -> Vec<u8> {
+        // A `curv` with a count of zero is the identity (ICC.1), and it is
+        // twelve bytes, which is already four-byte aligned.
+        let identity = {
+            let mut c = b"curv".to_vec();
+            c.extend_from_slice(&[0; 4]);
+            c.extend_from_slice(&0u32.to_be_bytes());
+            c
+        };
+        let mut tag = b"mAB ".to_vec();
+        tag.extend_from_slice(&[0; 4]);
+        tag.push(3); // input channels
+        tag.push(3); // output channels
+        tag.extend_from_slice(&[0; 2]);
+        // The five offsets, in the header's own order: B, matrix, M, CLUT, A.
+        tag.extend_from_slice(&32u32.to_be_bytes());
+        tag.extend_from_slice(&0u32.to_be_bytes());
+        tag.extend_from_slice(&0u32.to_be_bytes());
+        tag.extend_from_slice(&0u32.to_be_bytes());
+        tag.extend_from_slice(&0u32.to_be_bytes());
+        for _ in 0..3 {
+            tag.extend_from_slice(&identity);
+        }
+        tag
     }
 
     /// A grid whose declared size cannot fit is refused before it is

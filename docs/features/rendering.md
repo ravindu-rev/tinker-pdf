@@ -24,15 +24,23 @@ tables, and each colour is a lookup plus an integer matrix multiply, so
 nothing on the pixel path evaluates a transcendental and ruling 4 holds. Grey
 profiles are the same with one curve. A printer profile carries a multi-dimensional lookup table
 instead — `mft1` or `mft2` at an `A2B*` tag, three stages of curve with an
-interpolated grid between them — and those are read too, in the v2 shape that
-is almost all of them. Measured against the corpus's **3 235** real profiles,
-September 2026: **3 227 compile, 99.8 %** — and 682 of the 5 525 files name an
-`ICCBased` space that paints through one, which the corpus report counts as
-`iccbased`. The eight that do not compile are named: 4 a connection space this
-build cannot reach, 3 a data space with no transform here, and 1 v4's `mAB `
-table. Those are `ColorSpace::Approximated` — read by component count, which is
-the alternate-space reading 8.6.5.5 permits, and the approximation is stated on
-the type rather than hidden.
+interpolated grid between them. **v4's `mAB ` reads too**, which is five
+optional stages where v2 has three fixed ones — A curves, a grid whose axes may
+each carry their own point count, M curves, a matrix and B curves, run in that
+order although the header lists their offsets in the reverse. A grey profile
+whose connection space is `Lab` rather than `XYZ` reads as well: its one curve
+gives lightness instead of luminance, and the two differ by 8.6.5.4's cube
+root.
+
+Measured against the corpus's **3 235** real profiles, September 2026:
+**3 229 compile, 99.8 %** — and 682 of the 5 525 files name an `ICCBased` space
+that paints through one, which the corpus report counts as `iccbased`. **The
+six that do not are profiles contradicting themselves**, and the census names
+each: a monitor profile whose data space is `LAB` carrying the `rXYZ` columns a
+matrix applies to linear RGB; one naming a three-channel space no registry
+defines; and a CMYK printer profile with a single `kTRC` and no matrix — one
+curve for four channels of ink. Those are `ColorSpace::Approximated`, read by
+component count, which is the alternate-space reading 8.6.5.5 permits.
 
 **`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.1,
 8.6.5.2): the components go through `/Gamma`, `/Matrix` takes them into XYZ
@@ -219,8 +227,7 @@ helpers `Page::render` composes.
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | Blending a group declared in `/Lab` | `RenderWarning::UnsupportedGroupSpace` | Its components are not in the unit interval, so 11.3.5's formulas have nothing to say about them; the group composites in RGB and is **named**. Grey, RGB and CMYK groups all composite in their own space now | [ROADMAP](../ROADMAP.md) |
-| An ICC profile this build cannot make a transform of | `ColorSpace::Approximated`, stated on the type | A v4 `mAB ` table, a connection space other than XYZ, or a data space with no transform here — **8 of the corpus's 3 235 profiles**, September 2026. All three fall back to 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
-| `CalRGB` and `CalGray` | nothing — they are aliased to `DeviceRGB` and `DeviceGray` | 8.6.5.1 and 8.6.5.2's white point, gamma and matrix are not read, and unlike an ICC profile this build refuses, no type records that an approximation happened | [ROADMAP](../ROADMAP.md) |
+| An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
 

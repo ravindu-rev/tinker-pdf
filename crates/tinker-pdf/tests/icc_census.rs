@@ -299,6 +299,7 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
     let mut compiled = 0u32;
     let mut parsed_no_transform = 0u32;
     let mut refused: BTreeMap<String, u32> = BTreeMap::new();
+    let mut shapes: Vec<String> = Vec::new();
     for bytes in &streams {
         match IccProfile::parse(bytes) {
             Ok(profile) => {
@@ -309,6 +310,15 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
                 }
             }
             Err(error) => {
+                // What the refused profile *is*, so a row that says "refused
+                // by name with its count" can also say what the file did.
+                let shape = format!(
+                    "{} {} -> {}",
+                    sig(bytes, 12),
+                    sig(bytes, 16),
+                    sig(bytes, 20)
+                );
+                shapes.push(format!("{error:?}: {shape}"));
                 let name = match error {
                     IccError::TooShort => "TooShort",
                     IccError::NotAProfile => "NotAProfile",
@@ -343,7 +353,52 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
     for (name, count) in rows {
         println!("  {count:>6}  {name}");
     }
+    println!(
+        "
+what each refused profile is (class, data space, PCS):"
+    );
+    shapes.sort();
+    shapes.dedup();
+    for shape in &shapes {
+        println!("  {shape}");
+    }
+
+    // Pinned against `corpus/corpora.lock` as it stands, September 2026.
+    assert_eq!(total, STREAMS, "the corpus's profile population moved");
+    assert_eq!(compiled, COMPILED, "the compiled count moved");
+    assert_eq!(
+        shapes, REFUSED_SHAPES,
+        "the set of profiles this build cannot make a transform of changed"
+    );
 }
+
+/// Profile streams across the five corpora.
+const STREAMS: u32 = 3235;
+
+/// Of those, the ones that compile to a transform.
+///
+/// It was 3 227 before Tier 2: the v4 `mAB ` tag and a grey profile with a Lab
+/// connection space are the two that joined.
+const COMPILED: u32 = 3229;
+
+/// **Every profile left, and why each is refused.**
+///
+/// All three shapes are profiles that contradict themselves rather than
+/// capabilities this build lacks, which is the distinction the roadmap row
+/// wanted and the reason this list is the exit criterion rather than a count:
+///
+/// - `mntr LAB -> XYZ` carries `rXYZ`/`gXYZ`/`bXYZ` columns, and a matrix
+///   applies to linear RGB. Lab is not that, and multiplying it by one
+///   produces a colour rather than an error.
+/// - `mntr YYY -> XYZ` names a three-channel data space no registry defines,
+///   so nothing says what its components mean.
+/// - `prtr CMYK -> Lab` reaches the grey branch, which means it carries a
+///   single `kTRC` and no matrix — one curve for four channels of ink.
+const REFUSED_SHAPES: [&str; 3] = [
+    "UnsupportedSpace: mntr LAB -> XYZ",
+    "UnsupportedSpace: mntr YYY -> XYZ",
+    "UnsupportedSpace: prtr CMYK -> Lab",
+];
 
 /// **What the LUT profiles are made of.** The scoping question for the
 /// milestone `design/icc.md` sizes at L on its own.
