@@ -41,7 +41,17 @@ pub struct JpegImage {
     /// What the components mean.
     pub color: JpegColor,
     /// Interleaved samples, one byte each.
+    ///
+    /// **Eight bits whatever the frame's precision was.** A 12-bit frame is
+    /// decoded at twelve and narrowed here, because every `PixelFormat` this
+    /// engine rasters into is eight bits deep and a 16-bit sample path would
+    /// be a change to the raster rather than to this decoder. The narrowing is
+    /// reported as [`Warning::JpegPrecisionNarrowed`] and [`JpegImage::precision`]
+    /// says what it came from, so a later caller that grows a wider path knows
+    /// where to look.
     pub data: Vec<u8>,
+    /// T.81 B.2.2's `P`: the frame's sample precision, 8 or 12.
+    pub precision: u8,
     /// What the decoder tolerated.
     pub warnings: Vec<Warning>,
 }
@@ -51,9 +61,31 @@ pub struct JpegImage {
 pub enum JpegError {
     /// The bytes do not begin like a JPEG.
     NotJpeg,
-    /// Arithmetic coding, which is deferred behind a capability.
+    /// An arithmetic-coded frame: SOF9, SOF10, SOF11, SOF13, SOF14 or SOF15.
+    ///
+    /// T.81 Annex D's QM coder, which is related to but not the same as the MQ
+    /// coder in `mq.rs` -- a different state table, a different
+    /// renormalisation, and a different byte-stuffing rule. Refused rather than
+    /// half-decoded, and see `docs/ROADMAP.md` for the three separate reasons
+    /// it is not built.
     Arithmetic,
-    /// A sample precision other than 8 bits.
+    /// A lossless frame: SOF3 or SOF7.
+    ///
+    /// Annex H's predictive coder, which shares nothing with the DCT path
+    /// below -- no quantisation tables, no blocks, no transform. Named apart
+    /// from [`JpegError::Arithmetic`] because a file needing one is not a file
+    /// needing the other, and until now both were **skipped rather than
+    /// refused**: the marker fell through to the unknown-segment arm, the
+    /// decoder found no frame it understood, and the failure surfaced as
+    /// `Truncated`.
+    Lossless,
+    /// A differential frame: SOF5 or SOF6.
+    ///
+    /// The hierarchical progression of Annex J, where a frame codes the
+    /// difference from an upsampled earlier one. Same history as
+    /// [`JpegError::Lossless`]: skipped rather than refused.
+    Differential,
+    /// A sample precision T.81 B.2.2 does not allow: anything but 8 or 12.
     UnsupportedPrecision,
     /// The file ended before the image did, past any hope of recovery.
     Truncated,
@@ -368,6 +400,7 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     let mut adobe_transform: Option<u8> = None;
     let mut adobe_seen = false;
     let mut progressive = false;
+    let mut sample_precision = 8u8;
     let mut mcus = (0usize, 0usize);
     let mut allocated = false;
     let mut truncated = false;
@@ -411,9 +444,13 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                 else {
                     return Err(JpegError::Truncated);
                 };
-                if precision != 8 {
+                // B.2.2: `P` is 8 for a baseline frame and 8 or 12 for an
+                // extended sequential or progressive one. Anything else is a
+                // header this build will not guess at.
+                if precision != 8 && !(precision == 12 && marker != 0xC0) {
                     return Err(JpegError::UnsupportedPrecision);
                 }
+                sample_precision = precision;
                 height = usize::from(u16::from_be_bytes([h[0], h[1]]));
                 width = usize::from(u16::from_be_bytes([w[0], w[1]]));
 
@@ -437,7 +474,12 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                     });
                 }
             }
-            0xC9..=0xCB => return Err(JpegError::Arithmetic),
+            // Every other SOF marker, refused by the family it belongs to.
+            // 0xC4 is DHT and 0xCC is DAC, which are tables rather than
+            // frames and are handled below.
+            0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF => return Err(JpegError::Arithmetic),
+            0xC3 | 0xC7 => return Err(JpegError::Lossless),
+            0xC5 | 0xC6 => return Err(JpegError::Differential),
 
             // DQT
             0xDB => {
@@ -596,6 +638,7 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
         height,
         adobe_seen,
         adobe_transform,
+        sample_precision,
         max_output,
         warnings,
     )
@@ -1032,6 +1075,7 @@ fn finish(
     height: usize,
     adobe_seen: bool,
     adobe_transform: Option<u8>,
+    precision: u8,
     max_output: usize,
     mut warnings: Vec<Warning>,
 ) -> Result<JpegImage, JpegError> {
@@ -1060,6 +1104,12 @@ fn finish(
     if needed > max_output {
         warnings.push(Warning::OutputCapHit);
         return Err(JpegError::Truncated);
+    }
+
+    if precision > 8 {
+        // Ruling 10: the samples handed out are narrower than the frame's, and
+        // that is a leniency rather than a decode. Recorded once.
+        warnings.push(Warning::JpegPrecisionNarrowed);
     }
 
     let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
@@ -1101,7 +1151,7 @@ fn finish(
                         *slot = i32::from(coefficient).saturating_mul(q);
                     }
                 }
-                idct_block(&block, &mut pixels);
+                idct_block(&block, precision, &mut pixels);
 
                 let origin_x = bx * 8 * scale_x;
                 let origin_y = by * 8 * scale_y;
@@ -1210,12 +1260,13 @@ fn finish(
         height: height as u32,
         color,
         data: out,
+        precision,
         warnings,
     })
 }
 
 /// The inverse DCT of one block, separable and in integers.
-fn idct_block(input: &[i32; 64], out: &mut [u8; 64]) {
+fn idct_block(input: &[i32; 64], precision: u8, out: &mut [u8; 64]) {
     // A straightforward separable implementation: rows then columns, with
     // fixed-point cosines. Determinism matters more here than the last unit
     // of precision (ruling 4).
@@ -1250,7 +1301,13 @@ fn idct_block(input: &[i32; 64], out: &mut [u8; 64]) {
                 let cos = COS_TABLE.get(y * 8 + v).copied().unwrap_or(0);
                 sum += i64::from(coefficient) * i64::from(cos);
             }
-            let value = ((sum >> 14) + 128).clamp(0, 255) as u8;
+            // A.3.1's level shift is `2^(P-1)`, and the clamp is to the
+            // frame's own range. A 12-bit sample is then narrowed to the
+            // eight this crate hands out -- see [`JpegImage::data`] -- which
+            // for `P = 8` is a shift of zero and leaves the byte untouched.
+            let half = 1i64 << (precision - 1);
+            let ceiling = (1i64 << precision) - 1;
+            let value = (((sum >> 14) + half).clamp(0, ceiling) >> (precision - 8)) as u8;
             if let Some(slot) = out.get_mut(y * 8 + col) {
                 *slot = value;
             }
@@ -1356,14 +1413,83 @@ mod tests {
         );
     }
 
+    /// [`tiny_gray`] with the frame marker and the sample precision chosen.
+    ///
+    /// The SOF sits after SOI and a 69-byte DQT, and is found rather than
+    /// counted so that a change to the fixture above cannot silently move it.
+    fn tiny_gray_at(marker: u8, precision: u8) -> Vec<u8> {
+        let mut out = tiny_gray();
+        let at = out
+            .windows(2)
+            .position(|w| w == [0xFF, 0xC0])
+            .expect("the fixture has an SOF0");
+        out[at + 1] = marker;
+        out[at + 4] = precision;
+        out
+    }
+
+    /// **B.2.2 allows twelve bits, and only outside the baseline frame.**
+    ///
+    /// `P` is 8 for SOF0 and 8 or 12 for SOF1 and SOF2, so the same header at
+    /// twelve bits is a legal extended-sequential frame and an illegal
+    /// baseline one. Both are asserted, because accepting 12 everywhere would
+    /// read a corrupt baseline header as a valid frame.
     #[test]
-    fn a_twelve_bit_image_is_refused_rather_than_misread() {
-        let mut twelve = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x0C];
-        twelve.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x01, 0x11, 0x00]);
+    fn twelve_bits_are_read_outside_the_baseline_frame_and_refused_inside_it() {
         assert_eq!(
-            decode(&twelve, 1 << 20).err(),
-            Some(JpegError::UnsupportedPrecision)
+            decode(&tiny_gray_at(0xC0, 12), 1 << 20).err(),
+            Some(JpegError::UnsupportedPrecision),
+            "SOF0 at twelve bits is not a baseline frame"
         );
+        let image = decode(&tiny_gray_at(0xC1, 12), 1 << 20).expect("SOF1 at twelve bits decodes");
+        assert_eq!(image.precision, 12);
+        assert_eq!(
+            image.warnings,
+            vec![Warning::JpegPrecisionNarrowed],
+            "the narrowing to eight bits is recorded"
+        );
+        // A DC of zero is mid-grey after A.3.1's level shift, which at twelve
+        // bits is 2048 of 4095 -- and 2048 >> 4 is 128, the same byte the
+        // eight-bit path gives. That is the point: the narrowing is a shift,
+        // not a rescale, so mid-grey stays mid-grey.
+        assert_eq!(image.data.first().copied(), Some(128));
+
+        for bits in [1u8, 4, 9, 16] {
+            assert_eq!(
+                decode(&tiny_gray_at(0xC1, bits), 1 << 20).err(),
+                Some(JpegError::UnsupportedPrecision),
+                "{bits} bits"
+            );
+        }
+    }
+
+    /// **Every frame type this build does not decode refuses by its own
+    /// name**, rather than being skipped.
+    ///
+    /// Until now only SOF9, SOF10 and SOF11 were named. SOF3, SOF5, SOF6,
+    /// SOF7, SOF13, SOF14 and SOF15 fell through to the unknown-segment arm,
+    /// were stepped over as though they were a comment, and the decode then
+    /// failed as `Truncated` -- a lossless JPEG reported as a damaged file.
+    #[test]
+    fn every_frame_type_this_build_declines_refuses_by_its_own_name() {
+        for (marker, expected) in [
+            (0xC3u8, JpegError::Lossless),
+            (0xC5, JpegError::Differential),
+            (0xC6, JpegError::Differential),
+            (0xC7, JpegError::Lossless),
+            (0xC9, JpegError::Arithmetic),
+            (0xCA, JpegError::Arithmetic),
+            (0xCB, JpegError::Arithmetic),
+            (0xCD, JpegError::Arithmetic),
+            (0xCE, JpegError::Arithmetic),
+            (0xCF, JpegError::Arithmetic),
+        ] {
+            assert_eq!(
+                decode(&tiny_gray_at(marker, 8), 1 << 20).err(),
+                Some(expected),
+                "SOF marker {marker:#04x}"
+            );
+        }
     }
 
     #[test]
@@ -1387,7 +1513,7 @@ mod tests {
         let mut block = [0i32; 64];
         block[0] = 8 * 16; // an arbitrary DC level
         let mut pixels = [0u8; 64];
-        idct_block(&block, &mut pixels);
+        idct_block(&block, 8, &mut pixels);
 
         let first = pixels.first().copied().unwrap_or(0);
         assert!(

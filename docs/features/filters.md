@@ -31,8 +31,14 @@ ceiling (`Limits`), because a 1 KB flate stream can legally expand to
 gigabytes (ruling 1).
 
 **JPEG** (DCTDecode, 7.4.8; T.81): Huffman-coded baseline (SOF0), extended
-sequential (SOF1) and progressive (SOF2) at 8 bits — spectral selection,
-successive approximation and EOB runs (T.81 G.1.1.1.1) all decode. Every mode
+sequential (SOF1) and progressive (SOF2) — spectral selection, successive
+approximation and EOB runs (T.81 G.1.1.1.1) all decode. **B.2.2's twelve-bit
+precision decodes too**, outside the baseline frame where the clause allows it:
+A.3.1's level shift is `2^(P-1)` rather than 128, and the samples are narrowed
+to eight on the way out with `JpegPrecisionNarrowed` recorded, because every
+`PixelFormat` this engine rasters into is eight bits deep and a wider sample
+path is a change to the raster rather than to this codec. `JpegImage::precision`
+says what the frame declared. Every mode
 fills the same per-component coefficient buffer and is rendered once by a
 single dequantise-and-transform pass with an integer separable IDCT.
 `JpegColor` names what came out: greyscale, YCbCr already converted to RGB,
@@ -293,8 +299,10 @@ make both enums wrong.
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | T.800 allows 38 bits; the sample path carries 16, so this is refused rather than truncated | [ROADMAP](../ROADMAP.md) |
 | JPX tile-parts out of order, or a codestream with no complete tile | `Warning::JpxStructureInvalid` | Out of order is a codestream contradicting itself, and reassembling in stream order would produce a picture wrong in a way that looks like compression. A tile *short* of its declared parts is a different failure — a file that stopped — so it is left blank and reported as `JpxTruncated` wherever any tile survives, which is `JxrWarning::TileDroppedAsZero`'s bargain; only a codestream with no whole tile at all is refused | [ROADMAP](../ROADMAP.md) |
 | JPX work/sample/code-block budgets spent | `Warning::JpxBudgetSpent` | The budgets are totals, never refunded — a per-item cap is not a work cap once the structure branches (ruling 1) | [rulings](../rulings.md) |
-| JPEG arithmetic coding | `JpegError::Arithmetic` (gate `Capability::JpegArithmetic`) | Reported rather than half-decoded | [ROADMAP](../ROADMAP.md) |
-| JPEG precision other than 8 bits | `JpegError::UnsupportedPrecision` (gate `Capability::Jpeg12Bit`) | Same contract: named, not guessed at | [ROADMAP](../ROADMAP.md) |
+| JPEG arithmetic frames: SOF9, SOF10, SOF11, SOF13, SOF14, SOF15 | `JpegError::Arithmetic` | T.81 Annex D's QM coder — related to `mq.rs`'s MQ coder and not the same one. **Zero of 10 603 frames in five corpora**, and neither the standard's Table D.3 nor an encoder to build a fixture with is obtainable here ([ROADMAP](../ROADMAP.md)) | [ROADMAP](../ROADMAP.md) |
+| JPEG lossless frames: SOF3, SOF7 | `JpegError::Lossless` | Annex H's predictive coder shares nothing with the DCT path — no quantisation, no blocks, no transform. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
+| JPEG differential frames: SOF5, SOF6 | `JpegError::Differential` | Annex J's hierarchical progression, where a frame codes the difference from an upsampled earlier one. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
+| JPEG precision other than 8 or 12 bits | `JpegError::UnsupportedPrecision` | B.2.2 allows 8 in a baseline frame and 8 or 12 elsewhere; anything else is a header this build will not guess at | [ROADMAP](../ROADMAP.md) |
 | TIFF `PhotometricInterpretation` 4, 5, 8, 32803, and 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | A CMYK or CIELab image read as RGB is not a degraded picture, it is a different one; YCbCr is read only where a JPEG has already undone it | — |
 | TIFF `Compression` 6 (old-style JPEG), 34712 (JPEG 2000) and the rest | `TiffError::UnsupportedCompression` | Named by code, so a refusal says which | — |
 | TIFF `SampleFormat` 2 or 3 (signed, IEEE float) | `TiffError::UnsupportedSampleFormat` | A different number line; reading it as unsigned produces a picture rather than a refusal | — |

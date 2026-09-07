@@ -127,8 +127,6 @@ impl std::error::Error for FilterError {}
 pub enum Capability {
     Jbig2,
     Jpx,
-    JpegArithmetic,
-    Jpeg12Bit,
 }
 
 /// Every leniency this crate performs, as data rather than a log line.
@@ -284,6 +282,17 @@ pub enum Warning {
     /// declared a step size its own samples cannot justify.
     JpxCoefficientClamped,
 
+    // ---- JPEG ------------------------------------------------------------
+    /// JPEG: the frame's sample precision was twelve bits (T.81 B.2.2) and the
+    /// samples handed out are eight.
+    ///
+    /// The decode itself is at twelve; the narrowing is A.3.1's level shift
+    /// followed by a four-bit shift right, which is where the information
+    /// goes. Every `PixelFormat` this engine rasters into is eight bits deep,
+    /// so a wider `JpegImage` would be a change to the raster rather than to
+    /// the codec — `JpegImage::precision` records what it came from.
+    JpegPrecisionNarrowed,
+
     // ---- TIFF 6.0 --------------------------------------------------------
     //
     // Seven, and every one of them is a *leniency* rather than a refusal:
@@ -387,6 +396,7 @@ impl Warning {
             Self::JpxSegmentationSymbol => "jpx-segmentation-symbol",
             Self::JpxBudgetSpent => "jpx-budget-spent",
             Self::JpxCoefficientClamped => "jpx-coefficient-clamped",
+            Self::JpegPrecisionNarrowed => "jpeg-precision-narrowed",
             Self::PngChunkCrcMismatch => "png-chunk-crc-mismatch",
             Self::PngChunkDropped => "png-chunk-dropped",
             Self::PngPaletteIndexOutOfRange => "png-palette-index-out-of-range",
@@ -439,6 +449,7 @@ impl fmt::Display for Warning {
             Self::JpxSegmentationSymbol => "JPX segmentation symbol was not 1010",
             Self::JpxBudgetSpent => "JPX decode budget spent",
             Self::JpxCoefficientClamped => "JPX coefficient clamped to E.1's dynamic range",
+            Self::JpegPrecisionNarrowed => "JPEG twelve-bit samples narrowed to eight",
             Self::PngChunkCrcMismatch => "PNG ancillary chunk CRC-32 mismatch, chunk dropped",
             Self::PngChunkDropped => "PNG chunk dropped as misplaced or malformed",
             Self::PngPaletteIndexOutOfRange => "PNG sample indexed past the end of PLTE",
@@ -914,8 +925,8 @@ mod tests {
             "bad filter parameters: bad"
         );
         assert_eq!(
-            FilterError::Unsupported(Capability::Jpeg12Bit).to_string(),
-            "unsupported codec: Jpeg12Bit"
+            FilterError::Unsupported(Capability::Jpx).to_string(),
+            "unsupported codec: Jpx"
         );
         assert_eq!(
             Warning::EarlyEod.to_string(),
