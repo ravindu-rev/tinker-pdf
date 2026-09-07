@@ -270,26 +270,23 @@ fn every_refused_jbig2_file_is_attributed() {
 const BEARING: u32 = 118;
 
 /// Files reporting any refusal. It was **34** before Tier 2's JBIG2 rows.
-const REFUSED: u32 = 4;
+const REFUSED: u32 = 3;
 
 /// Every reason the corpus is still refused for, most files first.
 ///
-/// Three of the four say the *file* is broken rather than that this build is
-/// short of something, and a reader should be able to tell which from this list
-/// alone — that is what [`Jbig2Refusal::is_malformed`] is for.
+/// A reader should be able to tell a file that is broken from a build that is
+/// short of something out of this list alone — that is what
+/// [`Jbig2Refusal::is_malformed`] is for, and two of the three are broken.
 ///
-/// The four files, and there is nothing else:
+/// The three files, and there is nothing else:
 ///
 /// - `pdfjs/issue3371.pdf` — a stream that stops inside a segment. Damage.
-/// - `pdfjs/bitmap-symbol-empty.pdf` — a text region whose dictionary exports
-///   nothing.
 /// - `pdfjs/bitmap-symbol-symhuffB5B3-texthuffB7B9B12.pdf` — the three Annex B
 ///   tables that are not complete prefix codes.
 /// - `safedocs/0000337.pdf` — 46 pages of real OCR, one desynchronisation
 ///   inside the refinement/aggregate dictionary presenting seven ways.
-const EXPECTED: [(&str, u32); 13] = [
+const EXPECTED: [(&str, u32); 12] = [
     ("NoRegion", 3),
-    ("TextRegionRefused", 2),
     ("AggregateInstanceCap", 1),
     ("DanglingReference", 1),
     ("MoreInstancesThanDeclared", 1),
@@ -299,7 +296,7 @@ const EXPECTED: [(&str, u32); 13] = [
     ("SymbolIndexOutOfRange", 1),
     ("SymbolPixelCap", 1),
     ("SymbolWidthOutOfRange", 1),
-    ("TextRegionWithoutSymbols", 1),
+    ("TextRegionRefused", 1),
     ("Truncated", 1),
 ];
 

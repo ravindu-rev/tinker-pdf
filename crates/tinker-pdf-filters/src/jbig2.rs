@@ -2778,9 +2778,18 @@ fn text_region(
         note(warnings, Jbig2Refusal::TextInstanceCap);
         return None;
     }
-    if symbols.is_empty() {
-        // Every instance names a symbol; with no dictionary behind it there is
-        // nothing to place, and an empty region is not a region.
+    if symbols.is_empty() && instances > 0 {
+        // Every instance names a symbol, and with no dictionary behind it
+        // there is nothing for one to name.
+        //
+        // **`instances > 0` is the whole of the condition.** 6.4 does not
+        // require a text region to place anything: `SBNUMINSTANCES` is a count
+        // like any other and zero is a legal value, at which point the region
+        // is its own default pixel value over its own extent and 6.4.5's strip
+        // loop never runs. `bitmap-symbol-empty.pdf` is exactly that -- a
+        // dictionary that exports nothing and a region that asks for nothing
+        // -- and refusing it reported a whole page as undecodable over a
+        // region that had already said it would draw nothing.
         note(warnings, Jbig2Refusal::TextRegionWithoutSymbols);
         return None;
     }
@@ -6057,6 +6066,71 @@ mod tests {
             "exactly at the cap is admitted, and this warning says it was not: \
              {warnings:?}"
         );
+    }
+
+    /// **A text region that places nothing is blank, not broken.**
+    ///
+    /// The two halves of one condition, side by side, because they were one
+    /// check and should not have been. `SBNUMINSTANCES` is a count like any
+    /// other and zero is legal (6.4): the region is its own default pixel
+    /// value over its own extent and 6.4.5's strip loop never runs. What is
+    /// broken is instances with no symbols behind them, and that is the other
+    /// row.
+    ///
+    /// `bitmap-symbol-empty.pdf` is the first row, and refusing it reported a
+    /// whole page as undecodable over a region that had said it would draw
+    /// nothing.
+    #[test]
+    fn a_text_region_with_no_symbols_refuses_only_if_it_places_one() {
+        let region = |instances: u32| {
+            let mut data = Vec::new();
+            // 7.4.1: the region segment information field.
+            data.extend_from_slice(&8u32.to_be_bytes()); // width
+            data.extend_from_slice(&8u32.to_be_bytes()); // height
+            data.extend_from_slice(&0u32.to_be_bytes()); // x
+            data.extend_from_slice(&0u32.to_be_bytes()); // y
+            data.push(0); // external combination operator: OR
+                          // 7.4.4.1.1: arithmetic, one strip, TOPLEFT, OR, no offset.
+            data.extend_from_slice(&0u16.to_be_bytes());
+            data.extend_from_slice(&instances.to_be_bytes());
+            // 6.4.5 step 1 still reads STRIPT off the coder, so there has to
+            // be something for the decoder to read even when nothing is
+            // placed. A zero byte is a valid MQ stream prefix.
+            data.extend_from_slice(&[0u8; 4]);
+            data
+        };
+
+        let data = region(0);
+        let segment = Segment {
+            number: 2,
+            referred: Vec::new(),
+            kind: kind::IMMEDIATE_TEXT_REGION,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let mut warnings = Vec::new();
+        let (info, bitmap) = text_region(&segment, &[], &[], 1 << 20, &mut warnings)
+            .unwrap_or_else(|| panic!("a region placing nothing refused: {warnings:?}"));
+        assert_eq!((info.width, info.height), (8, 8));
+        assert!(
+            bitmap.bits.iter().all(|byte| *byte == 0),
+            "a region that placed nothing is not blank"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let data = region(1);
+        let segment = Segment {
+            number: 2,
+            referred: Vec::new(),
+            kind: kind::IMMEDIATE_TEXT_REGION,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let mut warnings = Vec::new();
+        assert!(text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
+        assert_eq!(warnings, vec![Jbig2Refusal::TextRegionWithoutSymbols]);
     }
 
     /// **[`MAX_JBIG2_TEXT_INSTANCES`] fires, and it fires off the header.**
