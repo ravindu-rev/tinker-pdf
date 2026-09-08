@@ -109,6 +109,18 @@ let pdf: Vec<u8> = b.finish();
 `ImageData` and `Target` are `#[non_exhaustive]`: the next shape is an
 addition, not a break.
 
+**`ImageData::Compressed` is constructible from outside the workspace**, which
+it was not: the enum crossed the facade and its payload did not, so the variant
+was documented and unreachable — a shape worse than an absent one, because it
+reads as a capability. `CompressedImage`, `ImageColorSpace`, `ImageFilter`,
+`SoftMask` and `CcittParams` are re-exported now. The fifth is the one a grep
+over the writer's own names does not find: `ImageFilter::CcittFax` carries
+7.4.6's parameters as the *filters* crate's struct rather than a second
+spelling of `/K`, so without it that variant could be neither built nor matched
+on. The doctest on the re-export names all five through the facade and nothing
+else, so deleting any one of them fails `cargo test --doc` rather than quietly
+reopening the gap.
+
 **The archival profile.** `DocumentBuilder::archival` takes an ISO 19005
 profile and turns this whole surface into one that says no: the standard 14,
 transparency under part 1, a device colour the output intent cannot reproduce
@@ -125,7 +137,6 @@ byte-deterministic XMP packet and the header version its part requires.
 | Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS and neither will: `glyph_run` is the shaped entry point, through `tinker-pdf-shape` | [fonts](fonts.md), [design/shaping.md](../design/shaping.md) |
 | Non-device colour spaces on write | `DeviceSpace` only (`/DeviceGray`, `/DeviceRGB`, `/DeviceCMYK`) | no CIE, ICC, `/Separation` or `/DeviceN` writer | — |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
-| `ImageData::Compressed` from outside the workspace | `CompressedImage`, `ImageColorSpace`, `ImageFilter` and `SoftMask` are not re-exported by the facade, so the variant cannot be constructed by an external caller | the container formats use it internally; the facade re-export is owed and not yet on the roadmap | — |
 | Layout | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API | — |
 | Everything an `ArchivalProfile` forbids | the call returns `false` and pushes a typed `ArchivalRefusal` naming its clause; `finish_archival` returns `Err` for what only a finished document can be judged on | a builder that emitted what the validator rejects would make the validator the last line of defence rather than the second | [pdfa](pdfa.md) |
 

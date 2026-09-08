@@ -180,6 +180,88 @@ pub use tinker_pdf_cos::{
     Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer, SigningRequest,
     SigningTarget,
 };
+/// The bytes-already-encoded image road: everything [`ImageData::Compressed`]
+/// is built out of.
+///
+/// [`ImageData`] was re-exported above and its `Compressed` variant was not
+/// constructible, which is the same defect the paragraphs above record for
+/// `ExtGState` and `Target` one level in: the *enum* could be named and the
+/// payload could not, so the variant was visible in the documentation and
+/// unreachable from any caller outside this workspace. That is worse than an
+/// absent variant, because it reads as a capability.
+///
+/// The roadmap row that named this counted four. It is **five**:
+/// [`CcittParams`] is the payload of [`ImageFilter::CcittFax`] and lives in the
+/// filters crate rather than in the writer's, so a grep over the writer's own
+/// names does not find it — and without it that variant can be neither built
+/// nor matched on. [`DeviceSpace`] was the same omission caught earlier and is
+/// already here, which is why it is not a sixth.
+///
+/// The doctest below is the check, and it is a compile rather than an
+/// assertion: it names all five through this facade and nothing else, so
+/// deleting any one of them fails `cargo test --doc` rather than quietly
+/// reopening the row.
+///
+/// ```
+/// use tinker_pdf::{
+///     CcittParams, CompressedImage, DeviceSpace, DocumentBuilder, ImageColorSpace, ImageData,
+///     ImageFilter, SoftMask,
+/// };
+///
+/// // Four palette entries, so the samples below are indices rather than
+/// // colours: `/Indexed` is what needs `DeviceSpace` for its base.
+/// let palette = [0u8, 0, 0, 255, 0, 0, 0, 255, 0, 255, 255, 255];
+/// // Two by two, one index a byte, deflated — `/FlateDecode` over the samples
+/// // directly, which is what `ImageFilter::Flate` names.
+/// let samples = [
+///     0x78, 0xda, 0x63, 0x60, 0x64, 0x62, 0x06, 0x00, 0x00, 0x0e, 0x00, 0x07,
+/// ];
+/// // 11.6.5.3's `/SMask`: its own geometry, its own filter, always
+/// // `/DeviceGray`.
+/// let alpha = [255u8, 128, 128, 0];
+///
+/// let mut builder = DocumentBuilder::new();
+/// assert!(builder.add_image(
+///     b"Im0",
+///     &ImageData::Compressed(CompressedImage {
+///         width: 2,
+///         height: 2,
+///         bits_per_component: 8,
+///         color_space: ImageColorSpace::Indexed {
+///             base: DeviceSpace::Rgb,
+///             lookup: &palette,
+///         },
+///         filter: Some(ImageFilter::Flate),
+///         data: &samples,
+///         color_key_mask: None,
+///         soft_mask: Some(SoftMask {
+///             width: 2,
+///             height: 2,
+///             bits_per_component: 8,
+///             filter: None,
+///             data: &alpha,
+///         }),
+///     }),
+/// ));
+///
+/// // The fifth name. 7.4.6's parameters are the filters crate's own struct
+/// // rather than a second spelling of `/K`, so this is the type that has to
+/// // cross the facade for `CcittFax` to be nameable at all.
+/// let fax = ImageFilter::CcittFax(CcittParams {
+///     k: -1,
+///     columns: 8,
+///     rows: 1,
+///     black_is_1: false,
+///     byte_align: false,
+///     end_of_line: false,
+///     end_of_block: true,
+/// });
+/// assert!(matches!(fax, ImageFilter::CcittFax(p) if p.columns == 8));
+///
+/// builder.add_page(20.0, 20.0, |page| page.image(b"Im0", 0.0, 0.0, 20.0, 20.0));
+/// assert!(!builder.finish().is_empty());
+/// ```
+pub use tinker_pdf_cos::{CompressedImage, ImageColorSpace, ImageFilter, SoftMask};
 /// The object model behind [`Document::cos`].
 ///
 /// The escape hatch is only an escape hatch if the types it hands back can be
@@ -191,6 +273,13 @@ pub use tinker_pdf_cos::{
 };
 pub use tinker_pdf_cos::{PubSecError, Recipient};
 pub use tinker_pdf_crypto::Permissions;
+/// 7.4.6 Table 11's `/CCITTFaxDecode` parameters, which
+/// [`ImageFilter::CcittFax`] carries and this facade would otherwise leave
+/// unnameable. It comes from the filters crate because there is one definition
+/// of `/K` in this workspace and the decoder owns it — re-spelling it for the
+/// writer is how a `/Rows` that is a strip's rather than an image's gets to
+/// disagree with itself.
+pub use tinker_pdf_filters::CcittParams;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, RenderWarning};
 /// Signature verdicts (12.8), behind [`Document::verify_signatures`].
