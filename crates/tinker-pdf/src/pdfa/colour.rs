@@ -83,7 +83,7 @@ const RENDERING_INTENTS: &[&[u8]] = &[
 /// says in those words what it is testing. A producer that wrote a real number
 /// meaning "fully opaque" and landed one part in ten million away has not made
 /// the file transparent, and a rule with an exact comparison reports it.
-const ALPHA_TOLERANCE: f64 = 1e-5;
+pub(super) const ALPHA_TOLERANCE: f64 = 1e-5;
 
 /// The blend modes ISO 19005-1 6.4 leaves a part 1 file.
 ///
@@ -109,6 +109,9 @@ pub(super) fn rules(
     gather_state_intents(doc, &mut used);
     gather_group_spaces(doc, &mut used);
     device_spaces(&destination, &used, out);
+    if part == Some(Part::One) {
+        annotation_colours(doc, &destination, out);
+    }
     icc_spaces(doc, &used, out);
     rendering_intents(&used, out);
     if part == Some(Part::One) {
@@ -663,6 +666,115 @@ fn device_spaces(destination: &Destination, used: &Used, out: &mut Vec<Raw>) {
                             profile: String::from_utf8_lossy(signature).trim().to_string(),
                         },
                     });
+                }
+            }
+        }
+    }
+}
+
+// ---- 6.2.3.3 / 6.3.2: an annotation's own colours -------------------------
+
+/// The most objects this rule will look at, so a file with a damaged
+/// cross-reference table cannot turn a validation into a sweep (ruling 1).
+/// The syntax group bounds its own walk the same way and for the same reason.
+const MAX_ANNOTATION_OBJECTS: usize = 200_000;
+
+/// ISO 19005-1 6.5.3 and its siblings, from the colour side.
+///
+/// `/C` and `/IC` are an annotation's border and interior colours, and ISO
+/// 32000-1 12.5.2 says the *number of components* names the space: one is
+/// `DeviceGray`, three `DeviceRGB`, four `DeviceCMYK`, and none at all means
+/// no colour. So they are device colours like any other and the same clause
+/// governs them — a `DeviceRGB` border under a CMYK output intent is a colour
+/// nobody can reproduce, exactly as it would be in a content stream.
+///
+/// **This lives in the colour group rather than with the other annotation
+/// rules**, and the split is by machinery rather than by subject: deciding it
+/// needs [`Destination`], which is the output intent's profile read through
+/// `tinker-pdf-color`. The annotation group reaches for nothing and stays that
+/// way; four Isartor fixtures are the whole population of this rule, and the
+/// clause they cite is the annotation one either way.
+///
+/// Grey is admitted under every destination, for the reason
+/// [`device_spaces`] already gives: a value on the neutral axis is
+/// reproducible on any device.
+///
+/// **Part 1 only, and the restriction is the corpus's own.** The four fixtures
+/// that test this are Isartor's, under ISO 19005-1 6.5.3, and no later part
+/// has a counterpart. Running it on part 4 anyway reported
+/// `6-3-3-t01-pass-d` — a `Projection` annotation carrying `/C [1 0 0]` in a
+/// file with no output intent at all, annotated **pass**. Whatever ISO 19005-4
+/// does with an annotation's own colour, it is not what part 1 does, and a
+/// rule extended past its evidence reports conforming files. `super::STAGED`
+/// names the gap rather than this build guessing at it.
+fn annotation_colours(doc: &CosDocument, destination: &Destination, out: &mut Vec<Raw>) {
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    for (num, entry) in doc.xref().iter().take(MAX_ANNOTATION_OBJECTS) {
+        let gen = match entry {
+            tinker_pdf_cos::XrefEntry::Free { .. } => continue,
+            tinker_pdf_cos::XrefEntry::Offset { gen, .. } => gen,
+            tinker_pdf_cos::XrefEntry::InStream { .. } => 0,
+        };
+        if !seen.insert(num) {
+            continue;
+        }
+        let reference = ObjRef::new(num, gen);
+        let Ok(object) = doc.get(reference) else {
+            continue;
+        };
+        let Some(dict) = object.as_dict() else {
+            continue;
+        };
+        let is_annotation = doc
+            .resolve_key(dict, doc.intern(b"Type"))
+            .as_name()
+            .and_then(|name| doc.name_bytes(name))
+            .is_some_and(|name| name.as_ref() == b"Annot");
+        if !is_annotation {
+            continue;
+        }
+        for key in [&b"C"[..], b"IC"] {
+            let value = doc.resolve_key(dict, doc.intern(key));
+            let Some(components) = value.as_array() else {
+                continue;
+            };
+            let space = match components.len() {
+                // `/C []` is 12.5.2's "no colour", and one component is grey.
+                0 | 1 => continue,
+                3 => DEVICE_RGB,
+                4 => DEVICE_CMYK,
+                // Any other length is not a colour this clause can name, and
+                // reporting it under a colour clause would be reporting the
+                // wrong defect.
+                _ => continue,
+            };
+            match destination {
+                Destination::Absent => out.push(Raw {
+                    rule: clauses::ANNOTATION_DICTS,
+                    object: Some(reference),
+                    kind: FindingKind::DeviceColourWithoutOutputIntent {
+                        space: space.to_string(),
+                    },
+                }),
+                // The profile is there and unreadable, so the question cannot
+                // be asked in either direction. Staged, not guessed.
+                Destination::Unreadable => {}
+                Destination::Space(signature) => {
+                    let admitted = match space {
+                        DEVICE_RGB => signature == b"RGB ",
+                        DEVICE_CMYK => signature == b"CMYK",
+                        _ => true,
+                    };
+                    if !admitted {
+                        out.push(Raw {
+                            rule: clauses::ANNOTATION_DICTS,
+                            object: Some(reference),
+                            kind: FindingKind::DeviceColourNotInOutputIntent {
+                                space: space.to_string(),
+                                profile: String::from_utf8_lossy(signature).trim().to_string(),
+                            },
+                        });
+                    }
                 }
             }
         }

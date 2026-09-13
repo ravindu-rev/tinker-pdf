@@ -48,6 +48,7 @@ use tinker_pdf_xml::{Event, Source};
 
 use crate::Document;
 
+mod annotations;
 mod colour;
 mod content;
 mod fonts;
@@ -250,6 +251,34 @@ pub(crate) mod clauses {
         one: "6.7.2",
         two_three: "6.6.2.3",
         four: "6.7.2",
+    };
+
+    /// The annotation types a part admits.
+    ///
+    /// **Part 1 numbers annotations 6.5 where parts 2 to 4 number them 6.3**,
+    /// and part 1 gives appearances no sub-clause of their own: its 6.5.3
+    /// carries the dictionary requirements and the appearance requirements
+    /// together, which is why [`ANNOTATION_DICTS`] and
+    /// [`ANNOTATION_APPEARANCES`] share a part-1 arm. The corpus's own
+    /// directory names are the check on all three.
+    pub(crate) const ANNOTATION_TYPES: ClauseTable = ClauseTable {
+        one: "6.5.2",
+        two_three: "6.3.1",
+        four: "6.3.1",
+    };
+
+    /// The annotation dictionary: its flags and its opacity.
+    pub(crate) const ANNOTATION_DICTS: ClauseTable = ClauseTable {
+        one: "6.5.3",
+        two_three: "6.3.2",
+        four: "6.3.2",
+    };
+
+    /// The annotation's appearance dictionary.
+    pub(crate) const ANNOTATION_APPEARANCES: ClauseTable = ClauseTable {
+        one: "6.5.3",
+        two_three: "6.3.3",
+        four: "6.3.3",
     };
 
     /// Version and conformance level identification: the `pdfaid` claim.
@@ -619,30 +648,36 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.3.1",
-        rule: "annotations: the permitted subtypes, the flags an \
-                annotation dictionary must and must not set, and the \
-                appearance stream every annotation needs",
-        because: "milestone 5's neighbour rather than milestone 5 \
-                   itself. The appearance rules need the annotation \
-                   appearance machinery and the colour rules need an \
-                   output intent, and neither is in this group",
+        rule: "annotations: the two requirements no fixture exercises - a \
+               /Popup's /Parent back-reference, and the /AS that says which \
+               state a sub-dictionary appearance is showing",
+        because: "the rest of the clause runs. What is left is what the \
+                  conformance suite does not test anywhere, under any part, so a \
+                  rule for it would be this build's reading of the clause text \
+                  held to nothing. The suite tests the subtypes, the flag word, \
+                  the opacity and the appearance dictionary, and those run",
+    },
+    StagedRule {
+        clause: "6.3.2",
+        rule: "an annotation's own /C and /IC against the output intent, \
+               outside part 1",
+        because: "the four fixtures that test it are Isartor's, under ISO \
+                  19005-1 6.5.3, and the rule runs there. No later part has a \
+                  counterpart, and running it on part 4 anyway reported \
+                  6-3-3-t01-pass-d: a Projection annotation carrying /C [1 0 0] \
+                  in a file with no output intent at all, annotated pass. What \
+                  ISO 19005-4 does with an annotation's own colour is not what \
+                  part 1 does, and this build has not established what it is",
     },
     StagedRule {
         clause: "6.9",
-        rule: "interactive form field appearances in parts 2 to 4",
-        because: "half of this row landed at milestone 5 and the half that \
-                   did not is what is left. Part 1's transparency \
-                   prohibition ran the moment the colour group could see a \
-                   graphics state; the form rules still need the appearance \
-                   streams the annotation group will bring, and there is no \
-                   annotation group",
-    },
-    StagedRule {
-        clause: "6.5",
-        rule: "part 1's annotation rules",
-        because: "part 1 numbers annotations at 6.5 where parts 2 to 4 \
-                   number them at 6.3. The rules are staged for the same \
-                   reason and the clause number is the only difference",
+        rule: "a widget annotation's /A in parts 2 to 4",
+        because: "the appearance half of this row landed with the annotation \
+                  group and its four part 1 fixtures now agree. What is left is \
+                  one requirement the forms clause makes and the action rules do \
+                  not: 6-4-1-t01-fail-a says in its own words that a widget \
+                  annotation dictionary contains the A key, which is a forms rule \
+                  rather than an annotation one and belongs to that ledger class",
     },
     StagedRule {
         clause: "6.6.3",
@@ -991,6 +1026,70 @@ pub enum FindingKind {
         /// The form the packet used.
         found: &'static str,
     },
+    /// An annotation whose subtype the part's reference specification does
+    /// not define at all (ISO 19005-1 6.5.2, ISO 19005-2 6.3.1).
+    ///
+    /// Separate from [`FindingKind::AnnotationTypeForbidden`] because the two
+    /// are different defects: a standard type the part excludes is a producer
+    /// using a feature archiving forbids, and a type nobody defines is a
+    /// producer inventing one. The corpus's own fixtures name them
+    /// differently too.
+    AnnotationTypeNonStandard {
+        /// The `/Subtype` as written, empty where there was none.
+        subtype: String,
+    },
+    /// An annotation of a standard type the part excludes (ISO 19005-1 6.5.2,
+    /// ISO 19005-2 6.3.1, ISO 19005-4 6.3.1).
+    AnnotationTypeForbidden {
+        /// The `/Subtype` as written.
+        subtype: String,
+    },
+    /// A part 4 level E `3D` annotation whose artwork stream is neither U3D
+    /// nor PRC (ISO 19005-4 6.3.1).
+    ThreeDArtworkFormat {
+        /// The artwork stream's `/Subtype` as written, empty where there was
+        /// none.
+        declared: String,
+    },
+    /// An annotation dictionary with no `/F` at all (ISO 19005-1 6.5.3, ISO
+    /// 19005-2 6.3.2).
+    ///
+    /// A `Popup` is exempt and reports nothing: the conformance suite
+    /// annotates a popup with no `/F` as conforming, under two parts.
+    AnnotationFlagsMissing,
+    /// An annotation flag that must be set and is not, or must be clear and
+    /// is not (ISO 19005-1 6.5.3, ISO 19005-2 6.3.2).
+    AnnotationFlag {
+        /// The flag's name in ISO 32000-1 table 165.
+        flag: &'static str,
+        /// How the file had it.
+        set: bool,
+    },
+    /// An annotation whose `/CA` is not 1.0 (ISO 19005-1 6.5.3, ISO 19005-2
+    /// 6.3.2).
+    ///
+    /// The value is deliberately not carried: `FindingKind` derives `Eq` so a
+    /// caller can match and compare findings, and an `f64` in it would give
+    /// that up for a number the clause makes binary anyway.
+    AnnotationNotOpaque,
+    /// An annotation that needs an appearance stream and has none, or whose
+    /// `/AP` has no `/N` (ISO 19005-1 6.5.3, ISO 19005-2 6.3.3).
+    AnnotationAppearanceMissing,
+    /// An `/AP` carrying a key other than `/N` (ISO 19005-1 6.5.3, ISO
+    /// 19005-2 6.3.3).
+    ///
+    /// A down or rollover appearance is a second appearance, and which of them
+    /// a reader shows is the reader's decision rather than the file's.
+    AnnotationAppearanceExtraState {
+        /// The key that should not be there.
+        key: String,
+    },
+    /// An `/AP` whose `/N` is not a stream, on an annotation whose `/N` should
+    /// be one (ISO 19005-1 6.5.3, ISO 19005-2 6.3.3).
+    AnnotationAppearanceNotAStream,
+    /// A push-button widget whose `/N` is a stream rather than the
+    /// sub-dictionary of states `/AS` selects from (ISO 19005-2 6.3.3).
+    AnnotationAppearanceNotStates,
     /// The document is encrypted. Every part of ISO 19005 forbids it: a file
     /// nobody can open without a key is not archival.
     Encrypted,

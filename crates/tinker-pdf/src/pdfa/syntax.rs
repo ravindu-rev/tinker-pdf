@@ -536,6 +536,9 @@ fn dictionary(
     action_rules(doc, flavour, dict, at, out);
     trigger_rules(doc, flavour, dict, at, out);
     embedded_file_rules(doc, part, dict, at, out);
+    // The annotation group rides this walk rather than reaching for machinery
+    // of its own; `pdfa/annotations.rs` says why at length.
+    super::annotations::rules(doc, flavour, dict, at, out);
 }
 
 /// ISO 19005-1 6.1.7 (parts 2 and 3: 6.1.7.1; part 4: 6.1.6).

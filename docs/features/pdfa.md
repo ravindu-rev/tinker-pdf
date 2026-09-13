@@ -22,12 +22,18 @@ namespace is checked: PDF/UA declares `pdfuaid:part`, an entirely different
 standard's version number, and matching on the local name alone read 434
 corpus files as claiming a PDF/A part they say nothing about.
 
-**Four rule groups, keyed by the machinery they need.**
+**Four rule groups, keyed by the machinery they need.** Four rather than five
+because the annotation rules need no machinery at all — a subtype name, a flag
+word, the shape of an `/AP` and four numbers in a `/Rect` are all in the COS
+document — so they ride the syntax group rather than counting a reach that
+never happens.
 
 - **Syntax** needs only the opened `CosDocument`: the header and its binary
   comment, the trailer's `/ID`, encryption, external streams, forbidden
-  filters and actions, embedded files, `/Perms`, optional content, XFA, and
-  part 4's constraints on `/Info` and the catalog's `/Version`.
+  filters and actions, embedded files, `/Perms`, optional content, XFA,
+  part 4's constraints on `/Info` and the catalog's `/Version`, and **every
+  annotation** — the subtypes each part admits, the `/F` flag word, `/CA`, and
+  the presence and shape of an appearance dictionary.
 - **Metadata** needs the XMP pull parser: the packet's well-formedness; the
   eight `/Info` entries ISO 19005-1 6.7.3 pairs with an XMP property, for
   part 1, compared as instants where they are dates; and the value type every
@@ -125,8 +131,8 @@ make no PDF/A claim, and scoring them would measure the measurement:
 | | files | agree |
 | --- | --- | --- |
 | annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 646 |
-| **total** | **2 371** | **1 476** |
+| annotated `-fail-` | 1 540 | 794 |
+| **total** | **2 371** | **1 624** |
 
 The single disagreement on the `pass` side is a **reading**, recorded as one:
 ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
@@ -145,7 +151,8 @@ waiting for, and a `staged` ledger row has to point at one.
 same discipline: a conforming baseline, one change per test, exactly one
 finding of exactly one kind asserted by kind, and a **near-miss twin** that
 must not fire. `pdfa_syntax.rs`, `pdfa_fonts.rs`, `pdfa_colour.rs`,
-`pdfa_metadata.rs` and `pdfa_flavour.rs` are the reading half;
+`pdfa_metadata.rs`, `pdfa_annotations.rs` and `pdfa_flavour.rs` are the
+reading half;
 `pdfa_writer.rs` is the writing half and judges every fixture twice — by the
 full validator with complete coverage, and by the strict structural validator
 in `tinker-pdf-cos`, which reads bytes rather than the object graph and was
@@ -171,7 +178,7 @@ against the table its fixture passed, so a clause this build reads wrongly is
 read wrongly in both directions and the pair agrees with itself.
 
 The corpus is where that asymmetry breaks, and only for files somebody else
-made. It is why "1 476 of 2 371" is the honest measure of how much of ISO
+made. It is why "1 624 of 2 371" is the honest measure of how much of ISO
 19005 this build understands, and why a document the writer produces is
 reported as *"this validator and the structural one find nothing"* rather than
 as *"it conforms"*.
@@ -197,8 +204,9 @@ discovering:
   corpus**: `StreamDoesNotDecode` and `FreeHeadMissing` between them accounted
   for 48 of the 52 false positives the first draft added, and a join that
   closes by adding false positives has closed nothing. The bar moved from
-  1 201 to 1 211 with the false-positive count unchanged at one, and the XMP
-  value-type rule below took it to 1 476 on the same terms.
+  1 201 to 1 211 with the false-positive count unchanged at one; the XMP
+  value-type rule took it to 1 476 on the same terms and the annotation group
+  to 1 624.
 
   What is still staged here is what nothing in the tree reads: hexadecimal
   string syntax, and the EOL markers around `obj` and `stream`. Implementation

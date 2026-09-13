@@ -454,6 +454,110 @@ one level too deep, which no fixture had. Writing that fixture took the row to
   wrote at every flavour it can claim and asserts zero findings, against a
   packet generated from the builder's own table.
 
+## What the annotation group measured
+
+*Recorded 13 September 2026, at the commit that landed it.* Same corpus, same
+2 371-file bar.
+
+**1 624 of 2 371 agree, against 1 476 before, with the false-positive count
+still 1.** This was the clause group with no rules at all — 164 annotated
+fixtures across four parts, and this build had nothing to say about any of
+them. It now has nothing left to say about them for the opposite reason.
+
+| | files | agreed before | agreed after |
+| --- | --- | --- | --- |
+| annotated `-pass-` | 831 | 830 | 830 |
+| annotated `-fail-` | 1 540 | 646 | 794 |
+| **total** | **2 371** | **1 476** | **1 624** |
+
+**Eighteen ledger rows went stale in one run, and five of them were not
+annotation rows.** `PDFA_STAGED`'s 6.9 entry said the interactive-form
+fixtures were waiting on "the appearance streams the annotation group will
+bring, and there is no annotation group". They were, and it did: the Isartor
+forms row and four `PDF_A-1b/6.9` files stopped disagreeing without a line
+being written for them. What is left of that entry is one requirement the
+forms clause makes and this group does not — `6-4-1-t01-fail-a` says in its
+own words that a widget annotation dictionary contains the `/A` key — and it
+belongs to the forms ledger class rather than this one.
+
+**The staged entry was wrong about what the clause needs, and the corpus is
+what said so.** It read: "the appearance rules need the annotation appearance
+machinery and the colour rules need an output intent, and neither is in this
+group." The second half was right and is why four fixtures live in the colour
+group. The first was not: across 164 fixtures the suite never once asks what
+an appearance *draws* — only whether one exists, whether the `/AP` carries
+anything besides `/N`, and whether `/N` is a stream or the sub-dictionary of
+states a push-button needs. All of that is in the COS document, which is why
+the group reaches for nothing and rides the syntax group's own walk.
+
+**Four exemptions this build would not have guessed**, each taken from a
+fixture the suite annotates `pass` rather than from the clause text:
+
+- a `Popup` needs no `/F` at all, stated twice — once under part 2 and again
+  under part 4;
+- a `Popup`, a `Link` and part 4's `Projection` need no appearance;
+- an annotation whose `/Rect` is a **point** needs none either, while one that
+  is merely zero-width does. `6-3-3-t01-pass-a` writes `[50 110 50 110]` and
+  passes; `6-3-3-t01-fail-p` writes `[50 600 50 50]` — zero wide and 550 tall
+  — and fails. "No area" is the reading that looks right and passes a file the
+  clause fails;
+- a push-button widget's `/N` is a sub-dictionary of states, and the `/FT`
+  that says so **may be inherited**. Reading it off the widget alone reported
+  `6-4-1-t01-pass-b`, a conforming radio group whose kids carry the states and
+  whose parent carries the `/FT`.
+
+**And one number that was simply wrong.** ToggleNoView is bit **9** of ISO
+32000-1 table 165, not bit 10. `6-3-2-t02-fail-e` writes `/F 268` — bits 3, 4
+and 9 — and a rule reading bit 10 had nothing to say about a file the suite
+annotates fail.
+
+**Counted injections.** Each defect re-introduced in turn, the whole
+`tinker-pdf` crate run with `--no-fail-fast` before `-p`, and the census run
+beside it, because most of these move a number rather than a verdict. The
+false-positive count is the column to read.
+
+| Injected | tests | the bar | false positives |
+| --- | ---: | ---: | ---: |
+| an annotation matched by its `/Rect` rather than by `/Type /Annot` | 1 | 1 624 | 1 |
+| a `Popup` not exempt from `/F` | 2 | 1 622 | **3** |
+| `Link` and `Popup` not exempt from an appearance | 2 | 1 620 | **5** |
+| ToggleNoView read as bit 10 | 2 | 1 623 | 1 |
+| the `/Rect` exemption read as no area rather than a point | 1 | 1 623 | 1 |
+| `/FT` read off the widget and not inherited | 1 | 1 623 | **2** |
+| part 4's levels permitting nothing extra | 2 | 1 617 | **9** |
+| ISO 32000-2's types admitted under every part | 2 | 1 623 | 1 |
+| the annotation colour rule run on every part | 1 | 1 623 | **2** |
+| the group never called (the control) | 17 | 1 480 | 1 |
+
+**The control decomposes the gain exactly.** With `annotations::rules`
+unreachable the bar is 1 480 rather than 1 476, which is the four Isartor `/C`
+and `/IC` fixtures the *colour* group answers. So of the 148 files this
+commit moves, 144 are the annotation group and 4 are the colour rule beside
+it.
+
+**Five of the ten injections cost false positives rather than coverage**, and
+that is the shape this group was expected to have: an annotation is the most
+ordinary thing a real document carries, so a rule that is too strict reports
+conforming files by the dozen. Removing part 4's level permissions costs nine
+of them at once.
+
+**The first row is the one with no corpus behind it.** Matching an annotation
+by its `/Rect` instead of by `/Type /Annot` changes the bar by nothing and the
+false-positive count by nothing — no file in the corpus has a non-annotation
+dictionary that would be caught. It is held by a test and by nothing else, and
+that is recorded here rather than discovered later.
+
+**What stays staged, and why it is not a backlog.** Two requirements in the
+clause have no fixture anywhere under any part: a `/Popup`'s `/Parent`
+back-reference, and the `/AS` that says which state a sub-dictionary appearance
+is showing. A rule for either would be this build's reading of the clause text
+held to nothing, which is the thing `PDFA_STAGED` exists to say out loud. The
+third staged row is new and is a measurement: an annotation's own `/C` and
+`/IC` are judged against the output intent under part 1, where four Isartor
+fixtures test it, and **not** outside it — running it on part 4 anyway reported
+`6-3-3-t01-pass-d`, a `Projection` carrying `/C [1 0 0]` in a file with no
+output intent at all, annotated pass.
+
 ## What milestones 5 and 6 actually measured
 
 *Recorded August 2026, at the commit that landed the writer profile.* Same
@@ -525,7 +629,9 @@ graphics clause, and parts 2-to-4's transparency constraints. About 90 are
 font clauses whose remaining half needs the code-to-glyph mapping — metrics,
 `/CharSet`, the `.notdef` glyph. The annotation clauses (6.3.1 to 6.3.3 in
 parts 2 to 4) are about 120 and have no group at all; they are milestone 5's
-neighbour rather than milestone 5.
+neighbour rather than milestone 5. *They have one now — see "What the
+annotation group measured" above, which closed them and took five interactive
+form rows with them.*
 
 **The writer.** `DocumentBuilder::archival` produces documents that this
 build's validator finds nothing wrong with at every flavour it can claim —
