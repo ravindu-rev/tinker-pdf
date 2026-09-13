@@ -52,9 +52,15 @@ component count from its SOF marker so the caller need not. Indexed images take 
 only — 8.6.6.3 forbids an `/Indexed` over `/Indexed`, and this writer emits
 no CIE, `/Separation` or `/DeviceN` space. It **does** write an `/ICCBased`
 space: `add_icc_color_space` registers one as an indirect object with `/N`
-checked against Table 66, and the XPS painter has used it for every
-`ContextColor` since that path landed. What `add_image` cannot yet take is that
-space, which is the one thing XPS's `{ColorConvertedBitmap}` refusal waits on.
+checked against Table 66, `set_fill_icc` and `set_stroke_icc` name it on the
+page, and `ImageColorSpace::Icc` names it on an image (8.9.5.4) — so one
+embedded profile serves a page's operators and its pictures alike.
+
+**The operand count comes from the space rather than from the caller.** 8.6.5.5's
+`/N` says how many operands `scn` takes, so four values against a three-channel
+profile lose the fourth and one value gains two zeros. A content stream whose
+arity disagrees with its own space is one every reader has to guess about, and
+the guesses differ.
 
 **Graphics.** `add_ext_gstate` (`ExtGState`: blend mode, alphas, soft mask
 with `MaskKind` and `StateMask`), `add_form` (`FormXObject`, optionally a
@@ -139,7 +145,7 @@ byte-deterministic XMP packet and the header version its part requires.
 | --- | --- | --- | --- |
 | Any image encoder but deflate | `Rgb8`/`Gray8` are deflated; JPEG and PNG-IDAT pass through; nothing is encoded to JPEG, CCITT, JBIG2 or JPX | the engine decodes those codecs; it does not write them | [filters](filters.md) |
 | Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS and neither will: `glyph_run` is the shaped entry point, through `tinker-pdf-shape` | [fonts](fonts.md), [design/shaping.md](../design/shaping.md) |
-| Non-device colour spaces on write | `DeviceSpace` on the fill, stroke and image setters | no CIE, `/Separation` or `/DeviceN` writer, and no typed setter for a registered space. **Not ICC**: `add_icc_color_space` writes one and the XPS painter consumes it; this row claimed otherwise until 14 September 2026 | [ROADMAP](../ROADMAP.md) |
+| CIE, `/Separation` and `/DeviceN` on write | `DeviceSpace` and `/ICCBased` on the fill, stroke and image setters | a `/Separation` or `/DeviceN` space is a tint transform into an alternate space, and this writer emits no function for one. **ICC is not in this row**: `add_icc_color_space` registers a space, `set_fill_icc` and `set_stroke_icc` name it, and `ImageColorSpace::Icc` puts it on an image | [ROADMAP](../ROADMAP.md) |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
 | Layout | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API | — |
 | Everything an `ArchivalProfile` forbids | the call returns `false` and pushes a typed `ArchivalRefusal` naming its clause; `finish_archival` returns `Err` for what only a finished document can be judged on | a builder that emitted what the validator rejects would make the validator the last line of defence rather than the second | [pdfa](pdfa.md) |

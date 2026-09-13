@@ -116,6 +116,22 @@ pub enum ImageColorSpace<'a> {
     DeviceRgb,
     /// `/DeviceCMYK`.
     DeviceCmyk,
+    /// A registered `/ICCBased` space, by the resource name
+    /// [`DocumentBuilder::add_icc_color_space`] gave it (8.6.5.5).
+    ///
+    /// An image's `/ColorSpace` may name a resource rather than state a space
+    /// inline (8.9.5.4), which is what lets one embedded profile serve a page's
+    /// operators and its images alike instead of being copied into each. The
+    /// channel count comes from the registered space's `/N`, so this variant
+    /// carries no count of its own — and an image whose samples disagree with
+    /// that count is a defect this writer cannot see, exactly as it cannot see
+    /// inside the profile.
+    Icc {
+        /// The resource name the space was registered under.
+        resource: &'a [u8],
+        /// How many channels a sample has, which must be the space's `/N`.
+        components: u8,
+    },
     /// `[/Indexed base hival lookup]` (8.6.6.3).
     Indexed {
         /// The space each table entry is expressed in.
@@ -141,6 +157,7 @@ impl ImageColorSpace<'_> {
             ImageColorSpace::DeviceGray | ImageColorSpace::Indexed { .. } => 1,
             ImageColorSpace::DeviceRgb => 3,
             ImageColorSpace::DeviceCmyk => 4,
+            ImageColorSpace::Icc { components, .. } => *components as u32,
         }
     }
 }
@@ -697,6 +714,14 @@ struct ResourceSet {
     shadings: Vec<(Vec<u8>, ObjRef)>,
     patterns: Vec<(Vec<u8>, ObjRef)>,
     color_spaces: Vec<(Vec<u8>, ObjRef)>,
+    /// `/N` for each registered `/ICCBased` space, by resource name.
+    ///
+    /// Carried beside `color_spaces` rather than inside it because the
+    /// `/Resources` assembly above is one loop over six identically shaped
+    /// lists, and widening the tuple would widen all six. What it buys is that
+    /// [`PageBuilder::set_fill_icc`] can write **exactly** the operand count
+    /// 8.6.5.5 declares, instead of trusting a caller to count to `/N`.
+    icc_channels: BTreeMap<Vec<u8>, u8>,
 }
 
 impl ResourceSet {
@@ -1678,6 +1703,53 @@ impl PageBuilder {
         let c = |v: f64| v.clamp(0.0, 1.0);
         self.content
             .extend_from_slice(format!("{} {} {} rg\n", c(r), c(g), c(b)).as_bytes());
+        true
+    }
+
+    /// Sets the non-stroking colour in a registered `/ICCBased` space:
+    /// `/Name cs c1 … cn scn` (8.6.5.5, Table 74).
+    ///
+    /// The space must already have been registered with
+    /// [`DocumentBuilder::add_icc_color_space`] under this page's document, and
+    /// `components` are the channel values in that profile's own space, each
+    /// clamped to `[0, 1]`.
+    ///
+    /// **The operand count comes from the space, not from the caller.**
+    /// 8.6.5.5's `/N` says how many operands `scn` takes, so a caller handing
+    /// over four values for a three-channel profile has them truncated here,
+    /// and one handing over two has them padded with zero — rather than a
+    /// reader being left to guess at a content stream whose arity disagrees
+    /// with its space. This is the guarantee the XPS painter has been making
+    /// privately since `ContextColor` landed; it belongs to every caller.
+    ///
+    /// Returns false for a name no `/ICCBased` space was registered under,
+    /// which is the one case where writing anything at all would name a
+    /// resource the page does not carry.
+    pub fn set_fill_icc(&mut self, resource: &[u8], components: &[f64]) -> bool {
+        self.set_icc(resource, components, false)
+    }
+
+    /// The same for the **stroking** colour, which Table 74 spells in capitals.
+    pub fn set_stroke_icc(&mut self, resource: &[u8], components: &[f64]) -> bool {
+        self.set_icc(resource, components, true)
+    }
+
+    /// Both of the above. `stroking` picks Table 74's case.
+    fn set_icc(&mut self, resource: &[u8], components: &[f64], stroking: bool) -> bool {
+        let Some(channels) = self.resources.icc_channels.get(resource).copied() else {
+            return false;
+        };
+        self.content.push(b'/');
+        self.content.extend_from_slice(resource);
+        self.content
+            .extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
+        for at in 0..usize::from(channels) {
+            let value = components.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            self.content
+                .extend_from_slice(format!("{value} ").as_bytes());
+        }
+        self.content
+            .extend_from_slice(if stroking { b"SCN\n" } else { b"scn\n" });
         true
     }
 
@@ -3195,6 +3267,9 @@ impl DocumentBuilder {
             ]),
         );
         self.resources.color_spaces.push((resource.to_vec(), space));
+        self.resources
+            .icc_channels
+            .insert(resource.to_vec(), components);
         true
     }
 
@@ -3857,6 +3932,10 @@ impl DocumentBuilder {
             ImageColorSpace::DeviceGray => Object::Name(self.names.intern(b"DeviceGray")),
             ImageColorSpace::DeviceRgb => Object::Name(self.names.intern(b"DeviceRGB")),
             ImageColorSpace::DeviceCmyk => Object::Name(self.names.intern(b"DeviceCMYK")),
+            // 8.9.5.4: a name, resolved through the page's `/Resources
+            // /ColorSpace`. Written as a bare name rather than as the array
+            // itself so one profile stream serves every image that names it.
+            ImageColorSpace::Icc { resource, .. } => Object::Name(self.names.intern(resource)),
             ImageColorSpace::Indexed { base, lookup } => Object::Array(vec![
                 Object::Name(self.names.intern(b"Indexed")),
                 Object::Name(self.names.intern(base.pdf_name())),
@@ -4839,6 +4918,10 @@ fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
             ImageColorSpace::DeviceRgb => Some(DeviceSpace::Rgb),
             ImageColorSpace::DeviceCmyk => Some(DeviceSpace::Cmyk),
             ImageColorSpace::Indexed { base, .. } => Some(base),
+            // Not a device colour at all: an `/ICCBased` space says which
+            // device its values are for, which is exactly what 6.2.3.3 asks a
+            // device space to have an output intent for. Nothing to refuse.
+            ImageColorSpace::Icc { .. } => None,
         },
     }
 }

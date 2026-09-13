@@ -28,10 +28,12 @@
 use std::collections::BTreeMap;
 
 use tinker_pdf::{
-    Bitmap, BlendMode, DeviceSpace, Document, DocumentBuilder, ExtGState, FormXObject, Function,
-    Glyph, MaskKind, PlacedGlyph, Shading, StateMask, TilingPattern, TilingType, TransparencyGroup,
+    Bitmap, BlendMode, CompressedImage, DeviceSpace, Document, DocumentBuilder, ExtGState,
+    FormXObject, Function, Glyph, ImageColorSpace, ImageData, MaskKind, PlacedGlyph, Shading,
+    StateMask, TilingPattern, TilingType, TransparencyGroup,
 };
 
+mod pdfa_support;
 mod render_support;
 use render_support::{render, same_picture};
 
@@ -1028,4 +1030,281 @@ fn a_run_into_a_simple_font_is_refused_and_writes_nothing() {
         &placed
     ));
     assert!(missing.is_empty());
+}
+
+// ---- /ICCBased colour on the page ----------------------------------------
+
+/// The profile these tests register. Any profile serves, because both halves
+/// of each comparison get the same one — what is under test is the plumbing,
+/// not the colour management.
+fn icc() -> Vec<u8> {
+    pdfa_support::srgb_like()
+}
+
+/// `hand`'s `extra` is a `&str`, and a profile is binary. This splices the
+/// trailing objects in where `extra` would have gone.
+fn with_binary_objects(mut written: Vec<u8>, objects: Vec<u8>) -> Vec<u8> {
+    let seam = written
+        .windows(7)
+        .position(|w| w == b"trailer")
+        .expect("the fixture has a trailer");
+    written.splice(seam..seam, objects);
+    written
+}
+
+/// Object 5: the profile stream the hand-written half points at.
+fn profile_object(profile: &[u8]) -> Vec<u8> {
+    let mut out = format!("5 0 obj\n<< /N 3 /Length {} >>\nstream\n", profile.len()).into_bytes();
+    out.extend_from_slice(profile);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    out
+}
+
+/// An `/ICCBased` fill set through the builder draws what the same space
+/// written by hand draws.
+///
+/// The builder half registers the profile once and names it; the hand half
+/// writes `[/ICCBased 5 0 R]` into `/Resources /ColorSpace` itself. Two
+/// documents that share no code above the parser, rendered to the same bytes.
+#[test]
+fn an_icc_fill_from_the_builder_draws_what_a_hand_written_one_draws() {
+    let profile = icc();
+
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_icc_color_space(b"CS0", &profile, 3));
+    builder.add_page(60.0, 60.0, |page| {
+        assert!(page.set_fill_icc(b"CS0", &[0.2, 0.4, 0.6]));
+        page.raw(b"10 10 40 40 re f");
+    });
+
+    let written = with_binary_objects(
+        hand(
+            "/ColorSpace << /CS0 [/ICCBased 5 0 R] >>",
+            "/CS0 cs 0.2 0.4 0.6 scn 10 10 40 40 re f",
+            "",
+        ),
+        profile_object(&profile),
+    );
+
+    same_picture(render(builder.finish()), render(written), "an ICC fill");
+}
+
+/// **The operand count comes from the space, not from the caller.**
+///
+/// 8.6.5.5's `/N` says how many operands `scn` takes. A caller handing over
+/// four values for a three-channel profile has the fourth dropped, and one
+/// handing over a single value has the rest padded with zero — so both of
+/// these draw exactly what the three-value call draws. A build that wrote
+/// whatever it was given would emit a content stream whose arity disagrees
+/// with its own space, which is a thing no reader has to accept.
+#[test]
+fn the_icc_operand_count_comes_from_the_space_and_not_from_the_caller() {
+    let profile = icc();
+    let draw = |components: &[f64]| {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_icc_color_space(b"CS0", &profile, 3));
+        let components = components.to_vec();
+        builder.add_page(60.0, 60.0, move |page| {
+            assert!(page.set_fill_icc(b"CS0", &components));
+            page.raw(b"10 10 40 40 re f");
+        });
+        render(builder.finish())
+    };
+
+    // A fourth operand is dropped rather than written.
+    same_picture(
+        draw(&[0.2, 0.4, 0.6]),
+        draw(&[0.2, 0.4, 0.6, 0.9]),
+        "a fourth operand against a three-channel space",
+    );
+    // A missing operand is zero rather than absent.
+    same_picture(
+        draw(&[0.2, 0.0, 0.0]),
+        draw(&[0.2]),
+        "one operand against a three-channel space",
+    );
+
+    // **And the operator itself, because the pictures above cannot see this.**
+    // A renderer handed a fourth operand ignores it, so both spellings draw
+    // the same page and a comparison of pictures passes either way — which a
+    // counted injection proved: writing `components.len()` operands instead of
+    // `/N` failed nothing at all until this assertion existed. The content
+    // stream is where the defect lives, so the content stream is what is read.
+    assert_eq!(
+        operators(&[0.2, 0.4, 0.6, 0.9]),
+        operators(&[0.2, 0.4, 0.6])
+    );
+    assert_eq!(operators(&[0.2]), operators(&[0.2, 0.0, 0.0]));
+    assert!(
+        operators(&[0.2, 0.4, 0.6, 0.9]).contains("/CS0 cs"),
+        "the space is named before its operands"
+    );
+    // Four values in, three operands out, and `0.9` nowhere in the stream.
+    assert!(!operators(&[0.2, 0.4, 0.6, 0.9]).contains("0.9"));
+}
+
+/// The content stream a page carrying one ICC fill writes.
+fn operators(components: &[f64]) -> String {
+    let profile = icc();
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_icc_color_space(b"CS0", &profile, 3));
+    let components = components.to_vec();
+    builder.add_page(60.0, 60.0, move |page| {
+        assert!(page.set_fill_icc(b"CS0", &components));
+    });
+    let doc = Document::open(builder.finish()).expect("the built document opens");
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let page = pages.first().expect("one page");
+    String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned()
+}
+
+/// A space the document never registered is refused, and nothing is written.
+///
+/// The refusal matters more than it looks: a content stream naming a resource
+/// its page does not carry is a stream every reader has to guess about, and
+/// the guesses differ. Returning false is what lets a caller find out at the
+/// call rather than in somebody else's viewer.
+#[test]
+fn an_icc_space_the_document_never_registered_is_refused() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(60.0, 60.0, |page| {
+        assert!(!page.set_fill_icc(b"CS0", &[0.2, 0.4, 0.6]));
+        assert!(!page.set_stroke_icc(b"CS0", &[0.2, 0.4, 0.6]));
+        page.raw(b"10 10 40 40 re f");
+    });
+
+    // Drawn in the default fill colour, which is black: the refused calls
+    // wrote nothing at all rather than half an operator.
+    let bitmap = render(builder.finish());
+    assert_eq!(at(&bitmap, 30.0, 30.0), (0, 0, 0));
+}
+
+/// The stroking spelling is Table 74's capitals, and it reaches the **stroke**
+/// rather than the fill.
+///
+/// **The colour is deliberately not black.** A first version of this test
+/// stroked in black, which is also the default stroking colour — so a build
+/// that wrote `cs`/`scn` where it meant `CS`/`SCN` set the *fill* colour, left
+/// the stroke at its default, and drew exactly the same picture. A counted
+/// injection put that at zero failures. Stroking in red is what makes the two
+/// spellings produce two pictures.
+#[test]
+fn an_icc_stroke_is_written_in_table_74s_capitals() {
+    let profile = icc();
+
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_icc_color_space(b"CS0", &profile, 3));
+    builder.add_page(60.0, 60.0, |page| {
+        assert!(page.set_stroke_icc(b"CS0", &[1.0, 0.0, 0.0]));
+        page.raw(b"6 w 15 15 30 30 re S");
+    });
+
+    let written = with_binary_objects(
+        hand(
+            "/ColorSpace << /CS0 [/ICCBased 5 0 R] >>",
+            "/CS0 CS 1 0 0 SCN 6 w 15 15 30 30 re S",
+            "",
+        ),
+        profile_object(&profile),
+    );
+
+    let built = render(builder.finish());
+    // Red on the border, and the interior untouched: a `stroke_rect` fills
+    // nothing, so a build that set the fill colour instead would leave the
+    // border at the default black.
+    let (r, g, b) = at(&built, 15.0, 30.0);
+    assert!(
+        r > 150 && g < 110 && b < 110,
+        "the border is the stroking colour, got ({r}, {g}, {b})"
+    );
+    same_picture(built, render(written), "an ICC stroke");
+}
+
+/// An image may name a registered `/ICCBased` space rather than state a device
+/// one (8.9.5.4), which is what lets one embedded profile serve a page's
+/// operators and its pictures alike — and is the one thing XPS's
+/// `{ColorConvertedBitmap}` refusal was waiting on.
+#[test]
+fn an_image_in_an_icc_space_draws_what_a_hand_written_one_draws() {
+    let profile = icc();
+    // Four pixels, one per corner, in the profile's own three channels.
+    let samples: [u8; 12] = [
+        255, 0, 0, // red
+        0, 255, 0, // green
+        0, 0, 255, // blue
+        255, 255, 0, // yellow
+    ];
+
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_icc_color_space(b"CS0", &profile, 3));
+    assert!(builder.add_image(
+        b"Im0",
+        &ImageData::Compressed(CompressedImage {
+            width: 2,
+            height: 2,
+            bits_per_component: 8,
+            color_space: ImageColorSpace::Icc {
+                resource: b"CS0",
+                components: 3,
+            },
+            filter: None,
+            data: &samples,
+            color_key_mask: None,
+            soft_mask: None,
+        }),
+    ));
+    builder.add_page(60.0, 60.0, |page| {
+        page.image(b"Im0", 10.0, 10.0, 40.0, 40.0);
+    });
+
+    let mut objects = profile_object(&profile);
+    objects.extend_from_slice(
+        format!(
+            "6 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2 \
+             /BitsPerComponent 8 /ColorSpace /CS0 /Length {} >>\nstream\n",
+            samples.len()
+        )
+        .as_bytes(),
+    );
+    objects.extend_from_slice(&samples);
+    objects.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let written = with_binary_objects(
+        hand(
+            "/ColorSpace << /CS0 [/ICCBased 5 0 R] >> /XObject << /Im0 6 0 R >>",
+            "q 40 0 0 40 10 10 cm /Im0 Do Q",
+            "",
+        ),
+        objects,
+    );
+
+    let built = builder.finish();
+    same_picture(
+        render(built.clone()),
+        render(written),
+        "an image in an ICC space",
+    );
+
+    // **The sample width, which the picture cannot see either.** An ICC image
+    // reporting one component instead of three writes `/DecodeParms /Colors 1`
+    // where a filter needs it and mis-sizes the row for any caller that asks
+    // how wide a sample is. A counted injection put that at zero failures
+    // until this assertion existed.
+    assert_eq!(
+        ImageColorSpace::Icc {
+            resource: b"CS0",
+            components: 3,
+        }
+        .components(),
+        3,
+        "an ICC image has as many components as its space declares"
+    );
+    let doc = Document::open(built).expect("the built document opens");
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let page = pages.first().expect("one page");
+    let content =
+        String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned();
+    assert!(content.contains("/Im0 Do"), "the image is drawn: {content}");
 }
