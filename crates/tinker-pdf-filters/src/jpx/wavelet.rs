@@ -10,9 +10,18 @@
 //! That gate does more work than it looks like. Byte-identity here pins the
 //! container, tier-2's packet arithmetic, tier-1's context *numbering*,
 //! dequantisation, and the DC level shift, all at once, against a decoder
-//! sharing no code with this one. T.800 publishes no datastream annex — there
-//! is no equivalent of T.88's Annex H.1, which is what gap 17 leaned on — so
-//! this comparison carries that weight instead.
+//! sharing no code with this one.
+//!
+//! *Corrected 14 September 2026.* This paragraph used to continue: "T.800
+//! publishes no datastream annex — there is no equivalent of T.88's Annex
+//! H.1, which is what gap 17 leaned on — so this comparison carries that
+//! weight instead." **T.800 does publish one.** Annex J.10, "An example of
+//! decoding showing intermediate steps", gives a complete 100-byte codestream
+//! in hex, walks its headers field by field, and states the nine decoded
+//! samples in J.10.5. It is decoded and asserted in
+//! `tests/jpx_annex_j.rs`, and it exercises this file's inverse 5/3 and level
+//! shift among everything else. The comparison below no longer carries that
+//! weight alone.
 //!
 //! # Two arithmetics, deliberately not mixed
 //!

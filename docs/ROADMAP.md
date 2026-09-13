@@ -32,8 +32,8 @@ its two font-bearing siblings:
 | `crop` held of asked | 4 929 of 5 075 |
 | `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 4 543 passed, 0 failed, 56 ignored as
-[verification.md](verification.md) records it, measured 13 September 2026.
+The suite stands at 4 545 passed, 0 failed, 56 ignored as
+[verification.md](verification.md) records it, measured 14 September 2026.
 
 ## What "best" means here
 
@@ -134,25 +134,53 @@ range, so no budget separates those two populations.
 ## Tier 2 — close the named refusals, by measured reachability
 
 **What is left of this tier, stated plainly.** Every row that could be closed
-has been; **two remain**, and they are held by the same wall rather than by a
-scheduling decision. Three walls, each checkable:
+has been; **two remain**, and they are no longer held by the same wall. Three
+walls, each checkable — and re-checking them on 13 September 2026 moved two of
+the three for JPX and none of them for JPEG arithmetic:
 
 - **Zero corpus reachability**, measured and pinned by a census that runs
   nightly — `jpeg_census.rs` walks 10 606 JPEG streams and finds no arithmetic
   frame, `jpx_attribution.rs` walks 39 JPX files and finds no coding
   capability among the refusals.
-- **The specification is not obtainable.** T.88 is published free of charge and
-  was fetched in September 2026, which is what closed the Annex B row above.
-  T.81 and T.800 are sold, and the freely published copies that exist are
-  either a 1993 scan whose tables extract as digits with no field boundaries
-  and whose procedures are figures, or gone from the web.
+- **The specification is not obtainable — and for T.800 this was wrong.**
+  T.88 is published free of charge and was fetched in September 2026, which is
+  what closed the Annex B row above. **T.800 is published free of charge too,
+  and was fetched on 13 September 2026**: 231 pages, born digital rather than
+  scanned, and its text extracts cleanly with this repository's own `tpdf
+  text` — RGN, POC, PPM, PPT and CRG are all there, and so is B.10.7.2's rule
+  for how many codeword segments a packet signals, which this file used to say
+  would have to be written from memory. The claim that ISO and the ITU both
+  sell it was never retested after it was first written, which is the third
+  time a "not obtainable" assertion here has turned out to be a WAF page or an
+  untried URL. **T.81 genuinely is sold** — the ITU's own publication endpoint
+  redirects to its shop — and its nearest free sibling was probed and rejected:
+  T.82 carries the same QM coder, is published free, and is a 1993 Acrobat
+  Distiller file whose procedures are *figures* and whose text mis-encodes, so
+  `Qe` does not appear in it once.
 - **No producer exists here** for a fixture, so the third route — build it and
-  hold it to something — is closed too.
+  hold it to something — is closed too. **For JPX this was wrong as well**:
+  T.800 Annex J.10 publishes a complete 100-byte codestream, annotated field by
+  field, with its nine decoded samples stated in J.10.5. It needs no producer,
+  and `crates/tinker-pdf-filters/tests/jpx_annex_j.rs` now decodes it and
+  asserts them — the first check in this decoder that is neither a round trip
+  through code written here nor a recording of what another program did once.
 
-Any one of the three moving is what schedules the remaining rows, and the
-Annex B work is the argument for not proceeding without one: of four
-mis-transcribed tables, three were caught by an invariant this repository could
-state and the fourth passed every check it had.
+Any one of the three moving is what schedules the remaining rows. **Two moved
+for JPX**, so its row is scheduled: the specification is in hand and Annex J.10
+adjudicates a decode. Only zero corpus reachability still holds there, and
+ruling 3 makes that a scheduling input rather than a wall. **None moved for
+JPEG arithmetic**, so that row stays where it was.
+
+The Annex B work remains the argument for not proceeding without a
+specification, and a second measurement now says the same thing from the other
+side. Six implementation specs for the JPX capabilities were drafted from
+T.800's text and then adversarially checked against it clause by clause:
+**37 of 182 citations were wrong** — a fifth of them — including clause numbers
+that do not exist, quotes that were paraphrased, and one table's contents
+attributed to another table entirely. Only one of the six came back clean. So
+having the specification is necessary and is not sufficient: what makes a
+transcription safe is checking it against the document a second time, which is
+what caught four wrong Annex B tables and what caught these.
 
 **What the JBIG2 rows left behind, since it is the number this tier was
 measured by.** **1 of the 118** JBIG2-bearing corpus files still reports a
