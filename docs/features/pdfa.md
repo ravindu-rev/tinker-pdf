@@ -28,9 +28,13 @@ corpus files as claiming a PDF/A part they say nothing about.
   comment, the trailer's `/ID`, encryption, external streams, forbidden
   filters and actions, embedded files, `/Perms`, optional content, XFA, and
   part 4's constraints on `/Info` and the catalog's `/Version`.
-- **Metadata** needs the XMP pull parser: the packet's well-formedness and,
-  for part 1, the eight `/Info` entries ISO 19005-1 6.7.3 pairs with an XMP
-  property, compared as instants where they are dates.
+- **Metadata** needs the XMP pull parser: the packet's well-formedness; the
+  eight `/Info` entries ISO 19005-1 6.7.3 pairs with an XMP property, for
+  part 1, compared as instants where they are dates; and the value type every
+  property of a predefined schema declares — a simple value, an array, a
+  language alternative or a structure — read from the serialisation's own
+  shape rather than from its text. Parts 1 to 3 carry that last requirement
+  and **part 4 dropped it**, so it does not run there.
 - **Fonts** needs `tinker-pdf-font` and the content walk: every font embedded
   including the standard 14, the program's format against the key that names
   it, the subset tag's shape, symbolic and non-symbolic `/Encoding`,
@@ -121,8 +125,8 @@ make no PDF/A claim, and scoring them would measure the measurement:
 | | files | agree |
 | --- | --- | --- |
 | annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 381 |
-| **total** | **2 371** | **1 211** |
+| annotated `-fail-` | 1 540 | 646 |
+| **total** | **2 371** | **1 476** |
 
 The single disagreement on the `pass` side is a **reading**, recorded as one:
 ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
@@ -147,6 +151,12 @@ full validator with complete coverage, and by the strict structural validator
 in `tinker-pdf-cos`, which reads bytes rather than the object graph and was
 written for the writer rather than for PDF/A.
 
+The value-type rule is the one whose failure mode is reporting a *conforming*
+file — it judges every property of every packet rather than waiting to be
+reached — so every one of its fixtures has a twin that must stay silent, and
+one fixture carries a property of each of the four forms and asserts nothing
+at all is said about it.
+
 `pdfa_ledger.rs` is the census, which walks the fetched corpus and asserts in
 both directions that the ledger accounts for every disagreement.
 
@@ -161,7 +171,7 @@ against the table its fixture passed, so a clause this build reads wrongly is
 read wrongly in both directions and the pair agrees with itself.
 
 The corpus is where that asymmetry breaks, and only for files somebody else
-made. It is why "1 211 of 2 371" is the honest measure of how much of ISO
+made. It is why "1 476 of 2 371" is the honest measure of how much of ISO
 19005 this build understands, and why a document the writer produces is
 reported as *"this validator and the structural one find nothing"* rather than
 as *"it conforms"*.
@@ -187,7 +197,8 @@ discovering:
   corpus**: `StreamDoesNotDecode` and `FreeHeadMissing` between them accounted
   for 48 of the 52 false positives the first draft added, and a join that
   closes by adding false positives has closed nothing. The bar moved from
-  1 201 to 1 211 with the false-positive count unchanged at one.
+  1 201 to 1 211 with the false-positive count unchanged at one, and the XMP
+  value-type rule below took it to 1 476 on the same terms.
 
   What is still staged here is what nothing in the tree reads: hexadecimal
   string syntax, and the EOL markers around `obj` and `stream`. Implementation

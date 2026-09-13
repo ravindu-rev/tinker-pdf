@@ -54,6 +54,7 @@ mod fonts;
 mod structure;
 mod syntax;
 mod xmp;
+mod xmp_schemas;
 
 /// A finding before its clause number is known.
 ///
@@ -236,6 +237,21 @@ pub(crate) mod clauses {
         four: "6.7.2",
     };
 
+    /// The predefined schemas' property value types.
+    ///
+    /// Part 1 numbers the whole requirement 6.7.2 and gives it no sub-clause,
+    /// which is why the part-1 arm here is the same number
+    /// [`METADATA`] carries. Parts 2 and 3 split it out as 6.6.2.3, "Schemas",
+    /// and the corpus's own directory names are the check on that. Part 4
+    /// **dropped the requirement**, so no number is right for it and the rule
+    /// does not run there; the `four` arm is part 1's, for a file that claims
+    /// no part at all.
+    pub(crate) const SCHEMA_TYPES: ClauseTable = ClauseTable {
+        one: "6.7.2",
+        two_three: "6.6.2.3",
+        four: "6.7.2",
+    };
+
     /// Version and conformance level identification: the `pdfaid` claim.
     pub(crate) const FLAVOUR_ID: ClauseTable = ClauseTable {
         one: "6.7.11",
@@ -406,12 +422,20 @@ pub const STAGED: &[StagedRule] = &[
     StagedRule {
         clause: "6.6.2.3",
         rule: "XMP properties must belong to a predefined schema or be \
-               described by an extension schema",
-        because: "it needs the predefined-schema property tables from the XMP \
-                  specification as vendored data; guessing them produces false \
-                  positives on conforming files, which is worse than not \
-                  checking. This is the single largest staged rule by corpus \
-                  count and the ledger says so",
+               described by an extension schema - the membership half. The \
+               value types those schemas declare are checked",
+        because: "the two halves need two different things from the same tables. \
+                  A value type is one both revisions agree on, and it runs. \
+                  Membership is a list, and the list moved: ISO 19005 cites the \
+                  XMP 2004 revision, Adobe publishes a later one, and the \
+                  difference is properties that conforming corpus files use - \
+                  xmp:Advisory, xmpMM:LastURL, xmpMM:RenditionOf, xmpMM:SaveID, \
+                  exif:MakerNote, exif:ComponentsConfiguration, four xmpDM: \
+                  properties, and the whole of xmpidq and the Exif aux namespace. \
+                  Reading the vendored table as a membership list would report \
+                  every one of those. The value-type half took 265 of the 512 \
+                  files these four ledger rows named; the 247 that are left are \
+                  this half",
     },
     StagedRule {
         clause: "6.1.5",
@@ -950,6 +974,23 @@ pub enum FindingKind {
     },
     /// The XMP packet is there and will not parse.
     MetadataUnreadable,
+    /// A property in a predefined XMP schema, written with a value of a
+    /// different type from the one that schema declares (ISO 19005-1 6.7.2,
+    /// ISO 19005-2 6.6.2.3).
+    ///
+    /// The finding is about the *shape* of the serialisation — a string where
+    /// a structure is declared, an `rdf:Bag` where a single value is — because
+    /// that is what can be judged without reading the value. A property whose
+    /// schema this build does not carry is not reported at all: the membership
+    /// half of the clause is staged, and [`STAGED`] says why.
+    XmpValueTypeMismatch {
+        /// The property, written with its schema's preferred prefix.
+        property: String,
+        /// The form the schema declares.
+        expected: &'static str,
+        /// The form the packet used.
+        found: &'static str,
+    },
     /// The document is encrypted. Every part of ISO 19005 forbids it: a file
     /// nobody can open without a key is not archival.
     Encrypted,

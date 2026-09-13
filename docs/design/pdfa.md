@@ -362,6 +362,98 @@ plausible output came with it. The root now finds the corpus inside a fetch
 directory, and an empty bar is an assertion rather than a printed zero. The
 `1 201` above was reproduced by switching the new group off, not carried.
 
+## What the XMP value-type rule measured
+
+*Recorded 13 September 2026, at the commit that landed it.* Same corpus, same
+2 371-file bar.
+
+**1 476 of 2 371 agree, against 1 211 before, and the false-positive count did
+not move.** That second clause is the acceptance criterion rather than the
+first: this rule judges every property of every packet, `pass` files included,
+so it is the first group here whose natural failure mode is reporting a
+conforming file.
+
+| | files | agreed before | agreed after |
+| --- | --- | --- | --- |
+| annotated `-pass-` | 831 | 830 | 830 |
+| annotated `-fail-` | 1 540 | 381 | 646 |
+| **total** | **2 371** | **1 211** | **1 476** |
+
+**ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 have two halves and only one of
+them landed.** The clause requires every property to belong to a predefined
+schema *and* to be written in the value type that schema declares. The second
+needs a table both revisions agree on; the first needs the revision ISO 19005
+cites, which is XMP 2004, and Adobe publishes a later one. The difference is
+not academic: `xmp:Advisory`, `xmpMM:LastURL`, `xmpMM:RenditionOf`,
+`xmpMM:SaveID`, `exif:MakerNote`, `exif:ComponentsConfiguration`, four
+`xmpDM:` properties and the whole of `xmpidq` and the Exif `aux` namespace
+appear in fixtures annotated **pass** and in none of the published tables, so
+reading the table as a membership list would have reported every one of them.
+`PDFA_STAGED` still carries the entry, still counts 37, and now says which half
+it is about.
+
+Per ledger row, in files still disagreeing:
+
+| subject | before | after |
+| --- | ---: | ---: |
+| `Isartor test files/PDFA-1b/6.7 Metadata` | 19 | 18 |
+| `PDF_A-1b/6.7 Metadata/6.7.2 Properties` | 195 | 88 |
+| `PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams` | 295 | 138 |
+| `PDF_A-4/6.7 Metadata/6.7.2 Metadata streams` | 3 | 3 |
+
+265 of the 512 files those four rows named now agree, and the 247 left are the
+membership half. This supersedes the remainder named in *What milestones 5 and
+6 actually measured* — "roughly 490 are still the XMP predefined-schema
+property rule" is now 247 — and the rest of that paragraph stands.
+
+**The defect the corpus never saw.** The walk that reads a property's value
+form had the attribute shorthand for a structure — `<xmpMM:DerivedFrom
+stRef:instanceID="…"/>`, which is what a real producer writes — stubbed out as
+`let shorthand = false`, so a conforming structure read as a simple value. It
+was a false positive rather than a miss, which is the direction that costs the
+`pass` side, and the number above was measured after it was fixed rather than
+before.
+
+**Counted injections.** Each defect re-introduced in turn, the whole
+`tinker-pdf` crate run with `--no-fail-fast` before `-p`, and the count
+recorded — zeros included, because a guard that catches nothing when its defect
+is injected is not a guard.
+
+| Injected | Tests that failed |
+| --- | ---: |
+| the attribute shorthand not detected | 3 |
+| every `rdf:Alt` counted as a language alternative | 3 |
+| the RDF and XML attribute exclusions dropped | 3 |
+| part 4 runs the rule | 2 |
+| the revision-drift row ignores which part asked | 2 |
+| the finding names the metadata clause instead of its own | 1 |
+| the top-level match keyed to depth instead of structure | 1 |
+| **the `rdf:RDF` grandparent test dropped** | **0, then 1** |
+| the rule never called at all (the control) | 10 |
+
+**The zero is the row worth reading.** Dropping the grandparent half of the
+top-level test — so that anything under any `rdf:Description` is judged as a
+property of the document — failed nothing at all. The reason is that a
+structure's fields are reached with a property already open, so the test is
+never consulted for them; the case that does consult it is a `dc:title` nested
+one level too deep, which no fixture had. Writing that fixture took the row to
+1. The rule is unchanged; what changed is that it is now guarded.
+
+**Two things the corpus cannot see, stated rather than implied.**
+
+- **Part 4's exclusion is worth nothing to the bar.** ISO 19005-4 dropped the
+  requirement rather than renumbering it — the conformance suite has
+  directories for it under `PDF_A-1b` and `PDF_A-2b` and none anywhere under
+  `PDF_A-4` — and running the rule there anyway moves the bar by **zero**, in
+  either direction. So the exclusion is a reading held by two tests and by
+  nothing else, and if the reading is wrong no corpus number here would say so.
+- **The `pass` side is where the risk was**, and 454 of the 831 `pass` files
+  live in the two directories whose fixtures are adversarial about XMP
+  serialisation. They still agree. The guard that runs on every machine, with
+  no corpus at all, is `pdfa_writer.rs`: it validates a document this engine
+  wrote at every flavour it can claim and asserts zero findings, against a
+  packet generated from the builder's own table.
+
 ## What milestones 5 and 6 actually measured
 
 *Recorded August 2026, at the commit that landed the writer profile.* Same

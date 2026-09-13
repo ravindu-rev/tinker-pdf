@@ -502,6 +502,79 @@ the Unicode Terms of Use and are released under LICENSE"*, and that LICENSE is
 the Unicode License v3, the same `Unicode-3.0` the UCD carries and `deny.toml`
 already allows. Its text is reproduced above.
 
+### The predefined XMP schemas' property tables
+
+Transcribed into `crates/tinker-pdf/src/pdfa/xmp_schemas.rs` rather than
+vendored as a tree, for the reason the four Brotli tables above are: 360 lines
+of `(name, value type)` pairs are short enough to read in a diff, and
+`cargo xtask vendor` checks directories under `crates/<crate>/data`, which this
+is deliberately not.
+
+The source is **Adobe's own published namespace tables**, the `XMPNamespaces`
+directory of `github.com/adobe/xmp-docs` at commit
+`e2573ad7e7959e657b1aed704546e19319cb4f5d`. Twelve schemas and 289 properties
+were taken, and **only the value-type column**: what form each property is
+written in — a simple value, an array, a language alternative, or a structure.
+
+The names are **not** read as a membership list, and that restraint is the
+whole reason this table can be trusted at all. ISO 19005 cites the XMP 2004
+revision; Adobe publishes a later one, and the difference is a list of
+properties that conforming files in the veraPDF corpus use — `xmp:Advisory`,
+`xmpMM:LastURL`, `xmpMM:RenditionOf`, `xmpMM:SaveID`, `exif:MakerNote`,
+`exif:ComponentsConfiguration`, four `xmpDM:` properties, and the whole of the
+`xmpidq` and Exif `aux` namespaces. Treating the table as a list of *permitted*
+properties would report every one of those conforming files, so the membership
+half of ISO 19005-1 6.7.2 stays staged and `PDFA_STAGED` names it.
+`crates/tinker-pdf/src/pdfa/xmp_schemas.rs` argues it at length.
+
+The transcription is left **exactly as Adobe publishes it**, and the one place
+this build reads a different answer is named separately rather than edited into
+the table: `REVISION_DRIFT` carries `photoshop:SupplementalCategories`, which
+ISO 19005-1's revision declares a simple value and the published table declares
+a bag. So what was transcribed and what was overridden stay separable.
+
+The evidence that the transcription is right is a count and a corpus:
+`the_vendored_table_is_sorted_and_has_no_duplicate_property` pins twelve
+schemas and 289 properties, and the rule runs over every annotated PDF/A file
+the veraPDF corpus carries without moving the false-positive count.
+
+The licence is reproduced here in full for the same reason Adobe's CMaps are:
+BSD-3-Clause requires a binary redistribution to carry it, and a compiled table
+is a binary redistribution. `xmp_schemas.rs` compiles into every binary that
+links the facade.
+
+```
+The BSD License
+
+Copyright (c) 1999 - 2018, Adobe Systems Incorporated
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of Adobe Systems Incorporated, nor the names of its
+  contributors may be used to endorse or promote products derived from this
+  software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
 ## Test fixtures
 
 `testdata/` holds PDFs written by mutool, copied from Tinker; see

@@ -17,17 +17,22 @@
 //! properties in three namespaces — and treat a packet the subset cannot read
 //! as a finding rather than as a pass.
 //!
-//! The largest metadata rule in the standard is *not* here and its absence is
-//! deliberate. ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 require every
-//! property in the packet to belong to a predefined schema or be described by
-//! an extension schema, which needs the XMP specification's predefined-schema
-//! property tables as vendored data. Guessing those tables produces false
-//! positives on conforming files, which is worse than not checking, so the
-//! rule is staged and [`super::STAGED`] names it.
+//! The largest metadata rule in the standard is here in **half**, and which
+//! half is a decision rather than an accident. ISO 19005-1 6.7.2 and ISO
+//! 19005-2 6.6.2.3 require every property in the packet to belong to a
+//! predefined schema or be described by an extension schema, **and** to carry
+//! the value type that schema declares.
+//!
+//! The value-type half runs, over the table in [`super::xmp_schemas`]. The
+//! membership half is staged and [`super::STAGED`] names it: reading the same
+//! table as a list of *permitted* properties would report conforming files,
+//! because the revision ISO 19005 cites and the revision Adobe publishes are
+//! not the same one. `xmp_schemas.rs` names the properties that differ.
 
 use tinker_pdf_cos::{decode_text_string, parse_date, Date, Dict};
 use tinker_pdf_xml::{Event, Name, Source};
 
+use super::xmp_schemas::ValueForm;
 use super::{clauses, FindingKind, Flavour, Machinery, Part, Raw, RuleGroup};
 
 use crate::Document;
@@ -41,6 +46,9 @@ const PDF: &str = "http://ns.adobe.com/pdf/1.3/";
 
 /// The RDF namespace, whose `rdf:li` carries an array member's text.
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+/// The XML namespace, which binds `xml:lang` whether a packet declares it or
+/// not — XML 1.0 §2.12 makes the prefix reserved and pre-bound.
+const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
 /// One `/Info` entry and the XMP property ISO 19005 pairs it with.
 ///
@@ -164,6 +172,15 @@ pub(super) fn rules(
         ));
         return;
     };
+
+    // The value-type half of 6.7.2 / 6.6.2.3, on the three parts that carry
+    // the requirement. It runs before the `/Info` agreement below because that
+    // half is part 1's alone and returns early.
+    if let Some(part) = flavour.map(|f| f.part) {
+        if part_carries_the_predefined_schema_rule(part) {
+            schema_value_types(&packet, part, out);
+        }
+    }
 
     // **Part 1 only, and the restriction is a refusal rather than a gap.**
     //
@@ -501,6 +518,307 @@ fn properties(packet: &[u8]) -> Option<Properties> {
     well_formed.then_some(Properties { values })
 }
 
+// ---- the predefined schemas' value types -----------------------------------
+//
+// ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 have two halves. The membership
+// half — every property belongs to a predefined schema or to an extension
+// schema — is still staged, and `xmp_schemas.rs` records at length why: the
+// applicable revision is XMP 2004, the published tables are a later one, and
+// the difference is a list of properties that conforming corpus files use.
+//
+// This is the other half. A property the vendored table *does* name is one
+// both revisions carry, and what it declares is a value type. A packet that
+// writes `xmpDM:projectRef` as a string where the schema declares a structure
+// has not written that property; it has written something else under its name,
+// which is precisely what the clause exists to stop.
+//
+// Part 4 is excluded, and the exclusion is evidence rather than caution: the
+// conformance suite has `PDF_A-1b/6.7 Metadata/6.7.2 Properties` and
+// `PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas`, and there is
+// no counterpart anywhere under `PDF_A-4` — ISO 19005-4 dropped the
+// restriction rather than renumbering it.
+
+/// A top-level property found in the packet, and the shape its value took.
+struct Found {
+    /// The resolved namespace URI.
+    namespace: String,
+    /// The local name.
+    local: String,
+    /// What the serialisation says the value is.
+    form: ValueForm,
+}
+
+/// The property currently being read, and the depth its element opened at.
+struct Pending {
+    /// The resolved namespace URI.
+    namespace: String,
+    /// The local name.
+    local: String,
+    /// The path depth its start tag sat at.
+    depth: usize,
+    /// The form settled so far.
+    form: ValueForm,
+    /// Whether a child element has settled the form. The **first** direct
+    /// child decides; a second cannot change it, because a property with two
+    /// container children is malformed RDF rather than a different type.
+    settled: bool,
+}
+
+/// Whether `name` is the RDF element `local`.
+fn is_rdf(name: &Name<'_>, local: &str) -> bool {
+    name.local() == local && (name.prefix() == Some("rdf") || name.namespace() == Some(RDF))
+}
+
+/// Whether a path entry is the RDF element `local`.
+fn is_rdf_element(entry: Option<&(Option<String>, String)>, local: &str) -> bool {
+    entry.is_some_and(|(namespace, name)| name == local && namespace.as_deref() == Some(RDF))
+}
+
+/// Whether the element about to open is a child of an `rdf:Description` that
+/// is itself a child of `rdf:RDF`.
+///
+/// Matched on the path's **tail** rather than at a fixed depth, because
+/// `x:xmpmeta` is optional: a packet inside `/Metadata` normally carries it
+/// and a bare `<rdf:RDF>` is equally legal, so a rule keyed to depth two reads
+/// every property of the wrapped form as a structure field and reports
+/// nothing. That is exactly what the first build of this rule did, and the
+/// corpus said so by not moving at all.
+fn parent_is_a_top_level_description(path: &[(Option<String>, String)]) -> bool {
+    let depth = path.len();
+    depth >= 2
+        && is_rdf_element(path.get(depth - 1), "Description")
+        && is_rdf_element(path.get(depth - 2), "RDF")
+}
+
+/// Every top-level property in the packet, with the value form it was written
+/// in.
+///
+/// "Top-level" is the standard's own level and is matched structurally: a
+/// child of an `rdf:Description` that is itself a child of `rdf:RDF`. Matching
+/// on `rdf:Description` alone would count a structure's *fields* as
+/// properties, since a structure value is serialised as a nested
+/// `rdf:Description` — and `stRef:instanceID` inside an `xmpMM:DerivedFrom`
+/// would then be judged as though the document declared it.
+fn top_level_properties(packet: &[u8]) -> Vec<Found> {
+    let packet = super::readable(packet);
+    let Ok(source) = Source::new(&packet) else {
+        return Vec::new();
+    };
+    let limits = tinker_pdf_xml::Limits::default();
+    let reader = source.reader(&limits);
+
+    let mut found = Vec::new();
+    // The element names on the way down. Only the two above the cursor are
+    // ever consulted, but the whole path is kept because depth is what says
+    // which two those are.
+    let mut path: Vec<(Option<String>, String)> = Vec::new();
+    let mut pending: Option<Pending> = None;
+    // Path depth of the `rdf:Alt` whose items are being inspected for
+    // `xml:lang`.
+    let mut alt_at: Option<usize> = None;
+
+    for event in reader {
+        let Ok(event) = event else {
+            // Read for what it said, exactly as `properties` does: a packet
+            // that stops part way has already reported the properties it got
+            // through, and `MetadataUnreadable` is the finding for one that
+            // never started.
+            break;
+        };
+        match event {
+            Event::Start(element) => {
+                let name = element.name();
+                let depth = path.len();
+                let namespace = name.namespace().map(str::to_string);
+                let local = name.local().to_string();
+
+                if let Some(open) = pending.as_mut() {
+                    if depth == open.depth + 1 && !open.settled {
+                        open.settled = true;
+                        open.form = if is_rdf(name, "Seq") || is_rdf(name, "Bag") {
+                            ValueForm::Array
+                        } else if is_rdf(name, "Alt") {
+                            alt_at = Some(depth);
+                            // Provisional. An `rdf:Alt` is a language
+                            // alternative only if its items say so, and no
+                            // item has been seen yet.
+                            ValueForm::Array
+                        } else {
+                            ValueForm::Structure
+                        };
+                    } else if alt_at == Some(depth - 1) && is_rdf_li(name) && has_xml_lang(&element)
+                    {
+                        open.form = ValueForm::LangAlt;
+                    }
+                } else if parent_is_a_top_level_description(&path)
+                    && namespace.as_deref() != Some(RDF)
+                {
+                    // A property element. Its own attributes can settle the
+                    // form before any child is seen: `rdf:parseType="Resource"`
+                    // and the shorthand in which a structure's fields are
+                    // written as attributes are both structures.
+                    let resource = element.attributes().iter().any(|attribute| {
+                        is_rdf(attribute.name(), "parseType") && attribute.value() == "Resource"
+                    });
+                    let shorthand = element
+                        .attributes()
+                        .iter()
+                        .any(|attribute| is_a_field_of_a_structure(attribute.name()));
+                    let structure = resource || shorthand;
+                    pending = Some(Pending {
+                        namespace: namespace.clone().unwrap_or_default(),
+                        local: local.clone(),
+                        depth,
+                        form: if structure {
+                            ValueForm::Structure
+                        } else {
+                            ValueForm::Simple
+                        },
+                        settled: structure,
+                    });
+                }
+
+                // The attribute form of a property, which is written on the
+                // `rdf:Description` itself: `<rdf:Description dc:format="…"/>`.
+                // An attribute value is one string, so the form is simple by
+                // construction.
+                if local == "Description"
+                    && namespace.as_deref() == Some(RDF)
+                    && is_rdf_element(path.last(), "RDF")
+                {
+                    for attribute in element.attributes() {
+                        if !is_a_field_of_a_structure(attribute.name()) {
+                            continue;
+                        }
+                        let Some(ns) = attribute.name().namespace() else {
+                            continue;
+                        };
+                        found.push(Found {
+                            namespace: ns.to_string(),
+                            local: attribute.name().local().to_string(),
+                            form: ValueForm::Simple,
+                        });
+                    }
+                }
+
+                path.push((namespace, local));
+            }
+            Event::End(_) => {
+                let depth = path.len().saturating_sub(1);
+                if pending.as_ref().is_some_and(|open| open.depth == depth) {
+                    let open = pending.take().expect("checked on the line above");
+                    found.push(Found {
+                        namespace: open.namespace,
+                        local: open.local,
+                        form: open.form,
+                    });
+                    alt_at = None;
+                }
+                path.pop();
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Whether an attribute is a *field of a structure* rather than a statement
+/// about the element that carries it.
+///
+/// XMP lets a structure be written three ways, and the third is the one this
+/// answers: `<xmpMM:DerivedFrom stRef:instanceID="…" stRef:documentID="…"/>`
+/// is the same value as a nested `rdf:Description` with two children. So an
+/// attribute that is a field makes its element a structure — and one that is
+/// not must not, because reporting a conforming file is worse than staying
+/// quiet.
+///
+/// Three exclusions, each for its own reason:
+///
+/// - **The RDF namespace**, excluded as a namespace rather than by listing
+///   `parseType`, `resource`, `about`, `ID`, `nodeID` and `datatype`: every one
+///   of them describes the *statement* and none is part of the value.
+///   `rdf:resource` is the one worth naming — it makes the value a reference,
+///   and counting it would turn every referenced simple value into a structure.
+/// - **The XML namespace**, which is `xml:lang` and also `xml:base` and
+///   `xml:space`. `has_xml_lang` reads `xml:lang` for a different question.
+/// - **An attribute that resolves to no namespace at all** — an unprefixed one,
+///   or one whose prefix was never declared. XMP writes every structure field
+///   qualified, so neither can be one, and the second is a packet this reader
+///   cannot name the namespace of anyway. This is the one exclusion that is
+///   *not* symmetric with `is_rdf` and `has_xml_lang`, which fall back to the
+///   conventional prefix when a declaration is missing: those two answer "is
+///   this the RDF element I am looking for", where guessing costs a rule that
+///   does not fire, and this one answers "is this element a structure", where
+///   guessing costs a conforming file reported.
+///
+/// There is deliberately no `xmlns` exclusion: `tinker-pdf-xml` resolves
+/// namespace declarations rather than reporting them, so they never reach an
+/// `attributes()` list at all. Adding one would be a guard against nothing, and
+/// reading this function without knowing that invites exactly that edit.
+fn is_a_field_of_a_structure(name: &Name<'_>) -> bool {
+    name.namespace()
+        .is_some_and(|namespace| namespace != RDF && namespace != XML_NAMESPACE)
+}
+
+/// Whether an element carries `xml:lang`, which is what makes an `rdf:Alt` a
+/// language alternative rather than an ordinary alternative array.
+fn has_xml_lang(element: &tinker_pdf_xml::Element<'_>) -> bool {
+    element.attributes().iter().any(|attribute| {
+        attribute.name().local() == "lang"
+            && (attribute.name().prefix() == Some("xml")
+                || attribute.name().namespace() == Some(XML_NAMESPACE))
+    })
+}
+
+/// Whether a part requires every property to belong to a predefined schema.
+///
+/// Parts 1, 2 and 3 do; **part 4 does not**, and that is a change in the
+/// standard rather than a gap here. The evidence is the conformance suite's
+/// own tree: `PDF_A-1b/6.7 Metadata/6.7.2 Properties` and `PDF_A-2b/6.6
+/// Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas` are directories full of
+/// annotated fixtures, and there is no counterpart anywhere under `PDF_A-4` —
+/// ISO 19005-4 dropped the restriction rather than renumbering it, and a build
+/// that ran the rule there would be inventing a requirement.
+fn part_carries_the_predefined_schema_rule(part: Part) -> bool {
+    match part {
+        Part::One | Part::Two | Part::Three => true,
+        Part::Four => false,
+    }
+}
+
+/// Reports every top-level property whose value form disagrees with the one
+/// its predefined schema declares.
+fn schema_value_types(packet: &[u8], part: Part, out: &mut Vec<Raw>) {
+    for property in top_level_properties(packet) {
+        let Some(declared) =
+            super::xmp_schemas::value_form(&property.namespace, &property.local, part)
+        else {
+            // Not a property this table names, which is not a statement that
+            // the property is unknown — only that nothing here can judge it.
+            continue;
+        };
+        if declared == property.form {
+            continue;
+        }
+        let named = match super::xmp_schemas::prefix_of(&property.namespace) {
+            Some(prefix) => format!("{prefix}:{}", property.local),
+            None => property.local.clone(),
+        };
+        out.push(Raw::file(
+            // One table for every part. `ClauseTable::of` routes by part
+            // already, and `SCHEMA_TYPES` carries part 1's own number in its
+            // `one` arm — which is `METADATA`'s number too, because part 1
+            // gives the whole of 6.7.2 one clause and no sub-clause.
+            clauses::SCHEMA_TYPES,
+            FindingKind::XmpValueTypeMismatch {
+                property: named,
+                expected: declared.describe(),
+                found: property.form.describe(),
+            },
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,5 +935,258 @@ mod tests {
         // Gregorian correction and the part a naive formula gets wrong.
         assert_eq!(minutes(at(2000, 3, 1)) - minutes(at(2000, 2, 28)), 2 * 1440);
         assert_eq!(minutes(at(1900, 3, 1)) - minutes(at(1900, 2, 28)), 1440);
+    }
+
+    // ---- the predefined schemas' value types ------------------------------
+
+    /// The packet these tests vary, with `body` dropped in as the properties.
+    fn packet(body: &str) -> String {
+        format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+             {body}\
+             </rdf:RDF></x:xmpmeta>"
+        )
+    }
+
+    /// The findings the value-type rule makes about `body`, under `part`.
+    fn types(body: &str, part: Part) -> Vec<String> {
+        let mut out = Vec::new();
+        schema_value_types(packet(body).as_bytes(), part, &mut out);
+        out.into_iter()
+            .map(|raw| match raw.kind {
+                FindingKind::XmpValueTypeMismatch {
+                    property,
+                    expected,
+                    found,
+                } => format!("{property}: {expected} declared, {found} written"),
+                other => format!("unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    /// A structure written as a string is the shape the corpus's largest
+    /// family is made of, and it is what the rule exists to catch.
+    ///
+    /// `xmpDM:projectRef` is a `ProjectLink`. Written with
+    /// `rdf:parseType="Resource"` it is that structure; written with text
+    /// between its tags it is a different property wearing the name, which is
+    /// the thing ISO 19005-1 6.7.2 forbids.
+    #[test]
+    fn a_structure_written_as_a_string_is_reported_and_the_structure_is_not() {
+        const NS: &str = "xmlns:xmpDM=\"http://ns.adobe.com/xmp/1.0/DynamicMedia/\"";
+        let wrong = format!(
+            "<rdf:Description {NS} rdf:about=\"\">\
+             <xmpDM:projectRef>http://example.invalid/</xmpDM:projectRef>\
+             </rdf:Description>"
+        );
+        assert_eq!(
+            types(&wrong, Part::Two),
+            ["xmpDM:projectRef: a structure declared, a simple value written"],
+        );
+
+        let right = format!(
+            "<rdf:Description {NS} rdf:about=\"\">\
+             <xmpDM:projectRef rdf:parseType=\"Resource\">\
+             <xmpDM:type>custom</xmpDM:type>\
+             </xmpDM:projectRef></rdf:Description>"
+        );
+        assert!(types(&right, Part::Two).is_empty(), "{right}");
+    }
+
+    /// The attribute shorthand for a structure is a structure.
+    ///
+    /// `<xmpDM:projectRef xmpDM:type="custom"/>` serialises the same value as
+    /// the `parseType` form. A rule that only knew `parseType` would report a
+    /// conforming file, which is the failure mode this whole rule group is
+    /// held to avoid.
+    #[test]
+    fn the_attribute_shorthand_for_a_structure_is_a_structure() {
+        let body = "<rdf:Description \
+                    xmlns:xmpDM=\"http://ns.adobe.com/xmp/1.0/DynamicMedia/\" rdf:about=\"\">\
+                    <xmpDM:projectRef xmpDM:type=\"custom\"/></rdf:Description>";
+        assert!(types(body, Part::Two).is_empty());
+    }
+
+    /// A language alternative is an `rdf:Alt` **whose items carry
+    /// `xml:lang`**, and the corpus is what settled that it is strict.
+    ///
+    /// Reading a bare `rdf:Alt` as satisfying a Lang Alt agrees with ten fewer
+    /// fixtures across seven suites and gains no conforming file, so the
+    /// leniency was measured and declined rather than assumed.
+    #[test]
+    fn a_language_alternative_needs_a_language_on_its_items() {
+        const NS: &str = "xmlns:dc=\"http://purl.org/dc/elements/1.1/\"";
+        let bare = format!(
+            "<rdf:Description {NS} rdf:about=\"\"><dc:title><rdf:Alt>\
+             <rdf:li>A title</rdf:li></rdf:Alt></dc:title></rdf:Description>"
+        );
+        assert_eq!(
+            types(&bare, Part::One),
+            ["dc:title: a language alternative declared, an array written"],
+        );
+
+        let tagged = format!(
+            "<rdf:Description {NS} rdf:about=\"\"><dc:title><rdf:Alt>\
+             <rdf:li xml:lang=\"x-default\">A title</rdf:li></rdf:Alt></dc:title>\
+             </rdf:Description>"
+        );
+        assert!(types(&tagged, Part::One).is_empty(), "{tagged}");
+    }
+
+    /// A structure's **fields** are not top-level properties.
+    ///
+    /// `stRef:instanceID` inside an `xmpMM:DerivedFrom` is a field of a
+    /// `ResourceRef`, not a property of the document. A walk that matched on
+    /// `rdf:Description` alone would judge it as one — and a structure value
+    /// is serialised as a nested `rdf:Description`, so that walk would judge
+    /// every field of every structure in the packet.
+    #[test]
+    fn a_structures_fields_are_not_judged_as_properties() {
+        let body = "<rdf:Description \
+                    xmlns:xmpMM=\"http://ns.adobe.com/xap/1.0/mm/\" \
+                    xmlns:stRef=\"http://ns.adobe.com/xap/1.0/sType/ResourceRef#\" \
+                    rdf:about=\"\"><xmpMM:DerivedFrom rdf:parseType=\"Resource\">\
+                    <stRef:instanceID>uuid:1</stRef:instanceID>\
+                    <stRef:documentID>uuid:2</stRef:documentID>\
+                    </xmpMM:DerivedFrom></rdf:Description>";
+        assert!(types(body, Part::One).is_empty());
+        let found = top_level_properties(packet(body).as_bytes());
+        assert_eq!(found.len(), 1, "only the one property is top-level");
+        assert_eq!(found[0].local, "DerivedFrom");
+    }
+
+    /// A property no predefined schema here names is **not** reported.
+    ///
+    /// This is the membership half staying staged, asserted rather than
+    /// described. `xmp:Advisory` is a real XMP 2004 property that Adobe's
+    /// current tables no longer carry, so a rule that read this table as a
+    /// membership list would report the conforming corpus file that uses it.
+    #[test]
+    fn a_property_this_table_does_not_name_is_not_a_finding() {
+        for body in [
+            "<rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" rdf:about=\"\">\
+             <xmp:Advisory><rdf:Bag><rdf:li>x</rdf:li></rdf:Bag></xmp:Advisory></rdf:Description>",
+            "<rdf:Description xmlns:zz=\"http://example.invalid/ns/\" rdf:about=\"\">\
+             <zz:whatever>x</zz:whatever></rdf:Description>",
+        ] {
+            assert!(types(body, Part::One).is_empty(), "{body}");
+        }
+    }
+
+    /// The packet's wrapper is optional, and a rule keyed to depth misses
+    /// every property when it is present.
+    ///
+    /// `x:xmpmeta` is what a `/Metadata` stream normally carries and a bare
+    /// `<rdf:RDF>` is equally legal. The first build of this rule matched a
+    /// property at a fixed depth of two, which is the bare form's depth, and
+    /// the whole corpus moved by **zero files** because every real packet has
+    /// the wrapper. Both are asserted so it cannot happen the other way round.
+    #[test]
+    fn the_xmpmeta_wrapper_is_optional() {
+        const INNER: &str = "<rdf:Description \
+                             xmlns:xmpDM=\"http://ns.adobe.com/xmp/1.0/DynamicMedia/\" \
+                             rdf:about=\"\"><xmpDM:projectRef>x</xmpDM:projectRef>\
+                             </rdf:Description>";
+        let wrapped = packet(INNER);
+        let bare = format!(
+            "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+             {INNER}</rdf:RDF>"
+        );
+        for form in [wrapped.as_str(), bare.as_str()] {
+            let found = top_level_properties(form.as_bytes());
+            assert_eq!(found.len(), 1, "{form}");
+            assert_eq!(found[0].form, ValueForm::Simple);
+        }
+    }
+
+    /// Part 4 dropped the requirement, so the rule does not run there — and
+    /// the evidence is the conformance suite's own directory tree, which has
+    /// `6.7.2 Properties` under part 1 and `6.6.2.3 Schemas` under part 2 and
+    /// nothing of the kind anywhere under `PDF_A-4`.
+    ///
+    /// Asserted on the predicate rather than on the walk, because the part is
+    /// decided before the walk is reached and handing the walk a `Part::Four`
+    /// would assert the opposite of the thing that matters.
+    #[test]
+    fn part_four_is_not_judged_on_predefined_schemas() {
+        assert!(!part_carries_the_predefined_schema_rule(Part::Four));
+        for part in [Part::One, Part::Two, Part::Three] {
+            assert!(part_carries_the_predefined_schema_rule(part), "{part:?}");
+        }
+        // And a part that does carry it reports, so the line above is a
+        // restriction rather than a rule that never fires anywhere.
+        let body = "<rdf:Description \
+                    xmlns:xmpDM=\"http://ns.adobe.com/xmp/1.0/DynamicMedia/\" rdf:about=\"\">\
+                    <xmpDM:projectRef>x</xmpDM:projectRef></rdf:Description>";
+        assert_eq!(types(body, Part::Two).len(), 1);
+    }
+
+    /// The one entry in [`super::super::xmp_schemas::REVISION_DRIFT`], from
+    /// both sides and under both parts.
+    ///
+    /// `photoshop:SupplementalCategories` is Text in the revision PDF/A-1
+    /// cites and an unordered array in the one parts 2 and 3 cite, and the
+    /// veraPDF suite asserts the conforming and the non-conforming spelling
+    /// under each. Four assertions, because an override applied to the wrong
+    /// part reports a conforming file — which is exactly what this one did
+    /// before the part was added to it.
+    #[test]
+    fn the_one_revision_drift_row_holds_under_both_parts() {
+        const NS: &str = "xmlns:photoshop=\"http://ns.adobe.com/photoshop/1.0/\"";
+        let text = format!(
+            "<rdf:Description {NS} rdf:about=\"\">\
+             <photoshop:SupplementalCategories>c</photoshop:SupplementalCategories>\
+             </rdf:Description>"
+        );
+        let bag = format!(
+            "<rdf:Description {NS} rdf:about=\"\">\
+             <photoshop:SupplementalCategories><rdf:Bag><rdf:li>c</rdf:li></rdf:Bag>\
+             </photoshop:SupplementalCategories></rdf:Description>"
+        );
+        // Part 1: text conforms, an array does not.
+        assert!(types(&text, Part::One).is_empty());
+        assert_eq!(types(&bag, Part::One).len(), 1);
+        // Parts 2 and 3: exactly the other way round.
+        assert!(types(&bag, Part::Two).is_empty());
+        assert_eq!(types(&text, Part::Two).len(), 1);
+        assert!(types(&bag, Part::Three).is_empty());
+        assert_eq!(types(&text, Part::Three).len(), 1);
+    }
+
+    /// The vendored table is sorted, which is what makes the lookup a binary
+    /// search and the iteration one order on every target (ruling 4).
+    ///
+    /// A generator that emitted an unsorted schema would make `value_form`
+    /// miss properties silently — a binary search over unsorted data returns
+    /// `Err` rather than failing — so the property is checked rather than
+    /// trusted to the generator.
+    #[test]
+    fn the_vendored_table_is_sorted_and_has_no_duplicate_property() {
+        let mut schemas = 0;
+        let mut properties = 0;
+        let mut previous_uri = "";
+        for schema in super::super::xmp_schemas::PREDEFINED {
+            assert!(
+                previous_uri < schema.uri,
+                "{} is out of order after {previous_uri}",
+                schema.uri
+            );
+            previous_uri = schema.uri;
+            schemas += 1;
+            let mut previous = "";
+            for (name, _) in schema.properties {
+                assert!(
+                    previous < *name,
+                    "{} in {} is out of order after {previous}",
+                    name,
+                    schema.uri
+                );
+                previous = name;
+                properties += 1;
+            }
+        }
+        assert_eq!(schemas, 12, "twelve predefined schemas");
+        assert_eq!(properties, 289, "289 properties");
     }
 }

@@ -25,9 +25,15 @@
 # disagreement it measures is covered by a row here, so a subject that stops
 # disagreeing leaves a stale row and a new disagreement fails the test.
 #
-# Measured at 1201/2371 against the files that are tests of PDF/A: 830 of 831
-# `-pass-` files agree, 371 of 1540 `-fail-` files agree. The one false
+# Measured at 1476/2371 against the files that are tests of PDF/A: 830 of 831
+# `-pass-` files agree, 646 of 1540 `-fail-` files agree. The one false
 # positive is the first row below and it is a reading, not a bug.
+#
+# Two numbers moved here at once and they are separate. This header read
+# 1201/371 until the XMP value-type rule landed, and it had been stale since
+# the structural join, which measured 1211/381 and did not edit this file. The
+# value-type rule is what took it from 1211 to 1476. The false-positive count
+# did not move, which is the number to watch.
 #
 # Milestone 5 moved that from 1017 to 1201 and left the false-positive count
 # where it was, which is the number to watch: a rule group that raised
@@ -41,7 +47,7 @@ staged	6.2	Isartor test files/PDFA-1b/6.2 Graphics	The colour group runs and cat
 staged	6.3	Isartor test files/PDFA-1b/6.3 Fonts	The font group runs and catches 11 of the 28. The 17 left are the staged rules: font metrics (6.3.6), the CMap's agreement with the CIDFont's /CIDSystemInfo (6.3.3.3), the permitted font types (6.3.2), and the Adobe Glyph List half of the Unicode rule (6.3.8). (17 files)
 staged	6.4	Isartor test files/PDFA-1b/6.4 Transparency	Part 1's transparency prohibition runs and catches 1 of the 6. The 5 left declare their transparency somewhere this walk does not reach: a soft mask named by an /ExtGState no content stream selects, or a group on an XObject no page invokes. The walk judges what is drawn, which is the same reading the font group uses. (5 files)
 staged	6.5	Isartor test files/PDFA-1b/6.5 Annotations	No rule in this group: part 1's annotation rules are staged with parts 2 to 4's. (24 files)
-staged	6.6.2.3	Isartor test files/PDFA-1b/6.7 Metadata	No rule: the predefined-schema property requirement, the largest staged rule in this build. (19 files)
+staged	6.6.2.3	Isartor test files/PDFA-1b/6.7 Metadata	The value-type half of the predefined-schema rule runs and catches 1 of the 19. The 18 left are the membership half, which is staged: ISO 19005 cites the XMP 2004 revision and the published tables are a later one. (18 files)
 staged	6.9	Isartor test files/PDFA-1b/6.9 Interactive Forms	No rule fires: what these break is the form's default resources rather than XFA or NeedsRendering. (2 files)
 staged	6.3.8	PDF_A-1a/6.3 Fonts/6.3.8 Unicode character maps	The determinable half of 6.3.8 runs and catches 2 of the 4. The 2 left are the staged half: fail-a and fail-b differ from pass-e only in which glyph of a /Differences array the page draws, so the answer is in the Adobe Glyph List and in the content stream rather than in the font dictionary. (2 files)
 staged	6.7.11	PDF_A-1a/6.7 Metadata/6.7.11 Version and conformance level identification	The claim is read and checked against the part's own table of levels, and these fixtures survive that. What they break is the schema description the packet is supposed to carry for the pdfaid namespace, which this build does not look for. (1 files)
@@ -64,7 +70,7 @@ staged	6.3.6	PDF_A-1b/6.3 Fonts/6.3.5 Font subsets	The subset-tag shape runs. Th
 staged	6.3.6	PDF_A-1b/6.3 Fonts/6.3.6 Font metrics	The font group runs. What is left in this directory is the staged half: 6.3.6 asks the /Widths array to agree with the embedded program's own advances, which needs the code-to-glyph mapping rather than the advance. (1 files)
 staged	6.5	PDF_A-1b/6.5 Annotations/6.5.3 Annotation dictionaries	No rule in this group: part 1 numbers annotations at 6.5 and they are staged exactly as parts 2 to 4's are. (1 files)
 staged	6.7.11	PDF_A-1b/6.7 Metadata/6.7.11 Version and conformance level identification	The claim is read and checked against the part's own table of levels, and these fixtures survive that. What they break is the schema description the packet is supposed to carry for the pdfaid namespace, which this build does not look for. (2 files)
-staged	6.6.2.3	PDF_A-1b/6.7 Metadata/6.7.2 Properties	No rule: every property in a predefined XMP schema must be one that schema defines, which needs the XMP specification's property tables as vendored data. Guessing them produces false positives on conforming files, which is worse than not checking. This is the single largest staged rule by corpus count - 195 files here and 295 in the part 2 row. (195 files)
+staged	6.6.2.3	PDF_A-1b/6.7 Metadata/6.7.2 Properties	The value-type half runs - a property a predefined schema names must be written in the form that schema declares - and catches 107 of the 195. The 88 left need the membership half, which is staged because reading the vendored table as a list of permitted property names would report conforming files. (88 files)
 staged	6.7.8	PDF_A-1b/6.7 Metadata/6.7.8 Extension schemas	No rule: the extension schema description is the exception to the predefined-schema rule, and checking the exception to a rule this build does not enforce would prove nothing. (4 files)
 staged	6.9	PDF_A-1b/6.9 Interactive Forms/veraPDF test suite 6-9-t01-fail-a.pdf	No rule fires: the AcroForm carries no XFA and no NeedsRendering, which are the two things this build checks. What the fixture breaks is a font in the form's default resources, which is milestone 5's. (1 files)
 staged	6.9	PDF_A-1b/6.9 Interactive Forms/veraPDF test suite 6-9-t01-fail-b.pdf	No rule fires: the AcroForm carries no XFA and no NeedsRendering, which are the two things this build checks. What the fixture breaks is a font in the form's default resources, which is milestone 5's. (1 files)
@@ -98,7 +104,7 @@ staged	6.3.1	PDF_A-2b/6.3 Annotations/6.3.1 Annotation types	No rule in this gro
 staged	6.3.1	PDF_A-2b/6.3 Annotations/6.3.2 Annotation dictionaries	No rule in this group: annotation subtypes, dictionary flags and appearance streams are staged, and the colour half of them needs the output intent milestone 5 brings. (25 files)
 staged	6.3.1	PDF_A-2b/6.3 Annotations/6.3.3 Annotation appearances	No rule in this group: annotation subtypes, dictionary flags and appearance streams are staged, and the colour half of them needs the output intent milestone 5 brings. (26 files)
 staged	6.4	PDF_A-2b/6.4 Interactive forms/6.4.1 General	No rule in this group: a form field's appearance stream is what these fixtures break, and the appearance machinery is milestone 5's. (2 files)
-staged	6.6.2.3	PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams	No rule: parts 2 and 3 number the predefined-schema requirement under 6.6.2.3, and it is the same staged rule as part 1's 6.7.2 row. 295 files. (295 files)
+staged	6.6.2.3	PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams	The same rule under parts 2 and 3, where it is numbered 6.6.2.3: the value-type half catches 157 of the 295 and the 138 left are the membership half. (138 files)
 staged	6.7.11	PDF_A-2b/6.6 Metadata/6.6.4 Version and conformance level identification	Parts 2 and 3 number version identification at 6.6.4; the reason is the schema-description one, unchanged. (2 files)
 staged	6.3.8	PDF_A-2u/6.2 Graphics/6.2.11 Fonts	The determinable half of the Unicode rule runs and catches 2 of the 9. The 7 left need the Adobe Glyph List and the glyphs the page actually drew, which is the staged half. (7 files)
 staged	6.7.11	PDF_A-2u/6.6 Metadata/6.6.4 Version and conformance level identification	Parts 2 and 3 number version identification at 6.6.4; the reason is the schema-description one, unchanged. (1 files)
@@ -132,7 +138,7 @@ staged	6.3.1	PDF_A-4/6.3 Annotations/6.3.2 Annotation dictionaries	No rule in th
 staged	6.3.1	PDF_A-4/6.3 Annotations/6.3.3 Annotation appearances	No rule in this group: annotation subtypes, dictionary flags and appearance streams are staged, and the colour half of them needs the output intent milestone 5 brings. (21 files)
 staged	6.4	PDF_A-4/6.4 Interactive forms/6.4.1 General	No rule in this group: a form field's appearance stream is what these fixtures break, and the appearance machinery is milestone 5's. (2 files)
 staged	6.6.3	PDF_A-4/6.6 Action/6.6.3 Trigger events	No rule: ISO 19005-4 6.6.3 permits some additional-action entries and forbids others rather than forbidding the entry, and this build has not read that list closely enough to enforce it. (3 files)
-staged	6.6.2.3	PDF_A-4/6.7 Metadata/6.7.2 Metadata streams	No rule: part 4 numbers the metadata stream clause at 6.7.2, and the predefined-schema requirement under it is the same staged rule. (3 files)
+staged	6.6.2.3	PDF_A-4/6.7 Metadata/6.7.2 Metadata streams	No rule, and by decision rather than by omission: ISO 19005-4 dropped the predefined-schema requirement rather than renumbering it, so this build does not run the rule for part 4 at all. The conformance suite has directories for it under PDF_A-1b and PDF_A-2b and none anywhere under PDF_A-4. These three disagree on the metadata stream clause for other reasons. (3 files)
 staged	6.7.11	PDF_A-4/6.7 Metadata/6.7.3 Version identification	Part 4 numbers version identification at 6.7.3. The pdfaid:rev rule added in this milestone catches most of these; what is left breaks the pdfaid schema description rather than the revision value itself. (3 files)
 staged	6.8	PDF_A-4/6.9 Embedded files/veraPDF test suite 6-9-t01-fail-a.pdf	The file-specification key rules run and pass these. What they break is the MIME type the embedded file stream declares, or whether the attachment is itself a PDF/A file - a recursive validation this milestone does not do. (1 files)
 staged	6.8	PDF_A-4/6.9 Embedded files/veraPDF test suite 6-9-t03-fail-a.pdf	The file-specification key rules run and pass these. What they break is the MIME type the embedded file stream declares, or whether the attachment is itself a PDF/A file - a recursive validation this milestone does not do. (1 files)
