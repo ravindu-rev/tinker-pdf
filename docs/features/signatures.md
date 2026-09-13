@@ -33,8 +33,11 @@ producer wrote. Every span is checked against the file it claims to describe:
 `WholeFile`, `Revision` for a signature a later incremental update was layered
 on (7.5.6), or `Suspicious` with the reason named — a range past the end of
 the file, spans that overlap, a gap that lands in an XMP packet rather than on
-`/Contents`. Of the corpus's 18: **11 whole-file, 1 over a revision, 6
-suspicious**, each of the six checked by hand against the file's bytes.
+`/Contents`. Of the corpus's 27: **16 whole-file, 5 over a revision, 6
+suspicious**. This paragraph read 18/11/1/6 until 14 September 2026, which was
+the figure before the SafeDocs shard was pinned; the census at
+`crates/tinker-pdf/tests/signatures.rs` has asserted the current one since
+6 September, and the sentence ten lines above already used it.
 
 `/Contents` is read from the gap between the spans rather than from the object
 model. That is the only reading that can disagree with a lying `/ByteRange` —
