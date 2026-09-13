@@ -48,9 +48,20 @@ living in one feature's head.
 5. **Tiles share the full-page code path.** Binds
    [rasterizer](features/rasterizer.md) and
    [rendering](features/rendering.md). A clipped render is the same pipeline
-   with a translated viewport — never a second implementation. Tile rows are
+   with a translated viewport — never a second implementation. A tile must be
    pinned byte-equal to the full-page subregion, and that test is the
    permanent guard.
+
+   *Corrected 13 September 2026.* This ruling used to say the tile rows "are
+   pinned byte-equal" and that the test "is the permanent guard", in the
+   present tense. **There is no such test in the tree**, and there never has
+   been: a sweep for a tile or region test finds nothing, the facade has no
+   `RenderOptions::region` to write one against, and the one nearby citation
+   in `crates/tinker-pdf-render/src/lib.rs` cites ruling 7 rather than this
+   one. The ruling stands as a requirement — it is what the facade's region
+   row in the [roadmap](ROADMAP.md) must satisfy — and the claim that it was
+   already met is withdrawn. A ruling that describes a guard nobody wrote is
+   worse than a ruling with no guard, because it stops anyone looking.
 
 6. **Destinations are an enum, everywhere.** Binds
    [document-model](features/document-model.md),
