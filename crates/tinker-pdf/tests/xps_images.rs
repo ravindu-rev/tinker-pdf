@@ -583,23 +583,23 @@ fn a_content_type_in_another_case_still_names_its_format() {
     assert_eq!(defects(&bytes), [], "IMAGE/PNG is image/png");
 }
 
-/// An `ImageSource` behind a colour profile is refused by its own name.
+/// A real RGB profile, the same fixture the `ContextColor` tests use.
+const RGB_PROFILE: &[u8] = include_bytes!("../../../fuzz/corpus/icc_profile/rgb-gamma-curve.icc");
+
+/// An `ImageSource` behind a colour profile is **read**, and the profile goes
+/// with the picture.
 ///
-/// 9.1.5's `{ColorConvertedBitmap ...}` names an ICC profile, which is a
-/// non-goal of this whole plan, and the syntax has nowhere to put an sRGB
-/// fallback — so drawing the picture unconverted would be colours the file did
-/// not ask for, which is the shape gap 18a's plausible photograph had.
+/// 9.1.5's `{ColorConvertedBitmap picture profile}` names two parts in one
+/// attribute. The picture is drawn and the profile is embedded as the
+/// `/ICCBased` space its samples are values in (8.6.5.5), so the reader does
+/// the colour management — the same translation-not-conversion a
+/// `ContextColor` gets, and for the same reason: nothing here evaluates a
+/// profile, so nothing here can be wrong about one.
+///
+/// This test asserted the opposite until 14 September 2026, when the write
+/// surface it was waiting on arrived.
 #[test]
-fn a_colour_converted_bitmap_is_refused_by_its_own_name() {
-    let bytes = package_with(
-        png_part(),
-        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
-           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
-        None,
-    );
-    // The helper writes a plain `ImageSource`; this rewrites it in place.
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let _ = text;
+fn a_colour_converted_bitmap_is_read_with_its_profile() {
     let body = r#"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
         <ImageBrush ImageSource="{ColorConvertedBitmap /Resources/i.png /Resources/p.icc}"
                     Viewbox="0,0,4,2" Viewport="0,0,200,100"
@@ -609,8 +609,62 @@ fn a_colour_converted_bitmap_is_refused_by_its_own_name() {
         r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
     );
     let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
-    let bytes = archive(before_content_types(parts, png_part()));
-    assert_eq!(defects(&bytes), [XpsElementDefect::ImageProfileUnsupported]);
+    let mut parts = before_content_types(parts, png_part());
+    parts.push(binary_part("Resources/p.icc", RGB_PROFILE.to_vec()));
+    let bytes = archive(parts);
+
+    assert_eq!(defects(&bytes), [], "no refusal: {:?}", defects(&bytes));
+
+    // **And the profile went with the picture.** Drawing the picture and
+    // dropping the profile is the failure this whole path exists to prevent,
+    // and it is silent: the page looks right and the colours are a guess. A
+    // counted injection that removed the registration entirely failed nothing
+    // at all until these three assertions existed.
+    let document = Document::open(bytes).expect("the package opens");
+    let saved = document.editor().save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    let holds = |needle: &[u8]| saved.windows(needle.len()).any(|w| w == needle);
+    assert!(holds(b"/ICCBased"), "the space is an ICCBased one");
+    assert!(holds(b"/N 3"), "declaring the profile's own channel count");
+    assert!(
+        holds(RGB_PROFILE),
+        "and the profile is in the file byte for byte"
+    );
+}
+
+/// A wrapper this build does not know is still refused by name.
+///
+/// The references inside one cannot be told apart — a wrapper with three of
+/// them is not `ColorConvertedBitmap`, and reading its first two would be
+/// drawing a picture in a profile the file never paired it with. So an
+/// unknown wrapper keeps the refusal the known one used to have.
+#[test]
+fn a_wrapper_this_build_does_not_know_is_refused_by_its_own_name() {
+    for source in [
+        "{SomeOtherWrapper /Resources/i.png /Resources/p.icc}",
+        "{ColorConvertedBitmap /Resources/i.png}",
+        "{ColorConvertedBitmap /Resources/i.png /Resources/p.icc /Resources/q.icc}",
+    ] {
+        let body = format!(
+            r#"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
+        <ImageBrush ImageSource="{source}"
+                    Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                    ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+        </Path.Fill></Path>"#
+        );
+        let markup = format!(
+            r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
+        );
+        let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
+        let bytes = archive(before_content_types(parts, png_part()));
+        assert_eq!(
+            defects(&bytes),
+            [XpsElementDefect::ImageProfileUnsupported],
+            "{source}"
+        );
+    }
 }
 
 /// A viewport with no extent paints nothing, so it is refused at the brush

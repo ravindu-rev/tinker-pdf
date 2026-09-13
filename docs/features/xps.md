@@ -133,7 +133,7 @@ the page synthesis.
 | A `ContextColor` in a **gradient stop** | `XpsElementDefect::BrushApproximated` | 8.7.4.5's shading names one colour space for the whole function, so a stop cannot carry one of its own; it takes the same alternate reading and the brush says it reached the page and not exactly | — |
 | An image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | a part neither the content type nor the magic bytes name is not one to guess at. **JPEG XR left this row**: 9.1.5.1's format now decodes and draws, so all four of 9.1.5's formats reach the page and the pre-emptive refusal loop that used to sit in front of both identification rules is gone | [filters](filters.md) |
 | A content type and magic bytes that disagree about two formats this build draws | `XpsElementDefect::ImageMediaTypeMismatch` | **the picture is drawn**, from the format its bytes name, because a decoder reads bytes — so this is a leniency and not a refusal, and what is lost is the producer's statement about the part. It rides the *success* side, on `Image::lenience`, because `Images::get` returns a `Result` whose `Err` is a refusal and a refusal here would lose a picture the package plainly holds; `State::tile` pushes it into `paint.rs`'s `defects`, where `warn` deduplicates it — set once per part, read once per use. Silence from one rule is not disagreement with it, so a part with no content type or no recognised signature owes nothing. Neither does one whose bytes then fail to decode: that is `ImageUnreadable`. Pinned by `a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named` and, for the deduplication, `one_mis_declared_part_used_twice_is_named_once` | [rulings](../rulings.md) ruling 10 |
-| `{ColorConvertedBitmap …}` naming an ICC profile | `XpsElementDefect::ImageProfileUnsupported` | *not* for want of an ICC pipeline — a `ContextColor` embeds its profile as an `/ICCBased` space — but because 8.9.5's image dictionary takes a `/ColorSpace` and this writer's `add_image` states only the three device families, so there is nowhere to put the profile. The picture is refused rather than drawn in colours the file did not ask for | [colour](colour.md) |
+| A wrapper around an `ImageSource` that is **not** `{ColorConvertedBitmap picture profile}` | `XpsElementDefect::ImageProfileUnsupported` | the references inside a wrapper cannot be told apart: one with three of them is not this wrapper, and reading its first two would draw a picture in a profile the file never paired it with. `{ColorConvertedBitmap …}` itself is **read** — the picture drawn, the profile embedded as the `/ICCBased` space its samples are values in | [colour](colour.md) |
 | `StyleSimulations` | `XpsElementDefect::GlyphsStyleSimulated` | reported; glyphs drawn unsimulated | — |
 | Gradient stops with differing alphas; a `ColorInterpolationMode` this build does not interpolate in | `XpsElementDefect::BrushApproximated` | the brush reached the page and not exactly — one constant alpha cannot express per-stop alphas — and the approximation is named | — |
 | Unknown element | `XpsElementDefect::ElementUnknown` | drawn around, never silently skipped | — |
@@ -184,9 +184,10 @@ things recorded in `crates/tinker-pdf/tests/xps/README.md` came from it, and
 three of them contradict something the eight Microsoft files had made look like
 a rule — `[Content_Types].xml` is not always last, colours come in three
 spellings and not two, and abbreviated geometry does too. One of its packages,
-`gs-images.xps`, is refused at two elements by the table above and is the
-fixture the TIFF row should start from: its image parts are `image/tiff`,
-reached through `{ColorConvertedBitmap …}` naming an ICC profile part.
+`gs-images.xps`, was refused at two elements and excluded from the conservation
+sweep for it; its image parts are `image/tiff` reached through
+`{ColorConvertedBitmap …}` naming an ICC profile part, and **it joined the sweep
+on 14 September 2026** when that wrapper was read.
 
 ## Verified
 
@@ -225,11 +226,14 @@ reached through `{ColorConvertedBitmap …}` naming an ICC profile part.
   which reach for `tinker-pdf-zip` and nothing above it: not the XML parser
   this reader parses with, not the image decoders that give a picture its pixel
   count, not `geometry`'s reader of 11.2.3, and not 18.1's scale and flip,
-  written out from the clause. Twelve of the thirteen packages conserve every
-  fact and the census is recorded in `tests/xps/CONSERVATION.tsv`; the
-  thirteenth, `gs-images.xps`, states two pictures this build refuses at the
-  element, so its divergence is pinned by a test of its own rather than
-  censused. It replaces
+  written out from the clause. **All thirteen packages conserve every fact** and
+  the census is recorded in `tests/xps/CONSERVATION.tsv`. Twelve did until 14
+  September 2026: `gs-images.xps` stated two pictures this build refused at the
+  element, and its divergence was pinned by a test of its own until the
+  `{ColorConvertedBitmap}` wrapper was read. Bringing it in needed two fixes to
+  the census as well as the engine — it could not measure a TIFF's dimensions,
+  and it read a transform only in its attribute spelling — and both were
+  invisible until a package needed them. It replaces
   `xps_mutool.rs`, which compared a second reader's device trace of the package
   against its trace of the document. **What left with that oracle is that two
   independent programs read one package and agree**, and no assertion here

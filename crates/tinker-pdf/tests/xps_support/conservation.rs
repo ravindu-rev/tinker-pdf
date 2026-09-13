@@ -353,6 +353,26 @@ impl Census {
 /// 18.1: one XPS unit is 1/96 inch and one PDF unit is 1/72.
 const UNIT: f64 = 0.75;
 
+/// The picture a `{ColorConvertedBitmap picture profile}` wrapper names.
+///
+/// The census's own copy of the engine's rule, deliberately: this harness
+/// shares no code with the engine above `tinker-pdf-zip`, and a shared parser
+/// would make the two agree by construction rather than by measurement.
+fn colour_converted_bitmap(uri: &str) -> Option<&str> {
+    let inner = uri.trim().strip_prefix('{')?.strip_suffix('}')?;
+    let rest = inner.trim().strip_prefix("ColorConvertedBitmap")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut parts = rest.split_whitespace();
+    let picture = parts.next()?;
+    parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(picture.split('#').next().unwrap_or(picture))
+}
+
 /// Every part of a package, by its absolute name.
 ///
 /// Absolute — with the leading solidus OPC 9.1.1.1 gives a part name — because
@@ -722,6 +742,56 @@ fn pixels(part: &[u8]) -> Option<(u32, u32)> {
         };
         return Some((word(16)?, word(20)?));
     }
+    // TIFF 6.0: a byte-order mark, `42`, and an offset to the first image file
+    // directory. The directory is a count and then twelve-byte entries, of
+    // which tags 256 and 257 are the width and the length. Read here because
+    // Ghostscript writes every picture as a TIFF, and a census that could not
+    // measure one counted zero pictures on a page that states two.
+    //
+    // Only the first directory, and only SHORT and LONG: that is what these
+    // packages carry, and a census that guessed at the rest would be stating
+    // more than it measured.
+    if part.starts_with(b"II*\x00") || part.starts_with(b"MM\x00*") {
+        let big = part.starts_with(b"MM");
+        let u16_at = |at: usize| -> Option<u16> {
+            let raw: [u8; 2] = part.get(at..at + 2)?.try_into().ok()?;
+            Some(if big {
+                u16::from_be_bytes(raw)
+            } else {
+                u16::from_le_bytes(raw)
+            })
+        };
+        let u32_at = |at: usize| -> Option<u32> {
+            let raw: [u8; 4] = part.get(at..at + 4)?.try_into().ok()?;
+            Some(if big {
+                u32::from_be_bytes(raw)
+            } else {
+                u32::from_le_bytes(raw)
+            })
+        };
+        let ifd = u32_at(4)? as usize;
+        let count = u16_at(ifd)? as usize;
+        let (mut width, mut height) = (None, None);
+        for index in 0..count.min(512) {
+            let entry = ifd + 2 + index * 12;
+            let tag = u16_at(entry)?;
+            let kind = u16_at(entry + 2)?;
+            // A SHORT sits in the first two bytes of the value field and a
+            // LONG fills it, both at the entry's own offset because a single
+            // value of either fits inline.
+            let value = match kind {
+                3 => u32::from(u16_at(entry + 8)?),
+                4 => u32_at(entry + 8)?,
+                _ => continue,
+            };
+            match tag {
+                256 => width = Some(value),
+                257 => height = Some(value),
+                _ => {}
+            }
+        }
+        return Some((width?, height?));
+    }
     // JPEG: scan the marker chain for a start-of-frame, which is where the
     // dimensions are. Every `SOFn` but the four that are not frames.
     if part.starts_with(b"\xff\xd8") {
@@ -763,6 +833,15 @@ enum Brush {
         viewbox: Rect,
         viewport: Rect,
         tile: String,
+        /// `<ImageBrush.Transform>`, which XPS writes as a child element
+        /// rather than as an attribute.
+        ///
+        /// Read because Ghostscript writes every picture this way: the
+        /// viewport states a 32-unit square and the transform is what puts it
+        /// on the page at its real size. A census that read only the
+        /// attribute form measured those pictures in the wrong place — and
+        /// said nothing, because a placement is compared and not counted.
+        transform: Matrix,
     },
 }
 
@@ -827,9 +906,41 @@ fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
             tile: attribute(attributes, "TileMode")
                 .unwrap_or("None")
                 .to_owned(),
+            transform: element_transform(inner),
         }),
         _ => None,
     }
+}
+
+/// The matrix a `<…Brush.Transform><MatrixTransform Matrix="a,b,c,d,e,f"/>`
+/// child states, or the identity where there is none.
+///
+/// XPS gives a transform two spellings and this census read only one of them.
+/// The attribute form is handled where elements are walked; this is the
+/// element form, which is what every Ghostscript package uses.
+fn element_transform(inner: &str) -> Matrix {
+    let Some(at) = inner.find(".Transform") else {
+        return Matrix::IDENTITY;
+    };
+    let rest = &inner[at..];
+    let Some(start) = rest.find("Matrix") else {
+        return Matrix::IDENTITY;
+    };
+    let rest = &rest[start + "Matrix".len()..];
+    let Some(open) = rest.find('"') else {
+        return Matrix::IDENTITY;
+    };
+    let rest = &rest[open + 1..];
+    let Some(close) = rest.find('"') else {
+        return Matrix::IDENTITY;
+    };
+    let numbers = scalars(&rest[..close]);
+    if numbers.len() != 6 {
+        return Matrix::IDENTITY;
+    }
+    Matrix([
+        numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5],
+    ])
 }
 
 /// How many copies of the picture one tile of this mode holds.
@@ -1125,12 +1236,21 @@ fn path_mark(
             // rectangle compared is the viewport, because that is what the
             // pattern matrix on the other side encodes.
             viewbox: _,
+            transform: own,
         } => {
+            let transform = transform.compose(own);
             // XPS 1.0 writes this absolute and OpenXPS writes it relative to
             // the page part, which is why both spellings resolve here rather
             // than one being assumed: the same picture under two dialects has
             // to census as the same part.
-            let name = resolve(part, &source);
+            // 9.1.5's `{ColorConvertedBitmap picture profile}` names the
+            // picture in its first reference. The markup census reads the
+            // wrapper for the same reason the engine does — a census that
+            // could not address these pictures counted zero of them, which is
+            // what kept `gs-images.xps` out of the sweep until the engine
+            // learned to draw them.
+            let stated = colour_converted_bitmap(&source).unwrap_or(source.as_str());
+            let name = resolve(part, stated);
             let pixels = parts.get(&name).and_then(|bytes| pixels(bytes))?;
             (
                 Paint::Image {
