@@ -115,15 +115,18 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
 
     // "an RGN marker, a Part 2 marker, or a marker the standard defines and
     // this build does not". Three separate claims and three cases: RGN and
-    // CRG are Table A.2's, and 0xFF74 is ISO/IEC 15444-2's MCT — Part 2 is a
+    // POC are Table A.2's, and 0xFF74 is ISO/IEC 15444-2's MCT — Part 2 is a
     // non-goal, and every Part 2 marker lands in the same place, as a code
     // Table A.2 does not define.
     assert_eq!(
+        // CRG stood where POC stands now. A.9.1 says it "has no effect on
+        // decoding the codestream", so it is parsed and carried rather than
+        // refused, and a marker this build accepts cannot demonstrate a refusal.
         refuse(&with_marker(marker::RGN, &[0, 0, 0])),
         Warning::JpxMarkerUnsupported,
     );
     assert_eq!(
-        refuse(&with_marker(marker::CRG, &[0, 0])),
+        refuse(&with_marker(marker::POC, &[0, 0])),
         Warning::JpxMarkerUnsupported,
     );
     assert_eq!(

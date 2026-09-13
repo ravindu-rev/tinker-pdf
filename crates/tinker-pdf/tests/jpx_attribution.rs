@@ -193,7 +193,7 @@ const BEARING: u32 = 39;
 /// - the two `colr` entries are veraPDF fixtures that are deliberately
 ///   non-conformant, and the budget is a ruling 1 limit rather than a gap.
 ///
-/// So RGN, POC, PPM, PPT, CRG, `BYPASS`, `TERMALL` and precision above sixteen
+/// So RGN, POC, PPM, PPT, `BYPASS`, `TERMALL` and precision above sixteen
 /// bits are reached by **zero** corpus files, real or fixture.
 const REASONS: [&str; 5] = [
     r#"Budget("tile-component samples")"#,

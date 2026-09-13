@@ -199,7 +199,10 @@ pub(crate) const MAX_JPX_WORK: u64 = 3 << 30;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// A marker T.800 Table A.2 defines and this build does not decode:
-    /// RGN, POC, PPM, PPT, CRG. Carries the marker's name.
+    /// RGN, POC, PPM, PPT. Carries the marker's name.
+    ///
+    /// CRG was the fifth until A.9.1 was read: the clause says it "has no
+    /// effect on decoding the codestream", so it is parsed and carried.
     Marker(&'static str),
     /// A marker code Table A.2 does not define — which includes every marker
     /// ISO/IEC 15444-2 adds, since Part 2 is a non-goal.

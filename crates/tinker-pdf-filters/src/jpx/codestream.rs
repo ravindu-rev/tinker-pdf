@@ -8,8 +8,8 @@
 //! # Every marker in Table A.2, or a refusal that names it
 //!
 //! There are twenty markers in Table A.2 and this module accounts for all
-//! twenty: fourteen are parsed, five are refused **by name** (RGN, POC, PPM,
-//! PPT, CRG) and one — EPH — belongs to tier-2 and is refused here only when
+//! twenty: fifteen are parsed, four are refused **by name** (RGN, POC, PPM,
+//! PPT) and one — EPH — belongs to tier-2 and is refused here only when
 //! it appears in a header. Anything else is refused as an unknown marker,
 //! which is where every ISO/IEC 15444-2 marker lands, Part 2 being a
 //! non-goal.
@@ -74,9 +74,10 @@ pub(crate) mod marker {
     pub const SOP: u16 = 0xFF91;
     /// End of packet header (A.8.2). Inside the tile data. No segment.
     pub const EPH: u16 = 0xFF92;
-    /// Component registration (A.9.1). **Refused**: it is a sub-pixel
-    /// registration offset between components, and this build has nowhere to
-    /// put one.
+    /// Component registration (A.9.1). **Parsed and carried, never applied**:
+    /// A.9.1 says in as many words that it "has no effect on decoding the
+    /// codestream", so honouring it means reading it and leaving the samples
+    /// alone.
     pub const CRG: u16 = 0xFF63;
     /// Comment (A.9.2). Carries no coding information.
     pub const COM: u16 = 0xFF64;
@@ -92,7 +93,6 @@ const fn refused_by_design(code: u16) -> Option<&'static str> {
         marker::POC => "POC, progression order change",
         marker::PPM => "PPM, packed packet headers in the main header",
         marker::PPT => "PPT, packed packet headers in a tile-part header",
-        marker::CRG => "CRG, component registration",
         marker::SOP => "SOP outside tile data",
         marker::EPH => "EPH outside tile data",
         _ => return None,
@@ -205,6 +205,28 @@ pub(crate) mod cb_style {
     /// two sets answer different questions and now say so separately.
     pub const DEFINED: u8 =
         BYPASS | RESET | TERMALL | VERTICALLY_CAUSAL | PREDICTABLE | SEGMENTATION_SYMBOLS;
+}
+
+/// One component's registration offset, from CRG (A.9.1).
+///
+/// `x` is in units of 1/65536 of that component's own horizontal separation
+/// `XRsiz`, so the offset in reference grid points is `dx * x / 65536` — the
+/// units are the component's separation and not a reference grid point, which
+/// is the field in this segment most easily got wrong.
+///
+/// **Carried and never applied.** A.9.1: "This marker segment has no effect on
+/// decoding the codestream." It describes the centre of mass of a component's
+/// samples for a renderer that wants to place them more precisely than the
+/// reference grid does; the samples themselves are unchanged, so a decoder
+/// that reads this and does nothing with it is a conforming one. Parsing it
+/// rather than refusing it is what stops a conforming file being refused for
+/// carrying information.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Registration {
+    /// Horizontal offset, in units of 1/65536 of `XRsiz`.
+    pub(crate) x: u16,
+    /// Vertical offset, in units of 1/65536 of `YRsiz`.
+    pub(crate) y: u16,
 }
 
 /// One component's geometry from SIZ (A.5.1).
@@ -432,6 +454,9 @@ pub(crate) struct Codestream<'a> {
     /// Per-component QCC overrides from the main header.
     pub(crate) qcc: Vec<Option<Quant>>,
     pub(crate) tile_parts: Vec<TilePart<'a>>,
+    /// Per-component registration offsets from CRG (A.9.1), when the main
+    /// header carried one. Read and never applied — see [`Registration`].
+    pub(crate) registration: Option<Vec<Registration>>,
 }
 
 impl Codestream<'_> {
@@ -554,6 +579,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
     let mut qcd: Option<Quant> = None;
     let mut coc: Vec<Option<CodingStyle>> = Vec::new();
     let mut qcc: Vec<Option<Quant>> = Vec::new();
+    let mut registration: Option<Vec<Registration>> = None;
     let mut tile_parts: Vec<TilePart<'_>> = Vec::new();
 
     loop {
@@ -645,6 +671,21 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
             // checked above, so a lying one is a truncation rather than a
             // read past the end.
             marker::TLM | marker::PLM | marker::PLT => {}
+            // A.9.1: component registration. Parsed so that a file carrying
+            // it is not refused for saying something true about itself, and
+            // then not applied, because the clause says it changes nothing.
+            marker::CRG => {
+                if registration.is_some() {
+                    // A.9.1: "Only one CRG may be used in the main header".
+                    return Err(Refusal::Structure("a second CRG marker"));
+                }
+                let Some(siz) = siz.as_ref() else {
+                    // A.6.1's ordering puts SIZ first, and without it there is
+                    // no component count to read this against.
+                    return Err(Refusal::Structure("a CRG marker before SIZ"));
+                };
+                registration = Some(parse_crg(body, siz.components.len())?);
+            }
             // A.9.2: a comment.
             marker::COM => {}
             _ => return Err(refuse_marker(code)),
@@ -670,7 +711,41 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
         qcd,
         qcc,
         tile_parts,
+        registration,
     })
+}
+
+/// T.800 A.9.1 and Table A.42: the CRG marker segment.
+///
+/// The segment is `Csiz` pairs of 16-bit values, **interleaved** as
+/// `Xcrg_0, Ycrg_0, Xcrg_1, Ycrg_1, …` rather than all the horizontals
+/// followed by all the verticals. Figure A.23 is what settles that: the prose
+/// says "This value is repeated for every component" separately of `Xcrg_i`
+/// and of `Ycrg_i`, which is ambiguous between the two orders on its own. SIZ
+/// itself interleaves the same way.
+///
+/// **The loop is bounded by `Csiz`, never by `Lcrg`.** `parse_siz` has already
+/// refused a component count above `MAX_JPX_COMPONENTS`, so counting pairs off
+/// the component count inherits that bound, while counting them off the
+/// segment length would take the count from the file. The length is then
+/// checked for equality rather than sufficiency, because Table A.42 fixes
+/// `Lcrg` at `2 + 4 × Csiz` — a segment that disagrees is malformed rather
+/// than merely long, and a decoder that read the first `Csiz` pairs out of a
+/// longer one would be inventing a tolerance the table does not give.
+fn parse_crg(body: &[u8], components: usize) -> Result<Vec<Registration>, Refusal> {
+    if body.len() != 4 * components {
+        return Err(Refusal::Structure(
+            "a CRG marker segment whose length is not 4 bytes per component",
+        ));
+    }
+    let mut out = Vec::with_capacity(components);
+    for pair in body.chunks_exact(4) {
+        out.push(Registration {
+            x: u16::from_be_bytes([pair[0], pair[1]]),
+            y: u16::from_be_bytes([pair[2], pair[3]]),
+        });
+    }
+    Ok(out)
 }
 
 /// The refusal a marker this build does not decode produces.

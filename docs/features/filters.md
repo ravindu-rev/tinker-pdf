@@ -193,7 +193,7 @@ capability**. One is a ruling 1 budget; two are veraPDF fixtures whose `colr`
 box is deliberately non-conformant; two are `/JPXDecode` streams whose bytes
 are not JPEG 2000 at all. Two further real documents are **truncated** — every
 tile short of its declared parts — and are drawn as far as they arrive rather
-than refused. So RGN, POC, PPM, PPT, CRG, `BYPASS`, `TERMALL` and precision
+than refused. So RGN, POC, PPM, PPT, `BYPASS`, `TERMALL` and precision
 above sixteen bits are reached by **zero** corpus files, fixture or real.
 
 That paragraph used to read "the corpus's nineteen readable JPX files as of
@@ -299,7 +299,7 @@ make both enums wrong.
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | T.88 7.4.3 |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
-| JPX markers RGN, POC, PPM, PPT, CRG (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it | [ROADMAP](../ROADMAP.md) |
+| JPX markers RGN, POC, PPM, PPT (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it. **CRG left this row**: A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied | [ROADMAP](../ROADMAP.md) |
 | JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
 | JPX coding features: two of Table A.19's six code-block styles — `BYPASS` and `TERMALL` — plus unmappable `colr` and unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. The two left both move where a coding pass's *bytes* start, so they need a length per pass out of the packet header (B.10.7) rather than anything tier-1 can do | [ROADMAP](../ROADMAP.md) |
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | T.800 allows 38 bits; the sample path carries 16, so this is refused rather than truncated | [ROADMAP](../ROADMAP.md) |

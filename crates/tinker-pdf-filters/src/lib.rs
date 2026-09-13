@@ -239,8 +239,8 @@ pub enum Warning {
     // the plan calls the cheapest real defence in the decoder were invisible
     // from outside the crate.
     /// JPX: a marker T.800 Table A.2 defines and this build does not decode —
-    /// RGN, POC, PPM, PPT or CRG. Never skipped, because a skipped RGN draws
-    /// a bright rectangle and a skipped POC mis-parses every packet after it.
+    /// RGN, POC, PPM or PPT. Never skipped, because a skipped RGN draws a
+    /// bright rectangle and a skipped POC mis-parses every packet after it.
     JpxMarkerUnsupported,
     /// JPX: a marker code Table A.2 does not define at all, which is where
     /// every ISO/IEC 15444-2 marker lands.

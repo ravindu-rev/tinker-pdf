@@ -281,7 +281,7 @@ fn every_table_a2_marker_is_parsed_or_named() {
         (marker::PPT, "PPT", false),
         (marker::SOP, "SOP", true),
         (marker::EPH, "EPH", true),
-        (marker::CRG, "CRG", false),
+        (marker::CRG, "CRG", true),
         (marker::COM, "COM", true),
     ];
 
@@ -364,16 +364,15 @@ fn a_marker_outside_table_a2_is_refused_by_code() {
     assert_eq!(parse(&bytes), Err(Refusal::UnknownMarker(0xFF74)));
 }
 
-/// The five Table A.2 markers this build refuses, each in a main header or a
+/// The four Table A.2 markers this build refuses, each in a main header or a
 /// tile-part header, each naming itself.
 #[test]
-fn the_five_refused_markers_name_themselves() {
+fn the_four_refused_markers_name_themselves() {
     let spec = Spec::default();
     for (code, name) in [
         (marker::RGN, "RGN"),
         (marker::POC, "POC"),
         (marker::PPM, "PPM"),
-        (marker::CRG, "CRG"),
     ] {
         let mut bytes = spec.main_header();
         bytes.extend_from_slice(&segment(code, &[0, 0, 0]));
@@ -1022,3 +1021,125 @@ fn no_prefix_or_corruption_panics() {
 // rather than over the five cases that lived here while the list was still
 // being built. Two tests moved there with milestone 8, and this note is where
 // a reader looking for them lands.
+
+/// T.800 A.9.1: a CRG marker segment is parsed, carried and never applied.
+///
+/// The clause is unusually explicit — "This marker segment has no effect on
+/// decoding the codestream" — so honouring it means reading it and leaving
+/// every sample alone. Refusing a file for carrying it, which this build did
+/// until A.9.1 was read, refused a conforming file for saying something true
+/// about itself.
+///
+/// The pairs are **interleaved** per component, `Xcrg_0, Ycrg_0, Xcrg_1,
+/// Ycrg_1`. Figure A.23 is what settles that: the prose says "This value is
+/// repeated for every component" separately of `Xcrg_i` and of `Ycrg_i`,
+/// which on its own is ambiguous between interleaved and grouped. This test
+/// uses two components with four distinct values, so a build that read them
+/// grouped would produce `(0x0102, 0x0304)` for the first component instead
+/// of `(0x0102, 0x8000)` and fail here rather than silently.
+#[test]
+fn a_crg_marker_is_parsed_and_carried() {
+    let spec = Spec {
+        components: vec![(7, false, 1, 1), (7, false, 1, 1)],
+        ..Default::default()
+    };
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&segment(
+        marker::CRG,
+        &[
+            0x01, 0x02, // Xcrg_0
+            0x80, 0x00, // Ycrg_0: half of YRsiz_0
+            0x03, 0x04, // Xcrg_1
+            0xFF, 0xFF, // Ycrg_1: just before the next sample's grid point
+        ],
+    ));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+
+    let parsed = parse(&bytes).expect("a CRG marker segment is not a refusal");
+    let registration = parsed.registration.expect("the CRG was carried");
+    assert_eq!(
+        registration,
+        vec![
+            codestream::Registration {
+                x: 0x0102,
+                y: 0x8000
+            },
+            codestream::Registration {
+                x: 0x0304,
+                y: 0xFFFF
+            },
+        ]
+    );
+}
+
+/// A codestream with no CRG carries no registration, which is what says the
+/// field above means "the file said so" rather than "the parser defaulted".
+#[test]
+fn a_codestream_without_crg_carries_no_registration() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(parse(&bytes).expect("parses").registration, None);
+}
+
+/// Table A.42 fixes `Lcrg` at `2 + 4 × Csiz`, so a segment of any other length
+/// is malformed rather than merely long.
+///
+/// Both directions, because the tolerant reading is the dangerous one: a
+/// decoder that took the first `Csiz` pairs out of a longer segment would be
+/// inventing a latitude the table does not give, and one that accepted a short
+/// segment would read a registration for a component the file never described.
+#[test]
+fn a_crg_whose_length_is_not_four_bytes_per_component_is_refused() {
+    let spec = Spec {
+        components: vec![(7, false, 1, 1), (7, false, 1, 1)],
+        ..Default::default()
+    };
+    for body in [
+        &[0x01, 0x02, 0x03, 0x04][..], // one pair short
+        &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A][..], // two bytes long
+    ] {
+        let mut bytes = spec.main_header();
+        bytes.extend_from_slice(&segment(marker::CRG, body));
+        bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+        assert!(
+            matches!(parse(&bytes), Err(Refusal::Structure(_))),
+            "a CRG of {} bytes against 2 components",
+            body.len()
+        );
+    }
+}
+
+/// A.9.1: "Only one CRG may be used in the main header."
+#[test]
+fn a_second_crg_marker_is_refused() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&segment(marker::CRG, &[0x00, 0x00, 0x00, 0x00]));
+    bytes.extend_from_slice(&segment(marker::CRG, &[0x00, 0x00, 0x00, 0x00]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert!(matches!(parse(&bytes), Err(Refusal::Structure(_))));
+}
+
+/// A.9.1: "Usage: Main header only." Table A.2 says the same, so a CRG in a
+/// tile-part header is a marker out of place rather than one this build
+/// refuses by name — a distinction a reader of the warning depends on.
+#[test]
+fn a_crg_in_a_tile_part_header_is_out_of_place() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(
+        0,
+        0,
+        1,
+        &segment(marker::CRG, &[0x00, 0x00, 0x00, 0x00]),
+        &[],
+    ));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert!(
+        matches!(parse(&bytes), Err(Refusal::Structure(_))),
+        "a CRG in a tile-part header"
+    );
+}
