@@ -593,6 +593,33 @@ only under `#[cfg(test)]`, and are not in any built artefact.
 These sit under `tests/data/` rather than `crates/<crate>/data/` because they
 are neither vendored *into* the engine nor redistributed by it; `cargo xtask
 vendor`'s allowlist governs the latter, and this is the former.
+
+`crates/tinker-pdf/tests/signature_support/` holds the output of **OpenSSL
+3.5.5 (27 Jan 2026)**, run once on this machine and committed — which is the
+half of ruling 13 that permits a third-party program to *supply data* and
+never to adjudicate one. Three artefacts, and none of them was in this file
+before the third arrived:
+
+- `certificates.tsv`, the expected subject, issuer, validity, SPKI digest and
+  serial for seventeen certificates the fetched corpora carry, produced
+  28 August 2026. Its own header records the commands.
+- `pubsec_support/pubsec-rc4-128.pdf` and `content-key.bin` (7.6.5's
+  public-key security handler), sealed 28 August 2026; `tests/pubsec.rs`
+  states which half of that fixture is interop and which half is one author
+  agreeing with themselves.
+- `ecdsa-p256.pdf`, `ecdsa-p384.pdf` and the two `-root.der` anchors, built
+  14 September 2026 by `ecdsa-fixtures.py` and OpenSSL: two throwaway
+  elliptic-curve key pairs, two certificate chains, and two detached CMS
+  `SignedData` blobs signed with ECDSA. They exist because **no signature in
+  any fetched corpus uses ECDSA**, so the verdict path's P-256 and P-384 arms
+  had nothing real to be held to; see
+  [`crates/tinker-pdf/tests/signature_support/README.md`](crates/tinker-pdf/tests/signature_support/README.md).
+
+The keys and certificates are generated for the fixtures and belong to nobody;
+there is no licence on any of it. Nothing re-runs OpenSSL — `cargo xtask
+oracles` refuses a test that tries — and these are `cargo test` inputs that
+reach no built artefact.
+
 `crates/tinker-pdf-filters/tests/jxr/*.jxr` are JPEG XR encodings of rasters
 this repository authors, produced by the Windows Imaging Component codec
 through WPF's `WmpBitmapEncoder` on Windows 11 Pro build 10.0.26200.0, 30

@@ -10,7 +10,7 @@
 //! 2. **Do those bytes still hash to what the signature says?** The CMS's
 //!    `messageDigest` signed attribute against a digest recomputed here.
 //! 3. **Was the signature made by the key in the certificate?** RSASSA-PKCS1
-//!    over the re-encoded signed attributes (RFC 5652 §5.4).
+//!    or ECDSA over the re-encoded signed attributes (RFC 5652 §5.4).
 //! 4. **Whose key is it?** How far the certificate chain reaches toward an
 //!    anchor the *caller* supplied.
 //!
@@ -43,10 +43,17 @@
 //! gated on NIST's published vectors and RFC 5652 §5.4 is adjudicated by
 //! fifteen real signatures from six producers — but the assembly below is this
 //! engine agreeing with itself.
+//!
+//! The ECDSA arm is the one place where that sentence needs a second clause,
+//! because no corpus signature uses ECDSA and none of the four questions could
+//! be asked of a real one. Its evidence is split three ways and
+//! `crates/tinker-pdf/tests/ecdsa_verdict.rs` states the split in full: the
+//! curve arithmetic is NIST CAVP's, the CMS and the certificates are OpenSSL's,
+//! and the `/ByteRange` spans are this repository's own on both sides.
 
-use tinker_pdf_crypto::{DigestAlgorithm as CryptoDigest, RsaPublicKey};
+use tinker_pdf_crypto::{Curve, DigestAlgorithm as CryptoDigest, EcPublicKey, RsaPublicKey};
 use tinker_pdf_pki::{
-    Certificate, ContentInfo, DigestAlgorithm as CmsDigest, PublicKey, SignatureAlgorithm,
+    oid, Certificate, ContentInfo, DigestAlgorithm as CmsDigest, PublicKey, SignatureAlgorithm,
     SignerInfo,
 };
 
@@ -113,8 +120,18 @@ pub enum Unchecked {
     /// The signer's certificate is not in the blob, so there is no key.
     SignerCertificateMissing,
     /// The certificate's public key is not one this build verifies with —
-    /// which today means it is not RSA.
+    /// not RSA, not an elliptic-curve point on P-256 or P-384, or a point
+    /// this build declines to read. The string says which.
     UnsupportedKey(String),
+    /// The `signatureValue` did not hold the structure its algorithm's
+    /// signature is encoded in — today, an ECDSA signature that is not RFC
+    /// 3279 §2.2.3's `SEQUENCE { r INTEGER, s INTEGER }`.
+    ///
+    /// Distinct from [`SignatureCheck::Failed`] on purpose, and the
+    /// distinction is the module's own: `Failed` means the arithmetic ran and
+    /// disagreed, and nothing ran here. Both are safe answers; only one of
+    /// them is true.
+    MalformedSignatureValue(String),
     /// There are no signed attributes, so there is no `messageDigest` to
     /// compare and the signature is over the content directly. Reported
     /// rather than approximated: one corpus signature is this shape, and
@@ -171,7 +188,9 @@ pub enum Weakness {
     /// Twelve of the corpus's seventeen signatures are, so it is read — and
     /// said.
     Sha1Digest,
-    /// The signature algorithm is SHA-1 with RSA.
+    /// The signature algorithm digests with SHA-1 — `sha1WithRSAEncryption`
+    /// or `ecdsa-with-SHA1`. The curve or the modulus may be fine; what the
+    /// signer committed to is a 160-bit digest either way.
     Sha1Signature,
     /// The signer's RSA modulus is under 2 048 bits.
     ShortRsaKey {
@@ -439,31 +458,63 @@ fn check_signature(
             )))
         }
     };
-    // ECDSA is implemented in `tinker-pdf-crypto` and gated on CAVP, but no
-    // corpus signature uses it and wiring it here would be an untested path in
-    // the one place an untested path is worst. It is named, not guessed.
-    if !matches!(algorithm, SignatureAlgorithm::RsaPkcs1v15 { .. }) {
-        return SignatureCheck::NotChecked(Unchecked::UnsupportedAlgorithm(format!(
-            "{algorithm:?}"
-        )));
-    }
-    if digest == CmsDigest::Sha1 {
-        weaknesses.push(Weakness::Sha1Signature);
-    }
-
-    let Some(key) = rsa_key(certificate) else {
-        return SignatureCheck::NotChecked(Unchecked::UnsupportedKey(
-            "the subject public key is not RSA".to_string(),
-        ));
-    };
-    if key.modulus_bits() < 2048 {
-        weaknesses.push(Weakness::ShortRsaKey {
-            bits: key.modulus_bits(),
-        });
-    }
-    match key.verify_pkcs1_v15_message(crypto_digest(digest), &message, signer.signature()) {
-        Ok(()) => SignatureCheck::Verified,
-        Err(_) => SignatureCheck::Failed,
+    // One `match` per algorithm this build has arithmetic for, and a named
+    // refusal for the rest. **No arm may fall through to a positive answer**:
+    // an unwired algorithm that returns `NotChecked` is a gap, and one that
+    // returns `Verified` is a forgery accepted, so every arm below ends in a
+    // call into `tinker-pdf-crypto` or in a refusal, and there is no `_ =>`.
+    match algorithm {
+        SignatureAlgorithm::RsaPkcs1v15 { .. } => {
+            if digest == CmsDigest::Sha1 {
+                weaknesses.push(Weakness::Sha1Signature);
+            }
+            let Some(key) = rsa_key(certificate) else {
+                return SignatureCheck::NotChecked(Unchecked::UnsupportedKey(
+                    "the subject public key is not RSA".to_string(),
+                ));
+            };
+            if key.modulus_bits() < 2048 {
+                weaknesses.push(Weakness::ShortRsaKey {
+                    bits: key.modulus_bits(),
+                });
+            }
+            match key.verify_pkcs1_v15_message(crypto_digest(digest), &message, signer.signature())
+            {
+                Ok(()) => SignatureCheck::Verified,
+                Err(_) => SignatureCheck::Failed,
+            }
+        }
+        // RFC 5758 §3.2's OIDs name the digest, so `effective_digest` above
+        // already resolved it; the curve comes from the certificate and never
+        // from the signature, which is what stops a signer choosing the group
+        // its own signature is checked in.
+        SignatureAlgorithm::Ecdsa { .. } => {
+            if digest == CmsDigest::Sha1 {
+                weaknesses.push(Weakness::Sha1Signature);
+            }
+            let key = match ec_key(certificate) {
+                Ok(key) => key,
+                Err(why) => return SignatureCheck::NotChecked(Unchecked::UnsupportedKey(why)),
+            };
+            let (r, s) = match tinker_pdf_pki::cms::ecdsa_signature_value(signer.signature()) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    return SignatureCheck::NotChecked(Unchecked::MalformedSignatureValue(format!(
+                        "{error}"
+                    )))
+                }
+            };
+            match key.verify_message(crypto_digest(digest), &message, r, s) {
+                Ok(()) => SignatureCheck::Verified,
+                Err(_) => SignatureCheck::Failed,
+            }
+        }
+        // RSASSA-PSS's parameters live in a structure `tinker-pdf-pki` does
+        // not read, so there is no salt length and no mask generation function
+        // to verify under. Its own roadmap row.
+        SignatureAlgorithm::RsaPss => {
+            SignatureCheck::NotChecked(Unchecked::UnsupportedAlgorithm(format!("{algorithm:?}")))
+        }
     }
 }
 
@@ -563,9 +614,6 @@ fn walk(
 /// produce different bytes for any certificate whose DER is not exactly what
 /// this engine would emit, and the signature is over what the issuer saw.
 fn verifies(child: &Certificate<'_>, issuer: &Certificate<'_>) -> bool {
-    let Some(key) = rsa_key(issuer) else {
-        return false;
-    };
     // A certificate's `signatureAlgorithm` is a *signature* OID —
     // `sha256WithRSAEncryption` — not a digest one, and resolving it through
     // the digest table returns nothing for every certificate ever issued.
@@ -573,21 +621,37 @@ fn verifies(child: &Certificate<'_>, issuer: &Certificate<'_>) -> bool {
     // is the failure mode a chain walk should have: it does not crash and it
     // does not accept, it reports a path that is not a path.
     let algorithm = tinker_pdf_pki::cms::signature_algorithm(child.signature_algorithm().oid());
-    let digest = match algorithm {
-        Some(SignatureAlgorithm::RsaPkcs1v15 { digest }) => digest,
-        // ECDSA and PSS reach here from a real certificate and are simply not
-        // verified by this build; the walk reports the path as broken rather
-        // than pretending to have checked it.
-        _ => None,
-    };
-    let Some(digest) = digest else {
-        return false;
-    };
     let Ok(signature) = child.signature().whole_bytes() else {
         return false;
     };
-    key.verify_pkcs1_v15_message(crypto_digest(digest), child.tbs(), signature)
-        .is_ok()
+    match algorithm {
+        Some(SignatureAlgorithm::RsaPkcs1v15 {
+            digest: Some(digest),
+        }) => {
+            let Some(key) = rsa_key(issuer) else {
+                return false;
+            };
+            key.verify_pkcs1_v15_message(crypto_digest(digest), child.tbs(), signature)
+                .is_ok()
+        }
+        Some(SignatureAlgorithm::Ecdsa { digest }) => {
+            let Ok(key) = ec_key(issuer) else {
+                return false;
+            };
+            let Ok((r, s)) = tinker_pdf_pki::cms::ecdsa_signature_value(signature) else {
+                return false;
+            };
+            key.verify_message(crypto_digest(digest), child.tbs(), r, s)
+                .is_ok()
+        }
+        // Bare `rsaEncryption` names no digest and is not a legal certificate
+        // `signatureAlgorithm`; PSS's parameters are not read; anything else
+        // this build cannot name. The walk reports the path as broken rather
+        // than pretending to have checked it.
+        Some(SignatureAlgorithm::RsaPkcs1v15 { digest: None })
+        | Some(SignatureAlgorithm::RsaPss)
+        | None => false,
+    }
 }
 
 fn rsa_key(certificate: &Certificate<'_>) -> Option<RsaPublicKey> {
@@ -595,6 +659,63 @@ fn rsa_key(certificate: &Certificate<'_>) -> Option<RsaPublicKey> {
         PublicKey::Rsa { modulus, exponent } => RsaPublicKey::new(modulus, exponent).ok(),
         _ => None,
     }
+}
+
+/// The certificate's elliptic-curve key, or why it is not one to verify with.
+///
+/// Three refusals, and each is a different attack if it is skipped rather than
+/// made:
+///
+/// * **The curve comes from `parameters` and nowhere else.** RFC 5480 §2.1.1
+///   puts a named-curve OID there and this reads it; a build that assumed
+///   P-256 because the point happened to be 65 bytes would verify a P-384
+///   signature in the wrong group, and a build that let the *signature*
+///   algorithm pick the curve would let the signer pick it.
+/// * **Only SEC 1 §2.3.3's uncompressed form is read.** A compressed point
+///   needs a square root in the field to recover `y`, and guessing the sign
+///   would produce a different key half the time. Declining is the honest
+///   answer; there is no compressed point in the corpus to decline.
+/// * **The point is checked against the curve equation**, inside
+///   [`EcPublicKey::new`]. A point off the curve lies in a group where the
+///   discrete logarithm may be easy, which is the invalid-curve attack.
+fn ec_key(certificate: &Certificate<'_>) -> Result<EcPublicKey, String> {
+    let PublicKey::Ec { curve, point } = certificate.subject_public_key_info().public_key() else {
+        return Err("the subject public key is not an elliptic-curve point".to_string());
+    };
+    let Some(named) = curve else {
+        return Err(
+            "the key's parameters do not name a curve, which RFC 5480 §2.1.1 requires".to_string(),
+        );
+    };
+    let curve = if named == oid::SECP256R1 {
+        Curve::P256
+    } else if named == oid::SECP384R1 {
+        Curve::P384
+    } else {
+        return Err(format!(
+            "the named curve {} is not one this build implements",
+            named.to_dotted()
+        ));
+    };
+
+    let Some((form, coordinates)) = point.split_first() else {
+        return Err("the subject public key holds no point".to_string());
+    };
+    if *form != 0x04 {
+        return Err(format!(
+            "the point's form octet is 0x{form:02x}; only SEC 1 §2.3.3's uncompressed 0x04 is read"
+        ));
+    }
+    let width = curve.field_bytes();
+    if coordinates.len() != width * 2 {
+        return Err(format!(
+            "the point is {} octets after its form octet, not the {} {curve:?} takes",
+            coordinates.len(),
+            width * 2
+        ));
+    }
+    let (x, y) = coordinates.split_at(width);
+    EcPublicKey::new(curve, x, y).map_err(|refusal| format!("the point was refused: {refusal:?}"))
 }
 
 /// The crypto crate's digest selector for the CMS crate's.

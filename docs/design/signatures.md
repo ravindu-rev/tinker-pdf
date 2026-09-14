@@ -9,8 +9,8 @@ private key held by a caller-supplied signer callback so key material never ente
 **All of that now happens.** Milestones 1 and 3 through 8 have landed, with milestone 2's
 crate under them. `Document::signatures()` finds every signature and classifies what its
 `/ByteRange` covers; `tinker-pdf-pki` reads DER, X.509 and CMS `SignedData`;
-`tinker-pdf-crypto` verifies RSA and ECDSA against 504 published vectors;
-`Document::verify_signatures()` assembles the four answers; `Signature::modifications()`
+`tinker-pdf-crypto` verifies RSA and ECDSA against 520 published vectors;
+`Document::verify_signatures()` assembles the four answers, reaching both algorithms; `Signature::modifications()`
 measures later revisions against `/DocMDP`; and `DocumentEditor::save_signed` produces
 signatures of its own, certifying and locking fields, with the key held by the caller. What
 holds the two ends together is that the writer and the reader call one `digest_spans`, so
@@ -136,6 +136,16 @@ by fixtures in `cms.rs` and by nothing else, and each says so where it is define
 > fixture-only — and the list gained a member: **no corpus blob has a BER `signedAttrs`**, so
 > the RFC 5652 §5.4 rule that refuses one is adjudicated by fixtures alone. The injection
 > matrix below is where that was found.
+>
+> *Re-measured 14 September 2026, and the ECDSA half is unchanged.* Of 34 `SignerInfo`s, 20
+> name `rsaEncryption`, 13 `sha256WithRSAEncryption` and 1 `sha1WithRSAEncryption`; of 71
+> certificates, 29 are `sha1WithRSAEncryption`, 29 `sha256`, 9 `sha512` and 4 `sha384`, all
+> RSA. Not one ECDSA signature and not one ECDSA certificate, after the production corpus
+> added a thousand documents off the open web. So `verdict::check_signature`'s ECDSA arm was
+> wired against the other thing the roadmap's exit criterion admits — a published vector —
+> and the fixtures that carry it into a whole document are OpenSSL's CMS around this
+> repository's own `/ByteRange`. `crates/tinker-pdf/tests/ecdsa_verdict.rs` states which link
+> is which; the split is the same one `pubsec.rs` makes, and for the same reason.
 
 ## What reading BER measured, and what it was not allowed to widen
 
@@ -226,6 +236,48 @@ content — an INTEGER, a digest, a modulus — so searching for the pair rather
 nodes in between does not fail to parse. It produces a *different, well-formed reading of the
 same bytes*, which is the parser differential a signature bypass is made of. Twelve tests and
 the census catch it, which is the level of coverage that rule deserves.
+
+### The injection matrix for the ECDSA verdict arm
+
+Nine more defects, reintroduced one at a time on 14 September 2026 when
+`verdict::check_signature` grew its ECDSA arm, with `cargo test --no-fail-fast -p
+tinker-pdf-pki -p tinker-pdf` re-run for each. Counts are of **non-ignored** tests; the
+corpus census is `#[ignore]`d and its column says whether it would also have caught the
+defect.
+
+| # | Defect reintroduced | Caught by | Census |
+|---|---------------------|-----------|--------|
+| 1 | the document digest always `Matches`, whatever the bytes say | 1 | caught |
+| 2 | the curve's OID ignored, so every named curve is taken as P-256 | 2 | 0 |
+| 3 | `r` and `s` swapped as the `ECDSA-Sig-Value` SEQUENCE is decoded | 8 | 0 |
+| 4a | RFC 5652 §5.4's tag substitution dropped, for RSA and ECDSA alike | 8 | caught |
+| 4b | the ECDSA arm alone checking over the stored `[0]` bytes | 5 | 0 |
+| 5 | the ECDSA arm returning `Verified` without calling the arithmetic | 2 | 0 |
+| 6 | SEC 1 §2.3.3's form octet not checked | **0 → 1** | 0 |
+| 7 | trailing bytes after the `ECDSA-Sig-Value` SEQUENCE accepted | 1 | 0 |
+| 8 | the chain walk's ECDSA link never verified, as before this commit | 3 | 0 |
+
+**Injection 6 was the hole, and it is the interesting one.** Dropping the form-octet
+comparison failed *nothing*: the fixture's octets after the octet are a real uncompressed
+pair, so a build that never looked at it still verified. The defect only bites on a
+certificate that *claims* compression — and the fix is one byte, not a new fixture:
+`a_point_whose_form_octet_says_compressed_is_refused_rather_than_read_as_a_pair` flips
+`0x04` to `0x02` in the committed blob, which makes a build with the check refuse by name
+and a build without it report `Verified` for a key whose own encoding it disagreed with.
+One catch now.
+
+**Seven of the nine are caught by nothing in the corpus, and that is the row's whole
+premise.** No corpus signature and no corpus certificate uses ECDSA, so every guard on that
+path is held up by the two committed fixtures and by CAVP, exactly as
+`subjectKeyIdentifier` and the BER `signedAttrs` rule are held up by fixtures alone. It is
+named here rather than left to be discovered.
+
+**Injection 5 is the one the roadmap row existed to prevent**, and it is worth saying why
+two catches is enough rather than few. An unwired algorithm returning *no* verdict is a gap;
+one returning a *positive* verdict is a forgery accepted. Both tests that catch it assert
+`Failed` on a signature the arithmetic must reject — a positive-only fixture cannot tell
+"verified" from "reached the arm", and neither can a fixture that only ever expects
+`NotChecked`.
 
 ## Scope
 
@@ -530,8 +582,8 @@ failure mode a chain walk should have.
 | 1 **done** | Signature inventory: `/ByteRange`/`/Contents` parsing, range digesting, coverage classification | `Document::signatures()` lists every signature in the fixture corpus with correct coverage; a flipped byte inside a covered range flips the digest verdict in a unit test; fuzzer on the parse path runs crash-free in CI | M |
 | 2 **done** | `tinker-pdf-pki` DER walker + X.509 | Parses every certificate in the fixture corpus to the subject/issuer/validity/SPKI values committed in its sidecar, transcribed once from the certificate's own DER and reviewed; RFC 5280's own example certificates parse; dedicated fuzz target in the fuzz workspace; depth-capped, zero panics | M |
 | 3 **done** | CMS `SignedData` parsing incl. signed attributes | RFC 5652 fixture set round-trips to expected values; `messageDigest` attribute extracted and re-digestable from exact DER; unknown OIDs yield typed refusals asserted by test | M |
-| 4 | Big-unsigned + RSASSA-PKCS1-v1_5 verify in `tinker-pdf-crypto` | NIST CAVP RSA verify vectors (2048/3072/4096, SHA-256/384/512) pass as `cargo test` merge gate; forged-padding vectors rejected; RFC 8017 worked example passes | M |
-| 5 | ECDSA P-256/P-384 verify | CAVP ECDSA verify vectors pass, including invalid-`r`/`s` and wrong-curve rejections; point-not-on-curve certificates refused with typed verdict | M |
+| 4 **done** | Big-unsigned + RSASSA-PKCS1-v1_5 verify in `tinker-pdf-crypto` | NIST CAVP RSA verify vectors (2048/3072/4096, SHA-256/384/512) pass as `cargo test` merge gate; forged-padding vectors rejected; RFC 8017 worked example passes | M |
+| 5 **done** | ECDSA P-256/P-384 verify | CAVP ECDSA verify vectors pass, including invalid-`r`/`s` and wrong-curve rejections; point-not-on-curve certificates refused with typed verdict | M |
 | 6 **done** | End-to-end verdicts + trust anchors | Corpus of signed fixtures (valid, tampered, expired, self-signed) each matches its committed expected-verdict sidecar; anchor supplied → `AnchoredTo`, withheld → `SelfSigned`/`Incomplete`, asserted per fixture | M |
 | 7 **done** | `/DocMDP` + `/FieldMDP` via `revisions()` | Fixtures: form-fill after certification level 2 → `PermittedChanges`; page edit after level 1 → `DisallowedChanges` naming the object; `/FieldMDP`-locked field edit detected; all as `cargo test` assertions | M |
 | 8 **done** | Sign on incremental save: seam + `Signer` callback | Every signing test asserts `starts_with(original)`; independently re-digesting the returned `/ByteRange` spans matches the digest handed to the `Signer`; the signed file re-opens and verifies through this engine's own read side, and passes the strict structural validator; oversized CMS → typed refusal test | L |

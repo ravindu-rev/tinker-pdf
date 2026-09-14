@@ -140,7 +140,8 @@ certify.
 | Deciding whether a certificate is expired, unasked | validity reported; judged only against a caller-supplied instant | ruling 4 bans a clock, and "expired" is a claim about *now* — a library that invents one answers differently on different days | [rulings](../rulings.md) ruling 4 |
 | CRL and OCSP fetching | embedded revocation data surfaced, never evaluated | the engine performs no I/O; freshness is the host's call | [design](../design/signatures.md) |
 | Validating an RFC 3161 timestamp | `SignerDescription::timestamped` says one is there | validating a token means validating the authority's own chain, which is a later tier | [design](../design/signatures.md) |
-| ECDSA in a verdict | `Unchecked::UnsupportedAlgorithm` | implemented in `tinker-pdf-crypto` and gated on 120 CAVP vectors, but **zero corpus signatures use it**, and wiring an unexercised path into a verdict is worst here | [ROADMAP](../ROADMAP.md) |
+| An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; a curve nobody has produced a PDF signature on is a liability rather than a feature | RFC 5480 §2.1.1 |
+| A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3 |
 | RSASSA-PSS | `SignatureAlgorithm::RsaPss`, named and not decoded | its parameters live in a structure this build does not read, so a caller meeting one knows what it is and knows nothing here has checked it | RFC 8017 |
 | `adbe.pkcs7.sha1` (12.8.3.3.1) | `Unchecked::LegacySha1SubFilter` | deprecated in ISO 32000-2; one corpus file has it and that file is a fuzzer's output, so it is named rather than implemented on a sample of one | 12.8.3.3.1 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
@@ -150,7 +151,7 @@ certify.
 ## Verified
 
 **Published vectors gate the arithmetic**, as they gate every other primitive
-in this tree ([encryption](encryption.md)). **504 of them ran**: 360 NIST CAVP
+in this tree ([encryption](encryption.md)). **520 of them ran**: 360 NIST CAVP
 `SigVer15` for RSA (60 valid and 300 that must be refused, moduli of 1 024 to
 4 096 bits crossed with SHA-1/256/384/512, of which 150 are forged paddings),
 120 CAVP ECDSA `SigVer` and 24 `PKV` for P-256 and P-384, and 16 from RFC
@@ -187,12 +188,32 @@ values OpenSSL produced once and this repository committed
 (`tests/signature_support/certificates.tsv`) — serial octets, validity window,
 SubjectPublicKeyInfo digest and both common names.
 
+**ECDSA is verified, and the corpus says nothing about it.** Of the 34
+`SignerInfo`s and 71 certificates in those blobs, **not one uses ECDSA** —
+every signer is RSASSA-PKCS1-v1_5 and every certificate is signed with RSA,
+measured on 14 September 2026. So the P-256 and P-384 arms are wired against a
+published vector instead, which is the other half of the rule: the curve
+arithmetic is NIST CAVP's, and two committed fixtures
+(`tests/signature_support/ecdsa-p256.pdf` and `-p384.pdf`, built once by
+OpenSSL 3.5.5) carry the CMS, the certificates and the signature value that a
+second implementation produced. Ten tests in `tests/ecdsa_verdict.rs` take
+them from the `/ByteRange` to an anchored chain and, for each of six ways of
+spoiling the file, insist the answer is not `Verified`. The one link only this
+repository vouches for is the `/ByteRange` spans, because the generator and
+the reader are the same reading of 12.8.1 — the fixtures' own README says so,
+and `tests/ecdsa_verdict.rs` says it again at the top.
+
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest
 algorithms, an oversized CMS refused rather than truncated, a signer that
 declines, and — the shape the whole design exists for — one byte flipped
 inside a signed range, which turns the document digest to `Differs` and leaves
 the signature `Verified`.
+
+All of it rides in the workspace suite, which stood at **4 627 passed, 0
+failed, 56 ignored across 212 suites** when the ECDSA arm landed on
+14 September 2026 — measured on that branch alone, and other lanes were moving
+the same total on the same day.
 
 **What this cannot establish, stated rather than absorbed.** Under ruling 13
 nothing outside this repository has ever agreed that a signature this code
