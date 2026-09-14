@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the suite total, the fuzz sessions and the corpus attributions below, which are 5-6 September 2026. `cargo test --workspace`
-is **4 583 passed, 0 failed, 56 ignored** across 211 suites on
+is **4 630 passed, 0 failed, 56 ignored** across 212 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -824,6 +824,57 @@ which is the argument for running them rather than reasoning about them.
 | Whose fault an engine-versus-book EPUB disagreement is | epubcheck 5.3.0 (`tests/epub/EPUBCHECK.tsv`) | Nothing. The verdicts stand as a dated record, never re-run | **done** |
 | JPEG 2000 decode against a decoder sharing no code | *(none — see below)* | Committed reference decodes, already offline | **done** |
 
+### PngSuite, which was never an oracle and now adjudicates both directions
+
+Ruling 13 removes *programs* from the verification surface and keeps *inputs*,
+and PngSuite is squarely the second: Willem van Schaik's 176 files say what a
+PNG implementation should do by being deliberately correct in 162 documented
+ways and deliberately broken in fourteen. Nothing of it is committed. It is
+fetched — `http://www.schaik.com/pngsuite/PngSuite-2017jul19.zip`, with
+`TINKER_PNGSUITE` pointing at the extracted directory — and
+`crates/tinker-pdf-filters/tests/png_suite.rs` prints `pngsuite-oracle: RAN` or
+`pngsuite-oracle: SKIPPED` per test, because gap 20's finding was that a
+skipped oracle exits 0 and reads exactly like a pass.
+
+**It adjudicates the decoder**: the filename convention is an independent
+statement of every IHDR, the fifteen `bas*` pairs are Table 11.1's fifteen
+legal pairings, `basn`/`basi` twins are fifteen independent confirmations of
+Adam7, the `oi*` group is one zlib stream cut into 1, 2, 4 and n IDAT chunks,
+and each of the fourteen broken files must be refused *by a name matching the
+published reason*.
+
+**Since the `Bitmap::to_png` row it adjudicates the encoder too**, and that
+needed two legs rather than one. Leg one decodes each of the 162 readable
+files, encodes the raster, decodes that and requires the same pixels — so the
+raster the encoder is handed came from an encoder nobody here wrote, at every
+legal colour-type/depth pairing, interlaced and not. Leg one alone would not be
+worth much: `png/encode.rs` filters with the same `predictors.rs` Paeth
+predictor `png.rs` unfilters with, so a defect in the shared predictor moves
+both directions together and the comparison stays green. **Leg two transcribes
+ISO/IEC 15948 9.2's five reconstruction formulas into the test** and rebuilds
+the raster from the encoder's own IDAT without calling `png_decode` at all —
+first-party, which ruling 13 requires, and a second *implementation* rather
+than a second *program*, which is the line that ruling draws.
+
+The injection matrix is the measurement rather than the claim, and it corrected
+this section's own first draft. A filter emitted under the wrong type byte is
+caught by both legs. A **reversed Paeth tie-break is invisible to leg one** —
+all 162 round trips pass, because both directions go through the same reversed
+function — and is caught by leg two and by two of the decoder tests that were
+already there: the Adam7 twins and the published equivalence classes. Those two
+catch it for a reason worth naming, because it generalises: they compare two
+*third-party* files against each other rather than against anything this
+repository wrote, so a shared defect has nothing to cancel against. Three of
+2 014 in all, and not one of them a round trip. The container is
+held to clause 5 on the way past — signature, IHDR first, IEND last and empty,
+every CRC recomputed over its chunk's type and data, and the IDAT payload equal
+to `zlib_compress` of the filtered stream.
+
+What PngSuite cannot see is the `Bitmap` side of it — it has no `PixelFormat`
+and no notion of ink or `L*a*b*` — so the format mapping is
+`crates/tinker-pdf/tests/png_output.rs`'s, and the two converted formats are
+asserted there by colour rather than by comparison.
+
 ### The strict validator
 
 `tinker_pdf_cos::validate` reads a file again with the leniency ladder **off**
@@ -1105,13 +1156,21 @@ gap is manageable and a false claim is not — nobody goes looking.
 - **`tpdf`** (`tools/tpdf`): debug CLI over the facade — `info`, `text`,
   `render`, `fields`, `outline`, `objects`, `check`, `probe`. `check --strict`
   runs the validator and exits by its verdict; `probe` is what the corpus
-  runner spawns, and its record carries the strict pass.
+  runner spawns, and its record carries the strict pass. `render` writes
+  `<stem>-NNNN.png` through `Bitmap::to_png` — PNG always, with no flag for
+  anything else: it wrote binary PNM until the encoder existed, and a debug
+  tool with two output paths has one that is rarely taken and eventually
+  wrong.
 - **`pdfcmp`** (`tools/pdfcmp`): the canonical perceptual comparator. Gates
   on the fraction of pixels where any channel moves more than a threshold —
   a glyph moving one pixel barely moves a mean, so the metric is changed
   pixels, not mean difference. `--diff` writes a per-pixel heat map beside
   the verdict, because a number that fails without a picture wastes a
-  human's morning.
+  human's morning. It reads a `.pnm` or a `.pdf` and **not** a `.png`, so
+  `tpdf render`'s output no longer feeds it directly; reading one would need a
+  PNG decoder, and `xtask`'s `TOOLS` table keeps a tool to the facade, which
+  publishes an encoder and no decoder. The seam is a [ROADMAP](ROADMAP.md) row
+  rather than a silent gap.
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary:
   no test may spawn a program the workspace did not build), `vendor`

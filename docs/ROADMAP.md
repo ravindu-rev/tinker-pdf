@@ -32,8 +32,9 @@ its two font-bearing siblings:
 | `crop` held of asked | 4 929 of 5 075 |
 | `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 4 583 passed, 0 failed, 56 ignored as
-[verification.md](verification.md) records it, measured 14 September 2026.
+The suite stands at 4 630 passed, 0 failed, 56 ignored as
+[verification.md](verification.md) records it, measured 14 September 2026 with
+`TINKER_PNGSUITE` set, so the ten PngSuite tests ran rather than skipped.
 
 ## What "best" means here
 
@@ -294,8 +295,8 @@ changes in the commit that schedules it.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| PNG output from `Bitmap` and from `tpdf render` | `tpdf render` writes binary PNM; no PNG encoder; the deflate encoder exists (`filters/deflate.rs`, fixed Huffman and stored blocks) | `Bitmap::to_png`; `tpdf render` writes `.png`; every PngSuite file round-trips through this reader | S |
-| Image encoders: JPEG; CCITT G4; JBIG2 generic region | decoders only, and the writer never re-encodes image bytes by contract | a baseline JPEG encoder held to this decoder and a published DCT vector set; a G4 encoder held to the T.4/T.6 coder the TIFF tests already carry; a JBIG2 encoder promoted from the test-only `MqEncoder` | M; S; M |
+| Image encoders: JPEG; CCITT G4; JBIG2 generic region | decoders only for these three, and the writer never re-encodes image bytes by contract. PNG is the one image format with an encoder — `Bitmap::to_png`, `tpdf render` and `tinker_pdf_filters::png_encode` (September 2026) | a baseline JPEG encoder held to this decoder and a published DCT vector set; a G4 encoder held to the T.4/T.6 coder the TIFF tests already carry; a JBIG2 encoder promoted from the test-only `MqEncoder` | M; S; M |
+| A PNG *read back* by `pdfcmp` | `tpdf render` writes `.png` and `pdfcmp` reads `.pnm` and `.pdf`, so its output no longer feeds the comparator. `xtask`'s `TOOLS` table keeps a tool to the facade, and the facade publishes an encoder and no decoder | either a facade entry point that turns PNG bytes into a `Bitmap`, or an argued exception in `TOOLS`; the decision belongs to whichever is written first | S |
 | Region and tile rendering on the facade | `RenderOptions` carries scale, format, cancel and annotations, and no clip. Ruling 5's translated viewport is the mechanism — `Renderer::new` already takes an arbitrary base matrix and an arbitrarily sized canvas — but **the byte-equal guard ruling 5 describes does not exist**: there is no tile or region test in the tree, and the one nearby citation (`crates/tinker-pdf-render/src/lib.rs`) cites ruling 7. Ruling 5 is corrected to say the guard is owed | `RenderOptions::region`; a tile byte-equal to the full-page subregion, which is the test ruling 5 has been claiming since it was written | S |
 | CMYK page output; a premultiplied-alpha option; an anti-aliasing switch | `CmykA8` is internal to transparency groups; alpha is straight only; no quality knob | each a `RenderOptions` field with its own fingerprint; the switch changes no determinism claim | S each |
 | A form XObject or an annotation rendered on its own | pages only | `Page::render_form`, `Page::render_annotation` | S |

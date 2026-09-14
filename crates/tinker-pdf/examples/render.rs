@@ -13,8 +13,6 @@
 //!
 //! Run: `cargo run -p tinker-pdf --example render [-- file.pdf]`
 
-use std::io::Write;
-
 use tinker_pdf::{Document, RenderOptions};
 
 fn main() {
@@ -56,20 +54,16 @@ fn main() {
         }
     }
 
-    // Written as a PNM because it needs no encoder and every image viewer on
-    // every platform reads it. `Bitmap::data` is plain interleaved bytes.
-    let out = std::env::temp_dir().join("tinker-pdf-example.pnm");
-    let mut file = std::fs::File::create(&out).expect("a file in the temporary directory");
-    let magic = if bitmap.components() >= 3 { "P6" } else { "P5" };
-    write!(file, "{magic}\n{} {}\n255\n", bitmap.width, bitmap.height).expect("the header");
-    let wanted = if bitmap.components() >= 3 { 3 } else { 1 };
-    for row in bitmap.data.chunks_exact(bitmap.stride) {
-        for pixel in row
-            .chunks_exact(bitmap.components())
-            .take(bitmap.width as usize)
-        {
-            file.write_all(&pixel[..wanted]).expect("a pixel");
-        }
-    }
+    // `Bitmap::to_png` is the whole of it. This used to hand-roll a PNM here,
+    // under a comment saying a PNM needs no encoder — true, and the reason it
+    // was written that way was that there was no PNG encoder to call. There is
+    // one now, it lives in the engine beside the zlib compressor and the
+    // CRC-32 a PNG is made of, and `None` comes back only for a bitmap that is
+    // not a picture: a zero dimension, or a buffer shorter than its own rows.
+    let out = std::env::temp_dir().join("tinker-pdf-example.png");
+    let png = bitmap
+        .to_png()
+        .expect("a rendered page is always a picture");
+    std::fs::write(&out, png).expect("a file in the temporary directory");
     println!("wrote     {}", out.display());
 }

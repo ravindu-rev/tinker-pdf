@@ -202,6 +202,22 @@ default) — and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
 `data`, and `warnings`, the `Vec<RenderWarning>` that carries every named
 degradation. Rendering never fails; it degrades and reports.
 
+`Bitmap::to_png` writes the page out as a PNG file (ISO/IEC 15948), eight bits
+a component, through `tinker_pdf_filters::png_encode` — which is where the
+zlib stream, the chunk CRC-32 and 9.2's row filters a PNG is made of already
+lived. It is **total over all six `PixelFormat`s**, which matters because a
+page comes back in two of them and the fields are public: `Gray8`, `Rgb8`,
+`GrayA8` and `Rgba8` are colour types 0, 2, 4 and 6 byte for byte, and the two
+PNG has no colour type for are converted rather than relabelled — `CmykA8`
+through 8.6.4.4's device relation and `LabA8` back out of `L*a*b*`, both
+keeping their alpha and both landing on type 6. Writing ink under a label
+saying RGB is the failure `page_format` exists to prevent one layer up, and it
+would be just as invisible here. `None` comes back only for a bitmap that is
+not a picture: a zero dimension, a stride narrower than a row, or a buffer
+shorter than the rows the other fields promise — none of which `Page::render`
+produces. `tpdf render` writes `.png` through it, and so does
+`examples/render.rs`.
+
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
 
@@ -263,5 +279,5 @@ helpers `Page::render` composes.
   stable.
 - Corpus, as of September 2026: 5 525 files, 5 516 rendered every page, zero
   crashes.
-- The workspace stands at 4 543 passed / 0 failed / 56 ignored
-  (Windows x86_64, 13 September 2026). See [verification](../verification.md).
+- The workspace stands at 4 630 passed / 0 failed / 56 ignored
+  (Windows x86_64, 14 September 2026). See [verification](../verification.md).

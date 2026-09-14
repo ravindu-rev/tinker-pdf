@@ -82,9 +82,31 @@
 //! - **No cap on either dimension alone.** A 1 x 2^31 image is refused by
 //!   [`MAX_PNG_SAMPLES`], because the sample count is the product; a separate
 //!   dimension cap would refuse nothing the sample cap does not.
+//!
+//! # The writer, and the one budget it does not share
+//!
+//! [`png_encode`] is in `png/encode.rs` and is the other direction: an
+//! interleaved 8-bit raster in, a whole file out. It reuses this module's
+//! chunk constants and `predictors.rs`'s Paeth predictor, and its argument for
+//! living in this crate rather than in the tool that wanted it is its own
+//! header.
+//!
+//! It does **not** charge [`MAX_PNG_SAMPLES`], and that asymmetry is
+//! deliberate. This cap is a *reader's* budget against a thirteen-byte IHDR
+//! asking for 2^63 samples; a writer is handed the pixels and has already paid
+//! for them. Charging it here would refuse a legal picture: a page at
+//! `tinker_pdf_render::MAX_PAGE_PIXELS` — 67.1 Mpx — is 268 million samples as
+//! RGBA, four times this ceiling. The consequence is worth stating rather than
+//! leaving to be found: **the largest page this engine renders writes a PNG
+//! this decoder will not read back**, because one side is defending against a
+//! hostile file and the other is serialising a buffer that already exists.
 
 use crate::crc32::Crc32;
 use crate::{inflate, predictor_decode, Limits, PredictorParams, Warning, Warnings};
+
+mod encode;
+
+pub use encode::{png_encode, PngEncodeError, PngSource};
 
 // --- the budget ---------------------------------------------------------
 
