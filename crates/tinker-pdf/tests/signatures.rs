@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf::{Anchor, Coverage, DigestAlgorithm, Document, SubFilter};
+use tinker_pdf::{Anchor, Coverage, CoverageDefect, DigestAlgorithm, Document, SubFilter};
 
 // ---- fixtures, built here so every shape has one --------------------------
 
@@ -410,6 +410,9 @@ fn census_of_the_corpus_signatures() {
     let mut suspicious = 0usize;
     let mut unreadable = Vec::new();
     let mut routes: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    // Which file each suspicious coverage came from, and which defect. The
+    // count alone cannot say whether the same six are still the six.
+    let mut attributed: Vec<(String, String)> = Vec::new();
 
     for path in &candidates {
         let name = path
@@ -468,6 +471,15 @@ fn census_of_the_corpus_signatures() {
                         .iter()
                         .map(|revision| revision.byte_range.end)
                         .collect();
+                    attributed.push((
+                        name.clone(),
+                        match defect {
+                            CoverageDefect::PastEndOfFile { .. } => "past the end of the file",
+                            CoverageDefect::GapIsNotContents => "the gap is not /Contents",
+                            other => panic!("a defect this census has never seen: {other:?}"),
+                        }
+                        .to_string(),
+                    ));
                     format!("suspicious {defect:?}; revision ends {ends:?}")
                 }
             };
@@ -509,9 +521,17 @@ fn census_of_the_corpus_signatures() {
     //   one and carrying no signature is qpdf's `bad-content.pdf`, which has
     //   no `/Type /Sig`, no `/Perms` and no CMS blob — it is deliberately not
     //   a signature.
-    // - 6 suspicious: two `/ByteRange`s that run past the end of a file edited
-    //   after signing, three gaps that land in XMP or XFA rather than on a
-    //   hexadecimal string, and one fuzzed file.
+    // - 6 suspicious, and **all six are the file's defect rather than this
+    //   engine's** — attributed one by one on 14 September 2026, by measuring
+    //   each against 12.8.1. In every one the declared gap is exactly as long
+    //   as the real `<…>` blob, so the `/ByteRange` was right when written and
+    //   the file moved under it. Two are veraPDF fixtures reusing an
+    //   11 516-byte sibling's `/ByteRange` verbatim in 6 706- and 7 207-byte
+    //   files, which is why both run past the end — not, as this comment said
+    //   until then, a file edited after signing. Three are re-serialisations
+    //   stale by 1 378, 4 214 and 523 273 bytes, whose gaps land in the CMS
+    //   blob itself (twice) and in XFA markup; **none lands in XMP**, which
+    //   this comment also claimed. One is a fuzzer mutation.
     //
     // Re-pinning a corpus moves these, and moving them is a deliberate act
     // with its own commit and its own reason.
@@ -527,6 +547,55 @@ fn census_of_the_corpus_signatures() {
     assert_eq!(whole, 16, "signatures covering their whole file");
     assert_eq!(revision, 5, "signatures over an earlier revision");
     assert_eq!(suspicious, 6, "signatures whose coverage does not hold up");
+
+    // **The six, by name and by defect.** The count alone cannot say the same
+    // six are still the six: a file dropping out and another falling in leaves
+    // it at 6. Each was read against 12.8.1 byte by byte on 14 September 2026
+    // and every one is the *file's* defect, so this list is also the record
+    // that none of them is waiting on a change here.
+    attributed.sort();
+    let expected: Vec<(String, String)> = [
+        // Two veraPDF fixtures whose `/ByteRange [0 1022 4862 6654]` is a
+        // sibling's, verbatim: the sibling is 11 516 bytes and these are
+        // 6 706 and 7 207, so the coverage ends 4 810 and 4 309 bytes past the
+        // end. The clause each was built for is about `/Perms` and never looks
+        // at coverage, which is why nobody recomputed it.
+        (
+            "verapdf/PDF_A-2b/6.1 File structure/6.1.12 Permissions/veraPDF test suite 6-1-12-t01-pass-a.pdf",
+            "past the end of the file",
+        ),
+        (
+            "verapdf/PDF_A-4/6.1 File structure/6.1.11 Permissions/veraPDF test suite 6-1-11-t01-pass-a.pdf",
+            "past the end of the file",
+        ),
+        // A fuzzer's mutation, which breaks the cross-reference table too: the
+        // gap is the right length and sits 5 596 bytes early, inside an
+        // ASCII85 stream.
+        (
+            "pdfjs/test/pdfs/poppler-395-0-fuzzed.pdf",
+            "the gap is not /Contents",
+        ),
+        // Re-serialised after signing, 1 378 bytes stale; the declared gap
+        // lands inside the signature's own CMS blob.
+        ("pdfjs/test/pdfs/issue6127.pdf", "the gap is not /Contents"),
+        // Two signatures in one file, stale by 4 214 and 523 273 bytes. **That
+        // the two shifts differ is the proof**: a trimmed prefix would move
+        // both by the same amount, and a full re-serialisation does not.
+        (
+            "pdfjs/test/pdfs/xfa_filled_imm1344e.pdf",
+            "the gap is not /Contents",
+        ),
+        (
+            "pdfjs/test/pdfs/xfa_filled_imm1344e.pdf",
+            "the gap is not /Contents",
+        ),
+    ]
+    .into_iter()
+    .map(|(file, defect)| (file.to_string(), defect.to_string()))
+    .collect();
+    let mut expected = expected;
+    expected.sort();
+    assert_eq!(attributed, expected, "the six, by file and by defect");
     assert_eq!(
         routes.get("/Perms /UR3").copied().unwrap_or_default(),
         5,

@@ -143,8 +143,17 @@ pub enum CoverageDefect {
         file: u64,
     },
     /// The gap between the spans is not a hexadecimal string, so it is not
-    /// where `/Contents` sits — whatever the dictionary says. Seen in the
-    /// corpus with the gap landing in an XMP packet and in XFA markup.
+    /// where `/Contents` sits — whatever the dictionary says.
+    ///
+    /// Four corpus signatures reach this, and **not one of them is a document
+    /// somebody edited**: in every one the declared gap is exactly as long as
+    /// the real `<…>` blob, so the signer wrote a correct `/ByteRange` and a
+    /// later full re-serialisation moved it. Two land inside the signature's
+    /// own CMS blob, one in an ASCII85 stream, one in XFA markup. **None lands
+    /// in an XMP packet**, which this comment claimed until 14 September 2026:
+    /// the two corpus files whose gap does fall in XMP declare a coverage that
+    /// ends past the end of the file, so they answer
+    /// [`CoverageDefect::PastEndOfFile`] before the gap is ever looked at.
     GapIsNotContents,
     /// Coverage stops before the end of the file at a place that is not a
     /// revision boundary, leaving unsigned bytes that no update explains.

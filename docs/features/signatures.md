@@ -32,9 +32,25 @@ makes no claim about the document's content.
 producer wrote. Every span is checked against the file it claims to describe:
 `WholeFile`, `Revision` for a signature a later incremental update was layered
 on (7.5.6), or `Suspicious` with the reason named — a range past the end of
-the file, spans that overlap, a gap that lands in an XMP packet rather than on
-`/Contents`. Of the corpus's 27: **16 whole-file, 5 over a revision, 6
-suspicious**. This paragraph read 18/11/1/6 until 14 September 2026, which was
+the file, spans that overlap, a gap that lands somewhere that is not a
+hexadecimal string. Of the corpus's 27: **16 whole-file, 5 over a revision, 6
+suspicious**.
+
+**All six suspicious ones are the file's defect, and the measurement that says
+so is the same in every one: the declared gap is exactly as long as the real
+`<…>` blob.** The signer wrote a `/ByteRange` that was right when it was
+written; what moved was the file. Two are veraPDF fixtures that reuse an
+11 516-byte sibling's `/ByteRange [0 1022 4862 6654]` verbatim in files of
+6 706 and 7 207 bytes — the clause they were built for is about `/Perms` and
+never looks at coverage, so nobody recomputed it. Three are full
+re-serialisations after signing, stale by 1 378, 4 214 and 523 273 bytes; the
+last of those carries two signatures whose shifts *differ*, which is what
+proves a re-serialisation rather than a trimmed prefix. One is a fuzzer
+mutation that breaks the cross-reference table as well. **None is this engine
+reading a well-formed file wrongly**, and the cases that would have been — an
+indirect `/ByteRange`, a signature over an earlier revision, a literal-string
+`/Contents`, an unfinished `[0 0 0 0]` placeholder — were each checked against
+the bytes and ruled out. This paragraph read 18/11/1/6 until 14 September 2026, which was
 the figure before the SafeDocs shard was pinned; the census at
 `crates/tinker-pdf/tests/signatures.rs` has asserted the current one since
 6 September, and the sentence ten lines above already used it.
