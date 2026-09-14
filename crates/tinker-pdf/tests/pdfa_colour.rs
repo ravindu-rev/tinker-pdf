@@ -874,3 +874,200 @@ fn an_unreadable_destination_profile_makes_the_intents_space_unknown() {
         }
     );
 }
+
+// ---- what a graphics object may not carry --------------------------------
+
+/// A page drawing one image XObject, with `entries` in its dictionary.
+fn drawing_an_image(entries: &str) -> Fixture {
+    let mut fixture = conforming();
+    fixture.resources = "<< /XObject << /Im 7 0 R >> >>".to_string();
+    fixture.content = "q 50 0 0 50 10 10 cm /Im Do Q".to_string();
+    fixture.extra = vec![(
+        7,
+        stream(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /BitsPerComponent 8 /ColorSpace /DeviceGray {entries}"
+            ),
+            &[0x80],
+        ),
+    )];
+    fixture
+}
+
+/// **An image may not name content held outside the file, or ask to be
+/// smoothed.**
+///
+/// `/Alternates` names other versions of the same picture and `/OPI` links a
+/// high-resolution original somewhere else — both make the page's appearance
+/// depend on something the file does not carry, which is the whole of what
+/// archiving forbids. `/Interpolate true` asks a reader to smooth on the way
+/// up and 8.9.5.1 leaves how entirely to the reader.
+///
+/// Each has a twin, and `/Interpolate false` is the twin that matters: it is
+/// the default, so a build that reported the *key* rather than the value would
+/// report a great many conforming files.
+#[test]
+fn an_image_may_not_name_outside_content_or_ask_to_be_smoothed() {
+    assert_eq!(
+        drawing_an_image("/OPI << /F (elsewhere.tif) >>").one_finding(),
+        FindingKind::ExternalContentForbidden {
+            key: "OPI".to_string()
+        }
+    );
+    assert_eq!(
+        drawing_an_image("/Alternates [8 0 R]").one_finding(),
+        FindingKind::ExternalContentForbidden {
+            key: "Alternates".to_string()
+        }
+    );
+    assert_eq!(
+        drawing_an_image("/Interpolate true").one_finding(),
+        FindingKind::ImageInterpolated
+    );
+
+    // The twins: the default value, and the plain image.
+    assert_eq!(
+        drawing_an_image("/Interpolate false").findings(),
+        Vec::<FindingKind>::new()
+    );
+    assert_eq!(drawing_an_image("").findings(), Vec::<FindingKind>::new());
+}
+
+/// An image states its own rendering intent, and 8.6.5.8's four are all there
+/// are — the same closed set the `ri` operator is held to, on the other
+/// surface an intent reaches a page through.
+#[test]
+fn an_images_rendering_intent_is_the_same_closed_set_as_the_operators() {
+    assert_eq!(
+        drawing_an_image("/Intent /Wrong").one_finding(),
+        FindingKind::RenderingIntentUnknown {
+            declared: "Wrong".to_string()
+        }
+    );
+    assert_eq!(
+        drawing_an_image("/Intent /RelativeColorimetric").findings(),
+        Vec::<FindingKind>::new()
+    );
+}
+
+/// **A form may not carry `/OPI`, and a PostScript XObject may not be drawn at
+/// all.**
+///
+/// 8.8.2 gives an XObject three subtypes and archiving admits two. The third
+/// is a program, and `/Subtype2 /PS` is the spelling that makes a *form* one —
+/// two ways to the same thing and both are reported.
+#[test]
+fn a_form_may_not_carry_opi_and_a_postscript_xobject_may_not_be_drawn() {
+    let mut form = conforming();
+    form.resources = "<< /XObject << /Fm 7 0 R >> >>".to_string();
+    form.content = "/Fm Do".to_string();
+    form.extra = vec![(
+        7,
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /OPI << /F (x.tif) >>",
+            b"",
+        ),
+    )];
+    assert_eq!(
+        form.one_finding(),
+        FindingKind::ExternalContentForbidden {
+            key: "OPI".to_string()
+        }
+    );
+
+    let mut second = form.clone();
+    second.extra = vec![(
+        7,
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Subtype2 /PS",
+            b"",
+        ),
+    )];
+    assert_eq!(
+        second.one_finding(),
+        FindingKind::PostScriptXObjectForbidden
+    );
+
+    let mut postscript = form.clone();
+    postscript.extra = vec![(7, stream("/Type /XObject /Subtype /PS", b""))];
+    assert_eq!(
+        postscript.one_finding(),
+        FindingKind::PostScriptXObjectForbidden
+    );
+
+    // The twin: an ordinary form, drawn and silent.
+    let mut plain = form;
+    plain.extra = vec![(
+        7,
+        stream("/Type /XObject /Subtype /Form /BBox [0 0 10 10]", b""),
+    )];
+    assert_eq!(plain.findings(), Vec::<FindingKind>::new());
+}
+
+/// **`/TR` is forbidden however it is spelled; `/TR2` only when it is not
+/// `/Default`.**
+///
+/// That asymmetry is the Isartor suite's, not a reading: it has four `/TR`
+/// fixtures — an array, a function, `/Identity` and **`/Default`** — and all
+/// four fail, against three `/TR2` fixtures where only `/Default` is admitted.
+/// So `/TR /Default` is a finding and `/TR2 /Default` is not, which "other
+/// than Default" alone would not have given.
+#[test]
+fn a_transfer_function_is_forbidden_and_tr2_default_is_the_one_exception() {
+    let state = |entries: &str| {
+        let mut fixture = conforming();
+        fixture.resources = "<< /ExtGState << /Gs 7 0 R >> >>".to_string();
+        fixture.content = "/Gs gs 0.5 g 10 10 50 50 re f".to_string();
+        fixture.extra = vec![
+            (7, format!("<< /Type /ExtGState {entries} >>").into_bytes()),
+            // Object 8 is the function the indirect spellings point at. It has
+            // to exist: a reference to a missing object resolves to null, and
+            // a rule reading null would find nothing to report — which is how
+            // the first version of this test passed for the wrong reason.
+            (
+                8,
+                stream("/FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1", b""),
+            ),
+        ];
+        fixture
+    };
+
+    for spelling in ["/TR /Identity", "/TR /Default", "/TR [8 0 R]", "/TR 8 0 R"] {
+        assert_eq!(
+            state(spelling).one_finding(),
+            FindingKind::TransferFunctionForbidden {
+                key: "TR".to_string()
+            },
+            "{spelling}"
+        );
+    }
+
+    for spelling in ["/TR2 /Identity", "/TR2 [8 0 R]"] {
+        assert_eq!(
+            state(spelling).one_finding(),
+            FindingKind::TransferFunctionForbidden {
+                key: "TR2".to_string()
+            },
+            "{spelling}"
+        );
+    }
+
+    // The one exception, and the plain state beside it.
+    assert_eq!(state("/TR2 /Default").findings(), Vec::<FindingKind>::new());
+    assert_eq!(state("").findings(), Vec::<FindingKind>::new());
+}
+
+/// A prohibited entry on an XObject **nothing draws** is not reported.
+///
+/// "Used for rendering" is this group's own qualifier and it decides answers
+/// elsewhere — a form's `/DR` names standard-14 fonts nothing paints with. An
+/// image carrying `/OPI` in a resource dictionary no content stream names is
+/// the same case, and reporting it would be reporting a picture that does not
+/// reach the page.
+#[test]
+fn a_prohibited_entry_on_an_xobject_nothing_draws_is_not_reported() {
+    let mut unused = drawing_an_image("/OPI << /F (elsewhere.tif) >>");
+    unused.content = "0.5 g 10 10 50 50 re f".to_string();
+    assert_eq!(unused.findings(), Vec::<FindingKind>::new());
+}

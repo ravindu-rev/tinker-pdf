@@ -117,6 +117,8 @@ pub(super) fn rules(
     }
     icc_spaces(doc, &used, out);
     rendering_intents(&used, out);
+    xobject_entries(doc, &used, out);
+    transfer_functions(doc, &used, out);
     if part == Some(Part::One) {
         transparency(doc, &used, out);
     }
@@ -320,6 +322,11 @@ struct Used {
     ext_g_states: BTreeSet<ObjRef>,
     /// Form XObjects the pages invoked.
     forms: BTreeSet<ObjRef>,
+    /// Image XObjects the pages drew.
+    images: BTreeSet<ObjRef>,
+    /// XObjects the pages drew that are neither a form nor an image, which
+    /// 8.8.2 leaves exactly one of: a PostScript XObject.
+    postscript: BTreeSet<ObjRef>,
     /// Device-independent blending colour spaces a transparency group named,
     /// by the device family each stands in for (11.6.6).
     group_spaces: BTreeSet<&'static str>,
@@ -392,7 +399,14 @@ fn scan(doc: &CosDocument, used: &mut Used) {
                         used.forms.insert(reference);
                     }
                     Some(b"Image") => {
+                        used.images.insert(reference);
                         image_space(doc, &stream.dict, reference, used);
+                    }
+                    // 8.8.2 defines three subtypes and this is the third. It
+                    // used to be swallowed here, which is how a PostScript
+                    // XObject reached a page unreported.
+                    Some(b"PS") | None => {
+                        used.postscript.insert(reference);
                     }
                     _ => {}
                 }
@@ -862,6 +876,163 @@ fn rendering_intents(used: &Used, out: &mut Vec<Raw>) {
                 declared: String::from_utf8_lossy(intent).into_owned(),
             },
         });
+    }
+}
+
+// ---- 6.2.4, 6.2.5, 6.2.7, 6.2.8: what a graphics object may not carry -----
+
+/// ISO 19005-1 6.2.4, 6.2.5 and 6.2.7, and their siblings: the entries an
+/// XObject used for rendering may not have.
+///
+/// Every one of these is a prohibition on a **dictionary**, which is why they
+/// arrive together and why none of them needs an interpreter: what decides
+/// them is a key being present, and in one case a boolean being true.
+///
+/// - **`/Alternates`** (6.2.4) names other versions of the same picture, and
+///   which one a reader shows is the reader's choice rather than the file's.
+/// - **`/OPI`** (6.2.4 for an image, 6.2.5 for a form) is a link to a
+///   high-resolution original held somewhere else, which is the whole of what
+///   archiving forbids: a file whose appearance depends on something not in it.
+/// - **`/Interpolate`** (6.2.4) asks a reader to smooth a picture on the way
+///   up, and 8.9.5.1 leaves how entirely to the reader. `false` is the default
+///   and is fine; `true` is a rendering nobody can reproduce.
+/// - **A PostScript XObject** (6.2.7), by `/Subtype /PS` or by the `/Subtype2`
+///   that makes a form one, is a program this format cannot bound.
+///
+/// The subject is the object the page drew, so a prohibited entry on an
+/// XObject nothing invokes is not reported — the "used for rendering"
+/// qualifier every rule in this group honours.
+fn xobject_entries(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+    for (reference, is_image) in used
+        .images
+        .iter()
+        .map(|r| (r, true))
+        .chain(used.forms.iter().map(|r| (r, false)))
+    {
+        let Ok(object) = doc.get(*reference) else {
+            continue;
+        };
+        let Some(stream) = object.as_stream() else {
+            continue;
+        };
+        let dict = &stream.dict;
+
+        if !doc.resolve_key(dict, doc.intern(b"OPI")).is_null() {
+            out.push(Raw {
+                rule: clauses::XOBJECTS,
+                object: Some(*reference),
+                kind: FindingKind::ExternalContentForbidden {
+                    key: "OPI".to_string(),
+                },
+            });
+        }
+        // 8.10.2's `/Subtype2 /PS` makes a form a PostScript XObject, and
+        // 8.8.2's `/PS` is one outright. The second is caught where the walk
+        // sorts XObjects by subtype; this is the first.
+        if name_of(doc, dict, b"Subtype2").as_deref() == Some(b"PS") {
+            out.push(Raw {
+                rule: clauses::XOBJECTS,
+                object: Some(*reference),
+                kind: FindingKind::PostScriptXObjectForbidden,
+            });
+        }
+
+        if !is_image {
+            continue;
+        }
+        if !doc.resolve_key(dict, doc.intern(b"Alternates")).is_null() {
+            out.push(Raw {
+                rule: clauses::IMAGES,
+                object: Some(*reference),
+                kind: FindingKind::ExternalContentForbidden {
+                    key: "Alternates".to_string(),
+                },
+            });
+        }
+        if doc
+            .resolve_key(dict, doc.intern(b"Interpolate"))
+            .as_bool()
+            .unwrap_or(false)
+        {
+            out.push(Raw {
+                rule: clauses::IMAGES,
+                object: Some(*reference),
+                kind: FindingKind::ImageInterpolated,
+            });
+        }
+        // An image states its own rendering intent, and 8.6.5.8's four are the
+        // only ones there are. The `ri` operator's are judged by
+        // `rendering_intents`; this is the same closed set on the other
+        // surface an intent reaches a page through.
+        if let Some(intent) = name_of(doc, dict, b"Intent") {
+            if !RENDERING_INTENTS.contains(&intent.as_slice()) {
+                out.push(Raw {
+                    rule: clauses::RENDERING_INTENTS,
+                    object: Some(*reference),
+                    kind: FindingKind::RenderingIntentUnknown {
+                        declared: String::from_utf8_lossy(&intent).into_owned(),
+                    },
+                });
+            }
+        }
+    }
+
+    for reference in &used.postscript {
+        out.push(Raw {
+            rule: clauses::XOBJECTS,
+            object: Some(*reference),
+            kind: FindingKind::PostScriptXObjectForbidden,
+        });
+    }
+}
+
+/// ISO 19005-1 6.2.8 and its siblings: an extended graphics state carries no
+/// transfer function.
+///
+/// A transfer function remaps component values on the way to the device, so a
+/// file that states one has an appearance that depends on a reader applying
+/// it — and 10.4's own text says a reader may ignore one entirely. Either way
+/// the page is not reproducible, which is what the clause is about.
+///
+/// **`/TR` is forbidden however it is spelled and `/TR2` is forbidden unless
+/// it is `/Default`**, and that asymmetry is the corpus's: the Isartor suite
+/// has four `/TR` fixtures — an array, a function, `/Identity` and `/Default`
+/// — and all four fail, against three `/TR2` fixtures where only `/Default`
+/// is admitted. So `/TR /Default` is a finding and `/TR2 /Default` is not,
+/// which no reading of "other than Default" alone would have given.
+fn transfer_functions(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+    for reference in &used.ext_g_states {
+        let Ok(object) = doc.get(*reference) else {
+            continue;
+        };
+        let Some(state) = object.as_dict() else {
+            continue;
+        };
+        if !doc.resolve_key(state, doc.intern(b"TR")).is_null() {
+            out.push(Raw {
+                rule: clauses::GRAPHICS_STATE,
+                object: Some(*reference),
+                kind: FindingKind::TransferFunctionForbidden {
+                    key: "TR".to_string(),
+                },
+            });
+        }
+        let second = doc.resolve_key(state, doc.intern(b"TR2"));
+        if !second.is_null() {
+            let default = second
+                .as_name()
+                .and_then(|name| doc.name_bytes(name))
+                .is_some_and(|name| name.as_ref() == b"Default");
+            if !default {
+                out.push(Raw {
+                    rule: clauses::GRAPHICS_STATE,
+                    object: Some(*reference),
+                    kind: FindingKind::TransferFunctionForbidden {
+                        key: "TR2".to_string(),
+                    },
+                });
+            }
+        }
     }
 }
 

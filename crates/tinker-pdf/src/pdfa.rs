@@ -281,6 +281,37 @@ pub(crate) mod clauses {
         four: "6.3.3",
     };
 
+    /// An image XObject's own entries.
+    ///
+    /// The three parts number it differently and the corpus's own directories
+    /// are the check: part 1's `6.2 Graphics/6.2.4`, parts 2 and 3's
+    /// `6.2.8 Images`, part 4's `6.2.7 Images`.
+    pub(crate) const IMAGES: ClauseTable = ClauseTable {
+        one: "6.2.4",
+        two_three: "6.2.8",
+        four: "6.2.7",
+    };
+
+    /// A form or PostScript XObject's own entries.
+    ///
+    /// Part 1 splits them — 6.2.5 for a form's `/OPI`, 6.2.7 for a PostScript
+    /// XObject — and parts 2 to 4 put both under one `XObjects` clause. The
+    /// part-1 arm is 6.2.5, which is where the `/OPI` fixtures sit; the
+    /// PostScript ones are Isartor's 6.2.7 and are reported under the same
+    /// heading rather than given a table of their own for one file.
+    pub(crate) const XOBJECTS: ClauseTable = ClauseTable {
+        one: "6.2.5",
+        two_three: "6.2.9",
+        four: "6.2.8",
+    };
+
+    /// The extended graphics state's transfer functions and halftones.
+    pub(crate) const GRAPHICS_STATE: ClauseTable = ClauseTable {
+        one: "6.2.8",
+        two_three: "6.2.5",
+        four: "6.2.5",
+    };
+
     /// Version and conformance level identification: the `pdfaid` claim.
     pub(crate) const FLAVOUR_ID: ClauseTable = ClauseTable {
         one: "6.7.11",
@@ -1110,6 +1141,25 @@ pub enum FindingKind {
         space: String,
         /// The destination profile's own colour space.
         profile: String,
+    },
+    /// An image or form XObject naming content held outside the file:
+    /// `/OPI`, or an image's `/Alternates` (ISO 19005-1 6.2.4, 6.2.5).
+    ///
+    /// The key is carried because the two are different things to fix, and a
+    /// caller reading a list of findings should not have to guess which.
+    ExternalContentForbidden {
+        /// The entry that should not be there.
+        key: String,
+    },
+    /// A PostScript XObject, by `/Subtype /PS` or by the `/Subtype2` that
+    /// makes a form one (ISO 19005-1 6.2.7).
+    PostScriptXObjectForbidden,
+    /// An image asking to be smoothed on the way up (ISO 19005-1 6.2.4).
+    ImageInterpolated,
+    /// A transfer function in an extended graphics state (ISO 19005-1 6.2.8).
+    TransferFunctionForbidden {
+        /// `TR` or `TR2`.
+        key: String,
     },
     /// The document is encrypted. Every part of ISO 19005 forbids it: a file
     /// nobody can open without a key is not archival.
