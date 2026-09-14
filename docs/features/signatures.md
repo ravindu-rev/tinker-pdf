@@ -210,8 +210,8 @@ declines, and — the shape the whole design exists for — one byte flipped
 inside a signed range, which turns the document digest to `Differs` and leaves
 the signature `Verified`.
 
-All of it rides in the workspace suite, which stood at **4 627 passed, 0
-failed, 56 ignored across 212 suites** when the ECDSA arm landed on
+All of it rides in the workspace suite, which stood at **4 654 passed, 0
+failed, 56 ignored across 213 suites** when the ECDSA arm landed on
 14 September 2026 — measured on that branch alone, and other lanes were moving
 the same total on the same day.
 

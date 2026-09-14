@@ -486,6 +486,6 @@ wants the reason to survive it.
 - Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
   15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
   bit-for-bit across targets ([determinism](determinism.md)), and the whole
-  workspace stands at 4 640 passed / 0 failed / 56 ignored
+  workspace stands at 4 654 passed / 0 failed / 56 ignored
   (Windows x86_64, 14 September 2026). See [verification](../verification.md) for
   the full harness.
