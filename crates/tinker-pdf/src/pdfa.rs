@@ -312,6 +312,13 @@ pub(crate) mod clauses {
         four: "6.2.5",
     };
 
+    /// Annex C's implementation limits.
+    pub(crate) const IMPLEMENTATION_LIMITS: ClauseTable = ClauseTable {
+        one: "6.1.12",
+        two_three: "6.1.13",
+        four: "6.1.12",
+    };
+
     /// Version and conformance level identification: the `pdfaid` claim.
     pub(crate) const FLAVOUR_ID: ClauseTable = ClauseTable {
         one: "6.7.11",
@@ -1160,6 +1167,18 @@ pub enum FindingKind {
     TransferFunctionForbidden {
         /// `TR` or `TR2`.
         key: String,
+    },
+    /// One of Annex C's implementation limits, exceeded (ISO 19005-1 6.1.12,
+    /// ISO 19005-2 6.1.13).
+    ///
+    /// The limit is named rather than enumerated because the list is Annex C's
+    /// and not this build's, and a caller reading "the length of a name" knows
+    /// what to look for without a table.
+    LimitExceeded {
+        /// Which limit, in words.
+        limit: &'static str,
+        /// What the file measured.
+        measured: u64,
     },
     /// The document is encrypted. Every part of ISO 19005 forbids it: a file
     /// nobody can open without a key is not archival.

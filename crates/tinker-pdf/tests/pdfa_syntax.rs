@@ -868,3 +868,132 @@ fn the_header_version_names_a_version_that_exists() {
         );
     }
 }
+
+// ---- 6.1.12 / 6.1.13 Implementation limits --------------------------------
+
+/// A document whose catalog carries `entry`, which is where these fixtures put
+/// the object that breaks a limit.
+fn catalog_carrying(entry: &str) -> Fixture {
+    let mut fixture = conforming();
+    fixture.catalog_extra = entry.to_string();
+    fixture
+}
+
+/// **A name longer than 127 bytes, in every part.**
+///
+/// The twin is a name of exactly 127, because an off-by-one here reports a
+/// conforming file — and Annex C states the limit inclusively.
+#[test]
+fn a_name_longer_than_annex_cs_limit_is_a_finding() {
+    let long = "A".repeat(128);
+    assert_eq!(
+        catalog_carrying(&format!("/{long} 1")).one_finding(),
+        FindingKind::LimitExceeded {
+            limit: "the length of a name",
+            measured: 128
+        }
+    );
+
+    let exact = "A".repeat(127);
+    assert_eq!(
+        catalog_carrying(&format!("/{exact} 1")).findings(),
+        Vec::<FindingKind>::new()
+    );
+}
+
+/// **An integer outside ±(2³¹ − 1), in every part.**
+///
+/// Both signs, because the corpus states both — `-2157483648` in a `/Widths`
+/// entry and `2157483648` in a `/Dest` — and a rule written with a bare `>`
+/// would catch one of them.
+#[test]
+fn an_integer_outside_annex_cs_range_is_a_finding_in_both_signs() {
+    for value in ["2157483648", "-2157483648"] {
+        assert_eq!(
+            catalog_carrying(&format!("/Custom {value}")).one_finding(),
+            FindingKind::LimitExceeded {
+                limit: "the magnitude of an integer",
+                measured: 2_157_483_648
+            },
+            "{value}"
+        );
+    }
+
+    // The twin, at the limit itself.
+    assert_eq!(
+        catalog_carrying("/Custom 2147483647").findings(),
+        Vec::<FindingKind>::new()
+    );
+}
+
+/// **A string longer than the part's own limit — and part 1's is the larger.**
+///
+/// Part 1 is defined on PDF 1.4, whose Appendix C allows 65535; parts 2 to 4
+/// are defined on ISO 32000-1, whose Annex C allows 32767. So the *same file*
+/// is conforming under part 1 and a finding under part 2, which is the pair
+/// this asserts — a build that used one limit for both would pass one half and
+/// fail the other whichever number it picked.
+#[test]
+fn the_string_limit_is_larger_in_part_one_than_in_part_two() {
+    let middling = "x".repeat(40000);
+
+    let mut one = catalog_carrying(&format!("/Custom ({middling})"));
+    one.packet = packet("1", Some("B"));
+    assert_eq!(one.findings(), Vec::<FindingKind>::new());
+
+    let mut two = catalog_carrying(&format!("/Custom ({middling})"));
+    two.packet = packet("2", Some("B"));
+    assert_eq!(
+        two.one_finding(),
+        FindingKind::LimitExceeded {
+            limit: "the length of a string",
+            measured: 40000
+        }
+    );
+
+    // And one that breaks both.
+    let long = "x".repeat(70000);
+    let mut both = catalog_carrying(&format!("/Custom ({long})"));
+    both.packet = packet("1", Some("B"));
+    assert_eq!(
+        both.one_finding(),
+        FindingKind::LimitExceeded {
+            limit: "the length of a string",
+            measured: 70000
+        }
+    );
+}
+
+/// **The two container limits are part 1's alone.**
+///
+/// ISO 32000-1 dropped Annex C's limits on how many entries a dictionary may
+/// hold and how many elements an array may have, so a part 2 file that exceeds
+/// them is conforming. A build that applied part 1's numbers to every part
+/// would report those files, which is the direction that costs a conforming
+/// file rather than a defect.
+#[test]
+fn the_container_limits_apply_to_part_one_and_not_to_part_two() {
+    let big = (0..4100)
+        .map(|n| format!("/K{n} {n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let entry = format!("/Custom << {big} >>");
+
+    let mut one = catalog_carrying(&entry);
+    one.packet = packet("1", Some("B"));
+    assert_eq!(
+        one.one_finding(),
+        FindingKind::LimitExceeded {
+            limit: "the entries of a dictionary",
+            // 4096 rather than 4100: `MAX_DICT_ENTRIES` is this reader's own
+            // ruling 1 bound and sits one above Annex C's 4095, so a
+            // dictionary that breaks the limit is always seen to break it and
+            // one that breaks it by more is reported at the bound.
+            measured: 4096
+        }
+    );
+
+    let mut two = catalog_carrying(&entry);
+    two.packet = packet("2", Some("B"));
+    assert_eq!(two.findings(), Vec::<FindingKind>::new());
+}

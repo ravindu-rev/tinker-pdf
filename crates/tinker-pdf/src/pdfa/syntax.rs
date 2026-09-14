@@ -491,6 +491,7 @@ fn walk(
     if depth > MAX_NESTING {
         return;
     }
+    implementation_limits(doc, flavour.map(|f| f.part), object, at, out);
     match object {
         Object::Array(values) => {
             for value in values {
@@ -499,15 +500,151 @@ fn walk(
         }
         Object::Dict(dict) => {
             dictionary(doc, flavour, dict, at, false, out);
-            for (_, value) in dict.entries() {
+            for (key, value) in dict.entries() {
+                // A key is a name, and Annex C's limit is on names. Judged
+                // here rather than in the walk below, which only ever sees
+                // values — a 128-byte key was invisible until this line.
+                implementation_limits(doc, flavour.map(|f| f.part), &Object::Name(*key), at, out);
                 walk(doc, flavour, value, at, depth + 1, out);
             }
         }
         Object::Stream(stream) => {
             dictionary(doc, flavour, &stream.dict, at, true, out);
-            for (_, value) in stream.dict.entries() {
+            for (key, value) in stream.dict.entries() {
+                implementation_limits(doc, flavour.map(|f| f.part), &Object::Name(*key), at, out);
                 walk(doc, flavour, value, at, depth + 1, out);
             }
+        }
+        _ => {}
+    }
+}
+
+// ---- 6.1.12 / 6.1.13 Implementation limits --------------------------------
+
+/// The longest a name may be, in bytes, in every part (Annex C).
+const MAX_NAME_BYTES: usize = 127;
+
+/// The most entries a dictionary may hold, in part 1.
+const MAX_DICT_ENTRIES_PART_ONE: usize = 4095;
+
+/// The most elements an array may hold, in part 1.
+const MAX_ARRAY_ELEMENTS_PART_ONE: usize = 8191;
+
+/// The largest absolute integer any part admits: 2^31 − 1.
+const MAX_INTEGER: i64 = 2_147_483_647;
+
+/// The longest a string may be, by part.
+///
+/// **Part 1's limit is the larger, and that is not a transcription slip.**
+/// Part 1 is defined on PDF 1.4, whose Appendix C allows 65535; parts 2 to 4
+/// are defined on ISO 32000-1, whose Annex C allows 32767. The corpus states
+/// both in its own titles — "Maximum length of a string is more than 65535"
+/// under `PDF_A-1b`, and "more than 32767" under `PDF_A-2b` — which is what
+/// settled the direction.
+const fn max_string_bytes(part: Part) -> usize {
+    match part {
+        Part::One => 65535,
+        Part::Two | Part::Three | Part::Four => 32767,
+    }
+}
+
+/// ISO 19005-1 6.1.12, ISO 19005-2/3 6.1.13, ISO 19005-4 6.1.12: the limits a
+/// conforming file stays inside.
+///
+/// **Why these six and not the whole table.** Annex C lists limits of two
+/// kinds. These six are properties of an object — how long a name is, how many
+/// entries a dictionary has, how large an integer is — and the walk that
+/// already visits every object can answer them. The rest are properties of a
+/// *content stream* or of a *decoded font*: the nesting depth of `q`/`Q`, a CID
+/// above 65535 inside a CMap, the number of open paths. Those wait on the
+/// interpreter, and `super::STAGED` says so rather than this rule half-running.
+///
+/// Reals are not checked either, and deliberately: Annex C's limit on them is
+/// a *precision* rather than a magnitude, and a reader that parsed a number at
+/// all has already lost the evidence of how it was written.
+///
+/// **The dictionary count is bounded by this reader before it is judged.**
+/// `MAX_DICT_ENTRIES` is 4096 under ruling 1, one above Annex C's 4095, so a
+/// dictionary that breaks the limit is always seen to break it — and one that
+/// breaks it by thousands is reported as 4096 rather than as its real size.
+/// The kind is right and the magnitude is this reader's; that is the honest
+/// way round, since the alternative is raising a bound a hostile file chooses.
+fn implementation_limits(
+    doc: &CosDocument,
+    part: Option<Part>,
+    object: &Object,
+    at: ObjRef,
+    out: &mut Vec<Raw>,
+) {
+    let Some(part) = part else {
+        return;
+    };
+    match object {
+        Object::Name(name) => {
+            if let Some(bytes) = doc.name_bytes(*name) {
+                if bytes.len() > MAX_NAME_BYTES {
+                    out.push(Raw {
+                        rule: clauses::IMPLEMENTATION_LIMITS,
+                        object: Some(at),
+                        kind: FindingKind::LimitExceeded {
+                            limit: "the length of a name",
+                            measured: bytes.len() as u64,
+                        },
+                    });
+                }
+            }
+        }
+        Object::String(text) => {
+            let cap = max_string_bytes(part);
+            if text.bytes.len() > cap {
+                out.push(Raw {
+                    rule: clauses::IMPLEMENTATION_LIMITS,
+                    object: Some(at),
+                    kind: FindingKind::LimitExceeded {
+                        limit: "the length of a string",
+                        measured: text.bytes.len() as u64,
+                    },
+                });
+            }
+        }
+        Object::Int(value) => {
+            if value.unsigned_abs() > MAX_INTEGER.unsigned_abs() {
+                out.push(Raw {
+                    rule: clauses::IMPLEMENTATION_LIMITS,
+                    object: Some(at),
+                    kind: FindingKind::LimitExceeded {
+                        limit: "the magnitude of an integer",
+                        measured: value.unsigned_abs(),
+                    },
+                });
+            }
+        }
+        // The two container limits are part 1's alone: ISO 32000-1 dropped
+        // both, so a part 2 file with a 5000-entry dictionary is conforming
+        // and reporting it would report a conforming file.
+        Object::Array(values)
+            if part == Part::One && values.len() > MAX_ARRAY_ELEMENTS_PART_ONE =>
+        {
+            out.push(Raw {
+                rule: clauses::IMPLEMENTATION_LIMITS,
+                object: Some(at),
+                kind: FindingKind::LimitExceeded {
+                    limit: "the elements of an array",
+                    measured: values.len() as u64,
+                },
+            });
+        }
+        Object::Dict(dict)
+            if part == Part::One && dict.entries().len() > MAX_DICT_ENTRIES_PART_ONE =>
+        {
+            out.push(Raw {
+                rule: clauses::IMPLEMENTATION_LIMITS,
+                object: Some(at),
+                kind: FindingKind::LimitExceeded {
+                    limit: "the entries of a dictionary",
+                    measured: dict.entries().len() as u64,
+                },
+            });
         }
         _ => {}
     }
