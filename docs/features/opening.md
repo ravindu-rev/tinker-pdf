@@ -79,6 +79,38 @@ null with a warning rather than hanging. The same code runs single-threaded
 on `wasm32-unknown-unknown`, which is why the input is bytes rather than a
 path: that target has no filesystem ([architecture](../architecture.md)).
 
+**Opening from a source rather than a buffer.** `Document::open_streaming`
+takes a `ByteSource` — length plus ranged reads, synchronous, with a typed
+miss — and reads what it needs. The engine performs no transport: `SliceSource`
+wraps bytes already in hand, and a host that fetches over HTTP range requests
+or a memory map implements the trait itself, exactly as it supplies fonts.
+Discovery is windowed: a head window for 7.5.2's header scan, the two
+`startxref` probes, then each cross-reference section as its own window. The
+same engine and the same answers — `streaming_determinism.rs` renders every
+fixture from a buffer, from a slice source and from one that answers a single
+byte at a time, and compares the pixels and the warnings.
+
+**Annex F, from the head.** A linearized file whose `/L` is the length of the
+file opens from its head alone: the first-page cross-reference section is
+parsed where it sits, `/O` names page one's page object so the page tree — whose
+root a linearized file may leave in the tail, and qpdf's linearizer does — is
+not walked, and **the page offset hint table places every page after it**.
+Table F.4 item 2 locates a page by accumulating the lengths of the pages before
+it; what the tables supply is that byte range and nothing else, because the
+objects inside it are read from the file's own `N G obj` headers and each one
+still passes `parse_at`'s header check. Hints accelerate, they never decide: a
+table that disagrees with the first-page section, or names a range whose
+leading object is not a page leaf carrying its own `/MediaBox` and
+`/Resources`, or whose runs do not begin one after another, gets
+`WarningKind::LinearizedHintsUnusable` or `LinearizedPageHintRejected` and the
+page tree walk instead. Page one of the
+60-page fixture costs **29,696 bytes of 1,631,095**, page 31 costs **37,888**,
+and neither reads the main cross-reference table at `/T`; `main_table_fetched`
+and `whole_file_fetched` are the observables that say so. What still costs the
+tail is declared: the page *count*, `xref()`, a repair rescan, a save, and a
+signature's byte range each fetch and warn first. See
+[design/streaming-open.md](../design/streaming-open.md).
+
 **Encryption at open.** An encrypted document opens perfectly well; the
 `/Encrypt` scalars are extracted and everything else waits. `readable()` is
 what separates "not a PDF" from "wants a password", and
@@ -101,6 +133,15 @@ second dependency. On `CosDocument`: `get`, `resolve`, `trailer`,
 `revisions`, `xref`, and the tiers `stream_raw_encrypted` / `stream_raw` /
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an
 image codec).
+
+The streaming seam adds `open_streaming(source)` and
+`open_streaming_with(source, &OpenOptions)`, the `ByteSource` trait with
+`SliceSource`, `CountingSource` and `ShreddedSource`, the `CHUNK_SIZE` the
+chunk cache reads in, and four observables a caller measures a streamed open
+by: `is_streamed()`, `first_page_end()` (Annex F's `/E`, `None` unless the
+head-only path engaged), `main_table_fetched()` and `whole_file_fetched()`.
+`complete_validation()` runs the eager offset probe a streamed open defers and
+returns the ladder level a buffered open would have reported.
 
 ```rust
 let bytes = std::fs::read("report.pdf")?;
@@ -138,7 +179,7 @@ exceed it routinely — declared in one place,
 
 ## Verified
 
-As of 13 September 2026, `cargo test --workspace` runs 4 543 tests (0 failed,
+As of 14 September 2026, `cargo test --workspace` runs 4 583 tests (0 failed,
 56 ignored, Windows x86_64), and the parts that cover opening are named
 ([verification](../verification.md)):
 
@@ -163,13 +204,29 @@ As of 13 September 2026, `cargo test --workspace` runs 4 543 tests (0 failed,
   values by ruling 12, which is why the enum stays `Copy + PartialEq + Eq`.
 - **Fuzzing** — `cos_document` (the whole file parser, every ladder rung
   reachable from arbitrary bytes, plus a bounded page-tree walk) and
-  `cos_object` are two of the 24 fuzz targets, run briefly in CI on every
+  `cos_object` are two of the 39 fuzz targets, run briefly in CI on every
   commit over committed seed corpora.
 - **Corpus** — 5 525 files, 5 516 of them rendered every page, 0 crashes
   (August 2026), in the ratcheted corpus run
   ([verification](../verification.md)); the canonical fixtures in
   `crates/tinker-pdf-cos/tests/document.rs` are mutool-written and must open
   at `Trust` with an empty warning list.
+- **`crates/tinker-pdf/tests/streaming_open.rs`** — what a streamed open
+  costs, in bytes, against committed budgets: the generic path, page one of a
+  linearized file, and page 31 of it. Annex F's hint tables are put to three
+  lies made one byte at a time out of a file that was correct before — a table
+  disagreeing with the first-page section, a page run whose leading object is
+  not a page, a hint stream the section places elsewhere — and each asserts the
+  same page comes out, off the page tree, with the leniency named — and a
+  fourth, a page length of zero, which is the one hint that could hand back the
+  page before it. Over the fetched qpdf corpus: 43 files open from their heads
+  and 41 draw the page one the page tree draws (the two exceptions are named,
+  and are files the walk cannot answer for at all); 29 of the 43 have a page
+  two, **every one of the 29 draws the page the main table draws**, and 20
+  reach it without that table.
+- **`crates/tinker-pdf/tests/streaming_determinism.rs`** — ruling 4 over a byte
+  source. Every fixture, linearized ones included, renders identically from a
+  buffer, from a slice source and from one answering a byte at a time.
 - **Determinism** — the 15 render fingerprints and 3 document byte-hashes all
   pass through `Document::open` first, so a change to opening moves them
   ([determinism](determinism.md)).

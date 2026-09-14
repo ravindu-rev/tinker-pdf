@@ -143,7 +143,7 @@ enum Section {
     /// objects a reader needs before it can do anything at all.
     Document,
     /// Part 6: the first page's section — its page object, everything only it
-    /// uses, and everything it shares with a later page. F.3.8 keeps a shared
+    /// uses, and everything it shares with a later page. F.4.2 keeps a shared
     /// object here when the first page needs it, because a reader holding the
     /// front of the file must not have to reach past `/E` to draw page one.
     FirstPage,
@@ -252,7 +252,7 @@ impl Plan {
             if document.contains(num) {
                 continue;
             }
-            // F.3.8: part 8 is for objects *several* pages need and the first
+            // F.3.9: part 8 is for objects *several* pages need and the first
             // page does not. An object the first page needs travels with it
             // whether or not later pages need it too, because a reader that
             // has only the front of the file has to be able to draw page one.
@@ -286,7 +286,7 @@ impl Plan {
             false
         };
 
-        // Part 4. F.3.4 puts the catalog first; a reader that has the front of
+        // Part 4. F.3.5 puts the catalog first; a reader that has the front of
         // the file reaches it without a search.
         push(root.num, Section::Document, &mut order);
         for num in objects.numbers() {
@@ -354,7 +354,7 @@ impl Plan {
             next = next.saturating_add(1);
         }
 
-        // F.3.1: `/O` names the first page's page object.
+        // Table F.1: `/O` names the first page's page object.
         let first_page_object = *mapping.get(pages.first()?)?;
 
         let crypt = encryption.as_ref().map(|(_, cipher)| cipher);
@@ -643,7 +643,7 @@ impl Plan {
         out
     }
 
-    /// Part 2: the linearization parameter dictionary (F.2.2).
+    /// Part 2: the linearization parameter dictionary (F.3.3).
     fn parameter_dictionary(
         &self,
         length: u64,

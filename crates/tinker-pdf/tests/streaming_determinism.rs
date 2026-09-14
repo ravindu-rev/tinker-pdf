@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use tinker_pdf::{
     Bitmap, CountingSource, Document, DocumentBuilder, RenderOptions, ShreddedSource, SliceSource,
+    WriteMode, WriteOptions,
 };
 
 /// Pixels that are not the white the page started as.
@@ -59,6 +60,40 @@ fn two_page_document() -> Vec<u8> {
     builder.finish()
 }
 
+/// Four pages saved linearized (Annex F), so the page requested is found
+/// through the hint tables rather than by walking the page tree.
+///
+/// A separate fixture because the hint path is a *different route to the same
+/// object*: the page offset hint table names a byte range, the objects inside
+/// it are read from their own `N G obj` headers, and nothing about that is
+/// exercised by a document that is not linearized. Object streams are off for
+/// the reason `tests/linearized.rs` turns them off -- a container would put
+/// every page's objects in one blob and there would be no per-page run to
+/// find.
+fn linearized_pages() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    for index in 0..4 {
+        builder.add_page(200.0, 100.0, |page| {
+            let shade = f64::from(index) / 4.0;
+            page.raw(
+                format!(
+                    "{shade:.3} 0.400 0.600 rg 20 20 m 180 40 l 100 90 l h f
+                     0.900 0.300 0.100 rg 30 30 m 60 80 90 20 170 70 c 100 10 l h f
+"
+                )
+                .as_bytes(),
+            );
+        });
+    }
+    let base = Document::open(builder.finish()).expect("it opens");
+    base.editor().save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize: true,
+        object_streams: false,
+        ..WriteOptions::default()
+    })
+}
+
 /// One fixture: how to build it, which page is rendered, and the fewest
 /// non-background pixels it may paint.
 struct Fixture {
@@ -66,6 +101,12 @@ struct Fixture {
     build: fn() -> Vec<u8>,
     page: u32,
     least_ink: usize,
+    /// Whether a streamed open of it must take Annex F's head-only path.
+    ///
+    /// Asserted rather than assumed: a fixture that quietly stopped being
+    /// linearized would still render identically on both paths and this file
+    /// would go on passing while covering one route instead of two.
+    linearized: bool,
 }
 
 const FIXTURES: &[Fixture] = &[
@@ -74,18 +115,35 @@ const FIXTURES: &[Fixture] = &[
         build: curves_page,
         page: 0,
         least_ink: 3000,
+        linearized: false,
     },
     Fixture {
         name: "two pages, first",
         build: two_page_document,
         page: 0,
         least_ink: 2000,
+        linearized: false,
     },
     Fixture {
         name: "two pages, second",
         build: two_page_document,
         page: 1,
         least_ink: 1000,
+        linearized: false,
+    },
+    Fixture {
+        name: "linearized, first",
+        build: linearized_pages,
+        page: 0,
+        least_ink: 3000,
+        linearized: true,
+    },
+    Fixture {
+        name: "linearized, third",
+        build: linearized_pages,
+        page: 2,
+        least_ink: 3000,
+        linearized: true,
     },
 ];
 
@@ -123,11 +181,26 @@ fn every_fixture_renders_identically_from_a_buffer_and_from_a_source() {
         let sliced = Document::open_streaming(Arc::new(SliceSource::new(bytes.clone())))
             .expect("it opens over a slice source");
         assert_eq!(
+            sliced.first_page_end().is_some(),
+            fixture.linearized,
+            "the {} fixture takes the head-only path or it does not, and this says which",
+            fixture.name
+        );
+        assert_eq!(
             shape_and_pixels(&render(&sliced, fixture.page)),
             shape_and_pixels(&from_buffer),
             "the {} fixture over a slice source",
             fixture.name
         );
+        if fixture.linearized && fixture.page > 0 {
+            // `/O` names page one and nothing else, so a page past it on a
+            // head-only open is one the hint tables placed.
+            assert!(
+                !sliced.main_table_fetched(),
+                "the {} fixture must be reached through Annex F's hint tables",
+                fixture.name
+            );
+        }
 
         let shredded = Document::open_streaming(Arc::new(ShreddedSource::new(SliceSource::new(
             bytes.clone(),

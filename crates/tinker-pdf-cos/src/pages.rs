@@ -321,34 +321,66 @@ pub fn count(doc: &CosDocument) -> u32 {
     }
 }
 
-/// Page one of a linearized document, from `/O` (Annex F.2.2 item 3).
+/// One page built from one object with nothing inherited, or nothing.
+///
+/// The page is built by [`leaf`], the same function the tree walk uses, which
+/// is only sound when the object is a leaf carrying its own `/MediaBox` and
+/// `/Resources`. When it is not, this declines and the walk runs, because a
+/// page laid out at US Letter because its ancestor was not fetched is the
+/// wrong page rather than a cheaper one.
+fn page_alone(doc: &CosDocument, reference: ObjRef, index: u32) -> Option<Page> {
+    let object = doc.get(reference).ok()?;
+    // Not a dictionary at all is the common way for this to be the wrong
+    // object: a run's leading object read a few bytes late is its content
+    // stream, and a stream is not a page.
+    let dict = object.as_dict()?;
+    let inherited = Inherited::default().extend(dict, doc);
+    // One test rather than two, because two were each other's shadow: a page
+    // with no `/MediaBox` key resolves to no media box, so whichever ran first
+    // declined and removing either alone changed nothing a test could see.
+    //
+    // 7.7.3.4 lets both attributes come from an ancestor, and an ancestor is
+    // exactly what neither route here fetched. `leaf` would default a missing
+    // media box to US Letter with a warning, which would be this function
+    // guessing rather than declining.
+    if inherited.media_box.is_none_or(|r| r.is_empty()) || inherited.resources.is_none() {
+        return None;
+    }
+    Some(leaf(reference, index, inherited, doc))
+}
+
+/// Page one of a linearized document, from `/O` (F.3.3, Table F.1).
 ///
 /// Annex F names the first page's object number so a reader holding only the
 /// head can reach it **without the page tree**. That is not a shortcut: a
 /// linearized file is free to leave the page tree root in the tail and qpdf's
 /// linearizer does, so a page-one render that insisted on walking the tree
 /// would fetch the end of every such file to draw the front of it.
-///
-/// The page is built by [`leaf`], the same function the tree walk uses, with
-/// nothing inherited -- which is only sound when the page carries its own
-/// `/MediaBox` and `/Resources`. When it does not, this declines and the walk
-/// runs, because a page laid out at US Letter because its ancestor was not
-/// fetched is the wrong page rather than a cheaper one.
 fn linearized_first_page(doc: &CosDocument) -> Option<Page> {
-    let num = doc.first_page_object()?;
-    let reference = ObjRef::new(num, 0);
-    let object = doc.get(reference).ok()?;
-    let dict = object.as_dict()?;
-    if !dict.contains_key(Name::MEDIA_BOX) || !dict.contains_key(Name::RESOURCES) {
-        return None;
+    page_alone(doc, ObjRef::new(doc.first_page_object()?, 0), 0)
+}
+
+/// Page `index` of a linearized document, from Annex F's page offset hint
+/// table.
+///
+/// `/O` names the first page and nothing else, so every page after it needed
+/// the main cross-reference table until the hint tables reached the open path.
+/// Table F.4 item 2 is what replaces it: a page's location is the accumulated
+/// lengths of the pages before it, and item 1 makes the page's own page object
+/// the first object of its run.
+///
+/// Only the *range* comes from the tables. The page is built here only when
+/// what the file's own object header names at the front of that range is a
+/// leaf with its own `/MediaBox` and `/Resources`; anything else declines with
+/// a typed warning naming what was found, and the tree walk runs. Hints
+/// accelerate and never decide (`docs/design/streaming-open.md`).
+fn hinted_page(doc: &CosDocument, index: u32) -> Option<Page> {
+    let reference = doc.hinted_page_object(index)?;
+    let page = page_alone(doc, reference, index);
+    if page.is_none() {
+        doc.warn_object(reference, WarningKind::LinearizedPageHintRejected);
     }
-    let inherited = Inherited::default().extend(dict, doc);
-    // An empty media box would be defaulted by `leaf` with a warning, which
-    // would be this function guessing rather than declining.
-    if inherited.media_box.is_none_or(|r| r.is_empty()) {
-        return None;
-    }
-    Some(leaf(reference, 0, inherited, doc))
+    page
 }
 
 /// Convenience: the page at `index`, if it exists.
@@ -358,6 +390,8 @@ pub fn at(doc: &CosDocument, index: u32) -> Option<Page> {
         if let Some(page) = linearized_first_page(doc) {
             return Some(page);
         }
+    } else if let Some(page) = hinted_page(doc, index) {
+        return Some(page);
     }
     let wanted = (index as usize).checked_add(1)?;
     collect_upto(doc, wanted).into_iter().nth(index as usize)

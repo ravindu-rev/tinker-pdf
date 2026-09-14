@@ -35,7 +35,7 @@
 
 use crate::limits;
 
-/// One page's row of the page offset hint table (F.3, Table F.4).
+/// One page's row of the page offset hint table (F.4.1, Table F.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PageHint {
     /// How many objects the page claims, item 1 plus the header's least.
@@ -46,7 +46,7 @@ pub(crate) struct PageHint {
     pub shared: Vec<u32>,
 }
 
-/// What the primary hint stream declares (F.3 and F.4).
+/// What the primary hint stream declares (F.4.1 and F.4.2).
 ///
 /// Every header item of Tables F.3 and F.5 is reported, in their order and
 /// under their numbers, rather than only the ones a caller happens to compare
@@ -136,7 +136,7 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
     }
     let mut bits = BitReader::new(data);
 
-    // ---- Page offset hint table (F.3, Table F.3) ----
+    // ---- Page offset hint table (F.4.1, Table F.3) ----
     let least_objects = bits.read(32)?;
     let first_page_offset = bits.read(32)?;
     let object_bits = bits.read(16)? as u16;
@@ -170,11 +170,19 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
     bits.align();
 
     // Item 4, one identifier per reference. The count is the file's own, so
-    // it is bounded against the bits that could hold the identifiers before
-    // any vector is grown by it: a zero-width identifier consumes nothing, so
-    // the reads below would never fail however large the claim.
+    // it is bounded before any vector is grown by it: a zero-width identifier
+    // consumes nothing, so the reads below would never fail however large the
+    // claim. Two bounds, because one of them is not enough. The bits that
+    // could hold the identifiers rule out a claim of four billion in a
+    // forty-byte stream -- but a stream may be [`limits::MAX_DECODED_STREAM`]
+    // long, and eight times that is a billion identifiers and four gigabytes
+    // of vector for a file that never had to hold one. So the table's own
+    // capacity is the first bound and what a document could reference is the
+    // second.
     let references: u64 = counts.iter().map(|c| u64::from(*c)).sum();
-    if references > data.len().saturating_mul(8) as u64 {
+    if references > data.len().saturating_mul(8) as u64
+        || references > limits::MAX_XREF_SLOTS as u64
+    {
         return None;
     }
     let mut shared = Vec::new();
@@ -205,7 +213,7 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
     }
     let page_table_end = bits.byte();
 
-    // ---- Shared object hint table (F.4, Table F.5) ----
+    // ---- Shared object hint table (F.4.2, Table F.5) ----
     //
     // Addressed by `/S` rather than by where the page table happened to end:
     // the stream's own dictionary says where this begins, and a reader that
@@ -223,7 +231,10 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
     let total = usize::try_from(total).ok()?;
     // A hostile file can claim four billion entries in a stream of forty
     // bytes; the reads below would fail anyway, but not before the allocation.
-    if total > data.len().saturating_mul(8) {
+    // And it can claim a billion of them in a stream large enough to hold
+    // that many bits, which the first bound alone lets through -- see the
+    // identifier count above, which is the same shape of claim.
+    if total > data.len().saturating_mul(8) || total > limits::MAX_XREF_SLOTS {
         return None;
     }
     let mut shared_lengths = Vec::new();
@@ -464,6 +475,56 @@ mod tests {
         assert_eq!(decode(&[0u8; 64], 0, limits::MAX_PAGES + 1), None);
     }
 
+    /// A shared-entry count the stream is large enough to state is still a
+    /// count no document could have.
+    ///
+    /// The bits-that-could-hold-them bound alone lets a 128 KiB hint stream
+    /// claim a million entries and a 16 MiB one claim a hundred million, which
+    /// is a four-hundred-megabyte vector grown from a field nobody checked.
+    /// Zero-width group lengths mean the reads that follow consume nothing, so
+    /// nothing downstream would have refused it either.
+    #[test]
+    fn a_shared_entry_count_no_document_could_have_is_refused() {
+        // Big enough that `total` passes the bits bound, so this measures the
+        // second one and not the first.
+        let mut data = vec![0u8; 36 + 24 + (limits::MAX_XREF_SLOTS + 8) / 8];
+        let shared_at = 36;
+        // Table F.5 item 4, the entry count, is the fourth 32-bit field of the
+        // shared object header: bytes 12 to 16 of it.
+        let total = (limits::MAX_XREF_SLOTS as u32) + 1;
+        data[shared_at + 12..shared_at + 16].copy_from_slice(&total.to_be_bytes());
+        assert_eq!(decode(&data, shared_at, 0), None);
+
+        // And the cap itself decodes, so what refused the above is the count
+        // being over it rather than anything else about these bytes.
+        data[shared_at + 12..shared_at + 16]
+            .copy_from_slice(&(limits::MAX_XREF_SLOTS as u32).to_be_bytes());
+        let read = decode(&data, shared_at, 0).expect("the cap itself is readable");
+        assert_eq!(read.shared_lengths.len(), limits::MAX_XREF_SLOTS);
+    }
+
+    /// The same claim in the other table: shared object *references*.
+    ///
+    /// Table F.4 item 3 is one count per page and item 4 is one identifier per
+    /// reference, so a single page can claim four billion of them. At item
+    /// 11's zero width they consume no bits, which is what makes the count
+    /// rather than the stream the thing that has to be bounded.
+    #[test]
+    fn a_shared_reference_count_no_document_could_have_is_refused() {
+        let mut data = vec![0u8; 36 + 24 + (limits::MAX_XREF_SLOTS + 8) / 8];
+        // Item 10, the width of a page's reference count, at bytes 28 and 29;
+        // item 11, the identifier width, left at zero.
+        data[29] = 32;
+        let references = (limits::MAX_XREF_SLOTS as u32) + 1;
+        data[36..40].copy_from_slice(&references.to_be_bytes());
+        let shared_at = data.len() - 24;
+        assert_eq!(decode(&data, shared_at, 1), None);
+
+        data[36..40].copy_from_slice(&(limits::MAX_XREF_SLOTS as u32).to_be_bytes());
+        let read = decode(&data, shared_at, 1).expect("the cap itself is readable");
+        assert_eq!(read.pages[0].shared.len(), limits::MAX_XREF_SLOTS);
+    }
+
     /// A hostile shared-reference count over a zero-width identifier column
     /// would otherwise grow a vector without consuming a bit.
     #[test]
@@ -580,8 +641,8 @@ mod corpus {
         NeedsPassword,
     }
 
-    /// F.2.2: the parameter dictionary is the first object in the file, so a
-    /// file whose first object is anything else is not linearized. That is the
+    /// F.3.3: the parameter dictionary is the first object in the body of the
+    /// file, so a file whose first object is anything else is not linearized. That is the
     /// same test [`crate::validate`] applies, deliberately: two different
     /// answers to "is this file linearized" would make the count meaningless.
     fn read_hints(bytes: Vec<u8>) -> Outcome {

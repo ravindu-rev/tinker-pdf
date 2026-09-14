@@ -852,6 +852,18 @@ impl Document {
         self.inner.first_page_end()
     }
 
+    /// Whether the main cross-reference table has been fetched.
+    ///
+    /// Always true for a document that did not open on Annex F's head-only
+    /// path, which has one table and read it at open. For one that did, this
+    /// is how a caller sees whether a page was reached through the hint
+    /// tables, which cost that page's own bytes, or through the page tree,
+    /// which costs the table at `/T` and therefore the tail.
+    #[must_use]
+    pub fn main_table_fetched(&self) -> bool {
+        self.inner.main_table_fetched()
+    }
+
     /// Whether every byte of the document has been fetched.
     ///
     /// Always true for one opened from a buffer. For a streamed one it is how

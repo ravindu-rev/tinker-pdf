@@ -348,7 +348,7 @@ pub enum DefectKind {
     LinkWithoutTarget,
 
     // ---- linearization (Annex F) ------------------------------------------
-    /// F.2.2: a parameter dictionary that is not what it declares — `/L`
+    /// F.3.3: a parameter dictionary that is not what it declares — `/L`
     /// against the file's own length, `/N` against the pages, `/O` against the
     /// first page's object, `/T` against the main table's first entry.
     LinearizedParameterWrong {
@@ -659,7 +659,7 @@ impl core::fmt::Display for DefectKind {
             },
             DefectKind::StreamDoesNotDecode => f.write_str("the filter chain refused it (7.4)"),
             DefectKind::LinearizedParameterWrong { entry } => {
-                write!(f, "the linearization dictionary's {entry} (F.2.2)")
+                write!(f, "the linearization dictionary's {entry} (Table F.1)")
             }
             DefectKind::HintStreamUnreadable => {
                 f.write_str("the primary hint stream cannot be read (F.3)")
@@ -2841,7 +2841,7 @@ impl Validator<'_> {
     /// whole design: the writer's own round-trip reader already agrees with
     /// the writer, which is the agreement that proves nothing.
     fn linearization(&mut self, sections: &[Section]) {
-        // F.2.2: the parameter dictionary is the first object in the file, and
+        // F.3.3: the parameter dictionary is the first object in the body, and
         // a file whose first object is anything else is simply not linearized.
         let Some(first) = self.first_object() else {
             return;
@@ -2857,7 +2857,7 @@ impl Validator<'_> {
             nonnegative(dict.get_int(name))
         };
 
-        // F.2.2 item 2: the length of the whole file.
+        // Table F.1's `/L`: the length of the whole file.
         if parameter(b"L") != Some(self.buf.len() as u64) {
             self.report(
                 Some(first.0),
@@ -3174,7 +3174,8 @@ impl Validator<'_> {
         }
     }
 
-    /// The consecutive run of object numbers page `index` owns (F.3.8).
+    /// The consecutive run of object numbers page `index` owns (Table F.4
+    /// item 1).
     fn page_run(&self, index: usize) -> Option<Vec<u32>> {
         let page = self.pages.get(index)?;
         match self.pages.get(index + 1) {
@@ -3219,7 +3220,7 @@ impl Validator<'_> {
     }
 
     /// The first indirect object in the file, by position rather than by
-    /// number (F.2.2 asks for the first one *written*).
+    /// number (F.3.3 asks for the first one *written*).
     fn first_object(&self) -> Option<(ObjRef, Object)> {
         let mut at = 0usize;
         while at < self.buf.len() {

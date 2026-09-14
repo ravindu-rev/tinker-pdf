@@ -175,6 +175,18 @@ pub const LADDER_RESCAN_MIN_FAILURES: usize = 4;
 /// which run to a few hundred thousand pages.
 pub const MAX_PAGES: usize = 1 << 21;
 
+/// The most objects one hint-named page run may contribute (Annex F).
+///
+/// A page's byte run is a range the file's own hint table chose, so the
+/// `N G obj` headers inside it are a count an attacker picks. Every one of
+/// them is a map entry, so the walk that finds them is bounded here rather
+/// than by the range's length: a megabyte of `1 0 obj` would otherwise buy a
+/// map of a hundred thousand entries for nothing. A run this long is not a
+/// page — the largest in the fetched corpora is sixteen objects — so a range
+/// that reaches the cap is refused whole and the page falls back to the main
+/// cross-reference table.
+pub const MAX_HINTED_PAGE_OBJECTS: usize = 4096;
+
 /// The most entries one name or number tree may yield.
 ///
 /// Bounds a hostile or cyclic tree without bounding any real one: documents

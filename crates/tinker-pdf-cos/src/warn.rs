@@ -272,6 +272,25 @@ pub enum WarningKind {
     /// path reads it instead, which is what every other reader would have
     /// done anyway.
     LinearizedParametersUnusable,
+    /// Annex F: the primary hint stream `/H` names could not be read, so a
+    /// page other than the first is reached through the main cross-reference
+    /// table instead.
+    ///
+    /// Not a defect in the file by itself — `/H` may name a stream this
+    /// reader will not decode, or the tables may run out mid-field, and both
+    /// are cases [`crate::validate`] already reports on their own terms. What
+    /// this records is the *consequence*: the accelerator stood down and the
+    /// generic path paid for the tail (ruling 10).
+    LinearizedHintsUnusable,
+    /// Annex F: the page offset hint table pointed at bytes that are not the
+    /// page it claimed, so the page tree was walked instead.
+    ///
+    /// The [`Warning`]'s `object` names what was found there, when anything
+    /// was. Hints accelerate and never decide: a table naming a byte range
+    /// whose leading object is not a page leaf with its own `/MediaBox` and
+    /// `/Resources` buys nothing, and a page built from it would be the wrong
+    /// page rather than a cheaper one.
+    LinearizedPageHintRejected,
     /// A streamed document needed every byte and fetched them.
     ///
     /// The repair rescan is one forward pass over everything, a container is
@@ -392,6 +411,8 @@ impl WarningKind {
             WarningKind::DocumentRescanned => "document-rescanned",
             WarningKind::LinearizedLengthMismatch => "linearized-length-mismatch",
             WarningKind::LinearizedParametersUnusable => "linearized-parameters-unusable",
+            WarningKind::LinearizedHintsUnusable => "linearized-hints-unusable",
+            WarningKind::LinearizedPageHintRejected => "linearized-page-hint-rejected",
             WarningKind::WholeFileFetched => "whole-file-fetched",
             WarningKind::FieldCharacterUnrepresentable { .. } => "field-character-unrepresentable",
         }
