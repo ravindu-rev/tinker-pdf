@@ -382,15 +382,20 @@ conforming file.
 **ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 have two halves and only one of
 them landed.** The clause requires every property to belong to a predefined
 schema *and* to be written in the value type that schema declares. The second
-needs a table both revisions agree on; the first needs the revision ISO 19005
-cites, which is XMP 2004, and Adobe publishes a later one. The difference is
-not academic: `xmp:Advisory`, `xmpMM:LastURL`, `xmpMM:RenditionOf`,
-`xmpMM:SaveID`, `exif:MakerNote`, `exif:ComponentsConfiguration`, four
-`xmpDM:` properties and the whole of `xmpidq` and the Exif `aux` namespace
-appear in fixtures annotated **pass** and in none of the published tables, so
-reading the table as a membership list would have reported every one of them.
-`PDFA_STAGED` still carries the entry, still counts 37, and now says which half
-it is about.
+needs a table both revisions agree on; the first needs the revision each part
+cites, and the table this build had was Adobe's current one, which is neither.
+The difference is not academic: `xmp:Advisory`, `xmpMM:LastURL`,
+`xmpMM:RenditionOf`, `xmpMM:SaveID`, `exif:MakerNote`,
+`exif:ComponentsConfiguration`, four `xmpDM:` properties and the whole of
+`xmpidq` and the Exif `aux` namespace appear in fixtures annotated **pass** and
+in none of the published tables, so reading that table as a membership list
+would have reported every one of them. `PDFA_STAGED` still carries the entry,
+still counts 37, and now says which half it is about.
+
+*Amended at the commit recorded in “The two revisions the standards cite”
+below.* The paragraph above said the revision "ISO 19005 cites" is XMP 2004,
+which is true of part 1 and false of parts 2 and 3; the wording has been
+corrected here and the cause is recorded there.
 
 Per ledger row, in files still disagreeing:
 
@@ -453,6 +458,111 @@ one level too deep, which no fixture had. Writing that fixture took the row to
   no corpus at all, is `pdfa_writer.rs`: it validates a document this engine
   wrote at every flavour it can claim and asserts zero findings, against a
   packet generated from the builder's own table.
+
+## The two revisions the standards cite
+
+*Recorded 14 September 2026, at the commit that landed it.* Same corpus, same
+2 371-file bar. **This commit ships no new rule.** It replaces one table with
+the two the standards actually cite, so that the membership half has something
+to be built on; the value-type half is the only rule reading them and it was
+not touched.
+
+**Which revision each part cites.**
+
+| part | revision | table | schemas | properties |
+| --- | --- | --- | ---: | ---: |
+| ISO 19005-1 | *XMP Specification*, January 2004, 94 pp, pp. 37–58 | `PREDEFINED_2004` | 11 | 169 |
+| ISO 19005-2, -3 | *XMP Specification*, September 2005, 112 pp, pp. 39–70 | `PREDEFINED_2005` | 14 | 274 |
+| ISO 19005-4 | — | neither | — | — |
+
+The evidence is the conformance suite, from two directions. Its fixtures state
+their own expectation in words: **all 366** part-1 membership fixtures say the
+property is or is not "in XMP 2004" and **all 549** part-2 ones say "in XMP
+2005", with no counterexample either way. And its machine-readable profiles
+bind the revision to the part by name — `PDFA-1B.xml` calls
+`isPredefinedInXMP2004`, `PDFA-2B.xml` calls `isPredefinedInXMP2005`.
+
+**The suite's own fixtures were then used to check the transcription, and they
+are 421 for 422.** Every fixture message of the form *the property X, which is
+(not) permitted in \<schema\> in XMP 2004/2005* is a membership claim; there
+are 422 distinct ones, and 421 agree with the transcribed tables schema by
+schema and name by name. The one that does not is `xmpMM:InstanceID`, which
+`6-7-2-t09-fail-q` calls permitted in XMP 2004 and whose name does not occur
+anywhere in the 94 pages of the January 2004 document — September 2005
+introduces it, with an editorial marker its own author left in (`<< new
+InstanceID stuff>>`, p45). The table is not patched to agree; the disagreement
+is between two published sources and belongs in the ledger when the membership
+rule lands.
+
+**The census moved by eleven files and the false-positive count did not move.**
+
+| | before | after |
+| --- | ---: | ---: |
+| the bar | 1 691/2 371 | **1 702**/2 371 |
+| false positives, of 831 annotated `pass` | 1 | **1** |
+| the value-type half's four ledger rows | 265/512 | **276**/512 |
+
+The movement was not predicted and is worth reading, because the cross-check
+that made this commit safe compared only the properties the old table and the
+two revisions **share** — on which every single form is identical, so no file
+could move for that reason, and none did. What moved is the properties they do
+*not* share.
+
+- **Thirteen files gained**, every one annotated `fail`, every one a property
+  the cited revision defines and Adobe's current tables had dropped:
+  `xmpMM:LastURL` and `xmpMM:RenditionOf` (under both parts), `exif:MakerNote`
+  and `exif:ComponentsConfiguration`, the four `xmpDM:` modification-date and
+  copyright properties, and `aux:Lens` and `aux:SerialNumber`. The old table
+  could say nothing about any of them because it no longer carried the name.
+- **Two files lost**, both under part 1, and each for its own good reason.
+  `6-7-2-t03-fail-u` writes `photoshop:History`, which January 2004 has no such
+  property in — and the fixture's own message is *"The property 'History' is
+  not permitted in Photoshop Schema in XMP 2004"*, a **membership** finding. The
+  old table reported that file on a value type, which was the right verdict for
+  the wrong reason; the right reason is the staged half. `6-7-2-t09-fail-q` is
+  the `xmpMM:InstanceID` disagreement above.
+
+Both losses are already covered by the four ledger rows, and the census still
+reports 0 uncovered disagreements and 0 stale rows.
+
+**`REVISION_DRIFT` is deleted, and nothing replaces it.** It held exactly one
+row — `photoshop:SupplementalCategories` under part 1 — a hand-written override
+saying "the suite wins here", bolted beside a table that could not explain why
+the suite said two different things under two parts. The specifications explain
+it: `Text` on page 47 of January 2004, `bag Text` on page 55 of September 2005,
+and the September 2005 changelog records the change under April 2005 in as many
+words. The override is now an ordinary row in each of two ordinary tables, and
+the four fixtures that pinned it still pass.
+
+**TechNote 0008 had been generalised, and all five places are corrected.** The
+note is titled *Predefined XMP Properties in **PDF/A-1***: authority for part 1
+and for no other part. Read as though it said "ISO 19005" it became a claim
+about parts 2 and 3 too, and that claim reached `xmp_schemas.rs`, `xmp.rs`,
+`pdfa.rs`, `docs/design/pdfa.md` and `THIRDPARTY.md` — including one file that
+contradicted itself, saying the revision "is XMP 2004" for both parts in one
+paragraph and that the parts cite different revisions in another.
+
+**Counted injections.** Each defect re-introduced in turn, the whole
+`tinker-pdf` crate run with `--no-fail-fast` before `-p`, and the count
+recorded — zeros included, because a guard that catches nothing when its defect
+is injected is not a guard.
+
+| Injected | Tests that failed |
+| --- | ---: |
+| the properties left unsorted | 18 |
+| `Lang Alt` mapped to `Array` | 10 |
+| a `bag` value type mapped to `Simple` | 6 |
+| part 2 routed to the 2004 table | 5 |
+| part 1 routed to the 2005 table | 3 |
+| `photoshop:SupplementalCategories` given one form in both tables | 3 |
+| **part 4 routed to the 2005 table** | **0, then 1** |
+
+**The zero is the row worth reading.** Routing part 4 to a table it does not
+cite failed nothing at all, because `part_carries_the_predefined_schema_rule`
+decides part 4 before `value_form` is ever asked — so the `Part::Four => None`
+arm was a sentence in a comment and not a claim anything held.
+`the_table_router_gives_part_four_nothing` is what makes it one, and the row
+above is measured before and after it was written.
 
 ## What the annotation group measured
 

@@ -39,8 +39,10 @@ never happens.
   part 1, compared as instants where they are dates; and the value type every
   property of a predefined schema declares — a simple value, an array, a
   language alternative or a structure — read from the serialisation's own
-  shape rather than from its text. Parts 1 to 3 carry that last requirement
-  and **part 4 dropped it**, so it does not run there.
+  shape rather than from its text, and against **the revision the part cites**:
+  part 1 the January 2004 XMP specification, parts 2 and 3 the September 2005
+  one. Parts 1 to 3 carry that last requirement and **part 4 dropped it**, so
+  it does not run there.
 - **Fonts** needs `tinker-pdf-font` and the content walk: every font embedded
   including the standard 14, the program's format against the key that names
   it, the subset tag's shape, symbolic and non-symbolic `/Encoding`,
@@ -131,8 +133,8 @@ make no PDF/A claim, and scoring them would measure the measurement:
 | | files | agree |
 | --- | --- | --- |
 | annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 861 |
-| **total** | **2 371** | **1 691** |
+| annotated `-fail-` | 1 540 | 872 |
+| **total** | **2 371** | **1 702** |
 
 The single disagreement on the `pass` side is a **reading**, recorded as one:
 ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
@@ -178,7 +180,7 @@ against the table its fixture passed, so a clause this build reads wrongly is
 read wrongly in both directions and the pair agrees with itself.
 
 The corpus is where that asymmetry breaks, and only for files somebody else
-made. It is why "1 691 of 2 371" is the honest measure of how much of ISO
+made. It is why "1 702 of 2 371" is the honest measure of how much of ISO
 19005 this build understands, and why a document the writer produces is
 reported as *"this validator and the structural one find nothing"* rather than
 as *"it conforms"*.

@@ -547,8 +547,10 @@ fn an_information_entry_that_is_not_a_string_is_a_finding() {
 // ---- 6.7.2 / 6.6.2.3: the predefined schemas' value types -----------------
 //
 // The membership half of the clause is staged and `PDFA_STAGED` names it; what
-// runs is the value-type half, over the table in `pdfa/xmp_schemas.rs`. Two
-// things are asserted throughout, and the second is the one that matters.
+// runs is the value-type half, over the two revision tables in
+// `pdfa/xmp_schemas.rs` — part 1 against January 2004, parts 2 and 3 against
+// September 2005. Two things are asserted throughout, and the second is the
+// one that matters.
 //
 // **Every case has a twin that must stay silent.** The table judges every
 // property of every packet in the corpus, `pass` files included, so the failure
@@ -556,10 +558,11 @@ fn an_information_entry_that_is_not_a_string_is_a_finding() {
 // file. A fixture that fires proves the rule can see; its twin proves it can
 // tell.
 //
-// **A property the table does not name is never judged.** That is the
-// membership half staying staged, and it is asserted against the three
-// families the corpus actually carries rather than against an invented
-// namespace.
+// **A property the cited revision's table does not name is never judged.**
+// That is the membership half staying staged, and it is asserted against names
+// the corpus actually carries rather than against an invented namespace — and
+// against the names one revision has and the other does not, which is where
+// the routing shows.
 
 /// The Dublin Core binding.
 const DC_NS: &str = r#"xmlns:dc="http://purl.org/dc/elements/1.1/""#;
@@ -567,7 +570,8 @@ const DC_NS: &str = r#"xmlns:dc="http://purl.org/dc/elements/1.1/""#;
 const PDF_NS: &str = r#"xmlns:pdf="http://ns.adobe.com/pdf/1.3/""#;
 /// The media-management binding, with the resource-reference structure's own.
 const MM_NS: &str = r##"xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#""##;
-/// The Photoshop binding, which is where the one revision-drift row lives.
+/// The Photoshop binding, which is where the one property the two revisions
+/// give different forms lives.
 const PS_NS: &str = r#"xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/""#;
 
 /// A packet claiming `part`, whose subject properties sit on a **second**
@@ -810,12 +814,13 @@ fn the_attribute_shorthand_is_a_structure_and_the_exclusions_are_not() {
     );
 }
 
-/// A property the table does not name is not judged, in either direction.
+/// A property the cited revision's table does not name is not judged, in
+/// either direction.
 ///
 /// This is the membership half staying staged, asserted against what the
-/// corpus actually carries. Each of these appears in an annotated `pass`
-/// fixture and in none of Adobe's published tables, so a build that read the
-/// table as a membership list would report every one of them.
+/// corpus actually carries. A name neither revision printed is a name only a
+/// membership rule could have an opinion about, and until 6.7.8's extension
+/// schemas are read there is no such rule here.
 #[test]
 fn a_property_the_table_does_not_name_is_never_judged() {
     // An entirely unknown schema.
@@ -836,32 +841,76 @@ fn a_property_the_table_does_not_name_is_never_judged() {
         Vec::new()
     );
 
-    // The three families `xmp_schemas.rs` names: a property of a known schema
-    // that a later revision added, the Exif `aux` namespace, and `xmpidq`.
+    // `pdf:Trapped` is the one the corpus pins directly: `6-7-2-t03-fail-r`
+    // says it is "not permitted in Adobe PDF Schema in XMP 2004", and the
+    // string does not occur in either specification, so it is in neither
+    // table. A membership rule would report it; this one says nothing.
     assert_eq!(
-        typed_findings(
-            "1",
-            r#"xmlns:exif="http://ns.adobe.com/exif/1.0/""#,
-            "<exif:MakerNote>x</exif:MakerNote>"
-        ),
+        typed_findings("1", PDF_NS, "<pdf:Trapped>False</pdf:Trapped>"),
         Vec::new()
     );
-    assert_eq!(
-        typed_findings(
-            "1",
+}
+
+/// The table a property is judged against is **the one its part cites**, and a
+/// name only the later revision carries is judged only under the later parts.
+///
+/// `xmp:Rating` is in the September 2005 XMP Basic schema (p41) and not in the
+/// January 2004 one (p38-39), so an array written where it declares a closed
+/// choice of Integer is a finding under parts 2 and 3 and silence under part 1
+/// — not because part 1 permits it, but because part 1's revision has no such
+/// property and only the staged membership half could say so. The Camera Raw,
+/// Dynamic Media and additional-Exif namespaces are the same case at schema
+/// scope: all three arrive in September 2005.
+#[test]
+fn a_property_only_the_later_revision_carries_is_judged_only_under_the_later_parts() {
+    const XMP_NS: &str = r#"xmlns:xmp="http://ns.adobe.com/xap/1.0/""#;
+    let rating = "<xmp:Rating><rdf:Bag><rdf:li>3</rdf:li></rdf:Bag></xmp:Rating>";
+    assert_eq!(typed_findings("1", XMP_NS, rating), Vec::new());
+    for part in ["2", "3"] {
+        assert_eq!(
+            typed_findings(part, XMP_NS, rating),
+            mismatch("xmp:Rating", "a simple value", "an array"),
+            "part {part}"
+        );
+    }
+
+    // Three whole schemas, at schema scope. Each is written in a form the
+    // September 2005 table contradicts, so part 1's silence is the routing
+    // rather than a packet nobody could object to.
+    for (bindings, properties, property, expected, found) in [
+        (
+            r#"xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/""#,
+            "<crs:Version><rdf:Bag><rdf:li>3.7</rdf:li></rdf:Bag></crs:Version>",
+            "crs:Version",
+            "a simple value",
+            "an array",
+        ),
+        (
             r#"xmlns:aux="http://ns.adobe.com/exif/1.0/aux/""#,
-            "<aux:Lens>50mm</aux:Lens>"
+            "<aux:Lens><rdf:Seq><rdf:li>50mm</rdf:li></rdf:Seq></aux:Lens>",
+            "aux:Lens",
+            "a simple value",
+            "an array",
         ),
-        Vec::new()
-    );
-    assert_eq!(
-        typed_findings(
-            "1",
-            r#"xmlns:xmpidq="http://ns.adobe.com/xmp/Identifier/qual/1.0/""#,
-            "<xmpidq:Scheme>x</xmpidq:Scheme>"
+        (
+            r#"xmlns:xmpDM="http://ns.adobe.com/xmp/1.0/DynamicMedia/""#,
+            "<xmpDM:projectRef>x</xmpDM:projectRef>",
+            "xmpDM:projectRef",
+            "a structure",
+            "a simple value",
         ),
-        Vec::new()
-    );
+    ] {
+        assert_eq!(
+            typed_findings("1", bindings, properties),
+            Vec::new(),
+            "{property} under part 1"
+        );
+        assert_eq!(
+            typed_findings("2", bindings, properties),
+            mismatch(property, expected, found),
+            "{property} under part 2"
+        );
+    }
 }
 
 /// Part 4 does not carry the requirement, and the silence is a decision.
@@ -909,16 +958,16 @@ fn the_clause_a_value_type_finding_names_follows_the_part() {
     }
 }
 
-/// The one row where the revisions disagree, reached through the flavour claim
-/// rather than through the rule directly.
+/// The one property whose form the revisions disagree about, reached through
+/// the flavour claim rather than through the rule directly.
 ///
-/// `photoshop:SupplementalCategories` is a bag in the published table and a
-/// simple value under ISO 19005-1's revision. The two spellings are each
-/// other's twin: whichever is conforming under one part is a finding under the
-/// other, so a build that dropped the per-part override would fail this in
-/// both directions at once.
+/// `photoshop:SupplementalCategories` is `Text` on page 47 of the January 2004
+/// revision and `bag Text` on page 55 of the September 2005 one. The two
+/// spellings are each other's twin: whichever is conforming under one part is
+/// a finding under the other, so a build that routed both parts to one table
+/// would fail this in both directions at once.
 #[test]
-fn the_revision_drift_row_is_reached_through_the_flavour_claim() {
+fn the_one_property_the_revisions_retyped_is_reached_through_the_flavour_claim() {
     let simple = "<photoshop:SupplementalCategories>x</photoshop:SupplementalCategories>";
     let bag = "<photoshop:SupplementalCategories><rdf:Bag><rdf:li>x</rdf:li></rdf:Bag>\
                </photoshop:SupplementalCategories>";

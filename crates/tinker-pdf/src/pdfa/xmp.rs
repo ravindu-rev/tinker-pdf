@@ -23,11 +23,14 @@
 //! predefined schema or be described by an extension schema, **and** to carry
 //! the value type that schema declares.
 //!
-//! The value-type half runs, over the table in [`super::xmp_schemas`]. The
-//! membership half is staged and [`super::STAGED`] names it: reading the same
-//! table as a list of *permitted* properties would report conforming files,
-//! because the revision ISO 19005 cites and the revision Adobe publishes are
-//! not the same one. `xmp_schemas.rs` names the properties that differ.
+//! The value-type half runs, over the tables in [`super::xmp_schemas`] — one
+//! per revision of the XMP specification, because the parts cite different
+//! ones: part 1 the January 2004 revision, parts 2 and 3 the September 2005
+//! one. The membership half is staged and [`super::STAGED`] names it: reading
+//! the same tables as lists of *permitted* properties would report every
+//! conforming file whose packet declares an extension schema, and ISO 19005-1
+//! 6.7.8 is what says those files are conforming. `xmp_schemas.rs` argues
+//! both halves at length.
 
 use tinker_pdf_cos::{decode_text_string, parse_date, Date, Dict};
 use tinker_pdf_xml::{Event, Name, Source};
@@ -523,14 +526,14 @@ fn properties(packet: &[u8]) -> Option<Properties> {
 // ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 have two halves. The membership
 // half — every property belongs to a predefined schema or to an extension
 // schema — is still staged, and `xmp_schemas.rs` records at length why: the
-// applicable revision is XMP 2004, the published tables are a later one, and
-// the difference is a list of properties that conforming corpus files use.
+// tables now say which properties each cited revision defined, and what is
+// left is the rule itself and the extension-schema exception 6.7.8 owes it.
 //
-// This is the other half. A property the vendored table *does* name is one
-// both revisions carry, and what it declares is a value type. A packet that
-// writes `xmpDM:projectRef` as a string where the schema declares a structure
-// has not written that property; it has written something else under its name,
-// which is precisely what the clause exists to stop.
+// This is the other half. A property the cited revision's table *does* name is
+// one that revision printed a value type for. A packet that writes
+// `xmpDM:projectRef` as a string where the schema declares a structure has not
+// written that property; it has written something else under its name, which
+// is precisely what the clause exists to stop.
 //
 // Part 4 is excluded, and the exclusion is evidence rather than caution: the
 // conformance suite has `PDF_A-1b/6.7 Metadata/6.7.2 Properties` and
@@ -821,6 +824,7 @@ fn schema_value_types(packet: &[u8], part: Part, out: &mut Vec<Raw>) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::xmp_schemas;
     use super::*;
 
     fn read(packet: &str) -> Option<Properties> {
@@ -1056,17 +1060,20 @@ mod tests {
         assert_eq!(found[0].local, "DerivedFrom");
     }
 
-    /// A property no predefined schema here names is **not** reported.
+    /// A property the cited revision's table does not name is **not**
+    /// reported.
     ///
     /// This is the membership half staying staged, asserted rather than
-    /// described. `xmp:Advisory` is a real XMP 2004 property that Adobe's
-    /// current tables no longer carry, so a rule that read this table as a
-    /// membership list would report the conforming corpus file that uses it.
+    /// described. `pdf:Trapped` is the sharp case: the veraPDF suite has a
+    /// fixture saying in as many words that it is "not permitted in Adobe PDF
+    /// Schema in XMP 2004", and the string "Trapped" appears in neither
+    /// revision — so a membership rule would report it and the value-type rule
+    /// says nothing about it at all.
     #[test]
     fn a_property_this_table_does_not_name_is_not_a_finding() {
         for body in [
-            "<rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" rdf:about=\"\">\
-             <xmp:Advisory><rdf:Bag><rdf:li>x</rdf:li></rdf:Bag></xmp:Advisory></rdf:Description>",
+            "<rdf:Description xmlns:pdf=\"http://ns.adobe.com/pdf/1.3/\" rdf:about=\"\">\
+             <pdf:Trapped>False</pdf:Trapped></rdf:Description>",
             "<rdf:Description xmlns:zz=\"http://example.invalid/ns/\" rdf:about=\"\">\
              <zz:whatever>x</zz:whatever></rdf:Description>",
         ] {
@@ -1122,17 +1129,44 @@ mod tests {
         assert_eq!(types(body, Part::Two).len(), 1);
     }
 
-    /// The one entry in [`super::super::xmp_schemas::REVISION_DRIFT`], from
+    /// And the table router gives part 4 **nothing**, rather than a revision
+    /// part 4 does not cite.
+    ///
+    /// This exists because of a measured zero. The walk above never asks
+    /// `value_form` for part 4, so routing part 4 to the September 2005 table
+    /// failed **no test at all** when it was injected: the arm was a sentence
+    /// in a comment and not a claim anything held. ISO 19005-4 is drafted
+    /// against ISO 16684-1, which neither table transcribes, so `None` — "no
+    /// table here can judge this" — is the only honest answer, and it is also
+    /// the only one that cannot report a conforming file if some later rule
+    /// does reach here.
+    #[test]
+    fn the_table_router_gives_part_four_nothing() {
+        // `dc:title` is in both revisions, so this is the router answering and
+        // not a name neither table carries.
+        const DC: &str = "http://purl.org/dc/elements/1.1/";
+        assert_eq!(
+            xmp_schemas::value_form(DC, "title", Part::One),
+            Some(ValueForm::LangAlt)
+        );
+        assert_eq!(
+            xmp_schemas::value_form(DC, "title", Part::Two),
+            Some(ValueForm::LangAlt)
+        );
+        assert_eq!(xmp_schemas::value_form(DC, "title", Part::Four), None);
+    }
+
+    /// The one property whose **form** the two revisions disagree about, from
     /// both sides and under both parts.
     ///
     /// `photoshop:SupplementalCategories` is Text in the revision PDF/A-1
     /// cites and an unordered array in the one parts 2 and 3 cite, and the
     /// veraPDF suite asserts the conforming and the non-conforming spelling
-    /// under each. Four assertions, because an override applied to the wrong
-    /// part reports a conforming file — which is exactly what this one did
-    /// before the part was added to it.
+    /// under each. Four assertions, because a table applied to the wrong part
+    /// reports a conforming file — which is exactly what the hand-written
+    /// override these tables replaced did before the part was added to it.
     #[test]
-    fn the_one_revision_drift_row_holds_under_both_parts() {
+    fn the_one_form_the_two_revisions_disagree_on_holds_under_both_parts() {
         const NS: &str = "xmlns:photoshop=\"http://ns.adobe.com/photoshop/1.0/\"";
         let text = format!(
             "<rdf:Description {NS} rdf:about=\"\">\
@@ -1154,39 +1188,129 @@ mod tests {
         assert_eq!(types(&text, Part::Three).len(), 1);
     }
 
-    /// The vendored table is sorted, which is what makes the lookup a binary
-    /// search and the iteration one order on every target (ruling 4).
+    /// Both revision tables are sorted, which is what makes the lookup a
+    /// binary search and the iteration one order on every target (ruling 4).
     ///
     /// A generator that emitted an unsorted schema would make `value_form`
     /// miss properties silently — a binary search over unsorted data returns
     /// `Err` rather than failing — so the property is checked rather than
-    /// trusted to the generator.
+    /// trusted to the script that emitted the rows.
     #[test]
-    fn the_vendored_table_is_sorted_and_has_no_duplicate_property() {
-        let mut schemas = 0;
-        let mut properties = 0;
-        let mut previous_uri = "";
-        for schema in super::super::xmp_schemas::PREDEFINED {
-            assert!(
-                previous_uri < schema.uri,
-                "{} is out of order after {previous_uri}",
-                schema.uri
-            );
-            previous_uri = schema.uri;
-            schemas += 1;
-            let mut previous = "";
-            for (name, _) in schema.properties {
+    fn both_revision_tables_are_sorted_and_have_no_duplicate_property() {
+        for (label, table, want_schemas, want_properties) in [
+            ("January 2004", xmp_schemas::PREDEFINED_2004, 11, 169),
+            ("September 2005", xmp_schemas::PREDEFINED_2005, 14, 274),
+        ] {
+            let mut schemas = 0;
+            let mut properties = 0;
+            let mut previous_uri = "";
+            for schema in table {
                 assert!(
-                    previous < *name,
-                    "{} in {} is out of order after {previous}",
-                    name,
+                    previous_uri < schema.uri,
+                    "{label}: {} is out of order after {previous_uri}",
                     schema.uri
                 );
-                previous = name;
-                properties += 1;
+                previous_uri = schema.uri;
+                schemas += 1;
+                let mut previous = "";
+                for (name, _) in schema.properties {
+                    assert!(
+                        previous < *name,
+                        "{label}: {name} in {} is out of order after {previous}",
+                        schema.uri
+                    );
+                    previous = name;
+                    properties += 1;
+                }
+            }
+            assert_eq!(schemas, want_schemas, "{label}: schemas");
+            assert_eq!(properties, want_properties, "{label}: properties");
+        }
+    }
+
+    /// The two tables differ **where the two specifications differ**, and
+    /// agree everywhere else.
+    ///
+    /// A table emitted by a script needs a check that the script's output is
+    /// what the specifications say, and a count alone does not give one: two
+    /// tables of the right size could still be the same table twice, or the
+    /// same table shifted. So the differences the transcription found are
+    /// named one by one — the three schemas September 2005 added, the two
+    /// `xmp` properties it added, the one `exif` property it dropped, and the
+    /// one value form it changed — and everything else is asserted to be
+    /// identical, property for property.
+    #[test]
+    fn the_two_tables_differ_exactly_where_the_two_specifications_do() {
+        use xmp_schemas::Schema;
+
+        fn form(table: &'static [Schema], uri: &str, local: &str) -> Option<ValueForm> {
+            let schema = table.iter().find(|schema| schema.uri == uri)?;
+            let index = schema
+                .properties
+                .binary_search_by(|(name, _)| (*name).cmp(local))
+                .ok()?;
+            Some(schema.properties[index].1)
+        }
+        fn has(table: &'static [Schema], uri: &str) -> bool {
+            table.iter().any(|schema| schema.uri == uri)
+        }
+        const OLD: &[Schema] = xmp_schemas::PREDEFINED_2004;
+        const NEW: &[Schema] = xmp_schemas::PREDEFINED_2005;
+
+        // Three whole schemas, added in June 2005 by the 2005 document's own
+        // changelog: Camera Raw, the additional Exif properties, and Dynamic
+        // Media.
+        for uri in [
+            "http://ns.adobe.com/camera-raw-settings/1.0/",
+            "http://ns.adobe.com/exif/1.0/aux/",
+            "http://ns.adobe.com/xmp/1.0/DynamicMedia/",
+        ] {
+            assert!(!has(OLD, uri), "{uri} is not in the January 2004 revision");
+            assert!(has(NEW, uri), "{uri} is in the September 2005 revision");
+        }
+
+        // `xmp:Label` and `xmp:Rating`, added to the XMP Basic schema.
+        const XMP: &str = "http://ns.adobe.com/xap/1.0/";
+        for local in ["Label", "Rating"] {
+            assert_eq!(form(OLD, XMP, local), None, "xmp:{local} in 2004");
+            assert_eq!(
+                form(NEW, XMP, local),
+                Some(ValueForm::Simple),
+                "xmp:{local} in 2005"
+            );
+        }
+
+        // And the other direction, so this is not simply "2005 has more".
+        const EXIF: &str = "http://ns.adobe.com/exif/1.0/";
+        assert_eq!(form(OLD, EXIF, "MakerNote"), Some(ValueForm::Simple));
+        assert_eq!(form(NEW, EXIF, "MakerNote"), None);
+
+        // The one property whose form moved.
+        const PHOTOSHOP: &str = "http://ns.adobe.com/photoshop/1.0/";
+        assert_eq!(
+            form(OLD, PHOTOSHOP, "SupplementalCategories"),
+            Some(ValueForm::Simple)
+        );
+        assert_eq!(
+            form(NEW, PHOTOSHOP, "SupplementalCategories"),
+            Some(ValueForm::Array)
+        );
+
+        // Everything else agrees. Exactly one shared property disagrees about
+        // its form across the whole of both tables, and it is the one above —
+        // which is why no corpus file the single table these replaced could
+        // judge changed its verdict. The eleven that moved moved on names that
+        // table did not carry at all.
+        let mut disagreements = Vec::new();
+        for schema in OLD {
+            for (name, old) in schema.properties {
+                if let Some(new) = form(NEW, schema.uri, name) {
+                    if new != *old {
+                        disagreements.push(format!("{}:{name}", schema.prefix));
+                    }
+                }
             }
         }
-        assert_eq!(schemas, 12, "twelve predefined schemas");
-        assert_eq!(properties, 289, "289 properties");
+        assert_eq!(disagreements, ["photoshop:SupplementalCategories"]);
     }
 }

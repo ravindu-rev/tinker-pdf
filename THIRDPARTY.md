@@ -505,75 +505,67 @@ already allows. Its text is reproduced above.
 ### The predefined XMP schemas' property tables
 
 Transcribed into `crates/tinker-pdf/src/pdfa/xmp_schemas.rs` rather than
-vendored as a tree, for the reason the four Brotli tables above are: 360 lines
+vendored as a tree, for the reason the four Brotli tables above are: 443 lines
 of `(name, value type)` pairs are short enough to read in a diff, and
 `cargo xtask vendor` checks directories under `crates/<crate>/data`, which this
 is deliberately not.
 
-The source is **Adobe's own published namespace tables**, the `XMPNamespaces`
-directory of `github.com/adobe/xmp-docs` at commit
-`e2573ad7e7959e657b1aed704546e19319cb4f5d`. Twelve schemas and 289 properties
-were taken, and **only the value-type column**: what form each property is
-written in — a simple value, an array, a language alternative, or a structure.
+**Two sources, because the standards cite two revisions.** ISO 19005-1 cites
+the January 2004 revision of Adobe's XMP specification; ISO 19005-2 and
+ISO 19005-3 are governed by the September 2005 revision; ISO 19005-4 carries no
+predefined-schema requirement at all, so it reads neither table.
 
-The names are **not** read as a membership list, and that restraint is the
-whole reason this table can be trusted at all. ISO 19005 cites the XMP 2004
-revision; Adobe publishes a later one, and the difference is a list of
-properties that conforming files in the veraPDF corpus use — `xmp:Advisory`,
-`xmpMM:LastURL`, `xmpMM:RenditionOf`, `xmpMM:SaveID`, `exif:MakerNote`,
-`exif:ComponentsConfiguration`, four `xmpDM:` properties, and the whole of the
-`xmpidq` and Exif `aux` namespaces. Treating the table as a list of *permitted*
-properties would report every one of those conforming files, so the membership
-half of ISO 19005-1 6.7.2 stays staged and `PDFA_STAGED` names it.
+| table | document | fetched from | bytes | SHA-256 |
+| --- | --- | --- | ---: | --- |
+| `PREDEFINED_2004` | *XMP Specification*, Adobe Systems Incorporated, January 2004, 94 pp | `https://printtechnologies.org/standards/files/xmp-specification-jan04.pdf` | 601 059 | `a452d9629814e5dd502dac6d245bb8484a543f5aced178e9405f2e87a41a072d` |
+| `PREDEFINED_2005` | *XMP Specification*, Adobe Systems Incorporated, September 2005, 112 pp | `https://printtechnologies.org/standards/files/xmp-specification-sep05.pdf` | 931 213 | `6fd7659bbb8d859aee598b928feb24ec50bb430924fe4038d5ed4f1276988ddc` |
+
+**Nothing is vendored, and what was taken is not either document's text.** Both
+PDFs carry "All rights reserved" and neither grants a redistribution licence;
+neither file is in this repository and neither is redistributed by anything
+this repository builds. What was taken is chapter 4 "XMP Schemas"' tabulated
+**facts** — for each property, the namespace URI, the preferred prefix, the
+property name and the value type the table's own column prints — read off
+pages 37–58 of the January 2004 document and pages 39–70 of the September 2005
+one, with the page recorded beside every row and every row read back against
+that page a second time before it was written into the source. Eleven schemas
+and 169 properties from the first; fourteen and 274 from the second. Each value
+type is then narrowed to one of four **forms** an RDF/XML serialisation can be
+distinguished into without reading the value — a simple value, an array, a
+language alternative, or a structure — which is the only thing the engine
+stores and the only thing the rule reads.
+
+Because nothing of either document is reproduced, there is no licence text to
+carry here; the rows above record where the facts were read, which is what this
+file exists to make checkable. The BSD-3-Clause notice this entry used to carry
+belonged to Adobe's `xmp-docs` namespace tables, which were Adobe's *current*
+revision and are the tables these two replaced. Nothing from that repository is
+in the engine any more, so the notice is gone with it.
+
+The names are **not** read as a membership list, and that restraint is what
+makes the tables safe to compile in. ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3
+require every property to belong to a predefined schema *or* be described by an
+extension schema, and 6.7.8 is the second half of that sentence: a packet may
+declare a schema of its own and carry properties neither revision defines. A
+membership rule written before that declaration is read would report every
+conforming file that uses one, and the veraPDF corpus is full of them — so the
+membership half of the clause stays staged, `PDFA_STAGED` names it, and
 `crates/tinker-pdf/src/pdfa/xmp_schemas.rs` argues it at length.
 
-The transcription is left **exactly as Adobe publishes it**, and the one place
-this build reads a different answer is named separately rather than edited into
-the table: `REVISION_DRIFT` carries `photoshop:SupplementalCategories`, which
-ISO 19005-1's revision declares a simple value and the published table declares
-a bag. So what was transcribed and what was overridden stay separable.
-
-The evidence that the transcription is right is a count and a corpus:
-`the_vendored_table_is_sorted_and_has_no_duplicate_property` pins twelve
-schemas and 289 properties, and the rule runs over every annotated PDF/A file
-the veraPDF corpus carries without moving the false-positive count.
-
-The licence is reproduced here in full for the same reason Adobe's CMaps are:
-BSD-3-Clause requires a binary redistribution to carry it, and a compiled table
-is a binary redistribution. `xmp_schemas.rs` compiles into every binary that
-links the facade.
-
-```
-The BSD License
-
-Copyright (c) 1999 - 2018, Adobe Systems Incorporated
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-* Redistributions of source code must retain the above copyright notice, this
-  list of conditions and the following disclaimer.
-
-* Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-
-* Neither the name of Adobe Systems Incorporated, nor the names of its
-  contributors may be used to endorse or promote products derived from this
-  software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
+The evidence that the transcription is right is a count, a difference and a
+corpus. `both_revision_tables_are_sorted_and_have_no_duplicate_property` pins
+11 schemas and 169 properties against 14 and 274;
+`the_two_tables_differ_exactly_where_the_two_specifications_do` pins the three
+schemas September 2005 added, the two `xmp` properties it added, the one `exif`
+property it dropped, and the single property whose form it changed
+(`photoshop:SupplementalCategories`, `Text` on page 47 of January 2004 and
+`bag Text` on page 55 of September 2005 — a change the September 2005 document's
+own changelog records under April 2005). And the rule runs over all 2 371
+annotated PDF/A files the veraPDF corpus carries without moving the
+false-positive count by one file: the tables replaced a single table of Adobe's
+current revision, on which every shared property kept its form, and the eleven
+files the agreement gained are eleven `fail` fixtures whose properties the
+cited revisions name and the current tables had dropped.
 
 ## Test fixtures
 

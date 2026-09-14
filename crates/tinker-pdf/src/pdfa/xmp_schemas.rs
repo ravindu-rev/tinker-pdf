@@ -1,61 +1,128 @@
-//! The predefined XMP schemas' property tables: what value type each property
-//! declares, transcribed from a published source.
+//! The predefined XMP schemas, **one table per revision of the XMP
+//! specification**: which properties a revision defined, and what value type
+//! each of them declares.
 //!
-//! This is the table behind the value-type half of ISO 19005-1 6.7.2 and ISO
-//! 19005-2 6.6.2.3 — the staged-rules row of `docs/ROADMAP.md`, whose exit
+//! These are the tables behind the value-type half of ISO 19005-1 6.7.2 and
+//! ISO 19005-2 6.6.2.3 — the staged-rules row of `docs/ROADMAP.md`, whose exit
 //! criterion is that the staged count moves down and the agreement ratchet up,
-//! one ledger class at a time. It joins the metadata rule group `pdfa/xmp.rs`
+//! one ledger class at a time. They join the metadata rule group `pdfa/xmp.rs`
 //! delivered at milestone 3 of `docs/design/pdfa.md`.
+//!
+//! # Which revision each part cites
+//!
+//! | part | revision | table |
+//! | --- | --- | --- |
+//! | ISO 19005-1 | XMP Specification, **January 2004** | [`PREDEFINED_2004`] |
+//! | ISO 19005-2, ISO 19005-3 | XMP Specification, **September 2005** | [`PREDEFINED_2005`] |
+//! | ISO 19005-4 | — | none; the part carries no such requirement |
+//!
+//! The evidence is the veraPDF conformance suite, and it comes from two
+//! directions that cannot both be a coincidence. **Its fixtures state their
+//! own expectation in their own words**: all 366 part-1 membership fixtures
+//! say the property is or is not "in XMP 2004" and all 549 part-2 ones say
+//! "in XMP 2005", with no counterexample either way. **Its machine-readable
+//! profiles bind the revision to the part by name**: `PDFA-1B.xml` calls
+//! `isPredefinedInXMP2004` and `PDFA-2B.xml` calls `isPredefinedInXMP2005`.
+//!
+//! **This file said something different until the commit that replaced its
+//! table, and the mistake is traceable to one document.** PDF Association
+//! TechNote 0008 is titled *Predefined XMP Properties in **PDF/A-1***. It says
+//! the applicable revision is XMP 2004 and that this version "differs
+//! significantly from earlier and later revisions", and both statements are
+//! true — **of part 1**, which is the only part it is about. Read as though it
+//! said "ISO 19005", it turned into a claim about parts 2 and 3 as well, and
+//! that claim spread to five files. It was wrong in each of them, and the
+//! corpus had already said so: see `photoshop:SupplementalCategories` below,
+//! which is the disagreement a part-2 fixture reported one clause after the
+//! generalisation was written down.
 //!
 //! # Provenance
 //!
-//! Every row below comes from **Adobe's own published namespace tables**, the
-//! `XMPNamespaces` directory of `github.com/adobe/xmp-docs` at commit
-//! `e2573ad7e7959e657b1aed704546e19319cb4f5d`, which is BSD-3-Clause and is
-//! recorded under "The predefined XMP schemas' property tables" in
-//! `THIRDPARTY.md`. They are a machine-readable statement by the
-//! format's owner, which is what makes this a transcription rather than a
-//! reconstruction — and the difference is one this repository has measured the
-//! price of, in the four Annex B tables that were written from a datastream
-//! and were wrong.
+//! Two specifications, transcribed rather than vendored — the tabulated facts
+//! (property name, namespace, preferred prefix, value type), not the
+//! documents' text. Both are recorded under "The predefined XMP schemas'
+//! property tables" in `THIRDPARTY.md`.
 //!
-//! # What this table is *not*
+//! | table | document | chapter 4 "XMP Schemas" | schemas | properties |
+//! | --- | --- | --- | ---: | ---: |
+//! | [`PREDEFINED_2004`] | *XMP Specification*, January 2004, 94 pp | pp. 37–58 | 11 | 169 |
+//! | [`PREDEFINED_2005`] | *XMP Specification*, September 2005, 112 pp | pp. 39–70 | 14 | 274 |
 //!
-//! **It is not a membership list, and no rule here treats it as one.** ISO
-//! 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 require every property to belong to a
-//! predefined schema or be described by an extension schema, and answering
-//! that needs the set of names the applicable revision defined. The applicable
-//! revision is **XMP 2004**: PDF Association TechNote 0008, "Predefined XMP
-//! Properties in PDF/A-1", says so in as many words and adds that this version
-//! "differs significantly from earlier and later revisions".
+//! Every row was read off the page it is printed on, with the page recorded
+//! beside it, and read a second time against that page before it was written
+//! here; the per-property page numbers stay out of the table because nothing
+//! in the engine reads them. The four value forms below are what the value
+//! type column collapses to: `Lang Alt` is a language alternative, anything
+//! containing `bag`, `seq` or `alt` is an array, the named structure types
+//! (`ResourceRef`, `Dimensions`, `Flash`, `CFAPattern`, `OECF/SFR`,
+//! `DeviceSettings`, `Colorant`, `ProjectLink`, `Time`, `Timecode` and the
+//! three `…Stretch` parameter structures) are structures, and everything else
+//! — `Text`, `Integer`, `Rational`, `Date`, `URI`, the closed and open choices
+//! — is a simple value.
 //!
-//! Adobe's currently published tables are a later revision, and the veraPDF
-//! corpus shows the difference by name. Every one of `xmp:Advisory`,
-//! `xmpMM:LastURL`, `xmpMM:RenditionOf`, `xmpMM:SaveID`, `exif:MakerNote`,
-//! `exif:ComponentsConfiguration`, `xmpDM:videoModDate`, `xmpDM:audioModDate`,
-//! `xmpDM:metadataModDate` and `xmpDM:copyright` appears in a fixture the
-//! suite annotates **pass** and in none of these tables, as do the whole of
-//! the `xmpidq` and Exif `aux` namespaces. A membership rule reading this
-//! table would report each of those conforming files as broken, which is
-//! exactly the failure [`super::STAGED`] said was worse than not checking. So
-//! membership stays staged and only the value *type* is read.
+//! # What these tables are not — yet
 //!
-//! TechNote 0008 is not a way round it either. It enumerates the 2004 set for
-//! every schema but one, and §2.10 sends the roughly one hundred Exif
-//! properties — the largest schema here, and the one the corpus exercises
-//! hardest — back to the XMP 2004 specification itself, which is not
-//! obtainable. Its own tables are also unreadable by this engine: 25 pages
-//! render and pages 6 and 19 extract **zero characters**, the table cells
-//! being lost while the prose around them comes through.
+//! **Neither is read as a membership list, and no rule here treats one as
+//! one.** ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 require every property to
+//! belong to a predefined schema *or* be described by an extension schema, and
+//! these tables are now the right half of that answer: the revision each part
+//! cites, as that revision printed it. What is still missing is the other
+//! half. 6.7.8's extension schemas are a packet's own way of declaring a
+//! property these tables cannot know, and a membership rule that ran before
+//! that exception was read would report every conforming file that uses one.
+//! So membership stays in [`super::STAGED`], which now names what is left of
+//! it rather than the table that could not support it, and only the value
+//! *type* is read.
 //!
-//! # Why the type half is sound where the membership half is not
+//! That restraint is also what makes the value-type half sound. A property a
+//! table does not name is skipped, so a name one revision had and the other
+//! dropped costs nothing; a property it does name is one the cited revision
+//! printed a value type for, and the type is then a claim about that
+//! revision's own row.
 //!
-//! A property this table does not name is skipped, so a name the 2004 revision
-//! had and Adobe has since dropped costs nothing. A property it *does* name is
-//! one both revisions carry, and the type is then a claim about a row that
-//! survived — a much narrower bet, and one the corpus checks from both sides:
-//! 289 properties, and across all 2 346 annotated PDF/A files exactly one type
-//! disagrees with the conformance suite. [`REVISION_DRIFT`] is that one.
+//! **One name is worth flagging for whoever writes the membership rule.** The
+//! suite's fixtures are themselves a list of membership claims — 422 distinct
+//! ones across the two parts, each of the form *the property X, which is (not)
+//! permitted in \<schema\> in XMP 2004/2005* — and **421 of the 422 agree with
+//! these tables exactly**, schema by schema and name by name. The one that
+//! does not is `xmpMM:InstanceID`, which `PDF_A-1b` `6-7-2-t09-fail-q` says is
+//! permitted in XMP 2004: the string does not occur anywhere in the 94 pages
+//! of the January 2004 document, and September 2005 introduces it with an
+//! editorial marker its own author left in the file (`<< new InstanceID
+//! stuff>>`, p45). So a membership rule reading [`PREDEFINED_2004`] strictly
+//! will report that one fixture where the suite would not. That is a
+//! disagreement between two published sources, to be recorded in the ledger
+//! when the rule lands rather than patched out of the table now.
+//!
+//! # `photoshop:SupplementalCategories`, which is what the revisions are for
+//!
+//! One property in these tables has a different form under part 1 from under
+//! parts 2 and 3, and it is worth the space because of what finding it cost.
+//! The veraPDF suite pins it from both sides in *both* places it appears, and
+//! the two places disagree:
+//!
+//! | fixture | value written | annotated |
+//! | --- | --- | --- |
+//! | `PDF_A-1b` `6-7-2-t13-pass-l` | text | conforming |
+//! | `PDF_A-1b` `6-7-2-t13-fail-l` | `rdf:Bag` | non-conforming |
+//! | `PDF_A-2b` `6-6-2-3-1-t13-pass-l` | `rdf:Bag` | conforming |
+//! | `PDF_A-2b` `6-6-2-3-1-t13-fail-l` | `rdf:Seq` | non-conforming |
+//!
+//! Under one table for all parts that was a contradiction, and it was carried
+//! as an override — a hand-written exception saying "the suite wins here, per
+//! part", bolted beside a table that could not explain why. It is now an
+//! ordinary row in each of two ordinary tables: `Text` on page 47 of January
+//! 2004, `bag Text` on page 55 of September 2005. The September 2005
+//! specification's own changelog records the change under April 2005 —
+//! *"Corrected value type for photoshop:SupplementalCategories, changed 'Text'
+//! to 'bag Text'"* — so the standards, the conformance suite and this file now
+//! say the same thing for the same reason, and nothing here overrides
+//! anything.
+//!
+//! It is also the one property the corpus forced, and it is the only place the
+//! two tables disagree about a value *form* at all: reading both revisions
+//! against the single table these replaced turns up exactly one shared
+//! property whose form moves, and this is it.
 
 use super::Part;
 
@@ -99,65 +166,24 @@ impl ValueForm {
 
 /// One predefined schema, and the value form each of its properties declares.
 pub(super) struct Schema {
-    /// The namespace URI, which is what a packet is matched on. The prefix is
-    /// only preferred (TechNote 0008 §1.2) and is never matched.
+    /// The namespace URI, which is what a packet is matched on.
     pub(super) uri: &'static str,
-    /// The preferred prefix, carried so a finding can name a property the way
-    /// a reader would write it.
+    /// The prefix the specification prints beside the schema, carried so a
+    /// finding can name a property the way a reader would write it. Both
+    /// revisions call it the *preferred* prefix; it is never matched.
     pub(super) prefix: &'static str,
     /// The properties, **sorted by name**, so the lookup below is a binary
     /// search and the iteration order is one order on every target (ruling 4).
     pub(super) properties: &'static [(&'static str, ValueForm)],
 }
 
-/// Where the conformance suite and the vendored table disagree, and the suite
-/// wins — **per part**, because the parts cite different revisions.
+/// The value form `local` declares in `uri`, under the revision `part` cites.
 ///
-/// One row, and it is worth the space because of what finding it cost and what
-/// it turned out to say. `photoshop:SupplementalCategories` is an unordered
-/// array of Text in Adobe's current table. The veraPDF suite pins it from both
-/// sides in *both* places it appears, and the two places disagree:
-///
-/// | fixture | value written | annotated |
-/// | --- | --- | --- |
-/// | `PDF_A-1b` `6-7-2-t13-pass-l` | text | conforming |
-/// | `PDF_A-1b` `6-7-2-t13-fail-l` | `rdf:Bag` | non-conforming |
-/// | `PDF_A-2b` `6-6-2-3-1-t13-pass-l` | `rdf:Bag` | conforming |
-/// | `PDF_A-2b` `6-6-2-3-1-t13-fail-l` | `rdf:Seq` | non-conforming |
-///
-/// So the property was plain Text in the revision PDF/A-1 cites and became an
-/// unordered array in the one parts 2 and 3 cite, and the suite asserts both.
-/// This was **not** predicted: the override was written for part 1 from the
-/// first pair, applied to every part, and the part-2 pair then reported a
-/// conforming file — the corpus caught a table this build had just corrected,
-/// one clause after the correction.
-///
-/// That two-sided, two-part pinning is the whole reason this list is allowed
-/// to exist. A single fixture agreeing with a reading proves only that the
-/// reading is load-bearing, which is a lesson this repository has recently
-/// paid for in T.88 6.5.8.2.2; a published conformance suite asserting the
-/// conforming *and* the non-conforming spelling, differently under two parts,
-/// is a statement about the standards rather than about a decoder. The
-/// vendored table above is left **exactly as Adobe publishes it** and every
-/// override is named here, so what was transcribed and what was overridden
-/// stay separable.
-pub(super) const REVISION_DRIFT: &[(Part, &str, &str, ValueForm)] = &[(
-    Part::One,
-    "http://ns.adobe.com/photoshop/1.0/",
-    "SupplementalCategories",
-    ValueForm::Simple,
-)];
-
-/// The value form `local` declares in `uri`, or `None` if this table does not
-/// name the property — which is not a statement that the property is unknown,
-/// only that nothing here can judge it.
+/// `None` if that revision's table does not name the property — which is not a
+/// statement that the property is unknown, only that nothing here can judge
+/// it.
 pub(super) fn value_form(uri: &str, local: &str, part: Part) -> Option<ValueForm> {
-    for (drift_part, drift_uri, drift_local, form) in REVISION_DRIFT {
-        if *drift_part == part && *drift_uri == uri && *drift_local == local {
-            return Some(*form);
-        }
-    }
-    let schema = PREDEFINED.iter().find(|schema| schema.uri == uri)?;
+    let schema = table_of(part)?.iter().find(|schema| schema.uri == uri)?;
     let index = schema
         .properties
         .binary_search_by(|(name, _)| (*name).cmp(local))
@@ -165,17 +191,292 @@ pub(super) fn value_form(uri: &str, local: &str, part: Part) -> Option<ValueForm
     Some(schema.properties[index].1)
 }
 
-/// The preferred prefix for a namespace this table knows, for a finding's own
-/// text.
+/// The table the revision `part` cites, or `None` for a part that cites none.
+fn table_of(part: Part) -> Option<&'static [Schema]> {
+    match part {
+        Part::One => Some(PREDEFINED_2004),
+        Part::Two | Part::Three => Some(PREDEFINED_2005),
+        // Part 4 asks this file nothing, and `None` is what it should get if
+        // it ever does. `xmp::part_carries_the_predefined_schema_rule` is
+        // false for it, so the walk that calls `value_form` does not run there
+        // at all — ISO 19005-4 dropped the requirement rather than renumbering
+        // it, and the conformance suite has no counterpart to `6.7.2
+        // Properties` or `6.6.2.3 Schemas` anywhere under `PDF_A-4`. The arm
+        // is written out rather than left to an `unreachable!` because the
+        // honest answer is the same either way: part 4 is drafted against ISO
+        // 16684-1, a third revision neither table above transcribes, so there
+        // is no table to route it to. `None` means "nothing here can judge
+        // it", which is the direction that cannot report a conforming file.
+        Part::Four => None,
+    }
+}
+
+/// The preferred prefix for a namespace either revision knows, for a finding's
+/// own text.
+///
+/// Not routed by part, because a prefix is a spelling rather than a judgement:
+/// every namespace January 2004 declared survives into September 2005 under
+/// the same prefix, so the two tables never disagree about one. Both are
+/// searched anyway, so this does not silently depend on that staying true.
 pub(super) fn prefix_of(uri: &str) -> Option<&'static str> {
-    PREDEFINED
+    PREDEFINED_2005
         .iter()
+        .chain(PREDEFINED_2004)
         .find(|schema| schema.uri == uri)
         .map(|schema| schema.prefix)
 }
 
-/// The twelve predefined schemas, sorted by URI.
-pub(super) const PREDEFINED: &[Schema] = &[
+/// The eleven schemas of the **January 2004** revision, sorted by URI: the
+/// revision ISO 19005-1 6.7.2 cites.
+///
+/// 169 properties, chapter 4 "XMP Schemas", pages 37-58.
+pub(super) const PREDEFINED_2004: &[Schema] = &[
+    Schema {
+        uri: "http://ns.adobe.com/exif/1.0/",
+        prefix: "exif",
+        properties: &[
+            ("ApertureValue", ValueForm::Simple),
+            ("BrightnessValue", ValueForm::Simple),
+            ("CFAPattern", ValueForm::Structure),
+            ("ColorSpace", ValueForm::Simple),
+            ("ComponentsConfiguration", ValueForm::Array),
+            ("CompressedBitsPerPixel", ValueForm::Simple),
+            ("Contrast", ValueForm::Simple),
+            ("CustomRendered", ValueForm::Simple),
+            ("DateTimeDigitized", ValueForm::Simple),
+            ("DateTimeOriginal", ValueForm::Simple),
+            ("DeviceSettingDescription", ValueForm::Structure),
+            ("DigitalZoomRatio", ValueForm::Simple),
+            ("ExifVersion", ValueForm::Simple),
+            ("ExposureBiasValue", ValueForm::Simple),
+            ("ExposureIndex", ValueForm::Simple),
+            ("ExposureMode", ValueForm::Simple),
+            ("ExposureProgram", ValueForm::Simple),
+            ("ExposureTime", ValueForm::Simple),
+            ("FNumber", ValueForm::Simple),
+            ("FileSource", ValueForm::Simple),
+            ("Flash", ValueForm::Structure),
+            ("FlashEnergy", ValueForm::Simple),
+            ("FlashpixVersion", ValueForm::Simple),
+            ("FocalLength", ValueForm::Simple),
+            ("FocalLengthIn35mmFilm", ValueForm::Simple),
+            ("FocalPlaneResolutionUnit", ValueForm::Simple),
+            ("FocalPlaneXResolution", ValueForm::Simple),
+            ("FocalPlaneYResolution", ValueForm::Simple),
+            ("GPSAltitude", ValueForm::Simple),
+            ("GPSAltitudeRef", ValueForm::Simple),
+            ("GPSAreaInformation", ValueForm::Simple),
+            ("GPSDOP", ValueForm::Simple),
+            ("GPSDestBearing", ValueForm::Simple),
+            ("GPSDestBearingRef", ValueForm::Simple),
+            ("GPSDestDistance", ValueForm::Simple),
+            ("GPSDestDistanceRef", ValueForm::Simple),
+            ("GPSDestLatitude", ValueForm::Simple),
+            ("GPSDestLongitude", ValueForm::Simple),
+            ("GPSDifferential", ValueForm::Simple),
+            ("GPSImgDirection", ValueForm::Simple),
+            ("GPSImgDirectionRef", ValueForm::Simple),
+            ("GPSLatitude", ValueForm::Simple),
+            ("GPSLongitude", ValueForm::Simple),
+            ("GPSMapDatum", ValueForm::Simple),
+            ("GPSMeasureMode", ValueForm::Simple),
+            ("GPSProcessingMethod", ValueForm::Simple),
+            ("GPSSatellites", ValueForm::Simple),
+            ("GPSSpeed", ValueForm::Simple),
+            ("GPSSpeedRef", ValueForm::Simple),
+            ("GPSStatus", ValueForm::Simple),
+            ("GPSTimeStamp", ValueForm::Simple),
+            ("GPSTrack", ValueForm::Simple),
+            ("GPSTrackRef", ValueForm::Simple),
+            ("GPSVersionID", ValueForm::Simple),
+            ("GainControl", ValueForm::Simple),
+            ("ISOSpeedRatings", ValueForm::Array),
+            ("ImageUniqueID", ValueForm::Simple),
+            ("LightSource", ValueForm::Simple),
+            ("MakerNote", ValueForm::Simple),
+            ("MaxApertureValue", ValueForm::Simple),
+            ("MeteringMode", ValueForm::Simple),
+            ("OECF", ValueForm::Structure),
+            ("PixelXDimension", ValueForm::Simple),
+            ("PixelYDimension", ValueForm::Simple),
+            ("RelatedSoundFile", ValueForm::Simple),
+            ("Saturation", ValueForm::Simple),
+            ("SceneCaptureType", ValueForm::Simple),
+            ("SceneType", ValueForm::Simple),
+            ("SensingMethod", ValueForm::Simple),
+            ("Sharpness", ValueForm::Simple),
+            ("ShutterSpeedValue", ValueForm::Simple),
+            ("SpatialFrequencyResponse", ValueForm::Structure),
+            ("SpectralSensitivity", ValueForm::Simple),
+            ("SubjectArea", ValueForm::Array),
+            ("SubjectDistance", ValueForm::Simple),
+            ("SubjectDistanceRange", ValueForm::Simple),
+            ("SubjectLocation", ValueForm::Array),
+            ("UserComment", ValueForm::LangAlt),
+            ("WhiteBalance", ValueForm::Simple),
+        ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/pdf/1.3/",
+        prefix: "pdf",
+        properties: &[
+            ("Keywords", ValueForm::Simple),
+            ("PDFVersion", ValueForm::Simple),
+            ("Producer", ValueForm::Simple),
+        ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/photoshop/1.0/",
+        prefix: "photoshop",
+        properties: &[
+            ("AuthorsPosition", ValueForm::Simple),
+            ("CaptionWriter", ValueForm::Simple),
+            ("Category", ValueForm::Simple),
+            ("City", ValueForm::Simple),
+            ("Country", ValueForm::Simple),
+            ("Credit", ValueForm::Simple),
+            ("DateCreated", ValueForm::Simple),
+            ("Headline", ValueForm::Simple),
+            ("Instructions", ValueForm::Simple),
+            ("Source", ValueForm::Simple),
+            ("State", ValueForm::Simple),
+            ("SupplementalCategories", ValueForm::Simple),
+            ("TransmissionReference", ValueForm::Simple),
+            ("Urgency", ValueForm::Simple),
+        ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/tiff/1.0/",
+        prefix: "tiff",
+        properties: &[
+            ("Artist", ValueForm::Simple),
+            ("BitsPerSample", ValueForm::Array),
+            ("Compression", ValueForm::Simple),
+            ("Copyright", ValueForm::LangAlt),
+            ("DateTime", ValueForm::Simple),
+            ("ImageDescription", ValueForm::LangAlt),
+            ("ImageLength", ValueForm::Simple),
+            ("ImageWidth", ValueForm::Simple),
+            ("Make", ValueForm::Simple),
+            ("Model", ValueForm::Simple),
+            ("Orientation", ValueForm::Simple),
+            ("PhotometricInterpretation", ValueForm::Simple),
+            ("PlanarConfiguration", ValueForm::Simple),
+            ("PrimaryChromaticities", ValueForm::Array),
+            ("ReferenceBlackWhite", ValueForm::Array),
+            ("ResolutionUnit", ValueForm::Simple),
+            ("SamplesPerPixel", ValueForm::Simple),
+            ("Software", ValueForm::Simple),
+            ("TransferFunction", ValueForm::Array),
+            ("WhitePoint", ValueForm::Array),
+            ("XResolution", ValueForm::Simple),
+            ("YCbCrCoefficients", ValueForm::Array),
+            ("YCbCrPositioning", ValueForm::Simple),
+            ("YCbCrSubSampling", ValueForm::Array),
+            ("YResolution", ValueForm::Simple),
+        ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/xap/1.0/",
+        prefix: "xmp",
+        properties: &[
+            ("Advisory", ValueForm::Array),
+            ("BaseURL", ValueForm::Simple),
+            ("CreateDate", ValueForm::Simple),
+            ("CreatorTool", ValueForm::Simple),
+            ("Identifier", ValueForm::Array),
+            ("MetadataDate", ValueForm::Simple),
+            ("ModifyDate", ValueForm::Simple),
+            ("Nickname", ValueForm::Simple),
+            ("Thumbnails", ValueForm::Array),
+        ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/xap/1.0/bj/",
+        prefix: "xmpBJ",
+        properties: &[("JobRef", ValueForm::Array)],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/xap/1.0/mm/",
+        prefix: "xmpMM",
+        properties: &[
+            ("DerivedFrom", ValueForm::Structure),
+            ("DocumentID", ValueForm::Simple),
+            ("History", ValueForm::Array),
+            ("LastURL", ValueForm::Simple),
+            ("ManageTo", ValueForm::Simple),
+            ("ManageUI", ValueForm::Simple),
+            ("ManagedFrom", ValueForm::Structure),
+            ("Manager", ValueForm::Simple),
+            ("ManagerVariant", ValueForm::Simple),
+            ("RenditionClass", ValueForm::Simple),
+            ("RenditionOf", ValueForm::Structure),
+            ("RenditionParams", ValueForm::Simple),
+            ("SaveID", ValueForm::Simple),
+            ("VersionID", ValueForm::Simple),
+            ("Versions", ValueForm::Array),
+        ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/xap/1.0/rights/",
+        prefix: "xmpRights",
+        properties: &[
+            ("Certificate", ValueForm::Simple),
+            ("Marked", ValueForm::Simple),
+            ("Owner", ValueForm::Array),
+            ("UsageTerms", ValueForm::LangAlt),
+            ("WebStatement", ValueForm::Simple),
+        ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/xap/1.0/t/pg/",
+        prefix: "xmpTPg",
+        properties: &[
+            ("MaxPageSize", ValueForm::Structure),
+            ("NPages", ValueForm::Simple),
+        ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/xmp/Identifier/qual/1.0/",
+        prefix: "xmpidq",
+        properties: &[("Scheme", ValueForm::Simple)],
+    },
+    Schema {
+        uri: "http://purl.org/dc/elements/1.1/",
+        prefix: "dc",
+        properties: &[
+            ("contributor", ValueForm::Array),
+            ("coverage", ValueForm::Simple),
+            ("creator", ValueForm::Array),
+            ("date", ValueForm::Array),
+            ("description", ValueForm::LangAlt),
+            ("format", ValueForm::Simple),
+            ("identifier", ValueForm::Simple),
+            ("language", ValueForm::Array),
+            ("publisher", ValueForm::Array),
+            ("relation", ValueForm::Array),
+            ("rights", ValueForm::LangAlt),
+            ("source", ValueForm::Simple),
+            ("subject", ValueForm::Array),
+            ("title", ValueForm::LangAlt),
+            ("type", ValueForm::Array),
+        ],
+    },
+];
+
+/// The fourteen schemas of the **September 2005** revision, sorted by URI: the
+/// revision ISO 19005-2 6.6.2.3 and ISO 19005-3 are governed by.
+///
+/// 274 properties, chapter 4 "XMP Schemas", pages 39-70. Against
+/// [`PREDEFINED_2004`]: three whole schemas more — `xmpDM` (57 properties),
+/// `crs` (41) and the Exif `aux` namespace (2), which the specification's own
+/// changelog lists as added in June 2005 — plus `xmp:Label`, `xmp:Rating`,
+/// `xmpMM:InstanceID` and three `xmpTPg` properties; `exif:MakerNote` gone;
+/// and two value types changed, of which only
+/// `photoshop:SupplementalCategories` changes the **form** a packet must
+/// write (`exif:GPSMeasureMode` moves from a closed choice of Integer to
+/// Text, and both are simple values).
+pub(super) const PREDEFINED_2005: &[Schema] = &[
     Schema {
         uri: "http://ns.adobe.com/camera-raw-settings/1.0/",
         prefix: "crs",
@@ -231,6 +532,7 @@ pub(super) const PREDEFINED: &[Schema] = &[
             ("BrightnessValue", ValueForm::Simple),
             ("CFAPattern", ValueForm::Structure),
             ("ColorSpace", ValueForm::Simple),
+            ("ComponentsConfiguration", ValueForm::Array),
             ("CompressedBitsPerPixel", ValueForm::Simple),
             ("Contrast", ValueForm::Simple),
             ("CustomRendered", ValueForm::Simple),
@@ -307,13 +609,20 @@ pub(super) const PREDEFINED: &[Schema] = &[
         ],
     },
     Schema {
+        uri: "http://ns.adobe.com/exif/1.0/aux/",
+        prefix: "aux",
+        properties: &[
+            ("Lens", ValueForm::Simple),
+            ("SerialNumber", ValueForm::Simple),
+        ],
+    },
+    Schema {
         uri: "http://ns.adobe.com/pdf/1.3/",
         prefix: "pdf",
         properties: &[
             ("Keywords", ValueForm::Simple),
             ("PDFVersion", ValueForm::Simple),
             ("Producer", ValueForm::Simple),
-            ("Trapped", ValueForm::Simple),
         ],
     },
     Schema {
@@ -324,19 +633,14 @@ pub(super) const PREDEFINED: &[Schema] = &[
             ("CaptionWriter", ValueForm::Simple),
             ("Category", ValueForm::Simple),
             ("City", ValueForm::Simple),
-            ("ColorMode", ValueForm::Simple),
             ("Country", ValueForm::Simple),
             ("Credit", ValueForm::Simple),
             ("DateCreated", ValueForm::Simple),
-            ("DocumentAncestors", ValueForm::Array),
             ("Headline", ValueForm::Simple),
-            ("History", ValueForm::Simple),
-            ("ICCProfile", ValueForm::Simple),
             ("Instructions", ValueForm::Simple),
             ("Source", ValueForm::Simple),
             ("State", ValueForm::Simple),
             ("SupplementalCategories", ValueForm::Array),
-            ("TextLayers", ValueForm::Array),
             ("TransmissionReference", ValueForm::Simple),
             ("Urgency", ValueForm::Simple),
         ],
@@ -376,6 +680,7 @@ pub(super) const PREDEFINED: &[Schema] = &[
         uri: "http://ns.adobe.com/xap/1.0/",
         prefix: "xmp",
         properties: &[
+            ("Advisory", ValueForm::Array),
             ("BaseURL", ValueForm::Simple),
             ("CreateDate", ValueForm::Simple),
             ("CreatorTool", ValueForm::Simple),
@@ -400,17 +705,17 @@ pub(super) const PREDEFINED: &[Schema] = &[
             ("DerivedFrom", ValueForm::Structure),
             ("DocumentID", ValueForm::Simple),
             ("History", ValueForm::Array),
-            ("Ingredients", ValueForm::Array),
             ("InstanceID", ValueForm::Simple),
+            ("LastURL", ValueForm::Simple),
             ("ManageTo", ValueForm::Simple),
             ("ManageUI", ValueForm::Simple),
             ("ManagedFrom", ValueForm::Structure),
             ("Manager", ValueForm::Simple),
             ("ManagerVariant", ValueForm::Simple),
-            ("OriginalDocumentID", ValueForm::Simple),
-            ("Pantry", ValueForm::Array),
             ("RenditionClass", ValueForm::Simple),
+            ("RenditionOf", ValueForm::Structure),
             ("RenditionParams", ValueForm::Simple),
+            ("SaveID", ValueForm::Simple),
             ("VersionID", ValueForm::Simple),
             ("Versions", ValueForm::Array),
         ],
@@ -441,7 +746,6 @@ pub(super) const PREDEFINED: &[Schema] = &[
         uri: "http://ns.adobe.com/xmp/1.0/DynamicMedia/",
         prefix: "xmpDM",
         properties: &[
-            ("Tracks", ValueForm::Array),
             ("absPeakAudioFilePath", ValueForm::Simple),
             ("album", ValueForm::Simple),
             ("altTapeName", ValueForm::Simple),
@@ -449,36 +753,26 @@ pub(super) const PREDEFINED: &[Schema] = &[
             ("artist", ValueForm::Simple),
             ("audioChannelType", ValueForm::Simple),
             ("audioCompressor", ValueForm::Simple),
+            ("audioModDate", ValueForm::Simple),
             ("audioSampleRate", ValueForm::Simple),
             ("audioSampleType", ValueForm::Simple),
             ("beatSpliceParams", ValueForm::Structure),
-            ("cameraAngle", ValueForm::Simple),
-            ("cameraLabel", ValueForm::Simple),
-            ("cameraModel", ValueForm::Simple),
-            ("cameraMove", ValueForm::Simple),
-            ("client", ValueForm::Simple),
-            ("comment", ValueForm::Simple),
             ("composer", ValueForm::Simple),
             ("contributedMedia", ValueForm::Array),
-            ("director", ValueForm::Simple),
-            ("directorPhotography", ValueForm::Simple),
-            ("discNumber", ValueForm::Simple),
+            ("copyright", ValueForm::Simple),
             ("duration", ValueForm::Structure),
             ("engineer", ValueForm::Simple),
             ("fileDataRate", ValueForm::Simple),
             ("genre", ValueForm::Simple),
-            ("good", ValueForm::Simple),
             ("instrument", ValueForm::Simple),
             ("introTime", ValueForm::Structure),
             ("key", ValueForm::Simple),
             ("logComment", ValueForm::Simple),
             ("loop", ValueForm::Simple),
-            ("lyrics", ValueForm::Simple),
             ("markers", ValueForm::Array),
+            ("metadataModDate", ValueForm::Simple),
             ("numberOfBeats", ValueForm::Simple),
             ("outCue", ValueForm::Structure),
-            ("partOfCompilation", ValueForm::Simple),
-            ("projectName", ValueForm::Simple),
             ("projectRef", ValueForm::Structure),
             ("pullDown", ValueForm::Simple),
             ("relativePeakAudioFilePath", ValueForm::Simple),
@@ -488,15 +782,11 @@ pub(super) const PREDEFINED: &[Schema] = &[
             ("scaleType", ValueForm::Simple),
             ("scene", ValueForm::Simple),
             ("shotDate", ValueForm::Simple),
-            ("shotDay", ValueForm::Simple),
             ("shotLocation", ValueForm::Simple),
             ("shotName", ValueForm::Simple),
-            ("shotNumber", ValueForm::Simple),
-            ("shotSize", ValueForm::Simple),
             ("speakerPlacement", ValueForm::Simple),
             ("startTimecode", ValueForm::Structure),
             ("stretchMode", ValueForm::Simple),
-            ("takeNumber", ValueForm::Simple),
             ("tapeName", ValueForm::Simple),
             ("tempo", ValueForm::Simple),
             ("timeScaleParams", ValueForm::Structure),
@@ -510,9 +800,15 @@ pub(super) const PREDEFINED: &[Schema] = &[
             ("videoFieldOrder", ValueForm::Simple),
             ("videoFrameRate", ValueForm::Simple),
             ("videoFrameSize", ValueForm::Structure),
+            ("videoModDate", ValueForm::Simple),
             ("videoPixelAspectRatio", ValueForm::Simple),
             ("videoPixelDepth", ValueForm::Simple),
         ],
+    },
+    Schema {
+        uri: "http://ns.adobe.com/xmp/Identifier/qual/1.0/",
+        prefix: "xmpidq",
+        properties: &[("Scheme", ValueForm::Simple)],
     },
     Schema {
         uri: "http://purl.org/dc/elements/1.1/",

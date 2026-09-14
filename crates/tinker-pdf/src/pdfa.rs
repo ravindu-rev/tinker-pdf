@@ -491,18 +491,20 @@ pub const STAGED: &[StagedRule] = &[
         rule: "XMP properties must belong to a predefined schema or be \
                described by an extension schema - the membership half. The \
                value types those schemas declare are checked",
-        because: "the two halves need two different things from the same tables. \
-                  A value type is one both revisions agree on, and it runs. \
-                  Membership is a list, and the list moved: ISO 19005 cites the \
-                  XMP 2004 revision, Adobe publishes a later one, and the \
-                  difference is properties that conforming corpus files use - \
-                  xmp:Advisory, xmpMM:LastURL, xmpMM:RenditionOf, xmpMM:SaveID, \
-                  exif:MakerNote, exif:ComponentsConfiguration, four xmpDM: \
-                  properties, and the whole of xmpidq and the Exif aux namespace. \
-                  Reading the vendored table as a membership list would report \
-                  every one of those. The value-type half took 265 of the 512 \
-                  files these four ledger rows named; the 247 that are left are \
-                  this half",
+        because: "the tables this needs now exist, one per cited revision: ISO \
+                  19005-1 cites the January 2004 XMP specification, ISO 19005-2 \
+                  and -3 are governed by the September 2005 one, and ISO 19005-4 \
+                  carries no predefined-schema requirement at all. The value-type \
+                  half reads them and runs. What membership still owes is the \
+                  rule itself and its exception: 6.7.8 lets a packet carry a \
+                  property no predefined schema defines, by describing it in an \
+                  extension schema, so a membership rule built before that \
+                  description is read would report every conforming file that \
+                  uses one - and the corpus is full of them. The value-type half \
+                  took 276 of the 512 files these four ledger rows named - 265 \
+                  against one table for every part, and eleven more once each \
+                  part read the revision it cites; the 236 that are left are this \
+                  half",
     },
     StagedRule {
         clause: "6.1.5",
