@@ -319,6 +319,46 @@ pub fn signature_algorithm(algorithm: Oid<'_>) -> Option<SignatureAlgorithm> {
     }
 }
 
+/// Splits an ECDSA signature value into `r` and `s` (RFC 3279 §2.2.3).
+///
+/// `ECDSA-Sig-Value ::= SEQUENCE { r INTEGER, s INTEGER }`, and that SEQUENCE
+/// is the whole of what a `SignerInfo`'s `signature` OCTET STRING or a
+/// certificate's `signatureValue` BIT STRING holds when the algorithm is one
+/// of RFC 5758 §3.2's. Both halves come back as unsigned magnitudes with the
+/// sign octet gone, which is the form [`tinker_pdf_crypto::EcPublicKey::verify`]
+/// takes.
+///
+/// **Order is the whole of the risk here, and it is why this is a named
+/// function rather than two lines at each call site.** `r` and `s` are two
+/// integers of the same size with no tag to tell them apart, so swapping them
+/// produces a verifier that rejects every valid signature and — far worse in
+/// a scheme with a different verification equation — could accept where it
+/// should not. The order is positional and RFC 3279 fixes it: `r` first.
+///
+/// Parsed under its own tight ceilings rather than the enclosing
+/// [`Limits::CMS`]: this is three nodes one level deep, and the BER
+/// indefinite-length form the CMS ceilings admit has no business inside a
+/// value that a signature's validity turns on.
+///
+/// # Errors
+///
+/// [`CmsError::Der`] for anything that is not exactly that SEQUENCE — a
+/// negative integer, a third field, trailing bytes after it, or an indefinite
+/// length.
+pub fn ecdsa_signature_value(signature: &[u8]) -> Result<(&[u8], &[u8]), CmsError> {
+    let budget = Budget::new(Limits::new(2, 8));
+    let mut outer = Cursor::new(signature, &budget);
+    let sequence = outer.read()?;
+    outer.finish()?;
+    sequence.require(Tag::Sequence)?;
+
+    let mut fields = sequence.children(&budget)?;
+    let r = fields.expect(Tag::Integer)?.as_integer()?;
+    let s = fields.expect(Tag::Integer)?.as_integer()?;
+    fields.finish()?;
+    Ok((r.magnitude()?, s.magnitude()?))
+}
+
 /// One `Attribute` (§5.3): a type OID and a `SET OF` values.
 ///
 /// The values are located rather than decoded, because what a value *is* is a
@@ -1395,6 +1435,85 @@ mod tests {
             content.insert(0, 0x00);
         }
         tlv(0x02, &content)
+    }
+
+    /// An `ECDSA-Sig-Value` OpenSSL 3.5.5 wrote, which is the one in
+    /// `crates/tinker-pdf/tests/signature_support/ecdsa-p256.pdf`.
+    ///
+    /// Here rather than only there because the order of the two integers is
+    /// positional and nothing in the encoding would object to reading them the
+    /// other way round. This pins it against bytes a third party produced:
+    /// `r` is the one that starts `06 FD`.
+    const OPENSSL_P256_SIG: &[u8] = &[
+        0x30, 0x44, 0x02, 0x20, 0x06, 0xFD, 0x94, 0x39, 0x81, 0x60, 0x5F, 0x31, 0x84, 0xD1, 0x76,
+        0x9E, 0xEB, 0xDE, 0xDE, 0xDC, 0x44, 0x32, 0x2F, 0x31, 0x57, 0x96, 0xD0, 0x32, 0x7A, 0x88,
+        0x6B, 0x78, 0xBF, 0x75, 0xE8, 0x86, 0x02, 0x20, 0x20, 0xA5, 0x0C, 0x3E, 0xB9, 0xD0, 0x48,
+        0x56, 0xF2, 0x77, 0x89, 0x8B, 0x80, 0xBC, 0x37, 0x11, 0xAE, 0x77, 0x2D, 0x88, 0x0C, 0x18,
+        0xC9, 0xB6, 0x04, 0x72, 0x37, 0xD1, 0x82, 0x49, 0x1E, 0x53,
+    ];
+
+    #[test]
+    fn an_ecdsa_signature_value_reads_r_first_and_s_second() {
+        let (r, s) = ecdsa_signature_value(OPENSSL_P256_SIG).expect("a SEQUENCE of two INTEGERs");
+        assert_eq!(r.len(), 32, "P-256's r is a field element wide");
+        assert_eq!(s.len(), 32);
+        assert_eq!(r[0], 0x06, "RFC 3279 §2.2.3 puts r first");
+        assert_eq!(s[0], 0x20);
+        assert_ne!(r, s, "and they are not the same number");
+    }
+
+    #[test]
+    fn an_ecdsa_signature_value_hands_back_magnitudes_not_encodings() {
+        // 0x80 has its top bit set, so DER writes it `02 02 00 80` and the
+        // leading zero is the sign octet rather than part of the number. A
+        // verifier handed the encoding would be verifying a 2-byte scalar
+        // where a 1-byte one was signed.
+        let der = seq(&[tlv(0x02, &[0x00, 0x80]), tlv(0x02, &[0x01])]);
+        let (r, s) = ecdsa_signature_value(&der).expect("two INTEGERs");
+        assert_eq!(r, &[0x80], "the sign octet is gone");
+        assert_eq!(s, &[0x01]);
+    }
+
+    #[test]
+    fn an_ecdsa_signature_value_refuses_everything_that_is_not_two_integers() {
+        let two = || vec![tlv(0x02, &[0x01]), tlv(0x02, &[0x02])];
+
+        let mut trailing = seq(&two());
+        trailing.push(0x00);
+        assert!(
+            ecdsa_signature_value(&trailing).is_err(),
+            "bytes after the SEQUENCE are not part of a signature value"
+        );
+
+        let mut three = two();
+        three.push(tlv(0x02, &[0x03]));
+        assert!(
+            ecdsa_signature_value(&seq(&three)).is_err(),
+            "a third field"
+        );
+
+        assert!(
+            ecdsa_signature_value(&seq(&[tlv(0x02, &[0x01])])).is_err(),
+            "one integer"
+        );
+        assert!(
+            ecdsa_signature_value(&seq(&[tlv(0x02, &[0xFF]), tlv(0x02, &[0x01])])).is_err(),
+            "a negative r: scalars are in [1, n-1] and no negative one is"
+        );
+        assert!(
+            ecdsa_signature_value(&set(&two())).is_err(),
+            "a SET rather than a SEQUENCE"
+        );
+        assert!(
+            ecdsa_signature_value(&indefinite(0x30, &cat(&two()))).is_err(),
+            "an indefinite length, which the enclosing CMS ceilings would \
+             have admitted and these do not"
+        );
+        assert!(ecdsa_signature_value(&[]).is_err(), "nothing at all");
+        assert!(
+            ecdsa_signature_value(&OPENSSL_P256_SIG[..20]).is_err(),
+            "a truncated one"
+        );
     }
 
     fn octets(value: &[u8]) -> Vec<u8> {
