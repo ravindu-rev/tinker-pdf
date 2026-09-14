@@ -1910,29 +1910,21 @@ fn is_delimiter(c: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! These tests used to carry **five** devices of their own — `Recorder`,
+    //! `GroupEvents`, `Painted`, `Scopes` and `Images` — each recording the
+    //! subset one test needed, with heavy overlap and no two agreeing on what
+    //! an event was. All five are gone; every test below drives
+    //! [`crate::record::RecordingDevice`], which keeps every call in order.
+    //!
+    //! What each of them asserted is unchanged. What moved is where the
+    //! *derived* answers are computed: the enclosing visibility of a scope was
+    //! a field `Scopes` maintained, and is now
+    //! [`RecordingDevice::hidden_at`](crate::record::RecordingDevice::hidden_at)
+    //! over the scopes the recorder kept — so a test here still fails for the
+    //! same reason a real drawing device would.
+
     use super::*;
-
-    #[derive(Default)]
-    struct Recorder {
-        glyphs: Vec<(String, f64, f64)>,
-        advances: Vec<f64>,
-        fills: usize,
-        strokes: usize,
-    }
-
-    impl Device for Recorder {
-        fn show_glyph(&mut self, glyph: &Glyph, _state: &GraphicsState) {
-            self.glyphs
-                .push((glyph.text.clone(), glyph.transform.e, glyph.transform.f));
-            self.advances.push(glyph.advance);
-        }
-        fn fill_path(&mut self, _path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
-            self.fills += 1;
-        }
-        fn stroke_path(&mut self, _path: &[PathSegment], _state: &GraphicsState) {
-            self.strokes += 1;
-        }
-    }
+    use crate::record::{Answers, Event, EventKind, RecordingDevice};
 
     /// Every byte is one code, 500/1000 em wide, mapping to itself.
     struct Simple;
@@ -1986,33 +1978,29 @@ mod tests {
         }
     }
 
-    /// Records the group events and the state each paint saw.
-    #[derive(Default)]
-    struct GroupEvents {
-        begins: Vec<Group>,
-        /// The `ca`, `CA` and blend mode in force at `begin_group`.
-        outer: Vec<(f64, f64, crate::state::BlendMode)>,
-        ends: usize,
-        /// The same three, at each fill.
-        fills: Vec<(f64, f64, crate::state::BlendMode)>,
-        /// What `begin_group` answers.
-        accept: bool,
+    /// The attributes of every transparency group the stream offered, in
+    /// order.
+    fn groups_offered(d: &RecordingDevice) -> Vec<Group> {
+        d.of_kind(EventKind::BeginGroup)
+            .filter_map(|event| match event {
+                Event::BeginGroup { group, .. } => Some(*group),
+                _ => None,
+            })
+            .collect()
     }
 
-    impl Device for GroupEvents {
-        fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
-            self.begins.push(group);
-            self.outer
-                .push((state.fill_alpha, state.stroke_alpha, state.blend));
-            self.accept
-        }
-        fn end_group(&mut self) {
-            self.ends += 1;
-        }
-        fn fill_path(&mut self, _path: &[PathSegment], state: &GraphicsState, _even_odd: bool) {
-            self.fills
-                .push((state.fill_alpha, state.stroke_alpha, state.blend));
-        }
+    /// The `ca`, `CA` and blend mode every event of `kind` saw.
+    ///
+    /// The three that 11.6.6 resets inside an accepted group, read back off
+    /// the state the recorder copied **at each call** — which is what makes
+    /// the group's own state and its contents' distinguishable at all.
+    fn alphas(d: &RecordingDevice, kind: EventKind) -> Vec<(f64, f64, crate::state::BlendMode)> {
+        d.of_kind(kind)
+            .map(|event| {
+                let state = event.state().expect("the state was captured");
+                (state.fill_alpha, state.stroke_alpha, state.blend)
+            })
+            .collect()
     }
 
     /// 11.6.6: the alphas and the blend mode at the `Do` belong to the group's
@@ -2020,10 +2008,10 @@ mod tests {
     /// `ca 0.5` fades every element separately *and* the result again.
     #[test]
     fn a_transparency_group_resets_the_alphas_and_the_blend_mode_inside_it() {
-        let mut device = GroupEvents {
-            accept: true,
-            ..GroupEvents::default()
-        };
+        let mut device = RecordingDevice::new().answering(Answers {
+            groups: true,
+            ..Answers::default()
+        });
         let fonts = Groups {
             group: Some(Group {
                 isolated: true,
@@ -2034,7 +2022,7 @@ mod tests {
         interpret(b"/Half gs /Fm Do", Matrix::IDENTITY, &mut device, &fonts);
 
         assert_eq!(
-            device.begins,
+            groups_offered(&device),
             vec![Group {
                 isolated: true,
                 knockout: false,
@@ -2043,16 +2031,20 @@ mod tests {
             "the group's own attributes reach the device"
         );
         assert_eq!(
-            device.outer,
+            alphas(&device, EventKind::BeginGroup),
             vec![(0.5, 0.25, crate::state::BlendMode::Multiply)],
             "and it is handed the state at the `Do`, which is the group's own"
         );
         assert_eq!(
-            device.fills,
+            alphas(&device, EventKind::FillPath),
             vec![(1.0, 1.0, crate::state::BlendMode::Normal)],
             "while the content inside runs at full strength under Normal"
         );
-        assert_eq!(device.ends, 1, "and the group is closed exactly once");
+        assert_eq!(
+            device.count(EventKind::EndGroup),
+            1,
+            "and the group is closed exactly once"
+        );
     }
 
     /// A device that declines the group must not have the state reset
@@ -2061,16 +2053,24 @@ mod tests {
     /// strength with nothing left to fade it.
     #[test]
     fn declining_a_group_leaves_the_state_alone() {
-        let mut device = GroupEvents::default();
+        let mut device = RecordingDevice::new();
         let fonts = Groups {
             group: Some(Group::default()),
         };
         interpret(b"/Half gs /Fm Do", Matrix::IDENTITY, &mut device, &fonts);
 
-        assert_eq!(device.begins.len(), 1, "it was still offered");
-        assert_eq!(device.ends, 0, "and not closed, having never opened");
         assert_eq!(
-            device.fills,
+            device.count(EventKind::BeginGroup),
+            1,
+            "it was still offered"
+        );
+        assert_eq!(
+            device.count(EventKind::EndGroup),
+            0,
+            "and not closed, having never opened"
+        );
+        assert_eq!(
+            alphas(&device, EventKind::FillPath),
             vec![(0.5, 0.25, crate::state::BlendMode::Multiply)],
             "the content keeps the alphas the page set"
         );
@@ -2079,20 +2079,20 @@ mod tests {
     /// A form that is not a transparency group is not offered at all.
     #[test]
     fn a_plain_form_raises_no_group_event() {
-        let mut device = GroupEvents {
-            accept: true,
-            ..GroupEvents::default()
-        };
+        let mut device = RecordingDevice::new().answering(Answers {
+            groups: true,
+            ..Answers::default()
+        });
         interpret(
             b"/Half gs /Fm Do",
             Matrix::IDENTITY,
             &mut device,
             &Groups { group: None },
         );
-        assert!(device.begins.is_empty());
-        assert_eq!(device.ends, 0);
+        assert_eq!(device.count(EventKind::BeginGroup), 0);
+        assert_eq!(device.count(EventKind::EndGroup), 0);
         assert_eq!(
-            device.fills,
+            alphas(&device, EventKind::FillPath),
             vec![(0.5, 0.25, crate::state::BlendMode::Multiply)]
         );
     }
@@ -2136,14 +2136,14 @@ mod tests {
         }
     }
 
-    fn run(src: &[u8]) -> Recorder {
-        let mut d = Recorder::default();
+    fn run(src: &[u8]) -> RecordingDevice {
+        let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, &Simple);
         d
     }
 
-    fn run_vertical(src: &[u8]) -> Recorder {
-        let mut d = Recorder::default();
+    fn run_vertical(src: &[u8]) -> RecordingDevice {
+        let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, &Vertical);
         d
     }
@@ -2151,28 +2151,28 @@ mod tests {
     #[test]
     fn glyphs_advance_by_their_width() {
         let d = run(b"BT /F0 10 Tf 0 0 Td (AB) Tj ET");
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(text, "AB");
         // 500/1000 em at 10pt is 5 points per glyph.
-        assert_eq!(d.glyphs.first().map(|g| g.1), Some(0.0));
-        assert_eq!(d.glyphs.get(1).map(|g| g.1), Some(5.0));
+        assert_eq!(d.glyphs().next().map(|g| g.transform.e), Some(0.0));
+        assert_eq!(d.glyphs().nth(1).map(|g| g.transform.e), Some(5.0));
     }
 
     #[test]
     fn tj_adjustments_move_the_pen_backwards() {
         let d = run(b"BT /F0 10 Tf [(A) -1000 (B)] TJ ET");
         // -1000 thousandths at 10pt closes 10 points, so B lands at 5 + 10.
-        assert_eq!(d.glyphs.get(1).map(|g| g.1), Some(15.0));
+        assert_eq!(d.glyphs().nth(1).map(|g| g.transform.e), Some(15.0));
     }
 
     #[test]
     fn character_and_word_spacing_apply_where_the_spec_says() {
         let spaced = run(b"BT /F0 10 Tf 2 Tc (AB) Tj ET");
-        assert_eq!(spaced.glyphs.get(1).map(|g| g.1), Some(7.0));
+        assert_eq!(spaced.glyphs().nth(1).map(|g| g.transform.e), Some(7.0));
 
         // Word spacing applies to code 32 only.
         let worded = run(b"BT /F0 10 Tf 100 Tw (A B) Tj ET");
-        let xs: Vec<f64> = worded.glyphs.iter().map(|g| g.1).collect();
+        let xs: Vec<f64> = worded.glyphs().map(|g| g.transform.e).collect();
         assert_eq!(xs.first(), Some(&0.0), "A");
         assert_eq!(xs.get(1), Some(&5.0), "the space itself is not shifted");
         assert_eq!(xs.get(2), Some(&110.0), "B follows the word space");
@@ -2204,19 +2204,22 @@ mod tests {
         let d = run_vertical(b"BT /F0 10 Tf 100 700 Td (AB) Tj ET");
 
         assert_eq!(
-            d.glyphs.first().map(|g| (g.1, g.2)),
+            d.glyphs().next().map(|g| (g.transform.e, g.transform.f)),
             Some((97.5, 693.0)),
             "A, at the pen minus its position vector"
         );
         assert_eq!(
-            d.glyphs.get(1).map(|g| (g.1, g.2)),
+            d.glyphs().nth(1).map(|g| (g.transform.e, g.transform.f)),
             Some((97.0, 685.5)),
             "B, one w1 further down and offset by its own v"
         );
 
         // The glyph event carries the same displacement, signed: a consumer
         // measuring a column reads it rather than recomputing it.
-        assert_eq!(d.advances, vec![-8.0, -9.0]);
+        assert_eq!(
+            d.glyphs().map(|g| g.advance).collect::<Vec<_>>(),
+            vec![-8.0, -9.0]
+        );
     }
 
     /// The position vector is the half of 9.7.4.3 that has nothing to do with
@@ -2229,7 +2232,7 @@ mod tests {
     #[test]
     fn the_position_vector_shifts_the_glyph_within_its_em_box() {
         let d = run_vertical(b"BT /F0 10 Tf 100 700 Td (AB) Tj ET");
-        let xs: Vec<f64> = d.glyphs.iter().map(|g| g.1).collect();
+        let xs: Vec<f64> = d.glyphs().map(|g| g.transform.e).collect();
         assert_eq!(xs, vec![97.5, 97.0]);
         assert!(
             xs.iter().all(|x| *x != 100.0),
@@ -2247,7 +2250,7 @@ mod tests {
         let d = run_vertical(b"BT /F0 10 Tf 2 Tc 200 Tz 100 700 Td (AB) Tj ET");
 
         assert_eq!(
-            d.glyphs.first().map(|g| (g.1, g.2)),
+            d.glyphs().next().map(|g| (g.transform.e, g.transform.f)),
             Some((95.0, 693.0)),
             "A: v_x doubled by Tz, v_y untouched by it"
         );
@@ -2255,7 +2258,7 @@ mod tests {
         // Character spacing shortens a downward step because the spec adds it
         // to a negative number; scaling it by 2 would put B at y = 682.
         assert_eq!(
-            d.glyphs.get(1).map(|g| (g.1, g.2)),
+            d.glyphs().nth(1).map(|g| (g.transform.e, g.transform.f)),
             Some((94.0, 687.5)),
             "B: one step of -6 down, not -12"
         );
@@ -2271,9 +2274,12 @@ mod tests {
 
         // A is where it always was; the pen is then at (100, 692), and -1000
         // thousandths at 10pt subtracts -10 from y, taking it to 702.
-        assert_eq!(d.glyphs.get(1).map(|g| (g.1, g.2)), Some((97.0, 695.5)));
         assert_eq!(
-            d.glyphs.get(1).map(|g| g.1),
+            d.glyphs().nth(1).map(|g| (g.transform.e, g.transform.f)),
+            Some((97.0, 695.5))
+        );
+        assert_eq!(
+            d.glyphs().nth(1).map(|g| g.transform.e),
             Some(97.0),
             "and the column has not moved sideways, which is what the \
              adjustment used to do"
@@ -2283,14 +2289,20 @@ mod tests {
     #[test]
     fn horizontal_scaling_multiplies_the_advance() {
         let d = run(b"BT /F0 10 Tf 50 Tz (AB) Tj ET");
-        assert_eq!(d.glyphs.get(1).map(|g| g.1), Some(2.5));
+        assert_eq!(d.glyphs().nth(1).map(|g| g.transform.e), Some(2.5));
     }
 
     #[test]
     fn td_and_t_star_move_by_the_leading() {
         let d = run(b"BT /F0 10 Tf 12 TL 5 700 Td (A) Tj T* (B) Tj ET");
-        assert_eq!(d.glyphs.first().map(|g| (g.1, g.2)), Some((5.0, 700.0)));
-        assert_eq!(d.glyphs.get(1).map(|g| (g.1, g.2)), Some((5.0, 688.0)));
+        assert_eq!(
+            d.glyphs().next().map(|g| (g.transform.e, g.transform.f)),
+            Some((5.0, 700.0))
+        );
+        assert_eq!(
+            d.glyphs().nth(1).map(|g| (g.transform.e, g.transform.f)),
+            Some((5.0, 688.0))
+        );
     }
 
     #[test]
@@ -2298,7 +2310,7 @@ mod tests {
         // Mode 3 is what a scanned page's OCR layer uses; extraction must see
         // it even though a renderer paints nothing.
         let d = run(b"BT /F0 10 Tf 3 Tr (hidden) Tj ET");
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(text, "hidden");
     }
 
@@ -2307,22 +2319,22 @@ mod tests {
         let d = run(b"q 2 0 0 2 0 0 cm BT /F0 10 Tf (A) Tj ET Q BT /F0 10 Tf (B) Tj ET");
         // Inside the q/Q the CTM doubles the font size's effect on advance,
         // but both glyphs start at the origin.
-        assert_eq!(d.glyphs.len(), 2);
-        assert_eq!(d.glyphs.first().map(|g| g.1), Some(0.0));
-        assert_eq!(d.glyphs.get(1).map(|g| g.1), Some(0.0));
+        assert_eq!(d.count(EventKind::ShowGlyph), 2);
+        assert_eq!(d.glyphs().next().map(|g| g.transform.e), Some(0.0));
+        assert_eq!(d.glyphs().nth(1).map(|g| g.transform.e), Some(0.0));
     }
 
     #[test]
     fn paths_reach_the_device() {
         let d = run(b"0 0 m 10 10 l S 0 0 100 100 re f");
-        assert_eq!(d.strokes, 1);
-        assert_eq!(d.fills, 1);
+        assert_eq!(d.count(EventKind::StrokePath), 1);
+        assert_eq!(d.count(EventKind::FillPath), 1);
     }
 
     #[test]
     fn an_inline_image_does_not_derail_the_stream() {
         let d = run(b"BI /W 2 /H 2 ID \x00\x01\x02\x03 EI BT /F0 10 Tf (A) Tj ET");
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(text, "A", "text after an inline image still runs");
     }
 
@@ -2346,27 +2358,14 @@ mod tests {
     fn a_non_finite_matrix_is_refused() {
         // Without the guard everything after this would be at NaN.
         let d = run(b"BT /F0 10 Tf 0 0 Td (A) Tj 1 0 0 0 0 0 Tm (B) Tj ET");
-        assert!(d.glyphs.iter().all(|g| g.1.is_finite() && g.2.is_finite()));
+        assert!(d
+            .glyphs()
+            .all(|g| g.transform.e.is_finite() && g.transform.f.is_finite()));
     }
 
     // -----------------------------------------------------------------------
     // Patterns (gap 07, 8.7.3).
     // -----------------------------------------------------------------------
-
-    /// The state as the device saw it when the path was painted.
-    #[derive(Default)]
-    struct Painted {
-        states: Vec<GraphicsState>,
-    }
-
-    impl Device for Painted {
-        fn fill_path(&mut self, _path: &[PathSegment], state: &GraphicsState, _even_odd: bool) {
-            self.states.push(state.clone());
-        }
-        fn stroke_path(&mut self, _path: &[PathSegment], state: &GraphicsState) {
-            self.states.push(state.clone());
-        }
-    }
 
     /// Two uncoloured pattern spaces (8.7.3.2), over different underlying
     /// spaces so a test cannot pass by resolving against the wrong one:
@@ -2405,10 +2404,20 @@ mod tests {
         }
     }
 
-    fn run_patterned(src: &[u8]) -> Painted {
-        let mut d = Painted::default();
+    fn run_patterned(src: &[u8]) -> RecordingDevice {
+        let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, &PatternSpaces);
         d
+    }
+
+    /// The state the stroke saw, copied at the call.
+    ///
+    /// `Painted` kept one `Vec<GraphicsState>` for fills and strokes alike;
+    /// every assertion it fed was about a stroke, and this says so.
+    fn stroke_state(d: &RecordingDevice) -> Option<&GraphicsState> {
+        d.of_kind(EventKind::StrokePath)
+            .next()
+            .and_then(Event::state)
     }
 
     /// 8.7.3.2: a `PaintType 2` pattern paints with the colour the operands
@@ -2427,7 +2436,7 @@ mod tests {
               0 0 m 10 10 l S",
         );
 
-        let state = d.states.first().expect("the stroke reached the device");
+        let state = stroke_state(&d).expect("the stroke reached the device");
         assert_eq!(
             state.fill_color,
             Rgb { r: 255, g: 0, b: 0 },
@@ -2457,7 +2466,7 @@ mod tests {
     fn a_pattern_named_alone_leaves_the_colour_where_it_was() {
         let d = run_patterned(b"0 1 0 RG /P1 SCN 0 0 m 10 10 l S");
 
-        let state = d.states.first().expect("the stroke reached the device");
+        let state = stroke_state(&d).expect("the stroke reached the device");
         assert_eq!(
             state.stroke_color,
             Rgb { r: 0, g: 255, b: 0 },
@@ -2472,7 +2481,7 @@ mod tests {
     fn an_ordinary_stroking_colour_clears_the_stroke_pattern() {
         let d = run_patterned(b"/P1 SCN 0 0 1 RG 0 0 m 10 10 l S");
 
-        let state = d.states.first().expect("the stroke reached the device");
+        let state = stroke_state(&d).expect("the stroke reached the device");
         assert_eq!(state.stroke_pattern, None);
         assert_eq!(state.stroke_color, Rgb { r: 0, g: 0, b: 255 });
     }
@@ -2481,15 +2490,52 @@ mod tests {
     // Marked content and optional content (gap 06, 14.6.2 and 8.11.3.2).
     // -----------------------------------------------------------------------
 
+    /// Every scope's own `(visible, layer)`, in order.
+    ///
+    /// Each scope's **own** answer, which is what the device is handed; the
+    /// enclosing answer is [`hidden_fills`] and `hidden_at` below.
+    fn begins(d: &RecordingDevice) -> Vec<(bool, Option<String>)> {
+        d.scopes()
+            .map(|scope| (scope.visible, scope.hidden_layer.clone()))
+            .collect()
+    }
+
+    /// Every scope's tag, in order.
+    fn scope_tags(d: &RecordingDevice) -> Vec<Vec<u8>> {
+        d.scopes().map(|scope| scope.tag.clone()).collect()
+    }
+
+    /// Every scope's property list, in order.
+    fn scope_props(d: &RecordingDevice) -> Vec<Option<MarkedProps>> {
+        d.scopes().map(|scope| scope.props.clone()).collect()
+    }
+
+    /// One entry per fill: whether **any** scope open at that fill was hiding
+    /// it.
+    ///
+    /// Derived rather than stored, which is the whole nesting argument: the
+    /// device keeps each scope's own answer and this walks the stack, exactly
+    /// as a drawing device must — so a test here fails for the same reason
+    /// the renderer would.
+    fn hidden_fills(d: &RecordingDevice) -> Vec<bool> {
+        d.indices(EventKind::FillPath)
+            .map(|index| d.hidden_at(index))
+            .collect()
+    }
+
+    /// The fills that were painted with nothing hiding them.
+    fn painted(d: &RecordingDevice) -> usize {
+        hidden_fills(d).iter().filter(|hidden| !**hidden).count()
+    }
+
     /// The property lists the interpreter reported, in order.
     fn props_of(source: &[u8]) -> Vec<Option<MarkedProps>> {
-        run_layers(source).props
+        scope_props(&run_layers(source))
     }
 
     /// The tags it reported, as strings.
     fn tags_of(source: &[u8]) -> Vec<String> {
-        run_layers(source)
-            .tags
+        scope_tags(&run_layers(source))
             .iter()
             .map(|tag| String::from_utf8_lossy(tag).into_owned())
             .collect()
@@ -2590,15 +2636,18 @@ mod tests {
     /// other way round. Neither lookup may stand in for the other.
     #[test]
     fn the_two_property_lookups_are_independent() {
-        let d = run_layers(b"/OC /Off BDC EMC /P /Plain BDC EMC");
+        let d = &run_layers(b"/OC /Off BDC EMC /P /Plain BDC EMC");
         assert_eq!(
-            d.begins[0],
+            begins(d)[0],
             (false, Some("Construction lines".to_string())),
             "/Off is a layer"
         );
-        assert!(d.props[0].is_none(), "and carries no /MCID");
-        assert_eq!(d.begins[1], (true, None), "/Plain is not a layer");
-        assert!(d.props[1].is_none(), "and is not a property list either");
+        assert!(scope_props(d)[0].is_none(), "and carries no /MCID");
+        assert_eq!(begins(d)[1], (true, None), "/Plain is not a layer");
+        assert!(
+            scope_props(d)[1].is_none(),
+            "and is not a property list either"
+        );
     }
 
     /// Every shape of malformed list: **no `/MCID`, and a visible scope.**
@@ -2626,10 +2675,14 @@ mod tests {
         for source in cases {
             let d = run_layers(source);
             let what = String::from_utf8_lossy(source);
-            assert_eq!(d.fills, vec![false], "{what} should paint");
-            assert_eq!(d.begins.len(), 1, "{what} should open one scope");
+            assert_eq!(hidden_fills(&d), vec![false], "{what} should paint");
             assert_eq!(
-                d.props[0].as_ref().and_then(|p| p.mcid),
+                d.count(EventKind::BeginMarkedContent),
+                1,
+                "{what} should open one scope"
+            );
+            assert_eq!(
+                scope_props(&d)[0].as_ref().and_then(|p| p.mcid),
                 None,
                 "{what} should name no marked sequence"
             );
@@ -2653,7 +2706,7 @@ mod tests {
         );
 
         assert_eq!(
-            d.begins,
+            begins(&d),
             vec![
                 (false, Some("Construction lines".to_string())),
                 (true, None),
@@ -2662,7 +2715,7 @@ mod tests {
             "the layer hides, the two paragraphs do not"
         );
         assert_eq!(
-            d.props
+            scope_props(&d)
                 .iter()
                 .map(|p| p.as_ref().and_then(|p| p.mcid))
                 .collect::<Vec<_>>(),
@@ -2670,19 +2723,19 @@ mod tests {
             "the hidden scope carries no identifier and the nested one does"
         );
         assert_eq!(
-            d.fills,
+            hidden_fills(&d),
             vec![true, false],
             "and only the painting was suppressed"
         );
-        assert_eq!(d.ends, 3);
+        assert_eq!(d.count(EventKind::EndMarkedContent), 3);
     }
 
     /// 14.6.1: `BMC` has no property list at all, so it can carry no `/MCID`.
     #[test]
     fn a_bmc_carries_no_properties() {
         let d = run_layers(b"/Span BMC 0 0 2 2 re f EMC");
-        assert_eq!(d.tags, vec![b"Span".to_vec()]);
-        assert_eq!(d.props, vec![None]);
+        assert_eq!(scope_tags(&d), vec![b"Span".to_vec()]);
+        assert_eq!(scope_props(&d), vec![None]);
     }
 
     /// An `/Artifact` with an inline property list is an artifact.
@@ -2698,76 +2751,6 @@ mod tests {
             tags_of(b"/Artifact << /Type /Pagination /BBox [0 0 9 9] >> BDC EMC"),
             vec!["Artifact"]
         );
-    }
-
-    /// A device that keeps the nesting the interpreter reports, so a test can
-    /// ask what was in force when something was painted.
-    ///
-    /// The counter is exactly what a drawing device has to keep — each scope's
-    /// *own* visibility arrives, so the enclosing answer is this stack — which
-    /// is the point: a test here fails for the same reason the renderer would.
-    #[derive(Default)]
-    struct Scopes {
-        /// Whether each open scope hid its contents, innermost last.
-        open: Vec<bool>,
-        /// Every `begin`, in order: `(visible, layer)`.
-        begins: Vec<(bool, Option<String>)>,
-        /// How many `end`s arrived.
-        ends: usize,
-        /// One entry per fill: whether any scope was hiding it.
-        fills: Vec<bool>,
-        /// One entry per glyph: its text, and whether any scope was hiding it.
-        glyphs: Vec<(String, bool)>,
-        /// Every `begin`'s tag, in order.
-        ///
-        /// Added with gap 14's milestone 2. The device deliberately ignored
-        /// the tag until then, which is why the peek that read a *value* out
-        /// of an inline property list and called it the tag survived here for
-        /// as long as it did.
-        tags: Vec<Vec<u8>>,
-        /// Every `begin`'s property list, in order.
-        props: Vec<Option<MarkedProps>>,
-    }
-
-    impl Scopes {
-        fn hidden(&self) -> bool {
-            self.open.iter().any(|h| *h)
-        }
-        /// The fills that were painted with nothing hiding them.
-        fn painted(&self) -> usize {
-            self.fills.iter().filter(|hidden| !**hidden).count()
-        }
-    }
-
-    impl Device for Scopes {
-        fn begin_marked_content(
-            &mut self,
-            tag: &[u8],
-            visible: bool,
-            hidden_layer: Option<&str>,
-            props: Option<&MarkedProps>,
-        ) {
-            self.open.push(!visible);
-            self.begins
-                .push((visible, hidden_layer.map(str::to_string)));
-            self.tags.push(tag.to_vec());
-            self.props.push(props.cloned());
-        }
-        fn end_marked_content(&mut self) {
-            self.ends += 1;
-            // Counted separately from the stack, so a pop with nothing open
-            // is visible as `ends > begins` rather than silently absorbed —
-            // which is what a real device's `saturating_sub` would do.
-            self.open.pop();
-        }
-        fn fill_path(&mut self, _path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
-            let hidden = self.hidden();
-            self.fills.push(hidden);
-        }
-        fn show_glyph(&mut self, glyph: &Glyph, _state: &GraphicsState) {
-            let hidden = self.hidden();
-            self.glyphs.push((glyph.text.clone(), hidden));
-        }
     }
 
     /// `/Off` names a layer the configuration hides, `/On` one it shows, and
@@ -2866,8 +2849,8 @@ mod tests {
         }
     }
 
-    fn run_layers(src: &[u8]) -> Scopes {
-        let mut d = Scopes::default();
+    fn run_layers(src: &[u8]) -> RecordingDevice {
+        let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, &Layers);
         d
     }
@@ -2891,15 +2874,15 @@ mod tests {
               0 0 5 5 re f",
         );
 
-        assert_eq!(d.fills.len(), 5, "every fill reached the device");
+        assert_eq!(hidden_fills(&d).len(), 5, "every fill reached the device");
         assert_eq!(
-            d.fills,
+            hidden_fills(&d),
             vec![false, true, true, true, false],
             "the three inside the /Off scope are hidden, including the two \
              nested ones"
         );
-        assert_eq!(d.painted(), 2);
-        assert_eq!(d.ends, 3, "one EMC per BDC");
+        assert_eq!(painted(&d), 2);
+        assert_eq!(d.count(EventKind::EndMarkedContent), 3, "one EMC per BDC");
     }
 
     /// M2's second exit criterion: an unbalanced `EMC` does not underflow.
@@ -2912,9 +2895,13 @@ mod tests {
     fn a_stray_emc_is_dropped_rather_than_underflowing() {
         let d = run_layers(b"EMC EMC EMC EMC /OC /Off BDC 0 0 2 2 re f EMC EMC EMC 0 0 3 3 re f");
 
-        assert_eq!(d.begins.len(), 1);
-        assert_eq!(d.ends, 1, "six of the seven EMCs had nothing to close");
-        assert_eq!(d.fills, vec![true, false]);
+        assert_eq!(d.count(EventKind::BeginMarkedContent), 1);
+        assert_eq!(
+            d.count(EventKind::EndMarkedContent),
+            1,
+            "six of the seven EMCs had nothing to close"
+        );
+        assert_eq!(hidden_fills(&d), vec![true, false]);
     }
 
     /// 14.6.2: a stream may end inside a scope, and the device must not be
@@ -2923,21 +2910,25 @@ mod tests {
     #[test]
     fn an_unclosed_scope_is_closed_at_the_end_of_its_stream() {
         let d = run_layers(b"/OC /Off BDC 0 0 2 2 re f");
-        assert_eq!(d.begins.len(), 1);
-        assert_eq!(d.ends, 1, "the page's own trailing scope was closed");
-        assert!(d.open.is_empty());
+        assert_eq!(d.count(EventKind::BeginMarkedContent), 1);
+        assert_eq!(
+            d.count(EventKind::EndMarkedContent),
+            1,
+            "the page's own trailing scope was closed"
+        );
+        assert!(d.open_scopes().is_empty());
 
         // `Frm` opens one scope it never closes and closes one it never
         // opened. Neither may reach the page: the fill after the form is
         // outside every layer.
         let d = run_layers(b"/Frm Do 0 0 9 9 re f");
         assert_eq!(
-            d.fills,
+            hidden_fills(&d),
             vec![true, false],
             "the form's own fill is hidden and the page's is not"
         );
-        assert_eq!(d.begins.len(), 1);
-        assert_eq!(d.ends, 1);
+        assert_eq!(d.count(EventKind::BeginMarkedContent), 1);
+        assert_eq!(d.count(EventKind::EndMarkedContent), 1);
     }
 
     /// 8.11.3.2: only an `/OC` tag selects optional content.
@@ -2946,8 +2937,8 @@ mod tests {
         // `/Off` is a hidden layer, but the tag here is `/Span`, so the name
         // is an ordinary property list and the fill paints.
         let d = run_layers(b"/Span /Off BDC 0 0 2 2 re f EMC");
-        assert_eq!(d.fills, vec![false]);
-        assert_eq!(d.begins, vec![(true, None)]);
+        assert_eq!(hidden_fills(&d), vec![false]);
+        assert_eq!(begins(&d), vec![(true, None)]);
     }
 
     /// Ruling 10: the scope that hides carries the layer's name, so a device
@@ -2956,7 +2947,7 @@ mod tests {
     fn a_hidden_scope_names_its_layer() {
         let d = run_layers(b"/OC /Off BDC 0 0 2 2 re f EMC");
         assert_eq!(
-            d.begins,
+            begins(&d),
             vec![(false, Some("Construction lines".to_string()))]
         );
     }
@@ -2982,7 +2973,7 @@ mod tests {
         ] {
             let d = run_layers(src);
             assert_eq!(
-                d.fills,
+                hidden_fills(&d),
                 vec![false],
                 "{} should paint",
                 String::from_utf8_lossy(src)
@@ -3003,10 +2994,14 @@ mod tests {
               0 0 3 3 re f",
         );
 
-        assert_eq!(d.begins.len(), 1, "only the BMC opened a scope");
-        assert_eq!(d.begins, vec![(true, None)]);
-        assert_eq!(d.ends, 1);
-        assert_eq!(d.fills, vec![false, false], "both fills painted");
+        assert_eq!(
+            d.count(EventKind::BeginMarkedContent),
+            1,
+            "only the BMC opened a scope"
+        );
+        assert_eq!(begins(&d), vec![(true, None)]);
+        assert_eq!(d.count(EventKind::EndMarkedContent), 1);
+        assert_eq!(hidden_fills(&d), vec![false, false], "both fills painted");
     }
 
     /// Hidden content still runs. The pen advances, `q`/`Q` balance, and the
@@ -3019,10 +3014,12 @@ mod tests {
               BT /F0 10 Tf (C) Tj ET",
         );
 
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(text, "ABC", "the hidden glyphs were still shown");
         assert_eq!(
-            d.glyphs.iter().map(|g| g.1).collect::<Vec<_>>(),
+            d.indices(EventKind::ShowGlyph)
+                .map(|index| d.hidden_at(index))
+                .collect::<Vec<_>>(),
             vec![true, true, false],
             "and only their painting was marked hidden"
         );
@@ -3038,68 +3035,74 @@ mod tests {
         let d = run_layers(b"/PlainFrm Do /HiddenFrm Do 0 0 9 9 re f");
 
         assert_eq!(
-            d.fills,
+            hidden_fills(&d),
             vec![false, true, false],
             "the plain form paints, the hidden one does not, and the page \
              after both does"
         );
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(
             text, "form textform text",
             "the hidden form was still interpreted"
         );
         assert_eq!(
-            d.begins,
+            begins(&d),
             vec![(false, Some("Construction lines".to_string()))],
             "one scope, opened around the `Do` rather than inside the form"
         );
-        assert_eq!(d.ends, 1);
-        assert!(d.open.is_empty());
+        assert_eq!(d.count(EventKind::EndMarkedContent), 1);
+        assert!(d.open_scopes().is_empty());
     }
 
     /// An image XObject is the branch where `form` returns `None`, so it is
-    /// asserted separately: a hidden one must not even be handed to the
-    /// device, or the device decodes it to find out it cannot.
+    /// asserted separately: a hidden one is wrapped in a hidden scope, and a
+    /// device that honours the scope never decodes it to find out it cannot.
+    ///
+    /// **This test used to be named `…_is_not_handed_to_the_device`, and the
+    /// device it drove claimed in a comment to record "whether it was asked at
+    /// all, which is the stronger property".** It did not: its `draw_image`
+    /// returned early while a scope was hiding, so it recorded what it *drew*.
+    /// `run_xobject` calls `draw_image` unconditionally — the `/OC` on the
+    /// XObject opens a scope around the `Do` and nothing else — so the hidden
+    /// image *is* handed over, and the claim was false about the code beside
+    /// it. The promoted recorder makes the difference visible rather than
+    /// absorbing it, because it keeps the call and derives the suppression;
+    /// the last assertion is the property the comment was reaching for, now
+    /// stated in the direction that is true.
     #[test]
-    fn a_hidden_image_xobject_is_not_handed_to_the_device() {
-        #[derive(Default)]
-        struct Images {
-            drawn: Vec<Vec<u8>>,
-            open: Vec<bool>,
-        }
-        impl Device for Images {
-            fn begin_marked_content(
-                &mut self,
-                _tag: &[u8],
-                visible: bool,
-                _layer: Option<&str>,
-                _props: Option<&MarkedProps>,
-            ) {
-                self.open.push(!visible);
-            }
-            fn end_marked_content(&mut self) {
-                self.open.pop();
-            }
-            fn draw_image(&mut self, image: &ImageRef, _state: &GraphicsState) {
-                // A drawing device suppresses here; this one records whether
-                // it was asked at all, which is the stronger property for a
-                // codec that would otherwise be reported as unsupported.
-                if self.open.iter().any(|hidden| *hidden) {
-                    return;
-                }
-                self.drawn.push(image.name.clone());
-            }
-        }
-
-        let mut d = Images::default();
+    fn a_hidden_image_xobject_arrives_inside_a_hidden_scope() {
+        let mut d = RecordingDevice::new();
         interpret(
             b"/PlainImg Do /HiddenImg Do",
             Matrix::IDENTITY,
             &mut d,
             &Layers,
         );
-        assert_eq!(d.drawn, vec![b"PlainImg".to_vec()]);
-        assert!(d.open.is_empty());
+
+        let drawn: Vec<Vec<u8>> = d
+            .indices(EventKind::DrawImage)
+            .filter(|index| !d.hidden_at(*index))
+            .filter_map(|index| match &d.events()[index] {
+                Event::DrawImage { image, .. } => Some(image.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn, vec![b"PlainImg".to_vec()]);
+        assert!(d.open_scopes().is_empty());
+
+        let offered: Vec<Vec<u8>> = d
+            .of_kind(EventKind::DrawImage)
+            .filter_map(|event| match event {
+                Event::DrawImage { image, .. } => Some(image.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offered,
+            vec![b"PlainImg".to_vec(), b"HiddenImg".to_vec()],
+            "both were handed over; only the scope around the second one \
+             tells a device not to decode it"
+        );
     }
 
     /// Depth is bounded, and running out of it shows content rather than
@@ -3134,18 +3137,22 @@ mod tests {
         src.extend_from_slice(b"0 0 3 3 re f EMC 0 0 4 4 re f");
 
         let d = run_layers(&src);
-        assert_eq!(d.begins.len(), cap, "the cap held");
-        assert_eq!(d.begins.len(), d.ends, "and every one was closed");
-        assert!(d.open.is_empty());
+        assert_eq!(d.count(EventKind::BeginMarkedContent), cap, "the cap held");
         assert_eq!(
-            d.fills,
+            d.count(EventKind::BeginMarkedContent),
+            d.count(EventKind::EndMarkedContent),
+            "and every one was closed"
+        );
+        assert!(d.open_scopes().is_empty());
+        assert_eq!(
+            hidden_fills(&d),
             vec![true, true, false],
             "the fill inside is hidden; so is the one after the unwinding, \
              because the outermost scope is still open; only the fill after \
              its own EMC paints"
         );
         assert!(
-            d.begins.iter().filter(|(visible, _)| !*visible).count() == 1,
+            begins(&d).iter().filter(|(visible, _)| !*visible).count() == 1,
             "the three scopes past the cap were refused, and a refused scope \
              is a visible one"
         );

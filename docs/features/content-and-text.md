@@ -90,6 +90,43 @@ same thing. Warnings are deduplicated — a page whose font is unknown says
 so once, not once per glyph — so "this page has no text" and "this page has
 text this build could not decode" stay distinguishable (ruling 2).
 
+**The recording device.** `tinker-pdf-content`'s `record.rs` carries a third
+`Device`, beside the text device here and the rasterising one in
+`tinker-pdf-render`: `RecordingDevice` keeps **every** call, in order, as a
+typed `Event` with a copy of the graphics state that call saw. It observes
+and decides nothing — no accumulated clip, no bounding boxes, no decoded
+image samples, and a `q`/`Q` pair that changed nothing is still two events —
+so two consumers wanting different scenes build them from one transcript
+rather than having to agree first.
+
+Three decisions are recorded in the module itself, because a later reader
+would otherwise have to re-derive them:
+
+- **The list is flat, with explicit begin and end events, rather than a
+  tree.** `q`/`Q` and `BMC`/`EMC` nest independently and may cross, so a tree
+  would have to name one of them the parent and be wrong in whichever
+  direction it chose; and the interpreter's own repairs — a stray `EMC`, a
+  scope refused past the depth cap, a stream that ended inside a scope —
+  have no parent to be given one. The price is that "what was open here" is
+  a prefix walk, paid only by the consumers that ask.
+- **Each scope's own visibility is what is stored**, with the enclosing
+  answer derived on demand, because the reverse cannot be undone: a nested
+  `/OC` naming a layer that is on, inside one that is off, is hidden, and a
+  recorder that stored only "hidden here" could never say which scope hid it.
+- **The state is copied at the call**, which is what the retained-page row's
+  byte-equal replay needs and what a recorder holding one shared handle
+  silently loses. `Capture` turns whole categories — and the state copy —
+  off for the two consumers that want only glyphs.
+
+It exists as a **prerequisite rather than as a capability**, which is why it
+has no [roadmap](../ROADMAP.md) row of its own. Six rows need it and only one
+of them says the words: a retained page (whose exit criterion already read "a
+recording `Device`"), PDF to SVG, structured text serialisation, table
+reconstruction from geometry, inferred reading order for untagged pages, and
+the glyph-usage walk that font subsetting on rewrite drives. Promoting it out
+of the interpreter's test module deleted five ad-hoc recorders that had grown
+there, each keeping what one test needed.
+
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a
@@ -166,8 +203,10 @@ that was never written, and none to write one no element claims.
 
 Coordinates are PDF user space, y upward — the space the page's own boxes
 are in; a display transform is the caller's. The `Device` trait, the
-interpreter and `TextDevice` live in `tinker-pdf-content` and are
-architecture rather than public API; see [architecture](../architecture.md).
+interpreter, `TextDevice` and `RecordingDevice` live in `tinker-pdf-content`
+and are architecture rather than public API — the facade projects none of
+them, and ruling 11 is about what a *document* exposes, not about whether a
+crate has an API of its own; see [architecture](../architecture.md).
 
 ## Refused by name
 
@@ -196,8 +235,22 @@ Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),
 `text.rs` (artifact scopes nest, `ET` continuation versus baseline gaps,
 search hit geometry, wmode/rtl separation, non-finite glyphs dropped),
-`interpret.rs` (group offer/decline, state save discipline) and `state.rs`
-(matrix convention, render-mode predicates).
+`interpret.rs` (group offer/decline, state save discipline), `record.rs` (a
+small stream's whole event list asserted in order including the nesting; two
+paints with different states asserted separately, which is what catches a
+recorder that shares one handle and reports every event with the last state;
+`q`/`Q` one for one; a declined form has no end; a glyph-only capture keeps
+glyphs and copies no state; the per-event size pinned) and `state.rs` (matrix
+convention, render-mode predicates).
+
+Every test in `interpret.rs` drives `RecordingDevice`. It used to carry five
+devices of its own — `Recorder`, `GroupEvents`, `Painted`, `Scopes` and
+`Images` — and all five are gone with what they asserted unchanged. One
+assertion grew rather than moved: the hidden-image test's device used to
+suppress a hidden image *itself* while its comment claimed it recorded
+"whether it was asked at all", so it proved the weaker of the two. The
+interpreter hands a hidden image to the device inside a hidden scope, and the
+test now says so.
 
 Facade integration tests: `crates/tinker-pdf/tests/inline_images.rs` (a
 predictor-filtered inline image matches the identical XObject pixel for
@@ -218,5 +271,5 @@ sweeps the same shapes on stable. Nothing compares this extractor against
 another one: ruling 13 ended that, and the harness that could have driven one
 is deleted. Across the corpus, 5 516 of
 5 525 files rendered every page with 0 crashes, and `cargo test
---workspace` stands at 4 543 passed / 0 failed / 56 ignored (Windows x86_64,
-13 September 2026).
+--workspace` stands at 4 613 passed / 0 failed / 56 ignored across 211 suites
+(Windows x86_64, 14 September 2026).

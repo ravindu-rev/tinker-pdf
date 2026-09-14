@@ -139,8 +139,11 @@ The graph cannot cycle, because `filters` depends on nothing.
 validator that reads a file back with the repairs turned off (ruling 13,
 [verification](verification.md)).
 `tinker-pdf-content` is the content-stream interpreter plus `trait Device`,
-and ships the text device; the rasterizing device lives in
-`tinker-pdf-render`. Because the two devices are in different crates, the
+and ships two devices: the text device, and the recording device that keeps
+every call in order for the consumers a display list, an SVG writer, a
+structured-text serialiser, a table reconstructor, a reading-order inference
+and a glyph-usage walk each need. The rasterizing device lives in
+`tinker-pdf-render`. Because the drawing device is in a different crate, the
 text-extraction path never links a rasterizer — the seam is load-bearing,
 not decorative (ruling 7). `tinker-pdf` is the facade and the only
 user-facing crate (ruling 11).
@@ -152,7 +155,11 @@ Convenient shortcuts between crates are how seams die.
 
 ## Per-crate map
 
-Source lines are `src/` including inline test modules, as of August 2026.
+Source lines are `src/` including inline test modules, as of August 2026 —
+except `tinker-pdf-content`, re-measured 14 September 2026 when the recording
+device landed. The August figure for it was 4 500 and the file was already
+5 531 lines before that change, so the rest of this column is a dated
+measurement rather than a number kept in step.
 
 | Crate | Role | ~LOC | Feature doc | Fuzz targets |
 | --- | --- | ---: | --- | --- |
@@ -163,7 +170,7 @@ Source lines are `src/` including inline test modules, as of August 2026.
 | `tinker-pdf-pki` | DER (X.690), X.509 (RFC 5280), CMS (RFC 5652) | 6 000 | [signatures](features/signatures.md) | `pki_der`, `pki_cms` |
 | `tinker-pdf-shape` | OpenType Layout: GDEF, GSUB, GPOS | 4 950 | [design/shaping.md](design/shaping.md) | `shape` |
 | `tinker-pdf-font` | font and CMap parsing, subsetting | 8 400 | [fonts](features/fonts.md) | `cff`, `cmap`, `sfnt`, `truetype`, `type1` |
-| `tinker-pdf-content` | interpreter + `Device` seam, text device | 4 500 | [content-and-text](features/content-and-text.md) | `content_tokenizer` |
+| `tinker-pdf-content` | interpreter + `Device` seam, text device, recording device | 6 700 | [content-and-text](features/content-and-text.md) | `content_tokenizer` |
 | `tinker-pdf-raster` | deterministic AA rasterizer | 5 900 | [rasterizer](features/rasterizer.md) | — (driven via `render_page`) |
 | `tinker-pdf-render` | the rasterizing `Device` | 6 000 | [rendering](features/rendering.md) | — (driven via `render_page`) |
 | `tinker-pdf-color` | colour spaces and functions | 1 100 | [rendering](features/rendering.md) | — |
