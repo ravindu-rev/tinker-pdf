@@ -377,6 +377,143 @@ impl Bitmap {
     pub fn components(&self) -> usize {
         self.format.components()
     }
+
+    /// This bitmap as a complete PNG file (ISO/IEC 15948), 8 bits a component.
+    ///
+    /// `None` exactly when the bitmap is not a picture: a zero `width` or
+    /// `height`, a `stride` narrower than one row, or a `data` shorter than
+    /// the rows the other three fields promise. [`Page::render`] produces none
+    /// of the three — a page is at least one pixel and its buffer is sized
+    /// from its own dimensions — but [`Bitmap`]'s fields are public and a
+    /// caller may build one, and there is nothing to degrade to: a PNG with no
+    /// pixels is not a smaller PNG.
+    ///
+    /// # Every format, and the two that cannot be written as they are
+    ///
+    /// PNG has five colour types — 0 grey, 2 truecolour, 3 indexed, 4 grey
+    /// with alpha, 6 truecolour with alpha — and **no CMYK and no Lab**. Four
+    /// of the six [`PixelFormat`]s are one of those layouts already and are
+    /// written byte for byte. The other two are converted here, and the
+    /// conversion is the point rather than a detail:
+    ///
+    /// | `PixelFormat` | Colour type | What happens |
+    /// | --- | --- | --- |
+    /// | `Gray8` | 0 | the bytes, unchanged |
+    /// | `Rgb8` | 2 | the bytes, unchanged |
+    /// | `GrayA8` | 4 | the bytes, unchanged |
+    /// | `Rgba8` | 6 | the bytes, unchanged |
+    /// | `CmykA8` | 6 | 8.6.4.4's device relation, ink to light; alpha kept |
+    /// | `LabA8` | 6 | `L*a*b*` decoded back to sRGB; alpha kept |
+    ///
+    /// `tinker_pdf_render::page_format`'s own doc already argues why this must
+    /// happen rather than being refused or passed through: a `Bitmap` says how
+    /// many components it has and **nothing about what they mean**, so a
+    /// consumer reading three bytes and calling them red, green and blue is
+    /// handed ink and produces a picture that looks almost right. That is why
+    /// `CmykA8` is not a page format at all. It is still constructible — the
+    /// fields are public, and a transparency group compositing over ink
+    /// (11.6.6) is a real buffer of this shape — so this method has to be
+    /// total over all six rather than over the two a page comes back in, and
+    /// writing four components under colour type 6 would put cyan, magenta and
+    /// yellow into a file labelled RGB.
+    ///
+    /// # Eight bits, and what the round trip is therefore at
+    ///
+    /// Table 11.1 permits 16-bit components for four of the five colour types
+    /// and this writes none: every `PixelFormat` is a byte a channel, so a
+    /// 16-bit file would carry eight bits of information in each pair of
+    /// bytes. **A 16-bit PNG read into a `Bitmap` and written back out comes
+    /// back at 8-bit precision**, which is the precision the `Bitmap` had.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let bytes = std::fs::read("document.pdf")?;
+    /// let doc = tinker_pdf::Document::open(bytes)?;
+    /// let page = doc.page(0).ok_or("no first page")?;
+    /// let bitmap = page.render(&tinker_pdf::RenderOptions::at_dpi(150.0));
+    /// std::fs::write("page-1.png", bitmap.to_png().ok_or("not a picture")?)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn to_png(&self) -> Option<Vec<u8>> {
+        use tinker_pdf_filters::{png_encode, PngColour, PngSource};
+
+        // The four formats PNG already has a colour type for: no copy, and the
+        // stride is handed through rather than flattened, because a padded
+        // buffer's padding is not pixels.
+        let direct = |colour: PngColour| PngSource {
+            width: self.width,
+            height: self.height,
+            colour,
+            stride: self.stride,
+            data: &self.data,
+        };
+        let converted: Vec<u8>;
+        let source = match self.format {
+            PixelFormat::Gray8 => direct(PngColour::Grey),
+            PixelFormat::GrayA8 => direct(PngColour::GreyAlpha),
+            PixelFormat::Rgb8 => direct(PngColour::Rgb),
+            PixelFormat::Rgba8 => direct(PngColour::Rgba),
+            PixelFormat::CmykA8 | PixelFormat::LabA8 => {
+                converted = self.to_rgba()?;
+                PngSource {
+                    width: self.width,
+                    height: self.height,
+                    colour: PngColour::Rgba,
+                    stride: self.width as usize * 4,
+                    data: &converted,
+                }
+            }
+        };
+        png_encode(&source).ok()
+    }
+
+    /// The two formats PNG cannot carry, as straight RGBA.
+    ///
+    /// Both keep their alpha, which is what makes truecolour-with-alpha the
+    /// right target for each: a `CmykA8` pixel is five bytes and a `LabA8` one
+    /// is four, and both carry an alpha that a three-component target would
+    /// have to drop or composite against a background nobody asked for.
+    ///
+    /// `None` when the buffer is shorter than the rows it promises — the same
+    /// condition [`Bitmap::to_png`] answers `None` for, found here first
+    /// because this is where the bytes are read.
+    fn to_rgba(&self) -> Option<Vec<u8>> {
+        let components = self.format.components();
+        let width = self.width as usize;
+        let mut out = Vec::with_capacity(width.checked_mul(self.height as usize)?.checked_mul(4)?);
+        for y in 0..self.height as usize {
+            let row = self.data.get(y.checked_mul(self.stride)?..)?;
+            for x in 0..width {
+                // Both ends checked: `width x components` is arithmetic on a
+                // caller's own numbers, and an end that wrapped would be a
+                // slice inside the buffer rather than a `None` (ruling 1).
+                let at = x.checked_mul(components)?;
+                let px = row.get(at..at.checked_add(components)?)?;
+                let (r, g, b, a) = match self.format {
+                    // 8.6.4.4, through the rasterizer's own byte-level copy of
+                    // the relation — held to `tinker_pdf_color`'s by a test in
+                    // `tinker-pdf-render` over every combination that matters,
+                    // so the two cannot drift apart behind this call.
+                    PixelFormat::CmykA8 => {
+                        let (r, g, b) =
+                            tinker_pdf_raster::canvas::cmyk_to_rgb(px[0], px[1], px[2], px[3]);
+                        (r, g, b, px[4])
+                    }
+                    // The inverse of the `L/100`, `(a + 128)/255`,
+                    // `(b + 128)/255` encoding `PixelFormat::LabA8` documents,
+                    // taken from the crate that owns it rather than rewritten.
+                    _ => {
+                        let (r, g, b) = tinker_pdf_raster::canvas::lab_to_rgb(px[0], px[1], px[2]);
+                        (r, g, b, px[3])
+                    }
+                };
+                out.extend_from_slice(&[r, g, b, a]);
+            }
+        }
+        Some(out)
+    }
 }
 
 /// Why a document could not be opened.

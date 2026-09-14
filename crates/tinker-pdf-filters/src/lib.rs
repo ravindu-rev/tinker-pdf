@@ -24,6 +24,14 @@
 //! the images its pass-through cannot carry. All three live here because this
 //! is where inflate, the PNG row filters and the checksum already are, and none
 //! of them changes anything a `/Filter` name reaches.
+//!
+//! [`png_encode`] is the fourth and the only one that *writes*. It is here for
+//! the same reason and more sharply: a PNG file is a zlib stream inside chunks
+//! carrying a CRC-32, with 9.2's row filters in front of it, and all three of
+//! those already live in this crate and in no other. `tinker_pdf::Bitmap::to_png`
+//! is a projection over it — it maps a `PixelFormat` onto one of PNG's colour
+//! types and calls this — because ruling 11 makes the facade the public surface
+//! for a *document* and a rendered page is what a caller has.
 
 #![forbid(unsafe_code)]
 
@@ -64,8 +72,9 @@ pub use jxr::{
 };
 pub use mq::{MqContext, MqContexts, MqDecoder};
 pub use png::{
-    colour_type_depth_is_legal, png_decode, png_scan, ChunkType, PngColour, PngError, PngHeader,
-    PngImage, PngScan, PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
+    colour_type_depth_is_legal, png_decode, png_encode, png_scan, ChunkType, PngColour,
+    PngEncodeError, PngError, PngHeader, PngImage, PngScan, PngSource, PngTransparency,
+    MAX_PNG_SAMPLES, PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
 pub use tiff::{

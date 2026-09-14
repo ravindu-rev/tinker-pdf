@@ -63,11 +63,56 @@
 //! why rather than leaving a reader to wonder: the `f*` filter files and the
 //! `g*` gamma files carry different pixel data from each other, so a test
 //! pairing them would be asserting something PngSuite never claimed.
+//!
+//! # And the encoder, which needed a second leg of its own
+//!
+//! `png_encode` arrived after the decoder and is held here too, because the
+//! same argument applies twice over: a raster this repository decoded, encoded
+//! and decoded again would agree with itself no matter what either half did.
+//! PngSuite breaks half of that — **the raster going in was produced by an
+//! encoder nobody here wrote**, across all fifteen legal colour-type/depth
+//! pairs, interlaced and not — and
+//! [`every_file_in_the_suite_survives_a_pass_through_this_encoder`] is that leg.
+//!
+//! It is not enough on its own, and the reason is specific rather than
+//! rhetorical. `png/encode.rs` filters with `predictors.rs`'s Paeth predictor
+//! and `png.rs` unfilters with the same function; a defect in it moves both
+//! directions together and a decode-encode-decode comparison cannot see one.
+//! So [`the_encoders_output_unfilters_by_clause_9_2s_own_formulas`] transcribes
+//! 9.2's five **reconstruction** formulas into this file — `Recon(a)`,
+//! `Recon(b)`, `Recon(c)` and `PaethPredictor` written out from the clause —
+//! and rebuilds the raster from the encoder's own IDAT without calling
+//! [`png_decode`] at all. First-party, which ruling 13 requires; a second
+//! *implementation* rather than a second *program*, which is the line that
+//! ruling draws.
+//!
+//! The two catch different things, and the injection matrix in the commit that
+//! added them is the measurement rather than the claim — including where it
+//! contradicted the first draft of this paragraph. A filter emitted under the
+//! wrong type byte is caught by both. A **reversed Paeth tie-break is invisible
+//! to leg one**: all 162 round trips stay green, because the encoder filters
+//! and the decoder unfilters through the same reversed function. Leg two
+//! catches it. So do two of the decoder tests already in this file —
+//! [`every_interlaced_twin_decodes_to_its_non_interlaced_original`] and
+//! [`the_published_equivalence_classes_decode_to_one_image_each`] — and they
+//! catch it for the same structural reason, which is worth naming: they compare
+//! two *third-party* files against each other rather than against anything this
+//! repository wrote, so the shared defect has nothing to cancel against. Three
+//! of 2 014 in all, and not one of them a round trip.
+//!
+//! One thing neither leg reaches: **16-bit precision**. `png_encode` writes
+//! eight bits a component because `tinker_pdf::Bitmap` has no 16-bit format,
+//! so the four colour types Table 11.1 permits at 16 are narrowed to their
+//! high bytes before the comparison, and the round trip below is at that
+//! precision. Stated at the assertion as well as here.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use tinker_pdf_filters::{png_decode, png_scan, Limits, PngColour, PngError, PngImage};
+use tinker_pdf_filters::{
+    crc32, flate_decode, png_decode, png_encode, png_scan, zlib_compress, Limits, PngColour,
+    PngError, PngImage, PngSource, PNG_SIGNATURE,
+};
 
 /// Printed once per test that actually read the corpus. CI greps for it.
 const RAN: &str = "pngsuite-oracle: RAN";
@@ -553,5 +598,302 @@ fn the_suite_does_not_collapse_into_one_picture() {
             "only {} distinct rasters from {valid} files",
             seen.len()
         );
+    });
+}
+
+// --- the encoder --------------------------------------------------------
+
+/// One decoded PngSuite image as `png_encode` takes it: eight bits a component,
+/// tightly packed.
+///
+/// **The narrowing is the 16-bit statement.** Four of Table 11.1's colour types
+/// permit 16-bit components and PngSuite ships files that use them; this writer
+/// emits eight, because `tinker_pdf::Bitmap` — the thing it exists to serialise
+/// — stores a byte a channel. So a 16-bit sample is reduced to its high byte,
+/// and every comparison below is against the narrowed raster rather than the
+/// original. The round trip is at `Bitmap` precision and says so.
+fn narrow(image: &PngImage) -> Vec<u8> {
+    if image.bits_per_component == 8 {
+        return image.data.clone();
+    }
+    image.data.chunks_exact(2).map(|p| p[0]).collect()
+}
+
+fn source<'a>(image: &PngImage, eight: &'a [u8]) -> PngSource<'a> {
+    PngSource {
+        width: image.width,
+        height: image.height,
+        colour: image.colour,
+        stride: image.width as usize * image.colour.components() as usize,
+        data: eight,
+    }
+}
+
+/// 5.3's chunk structure, walked here rather than through `png_scan`.
+///
+/// Every CRC is recomputed from the **type and the data**, which is what 5.3
+/// covers and not the length, and the walk asserts the file ends exactly where
+/// its last chunk does. Asking `png_scan` instead would be asking one of the
+/// two halves under test what it made of the other.
+fn chunks(file: &[u8], name: &str) -> Vec<([u8; 4], Vec<u8>)> {
+    assert_eq!(&file[..8], &PNG_SIGNATURE, "{name}: 5.2's signature");
+    let mut out = Vec::new();
+    let mut at = 8usize;
+    while at + 12 <= file.len() {
+        let len = u32::from_be_bytes([file[at], file[at + 1], file[at + 2], file[at + 3]]) as usize;
+        let kind = [file[at + 4], file[at + 5], file[at + 6], file[at + 7]];
+        let data = file[at + 8..at + 8 + len].to_vec();
+        let declared = u32::from_be_bytes([
+            file[at + 8 + len],
+            file[at + 9 + len],
+            file[at + 10 + len],
+            file[at + 11 + len],
+        ]);
+        let mut covered = Vec::from(kind);
+        covered.extend_from_slice(&data);
+        assert_eq!(
+            declared,
+            crc32(&covered),
+            "{name}: chunk {} carries the wrong CRC",
+            String::from_utf8_lossy(&kind)
+        );
+        out.push((kind, data));
+        at += 12 + len;
+    }
+    assert_eq!(at, file.len(), "{name}: a chunk ran off the end");
+    assert_eq!(out.first().map(|(k, _)| *k), Some(*b"IHDR"), "{name}: 5.6");
+    assert_eq!(out.last().map(|(k, _)| *k), Some(*b"IEND"), "{name}: 5.6");
+    assert!(
+        out.last().is_some_and(|(_, d)| d.is_empty()),
+        "{name}: IEND carries data"
+    );
+    out
+}
+
+/// The IDAT payload — every chunk's data concatenated, as 10.3 allows one zlib
+/// stream to be split — and the filtered scanlines inside it.
+fn idat_and_stream(file: &[u8], name: &str) -> (Vec<u8>, Vec<u8>) {
+    let mut idat = Vec::new();
+    for (kind, data) in chunks(file, name) {
+        if &kind == b"IDAT" {
+            idat.extend_from_slice(&data);
+        }
+    }
+    let decoded = flate_decode(&idat, &CAP, None).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert!(decoded.complete, "{name}: the IDAT did not inflate whole");
+    assert!(
+        decoded.warnings.is_empty(),
+        "{name}: this writer's own zlib stream took leniency: {:?}",
+        decoded.warnings
+    );
+    (idat, decoded.data)
+}
+
+/// **ISO/IEC 15948 9.2, Table 9.1 — the reconstruction formulas, transcribed.**
+///
+/// This is the second implementation, and it is the whole reason the round trip
+/// below means anything. `png.rs` unfilters through `predictors.rs`, which is
+/// also where `png/encode.rs` gets its Paeth predictor; a defect shared by the
+/// two directions cancels exactly and leaves a decode-encode-decode comparison
+/// perfectly green. Nothing here calls into that code.
+///
+/// `Recon(a)` is the byte `bpp` to the left of the current one **in the row
+/// being reconstructed**, `Recon(b)` the one directly above it in the previous
+/// reconstructed row, and `Recon(c)` the one above and to the left; each is
+/// zero where it falls outside the image. All arithmetic is modulo 256, which
+/// 9.2 states.
+fn unfilter_by_clause_9_2(stream: &[u8], width: usize, height: usize, bpp: usize) -> Vec<u8> {
+    let row_bytes = width * bpp;
+    let mut out = vec![0u8; row_bytes * height];
+    let mut prior = vec![0u8; row_bytes];
+    let mut at = 0usize;
+    for y in 0..height {
+        let kind = stream[at];
+        let filt = &stream[at + 1..at + 1 + row_bytes];
+        at += 1 + row_bytes;
+        let mut recon = vec![0u8; row_bytes];
+        for i in 0..row_bytes {
+            let a = if i >= bpp { recon[i - bpp] } else { 0 };
+            let b = prior[i];
+            let c = if i >= bpp { prior[i - bpp] } else { 0 };
+            recon[i] = match kind {
+                // Recon(x) = Filt(x)
+                0 => filt[i],
+                // Recon(x) = Filt(x) + Recon(a)
+                1 => filt[i].wrapping_add(a),
+                // Recon(x) = Filt(x) + Recon(b)
+                2 => filt[i].wrapping_add(b),
+                // Recon(x) = Filt(x) + floor((Recon(a) + Recon(b)) / 2)
+                3 => filt[i].wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8),
+                // Recon(x) = Filt(x) + PaethPredictor(Recon(a), Recon(b),
+                // Recon(c)), with the predictor written out from the clause:
+                // p = a + b - c, then whichever of a, b and c is nearest p,
+                // ties going to a and then to b — the order 9.2 gives them in,
+                // and the half of the rule a reimplementation gets wrong.
+                4 => {
+                    let (ai, bi, ci) = (i32::from(a), i32::from(b), i32::from(c));
+                    let p = ai + bi - ci;
+                    let (pa, pb, pc) = ((p - ai).abs(), (p - bi).abs(), (p - ci).abs());
+                    let pred = if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    };
+                    filt[i].wrapping_add(pred)
+                }
+                other => panic!("filter type {other}, which 9.2 does not define"),
+            };
+        }
+        out[y * row_bytes..(y + 1) * row_bytes].copy_from_slice(&recon);
+        prior = recon;
+    }
+    assert_eq!(at, stream.len(), "the filtered stream has bytes left over");
+    out
+}
+
+/// **Leg one: every file in the suite makes the round trip.**
+///
+/// Decode a file somebody else produced, encode the raster, decode that, and
+/// require the pixels to be the ones the first decode gave. 162 files, all
+/// fifteen legal colour-type/bit-depth pairs, interlaced and not — and the
+/// fourteen broken by design stay refused, counted here as well so that a
+/// change making the decoder tolerant cannot quietly widen the set.
+///
+/// The container is asserted against the specification rather than against the
+/// reader: the signature, IHDR first with 11.2.2's thirteen bytes, IEND last
+/// and empty, every chunk's CRC recomputed over its type and its data, and the
+/// IDAT payload equal to what `zlib_compress` makes of the filtered stream.
+#[test]
+fn every_file_in_the_suite_survives_a_pass_through_this_encoder() {
+    with_suite!("encoder-round-trip", |dir| {
+        let mut round_tripped = 0usize;
+        let mut refused = 0usize;
+        let mut sixteen_bit = 0usize;
+        for name in all(&dir) {
+            let Ok(first) = png_decode(&read(&dir, &name), &CAP) else {
+                refused += 1;
+                continue;
+            };
+            if first.bits_per_component == 16 {
+                sixteen_bit += 1;
+            }
+            let eight = narrow(&first);
+            let file = png_encode(&source(&first, &eight))
+                .unwrap_or_else(|e| panic!("{name}: this raster would not encode: {e}"));
+
+            let (idat, stream) = idat_and_stream(&file, &name);
+            assert_eq!(
+                idat,
+                zlib_compress(&stream),
+                "{name}: the IDAT is not zlib_compress of its own filtered stream"
+            );
+            let walked = chunks(&file, &name);
+            let ihdr = &walked[0].1;
+            assert_eq!(ihdr.len(), 13, "{name}: 11.2.2's thirteen bytes");
+            assert_eq!(&ihdr[0..4], &first.width.to_be_bytes(), "{name}: width");
+            assert_eq!(&ihdr[4..8], &first.height.to_be_bytes(), "{name}: height");
+            assert_eq!(ihdr[8], 8, "{name}: bit depth");
+            // Table 11.1's own numbering, against the layout the first decode
+            // reported rather than against anything the encoder said.
+            let want = match first.colour {
+                PngColour::Grey => 0u8,
+                PngColour::Rgb => 2,
+                PngColour::GreyAlpha => 4,
+                PngColour::Rgba => 6,
+            };
+            assert_eq!(ihdr[9], want, "{name}: colour type");
+            assert_eq!(&ihdr[10..13], &[0, 0, 0], "{name}: the three methods");
+
+            let second = png_decode(&file, &CAP)
+                .unwrap_or_else(|e| panic!("{name}: our own output did not read back: {e}"));
+            assert_eq!(second.width, first.width, "{name}");
+            assert_eq!(second.height, first.height, "{name}");
+            assert_eq!(second.colour, first.colour, "{name}");
+            assert_eq!(second.bits_per_component, 8, "{name}");
+            assert!(second.complete, "{name}");
+            // Ruling 10: a file this engine wrote must take no leniency from
+            // this engine's reader.
+            assert!(
+                second.warnings.is_empty(),
+                "{name}: re-read with {:?}",
+                second.warnings
+            );
+            assert_eq!(
+                second.data, eight,
+                "{name}: the round trip changed the picture \
+                 (at eight bits a component, which is all this writer emits)"
+            );
+            round_tripped += 1;
+        }
+        assert_eq!(round_tripped, 162, "every decodable file round-trips");
+        assert_eq!(refused, 14, "the broken fourteen are still refused");
+        assert!(
+            sixteen_bit > 0,
+            "no file was narrowed from 16 bits, so that half of the claim is vacuous"
+        );
+        println!("  {round_tripped} round-tripped, {sixteen_bit} narrowed from 16 bits to 8");
+    });
+}
+
+/// **Leg two: the encoder's own bytes, unfiltered by a transcription of 9.2
+/// that shares no code with this crate.**
+///
+/// This is the leg that breaks the symmetry. Leg one puts the output through
+/// `png_decode`, which unfilters with the same `predictors.rs` the encoder
+/// filters with — so a defect in the predictor cancels and the comparison stays
+/// green. Here the filtered stream is rebuilt by [`unfilter_by_clause_9_2`] and
+/// compared against the raster that went in.
+///
+/// It also asserts the **coverage of the filter types**, which is the other
+/// thing a round trip cannot see: an encoder emitting type 0 for every row
+/// would round-trip perfectly and would leave 9.2's other four formulas
+/// untouched on both sides. All five have to be chosen somewhere in the suite,
+/// and the tally is printed so a change that collapses the heuristic shows up
+/// as a number rather than as a pass.
+#[test]
+fn the_encoders_output_unfilters_by_clause_9_2s_own_formulas() {
+    with_suite!("independent-unfilter", |dir| {
+        let mut used = [0usize; 5];
+        let mut checked = 0usize;
+        for name in all(&dir) {
+            let Ok(first) = png_decode(&read(&dir, &name), &CAP) else {
+                continue;
+            };
+            let eight = narrow(&first);
+            let file = png_encode(&source(&first, &eight)).expect("a decoded raster encodes");
+            let (_, stream) = idat_and_stream(&file, &name);
+
+            let width = first.width as usize;
+            let height = first.height as usize;
+            let bpp = first.colour.components() as usize;
+            assert_eq!(
+                stream.len(),
+                (width * bpp + 1) * height,
+                "{name}: one tag and one row per scanline"
+            );
+            for y in 0..height {
+                let tag = stream[y * (width * bpp + 1)] as usize;
+                assert!(tag < 5, "{name}: row {y} is tagged {tag}");
+                used[tag] += 1;
+            }
+
+            let rebuilt = unfilter_by_clause_9_2(&stream, width, height, bpp);
+            assert_eq!(
+                rebuilt, eight,
+                "{name}: 9.2's reconstruction formulas do not give back the raster"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 162);
+        println!("  rows by 9.2 filter type, None first: {used:?}");
+        for (kind, count) in used.iter().enumerate() {
+            assert!(
+                *count > 0,
+                "9.2 filter type {kind} was never chosen, so the round trip \
+                 never exercised it: {used:?}"
+            );
+        }
     });
 }

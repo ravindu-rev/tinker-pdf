@@ -40,7 +40,7 @@ options:
   --raw        with --stream, before the filters rather than after
   --dpi D      resolution for render (default 150)
   --jobs N     render N pages at once (default 1)
-  --out DIR    where render writes its PNMs
+  --out DIR    where render writes its PNGs
   --fonts PATH a face, or a directory of faces, for documents that embed none
   --fonts bundled
                the faces this build carries; refused unless it carries any
@@ -595,8 +595,8 @@ fn render_pages(
                         ..RenderOptions::at_dpi(options.dpi)
                     });
 
-                    let out = format!("{dir}/{stem}-{:04}.pnm", index + 1);
-                    let report = write_pnm(&out, &bitmap).map(|()| {
+                    let out = format!("{dir}/{stem}-{:04}.png", index + 1);
+                    let report = write_png(&out, &bitmap).map(|()| {
                         let mut lines = format!("{out} {}x{}\n", bitmap.width, bitmap.height);
                         for warning in &bitmap.warnings {
                             lines.push_str(&format!("  {warning:?}\n"));
@@ -617,32 +617,36 @@ fn render_pages(
     reports.into_iter().map(|(_, report)| report).collect()
 }
 
-/// Writes a binary PNM, which needs no encoder and which every image tool
-/// reads. A PNG writer would mean a deflate encoder in a test tool, and the
-/// engine already has one it should not depend on from here.
-fn write_pnm(path: &str, bitmap: &tinker_pdf::Bitmap) -> Result<(), String> {
-    let components = bitmap.components();
-    let (magic, out_components) = match components {
-        1 | 2 => ("P5", 1),
-        _ => ("P6", 3),
-    };
-
-    let mut out = format!("{magic}\n{} {}\n255\n", bitmap.width, bitmap.height).into_bytes();
-    for y in 0..bitmap.height as usize {
-        let row = y * bitmap.stride;
-        for x in 0..bitmap.width as usize {
-            let at = row + x * components;
-            let Some(pixel) = bitmap.data.get(at..at + components) else {
-                continue;
-            };
-            // Alpha is dropped rather than composited: these are debugging
-            // images, and a surprising background would mislead more than a
-            // missing one.
-            out.extend_from_slice(&pixel[..out_components.min(pixel.len())]);
-        }
-    }
-
-    std::fs::write(path, out).map_err(|e| format!("writing {path}: {e}"))
+/// Writes the page as a PNG, through the facade's own
+/// [`tinker_pdf::Bitmap::to_png`].
+///
+/// This used to write a binary PNM under a comment that said "a PNG writer
+/// would mean a deflate encoder in a test tool, and the engine already has one
+/// it should not depend on from here." The premise was right and the
+/// conclusion was the wrong way round: the encoder belongs **in** the engine,
+/// beside the zlib compressor, the CRC-32 and the row predictors a PNG is made
+/// of — all three of which already lived in `tinker-pdf-filters` and nowhere
+/// else — and the tool calls it, which is the direction everything else here
+/// already runs in. See `crates/tinker-pdf-filters/src/png/encode.rs`.
+///
+/// **PNG always, and no flag to ask for anything else.** The case for a
+/// `--format` switch is the one consumer in this repository that reads what
+/// this writes, `tools/pdfcmp`; the case against is that a debug tool with two
+/// output paths has one that is rarely taken and eventually wrong, and that
+/// PNM was only ever here because there was no encoder. `pdfcmp` still reads a
+/// `.pnm` from any source and takes a `.pdf` directly, which its own usage
+/// text calls the usual shape of a comparison.
+///
+/// Alpha is **kept** rather than dropped, which the PNM path could not do:
+/// `Bitmap::to_png` maps `Rgba8` onto colour type 6 and `Gray8` onto type 0.
+/// A page comes back `Rgb8` by default, so the ordinary invocation writes the
+/// same pixels it always did and the one that asks for alpha stops throwing it
+/// away.
+fn write_png(path: &str, bitmap: &tinker_pdf::Bitmap) -> Result<(), String> {
+    let bytes = bitmap
+        .to_png()
+        .ok_or_else(|| format!("writing {path}: the page is not a picture"))?;
+    std::fs::write(path, bytes).map_err(|e| format!("writing {path}: {e}"))
 }
 
 fn fields(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
@@ -2297,7 +2301,7 @@ mod tests {
         // Page order absolutely, not merely stably: the first line names page
         // one and the last names page forty-eight.
         assert!(
-            serial[0].as_ref().expect("page 1").contains("doc-0001.pnm"),
+            serial[0].as_ref().expect("page 1").contains("doc-0001.png"),
             "{:?}",
             serial[0]
         );
@@ -2305,7 +2309,7 @@ mod tests {
             serial[47]
                 .as_ref()
                 .expect("page 48")
-                .contains("doc-0048.pnm"),
+                .contains("doc-0048.png"),
             "{:?}",
             serial[47]
         );
@@ -2366,7 +2370,7 @@ mod tests {
             // A directory standing exactly where page two's file must go: no
             // `write` on any platform goes through one, which is the cheap
             // stand-in for the full disk this policy exists for.
-            std::fs::create_dir_all(format!("{dir}/doc-0002.pnm")).expect("the blocking directory");
+            std::fs::create_dir_all(format!("{dir}/doc-0002.png")).expect("the blocking directory");
 
             let options = render_options(&dir, jobs);
             let reports = render_pages(&options, &dir, "doc", &doc);
@@ -2391,7 +2395,7 @@ mod tests {
                 );
             }
             assert!(
-                Path::new(&format!("{dir}/doc-0004.pnm")).exists(),
+                Path::new(&format!("{dir}/doc-0004.png")).exists(),
                 "--jobs {jobs}: the pages after the failure were still written"
             );
 

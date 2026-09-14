@@ -797,7 +797,7 @@ impl Canvas {
                 }
             }
             PixelFormat::LabA8 => {
-                let (r, g, b) = lab_colour(*px.first()?, *px.get(1)?, *px.get(2)?);
+                let (r, g, b) = lab_to_rgb(*px.first()?, *px.get(1)?, *px.get(2)?);
                 Color {
                     r,
                     g,
@@ -862,8 +862,17 @@ fn lab_bytes(color: Color) -> (u8, u8, u8) {
     (byte(l / 100.0 * 255.0), byte(a + 128.0), byte(b + 128.0))
 }
 
-/// The inverse of [`lab_bytes`].
-fn lab_colour(l: u8, a: u8, b: u8) -> (u8, u8, u8) {
+/// The inverse of [`lab_bytes`]: [`PixelFormat::LabA8`]'s three bytes back to
+/// sRGB.
+///
+/// `pub` beside [`cmyk_to_rgb`] for the same caller and the same reason.
+/// `tinker_pdf::Bitmap::to_png` has to turn every one of the six pixel formats
+/// into one of PNG's five colour types, and PNG has no Lab; re-deriving the
+/// `L/100`, `(a + 128)/255`, `(b + 128)/255` encoding at that call site would
+/// be a second copy of a choice this module's own doc says is a choice, which
+/// is the drift `tinker-pdf-color` already recorded once.
+#[must_use]
+pub fn lab_to_rgb(l: u8, a: u8, b: u8) -> (u8, u8, u8) {
     tinker_pdf_color::lab_to_srgb(
         f64::from(l) / 255.0 * 100.0,
         f64::from(a) - 128.0,

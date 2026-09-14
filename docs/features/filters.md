@@ -212,6 +212,45 @@ with no wrapper, for ZIP entries) and `crc32` — the reflected-polynomial
 CRC-32 that ZIP (APPNOTE 4.4.7) and PNG (5.3) both carry, with a resumable
 `Crc32` for checksums over non-adjacent slices.
 
+**And a PNG *encoder*, which is the only image writer in this crate.**
+`png_encode` takes an interleaved 8-bit raster and returns a whole file:
+signature, IHDR, IDAT, IEND, each chunk's CRC over its type and its data. It
+is here rather than in the tool that wanted it because a PNG file *is* the
+three things that already lived here and nowhere else — a zlib stream (10.3 is
+`zlib_compress`, RFC 1950), 9.2's row filters (`predictors.rs`, which PDF's
+`/Predictor 15` adopted wholesale) and a chunk CRC-32 — so any other home
+would have had to reach for all three or copy them.
+
+All five of 9.2's filter types are emitted, chosen per row by **the minimum
+sum of absolute differences** the specification itself recommends in 12.8,
+with the filtered bytes read as *signed* (a byte of `0xFF` is a difference of
+minus one, and the unsigned reading rejects exactly the rows a filter helped
+most). Integer arithmetic throughout, ties to the lowest-numbered filter, so
+the chosen filter and therefore every compressed byte is identical on every
+target (ruling 4). Across PngSuite the tally is 115 rows on None, 679 on Sub,
+1 313 on Up, 26 on Average and 2 813 on Paeth — measured, and asserted to be
+non-zero for all five, because an encoder emitting type 0 everywhere would
+round-trip perfectly and exercise 9.2's other four formulas on neither side.
+
+Four colour types are written — 0, 2, 4 and 6 — at **eight bits a component**.
+There is no indexed output, because a palette is a compression decision that
+costs a second pass over the raster to sometimes save bytes and the row filters
+already take the flat regions it would; no interlace, because Adam7 exists so
+that a partial download shows a blurry whole image and nothing here writes to a
+socket; and no 16-bit, because `tinker_pdf::Bitmap` — the thing the encoder
+exists to serialise — stores a byte a channel. **A 16-bit PNG decoded and
+re-encoded therefore comes back at 8-bit precision**, which is stated at the
+assertion that compares them. All three are read by `png_decode`, which is the
+direction that matters: a file somebody else wrote may be anything Table 11.1
+permits; a file this engine writes is one of four things it chose.
+
+One asymmetry is deliberate and worth knowing about: `png_encode` does **not**
+charge `MAX_PNG_SAMPLES`. That cap is a reader's budget against a thirteen-byte
+IHDR asking for 2^63 samples, and charging it on the way out would refuse a
+legal picture — a page at `MAX_PAGE_PIXELS` (67.1 Mpx) is 268 million samples
+as RGBA, four times the ceiling. So the largest page this engine renders writes
+a PNG this crate's own decoder will not read back.
+
 **TIFF** (TIFF 6.0) is the second container decoder, and the argument for it
 being here rather than in a reader is arithmetic: of the seven codings a TIFF
 strip can be in, **six were already written for a `/Filter` name**. Compression
@@ -277,9 +316,19 @@ Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 `predictor_decode`. The image codecs are `jpeg_decode` (returns `JpegImage`),
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
-`JpxImage`). The encoder half is `deflate` and `zlib_compress`; the container
+`JpxImage`). The encoder half is `deflate`, `zlib_compress` and `png_encode`
+(takes a `PngSource`, returns the file or a `PngEncodeError`); the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
 `inflate_raw`, `crc32` and `jxr_decode` (returns `JxrImage`).
+
+`png_encode` is the one filter entry point with a visible counterpart on the
+facade, and the shape is a projection rather than a re-export: ruling 11 keeps
+`tinker_pdf` the public surface for a *document*, and what a caller has is a
+rendered page, so `tinker_pdf::Bitmap::to_png` maps a `PixelFormat` onto one of
+PNG's colour types and calls this. Two of the six formats have no colour type
+to map onto and are converted there rather than here — `CmykA8` through
+8.6.4.4's device relation and `LabA8` back out of `L*a*b*` — because this crate
+holds no PDF colour and ruling 8 keeps it that way.
 
 `jxr_decode` is deliberately **not** a `Filter` or an `ImageCodec` variant.
 Those two enums are PDF `/Filter` dispatch — what a `/Filter` *name* resolves
@@ -376,11 +425,39 @@ wants the reason to survive it.
   it for a banner it does not print could not pass. Corrected with ruling 13,
   which keeps the committed decodes as a dated measurement and rules out ever
   regenerating them as a check.
-- `crates/tinker-pdf-filters/tests/png_suite.rs` — the PNG decoder against
-  PngSuite, 176 files as of August 2026: all fifteen legal colour-type/depth
-  pairs, and fourteen broken-by-design files that must each be refused. Runs
-  when `TINKER_PNGSUITE` points at the set, and prints `RAN`/`SKIPPED` so a
-  missing corpus never reads as a pass.
+- `crates/tinker-pdf-filters/tests/png_suite.rs` — the PNG decoder **and the
+  encoder** against PngSuite, 176 files in the 2017jul19 release, re-fetched
+  and run in September 2026: all fifteen legal
+  colour-type/depth pairs, and fourteen broken-by-design files that must each
+  be refused. Runs when `TINKER_PNGSUITE` points at the set, and prints
+  `RAN`/`SKIPPED` so a missing corpus never reads as a pass.
+
+  The encoder's two legs are there because one of them is not enough.
+  **Leg one** decodes each of the 162 readable files, encodes the raster,
+  decodes that and requires the same pixels — which means the raster going in
+  was produced by an encoder nobody here wrote, at every legal pairing,
+  interlaced and not. **Leg two** transcribes 9.2's five *reconstruction*
+  formulas into the test and rebuilds the raster from the encoder's own IDAT
+  without calling `png_decode` at all. Leg two exists because `png/encode.rs`
+  filters with the same `predictors.rs` Paeth predictor `png.rs` unfilters
+  with, so a defect in it moves both directions together and leg one stays
+  green; the injection matrix measures exactly that, and reversing the
+  tie-break is the case — **all 162 round trips pass**, and what catches it is
+  leg two plus the two decoder tests that compare two third-party files against
+  each other rather than against our own output (the Adam7 twins and the
+  published equivalence classes). Three of 2 014, not one of them a round trip.
+  The container is asserted against clause 5 rather than against the
+  reader: the signature, IHDR first with 11.2.2's thirteen bytes, IEND last and
+  empty, every chunk's CRC recomputed over its type and its data, and the IDAT
+  payload equal to `zlib_compress` of the filtered stream.
+- `crates/tinker-pdf/tests/png_output.rs` — `Bitmap::to_png` over all six
+  `PixelFormat`s, which is the half PngSuite cannot see because PngSuite has no
+  `Bitmap`. It owns the format mapping: the colour type in IHDR for each, alpha
+  surviving `Rgba8` and `GrayA8`, a padded stride not being written as pixels,
+  and the two converted formats named by colour rather than by comparison —
+  pure cyan is `(0, 255, 255)` because 8.6.4.4 says so, and sRGB's green
+  primary at its published CIELAB coordinates comes back green rather than the
+  mauve its encoded bytes are when read as RGB.
 - In-crate: `tiff.rs` is held to files this repository writes byte by byte
   from TIFF 6.0's own field layouts, and to coded strips written from the
   coding specification that owns each — a real T.4/T.6 coder for compressions

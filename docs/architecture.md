@@ -48,7 +48,7 @@ tinker-pdf-xml ─────────────────────�
 tinker-pdf-css ─────→ tinker-pdf-layout ──────────────────────────────────────────────→ tinker-pdf
 tinker-pdf-svg ─────→ tinker-pdf-xml, tinker-pdf-css, tinker-pdf-math ─────────────────→ tinker-pdf
 
-tools: pdfcmp (no engine deps) · tpdf (depends on facade)
+tools: pdfcmp, tpdf (both on the facade and nothing below it)
 ```
 
 **Fourteen leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
@@ -183,8 +183,11 @@ measurement rather than a number kept in step.
 | `tinker-pdf-layout` | box model, fragmentation, line breaking | 13 700 | [epub](features/epub.md) | `layout` |
 | `tinker-pdf-ffi` | C ABI | 900 | [bindings](features/bindings.md) | — |
 
-Tools: `tpdf` (debug CLI over the facade) and `pdfcmp` (perceptual
-comparator), both described in [verification.md](verification.md). There is no
+Tools: `tpdf` (debug CLI over the facade, whose `render` writes a `.png` a
+page through `Bitmap::to_png`) and `pdfcmp` (perceptual comparator), both
+described in [verification.md](verification.md) and both on the facade and
+nothing below it — `xtask`'s `TOOLS` table enforces that, so a tool exercises
+what a user gets rather than reaching past the API into a leaf. There is no
 third: `oracle-diff`, the external-renderer harness of retired ruling 9, was
 deleted with the last oracle it could have driven. `xtask` holds the workspace police
 (`dag`, `libm`, `oracles`, `vendor`, `versions`, `check`) and the release,

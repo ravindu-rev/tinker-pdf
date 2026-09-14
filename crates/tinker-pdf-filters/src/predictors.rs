@@ -204,7 +204,14 @@ fn unfilter(tag: u8, cur: &mut [u8], prev: &[u8], bpp: usize, w: &mut Warnings) 
 }
 
 /// PNG 9.4 Paeth predictor.
-fn paeth(a: u8, b: u8, c: u8) -> u8 {
+///
+/// `pub(crate)` because `png/encode.rs` filters with it, and the two
+/// directions of 9.2 must agree byte for byte or nothing this engine writes
+/// reads back. A second transcription beside the encoder is a second thing to
+/// get wrong; what sharing costs — a defect cancelling between the writer and
+/// the reader — is what `tests/png_suite.rs` transcribes its own unfilter to
+/// catch.
+pub(crate) fn paeth(a: u8, b: u8, c: u8) -> u8 {
     let (ai, bi, ci) = (i32::from(a), i32::from(b), i32::from(c));
     let p = ai + bi - ci;
     let (pa, pb, pc) = ((p - ai).abs(), (p - bi).abs(), (p - ci).abs());

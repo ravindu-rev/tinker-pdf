@@ -10,9 +10,19 @@
 //! `visual_regression.rs`, so budgets tuned there transfer here rather than
 //! having to be rediscovered.
 //!
-//! Inputs are PNM files, which is what `tpdf render` writes, or PDFs, which
-//! are rendered first. Comparing a PDF against a reference image is the usual
-//! shape of an oracle test.
+//! Inputs are PNM files or PDFs, which are rendered first. Comparing a PDF
+//! against a reference image is the usual shape of a comparison, and it is now
+//! the only shape that reaches `tpdf render`'s output: **that command writes
+//! PNG** as of the `Bitmap::to_png` row, and this tool reads no PNG.
+//!
+//! That is a real seam and it is recorded rather than papered over. Reading one
+//! here would mean a PNG decoder, and the only one in this workspace is
+//! `tinker-pdf-filters`' — which `xtask`'s `TOOLS` table deliberately keeps out
+//! of a tool's reach, on the rule that a tool exercises what a user gets
+//! through the facade rather than reaching past it into a leaf. The facade
+//! publishes an encoder and no decoder, because a `Bitmap` is a render going
+//! out and nothing in the engine reads one back in. Until it does, compare the
+//! two PDFs directly, which is what the usage text below asks for first.
 
 use std::process::ExitCode;
 
