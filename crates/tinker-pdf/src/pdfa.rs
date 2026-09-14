@@ -52,6 +52,7 @@ mod annotations;
 mod colour;
 mod content;
 mod fonts;
+mod logical;
 mod structure;
 mod syntax;
 mod xmp;
@@ -447,6 +448,54 @@ pub(crate) mod clauses {
         two_three: "6.2.10",
         four: "6.2.9",
     };
+
+    // ---- level A's logical structure -------------------------------------
+    //
+    // **Part 1 numbers logical structure 6.8 and parts 2 and 3 number it
+    // 6.7**, and the corpus's own directory names are the check on every row
+    // below: `PDF_A-1a/6.8 Logical structure/6.8.2 Tagged PDF/6.8.2.2 Mark
+    // information dictionary` against `PDF_A-2a/6.7 Logical structure/6.7.2
+    // Tagged PDF/6.7.2.2 Mark information dictionary` is one subject filed
+    // under two numbers, and so is each of the three rows that follow.
+    //
+    // **The `four` arm of all four rows is never reached.** ISO 19005-4
+    // defines no conformance level A — [`super::Part::allows`] admits only `E`
+    // and `F` there — and every rule below runs only for a file that claimed
+    // level A, so a part 4 file never resolves one of these numbers. The arm
+    // carries part 1's for the same reason [`PERMISSIONS`] does: a table with
+    // a hole in it is a table somebody has to remember is holed.
+
+    /// The mark information dictionary: `/MarkInfo` and its `/Marked`
+    /// (6.8.2.2 / 6.7.2.2).
+    pub(crate) const TAGGED_PDF: ClauseTable = ClauseTable {
+        one: "6.8.2.2",
+        two_three: "6.7.2.2",
+        four: "6.8.2.2",
+    };
+
+    /// The structure hierarchy: the catalog's `/StructTreeRoot`
+    /// (6.8.3.3 / 6.7.3.3).
+    pub(crate) const STRUCTURE_HIERARCHY: ClauseTable = ClauseTable {
+        one: "6.8.3.3",
+        two_three: "6.7.3.3",
+        four: "6.8.3.3",
+    };
+
+    /// Structure types: an element's `/S` after the `/RoleMap`
+    /// (6.8.3.4 / 6.7.3.4).
+    pub(crate) const STRUCTURE_TYPES: ClauseTable = ClauseTable {
+        one: "6.8.3.4",
+        two_three: "6.7.3.4",
+        four: "6.8.3.4",
+    };
+
+    /// Natural language specification: a `/Lang` entry's own spelling
+    /// (6.8.4 / 6.7.4).
+    pub(crate) const NATURAL_LANGUAGE: ClauseTable = ClauseTable {
+        one: "6.8.4",
+        two_three: "6.7.4",
+        four: "6.8.4",
+    };
 }
 
 /// One rule this build does not run yet, and what it is waiting for.
@@ -765,13 +814,35 @@ pub const STAGED: &[StagedRule] = &[
                    4's clause number",
     },
     StagedRule {
-        clause: "6.7",
-        rule: "logical structure: the tagged structure tree level A \
-                requires, its artefacts, and natural language \
-                specification",
-        because: "docs/design/tagged-pdf.md owns the structure tree, and \
-                   docs/design/pdfa.md's non-goals stage level A behind \
-                   it rather than claiming it wrongly",
+        clause: "6.7.4",
+        rule: "level A's natural language specification where the /Lang is \
+                inside a marked-content property list rather than on the \
+                catalog or a structure element",
+        because: "the rest of level A landed: /MarkInfo, the structure tree \
+                   root, the structure types after the role map, and every \
+                   /Lang the object graph carries are rules that run, and 19 \
+                   of the 21 logical-structure fixtures agree now. These two \
+                   - 6-8-4-t01-fail-c and 6-7-4-t01-fail-c, one per numbering \
+                   - write `/Span <</Lang <feff0430043d002d04210410>>> BDC` in \
+                   a page's content stream and nowhere else. Reading that \
+                   needs pdfa::content's walk, which is the machinery the font \
+                   and colour groups reach for, and this group is keyed to the \
+                   object graph: making it a third consumer changes what \
+                   Coverage::STRUCTURE costs, which is a decision for the \
+                   design doc's laziness section rather than for a rule",
+    },
+    StagedRule {
+        clause: "6.2.11.7.3",
+        rule: "level A's Unicode rule: a character mapped into a Private Use \
+                Area needs an /ActualText for that character",
+        because: "the ten fixtures say `for this character` and mean it - \
+                   `-fail-b` and `-fail-c` carry an /ActualText for a \
+                   different character in the same run, and `-pass-c` carries \
+                   one for a sequence the character is part of. Deciding that \
+                   needs the code-to-glyph mapping of every code a Tj drew and \
+                   the marked-content sequence it was drawn inside, which is \
+                   the interpreter rather than a tokenizer. Five fixtures are \
+                   annotated fail and this build reports nothing about them",
     },
     StagedRule {
         clause: "6.7.11",
@@ -837,7 +908,14 @@ pub enum RuleGroup {
     Metadata,
     /// The COS document, which every group has.
     Syntax,
-    /// A second parse of the whole file with the leniency ladder off.
+    /// A second parse of the whole file with the leniency ladder off, and the
+    /// bounded walk of the logical structure tree level A is about.
+    ///
+    /// Two walks under one name because both are *the file's structure judged
+    /// a second time*: one over the bytes the reader already normalised away,
+    /// one over a `/K` graph a rule engine keyed to dictionaries would have to
+    /// re-derive. Neither is paid for by a syntax-only sweep, which is what
+    /// the flag is for.
     Structure,
     /// `tinker-pdf-font`.
     Fonts,
@@ -1423,6 +1501,48 @@ pub enum FindingKind {
         defect: tinker_pdf_cos::DefectKind,
     },
 
+    // ---- level A's logical structure --------------------------------------
+    //
+    // Every kind below is reported **only for a file that claimed conformance
+    // level A**. Levels B and U require none of this and part 4 has no level
+    // A at all, so a level B file with no structure tree is silent here and
+    // that silence is correct rather than a gap.
+    /// The document catalog carries no `/MarkInfo` dictionary
+    /// (6.8.2.2 / 6.7.2.2).
+    ///
+    /// Distinct from [`FindingKind::NotMarkedAsTagged`] because the corpus
+    /// distinguishes them: `6-8-2-2-t01-fail-a` says "the document catalog
+    /// dictionary does not contain a MarkInfo dictionary", where `-fail-b` and
+    /// `-fail-c` say the dictionary is there and its `/Marked` is wrong.
+    MarkInfoMissing,
+    /// `/MarkInfo` is there and does not say `/Marked true`
+    /// (6.8.2.2 / 6.7.2.2).
+    ///
+    /// One kind for two fixtures on purpose. `6-8-2-2-t01-fail-b` writes
+    /// `/Marked false` and `-fail-c` omits `/Marked` altogether, and
+    /// ISO 32000-1 14.7.1 Table 321 gives the entry a default of `false` — so
+    /// the two files say the same thing about the document and splitting them
+    /// would be splitting a spelling rather than a defect.
+    NotMarkedAsTagged,
+    /// The document catalog carries no `/StructTreeRoot`
+    /// (6.8.3.3 / 6.7.3.3).
+    StructureTreeMissing,
+    /// A structure element whose `/S`, after the `/RoleMap`, is not one of the
+    /// standard structure types (6.8.3.4 / 6.7.3.4).
+    StructureTypeNotStandard {
+        /// `/S` exactly as the file wrote it.
+        declared: String,
+        /// What the `/RoleMap` made of it, which equals `declared` when the
+        /// role map does not mention it.
+        mapped: String,
+    },
+    /// A `/Lang` entry whose value is not a language identifier
+    /// (6.8.4 / 6.7.4).
+    LanguageMalformed {
+        /// The value, decoded as the text string 7.9.2.2 makes it.
+        declared: String,
+    },
+
     // ---- the colour group (milestone 5) ----------------------------------
     /// `/OutputIntents` is not an array of dictionaries, or an entry is
     /// missing a key its clause requires (6.2.2 / 6.2.3).
@@ -1510,13 +1630,19 @@ pub struct Coverage {
     pub metadata: bool,
     /// File structure: encryption, version, filters, actions, annotations.
     pub syntax: bool,
-    /// The strict structural validator, joined under ISO 19005's clauses.
+    /// The strict structural validator joined under ISO 19005's clauses, and
+    /// level A's logical structure rules.
     ///
     /// Its own flag rather than part of `syntax` because it **parses the file a
     /// second time** with the leniency ladder off, which is the most expensive
     /// thing here after the font group. The design doc requires a syntax-only
     /// sweep over the corpus to build no machinery it did not ask for, and a
     /// second parse is machinery.
+    ///
+    /// Level A's rules are here for the same reason: they walk a `/K` graph
+    /// bounded only by its own caps, which a sweep that asked for the file's
+    /// syntax did not ask for either. They run only on a file that claimed
+    /// conformance level A, so the cost is paid by the files it is about.
     pub structure: bool,
     /// Fonts: embedding, widths, Unicode mapping.
     pub fonts: bool,
@@ -1613,11 +1739,12 @@ impl Coverage {
         colour: false,
     };
 
-    /// The strict structural validator alone.
+    /// The structural group alone.
     ///
-    /// The whole file parsed a second time with the ladder off, and nothing
-    /// else — the sweep that answers "is this file laid out the way ISO 19005
-    /// requires" without asking what it says.
+    /// The whole file parsed a second time with the ladder off, and level A's
+    /// walk of the logical structure tree — the sweep that answers "is this
+    /// file laid out the way ISO 19005 requires, and does it say what it is"
+    /// without reading a font program or an ICC profile.
     pub const STRUCTURE: Coverage = Coverage {
         metadata: false,
         syntax: false,
@@ -1705,6 +1832,7 @@ pub(crate) fn validate_counting(
     // granted.
     if groups.structure {
         structure::rules(&document.inner, &machinery, flavour, &mut raw);
+        logical::rules(document, &machinery, flavour, &mut raw);
     }
     // Guarded at the call site rather than inside, and that is the laziness
     // requirement rather than a style: [`Machinery::reach`] records the *ask*

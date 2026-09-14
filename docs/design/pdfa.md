@@ -51,11 +51,16 @@ and Level A validation from this design and nothing else of it.
   with an untagged page and a missing natural language both refused at
   `finish_archival` rather than written and discovered.
 
-  The *validator* side of Level A is a different matter and is still staged:
-  reading a structure tree and deciding whether it is a correct one is
-  `PDFA_STAGED`'s 6.7 entry, so a Level A file this build reports nothing
-  about has had its tagging looked at by nobody. Writing A and validating A
-  are two claims and only the first has landed.
+  *Amended again, 14 September 2026.* The paragraph here used to say the
+  validator side of Level A was "a different matter and is still staged", and
+  that a Level A file this build reports nothing about had had its tagging
+  looked at by nobody. Both claims have landed now: the `structure` group
+  carries the four rules ISO 19005-1 6.8 and ISO 19005-2/3 6.7 make over the
+  object graph, 19 of the 21 logical-structure fixtures in the corpus agree,
+  and the writer's own Level A output is judged by them — see "What the level A
+  group measured" below. What is still staged there is the part of the clause
+  that lives in a **content stream**: a `/Lang` in a marked-content property
+  list (two fixtures), and 6.2.11.7.3's `/ActualText` per character (five).
 - **PDF/X and PDF/E.** Out entirely.
 - **Conversion.** No "fix this file into PDF/A" repair mode. Validation
   reports; building conforms; nothing rewrites an arbitrary document's
@@ -738,6 +743,162 @@ under part 1, the attribute shorthand for a description, and the page packets
 the main-package term needs. Each was one test before the injection was run and
 is one test after, which is what a guard looks like when it is the only one.
 
+## What the level A group measured
+
+*Recorded 14 September 2026, at the commit that landed it.* Same corpus, same
+2 371-file bar.
+
+**1 781 of 2 371 agree, against 1 762 before, with the false-positive count
+still 1.** Level A was the last conformance level the writer claimed and the
+validator said nothing about. It says four things about it now.
+
+| | files | agreed before | agreed after |
+| --- | --- | --- | --- |
+| annotated `-pass-` | 831 | 830 | 830 |
+| annotated `-fail-` | 1 540 | 932 | 951 |
+| **total** | **2 371** | **1 762** | **1 781** |
+
+| clause group | files | agreed before | agreed after |
+| --- | --- | --- | --- |
+| `PDF_A-1a/6.8 Logical structure` | 19 | 8 | 18 |
+| `PDF_A-2a/6.7 Logical structure` | 16 | 6 | 15 |
+
+**The rules, and where they live.** `RuleGroup` is a taxonomy of machinery, and
+level A's machinery is a bounded walk of a `/K` graph — not the COS document
+the syntax group already has, and not the second parse the strict validator
+does. It is the `structure` flag's second subject, in
+`crates/tinker-pdf/src/pdfa/logical.rs`, and `Coverage::SYNTAX` leaves it off
+with the rest of that group. The four rules are `/MarkInfo /Marked true`
+(6.8.2.2 / 6.7.2.2), a `/StructTreeRoot` (6.8.3.3 / 6.7.3.3), every element's
+`/S` resolving through the `/RoleMap` to one of ISO 32000-1 14.8.4's 49
+standard types (6.8.3.4 / 6.7.3.4), and every `/Lang` being a language
+identifier (6.8.4 / 6.7.4).
+
+**The tree is read by the reader that already reads it.**
+`crate::structure::bind` resolves the role map, bounds a cyclic or exponential
+`/K`, and reports what it tolerated. A second walk here would be a second
+reader to keep in step, and the drift would surface as the validator
+disagreeing with `Document::structure` about what a file's tagging says.
+
+**Four things the fixtures decided and the clause text would not have**, each
+one a rule that would otherwise report conforming files:
+
+- **`/Lang` is not required, only well formed.** `6-8-4-t01-pass-b` carries
+  `/Lang (sl)` on a `/Span` element and nothing in its catalog;
+  `6-8-4-t01-pass-c` carries its only `/Lang` inside a marked-content property
+  list. Both are annotated `pass`. Reading "the document shall specify its
+  natural language" as "the catalog shall carry `/Lang`" costs **12** false
+  positives, measured.
+- **The empty string is a permitted `/Lang`.** `6-8-4-t01-pass-d` writes
+  `/Lang ()` and its own outline says "its value is empty text string which is
+  permitted". No grammar for a language tag admits it. Refusing it costs
+  **3**.
+- **The value is a text string.** `6-8-4-t01-pass-f` writes
+  `/Lang <FEFF0065006E002D00470042>` — UTF-16BE for `en-GB`, annotated `pass`
+  — and `6-8-4-t01-fail-c` writes the same encoding around Cyrillic. Both are
+  hexadecimal strings and what separates them is only visible after 7.9.2.2's
+  decoding.
+- **Part 1 and parts 2–3 cite different RFCs, and neither clause says so.**
+  Part 1 sends a reader to PDF Reference 9.8.1, which defines the value by
+  RFC 1766, where a subtag is `1*8ALPHA`; parts 2 and 3 send a reader to ISO
+  32000-1 14.9.2, which defines it by RFC 3066, where a subtag is
+  `1*8(ALPHA / DIGIT)`. The suite states the difference twice: part 1 has
+  `6-8-4-t01-fail-b`, `/Lang (en-12)`, "Subtag of Lang entry contains digits";
+  parts 2 and 3 have **no such fixture** and instead `6-7-4-t01-pass-c`,
+  `/Lang (ru-petr1708)`, annotated `pass`.
+
+**And one the corpus settled by being read rather than by being reasoned
+about.** `6-8-3-4-t02-fail-a`'s outline says "a circular mapping shall not
+exist" and its role map is `<< /Document /Document /Span /Span /Standard
+/Standard >>`. Written as the fixture describes it — a rule about the role map
+cycling — it catches nothing, because `crate::structure` treats `/X → /X` as a
+*termination* and is right to: `/P /P` is the commonest role-map entry in the
+wild and calling it a loop produced 63 warnings over the fetched corpora
+against a handful of real ones. Asking instead what the type resolved *to*
+catches both this file and `6-8-3-4-t01-fail-a`, under the requirement they
+actually break.
+
+**The independent check is outside the suite.** Fifteen real PDF/A-1a and
+PDF/A-3a documents sit in the fetched pdfjs and SafeDocs corpora, unannotated
+and so invisible to the bar — one of them 444 pages and 59 737 structure
+elements, of which 8 657 are typed `/Standard` and resolved through a role
+map. They gain **one** level A finding between them, and that one file already
+carries a malformed object header and claims level A with no `/MarkInfo` and
+no `/StructTreeRoot` at all. A corpus of conformance fixtures cannot say
+whether a rule survives contact with what real producers write into a role
+map; those fifteen files can.
+
+**Counted injections.** Each defect re-introduced in turn, `cargo test
+--no-fail-fast -p tinker-pdf` (1 438 tests in the control, measured on this
+branch on 15 September 2026), and the census run beside it. The false-positive
+column is the one to read.
+
+| Injected | tests | the bar | false positives |
+| --- | ---: | ---: | ---: |
+| the group never called (the control) | 15 | 1 762 | 1 |
+| **the level gate removed — every level judged** | 130 | 1 561 | **763** |
+| `/Marked true` read as the defect rather than as the requirement | 14 | 1 758 | **30** |
+| the `/RoleMap` ignored — `/S` judged as the file wrote it | 11 | 1 774 | **16** |
+| the catalog's `/Lang` made mandatory | 2 | 1 775 | **12** |
+| the empty `/Lang` not permitted | 2 | 1 779 | **3** |
+| the `/MarkInfo` rule never called | 6 | 1 775 | 1 |
+| the catalog `/Lang` rule never called | 4 | 1 776 | 1 |
+| the structure-type rule never called | 4 | 1 777 | 1 |
+| the missing-`/StructTreeRoot` finding never pushed | 4 | 1 779 | 1 |
+| the element-`/Lang` rule never called | 1 | 1 779 | 1 |
+| digits in a subtag admitted under every part | 3 | 1 780 | 1 |
+| digits in a subtag refused under every part | 3 | *1 781* | 1 |
+| `ALPHA` read as "any letter" rather than as `A-Za-z` | 2 | *1 781* | 1 |
+| `Annot`, `THead`, `TBody`, `TFoot` dropped from the type list | 2 | *1 781* | 1 |
+| parts 2 and 3 given part 1's clause numbers | 5 | *1 781* | 1 |
+| the per-document finding cap removed | 1 | *1 781* | 1 |
+
+**The control decomposes the gain exactly**: 1 781 − 1 762 = 19, and 19 is the
+number of logical-structure fixtures this commit moves.
+
+**Three of those rows count a writer fixture**, and that is the exit criterion
+made checkable rather than asserted:
+`a_level_a_document_tagged_with_a_type_nobody_defines_is_reported_by_its_own_validator`
+builds a Level A document with `PageBuilder::tagged(b"Chapitre", …)`, and the
+validator reports it. It fails under the control, under the inverted `/Marked`
+rule and under the structure-type rule never being called — so the *other*
+writer fixture's zero findings at 2A are a verdict rather than a silence. It
+does not fail when the `/RoleMap` is ignored or when the four ISO 32000-1
+types are dropped, because `/Chapitre` and `/P` are on neither side of those
+readings; those two rows are held by `pdfa_logical.rs` alone.
+
+**Five injections move the census by nothing, and each has a fixture rather
+than an excuse.** Four of the five share one cause, and it is worth naming
+because it looks like a hole and is not: the corpus fixtures that would
+separate those readings — `6-8-4-t01-fail-c` and `6-7-4-t01-pass-c` — put
+their `/Lang` inside a **content stream**, which this group does not read. So
+the RFC 1766/3066 split in *both* directions, and the ASCII reading of
+`ALPHA`, are held by `pdfa_logical.rs` and `logical.rs`'s own unit tests and
+by nothing else, and that is recorded here rather than discovered later. The
+fifth zero is the four ISO 32000-1 structure types: no level A fixture uses
+one unmapped, so `every_standard_structure_type_is_admitted_unmapped` is what
+holds the wider list — and the wider list is the *permissive* direction, so
+the cost of being wrong about it is only a defect not reported.
+
+The clause-table and finding-cap rows are zeros for a different and ordinary
+reason: the census scores a file by whether the verdict is empty, so neither a
+clause number nor the length of the finding list is visible to it. Each is
+held by the test written for it.
+
+**Two fixtures stay staged and one clause stays untouched.**
+`6-8-4-t01-fail-c` and `6-7-4-t01-fail-c` — one file per numbering — write
+their only `/Lang` as `/Span <</Lang <feff0430043d002d04210410>>> BDC` in a
+page's content stream. Reading that needs `pdfa/content.rs`'s walk, which is
+the machinery the font and colour groups reach for; making this group a third
+consumer changes what `Coverage::STRUCTURE` costs, which is a decision for the
+laziness requirement above rather than for a rule. And level A's *font* rule,
+6.2.11.7.3, is five more files and a harder problem: a character mapped into a
+Unicode Private Use Area needs an `/ActualText` **for that character**, and two
+of the five fixtures carry one for a different character in the same run.
+That is the code-to-glyph mapping of every code a `Tj` drew, correlated with
+the marked-content sequence it was drawn inside — the interpreter rather than
+a tokenizer. Both are in `PDFA_STAGED` with those words.
+
 ## What the annotation group measured
 
 *Recorded 13 September 2026, at the commit that landed it.* Same corpus, same
@@ -988,10 +1149,13 @@ correctly even though `WriteOptions` cannot be *asked* for one.
   not. So a destination profile this build cannot read leaves the output
   intent's colour space **unknown**, the rules that depend on knowing it do
   not fire in either direction, and a test asserts that silence.
-- **[design/tagged-pdf.md](tagged-pdf.md)** — **Done.** Level A is claimable
-  by the writer, which tags; the validator's structure-tree rules stay staged
-  (`PDFA_STAGED`, 6.7). See the amended non-goal above for why those are two
-  different claims.
+- **[design/tagged-pdf.md](tagged-pdf.md)** — **Done, and used.** Level A is
+  claimable by the writer, which tags, and the validator's level A rules read
+  the tree through that design's own reader (`crate::structure::bind`) rather
+  than walking `/StructTreeRoot` a second time. What it does *not* yet give is
+  a `/RoleMap` on the writer's side, so a custom tag at level A is a file this
+  writer emits and this validator reports — asserted, with its twin, in
+  `pdfa_writer.rs`.
 - **`tinker-pdf-xml`** — exists, one of ruling 8's ten leaf crates;
   already a facade dependency, with the cos-side amendment on
   `xmp_metadata` deciding where the parse happens.

@@ -22,7 +22,7 @@ namespace is checked: PDF/UA declares `pdfuaid:part`, an entirely different
 standard's version number, and matching on the local name alone read 434
 corpus files as claiming a PDF/A part they say nothing about.
 
-**Four rule groups, keyed by the machinery they need.** Four rather than five
+**Five rule groups, keyed by the machinery they need.** Five and not six
 because the annotation rules need no machinery at all — a subtype name, a flag
 word, the shape of an `/AP` and four numbers in a `/Rect` are all in the COS
 document — so they ride the syntax group rather than counting a reach that
@@ -48,6 +48,15 @@ never happens.
   Parts 1 to 3 carry the requirement and **part 4 dropped it**, so neither half
   runs there. Under parts 2 and 3 the catalog's packet may describe a property
   a page's packet uses; under part 1 it may not.
+- **Structure** needs the file read a second time with the leniency ladder
+  off, and the logical structure tree: the cross-reference table's per-section
+  spelling, an indirect object's framing and a stream's extent under 6.1.4,
+  6.1.8 and 6.1.7, and **everything conformance level A adds** — `/MarkInfo
+  /Marked true`, a `/StructTreeRoot`, every structure element's `/S` resolving
+  through the `/RoleMap` to one of the 49 standard types, and every `/Lang` in
+  the catalog or on an element being a language identifier the part's own
+  reference specification defines. The level A rules run **only for a file
+  that claimed level A**, because nothing below it requires any of this.
 - **Fonts** needs `tinker-pdf-font` and the content walk: every font embedded
   including the standard 14, the program's format against the key that names
   it, the subset tag's shape, symbolic and non-symbolic `/Encoding`,
@@ -138,8 +147,8 @@ make no PDF/A claim, and scoring them would measure the measurement:
 | | files | agree |
 | --- | --- | --- |
 | annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 932 |
-| **total** | **2 371** | **1 762** |
+| annotated `-fail-` | 1 540 | 951 |
+| **total** | **2 371** | **1 781** |
 
 The single disagreement on the `pass` side is a **reading**, recorded as one:
 ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
@@ -148,9 +157,19 @@ ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
 Every disagreement has a row in `crates/tinker-pdf/tests/pdfa_ledger.tsv`
 carrying a class — our bug, a staged rule, or a reading — and a **mandatory
 reason**; a row without one is refused by the reader that loads the file, and a
-row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 37
+row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 38
 rules this build knows it does not run, each with its clause and what it is
 waiting for, and a `staged` ledger row has to point at one.
+
+The level A rules moved that total from 1 762 to 1 781 and left `830 of 831`
+untouched, which is the number that matters for them: a structure tree this
+build cannot follow reads exactly like a file with none, so a level A rule
+group that raised the bar by reporting conforming files would have raised it
+for nothing. The independent check is outside the suite — fifteen real
+PDF/A-1a and PDF/A-3a documents in the fetched pdfjs and SafeDocs corpora,
+unannotated and so invisible to the bar, gain exactly **one** level A finding
+between them, and that one file already carries a malformed object header and
+claims level A with no `/MarkInfo` and no `/StructTreeRoot` at all.
 
 ## Verified
 
@@ -158,8 +177,8 @@ waiting for, and a `staged` ledger row has to point at one.
 same discipline: a conforming baseline, one change per test, exactly one
 finding of exactly one kind asserted by kind, and a **near-miss twin** that
 must not fire. `pdfa_syntax.rs`, `pdfa_fonts.rs`, `pdfa_colour.rs`,
-`pdfa_metadata.rs`, `pdfa_annotations.rs` and `pdfa_flavour.rs` are the
-reading half;
+`pdfa_metadata.rs`, `pdfa_annotations.rs`, `pdfa_structure.rs`,
+`pdfa_logical.rs` and `pdfa_flavour.rs` are the reading half;
 `pdfa_writer.rs` is the writing half and judges every fixture twice — by the
 full validator with complete coverage, and by the strict structural validator
 in `tinker-pdf-cos`, which reads bytes rather than the object graph and was
@@ -173,6 +192,16 @@ rather than a spelling: its twins are a packet whose extension schema
 describes the property, a packet under the part whose revision defines it, and
 the schemas ISO 19005 defines for itself, which every conforming file carries
 and no XMP revision names.
+
+The level A rules are the second such group, and two of their twins are not a
+spelling at all but a **level**: the same broken bytes claiming `B`, and the
+same claiming part 4, are silent, because a rule that ran below level A would
+report every untagged PDF/A-1b in existence. The others are the pairs the
+corpus itself draws — a custom structure type with the `/RoleMap` entry that
+explains it against the same type without one, an identity `/RoleMap` entry on
+a standard type against one on a custom type, `/Lang ()` and
+`/Lang <FEFF0065006E002D00470042>` against the same hex encoding around
+Cyrillic, and `en-12` reported under part 1 and admitted under parts 2 and 3.
 
 `pdfa_ledger.rs` is the census, which walks the fetched corpus and asserts in
 both directions that the ledger accounts for every disagreement.
@@ -188,7 +217,7 @@ against the table its fixture passed, so a clause this build reads wrongly is
 read wrongly in both directions and the pair agrees with itself.
 
 The corpus is where that asymmetry breaks, and only for files somebody else
-made. It is why "1 762 of 2 371" is the honest measure of how much of ISO
+made. It is why "1 781 of 2 371" is the honest measure of how much of ISO
 19005 this build understands, and why a document the writer produces is
 reported as *"this validator and the structural one find nothing"* rather than
 as *"it conforms"*.
@@ -221,9 +250,25 @@ discovering:
   What is still staged here is what nothing in the tree reads: hexadecimal
   string syntax, and the EOL markers around `obj` and `stream`. Implementation
   limits are staged for a different reason and keep their own row.
-- **Level A is written but not validated.** The writer claims it by tagging
-  and refuses the ways of getting it wrong; the validator's structure-tree
-  rules are staged, so a level A file this build reports nothing about has had
-  its tagging read by nobody.
+- **Level A is validated now, in the same group and short of two files.** The
+  writer claimed level A by tagging and the validator said nothing about it;
+  it says four things about it now, under 6.8.2.2 / 6.7.2.2, 6.8.3.3 / 6.7.3.3,
+  6.8.3.4 / 6.7.3.4 and 6.8.4 / 6.7.4, and 19 of the 21 logical-structure
+  fixtures the corpus carries agree.
+
+  The two that do not are one file per numbering and one reason:
+  `6-8-4-t01-fail-c` and `6-7-4-t01-fail-c` write their only `/Lang` inside a
+  marked-content property list in a page's content stream, and reading that
+  needs `pdfa/content.rs`'s walk — the font and colour groups' machinery,
+  which this group is deliberately not a third consumer of. `PDFA_STAGED`
+  carries the refusal.
+
+  Level A's own font rule, 6.2.11.7.3, is staged for a harder reason and is
+  five more files: a character mapped into a Unicode Private Use Area needs an
+  `/ActualText` **for that character**, and two of the five fixtures carry one
+  for a *different* character in the same run. Deciding that is the
+  code-to-glyph mapping of every code a `Tj` drew, correlated with the
+  marked-content sequence it was drawn inside, which is the interpreter rather
+  than a tokenizer.
 
 The design and its milestones are in [design/pdfa.md](../design/pdfa.md).

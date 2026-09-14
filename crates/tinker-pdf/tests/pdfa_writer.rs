@@ -447,6 +447,57 @@ fn level_a_is_written_when_the_pages_are_tagged_and_refused_when_they_are_not() 
     );
 }
 
+/// **The writer's level A output, judged by the validator's level A rules.**
+///
+/// `level_a_is_written_when_the_pages_are_tagged_and_refused_when_they_are_not`
+/// above asserts the built document is clean, and until the level A rule group
+/// landed it was clean because nothing looked. This is the assertion that the
+/// looking happens: the same builder, told to tag with a type ISO 32000-1
+/// 14.8.4 does not define, produces a file the validator reports — so the zero
+/// findings above are a verdict rather than a silence.
+///
+/// It is also an honest statement of a writer gap. `PageBuilder::tagged` takes
+/// the caller's own name for a type and `DocumentBuilder` writes no
+/// `/RoleMap`, so a custom tag at level A is a file the writer will emit and
+/// its own validator will refuse. That is the right way round — the refusal is
+/// visible rather than silent — and it is `docs/design/tagged-pdf.md`'s to
+/// close rather than this one's.
+#[test]
+fn a_level_a_document_tagged_with_a_type_nobody_defines_is_reported_by_its_own_validator() {
+    let mut profile = rgb_profile(ArchivalPart::Two, Some(ArchivalLevel::A));
+    profile.language = Some("en-GB".to_string());
+
+    let mut builder = DocumentBuilder::archival(profile.clone());
+    assert!(builder.add_embedded_font(b"F1", b"Fixture", &face()));
+    builder.add_page(200.0, 200.0, |page| {
+        page.tagged(b"Chapitre", |page| {
+            page.text(b"F1", 12.0, 20.0, 100.0, "ABC");
+        });
+    });
+    let bytes = builder.finish_archival().expect("the writer emits it");
+    let (findings, structural) = judged(&bytes);
+    assert_eq!(
+        findings,
+        vec![FindingKind::StructureTypeNotStandard {
+            declared: "Chapitre".to_string(),
+            mapped: "Chapitre".to_string(),
+        }]
+    );
+    assert_eq!(structural, Vec::<String>::new());
+
+    // The twin, one token away: the same document tagged `/P`, which is a
+    // standard type, is reported by nothing.
+    let mut builder = DocumentBuilder::archival(profile);
+    assert!(builder.add_embedded_font(b"F1", b"Fixture", &face()));
+    builder.add_page(200.0, 200.0, |page| {
+        page.tagged(b"P", |page| {
+            page.text(b"F1", 12.0, 20.0, 100.0, "ABC");
+        });
+    });
+    let bytes = builder.finish_archival().expect("satisfiable");
+    assert_eq!(judged(&bytes).0, Vec::<FindingKind>::new());
+}
+
 /// A level the part does not define, and a part 1-to-3 profile with none, are
 /// both refused before any bytes are written.
 #[test]
