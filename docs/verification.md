@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 14 September 2026. `cargo test --workspace`
-is **4 654 passed, 0 failed, 56 ignored** across 213 suites on
+is **4 678 passed, 0 failed, 56 ignored** across 214 suites on
 `x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
