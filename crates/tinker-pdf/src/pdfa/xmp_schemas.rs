@@ -60,27 +60,27 @@
 //! — `Text`, `Integer`, `Rational`, `Date`, `URI`, the closed and open choices
 //! — is a simple value.
 //!
-//! # What these tables are not — yet
+//! # What these tables are, and the one thing they are not
 //!
-//! **Neither is read as a membership list, and no rule here treats one as
-//! one.** ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 require every property to
-//! belong to a predefined schema *or* be described by an extension schema, and
-//! these tables are now the right half of that answer: the revision each part
-//! cites, as that revision printed it. What is still missing is the other
-//! half. 6.7.8's extension schemas are a packet's own way of declaring a
-//! property these tables cannot know, and a membership rule that ran before
-//! that exception was read would report every conforming file that uses one.
-//! So membership stays in [`super::STAGED`], which now names what is left of
-//! it rather than the table that could not support it, and only the value
-//! *type* is read.
+//! **Both are read as membership lists, and both are read for value types.**
+//! ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 require every property to belong
+//! to a predefined schema *or* be described by an extension schema, and these
+//! tables are one half of that answer: the revision each part cites, as that
+//! revision printed it. The other half is [`super::xmp_extension`], which
+//! reads 6.7.8's extension schemas — a packet's own way of declaring a
+//! property these tables cannot know. A membership rule that ran before that
+//! exception was read would report every conforming file that uses one, which
+//! is why the two landed in one commit and neither before the other.
 //!
-//! That restraint is also what makes the value-type half sound. A property a
-//! table does not name is skipped, so a name one revision had and the other
-//! dropped costs nothing; a property it does name is one the cited revision
-//! printed a value type for, and the type is then a claim about that
-//! revision's own row.
+//! **What these tables are not is a list of what a conforming file may carry.**
+//! Two namespaces ISO 19005 defines for itself appear in nearly every
+//! conforming file and in no revision of the XMP specification: `pdfaid` and
+//! the `pdfaExtension` vocabularies. `xmp_extension::is_an_iso_19005_namespace`
+//! is where that is said, and the membership rule asks it first — a table
+//! patched to carry those names would be a claim about a document that never
+//! printed them.
 //!
-//! **One name is worth flagging for whoever writes the membership rule.** The
+//! **And one name is a disagreement between two published sources.** The
 //! suite's fixtures are themselves a list of membership claims — 422 distinct
 //! ones across the two parts, each of the form *the property X, which is (not)
 //! permitted in \<schema\> in XMP 2004/2005* — and **421 of the 422 agree with
@@ -89,10 +89,14 @@
 //! permitted in XMP 2004: the string does not occur anywhere in the 94 pages
 //! of the January 2004 document, and September 2005 introduces it with an
 //! editorial marker its own author left in the file (`<< new InstanceID
-//! stuff>>`, p45). So a membership rule reading [`PREDEFINED_2004`] strictly
-//! will report that one fixture where the suite would not. That is a
-//! disagreement between two published sources, to be recorded in the ledger
-//! when the rule lands rather than patched out of the table now.
+//! stuff>>`, p45). **The table is still not patched.** `PDF_A-1b`
+//! `6-7-2-t09-pass-q` writes the property and the suite annotates it
+//! conforming, so a strict reading reports a conforming file — and the
+//! membership rule therefore admits that one name under part 1, as a named
+//! exception in `xmp::is_a_member` with the argument beside it. A row here
+//! would be a claim about what the January 2004 document prints; the exception
+//! there is a claim about what a conformance suite says, which is what it
+//! actually is.
 //!
 //! # `photoshop:SupplementalCategories`, which is what the revisions are for
 //!

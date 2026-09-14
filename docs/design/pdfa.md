@@ -392,6 +392,11 @@ in none of the published tables, so reading that table as a membership list
 would have reported every one of them. `PDFA_STAGED` still carries the entry,
 still counts 37, and now says which half it is about.
 
+*Amended at the commit recorded in “The predefined-schema rule, whole” below,
+which landed the membership half and its extension-schema exception together.
+`PDFA_STAGED` no longer carries either entry; it still counts 37, because two
+narrower refusals took their place.*
+
 *Amended at the commit recorded in “The two revisions the standards cite”
 below.* The paragraph above said the revision "ISO 19005 cites" is XMP 2004,
 which is true of part 1 and false of parts 2 and 3; the wording has been
@@ -410,6 +415,13 @@ Per ledger row, in files still disagreeing:
 membership half. This supersedes the remainder named in *What milestones 5 and
 6 actually measured* — "roughly 490 are still the XMP predefined-schema
 property rule" is now 247 — and the rest of that paragraph stands.
+
+*Amended 14 September 2026.* "The 247 left are the membership half" was an
+estimate and it was wrong by a factor of four. The membership rule landed and
+took **60**; what the four rows actually held was mostly the value-type half
+still, at a granularity below the four serialised forms. The measurement is in
+*The predefined-schema rule, whole* below, and the estimate is left standing
+here because a prediction corrected is worth more than a prediction deleted.
 
 **The defect the corpus never saw.** The walk that reads a property's value
 form had the attribute shorthand for a structure — `<xmpMM:DerivedFrom
@@ -563,6 +575,168 @@ decides part 4 before `value_form` is ever asked — so the `Part::Four => None`
 arm was a sentence in a comment and not a claim anything held.
 `the_table_router_gives_part_four_nothing` is what makes it one, and the row
 above is measured before and after it was written.
+
+## The predefined-schema rule, whole
+
+*Recorded 14 September 2026, at the commit that landed it.* Same corpus, same
+2 371-file bar. The **membership** half of ISO 19005-1 6.7.2 and ISO 19005-2
+6.6.2.3.1, and the **extension-schema description** of 6.7.8 and 6.6.2.3.2 and
+6.6.2.3.3, land together. They had to: membership without the exception reports
+every conforming file that carries a custom property, and the exception without
+membership checks the escape hatch of a rule nobody enforces.
+
+**What the rule is.** Every top-level property of every packet belongs to a
+predefined schema of the revision its part cites — `PREDEFINED_2004` for part 1,
+`PREDEFINED_2005` for parts 2 and 3, neither for part 4, which dropped the
+requirement — or the packet describes it in `pdfaExtension:schemas`. A property
+that is neither is `XmpPropertyUndescribed`, named with its schema's preferred
+prefix where one exists and with its namespace in braces where none does.
+
+**What an extension schema must carry, settled by the fixtures rather than by
+reading the clause table.** Every veraPDF fixture states its own expectation in
+its outline, so each of these is a published claim:
+
+| required | optional |
+| --- | --- |
+| `pdfaSchema:` `schema`, `namespaceURI`, `prefix` | `pdfaSchema:` `property`, `valueType` |
+| `pdfaProperty:` `name`, `valueType`, `category`, `description` | |
+| `pdfaType:` `type`, `namespaceURI`, `prefix`, `description`, `field` | |
+| `pdfaField:` `name`, `valueType`, `description` | |
+
+The two optional entries are the ones that shaped the code: `6-6-2-3-3-t05-pass-a`
+carries no `pdfaSchema:property` and `t01-pass-e` carries no
+`pdfaSchema:valueType`, and both are annotated **conforming**. A description
+that carries neither describes no property, and the consequence — that a
+property it would have described is not a member — is the membership rule's to
+report.
+
+**And the prefixes are matched as spellings.** ISO 19005 fixes
+`pdfaExtension`, `pdfaSchema`, `pdfaProperty`, `pdfaType` and `pdfaField`, and
+the suite pins the four inner ones from the failing side eight times: four
+under part 2 (`6-6-2-3-3-t01-fail-f`, `t02-fail-e`, `t03-fail-f`, `t04-fail-d`)
+and four under part 1 (`6-7-8-t04` to `t07-fail-a`). **In every one of those
+eight files the wrong prefix is bound to the right namespace URI** —
+`xmlns:nonpdfaSchema="http://www.aiim.org/pdfa/ns/schema#"` — so a reader that
+compared resolved namespaces, which is what XML means by a name, would pass all
+eight. So an element is recognised by its namespace and then its prefix is
+checked, and the description is still read: a file gets one finding about the
+prefix rather than that plus a cascade about entries it plainly carries.
+
+**Part 2 has a term part 1 does not, and it is structural rather than about the
+revision.** veraPDF's part-1 profile asks `isPredefinedInXMP2004 ||
+isDefinedInCurrentPackage`; its part-2 profile asks `isPredefinedInXMP2005 ||
+isDefinedInMainPackage || isDefinedInCurrentPackage`. Under parts 2 and 3 the
+catalog's packet may therefore describe a property a **page's** packet uses.
+`6-6-2-3-2-t01-pass-b` asserts exactly that and says so in its own outline —
+*"The Catalog metadata defines custom property, which is used in the page
+metadata"* — annotated conforming. So the membership walk reads the catalog's
+packet and every page's, and carries the catalog's descriptions into a page
+under parts 2 and 3 only. The value-type half still reads the catalog's packet
+alone: that half was delivered and its movement counted over one packet, and
+widening its input in the same commit would leave neither number attributable.
+
+**Two exemptions, each with its evidence.**
+
+- **The schemas ISO 19005 defines for itself.** `pdfaid` and the five
+  extension vocabularies appear in no revision of the XMP specification, and
+  the suite's 831 `pass` files carry **1 646** `pdfaid` properties between them
+  while only **seven** of them describe any extension schema at all. A
+  membership rule that judged `pdfaid` would report nearly every conforming
+  file there is. Whether the packet describes `pdfaid` where the part asks it
+  to is clause 6.7.11's question and `PDFA_STAGED` still carries that row.
+- **`xmpMM:InstanceID` under part 1**, which is a disagreement between two
+  published sources and was flagged for this commit by the one before it. The
+  name does not occur in the 94 pages of the January 2004 XMP specification.
+  `PDF_A-1b` `6-7-2-t09-pass-q` writes it, states in its own outline that it
+  "is permitted in XMP Media Management Schema in XMP 2004", and is annotated
+  **conforming**. One source has to lose, and which way the mistake falls
+  settles it: reading the table strictly reports a file a conformance suite
+  calls conforming, which is the one outcome this rule group is held to avoid,
+  while admitting the name costs only the ability to report
+  `6-7-2-t09-fail-q` — which this build cannot report anyway, because the
+  value-type half needs a declared type and the document that would have
+  declared one never printed the row. **The exception is membership-only and
+  lives in the rule, not in the table**: a row added to `PREDEFINED_2004` would
+  be a claim about a document, and this is a claim about a corpus. The fail
+  file it forgives keeps its ledger row, which now names the disagreement.
+
+**The census.**
+
+| | before | after |
+| --- | ---: | ---: |
+| the bar | 1 702/2 371 | **1 762**/2 371 |
+| false positives, of 831 annotated `pass` | 1 | **1** |
+| ledger | 94 rows, 0 uncovered, 0 stale | **93** rows, 0 uncovered, 0 stale |
+
+Sixty files, every one annotated `fail`, and the false-positive count did not
+move — which was the acceptance criterion rather than the bar, because a rule
+that reports a conforming file has failed however far it moves the total.
+
+Per ledger row, in files still disagreeing:
+
+| subject | before | after |
+| --- | ---: | ---: |
+| `Isartor test files/PDFA-1b/6.7 Metadata` | 18 | 8 |
+| `PDF_A-1b/6.7 Metadata/6.7.2 Properties` | 86 | 61 |
+| `PDF_A-1b/6.7 Metadata/6.7.8 Extension schemas` | 4 | **0**, row deleted |
+| `PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams` | 129 | 109 |
+| `PDF_A-2b/6.6 Metadata/6.6.4 Version identification` | 2 | 1 |
+
+**The estimate this row carried was wrong by a factor of four, and the reason
+is worth more than the number.** The roadmap said "roughly 247 files turn on
+the membership half", taken from the four ledger rows' totals. Between them,
+membership and the description checks took **60**. Membership took the 25
+part-1 fixtures the suite states as membership claims ("not permitted in ... in
+XMP 2004", "the Camera Raw Schema is not defined in XMP 2004"), the one
+6.6.2.3.2 fixture, and a version-identification fixture that binds the prefix
+`pdfaid` to a namespace that is not the identification schema's; the
+description checks took the 19 under `6.6.2.3.3` and the 4 under part 1's
+`6.7.8`; Isartor's `6.7.8` directory gave ten, split between the two. What the
+rows actually held was the value-type half still, at a granularity below the four
+forms an RDF/XML serialisation distinguishes: 61 part-1 and 107 part-2 fixtures
+whose property *is* in the table, *is* written as the simple value its schema
+declares a simple value for, and whose text is not the kind of simple value it
+declares — an `Integer` where a `Rational` is asked for, a closed choice
+written outside its choices. The corpus said so all along and nobody had asked
+it: **not one** of the 549 files under `6.6.2.3.1 General` states a membership
+expectation, and all 549 state a value-type one.
+
+So `PDFA_STAGED` loses two entries and gains two, and still counts 37. What is
+staged now is named at the granularity the corpus actually has: the value types
+below the four serialised forms (6.6.2.3, 168 files), and an extension schema's
+custom value types — whether a type a property names is described anywhere, and
+whether a type with fields is used where a simple value is declared (6.7.8,
+four Isartor files).
+
+**Counted injections.** Each defect re-introduced in turn, the whole
+`tinker-pdf` crate run with `--no-fail-fast` before `-p`, the count recorded —
+zeros included, because a guard that catches nothing when its defect is
+injected is not a guard.
+
+| Injected | Tests that failed |
+| --- | ---: |
+| the `pdfaid` and `pdfaExtension` exemption dropped | 127 |
+| the membership rule never called at all | 7 |
+| a property in a namespace no table names admitted as a member | 4 |
+| the required-entry check never run | 4 |
+| the extension-schema lookup never consulted | 3 |
+| a described property matched by name but not by namespace | 2 |
+| the `pdfa*` prefix requirement dropped | 2 |
+| part 1 given part 2's main-package term | 2 |
+| part 2 denied the main-package term | 2 |
+| the rule applied to part 4 | 2 |
+| the `xmpMM:InstanceID` exception dropped | 1 |
+| the attribute shorthand for a description not read | 1 |
+| page packets never read | 1 |
+
+**No zeros, and that is the one result a campaign cannot take credit for.** The
+first row is the shape of the risk rather than a guard: dropping the exemption
+reports `pdfaid` on every conforming fixture in the suite, so 127 tests fail
+and none of them is about this rule. The rows worth reading are the three
+**ones**, each a single fixture written for it — `xmpMM:InstanceID` admitted
+under part 1, the attribute shorthand for a description, and the page packets
+the main-package term needs. Each was one test before the injection was run and
+is one test after, which is what a guard looks like when it is the only one.
 
 ## What the annotation group measured
 

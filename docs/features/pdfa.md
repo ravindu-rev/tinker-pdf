@@ -36,13 +36,18 @@ never happens.
   the presence and shape of an appearance dictionary.
 - **Metadata** needs the XMP pull parser: the packet's well-formedness; the
   eight `/Info` entries ISO 19005-1 6.7.3 pairs with an XMP property, for
-  part 1, compared as instants where they are dates; and the value type every
-  property of a predefined schema declares — a simple value, an array, a
-  language alternative or a structure — read from the serialisation's own
-  shape rather than from its text, and against **the revision the part cites**:
-  part 1 the January 2004 XMP specification, parts 2 and 3 the September 2005
-  one. Parts 1 to 3 carry that last requirement and **part 4 dropped it**, so
-  it does not run there.
+  part 1, compared as instants where they are dates; and both halves of the
+  predefined-schema rule. **Membership** — every top-level property belongs to
+  a predefined schema, or the packet describes it in an extension schema of
+  its own, in the `pdfaExtension` markup ISO 19005-1 6.7.8 and ISO 19005-2
+  6.6.2.3.2 define, with the entries and the five fixed `pdfa*` prefixes ISO
+  19005-2 6.6.2.3.3 requires. **Value type** — a simple value, an array, a
+  language alternative or a structure, read from the serialisation's own shape
+  rather than from its text. Both read **the revision the part cites**: part 1
+  the January 2004 XMP specification, parts 2 and 3 the September 2005 one.
+  Parts 1 to 3 carry the requirement and **part 4 dropped it**, so neither half
+  runs there. Under parts 2 and 3 the catalog's packet may describe a property
+  a page's packet uses; under part 1 it may not.
 - **Fonts** needs `tinker-pdf-font` and the content walk: every font embedded
   including the standard 14, the program's format against the key that names
   it, the subset tag's shape, symbolic and non-symbolic `/Encoding`,
@@ -133,8 +138,8 @@ make no PDF/A claim, and scoring them would measure the measurement:
 | | files | agree |
 | --- | --- | --- |
 | annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 872 |
-| **total** | **2 371** | **1 702** |
+| annotated `-fail-` | 1 540 | 932 |
+| **total** | **2 371** | **1 762** |
 
 The single disagreement on the `pass` side is a **reading**, recorded as one:
 ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
@@ -160,11 +165,14 @@ full validator with complete coverage, and by the strict structural validator
 in `tinker-pdf-cos`, which reads bytes rather than the object graph and was
 written for the writer rather than for PDF/A.
 
-The value-type rule is the one whose failure mode is reporting a *conforming*
-file — it judges every property of every packet rather than waiting to be
-reached — so every one of its fixtures has a twin that must stay silent, and
-one fixture carries a property of each of the four forms and asserts nothing
-at all is said about it.
+The predefined-schema rule is the one whose failure mode is reporting a
+*conforming* file — it judges every property of every packet rather than
+waiting to be reached — so every one of its fixtures has a twin that must stay
+silent. The membership half is sharper still, because it reports a property
+rather than a spelling: its twins are a packet whose extension schema
+describes the property, a packet under the part whose revision defines it, and
+the schemas ISO 19005 defines for itself, which every conforming file carries
+and no XMP revision names.
 
 `pdfa_ledger.rs` is the census, which walks the fetched corpus and asserts in
 both directions that the ledger accounts for every disagreement.
@@ -180,7 +188,7 @@ against the table its fixture passed, so a clause this build reads wrongly is
 read wrongly in both directions and the pair agrees with itself.
 
 The corpus is where that asymmetry breaks, and only for files somebody else
-made. It is why "1 702 of 2 371" is the honest measure of how much of ISO
+made. It is why "1 762 of 2 371" is the honest measure of how much of ISO
 19005 this build understands, and why a document the writer produces is
 reported as *"this validator and the structural one find nothing"* rather than
 as *"it conforms"*.

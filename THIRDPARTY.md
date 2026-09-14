@@ -542,15 +542,23 @@ belonged to Adobe's `xmp-docs` namespace tables, which were Adobe's *current*
 revision and are the tables these two replaced. Nothing from that repository is
 in the engine any more, so the notice is gone with it.
 
-The names are **not** read as a membership list, and that restraint is what
-makes the tables safe to compile in. ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3
-require every property to belong to a predefined schema *or* be described by an
-extension schema, and 6.7.8 is the second half of that sentence: a packet may
-declare a schema of its own and carry properties neither revision defines. A
-membership rule written before that declaration is read would report every
-conforming file that uses one, and the veraPDF corpus is full of them — so the
-membership half of the clause stays staged, `PDFA_STAGED` names it, and
-`crates/tinker-pdf/src/pdfa/xmp_schemas.rs` argues it at length.
+The names **are** read as a membership list, and only alongside the exception
+that makes one safe. ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 require every
+property to belong to a predefined schema *or* be described by an extension
+schema, and 6.7.8 is the second half of that sentence: a packet may declare a
+schema of its own and carry properties neither revision defines. A membership
+rule written before that declaration is read would report every conforming file
+that uses one, so neither half landed before the other;
+`crates/tinker-pdf/src/pdfa/xmp_extension.rs` reads the declarations and
+`crates/tinker-pdf/src/pdfa/xmp_schemas.rs` argues the tables at length. Two
+names are read out of these documents and **not** used as membership: the
+`pdfaid` identification schema and the `pdfaExtension` vocabularies are ISO
+19005's own and no XMP revision prints them, so the rule exempts them by
+namespace rather than pretending a table names them.
+
+*Amended 14 September 2026, at the commit that landed the membership half. The
+paragraph above said the restraint was what made the tables safe to compile in;
+what makes them safe is the exception, and it is now read.*
 
 The evidence that the transcription is right is a count, a difference and a
 corpus. `both_revision_tables_are_sorted_and_have_no_duplicate_property` pins

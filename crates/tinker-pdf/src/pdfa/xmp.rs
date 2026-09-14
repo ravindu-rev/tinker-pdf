@@ -17,24 +17,26 @@
 //! properties in three namespaces — and treat a packet the subset cannot read
 //! as a finding rather than as a pass.
 //!
-//! The largest metadata rule in the standard is here in **half**, and which
-//! half is a decision rather than an accident. ISO 19005-1 6.7.2 and ISO
-//! 19005-2 6.6.2.3 require every property in the packet to belong to a
-//! predefined schema or be described by an extension schema, **and** to carry
-//! the value type that schema declares.
+//! The largest metadata rule in the standard is here **whole**. ISO 19005-1
+//! 6.7.2 and ISO 19005-2 6.6.2.3 require every property in the packet to
+//! belong to a predefined schema or be described by an extension schema,
+//! **and** to carry the value type that schema declares.
 //!
-//! The value-type half runs, over the tables in [`super::xmp_schemas`] — one
-//! per revision of the XMP specification, because the parts cite different
-//! ones: part 1 the January 2004 revision, parts 2 and 3 the September 2005
-//! one. The membership half is staged and [`super::STAGED`] names it: reading
-//! the same tables as lists of *permitted* properties would report every
-//! conforming file whose packet declares an extension schema, and ISO 19005-1
-//! 6.7.8 is what says those files are conforming. `xmp_schemas.rs` argues
-//! both halves at length.
+//! Both halves read the tables in [`super::xmp_schemas`] — one per revision of
+//! the XMP specification, because the parts cite different ones: part 1 the
+//! January 2004 revision, parts 2 and 3 the September 2005 one, and part 4
+//! none, having dropped the requirement. The membership half also reads
+//! [`super::xmp_extension`], which is the exception ISO 19005-1 6.7.8 and ISO
+//! 19005-2 6.6.2.3.2 grant: a packet may carry a property no predefined schema
+//! defines as long as it describes that property itself. Neither half could
+//! land without the other — a membership rule written before the exception was
+//! read would report every conforming file that uses one — which is why they
+//! arrived in one commit.
 
-use tinker_pdf_cos::{decode_text_string, parse_date, Date, Dict};
+use tinker_pdf_cos::{decode_text_string, pages, parse_date, CosDocument, Date, Dict, ObjRef};
 use tinker_pdf_xml::{Event, Name, Source};
 
+use super::xmp_extension::Extensions;
 use super::xmp_schemas::ValueForm;
 use super::{clauses, FindingKind, Flavour, Machinery, Part, Raw, RuleGroup};
 
@@ -176,12 +178,13 @@ pub(super) fn rules(
         return;
     };
 
-    // The value-type half of 6.7.2 / 6.6.2.3, on the three parts that carry
-    // the requirement. It runs before the `/Info` agreement below because that
-    // half is part 1's alone and returns early.
+    // 6.7.2 / 6.6.2.3, on the three parts that carry the requirement. It runs
+    // before the `/Info` agreement below because that half is part 1's alone
+    // and returns early.
     if let Some(part) = flavour.map(|f| f.part) {
         if part_carries_the_predefined_schema_rule(part) {
             schema_value_types(&packet, part, out);
+            predefined_schema_membership(document, &packet, part, out);
         }
     }
 
@@ -521,24 +524,27 @@ fn properties(packet: &[u8]) -> Option<Properties> {
     well_formed.then_some(Properties { values })
 }
 
-// ---- the predefined schemas' value types -----------------------------------
+// ---- the predefined schemas ------------------------------------------------
 //
-// ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 have two halves. The membership
-// half — every property belongs to a predefined schema or to an extension
-// schema — is still staged, and `xmp_schemas.rs` records at length why: the
-// tables now say which properties each cited revision defined, and what is
-// left is the rule itself and the extension-schema exception 6.7.8 owes it.
+// ISO 19005-1 6.7.2 and ISO 19005-2 6.6.2.3 are one sentence with two halves,
+// and both are here.
 //
-// This is the other half. A property the cited revision's table *does* name is
-// one that revision printed a value type for. A packet that writes
+// **Membership.** Every top-level property belongs to a predefined schema of
+// the revision the part cites, or the packet describes it in an extension
+// schema of its own. `xmp_schemas.rs` carries the revisions and argues which
+// part cites which; `xmp_extension.rs` reads the descriptions and argues what
+// one must contain.
+//
+// **Value type.** A property the cited revision's table *does* name is one
+// that revision printed a value type for. A packet that writes
 // `xmpDM:projectRef` as a string where the schema declares a structure has not
 // written that property; it has written something else under its name, which
 // is precisely what the clause exists to stop.
 //
-// Part 4 is excluded, and the exclusion is evidence rather than caution: the
-// conformance suite has `PDF_A-1b/6.7 Metadata/6.7.2 Properties` and
-// `PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas`, and there is
-// no counterpart anywhere under `PDF_A-4` — ISO 19005-4 dropped the
+// Part 4 is excluded from both, and the exclusion is evidence rather than
+// caution: the conformance suite has `PDF_A-1b/6.7 Metadata/6.7.2 Properties`
+// and `PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas`, and
+// there is no counterpart anywhere under `PDF_A-4` - ISO 19005-4 dropped the
 // restriction rather than renumbering it.
 
 /// A top-level property found in the packet, and the shape its value took.
@@ -796,30 +802,212 @@ fn schema_value_types(packet: &[u8], part: Part, out: &mut Vec<Raw>) {
         let Some(declared) =
             super::xmp_schemas::value_form(&property.namespace, &property.local, part)
         else {
-            // Not a property this table names, which is not a statement that
-            // the property is unknown — only that nothing here can judge it.
+            // Not a property this revision's table names, so it has no
+            // declared type to disagree with. Whether the packet was allowed
+            // to carry it at all is the membership half's question, below.
             continue;
         };
         if declared == property.form {
             continue;
         }
-        let named = match super::xmp_schemas::prefix_of(&property.namespace) {
-            Some(prefix) => format!("{prefix}:{}", property.local),
-            None => property.local.clone(),
-        };
         out.push(Raw::file(
             // One table for every part. `ClauseTable::of` routes by part
-            // already, and `SCHEMA_TYPES` carries part 1's own number in its
-            // `one` arm — which is `METADATA`'s number too, because part 1
+            // already, and `PREDEFINED_SCHEMAS` carries part 1's own number in
+            // its `one` arm — which is `METADATA`'s number too, because part 1
             // gives the whole of 6.7.2 one clause and no sub-clause.
-            clauses::SCHEMA_TYPES,
+            clauses::PREDEFINED_SCHEMAS,
             FindingKind::XmpValueTypeMismatch {
-                property: named,
+                property: name_of(&property),
                 expected: declared.describe(),
                 found: property.form.describe(),
             },
         ));
     }
+}
+
+/// The property as a reader would write it.
+///
+/// The **preferred prefix** of the schema that declares the namespace, which
+/// is what `xmp_schemas::prefix_of` exists for: a reader who knows XMP knows
+/// `dc:title` and does not know which namespace URI Dublin Core has.
+///
+/// A property in a namespace **no** predefined schema declares has no
+/// preferred prefix, and it is the membership half's whole subject, so the
+/// fallback is not a corner case. It is the namespace in braces —
+/// `{http://example.invalid/ns/}Machine` — the notation the XML
+/// specifications use for a name there is no prefix for, and the packet's own
+/// prefix is deliberately **not** used in its place.
+///
+/// That is a decision and the corpus is why. `PDF_A-2b` `6-6-4-t01-fail-a`
+/// binds the prefix `pdfaid` to a namespace that is not the PDF/A
+/// identification schema's, which is the defect the fixture is for. Named by
+/// the prefix the packet wrote, the finding reads `pdfaid:part is described
+/// nowhere` — which names a schema ISO 19005 defines and this rule exempts,
+/// and so reads as a contradiction. Named by the namespace, it says the thing
+/// that is actually wrong. The braces cost a long line in the one case where
+/// a short one would be a lie.
+fn name_of(property: &Found) -> String {
+    match super::xmp_schemas::prefix_of(&property.namespace) {
+        Some(prefix) => format!("{prefix}:{}", property.local),
+        None => format!("{{{}}}{}", property.namespace, property.local),
+    }
+}
+
+/// Reports every top-level property that belongs to no predefined schema of
+/// the revision `part` cites and that no extension schema describes, and every
+/// defect in the descriptions themselves.
+///
+/// # Which packets are read, and why it is not just the catalog's
+///
+/// Every packet the document carries through its pages: the catalog's, and
+/// each page's own `/Metadata`. The clause is about the properties a
+/// conforming file specifies in XMP rather than about one stream.
+///
+/// The value-type half above reads the catalog's packet alone. That asymmetry
+/// is deliberate, and it is a measurement rather than a reading: that half was
+/// delivered and its movement counted over the catalog's packet, and widening
+/// its input in the same commit that adds this one would leave neither number
+/// attributable. Widening it is its own row.
+///
+/// # Part 2's extra term
+///
+/// veraPDF's profiles differ structurally between the parts, and not because
+/// of the revision: part 1 asks `isPredefinedInXMP2004 ||
+/// isDefinedInCurrentPackage`, and part 2 asks `isPredefinedInXMP2005 ||
+/// isDefinedInMainPackage || isDefinedInCurrentPackage`. So under parts 2 and
+/// 3 the **catalog's** packet may describe a property a **page's** packet
+/// uses, and under part 1 it may not. `6-6-2-3-2-t01-pass-b` is the fixture
+/// that asserts it, in its own words: *"The Catalog metadata defines custom
+/// property, which is used in the page metadata"*, annotated conforming under
+/// part 2. Part 1 has no counterpart fixture and no such term.
+fn predefined_schema_membership(
+    document: &Document,
+    catalog: &[u8],
+    part: Part,
+    out: &mut Vec<Raw>,
+) {
+    let main = super::xmp_extension::read(catalog);
+    judge_packet(catalog, None, &main, &main, part, out);
+    for (reference, packet) in page_packets(&document.inner) {
+        let current = super::xmp_extension::read(&packet);
+        judge_packet(&packet, Some(reference), &current, &main, part, out);
+    }
+}
+
+/// The most pages a membership walk visits.
+///
+/// The same bound the colour and content walks take, and for the same reason:
+/// a validator is handed untrusted bytes, and a page tree is a graph a file
+/// can make as large as it likes.
+const MAX_PAGES: usize = 1 << 14;
+
+/// Every page's own `/Metadata` stream, with the page it belongs to.
+///
+/// The page's reference rather than the stream's, because ruling 10 asks a
+/// finding to name an object a reader can find, and a metadata stream is
+/// reached through the page that owns it.
+fn page_packets(doc: &CosDocument) -> Vec<(ObjRef, Vec<u8>)> {
+    let mut packets = Vec::new();
+    for page in pages::collect_upto(doc, MAX_PAGES) {
+        let Ok(dict) = doc.get(page.reference) else {
+            continue;
+        };
+        let Some(dict) = dict.as_dict() else {
+            continue;
+        };
+        let Some(stream) = dict.get_ref(doc.intern(b"Metadata")) else {
+            continue;
+        };
+        let Ok(bytes) = doc.stream_decoded(stream) else {
+            continue;
+        };
+        packets.push((page.reference, bytes));
+    }
+    packets
+}
+
+/// Judges one packet against the schemas `current` describes and, under parts
+/// 2 and 3, the ones `main` describes.
+fn judge_packet(
+    packet: &[u8],
+    object: Option<ObjRef>,
+    current: &Extensions,
+    main: &Extensions,
+    part: Part,
+    out: &mut Vec<Raw>,
+) {
+    for kind in &current.defects {
+        out.push(Raw {
+            rule: clauses::EXTENSION_SCHEMAS,
+            object,
+            kind: kind.clone(),
+        });
+    }
+    for property in top_level_properties(packet) {
+        if is_a_member(&property, part, current, main) {
+            continue;
+        }
+        out.push(Raw {
+            rule: clauses::PREDEFINED_SCHEMAS,
+            object,
+            kind: FindingKind::XmpPropertyUndescribed {
+                property: name_of(&property),
+            },
+        });
+    }
+}
+
+/// The XMP media management namespace, which the one exception below is in.
+const XMP_MM: &str = "http://ns.adobe.com/xap/1.0/mm/";
+
+/// Whether the clause admits this property.
+fn is_a_member(property: &Found, part: Part, current: &Extensions, main: &Extensions) -> bool {
+    // ISO 19005 defines `pdfaid` and the extension-schema vocabularies itself
+    // and requires a conforming file to carry the first of them. No revision
+    // of the XMP specification names either, so a rule that judged them would
+    // report nearly every conforming file there is: the suite's 831 `pass`
+    // files carry 1 646 `pdfaid` properties between them, and only seven of
+    // them describe any extension schema at all. Whether the packet describes
+    // `pdfaid` where the part asks it to is clause 6.7.11's question, and
+    // `super::STAGED` still carries that row.
+    if super::xmp_extension::is_an_iso_19005_namespace(&property.namespace) {
+        return true;
+    }
+    if super::xmp_schemas::value_form(&property.namespace, &property.local, part).is_some() {
+        return true;
+    }
+    // **`xmpMM:InstanceID` under part 1, and it is a disagreement between two
+    // published sources rather than a table with a hole in it.**
+    //
+    // The string does not occur anywhere in the 94 pages of the January 2004
+    // XMP specification, which is the revision ISO 19005-1 cites; September
+    // 2005 introduces it with an editorial marker its own author left in the
+    // file. `xmp_schemas.rs` records that, and the 2004 table is right not to
+    // carry a row the document never printed.
+    //
+    // The veraPDF suite says the opposite, from both sides: `PDF_A-1b`
+    // `6-7-2-t09-pass-q` writes `xmpMM:InstanceID`, says in its own outline
+    // *"The property InstanceID is permitted in XMP Media Management Schema in
+    // XMP 2004"*, and is annotated **conforming**; `6-7-2-t09-fail-q` writes
+    // the same property and is annotated non-conforming for its value type.
+    //
+    // So one of two published sources has to lose, and which way the mistake
+    // falls settles it. Reading the table strictly reports a file a
+    // conformance suite calls conforming, which is the one outcome this rule
+    // group is held to avoid. Admitting the property costs only the ability to
+    // report `6-7-2-t09-fail-q`, which this build cannot report anyway: the
+    // value-type half needs a declared type, and the document that would have
+    // declared one never printed the row. So the exception is membership-only,
+    // it lives here rather than in the table where it would be a forgery, and
+    // the fail file it forgives keeps its ledger row.
+    if part == Part::One && property.namespace == XMP_MM && property.local == "InstanceID" {
+        return true;
+    }
+    if current.describes(&property.namespace, &property.local) {
+        return true;
+    }
+    // Parts 2 and 3 only: see `predefined_schema_membership`.
+    matches!(part, Part::Two | Part::Three) && main.describes(&property.namespace, &property.local)
 }
 
 #[cfg(test)]
@@ -1312,5 +1500,142 @@ mod tests {
             }
         }
         assert_eq!(disagreements, ["photoshop:SupplementalCategories"]);
+    }
+    // ---- the predefined schemas' membership ------------------------------
+
+    /// The membership findings `body` makes under `part`, with `main` as the
+    /// catalog packet's extension schemas.
+    fn members(body: &str, part: Part, main: &Extensions) -> Vec<String> {
+        let packet = packet(body);
+        let current = super::super::xmp_extension::read(packet.as_bytes());
+        let mut out = Vec::new();
+        judge_packet(packet.as_bytes(), None, &current, main, part, &mut out);
+        out.into_iter()
+            .map(|raw| match raw.kind {
+                FindingKind::XmpPropertyUndescribed { property } => property,
+                other => format!("unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    /// A packet describing one custom property, for use as a main package.
+    fn describing(namespace: &str, name: &str) -> Extensions {
+        let body = format!(
+            "<rdf:Description rdf:about=\"\" \
+             xmlns:pdfaExtension=\"http://www.aiim.org/pdfa/ns/extension/\" \
+             xmlns:pdfaSchema=\"http://www.aiim.org/pdfa/ns/schema#\" \
+             xmlns:pdfaProperty=\"http://www.aiim.org/pdfa/ns/property#\">\
+             <pdfaExtension:schemas><rdf:Bag><rdf:li rdf:parseType=\"Resource\">\
+             <pdfaSchema:schema>An example schema</pdfaSchema:schema>\
+             <pdfaSchema:namespaceURI>{namespace}</pdfaSchema:namespaceURI>\
+             <pdfaSchema:prefix>ex</pdfaSchema:prefix>\
+             <pdfaSchema:property><rdf:Seq><rdf:li rdf:parseType=\"Resource\">\
+             <pdfaProperty:name>{name}</pdfaProperty:name>\
+             <pdfaProperty:valueType>Text</pdfaProperty:valueType>\
+             <pdfaProperty:category>external</pdfaProperty:category>\
+             <pdfaProperty:description>a machine</pdfaProperty:description>\
+             </rdf:li></rdf:Seq></pdfaSchema:property></rdf:li></rdf:Bag>\
+             </pdfaExtension:schemas></rdf:Description>"
+        );
+        super::super::xmp_extension::read(packet(&body).as_bytes())
+    }
+
+    /// The **main package** term, which parts 2 and 3 have and part 1 does
+    /// not.
+    ///
+    /// Asserted on the rule rather than on a document, because the shape being
+    /// tested is a packet judged against another packet's descriptions and
+    /// that is exactly the pair `judge_packet` takes. The document-level twin
+    /// is `pdfa_metadata.rs`'s
+    /// `only_parts_two_and_three_read_the_main_packages_descriptions`.
+    #[test]
+    fn the_main_package_term_belongs_to_parts_two_and_three() {
+        const NS: &str = "http://example.invalid/ns/";
+        let body = "<rdf:Description rdf:about=\"\" xmlns:ex=\"http://example.invalid/ns/\">\
+                    <ex:Machine>M17</ex:Machine></rdf:Description>";
+        let main = describing(NS, "Machine");
+        let empty = Extensions::none();
+
+        for part in [Part::Two, Part::Three] {
+            assert!(members(body, part, &main).is_empty(), "{part:?}");
+        }
+        assert_eq!(
+            members(body, Part::One, &main),
+            [format!("{{{NS}}}Machine")],
+            "part 1 has no main-package term"
+        );
+        // And with nothing describing it anywhere, every part reports it — so
+        // the two silences above are the description and not the part.
+        for part in [Part::One, Part::Two, Part::Three] {
+            assert_eq!(
+                members(body, part, &empty),
+                [format!("{{{NS}}}Machine")],
+                "{part:?}"
+            );
+        }
+    }
+
+    /// A packet's **own** description is read under every part, including the
+    /// one with no main-package term.
+    #[test]
+    fn a_packets_own_description_is_read_under_every_part() {
+        const NS: &str = "http://example.invalid/ns/";
+        let body = format!(
+            "<rdf:Description rdf:about=\"\" xmlns:ex=\"{NS}\">\
+             <ex:Machine>M17</ex:Machine></rdf:Description>{}",
+            DESCRIPTION
+        );
+        for part in [Part::One, Part::Two, Part::Three] {
+            assert!(
+                members(&body, part, &Extensions::none()).is_empty(),
+                "{part:?}"
+            );
+        }
+    }
+
+    /// The description [`a_packets_own_description_is_read_under_every_part`]
+    /// carries, as a second top-level `rdf:Description`.
+    const DESCRIPTION: &str = "<rdf:Description rdf:about=\"\" \
+        xmlns:pdfaExtension=\"http://www.aiim.org/pdfa/ns/extension/\" \
+        xmlns:pdfaSchema=\"http://www.aiim.org/pdfa/ns/schema#\" \
+        xmlns:pdfaProperty=\"http://www.aiim.org/pdfa/ns/property#\">\
+        <pdfaExtension:schemas><rdf:Bag><rdf:li rdf:parseType=\"Resource\">\
+        <pdfaSchema:schema>An example schema</pdfaSchema:schema>\
+        <pdfaSchema:namespaceURI>http://example.invalid/ns/</pdfaSchema:namespaceURI>\
+        <pdfaSchema:prefix>ex</pdfaSchema:prefix>\
+        <pdfaSchema:property><rdf:Seq><rdf:li rdf:parseType=\"Resource\">\
+        <pdfaProperty:name>Machine</pdfaProperty:name>\
+        <pdfaProperty:valueType>Text</pdfaProperty:valueType>\
+        <pdfaProperty:category>external</pdfaProperty:category>\
+        <pdfaProperty:description>a machine</pdfaProperty:description>\
+        </rdf:li></rdf:Seq></pdfaSchema:property></rdf:li></rdf:Bag>\
+        </pdfaExtension:schemas></rdf:Description>";
+
+    /// How a finding writes a property's name, in both directions.
+    ///
+    /// The preferred prefix when a predefined schema declares the namespace,
+    /// and the namespace in braces when none does. The second is the one the
+    /// corpus forced: `PDF_A-2b` `6-6-4-t01-fail-a` binds the prefix `pdfaid`
+    /// to a namespace that is **not** the identification schema's, and a
+    /// finding named by the packet's own prefix would read
+    /// `pdfaid:part is described nowhere` about a schema this rule exempts.
+    #[test]
+    fn a_property_is_named_by_its_schema_or_by_its_namespace() {
+        let known = Found {
+            namespace: "http://purl.org/dc/elements/1.1/".to_string(),
+            local: "title".to_string(),
+            form: ValueForm::LangAlt,
+        };
+        assert_eq!(name_of(&known), "dc:title");
+
+        let unknown = Found {
+            namespace: "http://www.aiim.org/pdfa/ns/id-but-not-really/".to_string(),
+            local: "part".to_string(),
+            form: ValueForm::Simple,
+        };
+        assert_eq!(
+            name_of(&unknown),
+            "{http://www.aiim.org/pdfa/ns/id-but-not-really/}part"
+        );
     }
 }

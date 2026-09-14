@@ -55,6 +55,7 @@ mod fonts;
 mod structure;
 mod syntax;
 mod xmp;
+mod xmp_extension;
 mod xmp_schemas;
 
 /// A finding before its clause number is known.
@@ -238,7 +239,14 @@ pub(crate) mod clauses {
         four: "6.7.2",
     };
 
-    /// The predefined schemas' property value types.
+    /// The predefined schemas: which properties a packet may carry, and what
+    /// value type each of them declares.
+    ///
+    /// **One number for both halves of one sentence.** ISO 19005-1 6.7.2 and
+    /// ISO 19005-2 6.6.2.3 state a single requirement — a property shall
+    /// belong to a predefined schema or to an extension schema, *and* shall
+    /// carry the type that schema declares — so membership and value type are
+    /// numbered together because the standard numbers them together.
     ///
     /// Part 1 numbers the whole requirement 6.7.2 and gives it no sub-clause,
     /// which is why the part-1 arm here is the same number
@@ -247,10 +255,30 @@ pub(crate) mod clauses {
     /// **dropped the requirement**, so no number is right for it and the rule
     /// does not run there; the `four` arm is part 1's, for a file that claims
     /// no part at all.
-    pub(crate) const SCHEMA_TYPES: ClauseTable = ClauseTable {
+    pub(crate) const PREDEFINED_SCHEMAS: ClauseTable = ClauseTable {
         one: "6.7.2",
         two_three: "6.6.2.3",
         four: "6.7.2",
+    };
+
+    /// The extension schema description, which is the exception to
+    /// [`PREDEFINED_SCHEMAS`].
+    ///
+    /// Part 1 gives it a clause of its own, 6.7.8 "Extension schemas". Parts 2
+    /// and 3 split the subject in two: 6.6.2.3.2 says a property outside the
+    /// predefined schemas shall be described in the packet, and 6.6.2.3.3 says
+    /// what a description must carry. Every finding numbered here is about the
+    /// description itself, so the parts 2 and 3 arm is 6.6.2.3.3 — the
+    /// corpus's own directory names are the check, `PDF_A-1b/6.7
+    /// Metadata/6.7.8 Extension schemas` against `PDF_A-2b/.../6.6.2.3.3
+    /// Extension schema container schemas`. A property with no description at
+    /// all is the *rule* rather than the exception and is numbered
+    /// [`PREDEFINED_SCHEMAS`]. Part 4 carries no predefined-schema
+    /// requirement, so it has no exception to one either.
+    pub(crate) const EXTENSION_SCHEMAS: ClauseTable = ClauseTable {
+        one: "6.7.8",
+        two_three: "6.6.2.3.3",
+        four: "6.7.8",
     };
 
     /// The annotation types a part admits.
@@ -447,6 +475,35 @@ pub struct StagedRule {
 /// interpreted.
 pub const STAGED: &[StagedRule] = &[
     StagedRule {
+        clause: "6.6.2.3",
+        rule: "the predefined schemas' value types below the four forms an \
+               RDF/XML serialisation distinguishes: Integer, Real, Rational, \
+               Date, URI and the closed choices are all one element with text \
+               in it",
+        because: "`ValueForm` separates what the serialisation separates - a \
+                  simple value, an array, a language alternative, a structure \
+                  - and both halves of the rule run on that. Narrowing further \
+                  means reading every value against a per-type grammar, which \
+                  is a different rule over different input. 61 part-1 and 107 \
+                  part-2 fixtures are exactly this: a property the table names, \
+                  written as a simple value the schema declares a simple value \
+                  for, whose text is not the kind of simple value it declares",
+    },
+    StagedRule {
+        clause: "6.7.8",
+        rule: "an extension schema's custom value types: whether a value type \
+               a property names is described, and whether a type with fields \
+               is used where a simple value is declared",
+        because: "the description's own required entries are checked and the \
+                  membership rule reads the properties it describes. What is \
+                  not checked is the second hop - `pdfaProperty:valueType` \
+                  naming a type, and that type being either one XMP defines or \
+                  one `pdfaSchema:valueType` describes. It needs a list of the \
+                  value type names each cited XMP revision defines, which is a \
+                  table this build does not have; four Isartor fixtures turn \
+                  on it",
+    },
+    StagedRule {
         clause: "6.1.6",
         rule: "string objects: hexadecimal strings with an odd digit count or \
                a non-hexadecimal character",
@@ -485,26 +542,6 @@ pub const STAGED: &[StagedRule] = &[
         because: "it needs a recursive validation of the attachment, which is \
                   a validator calling itself on untrusted bytes and wants its \
                   own depth bound before it exists",
-    },
-    StagedRule {
-        clause: "6.6.2.3",
-        rule: "XMP properties must belong to a predefined schema or be \
-               described by an extension schema - the membership half. The \
-               value types those schemas declare are checked",
-        because: "the tables this needs now exist, one per cited revision: ISO \
-                  19005-1 cites the January 2004 XMP specification, ISO 19005-2 \
-                  and -3 are governed by the September 2005 one, and ISO 19005-4 \
-                  carries no predefined-schema requirement at all. The value-type \
-                  half reads them and runs. What membership still owes is the \
-                  rule itself and its exception: 6.7.8 lets a packet carry a \
-                  property no predefined schema defines, by describing it in an \
-                  extension schema, so a membership rule built before that \
-                  description is read would report every conforming file that \
-                  uses one - and the corpus is full of them. The value-type half \
-                  took 276 of the 512 files these four ledger rows named - 265 \
-                  against one table for every part, and eleven more once each \
-                  part read the revision it cites; the 236 that are left are this \
-                  half",
     },
     StagedRule {
         clause: "6.1.5",
@@ -735,15 +772,6 @@ pub const STAGED: &[StagedRule] = &[
         because: "docs/design/tagged-pdf.md owns the structure tree, and \
                    docs/design/pdfa.md's non-goals stage level A behind \
                    it rather than claiming it wrongly",
-    },
-    StagedRule {
-        clause: "6.7.8",
-        rule: "XMP extension schemas: the description a packet must \
-                carry for a property outside the predefined schemas",
-        because: "the other half of the predefined-schema rule, and \
-                   staged with it. A validator that checked the extension \
-                   schema without the schema tables would be checking the \
-                   exception to a rule it does not enforce",
     },
     StagedRule {
         clause: "6.7.11",
@@ -1055,9 +1083,10 @@ pub enum FindingKind {
     ///
     /// The finding is about the *shape* of the serialisation — a string where
     /// a structure is declared, an `rdf:Bag` where a single value is — because
-    /// that is what can be judged without reading the value. A property whose
-    /// schema this build does not carry is not reported at all: the membership
-    /// half of the clause is staged, and [`STAGED`] says why.
+    /// that is what can be judged without reading the value. A property no
+    /// predefined schema of the cited revision names is reported by
+    /// [`FindingKind::XmpPropertyUndescribed`] instead, because there is no
+    /// declared type there for it to disagree with.
     XmpValueTypeMismatch {
         /// The property, written with its schema's preferred prefix.
         property: String,
@@ -1065,6 +1094,44 @@ pub enum FindingKind {
         expected: &'static str,
         /// The form the packet used.
         found: &'static str,
+    },
+    /// A top-level XMP property belonging to no predefined schema of the
+    /// revision the part cites, and described by no extension schema the
+    /// packet carries (ISO 19005-1 6.7.2, ISO 19005-2 6.6.2.3.1).
+    ///
+    /// The membership half of the sentence
+    /// [`FindingKind::XmpValueTypeMismatch`] checks the other half of. Two
+    /// kinds rather than one, because they are different defects: a property
+    /// written in the wrong form is a producer misusing a schema everybody
+    /// agrees on, and this is a producer using a schema the file never says
+    /// what is in.
+    XmpPropertyUndescribed {
+        /// The property as a reader would write it. The preferred prefix of
+        /// the schema that declares it where there is one, the prefix the
+        /// packet itself bound where there is not, and the namespace in
+        /// braces where the packet bound none.
+        property: String,
+    },
+    /// A PDF/A extension schema written with a namespace prefix other than
+    /// the one ISO 19005 fixes for it (ISO 19005-1 6.7.8, ISO 19005-2
+    /// 6.6.2.3.3).
+    ///
+    /// The five prefixes are `pdfaExtension`, `pdfaSchema`, `pdfaProperty`,
+    /// `pdfaType` and `pdfaField`, and the requirement is about the spelling
+    /// rather than about the namespace: every corpus fixture for it binds the
+    /// wrong prefix to the right namespace URI.
+    XmpExtensionPrefix {
+        /// The prefix the standard fixes.
+        expected: &'static str,
+        /// The prefix the packet wrote, empty where it bound none.
+        found: String,
+    },
+    /// An entry a PDF/A extension schema description must carry and does not
+    /// (ISO 19005-1 6.7.8, ISO 19005-2 6.6.2.3.3).
+    XmpExtensionEntryMissing {
+        /// The entry, qualified as the standard writes it:
+        /// `pdfaSchema:namespaceURI`.
+        entry: String,
     },
     /// An annotation whose subtype the part's reference specification does
     /// not define at all (ISO 19005-1 6.5.2, ISO 19005-2 6.3.1).

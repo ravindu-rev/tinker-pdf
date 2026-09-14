@@ -56,33 +56,62 @@ use tinker_pdf::{Document, FindingKind, PdfACoverage};
 /// was built to produce. [`a_conforming_document_has_no_findings`] is what
 /// keeps that true as the rule set grows.
 fn document(packet: &str, info: Option<&str>) -> Vec<u8> {
+    document_with(packet, info, None)
+}
+
+/// The same, with `page` as the **page's** own `/Metadata` alongside the
+/// catalog's.
+///
+/// Two packets in one file is the shape ISO 19005-2 6.6.2.3.2 is about: a
+/// property a page's packet uses and the catalog's packet describes. One page
+/// is enough, because the extra term is "the main package" rather than "some
+/// other page's".
+fn document_with_page_metadata(packet: &str, page: &str) -> Vec<u8> {
+    document_with(packet, None, Some(page))
+}
+
+fn document_with(packet: &str, info: Option<&str>, page: Option<&str>) -> Vec<u8> {
     let stream = packet.as_bytes();
+    let metadata = |bytes: &[u8]| {
+        let mut body = format!(
+            "<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n",
+            bytes.len()
+        )
+        .into_bytes();
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\nendstream");
+        body
+    };
+    let page_dict = if page.is_some() {
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Metadata 6 0 R >>".to_vec()
+    } else {
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>".to_vec()
+    };
     let mut objects: Vec<(u32, Vec<u8>)> = vec![
         (
             1,
             b"<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_vec(),
         ),
         (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
-        (
-            3,
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>".to_vec(),
-        ),
-        (4, {
-            let mut body = format!(
-                "<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n",
-                stream.len()
-            )
-            .into_bytes();
-            body.extend_from_slice(stream);
-            body.extend_from_slice(b"\nendstream");
-            body
-        }),
+        (3, page_dict),
+        (4, metadata(stream)),
     ];
     if let Some(info) = info {
         objects.push((5, info.as_bytes().to_vec()));
     }
+    if let Some(page) = page {
+        objects.push((6, metadata(page.as_bytes())));
+    }
 
-    let count = objects.len();
+    // The highest object number rather than the count of them, because these
+    // fixtures number sparsely: a file with a page packet and no `/Info`
+    // defines 1 to 4 and 6, and an xref subsection sized by the count would
+    // stop at 5 and leave the last object unreachable.
+    let count = objects
+        .iter()
+        .map(|(num, _)| *num as usize)
+        .max()
+        .unwrap_or(0);
     let mut out = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
     let mut offsets = vec![0u64; count + 1];
     for (num, body) in &objects {
@@ -814,58 +843,366 @@ fn the_attribute_shorthand_is_a_structure_and_the_exclusions_are_not() {
     );
 }
 
-/// A property the cited revision's table does not name is not judged, in
-/// either direction.
+/// A property the cited revision's table does not name is **reported**, and
+/// that is the membership half.
 ///
-/// This is the membership half staying staged, asserted against what the
-/// corpus actually carries. A name neither revision printed is a name only a
-/// membership rule could have an opinion about, and until 6.7.8's extension
-/// schemas are read there is no such rule here.
+/// Four cases. The third is the one the corpus pins by name —
+/// `6-7-2-t03-fail-r` says `pdf:Trapped` is "not permitted in Adobe PDF
+/// Schema in XMP 2004", and the string occurs in neither revision, so it is a
+/// finding under every part that carries the rule. The fourth is the twin that
+/// matters: `6-7-2-t04-fail-a` says "The Camera Raw Schema is not defined in
+/// XMP 2004" and the September 2005 revision defines it, so the same packet is
+/// a finding under part 1 and **silence** under parts 2 and 3. A membership
+/// rule that read one table for every part would report a conforming part-2
+/// file there.
 #[test]
-fn a_property_the_table_does_not_name_is_never_judged() {
-    // An entirely unknown schema.
+fn a_property_the_table_does_not_name_is_reported_as_a_non_member() {
+    // An entirely unknown schema. No predefined schema declares the
+    // namespace, so there is no preferred prefix and the finding names the
+    // namespace instead.
     assert_eq!(
         typed_findings(
             "1",
             r#"xmlns:zz="http://example.invalid/ns/""#,
             "<zz:whatever>x</zz:whatever>"
         ),
-        Vec::new()
+        vec![FindingKind::XmpPropertyUndescribed {
+            property: "{http://example.invalid/ns/}whatever".to_string()
+        }]
     );
 
     // The sharper case: a schema the table **does** know, and a property in it
-    // that the table does not. The URI matches and the name does not, so the
-    // lookup fails and nothing is judged.
+    // that the table does not. The namespace has a preferred prefix, so the
+    // finding uses it.
     assert_eq!(
         typed_findings("1", PDF_NS, "<pdf:Whatever>x</pdf:Whatever>"),
-        Vec::new()
+        vec![FindingKind::XmpPropertyUndescribed {
+            property: "pdf:Whatever".to_string()
+        }]
     );
 
-    // `pdf:Trapped` is the one the corpus pins directly: `6-7-2-t03-fail-r`
-    // says it is "not permitted in Adobe PDF Schema in XMP 2004", and the
-    // string does not occur in either specification, so it is in neither
-    // table. A membership rule would report it; this one says nothing.
+    // `pdf:Trapped`, which neither revision printed, under every part that
+    // carries the rule.
+    for part in ["1", "2", "3"] {
+        assert_eq!(
+            typed_findings(part, PDF_NS, "<pdf:Trapped>False</pdf:Trapped>"),
+            vec![FindingKind::XmpPropertyUndescribed {
+                property: "pdf:Trapped".to_string()
+            }],
+            "part {part}"
+        );
+    }
+
+    // And the revision boundary, from both sides. The Camera Raw schema
+    // arrives in September 2005, so `crs:Version` written as the simple value
+    // that revision declares is a membership finding under part 1 and nothing
+    // at all under parts 2 and 3.
+    const CRS: &str = r#"xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/""#;
     assert_eq!(
-        typed_findings("1", PDF_NS, "<pdf:Trapped>False</pdf:Trapped>"),
-        Vec::new()
+        typed_findings("1", CRS, "<crs:Version>3.7</crs:Version>"),
+        vec![FindingKind::XmpPropertyUndescribed {
+            property: "crs:Version".to_string()
+        }]
+    );
+    for part in ["2", "3"] {
+        assert_eq!(
+            typed_findings(part, CRS, "<crs:Version>3.7</crs:Version>"),
+            Vec::new(),
+            "part {part}"
+        );
+    }
+}
+
+/// The schemas ISO 19005 defines for itself are not judged, and the twin of
+/// that exemption is that everything else in the packet still is.
+///
+/// `pdfaid:part` is on every conforming file there is and no revision of the
+/// XMP specification names it, so a membership rule that judged it would
+/// report all of them: the conformance suite's 831 `pass` files carry 1 646
+/// `pdfaid` properties between them. Asserted here rather than left to the
+/// corpus, because the corpus would say it by failing 830 files at once and
+/// this says it in one line.
+#[test]
+fn the_schemas_iso_19005_defines_for_itself_are_not_judged() {
+    for part in ["1", "2", "3"] {
+        // `typed` writes the flavour claim as `pdfaid` attributes on their own
+        // `rdf:Description`, which the attribute form of the walk reads as
+        // properties like any other.
+        assert_eq!(
+            typed_findings(part, DC_NS, "<dc:format>application/pdf</dc:format>"),
+            Vec::new(),
+            "part {part}"
+        );
+    }
+}
+
+/// `xmpMM:InstanceID` under part 1: the one name where two published sources
+/// disagree, and the rule takes the suite's side.
+///
+/// The string does not occur in the 94 pages of the January 2004 XMP
+/// specification. `PDF_A-1b` `6-7-2-t09-pass-q` writes it, says in its own
+/// outline that it "is permitted in XMP Media Management Schema in XMP 2004",
+/// and is annotated conforming — so a strict reading of the table reports a
+/// file a conformance suite calls conforming, and that is the one outcome
+/// this rule group is held to avoid.
+///
+/// The exception is **one name**, which is what the second half asserts:
+/// `xmpMM:Manifest` is equally absent from the January 2004 table and is
+/// equally reported, so this is not the media-management namespace being
+/// waved through.
+#[test]
+fn the_one_name_the_two_published_sources_disagree_about_is_admitted() {
+    const MM: &str = r#"xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/""#;
+    for part in ["1", "2", "3"] {
+        assert_eq!(
+            typed_findings(part, MM, "<xmpMM:InstanceID>uuid:1</xmpMM:InstanceID>"),
+            Vec::new(),
+            "part {part}"
+        );
+    }
+    // `6-7-2-t03-fail-g` says `xmpMM:Manifest` is "not permitted in XMP Media
+    // Management schema in XMP 2004", and nothing contradicts it.
+    assert_eq!(
+        typed_findings(
+            "1",
+            MM,
+            "<xmpMM:Manifest><rdf:Bag><rdf:li>x</rdf:li></rdf:Bag></xmpMM:Manifest>"
+        ),
+        vec![FindingKind::XmpPropertyUndescribed {
+            property: "xmpMM:Manifest".to_string()
+        }]
     );
 }
 
+/// An extension schema describes a property into membership, and taking the
+/// description away takes the membership with it.
+///
+/// This is ISO 19005-1 6.7.8 and ISO 19005-2 6.6.2.3.2, and it is the pair
+/// that had to land with the rule: without the first assertion the rule
+/// reports every conforming file that carries a custom property, and without
+/// the second the exception swallows the rule.
+#[test]
+fn an_extension_schema_describes_a_property_into_membership() {
+    const CUSTOM: &str = r#"xmlns:cs="http://example.invalid/ns/""#;
+    const USE: &str = "<cs:Machine>M17</cs:Machine>";
+
+    for part in ["1", "2", "3"] {
+        assert_eq!(
+            typed_findings(part, CUSTOM, USE),
+            vec![FindingKind::XmpPropertyUndescribed {
+                property: "{http://example.invalid/ns/}Machine".to_string()
+            }],
+            "part {part}"
+        );
+        assert_eq!(
+            typed_findings(
+                part,
+                CUSTOM,
+                &format!(
+                    "{USE}{}",
+                    describing("http://example.invalid/ns/", "Machine")
+                )
+            ),
+            Vec::new(),
+            "part {part}"
+        );
+    }
+
+    // And the description is matched on the namespace as well as the name: a
+    // schema that describes `Machine` in one namespace does not describe
+    // another namespace's `Machine`.
+    assert_eq!(
+        typed_findings(
+            "1",
+            CUSTOM,
+            &format!("{USE}{}", describing("http://other.invalid/ns/", "Machine"))
+        ),
+        vec![FindingKind::XmpPropertyUndescribed {
+            property: "{http://example.invalid/ns/}Machine".to_string()
+        }]
+    );
+}
+
+/// A `pdfaExtension:schemas` description, complete, for `name` in `namespace`.
+///
+/// Written as a second top-level property of the same `rdf:Description` the
+/// subject sits on, which is where a producer puts it.
+fn describing(namespace: &str, name: &str) -> String {
+    format!(
+        r##"<pdfaExtension:schemas xmlns:pdfaExtension="http://www.aiim.org/pdfa/ns/extension/"
+ xmlns:pdfaSchema="http://www.aiim.org/pdfa/ns/schema#"
+ xmlns:pdfaProperty="http://www.aiim.org/pdfa/ns/property#"><rdf:Bag>
+<rdf:li rdf:parseType="Resource">
+<pdfaSchema:schema>An example schema</pdfaSchema:schema>
+<pdfaSchema:namespaceURI>{namespace}</pdfaSchema:namespaceURI>
+<pdfaSchema:prefix>cs</pdfaSchema:prefix>
+<pdfaSchema:property><rdf:Seq><rdf:li rdf:parseType="Resource">
+<pdfaProperty:name>{name}</pdfaProperty:name>
+<pdfaProperty:valueType>Text</pdfaProperty:valueType>
+<pdfaProperty:category>external</pdfaProperty:category>
+<pdfaProperty:description>the machine</pdfaProperty:description>
+</rdf:li></rdf:Seq></pdfaSchema:property>
+</rdf:li></rdf:Bag></pdfaExtension:schemas>"##
+    )
+}
+
+/// An incomplete extension schema description is a finding of its own, and the
+/// complete one beside it is silent.
+///
+/// The entry list is the conformance suite's: `6-6-2-3-3-t01-fail-c` says a
+/// description with no `pdfaSchema:schema` fails, and `t05-pass-a` says one
+/// with no `pdfaSchema:property` passes. Both directions are asserted, because
+/// a required-entry list that is too long reports a conforming file and one
+/// that is too short reports nothing at all.
+#[test]
+fn an_extension_schema_description_carries_the_entries_the_suite_requires() {
+    const CUSTOM: &str = r#"xmlns:cs="http://example.invalid/ns/""#;
+    let complete = describing("http://example.invalid/ns/", "Machine");
+    let body = format!("<cs:Machine>M17</cs:Machine>{complete}");
+    assert_eq!(typed_findings("2", CUSTOM, &body), Vec::new());
+
+    let without = body.replace(
+        "<pdfaSchema:schema>An example schema</pdfaSchema:schema>",
+        "",
+    );
+    assert_ne!(without, body);
+    assert_eq!(
+        typed_findings("2", CUSTOM, &without),
+        vec![FindingKind::XmpExtensionEntryMissing {
+            entry: "pdfaSchema:schema".to_string()
+        }]
+    );
+
+    // The prefix the standard fixes, bound to the namespace the standard
+    // fixes — which is exactly how the eight corpus fixtures write it, and is
+    // why the check cannot be a namespace comparison.
+    let renamed = body
+        .replace("xmlns:pdfaProperty=", "xmlns:nonpdfaProperty=")
+        .replace("<pdfaProperty:", "<nonpdfaProperty:")
+        .replace("</pdfaProperty:", "</nonpdfaProperty:");
+    assert_ne!(renamed, body);
+    assert_eq!(
+        typed_findings("2", CUSTOM, &renamed),
+        vec![FindingKind::XmpExtensionPrefix {
+            expected: "pdfaProperty",
+            found: "nonpdfaProperty".to_string()
+        }]
+    );
+}
+
+/// The clause an extension-schema finding names follows the part, and the two
+/// numbers differ.
+///
+/// Part 1 gives the description a clause of its own, 6.7.8. Parts 2 and 3
+/// number it 6.6.2.3.3, which is a *different* number from the rule it is the
+/// exception to — so a build that reused one `ClauseTable` for both would
+/// number half of these wrong.
+#[test]
+fn the_clause_an_extension_schema_finding_names_follows_the_part() {
+    const CUSTOM: &str = r#"xmlns:cs="http://example.invalid/ns/""#;
+    let body = format!(
+        "<cs:Machine>M17</cs:Machine>{}",
+        describing("http://example.invalid/ns/", "Machine")
+    )
+    .replace("<pdfaSchema:prefix>cs</pdfaSchema:prefix>", "");
+    for (part, clause) in [("1", "6.7.8"), ("2", "6.6.2.3.3"), ("3", "6.6.2.3.3")] {
+        let verdict = Document::open(document(&typed(part, CUSTOM, &body), None))
+            .expect("the fixture opens")
+            .validate_pdfa_with(PdfACoverage::METADATA);
+        let clauses: Vec<String> = verdict
+            .findings
+            .iter()
+            .map(|finding| finding.clause.to_string())
+            .collect();
+        assert_eq!(clauses, vec![clause.to_string()], "part {part}");
+    }
+}
+
+/// Parts 2 and 3 let the **catalog's** packet describe a property a **page's**
+/// packet uses. Part 1 does not.
+///
+/// veraPDF's profiles say so structurally: part 1 asks
+/// `isPredefinedInXMP2004 || isDefinedInCurrentPackage` and part 2 asks
+/// `isPredefinedInXMP2005 || isDefinedInMainPackage || isDefinedInCurrentPackage`.
+/// `6-6-2-3-2-t01-pass-b` is the fixture, and its own outline states the case
+/// in words: *"The Catalog metadata defines custom property, which is used in
+/// the page metadata"*, annotated conforming under part 2.
+///
+/// The same file under part 1 is a finding, which is what makes the extra term
+/// a term rather than a spelling.
+#[test]
+fn only_parts_two_and_three_read_the_main_packages_descriptions() {
+    const CUSTOM: &str = r#"xmlns:cs="http://example.invalid/ns/""#;
+    let catalog = |part: &str| {
+        typed(
+            part,
+            CUSTOM,
+            &describing("http://example.invalid/ns/", "Machine"),
+        )
+    };
+    let page = typed("2", CUSTOM, "<cs:Machine>M17</cs:Machine>");
+
+    for part in ["2", "3"] {
+        assert_eq!(
+            findings(document_with_page_metadata(&catalog(part), &page)),
+            Vec::new(),
+            "part {part}"
+        );
+    }
+    assert_eq!(
+        findings(document_with_page_metadata(&catalog("1"), &page)),
+        vec![FindingKind::XmpPropertyUndescribed {
+            property: "{http://example.invalid/ns/}Machine".to_string()
+        }],
+        "part 1 has no main-package term"
+    );
+
+    // And the twin that keeps the extra term from meaning "anything goes": a
+    // catalog that describes nothing leaves the page's property a finding
+    // under every part, including the two that read the main package.
+    for part in ["1", "2", "3"] {
+        assert_eq!(
+            findings(document_with_page_metadata(&typed(part, CUSTOM, ""), &page)),
+            vec![FindingKind::XmpPropertyUndescribed {
+                property: "{http://example.invalid/ns/}Machine".to_string()
+            }],
+            "part {part}"
+        );
+    }
+
+    // A page packet with no property of its own is silent under every part,
+    // so the findings above are the page's property and not the page packet
+    // existing.
+    let empty = typed("2", CUSTOM, "");
+    for part in ["1", "2", "3"] {
+        assert_eq!(
+            findings(document_with_page_metadata(&catalog(part), &empty)),
+            Vec::new(),
+            "part {part}"
+        );
+    }
+}
+
 /// The table a property is judged against is **the one its part cites**, and a
-/// name only the later revision carries is judged only under the later parts.
+/// name only the later revision carries reaches a different rule under each.
 ///
 /// `xmp:Rating` is in the September 2005 XMP Basic schema (p41) and not in the
-/// January 2004 one (p38-39), so an array written where it declares a closed
-/// choice of Integer is a finding under parts 2 and 3 and silence under part 1
-/// — not because part 1 permits it, but because part 1's revision has no such
-/// property and only the staged membership half could say so. The Camera Raw,
+/// January 2004 one (p38-39). Written as an array where September 2005
+/// declares a closed choice of Integer, it is a **value-type** finding under
+/// parts 2 and 3 and a **membership** finding under part 1 — two different
+/// kinds from one packet, which is the routing showing itself. The Camera Raw,
 /// Dynamic Media and additional-Exif namespaces are the same case at schema
 /// scope: all three arrive in September 2005.
 #[test]
 fn a_property_only_the_later_revision_carries_is_judged_only_under_the_later_parts() {
     const XMP_NS: &str = r#"xmlns:xmp="http://ns.adobe.com/xap/1.0/""#;
     let rating = "<xmp:Rating><rdf:Bag><rdf:li>3</rdf:li></rdf:Bag></xmp:Rating>";
-    assert_eq!(typed_findings("1", XMP_NS, rating), Vec::new());
+    assert_eq!(
+        typed_findings("1", XMP_NS, rating),
+        vec![FindingKind::XmpPropertyUndescribed {
+            property: "xmp:Rating".to_string()
+        }]
+    );
     for part in ["2", "3"] {
         assert_eq!(
             typed_findings(part, XMP_NS, rating),
@@ -875,8 +1212,8 @@ fn a_property_only_the_later_revision_carries_is_judged_only_under_the_later_par
     }
 
     // Three whole schemas, at schema scope. Each is written in a form the
-    // September 2005 table contradicts, so part 1's silence is the routing
-    // rather than a packet nobody could object to.
+    // September 2005 table contradicts, so part 1 reporting membership rather
+    // than nothing is the routing rather than a packet nobody could object to.
     for (bindings, properties, property, expected, found) in [
         (
             r#"xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/""#,
@@ -900,9 +1237,16 @@ fn a_property_only_the_later_revision_carries_is_judged_only_under_the_later_par
             "a simple value",
         ),
     ] {
+        // Under part 1 the whole schema is unknown, so the property is a
+        // membership finding. It is still named with the preferred prefix:
+        // `prefix_of` is deliberately not routed by part, because a prefix is
+        // a spelling rather than a judgement and September 2005 is where the
+        // reader will look this schema up.
         assert_eq!(
             typed_findings("1", bindings, properties),
-            Vec::new(),
+            vec![FindingKind::XmpPropertyUndescribed {
+                property: property.to_string()
+            }],
             "{property} under part 1"
         );
         assert_eq!(
@@ -912,8 +1256,7 @@ fn a_property_only_the_later_revision_carries_is_judged_only_under_the_later_par
         );
     }
 }
-
-/// Part 4 does not carry the requirement, and the silence is a decision.
+// Part 4 does not carry the requirement, and the silence is a decision.
 ///
 /// ISO 19005-4 dropped it rather than renumbering it — the conformance suite
 /// has directories for it under `PDF_A-1b` and `PDF_A-2b` and nothing anywhere
