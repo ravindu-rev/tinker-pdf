@@ -1090,6 +1090,27 @@ pub enum FindingKind {
     /// A push-button widget whose `/N` is a stream rather than the
     /// sub-dictionary of states `/AS` selects from (ISO 19005-2 6.3.3).
     AnnotationAppearanceNotStates,
+    /// A page that blends states no blending colour space, in a file that
+    /// also names no destination (ISO 19005-2 6.2.10, ISO 19005-4 6.2.9).
+    ///
+    /// Both halves, because either alone is ordinary: a real file carries an
+    /// output intent, and most transparent pages carry no `/Group`. Together
+    /// they are a page whose composited colours nobody can reproduce.
+    BlendingSpaceMissing,
+    /// A page whose blending colour space is a device one, in a file that
+    /// names no destination.
+    BlendingSpaceWithoutOutputIntent {
+        /// The space the page's transparency group declared.
+        space: String,
+    },
+    /// A page whose blending colour space is a device one the output intent's
+    /// profile cannot reproduce.
+    BlendingSpaceNotInOutputIntent {
+        /// The space the page's transparency group declared.
+        space: String,
+        /// The destination profile's own colour space.
+        profile: String,
+    },
     /// The document is encrypted. Every part of ISO 19005 forbids it: a file
     /// nobody can open without a key is not archival.
     Encrypted,

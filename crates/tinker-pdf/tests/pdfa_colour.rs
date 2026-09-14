@@ -465,6 +465,111 @@ fn a_transparency_groups_blending_space_stands_in_for_a_device_space() {
     );
 }
 
+/// **A device blending space is judged against the destination, in parts 2 to
+/// 4.**
+///
+/// `6-2-10-t03` states it in its own titles: "DeviceRGB is used as blending
+/// color space of the transparency group; the document has a CMYK-based output
+/// ICC profile". Blending happens *in* a space, so compositing in `DeviceRGB`
+/// under a CMYK destination is the same defect as painting in it there — and
+/// it is reported with the same finding, because a reader learning two names
+/// for one defect has learned nothing.
+#[test]
+fn a_device_blending_space_is_judged_against_the_destination() {
+    // The page paints in grey, which every destination reproduces, so the only
+    // device colour in question is the group's.
+    let mut rgb_under_cmyk = Fixture::new("2", Some("B"));
+    rgb_under_cmyk.content = "0.5 g 10 10 50 50 re f".to_string();
+    rgb_under_cmyk.page_extra = "/Group << /S /Transparency /CS /DeviceRGB >>".to_string();
+    rgb_under_cmyk.profile = Some(cmyk_like());
+    assert_eq!(
+        rgb_under_cmyk.one_finding(),
+        FindingKind::DeviceColourNotInOutputIntent {
+            space: "DeviceRGB".to_string(),
+            profile: "CMYK".to_string()
+        }
+    );
+
+    // The twin: the same group under a destination that can reproduce it.
+    let mut rgb_under_rgb = rgb_under_cmyk.clone();
+    rgb_under_rgb.profile = Some(srgb_like());
+    assert_eq!(rgb_under_rgb.findings(), Vec::<FindingKind>::new());
+
+    // And the other direction, which the suite also states.
+    let mut cmyk_under_rgb = rgb_under_cmyk.clone();
+    cmyk_under_rgb.page_extra = "/Group << /S /Transparency /CS /DeviceCMYK >>".to_string();
+    cmyk_under_rgb.profile = Some(srgb_like());
+    assert_eq!(
+        cmyk_under_rgb.one_finding(),
+        FindingKind::DeviceColourNotInOutputIntent {
+            space: "DeviceCMYK".to_string(),
+            profile: "RGB".to_string()
+        }
+    );
+}
+
+/// **Part 1 is untouched: it forbids transparency rather than conditioning
+/// it.**
+///
+/// The same file under part 1 and part 2 gets two different findings, which is
+/// what says the two readings are separate rather than one rule with a
+/// tolerance. Part 1 reports the group itself; part 2 reports the space it
+/// composites in.
+#[test]
+fn part_one_forbids_the_group_and_part_two_judges_its_space() {
+    let group = "/Group << /S /Transparency /CS /DeviceRGB >>".to_string();
+
+    let mut one = Fixture::new("1", Some("B"));
+    one.content = "0.5 g 10 10 50 50 re f".to_string();
+    one.page_extra = group.clone();
+    one.profile = Some(cmyk_like());
+    // The whole list, not a `contains`: part 1 reports the group and says
+    // **nothing** about the space it composites in, because the group is
+    // already forbidden. A build that ran the parts 2-to-4 gatherer here too
+    // would add a second finding, and a `contains` would not have noticed —
+    // a counted injection put that at zero failures until this was an
+    // equality.
+    assert_eq!(
+        one.findings(),
+        vec![FindingKind::TransparencyForbidden {
+            feature: "Group".to_string()
+        }]
+    );
+
+    let mut two = one.clone();
+    two.part = "2".to_string();
+    two.level = Some("B".to_string());
+    assert_eq!(
+        two.one_finding(),
+        FindingKind::DeviceColourNotInOutputIntent {
+            space: "DeviceRGB".to_string(),
+            profile: "CMYK".to_string()
+        }
+    );
+}
+
+/// **One defect, reported once.**
+///
+/// A page that both paints in `DeviceRGB` and composites in it says so a
+/// single time. A first draft of this rule reported the blending space
+/// separately and produced two findings for one defect on exactly this file,
+/// which is the shape `docs/features/pdfa.md` already names as worse than
+/// reporting it once.
+#[test]
+fn a_page_that_paints_and_blends_in_one_device_space_says_so_once() {
+    let mut fixture = Fixture::new("2", Some("B"));
+    fixture.content = "1 0 0 rg 10 10 50 50 re f".to_string();
+    fixture.page_extra = "/Group << /S /Transparency /CS /DeviceRGB >>".to_string();
+    fixture.profile = Some(cmyk_like());
+    assert_eq!(
+        fixture.findings(),
+        vec![FindingKind::DeviceColourNotInOutputIntent {
+            space: "DeviceRGB".to_string(),
+            profile: "CMYK".to_string()
+        }]
+    );
+}
+
 /// ISO 19005-4 6.2.3 admits an output intent on a **page**, and parts 1 to 3
 /// do not.
 ///

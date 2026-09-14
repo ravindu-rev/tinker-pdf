@@ -108,6 +108,9 @@ pub(super) fn rules(
     scan(doc, &mut used);
     gather_state_intents(doc, &mut used);
     gather_group_spaces(doc, &mut used);
+    if part.is_some() && part != Some(Part::One) {
+        gather_blending_spaces(doc, &mut used);
+    }
     device_spaces(&destination, &used, out);
     if part == Some(Part::One) {
         annotation_colours(doc, &destination, out);
@@ -984,6 +987,97 @@ fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
                 }
             }
         }
+    }
+}
+
+// ---- 6.2.10 / 6.2.9: transparency needs a blending space ------------------
+
+/// ISO 19005-2 6.2.10 and ISO 19005-4 6.2.9: a device blending space is a
+/// device colour like any other.
+///
+/// **Part 1 forbids transparency; parts 2 to 4 admit it and condition it.**
+/// What they condition is what 6.2.3.3 conditions every device colour on:
+/// blending happens *in* a colour space, so a page that blends in `DeviceRGB`
+/// under a CMYK destination has composited numbers nobody can reproduce —
+/// the same defect, on the same clause's terms, as painting in `DeviceRGB`
+/// there.
+///
+/// So this records the blending space as a **use** rather than reporting it,
+/// and [`device_spaces`] judges it with everything else. Two things follow
+/// that a rule of its own would have got wrong: the finding is one a reader
+/// already knows, and a page that both blends and paints in `DeviceRGB` says
+/// so **once** — one defect reported twice under one clause is worse than
+/// once, and a first draft of this did exactly that.
+///
+/// The inverse is already here and stays: an *independent* blending space
+/// excuses a device colour ([`gather_group_spaces`]), because a group that
+/// says what its own values mean can reproduce them.
+///
+/// # Why the reading comes from fixtures rather than from the clause
+///
+/// ISO 19005-2 and -4 are sold and this repository has no copy. What it has is
+/// 118 annotated fixtures across the two parts — a published statement by the
+/// people who wrote the conformance suite, admissible under ruling 13, and the
+/// same evidence the annotation group was built from. The check on the reading
+/// is the census: the `pass` side must not move.
+///
+/// **There is no "is anything transparent" guard, and a counted injection is
+/// why.** A first draft opened with one, over a helper that answered whether
+/// any graphics state or group in the document was transparent. It could not
+/// change an answer: this walk reads only a `/Group` whose `/S` is
+/// `/Transparency`, and a document carrying one of those is transparent by
+/// that helper's own definition — so removing the guard failed nothing,
+/// because nothing it guarded against could happen. Both are gone. A line
+/// that looks load-bearing and is not is worse than no line.
+fn gather_blending_spaces(doc: &CosDocument, used: &mut Used) {
+    let mut dicts: Vec<(Dict, Option<ObjRef>)> = Vec::new();
+    for page in pages::collect_upto(doc, MAX_PAGES) {
+        if let Some(dict) = doc
+            .get(page.reference)
+            .ok()
+            .and_then(|o| o.as_dict().cloned())
+        {
+            dicts.push((dict, Some(page.reference)));
+        }
+    }
+    // An appearance stream's own group counts too: the suite states it as its
+    // own fixture, "DeviceRGB is used as blending color space of the
+    // transparency group in the annotation's appearance stream".
+    for reference in &used.forms {
+        if let Some(stream) = doc
+            .get(*reference)
+            .ok()
+            .and_then(|o| o.as_stream().cloned())
+        {
+            dicts.push((stream.dict, Some(*reference)));
+        }
+    }
+    for (dict, at) in &dicts {
+        let group = doc.resolve_key(dict, doc.intern(b"Group"));
+        let Some(group) = group.as_dict() else {
+            continue;
+        };
+        if name_of(doc, group, b"S").as_deref() != Some(b"Transparency") {
+            continue;
+        }
+        // 11.6.6 lets `/CS` be a name or an array. The array forms are
+        // device-independent and `gather_group_spaces` has taken them already;
+        // what is left is one of the three device names.
+        let space = doc.resolve_key(group, doc.intern(b"CS"));
+        let Some(family) = space
+            .as_name()
+            .and_then(|name| doc.name_bytes(name))
+            .map(|name| name.to_vec())
+        else {
+            continue;
+        };
+        let named = match family.as_slice() {
+            b"DeviceGray" => DEVICE_GRAY,
+            b"DeviceRGB" => DEVICE_RGB,
+            b"DeviceCMYK" => DEVICE_CMYK,
+            _ => continue,
+        };
+        used.devices.entry(named).or_insert(*at);
     }
 }
 
