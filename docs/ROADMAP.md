@@ -32,7 +32,7 @@ its two font-bearing siblings:
 | `crop` held of asked | 4 929 of 5 075 |
 | `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 4 630 passed, 0 failed, 56 ignored as
+The suite stands at 4 640 passed, 0 failed, 56 ignored as
 [verification.md](verification.md) records it, measured 14 September 2026 with
 `TINKER_PNGSUITE` set, so the ten PngSuite tests ran rather than skipped.
 

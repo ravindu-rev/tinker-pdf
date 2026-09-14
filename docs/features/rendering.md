@@ -279,5 +279,5 @@ helpers `Page::render` composes.
   stable.
 - Corpus, as of September 2026: 5 525 files, 5 516 rendered every page, zero
   crashes.
-- The workspace stands at 4 613 passed / 0 failed / 56 ignored
+- The workspace stands at 4 640 passed / 0 failed / 56 ignored
   (Windows x86_64, 14 September 2026). See [verification](../verification.md).
