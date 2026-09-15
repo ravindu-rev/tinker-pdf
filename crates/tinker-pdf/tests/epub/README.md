@@ -563,24 +563,36 @@ last is not a finding about the format at all.
 
 ### And one that is not about the format
 
-11. **A fixed-layout comic reaches this build as six correctly-sized,
-    correctly-clipped, entirely blank pages.** The book paginates at the right
-    count, at the six right sizes, with §8.1.2's clip on each — and **draws none
-    of the six pictures**, because nothing in `src/epub/` turns an `<img>` into
-    a box. No committed book draws an image on any page; the other eight are
-    text, and text arrives, so the gap was invisible until a book arrived whose
-    entire content is pictures. This is the corpus doing the job it exists for,
-    and it is exactly gap 29's closing sentence coming true a format later: *"the
-    first real archive this meets may find something, and nothing here would
-    have."*
+11. **A fixed-layout comic reached this build as six correctly-sized,
+    correctly-clipped, entirely blank pages — and that is what this book was
+    bought to find.** The book paginated at the right count, at the six right
+    sizes, with §8.1.2's clip on each, and **drew none of the six pictures**,
+    because nothing in `src/epub/` turned an `<img>` into a box. No other
+    committed book draws an image on any page; the other eight are text, and
+    text arrives, so the gap was invisible until a book arrived whose entire
+    content is pictures. This is the corpus doing the job it exists for, and it
+    is exactly gap 29's closing sentence coming true a format later: *"the first
+    real archive this meets may find something, and nothing here would have."*
 
-    It is recorded as an assertion rather than a note.
-    `today_every_page_of_the_real_book_is_empty_inside_its_clip` pins every
+    It was recorded as an assertion rather than a note.
+    `today_every_page_of_the_real_book_is_empty_inside_its_clip` pinned every
     page's content stream to `q 0 0 W H re W n Q` and nothing between, and also
-    checks the JPEGs really are in the container — so the emptiness is the
+    checked the JPEGs really are in the container — so the emptiness was the
     painter's and not the archive's. **The milestone that paints a replaced
-    element has to come here and delete that test**, which is the only kind of
+    element had to come here and delete that test**, which is the only kind of
     caveat that cannot rot.
+
+    **It came, and it deleted it.** The pin's replacement,
+    `every_page_of_the_real_book_is_its_picture_in_more_than_one_colour`, holds
+    the same clip, requires one `/XObject` placement per page at the viewport's
+    own size, and then *renders* each page and counts its distinct colours —
+    because a content stream naming a resource proves nothing about whether a
+    reader can resolve the name, and only pixels tell a drawn page from a blank
+    one. Measured 15 September 2026: **1, 1, 1, 1, 1, 1** before, **44, 45, 42,
+    51, 50, 63** after. The sixth page's black `<body>` background is asserted
+    by name, because a black rectangle under a picture is exactly what a page
+    would look like if the picture were missing and the background were the
+    second colour.
 
 ## Regenerating
 

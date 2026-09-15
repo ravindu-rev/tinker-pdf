@@ -537,6 +537,42 @@ pub enum ImageFormat {
     Jpeg2000,
 }
 
+/// Why an XHTML `<img>` did not become a replaced box on the page.
+///
+/// **Four arms and not a string**, because each of them is a different party's
+/// fault and a host acts on them differently: the book is wrong in the first,
+/// the book is beyond this build in the second and third, and this build is
+/// wrong -- or the bytes are -- in the fourth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ImageDefect {
+    /// `src` is absent or empty, or it resolves to a path the container holds
+    /// no entry for, or the entry would not inflate.
+    Unresolved,
+    /// A format recognised by its magic bytes and not placed here, named rather
+    /// than collapsed.
+    ///
+    /// An EPUB `<img>` reaches the page through **JPEG and PNG**, which are the
+    /// two of EPUB 3.3 §3.2's core image media types this build has a
+    /// container-to-page route for. GIF and WebP are core media types with no
+    /// decoder here; the rest are foreign resources a §3.2-conforming book may
+    /// only use behind a manifest fallback this build does not follow.
+    UnsupportedFormat(ImageFormat),
+    /// Bytes whose leading magic matches no format [`image_format`] knows.
+    ///
+    /// **This is where an SVG lands**, and it is where it belongs: an SVG is
+    /// XML and has no magic number, so the classifier that refuses to read an
+    /// extension as a fact cannot recognise one. `<img src="cover.svg">` is a
+    /// core media type this build places only as a **spine item** -- see
+    /// [`ArchiveWarning::Svg`] -- and never as a replaced box.
+    Unknown,
+    /// A JPEG or a PNG whose bytes would not make an image: an unreadable
+    /// header, a colour type outside Table 11.1, a zero dimension, a raster
+    /// past the ceiling. [`PageDefect::Undecodable`]'s sentence, one container
+    /// along.
+    Undecodable,
+}
+
 /// Why a page is a placeholder rather than the picture the archive holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -787,6 +823,31 @@ pub enum ArchiveWarning {
         /// The container path of the SVG content document.
         item: String,
         /// How many references on that page did not resolve.
+        images: usize,
+    },
+    /// An `<img>` in an XHTML content document that **did not become a box on
+    /// the page**, with the number of them in that document that failed the
+    /// same way.
+    ///
+    /// The ruling 10 companion to [`ArchiveWarning::SvgImageUnresolved`], which
+    /// is an SVG `<image>` and only that. The two are separate variants because
+    /// the two elements are read by different halves of this reader — one is a
+    /// display list drawn onto a page and the other is a replaced box in a flow
+    /// — and a host told only that *"an image did not resolve"* could not say
+    /// which of the two to look at.
+    ///
+    /// **A refusal here is a page with nothing where a picture was**, and the
+    /// hole is invisible: HTML §4.8.4.4 makes an `<img>` a replaced element
+    /// *"only when the image is available"*, so an unavailable one generates no
+    /// box at all and the text around it closes over the gap. Nothing about the
+    /// page says a picture was meant to be there, which is precisely why this
+    /// says it.
+    ImageNotDrawn {
+        /// The container path of the content document the `<img>` is in.
+        item: String,
+        /// Why it did not reach the page.
+        defect: ImageDefect,
+        /// How many `<img>` elements in that document failed that way.
         images: usize,
     },
     /// A CSS property this build does not implement, and **how many elements

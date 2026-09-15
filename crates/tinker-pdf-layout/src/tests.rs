@@ -23,7 +23,8 @@ use crate::flow::marker_text;
 use crate::metrics::FixedPitch;
 use crate::table;
 use crate::{
-    layout, layout_with, BoxNode, Budget, Content, Layout, Limits, Options, Refusal, Warning,
+    layout, layout_with, BoxNode, Budget, Content, Intrinsic, Layout, Limits, Options, Refusal,
+    Warning,
 };
 
 /// One point of advance per point of font size.
@@ -2301,7 +2302,7 @@ fn a_stray_cell_outside_a_table_gets_an_anonymous_table() {
     let tree = BoxNode::element(block(), vec![cell_of("a"), cell_of("b"), para("after")]);
     let children = match &tree.content {
         Content::Children(children) => children,
-        Content::Text(_) => unreachable!(),
+        Content::Text(_) | Content::Replaced(_) => unreachable!(),
     };
     assert_eq!(table::misparented_run(children, 0), 2);
     let laid = run(&tree, 300.0, 400.0);
@@ -4337,6 +4338,458 @@ fn a_percentage_min_height_against_an_auto_height_is_auto() {
         "an `auto` minimum is not a maximum that did nothing: {:?}",
         laid.warnings
     );
+}
+
+// ---- CSS 2.2 §10.3.2, §10.6.2 and §10.4's table, the replaced box ----------
+//
+// A replaced element is the one box whose size comes from outside CSS, so
+// every number below starts from an intrinsic pair the fixture states and
+// nothing here is a measurement of this engine's own output.
+//
+// # Counted injection, over `cargo test --no-fail-fast -p tinker-pdf-layout`
+//
+// | Defect injected | Tests that failed |
+// | --- | ---: |
+// | the replaced box is laid out and never emitted as a fragment | 18 |
+// | §10.4's constraint table replaced by the ordinary clamp | 1 |
+// | `width` stated and `height` auto handled as though both were stated | 1 |
+// | the picture drawn at the border box's corner, not the content box's | 1 |
+// | the picture emitted once per page fragment rather than once per box | 1 |
+// | `Intrinsic::raster`'s degenerate-side guard removed | 1 |
+// | a floating replaced box sent through shrink-to-fit | 1 |
+// | `css-display-3` §2.2 ignored: the inner display type dispatched | 1 |
+//
+// **Two of those caught nothing the first time and both were real.** Breaking
+// the `(width stated, height auto)` case changed no answer, because the clamp
+// below it recomputed the height unconditionally and every value that arm
+// produced was discarded — the clamp now re-derives only a width it actually
+// moved, which is also §10.6.2 case 1's own precedence. And emitting a picture
+// once per *fragment* changed no answer, because every fixture here was a box
+// of one flow item and one item is on one page;
+// `a_picture_whose_box_is_cut_above_it_is_still_drawn_once` is the padded box
+// that is three.
+//
+// §10.4's row is 1 rather than 3 and that is a measurement, not a weakness in
+// the fixtures: for a width constraint the table and the ordinary clamp agree
+// exactly — clamp the width, re-derive the height through the ratio — and they
+// part only where the *height* is the constrained axis. Which is the row
+// `a_max_height_shorter_than_the_picture_scales_the_width_with_it` is.
+
+/// A picture, as a block-level replaced box.
+fn picture(intrinsic: Intrinsic) -> BoxNode {
+    let mut style = block();
+    style.background_color = Color {
+        r: 1,
+        g: 2,
+        b: 3,
+        a: 255,
+    };
+    BoxNode::replaced(style, intrinsic)
+}
+
+/// The one replaced fragment on a page.
+fn only_replaced(laid: &Layout, page: usize) -> &crate::ReplacedFragment {
+    let replaced = &laid.pages[page].replaced;
+    assert_eq!(replaced.len(), 1, "{replaced:?}");
+    &replaced[0]
+}
+
+/// A 4:1 source, so a stretched box and a scaled one can never agree by
+/// accident: at this ratio a wrong axis is out by a factor of four.
+const WIDE: Intrinsic = Intrinsic {
+    width: Some(400.0),
+    height: Some(100.0),
+    ratio: Some(4.0),
+};
+
+/// §10.3.2's first case and §10.6.2's first: neither `width` nor `height` is
+/// stated, so the used size **is** the intrinsic size.
+///
+/// The claim is against the source's own numbers rather than against a literal,
+/// which is what makes this a test of the rule and not of the fixture.
+#[test]
+fn a_replaced_box_with_neither_dimension_stated_is_its_intrinsic_size() {
+    let tree = BoxNode::element(block(), vec![picture(WIDE)]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!(fragment.width, WIDE.width.expect("an intrinsic width"));
+    assert_eq!(fragment.height, WIDE.height.expect("an intrinsic height"));
+    // And the flow is as tall as the picture, which is the half of this that
+    // `Page::replaced` alone cannot say: a fragment at the right size inside a
+    // box of the wrong height overlaps whatever follows it.
+    assert_eq!(laid.pages[0].boxes[0].height, 100.0);
+}
+
+/// §10.6.2's second case: `width` stated, `height` `auto`, so the height is
+/// *(used width) ÷ (intrinsic ratio)* — **not** the intrinsic height.
+///
+/// A quarter of the source's width, so the height must be a quarter of the
+/// source's height. A build that read a stated `width` as though both were
+/// stated leaves the height at 100 and draws the picture four times too tall.
+#[test]
+fn a_stated_width_scales_the_height_by_the_intrinsic_ratio() {
+    let mut node = picture(WIDE);
+    node.style.width = Size::Length(LengthPercentage::Px(100.0));
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!(fragment.width, 100.0);
+    assert_eq!(fragment.height, 100.0 / WIDE.ratio.expect("a ratio"));
+}
+
+/// §10.3.2's second case, the other way round: `height` stated, `width` `auto`,
+/// so the width is *(used height) × (intrinsic ratio)*.
+///
+/// Both directions and not one, because a build that scaled only from the width
+/// passes the fixture above and draws every `height`-constrained picture at its
+/// full intrinsic width.
+#[test]
+fn a_stated_height_scales_the_width_by_the_intrinsic_ratio() {
+    let mut node = picture(WIDE);
+    node.style.height = Size::Length(LengthPercentage::Px(25.0));
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!(fragment.height, 25.0);
+    assert_eq!(fragment.width, 25.0 * WIDE.ratio.expect("a ratio"));
+}
+
+/// Both stated: both used, and the ratio is **ignored**.
+///
+/// CSS has no `object-fit` here and neither does this build, so a declaration
+/// that disagrees with the source's proportions stretches the picture. Asserted
+/// rather than assumed, because "preserve the ratio" is the plausible wrong
+/// answer and it would silently letterbox every author who meant what they
+/// wrote.
+#[test]
+fn both_dimensions_stated_are_both_used_and_the_ratio_is_ignored() {
+    let mut node = picture(WIDE);
+    node.style.width = Size::Length(LengthPercentage::Px(50.0));
+    node.style.height = Size::Length(LengthPercentage::Px(50.0));
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (50.0, 50.0));
+}
+
+/// §10.3.2's and §10.6.2's last cases: a source that states nothing about its
+/// own size is 300 by 150.
+#[test]
+fn a_replaced_box_with_no_intrinsic_size_at_all_is_three_hundred_by_a_hundred_and_fifty() {
+    let tree = BoxNode::element(block(), vec![picture(Intrinsic::NONE)]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (300.0, 150.0));
+}
+
+/// A ratio and no dimensions: `css-images-3` §5.3.2's default sizing algorithm,
+/// which is the largest rectangle of that ratio inside §5.3.1's 300 by 150.
+///
+/// At 4:1 the width binds at 300 and the height falls to 75; at 1:4 the height
+/// binds at 150 and the width falls to 37.5. Both, because a build that only
+/// ever capped the width is right about the first and draws the second 600
+/// points tall.
+#[test]
+fn a_ratio_with_no_dimensions_fits_the_default_object_size() {
+    let of = |ratio: f64| {
+        let intrinsic = Intrinsic {
+            width: None,
+            height: None,
+            ratio: Some(ratio),
+        };
+        let tree = BoxNode::element(block(), vec![picture(intrinsic)]);
+        let laid = run(&tree, 1000.0, 1000.0);
+        let fragment = only_replaced(&laid, 0);
+        (fragment.width, fragment.height)
+    };
+    assert_eq!(of(4.0), (300.0, 75.0));
+    assert_eq!(of(0.25), (37.5, 150.0));
+}
+
+/// **§10.4's constraint table, and the clause that makes it a table.**
+///
+/// `img { max-width: 100% }` is on almost every reflowable book's stylesheet,
+/// and it is the case §10.4 stops using its ordinary *"apply the rules again"*
+/// instruction for: a picture wider than its measure, with `width` and `height`
+/// both `auto` and an intrinsic ratio, takes row *w > max-width* of the table,
+/// whose used height is `max(max-width × h ÷ w, min-height)`.
+///
+/// So a 400 × 100 source in a 200-point measure is 200 × 50 and **not** 200 ×
+/// 100. The second is exactly what clamping the width alone produces, which is
+/// a picture squashed to half its proportions on every page of every book that
+/// declares the rule — and every other fixture in this file passes with it.
+#[test]
+fn a_max_width_narrower_than_the_picture_scales_the_height_with_it() {
+    let mut node = picture(WIDE);
+    node.style.max_width = MaxSize::Length(LengthPercentage::Percent(100.0));
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 200.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (200.0, 50.0));
+}
+
+/// The same table's *h > max-height* row, which scales the **width** down.
+#[test]
+fn a_max_height_shorter_than_the_picture_scales_the_width_with_it() {
+    let mut node = picture(WIDE);
+    node.style.max_height = max_px(50.0);
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (200.0, 50.0));
+}
+
+/// A `min-width` wider than the picture takes the table's *w < min-width* row
+/// and scales the height **up** with it.
+#[test]
+fn a_min_width_wider_than_the_picture_scales_the_height_with_it() {
+    let mut node = picture(WIDE);
+    node.style.min_width = min_px(800.0);
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (800.0, 200.0));
+}
+
+/// The table is for `width: auto` **and** `height: auto` only. With a stated
+/// `width`, §10.4's ordinary instruction applies and the clamp is the ordinary
+/// one — the height follows the *clamped* width, because applying §10.3's rules
+/// again is what §10.4 says to do.
+#[test]
+fn a_stated_width_past_its_max_leaves_the_height_following_the_clamped_width() {
+    let mut node = picture(WIDE);
+    node.style.width = Size::Length(LengthPercentage::Px(800.0));
+    node.style.max_width = max_px(100.0);
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (100.0, 25.0));
+}
+
+/// The picture is drawn **inside** the box's border and padding, CSS 2.2 §8.1,
+/// and the border box is the content box plus both.
+///
+/// The one number this pins that nothing else does is the fragment's origin: a
+/// build that drew at the border box's corner puts every bordered figure up and
+/// to the left of where it belongs, by an amount no size assertion can see.
+#[test]
+fn a_replaced_box_draws_inside_its_border_and_padding() {
+    let mut node = picture(WIDE);
+    node.style.margin.left = px(7.0);
+    node.style.border_width = Sides::all(3.0);
+    node.style.border_style = Sides::all(BorderStyle::Solid);
+    node.style.padding = Sides::all(LengthPercentage::Px(5.0));
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!(fragment.x, 7.0 + 3.0 + 5.0);
+    assert_eq!(fragment.y, 3.0 + 5.0);
+    // And the border box around it is the content box plus both, on both axes.
+    let border_box = &laid.pages[0].boxes[0];
+    assert_eq!(border_box.x, 7.0);
+    assert_eq!(border_box.width, 400.0 + 16.0);
+    assert_eq!(border_box.height, 100.0 + 16.0);
+}
+
+/// §9.2.2: an inline replaced element is an **atomic inline-level box**, placed
+/// on a line beside the text rather than taking a line of its own.
+///
+/// The picture is 40 by 20 in a measure that holds far more, so the two words
+/// either side of it must be on one line with it — and the fragment's `x` must
+/// be past the first word's advance, which is what makes it *on* the line
+/// rather than at the margin.
+#[test]
+fn an_inline_replaced_box_sits_on_the_line_beside_its_text() {
+    let mut style = base();
+    style.display = Display::Inline;
+    let intrinsic = Intrinsic::raster(40.0, 20.0);
+    let tree = BoxNode::element(
+        block(),
+        vec![text("ab"), BoxNode::replaced(style, intrinsic), text("cd")],
+    );
+    let laid = run(&tree, 500.0, 500.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (40.0, 20.0));
+    // Two characters of a ten-point fixed-pitch face.
+    assert_eq!(fragment.x, 20.0);
+    // One line box, and the text on both sides of the picture is on it.
+    assert_eq!(page_text(&laid, 0), "abcd");
+    let tops: Vec<f64> = laid.pages[0].runs.iter().map(|run| run.y).collect();
+    assert_eq!(tops.len(), 2);
+    assert_eq!(tops[0], tops[1]);
+}
+
+/// `visibility: hidden` lays the box out and paints nothing, CSS 2.2 §11.2 —
+/// and a picture is ink like a background.
+///
+/// The flow is still as tall as the picture, which is the half that makes this
+/// `hidden` rather than `display: none`.
+#[test]
+fn a_hidden_replaced_box_is_laid_out_and_not_painted() {
+    let mut node = picture(WIDE);
+    node.style.visibility = Visibility::Hidden;
+    let tree = BoxNode::element(block(), vec![node, para("after")]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    assert!(laid.pages[0].replaced.is_empty(), "a hidden picture is ink");
+    assert_eq!(baselines(&laid, 0), vec![100.0 + 0.8 * 10.0 + 1.0]);
+}
+
+/// The anchor is carried from the node to the fragment unchanged, and it is the
+/// only thing that says **which** picture a box is.
+///
+/// Two pictures, so a build that carried one anchor to both fragments — or
+/// dropped them and left `None` — cannot pass.
+#[test]
+fn every_replaced_fragment_carries_its_nodes_anchor() {
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            picture(WIDE).with_anchor(11),
+            picture(Intrinsic::raster(10.0, 10.0)).with_anchor(22),
+        ],
+    );
+    let laid = run(&tree, 1000.0, 1000.0);
+    let anchors: Vec<Option<u32>> = laid.pages[0]
+        .replaced
+        .iter()
+        .map(|fragment| fragment.anchor)
+        .collect();
+    assert_eq!(anchors, vec![Some(11), Some(22)]);
+}
+
+/// A picture is drawn **once**, on the page its box begins on, however the
+/// pagination falls.
+///
+/// A 100-point picture in a 60-point page: §13.3.3 offers no break position
+/// inside a box with no line boxes in it, so the box is drawn where it starts
+/// and overflows. Two fragments would be the same photograph printed twice at
+/// two different heights, which is what a per-page emission produces.
+#[test]
+fn a_replaced_box_taller_than_its_page_is_drawn_once_where_it_starts() {
+    let tree = BoxNode::element(block(), vec![para("first"), picture(WIDE)]);
+    let laid = run(&tree, 1000.0, 60.0);
+    let drawn: Vec<(usize, f64)> = laid
+        .pages
+        .iter()
+        .enumerate()
+        .flat_map(|(at, page)| page.replaced.iter().map(move |f| (at, f.y)))
+        .collect();
+    assert_eq!(drawn.len(), 1, "{drawn:?}");
+    // The second page, because the first holds the paragraph and the picture
+    // did not fit under it; at that page's own top, because the box began
+    // there.
+    assert_eq!(drawn[0], (1, 0.0));
+}
+
+/// The same picture, once, when the page break falls **inside its own box but
+/// above the picture** — which is the case the once-per-box guard is for and
+/// the one a single-item fixture cannot reach.
+///
+/// A replaced box with padding is three flow items: the padding above, the
+/// picture, the padding below. Put the break between the first two and the box
+/// has a fragment on each page, so a build that emitted the picture once per
+/// *fragment* draws the same photograph twice at two different heights. The
+/// fixture above cannot see that: with no padding the box is one item, and one
+/// item is on one page.
+///
+/// **Found by a counted injection that caught nothing.** Removing the guard
+/// left every replaced fixture green, which is what a guard with no fixture
+/// looks like from the outside.
+#[test]
+fn a_picture_whose_box_is_cut_above_it_is_still_drawn_once() {
+    let mut node = picture(WIDE);
+    node.style.padding = Sides::all(LengthPercentage::Px(40.0));
+    let tree = BoxNode::element(block(), vec![para("first"), node]);
+    let laid = run(&tree, 1000.0, 60.0);
+    let drawn: Vec<(usize, f64)> = laid
+        .pages
+        .iter()
+        .enumerate()
+        .flat_map(|(at, page)| page.replaced.iter().map(move |f| (at, f.y)))
+        .collect();
+    // The box really is cut, and into three: the padding above, the picture,
+    // the padding below, one to a page. A fixture whose break fell elsewhere
+    // would be asserting the guard against a case that never happens, so this
+    // is checked rather than assumed.
+    let fragments = laid
+        .pages
+        .iter()
+        .flat_map(|page| page.boxes.iter())
+        .filter(|b| b.width == 400.0 + 80.0)
+        .count();
+    assert_eq!(fragments, 3, "the padded box is not cut across pages");
+    // And the picture is drawn once, on the page the box **begins** on, below
+    // its own padding — overflowing that page's bottom edge the way an atomic
+    // box does everywhere else in this crate.
+    assert_eq!(drawn, [(1, 40.0)]);
+}
+
+/// A `float: left` picture is shrunk to its own width and not to the measure.
+///
+/// §10.3.6 sends a floating replaced box through §10.3.2 rather than through
+/// shrink-to-fit, and shrink-to-fit measures how far right the *text* reached —
+/// which for a picture is nowhere. A build that skipped the sentence gives
+/// every floated figure a width of zero and lets the text run straight over it.
+#[test]
+fn a_floated_picture_is_its_own_width_and_not_a_shrink_to_fit_of_nothing() {
+    let mut node = picture(WIDE);
+    node.style.float = Float::Left;
+    let tree = BoxNode::element(block(), vec![node, para("abcdefghij")]);
+    let laid = run(&tree, 500.0, 500.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (400.0, 100.0));
+    // And the line beside it starts past it, which is what a float of a real
+    // width does to the text it is beside.
+    assert_eq!(laid.pages[0].runs[0].x, 400.0);
+}
+
+/// `css-display-3` §2.2: *"replaced elements ... ignore the inner display
+/// type"*. `img { display: flex }` is a block-level picture, not an empty flex
+/// container.
+#[test]
+fn a_replaced_box_ignores_its_inner_display_type() {
+    let mut node = picture(WIDE);
+    node.style.display = Display::Flex;
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (400.0, 100.0));
+}
+
+/// A degenerate source — a zero dimension — yields no ratio rather than one of
+/// zero or of infinity, so the box falls to §10.3.2's last case instead of
+/// multiplying by it.
+///
+/// Every ratio row of §10.3.2 and §10.6.2 multiplies or divides by the ratio,
+/// and a zero or an infinity there is a size that is `NaN` or unbounded on a
+/// page. `Intrinsic::raster` is where that is refused, and this is the fixture
+/// that says the refusal reaches the page.
+#[test]
+fn a_zero_sided_source_has_no_ratio_and_takes_the_default_size() {
+    assert_eq!(Intrinsic::raster(0.0, 100.0), Intrinsic::NONE);
+    assert_eq!(Intrinsic::raster(100.0, f64::NAN), Intrinsic::NONE);
+    let tree = BoxNode::element(block(), vec![picture(Intrinsic::raster(400.0, 0.0))]);
+    let laid = run(&tree, 1000.0, 1000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (300.0, 150.0));
+}
+
+/// A picture inside a table cell is drawn inside the cell, which is the band
+/// path rather than the column path — a second walk, and the one a build adds
+/// the fragment to first and then forgets.
+#[test]
+fn a_picture_in_a_table_cell_is_drawn_in_the_cell() {
+    let mut cell = base();
+    cell.display = Display::TableCell;
+    let tree = table_of(vec![row_of(vec![
+        cell_of("a"),
+        BoxNode::element(cell, vec![picture(Intrinsic::raster(30.0, 20.0))]),
+    ])]);
+    let laid = run(&tree, 500.0, 500.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (30.0, 20.0));
+    // The second column, so the fragment's `x` is past the first cell.
+    assert!(fragment.x > 0.0, "{fragment:?}");
 }
 
 // ---- nesting, and the work cap it multiplies -------------------------------

@@ -77,7 +77,7 @@ use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
 use crate::uax14;
-use crate::{BoxNode, Budget, Content, Limits, Options, Refusal, TextRun, Warning};
+use crate::{BoxNode, Budget, Content, Intrinsic, Limits, Options, Refusal, TextRun, Warning};
 
 /// Slack for the comparisons a float's geometry needs, in points.
 ///
@@ -117,6 +117,15 @@ pub(crate) struct BlockRecord {
     pub border_color: Sides<Color>,
     /// Whether anything about it would be painted at all.
     pub painted: bool,
+    /// The picture inside it, for a replaced box, CSS 2.2 §3.1.
+    ///
+    /// On the record rather than in [`Flow::items`] and that is not a filing
+    /// decision: a record is the one thing in this module that is already
+    /// carried through every context a box can end up in — a float, a band, an
+    /// atomic inline, a column — and every one of those already moves a
+    /// record's `x` when it moves the box. Putting the picture anywhere else
+    /// would mean four more places to move it and four ways to forget.
+    pub replaced: Option<ReplacedPaint>,
     /// CSS 2.2 §9.4.3's relative offset, carried to **paint**.
     ///
     /// The horizontal half of the offset is folded into `x`, because a record's
@@ -125,6 +134,28 @@ pub(crate) struct BlockRecord {
     /// *"does not affect the layout of any other box"*, and this field is that
     /// sentence: the flow keeps the box where it was and only the ink moves.
     pub dy: f64,
+}
+
+/// A replaced box's picture, as an inset from the box's own border-box corner.
+///
+/// **Insets and not absolute coordinates**, which is the whole reason this is
+/// three numbers rather than a rectangle: [`translate`] moves a record by
+/// adding to its `x`, and a picture stored at an absolute `x` would be left
+/// behind by every flex placement, every band and every float in the crate. An
+/// inset moves with the box for free.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReplacedPaint {
+    /// Border-box left edge to content-box left edge: `border-left` plus
+    /// `padding-left`.
+    pub left: f64,
+    /// Border-box top edge to content-box top edge.
+    pub top: f64,
+    /// The used `width`, CSS 2.2 §10.3.2.
+    pub width: f64,
+    /// The used `height`, §10.6.2.
+    pub height: f64,
+    /// The node's [`crate::BoxNode::anchor`], carried unchanged.
+    pub anchor: Option<u32>,
 }
 
 /// CSS 2.2 §13.3.3's first kind of break position: the margin between two
@@ -932,16 +963,31 @@ impl<M: Metrics> Builder<'_, M> {
             Size::Auto => None,
             Size::Length(length) => Some(to_content(resolve_length(length, containing))),
         };
+        // CSS 2.2 §3.1's replaced element, sized here rather than by everything
+        // below it. §10.3.4 says so in one sentence — *"the used value of
+        // `width` is determined as for inline replaced elements"* — and
+        // §10.6.2's title lists block-level replaced boxes beside inline ones,
+        // so one call answers both axes for every `display` a picture can have.
+        //
+        // **Before `is_table`, `is_flex` and `is_multicol` below**, which is
+        // `css-display-3` §2.2: *"replaced elements ... ignore the inner
+        // display type"*. `img { display: flex }` is a block-level picture and
+        // not an empty flex container, and a build that asked `is_flex` first
+        // would produce the second.
+        let replaced = replaced_box(node, &style, containing);
         // §10.4: the tentative used width comes from §10.3, and then the whole
         // of §10.3 is *"applied again"* with `max-width` as the width, and
         // again with `min-width`. `style::clamp_size` is that order, which is
         // not `f64::clamp`: a `min-width` larger than the `max-width` wins.
         let tentative = stated_width.unwrap_or(auto_width);
-        let content_width = crate::style::clamp_size(
-            tentative,
-            crate::style::min_length(style.min_width, Some(containing)).map(to_content),
-            crate::style::max_length(style.max_width, Some(containing)).map(to_content),
-        );
+        let content_width = match replaced {
+            Some((width, _)) => width,
+            None => crate::style::clamp_size(
+                tentative,
+                crate::style::min_length(style.min_width, Some(containing)).map(to_content),
+                crate::style::max_length(style.max_width, Some(containing)).map(to_content),
+            ),
+        };
         // §10.3.3: with a used width that is not `auto`, two `auto` margins
         // centre the box and the leftover is otherwise put on the right. An
         // `auto` width that §10.4's clamp has narrowed reaches this too, and
@@ -950,7 +996,11 @@ impl<M: Metrics> Builder<'_, M> {
         // not `auto`.
         let both_auto =
             style.margin.left == MarginValue::Auto && style.margin.right == MarginValue::Auto;
-        let definite = stated_width.is_some() || content_width < tentative;
+        // §10.3.4 sends a block-level replaced box through §10.3.3's margin
+        // rules with the width §10.3.2 gave it, which is never `auto` — so two
+        // `auto` margins centre a picture exactly as they centre a `<div>` with
+        // a stated width.
+        let definite = replaced.is_some() || stated_width.is_some() || content_width < tentative;
         let mut left = if both_auto && definite {
             x + ((containing - (content_width + extra)) / 2.0).max(0.0)
         } else {
@@ -977,6 +1027,8 @@ impl<M: Metrics> Builder<'_, M> {
             border_style: style.border_style,
             border_color: style.border_color,
             painted: painted && style.visible,
+            // Filled in below, once `content_x` and the used height exist.
+            replaced: None,
             dy: 0.0,
         };
         let block = self.flow.blocks.len();
@@ -1035,7 +1087,15 @@ impl<M: Metrics> Builder<'_, M> {
         // for the reason above: an uncommitted margin has not moved `self.y`
         // yet and it will.
         let outer_top = std::mem::replace(&mut self.content_top, before + self.pending.value());
-        if style.is_table() {
+        if let Some(size) = replaced {
+            self.replaced_content(
+                block,
+                node,
+                &style,
+                (border.left + padding.left, top_edge),
+                size,
+            );
+        } else if style.is_table() {
             // CSS 2.2 §17. Everything above this line -- the margins, the
             // border, the padding, `width`, `box-sizing`, the page-break
             // properties -- is the ordinary block box a table also is, and
@@ -1060,42 +1120,8 @@ impl<M: Metrics> Builder<'_, M> {
         self.content_top = outer_top;
         let content_height = self.y - before;
 
-        // A specified height is honoured by padding the flow out to it; a
-        // content taller than the height overflows, which CSS 2.2 §10.6.3's
-        // `overflow: visible` initial value asks for.
-        //
-        // §10.7 then clamps that tentative height, and the two halves of the
-        // clamp are not equally implementable here. `min-height` is padding and
-        // is exactly what `height` already does. `max-height` can only make a
-        // box **shorter**, and this module has already emitted the items its
-        // content came to -- the flow is one column whose `y` never goes
-        // backwards, so there is no negative edge to emit. So it clamps the
-        // padding, which is the whole of its effect on a box whose content
-        // fits, and says `MaxHeightAsAuto` by name on the box whose content
-        // does not. A build that stayed silent would draw a `max-height: 4em`
-        // figure at whatever height its caption came to and nothing anywhere
-        // would say so.
-        //
-        // The percentages resolve against `None` for §10.5's reason: this box's
-        // containing block has an `auto` height at this point in the pass, so a
-        // percentage `min-height` or `max-height` behaves as `auto` and `none`.
-        let stated_height = match style.height {
-            Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
-            Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
-        };
-        let min_height = crate::style::min_length(style.min_height, None);
-        let max_height = crate::style::max_length(style.max_height, None);
-        let wanted = crate::style::clamp_size(
-            stated_height.unwrap_or(content_height),
-            min_height,
-            max_height,
-        );
-        if wanted > content_height {
-            self.commit_margin();
-            self.emit(wanted - content_height, ItemKind::Edge, true);
-        } else if max_height.is_some_and(|max| content_height > max + EPSILON) {
-            self.warn(Warning::MaxHeightAsAuto);
-        }
+        // §10.6.3's height and §10.7's clamp. See [`Builder::fill_height`].
+        self.fill_height(&style, content_height);
 
         let bottom_edge = border.bottom + padding.bottom;
         if bottom_edge > 0.0 {
@@ -1125,6 +1151,99 @@ impl<M: Metrics> Builder<'_, M> {
             self.marker(&style, block, content_x, ordinal);
         }
         Ok(())
+    }
+
+    /// §10.6.3's `height`, §10.7's clamp, and the padding that makes the flow
+    /// as tall as the box said it was.
+    ///
+    /// **A method and not fifteen lines inside [`Builder::block`]**, and the
+    /// reason is [`Builder::offset_relative`]'s below, word for word: `block`
+    /// recurses once per level of the document and its frame is what the depth
+    /// cap is measured in stack against. The four locals this holds went back
+    /// into `block` for one edit and
+    /// `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name` overflowed the
+    /// stack again.
+    ///
+    /// A specified height is honoured by padding the flow out to it; a content
+    /// taller than the height overflows, which CSS 2.2 §10.6.3's `overflow:
+    /// visible` initial value asks for.
+    ///
+    /// §10.7 then clamps that tentative height, and the two halves of the clamp
+    /// are not equally implementable here. `min-height` is padding and is
+    /// exactly what `height` already does. `max-height` can only make a box
+    /// **shorter**, and this module has already emitted the items its content
+    /// came to — the flow is one column whose `y` never goes backwards, so
+    /// there is no negative edge to emit. So it clamps the padding, which is
+    /// the whole of its effect on a box whose content fits, and says
+    /// `MaxHeightAsAuto` by name on the box whose content does not. A build
+    /// that stayed silent would draw a `max-height: 4em` figure at whatever
+    /// height its caption came to and nothing anywhere would say so.
+    ///
+    /// The percentages resolve against `None` for §10.5's reason: this box's
+    /// containing block has an `auto` height at this point in the pass, so a
+    /// percentage `min-height` or `max-height` behaves as `auto` and `none`.
+    fn fill_height(&mut self, style: &Consumed, content_height: f64) {
+        let stated_height = match style.height {
+            Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+            Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
+        };
+        let min_height = crate::style::min_length(style.min_height, None);
+        let max_height = crate::style::max_length(style.max_height, None);
+        let wanted = crate::style::clamp_size(
+            stated_height.unwrap_or(content_height),
+            min_height,
+            max_height,
+        );
+        if wanted > content_height {
+            self.commit_margin();
+            self.emit(wanted - content_height, ItemKind::Edge, true);
+        } else if max_height.is_some_and(|max| content_height > max + EPSILON) {
+            self.warn(Warning::MaxHeightAsAuto);
+        }
+    }
+
+    /// A replaced box's one flow item and the picture recorded against it.
+    ///
+    /// **A method and not fifteen lines inside [`Builder::block`]**, and the
+    /// reason is [`Builder::offset_relative`]'s below, word for word: `block`
+    /// recurses once per level of the document and its frame is what the depth
+    /// cap is measured in stack against. Written inline, this took
+    /// `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name` from a named
+    /// refusal to a stack overflow a second time. The fixture found it again;
+    /// this is where the frame went.
+    ///
+    /// A replaced box has no children to lay out — CSS 2.2 §3.1 puts its
+    /// content *"outside the scope of the CSS formatting model"* — so the flow
+    /// gets one item of the used height and the picture is recorded against the
+    /// box that item belongs to. An `ItemKind::Edge` rather than an item kind
+    /// of its own, which is what makes a picture page-breakable,
+    /// float-placeable and band-placeable for free: an edge is what a border
+    /// and a padding already are, and nothing in [`crate::fragment`] has to
+    /// learn a new shape.
+    ///
+    /// **`visibility` gates the picture and not the box.** CSS 2.2 §11.2 makes
+    /// `visibility: hidden` a box that is laid out and not painted, which is
+    /// exactly what `painted` does for a background, and a picture is ink like
+    /// any other.
+    fn replaced_content(
+        &mut self,
+        block: usize,
+        node: &BoxNode,
+        style: &Consumed,
+        inset: (f64, f64),
+        size: (f64, f64),
+    ) {
+        if size.1 > 0.0 {
+            self.commit_margin();
+            self.emit(size.1, ItemKind::Edge, true);
+        }
+        self.flow.blocks[block].replaced = style.visible.then_some(ReplacedPaint {
+            left: inset.0,
+            top: inset.1,
+            width: size.0,
+            height: size.1,
+            anchor: node.anchor,
+        });
     }
 
     /// CSS 2.2 §9.4.3's offset, applied once the box is closed.
@@ -1210,6 +1329,12 @@ impl<M: Metrics> Builder<'_, M> {
         block: usize,
     ) -> Result<(), Refusal> {
         match &node.content {
+            // Unreachable: [`Builder::block`] sizes a replaced box and emits
+            // its one item before the dispatch that calls this, for
+            // `css-display-3` §2.2's reason. An arm rather than a `_`, so that
+            // a fourth kind of content cannot be added without this file
+            // deciding what a block container does with it.
+            Content::Replaced(_) => Ok(()),
             Content::Text(source) => {
                 let mut pieces = Vec::new();
                 let mut collapser = Collapser::new();
@@ -1383,15 +1508,25 @@ impl<M: Metrics> Builder<'_, M> {
             return self.float_box(node, &style, content_width, content_x, depth, false);
         }
         self.budget.spend_box()?;
-        if style.display == Display::InlineBlock {
-            // §9.2.2: an atomic inline-level box. Here rather than beside the
-            // block builder for the reason the warning that used to stand here
-            // gave: an `inline-block` is not block-level, so it arrives in an
-            // inline formatting context — and this is where that context can
-            // give it a place on a line instead of pouring its text into one.
+        // §9.2.2's own list: *"inline-level boxes that are not inline boxes
+        // (such as replaced inline-level elements, inline-block elements and
+        // inline-table elements) are called atomic inline-level boxes"*. A
+        // picture is the first of the three and takes the same path as the
+        // second — one box on the line, placed rather than set, with nothing
+        // inside it a line breaker may split.
+        if style.display == Display::InlineBlock || matches!(node.content, Content::Replaced(_)) {
+            // Here rather than beside the block builder for the reason the
+            // warning that used to stand here gave: an `inline-block` is not
+            // block-level, so it arrives in an inline formatting context — and
+            // this is where that context can give it a place on a line instead
+            // of pouring its text into one.
             return self.atomic_inline(node, &style, out, depth, content_width);
         }
         match &node.content {
+            // Unreachable: the line above takes every replaced element, whether
+            // its `display` is `inline`, `inline-block` or anything else the
+            // block dispatch did not claim first.
+            Content::Replaced(_) => {}
             Content::Text(source) => {
                 let text = collapser.push(source, style.white_space);
                 if !text.is_empty() {
@@ -1754,6 +1889,15 @@ impl<M: Metrics> Builder<'_, M> {
             + style.padding_px(Side::Right, containing)
             + style.border_width.left
             + style.border_width.right;
+        // §10.3.6 for a floating replaced box and §10.3.5's sentence for an
+        // absolutely positioned one say the same thing in the same words:
+        // *"the used value of `width` is determined as for inline replaced
+        // elements"*. So a picture never reaches the shrink-to-fit trials
+        // below, which would measure it as nothing — they count the rightmost
+        // edge any **text** reached and a picture has none.
+        if let Some((width, _)) = replaced_box(node, style, containing) {
+            return Ok(width + extra + margins);
+        }
         if let Size::Length(length) = style.width {
             let specified = match length {
                 LengthPercentage::Px(px) => px,
@@ -2536,6 +2680,7 @@ impl<M: Metrics> Builder<'_, M> {
                     border_style: Sides::all(BorderStyle::None),
                     border_color: Sides::all(Color::TRANSPARENT),
                     painted: true,
+                    replaced: None,
                     dy: 0.0,
                 });
             }
@@ -3969,6 +4114,223 @@ impl<M: Metrics> Builder<'_, M> {
     }
 }
 
+/// CSS 2.2 §10.3.2's last case: the used `width` of a replaced box that has no
+/// intrinsic width and no ratio to derive one from, in CSS pixels.
+const REPLACED_DEFAULT_WIDTH: f64 = 300.0;
+
+/// §10.6.2's last case: *"the height of the largest rectangle that has a 2:1
+/// ratio, has a height not greater than 150px, and has a width not greater than
+/// the device width"*. The 150 is the cap; the 2:1 is applied against the used
+/// width beside it.
+const REPLACED_DEFAULT_HEIGHT: f64 = 150.0;
+
+/// A replaced box's used size, with every specified value resolved the way
+/// [`Builder::block`] resolves it for every other box.
+///
+/// `None` for anything that is not a replaced element, which is what lets the
+/// three callers — the block builder, the float width and the absolutely
+/// positioned box — ask the same question without first asking what kind of
+/// node they are holding.
+fn replaced_box(node: &BoxNode, style: &Consumed, containing: f64) -> Option<(f64, f64)> {
+    let Content::Replaced(intrinsic) = &node.content else {
+        return None;
+    };
+    let extra = style.padding_px(Side::Left, containing)
+        + style.padding_px(Side::Right, containing)
+        + style.border_width.left
+        + style.border_width.right;
+    let to_content = |specified: f64| {
+        match style.box_sizing {
+            BoxSizing::ContentBox => specified,
+            BoxSizing::BorderBox => specified - extra,
+        }
+        .max(0.0)
+    };
+    Some(replaced_size(
+        *intrinsic,
+        match style.width {
+            Size::Auto => None,
+            Size::Length(length) => Some(to_content(resolve_length(length, containing))),
+        },
+        match style.height {
+            // §10.5: a percentage height against a containing block whose own
+            // height is `auto` *"is treated as `auto`"*, and at this point in
+            // the pass every ancestor's height is still being accumulated. The
+            // same reading [`Builder::block`]'s `stated_height` takes, so a
+            // picture and a `<div>` agree about what a percentage height is.
+            Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+            Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
+        },
+        (
+            crate::style::min_length(style.min_width, Some(containing)).map(to_content),
+            crate::style::min_length(style.min_height, None),
+        ),
+        (
+            crate::style::max_length(style.max_width, Some(containing)).map(to_content),
+            crate::style::max_length(style.max_height, None),
+        ),
+    ))
+}
+
+/// CSS 2.2 §10.3.2 and §10.6.2: a replaced box's used `width` and `height`,
+/// with §10.4's and §10.7's constraints applied.
+///
+/// # Why this is one function and not two
+///
+/// The two sections are mutually recursive and the specification writes them
+/// that way: §10.3.2's second case is *"the used value of `width` is (used
+/// height) × (intrinsic ratio)"* and §10.6.2's second is *"(used width) ÷
+/// (intrinsic ratio)"*. Only one of the two can be the one that recurses, and
+/// which one it is depends on which of `width` and `height` the author stated.
+/// A build with a `used_width` and a `used_height` that each called the other
+/// either loops or silently picks a winner; this takes the pair at once and the
+/// cases are the specification's own, in its order.
+///
+/// # And why §10.4's table is here rather than [`crate::style::clamp_size`]
+///
+/// §10.4 has two algorithms. For every other box it is *"apply the rules again
+/// with `max-width` as the width, then again with `min-width`"*, which
+/// `clamp_size` is. For a replaced box **with an intrinsic ratio and both
+/// `width` and `height` auto** it is instead a table of eleven constraint
+/// violations, and the difference is the whole point of the table: clamping the
+/// width alone would leave the height at its intrinsic value and **stretch the
+/// picture**. `img { max-width: 100% }` — which is on almost every reflowable
+/// book's stylesheet — is exactly that case, so the table is the common path
+/// and not the exotic one.
+///
+/// Every argument is already resolved into content-box CSS pixels; `None` is
+/// `auto` for `width`/`height` and for `min-*`, and `none` for `max-*`.
+fn replaced_size(
+    intrinsic: Intrinsic,
+    width: Option<f64>,
+    height: Option<f64>,
+    min: (Option<f64>, Option<f64>),
+    max: (Option<f64>, Option<f64>),
+) -> (f64, f64) {
+    // The four constraints as numbers rather than as options, which is what
+    // lets §10.4's table be written in the specification's own words: every one
+    // of its rows reads `max(…, min-height)` or `min(…, max-width)`, and those
+    // expressions are only total once an absent minimum is zero and an absent
+    // maximum is infinite.
+    let min_width = min.0.unwrap_or(0.0).max(0.0);
+    let min_height = min.1.unwrap_or(0.0).max(0.0);
+    let max_width = max.0.unwrap_or(f64::INFINITY).max(0.0);
+    let max_height = max.1.unwrap_or(f64::INFINITY).max(0.0);
+
+    // ---- §10.3.2 and §10.6.2, before any constraint ------------------------
+    let (tentative_width, tentative_height) = match (width, height) {
+        (Some(w), Some(h)) => (w, h),
+        // `width` stated, `height` auto: §10.6.2's case 2, then 3, then 4.
+        (Some(w), None) => (w, height_from(w, intrinsic)),
+        // `height` stated, `width` auto: §10.3.2's *"`width` has a computed
+        // value of `auto`, `height` has some other computed value, and the
+        // element does have an intrinsic ratio"*, then case 4, then case 5.
+        (None, Some(h)) => {
+            let w = match (intrinsic.ratio, intrinsic.width) {
+                (Some(ratio), _) => h * ratio,
+                (None, Some(w)) => w,
+                (None, None) => REPLACED_DEFAULT_WIDTH,
+            };
+            (w, h)
+        }
+        (None, None) => {
+            let w = match (intrinsic.width, intrinsic.height, intrinsic.ratio) {
+                // §10.3.2 case 1.
+                (Some(w), _, _) => w,
+                // §10.3.2 case 2's first half: no intrinsic width, but an
+                // intrinsic height and a ratio.
+                (None, Some(h), Some(ratio)) => h * ratio,
+                // §10.3.2 calls this one *"undefined in CSS 2.2"*.
+                // `css-images-3` §5.3.2's default sizing algorithm defines it:
+                // the largest rectangle with the ratio that fits the default
+                // object size, which §5.3.1 fixes at 300 by 150.
+                (None, None, Some(ratio)) => {
+                    REPLACED_DEFAULT_WIDTH.min(REPLACED_DEFAULT_HEIGHT * ratio)
+                }
+                // §10.3.2's last case: *"none of the conditions above are met,
+                // then the used value of `width` becomes 300px"*. An intrinsic
+                // height with no ratio lands here and not in case 2, which
+                // needs both.
+                (None, _, None) => REPLACED_DEFAULT_WIDTH,
+            };
+            let h = match intrinsic.height {
+                // §10.6.2 case 1.
+                Some(h) => h,
+                None => height_from(w, intrinsic),
+            };
+            (w, h)
+        }
+    };
+
+    // ---- §10.4 and §10.7 ---------------------------------------------------
+    //
+    // The table governs only the case it is stated for. Everywhere else §10.4's
+    // ordinary instruction applies — *"the rules are applied again, but this
+    // time using the computed value of `max-width` as the computed value for
+    // `width`"* — and applying §10.3's rules again with a width that is no
+    // longer `auto` is exactly what recomputing the height from the clamped
+    // width does.
+    let governed = width.is_none()
+        && height.is_none()
+        && intrinsic.ratio.is_some()
+        && tentative_width > 0.0
+        && tentative_height > 0.0;
+    if !governed {
+        let used_width = crate::style::clamp_size(tentative_width, min.0, max.0).max(0.0);
+        // **Only a width the clamp actually moved re-derives the height**, and
+        // that condition is not a shortcut: §10.6.2's case 1 prefers an
+        // intrinsic *height* to a height derived through the ratio, so a box
+        // whose width nothing touched must keep the height §10.6.2 already gave
+        // it rather than have `height_from` answer a second time. Recomputing
+        // unconditionally is also what made the `(Some(w), None)` arm above
+        // unreadable — a counted injection that broke it caught **nothing**,
+        // because every value it produced was thrown away here.
+        let used_height = if height.is_some() || used_width == tentative_width {
+            tentative_height
+        } else {
+            height_from(used_width, intrinsic)
+        };
+        return (
+            used_width,
+            crate::style::clamp_size(used_height, min.1, max.1).max(0.0),
+        );
+    }
+
+    let (w, h) = (tentative_width, tentative_height);
+    let (over_w, under_w) = (w > max_width, w < min_width);
+    let (over_h, under_h) = (h > max_height, h < min_height);
+    // The two-violation rows first: each of them is also a single-violation row
+    // and would be answered wrongly by it.
+    let (used_width, used_height) = match (over_w, under_w, over_h, under_h) {
+        (true, _, true, _) if max_width / w <= max_height / h => {
+            (max_width, min_height.max(max_width * h / w))
+        }
+        (true, _, true, _) => (min_width.max(max_height * w / h), max_height),
+        (_, true, _, true) if min_width / w <= min_height / h => {
+            (max_width.min(min_height * w / h), min_height)
+        }
+        (_, true, _, true) => (min_width, max_height.min(min_width * h / w)),
+        (_, true, true, _) => (min_width, max_height),
+        (true, _, _, true) => (max_width, min_height),
+        (true, ..) => (max_width, min_height.max(max_width * h / w)),
+        (_, true, ..) => (min_width, max_height.min(min_width * h / w)),
+        (_, _, true, _) => (min_width.max(max_height * w / h), max_height),
+        (.., true) => (max_width.min(min_height * w / h), min_height),
+        _ => (w, h),
+    };
+    (used_width.max(0.0), used_height.max(0.0))
+}
+
+/// §10.6.2's cases 2, 3 and 4: a replaced box's `height` when `height` is
+/// `auto` and the used `width` is settled.
+fn height_from(width: f64, intrinsic: Intrinsic) -> f64 {
+    match (intrinsic.ratio, intrinsic.height) {
+        (Some(ratio), _) if ratio > 0.0 => width / ratio,
+        (_, Some(height)) => height,
+        _ => (width / 2.0).min(REPLACED_DEFAULT_HEIGHT),
+    }
+}
+
 /// A length or a percentage against a containing width.
 fn resolve_length(length: LengthPercentage, containing: f64) -> f64 {
     match length {
@@ -3995,6 +4357,7 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         border_style: style.border_style,
         border_color: style.border_color,
         painted: painted && style.visible,
+        replaced: None,
         dy: 0.0,
     }
 }
@@ -4250,6 +4613,10 @@ fn collapsed_borders(
 fn flex_boxes(container: &BoxNode) -> Vec<ItemBox<'_>> {
     let mut out: Vec<ItemBox<'_>> = Vec::new();
     match &container.content {
+        // Unreachable: `css-display-3` §2.2 makes a replaced element's inner
+        // display type ignored, so [`Builder::block`] never dispatches one to
+        // the flex driver. A picture has no flex items either way.
+        Content::Replaced(_) => {}
         Content::Text(text) => {
             if !text.trim().is_empty() {
                 out.push(ItemBox::Anonymous(Box::new(anonymous_flex_item(

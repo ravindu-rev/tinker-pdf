@@ -326,7 +326,10 @@ fn is_none(node: &BoxNode) -> bool {
 fn is_whitespace(node: &BoxNode) -> bool {
     match &node.content {
         Content::Text(text) => text.chars().all(char::is_whitespace),
-        Content::Children(_) => false,
+        // A picture is not white space, however little ink it has: rules 3 and
+        // 4 remove boxes a table's markup did not mean to contain, and a
+        // `<img>` between two `<td>`s is content the document wrote.
+        Content::Children(_) | Content::Replaced(_) => false,
     }
 }
 
@@ -334,7 +337,10 @@ fn is_whitespace(node: &BoxNode) -> bool {
 fn kids(node: &BoxNode) -> &[BoxNode] {
     match &node.content {
         Content::Children(children) => children,
-        Content::Text(_) => &[],
+        // A replaced box's content is *"outside the scope of the CSS formatting
+        // model"* (CSS 2.2 §3.1), so it has no children for §17.2.1 to generate
+        // boxes around.
+        Content::Text(_) | Content::Replaced(_) => &[],
     }
 }
 

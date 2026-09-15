@@ -68,7 +68,7 @@ use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_layout::metrics::{FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, Vertical};
-use tinker_pdf_layout::{BoxFragment, Page as LayoutPage, TextRun};
+use tinker_pdf_layout::{BoxFragment, Page as LayoutPage, ReplacedFragment, TextRun};
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::itemize;
 
@@ -919,18 +919,35 @@ impl Frame {
 ///
 /// Returns how many shaped pieces the writer refused, which the caller turns
 /// into [`crate::ArchiveWarning::UnwritableTextRun`] (ruling 10).
+#[allow(clippy::too_many_arguments)]
 pub fn draw_page(
     builder: &mut DocumentBuilder,
     page: &mut PageBuilder,
     laid: &LayoutPage,
     frame: &Frame,
     fonts: &Fonts<'_>,
+    pictures: &[(u32, Vec<u8>)],
     dom: Option<&Dom>,
     chapter: u64,
 ) -> usize {
     let mut refused = 0usize;
     for fragment in &laid.boxes {
         draw_box(page, fragment, frame);
+    }
+    // After the backgrounds and before the text, which is CSS 2.2 §E.2's
+    // painting order for a replaced element's content: it goes in the same
+    // layer as in-flow inline content, above its own background and below
+    // nothing the flow put on top of it. A picture registered nowhere — the
+    // writer refused the bytes after the box was already laid out — leaves its
+    // box empty and is named by `ArchiveWarning::ImageNotDrawn`.
+    for fragment in &laid.replaced {
+        let Some(anchor) = fragment.anchor else {
+            continue;
+        };
+        let Some((_, name)) = pictures.iter().find(|(at, _)| *at == anchor) else {
+            continue;
+        };
+        draw_replaced(page, fragment, frame, name);
     }
     // 14.7's structure tree, when the caller has the element tree the runs
     // came from. Every run carries the index of the element that wrote it, so
@@ -1195,6 +1212,44 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
         };
         fill(page, bx, by, bw, bh);
     }
+}
+
+/// Draws one replaced element's picture into its content box.
+///
+/// # What it does not do
+///
+/// **It does not scale to fit and it does not letterbox.** A raster's intrinsic
+/// aspect ratio is already in the box `tinker-pdf-layout` gave it — CSS 2.2
+/// §10.3.2 and §10.6.2 put it there — so the picture fills the content box
+/// exactly, and where an author stated a `width` and a `height` that disagree
+/// with the picture's proportions, it is stretched. That is what CSS says
+/// happens: `object-fit` is the property that would say otherwise and it is not
+/// implemented here. The SVG path's `preserveAspectRatio` is a different
+/// question about a different element and `epub::svg::place_image` answers it
+/// there.
+///
+/// **It draws untagged.** 14.8.4.4 would put a picture in a `/Figure` with an
+/// `/Alt`, and the structure this file builds is built out of *text runs* —
+/// every element of it is opened around a run's ancestry. See the refusal table
+/// in `docs/features/epub.md`.
+fn draw_replaced(page: &mut PageBuilder, fragment: &ReplacedFragment, frame: &Frame, name: &[u8]) {
+    let width = fragment.width * PX_TO_PT;
+    let height = fragment.height * PX_TO_PT;
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    // 8.9.5.2 puts an image in the unit square with its first row at the top,
+    // and `PageBuilder::image` writes the `cm` that maps the square onto a
+    // rectangle given by its **bottom** left corner — which is `frame.y` of the
+    // content box's bottom edge, the one place the downward `y` of a flow and
+    // the upward `y` of a page have to meet.
+    page.image(
+        name,
+        frame.x(fragment.x),
+        frame.y(fragment.y + fragment.height),
+        width,
+        height,
+    );
 }
 
 /// Whether a border style puts ink on the page at all.

@@ -96,7 +96,7 @@ pub mod svg;
 pub mod typeface;
 pub mod xhtml;
 
-use tinker_pdf_cos::build::{OutlineEntry, Target};
+use tinker_pdf_cos::build::{ImageData, OutlineEntry, Target};
 use tinker_pdf_cos::dest::is_writable_uri;
 use tinker_pdf_cos::DocumentBuilder;
 use tinker_pdf_css::cascade::ComputedStyle;
@@ -113,7 +113,7 @@ use tinker_pdf_xml::Limits as XmlLimits;
 use tinker_pdf_zip::{limits as zip_limits, Archive};
 
 use crate::cbz::{
-    ArchiveRefusal, ArchiveReport, ArchiveWarning, PageOrigin, DOCUMENT_OVERHEAD,
+    ArchiveRefusal, ArchiveReport, ArchiveWarning, ImageDefect, PageOrigin, DOCUMENT_OVERHEAD,
     MAX_SYNTHESISED_PDF, PAGE_OVERHEAD, PLACEHOLDER_GREY,
 };
 use ocf::resolve_reference;
@@ -1026,9 +1026,20 @@ pub fn synthesise(
         // reflowable one is the caller's and for a pre-paginated one is its
         // §8.2.2.6 viewport.
         let (chapter_width, chapter_height) = chapter.frame.content_px();
-        let chapter_options = LayoutOptions::new(chapter_width, chapter_height);
         let chapter_options = if chapter.fixed {
-            chapter_options
+            // EPUB RS 3.3 §8.1: *"exactly one page per spine itemref"*, and
+            // §8.1.2: the viewport is the initial containing block and what
+            // falls outside it is **clipped**. Both sentences are in this one
+            // call — the box is the viewport, and the flow is not cut at it.
+            //
+            // It used to be cut at it and the pages after the first dropped,
+            // which is a third rule neither sentence says: content that
+            // overflows by a hair is not clipped, it is *moved* to a page that
+            // is then thrown away. A picture in a viewport sized to the picture
+            // overflows by exactly the strut's descender (CSS 2.2 §10.8.1), so
+            // that reading lost the whole of every page of every comic — see
+            // `epub_fixed_layout.rs`.
+            LayoutOptions::new(chapter_width, chapter_height).unpaginated()
         } else {
             options
         };
@@ -1047,20 +1058,30 @@ pub fn synthesise(
                         None => layout_warnings.push((warning, count)),
                     }
                 }
-                if chapter.fixed && laid.pages.len() > 1 {
-                    // EPUB RS 3.3 §8.1.2: the viewport is the initial
-                    // containing block and what falls outside it is clipped.
-                    // Everything that would have been a second page is outside
-                    // it, so it is dropped here -- and counted, because those
-                    // characters are gone from `Page::text()` as well as from
-                    // the picture.
-                    let lost: usize = laid.pages[1..]
-                        .iter()
-                        .flat_map(|page| page.runs.iter())
-                        .filter(|run| !run.generated)
-                        .map(|run| run.text.chars().count())
-                        .sum();
-                    laid.pages.truncate(1);
+                if chapter.fixed {
+                    // §8.1.2's clip, counted. The flow was not cut, so every
+                    // run is on the one page and the ones below the viewport's
+                    // bottom edge are the ones the clip path will hide: they
+                    // are **drawn and clipped** rather than dropped, which is
+                    // what §8.1.2 asks for and is why they are still in
+                    // `Page::text()`. A host is told how many characters a
+                    // reader will not see.
+                    //
+                    // The baseline and not the top, because a run's `y` is its
+                    // baseline: a line whose baseline is past the edge has at
+                    // most its ascenders showing, and counting by the top would
+                    // call a fully visible last line clipped.
+                    let lost: usize = laid
+                        .pages
+                        .first()
+                        .map(|page| {
+                            page.runs
+                                .iter()
+                                .filter(|run| !run.generated && run.y > chapter_height)
+                                .map(|run| run.text.chars().count())
+                                .sum()
+                        })
+                        .unwrap_or(0);
                     if lost > 0 {
                         clipped.push((chapter.name.clone(), lost));
                     }
@@ -1113,6 +1134,30 @@ pub fn synthesise(
             characters: *characters,
         });
     }
+    // Ruling 10 for the `<img>` this build could not put on a page, and the
+    // reason it is counted per item and per defect rather than per element is
+    // `UnimplementedProperty`'s: a comic whose forty pictures are all WebP is
+    // one sentence a host can act on and forty identical warnings is not.
+    for chapter in &chapters {
+        let Some(reading) = &chapter.reading else {
+            continue;
+        };
+        let mut ranked: Vec<(ImageDefect, usize)> = Vec::new();
+        for (_, defect) in &reading.pictures.refused {
+            match ranked.iter_mut().find(|(seen, _)| seen == defect) {
+                Some(slot) => slot.1 += 1,
+                None => ranked.push((*defect, 1)),
+            }
+        }
+        ranked.sort_by_key(|(_, images)| std::cmp::Reverse(*images));
+        for (defect, images) in ranked {
+            warnings.push(ArchiveWarning::ImageNotDrawn {
+                item: chapter.name.clone(),
+                defect,
+                images,
+            });
+        }
+    }
     if fonts.unrepresented() > 0 {
         warnings.push(ArchiveWarning::UnrepresentedCharacters {
             characters: fonts.unrepresented(),
@@ -1137,6 +1182,7 @@ pub fn synthesise(
         builder.set_info(b"Author", creator);
     }
     fonts.register(&mut builder);
+    let pictures = register_pictures(&mut builder, &chapters, &mut warnings);
 
     let links = cross_references(&chapters, limits, total_pages);
 
@@ -1244,6 +1290,7 @@ pub fn synthesise(
                 laid,
                 &chapter_frame,
                 &fonts,
+                &pictures[spine_at],
                 chapter.reading.as_ref().map(|reading| &reading.dom),
                 // **A base per content document.** Both an element index and a
                 // reading-order stamp restart at every spine item, so two
@@ -1381,6 +1428,82 @@ fn resolve_target(
         None => chapter.first_page,
     };
     (page < total_pages).then(|| page_target(u32::try_from(page).unwrap_or(u32::MAX)))
+}
+
+/// Every picture in the book, registered as an `/XObject` **before the first
+/// page begins**, indexed by spine item and then by element.
+///
+/// # The ordering is the whole of it
+///
+/// `DocumentBuilder::begin_page` *snapshots* the document's resource set, so an
+/// `/XObject` added after that call is invisible to the page that names it: the
+/// `Do` is written, the reader cannot resolve the name, and the photograph is
+/// silently gone while every word on the page still sets. That is the bug
+/// [`svg::Registry`] exists to make impossible for an SVG `<image>`, and this
+/// is the same sentence for an XHTML `<img>` — a pass of its own, run before
+/// the page loop, handing back names rather than a builder anything could add
+/// to.
+///
+/// # Only the pictures that reached a page
+///
+/// The set is taken from the **laid-out pages** rather than from the box tree,
+/// which is not an optimisation: an `<img>` inside a `display: none` subtree,
+/// or below a pre-paginated document's viewport, produces no fragment, and
+/// embedding it anyway would put a picture no page draws into every synthesised
+/// document and charge the caller's `max_synthesised` for it.
+fn register_pictures(
+    builder: &mut DocumentBuilder,
+    chapters: &[Chapter],
+    warnings: &mut Vec<ArchiveWarning>,
+) -> Vec<Vec<(u32, Vec<u8>)>> {
+    let mut out: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); chapters.len()];
+    let mut next = 0usize;
+    for (at, chapter) in chapters.iter().enumerate() {
+        let Some(reading) = &chapter.reading else {
+            continue;
+        };
+        let mut refused = 0usize;
+        for picture in &reading.pictures.drawn {
+            let anchor = u32::try_from(picture.element).unwrap_or(u32::MAX);
+            let drawn = chapter
+                .pages
+                .iter()
+                .flat_map(|page| page.replaced.iter())
+                .any(|fragment| fragment.anchor == Some(anchor));
+            if !drawn {
+                continue;
+            }
+            // One name per picture across the whole document, unlike
+            // `cbz.rs`'s single `/Im` per page: a book's pages may hold several
+            // pictures each and two of them on one page would collide.
+            let name = format!("Im{next}").into_bytes();
+            next += 1;
+            let registered = match &picture.data {
+                read::PictureData::Jpeg(bytes) => builder.add_image(&name, &ImageData::Jpeg(bytes)),
+                read::PictureData::Png(png) => builder.add_image(&name, &png.image()),
+            };
+            if registered {
+                out[at].push((anchor, name));
+            } else {
+                // The one case where this build does leave **a box of the right
+                // size with nothing in it**: the picture read, the box was laid
+                // out to its dimensions, and the writer then refused the bytes.
+                // By that point the box cannot be unmade — every line after it
+                // is already placed — so the honest answer is the geometry the
+                // page would have had with the picture, and a warning saying
+                // the picture is not in it.
+                refused += 1;
+            }
+        }
+        if refused > 0 {
+            warnings.push(ArchiveWarning::ImageNotDrawn {
+                item: chapter.name.clone(),
+                defect: ImageDefect::Undecodable,
+                images: refused,
+            });
+        }
+    }
+    out
 }
 
 /// One page's link annotations: a rectangle in the page's own points, and

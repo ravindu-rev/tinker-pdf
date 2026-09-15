@@ -33,11 +33,13 @@
 
 mod epub_support;
 
+use std::collections::BTreeSet;
+
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::epub::ocf::{CONTAINER_ITEM, MIMETYPE_ITEM, OCF_MEDIA_TYPE};
 use tinker_pdf::epub::package::{self, RenditionLayout};
 use tinker_pdf::epub::{Limits, DEFAULT_PAGE};
-use tinker_pdf::{ArchiveWarning, Document, OpenOptions};
+use tinker_pdf::{ArchiveWarning, Document, OpenOptions, RenderOptions};
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -812,36 +814,85 @@ fn the_real_book_trips_neither_fixed_layout_warning() {
     assert_eq!(reported, [], "the real fixed-layout book reports something");
 }
 
-/// **Every page of the real book is its clip and nothing else**, and that is
-/// this build's largest gap in this format written down as a test.
+/// **Every page of the real book is its picture, and every page is more than
+/// one colour.**
 ///
-/// A fixed-layout comic is six pictures. This build paginates it correctly, at
-/// the right count, at the right six sizes, with §8.1.2's clip on each — and
-/// **draws none of the pictures**, because no path in `epub::` turns an `<img>`
-/// into a box. Six blank pages of exactly the right dimensions is a
-/// complete-looking book of the wrong contents, which is the failure this whole
-/// gap is organised around, and it took a real fixed-layout book to make it
-/// visible: the other eight books are text, and text arrives.
+/// # What stood here, and what deleting it was
 ///
-/// Written as an assertion rather than a comment so that the milestone which
-/// paints a replaced element **has to come here and delete it**. `q … re W n …
-/// Q` and nothing between is the whole content stream today.
+/// `today_every_page_of_the_real_book_is_empty_inside_its_clip` asserted the
+/// opposite: that the whole content stream of every page was `q … re W n Q`
+/// with nothing between it, because no path in `epub::` turned an `<img>` into
+/// a box. Six blank pages of exactly the right dimensions is a complete-looking
+/// book of the wrong contents, and that test existed so the milestone which
+/// paints a replaced element would have to come here and delete it. This is
+/// that deletion, and this is its replacement.
+///
+/// # The colour count, and why it and not the operators
+///
+/// The content stream is checked first because it is the specific claim — an
+/// `/XObject` at the viewport's own size, mapped by one `cm` — but a content
+/// stream naming a picture proves nothing about whether a reader can resolve
+/// the name. `DocumentBuilder::begin_page` snapshots the resource set, so an
+/// `/XObject` registered after the page begins leaves a `Do` whose name
+/// resolves to nothing and a page that is still blank. **Only the render can
+/// tell those two apart**, which is why the measurement is pixels.
+///
+/// One colour is a blank page. Measured on 15 September 2026 against the tree
+/// this replaces: `[1, 1, 1, 1, 1, 1]` — six pages, one colour each. Measured
+/// on this one: `[44, 45, 42, 51, 50, 63]`. The bound asserted is `> 1` rather
+/// than those numbers, because the exact count is a property of the renderer's
+/// sampling and the claim is about the painter.
 #[test]
-fn today_every_page_of_the_real_book_is_empty_inside_its_clip() {
+fn every_page_of_the_real_book_is_its_picture_in_more_than_one_colour() {
     let doc = open_at(&real_book(), DEFAULT_PAGE);
+    assert_eq!(doc.page_count(), 6);
     for at in 0..doc.page_count() {
         let content = page_content(&doc, at as usize);
+        let content = content.split_whitespace().collect::<Vec<_>>().join(" ");
         let (width, height) = doc.page(at).expect("a page").size();
-        let expected = format!("q 0 0 {width} {height} re W n Q");
-        assert_eq!(
-            content.split_whitespace().collect::<Vec<_>>().join(" "),
-            expected,
-            "page {at} draws something, so this test is out of date and the \
-             README's finding about it needs re-measuring"
+        // The clip is still §8.1.2's and the picture is inside it, at the
+        // viewport's own size: `w 0 0 h 0 0 cm` maps 8.9.5.2's unit square onto
+        // the whole page, which is what an intrinsic size equal to the viewport
+        // comes to. One `Do` and one only, so a page cannot pass this by
+        // drawing its neighbour's picture as well as its own.
+        assert!(
+            content.starts_with(&format!("q 0 0 {width} {height} re W n"))
+                && content.ends_with('Q'),
+            "page {at} lost §8.1.2's clip: {content}"
+        );
+        assert!(
+            content.contains(&format!("q {width} 0 0 {height} 0 0 cm /Im{at} Do Q")),
+            "page {at}: {content}"
+        );
+        assert_eq!(content.matches(" Do ").count(), 1, "page {at}: {content}");
+    }
+    // The last content document is the one that also paints: `<body
+    // style="background-color:#000000">`. It is asserted by name rather than
+    // allowed for, because a black rectangle under a picture is exactly what a
+    // page would look like if the picture were missing and the *background*
+    // were the second colour — so this is where the two are told apart.
+    let last = page_content(&doc, 5);
+    let last = last.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        last.contains("0 0 0 rg") && last.find("rg") < last.find("Do"),
+        "the sixth page paints its body's black background under the picture: {last}"
+    );
+    for at in 0..5 {
+        let content = page_content(&doc, at);
+        assert!(
+            !content.contains(" rg"),
+            "page {at} paints a background the book did not declare: {content}"
         );
     }
-    // The pictures really are in the container, so the emptiness is the
-    // painter's and not the archive's.
+
+    let counts: Vec<usize> = (0..doc.page_count()).map(|at| colours(&doc, at)).collect();
+    assert!(
+        counts.iter().all(|count| *count > 1),
+        "a page of one colour is a blank page: {counts:?}"
+    );
+
+    // The pictures really are in the container, which is what makes the
+    // assertion above one about this build rather than about the fixture.
     let bytes = real_book();
     for name in [
         "OEBPS/Images/kcc-0001-kcc-x.jpg",
@@ -853,6 +904,25 @@ fn today_every_page_of_the_real_book_is_empty_inside_its_clip() {
             "{name} is not a JPEG in the container"
         );
     }
+}
+
+/// How many distinct colours one rendered page has.
+fn colours(doc: &Document, at: u32) -> usize {
+    let bitmap = doc
+        .page(at)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let components = bitmap.components();
+    let mut seen: BTreeSet<&[u8]> = BTreeSet::new();
+    for y in 0..bitmap.height as usize {
+        for x in 0..bitmap.width as usize {
+            let start = y * bitmap.stride + x * components;
+            if let Some(pixel) = bitmap.data.get(start..start + components) {
+                seen.insert(pixel);
+            }
+        }
+    }
+    seen.len()
 }
 
 /// **The real book's pages carry no text either, and the six characters it does
