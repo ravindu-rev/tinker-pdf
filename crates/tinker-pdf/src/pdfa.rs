@@ -525,18 +525,26 @@ pub struct StagedRule {
 pub const STAGED: &[StagedRule] = &[
     StagedRule {
         clause: "6.6.2.3",
-        rule: "the predefined schemas' value types below the four forms an \
-               RDF/XML serialisation distinguishes: Integer, Real, Rational, \
-               Date, URI and the closed choices are all one element with text \
-               in it",
-        because: "`ValueForm` separates what the serialisation separates - a \
-                  simple value, an array, a language alternative, a structure \
-                  - and both halves of the rule run on that. Narrowing further \
-                  means reading every value against a per-type grammar, which \
-                  is a different rule over different input. 61 part-1 and 107 \
-                  part-2 fixtures are exactly this: a property the table names, \
-                  written as a simple value the schema declares a simple value \
-                  for, whose text is not the kind of simple value it declares",
+        rule: "the predefined schemas' value types that have no published \
+               grammar, or that have one and no fixture: Rational, URI, URL, \
+               GPSCoordinate, XPath, Locale, MIMEType, ProperName, AgentName, \
+               RenditionClass, and a structure's own fields",
+        because: "the shape of the serialisation is read against `Shape`, and \
+                  the text of a value is read against `Item` for the four \
+                  types the corpus exercises - Integer, Real, Boolean, Date, \
+                  each against the grammar the XMP specification prints. The \
+                  types above are not read: of the 468 `-fail-` fixtures under \
+                  the two clause directories this rule serves, 467 are \
+                  reported on without them, so there is nothing left for such \
+                  a rule to catch. A grammar written against no test is a \
+                  guess, and a guess that is too strict reports conforming \
+                  files - which is the one direction this rule group may not \
+                  move",
+    },
+    StagedRule {
+        clause: "6.6.2.1",
+        rule: "the `bytes` and `encoding` attributes of the XMP packet                header's `<?xpacket?>` processing instruction, which a                conforming file may not write",
+        because: "nothing blocks it, and that is why it is named here rather                   than slipped in: the packet reaches this group whole and                   `tinker-pdf-xml` reports the instruction as an event the                   walk does not read. It is a different clause from the                   predefined-schema rules this group serves, with four                   fixtures of its own - `6-6-2-1-t01-fail-b` and `-fail-c`                   under parts 2 and 3, which name the two attributes in their                   own outlines, and two Isartor files under part 1 - and a                   rule landed without its own fixtures and its own counted                   injection beside it is a rule nobody measured",
     },
     StagedRule {
         clause: "6.7.8",
@@ -1160,10 +1168,11 @@ pub enum FindingKind {
     /// ISO 19005-2 6.6.2.3).
     ///
     /// The finding is about the *shape* of the serialisation — a string where
-    /// a structure is declared, an `rdf:Bag` where a single value is — because
-    /// that is what can be judged without reading the value. A property no
-    /// predefined schema of the cited revision names is reported by
-    /// [`FindingKind::XmpPropertyUndescribed`] instead, because there is no
+    /// a structure is declared, an `rdf:Bag` where an `rdf:Seq` is — because
+    /// that is what can be judged without reading the value. What the text of
+    /// the value itself says is [`FindingKind::XmpValueNotOfDeclaredType`]. A
+    /// property no predefined schema of the cited revision names is reported
+    /// by [`FindingKind::XmpPropertyUndescribed`] instead, because there is no
     /// declared type there for it to disagree with.
     XmpValueTypeMismatch {
         /// The property, written with its schema's preferred prefix.
@@ -1172,6 +1181,26 @@ pub enum FindingKind {
         expected: &'static str,
         /// The form the packet used.
         found: &'static str,
+    },
+    /// A property in a predefined XMP schema whose value is serialised in the
+    /// declared shape, but whose *text* is not an instance of the declared
+    /// value type (ISO 19005-1 6.7.2, ISO 19005-2 6.6.2.3).
+    ///
+    /// The other half of [`FindingKind::XmpValueTypeMismatch`], and a separate
+    /// kind because it is answered from different input: the shape is settled
+    /// by the element names, and this is settled by reading the characters
+    /// against the grammar the XMP specification prints for the type. Only the
+    /// types that have such a grammar and that the corpus exercises are read —
+    /// `xmp_schemas::Item::judged` is the list, and says what is left alone
+    /// and why.
+    XmpValueNotOfDeclaredType {
+        /// The property, written with its schema's preferred prefix.
+        property: String,
+        /// The value type the schema declares, in the specification's word.
+        expected: &'static str,
+        /// The text the packet wrote, as written but for surrounding
+        /// whitespace.
+        found: String,
     },
     /// A top-level XMP property belonging to no predefined schema of the
     /// revision the part cites, and described by no extension schema the
