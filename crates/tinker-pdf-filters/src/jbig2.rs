@@ -50,6 +50,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::mq::{MqContexts, MqDecoder};
 use crate::{Capability, FilterError, Warning};
 
+mod encode;
+
+pub use encode::{generic_encode, generic_region_segment, Jbig2EncodeError, Jbig2GenericSource};
+
 /// Segment types (T.88 7.3, Table 34) this decoder distinguishes by name.
 mod kind {
     pub const SYMBOL_DICTIONARY: u8 = 0;
@@ -5135,10 +5139,6 @@ mod tests {
         bitmap
     }
 
-    fn rows_identical(bitmap: &Bitmap, a: u32, b: u32) -> bool {
-        (0..bitmap.width).all(|x| bitmap.get(x as i32, a as i32) == bitmap.get(x as i32, b as i32))
-    }
-
     /// The exact inverse of [`decode_arithmetic`], through the encoder Annex
     /// H.2 pins.
     ///
@@ -5242,8 +5242,9 @@ mod tests {
         data
     }
 
-    /// The encoder's side of 6.3, written the way [`encode_arithmetic`] is:
-    /// contexts come off the finished target rather than off a half-built one.
+    /// The encoder's side of 6.3, written the way [`crate::jbig2_generic_encode`]
+    /// is: contexts come off the finished target rather than off a half-built
+    /// one.
     ///
     /// That is the same thing here because every *destination-layer* position
     /// either template names — `REFINE_0_HERE`, `REFINE_1_HERE` and
@@ -6356,30 +6357,36 @@ mod tests {
         );
     }
 
-    fn encode_arithmetic(
-        source: &Bitmap,
+    /// One generic region's segment data, from the promoted encoder.
+    ///
+    /// This used to be a test-only `encode_arithmetic` beside a hand-written
+    /// 7.4.6 header, and both are now [`crate::jbig2_generic_region_segment`]
+    /// — which is the promotion the roadmap's image-encoder row asked for.
+    /// The fixtures below are therefore held to the *shipped* encoder, so a
+    /// defect in it cannot pass by agreeing with a second copy that only tests
+    /// could reach.
+    fn generic_region_data(
+        rows: &[&str],
         template: u8,
         tpgdon: bool,
-        at: &[(i32, i32); 4],
+        at: [(i32, i32); 4],
     ) -> Vec<u8> {
-        let mut encoder = MqEncoder::new(1 << template_bits(template));
-        let mut ltp = 0u8;
-        for y in 0..source.height {
-            if tpgdon {
-                let typical = y > 0 && rows_identical(source, y - 1, y);
-                let sltp = u8::from(typical != (ltp == 1));
-                encoder.encode_at(tpgdon_context(template), sltp);
-                ltp ^= sltp;
-                if ltp == 1 {
-                    continue;
-                }
-            }
-            for x in 0..source.width {
-                let cx = context(source, template, at, x as i32, y as i32);
-                encoder.encode_at(cx, source.get(x as i32, y as i32) as u8);
-            }
-        }
-        encoder.flush()
+        let source = bitmap_from(rows);
+        crate::jbig2_generic_region_segment(
+            &crate::Jbig2GenericSource {
+                width: source.width,
+                height: source.height,
+                template,
+                tpgdon,
+                at: at.map(|(x, y)| (x as i8, y as i8)),
+                stride: source.stride,
+                data: &source.bits,
+            },
+            0,
+            0,
+            0,
+        )
+        .expect("a test picture is a region")
     }
 
     /// A one-page embedded stream carrying one generic region at the origin.
@@ -6390,21 +6397,7 @@ mod tests {
         at: [(i32, i32); 4],
     ) -> Vec<u8> {
         let source = bitmap_from(rows);
-        let mut data = Vec::new();
-        // 7.4.1, the region segment information field.
-        data.extend_from_slice(&source.width.to_be_bytes());
-        data.extend_from_slice(&source.height.to_be_bytes());
-        data.extend_from_slice(&0u32.to_be_bytes());
-        data.extend_from_slice(&0u32.to_be_bytes());
-        data.push(0); // OR
-                      // 7.4.6.2, the generic region flags.
-        data.push((u8::from(tpgdon) << 3) | (template << 1));
-        for (dx, dy) in at.iter().take(if template == 0 { 4 } else { 1 }) {
-            data.push(*dx as u8);
-            data.push(*dy as u8);
-        }
-        data.extend(encode_arithmetic(&source, template, tpgdon, &at));
-
+        let data = generic_region_data(rows, template, tpgdon, at);
         let info = page_info(source.width, source.height, 0);
         let mut stream = header(0, kind::PAGE_INFORMATION, 1, &info);
         stream.extend(header(1, kind::IMMEDIATE_GENERIC_REGION, 1, &data));
@@ -6964,6 +6957,166 @@ mod tests {
         );
     }
 
+    /// The region segment data of whichever generic region a page of
+    /// [`ANNEX_H`] carries, split into its 7.4.6 fields.
+    ///
+    /// Lifted out of the one authoritative copy of the annex rather than
+    /// transcribed a second time, for the reason [`ANNEX_H`]'s own header
+    /// gives: a sub-stream that disagreed with the whole would be a
+    /// transcription error nothing could catch.
+    fn annex_h_region_fields(page: &[u8]) -> (RegionInfo, u8, Vec<u8>) {
+        let mut warnings = Vec::new();
+        let segments = segments(page, &mut warnings);
+        let segment = segments
+            .iter()
+            .find(|segment| {
+                matches!(
+                    segment.kind,
+                    kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
+                )
+            })
+            .expect("the page carries a generic region");
+        let mut reader = Reader::new(segment.data);
+        let info = RegionInfo::read(&mut reader).expect("seventeen bytes of 7.4.1");
+        let flags = reader.u8().expect("7.4.6.2's flags");
+        (info, flags, reader.rest().to_vec())
+    }
+
+    /// **ITU-T T.6, adjudicated by ITU-T T.88.** Annex H.1's page 1 codes the
+    /// frame as MMR — T.6 two-dimensional coding with none of 7.4.6's framing
+    /// around it (T.88 6.2.6) — and segment 4 carries the 26 bytes it produced.
+    /// The same annex publishes the picture as [`ANNEX_H_REGION`].
+    ///
+    /// **Both halves of this comparison are the standard's**, which is the
+    /// whole point. A round trip through [`crate::ccitt_decode`] would say
+    /// only that an encoder and a decoder written in the same room agree; this
+    /// says the encoder emits the bits a body that is not this repository
+    /// emitted for a bitmap that body also published. Every part of T.6 §2.2
+    /// that the frame reaches is pinned at once: pass mode (the two black rows
+    /// below the frame's interior), horizontal mode with its two run-length
+    /// codes (the frame's first row and the first interior row), vertical mode
+    /// V(0) (every repeated row), the imaginary all-white reference line of
+    /// §2.2.1, and §2.2.5.1's rule that the first run on a line is measured
+    /// from before the first element.
+    ///
+    /// What it does **not** pin is named rather than left implied: no run here
+    /// is longer than 54 pixels, so not one make-up code of T.4 Table 3a or 3b
+    /// is exercised by these bytes. Those are held by
+    /// [`super::super::ccitt::tests::the_run_tables_are_itu_t_t_4_s_own`],
+    /// which asserts every entry against the published tables directly, and by
+    /// the long-run round trips beside it.
+    ///
+    /// EOFB is off because the annex's segment carries none: T.88 6.2.6 gives
+    /// the row count in the region header, so the terminator has nothing to
+    /// say. The trailing four zero bits of the last byte are §2.4.1.2's pad.
+    #[test]
+    fn annex_h_mmr_region_re_encodes_to_the_published_bytes() {
+        let (info, flags, published) = annex_h_region_fields(&ANNEX_H[PAGE_1]);
+        assert_eq!(flags & 0x01, 1, "page 1's generic region is the MMR one");
+        assert_eq!((info.width, info.height), (54, 44));
+
+        let source = bitmap_from(&ANNEX_H_REGION);
+        let coded = crate::ccitt_g4_encode(&crate::CcittSource {
+            columns: info.width,
+            rows: info.height,
+            // JBIG2's own sense, 6.2.2, which is what `bitmap_from` packs.
+            black_is_1: true,
+            stride: source.stride,
+            end_of_block: false,
+            data: &source.bits,
+        })
+        .expect("the annex's own dimensions describe an image");
+
+        assert_eq!(
+            coded, published,
+            "T.88 Annex H.1 segment 4 did not re-encode; the G4 coder is not \
+             T.6's and no round trip built on it means anything"
+        );
+    }
+
+    /// **ITU-T T.88 Annex H.1 segment 11, from the other side.**
+    ///
+    /// The companion to [`Self::annex_h_generic_region_decodes_to_its_published_bitmap`]
+    /// and the strongest thing available to this row: the annex publishes a
+    /// bitmap *and* the nine bytes its own encoder produced for that bitmap at
+    /// template 0 with TPGDON on and the nominal AT pixels. Encoding the
+    /// published picture and comparing against the published bytes leaves an
+    /// encoder nowhere to hide — the MQ registers, `BYTEOUT`'s carry and 0xFF
+    /// stuffing, `FLUSH`'s trailing `FF AC`, *which* pixels template 0 reads,
+    /// and 6.2.5.7's SLTP rule are all in them.
+    ///
+    /// That last one is worth naming, because it is the one place T.88 leaves
+    /// an encoder a legitimate choice. TPGDON codes one decision a row saying
+    /// whether this row repeats the last; an encoder is *permitted* to answer
+    /// "no" on a row that does repeat and code its pixels out in full, and the
+    /// result decodes to the same picture. It would not produce these bytes.
+    /// So this test pins the canonical choice — toggle whenever typicality
+    /// changes — and what makes that legitimate to assert is that the annex
+    /// made it too, on this image, at this template.
+    ///
+    /// **What these bytes do not pin is the context numbering, and that was
+    /// measured rather than argued.** Two injections on 15 September 2026,
+    /// each run as `cargo test --no-fail-fast -p tinker-pdf-filters`:
+    /// transposing template 0's context bits 8 and 7 — `p(-1, -1)` and
+    /// `p(0, -1)` — and reading `p(-2, -2)` where Figure 8 draws `p(-2, -1)`.
+    /// Both left these nine bytes unchanged, left
+    /// [`Self::annex_h_generic_region_decodes_to_its_published_bitmap`]
+    /// passing, and left every round trip in this module passing. Each fired
+    /// exactly one test in the workspace:
+    /// [`Self::template_context_bits_match_the_figures`].
+    ///
+    /// The first is general and the second is this picture's: `mq.rs` records
+    /// that a context index is only a label into an array whose slots all
+    /// start identical, so *any* bijection of the numbering is invisible to a
+    /// coder — and a published bitstream is what a coder produced, so it
+    /// cannot see one either. The second is narrower: the annex's frame
+    /// repeats its rows, so the two neighbours hold the same bit everywhere
+    /// TPGDON leaves a row to code at all.
+    ///
+    /// So the division of labour is worth stating plainly, because the
+    /// temptation is to think one published datastream settles everything:
+    /// **the annex's bytes adjudicate the coder, the SLTP rule and the pixel
+    /// set; T.88's Figures 8 to 11 adjudicate the numbering**, transcribed in
+    /// [`Self::template_context_bits_match_the_figures`], which says the same
+    /// thing from the decoder's side and was right before this test existed.
+    #[test]
+    fn annex_h_generic_region_re_encodes_to_the_published_bytes() {
+        let (info, flags, mut published) = annex_h_region_fields(&ANNEX_H[PAGE_2]);
+        assert_eq!(flags, 0x08, "template 0, TPGDON on, not MMR");
+        assert_eq!((info.width, info.height), (54, 44));
+
+        // 7.4.6.3's four AT pairs precede the coded data at template 0, and
+        // the annex writes the nominal positions out in full.
+        let at: Vec<(i32, i32)> = published
+            .drain(..8)
+            .collect::<Vec<u8>>()
+            .chunks(2)
+            .map(|pair| (i32::from(pair[0] as i8), i32::from(pair[1] as i8)))
+            .collect();
+        assert_eq!(
+            at, NOMINAL_AT[0],
+            "the annex writes 6.2.5.3's own positions"
+        );
+
+        let source = bitmap_from(&ANNEX_H_REGION);
+        let coded = crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+            width: info.width,
+            height: info.height,
+            template: 0,
+            tpgdon: true,
+            at: NOMINAL_AT[0].map(|(x, y)| (x as i8, y as i8)),
+            stride: source.stride,
+            data: &source.bits,
+        })
+        .expect("the annex's own parameters describe a region");
+
+        assert_eq!(
+            coded, published,
+            "T.88 Annex H.1 segment 11 did not re-encode; template 0's pixel \
+             set, the SLTP rule or the MQ coder is not the standard's"
+        );
+    }
+
     /// The region lands where 7.4.1 says, not at the origin.
     #[test]
     fn a_region_is_composited_at_the_coordinates_its_segment_names() {
@@ -7190,6 +7343,15 @@ mod tests {
     /// still decoded to its published picture byte for byte, and every
     /// round-trip below still passed. Only this assertion moved.
     ///
+    /// **Re-measured 15 September 2026, now that the encoder is shipped and
+    /// [`Self::annex_h_generic_region_re_encodes_to_the_published_bytes`]
+    /// compares against the annex's own nine bytes from the other side.** The
+    /// conclusion is unchanged and that is the finding: transposing bits 8 and
+    /// 7, and reading `p(-2, -2)` where the figure draws `p(-2, -1)`, each
+    /// still fired this test and nothing else in the workspace. A published
+    /// bitstream is produced by a coder, so it is blind to a relabelling in
+    /// exactly the way a round trip is.
+    ///
     /// That does not make the order cosmetic, because 6.2.5.7's
     /// pseudo-context is a *literal* slot number. Once TPGDON is on, the SLTP
     /// decision shares the array with whichever neighbourhood the numbering
@@ -7335,6 +7497,279 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **7.4.1 and 7.4.6.2, byte for byte**, on a region that is neither
+    /// square nor at the origin.
+    ///
+    /// Every field of this header is a big-endian `u32` and every one of them
+    /// has a wrong version that decodes *something*. A byte-swapped width on a
+    /// 40 by 24 region is 671 088 640 and is refused loudly; a byte-swapped
+    /// width on a **square** region is the same number the right one is, and a
+    /// transposed picture comes back with no complaint at all. So the region
+    /// here is deliberately oblong and deliberately displaced, and the bytes
+    /// are asserted as bytes rather than only round-tripped.
+    ///
+    /// The AT count is asserted the same way and for the same reason: 7.4.6.3
+    /// writes four pairs at template 0 and one at every other, and writing the
+    /// wrong number puts the coded data six bytes out — which decodes as noise
+    /// rather than as a slightly wrong picture, and is therefore easy to
+    /// mistake for a coder defect.
+    #[test]
+    fn the_region_segment_header_is_the_fields_seven_four_one_names() {
+        let source = bitmap_from(&SPECIMEN);
+        let region = |template: u8, tpgdon: bool| {
+            crate::jbig2_generic_region_segment(
+                &crate::Jbig2GenericSource {
+                    width: source.width,
+                    height: source.height,
+                    template,
+                    tpgdon,
+                    at: NOMINAL_AT[template as usize].map(|(x, y)| (x as i8, y as i8)),
+                    stride: source.stride,
+                    data: &source.bits,
+                },
+                5,
+                7,
+                // 7.4.1.5's REPLACE, and the high bits of the byte are not
+                // part of the field.
+                0xF4,
+            )
+            .expect("a specimen is a region")
+        };
+
+        let data = region(0, true);
+        assert_eq!(
+            &data[..18],
+            &[
+                0, 0, 0, 40, // width
+                0, 0, 0, 24, // height
+                0, 0, 0, 5, // x
+                0, 0, 0, 7,    // y
+                4,    // REPLACE, masked out of 0xF4
+                0x08, // template 0, TPGDON on, MMR off
+            ],
+            "the seventeen bytes of 7.4.1 and the flags of 7.4.6.2"
+        );
+        assert_eq!(
+            &data[18..26],
+            &[3, 0xFF, 0xFD, 0xFF, 2, 0xFE, 0xFE, 0xFE],
+            "template 0 writes four AT pairs"
+        );
+
+        // Template 2's flags are `template << 1` with TPGDON clear, and it
+        // writes one pair.
+        let data = region(2, false);
+        assert_eq!(data[17], 0x04, "template 2, TPGDON off");
+        assert_eq!(&data[18..20], &[2, 0xFF], "one AT pair at template 2");
+
+        // And the whole thing is what this crate's own region reader consumes,
+        // at the coordinates it named.
+        let mut warnings = Vec::new();
+        let data = region(0, true);
+        let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
+            kind: kind::IMMEDIATE_GENERIC_REGION,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let (info, bitmap) =
+            generic_region(&segment, 1 << 20, &mut warnings).expect("the region decodes");
+        assert_eq!(
+            (info.width, info.height, info.x, info.y, info.op),
+            (40, 24, 5, 7, 4)
+        );
+        assert_eq!(picture(&bitmap.bits, bitmap.width, bitmap.height), SPECIMEN);
+    }
+
+    /// A stride wider than a row is padding and is not read as pixels.
+    ///
+    /// The same test `png/encode.rs` and `ccitt.rs` each carry, and it has to
+    /// be built rather than found for the same reason: [`Bitmap`] packs at
+    /// exactly `width.div_ceil(8)`, so every buffer this crate makes has the
+    /// stride equal to the row and a version that ignored the field would be
+    /// invisible here forever.
+    ///
+    /// The padding bytes are `0xFF` — black in JBIG2's sense — so a version
+    /// that read them would not merely shift the picture, it would fill it.
+    #[test]
+    fn a_padded_stride_is_not_read_as_pixels() {
+        let rows = ["#..##...", "..####..", "###...##"];
+        let packed: Vec<u8> = rows
+            .iter()
+            .map(|row| {
+                row.chars()
+                    .enumerate()
+                    .fold(0u8, |byte, (x, c)| byte | (u8::from(c == '#') << (7 - x)))
+            })
+            .collect();
+        let mut padded = Vec::new();
+        for byte in &packed {
+            padded.push(*byte);
+            padded.extend_from_slice(&[0xFF, 0xFF]);
+        }
+
+        let base = crate::Jbig2GenericSource {
+            width: 8,
+            height: 3,
+            template: 0,
+            tpgdon: false,
+            at: NOMINAL_AT[0].map(|(x, y)| (x as i8, y as i8)),
+            stride: 1,
+            data: &packed,
+        };
+        let tight = crate::jbig2_generic_encode(&base).expect("well formed");
+        let loose = crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+            stride: 3,
+            data: &padded,
+            ..base
+        })
+        .expect("well formed");
+        assert_eq!(tight, loose, "the two padding bytes a row are not pixels");
+    }
+
+    /// The bits past `width` in a row's last byte are outside the region, and
+    /// 6.2.5.2 says every position outside it reads 0 — so two rasters that
+    /// differ only there code identically, and a row of five pixels that ends
+    /// in three set padding bits is not a row that repeats itself.
+    ///
+    /// The second half is what makes this more than tidiness: TPGDON's
+    /// typicality test compares packed bytes, and dirty padding would make two
+    /// identical rows look different and cost the compression TPGDON exists
+    /// for — silently, because the picture would still be right.
+    #[test]
+    fn padding_bits_past_the_width_are_outside_the_region() {
+        let clean = [0b1010_1000u8, 0b1010_1000];
+        let dirty = [0b1010_1111u8, 0b1010_1001];
+        let base = crate::Jbig2GenericSource {
+            width: 5,
+            height: 2,
+            template: 0,
+            tpgdon: true,
+            at: NOMINAL_AT[0].map(|(x, y)| (x as i8, y as i8)),
+            stride: 1,
+            data: &clean,
+        };
+        assert_eq!(
+            crate::jbig2_generic_encode(&base).expect("well formed"),
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+                data: &dirty,
+                ..base
+            })
+            .expect("well formed"),
+        );
+    }
+
+    /// The four refusals, each on the input that earns it.
+    #[test]
+    fn a_region_that_is_not_an_image_is_refused_rather_than_coded() {
+        let data = [0u8; 64];
+        let base = crate::Jbig2GenericSource {
+            width: 8,
+            height: 2,
+            template: 0,
+            tpgdon: false,
+            at: NOMINAL_AT[0].map(|(x, y)| (x as i8, y as i8)),
+            stride: 1,
+            data: &data,
+        };
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource { width: 0, ..base }),
+            Err(crate::Jbig2EncodeError::BadDimensions {
+                width: 0,
+                height: 2
+            })
+        );
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource { height: 0, ..base }),
+            Err(crate::Jbig2EncodeError::BadDimensions {
+                width: 8,
+                height: 0
+            })
+        );
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+                template: 4,
+                ..base
+            }),
+            Err(crate::Jbig2EncodeError::BadTemplate(4)),
+            "there are four figures and no fifth"
+        );
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+                width: 32,
+                stride: 3,
+                ..base
+            }),
+            Err(crate::Jbig2EncodeError::ShortStride {
+                stride: 3,
+                row_bytes: 4
+            })
+        );
+        let short = [0u8; 1];
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+                data: &short,
+                ..base
+            }),
+            Err(crate::Jbig2EncodeError::ShortData { have: 1, need: 2 })
+        );
+        // A buffer that stops exactly at the last pixel is enough, and the
+        // segment builder refuses exactly what the coder refuses.
+        let exact = [0u8; 2];
+        assert!(crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+            data: &exact,
+            ..base
+        })
+        .is_ok());
+        assert_eq!(
+            crate::jbig2_generic_region_segment(
+                &crate::Jbig2GenericSource {
+                    template: 4,
+                    ..base
+                },
+                0,
+                0,
+                0
+            ),
+            Err(crate::Jbig2EncodeError::BadTemplate(4))
+        );
+    }
+
+    /// **Typical prediction earns its bits.** With TPGDON on, a picture whose
+    /// rows repeat codes to less than the same picture coded without it, and
+    /// both decode to the same pixels.
+    ///
+    /// This is the property 6.2.5.7 exists for, and it is the one a wrong SLTP
+    /// rule breaks without breaking the picture: an encoder that answered
+    /// "this row is new" on every row would still round-trip — TPGDON would
+    /// simply cost one decision a row and save nothing — so only a size
+    /// comparison sees it. The direction it is asserted in matters: "smaller"
+    /// is the claim, and a fixed byte count would pin the coder rather than
+    /// the rule.
+    #[test]
+    fn typical_prediction_shortens_a_picture_whose_rows_repeat() {
+        let rows: Vec<String> = (0..40)
+            .map(|y| {
+                if y < 4 {
+                    "#.#.#.#.#.#.#.#.".to_string()
+                } else {
+                    "##....##....##..".to_string()
+                }
+            })
+            .collect();
+        let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let with = generic_region_data(&borrowed, 0, true, NOMINAL_AT[0]);
+        let without = generic_region_data(&borrowed, 0, false, NOMINAL_AT[0]);
+        assert!(
+            with.len() < without.len(),
+            "typical prediction cost bytes instead of saving them: {} against {}",
+            with.len(),
+            without.len()
+        );
+        assert_eq!(round_trip(&borrowed, 0, true, NOMINAL_AT[0]), borrowed);
     }
 
     /// A region one row tall, and one a single column wide.

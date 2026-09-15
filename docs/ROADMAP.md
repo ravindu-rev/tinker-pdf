@@ -247,9 +247,11 @@ a host seam like `FontProvider` and not an engine; **container writing** — CBZ
 XPS and EPUB are read-only conversions; **an archival profile on
 `WriteOptions`** — `rewrite` returns `Vec<u8>` with nowhere to put a refusal,
 which is why the builder has one and the rewriter does not
-([design/pdfa.md](design/pdfa.md)); **image encoders beyond deflate** — the
-engine decodes JPEG, CCITT, JBIG2 and JPX and writes none, and partial image
-redaction waits on this; **rendering intents** — measured and declined, since
+([design/pdfa.md](design/pdfa.md)); **image encoders the *writer* reaches for**
+— `tinker-pdf-filters` writes PNG, CCITT G4 and JBIG2 generic regions as of
+15 September 2026, and the document writer calls none of them, so partial image
+redaction still waits on the decision of when to choose a codec rather than on
+a codec; **rendering intents** — measured and declined, since
 no corpus file sets an ExtGState `/RenderingIntent` and five carry `ri`
 ([design/icc.md](design/icc.md)); **variation-aware, vertical, AAT and
 Graphite shaping, and `JSTF`** — deferred under ruling 3
@@ -294,7 +296,7 @@ changes in the commit that schedules it.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| Image encoders: JPEG; CCITT G4; JBIG2 generic region | decoders only for these three, and the writer never re-encodes image bytes by contract. PNG is the one image format with an encoder — `Bitmap::to_png`, `tpdf render` and `tinker_pdf_filters::png_encode` (September 2026) | a baseline JPEG encoder held to this decoder and a published DCT vector set; a G4 encoder held to the T.4/T.6 coder the TIFF tests already carry; a JBIG2 encoder promoted from the test-only `MqEncoder` | M; S; M |
+| Image encoder: JPEG | **The other two landed 15 September 2026**, with one exit criterion changed and the change stated below: `tinker_pdf_filters::ccitt_g4_encode` is T.6 two-dimensional coding (`/K` negative, optional EOFB, `/BlackIs1` either way) and `jbig2_generic_encode` / `jbig2_generic_region_segment` are T.88 6.2.5's arithmetic generic region at all four templates with TPGDON, over an `MqEncoder` that is no longer `#[cfg(test)]`. **Nothing calls either**, which is a writer contract and not a missing coder — the writer still never re-encodes image bytes. JPEG is a decoder only. PNG stays the one image format the facade projects — `Bitmap::to_png`, `tpdf render` and `png_encode` (September 2026) | a baseline JPEG encoder held to this decoder and a published DCT vector set | M |
 | A PNG *read back* by `pdfcmp` | `tpdf render` writes `.png` and `pdfcmp` reads `.pnm` and `.pdf`, so its output no longer feeds the comparator. `xtask`'s `TOOLS` table keeps a tool to the facade, and the facade publishes an encoder and no decoder | either a facade entry point that turns PNG bytes into a `Bitmap`, or an argued exception in `TOOLS`; the decision belongs to whichever is written first | S |
 | Region and tile rendering on the facade | `RenderOptions` carries scale, format, cancel and annotations, and no clip. Ruling 5's translated viewport is the mechanism — `Renderer::new` already takes an arbitrary base matrix and an arbitrarily sized canvas — but **the byte-equal guard ruling 5 describes does not exist**: there is no tile or region test in the tree, and the one nearby citation (`crates/tinker-pdf-render/src/lib.rs`) cites ruling 7. Ruling 5 is corrected to say the guard is owed | `RenderOptions::region`; a tile byte-equal to the full-page subregion, which is the test ruling 5 has been claiming since it was written | S |
 | CMYK page output; a premultiplied-alpha option; an anti-aliasing switch | `CmykA8` is internal to transparency groups; alpha is straight only; no quality knob | each a `RenderOptions` field with its own fingerprint; the switch changes no determinism claim | S each |
@@ -302,6 +304,36 @@ changes in the commit that schedules it.
 | A retained page — a display list replayed at any scale | every render re-interprets the content stream; `tinker-pdf-svg`'s `Scene` is the shape. **The recording `Device` this row asks for has landed** — `tinker-pdf-content`'s `record.rs`, promoted out of the interpreter's test module as a prerequisite rather than as a capability, so it has no row of its own; five other rows share it ([content-and-text](features/content-and-text.md)). Nothing replays it yet, which is all that is left of this row | a replay byte-equal to a direct render at every scale the fingerprints use | M |
 | PDF to SVG | SVG is input only | a `Device` that writes SVG 1.1, held by reading its output back through `tinker-pdf-svg` | M |
 | PostScript and PCL output | none | decision: print pipelines are the only consumer | decision |
+
+#### The G4 exit criterion changed, and the change is the point
+
+This row asked for "a G4 encoder held to **the T.4/T.6 coder the TIFF tests
+already carry**". That criterion cannot be met and should never have been
+written: `tiff/tests.rs`'s coder is written in this repository, its own header
+says there is no `.tif` in the tree and none is fetched, and holding an encoder
+this project wrote to a coder this project wrote is the failure
+[rulings.md](rulings.md) 13 and the self-round-trip rule exist to name. The
+coder was still the right thing to promote *from* — it is where the code came
+from — but not the right thing to be judged *by*.
+
+What it was held to instead, both third-party:
+
+- **ITU-T T.4 Tables 2, 3a, 3b and 4** — fetched 15 September 2026, read twice
+  (text layer, then rendered pages at 170 dpi), all 195 run-length entries
+  asserted in `ccitt::tests::the_run_tables_are_itu_t_t_4_s_own`. This is the
+  only thing in the tree that reaches a make-up code, because no fixture has a
+  run longer than 63.
+- **ITU-T T.88 Annex H.1 segment 4** — 26 bytes of MMR, which 6.2.6 says *is*
+  T.6, coding a bitmap the same annex publishes as a picture. Both halves are
+  the standard's, so re-encoding the picture and comparing with the bytes is
+  adjudicated end to end by a body that is not this repository.
+
+The JBIG2 criterion was met as written, and its adjudicator is the same annex's
+segment 11 — nine published bytes for the same picture at template 0. One limit
+found in the doing and recorded at the test: **no published bitstream can pin
+the context numbering**, because a context index is only a label into an array
+whose slots all start identical, so a coder's output is blind to any bijection
+of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 
 ### Text
 

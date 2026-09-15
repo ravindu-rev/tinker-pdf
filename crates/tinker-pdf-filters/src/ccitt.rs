@@ -22,6 +22,10 @@
 
 use crate::Warning;
 
+mod encode;
+
+pub use encode::{g4_encode, CcittEncodeError, CcittSource};
+
 /// How the data is coded (7.4.6, Table 11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CcittParams {
@@ -1313,5 +1317,526 @@ mod tests {
         };
         let (pixels, _) = decode(&[0xFF, 0x00], &params, 1 << 16);
         assert!(pixels.len() <= 1);
+    }
+
+    // ---- The encoder (T.6 §2.2) ---------------------------------------
+
+    /// **ITU-T T.4 Table 2, transcribed from the Recommendation and not from
+    /// `ccitt.rs`.** The terminating codes for white runs of 0 to 63.
+    ///
+    /// The Recommendation was fetched from the ITU in September 2026 and every
+    /// entry below was read **twice**: once out of the PDF's text layer, once
+    /// off the rendered page at 170 dpi. The two readings agree on all 195
+    /// entries of the five tables here, which is the check the tables needed —
+    /// one measurement in this repository found 37 wrong entries out of 182 in
+    /// tables drafted in a single pass.
+    ///
+    /// These exist as bit *strings* rather than as `(length, code)` pairs on
+    /// purpose. The pair form is [`WHITE_TERM`]'s own, and a transcription in
+    /// the same shape invites copying rather than reading: a leading zero is
+    /// invisible in `0x07` and decisive in `000111`.
+    #[rustfmt::skip]
+    const T4_WHITE_TERM: [&str; 64] = [
+        "00110101", "000111", "0111", "1000", "1011", "1100", "1110", "1111", "10011", "10100",
+        "00111", "01000", "001000", "000011", "110100", "110101", "101010", "101011", "0100111",
+        "0001100", "0001000", "0010111", "0000011", "0000100", "0101000", "0101011", "0010011",
+        "0100100", "0011000", "00000010", "00000011", "00011010", "00011011", "00010010",
+        "00010011", "00010100", "00010101", "00010110", "00010111", "00101000", "00101001",
+        "00101010", "00101011", "00101100", "00101101", "00000100", "00000101", "00001010",
+        "00001011", "01010010", "01010011", "01010100", "01010101", "00100100", "00100101",
+        "01011000", "01011001", "01011010", "01011011", "01001010", "01001011", "00110010",
+        "00110011", "00110100",
+    ];
+
+    /// ITU-T T.4 Table 2, the black column.
+    #[rustfmt::skip]
+    const T4_BLACK_TERM: [&str; 64] = [
+        "0000110111", "010", "11", "10", "011", "0011", "0010", "00011", "000101", "000100",
+        "0000100", "0000101", "0000111", "00000100", "00000111", "000011000", "0000010111",
+        "0000011000", "0000001000", "00001100111", "00001101000", "00001101100", "00000110111",
+        "00000101000", "00000010111", "00000011000", "000011001010", "000011001011",
+        "000011001100", "000011001101", "000001101000", "000001101001", "000001101010",
+        "000001101011", "000011010010", "000011010011", "000011010100", "000011010101",
+        "000011010110", "000011010111", "000001101100", "000001101101", "000011011010",
+        "000011011011", "000001010100", "000001010101", "000001010110", "000001010111",
+        "000001100100", "000001100101", "000001010010", "000001010011", "000000100100",
+        "000000110111", "000000111000", "000000100111", "000000101000", "000001011000",
+        "000001011001", "000000101011", "000000101100", "000001011010", "000001100110",
+        "000001100111",
+    ];
+
+    /// ITU-T T.4 Table 3a, the white column: make-up codes for 64 to 1 728.
+    #[rustfmt::skip]
+    const T4_WHITE_MAKEUP: [&str; 27] = [
+        "11011", "10010", "010111", "0110111", "00110110", "00110111", "01100100", "01100101",
+        "01101000", "01100111", "011001100", "011001101", "011010010", "011010011", "011010100",
+        "011010101", "011010110", "011010111", "011011000", "011011001", "011011010", "011011011",
+        "010011000", "010011001", "010011010", "011000", "010011011",
+    ];
+
+    /// ITU-T T.4 Table 3a, the black column.
+    #[rustfmt::skip]
+    const T4_BLACK_MAKEUP: [&str; 27] = [
+        "0000001111", "000011001000", "000011001001", "000001011011", "000000110011",
+        "000000110100", "000000110101", "0000001101100", "0000001101101", "0000001001010",
+        "0000001001011", "0000001001100", "0000001001101", "0000001110010", "0000001110011",
+        "0000001110100", "0000001110101", "0000001110110", "0000001110111", "0000001010010",
+        "0000001010011", "0000001010100", "0000001010101", "0000001011010", "0000001011011",
+        "0000001100100", "0000001100101",
+    ];
+
+    /// ITU-T T.4 Table 3b: make-up codes for 1 792 to 2 560, shared by both
+    /// colours.
+    #[rustfmt::skip]
+    const T4_EXT_MAKEUP: [&str; 13] = [
+        "00000001000", "00000001100", "00000001101", "000000010010", "000000010011",
+        "000000010100", "000000010101", "000000010110", "000000010111", "000000011100",
+        "000000011101", "000000011110", "000000011111",
+    ];
+
+    /// The bit string a `(length, code, run)` row of one of this module's
+    /// tables spells, so the two forms can be compared at all.
+    fn spelled(entry: RunCode) -> String {
+        let (length, code, _) = entry;
+        (0..length)
+            .rev()
+            .map(|index| if (code >> index) & 1 == 1 { '1' } else { '0' })
+            .collect()
+    }
+
+    /// **The tables both directions share are ITU-T T.4's own.**
+    ///
+    /// This is the test that makes sharing them defensible. `encode.rs` emits
+    /// from the same five arrays [`read_run`] reads, which is the right
+    /// engineering — the two directions must agree entry for entry or nothing
+    /// round-trips, and a second copy is a second thing to get wrong — but it
+    /// means a wrong entry cancels between them and every round trip in this
+    /// file still passes. Nothing in the tree notices except this, which
+    /// compares against a transcription of the Recommendation rather than
+    /// against either implementation.
+    ///
+    /// The run *lengths* are asserted too, and not only the code words: a
+    /// table whose rows are right but shifted by one is the defect a spot
+    /// check misses.
+    #[test]
+    fn the_run_tables_are_itu_t_t_4_s_own() {
+        for (run, expected) in T4_WHITE_TERM.iter().enumerate() {
+            assert_eq!(
+                &spelled(WHITE_TERM[run]),
+                expected,
+                "white terminating {run}"
+            );
+            assert_eq!(
+                WHITE_TERM[run].2 as usize, run,
+                "white terminating row {run}"
+            );
+        }
+        for (run, expected) in T4_BLACK_TERM.iter().enumerate() {
+            assert_eq!(
+                &spelled(BLACK_TERM[run]),
+                expected,
+                "black terminating {run}"
+            );
+            assert_eq!(
+                BLACK_TERM[run].2 as usize, run,
+                "black terminating row {run}"
+            );
+        }
+        for (index, expected) in T4_WHITE_MAKEUP.iter().enumerate() {
+            assert_eq!(
+                &spelled(WHITE_MAKEUP[index]),
+                expected,
+                "white make-up {index}"
+            );
+            assert_eq!(WHITE_MAKEUP[index].2 as usize, (index + 1) * 64);
+        }
+        for (index, expected) in T4_BLACK_MAKEUP.iter().enumerate() {
+            assert_eq!(
+                &spelled(BLACK_MAKEUP[index]),
+                expected,
+                "black make-up {index}"
+            );
+            assert_eq!(BLACK_MAKEUP[index].2 as usize, (index + 1) * 64);
+        }
+        for (index, expected) in T4_EXT_MAKEUP.iter().enumerate() {
+            assert_eq!(
+                &spelled(EXT_MAKEUP[index]),
+                expected,
+                "extended make-up {index}"
+            );
+            assert_eq!(EXT_MAKEUP[index].2 as usize, 1792 + index * 64);
+        }
+    }
+
+    /// Packs `pattern` — '0' and '1', anything else ignored — as one row of
+    /// pixels, 1 for black, and codes it.
+    fn encode_rows(rows: &[&str], end_of_block: bool) -> Vec<u8> {
+        let columns = rows[0].len();
+        let stride = row_bytes(columns);
+        let mut data = vec![0u8; stride * rows.len()];
+        for (y, row) in rows.iter().enumerate() {
+            for (x, cell) in row.chars().enumerate() {
+                if cell == '#' {
+                    data[y * stride + (x >> 3)] |= 0x80 >> (x & 7);
+                }
+            }
+        }
+        g4_encode(&CcittSource {
+            columns: columns as u32,
+            rows: rows.len() as u32,
+            black_is_1: true,
+            stride,
+            end_of_block,
+            data: &data,
+        })
+        .expect("a well-formed raster")
+    }
+
+    /// One row of `columns` pixels: `white` white pixels, then black to the
+    /// end, coded with no end-of-block.
+    fn encode_one_run(columns: usize, white: usize) -> Vec<u8> {
+        let row: String = (0..columns)
+            .map(|x| if x < white { '.' } else { '#' })
+            .collect();
+        encode_rows(&[&row], false)
+    }
+
+    /// The bits `codes` spell, packed most significant bit first and padded
+    /// with zeros — what [`g4_encode`] should have produced.
+    fn expect_bits(codes: &[&str]) -> Vec<u8> {
+        bits_from(&codes.concat())
+    }
+
+    /// **T.6 §2.2.4 step 2 iii), against T.4's tables directly.**
+    ///
+    /// A run longer than 63 is a make-up code plus a terminating code, and the
+    /// make-up is the one "nearest, not longer" — three separate rules, each of
+    /// which has a plausible wrong version that a round trip cannot see,
+    /// because this crate's decoder sums make-ups and terminating codes in
+    /// whatever order they arrive.
+    ///
+    /// Every expected code word below comes from [`T4_WHITE_TERM`] and its
+    /// neighbours, which are the Recommendation's; nothing here reads the
+    /// tables the encoder emits from.
+    ///
+    /// The four cases are the four ranges the clause distinguishes:
+    /// - 64 exactly: a make-up and a **terminating code for zero**, which is
+    ///   the one an encoder is most likely to drop, because dropping it
+    ///   changes nothing about runs that are not multiples of 64.
+    /// - 1 000: a make-up out of Table 3a and a remainder.
+    /// - 2 000: a make-up out of Table **3b**, which a version that only knew
+    ///   its own colour's table would answer with 1 728 and a remainder of 272
+    ///   — a run length no terminating code can express.
+    /// - 3 000: past 2 623, so Table 3b's note applies and the code opens with
+    ///   a 2 560.
+    #[test]
+    fn a_run_past_sixty_three_is_a_make_up_code_and_a_terminating_code() {
+        // Sixty-four white then black to 200. The black run is 136, which is a
+        // make-up of 128 and a terminating 8.
+        assert_eq!(
+            encode_one_run(200, 64),
+            expect_bits(&[
+                "001",
+                T4_WHITE_MAKEUP[0],
+                T4_WHITE_TERM[0],
+                T4_BLACK_MAKEUP[1],
+                T4_BLACK_TERM[8],
+            ]),
+            "a run of exactly 64 owes a terminating code for a run of zero"
+        );
+
+        // 1 000 white then 1 000 black in a 2 000 pixel row. 960 is the
+        // largest make-up not longer than 1 000.
+        assert_eq!(
+            encode_one_run(2000, 1000),
+            expect_bits(&[
+                "001",
+                T4_WHITE_MAKEUP[14],
+                T4_WHITE_TERM[40],
+                T4_BLACK_MAKEUP[14],
+                T4_BLACK_TERM[40],
+            ]),
+        );
+
+        // 2 000 white then 2 000 black in a 4 000 pixel row. 1 984 is in
+        // Table 3b and 1 728 is the last row of Table 3a.
+        assert_eq!(
+            encode_one_run(4000, 2000),
+            expect_bits(&[
+                "001",
+                T4_EXT_MAKEUP[3],
+                T4_WHITE_TERM[16],
+                T4_EXT_MAKEUP[3],
+                T4_BLACK_TERM[16],
+            ]),
+            "1 984 is nearer to 2 000 than 1 728 and Table 3b is shared"
+        );
+
+        // 3 000 white then 2 000 black in a 5 000 pixel row. 3 000 is past
+        // 2 623, so it opens with 2 560 and codes the remaining 440 by the
+        // ordinary rule: a make-up of 384 and a terminating 56.
+        assert_eq!(
+            encode_one_run(5000, 3000),
+            expect_bits(&[
+                "001",
+                T4_EXT_MAKEUP[12],
+                T4_WHITE_MAKEUP[5],
+                T4_WHITE_TERM[56],
+                T4_EXT_MAKEUP[3],
+                T4_BLACK_TERM[16],
+            ]),
+        );
+    }
+
+    /// Runs of every length up to a full 65 536-pixel row survive the decoder.
+    ///
+    /// This one *is* a self round trip and says so: it proves the encoder and
+    /// this decoder agree, which is worth having because the composition rule
+    /// for a long run has more arithmetic in it than any code word does, and
+    /// worth nothing at all about T.4 — which is what
+    /// [`Self::a_run_past_sixty_three_is_a_make_up_code_and_a_terminating_code`]
+    /// is for.
+    #[test]
+    fn long_runs_survive_the_round_trip() {
+        for white in [
+            0, 1, 63, 64, 65, 127, 1727, 1728, 1729, 2559, 2560, 2623, 2624, 5121,
+        ] {
+            let columns = 65536usize;
+            let coded = encode_one_run(columns, white);
+            let params = CcittParams {
+                k: -1,
+                columns: columns as u32,
+                rows: 1,
+                black_is_1: true,
+                ..CcittParams::default()
+            };
+            let (pixels, warnings) = decode(&coded, &params, 1 << 20);
+            assert!(warnings.is_empty(), "{white}: {warnings:?}");
+            let expected: Vec<usize> = if white == 0 { vec![0] } else { vec![white] };
+            let stride = row_bytes(columns);
+            let mut want = vec![0u8; stride];
+            pack_row(&expected, columns, true, &mut want);
+            assert_eq!(pixels, want, "a white run of {white}");
+        }
+    }
+
+    /// **The picture comes back**, through every mode T.6 §2.2.3 has.
+    ///
+    /// A self round trip, and its whole value is breadth rather than depth:
+    /// the pattern below reaches pass mode, horizontal mode and all seven
+    /// vertical codes, which the two published fixtures between them do not.
+    /// What adjudicates the coding is
+    /// `jbig2::tests::annex_h_mmr_region_re_encodes_to_the_published_bytes`.
+    #[test]
+    fn every_two_dimensional_mode_round_trips() {
+        #[rustfmt::skip]
+        let rows = [
+            "................................",
+            "###############.................",
+            "..###############...............",
+            "....############................",
+            "#..#..#..#..#..#..#..#..#..#..#.",
+            ".#..#..#..#..#..#..#..#..#..#..#",
+            "################################",
+            "................................",
+            "#..............................#",
+            "###.........................####",
+            "..#############################.",
+            "###############################.",
+        ];
+        let coded = encode_rows(&rows, true);
+        let params = CcittParams {
+            k: -1,
+            columns: 32,
+            rows: rows.len() as u32,
+            black_is_1: true,
+            ..CcittParams::default()
+        };
+        let (pixels, warnings) = decode(&coded, &params, 1 << 20);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let picture: Vec<String> = pixels
+            .chunks(4)
+            .map(|row| {
+                (0..32)
+                    .map(|x| {
+                        if (row[x >> 3] >> (7 - (x & 7))) & 1 == 1 {
+                            '#'
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(picture, rows);
+    }
+
+    /// `/EndOfBlock` writes T.6 §2.4.1.1's twenty-four bits and nothing else
+    /// changes.
+    ///
+    /// The two encodings are byte-identical up to the terminator, which is the
+    /// half that would be missed by comparing only the decoded pictures: an
+    /// EOFB written *instead of* the last row's codes rather than after them
+    /// decodes to the same image with `/Rows` set.
+    #[test]
+    fn the_end_of_block_is_two_end_of_line_codes_after_the_last_row() {
+        let rows = ["##..####", "..######"];
+        let plain = encode_rows(&rows, false);
+        let terminated = encode_rows(&rows, true);
+
+        assert!(terminated.starts_with(&plain[..plain.len() - 1]));
+        // The rows occupy 22 bits here, so the EOFB starts mid-byte and the
+        // comparison has to be on bits rather than on bytes.
+        let mut expected = bits_from(&format!(
+            "{}{}",
+            (0..plain.len() * 8)
+                .map(|at| {
+                    let bit = (plain[at / 8] >> (7 - (at % 8))) & 1;
+                    if bit == 1 {
+                        '1'
+                    } else {
+                        '0'
+                    }
+                })
+                .collect::<String>()
+                .trim_end_matches('0'),
+            "000000000001000000000001"
+        ));
+        expected.truncate(terminated.len());
+        assert_eq!(terminated, expected);
+    }
+
+    /// `/BlackIs1` chooses which bit value the encoder reads as black, and
+    /// nothing else — the same two pictures, coded identically.
+    #[test]
+    fn black_is_1_chooses_the_polarity_the_encoder_reads() {
+        let rows = ["##....##", "..####.."];
+        let stride = 1usize;
+        let mut ones = vec![0u8; 2];
+        for (y, row) in rows.iter().enumerate() {
+            for (x, cell) in row.chars().enumerate() {
+                if cell == '#' {
+                    ones[y * stride + (x >> 3)] |= 0x80 >> (x & 7);
+                }
+            }
+        }
+        let zeros: Vec<u8> = ones.iter().map(|byte| !byte).collect();
+
+        let as_ones = g4_encode(&CcittSource {
+            columns: 8,
+            rows: 2,
+            black_is_1: true,
+            stride,
+            end_of_block: true,
+            data: &ones,
+        })
+        .expect("well formed");
+        let as_zeros = g4_encode(&CcittSource {
+            columns: 8,
+            rows: 2,
+            black_is_1: false,
+            stride,
+            end_of_block: true,
+            data: &zeros,
+        })
+        .expect("well formed");
+        assert_eq!(as_ones, as_zeros);
+    }
+
+    /// A stride wider than a row is padding and is not read as pixels.
+    ///
+    /// `png/encode.rs` records why this test has to be built rather than
+    /// found: for every unpadded buffer the stride equals the row length, so a
+    /// version that read the raster as one contiguous run produces identical
+    /// output and nothing in the engine would notice.
+    #[test]
+    fn a_padded_stride_is_not_read_as_pixels() {
+        let packed = [0b1010_0000u8, 0b0101_0000];
+        let padded = [0b1010_0000u8, 0xFF, 0xFF, 0b0101_0000, 0xFF, 0xFF];
+        let tight = g4_encode(&CcittSource {
+            columns: 4,
+            rows: 2,
+            black_is_1: true,
+            stride: 1,
+            end_of_block: true,
+            data: &packed,
+        })
+        .expect("well formed");
+        let loose = g4_encode(&CcittSource {
+            columns: 4,
+            rows: 2,
+            black_is_1: true,
+            stride: 3,
+            end_of_block: true,
+            data: &padded,
+        })
+        .expect("well formed");
+        assert_eq!(tight, loose, "the three padding bytes a row are not pixels");
+    }
+
+    /// The three refusals, each on the buffer that earns it.
+    #[test]
+    fn a_raster_that_is_not_an_image_is_refused_rather_than_coded() {
+        let data = [0u8; 64];
+        let base = CcittSource {
+            columns: 8,
+            rows: 2,
+            black_is_1: true,
+            stride: 1,
+            end_of_block: true,
+            data: &data,
+        };
+        assert_eq!(
+            g4_encode(&CcittSource { columns: 0, ..base }),
+            Err(CcittEncodeError::BadDimensions {
+                columns: 0,
+                rows: 2
+            })
+        );
+        assert_eq!(
+            g4_encode(&CcittSource { rows: 0, ..base }),
+            Err(CcittEncodeError::BadDimensions {
+                columns: 8,
+                rows: 0
+            })
+        );
+        assert_eq!(
+            g4_encode(&CcittSource {
+                columns: (1 << 16) + 1,
+                ..base
+            }),
+            Err(CcittEncodeError::BadDimensions {
+                columns: (1 << 16) + 1,
+                rows: 2
+            }),
+            "past what `decode` will clamp `/Columns` to, so it could not read it back"
+        );
+        assert_eq!(
+            g4_encode(&CcittSource {
+                columns: 32,
+                stride: 3,
+                ..base
+            }),
+            Err(CcittEncodeError::ShortStride {
+                stride: 3,
+                row_bytes: 4
+            })
+        );
+        let short = [0u8; 1];
+        assert_eq!(
+            g4_encode(&CcittSource {
+                data: &short,
+                ..base
+            }),
+            Err(CcittEncodeError::ShortData { have: 1, need: 2 })
+        );
+        // And a buffer that stops exactly at the last pixel is enough.
+        let exact = [0u8; 2];
+        assert!(g4_encode(&CcittSource {
+            data: &exact,
+            ..base
+        })
+        .is_ok());
     }
 }

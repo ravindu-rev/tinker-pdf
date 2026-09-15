@@ -82,6 +82,16 @@ placeholder-plus-warning contract of rulings 2 and 10 in
   reachability test, rather than as something believed absent.
 - **Encoding.** The `MqEncoder` in `mq.rs` stays test-only, used to build
   fixtures the way the generic-region tests already do.
+
+  *Reversed 15 September 2026, and only for the generic region.* The roadmap's
+  image-encoder row promoted `MqEncoder` and the generic-region row loop to
+  public API as `jbig2_generic_encode` — see "As built: the generic-region
+  encoder" below. **This non-goal still holds for everything this doc is
+  about**: no symbol dictionary, text region or refinement is written, for the
+  reason that made them a non-goal in the first place and one more — an encoder
+  for a lineage could only ever be held to a round trip against this file's own
+  decoder, and Annex H.1 publishes no symbol bitmaps to adjudicate it with
+  (milestone 3's row says so).
 - **The random-access file organisation** (Annex D.1) — already refused in
   `segments()`; unchanged.
 - No new crate, no new public API: `jbig2_decode` keeps its exact signature,
@@ -860,6 +870,48 @@ round trip for the placement plumbing. Both are honest about what they are:
   symbol code being as wide as the count needs. It cannot show that the
   placement convention itself is right. Nothing here can until milestone 6.
 
+### As built: the generic-region encoder, 15 September 2026
+
+Not a milestone of this doc — the roadmap's image-encoder row owns it — but it
+reverses one of this doc's non-goals, so it is recorded here rather than left
+for a reader to find by grep.
+
+**What moved.** `mq.rs`'s `MqEncoder` lost its `#[cfg(test)]`, and the
+`encode_arithmetic` helper that sat beside it in `jbig2.rs`'s test module became
+`jbig2/encode.rs`. The decision sequence is the same one, the context function
+is literally the decoder's `context()`, and the bytes it produces for Annex
+H.1's picture are the bytes it produced as a fixture. What promotion cost was a
+boundary — a packed raster and a caller's stride instead of a `Bitmap`, with a
+copy that clears the padding bits past the width — and a refusal set: four
+variants for a caller that describes its own buffer or its own template wrongly.
+Ruling 2 does not apply to any of them; there is nothing to degrade to when the
+pixels asked for were never handed over.
+
+**What it writes, and what it does not.** All four templates at any AT
+positions, 6.2.5.7's TPGDON with the canonical SLTP choice, and 7.4.6's region
+segment *data*. Not: MMR generic regions (`ccitt_g4_encode` is the T.6 coder
+6.2.6 defers to, and a second copy is a second thing to get wrong), symbol
+dictionaries, text regions, refinement, halftones, pattern dictionaries,
+USESKIP, or any part of a JBIG2 file above one segment's data.
+
+**What adjudicates it, and the limit that surfaced.** Annex H.1 segment 11 —
+nine published bytes for a published picture at template 0 with TPGDON and the
+nominal AT pixels. Encoding the picture reproduces the bytes, which pins the MQ
+registers, `BYTEOUT`, `FLUSH`, the AT layout, 6.2.5.7's SLTP rule and *which*
+pixels template 0 reads.
+
+It does **not** pin the context numbering, and this was measured rather than
+argued: transposing template 0's context bits 8 and 7, and separately reading
+`p(-2, -2)` where Figure 8 draws `p(-2, -1)`, each left those nine bytes
+unchanged, left the annex still decoding to its published picture, left every
+round trip passing, and fired exactly one test in the workspace —
+`template_context_bits_match_the_figures`. The general reason is the one
+`mq.rs` has always given: a context index is only a label into an array whose
+slots all start identical, so any bijection of the numbering is invisible to a
+coder, and a published bitstream is what a coder produced. "What Annex H.1
+cannot adjudicate" above gains a third entry, and it is the sharpest of them,
+because it is the one a second published datastream would not fix.
+
 ### What the corpus said, which is better than either
 
 Measured after the milestone landed, over the 102 JBIG2-bearing corpus files,
@@ -909,8 +961,10 @@ each of the right-hand pair — so none of them could have been skipped.
 
 ## Dependencies
 
-- `crates/tinker-pdf-filters/src/mq.rs` — `MqDecoder`, `MqContexts`,
-  test-only `MqEncoder`; shared with JPX, unchanged.
+- `crates/tinker-pdf-filters/src/mq.rs` — `MqDecoder`, `MqContexts`, and
+  `MqEncoder`, which was test-only while this doc was written and is public
+  from 15 September 2026; shared with JPX. The coder itself is unchanged — the
+  same three procedures, pinned by the same Annex H.2 test.
 - `crates/tinker-pdf-filters/src/jbig2.rs` — `Segment`, `Reader`, `Bitmap`,
   `RegionInfo`, `packed_size`, `Page`, the `ANNEX_H` fixture, and the
   `Warning`/`Capability` enums in `lib.rs`.
