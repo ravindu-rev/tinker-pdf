@@ -63,20 +63,45 @@ re-emitted with a displacement in their place, so surviving text keeps its
 position. Deciding which glyphs a rectangle covers needs the whole `Tm` and
 `cm` matrices, not a translation — a scaled or rotated run measured as a
 translation cuts the wrong glyphs, which is the worst failure a redaction
-can have because it looks like it worked. A rotated or skewed run is
-therefore left uncut rather than mis-cut — under-redaction is visible to
-whoever checks. Form XObjects are rewritten recursively, each
+can have because it looks like it worked. Both matrices are carried whole,
+so a rotated or skewed run is **cut along its own baseline**: the glyph box
+is a parallelogram in page space and whether it meets the rectangle is a
+separating-axis test rather than a comparison of two intervals, while the
+replacement displacement needs no frame of its own, because 9.4.3 already
+measures a `TJ` number in unscaled text space — the run's own frame — and
+the gap a removed glyph leaves therefore rotates with the run for free. The
+surviving sub-runs keep the original text matrix untouched; giving each a
+fresh `Tm` at its own origin is the answer that looks plausible on screen
+and is wrong four ways, which `emit_array`'s doc comment sets out. A glyph
+the rectangle covers only *partly* is removed, because a content stream can
+show a glyph or not show it and only one of those two can leak. What
+redaction cannot **measure** it still leaves whole and names in
+`RedactionReport::warnings` — the four classes in the refusal table below —
+because a redaction that silently fails to redact is worse than one that
+refuses: the caller believes the content is gone and distributes the file.
+A warning says the run was not measured, not that it was covered, so
+warnings are raised only when there is at least one rectangle to fall under.
+Form XObjects are rewritten recursively, each
 resolving names against its own `/Resources` (8.10.1), because forms are how
 most producers place repeated content and a redaction driven straight
-through one would leave the secret in the form. An image a redaction touches
+through one would leave the secret in the form. Each form is rewritten
+**once**, which is right when a form is drawn once or twice under the same
+transform and wrong when the same form is drawn in two places: only the first
+placement is measured, and that under-redaction is pinned by
+`a_form_drawn_twice_is_cut_only_at_its_first_placement` and carries a
+[roadmap](../ROADMAP.md) row of its own. An image a redaction touches
 is scrubbed whole to a blank sample: cutting a hole would mean decoding,
 editing and re-encoding through a codec this build may have no encoder for,
 and leaving the rest is not a redaction. `mark` paints the area black
 afterwards — cosmetic, because the content is already gone; it tells a
 reader something was removed rather than leaving a gap that reads as if
-nothing was there. The acceptance test is not "does it look right" but
-"decompress every stream in the output and assert the needle bytes are
-absent".
+nothing was there. The acceptance test is not "does it look right" but two
+assertions at once: decompress every stream in the output and assert the
+needle bytes are absent, **and** render the redacted page and assert there
+is no ink inside the rectangle. A stream check alone would pass a build that
+left the glyph in an untouched duplicate stream; an ink check alone would
+pass the black-rectangle non-redaction this module exists to refuse. Neither
+half is the property.
 
 ## API
 
@@ -94,7 +119,8 @@ let report = tinker_pdf::redact::apply(
     &[tinker_pdf::redact::Redaction { area: rect, mark: true }],
 )
 .expect("page 0 exists"); // None only when the page does not
-// report.operations cut, report.glyphs removed, report.images scrubbed
+// report.operations cut, report.glyphs removed, report.images scrubbed,
+// report.warnings: runs left whole because they could not be measured
 
 let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 ```
@@ -106,9 +132,13 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `import_page()`,
 `keep_pages()`, `append_content()`, `page_box()`, `flatten_annotations()`,
 `add_annotation()`, the [forms](forms.md) methods, and `save(&WriteOptions)
--> Vec<u8>`. `redact::{Redaction, RedactionReport, apply}` live in the facade
+-> Vec<u8>`. `redact::{Redaction, RedactionReport, RedactionWarning, apply}`
+live in the facade
 (`apply` returns `Option<RedactionReport>`, `None` for a page that does not
-exist; the report counts `operations`, `glyphs` and `images`)
+exist; the report counts `operations`, `glyphs` and `images`, and carries
+`warnings: Vec<RedactionWarning>` — empty is the answer a caller wants,
+since a non-empty list means some text was never tested against the
+rectangles at all)
 because glyph coverage needs both the content tokenizer and font metrics
 (ruling 8, [rulings.md](../rulings.md)).
 
@@ -116,7 +146,10 @@ because glyph coverage needs both the content tokenizer and font metrics
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| Redacting a rotated or skewed text run | that run is left uncut, so its glyphs never reach `RedactionReport::glyphs` — an under-redaction a caller can see (`a_rotated_run_is_left_alone_rather_than_cut_wrongly`) | cutting a rotated run by a rectangle mis-cuts glyphs and looks correct — the worst redaction failure | — |
+| Redacting a **vertical** text run (9.4.4) | the run is left whole and `RedactionReport::warnings` carries a `VerticalRun` naming the font and how many operand bytes stayed (`a_vertical_run_is_left_uncut_and_reported`) | the vertical branch advances by `/W2`'s `w1` down the page and a `TJ` number displaces along that axis too — a different formula, not a different matrix. This class used to hide behind the rotation refusal, whose matrix test a vertical run passes, so it was being cut horizontally | — |
+| Redacting a run in a **Type 3 font whose `/FontMatrix` is not the 1/1000 default** (9.6.5) | left whole, `RescaledType3Font` (`a_rescaled_type3_font_is_left_uncut_and_reported`); the same font with the conventional matrix is cut (`a_type3_font_with_the_conventional_matrix_is_cut`) | `/Widths` are in the font's own glyph space, and `width / 1000` is right for the conventional matrix and wrong by exactly that matrix for any other, so every position after the first glyph drifts | — |
+| Redacting a run whose `Tf` named a font the resources in scope do not have | left whole, `UnknownFont` (`a_run_whose_font_is_not_in_scope_is_left_uncut_and_reported`) | no metrics at all, so no glyph can be placed. Permanent, and it was silent before: the run was kept, nothing was counted, and the report looked like a rectangle that covered nothing | — |
+| Redacting a run whose text rendering matrix is not finite | left whole, `UnmeasurableFrame` (`a_non_finite_text_matrix_is_left_uncut_and_reported`) | a position that is not a number cannot be compared with a rectangle. Permanent. The whole showing operand is left, never half of it | — |
 | Partial image redaction | the whole image is scrubbed (`RedactionReport::images`) | a hole needs a re-encode through a codec this build may not write | [filters](filters.md) |
 | Appearance synthesis for other subtypes | `add_annotation` inserts the dictionary; no `/AP` is generated | seven subtypes cover the common producer gap; others render only if they carry their own `/AP` | — |
 | Redaction of text inside a Type 3 glyph procedure or an annotation appearance | not rewritten | content streams reachable from a page are rewritten; glyph procedures and `/AP` streams are separate objects | — |
@@ -134,8 +167,18 @@ because glyph coverage needs both the content tokenizer and font metrics
 - Redaction tests live beside `crates/tinker-pdf/src/redact.rs`: multi-page
   fixtures (a two-page file once redacted page 0's image and left page 1's
   secret), text inside form XObjects and a self-referential form that
-  terminates, scaled and rotated runs, and the needle-bytes-absent assertion
-  over every decompressed stream.
+  terminates, scaled runs, and the needle-bytes-absent assertion over every
+  decompressed stream. Three further modules carry the rotated cut: a
+  quarter turn, an oblique rotation, a skew, a rotation that lives in the
+  `cm` rather than the `Tm`, and the matrix and the `TJ` gaps re-emitted in
+  the run's own units (`rotated_runs`); `'`, `"` and an existing `TJ`
+  adjustment surviving a cut (`showing_operators`); and one test per
+  `RedactionWarning` variant (`refusals`). Their fixtures are a Type 3 font
+  whose every glyph fills its em square, so the geometry a test computes by
+  hand from 9.4.2 to 9.4.4 and the ink the renderer draws are the same
+  rectangle — which is what lets each of them assert the safety property at
+  both levels, the covered glyph's code absent from every stream **and** no
+  ink inside the rectangle.
 - Every edited document is written through the [writer](writing.md), whose
   output is held to the strict validator (`strict_validator.rs`); the
   `render_page` and
