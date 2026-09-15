@@ -191,14 +191,36 @@ its last row or column; A4 at 150 dpi is 1240×1755. A page whose area would
 exceed `MAX_PAGE_PIXELS` (67.1 Mpx) renders whole at a smaller scale and
 says so, because a complete page at lower resolution beats a fragment.
 Annotation appearance streams draw over the content when asked (12.5.5).
+`Page::pixel_size` returns that size without rendering, because a caller who
+tiles has to compute a lattice against the same three rules the renderer
+applies — outward rounding, a non-finite or non-positive scale read as 1.0,
+and the `MAX_PAGE_PIXELS` clamp — and a lattice computed against different
+ones leaves a strip of the page that nothing ever asks for.
+
+**Regions.** `RenderOptions::region` narrows the render to a `PixelRegion`,
+a rectangle of **the rendered bitmap's own pixels** counting down from its
+top-left — not points, and not PDF user space's upward `y`. The bitmap is
+already turned and already cropped, so a region indexes the picture a reader
+sees: `(0, 0, 32, 32)` of a `/Rotate 90` page is the top-left of the sideways
+picture, never the corner of the upright sheet. The mechanism is ruling 5's
+translated viewport and nothing else — `region_view_transform` composes a
+pixel translation *after* `page_view_transform`, so the same interpreter,
+the same glyphs, the same sampler and a smaller canvas draw the tile. A
+region reaching past the page is **intersected**, never slid back on, because
+a moved rectangle returns real pixels from coordinates the caller did not
+name; one that misses entirely comes back with no pixels. Both trims are
+reported as `RenderWarning::RegionClamped`. Ruling 5's byte-equality guard,
+its fixtures and the one scale-dependent exception are in
+[rulings](../rulings.md).
 
 ## API
 
 The facade is the whole public surface (ruling 11): `Page::render` takes a
 `RenderOptions` — `scale` (pixels per point, or `RenderOptions::at_dpi`),
 `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
-checked between operations and scanline bands) and `annotations` (on by
-default) — and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
+checked between operations and scanline bands), `annotations` (on by
+default) and `region` (an optional `PixelRegion`, `None` for the whole page)
+— and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
 `data`, and `warnings`, the `Vec<RenderWarning>` that carries every named
 degradation. Rendering never fails; it degrades and reports.
 
@@ -214,9 +236,12 @@ keeping their alpha and both landing on type 6. Writing ink under a label
 saying RGB is the failure `page_format` exists to prevent one layer up, and it
 would be just as invisible here. `None` comes back only for a bitmap that is
 not a picture: a zero dimension, a stride narrower than a row, or a buffer
-shorter than the rows the other fields promise — none of which `Page::render`
-produces. `tpdf render` writes `.png` through it, and so does
-`examples/render.rs`.
+shorter than the rows the other fields promise. `Page::render` produces a
+picture for every page at every scale and for every `region` that meets the
+page; the one way to get a bitmap that is not one is to ask for a region
+wholly off the page, which trims to nothing and says so. `Bitmap`'s fields
+are public besides, so a caller may always build one by hand. `tpdf render`
+writes `.png` through it, and so does `examples/render.rs`.
 
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
@@ -236,7 +261,11 @@ interpreter's `Device` trait and pulls outlines, images, shadings, patterns
 and tiles through the `GlyphSource` seam — implemented by the facade's
 `PageResources`, so no COS type enters the render crate. `page_scale`,
 `page_pixels`, `page_canvas` and `page_view_transform` are the geometry
-helpers `Page::render` composes.
+helpers `Page::render` composes, with `region_view_transform` and
+`region_canvas_in` the two that take a `PixelRegion`. `None` is not a special
+case in the facade: it becomes the region covering the whole page, whose
+translation is zero, so a tile and a page take one code path and there is no
+un-tiled spelling left for a defect to hide in.
 
 ## Refused by name
 
@@ -252,6 +281,7 @@ helpers `Page::render` composes.
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
+| A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -262,13 +292,23 @@ helpers `Page::render` composes.
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
   `annotation_appearances.rs` — each asserting pixels, not absence of error.
+- Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Ten
+  fixtures over four rasterizer paths, three of them turned and three cropped,
+  tiled at 64, 37, 23 and 53 pixels against a 91×131 page and down to a
+  one-pixel lattice, each tile asserted **byte-equal** to its rectangle of the
+  whole render with no tolerance; plus the trim at the page edge and its
+  warning, a region wholly off the page, and — because tile equality alone is
+  satisfied by a *consistent* mistake — two fixtures that assert which quadrant
+  of the displayed picture one mark lands in, on a rotated page and on a
+  cropped one. Every fixture carries an ink floor, because a blank page tiles
+  perfectly.
 - In-crate: unit tests in `tinker-pdf-render/src/lib.rs` (among them
   `a_small_fill_on_a_large_page_stays_small`, which counts mask pixels asked
   for so an O(canvas) regression fails rather than merely costs, and
   `a_cancelled_clip_and_text_clip_rasterize_nothing`), `shading.rs`,
   `mesh.rs`, and `tinker-pdf-color`'s tests over conversion, palettes, tint
   transforms and all function types.
-- Determinism: ten of the 15 render fingerprints in
+- Determinism: ten of the 19 render fingerprints in
   `crates/tinker-pdf/tests/determinism.rs` — `text`, `curves`, `shading`,
   `blend`, `pattern`, `optional`, `image`, `transparency`, `tiling`, `mesh`
   — pin this device's output bit-for-bit across x86_64 Windows, Linux and

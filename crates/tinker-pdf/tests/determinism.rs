@@ -1701,6 +1701,52 @@ fn epub_book() -> Vec<u8> {
 /// its own. A structure tree that had touched the page content would have
 /// moved a raster fingerprint too, and none of them shifted.
 ///
+/// # Eight raster hashes moved once, deliberately, and eleven did not
+///
+/// *15 September 2026, with ruling 5's region row.* `fill` used to hold an
+/// edge's slope as a whole number of 1/256 pixel per sub-scanline, which
+/// truncated every slope below one pixel of x per sixteen of y to **zero** and
+/// left every steeper edge walking `h/16` pixels off the line over an edge `h`
+/// tall; and it truncated an edge's x toward zero rather than taking the
+/// nearest unit. Both are fixed, `analytic_coverage.rs` adjudicates the fix
+/// against the line's own equation rather than against a picture, and the
+/// eight pages here that rasterise a path or a glyph moved.
+///
+/// The shape of the move is the evidence that it is the one change, so it is
+/// recorded rather than described. Pixels differing, and the worst component
+/// difference of 255, between the previous entry and this one:
+///
+/// | Page | Pixels | Of | Worst |
+/// | --- | ---: | ---: | ---: |
+/// | `curves` | 786 | 13 000 | 239 |
+/// | `epub` | 22 042 | 279 936 | 109 |
+/// | `text` | 814 | 20 000 | 74 |
+/// | `tiling` | 1 621 | 9 600 | 182 |
+/// | `mesh` | 305 | 9 600 | 53 |
+/// | `pattern` | 103 | 9 600 | 20 |
+/// | `optional` | 37 | 9 600 | 10 |
+/// | `xps` | 154 | 484 704 | 24 |
+///
+/// *Re-measured on the committed tree before this entry was written, and the
+/// eight rows all moved by a few pixels from the draft that first carried
+/// them: 789, 21 612, 799, 1 601, 306, 101, 40, 149, and a worst of 183 for
+/// `tiling`. The draft's numbers came from a working tree that still had a
+/// clamp in `build_edges` that the committed one does not. A table nobody
+/// re-runs is a dated measurement (ruling 13's own distinction), so the date
+/// above is load-bearing and the numbers are the tree's, not a previous
+/// tree's.*
+///
+/// The slope is almost all of it. Taking the nearest unit rather than the one
+/// below accounts for the rest and never for more than **two** levels: on its
+/// own it moves 139 pixels of `curves`, 8 825 of `epub`, 369 of `text`, 432 of
+/// `tiling`, 85 of `mesh`, 26 of `pattern`, 14 of `optional` and 85 of `xps`.
+///
+/// **`shading`, `blend`, `image`, `transparency`, `jbig2`, `jpx`, `cbz` and the
+/// four `analytic_` pages did not move at all**, which is the half that says it
+/// was the scanline filler: those pages are sampled or composited per pixel and
+/// never ask `fill` for a coverage. A change that had reached the compositor,
+/// the colour path or a decoder could not have left them alone.
+///
 /// They moved a **second** time, in the same three places and again with no
 /// raster movement, when the tree became document-level: an element's kids may
 /// now name different pages, so a paragraph broken across a page break is one
@@ -1955,11 +2001,11 @@ fn rendering_is_stable_across_targets() {
         // what says this is a rendering change and not a determinism bug.
         (
             "text",
-            "b0bc9383d116d84d7a104afc67b3d5dc8e727323ba30262f67121a32b89004c2",
+            "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
         ),
         (
             "curves",
-            "7924b1b282589efa4bbfc39055af40d9f29c9405d0c95381420706b97163968b",
+            "48b65e520b0649c6d19deb779f0213f4ba5cb6fbbc9ca546b35b1c603050f380",
         ),
         (
             "shading",
@@ -1973,13 +2019,13 @@ fn rendering_is_stable_across_targets() {
         // `fill_with_pattern` at all.
         (
             "pattern",
-            "18765f39455bc173f00fc6272449402d0c5db445963b5334e3d511a766199af2",
+            "e02ff91587f4a82c2273f7980e42d953878eead57026dd863de757241217cd5c",
         ),
         // Added August 2026 with gap 06. No existing fixture has an
         // `/OCProperties`, so none of them would move if 8.11 stopped working.
         (
             "optional",
-            "e0f2bc33f56dcb85beb7a1770f9cb33e22a1a2cdba1cbb4b838be656370035a1",
+            "e2e801543a390458985e5f42aa3e7526ef8af413e24234dfbd0252904e65a6a8",
         ),
         // Added August 2026 with gap 12. No existing fixture drew an image,
         // so the whole of image sampling — every row of the policy matrix,
@@ -2017,7 +2063,7 @@ fn rendering_is_stable_across_targets() {
         // rasterised cell, a lattice, or `PaintType 2`.
         (
             "tiling",
-            "aa7b2df6bd7613fb53c696ed4b9018a00d1aa4dece2ffe82775c40bfaa1a5011",
+            "274c17e359636faacafe251c7f71ca3b48d85f98a7b2251642048ea8897b5bd6",
         ),
         // Added August 2026 with gap 17. Nothing above decodes a JBIG2
         // stream, and the MQ arithmetic coder underneath it is shared with
@@ -2038,7 +2084,7 @@ fn rendering_is_stable_across_targets() {
         // a rounding difference.
         (
             "mesh",
-            "546f7f9e61572460b1b76610719e772b69625651d6a6b3b820ab30538be7d693",
+            "7faa166696c1283b6fb7556185d6e2f2a73bc49365a19bcf6797ad60e47c8c27",
         ),
         // Added August 2026 with gap 18a. Nothing above decodes a JPEG 2000
         // stream, so the whole of T.800 -- the container, tier-2's packets,
@@ -2077,7 +2123,7 @@ fn rendering_is_stable_across_targets() {
         // wrote, as well as the renderer every other row here covers.
         (
             "xps",
-            "9551458aff13b14485b22f5c8e12265229273886bf8489500fb700c0c07d1f30",
+            "5dd016599f8b550f523f7faa189b0d2c9edfcaf35860ac286caec4d71da56b11",
         ),
         // Added August 2026 with gap 31 milestone 13, and **the first entry
         // here whose page number is not a property of the file**: this is page
@@ -2092,7 +2138,7 @@ fn rendering_is_stable_across_targets() {
         // what it wrote, as well as the renderer every other row here covers.
         (
             "epub",
-            "601b099fe7ff948adda1e1d8649c383cc7f8e9a999e64b9d7cda7d1a2c745b3e",
+            "a0cc8fd3b519745300b0b3eba14cfc5c2fb516b6af9c692801b8031f5585fbd6",
         ),
         // Enrolled with the analytic tier's own pages (milestone 2). Their
         // right answer is an equation `render_analytic.rs` evaluates per pixel;

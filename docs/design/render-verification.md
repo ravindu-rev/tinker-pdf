@@ -99,7 +99,12 @@ of the same file, which needs no ground truth at all:
 - **Cropping.** A render of a translated `CropBox` must equal the
   corresponding sub-rectangle of the full render. This is ruling 5's
   tile-equality property, generalised from tiles to the page box and applied
-  corpus-wide rather than to fixtures.
+  corpus-wide rather than to fixtures. *Since September 2026 the property it
+  generalises is itself pinned in-tree*, on fixtures and at tile sizes that do
+  not divide the page: `crates/tinker-pdf/tests/render_regions.rs`. The two are
+  worth keeping apart — this one is breadth over documents nobody here wrote
+  and no known answer, that one is a byte-equality assertion with one measured
+  exception ([rulings](../rulings.md)).
 - **Resolution coherence.** A render at 144 dpi, box-filtered down by two,
   must agree with the direct 72 dpi render within a budget measured and
   ratcheted rather than guessed. Sampling-grid and rounding bugs move this;
@@ -155,7 +160,7 @@ quietly stopped proving something is not.
 
 | # | Deliverable | Exit criteria (concrete, testable) | Size |
 | --- | --- | --- | --- |
-| 1 | Analytic coverage and fill-rule fixtures in `tinker-pdf-raster` | **Done.** `tests/analytic_coverage.rs`: expected coverage computed from the sampling grid by an in-test function, byte-equal; the injections on the coverage rounding and on the nonzero rule are each caught, and the rounding one is what the first draft missed | S |
+| 1 | Analytic coverage and fill-rule fixtures in `tinker-pdf-raster` | **Done.** `tests/analytic_coverage.rs`: expected coverage computed from the sampling grid by an in-test function, byte-equal; the injections on the coverage rounding and on the nonzero rule are each caught, and the rounding one is what the first draft missed. **Extended September 2026**, and it took an outside prompt: every slope in the file was a whole number of units per sub-scanline, so the file could not see that `fill` stored a slope as one — flattening every edge shallower than one pixel of `x` per sixteen of `y` to vertical. `a_shallow_edge_keeps_the_slope_the_line_states` is the fixture that can, and it answers to the line's own equation rather than to how an edge is stored, which is why it is adjudication and not agreement. Ruling 5's tile guard is what asked the question; the file's header now separates the half of that change this tier adjudicates from the half it merely agrees with | S |
 | 2 | Analytic operator fixtures at the facade (`tests/render_analytic.rs`): strokes, axial and radial shadings, separable blend modes, integer image scaling | **Done.** Both shadings are compared per pixel over the whole page, the twelve separable modes over nine pairs, and the injections on the blend expression and on the shading parametric are each caught. Strokes live with the coverage fixtures rather than here, since they need no content stream. The two halves that were owed landed **apart**, and deliberately: the least-ink floor is local to `render_analytic.rs`, where the fixtures are, and the four fingerprints are in `determinism.rs`, because that is the only test the wasm and Linux legs run on their own — a fingerprint anywhere else is not evidence about ruling 4. The pages are built by one function each in `tests/render_support/`, so the document the equation adjudicates is the document the hash covers. The twelve modes needed a thirteenth page for that: the per-mode fixture builds a hundred and eight documents and samples one pixel of each, which cannot be enrolled, so `blend_grid_page` lays the same arithmetic out as one picture and is held to the clause cell by cell | M |
 | 3 | Metamorphic probe modes in `tpdf probe` | **Done.** The probe emits `meta rotate`, `meta crop` and `meta dpi`, each checked in-process so no image leaves the child, on the first page | S |
 | 4 | `corpus-run` rows and ratchet entries for the three relations | **Done.** `corpus/ratchet.json` carries per-corpus `compared` and `held` for each relation and the comparator ratchets both; every budget is recorded with the measurement that set it, and `crop` has none because it was exact on all 119 files measured | M |

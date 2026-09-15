@@ -281,7 +281,7 @@ pub use tinker_pdf_crypto::Permissions;
 /// disagree with itself.
 pub use tinker_pdf_filters::CcittParams;
 pub use tinker_pdf_raster::canvas::PixelFormat;
-pub use tinker_pdf_render::{CancelToken, RenderWarning};
+pub use tinker_pdf_render::{CancelToken, PixelRegion, RenderWarning};
 /// Signature verdicts (12.8), behind [`Document::verify_signatures`].
 pub use verdict::{
     Chain, CmsState, DocumentDigest, SignatureCheck, SignerDescription, TrustAnchors, Unchecked,
@@ -330,6 +330,50 @@ pub struct RenderOptions {
     /// without its annotations is missing its highlights, its stamps and its
     /// filled-in form fields, and looks convincingly complete without them.
     pub annotations: bool,
+    /// Which part of the page to render, or `None` for all of it.
+    ///
+    /// A rectangle of the **rendered bitmap's own pixels**, counting down from
+    /// its top-left corner — [`PixelRegion`] argues why that unit and not
+    /// points, and why that origin. The rest of the options mean exactly what
+    /// they mean without it: a region changes the size of the buffer and where
+    /// the page sits in it, and nothing else.
+    ///
+    /// # What it is for, and the promise that makes it worth having
+    ///
+    /// Ruling 5: **a tile is byte-equal to the corresponding sub-rectangle of
+    /// the full-page render**, so a caller who cannot hold a whole page at
+    /// 600 dpi can assemble one out of tiles and get the identical picture,
+    /// seams included. That is a guarantee rather than an aspiration —
+    /// `crates/tinker-pdf/tests/render_regions.rs` holds every fixture in that
+    /// file to it at tile sizes that deliberately do not divide the page — and
+    /// it is the reason a region is a rectangle of pixels rather than of
+    /// points.
+    ///
+    /// It holds for a region trimmed by the page edge too: what comes back is
+    /// the part of the ask that is on the page, which is still a sub-rectangle
+    /// of the full render at the coordinates the caller named.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let bytes = std::fs::read("document.pdf")?;
+    /// let doc = tinker_pdf::Document::open(bytes)?;
+    /// let page = doc.page(0).ok_or("no first page")?;
+    /// let mut options = tinker_pdf::RenderOptions::at_dpi(600.0);
+    /// let (width, height) = page.pixel_size(&options);
+    ///
+    /// for top in (0..height).step_by(512) {
+    ///     for left in (0..width).step_by(512) {
+    ///         options.region = Some(tinker_pdf::PixelRegion::new(left, top, 512, 512));
+    ///         let tile = page.render(&options);
+    ///         // `tile` is exactly the 512x512 of the full render at (left, top),
+    ///         // trimmed at the right and bottom edges of the page.
+    ///         let _ = tile;
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub region: Option<PixelRegion>,
 }
 
 impl Default for RenderOptions {
@@ -339,6 +383,7 @@ impl Default for RenderOptions {
             format: PixelFormat::Rgb8,
             cancel: None,
             annotations: true,
+            region: None,
         }
     }
 }
@@ -382,11 +427,16 @@ impl Bitmap {
     ///
     /// `None` exactly when the bitmap is not a picture: a zero `width` or
     /// `height`, a `stride` narrower than one row, or a `data` shorter than
-    /// the rows the other three fields promise. [`Page::render`] produces none
-    /// of the three — a page is at least one pixel and its buffer is sized
-    /// from its own dimensions — but [`Bitmap`]'s fields are public and a
-    /// caller may build one, and there is nothing to degrade to: a PNG with no
-    /// pixels is not a smaller PNG.
+    /// the rows the other three fields promise. There is nothing to degrade
+    /// to — a PNG with no pixels is not a smaller PNG.
+    ///
+    /// [`Page::render`] produces a picture for every page, at every scale, and
+    /// for every [`RenderOptions::region`] that meets the page: a page is at
+    /// least one pixel and its buffer is sized from its own dimensions. The one
+    /// way to render a bitmap that is not a picture is to ask for a region
+    /// wholly off the page, which trims to nothing and says so with
+    /// [`RenderWarning::RegionClamped`]. `Bitmap`'s fields are public besides,
+    /// so a caller may always build one by hand.
     ///
     /// # Every format, and the two that cannot be written as they are
     ///
@@ -1463,34 +1513,83 @@ impl Page {
         self.inner.display_size()
     }
 
-    /// Renders the page to a bitmap.
+    /// The size in pixels of the bitmap [`Page::render`] produces for these
+    /// options, **ignoring `options.region`**: the whole page, at this scale.
     ///
-    /// The bitmap's size is the page's *displayed* size — the crop box, with
-    /// its axes swapped for a quarter-turn `/Rotate` — scaled and **rounded
-    /// outward** so a page never loses its last row or column: A4 at 150 dpi
-    /// is 1240×1755.
+    /// The rounding is not arithmetic a caller can do for themselves from
+    /// [`Page::size`] and [`RenderOptions::scale`], which is why this exists
+    /// rather than being left as folklore: the sides round *outward*, a
+    /// non-finite or non-positive scale is read as 1.0, and a page whose area
+    /// would pass `MAX_PAGE_PIXELS` is scaled down to fit. A caller who wants
+    /// to tile needs the real answer to all three, because a tile lattice
+    /// computed from a wrong page size leaves a strip of the page unrendered
+    /// and nothing says so.
     #[must_use]
-    pub fn render(&self, options: &RenderOptions) -> Bitmap {
+    pub fn pixel_size(&self, options: &RenderOptions) -> (u32, u32) {
+        let (w, h) = self.size();
+        tinker_pdf_render::page_pixels(w, h, self.scales(options).1)
+    }
+
+    /// The scale asked for and the scale that will be used, in that order.
+    ///
+    /// One spelling for both, because [`Page::pixel_size`] and [`Page::render`]
+    /// have to agree about the answer exactly — a caller tiles by the first and
+    /// is handed pixels by the second, and a lattice computed against a
+    /// different clamp than the one the renderer applied leaves a strip of the
+    /// page nothing ever asks for.
+    fn scales(&self, options: &RenderOptions) -> (f64, f64) {
         let (w, h) = self.size();
         let scale = if options.scale.is_finite() && options.scale > 0.0 {
             options.scale
         } else {
             1.0
         };
-
         // The canvas is clamped for an enormous page; the transform has to be
         // clamped by the same factor or the content is drawn full-size onto a
         // smaller surface, which crops instead of scaling.
-        let applied = tinker_pdf_render::page_scale(w, h, scale);
+        (scale, tinker_pdf_render::page_scale(w, h, scale))
+    }
+
+    /// Renders the page to a bitmap.
+    ///
+    /// The bitmap's size is the page's *displayed* size — the crop box, with
+    /// its axes swapped for a quarter-turn `/Rotate` — scaled and **rounded
+    /// outward** so a page never loses its last row or column: A4 at 150 dpi
+    /// is 1240×1755. [`RenderOptions::region`] narrows it to a rectangle of
+    /// those pixels, and then the bitmap is that rectangle's size.
+    #[must_use]
+    pub fn render(&self, options: &RenderOptions) -> Bitmap {
+        let (w, h) = self.size();
+        let (scale, applied) = self.scales(options);
 
         // Ruling 2: the caller gets a whole page rather than a fragment, and
         // is told the resolution is not the one they asked for.
         let scaled_down = applied < scale;
+
+        // Ruling 5. The whole page's pixel rectangle is computed first,
+        // because it is what a region is a rectangle *of*: the region's
+        // coordinates only mean anything against the bitmap the caller would
+        // otherwise have got, so the clamp needs that size and not the page's
+        // points.
+        //
+        // `None` is not a special case in what follows — it is the region
+        // covering the whole page, whose translation is zero — so a tile and a
+        // page take one code path here as well as in the renderer, and there is
+        // no un-tiled spelling left for a defect to hide in.
+        let (full_width, full_height) = tinker_pdf_render::page_pixels(w, h, applied);
+        let asked = options.region;
+        let view = asked
+            .unwrap_or(PixelRegion::new(0, 0, full_width, full_height))
+            .clamped_to(full_width, full_height);
+
         // The rotation and the crop-box origin belong in the transform, not
         // only in the canvas size: sizing for a rotated page and then drawing
         // it upright fills a sideways canvas with clipped, upright content.
+        // The region's own translation composes after both, which is what
+        // makes it a rectangle of the displayed picture rather than of the
+        // upright sheet.
         let crop = self.crop_box();
-        let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), applied);
+        let base = tinker_pdf_render::region_view_transform(crop, self.rotation(), applied, view);
 
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
@@ -1507,7 +1606,7 @@ impl Page {
         let canvas_format = page_space
             .map(tinker_pdf_render::group_format)
             .unwrap_or(options.format);
-        let canvas = tinker_pdf_render::page_canvas_in(w, h, applied, canvas_format);
+        let canvas = tinker_pdf_render::region_canvas_in(view, canvas_format);
 
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
         if let Some(cancel) = &options.cancel {
@@ -1544,6 +1643,16 @@ impl Page {
             warnings.push(RenderWarning::PageScaledDown {
                 requested: scale,
                 applied,
+            });
+        }
+        // Ruling 10: a bitmap smaller than the rectangle asked for is a
+        // leniency, and a leniency is named. Only when the trim actually
+        // changed the ask — a region inside the page reports nothing, which is
+        // every tile of a well-formed lattice.
+        if let Some(requested) = asked.filter(|requested| *requested != view) {
+            warnings.push(RenderWarning::RegionClamped {
+                requested,
+                applied: view,
             });
         }
 

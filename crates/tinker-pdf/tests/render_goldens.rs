@@ -41,6 +41,54 @@
 //! no reviewer can assess" — and `a_golden_stays_small_enough_to_review` is
 //! that sentence as an assertion rather than as prose.
 //!
+//! # Four pictures changed on 15 September 2026, and what changed in them
+//!
+//! Recorded here because a golden is a *claim about what correct output is*,
+//! and a claim that moves without a record is a regression test that agreed
+//! with whatever arrived. The reviewer signing these four needs the numbers,
+//! not the adjective.
+//!
+//! `fill` was doing two things wrong, both of them wrong for a whole page as
+//! much as for the tile that found them (ruling 5,
+//! `crates/tinker-pdf/tests/render_regions.rs`): it stored an edge's slope as a
+//! whole 1/256 pixel per sub-scanline, so every slope shallower than one pixel
+//! of `x` per sixteen of `y` truncated to **zero** and the edge came out
+//! vertical; and it reduced a crossing toward zero rather than to the nearest
+//! 1/256 unit.
+//!
+//! | Golden | Pixels | Of | Worst component | Mean over those pixels | On an edge | In a flat interior |
+//! | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+//! | `path-stroke` | 301 | 2 304 | 135 | 43.7 | 301 | **0** |
+//! | `text` | 173 | 2 304 | 61 | 10.0 | 173 | **0** |
+//! | `path-fill` | 143 | 2 304 | 50 | 10.1 | 143 | **0** |
+//! | `type3-glyph` | 14 | 2 304 | 1 | 0.7 | 14 | **0** |
+//!
+//! `clip`, `image`, `pattern`, `shading` and `transparency` did **not move at
+//! all**, and that is half the evidence: they are axis-aligned, sampled or
+//! composited, and never ask `fill` for a diagonal coverage.
+//!
+//! **Not one differing pixel sits in a flat interior.** A pixel counts as
+//! interior here when all eight of its neighbours in the *old* picture held its
+//! exact value; every one of the 631 differing pixels across the four fails
+//! that. A colour, a placement or a compositing change moves interiors. Only a
+//! coverage change cannot.
+//!
+//! The two halves separate cleanly, which is the rest of the evidence. With the
+//! slope fixed and the reduction still truncating, the pictures move by 300,
+//! 163, 141 and **0** pixels at worsts of 135, 61, 51 and 0 — so the slope is
+//! all of the magnitude and none of `type3-glyph`. Adding the nearest-unit
+//! reduction on top moves a further 88, 67, 55 and 14 pixels **by exactly one
+//! level of 255, every time**, which is the shape a quantisation rule has.
+//!
+//! And the attribution is not an inference: with every other change in the
+//! commit in place and `fill.rs` alone reverted, all nine goldens regenerate
+//! **byte-identical** to the ones committed before it. Nothing in the region
+//! API, the facade or the tool moved a pixel of a whole-page render.
+//!
+//! *The four headers are untouched.* All nine goldens in this tree still read
+//! `reviewer: unreviewed`, which is what `UNREVIEWED` says they may, so no
+//! signature was inherited by a picture nobody has looked at.
+//!
 //! # The injections that were counted
 //!
 //! Over the whole workspace, 4 413 tests. Each of the three ways this tier can
