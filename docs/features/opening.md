@@ -179,8 +179,8 @@ exceed it routinely — declared in one place,
 
 ## Verified
 
-As of 14 September 2026, `cargo test --workspace` runs 4 741 tests (0 failed,
-56 ignored, Windows x86_64), and the parts that cover opening are named
+As of 14 September 2026, `cargo test --workspace` runs 4 832 tests (0 failed,
+58 ignored, Windows x86_64), and the parts that cover opening are named
 ([verification](../verification.md)):
 
 - **`crates/tinker-pdf-cos/tests/corrupt.rs`** — the ladder on damage built

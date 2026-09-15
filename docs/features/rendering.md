@@ -319,5 +319,5 @@ un-tiled spelling left for a defect to hide in.
   stable.
 - Corpus, as of September 2026: 5 525 files, 5 516 rendered every page, zero
   crashes.
-- The workspace stands at 4 741 passed / 0 failed / 56 ignored
+- The workspace stands at 4 832 passed / 0 failed / 58 ignored
   (Windows x86_64, 14 September 2026). See [verification](../verification.md).

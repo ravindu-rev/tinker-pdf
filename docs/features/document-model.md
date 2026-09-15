@@ -224,7 +224,7 @@ and 5 129 annotations carry a normal appearance.
 ## Verified
 
 As of 15 September 2026, in the workspace suite of 4 779 passing tests
-(0 failed, 58 ignored, 217 suites, Windows x86_64, measured on this
+(0 failed, 58 ignored, 218 suites, Windows x86_64, measured on this
 branch — other lanes are moving the total in parallel):
 
 - `crates/tinker-pdf/src/layers.rs` and `src/annotations.rs` — 6 and 13 unit

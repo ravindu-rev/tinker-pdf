@@ -809,7 +809,7 @@ could show was right.
   read as a pass ([determinism](determinism.md)); the `epub` fixture renders
   through `SimpleFontProvider`, covering the provider path.
 - The whole workspace stands at 4 779 passed / 0 failed / 58 ignored across
-  217 suites (Windows x86_64, 15 September 2026, measured on this branch;
+  218 suites (Windows x86_64, 15 September 2026, measured on this branch;
   other lanes are moving the total in parallel), and the corpus run of 13 September 2026
   — 5 525 files, 5 516 rendered every page, 0 crashes — exercises real
   embedded fonts of every
