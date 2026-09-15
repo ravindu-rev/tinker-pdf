@@ -38,9 +38,10 @@ that is a very interesting report.
 
 ## The hand-rolled crypto, stated plainly
 
-This project implements MD5, RC4, SHA-2 and AES-CBC itself, along with the PDF
-standard security handler and — for signature verification — big-integer
-modular arithmetic, RSASSA-PKCS1-v1_5 and ECDSA over P-256 and P-384, because
+This project implements MD5, RC4, SHA-2, AES-CBC and DES-EDE3-CBC itself, along
+with the PDF standard security handler and — for signature verification —
+big-integer modular arithmetic, RSASSA-PKCS1-v1_5 and ECDSA over P-256 and
+P-384, because
 the project's design mandate is that no third-party crate implements engine
 functionality. That is an unusual choice and it deserves an unusual amount of
 scrutiny, so here is the honest framing:
@@ -57,19 +58,26 @@ scrutiny, so here is the honest framing:
   RFC 6229 for RC4, worked examples for SHA-2, and known-answer tests for AES.
 
   Stated precisely, because the previous wording here claimed more than was
-  true: for the *cipher and hash* primitives the full NIST CAVP suites are
-  **not** wired in, and there is no CBC-AES-256 vector even though that is the
-  mode the fixtures use. AES-256 in CBC is exercised end to end by decrypting a
-  mutool-written R6 fixture and by an independent Python reimplementation of
-  Algorithm 2.B in the test suite, which is real evidence and is not the same
-  thing as CAVP. Wiring the suites is tracked in
+  true: for *most* of the cipher and hash primitives the full NIST CAVP suites
+  are **not** wired in, and there is no CBC-AES-256 vector even though that is
+  the mode the fixtures use. AES-256 in CBC is exercised end to end by
+  decrypting a mutool-written R6 fixture and by an independent Python
+  reimplementation of Algorithm 2.B in the test suite, which is real evidence
+  and is not the same thing as CAVP. Wiring the suites is tracked in
   [`docs/features/encryption.md`](docs/features/encryption.md).
 
-  The *signature* primitives are the exception, and they are gated on CAVP
-  itself: 360 `SigVer15` vectors for RSA (moduli of 1024 to 4096 bits crossed
-  with SHA-1/256/384/512, 60 valid and 300 that must be refused, 150 of those
-  being forged paddings), 120 `SigVer` vectors and 24 `PKV` points for ECDSA,
-  and RFC 6979's sixteen appendix A.2 signatures. The vector files are
+  **Triple DES is the one cipher that is gated on CAVP**, and it was built that
+  way from the start: 500 known answers across seven committed files, the
+  FIPS 46-3 tables read twice, and a counted-injection campaign recorded in
+  [`docs/design/pubsec.md`](docs/design/pubsec.md) that measures which vectors
+  catch which defect — including the one that caught nothing until a seventh
+  file was committed for it.
+
+  The *signature* primitives are the other exception, and they are gated on
+  CAVP itself: 360 `SigVer15` vectors for RSA (moduli of 1024 to 4096 bits
+  crossed with SHA-1/256/384/512, 60 valid and 300 that must be refused, 150 of
+  those being forged paddings), 120 `SigVer` vectors and 24 `PKV` points for
+  ECDSA, and RFC 6979's sixteen appendix A.2 signatures. The vector files are
   committed under `crates/tinker-pdf-crypto/tests/data/cavp/` with their
   provenance in each file's header.
 - **Password comparison is constant-time.**
@@ -87,6 +95,13 @@ scrutiny, so here is the honest framing:
   permission flags are advisory — a document that says "printing denied" is
   asking, not enforcing. Nothing this engine does changes that, and no
   embedder should treat PDF permissions as a security boundary.
+- **Triple DES is here to read old documents and nothing else.** Its 64-bit
+  block is Sweet32's whole premise and two-key EDE is below 112 bits of
+  security. It exists because `openssl cms -encrypt` still chooses
+  `des-ede3-cbc` by default for older recipients, so public-key-encrypted PDFs
+  in the wild carry it. The module decrypts only: there is no way to reach a
+  DES *encryption* from any public API, and nothing in this engine will ever
+  write such an envelope.
 
 Review of the crypto crate is actively welcomed, and a finding there is worth
 reporting even if you cannot demonstrate an exploit.

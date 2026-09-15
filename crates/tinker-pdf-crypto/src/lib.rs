@@ -9,13 +9,14 @@
 //!
 //! # On trusting this
 //!
-//! Implementing MD5, RC4, SHA-2, AES and now RSA and ECDSA verification by
-//! hand is unusual and deserves the scrutiny it invites. The honest framing,
-//! also recorded in `SECURITY.md`: the scope is document decryption,
+//! Implementing MD5, RC4, SHA-2, AES, DES and now RSA and ECDSA verification
+//! by hand is unusual and deserves the scrutiny it invites. The honest
+//! framing, also recorded in `SECURITY.md`: the scope is document decryption,
 //! encryption-on-save and signature *verification*, not a protocol;
-//! correctness is gated on published vectors (FIPS 197, FIPS 180-4, RFC 6229,
-//! RFC 1321, and NIST CAVP for the two signature schemes) as merge
-//! requirements rather than aspirations; password comparison is constant-time.
+//! correctness is gated on published vectors (FIPS 197, FIPS 180-4, FIPS 46-3,
+//! RFC 6229, RFC 1321, and NIST CAVP for Triple DES and the two signature
+//! schemes) as merge requirements rather than aspirations; password comparison
+//! is constant-time.
 //! PDF's own older revisions are weak by design — RC4 at 40 bits protects
 //! nothing — and its permission flags are advisory: a document saying
 //! "printing denied" is asking, not enforcing. Nothing here changes that, and
@@ -33,6 +34,7 @@
 
 pub mod aes;
 pub mod bignum;
+pub mod des;
 pub mod ecdsa;
 pub mod handler;
 pub mod md5;

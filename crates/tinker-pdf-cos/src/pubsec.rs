@@ -17,17 +17,22 @@
 //!
 //! # What has no evidence behind it, stated first rather than last
 //!
-//! **Not one of the 4 594 files in the fetched corpora uses this handler.**
-//! Ruling 3 schedules capabilities by corpus hit-rate and this one measures
-//! zero; it is built because it was asked for, not because the evidence said
-//! so, and the consequence is that its verification is circular in a way the
-//! rest of this crate's is not.
+//! **Not one of the 5 605 files in the fetched corpora uses this handler**
+//! — re-measured 15 September 2026 over every PDF under `corpus/files`,
+//! `/Adobe.PubSec` and `/Recipients` both zero. Ruling 3 schedules capabilities by corpus hit-rate and this one
+//! measures zero; it is built because it was asked for, not because the
+//! evidence said so, and the consequence is that its verification is circular
+//! in a way the rest of this crate's is not.
 //!
 //! The layers are worth separating, because they are not equally weak:
 //!
 //! - **The envelope** is parsed by `tinker-pdf-pki` and is checked against
 //!   `EnvelopedData` structures **OpenSSL produced** — real evidence that the
 //!   parser reads what another implementation writes.
+//! - **The content ciphers** — AES-CBC, RC4 and, since this commit,
+//!   `des-ede3-cbc` — are each held to published vectors: FIPS 197, RFC 6229,
+//!   and 500 NIST CAVP known answers for Triple DES. That evidence is as
+//!   strong as anything in this crate and owes nothing to the corpus.
 //! - **The key derivation below** is checked against a second implementation
 //!   written from the same clause by the same author. That catches a
 //!   transcription slip and cannot catch a misreading, and there is no third
@@ -127,6 +132,9 @@ const AES_128_CBC: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x0
 const AES_256_CBC: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2A];
 /// RC4, `1.2.840.113549.3.4`.
 const RC4: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x03, 0x04];
+/// Triple DES in CBC mode, `1.2.840.113549.3.7`. OpenSSL's `cms -encrypt`
+/// still chooses this by default for older recipients.
+const DES_EDE3_CBC: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x03, 0x07];
 
 /// The envelopes this document carries, wherever it put them.
 ///
@@ -206,9 +214,21 @@ fn decrypt_content(
         plain
     } else if oid.as_bytes() == RC4 {
         tinker_pdf_crypto::rc4::rc4(key, sealed)
+    } else if oid.as_bytes() == DES_EDE3_CBC {
+        // RFC 3217 §2: the parameter is the eight-byte initialisation vector,
+        // the block being half AES's. Same shape as the branch above and a
+        // different width, which is the whole of the difference here.
+        let iv = algorithm
+            .parameters()
+            .and_then(|node| node.as_octet_string().ok())
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .ok_or_else(|| PubSecError::UnsupportedContentCipher {
+                oid: oid.to_dotted(),
+            })?;
+        let (plain, _notes) = tinker_pdf_crypto::des::cbc_decrypt(key, &iv, sealed);
+        plain
     } else {
-        // Triple DES is the one real gap: OpenSSL emits it by default for
-        // older recipients and this crate has no DES. Named, because a caller
+        // Whatever is left. Named rather than skipped, because a caller
         // meeting it can re-seal with something else, where a silent failure
         // tells them nothing.
         return Err(PubSecError::UnsupportedContentCipher {
@@ -416,6 +436,76 @@ mod tests {
         let envelope = include_bytes!("../../tinker-pdf-pki/tests/data/enveloped/aes-256-cbc.der");
         let outcome = unseal(&[envelope.to_vec()], &Nobody);
         assert_eq!(outcome, Err(PubSecError::NoMatchingRecipient));
+    }
+
+    /// The `des-ede3-cbc` branch is reached on an envelope **OpenSSL wrote**,
+    /// and is no longer the refusal it was.
+    ///
+    /// What this proves and what it does not, precisely. The fixture is
+    /// `tinker-pdf-pki`'s: OpenSSL 3.5.5 sealed a known seed to a throwaway
+    /// certificate on 28 August 2026 and the private key was not kept. So
+    /// **nothing can unseal it**, and this test cannot check a plaintext. What
+    /// it does check is everything between the OID and the cipher:
+    ///
+    /// - the OID constant this module matches on is the one OpenSSL emits,
+    ///   byte for byte, rather than one transcribed from a table;
+    /// - the algorithm parameters are an eight-byte octet string, so the IV
+    ///   this module reads out of a real envelope is the width DES takes —
+    ///   the AES branch beside it reads sixteen and a copied line would have
+    ///   kept that;
+    /// - handed a content key, the path runs the cipher and returns bytes
+    ///   instead of `UnsupportedContentCipher`.
+    ///
+    /// The key offered here is wrong — it is not the sealed one — so the bytes
+    /// that come back are garbage, and the test says so rather than pretending
+    /// otherwise. That garbage is the "a wrong key reads as a decrypted
+    /// document" risk `docs/design/pubsec.md` records, visible here in
+    /// miniature. Whether the cipher is *correct* is settled by the 500 NIST
+    /// CAVP vectors in `tinker_pdf_crypto::des`, and by nothing in this file.
+    #[test]
+    fn the_openssl_triple_des_envelope_reaches_the_cipher() {
+        use tinker_pdf_pki::EnvelopedData;
+
+        const DER: &[u8] =
+            include_bytes!("../../tinker-pdf-pki/tests/data/enveloped/des-ede3-cbc.der");
+        let parsed = EnvelopedData::parse(DER).expect("the OpenSSL fixture parses");
+        let algorithm = parsed.content_algorithm();
+        assert_eq!(
+            algorithm.oid().as_bytes(),
+            DES_EDE3_CBC,
+            "the constant matched on is what OpenSSL wrote"
+        );
+        assert_eq!(algorithm.oid().to_dotted(), "1.2.840.113549.3.7");
+
+        let iv = algorithm
+            .parameters()
+            .and_then(|node| node.as_octet_string().ok())
+            .expect("RFC 3217 §2: the parameter is the IV");
+        assert_eq!(iv.len(), 8, "a DES block is half an AES block");
+
+        // Any 24-byte key at all: what is under test is that the branch runs.
+        struct Whoever;
+        impl Recipient for Whoever {
+            fn unseal(&self, _: &[u8], _: Option<&[u8]>, _: Option<&[u8]>) -> Option<Vec<u8>> {
+                Some(vec![0x5Au8; 24])
+            }
+        }
+        let outcome = unseal(&[DER.to_vec()], &Whoever);
+        assert!(
+            !matches!(outcome, Err(PubSecError::UnsupportedContentCipher { .. })),
+            "the cipher is implemented now: {outcome:?}"
+        );
+        let plain = outcome.expect("the cipher ran");
+        assert_eq!(
+            plain.len() % 8,
+            0,
+            "a wrong key leaves whole blocks of garbage, not a short read"
+        );
+        assert_ne!(
+            &plain[..20],
+            b"SEEDSEEDSEEDSEEDSEED",
+            "and the garbage is not the seed, because this is not the key"
+        );
     }
 
     #[test]

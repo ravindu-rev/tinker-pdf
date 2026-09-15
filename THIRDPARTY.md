@@ -582,17 +582,55 @@ cited revisions name and the current tables had dropped.
 not redistributed in any built artefact.
 
 `crates/tinker-pdf-crypto/tests/data/cavp/` holds NIST CAVP known-answer
-vectors for RSA and ECDSA signature verification, from the DSS test-vector
-archives at csrc.nist.gov. NIST publications are works of the United States
-Government and carry no copyright, so there is no licence to reproduce. Each
-file's own header comment records the archive it came from, the date it was
-fetched, the SHA-256 of that archive, and — for the two ECDSA files — which
-curve groups were dropped and why. They are `cargo test` inputs, compiled in
-only under `#[cfg(test)]`, and are not in any built artefact.
+vectors for RSA and ECDSA signature verification and for Triple DES, from the
+DSS and block-cipher test-vector archives at csrc.nist.gov. NIST publications
+are works of the United States Government and carry no copyright, so there is
+no licence to reproduce. Each file's own header comment records the archive it
+came from, the date it was fetched, the SHA-256 of that archive, the SHA-256 of
+the file inside it, and what was taken — for the two ECDSA files, which curve
+groups were dropped and why; for the seven Triple DES files, that nothing was
+dropped at all. They are `cargo test` inputs, compiled in only under
+`#[cfg(test)]`, and are not in any built artefact.
 
-These sit under `tests/data/` rather than `crates/<crate>/data/` because they
-are neither vendored *into* the engine nor redistributed by it; `cargo xtask
-vendor`'s allowlist governs the latter, and this is the former.
+The seven Triple DES files were added 15 September 2026 with the `des-ede3-cbc`
+content cipher, and they are **committed rather than fetched**, deliberately.
+This repository commits small vector sets and fetches large corpora, and the
+rule that decides between them is that a check which quietly succeeds when its
+data is missing is worse than no check. These total 71 KB — smaller than the
+ECDSA `SigVer` file already beside them and a fifteenth of the RSA one — so
+committing them costs little and makes the gate unconditional: there is no
+`SKIPPED` path, because there is nothing to skip. `TCBCvartext`, `TCBCvarkey`,
+`TCBCsubtab`, `TCBCpermop` and `TCBCinvperm` come from `KAT_TDES.zip`, and
+`TCBCMMT3` and `TCBCMMT2` from `tdesmmt.zip`, both under
+`https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/des/`.
+The CBC-mode files are taken in preference to the ECB ones because CBC is what
+a CMS envelope uses, and every KAT in them is single-block under a zero IV, so
+they exercise the bare block cipher as well as the mode. The two `MMT` files
+are the multi-block ones, and they are what the KATs cannot be: `TCBCMMT3` is
+the only file whose three keys differ, so it is the only one that can see the
+order of EDE3's sub-keys, and `TCBCMMT2` is the only published answer keying
+option 2 has at all. Both were chosen by a counted-injection campaign rather
+than by taste — the sub-key order and the 16-byte key bundle were each caught
+by exactly nothing until the file that sees them was committed.
+
+Each of the seven was checked back against its archive when it was committed:
+re-fetching both zips, hashing them, and comparing each committed file's body,
+after the LF normalisation `.gitattributes` applies to the whole tree, against
+the member inside — all seven are byte-for-byte the archive, and the SHA-256s
+their headers pin are the SHA-256s the archives yield.
+
+**The tables those vectors adjudicate** are from **FIPS 46-3** (reaffirmed 25
+October 1999, withdrawn 19 May 2005), the archived PDF at
+`https://csrc.nist.gov/files/pubs/fips/46-3/final/docs/fips46-3.pdf`, SHA-256
+`38dc009ca59d391814328fbbf3df0dfe30c69e75dc22b280efd807621e0244b1` — fetched
+and hashed again on 15 September 2026, and it is that document. Also a United
+States Government work and also uncopyrighted; the document itself is not
+committed, only the eight S-boxes and six permutation tables it specifies,
+which are the algorithm and not the text.
+
+The vector files sit under `tests/data/` rather than `crates/<crate>/data/`
+because they are neither vendored *into* the engine nor redistributed by it;
+`cargo xtask vendor`'s allowlist governs the latter, and this is the former.
 `crates/tinker-pdf-filters/tests/jxr/*.jxr` are JPEG XR encodings of rasters
 this repository authors, produced by the Windows Imaging Component codec
 through WPF's `WmpBitmapEncoder` on Windows 11 Pro build 10.0.26200.0, 30
