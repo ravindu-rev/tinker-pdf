@@ -56,21 +56,25 @@ mod tiff;
 use core::fmt;
 
 pub use brotli::{brotli_decode, BrotliError};
-pub use ccitt::{decode as ccitt_decode, CcittParams, T6Rows};
+pub use ccitt::{
+    decode as ccitt_decode, g4_encode as ccitt_g4_encode, CcittEncodeError, CcittParams,
+    CcittSource, T6Rows,
+};
 pub use crc32::{crc32, Crc32};
 pub use deflate::{deflate, zlib_compress};
 pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{
-    decode as jbig2_decode, decode_attributed as jbig2_decode_attributed, Jbig2Params,
-    Jbig2Refusal, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TABLE_LINES,
-    MAX_JBIG2_TEXT_INSTANCES,
+    decode as jbig2_decode, decode_attributed as jbig2_decode_attributed,
+    generic_encode as jbig2_generic_encode, generic_region_segment as jbig2_generic_region_segment,
+    Jbig2EncodeError, Jbig2GenericSource, Jbig2Params, Jbig2Refusal, MAX_JBIG2_SYMBOLS,
+    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TABLE_LINES, MAX_JBIG2_TEXT_INSTANCES,
 };
 pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
 pub use jpx::{jpx_decode, jpx_decode_attributed, JpxColour, JpxImage, Refusal as JpxRefusal};
 pub use jxr::{
     jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,
 };
-pub use mq::{MqContext, MqContexts, MqDecoder};
+pub use mq::{encoder::MqEncoder, MqContext, MqContexts, MqDecoder};
 pub use png::{
     colour_type_depth_is_legal, png_decode, png_encode, png_scan, ChunkType, PngColour,
     PngEncodeError, PngError, PngHeader, PngImage, PngScan, PngSource, PngTransparency,

@@ -212,7 +212,7 @@ with no wrapper, for ZIP entries) and `crc32` — the reflected-polynomial
 CRC-32 that ZIP (APPNOTE 4.4.7) and PNG (5.3) both carry, with a resumable
 `Crc32` for checksums over non-adjacent slices.
 
-**And a PNG *encoder*, which is the only image writer in this crate.**
+**And a PNG *encoder*, the first of this crate's three image writers.**
 `png_encode` takes an interleaved 8-bit raster and returns a whole file:
 signature, IHDR, IDAT, IEND, each chunk's CRC over its type and its data. It
 is here rather than in the tool that wanted it because a PNG file *is* the
@@ -250,6 +250,62 @@ IHDR asking for 2^63 samples, and charging it on the way out would refuse a
 legal picture — a page at `MAX_PAGE_PIXELS` (67.1 Mpx) is 268 million samples
 as RGBA, four times the ceiling. So the largest page this engine renders writes
 a PNG this crate's own decoder will not read back.
+
+**Two bilevel encoders joined it on 15 September 2026**, both promoted from
+code that already existed as a test fixture, and both shaped like `png_encode`:
+a borrowed raster with an explicit stride, plain numbers beside it, a free
+function returning `Result<Vec<u8>, _>`, and a refusal enum whose every variant
+is a caller mis-describing its own buffer rather than damage in something read.
+
+`ccitt_g4_encode` takes a `CcittSource` and writes **ITU-T T.6 two-dimensional
+coding** — PDF's `/CCITTFaxDecode` at `/K` negative, and JBIG2's MMR (T.88
+6.2.6) with `end_of_block` off. Pass, vertical and horizontal modes off T.6
+§2.2.4's flow diagram; the full T.4 run tables, both make-up tables, Table 3b's
+shared extension and the rule for a run past 2 623 pels; `/BlackIs1` either
+way; EOFB on request. It writes G4 and nothing else — no `/K` zero, no `/K`
+positive with its per-line tag, no TIFF compression 2 with byte-aligned rows,
+no uncompressed mode — because each of those is a different framing around the
+same row coder, G4 is smaller than all of them on every image, and a caller
+that wants one should have to ask.
+
+`jbig2_generic_encode` takes a `Jbig2GenericSource` and writes **T.88 6.2.5's
+arithmetically coded generic region**: all four templates of Figures 8 to 11 at
+any AT positions 7.4.6.3 can express, 6.2.5.7's typical prediction, over an
+`MqEncoder` that stopped being `#[cfg(test)]` to carry it.
+`jbig2_generic_region_segment` wraps that in 7.4.1's region information field
+and 7.4.6.2's flags, which is one segment's *data* and not a JBIG2 file: no
+page information segment, no file header, no D.3 embedded-stream assembly.
+Symbol dictionaries, text regions, refinement, halftones, pattern dictionaries
+and USESKIP are not written, each named in the module header with its reason.
+MMR generic regions are not written *here* either, because `ccitt_g4_encode`
+is the coder 6.2.6 defers to and a second copy would be a second thing to get
+wrong.
+
+**What adjudicates them is third-party data in both directions.** A round trip
+through this crate's own decoder proves the two halves of one misunderstanding
+agree, so it is never the claim:
+
+- **ITU-T T.4 Tables 2, 3a, 3b and 4** — fetched 15 September 2026, read twice
+  (once out of the text layer, once off the rendered pages at 170 dpi), and all
+  195 run-length entries asserted against that transcription. No fixture in the
+  tree has a run longer than 63, so this is the only guard on a make-up code.
+- **ITU-T T.88 Annex H.1** publishes a 54 × 44 bitmap *and* the bytes its own
+  encoder produced for it twice over: segment 4 is 26 bytes of MMR and segment
+  11 is nine bytes of arithmetic generic region at template 0 with TPGDON.
+  Encoding the published picture and comparing with the published bytes leaves
+  an encoder nowhere to hide. Annex H.2's thirty bytes pin the MQ coder
+  underneath independently.
+
+One limit is recorded rather than glossed: **no published bitstream can pin the
+context numbering.** A context index is a label into an array whose slots all
+start identical, so any bijection of the numbering is invisible to a coder —
+measured, by injecting two such permutations and watching Annex H.1 still match
+byte for byte. T.88's Figures 8 to 11, transcribed pixel by pixel, are what pin
+it, and they pin all four templates rather than the one the annex uses.
+
+**Nothing in this repository calls either encoder outside the tests**, and the
+writer's contract — it never re-encodes image bytes — is unchanged by their
+existence ([creation](creation.md), [ROADMAP](../ROADMAP.md)).
 
 **TIFF** (TIFF 6.0) is the second container decoder, and the argument for it
 being here rather than in a reader is arithmetic: of the seven codings a TIFF
@@ -316,10 +372,20 @@ Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 `predictor_decode`. The image codecs are `jpeg_decode` (returns `JpegImage`),
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
-`JpxImage`). The encoder half is `deflate`, `zlib_compress` and `png_encode`
-(takes a `PngSource`, returns the file or a `PngEncodeError`); the container
+`JpxImage`). The encoder half is `deflate`, `zlib_compress`, `png_encode`
+(takes a `PngSource`, returns the file or a `PngEncodeError`), `ccitt_g4_encode`
+(takes a `CcittSource`, returns the coded bits or a `CcittEncodeError`) and
+`jbig2_generic_encode` / `jbig2_generic_region_segment` (take a
+`Jbig2GenericSource`, return the MQ bytes or the whole segment data, or a
+`Jbig2EncodeError`), with `MqEncoder` public beneath the last two; the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
 `inflate_raw`, `crc32` and `jxr_decode` (returns `JxrImage`).
+
+Every one of those five takes plain numbers and a borrowed byte slice and
+returns bytes, which is all ruling 8 asks of a leaf. The parameter names
+`columns`, `rows`, `black_is_1` and `end_of_block` are PDF's, and deliberately:
+`CcittParams` has been public with those names since the decoder landed, and one
+name per concept in a crate beats two.
 
 `png_encode` is the one filter entry point with a visible counterpart on the
 facade, and the shape is a projection rather than a re-export: ruling 11 keeps
@@ -329,6 +395,15 @@ PNG's colour types and calls this. Two of the six formats have no colour type
 to map onto and are converted there rather than here — `CmykA8` through
 8.6.4.4's device relation and `LabA8` back out of `L*a*b*` — because this crate
 holds no PDF colour and ruling 8 keeps it that way.
+
+`ccitt_g4_encode` and `jbig2_generic_encode` have **no** facade counterpart, and
+that is the same ruling read the same way rather than an omission. Ruling 11
+makes `tinker_pdf` the surface for a *document*; a bilevel raster is not one,
+and nothing the facade hands a caller is one. `Bitmap::to_png` exists because a
+caller of the facade holds a rendered page; there is no equivalent thing to
+project here, and inventing an entry point to satisfy a ruling that does not ask
+for one would be the actual mistake. A caller who wants G4 or JBIG2 bytes
+depends on the leaf crate, which is what leaf crates are for.
 
 `jxr_decode` is deliberately **not** a `Filter` or an `ImageCodec` variant.
 Those two enums are PDF `/Filter` dispatch — what a `/Filter` *name* resolves
