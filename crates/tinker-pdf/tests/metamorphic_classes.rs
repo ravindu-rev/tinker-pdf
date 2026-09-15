@@ -52,14 +52,24 @@
 //! Measured on pages the construct covers, at sizes a document has
 //! (`where_the_rotate_budget_goes`, which re-measures every figure it prints):
 //!
-//! | Page | `rotate` |
-//! | --- | ---: |
-//! | two triangles in a corner of 64 pt | 2.81 % |
-//! | the same two triangles on 595 pt | 0.03 % |
-//! | 11-point text filling 200 pt | 7.74 % |
-//! | 11-point text filling 595 pt | **8.77 %** |
-//! | 11-point text filling 842 pt | **8.74 %** |
-//! | diagonal edges covering 595 pt | 23.52 % |
+//! | Page | `rotate` when the budget was sited | `rotate` today |
+//! | --- | ---: | ---: |
+//! | two triangles in a corner of 64 pt | 2.81 % | 0.22 % |
+//! | the same two triangles on 595 pt | 0.03 % | 0.00 % |
+//! | 11-point text filling 200 pt | 7.74 % | 3.38 % |
+//! | 11-point text filling 595 pt | **8.77 %** | **3.63 %** |
+//! | 11-point text filling 842 pt | **8.74 %** | **3.66 %** |
+//! | diagonal edges covering 595 pt | 23.52 % | 0.20 % |
+//!
+//! **The right column is 15 September 2026**, after `fill` stopped truncating
+//! an edge's slope to a whole 1/256 pixel per sub-scanline. A quarter turn
+//! makes a steep edge shallow, and a shallow slope was precisely the case that
+//! truncation flattened to vertical — so most of what this relation was
+//! measuring was the rasterizer's own quantisation rather than anything about
+//! the document. Every figure more than halved. `ROTATE_BUDGET` is left at
+//! 10 % all the same: the 181-files-to-15 corpus counts that sited it were
+//! measured on the old arithmetic, and re-siting a budget wants a corpus run
+//! rather than this file's six fixtures.
 //!
 //! **A page of text costs 8.8%, and stays there as the page grows** — the
 //! corner fixture's cost fell with page size because its shapes stayed put,
@@ -74,11 +84,16 @@
 //! the ratchet holds and no run fails on, so the 107 files between the two
 //! lines stay counted.
 //!
-//! **And one limitation no budget removes.** A page saturated with diagonal
-//! edge costs 23.5% at 595 points, which is the tiling class's own range. At
-//! no budget does this relation separate a saturated vector page from a
-//! lattice rounded wrongly, and the test asserts that rather than leaving it
-//! to be rediscovered.
+//! **And the limitation that has gone.** A page saturated with diagonal edge
+//! used to cost 23.5% at 595 points and 46.8% at 64 — the tiling class's own
+//! range — so at no budget did this relation separate a saturated vector page
+//! from a lattice rounded wrongly. That was asserted rather than written down,
+//! so the day it stopped being true would be a failing run and not a
+//! discovery; the day was 15 September 2026. The same page now costs 0.20% at
+//! 595 points and 2.05% at 64 against the tiling class's 22%, and the
+//! assertion is the other way round: the saturated page must stay inside the
+//! budget and under the defect class, which fails if the slope arithmetic ever
+//! goes back.
 //!
 //! # What the corpus said first
 //!
@@ -154,6 +169,7 @@ fn dpi_relation(bytes: Vec<u8>) -> (u64, u64) {
         format: PixelFormat::Rgb8,
         cancel: None,
         annotations: true,
+        region: None,
     };
     let base = page.render(&options);
     let doubled = page.render(&RenderOptions {
@@ -470,6 +486,7 @@ fn rotate_relation(bytes: Vec<u8>) -> (u64, u64) {
         format: PixelFormat::Rgb8,
         cancel: None,
         annotations: true,
+        region: None,
     };
     let base = document.page(0).expect("a page").render(&options);
 
@@ -511,6 +528,7 @@ fn crop_relation(bytes: Vec<u8>) -> (u64, u64) {
         format: PixelFormat::Rgb8,
         cancel: None,
         annotations: true,
+        region: None,
     };
     let page = document.page(0).expect("a page");
     let base = page.render(&options);
@@ -655,14 +673,25 @@ fn what_moves_under_a_quarter_turn() {
 /// at three percent and records it as `rotate-tight`, which the ratchet holds
 /// like any other relation and which no run fails on.
 ///
-/// **And the limitation, which no budget removes.** A page that is nothing but
-/// diagonal edge — twelve wedges spanning it — costs 23.5% at 595 points and
-/// 46.8% at 64, which is the same range as the tiling-pattern *defect* this
-/// file attributes at 22%. The two populations overlap, so at no budget does
-/// this relation separate a saturated vector page from a lattice rounded
-/// wrongly. That is asserted below rather than written down and forgotten: the
-/// day a rasteriser change makes a saturated page cheap, the assertion fails
-/// and this paragraph gets rewritten.
+/// **And the limitation that the assertion below caught going away.** A page
+/// that is nothing but diagonal edge — twelve wedges spanning it — cost 23.5%
+/// at 595 points and 46.8% at 64, the same range as the tiling-pattern
+/// *defect* this file attributes at 22%. The two populations overlapped, so at
+/// no budget did this relation separate a saturated vector page from a lattice
+/// rounded wrongly, and this paragraph said so with an assertion under it
+/// rather than a sentence alone: *the day a rasteriser change makes a
+/// saturated page cheap, the assertion fails and this paragraph gets
+/// rewritten.*
+///
+/// It failed on 15 September 2026, and this is the rewrite. `fill` had been
+/// storing an edge's slope as a whole number of 1/256 pixel per sub-scanline,
+/// which truncated every slope below one pixel of x per sixteen of y to zero;
+/// a quarter turn is what makes a page's steep edges shallow, so the relation
+/// was reading that quantisation back as disagreement. Twelve wedges now cost
+/// **2.05% at 64 points, 0.59% at 200 and 0.20% at 595**, and the assertion is
+/// inverted: the saturated class has to stay inside the budget *and* under the
+/// tiling class, so the separation this paragraph used to deny is now a claim
+/// a regression would break.
 #[test]
 fn where_the_rotate_budget_goes() {
     // What the budget must admit: pages a producer emits. The construct in a
@@ -686,8 +715,9 @@ fn where_the_rotate_budget_goes() {
         worst_document = worst_document.max(share_moved);
     }
 
-    // And what it cannot admit, which is stated rather than left to be
-    // discovered: a page that is nothing *but* diagonal edge.
+    // And the class that used to sit outside every budget: a page that is
+    // nothing *but* diagonal edge. It sits inside now, which is the whole of
+    // what the slope fix bought this relation.
     let mut worst_saturated: f64 = 0.0;
     for (name, bytes) in [
         ("diagonal edges covering 64 pt", covered_page_at(SIZE)),
@@ -697,7 +727,7 @@ fn where_the_rotate_budget_goes() {
         let (moved, total) = rotate_relation(bytes);
         let share_moved = share(moved, total);
         println!(
-            "  {name:<34} {moved:>7} of {total:>7} ({:.2}%)  [beyond any budget]",
+            "  {name:<34} {moved:>7} of {total:>7} ({:.2}%)  [the saturated class]",
             share_moved * 100.0
         );
         worst_saturated = worst_saturated.max(share_moved);
@@ -737,12 +767,29 @@ fn where_the_rotate_budget_goes() {
         ROTATE_BUDGET * 100.0,
         tiling * 100.0
     );
+    // The inversion of the assertion this test carried until 15 September
+    // 2026. Both halves matter: inside the budget is what makes a saturated
+    // vector page a page rather than a failure, and under the tiling class is
+    // what makes the two populations separable at all. A slope truncated back
+    // to a whole 1/256 unit per sub-scanline puts this at 46.8% and fails
+    // both.
     assert!(
-        worst_saturated > ROTATE_BUDGET,
-        "a page saturated with diagonal edges costs {:.2}%, which is inside the \
-         budget -- if this ever passes, the limitation recorded above has gone \
-         away and the doc comment is wrong",
-        worst_saturated * 100.0
+        worst_saturated <= ROTATE_BUDGET,
+        "a page saturated with diagonal edges costs {:.2}% and the budget \
+         admits {:.2}% -- this class was outside every budget until the slope \
+         arithmetic was fixed, so a regression here is a rasteriser change and \
+         not a reason to raise the budget",
+        worst_saturated * 100.0,
+        ROTATE_BUDGET * 100.0
+    );
+    assert!(
+        worst_saturated < tiling,
+        "a saturated vector page costs {:.2}% and the tiling *defect* costs \
+         {:.2}%: the two populations have merged again, and this relation no \
+         longer separates a page that is hard to rotate from a lattice rounded \
+         wrongly",
+        worst_saturated * 100.0,
+        tiling * 100.0
     );
 }
 

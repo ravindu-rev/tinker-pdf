@@ -30,10 +30,40 @@ points are dropped at construction, so nothing downstream ever sees a NaN.
 non-zero winding (8.5.3.3.2) or even-odd (8.5.3.3.3) rule. Coverage is
 accumulated at sixteen sub-scanlines per pixel row with exact horizontal
 spans in 1/256-pixel fixed point, entirely in integer arithmetic — the
-choice ruling 4 pays for over analytic exact-area coverage, and the
-difference stays below one 8-bit level at every edge angle. The sweep keeps
+choice ruling 4 pays for over analytic exact-area coverage. The sweep keeps
 an active-edge list and visits only the rows a shape reaches, so a glyph-tall
 fill on a page-tall region does the shape's work, not the paper's.
+
+*What the fixed grid costs, measured rather than asserted.* This paragraph
+used to end "and the difference stays below one 8-bit level at every edge
+angle". It does not, and never did. Measured 15 September 2026 against the
+true area of a half-plane over a sweep of angles and sub-pixel offsets, the
+worst pixel is **14.7 levels of 255** at one degree off horizontal; the error
+sits between 8 and 10 levels from two degrees to forty-five and falls to 1.1
+at eighty-nine. Sixteen sub-scanlines quantise an edge's vertical position to
+a sixteenth of a pixel, and that is what those numbers are. The trade is still
+the right one — a fixed grid is what makes ruling 4's bit-identical output
+possible at all, and a floating-point area integrator would not be — but it is
+a trade, and `SAMPLES` is the knob that buys quality back at a linear cost and
+at the price of re-baselining every fingerprint in the tree.
+
+*An edge carries sixteen more bits than the spans do*, and the reason is
+worth stating because it was got wrong for as long as this file existed. An
+edge's slope is multiplied by the height of the edge and its position is not,
+so the slope needs far more precision. Held at a whole 1/256 unit per
+sub-scanline, a slope is stored as `trunc(slope × 16)`: **every slope
+shallower than one pixel of `x` per sixteen of `y` truncated to zero and the
+edge was drawn vertical**, and every steeper one walked its lower end `h/16`
+pixels off the line over an edge `h` tall. `SUBSTEP_BITS` puts sixteen bits
+under the 1/256 unit, which leaves a page-tall edge under a thousandth of a
+level from the line it states. The reduction back to 1/256 takes the
+**nearest** unit — `+ half, >> bits`, a `floor` of a shifted value — rather
+than truncating toward zero, which is a different operation on the two sides
+of the origin and so quantised a shape differently once it moved across one.
+That is the property a tile rests on (ruling 5), and it is also simply the
+closer answer: a span is linear in the crossing, so the nearest unit is the
+one whose span is nearest the geometry's. Both were found by ruling 5's tile
+guard and both were wrong for a whole page as much as for a tile.
 
 **Stroking.** `stroke` expands a path under a `StrokeStyle` pen into an
 outline filled with the non-zero rule, so a stroked edge anti-aliases
@@ -227,12 +257,24 @@ tiny pattern over a long line cannot generate millions of pieces.
   proves shared edges leave no seam; `canvas.rs` covers formats, backdrops
   and bounded compositing.
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
-  of the 15 committed render fingerprints, `text`, `curves`, `shading`,
+  of the 19 committed render fingerprints, `text`, `curves`, `shading`,
   `blend`, `pattern`, `image`, `transparency`, `tiling` and `mesh` exercise
   this crate directly, each a pixel hash plus dimensions and an ink floor,
   reproduced byte-for-byte on three measured targets
   ([determinism](determinism.md)).
-- **Analytic sampling and coverage**
+- **Analytic coverage** (`tinker-pdf-raster/tests/analytic_coverage.rs`):
+  every expectation a closed form of the sampling grid, evaluated in the test
+  from the path's own equation and compared byte for byte — both fill rules, a
+  half-covered edge, a diagonal against the area the line states, and
+  `a_shallow_edge_keeps_the_slope_the_line_states`, a parallelogram two pixels
+  wide and 256 tall drifting fourteen across, whose slope is 0.875 of a 1/256
+  unit per sub-scanline. That last one is the fixture the truncated slope
+  above had no answer for: it rasterised as a straight vertical bar, fourteen
+  pixels wrong at its lower end. What this tier adjudicates is the
+  implementation against the *stated sampling model*, which is this crate's
+  own contract rather than ISO 32000's — named here because that is a weaker
+  claim than a third-party vector and is worth not mistaking for one.
+- **Analytic sampling**
   (`tinker-pdf-raster/tests/analytic_sampling.rs`): every expectation computed
   in the test from the geometry. Minification against an independent box
   average at six ratios; a half-covered edge against its area on either axis at

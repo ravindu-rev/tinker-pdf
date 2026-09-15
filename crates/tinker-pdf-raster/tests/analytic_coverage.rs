@@ -9,10 +9,18 @@
 //! # The sampling grid, stated once
 //!
 //! `fill` samples **sixteen sub-scanlines per pixel row** and accumulates
-//! **exact horizontal spans in units of 1/256 of a pixel**. Both numbers are
-//! `fill.rs`'s own constants and both are part of ruling 4's contract — the
-//! result is fixed-point and identical on every target, which a floating-point
-//! area integrator would not be.
+//! **exact horizontal spans in units of 1/256 of a pixel**, each edge taken to
+//! the **nearest** unit. Both numbers are `fill.rs`'s own constants and both
+//! are part of ruling 4's contract — the result is fixed-point and identical on
+//! every target, which a floating-point area integrator would not be.
+//!
+//! The *nearest* is newer than the rest of this file. An edge used to be
+//! truncated toward zero, which is not the same operation on the two sides of
+//! the origin, so a shape quantised differently once it was moved across it —
+//! which ruling 5's tile guard (`crates/tinker-pdf/tests/render_regions.rs`)
+//! measured as a one-level difference between a tile and the page under it.
+//! Rounding is also the unbiased choice: truncation moved every edge of every
+//! page a half-unit toward zero.
 //!
 //! Given that grid the coverage of any pixel is a closed form:
 //!
@@ -45,6 +53,37 @@
 //! have — because every offset in this file landed on a sixteenth, where the
 //! two roundings the grid performs are invisible. A fixture that cannot see a
 //! rounding is not a fixture for a rasterizer.
+//!
+//! # Which half of this is adjudication and which is agreement
+//!
+//! Said plainly, because the two look identical in a passing run and only one
+//! of them is evidence.
+//!
+//! **No third-party data adjudicates anything in this file.** There is no
+//! published vector set for a coverage grid; the grid is `fill.rs`'s own choice
+//! under ruling 4. What this file can do, and does, is hold the implementation
+//! to the *stated model* by a route that does not pass through the
+//! implementation — and the two halves of the September 2026 change sit on
+//! opposite sides of that line:
+//!
+//! - **The slope is adjudicated.** [`a_shallow_edge_keeps_the_slope_the_line_states`]
+//!   computes the parallelogram's left edge as `8 + 14·y/256` — the line's own
+//!   equation, evaluated per sub-scanline — and never asks how an edge is
+//!   stored. `fill.rs` used to keep a slope as a whole 1/256 unit per
+//!   sub-scanline and this fixture is 0.875 of one, so the old arithmetic
+//!   disagreed with the line by fourteen pixels. That is a real finding: the
+//!   expectation could not have been written to match it.
+//! - **The rounding is agreement, not adjudication.** [`units`] takes an
+//!   edge to the *nearest* 1/256 unit, and `fill.rs` was changed to do the same
+//!   in the same commit. An oracle changed alongside the code it checks proves
+//!   nothing on its own, and this one is written down as such. The argument for
+//!   it is in [`units`] and is about the geometry rather than about `fill.rs`:
+//!   the overlap is **linear** in each edge's position, so the nearest unit is
+//!   the unit whose overlap is nearest the real overlap, and truncation is the
+//!   further of the two on every edge. What carries independent weight is the
+//!   *size* of the disagreement — measured at **at most one level of 255**, on
+//!   fewer than 3% of the pixels of any reviewed golden — which is the shape a
+//!   quantisation rule has and not the shape a placement bug has.
 //!
 //! # What this cannot reach
 //!
@@ -99,9 +138,24 @@ fn sub_scanlines(row: u32, y0: f64, y1: f64) -> i64 {
 }
 
 /// A pixel column's horizontal overlap with `[x0, x1]`, in 1/256 units.
+///
+/// **To the nearest unit, not toward zero**, which is the grid's own rule and
+/// was `as i64` here until ruling 5's tile guard landed.
+///
+/// The argument is about the geometry and not about `fill.rs`, which is the
+/// only reason this file is allowed to state it: the overlap this function
+/// returns is **linear** in each edge's position, so the unit nearest the real
+/// edge is the unit whose overlap is nearest the real overlap. A left edge at
+/// `x = 2.51` is 642.56 units along; rounded it is 643 and the column-2 overlap
+/// comes out 125, truncated it is 642 and the overlap comes out 126, and the
+/// real overlap is 125.44. Truncation is the further of the two, on every edge,
+/// and it is not even the same operation on the two sides of the origin — so a
+/// shape quantised differently once it moved across one, which is what ruling
+/// 5's tile guard (`crates/tinker-pdf/tests/render_regions.rs`) measured as a
+/// one-level difference between a tile and the page under it.
 fn units(column: u32, x0: f64, x1: f64) -> i64 {
-    let left = (x0 * UNITS as f64) as i64;
-    let right = (x1 * UNITS as f64) as i64;
+    let left = (x0 * UNITS as f64).round() as i64;
+    let right = (x1 * UNITS as f64).round() as i64;
     let cell = i64::from(column) * UNITS;
     (right.min(cell + UNITS) - left.max(cell)).max(0)
 }
@@ -357,6 +411,79 @@ fn a_diagonal_edge_covers_the_area_the_line_states() {
     // top edge, so the sixteen spans under `x = y` run 0, 1/16, … 15/16 of a
     // pixel and average to 15/32 rather than to a half.
     assert_eq!(at(&mask, 0, 0), 120);
+}
+
+/// **A slope below one unit of `x` per sub-scanline is carried, not dropped.**
+///
+/// The fixture above runs along `x = y`, where the shape moves exactly one
+/// pixel of `x` per pixel of `y` — sixteen 1/256 units per sub-scanline, a
+/// whole number. Every slope in this file was a whole number, and an edge's
+/// slope was **stored** as a whole number of 1/256 units per sub-scanline, so
+/// the file could not see the quantisation at all. What it hid:
+///
+/// > any edge shallower than one pixel of `x` per sixteen of `y` had its slope
+/// > truncated to **zero** and was rasterised vertical.
+///
+/// This parallelogram is two pixels wide, 256 tall and drifts fourteen across,
+/// which is 0.875 of a unit per sub-scanline — under one, and so exactly the
+/// case. Under the old arithmetic it came out a straight vertical bar and was
+/// fourteen pixels wrong at the bottom; every pixel below the first few rows
+/// fails against the expectation here.
+///
+/// The expectation is the same closed form as every other fixture in this file:
+/// on each of the sixteen sub-scanlines of a row the shape runs from `x(y)` to
+/// `x(y) + 2`, where `x(y) = 8 + 14·y/256` is the parallelogram's own left
+/// edge, and the row's coverage is those sixteen overlaps summed and divided by
+/// sixteen. Nothing here reads `fill.rs`.
+#[test]
+fn a_shallow_edge_keeps_the_slope_the_line_states() {
+    // Wide enough for the drift, tall enough for a sub-unit slope to matter,
+    // and both ends on whole pixel rows so every row has all sixteen of its
+    // sub-scanlines inside the shape.
+    const WIDE: u32 = 32;
+    const TALL: u32 = 256;
+    const LEFT: f64 = 8.0;
+    const DRIFT: f64 = 14.0;
+    const THICK: f64 = 2.0;
+
+    let left_at = |y: f64| LEFT + DRIFT * y / f64::from(TALL);
+
+    let mut path = Path::new();
+    path.move_to(LEFT, 0.0);
+    path.line_to(LEFT + THICK, 0.0);
+    path.line_to(left_at(f64::from(TALL)) + THICK, f64::from(TALL));
+    path.line_to(left_at(f64::from(TALL)), f64::from(TALL));
+    path.close();
+    let mask = fill(&path, FillRule::NonZero, 0, 0, WIDE, TALL, 0.1, None);
+
+    let mut wanted = Vec::with_capacity((WIDE * TALL) as usize);
+    for row in 0..TALL {
+        for column in 0..WIDE {
+            let mut total = 0i64;
+            for sample in 0..SAMPLES {
+                let y = (i64::from(row) * SAMPLES + sample) as f64 / SAMPLES as f64;
+                total += units(column, left_at(y), left_at(y) + THICK);
+            }
+            wanted.push(quantised(1, total));
+        }
+    }
+    assert_eq!(
+        mask.data, wanted,
+        "the shallow edge is not where the line says it is"
+    );
+
+    // And it really does drift, so the fixture is not a vertical bar agreeing
+    // with a vertical expectation: the ink is at one end of the region at the
+    // top and at the other at the bottom.
+    let leftmost = |row: u32| (0..WIDE).find(|column| at(&mask, *column, row) > 0);
+    assert_eq!(leftmost(0), Some(8), "the ink starts at x = 8");
+    assert_eq!(
+        leftmost(TALL - 1),
+        Some(21),
+        "and ends thirteen columns over: the left edge has travelled the \
+         fourteen pixels the line states, which a truncated slope threw away \
+         entirely"
+    );
 }
 
 // ---- strokes ----------------------------------------------------------------

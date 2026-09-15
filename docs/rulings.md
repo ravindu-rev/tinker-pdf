@@ -52,16 +52,68 @@ living in one feature's head.
    pinned byte-equal to the full-page subregion, and that test is the
    permanent guard.
 
-   *Corrected 13 September 2026.* This ruling used to say the tile rows "are
-   pinned byte-equal" and that the test "is the permanent guard", in the
-   present tense. **There is no such test in the tree**, and there never has
-   been: a sweep for a tile or region test finds nothing, the facade has no
-   `RenderOptions::region` to write one against, and the one nearby citation
-   in `crates/tinker-pdf-render/src/lib.rs` cites ruling 7 rather than this
-   one. The ruling stands as a requirement — it is what the facade's region
-   row in the [roadmap](ROADMAP.md) must satisfy — and the claim that it was
-   already met is withdrawn. A ruling that describes a guard nobody wrote is
-   worse than a ruling with no guard, because it stops anyone looking.
+   *Corrected 13 September 2026; satisfied, with one stated exception,
+   15 September 2026.* The correction is kept rather than overwritten,
+   because it is the reason the present entry can be read at face value.
+   This ruling used to say the tile rows "are pinned byte-equal" and that
+   the test "is the permanent guard", in the present tense, when **there was
+   no such test in the tree** and there never had been: a sweep for a tile
+   or region test found nothing, the facade had no `RenderOptions::region`
+   to write one against, and the one nearby citation in
+   `crates/tinker-pdf-render/src/lib.rs` cited ruling 7 rather than this
+   one. A ruling that describes a guard nobody wrote is worse than a ruling
+   with no guard, because it stops anyone looking.
+
+   **The guard is `crates/tinker-pdf/tests/render_regions.rs`.**
+   `every_tile_is_byte_equal_to_the_page_under_it` renders each of ten
+   fixtures whole and then one tile at a time through
+   `RenderOptions::region`, and asserts each tile equals its rectangle of
+   the whole render byte for byte, with no tolerance. The ten are text, a
+   diagonal axial shading, an image and strokes — four different paths
+   through the rasterizer, only one of which the scanline filler
+   anti-aliases — three of them turned a quarter or three-quarter turn, two
+   with a crop box offset from the media box on both axes, and one with both
+   at once. The tile sizes are 64, 37 and 23 against a 91×131 page, so no
+   lattice divides it and the last row and column are always partial.
+   `tiles_at_other_scales_are_byte_equal_too` repeats the whole set at 0.5×,
+   2× and 4×; `single_pixel_tiles_are_byte_equal` runs a one-pixel lattice;
+   `annotations_are_tiled_with_the_page` covers the annotation layer, which
+   no other fixture there draws from.
+
+   **It is byte-equal at those scales and not at every scale, and the
+   exception is measured rather than waved at.** A tile's transform is the
+   page's with a whole number of pixels taken off `e` and `f`, which is
+   exact as arithmetic and not as floating point: `fl(u + e)` and
+   `fl(u + e − tx)` are two roundings at two magnitudes and differ in the
+   last ulp, which reaches a byte only where the exact value sits on one of
+   the rasterizer's 1/256 steps. Measured 15 September 2026 over all ten
+   fixtures at 0.75×, 1.5× and 3×, tiling at 53: **29 of the 30 lattices
+   are exact, and the thirtieth — the axial shading at 3× — differs on one
+   pixel of 107 289 by one level of 255.**
+   `at_the_scales_where_two_frames_round_apart_the_gap_is_one_level` pins
+   that as the bound rather than above it, so a change makes it fail
+   whichever way it moves.
+
+   Which sampler is left is the useful half of that measurement. `fill`
+   reduces a crossing to the *nearest* 1/256 unit by adding a half and
+   shifting, which is a `floor` of a shifted value and commutes with moving
+   a shape a whole number of pixels; `draw_image` snaps its quad to the same
+   grid, which [rasterizer](features/rasterizer.md) records was put there
+   for this reason. A shading sampler does neither — it takes the axial
+   parameter from `a·x + c·y + e` straight into a colour with no grid in
+   between — and the one lattice that diverges is a shading. Closing it
+   means carrying the canvas's origin through the sampler, the mesh and the
+   image run so that both frames compute in one lattice; that is a change to
+   `tinker-pdf-raster`'s shape and it has its own [roadmap](ROADMAP.md) row.
+   Until it lands, this ruling is a byte-equality claim **with a named
+   exception** rather than an unconditional one, and saying so is the whole
+   point of the September correction above.
+
+   *What the guard found on its first run is worth recording, because none
+   of it was about tiles:* two defects in `tinker-pdf-raster`'s scanline
+   filler that were wrong for a whole page exactly as much as for a tile,
+   and that nothing else in the tree could see
+   ([rasterizer](features/rasterizer.md)).
 
 6. **Destinations are an enum, everywhere.** Binds
    [document-model](features/document-model.md),

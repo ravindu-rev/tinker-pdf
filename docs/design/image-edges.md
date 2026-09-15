@@ -73,12 +73,21 @@ again, and could then disagree with `fill` about.
 
 The corners are **snapped to that 1/256 grid** before filling. An image
 rectangle placed by a translation lands on a grid line far more often than not,
-`fill` truncates a crossing at `(x * 256) as i64`, and `a + (e - t)` need not
-equal `(a + e) - t` to the last bit — so an ulp below a grid line truncates to
-the unit beneath it. `crop` found this: a cropped page must be the
-sub-rectangle of the whole page *exactly*, and 240 pixels of `pclm-in.pdf`
-disagreed until the snap went in. `round` is IEEE-exact, so this costs no
-determinism.
+and `a + (e - t)` need not equal `(a + e) - t` to the last bit — so an ulp
+either side of a grid line falls on the wrong side of it. `crop` found this: a
+cropped page must be the sub-rectangle of the whole page *exactly*, and 240
+pixels of `pclm-in.pdf` disagreed until the snap went in. `round` is
+IEEE-exact, so this costs no determinism.
+
+*This paragraph used to say the snap was needed because "`fill` truncates a
+crossing at `(x * 256) as i64`". It no longer does — since September 2026
+`fill` takes each crossing to the **nearest** 1/256 unit, for the same reason
+the snap exists, under ruling 5's tile guard. The snap is still needed and the
+argument is now the shorter one above: the quad's corners are computed from an
+affine evaluated at one magnitude and compared against one evaluated at
+another, and no rounding rule inside `fill` can reconcile two inputs that
+already differ. The one lattice in `render_regions.rs` that is still not
+byte-equal is a shading, which does no snapping of any kind.*
 
 **Sampling keeps one family across 1:1.** Hard samples are `Area` over the
 pixel's own footprint, which above 1:1 is smaller than one sample: a pixel

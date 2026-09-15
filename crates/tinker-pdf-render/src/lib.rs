@@ -181,6 +181,21 @@ pub enum RenderWarning {
     },
     /// The render stopped because it was cancelled.
     Cancelled,
+    /// A [`PixelRegion`] reached past the edge of the page, so the part that
+    /// is on the page was rendered and the rest was trimmed away.
+    ///
+    /// Ruling 2 and ruling 10 together: the caller gets the pixels that exist
+    /// rather than an error, and is told the bitmap is not the size they asked
+    /// for — which they would otherwise discover by arithmetic, or not at all.
+    /// `applied` is the intersection of the ask with the page, so an `applied`
+    /// of zero width or height means the region missed the page entirely and
+    /// the bitmap has no pixels.
+    RegionClamped {
+        /// The region the caller asked for.
+        requested: PixelRegion,
+        /// The part of it that is on the page, which is what was rendered.
+        applied: PixelRegion,
+    },
 }
 
 /// What a pattern name paints with (8.7.3).
@@ -2853,6 +2868,164 @@ pub fn page_view_transform(crop: (f64, f64, f64, f64), rotation: u16, scale: f64
     to_origin
         .then(&rotate)
         .then(&page_transform(rotated_height, scale))
+}
+
+/// A rectangle of a page's **rendered pixels**: the unit the bitmap is in, not
+/// the unit the page is in.
+///
+/// # Why pixels and not points, which is the decision this type exists to state
+///
+/// A region could as defensibly be a rectangle of PDF points, and both answers
+/// are useful: a caller tiling a 4x render thinks in pixels, a caller asking
+/// for "the top-left quarter of this page" thinks in points. The two differ,
+/// and a bare four-number rectangle that could be either is exactly the API
+/// defect this type refuses — the name and the `u32`s say which, at every call
+/// site, without a doc comment having to be read.
+///
+/// Pixels win because of ruling 5. The property the whole feature owes is that
+/// **a tile is byte-equal to the corresponding sub-rectangle of the full-page
+/// render**, and a sub-rectangle of a bitmap is a rectangle of whole pixels. A
+/// region in points has to be multiplied by the scale and rounded before it can
+/// become a canvas, and no rounding rule makes an arbitrary point rectangle land
+/// on pixel boundaries: `page_pixels` already rounds the page itself *outward*,
+/// so a caller who asked for a half-open point range would get a tile that
+/// straddles a source pixel and could not be compared to anything exactly. The
+/// guard would then need a tolerance, and a tolerance is precisely what ruling 5
+/// says this must not have.
+///
+/// A caller who is thinking in points converts once, with the page's own
+/// rounding rule, through `tinker_pdf::Page::pixel_size`. A caller who is
+/// thinking in pixels — which is every caller that tiles, which is the use this
+/// row exists for — writes what they mean.
+///
+/// # Where the origin is
+///
+/// `x` and `y` count from the **top-left of the rendered bitmap, downward**,
+/// like the bitmap's own rows and unlike PDF user space, which counts up from
+/// the bottom-left. Stated because it is the second thing a region API gets
+/// wrong and the picture still looks plausible: a region whose y runs the other
+/// way returns a real part of a real page, mirrored about the middle.
+///
+/// The consequence for the page's own geometry follows from this and is not a
+/// separate decision: the bitmap is already `/Rotate`d and already cropped to
+/// the crop box, so the region indexes the picture *after* both. Asking for
+/// `(0, 0, 32, 32)` of a `/Rotate 90` page gives the top-left 32x32 of the
+/// sideways picture a reader sees, never the corner of the upright sheet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelRegion {
+    /// Distance from the bitmap's left edge, in pixels.
+    pub x: u32,
+    /// Distance from the bitmap's top edge, in pixels, counting downward.
+    pub y: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl PixelRegion {
+    /// A region at `(x, y)` of the given size.
+    #[must_use]
+    pub fn new(x: u32, y: u32, width: u32, height: u32) -> PixelRegion {
+        PixelRegion {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Whether this region asks for no pixels at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    /// This region **intersected** with a bitmap of `width` by `height`.
+    ///
+    /// # Why an intersection, and why nothing more forgiving
+    ///
+    /// Ruling 2 says degrade rather than fail, and a region hanging off the
+    /// edge of the page is a degradation waiting to be chosen: clamp it, refuse
+    /// it, return nothing, or panic. Panicking is out under ruling 1 — the
+    /// region is a caller's number, but a page's pixel size is the *file's*,
+    /// and a tiler that is correct for one document must not abort on another.
+    ///
+    /// Of the three that remain, the intersection is the only one that keeps
+    /// ruling 5's guard true. Any clamp that moves the rectangle rather than
+    /// trimming it — sliding an off-page tile back onto the page, or growing an
+    /// empty one to a single pixel so that the result is always "a picture" —
+    /// returns pixels the caller did not ask for, and those pixels are not the
+    /// sub-rectangle of the full render that the caller's own coordinates name.
+    /// The guard would hold for tiles inside the page and quietly not hold at
+    /// the edge, which is the one place a tiler actually needs it.
+    ///
+    /// So the far edges are trimmed and the near ones are not moved, and a
+    /// region that does not meet the page trims to nothing: width or height
+    /// zero, which is an honest empty answer rather than an invented pixel.
+    /// `tinker_pdf::Page::render` reports the trim as
+    /// [`RenderWarning::RegionClamped`] rather than performing it silently
+    /// (ruling 10), so "I got the tile I asked for" and "I got what was left of
+    /// it" stay distinguishable.
+    #[must_use]
+    pub fn clamped_to(&self, width: u32, height: u32) -> PixelRegion {
+        let x = self.x.min(width);
+        let y = self.y.min(height);
+        PixelRegion {
+            x,
+            y,
+            width: self.width.min(width - x),
+            height: self.height.min(height - y),
+        }
+    }
+}
+
+/// [`page_view_transform`], moved so that `region`'s top-left corner lands on
+/// the canvas origin.
+///
+/// This is ruling 5's mechanism in one line: **a clipped render is the same
+/// pipeline with a translated viewport**, never a second implementation. Every
+/// operator, every glyph, every image and every shading goes through the code
+/// that draws a whole page; the only difference is where the page's pixels are
+/// relative to the buffer, and a smaller buffer.
+///
+/// # The translation is composed *after* the page view, and that is the choice
+///
+/// `page_view_transform(..).then(&translate)` puts the shift in device space,
+/// after the crop-box origin, after `/Rotate` and after the y flip — so it
+/// subtracts bitmap pixels from bitmap coordinates. Composing it the other way
+/// round, `translate.then(&page_view_transform(..))`, shifts the page in *user*
+/// space before it is turned, which is the mistake this comment exists to name:
+/// on an unrotated page the two are indistinguishable up to a sign, and on a
+/// `/Rotate 90` page the wrong one still produces a clean, sensible-looking
+/// picture of the page — just not the part of it the caller asked for. Only a
+/// test that knows which part it asked for can tell the difference, which is
+/// why `render_regions.rs` asserts corners on a rotated page as well as
+/// tile equality.
+///
+/// The translation is exact: `region.x` and `region.y` are integers small
+/// enough to be exactly representable, so this changes `e` and `f` and nothing
+/// else, and the geometry that reaches the rasterizer is the page's own.
+#[must_use]
+pub fn region_view_transform(
+    crop: (f64, f64, f64, f64),
+    rotation: u16,
+    scale: f64,
+    region: PixelRegion,
+) -> Matrix {
+    page_view_transform(crop, rotation, scale).then(&Matrix::translate(
+        -f64::from(region.x),
+        -f64::from(region.y),
+    ))
+}
+
+/// A white canvas the size of `region`, in exactly the format asked for.
+///
+/// The region's position is not this function's business — it is in the
+/// transform, which is the whole of ruling 5 — so only the size is read.
+#[must_use]
+pub fn region_canvas_in(region: PixelRegion, format: PixelFormat) -> Canvas {
+    Canvas::new(region.width, region.height, format, Color::WHITE)
 }
 
 /// The largest canvas this will allocate for one page, in pixels.
