@@ -37,7 +37,7 @@ use tinker_pdf_cos::{decode_text_string, pages, parse_date, CosDocument, Date, D
 use tinker_pdf_xml::{Event, Name, Source};
 
 use super::xmp_extension::Extensions;
-use super::xmp_schemas::ValueForm;
+use super::xmp_schemas::Written;
 use super::{clauses, FindingKind, Flavour, Machinery, Part, Raw, RuleGroup};
 
 use crate::Document;
@@ -554,7 +554,15 @@ struct Found {
     /// The local name.
     local: String,
     /// What the serialisation says the value is.
-    form: ValueForm,
+    written: Written,
+    /// The text of each value the property carries: one entry for a simple
+    /// value, one per `rdf:li` for an array, and none for a structure.
+    ///
+    /// Collected whatever the declared type turns out to be, because the walk
+    /// does not know it: a walk that asked the table first would have to carry
+    /// the part down into it, and the table is looked up once per property
+    /// afterwards either way.
+    values: Vec<String>,
 }
 
 /// The property currently being read, and the depth its element opened at.
@@ -565,12 +573,22 @@ struct Pending {
     local: String,
     /// The path depth its start tag sat at.
     depth: usize,
-    /// The form settled so far.
-    form: ValueForm,
-    /// Whether a child element has settled the form. The **first** direct
-    /// child decides; a second cannot change it, because a property with two
-    /// container children is malformed RDF rather than a different type.
+    /// The serialisation settled so far.
+    written: Written,
+    /// Whether a child element has settled the serialisation. The **first**
+    /// direct child decides; a second cannot change it, because a property
+    /// with two container children is malformed RDF rather than a different
+    /// type.
     settled: bool,
+    /// The values read so far, and the depth whose character data is being
+    /// accumulated into the last of them.
+    values: Vec<String>,
+    /// The depth at which character data belongs to the value being read:
+    /// the property's own depth for a simple value, an `rdf:li`'s for an
+    /// array item. Text arriving at any other depth is not part of the value,
+    /// which is what makes the whitespace between two `rdf:li`s belong to
+    /// neither of them.
+    text_at: Option<usize>,
 }
 
 /// Whether `name` is the RDF element `local`.
@@ -625,6 +643,10 @@ fn top_level_properties(packet: &[u8]) -> Vec<Found> {
     // Path depth of the `rdf:Alt` whose items are being inspected for
     // `xml:lang`.
     let mut alt_at: Option<usize> = None;
+    // Path depth of the `rdf:Bag`, `rdf:Seq` or `rdf:Alt` whose `rdf:li`
+    // children are the values being collected. Separate from `alt_at` because
+    // every container has items and only an `rdf:Alt` has a language.
+    let mut container_at: Option<usize> = None;
 
     for event in reader {
         let Ok(event) = event else {
@@ -644,20 +666,36 @@ fn top_level_properties(packet: &[u8]) -> Vec<Found> {
                 if let Some(open) = pending.as_mut() {
                     if depth == open.depth + 1 && !open.settled {
                         open.settled = true;
-                        open.form = if is_rdf(name, "Seq") || is_rdf(name, "Bag") {
-                            ValueForm::Array
+                        // A container child means the property's own character
+                        // data was whitespace between tags, not a value.
+                        open.values.clear();
+                        open.text_at = None;
+                        open.written = if is_rdf(name, "Seq") {
+                            container_at = Some(depth);
+                            Written::Seq
+                        } else if is_rdf(name, "Bag") {
+                            container_at = Some(depth);
+                            Written::Bag
                         } else if is_rdf(name, "Alt") {
+                            container_at = Some(depth);
                             alt_at = Some(depth);
                             // Provisional. An `rdf:Alt` is a language
                             // alternative only if its items say so, and no
                             // item has been seen yet.
-                            ValueForm::Array
+                            Written::Alt
                         } else {
-                            ValueForm::Structure
+                            Written::Structure
                         };
-                    } else if alt_at == Some(depth - 1) && is_rdf_li(name) && has_xml_lang(&element)
-                    {
-                        open.form = ValueForm::LangAlt;
+                    } else if container_at == Some(depth - 1) && is_rdf_li(name) {
+                        if alt_at == Some(depth - 1) && has_xml_lang(&element) {
+                            open.written = Written::LangAlt;
+                        }
+                        // One value per item, whatever the item turns out to
+                        // contain: an item that is itself a structure ends up
+                        // holding whitespace, and a structure's fields are
+                        // never a type this build reads.
+                        open.values.push(String::new());
+                        open.text_at = Some(depth);
                     }
                 } else if parent_is_a_top_level_description(&path)
                     && namespace.as_deref() != Some(RDF)
@@ -678,12 +716,21 @@ fn top_level_properties(packet: &[u8]) -> Vec<Found> {
                         namespace: namespace.clone().unwrap_or_default(),
                         local: local.clone(),
                         depth,
-                        form: if structure {
-                            ValueForm::Structure
+                        written: if structure {
+                            Written::Structure
                         } else {
-                            ValueForm::Simple
+                            Written::Simple
                         },
                         settled: structure,
+                        // A structure has no value of its own to read; a
+                        // simple value's text arrives at the property's own
+                        // depth, which is where the accumulator is pointed.
+                        values: if structure {
+                            Vec::new()
+                        } else {
+                            vec![String::new()]
+                        },
+                        text_at: if structure { None } else { Some(depth) },
                     });
                 }
 
@@ -705,7 +752,8 @@ fn top_level_properties(packet: &[u8]) -> Vec<Found> {
                         found.push(Found {
                             namespace: ns.to_string(),
                             local: attribute.name().local().to_string(),
-                            form: ValueForm::Simple,
+                            written: Written::Simple,
+                            values: vec![attribute.value().to_string()],
                         });
                     }
                 }
@@ -714,16 +762,48 @@ fn top_level_properties(packet: &[u8]) -> Vec<Found> {
             }
             Event::End(_) => {
                 let depth = path.len().saturating_sub(1);
+                // No `text_at` reset here, and the omission is measured
+                // rather than an oversight. Clearing the accumulator when the
+                // element it points at closes was written first and injected
+                // out again: **no test moved**, because character data after
+                // an `rdf:li` closes arrives at the *container's* depth and
+                // never at the item's, so the pointer can only go stale
+                // pointing at a depth nothing will match. It is the
+                // property's own `End` that ends the read, below.
+                if container_at == Some(depth) {
+                    container_at = None;
+                }
+                if alt_at == Some(depth) {
+                    alt_at = None;
+                }
                 if pending.as_ref().is_some_and(|open| open.depth == depth) {
                     let open = pending.take().expect("checked on the line above");
                     found.push(Found {
                         namespace: open.namespace,
                         local: open.local,
-                        form: open.form,
+                        written: open.written,
+                        values: open.values,
                     });
                     alt_at = None;
+                    container_at = None;
                 }
                 path.pop();
+            }
+            Event::Text(text) | Event::Cdata(text) => {
+                // Character data belongs to a value only when the
+                // accumulator points at the depth it arrived under, so the
+                // whitespace between two `rdf:li`s — which arrives at the
+                // container's depth — belongs to neither. Whitespace between a
+                // property's tag and its `rdf:Bag` is dropped by the container
+                // arm above, which clears what was collected before it.
+                if let Some(open) = pending.as_mut() {
+                    let depth = path.len().saturating_sub(1);
+                    if open.text_at == Some(depth) {
+                        if let Some(last) = open.values.last_mut() {
+                            last.push_str(&text);
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -795,34 +875,87 @@ fn part_carries_the_predefined_schema_rule(part: Part) -> bool {
     }
 }
 
-/// Reports every top-level property whose value form disagrees with the one
-/// its predefined schema declares.
+/// Reports every top-level property whose value disagrees with the type its
+/// predefined schema declares, in either of the two ways it can.
+///
+/// The two halves run in order and at most one fires per property, because the
+/// second is only a question once the first is answered: asking whether the
+/// text of an `rdf:Bag` is an integer, when an integer was declared and a bag
+/// is already the finding, reports the same defect twice and says the second
+/// thing about a value that was never meant to be read on its own.
 fn schema_value_types(packet: &[u8], part: Part, out: &mut Vec<Raw>) {
     for property in top_level_properties(packet) {
-        let Some(declared) =
-            super::xmp_schemas::value_form(&property.namespace, &property.local, part)
+        let Some((shape, item)) =
+            super::xmp_schemas::value_type(&property.namespace, &property.local, part)
         else {
             // Not a property this revision's table names, so it has no
             // declared type to disagree with. Whether the packet was allowed
             // to carry it at all is the membership half's question, below.
             continue;
         };
-        if declared == property.form {
+        if !super::xmp_schemas::satisfies(property.written, shape, item) {
+            out.push(Raw::file(
+                // One table for every part. `ClauseTable::of` routes by part
+                // already, and `PREDEFINED_SCHEMAS` carries part 1's own
+                // number in its `one` arm — which is `METADATA`'s number too,
+                // because part 1 gives the whole of 6.7.2 one clause and no
+                // sub-clause.
+                clauses::PREDEFINED_SCHEMAS,
+                FindingKind::XmpValueTypeMismatch {
+                    property: name_of(&property),
+                    expected: super::xmp_schemas::wanted(shape, item).describe(),
+                    found: property.written.describe(),
+                },
+            ));
             continue;
         }
-        out.push(Raw::file(
-            // One table for every part. `ClauseTable::of` routes by part
-            // already, and `PREDEFINED_SCHEMAS` carries part 1's own number in
-            // its `one` arm — which is `METADATA`'s number too, because part 1
-            // gives the whole of 6.7.2 one clause and no sub-clause.
-            clauses::PREDEFINED_SCHEMAS,
-            FindingKind::XmpValueTypeMismatch {
-                property: name_of(&property),
-                expected: declared.describe(),
-                found: property.form.describe(),
-            },
-        ));
+        let Some(judged) = item.judged() else {
+            continue;
+        };
+        if value_is_not_read(&property.namespace, &property.local) {
+            continue;
+        }
+        for value in &property.values {
+            let text = value.trim();
+            if judged.admits(text) {
+                continue;
+            }
+            out.push(Raw::file(
+                clauses::PREDEFINED_SCHEMAS,
+                FindingKind::XmpValueNotOfDeclaredType {
+                    property: name_of(&property),
+                    expected: judged.describe(),
+                    found: text.to_string(),
+                },
+            ));
+            // One finding per property, not one per item. An array whose every
+            // item is the wrong type is one defect in one property, and the
+            // fixtures that carry it say so by carrying one expected message.
+            break;
+        }
     }
+}
+
+/// Whether a property's value is left unread although its declared type has a
+/// grammar this build knows.
+///
+/// **One property, and the conformance suite is the reason.** September 2005
+/// p. 41 declares `xmp:Rating` a `Closed Choice of Integer`, so the table says
+/// `Integer` and the grammar would refuse `1.0`. `PDF_A-2b` `6.6.2.3.1
+/// General` `6-6-2-3-1-t07-pass-m` writes exactly `1.0` into `xmp:Rating`, is
+/// annotated **pass**, and has no failing twin anywhere in the suite. That is
+/// a published statement that the value is admissible standing against a
+/// published statement that the type is an integer, and ruling 13 settles
+/// which this build follows: where the suite calls a file conforming, this
+/// build does not report it.
+///
+/// The exception lives here rather than in the table because the table is a
+/// transcription — changing a cell there to something no page prints would
+/// make the transcription a lie, and the next person to check it against the
+/// specification would "fix" it back. It is one namespace and one name wide,
+/// and `xmp_rating_is_not_read` is the fixture that holds it to that.
+fn value_is_not_read(namespace: &str, local: &str) -> bool {
+    namespace == "http://ns.adobe.com/xap/1.0/" && local == "Rating"
 }
 
 /// The property as a reader would write it.
@@ -973,7 +1106,7 @@ fn is_a_member(property: &Found, part: Part, current: &Extensions, main: &Extens
     if super::xmp_extension::is_an_iso_19005_namespace(&property.namespace) {
         return true;
     }
-    if super::xmp_schemas::value_form(&property.namespace, &property.local, part).is_some() {
+    if super::xmp_schemas::value_type(&property.namespace, &property.local, part).is_some() {
         return true;
     }
     // **`xmpMM:InstanceID` under part 1, and it is a disagreement between two
@@ -1013,6 +1146,7 @@ fn is_a_member(property: &Found, part: Part, current: &Extensions, main: &Extens
 #[cfg(test)]
 mod tests {
     use super::super::xmp_schemas;
+    use super::super::xmp_schemas::{Item, Shape};
     use super::*;
 
     fn read(packet: &str) -> Option<Properties> {
@@ -1203,9 +1337,11 @@ mod tests {
     /// A language alternative is an `rdf:Alt` **whose items carry
     /// `xml:lang`**, and the corpus is what settled that it is strict.
     ///
-    /// Reading a bare `rdf:Alt` as satisfying a Lang Alt agrees with ten fewer
-    /// fixtures across seven suites and gains no conforming file, so the
-    /// leniency was measured and declined rather than assumed.
+    /// Reading a bare `rdf:Alt` as satisfying a Lang Alt agrees with **four
+    /// fewer** corpus files — two under `PDF_A-1b/6.7 Metadata` and two under
+    /// `PDF_A-2b/6.6 Metadata`, the bar 1 948 to 1 944 — and gains no
+    /// conforming file, so the leniency was measured and declined rather than
+    /// assumed.
     #[test]
     fn a_language_alternative_needs_a_language_on_its_items() {
         const NS: &str = "xmlns:dc=\"http://purl.org/dc/elements/1.1/\"";
@@ -1215,7 +1351,7 @@ mod tests {
         );
         assert_eq!(
             types(&bare, Part::One),
-            ["dc:title: a language alternative declared, an array written"],
+            ["dc:title: a language alternative declared, an alternative array written"],
         );
 
         let tagged = format!(
@@ -1291,7 +1427,7 @@ mod tests {
         for form in [wrapped.as_str(), bare.as_str()] {
             let found = top_level_properties(form.as_bytes());
             assert_eq!(found.len(), 1, "{form}");
-            assert_eq!(found[0].form, ValueForm::Simple);
+            assert_eq!(found[0].written, Written::Simple);
         }
     }
 
@@ -1334,14 +1470,14 @@ mod tests {
         // not a name neither table carries.
         const DC: &str = "http://purl.org/dc/elements/1.1/";
         assert_eq!(
-            xmp_schemas::value_form(DC, "title", Part::One),
-            Some(ValueForm::LangAlt)
+            xmp_schemas::value_type(DC, "title", Part::One),
+            Some((Shape::LangAlt, Item::Text))
         );
         assert_eq!(
-            xmp_schemas::value_form(DC, "title", Part::Two),
-            Some(ValueForm::LangAlt)
+            xmp_schemas::value_type(DC, "title", Part::Two),
+            Some((Shape::LangAlt, Item::Text))
         );
-        assert_eq!(xmp_schemas::value_form(DC, "title", Part::Four), None);
+        assert_eq!(xmp_schemas::value_type(DC, "title", Part::Four), None);
     }
 
     /// The one property whose **form** the two revisions disagree about, from
@@ -1401,7 +1537,7 @@ mod tests {
                 previous_uri = schema.uri;
                 schemas += 1;
                 let mut previous = "";
-                for (name, _) in schema.properties {
+                for (name, _, _) in schema.properties {
                     assert!(
                         previous < *name,
                         "{label}: {name} in {} is out of order after {previous}",
@@ -1431,13 +1567,14 @@ mod tests {
     fn the_two_tables_differ_exactly_where_the_two_specifications_do() {
         use xmp_schemas::Schema;
 
-        fn form(table: &'static [Schema], uri: &str, local: &str) -> Option<ValueForm> {
+        fn form(table: &'static [Schema], uri: &str, local: &str) -> Option<(Shape, Item)> {
             let schema = table.iter().find(|schema| schema.uri == uri)?;
             let index = schema
                 .properties
-                .binary_search_by(|(name, _)| (*name).cmp(local))
+                .binary_search_by(|(name, _, _)| (*name).cmp(local))
                 .ok()?;
-            Some(schema.properties[index].1)
+            let (_, shape, item) = schema.properties[index];
+            Some((shape, item))
         }
         fn has(table: &'static [Schema], uri: &str) -> bool {
             table.iter().any(|schema| schema.uri == uri)
@@ -1461,45 +1598,61 @@ mod tests {
         const XMP: &str = "http://ns.adobe.com/xap/1.0/";
         for local in ["Label", "Rating"] {
             assert_eq!(form(OLD, XMP, local), None, "xmp:{local} in 2004");
-            assert_eq!(
-                form(NEW, XMP, local),
-                Some(ValueForm::Simple),
+            assert!(
+                matches!(form(NEW, XMP, local), Some((Shape::One, _))),
                 "xmp:{local} in 2005"
             );
         }
 
         // And the other direction, so this is not simply "2005 has more".
         const EXIF: &str = "http://ns.adobe.com/exif/1.0/";
-        assert_eq!(form(OLD, EXIF, "MakerNote"), Some(ValueForm::Simple));
+        assert_eq!(form(OLD, EXIF, "MakerNote"), Some((Shape::One, Item::Text)));
         assert_eq!(form(NEW, EXIF, "MakerNote"), None);
 
         // The one property whose form moved.
         const PHOTOSHOP: &str = "http://ns.adobe.com/photoshop/1.0/";
         assert_eq!(
             form(OLD, PHOTOSHOP, "SupplementalCategories"),
-            Some(ValueForm::Simple)
+            Some((Shape::One, Item::Text))
         );
         assert_eq!(
             form(NEW, PHOTOSHOP, "SupplementalCategories"),
-            Some(ValueForm::Array)
+            Some((Shape::Bag, Item::Text))
         );
 
-        // Everything else agrees. Exactly one shared property disagrees about
-        // its form across the whole of both tables, and it is the one above —
-        // which is why no corpus file the single table these replaced could
-        // judge changed its verdict. The eleven that moved moved on names that
-        // table did not carry at all.
+        // Everything else agrees, and "everything else" is now the whole
+        // declared value type rather than the serialised form alone. 168
+        // properties are printed in both documents; **exactly two** declare a
+        // different type in the two, and both are named above:
+        // `photoshop:SupplementalCategories`, whose change the September 2005
+        // changelog records, and `exif:GPSMeasureMode`, whose does not appear
+        // in any changelog and which both pages state plainly — January 2004
+        // p. 57 prints `Closed Choice of Integer` and September 2005 p. 68
+        // prints `Text`.
+        //
+        // Only the first of the two moves a *form*, which is why the table
+        // this replaced could carry one disagreement and be right about the
+        // rule it ran: `Closed Choice of Integer` and `Text` are both one
+        // element with text in it. Reading the value is what makes the second
+        // one visible at all.
         let mut disagreements = Vec::new();
+        let mut shared = 0;
         for schema in OLD {
-            for (name, old) in schema.properties {
+            for (name, shape, item) in schema.properties {
                 if let Some(new) = form(NEW, schema.uri, name) {
-                    if new != *old {
+                    shared += 1;
+                    if new != (*shape, *item) {
                         disagreements.push(format!("{}:{name}", schema.prefix));
                     }
                 }
             }
         }
-        assert_eq!(disagreements, ["photoshop:SupplementalCategories"]);
+        assert_eq!(shared, 168, "properties printed in both documents");
+        disagreements.sort();
+        assert_eq!(
+            disagreements,
+            ["exif:GPSMeasureMode", "photoshop:SupplementalCategories"]
+        );
     }
     // ---- the predefined schemas' membership ------------------------------
 
@@ -1624,14 +1777,16 @@ mod tests {
         let known = Found {
             namespace: "http://purl.org/dc/elements/1.1/".to_string(),
             local: "title".to_string(),
-            form: ValueForm::LangAlt,
+            written: Written::LangAlt,
+            values: Vec::new(),
         };
         assert_eq!(name_of(&known), "dc:title");
 
         let unknown = Found {
             namespace: "http://www.aiim.org/pdfa/ns/id-but-not-really/".to_string(),
             local: "part".to_string(),
-            form: ValueForm::Simple,
+            written: Written::Simple,
+            values: Vec::new(),
         };
         assert_eq!(
             name_of(&unknown),

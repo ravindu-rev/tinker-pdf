@@ -668,7 +668,7 @@ fn mismatch(property: &str, expected: &'static str, found: &'static str) -> Vec<
 fn a_simple_value_where_an_array_is_declared_is_a_finding() {
     assert_eq!(
         typed_findings("1", DC_NS, "<dc:subject>archival</dc:subject>"),
-        mismatch("dc:subject", "an array", "a simple value")
+        mismatch("dc:subject", "an unordered array", "a simple value")
     );
     // The twin: the same value, written as the schema declares it.
     assert_eq!(
@@ -691,7 +691,7 @@ fn an_array_where_a_simple_value_is_declared_is_a_finding() {
             PDF_NS,
             "<pdf:Producer><rdf:Seq><rdf:li>Acme 1.0</rdf:li></rdf:Seq></pdf:Producer>"
         ),
-        mismatch("pdf:Producer", "a simple value", "an array")
+        mismatch("pdf:Producer", "a simple value", "an ordered array")
     );
     assert_eq!(
         typed_findings("1", PDF_NS, "<pdf:Producer>Acme 1.0</pdf:Producer>"),
@@ -718,7 +718,11 @@ fn a_language_alternative_is_distinguished_from_a_bare_alternative() {
             DC_NS,
             "<dc:rights><rdf:Alt><rdf:li>Public domain</rdf:li></rdf:Alt></dc:rights>"
         ),
-        mismatch("dc:rights", "a language alternative", "an array")
+        mismatch(
+            "dc:rights",
+            "a language alternative",
+            "an alternative array"
+        )
     );
     // The twin.
     assert_eq!(
@@ -745,7 +749,7 @@ fn a_title_without_a_language_is_a_finding_which_is_why_the_info_fixtures_tag_th
             DC_NS,
             "<dc:title><rdf:Alt><rdf:li>A Title</rdf:li></rdf:Alt></dc:title>"
         ),
-        mismatch("dc:title", "a language alternative", "an array")
+        mismatch("dc:title", "a language alternative", "an alternative array")
     );
     assert_eq!(
         typed_findings(
@@ -1206,7 +1210,7 @@ fn a_property_only_the_later_revision_carries_is_judged_only_under_the_later_par
     for part in ["2", "3"] {
         assert_eq!(
             typed_findings(part, XMP_NS, rating),
-            mismatch("xmp:Rating", "a simple value", "an array"),
+            mismatch("xmp:Rating", "a simple value", "an unordered array"),
             "part {part}"
         );
     }
@@ -1220,14 +1224,14 @@ fn a_property_only_the_later_revision_carries_is_judged_only_under_the_later_par
             "<crs:Version><rdf:Bag><rdf:li>3.7</rdf:li></rdf:Bag></crs:Version>",
             "crs:Version",
             "a simple value",
-            "an array",
+            "an unordered array",
         ),
         (
             r#"xmlns:aux="http://ns.adobe.com/exif/1.0/aux/""#,
             "<aux:Lens><rdf:Seq><rdf:li>50mm</rdf:li></rdf:Seq></aux:Lens>",
             "aux:Lens",
             "a simple value",
-            "an array",
+            "an ordered array",
         ),
         (
             r#"xmlns:xmpDM="http://ns.adobe.com/xmp/1.0/DynamicMedia/""#,
@@ -1271,7 +1275,7 @@ fn part_four_does_not_carry_the_predefined_schema_rule() {
     for part in ["1", "2", "3"] {
         assert_eq!(
             metadata_findings(part, DC_NS, body),
-            mismatch("dc:subject", "an array", "a simple value"),
+            mismatch("dc:subject", "an unordered array", "a simple value"),
             "part {part}"
         );
     }
@@ -1321,7 +1325,7 @@ fn the_one_property_the_revisions_retyped_is_reached_through_the_flavour_claim()
         mismatch(
             "photoshop:SupplementalCategories",
             "a simple value",
-            "an array"
+            "an unordered array"
         )
     );
 
@@ -1330,7 +1334,7 @@ fn the_one_property_the_revisions_retyped_is_reached_through_the_flavour_claim()
         typed_findings("2", PS_NS, simple),
         mismatch(
             "photoshop:SupplementalCategories",
-            "an array",
+            "an unordered array",
             "a simple value"
         )
     );
@@ -1403,6 +1407,457 @@ fn a_conforming_packet_of_every_form_is_silent() {
 <dc:format>application/pdf</dc:format>
 <pdf:Producer>Acme 1.0</pdf:Producer>
 <xmpMM:DerivedFrom stRef:instanceID="uuid:1"/>"#
+        ),
+        Vec::new()
+    );
+}
+
+// ---- the value half: the text, against the type the schema declares --------
+
+/// One value-type finding about the **text** of a value.
+fn not_of_type(property: &str, expected: &'static str, found: &str) -> Vec<FindingKind> {
+    vec![FindingKind::XmpValueNotOfDeclaredType {
+        property: property.to_string(),
+        expected,
+        found: found.to_string(),
+    }]
+}
+
+/// The TIFF binding, whose schema is where the corpus's integer fixtures live.
+const TIFF_NS: &str = r#"xmlns:tiff="http://ns.adobe.com/tiff/1.0/""#;
+/// The XMP Basic binding, which carries the dates and `xmp:Rating`.
+const XMP_NS: &str = r#"xmlns:xmp="http://ns.adobe.com/xap/1.0/""#;
+/// The rights-management binding, which carries the one Boolean the corpus
+/// tests.
+const RIGHTS_NS: &str = r#"xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/""#;
+/// The Camera Raw binding, whose properties are Reals.
+const CRS_NS: &str = r#"xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/""#;
+/// The EXIF binding, which carries the Rationals and the integer arrays.
+const EXIF_NS: &str = r#"xmlns:exif="http://ns.adobe.com/exif/1.0/""#;
+
+/// An `Integer` whose text is not one, and the conforming spelling beside it.
+///
+/// `tiff:ImageWidth` is `Integer` on January 2004 p. 48 and September 2005
+/// p. 59. The wrong spellings are the ones the corpus actually writes rather
+/// than invented ones: `PDF_A-1b` `6-7-2-t14-fail-a` writes `256 mm` into this
+/// very property, and `6-7-2-t14-fail-b` writes `256/1` into
+/// `tiff:ImageLength`.
+#[test]
+fn an_integer_whose_text_is_not_an_integer_is_a_finding() {
+    for wrong in ["2.0", "256/1", "256 mm", "Some Value", "", "+"] {
+        assert_eq!(
+            typed_findings(
+                "1",
+                TIFF_NS,
+                &format!("<tiff:ImageWidth>{wrong}</tiff:ImageWidth>")
+            ),
+            not_of_type("tiff:ImageWidth", "an integer", wrong),
+            "{wrong}"
+        );
+    }
+    // The twins. The sign is optional and either sign is admitted, which is
+    // what "an optional leading `+` or `-` sign" says.
+    for right in ["256", "+256", "-256", "0", "000256"] {
+        assert_eq!(
+            typed_findings(
+                "1",
+                TIFF_NS,
+                &format!("<tiff:ImageWidth>{right}</tiff:ImageWidth>")
+            ),
+            Vec::new(),
+            "{right}"
+        );
+    }
+}
+
+/// A `Real` whose text is not one, and the conforming spelling beside it.
+///
+/// `crs:Exposure` is the schema's `Real` — September 2005 prints
+/// `crs:ExposureReal` against "Range -4.0 to +4.0", where its neighbour
+/// `crs:Brightness` is an `Integer`. A rational is the spelling the corpus
+/// writes: `PDF_A-2b` `6-6-2-3-1-t04-fail-u` puts `2/1` into this very
+/// property.
+#[test]
+fn a_real_whose_text_is_not_a_real_is_a_finding() {
+    for wrong in ["2/1", "1.2.3", "1,2", "Some Value", "", "."] {
+        assert_eq!(
+            typed_findings(
+                "2",
+                CRS_NS,
+                &format!("<crs:Exposure>{wrong}</crs:Exposure>")
+            ),
+            not_of_type("crs:Exposure", "a real", wrong),
+            "{wrong}"
+        );
+    }
+    // The twins. A decimal point is optional and so is either half of it,
+    // which is what "an optional single decimal point" says: an integer is a
+    // real, and `0.` and `.5` are reals.
+    for right in ["0.0", "-90.0", "+52.0", "10", "0.", ".5"] {
+        assert_eq!(
+            typed_findings(
+                "2",
+                CRS_NS,
+                &format!("<crs:Exposure>{right}</crs:Exposure>")
+            ),
+            Vec::new(),
+            "{right}"
+        );
+    }
+}
+
+/// A `Boolean` is `True` or `False` and the specification says so twice.
+///
+/// January 2004 p. 62 and September 2005 p. 74 both print "Allowed values are
+/// True or False (the strings should be spelled exactly as shown)", and
+/// "exactly as shown" is the whole rule: `xmpRights:Marked` written `FALSE` is
+/// `PDF_A-1b` `6-7-2-t08-fail-b`, and `true` is what `PDF_A-2b`
+/// `6-6-2-3-1-t02-fail-v` writes into `xmpDM:loop`.
+#[test]
+fn a_boolean_is_spelled_exactly_as_shown() {
+    for wrong in ["true", "false", "FALSE", "TRUE", "1", "0", "yes", ""] {
+        assert_eq!(
+            typed_findings(
+                "1",
+                RIGHTS_NS,
+                &format!("<xmpRights:Marked>{wrong}</xmpRights:Marked>")
+            ),
+            not_of_type("xmpRights:Marked", "a boolean", wrong),
+            "{wrong}"
+        );
+    }
+    for right in ["True", "False"] {
+        assert_eq!(
+            typed_findings(
+                "1",
+                RIGHTS_NS,
+                &format!("<xmpRights:Marked>{right}</xmpRights:Marked>")
+            ),
+            Vec::new(),
+            "{right}"
+        );
+    }
+}
+
+/// The six date forms the specification prints, accepted; and the shapes it
+/// does not print, refused.
+///
+/// September 2005 p. 75 lists the six forms and the range of every field.
+/// January 2004 p. 62 gives no forms at all and defers to
+/// `http://www.w3.org/TR/NOTE-datetime`, which lists the same six — so one
+/// grammar serves both parts, and this test runs it under both to say that is
+/// a decision rather than an accident.
+///
+/// The refusals are the corpus's own: `2016-02-01T13:19:21Z+01:00` is
+/// `6-7-2-t07-fail-c`, `2016-02-01TIME13:19:21+01:00` is `6-7-2-t07-fail-g`,
+/// and `Date: 2016-02-01T13:19:21+01:00` is `6-7-2-t07-fail-f`.
+#[test]
+fn a_date_follows_the_six_printed_forms() {
+    for part in ["1", "2"] {
+        for right in [
+            "2016",
+            "2016-02",
+            "2016-02-01",
+            "2016-02-01T13:19Z",
+            "2016-02-01T13:19:21Z",
+            "2016-02-01T13:19:21.45Z",
+            "2016-02-01T13:19:21+01:00",
+            "2016-02-01T13:19:21-06:00",
+            "2016-02-01T13:19:21.450000-06:00",
+        ] {
+            assert_eq!(
+                typed_findings(
+                    part,
+                    XMP_NS,
+                    &format!("<xmp:CreateDate>{right}</xmp:CreateDate>")
+                ),
+                Vec::new(),
+                "part {part}: {right}"
+            );
+        }
+        for wrong in [
+            // A designator is not optional in the three forms with a time.
+            "2016-02-01T13:19:21",
+            "2016-02-01T13:19",
+            // Two designators.
+            "2016-02-01T13:19:21Z+01:00",
+            // Not a `T`.
+            "2016-02-01TIME13:19:21+01:00",
+            "2016-02-01 13:19:21Z",
+            // Prose around a date is not a date.
+            "Date: 2016-02-01T13:19:21+01:00",
+            // Fields outside the printed ranges.
+            "2016-13-01",
+            "2016-00-01",
+            "2016-02-32",
+            "2016-02-01T24:00:00Z",
+            "2016-02-01T13:60:00Z",
+            // Shapes the list does not print.
+            "16-02-01",
+            "2016-2-1",
+            "2016-02-01T13:19:21.Z",
+            "",
+        ] {
+            assert_eq!(
+                typed_findings(
+                    part,
+                    XMP_NS,
+                    &format!("<xmp:CreateDate>{wrong}</xmp:CreateDate>")
+                ),
+                not_of_type("xmp:CreateDate", "a date", wrong),
+                "part {part}: {wrong}"
+            );
+        }
+    }
+}
+
+/// A closed choice is read for its base type and not for its vocabulary.
+///
+/// `tiff:ResolutionUnit` is `Closed Choice of Integer` with `2` and `3` the
+/// printed values (September 2005 p. 60). `2.0` is not an integer and is a
+/// finding — it is `6-7-2-t14-fail-m`. `1` **is** an integer and outside the
+/// printed list, and is silent: no fixture in the suite tests a syntactically
+/// valid value that is merely outside a vocabulary, and the two revisions
+/// print different admissible sets for `exif:ColorSpace` (September 2005's own
+/// changelog records correcting it from -32768 to 65535), so a vocabulary rule
+/// would have a moving target and no test behind it.
+#[test]
+fn a_closed_choice_is_judged_for_its_type_and_not_its_vocabulary() {
+    assert_eq!(
+        typed_findings(
+            "2",
+            TIFF_NS,
+            "<tiff:ResolutionUnit>2.0</tiff:ResolutionUnit>"
+        ),
+        not_of_type("tiff:ResolutionUnit", "an integer", "2.0")
+    );
+    // The twin, and the deliberate silence beside it.
+    for admitted in ["2", "3", "1", "65535"] {
+        assert_eq!(
+            typed_findings(
+                "2",
+                TIFF_NS,
+                &format!("<tiff:ResolutionUnit>{admitted}</tiff:ResolutionUnit>")
+            ),
+            Vec::new(),
+            "{admitted}"
+        );
+    }
+}
+
+/// A type with no grammar this build follows is left alone, whatever its text
+/// says.
+///
+/// `exif:ApertureValue` is `Rational`, and nothing in the corpus tests a
+/// rational's text: of the 468 `-fail-` fixtures under the two clause
+/// directories this rule serves, none is silent for want of a rational rule.
+/// A grammar written against no test is a guess, and a guess that is too
+/// strict reports conforming files — so the silence here is the rule rather
+/// than a gap waiting to be filled.
+#[test]
+fn a_type_this_build_does_not_read_is_silent_whatever_the_text_says() {
+    for text in ["4/1", "not a rational", "2.0", ""] {
+        assert_eq!(
+            typed_findings(
+                "2",
+                EXIF_NS,
+                &format!("<exif:ApertureValue>{text}</exif:ApertureValue>")
+            ),
+            Vec::new(),
+            "{text}"
+        );
+    }
+}
+
+/// Every item of an array is read, and one wrong item is one finding.
+///
+/// `exif:ISOSpeedRatings` is `seq Integer`, and `PDF_A-1b` `6-7-2-t15-fail-r`
+/// writes `<rdf:li>2</rdf:li><rdf:li>1/1</rdf:li>` — a conforming first item
+/// and a rational second. A rule that read only the first item would call that
+/// file conforming.
+#[test]
+fn an_array_is_judged_item_by_item() {
+    assert_eq!(
+        typed_findings(
+            "1",
+            EXIF_NS,
+            "<exif:ISOSpeedRatings><rdf:Seq><rdf:li>2</rdf:li><rdf:li>1/1</rdf:li>\
+             </rdf:Seq></exif:ISOSpeedRatings>"
+        ),
+        not_of_type("exif:ISOSpeedRatings", "an integer", "1/1")
+    );
+    // The twin: both items integers.
+    assert_eq!(
+        typed_findings(
+            "1",
+            EXIF_NS,
+            "<exif:ISOSpeedRatings><rdf:Seq><rdf:li>2</rdf:li><rdf:li>400</rdf:li>\
+             </rdf:Seq></exif:ISOSpeedRatings>"
+        ),
+        Vec::new()
+    );
+}
+
+/// An array whose every item is wrong is **one** finding, not one per item.
+///
+/// Every veraPDF fixture states a single expected message, and a reader of a
+/// verdict wants one place to look per defect rather than one per array
+/// element. The suite carries the mixed case — `6-7-2-t15-fail-r`, a
+/// conforming first item and a rational second — and not this one, so without
+/// this fixture the `break` that stops after the first bad item is a line no
+/// test would notice the loss of: it was injected and **nothing failed**.
+#[test]
+fn an_array_of_wrong_items_is_one_finding_and_not_one_per_item() {
+    assert_eq!(
+        typed_findings(
+            "1",
+            EXIF_NS,
+            "<exif:ISOSpeedRatings><rdf:Seq><rdf:li>1/1</rdf:li><rdf:li>2/2</rdf:li>             <rdf:li>3/3</rdf:li></rdf:Seq></exif:ISOSpeedRatings>"
+        ),
+        not_of_type("exif:ISOSpeedRatings", "an integer", "1/1")
+    );
+}
+
+/// A wrong shape is one finding, not two.
+///
+/// `tiff:ImageWidth` is a simple `Integer`. Written as an `rdf:Bag` of text it
+/// is the shape finding and nothing else: asking whether `x` is an integer,
+/// when the value was never meant to be read as one item, reports the same
+/// defect twice and sends a caller to two places.
+#[test]
+fn a_wrong_shape_does_not_also_report_the_value() {
+    assert_eq!(
+        typed_findings(
+            "1",
+            TIFF_NS,
+            "<tiff:ImageWidth><rdf:Bag><rdf:li>x</rdf:li></rdf:Bag></tiff:ImageWidth>"
+        ),
+        mismatch("tiff:ImageWidth", "a simple value", "an unordered array")
+    );
+}
+
+/// Whitespace around a value is not part of it.
+///
+/// A packet that writes its properties across indented lines is the normal
+/// case rather than the exception, and a rule that read the newlines as part
+/// of the integer would report every one of them.
+#[test]
+fn whitespace_around_a_value_is_not_part_of_it() {
+    assert_eq!(
+        typed_findings(
+            "1",
+            TIFF_NS,
+            "<tiff:ImageWidth>\n    256\n  </tiff:ImageWidth>"
+        ),
+        Vec::new()
+    );
+    assert_eq!(
+        typed_findings(
+            "1",
+            TIFF_NS,
+            "<tiff:ImageWidth>\n    256 mm\n  </tiff:ImageWidth>"
+        ),
+        not_of_type("tiff:ImageWidth", "an integer", "256 mm")
+    );
+}
+
+/// The attribute form carries a value, and the value is judged.
+///
+/// The shape half already reads an attribute as a simple value. Reading its
+/// text too is what stops `tiff:ImageWidth="2.0"` being the one spelling of
+/// the defect that gets through.
+#[test]
+fn the_attribute_form_carries_a_value_that_is_judged() {
+    assert_eq!(
+        typed_findings(
+            "1",
+            format!(r#"{TIFF_NS} tiff:ImageWidth="2.0""#).as_str(),
+            ""
+        ),
+        not_of_type("tiff:ImageWidth", "an integer", "2.0")
+    );
+    assert_eq!(
+        typed_findings(
+            "1",
+            format!(r#"{TIFF_NS} tiff:ImageWidth="256""#).as_str(),
+            ""
+        ),
+        Vec::new()
+    );
+}
+
+/// `xmp:Rating`'s value is not read, and the conformance suite is the reason.
+///
+/// September 2005 p. 41 declares it `Closed Choice of Integer`. `PDF_A-2b`
+/// `6.6.2.3.1 General` `6-6-2-3-1-t07-pass-m` writes `1.0` into it and is
+/// annotated **pass**, with no failing twin anywhere in the suite — the only
+/// three `xmp:Rating` fixtures in the whole corpus are that one, `pass-l`
+/// which writes `1`, and a part-1 fixture where the property is a membership
+/// question because January 2004 does not name it at all.
+///
+/// Two published sources disagree, and ruling 13 settles which this build
+/// follows: where the suite calls a file conforming, this build does not
+/// report it. The exception is one property wide, and the shape half still
+/// runs on it — which is what the second assertion holds it to.
+#[test]
+fn xmp_rating_is_not_read() {
+    for text in ["1.0", "1", "not a number"] {
+        assert_eq!(
+            typed_findings("2", XMP_NS, &format!("<xmp:Rating>{text}</xmp:Rating>")),
+            Vec::new(),
+            "{text}"
+        );
+    }
+    // The exception is about the value and not about the property: written in
+    // the wrong shape it is still a finding.
+    assert_eq!(
+        typed_findings(
+            "2",
+            XMP_NS,
+            "<xmp:Rating><rdf:Bag><rdf:li>1</rdf:li></rdf:Bag></xmp:Rating>"
+        ),
+        mismatch("xmp:Rating", "a simple value", "an unordered array")
+    );
+    // And the neighbouring integer in another schema **is** read, so the
+    // exception is not the rule quietly switched off.
+    assert_eq!(
+        typed_findings("2", TIFF_NS, "<tiff:ImageWidth>1.0</tiff:ImageWidth>"),
+        not_of_type("tiff:ImageWidth", "an integer", "1.0")
+    );
+}
+
+/// The three array containers are told apart, which is what 35 fixtures turn
+/// on.
+///
+/// `dc:creator` is `seq ProperName` and `dc:subject` is `bag Text`, so each is
+/// a finding written as the other's container. Under one `Array` form for all
+/// three these were indistinguishable from the conforming spelling, and
+/// `PDF_A-1b` `6-7-2-t06-fail-p` and `-fail-m` are exactly that pair.
+#[test]
+fn the_three_array_containers_are_told_apart() {
+    assert_eq!(
+        typed_findings(
+            "1",
+            DC_NS,
+            "<dc:creator><rdf:Bag><rdf:li>Ada Lovelace</rdf:li></rdf:Bag></dc:creator>"
+        ),
+        mismatch("dc:creator", "an ordered array", "an unordered array")
+    );
+    assert_eq!(
+        typed_findings(
+            "1",
+            DC_NS,
+            "<dc:subject><rdf:Seq><rdf:li>archival</rdf:li></rdf:Seq></dc:subject>"
+        ),
+        mismatch("dc:subject", "an unordered array", "an ordered array")
+    );
+    // The twins.
+    assert_eq!(
+        typed_findings(
+            "1",
+            DC_NS,
+            "<dc:creator><rdf:Seq><rdf:li>Ada Lovelace</rdf:li></rdf:Seq></dc:creator>\
+             <dc:subject><rdf:Bag><rdf:li>archival</rdf:li></rdf:Bag></dc:subject>"
         ),
         Vec::new()
     );

@@ -147,8 +147,8 @@ make no PDF/A claim, and scoring them would measure the measurement:
 | | files | agree |
 | --- | --- | --- |
 | annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 951 |
-| **total** | **2 371** | **1 781** |
+| annotated `-fail-` | 1 540 | 1 118 |
+| **total** | **2 371** | **1 948** |
 
 The single disagreement on the `pass` side is a **reading**, recorded as one:
 ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
@@ -157,11 +157,31 @@ ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
 Every disagreement has a row in `crates/tinker-pdf/tests/pdfa_ledger.tsv`
 carrying a class — our bug, a staged rule, or a reading — and a **mandatory
 reason**; a row without one is refused by the reader that loads the file, and a
-row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 38
+row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 39
 rules this build knows it does not run, each with its clause and what it is
 waiting for, and a `staged` ledger row has to point at one.
 
-The level A rules moved that total from 1 762 to 1 781 and left `830 of 831`
+The predefined schemas' value types moved that total from 1 781 to 1 948 and
+left `830 of 831` where it was: the shape half now tells `rdf:Bag`, `rdf:Seq`
+and `rdf:Alt` apart instead of collapsing them to one array, and the value half
+reads a property's text against the grammar the XMP specification prints for
+its declared type — `Integer`, `Real`, `Boolean` and `Date`, and no others.
+Those four are what the corpus exercises: of the 468 `-fail-` fixtures under
+the two clause directories the rule serves, 467 are now reported on, and of the
+448 `-pass-` fixtures there, none is. What stays staged is the types nothing
+in the corpus exercises — `Rational`, `URI`, `URL`, `GPSCoordinate`, `XPath`,
+`Locale`, `MIMEType`, `ProperName`, `AgentName`, `RenditionClass` and a
+structure's own fields — because a grammar written against no test is a guess,
+and a guess that is too strict reports conforming files.
+
+One property's value is left unread on purpose. September 2005 p. 41 declares
+`xmp:Rating` a `Closed Choice of Integer`, and `6-6-2-3-1-t07-pass-m` writes
+`1.0` into it and is annotated **conforming** with no failing twin. Where two
+published sources disagree and one of them is a conformance suite calling a
+file conforming, this build does not report it — the same rule that admitted
+`xmpMM:InstanceID` under part 1, and one property wide.
+
+The level A rules before them moved the total from 1 762 to 1 781 and left `830 of 831`
 untouched, which is the number that matters for them: a structure tree this
 build cannot follow reads exactly like a file with none, so a level A rule
 group that raised the bar by reporting conforming files would have raised it
@@ -217,7 +237,7 @@ against the table its fixture passed, so a clause this build reads wrongly is
 read wrongly in both directions and the pair agrees with itself.
 
 The corpus is where that asymmetry breaks, and only for files somebody else
-made. It is why "1 781 of 2 371" is the honest measure of how much of ISO
+made. It is why "1 948 of 2 371" is the honest measure of how much of ISO
 19005 this build understands, and why a document the writer produces is
 reported as *"this validator and the structural one find nothing"* rather than
 as *"it conforms"*.

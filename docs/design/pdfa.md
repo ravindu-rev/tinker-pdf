@@ -706,12 +706,14 @@ written outside its choices. The corpus said so all along and nobody had asked
 it: **not one** of the 549 files under `6.6.2.3.1 General` states a membership
 expectation, and all 549 state a value-type one.
 
-So `PDFA_STAGED` loses two entries and gains two, and still counts 37. What is
-staged now is named at the granularity the corpus actually has: the value types
-below the four serialised forms (6.6.2.3, 168 files), and an extension schema's
-custom value types — whether a type a property names is described anywhere, and
-whether a type with fields is used where a simple value is declared (6.7.8,
-four Isartor files).
+So `PDFA_STAGED` loses two entries and gains two, and still counts 37 at this
+milestone. What was staged then was named at the granularity the corpus
+actually has: the value types below the four serialised forms (6.6.2.3, 168
+files), and an extension schema's custom value types — whether a type a
+property names is described anywhere, and whether a type with fields is used
+where a simple value is declared (6.7.8, four Isartor files). The first of
+those two is what "What the predefined value types measured" below closes; the
+second is still staged.
 
 **Counted injections.** Each defect re-introduced in turn, the whole
 `tinker-pdf` crate run with `--no-fail-fast` before `-p`, the count recorded —
@@ -742,6 +744,126 @@ and none of them is about this rule. The rows worth reading are the three
 under part 1, the attribute shorthand for a description, and the page packets
 the main-package term needs. Each was one test before the injection was run and
 is one test after, which is what a guard looks like when it is the only one.
+
+## What the predefined value types measured
+
+*Recorded 15 September 2026, at the commit that landed it.* Same corpus, same
+2 371-file bar. This closes the first of the two entries the section above left
+staged: the value types below the four forms an RDF/XML serialisation
+distinguishes.
+
+**1 948 of 2 371 agree, against 1 781 before, with the false-positive count
+still 1.** 167 files, every one annotated `fail`, and the 831 annotated `pass`
+gained nothing to say — which is the acceptance criterion rather than the
+total, because a value-type rule that is too strict reports conforming files
+and there are 831 of them standing ready to catch it.
+
+| | files | agreed before | agreed after |
+| --- | --- | --- | --- |
+| annotated `-pass-` | 831 | 830 | 830 |
+| annotated `-fail-` | 1 540 | 951 | 1 118 |
+| **total** | **2 371** | **1 781** | **1 948** |
+
+| ledger row | before | after |
+| --- | ---: | ---: |
+| `PDF_A-1b/6.7 Metadata/6.7.2 Properties` | 61 | **1** |
+| `PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams` | 109 | **2** |
+
+Neither row is deleted, and neither leftover is a value type. The part-1 row
+is `6-7-2-t09-fail-q`, the `xmpMM:InstanceID` disagreement the section above
+named — judging it would mean inventing a table row no page of the January
+2004 document carries — and it is reclassified from `staged` to `reading`. The
+part-2 row is `6-6-2-1-t01-fail-b` and `-fail-c`, whose own outlines say *"The
+bytes attribute is used in the header of an XMP packet"* and *"The encoding
+attribute…"*: a different clause, 6.6.2.1, with no rule at all, and
+`PDFA_STAGED` gains an entry that says so rather than letting them shelter
+under a row about value types.
+
+**A value type is two questions and they have different inputs, which is why
+the old rule could not ask the second.** `Shape` is how the value is arrayed
+— `bag`, `seq`, `alt`, `Lang Alt`, or none of those — and is settled by the
+element names alone. `Item` is what one value *is*, and settling it means
+reading the characters against a published grammar. The table these replaced
+carried one `ValueForm` per property collapsing both, with all three RDF
+containers as a single `Array`, so `Integer` and `Rational` and `Date` were
+indistinguishable and so were `rdf:Bag` and `rdf:Seq`.
+
+**Splitting the containers is worth 35 fixtures on its own**, and it is the
+cheaper half: `dc:creator` is `seq ProperName` and `dc:subject` is `bag Text`,
+and each written as the other's container was, under one `Array`,
+indistinguishable from the conforming spelling. `PDF_A-1b` `6-7-2-t06-fail-p`
+and `-fail-m` are exactly that pair.
+
+**And a language alternative stays separate from a bare `alt`, which is a
+strictness rather than a leniency and so had to be measured.** A `Lang Alt`
+satisfies a declared `alt`, because a language alternative *is* an alternative
+array; the converse is not granted. Granting it — reading a bare `rdf:Alt` as
+a `Lang Alt` — takes the bar from 1 948 to **1 944**, two files under
+`PDF_A-1b/6.7 Metadata` and two under `PDF_A-2b/6.6 Metadata`, and gains no
+conforming file. A comment in this tree claimed that leniency cost ten
+fixtures across seven suites; it costs four across two, and the number here is
+the one measured on this branch.
+
+**Four types are read and the rest deliberately are not.** `Integer`, `Real`,
+`Boolean` and `Date`, each against the lexis its own specification prints —
+September 2005 pp. 74–77 for parts 2 and 3, January 2004 pp. 62–63 for part 1.
+Grouping the 168 files this rule was staged for by what their value actually
+violates gives 96 an integer that is not one, 35 an array of the wrong kind,
+17 a date that is not one, 10 a boolean that is not one, 9 a real that is not
+one, and one `xmpMM:InstanceID`. Nothing else. So `Rational`, `URI`, `URL`,
+`GPSCoordinate`, `XPath`, `Locale`, `MIMEType`, `ProperName`, `AgentName`,
+`RenditionClass` and a structure's own fields have no rule written for them:
+**467 of the 468 `-fail-` fixtures in the two clause directories this rule
+serves are already reported on**, and of the 448 `-pass-` fixtures there,
+none is. A grammar written against no test is a guess, and a guess that is too
+strict reports conforming files.
+
+**The `Date` grammar is the one place a rule could have been built on half its
+evidence.** September 2005 p. 75 prints six forms and the range of every
+field. January 2004 p. 62 prints one sentence and defers to
+`http://www.w3.org/TR/NOTE-datetime`, which lists the same six forms with the
+same ranges — so one function serves both parts, and `a_date_follows_the_six_printed_forms`
+runs under both to say that is a decision rather than an accident. The time
+zone designator is **not optional** in the three forms that carry a time, and
+that is the reading that could have cost conforming files. It does not: the
+only `pass` files carrying a time with no designator are six under `PDF_A-4`
+and `PDF_A-4e`, and ISO 19005-4 carries no predefined-schema requirement, so
+the rule never runs there.
+
+**The closed and open choices are read for their base type and not for their
+vocabulary**, which is the same decision made once more. 51 of the 168 are
+choice fixtures and **not one** writes a syntactically valid integer that is
+merely outside a printed list: every one fails because the value is not an
+integer at all — `2.0`, `2/5`, `Pos - 1`, `value: 3`. Reading the
+vocabularies would also be reading a moving target, because the September 2005
+changelog records correcting `exif:ColorSpace`'s "uncalibrated" value from
+−32768 to 65535, so the two revisions print different admissible sets for one
+property.
+
+**One property's value is not read at all, and the reason is the one that
+settled `xmpMM:InstanceID` a section above.** September 2005 p. 41 declares
+`xmp:Rating` a `Closed Choice of Integer`; `PDF_A-2b`
+`6-6-2-3-1-t07-pass-m` writes `1.0` into it, is annotated **conforming**, and
+has no failing twin anywhere in the suite. Two published sources disagree and
+ruling 13 settles which this build follows: where a conformance suite calls a
+file conforming, this build does not report it. The exception lives at the
+call site in `xmp::schema_value_types` rather than in the table, because a
+patched cell would be a claim about a document that never printed it, and the
+next reader checking the transcription against the page would "fix" it back.
+
+**The transcription was read a second time by a check that does not share a
+failure mode with the first.** 168 properties are printed in both documents.
+**166 declare the same value type in both**; the two that differ are
+`photoshop:SupplementalCategories`, whose change the September 2005 changelog
+records, and `exif:GPSMeasureMode`, which January 2004 p. 57 prints as `Closed
+Choice of Integer` and September 2005 p. 68 prints as `Text` — a difference
+neither changelog mentions and both pages state plainly. Only the first moves
+a *form*, which is why the table this replaced could carry one disagreement
+and be right about the rule it ran. And collapsing every freshly read value
+type back to the form the old table carried reproduces **all 443** of its
+rows, with the property set unchanged: the same 443 `(namespace, name)` pairs,
+neither added to nor removed from. So this moves the type column and nothing
+else, which is what keeps the membership half where it was.
 
 ## What the level A group measured
 
@@ -1064,7 +1186,11 @@ entries — "graphics: colour spaces, output intents, transparency, rendering
 intents" and "fonts: embedding, widths, symbolic flags, Unicode mapping" —
 with eleven specific ones that each name a rule and why it is not running. A
 staged list that shrinks as rules land and never grows is a list nobody is
-reading carefully.
+reading carefully. *It stands at 39 today: the predefined value types closed
+the 6.6.2.3 entry down to the types no fixture exercises and added one at
+6.6.2.1 for the packet header's `bytes` and `encoding` attributes, which the
+row it used to shelter under no longer covers — see "What the predefined value
+types measured" above.*
 
 **Where the 1 169 unagreed `fail` files are.** Roughly 490 are still the XMP
 predefined-schema property rule. About 250 are in graphics clauses this build
