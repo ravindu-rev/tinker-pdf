@@ -43,7 +43,7 @@
 //! says where the rules had to be given up.
 
 use crate::flow::{Abreast, BlockRecord, FloatRecord, Flow, Item, ItemKind};
-use crate::{BoxFragment, Layout, Limits, Options, Page, Refusal, Warning};
+use crate::{BoxFragment, Layout, Limits, Options, Page, Refusal, ReplacedFragment, Warning};
 
 /// Slack for a comparison against a page height, in points.
 ///
@@ -211,6 +211,18 @@ fn slice(band: &Abreast, from: f64, available: f64) -> (f64, bool) {
 
 /// Cuts a flow into pages.
 pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result<Layout, Refusal> {
+    // The fragmentainer, which is the page box for a paginated flow and has no
+    // bottom at all for one that is not. **A local rather than a branch**: with
+    // an infinite height every comparison below answers the way an unpaginated
+    // flow needs it to -- nothing overflows, no cut is chosen, no band is
+    // sliced, every float finishes on the page it began on -- so there is one
+    // cutter and not two, and a rule added to it cannot be added to only one of
+    // them. See [`Options::paginate`].
+    let fragmentainer = if options.paginate {
+        options.height
+    } else {
+        f64::INFINITY
+    };
     let mut warnings = flow.warnings.clone();
     let mut pages: Vec<Page> = Vec::new();
     let mut floats: Vec<FloatCursor> = vec![FloatCursor::default(); flow.floats.len()];
@@ -236,12 +248,19 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
     let mut after = 0.0;
     while cursor < flow.items.len() {
         let top = flow.items[cursor].y + drawn;
-        after = top + options.height;
-        let limit = top + options.height;
+        after = top + fragmentainer;
+        let limit = top + fragmentainer;
         let mut forced_at = None;
         let mut overflow_at = None;
         for index in cursor..flow.items.len() {
-            if index > cursor {
+            // §13.3.1's forced break, which an unpaginated flow has nowhere
+            // to take: RS §8.1 makes a pre-paginated document one page per
+            // itemref, and a `page-break-before: always` inside one is a
+            // declaration about a pagination that is not happening. The
+            // infinite fragmentainer above cannot express this one -- a forced
+            // break is a cut nothing overflowed into -- so it is the single
+            // place the flag is read.
+            if index > cursor && options.paginate {
                 if let ItemKind::Margin(margin) = &flow.items[index].kind {
                     if margin.forced {
                         forced_at = Some(index);
@@ -283,7 +302,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             // and cutting it here costs no overflow. A cut that would overflow
             // is worse than a push, because the push gets a whole page to try
             // again with.
-            let hopeless = flow.items[at].height - from > options.height + EPSILON;
+            let hopeless = flow.items[at].height - from > fragmentainer + EPSILON;
             if available > EPSILON && (at == cursor || (hopeless && !forced)) {
                 if forced {
                     // **Narrowed, not gone.** What overflows a page now is one
@@ -316,7 +335,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
                     &mut placed,
                     &mut built,
                     top,
-                    options.height,
+                    fragmentainer,
                     // The next page carries on inside this same band, so its
                     // column begins exactly where this slice ended.
                     flow.items[at].y + end,
@@ -377,7 +396,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             &mut placed,
             &mut built,
             top,
-            options.height,
+            fragmentainer,
             reach,
             &mut warnings,
         );
@@ -410,7 +429,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             &mut placed,
             &mut built,
             top,
-            options.height,
+            fragmentainer,
             // **Everything.** The column has run out, so there is no next one
             // for a float to belong to instead -- and holding one back here
             // would be a loop that never ends rather than a page that is
@@ -424,7 +443,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
         if pages.len() > limits.max_pages {
             return Err(Refusal::TooManyPages { pages: pages.len() });
         }
-        top += options.height;
+        top += fragmentainer;
     }
 
     Ok(Layout { pages, warnings })
@@ -695,7 +714,7 @@ fn emit(
     // Decorations first and in tree order, so an ancestor's background is
     // under its descendants'.
     for block in blocks {
-        if !block.painted {
+        if !block.painted && block.replaced.is_none() {
             continue;
         }
         let Some(head) = block.first else {
@@ -718,19 +737,36 @@ fn emit(
         if box_bottom < box_top {
             continue;
         }
-        out.boxes.push(BoxFragment {
-            x: block.x,
-            // CSS 2.2 §9.4.3's offset, which the flow deliberately does not
-            // carry: a relatively positioned box keeps its place in the column
-            // and only its ink moves.
-            y: box_top + offset + block.dy,
-            width: block.width,
-            height: (box_bottom - box_top).max(0.0),
-            background: block.background,
-            border_width: block.border_width,
-            border_style: block.border_style,
-            border_color: block.border_color,
-        });
+        if block.painted {
+            out.boxes.push(BoxFragment {
+                x: block.x,
+                // CSS 2.2 §9.4.3's offset, which the flow deliberately does not
+                // carry: a relatively positioned box keeps its place in the
+                // column and only its ink moves.
+                y: box_top + offset + block.dy,
+                width: block.width,
+                height: (box_bottom - box_top).max(0.0),
+                background: block.background,
+                border_width: block.border_width,
+                border_style: block.border_style,
+                border_color: block.border_color,
+            });
+        }
+        // The picture, once, on the page its box **begins** on. `from == head`
+        // is that condition: a box cut across a page boundary has a fragment on
+        // each page, and a picture drawn once per fragment would be drawn twice
+        // at two different heights. See [`crate::ReplacedFragment::height`].
+        if let Some(replaced) = &block.replaced {
+            if from == head {
+                out.replaced.push(ReplacedFragment {
+                    x: block.x + replaced.left,
+                    y: items[head].y + offset + block.dy + replaced.top,
+                    width: replaced.width,
+                    height: replaced.height,
+                    anchor: replaced.anchor,
+                });
+            }
+        }
     }
     for (at, item) in items[start..end].iter().enumerate() {
         match &item.kind {
@@ -782,7 +818,7 @@ fn emit(
 /// the item at band-local `window.from` on this page's top edge.
 fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
     for block in &band.blocks {
-        if !block.painted {
+        if !block.painted && block.replaced.is_none() {
             continue;
         }
         let Some(head) = block.first else {
@@ -797,16 +833,33 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
         if box_bottom < box_top {
             continue;
         }
-        out.boxes.push(BoxFragment {
-            x: block.x,
-            y: box_top + offset + block.dy,
-            width: block.width,
-            height: (box_bottom - box_top).max(0.0),
-            background: block.background,
-            border_width: block.border_width,
-            border_style: block.border_style,
-            border_color: block.border_color,
-        });
+        if block.painted {
+            out.boxes.push(BoxFragment {
+                x: block.x,
+                y: box_top + offset + block.dy,
+                width: block.width,
+                height: (box_bottom - box_top).max(0.0),
+                background: block.background,
+                border_width: block.border_width,
+                border_style: block.border_style,
+                border_color: block.border_color,
+            });
+        }
+        // A picture inside a band — a table cell, a flex item, a column — on
+        // the page the band's own top is on, which is `window.from`'s job: a
+        // band cut across pages has its own window and a box above it is not on
+        // this page at all.
+        if let Some(replaced) = &block.replaced {
+            if band.items[head].y >= window.from {
+                out.replaced.push(ReplacedFragment {
+                    x: block.x + replaced.left,
+                    y: band.items[head].y + offset + block.dy + replaced.top,
+                    width: replaced.width,
+                    height: replaced.height,
+                    anchor: replaced.anchor,
+                });
+            }
+        }
     }
     for item in &band.items {
         if !window.holds(item.y) {

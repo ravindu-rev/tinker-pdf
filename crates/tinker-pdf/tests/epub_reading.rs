@@ -132,7 +132,7 @@ fn the_committed_sheet_is_what_a_book_is_set_with() {
 #[test]
 fn without_the_ua_stylesheet_a_book_has_no_block_structure_at_all() {
     use tinker_pdf::epub::paint::BookMetrics;
-    use tinker_pdf::epub::read::{box_tree, PX_TO_PT};
+    use tinker_pdf::epub::read::{box_tree, Pictures, PX_TO_PT};
     use tinker_pdf::epub::xhtml;
     use tinker_pdf_css::cascade::{cascade, Origin};
     use tinker_pdf_css::media::MediaContext;
@@ -214,14 +214,14 @@ fn without_the_ua_stylesheet_a_book_has_no_block_structure_at_all() {
     // stylesheet's own source set as text.
     let options = Options::new(400.0 / PX_TO_PT, 100_000.0);
     let laid_with = layout(
-        &box_tree(&dom, &with),
+        &box_tree(&dom, &with, &Pictures::default()),
         &BookMetrics::STANDARD,
         &options,
         &LayoutLimits::DEFAULT,
     )
     .expect("a layout with the sheet");
     let laid_without = layout(
-        &box_tree(&dom, &without),
+        &box_tree(&dom, &without, &Pictures::default()),
         &BookMetrics::STANDARD,
         &options,
         &LayoutLimits::DEFAULT,

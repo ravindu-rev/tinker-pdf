@@ -36,6 +36,7 @@
 
 use std::cell::RefCell;
 
+use tinker_pdf_cos::png_image;
 use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, StyleTree};
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
@@ -45,11 +46,14 @@ use tinker_pdf_css::selector::PseudoElement;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
 };
-use tinker_pdf_layout::{BoxNode, CellSpan, Content};
+use tinker_pdf_filters::Limits as FilterLimits;
+use tinker_pdf_layout::{BoxNode, CellSpan, Content, Intrinsic};
+use tinker_pdf_zip::limits as zip_limits;
 
 use super::ocf::{resolve_reference, Ocf};
 use super::xhtml::{Child, Dom, Node};
 use super::Limits;
+use crate::cbz::{image_format, ImageDefect, ImageFormat};
 
 /// The user-agent stylesheet, as CSS, committed at `src/epub/ua.css`.
 pub const UA_STYLESHEET: &str = include_str!("ua.css");
@@ -202,6 +206,10 @@ pub struct Reading {
     /// fixed-layout — §8.2.1's `rendition:layout` is what decides that — and
     /// reading it here keeps the two questions apart.
     pub viewport: Option<super::xhtml::Viewport>,
+    /// Every `<img>` in the document, resolved against the container: the ones
+    /// that became replaced boxes, with their bytes, and the ones that did not,
+    /// with the reason.
+    pub pictures: Pictures,
 }
 
 /// Reads one content document: markup, stylesheets, cascade, box tree.
@@ -299,7 +307,11 @@ pub fn read_document(
         }
     }
 
-    let tree = box_tree(&dom, &styles);
+    // After the cascade and before the tree, which is the only place it can be:
+    // the box tree needs each picture's dimensions and the cascade needs the
+    // container's reader, which `author_sheets` is still holding until here.
+    let pictures = pictures(book, path, &dom, limits);
+    let tree = box_tree(&dom, &styles, &pictures);
     Ok(Reading {
         dom,
         tree,
@@ -307,6 +319,7 @@ pub fn read_document(
         census,
         viewport,
         font_faces,
+        pictures,
     })
 }
 
@@ -439,6 +452,170 @@ pub fn inline_box(parent: &ComputedStyle) -> ComputedStyle {
     style
 }
 
+/// One `<img>` this build can put on a page, with the bytes it will put there.
+///
+/// **The bytes are held rather than the entry index**, and that is the write
+/// pass's ordering rather than a cache: `DocumentBuilder::begin_page` snapshots
+/// the document's resource set, so every picture in the book has to be
+/// registered before the first page begins — by which time the container's
+/// reader is no longer being walked in spine order. It is the same lesson
+/// [`super::svg::Registry`] is named after, one element along.
+#[derive(Debug)]
+pub struct Picture {
+    /// The element this picture is the content of, indexing `Dom::nodes`.
+    pub element: usize,
+    /// The picture's own pixel dimensions, which are CSS pixels: `css-images-3`
+    /// §4.1 makes a raster's intrinsic size *"its density-corrected intrinsic
+    /// size"*, and nothing in an EPUB sets a density.
+    pub intrinsic: (f64, f64),
+    /// The bytes, in whichever shape the writer takes them.
+    pub data: PictureData,
+}
+
+/// A picture's bytes, ready for `DocumentBuilder::add_image`.
+///
+/// The same two routes `cbz.rs` takes and for its reasons: a JPEG is placed
+/// verbatim because re-encoding is generational loss the caller cannot undo,
+/// and a PNG goes through the reader that decides between passing its `IDAT`
+/// through and decoding it.
+pub enum PictureData {
+    /// A JPEG, placed as its own bytes.
+    Jpeg(Vec<u8>),
+    /// A PNG, read into whatever `tinker-pdf-cos` decided to write.
+    Png(Box<tinker_pdf_cos::PngImageData>),
+}
+
+impl std::fmt::Debug for PictureData {
+    /// Hand-written because `PngImageData` is not `Debug`: it owns a decoded
+    /// raster, and a derived one would print a book's worth of samples.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PictureData::Jpeg(bytes) => write!(f, "Jpeg({} bytes)", bytes.len()),
+            PictureData::Png(png) => write!(f, "Png({} by {})", png.width(), png.height()),
+        }
+    }
+}
+
+/// Every `<img>` in one content document, resolved against the container.
+///
+/// Two lists and not one map, because the two halves go to different places:
+/// the resolved ones become replaced boxes and then `/XObject`s, and the
+/// refused ones become [`crate::ArchiveWarning::ImageNotDrawn`] and nothing
+/// else. A document with no `<img>` in it produces an empty one of these and
+/// pays nothing.
+#[derive(Debug, Default)]
+pub struct Pictures {
+    /// The ones that will be drawn, in document order.
+    pub drawn: Vec<Picture>,
+    /// The ones that will not, each with the element it was and why.
+    pub refused: Vec<(usize, ImageDefect)>,
+}
+
+impl Pictures {
+    /// The intrinsic size of the picture an element is, if it is one.
+    #[must_use]
+    fn intrinsic_of(&self, element: usize) -> Option<(f64, f64)> {
+        self.drawn
+            .iter()
+            .find(|picture| picture.element == element)
+            .map(|picture| picture.intrinsic)
+    }
+}
+
+/// Resolves every `<img>` in a content document against the container it came
+/// from.
+///
+/// # Why the bytes are read here and not at the painter
+///
+/// A replaced box's size is the picture's size, CSS 2.2 §10.3.2, and the box
+/// tree is built before anything is laid out — so the dimensions have to exist
+/// before the flow does. Reading the entry is the only way to have them:
+/// `<img width>` and `<img height>` are HTML §15.4.2 presentational hints this
+/// build does not map (see `docs/features/epub.md`), and the manifest's
+/// `media-type` is a claim where the first bytes of an entry are a fact.
+///
+/// # What is **not** here
+///
+/// `alt`. HTML §4.8.4.4 makes an unavailable `<img>` represent its alternative
+/// text, and laying that out would put characters on the page that the spine's
+/// markup does not contain — one page character per refused image with no
+/// source character to answer it, which is exactly the quantity
+/// `epub_conservation.rs` compares. So a refused `<img>` generates **no box**,
+/// which is the other half of §4.8.4.4's own sentence: an element is *"expected
+/// to be treated as a replaced element"* only when the image is available.
+fn pictures(book: &mut Ocf<'_>, path: &str, dom: &Dom, limits: &Limits) -> Pictures {
+    let mut out = Pictures::default();
+    for element in 0..dom.nodes.len() {
+        let node = &dom.nodes[element];
+        if !node.is_html() || node.name != "img" {
+            continue;
+        }
+        match picture(book, path, element, dom, limits) {
+            Ok((intrinsic, data)) => out.drawn.push(Picture {
+                element,
+                intrinsic,
+                data,
+            }),
+            Err(defect) => out.refused.push((element, defect)),
+        }
+    }
+    out
+}
+
+/// One `<img>`, resolved and read, or the reason it was not.
+fn picture(
+    book: &mut Ocf<'_>,
+    path: &str,
+    element: usize,
+    dom: &Dom,
+    limits: &Limits,
+) -> Result<((f64, f64), PictureData), ImageDefect> {
+    // §5.7's reference, resolved against the document it was written in —
+    // `epub::svg`'s own sentence, and the same function.
+    let href = dom.nodes[element]
+        .attr("src")
+        .ok_or(ImageDefect::Unresolved)?
+        .to_owned();
+    let target = resolve_reference(path, &href, limits).map_err(|_| ImageDefect::Unresolved)?;
+    let index = book.index_of(&target).ok_or(ImageDefect::Unresolved)?;
+    let bytes = book.read(index).map_err(|_| ImageDefect::Unresolved)?;
+    // Classification by magic and never by extension, `cbz::image_format`'s
+    // own rule: a `.jpg` that is a PNG is routine, and an extension is a claim
+    // where the first bytes of a file are a fact.
+    match image_format(bytes).ok_or(ImageDefect::Unknown)? {
+        ImageFormat::Jpeg => {
+            // The same reader `add_image` uses, so the box and the `/Width`
+            // cannot disagree.
+            let (width, height, _) =
+                tinker_pdf_cos::jpeg_shape(bytes).ok_or(ImageDefect::Undecodable)?;
+            if width == 0 || height == 0 {
+                return Err(ImageDefect::Undecodable);
+            }
+            Ok((
+                (f64::from(width), f64::from(height)),
+                PictureData::Jpeg(bytes.to_vec()),
+            ))
+        }
+        ImageFormat::Png => {
+            // The caller's own entry ceiling, which is `cbz.rs`'s posture
+            // exactly: a raster bigger than the biggest file the container may
+            // hold is not a picture, and the number is the *host's* rather than
+            // the decoder's so a host that lowered it can tell its decision
+            // from `MAX_PNG_SAMPLES`.
+            let png = png_image(bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+                .map_err(|_| ImageDefect::Undecodable)?;
+            if png.width() == 0 || png.height() == 0 {
+                return Err(ImageDefect::Undecodable);
+            }
+            Ok((
+                (f64::from(png.width()), f64::from(png.height())),
+                PictureData::Png(Box::new(png)),
+            ))
+        }
+        other => Err(ImageDefect::UnsupportedFormat(other)),
+    }
+}
+
 /// Turns the element tree and its computed styles into a box tree.
 ///
 /// Public so that a test can build the same tree from a cascade it controls:
@@ -462,14 +639,14 @@ pub fn inline_box(parent: &ComputedStyle) -> ComputedStyle {
 /// A document with no element at all lays out as an empty block, which is a
 /// page rather than a refusal.
 #[must_use]
-pub fn box_tree(dom: &Dom, styles: &StyleTree) -> BoxNode {
+pub fn box_tree(dom: &Dom, styles: &StyleTree, pictures: &Pictures) -> BoxNode {
     let Some(root) = dom.root else {
         return BoxNode::element(ComputedStyle::initial(), Vec::new());
     };
-    build(dom, styles, root)
+    build(dom, styles, pictures, root)
 }
 
-fn build(dom: &Dom, styles: &StyleTree, at: usize) -> BoxNode {
+fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNode {
     let style = styles
         .styles
         .get(at)
@@ -477,6 +654,21 @@ fn build(dom: &Dom, styles: &StyleTree, at: usize) -> BoxNode {
         .unwrap_or_else(ComputedStyle::initial);
     let node: &Node = &dom.nodes[at];
     let anchor = u32::try_from(at).unwrap_or(u32::MAX);
+    // CSS 2.2 §3.1's replaced element, and the only one this build has. It is
+    // decided here rather than by `display`, because *being replaced* is a
+    // property of the element and not of a property: `img { display: block }`
+    // is a block-level picture and `img { display: inline }` is an inline one,
+    // and a build that keyed on `display` would have to say which of them is
+    // the picture.
+    //
+    // An `<img>` whose picture did not resolve is **not** one: HTML §4.8.4.4
+    // makes an element *"expected to be treated as a replaced element"* only
+    // when the image is available, so it falls through to the branch below and
+    // becomes what it is — an empty inline element, generating an empty box and
+    // no ink. See [`pictures`].
+    if let Some((width, height)) = pictures.intrinsic_of(at) {
+        return BoxNode::replaced(style, Intrinsic::raster(width, height)).with_anchor(anchor);
+    }
     let mut children = Vec::with_capacity(node.children.len());
     // CSS 2.1 §12.1: `::before` is the first child of its originating element
     // and `::after` is the last. **Inside**, not beside — a `::before` on a
@@ -488,7 +680,7 @@ fn build(dom: &Dom, styles: &StyleTree, at: usize) -> BoxNode {
     }
     for child in &node.children {
         match child {
-            Child::Element(index) => children.push(build(dom, styles, *index)),
+            Child::Element(index) => children.push(build(dom, styles, pictures, *index)),
             Child::Text(text) => {
                 children.push(BoxNode::text(inline_box(&style), text.clone()).with_anchor(anchor));
             }

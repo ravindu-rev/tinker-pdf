@@ -215,6 +215,73 @@ pub enum Content {
     /// preserved newline and a collapsible one before `white-space` was
     /// consulted.
     Text(String),
+    /// A **replaced** element, CSS 2.2 §3.1: *"an element whose content is
+    /// outside the scope of the CSS formatting model"* — a picture, and nothing
+    /// else in this build.
+    ///
+    /// The payload is everything the formatting model is allowed to know about
+    /// that content: the size the source itself has. What the picture *is*
+    /// stays with the caller, reached through [`BoxNode::anchor`], and that is
+    /// ruling 8 rather than a convenience — this crate holds no decoder, no
+    /// container and no idea what a JPEG is, and a variant carrying bytes would
+    /// have put all three here.
+    Replaced(Intrinsic),
+}
+
+/// What a replaced element's own source says about its size, `css-images-3` §4.
+///
+/// Three fields and not two, because the specification's sizing cascade
+/// distinguishes all three and the distinctions are load-bearing: CSS 2.2
+/// §10.3.2 has a case for *"no intrinsic width, but ... an intrinsic height and
+/// intrinsic ratio"* that a build deriving the ratio from the dimensions could
+/// never reach, and `css-images-3` §4.1 makes an SVG with a `viewBox` and
+/// percentage dimensions exactly that shape. This build's only producer is a
+/// raster, where [`Intrinsic::raster`] fills all three from one pair of numbers
+/// — but the cascade is written against the general case, so the general case
+/// is what the type can express.
+///
+/// Every length is in CSS pixels, which is the unit the whole crate measures in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Intrinsic {
+    /// The intrinsic width, where the source has one.
+    pub width: Option<f64>,
+    /// The intrinsic height, where the source has one.
+    pub height: Option<f64>,
+    /// The intrinsic aspect ratio, as width divided by height.
+    pub ratio: Option<f64>,
+}
+
+impl Intrinsic {
+    /// A source that states nothing about its own size.
+    ///
+    /// CSS 2.2 §10.3.2's and §10.6.2's last cases are written for exactly this
+    /// and give it 300 by 150 pixels. **No EPUB `<img>` reaches it**: the
+    /// facade makes an element replaced only once it has the picture's
+    /// dimensions, because HTML §4.8.4.4 makes an `<img>` a replaced element
+    /// *"only when the image is available"*. It is reachable from this crate's
+    /// own API, which is what its fixtures use.
+    pub const NONE: Self = Self {
+        width: None,
+        height: None,
+        ratio: None,
+    };
+
+    /// A raster's dimensions: a width, a height and the ratio between them.
+    ///
+    /// A degenerate side — zero or not finite — yields [`Intrinsic::NONE`]
+    /// rather than a ratio of zero or of infinity, because every one of
+    /// §10.3.2's ratio cases multiplies by it.
+    #[must_use]
+    pub fn raster(width: f64, height: f64) -> Self {
+        if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+            return Self::NONE;
+        }
+        Self {
+            width: Some(width),
+            height: Some(height),
+            ratio: Some(width / height),
+        }
+    }
 }
 
 impl BoxNode {
@@ -235,6 +302,22 @@ impl BoxNode {
         Self {
             style,
             content: Content::Children(children),
+            anchor: None,
+            span: CellSpan::ONE,
+        }
+    }
+
+    /// A replaced element — a picture — with whatever its source says about its
+    /// own size.
+    ///
+    /// Tag it with [`BoxNode::with_anchor`]: every [`ReplacedFragment`] this
+    /// node produces carries that tag and **nothing else**, so a caller with no
+    /// anchor on it gets a box on the page it cannot put a picture in.
+    #[must_use]
+    pub fn replaced(style: ComputedStyle, intrinsic: Intrinsic) -> Self {
+        Self {
+            style,
+            content: Content::Replaced(intrinsic),
             anchor: None,
             span: CellSpan::ONE,
         }
@@ -274,6 +357,12 @@ impl BoxNode {
                     child.collect_text(out);
                 }
             }
+            // A picture contributes no characters to either side of the
+            // conservation comparison, which is the whole reason `<img alt>` is
+            // not laid out: `alt` is an attribute, the spine's text does not
+            // contain it, and setting it would be one page character per image
+            // that no source text answers.
+            Content::Replaced(_) => {}
         }
     }
 }
@@ -289,13 +378,48 @@ pub struct Options {
     pub width: f64,
     /// The height available to the flow.
     pub height: f64,
+    /// Whether the flow is **cut** at [`Options::height`] at all.
+    ///
+    /// `true` for a book that is paginated, which is the ordinary case and what
+    /// [`Options::new`] gives.
+    ///
+    /// `false` for a flow that is one page however tall its content comes to,
+    /// which is not a convenience: EPUB RS 3.3 §8.1 makes a pre-paginated
+    /// content document *"exactly one page per spine itemref"* and §8.1.2 makes
+    /// the viewport the initial containing block, **clipping** what falls
+    /// outside it. Those are two different sentences about the same box, and a
+    /// caller that expressed the second by paginating at the viewport and
+    /// dropping the pages after the first gets a third thing: content that
+    /// overflows by a hair is not clipped, it is moved to a page that then does
+    /// not exist. An inline picture in a viewport sized to the picture
+    /// overflows by exactly the strut's descender, CSS 2.2 §10.8.1, which is
+    /// how this was found.
+    ///
+    /// [`Options::height`] still means what it means — §10.1's initial
+    /// containing block, which a `position: absolute; bottom: 0` box is placed
+    /// against — so the two questions stay separate.
+    pub paginate: bool,
 }
 
 impl Options {
-    /// A page of the given content size.
+    /// A page of the given content size, cut into pages at its height.
     #[must_use]
     pub fn new(width: f64, height: f64) -> Self {
-        Self { width, height }
+        Self {
+            width,
+            height,
+            paginate: true,
+        }
+    }
+
+    /// The same box, as **one** page however tall the content is. See
+    /// [`Options::paginate`].
+    #[must_use]
+    pub fn unpaginated(self) -> Self {
+        Self {
+            paginate: false,
+            ..self
+        }
     }
 }
 
@@ -309,6 +433,15 @@ pub struct Page {
     /// Backgrounds and borders, in paint order: an ancestor before its
     /// descendants, so a child's background covers its parent's.
     pub boxes: Vec<BoxFragment>,
+    /// Replaced elements' **content boxes**, in the same paint order as
+    /// [`Page::boxes`] and produced by the same walk.
+    ///
+    /// A third list rather than a field on [`BoxFragment`], because the two
+    /// answer different questions about the same box: a fragment is a border
+    /// box that exists for every page a box crosses, and a picture is drawn
+    /// once, whole, from the page its box began on. See
+    /// [`ReplacedFragment::height`].
+    pub replaced: Vec<ReplacedFragment>,
     /// Text, in **reading order**, which is what makes text conservation a
     /// comparison rather than a search.
     pub runs: Vec<TextRun>,
@@ -334,6 +467,35 @@ pub struct BoxFragment {
     pub border_style: Sides<BorderStyle>,
     /// `border-*-color`.
     pub border_color: Sides<Color>,
+}
+
+/// A replaced element's content box on one page.
+///
+/// **The content box and not the border box**, CSS 2.2 §8.1: a picture is drawn
+/// inside its padding and border, and a consumer handed the border box would
+/// draw over both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplacedFragment {
+    /// Content-box left edge.
+    pub x: f64,
+    /// Content-box top edge.
+    pub y: f64,
+    /// The used `width`, CSS 2.2 §10.3.2.
+    pub width: f64,
+    /// The used `height`, §10.6.2.
+    ///
+    /// **Not clipped to the page.** A replaced box taller than the page it
+    /// begins on is drawn whole, overflowing the bottom — CSS 2.2 §13.3.3
+    /// offers no break position inside a box with no line boxes in it, and this
+    /// crate's answer to an atomic box taller than a page is everywhere else to
+    /// draw it where it starts. One fragment per picture for that reason: a
+    /// second one on the next page would draw the picture twice.
+    pub height: f64,
+    /// The [`BoxNode::anchor`] of the node this box came from, unchanged.
+    ///
+    /// The only thing that says **which** picture this is. This crate never
+    /// reads it; see [`BoxNode::anchor`].
+    pub anchor: Option<u32>,
 }
 
 /// One run of text, positioned.

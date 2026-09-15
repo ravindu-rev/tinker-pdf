@@ -124,17 +124,33 @@ fn book_of_one_plate() -> Vec<u8> {
     ocf_zip(&entries, &directory)
 }
 
-/// The synthesised book is smaller than the decoded raster would be.
+/// The synthesised book is the picture's own bytes and not the decoded raster.
 ///
 /// *w × h × 3* for this plate is 18 MB. A build that decoded the PNG and
 /// embedded samples would produce a document at least that large whatever else
 /// it did, so a document under it is one that did not decode — which is gap
 /// 29's pass-through, stated in bytes rather than in allocator behaviour, and
 /// inherited by this format without a line of new code.
+///
+/// # Re-measured when the picture first arrived, and the old bound was wrong
+///
+/// Until an `<img>` became a replaced box this book synthesised to a few
+/// kilobytes — **the picture was not on the page at all** — and every bound
+/// here passed for the wrong reason. Two of them were bounds against
+/// `bytes.len()`, the size of the *container*, which deflates a 1 903 907-byte
+/// PNG down to 446 KB a second time: a document holding that PNG verbatim is
+/// four times its own book and was being asked to be under three.
+///
+/// So the bound is against the picture rather than against the archive, and it
+/// is the stronger claim of the two: a document that is the plate's own bytes
+/// plus a page of PDF is one whose samples were neither expanded nor
+/// re-encoded, which is what the pass-through promises and what a ratio against
+/// a ZIP cannot say. Measured on 15 September 2026: 1 905 161 bytes of document
+/// over a 1 903 907-byte plate, which is 1 254 bytes of PDF.
 #[test]
 fn a_book_of_one_large_plate_does_not_cost_its_decoded_size() {
     let bytes = book_of_one_plate();
-    let document = Document::open(bytes.clone()).expect("a book");
+    let document = Document::open(bytes).expect("a book");
     let saved = document.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
@@ -146,19 +162,26 @@ fn a_book_of_one_large_plate_does_not_cost_its_decoded_size() {
         "the document is {} bytes and the decoded raster alone would be {decoded}",
         saved.len()
     );
+    // One page's worth of PDF around the picture: the catalogue, the page tree,
+    // the resource dictionary and the content stream. Generous by a factor of
+    // six against the 1 254 bytes measured, because the point of the bound is
+    // the *raster* and a page object that grew a dictionary is not this test's
+    // business.
+    const PAGE_OF_PDF: usize = 8 * 1024;
+    let picture = plate().len();
     assert!(
-        saved.len() < bytes.len() * 3,
-        "the document is {} bytes over a {}-byte book",
-        saved.len(),
-        bytes.len()
+        saved.len() < picture + PAGE_OF_PDF,
+        "the document is {} bytes over a {picture}-byte picture, which is not \
+         the picture's own bytes plus a page",
+        saved.len()
     );
-    // The margin is worth an eye rather than only a bound: a page of six
-    // million samples that costs well under a tenth of them is one whose
-    // picture was never expanded.
+    // And the picture really is in it, so the bound above is a bound on a
+    // document that has one: a book whose `<img>` never became a box would
+    // satisfy every inequality here by drawing nothing.
     assert!(
-        saved.len() * 10 < decoded,
-        "the document is {} bytes against a {decoded}-byte raster, which is not \
-         the order of magnitude a pass-through gives",
+        saved.len() > picture,
+        "the document is {} bytes and the picture alone is {picture}, so the \
+         picture is not in it",
         saved.len()
     );
 }

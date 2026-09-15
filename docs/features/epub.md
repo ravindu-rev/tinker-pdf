@@ -73,7 +73,13 @@ margin-collapsing cases of §8.3.1; block and inline formatting contexts
 two-pass automatic width and §17.6.2.1's five-rule border conflict
 resolution, `rowspan` clamped; `css-flexbox-1`'s line algorithm with
 grow/shrink freeze-and-redistribute and `order`; §13.3 fragmentation rules
-A–D with the spec's own escape; `page-break-*`, `orphans`, `widows`. Line
+A–D with the spec's own escape; `page-break-*`, `orphans`, `widows`.
+§3.1's **replaced elements**, sized by §10.3.2 and §10.6.2 with §10.4's
+eleven-row constraint table — which is the algorithm `img { max-width: 100% }`
+takes, and the one that keeps a narrowed picture from being squashed rather
+than scaled. The intrinsic size is three values (a width, a height, a ratio) and
+never the bytes: `css-images-3` §4 distinguishes all three and the leaf crate
+holds no decoder ([design/epub-layout.md](../design/epub-layout.md)). Line
 breaking is **UAX #14** over vendored Unicode 17.0.0 data, passing
 **19 338 of 19 338** pairs of Unicode's own `LineBreakTest.txt`. Advances
 come from the face (embedded, host-provided, or the standard-14 metrics for
@@ -90,9 +96,15 @@ into. A run in one of the standard 14 is unshaped and one glyph per character,
 and keeps `PageBuilder::glyphs`. Faces are subset to what the book draws; every
 run that could not be represented is counted (`UnrepresentedCharacters`,
 `UncoveredCharacters`), and a run the writer refused is
-`UnwritableTextRun`. Images, borders, backgrounds, list markers and links are
-drawn; every internal link and every navigation entry becomes a link
-annotation or outline item.
+`UnwritableTextRun`. Borders, backgrounds, list markers and links are drawn;
+every internal link and every navigation entry becomes a link annotation or
+outline item. **An XHTML `<img>` is a replaced box** at the picture's own
+dimensions, drawn inside its content box as an `/XObject` registered before the
+first page begins — JPEG and PNG, classified by magic bytes and never by name
+or by the manifest's `media-type`, through the same pass-through path `cbz.rs`
+takes, so a plate is neither decoded nor re-encoded. An `<img>` that does not
+reach the page is named (`ImageNotDrawn`, four defects) rather than leaving a
+hole the surrounding text closes over.
 
 **Reflowable and fixed-layout.** A reflowable book is paginated into
 `OpenOptions::page` (default 432 × 648 pt, 36 pt margin, 12 pt base size);
@@ -174,6 +186,9 @@ order, at nine page boxes.
 | --- | --- | --- | --- |
 | Inside an SVG content document: `<filter>`, `<mask>`, `<pattern>` as a paint, `<marker>`, `<foreignObject>`, SMIL animation, `<script>`, `<textPath>`/`<tref>`/`<altGlyph>`, and `spreadMethod` other than `pad` | `ArchiveWarning::Svg { item, warning }` | the document draws; each of these is a subsystem this build declines, named per document and deduplicated by the crate that met it. §14.5's group `opacity` is **flattened** into each descendant's alpha — exact for a shape painted one way, too dark where a fill and a stroke overlap, so `GroupOpacityFlattened` fires only where it shows | [design/svg.md](../design/svg.md) |
 | An `<image>` inside an SVG whose reference does not resolve, or whose bytes are neither JPEG nor PNG | `ArchiveWarning::SvgImageUnresolved { item, images }` | those two are embedded through the same `ImageData` path `cbz.rs` uses; anything else is counted per page rather than drawn as nothing | [design/svg.md](../design/svg.md) |
+| An XHTML `<img>` that did not become a box on the page | `ArchiveWarning::ImageNotDrawn { item, defect, images }` | four defects, because each is a different party's fault: `Unresolved` (no `src`, or one the container has no entry for), `UnsupportedFormat(f)` (GIF and WebP are EPUB 3.3 §3.2 core media types with no decoder here, named by format), `Unknown` (bytes matching no magic number — **an SVG lands here**, having none, and is a spine item in this build rather than a replaced box) and `Undecodable` (a JPEG or PNG whose bytes would not make an image). Counted per content document and per defect, so a comic whose forty pictures are all WebP is one sentence a host can act on. The ruling 10 companion to `SvgImageUnresolved`, which is an SVG `<image>` and could never say this | [design/epub-layout.md](../design/epub-layout.md) |
+| A refused `<img>` — **not a refusal, a stated answer** | — | HTML §4.8.4.4 makes an element *"expected to be treated as a replaced element"* **only when the image is available**, so an unavailable one is an ordinary empty inline and generates **no box**. §10.3.2's 300 by 150 default would put a blank postcard into a paragraph for a reference that was merely misspelled, and carrying `alt` into it would put characters on the page the spine's markup does not contain — one per refused image, with no source character to answer it. Asserted as a byte-for-byte identity against the same book with an empty `<span>` in the `<img>`'s place | [design/epub-layout.md](../design/epub-layout.md) |
+| `object-fit`, `object-position` | `ArchiveWarning::UnimplementedProperty` | a replaced box's content fills its content box exactly, which is what CSS says happens when the property that would say otherwise is absent. An author who states a `width` and a `height` that disagree with the picture's proportions gets a stretched picture, asserted rather than assumed | [ROADMAP.md](../ROADMAP.md) |
 | An SVG content document that produced no picture at all | `SpineDefect::SvgUnreadable(tinker_pdf_svg::Refusal)` | six named causes — not XML, not an `<svg>` root, a `<use>` that reaches its own ancestor, or one of four ceilings — and the refusal travels, so a caller can tell a bomb from a truncated file | [design/svg.md](../design/svg.md) |
 | `position: fixed` — **not a refusal, a stated answer** | — | CSS 2.2 §9.6.1: *"in the case of paged media, fixed boxes are repeated on every page, and are fixed with respect to the page box"*. So a fixed box is positioned against the page box and drawn on every page of the document. That is the specification's own paged answer, not a degradation of the screen behaviour, and it is what a stylesheet asking for a running header meant | — |
 | `position: sticky` — **also a stated answer** | — | `css-position-3` §3.4: a sticky box is offset by how far its nearest scrollport has scrolled, clamped to its containing block. A paginated document has no scrollport, so that distance is zero on every page and §3.4's own words are that it is then *"the same as `relative`"*. The value of a parameter this medium does not have, rather than a gap | — |
@@ -284,9 +299,11 @@ postdate the tool's removal under ruling 13, so
   that the sets of books the tool was unhappy with and never saw are the ones
   recorded. The three tier-4 books closed the roadmap's fixed-layout and
   `@font-face` rows and found **eleven things** the first six could not, listed
-  in `tests/epub/README.md` — including that a fixed-layout comic reaches this
-  build as correctly-sized, correctly-clipped, entirely blank pages, because no
-  path here paints a replaced element. **Twenty more are fetched**,
+  in `tests/epub/README.md` — including that a fixed-layout comic reached this
+  build as correctly-sized, correctly-clipped, **entirely blank pages**, because
+  no path here painted a replaced element. That one is closed: its six pages
+  measured 1, 1, 1, 1, 1, 1 distinct colours and now measure 44, 45, 42, 51, 50
+  and 63, asserted per page as more than one. **Twenty more are fetched**,
   never committed (Project Gutenberg's trademark licence and `epub3-samples`'
   CC-BY-SA are both barred by this repository's own no-copyleft gate), and
   `epub_fetched.rs` needs `TINKER_EPUB_CORPUS` set to an **absolute** path
@@ -299,7 +316,7 @@ postdate the tool's removal under ruling 13, so
   `epub_conservation.rs`.
 - `tests/epub.rs`, `epub_ocf.rs`, `epub_package.rs`, `epub_reading.rs`,
   `epub_css.rs`, `epub_tables.rs`, `epub_fixed_layout.rs`, `epub_fonts.rs`,
-  `epub_memory.rs`; the layout crate's own suite (`layout/src/tests.rs`,
+  `epub_images.rs`, `epub_memory.rs`; the layout crate's own suite (`layout/src/tests.rs`,
   floats and tables step by step, UAX #14 conformance over the full pair
   table); the CSS crate's tokenizer, selector and cascade suites.
 - `epub_fonts.rs`'s WOFF half: a book whose `@font-face` names a WOFF or a
