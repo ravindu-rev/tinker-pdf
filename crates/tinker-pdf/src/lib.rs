@@ -22,10 +22,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod annotations;
 mod annots;
 pub mod cbz;
 pub mod epub;
+pub mod fontlist;
 pub mod fonts;
+pub mod layers;
 pub mod mdp;
 mod optional;
 pub mod pdfa;
@@ -42,13 +45,22 @@ use std::sync::Arc;
 use tinker_pdf_content::{interpret, Matrix, TextDevice};
 use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 
+/// The read surface's own projections (ruling 11), and the argument for them.
+///
+/// Three questions a *document* answers about itself — what fonts it carries,
+/// what layers it declares, what is annotated on a page — in types this crate
+/// owns rather than the internal ones. `fontlist`'s module comment argues the
+/// boundary once for all three.
+pub use annotations::{Annotation, AnnotationFlags, AnnotationKind};
 /// Comic archives: what [`Document::open`] does with a `PK\x03\x04` at offset
 /// zero, and what it refuses by name.
 pub use cbz::{
     ArchiveRefusal, ArchiveReport, ArchiveWarning, ComicInfo, ComicInfoDefect, Container,
     PageDefect, PageOrigin,
 };
+pub use fontlist::{DocumentFont, FontProgram};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
+pub use layers::OptionalGroup;
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};
 /// PDF/A conformance (ISO 19005), behind [`Document::validate_pdfa`].
@@ -93,6 +105,15 @@ pub use tinker_pdf_cos::{
 pub use tinker_pdf_cos::{
     ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE,
 };
+/// 9.6/9.7's font families and 9.9's `/FontFile*` keys, as [`Document::fonts`]
+/// reports them.
+///
+/// Re-exported rather than twinned: both are `Copy` enums over a closed table
+/// in the specification, so a facade copy would be a second enum to keep in
+/// step and a `match` that stops being exhaustive without saying so. Ruling 11
+/// asks that a caller be able to *name* what it is handed, and a re-export is
+/// that.
+pub use tinker_pdf_cos::{FontKind, ProgramKey};
 
 /// How many bytes are read to decide whether a source holds a container.
 ///
@@ -1311,6 +1332,48 @@ impl Document {
         tinker_pdf_cos::xmp_metadata(&self.inner)
     }
 
+    /// Every font the document's pages can reach (9.5 to 9.9).
+    ///
+    /// Name, family, whether the program is embedded, the subset tag, and
+    /// where the program is — the bytes themselves only when
+    /// [`DocumentFont::program_bytes`] is called, because a font program is
+    /// routinely a megabyte and a caller who wanted a list did not ask for
+    /// one. See [`crate::fontlist`] for the whole projection argument.
+    ///
+    /// Each font once, however many pages and resource names reach it, with
+    /// the names it answered to on [`DocumentFont::resource_names`]. A
+    /// composite font is one entry: 9.7.4 makes the descendant CIDFont part
+    /// of it rather than a font of its own.
+    ///
+    /// Reachable means what an interpreter could bind — the pages'
+    /// `/Resources`, the form XObject, tiling pattern, Type 3 and
+    /// annotation-appearance scopes those open, and the form's `/DR`
+    /// (12.7.3.3), where a field's `/DA` resolves its font and where a face
+    /// no page mentions can be the only one a document carries.
+    ///
+    /// **This adds nothing to [`Document::warnings`].** Listing is a read,
+    /// and a read that changed what the document reports about itself would
+    /// make the answer depend on the order the caller asked in.
+    #[must_use]
+    pub fn fonts(&self) -> Vec<DocumentFont> {
+        fontlist::of_document(&self.inner)
+    }
+
+    /// The document's optional content groups, in `/OCProperties /OCGs` order
+    /// (8.11).
+    ///
+    /// Each with its `/Name` and whether the **default** configuration `/D`
+    /// shows it (8.11.4.3) — the same answer, from the same bound
+    /// configuration, that decides what [`Page::render`] paints. Empty for
+    /// the great majority of documents, which declare no optional content.
+    ///
+    /// Read only. Writing groups and toggling a configuration are the other
+    /// half of the roadmap's optional content row and are not in this build.
+    #[must_use]
+    pub fn layers(&self) -> Vec<OptionalGroup> {
+        layers::of_document(&self.inner)
+    }
+
     /// The document's interactive form fields (12.7).
     ///
     /// Empty when the document has no `/AcroForm`, which is most documents.
@@ -1682,6 +1745,38 @@ impl Page {
     #[must_use]
     pub fn links(&self) -> Vec<Link> {
         tinker_pdf_cos::links(&self.doc, self.inner.reference)
+    }
+
+    /// Every entry of the page's `/Annots`, in the array's own order (12.5).
+    ///
+    /// **Total by construction**, up to ruling 1's bound of 4 096 entries per
+    /// page: one [`Annotation`] per array entry, however malformed. Past the
+    /// bound the list is shortened and nothing says so — a read cannot append
+    /// to [`Document::warnings`] without changing what the document reports
+    /// about itself — which is a gap the roadmap carries rather than one this
+    /// method hides. The corpus's largest page carries 122.
+    ///
+    /// A subtype ISO 32000 does not define comes back as
+    /// [`AnnotationKind::Other`] carrying the name the file used, a
+    /// dictionary with no `/Subtype` as [`AnnotationKind::Unnamed`], and an
+    /// entry that is not a dictionary at all as
+    /// [`AnnotationKind::Unreadable`]. Nothing is dropped, so a caller
+    /// auditing a file can count what this build does not model instead of
+    /// wondering what went missing (ruling 10).
+    ///
+    /// Carries 12.5.2 Table 164's common entries and Table 170's markup ones
+    /// — `/Contents`, `/T`, `/M`, `/F`, `/Rect`, `/Popup`, `/Parent` — with
+    /// 12.5.6.14's rule applied: a pop-up's text comes from its parent.
+    /// Per-subtype geometry (`/QuadPoints`, `/InkList`, `/Vertices`, `/L`)
+    /// is not here; see the roadmap.
+    ///
+    /// [`Page::links`] is the narrower navigation view over the same array
+    /// and is unchanged: it returns `/Link` annotations with their targets
+    /// **resolved**, which is a question about destinations rather than about
+    /// annotations (ruling 6).
+    #[must_use]
+    pub fn annotations(&self) -> Vec<Annotation> {
+        annotations::of_page(&self.doc, self.inner.reference)
     }
 
     /// The page's text.
