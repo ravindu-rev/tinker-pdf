@@ -721,7 +721,7 @@ could show was right.
   targets, asserting a least-ink floor so a face that stops drawing cannot
   read as a pass ([determinism](determinism.md)); the `epub` fixture renders
   through `SimpleFontProvider`, covering the provider path.
-- The whole workspace stands at 4 693 passed / 0 failed / 56 ignored
+- The whole workspace stands at 4 741 passed / 0 failed / 56 ignored
   (Windows x86_64, 14 September 2026), and the corpus run of 13 September 2026
   — 5 525 files, 5 516 rendered every page, 0 crashes — exercises real
   embedded fonts of every

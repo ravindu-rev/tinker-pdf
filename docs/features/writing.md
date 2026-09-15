@@ -201,7 +201,7 @@ forms suites save through both modes. The three document byte-hashes in
 `crates/tinker-pdf/tests/determinism.rs` pin writer byte-determinism —
 object numbering, dictionary order and stream framing frozen as bytes
 (ruling 4, [determinism](determinism.md)). All of it rides in the
-workspace suite: 4 693 passed, 0 failed, 56 ignored (Windows x86_64,
+workspace suite: 4 741 passed, 0 failed, 56 ignored (Windows x86_64,
 14 September 2026) — [verification](../verification.md).
 
 **And it runs at scale.** Every corpus file this engine reads cleanly is
