@@ -207,6 +207,78 @@ let doc = Document::open(bytes)?
 // would extract perfectly and render none of it, reporting UnreadableFont.
 ```
 
+## Listing what a document carries
+
+`Document::fonts()` answers "which faces is this file made of" without
+rendering anything. Each `DocumentFont` carries the `/Subtype` family
+(`FontKind`), `/BaseFont` exactly as the file spelled it, that name with
+9.6.4's subset tag stripped, the tag itself, whether a program is embedded and
+under which `/FontFile*` key (`ProgramKey`), and the resource names the font
+answered to. `tpdf fonts <file>` prints that list; `tpdf fonts <file> --out
+DIR` additionally writes each embedded program out, naming each file from the
+program's own first bytes rather than from the descriptor key, since
+`/FontFile3` holds a bare CFF or an OpenType wrapper and the listing does not
+read the stream's `/Subtype` to tell them apart.
+
+**The bytes are lazy and the listing is not a parse.** `DocumentFont` holds
+the *address* of the program; `program_bytes()` decodes the stream, and
+nothing else does. The listing reads `/Subtype`, `/BaseFont` and the
+descriptor and never a CMap — which is what keeps it cheap, and also what
+keeps it a *read*: `cos::font::read` absorbs its leniencies into the
+document's warnings, so a listing built on it would make `warnings()` depend
+on whether anyone had asked for the fonts first. A test asserts the warning
+count is unchanged across a call.
+
+Each face appears once however many pages and resource names reach it, and a
+composite font is one entry rather than two: 9.7.4 makes the descendant
+CIDFont part of the Type 0 font, so listing both would report every CJK face
+twice. Reachability is the pages' `/Resources` plus every scope their content
+can enter — form XObjects (8.10.1), tiling patterns (8.7.3), Type 3 glyph
+procedures (9.6.5), every state of every annotation appearance (12.5.5) — and
+the form's `/DR` (12.7.3.3).
+
+**`/DR` is there because the corpus census put it there.** A variable-text
+field's `/DA` names its font in `/DR`, which no page has to mention: in
+`verapdf/Isartor test files/PDFA-1b/6.9 Interactive Forms/isartor-6-9-t01-fail-a.pdf`
+the page's whole `/Resources` is a `/ProcSet`, and the one embedded face in
+the file is reachable only that way. Walking pages alone called that document
+fontless. Adding `/DR` moved the corpus from 22 168 fonts across 3 151 files
+to **22 769 across 3 242**.
+
+### Measured over the corpus
+
+`crates/tinker-pdf/tests/annotation_census.rs`'s font half, `#[ignore]`d and
+run with `-- --ignored --nocapture`, over the 5 605 fetched files
+(15 September 2026; 5 597 opened, 8 did not):
+
+| | |
+| --- | --- |
+| distinct fonts listed | 22 769 across 3 242 files |
+| by family | TrueType 7 813, Type1 8 056, Type0 6 737, Type3 163 |
+| embedded | 17 794 (78.2%) |
+| by key (9.9 Table 126) | `/FontFile2` 12 285, `/FontFile3` 4 949, `/FontFile` 560 |
+| subset-tagged | 15 899, every tag six upper-case ASCII letters |
+| program bytes decoded | 909 758 651, with **no** embedded program failing to decode |
+| reached under more than one resource name | 1 863 |
+| written as a direct dictionary | 23 |
+
+Fourteen files name `/FontFile` somewhere in their raw bytes and yield no
+embedded program. The census prints them by name rather than asserting about
+them, because the bytes can be in an unreferenced object, on a page outside
+the tree, or in a descriptor key whose value is not a stream — the byte scan
+is a hint, not a claim. They are: two fuzzed pdfjs inputs, three other pdfjs
+issue files and one SafeDocs file, five veraPDF 6.1.12 implementation-limit
+fixtures, and three veraPDF font-embedding fixtures.
+
+The last three are the ones that were read, and all three carry a
+`/FontFile3` that resolves to nothing: two write `null` as the descriptor's
+value outright, the third names an object that is itself `null`. Each states
+its own expectation in its outline, and the expectation is ours —
+`6-2-11-4-1-t01-fail-a.pdf` says *"Type1 font that is used for rendering is
+not embedded"*, `6-2-10-4-1-t01-pass-a.pdf` says the same with *"the text
+rendering mode is 3"* after it, and `is_embedded()` answers `false` for the
+face in both. The other eleven are counted, not diagnosed.
+
 ## What the missing faces cost, measured
 
 This engine bundles no font programs, so a document that names Helvetica and
@@ -616,6 +688,21 @@ could show was right.
 
 ## Verified
 
+- `crates/tinker-pdf/src/fontlist.rs` — 12 unit tests beside the listing:
+  9.6.4's subset-tag shape in both directions (seven strings that are not a
+  tag, each for its own reason), a descriptor deciding embedding, a
+  `/FontFile2` naming no stream reported **not** embedded, a composite font
+  as one entry carrying its descendant's program, one face reached three ways
+  listed once with both its resource names, a form XObject's and an
+  annotation appearance's fonts reached, a resource cycle that terminates,
+  the form's `/DR` reached, the listing agreeing with `cos::font::read` about
+  family and embedding (self-consistency, named as such), and listing adding
+  no warnings.
+- `crates/tinker-pdf/tests/annotation_census.rs`'s font half — the corpus
+  numbers above, `#[ignore]`d, printing `RAN`/`SKIPPED`. It asserts every
+  subset tag it meets against 9.6.4's shape, that a font with a program is
+  `is_embedded()` and one without is not, and floors at 22 769 fonts over
+  5 605 files with all four families present.
 - `crates/tinker-pdf-font/tests/woff_fixtures.rs` — 12 tests, **the WOFF
   decoders against seven committed files**, in `crates/tinker-pdf-font/tests/woff/`,
   written on 2026-08-31 by `make-fixtures.py` from `cargo xtask synth-face` —
@@ -721,8 +808,9 @@ could show was right.
   targets, asserting a least-ink floor so a face that stops drawing cannot
   read as a pass ([determinism](determinism.md)); the `epub` fixture renders
   through `SimpleFontProvider`, covering the provider path.
-- The whole workspace stands at 4 741 passed / 0 failed / 56 ignored
-  (Windows x86_64, 14 September 2026), and the corpus run of 13 September 2026
+- The whole workspace stands at 4 779 passed / 0 failed / 58 ignored across
+  217 suites (Windows x86_64, 15 September 2026, measured on this branch;
+  other lanes are moving the total in parallel), and the corpus run of 13 September 2026
   — 5 525 files, 5 516 rendered every page, 0 crashes — exercises real
   embedded fonts of every
   kind here. See [verification](../verification.md).

@@ -47,6 +47,16 @@ pub(crate) struct OptionalContent {
     /// order a correctness question everywhere in this engine, and a map that
     /// is only ever looked up today is a map somebody iterates tomorrow.
     states: BTreeMap<ObjRef, bool>,
+    /// `/OCProperties /OCGs` in the order the catalog wrote it (8.11.4.2).
+    ///
+    /// The map above answers "is this group on", which is all the renderer
+    /// ever asks and all it needed before [`crate::layers`] existed. A list
+    /// of the document's layers is a different question and the map cannot
+    /// answer it: `BTreeMap` order is object-number order, and a producer's
+    /// `/OCGs` order is the order its layer panel shows. Keeping both is four
+    /// words of state and the alternative is a second walk of the catalog
+    /// that could disagree with this one.
+    listed: Vec<ObjRef>,
 }
 
 impl OptionalContent {
@@ -58,11 +68,11 @@ impl OptionalContent {
         let mut states = BTreeMap::new();
 
         let Some(catalog) = doc.catalog() else {
-            return OptionalContent { states };
+            return OptionalContent::default();
         };
         let entry = doc.resolve_key(&catalog, doc.intern(b"OCProperties"));
         let Some(properties) = entry.as_dict() else {
-            return OptionalContent { states };
+            return OptionalContent::default();
         };
 
         // 8.11.4.2: /OCGs lists every group in the document, and /D is the
@@ -93,7 +103,28 @@ impl OptionalContent {
             states.insert(reference, false);
         }
 
-        OptionalContent { states }
+        OptionalContent {
+            states,
+            listed: all,
+        }
+    }
+
+    /// The groups `/OCProperties /OCGs` names, in the catalog's own order.
+    ///
+    /// Only the listed ones: a group some content stream's `/OC` mentions but
+    /// the catalog never declared is not a layer of this document, and
+    /// [`Self::layer_of`] already resolves it to visible where it is used.
+    /// Listing it here would invent a layer entry for a malformation.
+    pub(crate) fn listed(&self) -> Vec<ObjRef> {
+        self.listed.clone()
+    }
+
+    /// Whether the default configuration shows the group at `reference`.
+    ///
+    /// A group the configuration never mentioned reads as visible, which is
+    /// this module's one direction of fallback throughout.
+    pub(crate) fn is_visible(&self, reference: ObjRef) -> bool {
+        self.group_state(reference).unwrap_or(true)
     }
 
     /// Whether the group at `reference` is on.

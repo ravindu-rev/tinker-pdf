@@ -28,6 +28,7 @@ usage:
   tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--jobs N]
                                     [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
+  tpdf fonts   <file.pdf> [--out DIR] [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
   tpdf check   <file.pdf>... [--strict] [--pdfa]
@@ -90,6 +91,17 @@ file that fails to open is a result to be counted, not an error in the tool,
 and an exit code that conflated them would make every unopenable file look
 like a crashed run.
 
+`fonts` lists every font the pages of a document can reach — once each,
+whatever number of pages and resource names arrive at it — with its family,
+its subset tag, whether the file carries its program, and the names it
+answered to. `--out DIR` additionally writes each embedded program to that
+directory, which is the only thing here that pays for a font program: the
+listing itself reads names and never a stream.
+
+Do not confuse it with the `--fonts` flag above. `fonts` *reads* the faces a
+document carries; `--fonts` *supplies* faces to `render` and `probe` for a
+document that carries none, which is the opposite direction.
+
 `objects` is the view underneath every other command: what the engine
 actually parsed, object by object. It is what a corpus failure gets looked
 at with, which is why it prints the cross-reference kind alongside each
@@ -118,6 +130,7 @@ fn main() -> ExitCode {
         "text" => run(&options, text),
         "render" => run(&options, render),
         "fields" => run(&options, fields),
+        "fonts" => run(&options, fonts),
         "outline" => run(&options, outline),
         "objects" => run(&options, objects),
         "check" => check(&options),
@@ -683,6 +696,103 @@ fn fields(_options: &Options, path: &str, doc: &Document) -> Result<(), String> 
         );
     }
     Ok(())
+}
+
+/// Lists the fonts a document's pages can reach, and with `--out` writes the
+/// embedded programs out.
+///
+/// The listing half costs names and nothing else — `Document::fonts` reads no
+/// stream — which is what makes this cheap to run over a corpus. The
+/// extraction half is where the bytes are paid for, once per font, and only
+/// when a directory was named.
+fn fonts(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
+    let found = doc.fonts();
+    if found.is_empty() {
+        println!("{path}: no fonts");
+        return Ok(());
+    }
+
+    println!("{path}: {} fonts", found.len());
+    for font in &found {
+        let name = match font.name.is_empty() {
+            true => "(no /BaseFont)",
+            false => font.name.as_str(),
+        };
+        println!(
+            "  {:<32} {:<9} {:<13} {}",
+            name,
+            format!("{:?}", font.kind),
+            match font.program {
+                Some(program) => format!("{:?}", program.key),
+                None => "not embedded".to_string(),
+            },
+            match &font.subset_tag {
+                Some(tag) => format!("subset {tag} as {}", font.resource_names.join(", ")),
+                None => format!("as {}", font.resource_names.join(", ")),
+            }
+        );
+    }
+
+    let Some(directory) = options.out.as_deref() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(directory).map_err(|e| format!("creating {directory}: {e}"))?;
+    let mut written = 0usize;
+    for (index, font) in found.iter().enumerate() {
+        let Some(bytes) = font.program_bytes() else {
+            continue;
+        };
+        // Numbered as well as named: two subsets of one face share a name
+        // after the tag is stripped, and a run that silently overwrote the
+        // first with the second would report a count it did not write.
+        let stem = sanitised(&font.base_font);
+        let file = format!("{directory}/{index:03}-{stem}.{}", extension(&bytes));
+        std::fs::write(&file, &bytes).map_err(|e| format!("writing {file}: {e}"))?;
+        println!("  wrote {file} ({} bytes)", bytes.len());
+        written += 1;
+    }
+    println!("{path}: {written} embedded programs written to {directory}");
+    Ok(())
+}
+
+/// A file name that is safe on every host, from a `/BaseFont` that need not be.
+///
+/// 7.3.5 lets a name hold any byte but the delimiters, so a `/BaseFont` can
+/// carry a slash, a colon or a space. Anything outside the ASCII word
+/// characters becomes `_`, which is lossy on purpose: the exact spelling is on
+/// the line above, and this is only how the file is found afterwards.
+fn sanitised(base_font: &str) -> String {
+    let cleaned: String = base_font
+        .chars()
+        .map(
+            |c| match c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                true => c,
+                false => '_',
+            },
+        )
+        .collect();
+    match cleaned.is_empty() {
+        true => "font".to_string(),
+        false => cleaned,
+    }
+}
+
+/// What to call an extracted program, from the bytes rather than from the key.
+///
+/// `/FontFile3` holds a bare CFF *or* an OpenType wrapper (9.9 Table 126), and
+/// the listing does not read the stream's `/Subtype` — so naming the file from
+/// the descriptor key would write an OpenType face called `.cff`. The first
+/// four bytes say which it is without opening the question.
+fn extension(bytes: &[u8]) -> &'static str {
+    match bytes {
+        [0x00, 0x01, 0x00, 0x00, ..] | [b't', b'r', b'u', b'e', ..] => "ttf",
+        [b'O', b'T', b'T', b'O', ..] => "otf",
+        [b't', b't', b'c', b'f', ..] => "ttc",
+        [0x80, ..] => "pfb",
+        [b'%', b'!', ..] => "pfa",
+        [0x01, 0x00, ..] => "cff",
+        _ => "bin",
+    }
 }
 
 fn outline(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
