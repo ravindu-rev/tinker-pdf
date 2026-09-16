@@ -140,6 +140,20 @@ made it commoner: **1 936 of the fetched corpora's 3 313 CFF faces** are
 already producer-made subsets with nothing left to remove, against 212 of 441
 before a thousand real-world documents were pinned.
 
+**Rewriting** (9.6.4, 9.9). The paragraph above is the *builder*, which knows
+every glyph it placed because it placed them. A rewrite of somebody else's
+document knows nothing of the kind, and until `tinker_pdf::subset::apply`
+existed it copied every embedded program through untouched however little of it
+the pages used. It now runs the same `tinker_pdf_font::subset` over a glyph set
+the interpreter collects — pages, form XObjects at any depth, Type 3 glyph
+procedures and every state of every annotation `/AP` — and leaves whole,
+by name, any program it cannot bound. The encoding needs no repair because
+glyph identifiers are never renumbered; only `/BaseFont`, the descendant's
+`/BaseFont` and the descriptor's `/FontName` move, all three to the same
+9.6.4 name, from the same `subset_tag` this page's builder uses. It is an
+editing operation and lives with the rest of them: see
+[editing](editing.md).
+
 **WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2018]). `woff.rs` unpacks
 both to the sfnt inside them; nothing else in the crate knows they exist, and
 `Sfnt::parse` is what reads what comes out. The two are not variations on each

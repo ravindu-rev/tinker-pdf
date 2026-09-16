@@ -946,7 +946,14 @@ struct CidFont {
 /// different subsets of the same face collide only if their bytes hash the
 /// same, and a collision would merely give two fonts the same name, which is
 /// legal.
-fn subset_tag(program: &[u8]) -> Vec<u8> {
+///
+/// Public because the *rewrite* side subsets fonts too, and a second
+/// implementation of this would be two ways of naming the same bytes: a
+/// document built here and the same document rewritten here would disagree
+/// about what a subset of one face is called, for no reason a reader of either
+/// file could see. One door, as with [`tinker_pdf_font::subset`] itself.
+#[must_use]
+pub fn subset_tag(program: &[u8]) -> Vec<u8> {
     // FNV-1a, for no reason beyond being short and well spread.
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for &byte in program {

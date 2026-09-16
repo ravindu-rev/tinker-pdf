@@ -34,6 +34,7 @@ mod resources;
 pub mod shaping;
 pub mod signature;
 pub mod structure;
+pub mod subset;
 pub mod verdict;
 pub mod xps;
 
@@ -63,6 +64,8 @@ pub use structure::{
     StructElement, StructKid, StructureTree, StructureWarning, StructuredNode, StructuredText,
     TextSource,
 };
+/// Font subsetting on rewrite (9.6.4, 9.9).
+pub use subset::{SubsetReport, Subsetted, Untouched, UntouchedReason};
 pub use tinker_pdf_content::{
     MarkedProps, Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
 };

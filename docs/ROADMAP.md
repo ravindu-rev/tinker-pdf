@@ -32,8 +32,8 @@ its two font-bearing siblings:
 | `crop` held of asked | 4 929 of 5 075 |
 | `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 4 741 passed, 0 failed, 56 ignored as
-[verification.md](verification.md) records it, measured 14 September 2026 with
+The suite stands at 4 766 passed, 0 failed, 56 ignored as
+[verification.md](verification.md) records it, measured 16 September 2026 with
 `TINKER_PNGSUITE` set, so the ten PngSuite tests ran rather than skipped.
 
 ## What "best" means here
@@ -365,7 +365,7 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 | Named destinations on write | deliberately absent: a name is a destination only once the catalog carries a `/Names /Dests` tree | write the tree; ruling 6 still holds, and a named destination is never collapsed | S |
 | Optional content: a facade reader, and writing groups and configurations | the reader is internal; nothing is written | `Document::layers()`; `DocumentBuilder::add_layer`; the editor toggles a default configuration | M |
 | Watermark and stamp on existing pages | `append_content` is the primitive; nothing registers a resource on an existing page | `DocumentEditor::add_resource` and `stamp(page, form)` | M |
-| Font subsetting on rewrite | build-side only; a rewrite copies every program untouched | glyph usage from the interpreter — the rewrite path `crates/tinker-pdf/src/redact.rs` already walks — drives `cff_subset` and the TrueType subsetter beside it, both of which `crates/tinker-pdf-font/src/subset.rs` already dispatches | M |
+| Font subsetting on rewrite, asked for rather than arranged | `tinker_pdf::subset::apply(&mut editor)` does it: the interpreter's own glyph walk — pages, form XObjects at any depth, every state of every `/AP` — drives `tinker_pdf_font::subset`; the encoding survives untouched because glyph identifiers are never renumbered; and `SubsetReport` names every program left whole and why (ruling 10). Measured on the vendored Liberation Serif: 393 576 bytes down to 29 376 for ten characters, and a redacted page's file from 395 534 to 30 301 with the removed letters' outlines gone. A caller has to **ask**: nothing on `WriteOptions`, `save` or `tpdf` runs it, so a redaction that must not disclose has to remember to | a `WriteOptions` switch and a `tpdf` flag, so the common case is not something to remember; and the census `crates/tinker-pdf/tests/cff_subset_census.rs` that runs for the *build* side run for this path too, since a self-built fixture cannot speak for a real producer's encoding | S |
 | Image recompression and downsampling on rewrite | never, by contract | an opt-in `WriteOptions::images` once the encoders above exist; original bytes untouched by default | M |
 | Stream deduplication | declined until content hashing exists | SHA-256 over decoded bytes plus dictionary equality — identical means identical, since a wrong merge silently swaps two fonts | S |
 | Sanitise: strip JavaScript, actions, embedded files, metadata | scripts are reported, nothing is stripped | `DocumentEditor::sanitise(Sanitise)` with a typed report of what left | S |

@@ -307,6 +307,45 @@ impl DocumentEditor {
         &self.doc
     }
 
+    /// The document being edited, as the shared handle it was opened with.
+    ///
+    /// For a caller that must build something *over* the document while
+    /// holding the editor — a page's resources, an interpretation of a content
+    /// stream — where a borrow of [`DocumentEditor::document`] would pin the
+    /// editor for as long as that thing lived.
+    #[must_use]
+    pub fn shared_document(&self) -> Arc<CosDocument> {
+        Arc::clone(&self.doc)
+    }
+
+    /// The decoded bytes of a stream **as this editor now has it**.
+    ///
+    /// The editor's own overlay first, the document underneath. That order is
+    /// the whole point: a caller reading a content stream it has already
+    /// rewritten must see the rewrite, and [`CosDocument::stream_decoded`]
+    /// cannot show it one — it reads the file, which still says what it said
+    /// before the edit. A pass that rewrites content and then walks it (the
+    /// glyph-usage walk font subsetting does after a redaction) reads the
+    /// *original* text through the document and would put back exactly what
+    /// the redaction removed.
+    ///
+    /// `None` when the object is neither an overlay stream nor a decodable
+    /// stream in the file — including one this editor has deleted.
+    #[must_use]
+    pub fn stream_bytes(&self, r: ObjRef) -> Option<Vec<u8>> {
+        if self.deleted.contains(&r.num) {
+            return None;
+        }
+        match self.overlay.get(&r.num) {
+            Some(Written::Stream(stream)) => Some(stream.data.clone()),
+            // An overlay entry that is not a stream replaced the stream with
+            // something else, and the file's bytes are no longer what this
+            // object is.
+            Some(Written::Object(_)) => None,
+            None => self.doc.stream_decoded(r).ok(),
+        }
+    }
+
     /// Whether anything has been changed.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
@@ -1013,10 +1052,10 @@ impl DocumentEditor {
         let mut out = Vec::new();
         for r in refs {
             // An overlay stream is this editor's own work; otherwise the
-            // document's decoded bytes.
-            if let Some(Written::Stream(stream)) = self.overlay.get(&r.num) {
-                out.extend_from_slice(&stream.data);
-            } else if let Ok(bytes) = self.doc.stream_decoded(r) {
+            // document's decoded bytes. One reader for both, so that a caller
+            // asking the same question through `stream_bytes` cannot get a
+            // different answer from the one this uses.
+            if let Some(bytes) = self.stream_bytes(r) {
                 out.extend_from_slice(&bytes);
             }
             out.push(b'\n');
