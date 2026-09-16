@@ -288,9 +288,16 @@ bindings, never against a doc alone. None has corpus evidence, because a
 capability an engine lacks leaves no trace in a corpus run; the groups are
 ordered by how much of the field uses them, which is a judgement and is
 labelled as one. **Every L and XL row is owed a design doc before it is
-scheduled, and none exists yet.** Where a row reverses a non-goal a feature
-or design doc states, the reversal is a decision taken here and the doc
-changes in the commit that schedules it.
+scheduled.** The four L rows this tier carries — inferred reading order,
+table reconstruction, PDF/UA validation, PDF/X validation and writing — got
+theirs on 16 September 2026, each written before its row was scheduled and
+each naming what decides whether the build is right; **none of the four is
+scheduled**, and the PDF/X document says in as many words which part of its
+row cannot be. The two rows that price an L or XL alternative (hinting, a full
+ECMAScript engine) are decisions rather than rows and owe nothing until they
+are taken. Where a row reverses a non-goal a feature or design doc states, the
+reversal is a decision taken here and the doc changes in the commit that
+schedules it.
 
 ### Output
 
@@ -342,8 +349,8 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 | Word segmentation and word boxes | glyph, line and block quads; no word. `TextLine` has no `impl` at all. **The shaper's UCD carries no UAX #29 table** — its eleven vendored files are UAX #9, #24 and #15, and nothing in the tree reads `Word_Break`. The vendoring machinery to copy is one crate over: `tinker-pdf-layout` generates its UAX #14 line-break table from `data/ucd` in its own `build.rs` | `TextLine::words()` on UAX #29 boundaries, with `WordBreakProperty.txt` vendored and its table generated the way the line-breaker's is | M, and the size is the vendoring |
 | Structured text serialisation — JSON, XML, HTML — with fonts, sizes and boxes | the model exists and nothing serialises it; no serde in the tree and none wanted | hand-written writers, so zero third-party logic crates stays true (no first-party manifest names serde; `Cargo.lock` carries it transitively through `criterion`, which is a dev-dependency of the benchmarks); `tpdf text --json`; the font name carried on the span | M |
 | Search options: case-sensitive, whole word, diacritic-insensitive; regular expressions | literal and case-insensitive, one argument | an options struct for the first three; regular expressions are a decision, since the tree has no regex engine and links none | S; decision |
-| Inferred reading order for untagged pages — columns, running heads, footnotes — labelled as inferred | geometric line and block order; inference is a named refusal so a guess is never mistaken for the file's own order | an opt-in `ReadingOrder::Inferred` that is never the default, held to the 717 tagged corpus files by inferring with the tree hidden and scoring against it | L |
-| Table reconstruction from geometry | none | opt-in, same discipline, held to the `/Table` elements the corpus carries | L |
+| Inferred reading order for untagged pages — columns, running heads, footnotes — labelled as inferred | content-stream order, joined geometrically — `TextDevice` sorts nothing, and the row used to say "geometric line and block order"; inference is a named refusal so a guess is never mistaken for the file's own order | an opt-in `ReadingOrder::Inferred` that is never the default, held to the 1 078 tagged corpus files (`corpus/ratchet.json`'s `tagged.files` summed over five corpora; the 717 this row carried was the sum over four) by inferring with the tree hidden and scoring against it, with the 589 one-paragraph veraPDF fixtures as the set where nothing may move rather than as the population | L ([design/reading-order.md](design/reading-order.md)) |
+| Table reconstruction from geometry | none; the corpus carries 207 files with a `/Table` element, 1 908 tables, 145 of the files and 1 836 of the tables in SafeDocs, measured 16 September 2026 | opt-in, same discipline, held to the `/Table` elements the corpus carries | L ([design/table-reconstruction.md](design/table-reconstruction.md)) |
 | Hyphen rejoining at line ends | never, unless the producer wrote `/ActualText` | opt-in on `plain_text`: a soft hyphen always, a hard hyphen at a line end followed by a lower-case start; counted | S |
 
 ### Images and fonts
@@ -390,8 +397,8 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| PDF/UA validation | a measured abstention: 29 of 239 non-conforming fixtures caught, 210 abstained | a rule group that decides the decidable clauses and abstains by name on the rest | L |
-| PDF/X validation and writing | a `GTS_PDFX` intent is tolerated and never checked | an ISO 15930 rule group; the archival profile grows a PDF/X flavour | L |
+| PDF/UA validation | a measured abstention: 29 of 239 non-conforming fixtures caught, 210 abstained, 0 false alarms over 195 conforming, re-measured 16 September 2026; 24 of the 25 font-clause fixtures abstain, and about half of them ask for rules the PDF/A font group already has and does not run for a PDF/UA claim | a rule group that decides the decidable clauses and abstains by name on the rest | L, schedulable as an M half first ([design/pdfua.md](design/pdfua.md)) |
+| PDF/X validation and writing | a `GTS_PDFX` intent is tolerated and never checked; **no annotated PDF/X conformance corpus exists** — the veraPDF corpus carries none, 23 fetched files claim a PDF/X flavour, and the two published suites (Ghent Output Suite 5.0, Altona 1.2) are conforming files only, so a validator would have a false-positive bar and no false-negative bar | an ISO 15930 rule group for the 2003 levels; the archival profile grows a PDF/X flavour; X-4 and X-6 wait on the standards' text | L for the 2003 levels; X-4 and X-6 unpriced ([design/pdfx.md](design/pdfx.md)) |
 | PDF/E | absent | decision | decision |
 | PDF 2.0: associated files, page-level output intents, namespaced structure types, the UTF-8 string type | encryption is the only 2.0 delta implemented | each read and written, and its row in [pdf20-deltas.md](pdf20-deltas.md) moved | S to M |
 
