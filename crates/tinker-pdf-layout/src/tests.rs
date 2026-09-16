@@ -4359,6 +4359,25 @@ fn a_percentage_min_height_against_an_auto_height_is_auto() {
 // | a floating replaced box sent through shrink-to-fit | 1 |
 // | `css-display-3` §2.2 ignored: the inner display type dispatched | 1 |
 //
+// **§10.4's two-violation rows caught nothing at all, and there were five such
+// checks.** Measured 16 September 2026, each reintroduced one at a time over
+// `cargo test --no-fail-fast -p <crate>`, before the fixtures below existed:
+//
+// | Defect injected | layout | tinker-pdf |
+// | --- | ---: | ---: |
+// | both-maxima rows deleted, so a single-violation row answers | 0 | 0 |
+// | both-minima rows deleted, the same way | 0 | 0 |
+// | the two mixed rows deleted, the same way | 0 | 0 |
+// | the *h < min-height* row clamps the height and leaves the width | 0 | 0 |
+// | §10.6.2 case 4 answered as a flat 150 rather than `min(w / 2, 150)` | 0 | 0 |
+//
+// Six of §10.4's ten constraint rows were held by nothing, and the one row the
+// file did hold -- `max-width` -- is the row a plain clamp already agrees with.
+// The fixtures below take the first, second, fourth and fifth of those counts
+// to **1, 1, 1 and 1**. The mixed rows stay at 0 and no fixture can raise them:
+// each is an identity of the row that answers it, so they are deleted and their
+// answers asserted instead.
+//
 // **Two of those caught nothing the first time and both were real.** Breaking
 // the `(width stated, height auto)` case changed no answer, because the clamp
 // below it recomputed the height unconditionally and every value that arm
@@ -4549,6 +4568,132 @@ fn a_min_width_wider_than_the_picture_scales_the_height_with_it() {
     let laid = run(&tree, 1000.0, 1000.0);
     let fragment = only_replaced(&laid, 0);
     assert_eq!((fragment.width, fragment.height), (800.0, 200.0));
+}
+
+/// The table's *h < min-height* row, which scales the **width** up with it:
+/// the resolved width is `min(min-height x w / h, max-width)`.
+///
+/// The `min-width` fixture above does not reach this one. A 400 x 100 source
+/// under `min-height: 400px` is 1600 x 400, and the plausible wrong answer --
+/// raise the height, leave the width alone -- is 400 x 400: a picture at a
+/// quarter of its own proportions on every page a stylesheet gives a floor to.
+#[test]
+fn a_min_height_taller_than_the_picture_scales_the_width_with_it() {
+    let mut node = picture(WIDE);
+    node.style.min_height = min_px(400.0);
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 2000.0, 2000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (1600.0, 400.0));
+}
+
+/// **Both maxima violated** -- the first two of §10.4's two-violation rows, and
+/// the guard between them, `max-width / w <= max-height / h`, which decides
+/// which maximum the picture is scaled by.
+///
+/// Both cases below resolve to 200 x 50 by different formulas, and that is what
+/// makes them a pair rather than one fixture written twice: with the guard
+/// turned round each takes the other's row and both become 320 x 80, which
+/// violates the very maximum that selected the row. With neither row present,
+/// the second falls to the *w > max-width* row and is 320 x 80 as well.
+#[test]
+fn both_maxima_violated_scale_by_whichever_binds_harder() {
+    let of = |max_w: f64, max_h: f64| {
+        let mut node = picture(WIDE);
+        node.style.max_width = max_px(max_w);
+        node.style.max_height = max_px(max_h);
+        let tree = BoxNode::element(block(), vec![node]);
+        let laid = run(&tree, 2000.0, 2000.0);
+        let fragment = only_replaced(&laid, 0);
+        (fragment.width, fragment.height)
+    };
+    // max-width / w = 0.5 <= max-height / h = 0.8, so the width binds and the
+    // height follows at max(min-height, max-width x h / w) = max(0, 50).
+    assert_eq!(of(200.0, 80.0), (200.0, 50.0));
+    // 0.8 > 0.5, so the height binds and the width follows at
+    // max(min-width, max-height x w / h) = max(0, 200).
+    assert_eq!(of(320.0, 50.0), (200.0, 50.0));
+}
+
+/// **Both minima violated** -- the same pair of rows the other way up, with
+/// `min-width / w <= min-height / h` as the guard.
+///
+/// Both cases resolve to 1600 x 400, again by different formulas: turning the
+/// guard round makes the first 600 x 150 -- short of the `min-height` that
+/// selected the row -- and the second 800 x 200, short of the `min-width`. With
+/// neither row present, the first falls to the *w < min-width* row and is
+/// 600 x 150.
+#[test]
+fn both_minima_violated_scale_by_whichever_binds_harder() {
+    let of = |min_w: f64, min_h: f64| {
+        let mut node = picture(WIDE);
+        node.style.min_width = min_px(min_w);
+        node.style.min_height = min_px(min_h);
+        let tree = BoxNode::element(block(), vec![node]);
+        let laid = run(&tree, 2000.0, 2000.0);
+        let fragment = only_replaced(&laid, 0);
+        (fragment.width, fragment.height)
+    };
+    // min-width / w = 1.5 <= min-height / h = 4, so the height binds and the
+    // width follows at min(max-width, min-height x w / h) = min(inf, 1600).
+    assert_eq!(of(600.0, 400.0), (1600.0, 400.0));
+    // 4 > 2, so the width binds and the height follows at
+    // min(max-height, min-width x h / w) = min(inf, 400).
+    assert_eq!(of(1600.0, 200.0), (1600.0, 400.0));
+}
+
+/// A minimum on one axis and a maximum on the other: §10.4's last two rows,
+/// whose resolved pair is just the two constraints.
+///
+/// `replaced_size` does not transcribe either row, because each is an identity
+/// of the single-violation row that answers it -- the proof is beside the match
+/// arms in `flow.rs`, and deleting the two rows failed 0 tests in either crate,
+/// which is what sent someone to look for a proof. The numbers are asserted
+/// here so that what §10.4 says the pair is stays pinned now that no row in the
+/// match says it.
+#[test]
+fn a_minimum_on_one_axis_and_a_maximum_on_the_other_are_both_honoured() {
+    // w < min-width and h > max-height.
+    let mut node = picture(WIDE);
+    node.style.min_width = min_px(800.0);
+    node.style.max_height = max_px(50.0);
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 2000.0, 2000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (800.0, 50.0));
+
+    // w > max-width and h < min-height.
+    let mut node = picture(WIDE);
+    node.style.max_width = max_px(200.0);
+    node.style.min_height = min_px(400.0);
+    let tree = BoxNode::element(block(), vec![node]);
+    let laid = run(&tree, 2000.0, 2000.0);
+    let fragment = only_replaced(&laid, 0);
+    assert_eq!((fragment.width, fragment.height), (200.0, 400.0));
+}
+
+/// §10.6.2's case 4: a `height` of `auto` with neither an intrinsic height nor
+/// a ratio to derive one from is *"the height of the largest rectangle that has
+/// a 2:1 ratio, has a height not greater than 150px, and has a width not
+/// greater than the device width"* -- half the used width, capped at 150.
+///
+/// Both sides of the cap, because a build that answered a flat 150 is right
+/// about the second and draws the first three times too tall. The 300 x 150
+/// fixture above cannot tell those apart: at a used width of 300 the cap and
+/// the half are the same number, which is why it is 300 by 150 in the first
+/// place.
+#[test]
+fn a_height_with_nothing_to_derive_it_from_is_half_the_width_capped_at_150() {
+    let of = |width: f64| {
+        let mut node = picture(Intrinsic::NONE);
+        node.style.width = Size::Length(LengthPercentage::Px(width));
+        let tree = BoxNode::element(block(), vec![node]);
+        let laid = run(&tree, 2000.0, 2000.0);
+        let fragment = only_replaced(&laid, 0);
+        (fragment.width, fragment.height)
+    };
+    assert_eq!(of(100.0), (100.0, 50.0));
+    assert_eq!(of(400.0), (400.0, 150.0));
 }
 
 /// The table is for `width: auto` **and** `height: auto` only. With a stated

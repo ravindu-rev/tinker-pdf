@@ -4310,8 +4310,27 @@ fn replaced_size(
             (max_width.min(min_height * w / h), min_height)
         }
         (_, true, _, true) => (min_width, max_height.min(min_width * h / w)),
-        (_, true, true, _) => (min_width, max_height),
-        (true, _, _, true) => (max_width, min_height),
+        // §10.4's *(w < min-width) and (h > max-height)* row and its
+        // *(w > max-width) and (h < min-height)* twin are **not written
+        // here**, and that is a proof rather than an omission: each is an
+        // identity of the single-violation row that answers it, for every
+        // input that could reach it.
+        //
+        // Reaching the first means `under_w && over_h`, with `over_w` and
+        // `under_h` both false — every earlier arm needs one of those two. So
+        // the *w < min-width* row below answers it, and its height reads
+        // `min(min-width × h ÷ w, max-height)`: `min-width ÷ w > 1` makes the
+        // left term greater than `h`, and `h > max-height` makes it greater
+        // than the right, so the minimum **is** `max-height` and the pair is
+        // `(min-width, max-height)` — the row. The twin is the same argument
+        // with every inequality turned round, against the *w > max-width* row.
+        //
+        // Measured, 16 September 2026: transcribing both rows and then
+        // deleting them again failed **0** tests in `tinker-pdf-layout` and
+        // **0** in `tinker-pdf`, and the proof above is why no fixture could
+        // raise either number. A row that cannot change an answer is not a
+        // guard, so it is gone and the answers it gave are asserted by
+        // `a_minimum_on_one_axis_and_a_maximum_on_the_other_are_both_honoured`.
         (true, ..) => (max_width, min_height.max(max_width * h / w)),
         (_, true, ..) => (min_width, max_height.min(min_width * h / w)),
         (_, _, true, _) => (min_width.max(max_height * w / h), max_height),
