@@ -212,7 +212,7 @@ with no wrapper, for ZIP entries) and `crc32` — the reflected-polynomial
 CRC-32 that ZIP (APPNOTE 4.4.7) and PNG (5.3) both carry, with a resumable
 `Crc32` for checksums over non-adjacent slices.
 
-**And a PNG *encoder*, the first of this crate's three image writers.**
+**And a PNG *encoder*, the first of this crate's four image writers.**
 `png_encode` takes an interleaved 8-bit raster and returns a whole file:
 signature, IHDR, IDAT, IEND, each chunk's CRC over its type and its data. It
 is here rather than in the tool that wanted it because a PNG file *is* the
@@ -307,6 +307,91 @@ it, and they pin all four templates rather than the one the annex uses.
 writer's contract — it never re-encodes image bytes — is unchanged by their
 existence ([creation](creation.md), [ROADMAP](../ROADMAP.md)).
 
+**And a baseline JPEG encoder joined them on 16 September 2026**, which closes
+the roadmap's image-encoder row with one gap named rather than papered over.
+`jpeg_encode` takes a `JpegSource` — the same borrowed raster, explicit stride
+and plain numbers as the other three — and writes **ITU-T T.81's baseline
+process and only that**: sequential DCT, Huffman coding, 8-bit precision, one
+SOF0 frame, one scan, `Ss = 0`, `Se = 63`, `Ah = Al = 0`, SOI to EOI with no
+abbreviated form. Everything else T.81 defines is excluded rather than
+half-built, each named in the module header with its reason: progressive and
+extended sequential, arithmetic (Annex D's QM coder, which the decoder beside
+it already refuses), lossless, hierarchical and differential, 12-bit precision,
+four-component CMYK and YCCK — whose meaning comes from Adobe's APP14 and not
+from T.81 or T.871, so writing one would be inventing a convention — and K.2's
+procedure for optimising a Huffman table from an image's own statistics.
+
+Three things had to be settled, and each is settled against a published clause
+rather than against what other encoders do:
+
+- **Colour.** T.81 A.1 specifies no colour space at all; it codes numbered
+  components. The published outside is **ITU-T T.871 clause 7**, the same
+  YCbCr the decoder inverts, so exactly two source colours are written — one
+  component with no transform, or three through clause 7's **exact** forward
+  equations with the JFIF APP0 clause 10.1 requires, so a reader is *told*
+  which YCbCr it is rather than guessing from the component count.
+- **Sampling factors are named by the caller and never inferred.** 4:4:4 or
+  4:2:0, defaulting to 4:4:4. T.81 recommends no factors; choosing them from
+  the pixels would make the output depend on image content in a way the caller
+  cannot predict; and subsampling is a lossy colour decision, so a caller who
+  did not ask for it should not silently get chroma back through a box filter
+  and a replicate.
+- **Quantisation, and the caller who wants a quality number.** T.81 publishes
+  exactly two settings — Tables K.1 and K.2, and K.1's own "if these
+  quantization values are divided by 2" — and this offers exactly those two
+  plus the caller's own tables. There is deliberately **no `quality: u8` from
+  1 to 100**: every such scale in circulation is some program's private
+  convention, none of them is in T.81, T.83 or T.871, and shipping one would
+  put a number in this crate's public API that no published document
+  adjudicates. What the format carries is the table, so a caller who wants a
+  specific quality supplies the table and gets exactly it.
+
+**An image whose dimensions are not a multiple of the MCU size** is completed
+by **A.2.4 and its NOTE**: the right-most column and the bottom line are
+replicated into the partial MCU, and A.2.4's last sentence — "any sample added
+by an encoding process to complete partial MCUs shall be removed by the
+decoding process" — is why nothing else is needed. Zero-fill would put a step
+of up to 128 levels inside the edge block, costing bits in every AC coefficient
+and ringing back across the boundary into pixels the caller can see; mirroring
+costs the same as replication and is a different picture from the one the
+standard recommends, for no gain.
+
+**What adjudicates it, and — said plainly — what does not.** `T-REC-T.81` (the
+W3C's copy of CCITT Rec. T.81 (1992), ISO/IEC 10918-1 : 1993) was fetched and
+read **twice**, once out of the text layer and once off `tpdf render`'s pages at
+200 dpi, because T.81's tables are typeset with column rules that the text layer
+emits as a literal `1`: Table K.1's first row arrives as `16111016124140151161`
+and is only resolvable into `16 11 10 16 24 40 51 61` against the picture. The
+two readings agree on all 604 entries behind Figure A.6's zig-zag, Tables K.1
+and K.2, and K.3.3's four byte lists. Two of those readings then appear in the
+**output**: every DHT segment this writes is K.3.3's published byte list
+verbatim, because B.2.4.2's payload after `Tc`/`Th` is exactly BITS then
+HUFFVAL; and two whole entropy-coded segments are derived from Tables K.3's and
+K.5's *printed code words* with no implementation in the middle — a flat
+mid-grey block is `DIFF = 0` then EOB, which K.3 category 0 (`00`) and K.5 0/0
+(`1010`) fix at `001010`, padded per B.1.1.5 NOTE 1 to `X'2B'`.
+
+**But no published DCT vector set adjudicates the coefficients.** ITU-T T.83
+(ISO/IEC 10918-2) is the compliance data published for exactly this, and its own
+clause 4.4 says the data ships *on three diskettes* accompanying the document
+rather than inside it. The ITU's copy returns HTTP 500 and the Recommendation's own
+page says it "is only available through payment"; ISO's returns HTTP 403; the
+one reachable copy is the standards-preview extract, which carries the numbered
+pages 1 to 11 and stops mid-sentence in clause 5.2.1 — and whose own contents
+list puts clause 6's encoder compliance tests on p. 19, Annex B's compliance
+quantisation tables on p. 28 and Annex C's compressed test data on p. 30, every
+one of them past where it stops. The Internet Archive holds nothing. So the
+forward transform is held to **A.3.3's equation recomputed in `f64` in the
+test** — the standard's formula, not the standard's numbers — and that is what
+the test's own doc comment says. Nor does "held to this crate's decoder" help:
+that decoder is adjudicated by nothing third-party either — every fixture in
+`jpeg.rs` is built by that module's own bit writer, and `jpeg_census.rs` counts
+frame types without comparing a pixel — so the round-trip tests here say "round
+trip" and claim nothing else.
+
+**Nothing in this repository calls `jpeg_encode` outside the tests**, on the
+same contract as the two bilevel encoders.
+
 **TIFF** (TIFF 6.0) is the second container decoder, and the argument for it
 being here rather than in a reader is arithmetic: of the seven codings a TIFF
 strip can be in, **six were already written for a `/Filter` name**. Compression
@@ -374,14 +459,16 @@ Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `JpxImage`). The encoder half is `deflate`, `zlib_compress`, `png_encode`
 (takes a `PngSource`, returns the file or a `PngEncodeError`), `ccitt_g4_encode`
-(takes a `CcittSource`, returns the coded bits or a `CcittEncodeError`) and
+(takes a `CcittSource`, returns the coded bits or a `CcittEncodeError`),
 `jbig2_generic_encode` / `jbig2_generic_region_segment` (take a
 `Jbig2GenericSource`, return the MQ bytes or the whole segment data, or a
-`Jbig2EncodeError`), with `MqEncoder` public beneath the last two; the container
+`Jbig2EncodeError`), with `MqEncoder` public beneath those two, and
+`jpeg_encode` (takes a `JpegSource` and a `JpegOptions`, returns the whole
+interchange datastream or a `JpegEncodeError`); the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
 `inflate_raw`, `crc32` and `jxr_decode` (returns `JxrImage`).
 
-Every one of those five takes plain numbers and a borrowed byte slice and
+Every one of those six takes plain numbers and a borrowed byte slice and
 returns bytes, which is all ruling 8 asks of a leaf. The parameter names
 `columns`, `rows`, `black_is_1` and `end_of_block` are PDF's, and deliberately:
 `CcittParams` has been public with those names since the decoder landed, and one
@@ -396,14 +483,17 @@ to map onto and are converted there rather than here — `CmykA8` through
 8.6.4.4's device relation and `LabA8` back out of `L*a*b*` — because this crate
 holds no PDF colour and ruling 8 keeps it that way.
 
-`ccitt_g4_encode` and `jbig2_generic_encode` have **no** facade counterpart, and
+`ccitt_g4_encode`, `jbig2_generic_encode` and `jpeg_encode` have **no** facade
+counterpart, and
 that is the same ruling read the same way rather than an omission. Ruling 11
 makes `tinker_pdf` the surface for a *document*; a bilevel raster is not one,
 and nothing the facade hands a caller is one. `Bitmap::to_png` exists because a
 caller of the facade holds a rendered page; there is no equivalent thing to
 project here, and inventing an entry point to satisfy a ruling that does not ask
-for one would be the actual mistake. A caller who wants G4 or JBIG2 bytes
-depends on the leaf crate, which is what leaf crates are for.
+for one would be the actual mistake. A caller who wants G4, JBIG2 or JPEG bytes
+depends on the leaf crate, which is what leaf crates are for. If a facade caller
+ever wants a JPEG *of a rendered page*, that is a projection beside
+`Bitmap::to_png` and not a re-export of this one.
 
 `jxr_decode` is deliberately **not** a `Filter` or an `ImageCodec` variant.
 Those two enums are PDF `/Filter` dispatch — what a `/Filter` *name* resolves
@@ -429,7 +519,7 @@ make both enums wrong.
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | T.800 allows 38 bits; the sample path carries 16, so this is refused rather than truncated | [ROADMAP](../ROADMAP.md) |
 | JPX tile-parts out of order, or a codestream with no complete tile | `Warning::JpxStructureInvalid` | Out of order is a codestream contradicting itself, and reassembling in stream order would produce a picture wrong in a way that looks like compression. A tile *short* of its declared parts is a different failure — a file that stopped — so it is left blank and reported as `JpxTruncated` wherever any tile survives, which is `JxrWarning::TileDroppedAsZero`'s bargain; only a codestream with no whole tile at all is refused | [ROADMAP](../ROADMAP.md) |
 | JPX work/sample/code-block budgets spent | `Warning::JpxBudgetSpent` | The budgets are totals, never refunded — a per-item cap is not a work cap once the structure branches (ruling 1) | [rulings](../rulings.md) |
-| JPEG arithmetic frames: SOF9, SOF10, SOF11, SOF13, SOF14, SOF15 | `JpegError::Arithmetic` | T.81 Annex D's QM coder — related to `mq.rs`'s MQ coder and not the same one. **Zero of 10 603 frames in five corpora**, and neither the standard's Table D.3 nor an encoder to build a fixture with is obtainable here ([ROADMAP](../ROADMAP.md)) | [ROADMAP](../ROADMAP.md) |
+| JPEG arithmetic frames: SOF9, SOF10, SOF11, SOF13, SOF14, SOF15 | `JpegError::Arithmetic` | T.81 Annex D's QM coder — related to `mq.rs`'s MQ coder and not the same one. **Zero of 10 603 frames in five corpora**. T.81 itself *is* obtainable — it was fetched again for the baseline encoder above, and Table D.3 is legible off a rendered page — so what this row lacks is not the specification but an adjudicator: no corpus file reaches it, and the encoder written here is Huffman-only by design and emits no arithmetic frame to build a fixture from ([ROADMAP](../ROADMAP.md)) | [ROADMAP](../ROADMAP.md) |
 | JPEG lossless frames: SOF3, SOF7 | `JpegError::Lossless` | Annex H's predictive coder shares nothing with the DCT path — no quantisation, no blocks, no transform. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
 | JPEG differential frames: SOF5, SOF6 | `JpegError::Differential` | Annex J's hierarchical progression, where a frame codes the difference from an upsampled earlier one. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
 | JPEG precision other than 8 or 12 bits | `JpegError::UnsupportedPrecision` | B.2.2 allows 8 in a baseline frame and 8 or 12 elsewhere; anything else is a header this build will not guess at | [ROADMAP](../ROADMAP.md) |

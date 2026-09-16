@@ -69,7 +69,10 @@ pub use jbig2::{
     Jbig2EncodeError, Jbig2GenericSource, Jbig2Params, Jbig2Refusal, MAX_JBIG2_SYMBOLS,
     MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TABLE_LINES, MAX_JBIG2_TEXT_INSTANCES,
 };
-pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
+pub use jpeg::{
+    decode as jpeg_decode, jpeg_encode, JpegColor, JpegEncodeError, JpegError, JpegImage,
+    JpegOptions, JpegQuantisation, JpegSampling, JpegSource, JpegSourceColour,
+};
 pub use jpx::{jpx_decode, jpx_decode_attributed, JpxColour, JpxImage, Refusal as JpxRefusal};
 pub use jxr::{
     jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,
