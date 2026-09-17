@@ -270,3 +270,52 @@ reintroduced one at a time, four of which caught **zero**:
 - Making the classifier read the file extension caught nothing, because every
   fixture named its pictures correctly. A JPEG called `pic.png` and a GIF
   called `pic.png` are both fixtures now.
+
+### §10.4's table had a fixture for three of its ten rows, 16 September 2026
+
+Milestone 1 landed the constraint table and counted one injection against it —
+*"§10.4's table replaced by the ordinary clamp"*, which failed one test — and
+recorded that the number was 1 rather than 3 because the table and a plain
+clamp agree exactly wherever the **width** is the constrained axis. What that
+measurement did not ask is how much of the table any fixture reached at all.
+Seven of its ten constraint rows had none. Injected one row at a time,
+`cargo test --no-fail-fast -p <crate>`, before → after the fixtures below:
+
+| Defect injected | layout | `tinker-pdf` |
+| --- | ---: | ---: |
+| both-maxima rows deleted, so a single-violation row answers | **0** → 1 | 0 → 0 |
+| both-minima rows deleted, the same way | **0** → 1 | 0 → 0 |
+| the *w > max-width* / *h > max-height* guard inverted | **0** → 1 | 0 → 0 |
+| the *w < min-width* / *h < min-height* guard inverted | **0** → 1 | 0 → 0 |
+| the *h < min-height* row clamps the height and leaves the width alone | **0** → 1 | 0 → 0 |
+| §10.6.2 case 4 answered as a flat 150 rather than `min(w ÷ 2, 150)` | **0** → 1 | 0 → 0 |
+| the two mixed-constraint rows deleted, the same way | **0**, and no fixture can raise it | 0 |
+
+Four fixtures in `layout/src/tests.rs` close the first six rows, and a fifth
+asserts what the seventh row's arms used to say. Each states its expected pair
+as §10.4's own arithmetic — a 400 × 100 source under `min-height: 400px` is
+1600 × 400, and the plausible wrong answer, raise the height and leave the
+width alone, is 400 × 400 — so the fixture holds the clause to its own words
+rather than to this engine's output.
+
+**The last row is deleted rather than given a fixture, and that is a proof.**
+§10.4's *(w < min-width) and (h > max-height)* row and its *(w > max-width) and
+(h < min-height)* twin cannot be made to catch anything. Reaching the first
+means `under_w && over_h` with `over_w` and `under_h` both false, since every
+earlier arm needs one of those two; the *w < min-width* row that then answers
+reads `min(min-width × h ÷ w, max-height)` for its height, where
+`min-width ÷ w > 1` puts the left term above `h` and `h > max-height` puts it
+above the right — so the minimum **is** `max-height`, and the pair is
+`(min-width, max-height)`, which is the row. The twin is the same argument with
+every inequality turned round. A row that cannot change an answer is not a
+guard, so both are gone, with the proof beside the arms that remain and
+`a_minimum_on_one_axis_and_a_maximum_on_the_other_are_both_honoured` asserting
+the pair §10.4 says it is.
+
+**The `tinker-pdf` column is 0 on every row, before and after**, and it is left
+at 0 deliberately. Nothing in that crate's suite reaches these rows — the books
+it opens meet §10.4 through `max-width`, the row milestone 1 already held — and
+the right place to hold a constraint table is the crate that implements it,
+against arithmetic, not a book whose stylesheet could stop declaring the rule.
+Which of these rows a real EPUB ever takes is a corpus question, and this change
+does not answer it.
