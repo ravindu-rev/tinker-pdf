@@ -14,6 +14,16 @@
 //! from libjpeg's by a least-significant bit on some coefficients — there is no
 //! single correct IDCT, only conforming ones — so comparison against a
 //! reference is perceptual, never exact.
+//!
+//! The encoder is `encode`, which writes baseline and only baseline; what it
+//! excludes, what adjudicates it, and what does not, are that module's header.
+
+mod encode;
+
+pub use encode::{
+    jpeg_encode, JpegEncodeError, JpegOptions, JpegQuantisation, JpegSampling, JpegSource,
+    JpegSourceColour,
+};
 
 use crate::Warning;
 
@@ -1781,5 +1791,992 @@ mod tests {
             }
             let _ = decode(&damaged, 1 << 20);
         }
+    }
+
+    // ---------------------------------------------------------------- encoder
+    //
+    // Everything below is the baseline encoder in `jpeg/encode.rs`. Each test's
+    // own doc comment says which link it adjudicates with third-party data and
+    // which it only holds to itself; there is no test here that presents an
+    // encode-then-decode round trip as adjudication.
+
+    use super::encode::{
+        canonical_codes, category, forward_dct_quantise, pad_plane, rgb_to_ycbcr, HuffSpec,
+        ANNEX_K1_LUMINANCE, ANNEX_K2_CHROMINANCE, ANNEX_K3_DC_LUMA, ANNEX_K4_DC_CHROMA,
+        ANNEX_K5_AC_LUMA, ANNEX_K6_AC_CHROMA,
+    };
+
+    /// Hex, one byte per two characters, spaces ignored.
+    fn hex(text: &str) -> Vec<u8> {
+        let digits: Vec<u8> = text
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .map(|b| match b {
+                b'0'..=b'9' => b - b'0',
+                b'A'..=b'F' => b - b'A' + 10,
+                b'a'..=b'f' => b - b'a' + 10,
+                other => panic!("not hex: {other}"),
+            })
+            .collect();
+        digits
+            .chunks(2)
+            .map(|pair| (pair[0] << 4) | pair[1])
+            .collect()
+    }
+
+    /// The entropy-coded segment: everything between the SOS segment and EOI.
+    fn entropy_segment(bytes: &[u8]) -> Vec<u8> {
+        let mut at = 2; // past SOI
+        while at + 3 < bytes.len() {
+            assert_eq!(bytes[at], 0xFF, "expected a marker at {at}");
+            let code = bytes[at + 1];
+            let length = usize::from(bytes[at + 2]) << 8 | usize::from(bytes[at + 3]);
+            if code == 0xDA {
+                let start = at + 2 + length;
+                let end = bytes.len() - 2;
+                assert_eq!(&bytes[end..], &[0xFF, 0xD9], "EOI");
+                return bytes[start..end].to_vec();
+            }
+            at += 2 + length;
+        }
+        panic!("no SOS");
+    }
+
+    /// Every marker segment's payload, keyed by marker code, in order.
+    fn segments(bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut at = 2;
+        while at + 3 < bytes.len() {
+            let code = bytes[at + 1];
+            let length = usize::from(bytes[at + 2]) << 8 | usize::from(bytes[at + 3]);
+            out.push((code, bytes[at + 4..at + 2 + length].to_vec()));
+            if code == 0xDA {
+                break;
+            }
+            at += 2 + length;
+        }
+        out
+    }
+
+    fn gray(width: u32, height: u32, value: u8) -> Vec<u8> {
+        vec![value; (width * height) as usize]
+    }
+
+    fn gray_source(data: &[u8], width: u32, height: u32) -> JpegSource<'_> {
+        JpegSource {
+            width,
+            height,
+            colour: JpegSourceColour::Gray,
+            stride: width as usize,
+            data,
+        }
+    }
+
+    /// T.81 Figure A.6 as printed: for each natural (row-major) coefficient
+    /// position, the index at which the zig-zag sequence visits it. That is the
+    /// **inverse** of [`ZIGZAG`], which is what makes the test below a check on
+    /// the shipped table rather than a copy of it.
+    const FIGURE_A_6: [usize; 64] = [
+        0, 1, 5, 6, 14, 15, 27, 28, //
+        2, 4, 7, 13, 16, 26, 29, 42, //
+        3, 8, 12, 17, 25, 30, 41, 43, //
+        9, 11, 18, 24, 31, 40, 44, 53, //
+        10, 19, 23, 32, 39, 45, 52, 54, //
+        20, 22, 33, 38, 46, 51, 55, 60, //
+        21, 34, 37, 47, 50, 56, 59, 61, //
+        35, 36, 48, 49, 57, 58, 62, 63,
+    ];
+
+    /// **Adjudicated by third-party data.** T.81 Figure A.6, read twice — text
+    /// layer and `tpdf render --dpi 200`'s page 30 — from the same
+    /// `T-REC-T.81` the tables below come from. Both readings agree on all 64
+    /// cells.
+    ///
+    /// This test exists because a counted injection found it missing. Swapping
+    /// two entries of [`ZIGZAG`] fired **nothing**: the decoder scatters with
+    /// the same table the encoder gathers with, so a round trip is blind to any
+    /// permutation of it, and every other test here had been written in terms of
+    /// [`ZIGZAG`] rather than in terms of the figure. Holding the shipped table
+    /// to its own inverse, transcribed independently, is what closes that — and
+    /// `a_grayscale_datastream_carries_annex_k_s_published_table_bytes` and
+    /// `the_forward_dct_matches_a_3_3_s_equation` were rewritten to build their
+    /// expectations from `FIGURE_A_6` for the same reason.
+    #[test]
+    fn the_zig_zag_order_is_figure_a_6_s() {
+        for (natural, &k) in FIGURE_A_6.iter().enumerate() {
+            assert_eq!(
+                ZIGZAG[k], natural,
+                "the zig-zag sequence's step {k} is not Figure A.6's cell {natural}"
+            );
+        }
+        // A.6 is a permutation of the 64 positions, which is the property a
+        // transposition preserves and a duplicated entry does not.
+        let mut seen = [false; 64];
+        for &k in FIGURE_A_6.iter() {
+            assert!(!seen[k], "step {k} appears twice");
+            seen[k] = true;
+        }
+    }
+
+    /// **Adjudicated by third-party data.** T.81 Tables K.1 and K.2, from
+    /// `T-REC-T.81` (<https://www.w3.org/Graphics/JPEG/itu-t81.pdf>, W3C's copy
+    /// of CCITT Rec. T.81 (1992) | ISO/IEC 10918-1 : 1993), fetched 15 September
+    /// 2026 and read twice: once from the text layer `tpdf text` extracts, once
+    /// off `tpdf render --dpi 200`'s page 143. The two readings agree on all 128
+    /// entries, and the transcription below is the rendered one.
+    ///
+    /// The second reading was not a formality. T.81's tables are typeset with
+    /// column rules that the text layer emits as a literal `1`, so K.1's first
+    /// row arrives as `16111016124140151161` and resolves into
+    /// `16 11 10 16 24 40 51 61` only against the picture.
+    #[test]
+    fn the_quantisation_tables_are_itu_t_t_81_annex_k_s() {
+        let k1: [u8; 64] = [
+            16, 11, 10, 16, 24, 40, 51, 61, //
+            12, 12, 14, 19, 26, 58, 60, 55, //
+            14, 13, 16, 24, 40, 57, 69, 56, //
+            14, 17, 22, 29, 51, 87, 80, 62, //
+            18, 22, 37, 56, 68, 109, 103, 77, //
+            24, 35, 55, 64, 81, 104, 113, 92, //
+            49, 64, 78, 87, 103, 121, 120, 101, //
+            72, 92, 95, 98, 112, 100, 103, 99,
+        ];
+        let k2: [u8; 64] = [
+            17, 18, 24, 47, 99, 99, 99, 99, //
+            18, 21, 26, 66, 99, 99, 99, 99, //
+            24, 26, 56, 99, 99, 99, 99, 99, //
+            47, 66, 99, 99, 99, 99, 99, 99, //
+            99, 99, 99, 99, 99, 99, 99, 99, //
+            99, 99, 99, 99, 99, 99, 99, 99, //
+            99, 99, 99, 99, 99, 99, 99, 99, //
+            99, 99, 99, 99, 99, 99, 99, 99,
+        ];
+        assert_eq!(ANNEX_K1_LUMINANCE, k1, "Table K.1");
+        assert_eq!(ANNEX_K2_CHROMINANCE, k2, "Table K.2");
+        // B.2.4.1 gives Qk the range 1 to 255 at Pq = 0.
+        assert!(k1.iter().chain(k2.iter()).all(|&q| q >= 1));
+    }
+
+    /// **Adjudicated by third-party data.** T.81 K.3.3.1 and K.3.3.2 print the
+    /// BITS and HUFFVAL lists of Tables K.3 to K.6 as hexadecimal byte strings,
+    /// and B.2.4.2 makes those strings the DHT payload. Read twice from the same
+    /// document as the test above: text layer, and `tpdf render`'s pages 158 and
+    /// 159. Both readings agree on all 396 bytes.
+    ///
+    /// These strings, and not Tables K.3 to K.6's typeset grids, are what the
+    /// shipped tables are held to, because running text extracts unambiguously
+    /// where a ruled grid does not.
+    #[test]
+    fn the_huffman_tables_are_itu_t_t_81_annex_k_s() {
+        let cases: [(&HuffSpec, &str, &str, &str); 4] = [
+            (
+                &ANNEX_K3_DC_LUMA,
+                "K.3 luminance DC",
+                "00010501010101010100000000000000",
+                "000102030405060708090A0B",
+            ),
+            (
+                &ANNEX_K4_DC_CHROMA,
+                "K.4 chrominance DC",
+                "00030101010101010101010000000000",
+                "000102030405060708090A0B",
+            ),
+            (
+                &ANNEX_K5_AC_LUMA,
+                "K.5 luminance AC",
+                "0002010303020403050504040000017D",
+                "01020300041105122131410613516107\
+                 227114328191A1082342B1C11552D1F0\
+                 2433627282090A161718191A25262728\
+                 292A3435363738393A43444546474849\
+                 4A535455565758595A63646566676869\
+                 6A737475767778797A83848586878889\
+                 8A92939495969798999AA2A3A4A5A6A7\
+                 A8A9AAB2B3B4B5B6B7B8B9BAC2C3C4C5\
+                 C6C7C8C9CAD2D3D4D5D6D7D8D9DAE1E2\
+                 E3E4E5E6E7E8E9EAF1F2F3F4F5F6F7F8\
+                 F9FA",
+            ),
+            (
+                &ANNEX_K6_AC_CHROMA,
+                "K.6 chrominance AC",
+                "00020102040403040705040400010277",
+                "000102031104 05213106124151076171\
+                 1322328108144291A1B1C109233352F0\
+                 156272D10A162434E125F11718191A26\
+                 2728292A35363738393A434445464748\
+                 494A535455565758595A6364 65666768\
+                 696A737475767778797A828384858687\
+                 88898A92939495969798999AA2A3A4A5\
+                 A6A7A8A9AAB2B3B4B5 B6B7B8B9BAC2C3\
+                 C4C5C6C7C8C9CAD2D3D4D5D6D7D8D9DA\
+                 E2E3E4E5E6E7E8E9EAF2F3F4F5F6F7F8\
+                 F9FA",
+            ),
+        ];
+
+        for (spec, name, bits, values) in cases {
+            assert_eq!(spec.bits.as_slice(), hex(bits).as_slice(), "{name} BITS");
+            assert_eq!(spec.values, hex(values).as_slice(), "{name} HUFFVAL");
+            // C.2: the counts and the value list have to describe the same
+            // table, which is also the check that catches a dropped byte.
+            let total: usize = spec.bits.iter().map(|&n| usize::from(n)).sum();
+            assert_eq!(total, spec.values.len(), "{name} BITS sum");
+        }
+        assert_eq!(ANNEX_K5_AC_LUMA.values.len(), 162);
+        assert_eq!(ANNEX_K6_AC_CHROMA.values.len(), 162);
+    }
+
+    /// **Adjudicated by third-party data.** T.81 Tables K.3 and K.4 print, for
+    /// every one of their 24 symbols, a code length *and* a binary code word.
+    /// Those 24 code words are transcribed here and required to be what Annex
+    /// C's canonical assignment produces from the BITS and HUFFVAL of the test
+    /// above — two independent presentations of the same table in the same
+    /// Recommendation, which is why this is a check and not a restatement.
+    ///
+    /// Read twice, text layer and `tpdf render`'s page 149. The text layer
+    /// carries the same column-rule `1` that Table K.1 does, so
+    /// `1641110` is category 6, length 4, code word `1110`.
+    ///
+    /// Tables K.5 and K.6 print 324 more code words the same way. **Sheet 1 of
+    /// 4 of Table K.5 — 40 of them — is transcribed here too**, read twice from
+    /// the text layer and from `tpdf render`'s page 150; that sample reaches
+    /// nine of the sixteen code lengths, including the 16-bit group whose codes
+    /// are the last ones the canonical assignment produces and therefore the
+    /// ones a mis-stepped `code <<= 1` would land wrongest. The remaining three
+    /// sheets and all of K.6 are left to the BITS and HUFFVAL above, which
+    /// determine them.
+    #[test]
+    fn the_canonical_codes_are_tables_k_3_and_k_4_s_printed_code_words() {
+        // (category, code length, code word) exactly as Table K.3 prints them.
+        let k3: [(u8, u8, &str); 12] = [
+            (0, 2, "00"),
+            (1, 3, "010"),
+            (2, 3, "011"),
+            (3, 3, "100"),
+            (4, 3, "101"),
+            (5, 3, "110"),
+            (6, 4, "1110"),
+            (7, 5, "11110"),
+            (8, 6, "111110"),
+            (9, 7, "1111110"),
+            (10, 8, "11111110"),
+            (11, 9, "111111110"),
+        ];
+        // Table K.4.
+        let k4: [(u8, u8, &str); 12] = [
+            (0, 2, "00"),
+            (1, 2, "01"),
+            (2, 2, "10"),
+            (3, 3, "110"),
+            (4, 4, "1110"),
+            (5, 5, "11110"),
+            (6, 6, "111110"),
+            (7, 7, "1111110"),
+            (8, 8, "11111110"),
+            (9, 9, "111111110"),
+            (10, 10, "1111111110"),
+            (11, 11, "11111111110"),
+        ];
+        // Table K.5, the whole of sheet 1 of 4: run/size, length, code word.
+        let k5: [(u8, u8, &str); 40] = [
+            (0x00, 4, "1010"), // EOB
+            (0x01, 2, "00"),
+            (0x02, 2, "01"),
+            (0x03, 3, "100"),
+            (0x04, 4, "1011"),
+            (0x05, 5, "11010"),
+            (0x06, 7, "1111000"),
+            (0x07, 8, "11111000"),
+            (0x08, 10, "1111110110"),
+            (0x09, 16, "1111111110000010"),
+            (0x0A, 16, "1111111110000011"),
+            (0x11, 4, "1100"),
+            (0x12, 5, "11011"),
+            (0x13, 7, "1111001"),
+            (0x14, 9, "111110110"),
+            (0x15, 11, "11111110110"),
+            (0x16, 16, "1111111110000100"),
+            (0x17, 16, "1111111110000101"),
+            (0x18, 16, "1111111110000110"),
+            (0x19, 16, "1111111110000111"),
+            (0x1A, 16, "1111111110001000"),
+            (0x21, 5, "11100"),
+            (0x22, 8, "11111001"),
+            (0x23, 10, "1111110111"),
+            (0x24, 12, "111111110100"),
+            (0x25, 16, "1111111110001001"),
+            (0x26, 16, "1111111110001010"),
+            (0x27, 16, "1111111110001011"),
+            (0x28, 16, "1111111110001100"),
+            (0x29, 16, "1111111110001101"),
+            (0x2A, 16, "1111111110001110"),
+            (0x31, 6, "111010"),
+            (0x32, 9, "111110111"),
+            (0x33, 12, "111111110101"),
+            (0x34, 16, "1111111110001111"),
+            (0x35, 16, "1111111110010000"),
+            (0x36, 16, "1111111110010001"),
+            (0x37, 16, "1111111110010010"),
+            (0x38, 16, "1111111110010011"),
+            (0x39, 16, "1111111110010100"),
+        ];
+
+        for (spec, printed, name) in [
+            (&ANNEX_K3_DC_LUMA, k3.as_slice(), "K.3"),
+            (&ANNEX_K4_DC_CHROMA, k4.as_slice(), "K.4"),
+        ] {
+            let codes = canonical_codes(spec);
+            for &(value, length, word) in printed {
+                let code = codes[usize::from(value)];
+                assert_eq!(code.length, length, "{name} value {value} length");
+                assert_eq!(
+                    format!("{:0width$b}", code.bits, width = usize::from(length)),
+                    word,
+                    "{name} value {value} code word"
+                );
+            }
+        }
+
+        let codes = canonical_codes(&ANNEX_K5_AC_LUMA);
+        for &(value, length, word) in k5.iter() {
+            let code = codes[usize::from(value)];
+            assert_eq!(code.length, length, "K.5 run/size {value:02X} length");
+            assert_eq!(
+                format!("{:0width$b}", code.bits, width = usize::from(length)),
+                word,
+                "K.5 run/size {value:02X} code word"
+            );
+        }
+    }
+
+    /// **Adjudicated by third-party data.** B.2.4.1 makes a DQT payload
+    /// `Pq`/`Tq` then the table in zig-zag order, and B.2.4.2 makes a DHT
+    /// payload `Tc`/`Th` then BITS then HUFFVAL. So the bytes T.81 K.1 and
+    /// K.3.3 print appear in this encoder's output verbatim, and this test finds
+    /// them there — encoder output against published bytes, with no decoder on
+    /// either side.
+    #[test]
+    fn a_grayscale_datastream_carries_annex_k_s_published_table_bytes() {
+        let pixels = gray(8, 8, 128);
+        let bytes = jpeg_encode(&gray_source(&pixels, 8, 8), &JpegOptions::default()).unwrap();
+        let found = segments(&bytes);
+
+        let dqt = &found.iter().find(|(code, _)| *code == 0xDB).unwrap().1;
+        assert_eq!(dqt[0], 0x00, "Pq = 0, Tq = 0");
+        let mut zigzagged = [0u8; 64];
+        for (natural, &k) in FIGURE_A_6.iter().enumerate() {
+            zigzagged[k] = ANNEX_K1_LUMINANCE[natural];
+        }
+        assert_eq!(
+            &dqt[1..],
+            zigzagged.as_slice(),
+            "Table K.1 in Figure A.6's order"
+        );
+
+        let dhts: Vec<&(u8, Vec<u8>)> = found.iter().filter(|(code, _)| *code == 0xC4).collect();
+        assert_eq!(dhts.len(), 2, "a grayscale frame needs one DC and one AC");
+
+        let mut dc = vec![0x00u8];
+        dc.extend_from_slice(&hex("00010501010101010100000000000000"));
+        dc.extend_from_slice(&hex("000102030405060708090A0B"));
+        assert_eq!(dhts[0].1, dc, "K.3.3.1's published bytes");
+
+        let mut ac = vec![0x10u8];
+        ac.extend_from_slice(&hex("0002010303020403050504040000017D"));
+        ac.extend_from_slice(ANNEX_K5_AC_LUMA.values);
+        assert_eq!(dhts[1].1, ac, "K.3.3.2's published bytes");
+
+        // B.2.2's SOF0: P, Y, X, Nf, then one component.
+        let sof = &found.iter().find(|(code, _)| *code == 0xC0).unwrap().1;
+        assert_eq!(sof.as_slice(), &[8, 0, 8, 0, 8, 1, 1, 0x11, 0]);
+    }
+
+    /// **Adjudicated by third-party data.** Two complete entropy-coded segments
+    /// whose every bit follows from the standard alone: A.3.3's equation, K.1's
+    /// quantiser, the code words Tables K.3 and K.5 print, and B.1.1.5 NOTE 1's
+    /// 1-bit padding. Nothing in this repository is consulted to produce the
+    /// expected bytes, and no decoder runs.
+    ///
+    /// A flat 8x8 block of 128 level-shifts to zero, so every coefficient is
+    /// zero: `DIFF = 0` is K.3 category 0, code word `00`; the rest of the block
+    /// is K.5's 0/0 EOB, code word `1010`. Six bits, padded to `00101011`.
+    ///
+    /// A flat block of 144 has `s = 16` everywhere, so A.3.3 gives
+    /// `S00 = (1/4)(1/sqrt 2)(1/sqrt 2) x 64 x 16 = 128` and every other
+    /// coefficient zero; K.1's `Q00 = 16` makes `Sq00 = 8`. Category 4 is K.3's
+    /// `101`, the four additional bits of F.1.2.1.1 are `1000`, then EOB
+    /// `1010` — eleven bits, padded to `10110001 01011111`.
+    #[test]
+    fn the_flat_block_datastreams_are_annex_k_s_own_code_words() {
+        for (value, expected) in [(128u8, vec![0x2Bu8]), (144, vec![0xB1, 0x5F])] {
+            let pixels = gray(8, 8, value);
+            let bytes = jpeg_encode(&gray_source(&pixels, 8, 8), &JpegOptions::default()).unwrap();
+            assert_eq!(entropy_segment(&bytes), expected, "a flat block of {value}");
+        }
+    }
+
+    /// A.3.3's FDCT, transcribed here in `f64` from the equation on the
+    /// rendered page 27, against the fixed-point transform the encoder runs.
+    ///
+    /// **This is the standard's formula, not the standard's numbers.** ITU-T
+    /// T.83's compliance data — the published vector set that would adjudicate
+    /// these coefficients — is on three MS-DOS diskettes bundled with the paid
+    /// Recommendation (T.83 clause 4.4) and could not be obtained; the module
+    /// header lists the URLs tried and what each returned. What this test can
+    /// and does say is that the integer path rounds the ideal transform
+    /// **correctly to within 0.012 of a quantiser step** on every coefficient of
+    /// every block below — 0.5117 measured, where 0.5 is a correct rounding —
+    /// which is enough to catch a transposed basis function, a quantiser
+    /// applied on the wrong side of the transform, or a zig-zag that scans the
+    /// wrong cell.
+    #[test]
+    fn the_forward_dct_matches_a_3_3_s_equation() {
+        fn reference(samples: &[i32; 64], u: usize, v: usize) -> f64 {
+            let c = |k: usize| {
+                if k == 0 {
+                    1.0 / std::f64::consts::SQRT_2
+                } else {
+                    1.0
+                }
+            };
+            let mut sum = 0.0;
+            for x in 0..8usize {
+                for y in 0..8usize {
+                    sum += f64::from(samples[y * 8 + x])
+                        * ((2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI / 16.0).cos()
+                        * ((2.0 * y as f64 + 1.0) * v as f64 * std::f64::consts::PI / 16.0).cos();
+                }
+            }
+            0.25 * c(u) * c(v) * sum
+        }
+
+        let mut worst = 0.0f64;
+        let mut state = 0x1234_5678u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as i32 - 128
+        };
+
+        for case in 0..24usize {
+            let mut samples = [0i32; 64];
+            for (i, slot) in samples.iter_mut().enumerate() {
+                *slot = match case {
+                    0 => 0,
+                    1 => 127,
+                    2 => -128,
+                    3 => {
+                        if (i / 8 + i % 8) % 2 == 0 {
+                            127
+                        } else {
+                            -128
+                        }
+                    }
+                    4 => (i as i32) - 32,
+                    _ => next(),
+                };
+            }
+            for table in [&ANNEX_K1_LUMINANCE, &ANNEX_K2_CHROMINANCE, &[1u8; 64]] {
+                let mut coefficients = [0i32; 64];
+                forward_dct_quantise(&samples, table, &mut coefficients);
+                for (natural, &k) in FIGURE_A_6.iter().enumerate() {
+                    let (v, u) = (natural / 8, natural % 8);
+                    let exact = reference(&samples, u, v) / f64::from(table[natural]);
+                    let error = (f64::from(coefficients[k]) - exact).abs();
+                    worst = worst.max(error);
+                }
+            }
+        }
+        assert!(
+            worst <= 0.55,
+            "the fixed-point transform strayed {worst} from A.3.3's equation"
+        );
+    }
+
+    /// Why the encoder needs no "coefficient too large" refusal, measured
+    /// rather than argued.
+    ///
+    /// Annex K's tables code AC magnitudes up to size 10 (`|Sq| <= 1023`) and DC
+    /// differences up to category 11 (`|DIFF| <= 2047`). A.3.3's transform is
+    /// linear in the samples, so its extreme over the box `s in [-128, 127]` is
+    /// attained at a vertex, and the vertex is known: take `127` where the basis
+    /// product is positive and `-128` where it is negative. That is computed
+    /// here for all 64 coefficients at the finest quantiser B.2.4.1 allows, a
+    /// table of ones, which is the worst case over every legal table.
+    ///
+    /// The clamp in `forward_dct_quantise` is unreachable because of this, and
+    /// this test is what keeps that true.
+    #[test]
+    fn no_quantiser_can_push_a_coefficient_past_annex_k() {
+        let basis = |x: usize, u: usize| {
+            let c = if u == 0 {
+                1.0 / std::f64::consts::SQRT_2
+            } else {
+                1.0
+            };
+            c / 2.0 * ((2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI / 16.0).cos()
+        };
+
+        let mut worst_ac = 0.0f64;
+        let (mut dc_high, mut dc_low) = (0.0f64, 0.0f64);
+        for v in 0..8usize {
+            for u in 0..8usize {
+                let mut high = 0.0f64;
+                let mut low = 0.0f64;
+                for x in 0..8usize {
+                    for y in 0..8usize {
+                        let weight = basis(x, u) * basis(y, v);
+                        // The vertex that maximises, and the one that minimises.
+                        high += weight * if weight > 0.0 { 127.0 } else { -128.0 };
+                        low += weight * if weight > 0.0 { -128.0 } else { 127.0 };
+                    }
+                }
+                if u == 0 && v == 0 {
+                    dc_high = high;
+                    dc_low = low;
+                } else {
+                    worst_ac = worst_ac.max(high.abs()).max(low.abs());
+                }
+            }
+        }
+
+        assert!(
+            worst_ac <= 1023.0,
+            "an AC coefficient can reach {worst_ac}, past K.5's size 10"
+        );
+        let spread = dc_high - dc_low;
+        assert!(
+            spread <= 2047.0,
+            "a DC difference can reach {spread}, past K.3's category 11"
+        );
+        // The categories those magnitudes fall in, so a changed bound is loud.
+        assert_eq!(category(worst_ac.round() as i32), 10);
+        assert_eq!(category(spread.round() as i32), 11);
+    }
+
+    /// **Adjudicated by third-party data.** ITU-T T.871 | ISO/IEC 10918-5
+    /// clause 7's exact forward equations, read off `tpdf render`'s page 4 of
+    /// `T-REC-T.871-201105-I` — fetched from the ITU 15 September 2026, by
+    /// `WebFetch` where `curl` got an HTTP 500 — and written out here literally.
+    ///
+    /// The encoder computes the algebraically equivalent identity
+    /// `Cb = (B - Y)/1.772 + 128` in fixed point, so agreement is a check on
+    /// both the identity and the fixed-point precision rather than a
+    /// restatement of one expression as itself. The tolerance is one level,
+    /// which is what a 1/65536 fixed point buys.
+    #[test]
+    fn the_colour_transform_is_t_871_clause_7_s() {
+        let published = |r: u8, g: u8, b: u8| {
+            let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
+            let clamp = |v: f64| v.round().clamp(0.0, 255.0) as i32;
+            (
+                clamp(0.299 * r + 0.587 * g + 0.114 * b),
+                clamp((-0.299 * r - 0.587 * g + 0.886 * b) / 1.772 + 128.0),
+                clamp((0.701 * r - 0.587 * g - 0.114 * b) / 1.402 + 128.0),
+            )
+        };
+
+        let mut worst = 0i32;
+        for r in (0..=255u32).step_by(15) {
+            for g in (0..=255u32).step_by(15) {
+                for b in (0..=255u32).step_by(15) {
+                    let (r, g, b) = (r as u8, g as u8, b as u8);
+                    let (y, cb, cr) = rgb_to_ycbcr(r, g, b);
+                    let want = published(r, g, b);
+                    worst = worst
+                        .max((i32::from(y) - want.0).abs())
+                        .max((i32::from(cb) - want.1).abs())
+                        .max((i32::from(cr) - want.2).abs());
+                }
+            }
+        }
+        assert!(
+            worst <= 1,
+            "the transform strayed {worst} levels from T.871"
+        );
+
+        // The three points clause 7 pins exactly, in both directions.
+        assert_eq!(rgb_to_ycbcr(0, 0, 0), (0, 128, 128));
+        assert_eq!(rgb_to_ycbcr(255, 255, 255), (255, 128, 128));
+    }
+
+    /// A.2.4's NOTE: "any incomplete MCUs be completed by replication of the
+    /// right-most column and the bottom line of each component". Held to the
+    /// clause, not to a round trip — a padding rule is only visible in the bits
+    /// it costs, and a decoder discards it by A.2.4's last sentence.
+    #[test]
+    fn a_partial_mcu_is_completed_by_replicating_the_edge() {
+        // A 3 x 2 picture in an 8 x 8 plane, with a distinct value per pixel.
+        let mut plane = vec![0u8; 64];
+        for y in 0..2usize {
+            for x in 0..3usize {
+                plane[y * 8 + x] = (y * 3 + x + 1) as u8;
+            }
+        }
+        pad_plane(&mut plane, 8, 8, 3, 2);
+
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let sy = y.min(1);
+                let sx = x.min(2);
+                assert_eq!(
+                    plane[y * 8 + x],
+                    (sy * 3 + sx + 1) as u8,
+                    "the sample at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    /// F.1.2.3's byte stuffing, checked over an image noisy enough to produce
+    /// X'FF' bytes in the coded data. Held to the clause: inside the entropy-
+    /// coded segment of a scan with no restart interval, an X'FF' may be
+    /// followed only by X'00'.
+    #[test]
+    fn every_ff_in_the_coded_data_is_followed_by_a_stuffed_zero() {
+        let mut pixels = vec![0u8; 64 * 64];
+        let mut state = 0x9E37_79B9u32;
+        for slot in pixels.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *slot = (state >> 24) as u8;
+        }
+        let options = JpegOptions {
+            quantisation: JpegQuantisation::Tables {
+                luminance: [1; 64],
+                chrominance: [1; 64],
+            },
+            ..JpegOptions::default()
+        };
+        let bytes = jpeg_encode(&gray_source(&pixels, 64, 64), &options).unwrap();
+        let coded = entropy_segment(&bytes);
+        let mut stuffed = 0;
+        let mut at = 0;
+        while at < coded.len() {
+            if coded[at] == 0xFF {
+                assert_eq!(
+                    coded.get(at + 1).copied(),
+                    Some(0x00),
+                    "an unstuffed X'FF' at {at}"
+                );
+                stuffed += 1;
+                at += 2;
+            } else {
+                at += 1;
+            }
+        }
+        assert!(
+            stuffed > 0,
+            "this fixture is supposed to produce X'FF' bytes"
+        );
+    }
+
+    /// 4.10 and F.1.2.3's restart interval: the markers are RST0 through RST7 in
+    /// order, there is one every `Ri` MCUs, and — the half that a decoder can
+    /// hide — the DC predictor goes back to zero at each one.
+    ///
+    /// The predictor reset is what the second half of this test is for. It is
+    /// invisible to any check that only counts markers, and it is invisible to a
+    /// round trip through a decoder that also forgets to reset, so the bits are
+    /// read here instead: the first block after a restart must code its DC as a
+    /// difference from zero, which for this flat image is the same code word the
+    /// very first block emitted.
+    #[test]
+    fn the_restart_interval_is_emitted_and_the_predictors_reset() {
+        // 32 x 16 of one value: eight MCUs of 8 x 8, all with the same DC.
+        let pixels = gray(32, 16, 144);
+        let options = JpegOptions {
+            restart_interval: 2,
+            ..JpegOptions::default()
+        };
+        let bytes = jpeg_encode(&gray_source(&pixels, 32, 16), &options).unwrap();
+
+        let dri = segments(&bytes)
+            .into_iter()
+            .find(|(code, _)| *code == 0xDD)
+            .expect("a DRI segment");
+        assert_eq!(dri.1, vec![0x00, 0x02]);
+
+        let coded = entropy_segment(&bytes);
+        // Eight MCUs, a restart before MCUs 2, 4 and 6: three markers.
+        let mut markers = Vec::new();
+        let mut runs: Vec<Vec<u8>> = vec![Vec::new()];
+        let mut at = 0;
+        while at < coded.len() {
+            if coded[at] == 0xFF {
+                match coded.get(at + 1).copied() {
+                    Some(0x00) => {
+                        runs.last_mut().unwrap().push(0xFF);
+                        at += 2;
+                        continue;
+                    }
+                    Some(m) if (0xD0..=0xD7).contains(&m) => {
+                        markers.push(m);
+                        runs.push(Vec::new());
+                        at += 2;
+                        continue;
+                    }
+                    other => panic!("a marker {other:?} inside the coded data"),
+                }
+            }
+            runs.last_mut().unwrap().push(coded[at]);
+            at += 1;
+        }
+        assert_eq!(markers, vec![0xD0, 0xD1, 0xD2], "RSTn in order from RST0");
+
+        // Each run codes two identical MCUs, and each starts from a zeroed
+        // predictor, so every run is byte-identical to the first.
+        assert_eq!(runs.len(), 4);
+        for (i, run) in runs.iter().enumerate() {
+            assert_eq!(run, &runs[0], "run {i} after a restart");
+        }
+        // And it is the flat-block code word of the published test above, twice
+        // over: 101 1000 1010 then 000 1010 (DIFF = 0 for the second MCU).
+        assert_eq!(runs[0], vec![0xB1, 0x45, 0x7F]);
+    }
+
+    /// Self-consistency only: this encoder against this crate's decoder, which
+    /// `jpeg/encode.rs`'s header says is itself adjudicated by nothing
+    /// third-party. It says that a datastream is well-formed enough to be read
+    /// back and that the picture survives; it says nothing about T.81.
+    #[test]
+    fn a_round_trip_keeps_the_picture_in_every_colour_and_sampling() {
+        let cases: [(u32, u32, JpegSourceColour, JpegSampling); 5] = [
+            (16, 16, JpegSourceColour::Gray, JpegSampling::FourFourFour),
+            (16, 16, JpegSourceColour::Rgb, JpegSampling::FourFourFour),
+            (32, 32, JpegSourceColour::Rgb, JpegSampling::FourTwoZero),
+            (13, 7, JpegSourceColour::Gray, JpegSampling::FourFourFour),
+            (13, 7, JpegSourceColour::Rgb, JpegSampling::FourTwoZero),
+        ];
+
+        for (width, height, colour, sampling) in cases {
+            let components = usize::from(colour.components());
+            let mut pixels = vec![0u8; width as usize * height as usize * components];
+            for (i, slot) in pixels.iter_mut().enumerate() {
+                let pixel = i / components;
+                // A smooth luma ramp: coarse quantisers keep it, so the
+                // comparison can be tight without asserting anything about the
+                // IDCT.
+                let base = (pixel % 8 * 16 + 64) as i32;
+                // And a colour that is genuinely off neutral, because a grey
+                // ramp leaves both chrominance planes at 128 and makes every
+                // colour case a luminance case wearing three components. The
+                // offset flips every sixteenth row, which is one 4:2:0 MCU, so
+                // each chrominance block is still *flat*: the box filter and
+                // the block transform are exact on it and the tolerance below
+                // stays the luma ramp's. Transposing Cb and Cr fires this test
+                // only because of these three lines.
+                let offset = if components == 3 {
+                    let band = if (pixel / width as usize / 16) % 2 == 0 {
+                        1i32
+                    } else {
+                        -1
+                    };
+                    band * match i % 3 {
+                        0 => 40i32,
+                        1 => 0,
+                        _ => -40,
+                    }
+                } else {
+                    0
+                };
+                *slot = (base + offset) as u8;
+            }
+            let source = JpegSource {
+                width,
+                height,
+                colour,
+                stride: width as usize * components,
+                data: &pixels,
+            };
+            let options = JpegOptions {
+                quantisation: JpegQuantisation::AnnexKHalved,
+                sampling,
+                restart_interval: 0,
+            };
+            let bytes = jpeg_encode(&source, &options).unwrap();
+            let image = decode(&bytes, 1 << 24).expect("the encoder's own output decodes");
+            assert_eq!((image.width, image.height), (width, height));
+            assert_eq!(image.data.len(), pixels.len());
+
+            let worst = image
+                .data
+                .iter()
+                .zip(pixels.iter())
+                .map(|(&got, &want)| (i32::from(got) - i32::from(want)).abs())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                worst <= 24,
+                "{width}x{height} {colour:?} {sampling:?} strayed {worst} levels"
+            );
+        }
+    }
+
+    /// Self-consistency only, and the reason it is here rather than folded into
+    /// the round trip above: a restart interval must change the bytes and not
+    /// the picture. A decoder that mishandles RSTn desynchronises, so this is
+    /// the cheapest total check that the markers are where the decoder expects.
+    #[test]
+    fn restarts_change_the_bytes_and_not_the_picture() {
+        let pixels: Vec<u8> = (0..64u32 * 64).map(|i| (i % 251) as u8).collect();
+        let plain = jpeg_encode(&gray_source(&pixels, 64, 64), &JpegOptions::default()).unwrap();
+        let restarted = jpeg_encode(
+            &gray_source(&pixels, 64, 64),
+            &JpegOptions {
+                restart_interval: 3,
+                ..JpegOptions::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(plain, restarted);
+        assert_eq!(
+            decode(&plain, 1 << 24).unwrap().data,
+            decode(&restarted, 1 << 24).unwrap().data
+        );
+    }
+
+    /// The stride is the field an encoder is most likely to ignore, because for
+    /// every unpadded buffer it equals the row length. `PngSource`'s test says
+    /// the same thing about the same mistake.
+    #[test]
+    fn a_padded_stride_is_not_read_as_pixels() {
+        let mut padded = vec![0u8; 12 * 4];
+        for y in 0..4usize {
+            for x in 0..4usize {
+                padded[y * 12 + x] = (x * 16 + y * 4) as u8;
+            }
+        }
+        let tight: Vec<u8> = (0..4usize)
+            .flat_map(|y| (0..4usize).map(move |x| (x * 16 + y * 4) as u8))
+            .collect();
+
+        let from_padded = jpeg_encode(
+            &JpegSource {
+                width: 4,
+                height: 4,
+                colour: JpegSourceColour::Gray,
+                stride: 12,
+                data: &padded,
+            },
+            &JpegOptions::default(),
+        )
+        .unwrap();
+        let from_tight = jpeg_encode(&gray_source(&tight, 4, 4), &JpegOptions::default()).unwrap();
+        assert_eq!(from_padded, from_tight);
+    }
+
+    /// Every refusal, by its own name. All five are a caller describing its own
+    /// buffer or its own intent wrongly; none can be reached from the pixels.
+    #[test]
+    fn every_refusal_fires_by_its_own_name() {
+        let pixels = gray(8, 8, 128);
+        let default = JpegOptions::default();
+
+        assert_eq!(
+            jpeg_encode(&gray_source(&pixels, 0, 8), &default),
+            Err(JpegEncodeError::BadDimensions {
+                width: 0,
+                height: 8
+            })
+        );
+        assert_eq!(
+            jpeg_encode(&gray_source(&pixels, 65_536, 8), &default),
+            Err(JpegEncodeError::BadDimensions {
+                width: 65_536,
+                height: 8
+            })
+        );
+        assert_eq!(
+            jpeg_encode(
+                &JpegSource {
+                    width: 8,
+                    height: 8,
+                    colour: JpegSourceColour::Gray,
+                    stride: 4,
+                    data: &pixels,
+                },
+                &default
+            ),
+            Err(JpegEncodeError::ShortStride {
+                stride: 4,
+                row_bytes: 8
+            })
+        );
+        assert_eq!(
+            jpeg_encode(&gray_source(&pixels[..40], 8, 8), &default),
+            Err(JpegEncodeError::ShortData { have: 40, need: 64 })
+        );
+        assert_eq!(
+            jpeg_encode(
+                &gray_source(&pixels, 8, 8),
+                &JpegOptions {
+                    quantisation: JpegQuantisation::Tables {
+                        luminance: {
+                            let mut table = [1u8; 64];
+                            table[7] = 0;
+                            table
+                        },
+                        chrominance: [1; 64],
+                    },
+                    ..default
+                }
+            ),
+            Err(JpegEncodeError::ZeroQuantiser {
+                chrominance: false,
+                index: 7
+            })
+        );
+        assert_eq!(
+            jpeg_encode(
+                &gray_source(&pixels, 8, 8),
+                &JpegOptions {
+                    sampling: JpegSampling::FourTwoZero,
+                    ..default
+                }
+            ),
+            Err(JpegEncodeError::SubsampledGrayscale)
+        );
+    }
+
+    /// The two rungs T.81 names are different quantisers and therefore different
+    /// bytes, and the halved one is finer — which is the whole content of K.1's
+    /// second paragraph.
+    #[test]
+    fn annex_k_halved_is_finer_than_annex_k() {
+        let pixels: Vec<u8> = (0..32u32 * 32).map(|i| (i % 97 * 2) as u8).collect();
+        let coarse = jpeg_encode(&gray_source(&pixels, 32, 32), &JpegOptions::default()).unwrap();
+        let fine = jpeg_encode(
+            &gray_source(&pixels, 32, 32),
+            &JpegOptions {
+                quantisation: JpegQuantisation::AnnexKHalved,
+                ..JpegOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(fine.len() > coarse.len(), "a finer quantiser costs bits");
+
+        let error = |bytes: &[u8]| {
+            decode(bytes, 1 << 24)
+                .unwrap()
+                .data
+                .iter()
+                .zip(pixels.iter())
+                .map(|(&got, &want)| u32::from(got.abs_diff(want)))
+                .sum::<u32>()
+        };
+        assert!(error(&fine) < error(&coarse), "and buys accuracy");
+
+        // Rounding up, so halving can never produce the zero B.2.4.1 forbids.
+        let dqt = segments(&fine)
+            .into_iter()
+            .find(|(code, _)| *code == 0xDB)
+            .unwrap()
+            .1;
+        assert!(dqt[1..].iter().all(|&q| q >= 1));
+        assert_eq!(dqt[1], ANNEX_K1_LUMINANCE[0].div_ceil(2));
     }
 }
