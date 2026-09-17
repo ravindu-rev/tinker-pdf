@@ -127,6 +127,21 @@ the glyph-usage walk that font subsetting on rewrite drives. Promoting it out
 of the interpreter's test module deleted five ad-hoc recorders that had grown
 there, each keeping what one test needed.
 
+**The first of the six has landed**, and the fit is reported rather than
+assumed. `crates/tinker-pdf/src/subset.rs` is one `interpret` into a
+`RecordingDevice` and one pass over its events — no second interpreter, no
+device of its own. What did *not* fit is `Capture::GLYPHS`, the preset
+introduced for that consumer, which turns the bracketing events off:
+`Glyph::font_id` is the interned **resource name**, and a resource name is
+scope-relative, so without `BeginForm`/`EndForm` there is no way to say which
+`/F1` a glyph meant and one font's glyphs would be credited to another — which
+drops the glyphs the other font needs. The walk runs under `text` **and**
+`structure` instead. The preset is still right for the other glyph-only
+consumer named above, inferred reading order, which wants glyphs in document
+order and never asks which dictionary a font came from; its name is what is
+one preset short, and that is written down in `subset.rs` rather than fixed
+by renaming a public constant from a row that is about fonts.
+
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a

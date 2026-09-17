@@ -39,6 +39,47 @@ type OutlineCache = HashMap<(u64, u32), Option<Arc<Outline>>>;
 /// not parse must be refused once rather than re-read at every `cs`.
 type IccCache = HashMap<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transform>>>;
 
+/// Which glyph of an embedded program a code selects, and on whose authority.
+///
+/// The second half is what [`crate::subset`] rests on, and it is the whole
+/// reason this is a struct rather than a `u16`. 9.6.6.4 ends its selection
+/// order with a guess — *read the code as the glyph index* — which is what
+/// every reader does with a subset font whose producer dropped the `cmap`, and
+/// which is **not** a statement the font made. Two readers guessing are free
+/// to guess differently: this one reads the code, another reads the
+/// `/Differences` name through a `post` table the subsetter drops.
+///
+/// A glyph kept on the strength of a guess is therefore a glyph some other
+/// reader may not draw, and — much worse — a glyph *dropped* because the guess
+/// went elsewhere is a glyph that reader draws and no longer has. So
+/// subsetting refuses a font any of whose shown codes landed here, and leaves
+/// its program whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Selection {
+    /// The glyph index in the embedded program.
+    pub glyph: u16,
+    /// Whether a mapping the font itself states chose it — its `cmap` through
+    /// a character, its `/CIDToGIDMap` through a CID, or its CFF charset
+    /// through a name — rather than 9.6.6.4's closing guess.
+    pub stated: bool,
+}
+
+impl Selection {
+    fn stated(glyph: u16) -> Selection {
+        Selection {
+            glyph,
+            stated: true,
+        }
+    }
+
+    fn guessed(glyph: u16) -> Selection {
+        Selection {
+            glyph,
+            stated: false,
+        }
+    }
+}
+
 /// Everything one page's rendering needs from its resources.
 pub struct PageResources {
     doc: Arc<CosDocument>,
@@ -1815,16 +1856,82 @@ impl PageResources {
         built
     }
 
+    /// The resource name a font id stands for in this scope.
+    fn resource_name(&self, font_id: u64) -> Option<Vec<u8>> {
+        self.font_ids
+            .iter()
+            .find(|(_, id)| **id == font_id)
+            .map(|(name, _)| name.clone())
+    }
+
+    /// This scope's `/Font` subdictionary (7.8.3).
+    fn font_table(&self) -> Option<Dict> {
+        let resources = self.resources.as_ref()?;
+        self.doc
+            .resolve_key(resources, self.doc.intern(b"Font"))
+            .as_dict()
+            .cloned()
+    }
+
+    /// The object a font resource name stands for.
+    ///
+    /// **This is the identity [`crate::subset`] keys glyph usage by, and
+    /// [`tinker_pdf_content::Glyph::font_id`] is not.** That id is the
+    /// interned *resource name* — `/F1` — which is scope-relative: a form
+    /// XObject with its own `/Resources` may bind `/F1` to a different font
+    /// from the page that drew it, and the two then share an id. An object
+    /// reference is the document's own answer to "which font", and two of them
+    /// are equal exactly when the font is.
+    ///
+    /// `None` for a font written directly into the resource dictionary rather
+    /// than by reference: there is no object for a rewrite to address, so
+    /// subsetting leaves such a font whole rather than editing a copy of it
+    /// that the file does not use.
+    pub(crate) fn font_object(&self, font_id: u64) -> Option<ObjRef> {
+        let name = self.resource_name(font_id)?;
+        self.font_table()?.get_ref(self.doc.intern(&name))
+    }
+
+    /// Every font this scope names, by object.
+    ///
+    /// What makes "this scope was walked and never showed that font" sayable,
+    /// which is what lets an embedded program whose text a redaction removed
+    /// be cut down to `.notdef` rather than left whole.
+    pub(crate) fn font_objects(&self) -> Vec<ObjRef> {
+        let Some(table) = self.font_table() else {
+            return Vec::new();
+        };
+        table
+            .iter()
+            .filter_map(|(_, value)| value.as_objref())
+            .collect()
+    }
+
+    /// Every font this scope writes **directly** into its `/Font`
+    /// subdictionary rather than by reference.
+    ///
+    /// The complement of [`PageResources::font_objects`], and it exists
+    /// because the two together are the whole table: a font with no object has
+    /// no identity for [`crate::subset`] to key glyph usage by, so a program it
+    /// embeds is one that pass must leave whole — including when some *other*
+    /// font reaches the same program by reference, which is the case that
+    /// would otherwise lose this one's glyphs.
+    pub(crate) fn direct_fonts(&self) -> Vec<Dict> {
+        let Some(table) = self.font_table() else {
+            return Vec::new();
+        };
+        table
+            .iter()
+            .filter_map(|(_, value)| value.as_dict().cloned())
+            .collect()
+    }
+
     /// Pulls one glyph's outline out of an embedded font program.
     fn extract_outline(&self, font_id: u64, code: u32) -> Option<Outline> {
         let program = self.program(font_id)?;
 
         // The font's own character mapping decides which glyph a code means.
-        let name = self
-            .font_ids
-            .iter()
-            .find(|(_, id)| **id == font_id)
-            .map(|(name, _)| name.clone())?;
+        let name = self.resource_name(font_id)?;
         let font = self.fonts.get(&name)?;
         let text = font.text_of(code);
         let ch = text.chars().next();
@@ -1839,41 +1946,14 @@ impl PageResources {
             if sfnt.table(0x676C_7966).is_none() {
                 if let Some(table) = sfnt.table(0x4346_4620) {
                     if let Some(cff) = Cff::parse(table) {
-                        return self.cff_outline(&cff, font, &name, code);
+                        let chosen = self.cff_selection(&cff, font, &name, code);
+                        return self.cff_outline(&cff, chosen.glyph);
                     }
                 }
                 return None;
             }
 
-            let glyph = if font.kind() == cos_font::FontKind::Type0 {
-                self.cid_glyph(font, &name, code)
-            } else {
-                match ch {
-                    Some(c) => sfnt.glyph_for_char(c).filter(|g| *g != 0),
-                    None => None,
-                }
-                // 9.6.6.4: a symbolic font's codes go through its `cmap`
-                // directly rather than through a character — the (3,0)
-                // subtable maps the code into the F0xx private-use block,
-                // which is what `glyph_for_char` does with a character it is
-                // handed. Without this a symbolic face fell straight to the
-                // last resort below.
-                .or_else(|| {
-                    char::from_u32(code)
-                        .and_then(|c| sfnt.glyph_for_char(c))
-                        .filter(|g| *g != 0)
-                })
-                // The last resort: a subset font whose `cmap` was dropped,
-                // where the code is the only glyph number on offer, and the
-                // guess every reader makes for it. It used to be correct for
-                // a composite font too — an identity `/CIDToGIDMap` makes the
-                // code the glyph — but that reading only held while every
-                // composite font's CMap was the identity as well. The branch
-                // above owns that case now and indexes by CID, which is the
-                // same number whenever the old reading was right and the
-                // right one whenever it was not.
-                .or_else(|| u16::try_from(code).ok())?
-            };
+            let glyph = self.sfnt_selection(&sfnt, font, &name, code)?.glyph;
 
             let units = f64::from(sfnt.units_per_em.max(1));
             let outline = glyf::outline(&sfnt, glyph)?;
@@ -1881,7 +1961,8 @@ impl PageResources {
         }
 
         if let Some(cff) = Cff::parse(&program) {
-            return self.cff_outline(&cff, font, &name, code);
+            let chosen = self.cff_selection(&cff, font, &name, code);
+            return self.cff_outline(&cff, chosen.glyph);
         }
 
         // 9.9: a `/FontFile` is a Type 1 program. Until this existed the bytes
@@ -1911,6 +1992,115 @@ impl PageResources {
         None
     }
 
+    /// Which glyph of the embedded program a code selects, and on whose
+    /// authority, without drawing anything.
+    ///
+    /// The **same decision** [`PageResources::extract_outline`] makes, reached
+    /// through the same two helpers, because the glyph-usage walk in
+    /// [`crate::subset`] has to keep exactly the glyphs this renderer would
+    /// draw. A second resolver written beside this one would agree on the
+    /// ordinary cases and diverge on the ones that matter — a symbolic face, a
+    /// non-identity `/CIDToGIDMap`, a CFF reached by name — and every
+    /// divergence is a glyph dropped from a program that still needs it, which
+    /// renders as a blank rather than as an error.
+    ///
+    /// [`Selection::stated`] is what subsetting actually rests on; see its own
+    /// documentation.
+    ///
+    /// `None` where no glyph index exists to keep: no embedded program, a
+    /// program neither parser reads, or a Type 1 program — which addresses its
+    /// charstrings by name, so the index [`PageResources::extract_outline`]
+    /// uses above is an index into *that* font's private ordering and not a
+    /// glyph id any subsetter could act on.
+    pub(crate) fn selection(&self, font_id: u64, code: u32) -> Option<Selection> {
+        let program = self.program(font_id)?;
+        let name = self.resource_name(font_id)?;
+        let font = self.fonts.get(&name)?;
+
+        if let Some(sfnt) = Sfnt::parse(&program) {
+            if sfnt.table(0x676C_7966).is_none() {
+                let cff = Cff::parse(sfnt.table(0x4346_4620)?)?;
+                return Some(self.cff_selection(&cff, font, &name, code));
+            }
+            return self.sfnt_selection(&sfnt, font, &name, code);
+        }
+        if let Some(cff) = Cff::parse(&program) {
+            return Some(self.cff_selection(&cff, font, &name, code));
+        }
+        None
+    }
+
+    /// Which glyph of a `glyf`-flavoured program a code selects (9.6.6.4,
+    /// 9.7.4.2).
+    fn sfnt_selection(
+        &self,
+        sfnt: &Sfnt<'_>,
+        font: &cos_font::Font,
+        name: &[u8],
+        code: u32,
+    ) -> Option<Selection> {
+        if font.kind() == cos_font::FontKind::Type0 {
+            // `/CIDToGIDMap` is exhaustive by construction — a CID it does not
+            // name is one the font does not have — so even the `.notdef` it
+            // answers with is the font's own statement rather than a guess.
+            return Some(Selection::stated(self.cid_glyph(font, name, code)));
+        }
+
+        let text = font.text_of(code);
+        let ch = text.chars().next();
+        let stated = match ch {
+            Some(c) => sfnt.glyph_for_char(c).filter(|g| *g != 0),
+            None => None,
+        }
+        // 9.6.6.4: a symbolic font's codes go through its `cmap`
+        // directly rather than through a character — the (3,0)
+        // subtable maps the code into the F0xx private-use block,
+        // which is what `glyph_for_char` does with a character it is
+        // handed. Without this a symbolic face fell straight to the
+        // last resort below.
+        .or_else(|| {
+            char::from_u32(code)
+                .and_then(|c| sfnt.glyph_for_char(c))
+                .filter(|g| *g != 0)
+        });
+        if let Some(glyph) = stated {
+            return Some(Selection::stated(glyph));
+        }
+
+        // The last resort: a subset font whose `cmap` was dropped,
+        // where the code is the only glyph number on offer, and the
+        // guess every reader makes for it. It used to be correct for
+        // a composite font too — an identity `/CIDToGIDMap` makes the
+        // code the glyph — but that reading only held while every
+        // composite font's CMap was the identity as well. The branch
+        // above owns that case now and indexes by CID, which is the
+        // same number whenever the old reading was right and the
+        // right one whenever it was not.
+        Some(Selection::guessed(u16::try_from(code).ok()?))
+    }
+
+    /// Which glyph of a CFF program a code selects, the way 9.6.6 says to
+    /// choose it.
+    fn cff_selection(
+        &self,
+        cff: &Cff<'_>,
+        font: &cos_font::Font,
+        resource: &[u8],
+        code: u32,
+    ) -> Selection {
+        match cff_glyph(cff, font, code) {
+            Some(glyph) => Selection::stated(glyph),
+            None => {
+                // Nothing named this glyph. `.notdef` is glyph 0 in every CFF
+                // font — usually empty, sometimes a box — and the page reports
+                // rather than drawing whichever glyph the code happened to
+                // number.
+                self.report_unresolved_glyph(resource);
+                Selection::guessed(0)
+            }
+        }
+    }
+
     /// Which glyph of a TrueType program a composite font's code selects
     /// (9.7.4.2).
     ///
@@ -1937,21 +2127,9 @@ impl PageResources {
         glyph
     }
 
-    /// One glyph of a CFF program, chosen the way 9.6.6 says to choose it.
-    fn cff_outline(
-        &self,
-        cff: &Cff<'_>,
-        font: &cos_font::Font,
-        resource: &[u8],
-        code: u32,
-    ) -> Option<Outline> {
-        let glyph = cff_glyph(cff, font, code).unwrap_or_else(|| {
-            // Nothing named this glyph. `.notdef` is glyph 0 in every CFF
-            // font — usually empty, sometimes a box — and the page reports
-            // rather than drawing whichever glyph the code happened to number.
-            self.report_unresolved_glyph(resource);
-            0
-        });
+    /// One glyph of a CFF program, once [`PageResources::cff_selection`] has
+    /// chosen it.
+    fn cff_outline(&self, cff: &Cff<'_>, glyph: u16) -> Option<Outline> {
         let outline = cff.outline(glyph)?;
         // A CFF font matrix is usually 1/1000 but need not be, and a
         // CID-keyed font may carry a different one per Font DICT.

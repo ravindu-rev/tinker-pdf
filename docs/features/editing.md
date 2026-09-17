@@ -103,6 +103,65 @@ left the glyph in an untouched duplicate stream; an ink check alone would
 pass the black-rectangle non-redaction this module exists to refuse. Neither
 half is the property.
 
+**Font subsetting on rewrite** (9.6.4, 9.9). A rewrite used to copy every
+embedded font program through untouched however little of it the document
+still drew. `subset::apply(&mut editor)` cuts each one down to the glyphs the
+document draws now. Two costs go with it, and the second is why the redaction
+section above ends here:
+
+- **Size.** Measured on the vendored Liberation Serif Regular, 393 576 bytes:
+  a page of ten characters carries **29 376** after the pass, and a page
+  drawing none of it 26 428 — not zero, and it should not be, since `cmap`,
+  `hmtx`, `OS/2` and the three hinting tables are copied through for the
+  readers that interpret them.
+- **Disclosure.** Redaction removes the *text*. It does not remove the
+  **glyphs**, which sit in the program exactly as they were, and a face whose
+  `glyf` entries are `J`, `o`, `h`, `n`, `S`, `m`, `i`, `t` and `h` names what
+  the redaction was for. So a redaction that must not disclose runs this
+  afterwards. Measured on a two-line fixture: 395 534 bytes redacted, **30 301**
+  redacted and subsetted, and the six removed letters' outlines absent from the
+  program that remains — asserted against its own `loca` and `glyf`, not
+  against a picture.
+
+**It is whole-document and it runs last.** A font used on page two must keep
+page two's glyphs however thoroughly page one was redacted, so there is no
+per-page form of the operation that is not wrong; and it reads the content the
+*editor* now has rather than the file, so an edit applied first is an edit this
+sees. Run the other way round it would keep exactly what the redaction removed.
+Save with `WriteMode::Rewrite` if the removal has to be real — an incremental
+save appends and leaves the original program's bytes in the file, the same
+caveat redaction carries.
+
+**Which glyphs count as used.** Err toward inclusion: a glyph wrongly excluded
+is a blank or a wrong glyph on the page, with nothing in the file saying so.
+Counted are a page's own content stream; a form XObject it draws, at any depth
+(8.10); a Type 3 glyph procedure entered because its own glyph was shown
+(9.6.5); and **every** appearance stream under an annotation's `/AP` — `/N`,
+`/D` and `/R`, and every state of each, whatever `/AS` currently selects, since
+12.5.5 lets a viewer switch states with no edit to the file and a subset cut to
+today's state loses tomorrow's tick. A hidden annotation's appearance counts
+too: the flag is a viewer's instruction, and clearing it is one bit.
+
+**How the encoding survives.** `tinker_pdf_font::subset` does not renumber — a
+dropped glyph becomes a zero-length `loca` entry rather than a gap the later
+glyphs shuffle into — so `/FirstChar`, `/LastChar`, `/Widths`, `/W`, `/DW`,
+`/Encoding`, `/Differences`, `/CIDToGIDMap` and `/ToUnicode` are all still
+correct **because they are unchanged**, and this pass changes none of them
+(`font_dictionaries_are_untouched_except_for_the_subset_tag`). Three names do
+move, and all three are the same name: `/BaseFont` on the font dictionary gains
+9.6.4's six-letter tag from the same `subset_tag` the *builder* names its
+subsets with, `/BaseFont` on a composite font's descendant (9.7.6.2) and
+`/FontName` in the descriptor (9.8.1) follow it. A tag already there is
+replaced, never stacked. One thing moves on the stream: `/Length1`, which
+Table 126 defines as the decoded length of a `/FontFile2`; a `/FontFile3` has
+none and a stale one is dropped rather than carried.
+
+**The unit of work is the program, not the font dictionary.** Two font
+dictionaries may point at one `/FontFile2`, and subsetting it for one of them
+would take the other's glyphs away, so every font that names a given stream is
+found first, their glyph sets unioned, and the stream left whole if any one of
+those fonts is one this pass will not bound.
+
 ## API
 
 ```rust
@@ -142,6 +201,30 @@ rectangles at all)
 because glyph coverage needs both the content tokenizer and font metrics
 (ruling 8, [rulings.md](../rulings.md)).
 
+`subset::{SubsetReport, Subsetted, Untouched, UntouchedReason, apply}` are on
+the facade too. `apply(&mut editor) -> SubsetReport` takes no page: it is
+whole-document by construction. `SubsetReport::subsetted` carries each
+program's object, its new `/BaseFont`, the bytes before and after, and how many
+glyphs were asked for; `untouched` carries every program written through whole
+with its `UntouchedReason`, and `bytes_before()`/`bytes_after()` total both.
+An empty `untouched` is the answer a caller wants; a non-empty one is not an
+error list, since a document whose every face is already a tight subset reports
+all of them and is right to.
+
+```rust
+let report = tinker_pdf::subset::apply(&mut editor); // after every other edit
+for whole in &report.untouched {
+    // "/LiberationSerif left whole (393 576 bytes): a form field's /DA may
+    //  draw it at any character (12.7.3.3)" — ruling 10, so a caller checking
+    //  for disclosure can see what is still in the file
+    println!("{whole}");
+}
+let bytes = editor.save(&tinker_pdf::WriteOptions {
+    mode: tinker_pdf::WriteMode::Rewrite, // an incremental save keeps the old program's bytes
+    ..Default::default()
+});
+```
+
 ## Refused by name
 
 | What | How it shows | Why | See |
@@ -153,6 +236,14 @@ because glyph coverage needs both the content tokenizer and font metrics
 | Partial image redaction | the whole image is scrubbed (`RedactionReport::images`) | a hole needs a re-encode through a codec this build may not write | [filters](filters.md) |
 | Appearance synthesis for other subtypes | `add_annotation` inserts the dictionary; no `/AP` is generated | seven subtypes cover the common producer gap; others render only if they carry their own `/AP` | — |
 | Redaction of text inside a Type 3 glyph procedure or an annotation appearance | not rewritten | content streams reachable from a page are rewritten; glyph procedures and `/AP` streams are separate objects | — |
+| Subsetting a program `tinker_pdf_font::subset` will not rebuild — a Type 1 program, a CFF whose charstrings cannot be renumbered without guessing, bytes that are neither | the program is written through exactly as it arrived, `UntouchedReason::ProgramNotRebuildable` | ruling 2: a document that renders is worth more than one that is small | [fonts](fonts.md) |
+| A subset that comes out no smaller than the face | whole face, `SubsetNotSmaller` (`a_subset_that_is_no_smaller_is_refused_and_named`) | the face is both smaller and the one the producer tested — the same reason the builder refuses it | [fonts](fonts.md) |
+| Subsetting a font any of whose shown codes resolved only by 9.6.6.4's **closing guess** — read the code as the glyph index | whole face, `CodeNotMapped` (`a_font_whose_codes_resolve_only_by_guess_is_left_whole_and_reported`) | the guess is not a statement the font made, and two readers are free to guess differently; a glyph dropped on one guess is a glyph the other reader draws and no longer has | 9.6.6.4 |
+| Subsetting a font the AcroForm `/DR` names for a field's `/DA` | whole face, `FieldResource` (`a_font_the_acroform_default_resources_name_is_left_whole_and_reported`) | a `/DA` is a promise about *future* uses: the field's value can be retyped and the generated appearance may draw any character the font has, so there is no set to bound | 12.7.3.3 |
+| Subsetting a font no walked resource dictionary names — one reached only from a form XObject nothing draws | whole face, `ScopeNotWalked` (`a_font_no_walked_scope_names_is_left_whole_and_reported`) | "no glyphs were shown through it" is then ignorance rather than a measurement | — |
+| Subsetting a font a **Type 3 font's own `/Resources`** names | whole face, `Type3Resource` (`a_font_a_type3_fonts_own_resources_name_is_left_whole_and_reported`) | this engine runs a glyph procedure in the *enclosing* scope, so a `/F0` inside a procedure is credited to the enclosing `/F0`; the enclosing font merely gains glyphs it does not need, the Type 3 font's own would lose every glyph it does | 9.6.5 |
+| Subsetting a font written **directly** into a resource dictionary rather than by reference | whole face, `NotAnObject` (`a_font_written_directly_into_the_resources_is_left_whole_and_reported`) | there is no object to key glyph usage by; the refusal also protects a program such a font *shares* with one that does have an object, which would otherwise be cut to the other font's glyphs | — |
+| Running the subsetter automatically on `save`, or from `tpdf` | a caller calls `subset::apply` | whole-document and order-dependent — it must run after every other edit — and it costs a full interpretation of every page, which a save that changed one annotation should not pay. A `WriteOptions` switch is a [roadmap](../ROADMAP.md) row | — |
 
 ## Verified
 
@@ -179,6 +270,64 @@ because glyph coverage needs both the content tokenizer and font metrics
   rectangle — which is what lets each of them assert the safety property at
   both levels, the covered glyph's code absent from every stream **and** no
   ink inside the rectangle.
+- Subsetting-on-rewrite tests live beside `crates/tinker-pdf/src/subset.rs` —
+  25 of them over the **vendored Liberation faces**, which are third-party
+  bytes: which of their glyphs are composite, what those are built from and
+  where `loca` puts them are facts about the face and not about a fixture
+  written to pass. The document around them is this engine's own writer, which
+  is a container and not an adjudicator, and that is said in the module's own
+  documentation rather than implied. What is asserted: the rewrite renders
+  **identically** to the original and the program shrank; every glyph the page
+  shows is still in the program and the `/BaseFont` carries a well-formed
+  9.6.4 tag on all three names that must agree; the font dictionary is
+  untouched except for that tag, `/Widths` and `/FirstChar` included; a glyph
+  shown only in an annotation appearance survives, and so does one in a state
+  `/AS` does not select, whether the state dictionary is written inline or
+  reached by reference; a shown composite glyph's components survive; two
+  fonts in one scope each keep their own glyphs and neither the other's; an
+  existing tag is replaced rather than stacked; and one test per
+  `UntouchedReason`, since a refusal nothing can reach is not a refusal.
+  The disclosure property has its own: after redacting one of two lines, the
+  removed letters' outlines are **absent** from the embedded program, read back
+  through its own `loca` and `glyf`, while the kept line's are there and render
+  unchanged.
+- **Counted injection over the subsetter's rewrite path**
+  (`docs/verification.md`'s house practice). Nineteen defects put back one at a
+  time, `cargo test --no-fail-fast -p tinker-pdf` run for each, and the
+  assertions that fire counted:
+
+  | defect reintroduced | tests that caught it |
+  | --- | --- |
+  | the used-glyph set is collected but not passed to the subsetter | 8 |
+  | a glyph used only in an annotation appearance is omitted | 2 |
+  | the pass moves an encoding key it must not touch (`/FirstChar`) | 3 |
+  | the pass truncates `/Widths` rather than leaving it at the original range | 3 |
+  | the 9.6.4 subset tag is omitted | 2 |
+  | the subset tag is written malformed — `abc+` for `ABCDEF+` | 1 |
+  | an existing tag is stacked rather than replaced | 2 |
+  | the composite-glyph closure is not taken | 1 here, 1 in `tinker-pdf-font` |
+  | the fallback-to-whole-program path is taken silently | 5 |
+  | the walk reads the file rather than the editor's rewritten content | 1 |
+  | `/Length1` is left describing the face | 1 |
+  | a glyph chosen by 9.6.6.4's closing guess is counted as used | 1 |
+  | `NotAnObject` dropped — a directly written font's program is cut | 1 |
+  | `ScopeNotWalked` dropped | 1 |
+  | `Type3Resource` dropped | 1 |
+  | `FieldResource` dropped | 2 |
+  | a `/AP` state dictionary written **inline** is dropped, only a stream counting | 1 |
+  | a `/AP` state dictionary reached by **reference** is dropped | **0**, then 1 |
+  | glyph usage keyed by the scope's first font rather than the named one | 1 |
+
+  **One row scored zero, and it is the row worth reading.** `appearance_streams`
+  has a branch for an `/AP` entry that is an indirect reference, which must then
+  be resolved and asked whether what came back is a stream (one appearance) or a
+  dictionary (a state per key). Deleting the dictionary half of that branch
+  broke nothing: every fixture wrote its states inline, so the branch real
+  producers actually take — the states are shared between widgets, so they get
+  an object — was reached by no test at all. It is now
+  `a_glyph_in_an_appearance_state_reached_by_reference_is_kept`, and the same
+  deletion scores 1.
+
 - Every edited document is written through the [writer](writing.md), whose
   output is held to the strict validator (`strict_validator.rs`); the
   `render_page` and
