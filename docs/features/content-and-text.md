@@ -286,5 +286,5 @@ sweeps the same shapes on stable. Nothing compares this extractor against
 another one: ruling 13 ended that, and the harness that could have driven one
 is deleted. Across the corpus, 5 516 of
 5 525 files rendered every page with 0 crashes, and `cargo test
---workspace` stands at 4 832 passed / 0 failed / 58 ignored across 218 suites
+--workspace` stands at 4 879 passed / 0 failed / 58 ignored across 218 suites
 (Windows x86_64, 14 September 2026).
