@@ -221,7 +221,8 @@
 //!   third-party, so "held to this decoder" is worth less than it sounds.**
 //!   This was checked rather than assumed. Every fixture in `jpeg.rs`'s test
 //!   module is built by that module's own `BitWriter` and `marker` helpers;
-//!   `fuzz/corpus/jpeg/` is four files written out of those same fixtures;
+//!   `fuzz/corpus/jpeg/` is six files written out of those same fixtures,
+//!   two of them the arithmetic seeds added with `qm.rs`;
 //!   `crates/tinker-pdf/tests/cbz/source/page3.jpg` is 169 bytes and is one of
 //!   them; `crates/tinker-pdf/tests/jpeg_census.rs` walks 10 606 real streams
 //!   but counts *frame types* and never compares a pixel; and there is no JPEG

@@ -3306,6 +3306,92 @@ mod tests {
         );
     }
 
+    /// The two seeds `fuzz/corpus/jpeg/` carries for the arithmetic frames,
+    /// written from the same helpers as the tests above so the two cannot
+    /// drift apart.
+    ///
+    /// Worth having because the corpus held four seeds before this and every
+    /// one of them was Huffman-coded: `qm.rs` and `jpeg/arith.rs` together are
+    /// roughly a thousand lines that **no fuzz target could reach**, and a
+    /// mutator starting from a SOF0 file does not stumble into a SOF9 one —
+    /// it would have to invent a valid arithmetic segment from nothing. This
+    /// is ruling 1's enforcement arm being given a door.
+    ///
+    /// The seeds are **reachable by construction rather than measured**: the
+    /// assertions below prove each one decodes, and to the block it was built
+    /// from, before a single byte is mutated.
+    ///
+    /// Run with `--ignored` when the fixtures change; the corpus is committed,
+    /// and a run that rewrites it is a diff to look at rather than apply
+    /// blindly.
+    #[test]
+    #[ignore = "writes into fuzz/corpus/jpeg, which is committed"]
+    fn write_the_arithmetic_fuzz_seeds() {
+        let mut sequential = diff_of_128();
+        sequential.push((arith::Bin::Ac(0), 0));
+        sequential.push((arith::Bin::Ac(1), 1));
+        sequential.push((arith::Bin::Fixed, 1));
+        sequential.push((arith::Bin::Ac(2), 1));
+        sequential.push((arith::Bin::Ac(2), 1));
+        sequential.push((arith::Bin::Ac(189), 0));
+        sequential.push((arith::Bin::Ac(203), 0));
+        sequential.push((arith::Bin::Ac(3), 1));
+        let sequential = arithmetic_gray(
+            0xC9,
+            16,
+            8,
+            None,
+            Some(&[0x10, 0x06, 0x00, 0x31]),
+            &[(0x00, 0x3F, 0x00, arith_segment(&sequential))],
+        );
+
+        let progressive = arithmetic_gray(
+            0xCA,
+            8,
+            8,
+            None,
+            None,
+            &[
+                (0x00, 0x00, 0x04, arith_segment(&diff_of_eight())),
+                (0x00, 0x00, 0x43, arith_segment(&[(arith::Bin::Fixed, 1)])),
+                (
+                    0x01,
+                    0x3F,
+                    0x03,
+                    arith_segment(&[
+                        (arith::Bin::Ac(0), 0),
+                        (arith::Bin::Ac(1), 1),
+                        (arith::Bin::Fixed, 0),
+                        (arith::Bin::Ac(2), 1),
+                        (arith::Bin::Ac(2), 0),
+                        (arith::Bin::Ac(3), 1),
+                    ]),
+                ),
+                (0x01, 0x3F, 0x30, arith_segment(&[(arith::Bin::Ac(2), 1)])),
+            ],
+        );
+
+        // A seed that no longer reaches what it was chosen for is worse than
+        // no seed, because it looks like coverage.
+        for (label, bytes) in [
+            ("arithmetic-sequential", &sequential),
+            ("arithmetic-progressive", &progressive),
+        ] {
+            let image = decode(bytes, 1 << 20).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            assert_eq!(image.warnings, Vec::new(), "{label}");
+            assert!(
+                image.data.iter().any(|&s| s != 128),
+                "{label}: nothing decoded"
+            );
+        }
+
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/jpeg");
+        std::fs::write(base.join("arithmetic-sequential.jpg"), &sequential)
+            .expect("the corpus directory is there");
+        std::fs::write(base.join("arithmetic-progressive.jpg"), &progressive)
+            .expect("the corpus directory is there");
+    }
+
     /// An arithmetic scan that stops in the middle is reported as truncated
     /// rather than silently completed (ruling 10), and what decoded stays
     /// (ruling 2).
