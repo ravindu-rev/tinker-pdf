@@ -113,8 +113,9 @@ fetch the hint stream at `/H` (offset, length), and hand it to
 the page-offset table (F.4.1) yields each page's object run and byte span,
 the shared-object table the groups pages share. Page one's objects all lie
 below `/E`, so rendering it is head reads only; `/Encrypt`, when present,
-is object 3 in the head by this writer's own layout, so authentication
-needs no tail either. The main table at `/T` is fetched only when a read
+is numbered inside the head group by this writer's own layout — directly
+after the parameter dictionary — so the front section places it and
+authentication needs no tail either. The main table at `/T` is fetched only when a read
 leaves page one. Hints are attacker-controlled bytes: they are an
 accelerator, never an authority — every object still passes `parse_at`'s
 header check, and a hint that lies falls back to the generic path with a
@@ -289,10 +290,14 @@ rather than the file.
 Object *numbers* are deliberately not derived. F.3.1 numbers the remaining
 pages' objects from 1 and the first page's after them, and Table F.4 item 1
 repeats the rule — but a reader that derived numbers would be believing a hint,
-and this one reads them off the file's own headers instead. **That is not a
-theoretical preference: this project's own linearizer numbers the two groups
-the other way round** (see the roadmap), and the reader works on both because
-it never asks.
+and this one reads them off the file's own headers instead. That was not a
+theoretical preference while this project's own linearizer numbered the two
+groups the other way round; it numbers them F.3.1's way as of 20 September
+2026, and the reader is unchanged, because it never asked. What does derive
+the numbers, and says so, is
+`crates/tinker-pdf-cos/tests/linearized_numbering.rs` and
+`validate/hints.rs`'s `annex_f_numbering` — a test rather than a read path,
+which is the whole distinction.
 
 The shared object hint table comes along for the same ride. Table F.6 item 1
 places part 8's groups by accumulating from Table F.5 item 2, and Table F.4
@@ -306,7 +311,7 @@ table at `/T`.
 |---|---|---|
 | Open, generic path | generated, 120 pages, 4,891,065 bytes | 13,753 |
 | Open plus one mid-file object | the same | 67,001 |
-| Page-one render, linearized | generated, 60 pages, 1,631,095 bytes, `/E` 28,224 | 29,696 |
+| Page-one render, linearized | generated, 60 pages, 1,631,075 bytes, `/E` 28,222 | 29,696 |
 | Page-31 render, same document untouched | the same | 37,888 |
 | Page 31 after page one, marginal | the same | 32,768 |
 

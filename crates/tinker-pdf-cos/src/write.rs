@@ -908,7 +908,7 @@ pub fn rewrite(
         Vec::new()
     };
 
-    // F.2.2: the linearization parameter dictionary describes *this file's*
+    // F.3.3: the linearization parameter dictionary describes *this file's*
     // layout, and an ordinary rewrite is not that layout. It arrives here from
     // any source that was linearized, nothing references it, and carrying it
     // through makes the new file claim a fast-web-view layout whose hint

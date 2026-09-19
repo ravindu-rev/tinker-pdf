@@ -651,13 +651,22 @@ fn the_encrypted_layout_is_the_same_pages_at_greater_length() {
         "the fixture really is encrypted"
     );
 
-    // The runs, not the absolute numbers: an encrypted file carries one more
-    // object than a plain one — 7.6.1's `/Encrypt` dictionary — so every page
-    // is numbered one higher and the *gaps* are what stay the same. Each page
-    // still owns the same objects it did.
+    // The runs, not the absolute numbers. An encrypted file carries one more
+    // object than a plain one — 7.6.1's `/Encrypt` dictionary — and F.3.1
+    // numbers the remaining pages from 1 and the head group after them, so the
+    // extra object shifts the head and leaves pages two onward exactly where
+    // they were. What stays the same either way is every page's *run length*:
+    // the gaps between the remaining pages, and page one's own run, which
+    // reaches the top of the numbering because F.3.6 puts only the hint stream
+    // above it.
     let runs = |doc: &CosDocument| -> Vec<u32> {
         let numbers: Vec<u32> = pages(doc).iter().map(|(r, _)| r.num).collect();
-        numbers.windows(2).map(|pair| pair[1] - pair[0]).collect()
+        let mut gaps: Vec<u32> = numbers[1..]
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect();
+        gaps.push(doc.max_object_number() - numbers[0]);
+        gaps
     };
     assert_eq!(
         runs(&plain_doc),

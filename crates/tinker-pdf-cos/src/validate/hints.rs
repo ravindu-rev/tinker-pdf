@@ -600,7 +600,7 @@ mod corpus {
 
     /// Where `cargo xtask corpus-fetch` puts the qpdf corpus, and the override
     /// for a checkout that shares one fetch between worktrees.
-    fn corpus_dir() -> Option<PathBuf> {
+    pub(super) fn corpus_dir() -> Option<PathBuf> {
         let named = std::env::var_os("TINKER_QPDF_CORPUS").map(PathBuf::from);
         let default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/files/qpdf/qpdf/qtest/qpdf");
@@ -612,7 +612,7 @@ mod corpus {
 
     /// Every `.pdf` in the corpus, by name, so the order is the same on every
     /// machine and a failure names the same file twice running.
-    fn pdfs(dir: &PathBuf) -> Vec<PathBuf> {
+    pub(super) fn pdfs(dir: &PathBuf) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -782,6 +782,284 @@ mod corpus {
         assert_eq!(
             sealed, SEALED_FILES,
             "this many are sealed under a password"
+        );
+    }
+}
+
+/// Annex F's own numbering rule, applied to files this project did not write.
+///
+/// F.3.1 divides every indirect object into two groups: the remaining pages,
+/// the shared objects and everything else, *numbered sequentially starting at
+/// 1*, and the catalogue, the document-level objects and the first page's
+/// after them. Table F.4 item 1 states what that buys a reader — *the first
+/// object of the second page shall have an object number of 1* — and F.4.1's
+/// per-page entry gives a count and nothing else, so a reader derives every
+/// page's first object number by accumulating counts from `/O`.
+///
+/// This is that derivation, run against the page objects the document walk
+/// finds. It lives here rather than in `tests/` because the counts come from
+/// [`decode`], which is `pub(crate)`: this module's own header says why there
+/// is one reader for these tables and not two, and widening it so an
+/// integration test could reach it would put Annex F's bit layout on the
+/// public surface of a crate that routes through the facade (ruling 11). The
+/// halves the public API can answer are in
+/// `crates/tinker-pdf-cos/tests/linearized_numbering.rs`.
+#[cfg(test)]
+mod annex_f_numbering {
+    use std::path::PathBuf;
+
+    use super::corpus::{corpus_dir, pdfs};
+    use super::decode;
+    use crate::doc::CosDocument;
+    use crate::name::Name;
+    use crate::object::{ObjRef, Object};
+    use crate::pages;
+    use crate::parse::parse_indirect_at;
+    use crate::repair::next_object_header;
+    use crate::warn::WarningSink;
+    use crate::xref;
+
+    /// How many linearized files in the pinned qpdf corpus this rule can be
+    /// applied to end to end — opened, hint tables decoded, and every page
+    /// found by Annex F's arithmetic.
+    ///
+    /// Measured against the `qpdf` entry of `corpus/corpora.lock`, commit
+    /// e8adee32, whose pinned subdirectory holds 626 PDFs, 45 of them already
+    /// linearized. Committed rather than counted at run time, because a sweep
+    /// that reports whatever it found reads as a pass when the set shrinks to
+    /// nothing.
+    const ANNEX_F_NUMBERED_CORPUS_FILES: usize = 31;
+
+    /// The linearized corpus files Annex F's arithmetic does not find every
+    /// page of, by name and with the reason.
+    ///
+    /// Named rather than counted, in the style of this module's
+    /// `REFUSED_FILES`: a file that stopped failing, or one that started, both
+    /// fail here.
+    const NOT_NUMBERED_BY_ANNEX_F: &[&str] = &[
+        "badlin1.pdf: qpdf's deliberately damaged linearization — its /O names object 63, \n         which is page one's content stream rather than its page object, so the chain \n         starts one object late and every page after it is out by one",
+    ];
+
+    /// What applying the rule to one file came to.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        /// Not a linearized file, or one whose tables this reader will not
+        /// read — both already counted by `corpus` above, and neither this
+        /// rule's business.
+        NotChecked,
+        /// Every page was found by the arithmetic.
+        Numbered,
+        /// It was not.
+        Wrong(String),
+    }
+
+    /// `first[0]` is `/O`; `first[1]` is 1; `first[k]` is `first[k - 1]` plus
+    /// how many objects page `k - 1` owns. Nothing else.
+    fn annex_f_first_objects(first_page_object: u32, counts: &[u32]) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::with_capacity(counts.len());
+        for index in 0..counts.len() {
+            let number = match index {
+                0 => first_page_object,
+                1 => 1,
+                _ => out[index - 1].saturating_add(counts[index - 1]),
+            };
+            out.push(number);
+        }
+        out
+    }
+
+    /// Opens one file, decodes its tables, and asks whether the numbers the
+    /// rule produces are the pages the document walk finds.
+    fn check(bytes: Vec<u8>) -> Outcome {
+        let Ok(doc) = CosDocument::open(bytes) else {
+            return Outcome::NotChecked;
+        };
+        let mut sink = WarningSink::new();
+        let shift = xref::header_shift(doc.bytes(), &mut sink);
+        let Some(at) = next_object_header(doc.bytes(), 0) else {
+            return Outcome::NotChecked;
+        };
+        let Some(first) = parse_indirect_at(doc.bytes(), at, doc.names_table(), &mut sink) else {
+            return Outcome::NotChecked;
+        };
+        let linearized = doc.intern(b"Linearized");
+        let Some(dict) = first
+            .object
+            .as_dict()
+            .filter(|d| d.contains_key(linearized))
+        else {
+            return Outcome::NotChecked;
+        };
+
+        let page_count = dict
+            .get_int(doc.intern(b"N"))
+            .and_then(|v| usize::try_from(v).ok());
+        let first_page_object = dict
+            .get_int(doc.intern(b"O"))
+            .and_then(|v| u32::try_from(v).ok());
+        let hint_offset = dict
+            .get_array(doc.intern(b"H"))
+            .and_then(|a| a.first().cloned())
+            .and_then(|o| o.as_int())
+            .and_then(|v| u64::try_from(v).ok());
+        let (Some(page_count), Some(first_page_object), Some(hint_offset)) =
+            (page_count, first_page_object, hint_offset)
+        else {
+            return Outcome::NotChecked;
+        };
+
+        if doc.is_encrypted() && doc.authenticate("").is_err() {
+            return Outcome::NotChecked;
+        }
+
+        let len = doc.bytes().len() as u64;
+        let stream = xref::offset_candidates(len, hint_offset, shift)
+            .into_iter()
+            .find_map(|at| parse_indirect_at(doc.bytes(), at, doc.names_table(), &mut sink));
+        let Some(stream) = stream else {
+            return Outcome::NotChecked;
+        };
+        let Object::Stream(hint) = &stream.object else {
+            return Outcome::NotChecked;
+        };
+        let shared_at = hint
+            .dict
+            .get_int(doc.intern(b"S"))
+            .and_then(|v| usize::try_from(v).ok());
+        let (Some(shared_at), Ok(data)) = (shared_at, doc.stream_decoded(stream.reference)) else {
+            return Outcome::NotChecked;
+        };
+        let Some(tables) = decode(&data, shared_at, page_count) else {
+            return Outcome::NotChecked;
+        };
+
+        let walked = pages::collect(&doc);
+        if walked.len() != page_count {
+            return Outcome::NotChecked;
+        }
+        let counts: Vec<u32> = tables.pages.iter().map(|page| page.objects).collect();
+        let page = doc.intern(b"Page");
+        for (index, number) in annex_f_first_objects(first_page_object, &counts)
+            .into_iter()
+            .enumerate()
+        {
+            let Ok(object) = doc.get(ObjRef::new(number, 0)) else {
+                return Outcome::Wrong(format!("page {index} lands on object {number}, absent"));
+            };
+            if object.as_dict().and_then(|d| d.get_name(Name::TYPE)) != Some(page) {
+                return Outcome::Wrong(format!(
+                    "page {index} lands on object {number}, which is not a page"
+                ));
+            }
+            if walked.get(index).map(|p| p.reference.num) != Some(number) {
+                return Outcome::Wrong(format!(
+                    "page {index} lands on object {number}, which is some other page"
+                ));
+            }
+        }
+        Outcome::Numbered
+    }
+
+    /// The writer's own output, held to the same rule.
+    ///
+    /// Always runs. The helper above would be worth nothing if it had only
+    /// ever met files somebody else laid out, and a corpus that is not fetched
+    /// would leave it never executed at all.
+    #[test]
+    fn this_writers_pages_are_found_by_annex_fs_own_arithmetic() {
+        for pages in [2usize, 3, 6] {
+            let mut builder = crate::DocumentBuilder::new();
+            builder.add_base_font(b"F0", b"Helvetica");
+            for index in 0..pages {
+                builder.add_page(200.0, 100.0, |page| {
+                    page.text(b"F0", 12.0, 10.0, 50.0, &format!("page {index}"));
+                });
+            }
+            let doc = std::sync::Arc::new(
+                CosDocument::open(builder.finish()).expect("the fixture opens"),
+            );
+            let bytes = crate::edit::DocumentEditor::new(doc).save(&crate::write::WriteOptions {
+                mode: crate::write::WriteMode::Rewrite,
+                linearize: true,
+                object_streams: false,
+                ..crate::write::WriteOptions::default()
+            });
+            assert_eq!(
+                check(bytes),
+                Outcome::Numbered,
+                "{pages} pages of this writer's own output"
+            );
+        }
+    }
+
+    /// And over files this project did not write.
+    ///
+    /// Ruling 13's `RAN`/`SKIPPED` discipline: a check that can be absent says
+    /// which it was, and `TINKER_CORPUS_REQUIRED` turns the absence into a
+    /// failure for a run that is meant to include it.
+    #[test]
+    fn qpdf_linearized_files_are_found_by_annex_fs_own_arithmetic() {
+        let Some(dir) = corpus_dir() else {
+            assert!(
+                std::env::var_os("TINKER_CORPUS_REQUIRED").is_none(),
+                "TINKER_CORPUS_REQUIRED is set and the qpdf corpus is not there"
+            );
+            println!(
+                "SKIPPED linearized numbering over the qpdf corpus: it is not fetched \
+                 (set TINKER_QPDF_CORPUS)"
+            );
+            return;
+        };
+
+        let files: Vec<PathBuf> = pdfs(&dir);
+        assert!(
+            files.len() > 500,
+            "{} holds {} PDFs, which is not the qpdf corpus",
+            dir.display(),
+            files.len()
+        );
+
+        let mut checked = 0usize;
+        let mut wrong: Vec<String> = Vec::new();
+        for path in &files {
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match check(bytes) {
+                Outcome::NotChecked => {}
+                Outcome::Numbered => checked += 1,
+                Outcome::Wrong(why) => wrong.push(format!("{name}: {why}")),
+            }
+        }
+
+        println!(
+            "RAN linearized numbering over qpdf: {checked} files found every page by Annex F's \
+             arithmetic, {} did not, over {} PDFs",
+            wrong.len(),
+            files.len()
+        );
+        let named: Vec<String> = wrong
+            .iter()
+            .map(|line| line.split(':').next().unwrap_or(line).to_string())
+            .collect();
+        let expected: Vec<String> = NOT_NUMBERED_BY_ANNEX_F
+            .iter()
+            .map(|line| line.split(':').next().unwrap_or(line).to_string())
+            .collect();
+        assert_eq!(
+            named, expected,
+            "these are the linearized corpus files Annex F's arithmetic does not find every page \
+             of, and no others: {wrong:?}"
+        );
+        assert!(
+            checked >= ANNEX_F_NUMBERED_CORPUS_FILES,
+            "only {checked} corpus files were checked end to end, and \
+             {ANNEX_F_NUMBERED_CORPUS_FILES} were when this was measured: a shrinking set reads \
+             as a pass"
         );
     }
 }

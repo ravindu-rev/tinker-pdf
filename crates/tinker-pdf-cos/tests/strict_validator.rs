@@ -1218,7 +1218,7 @@ fn shared_resource() -> Vec<u8> {
 
 /// Rewrites one of the parameter dictionary's fixed-width integers.
 ///
-/// F.2.1 writes every one of them to the same width so the dictionary's own
+/// F.3.3 writes every one of them to the same width so the dictionary's own
 /// length is known before the layout is: an injection can therefore change a
 /// value without moving a byte, which is exactly what these rules need.
 fn parameter(bytes: &[u8], key: &[u8], value: u64) -> Vec<u8> {
@@ -1229,8 +1229,21 @@ fn parameter(bytes: &[u8], key: &[u8], value: u64) -> Vec<u8> {
 }
 
 /// Where the primary hint stream's data begins.
+///
+/// Reached through `/H`'s first element, which is where F.3.3 says the stream
+/// is. Searching for `2 0 obj` instead was a substring search that also
+/// matches inside `12 0 obj`, and it only ever found the right object because
+/// the hint stream happened to be numbered 2 and to sit near the front of the
+/// file: with the head group numbered after the tail it finds a content stream
+/// in the tail, and every injection below would patch that instead.
 fn hint_data(bytes: &[u8]) -> usize {
-    let object = find(bytes, b"2 0 obj").expect("the hint stream is object two");
+    let at = find(bytes, b"/H [ ").expect("the parameter dictionary states /H") + 5;
+    let offset = digits_at(bytes, at)
+        .iter()
+        .fold(0usize, |acc, b| acc * 10 + usize::from(b - b'0'));
+    // Annex F reserves no object numbers, so the header there is `N G obj`
+    // for whatever N the layout produced.
+    let object = offset + find(&bytes[offset..], b" obj\n").expect("an object header at /H") + 5;
     object + find(&bytes[object..], b"stream\n").expect("its data") + 7
 }
 
@@ -1253,12 +1266,27 @@ fn a_declared_file_length_that_is_not_the_files_is_refused() {
     );
 }
 
+/// Table F.1 item 3: `/O` is the first page's own object number.
+///
+/// The injected value is derived from the file rather than written as a
+/// literal. A literal 9 refused on the old numbering by luck — 9 was some
+/// other object — and would have gone on refusing for the wrong reason the day
+/// the fixture gained one. `FIELD_WIDTH` is ten digits, so any value is a
+/// zero-cost patch and no offset moves.
 #[test]
 fn a_first_page_object_that_is_not_the_first_pages_is_refused() {
-    refused(
-        parameter(&linearized(), b"/O ", 9),
-        "linearized-parameter-wrong",
-    );
+    let bytes = linearized();
+    let at = find(&bytes, b"/O ").expect("the parameter dictionary states /O") + 3;
+    let real: u64 = digits_at(&bytes, at)
+        .iter()
+        .fold(0u64, |acc, b| acc * 10 + u64::from(b - b'0'));
+    for wrong in [0, real + 1] {
+        assert_ne!(wrong, real, "the injected value is not the right one");
+        refused(
+            parameter(&bytes, b"/O ", wrong),
+            "linearized-parameter-wrong",
+        );
+    }
 }
 
 #[test]
@@ -1269,7 +1297,7 @@ fn a_page_count_the_tree_does_not_agree_with_is_refused() {
     );
 }
 
-/// F.2.2 item 6: `/T` names the first *entry* of the main table, not the
+/// Table F.1 item 6: `/T` names the first *entry* of the main table, not the
 /// `xref` keyword above it — a distinction worth a rule, because a reader
 /// seeking there lands one line early and reads the subsection header as an
 /// entry.
@@ -1281,7 +1309,7 @@ fn a_main_table_offset_that_names_the_wrong_byte_is_refused() {
     );
 }
 
-/// F.2.2 item 5: `/E` is the end of the first page's section, so a value
+/// Table F.1 item 5: `/E` is the end of the first page's section, so a value
 /// before the first page's own objects end is one that cuts them off.
 #[test]
 fn a_first_page_end_before_the_first_page_is_refused() {
@@ -1433,7 +1461,7 @@ fn a_table_whose_objects_start_above_one_still_heads_its_free_list() {
 
 /// A rewrite of a linearized file does not claim to be linearized.
 ///
-/// F.2.2's parameter dictionary describes *that* file's layout: where the
+/// F.3.3's parameter dictionary describes *that* file's layout: where the
 /// hint stream is, where the first page's section ends, where the main table
 /// starts. An ordinary rewrite has none of those, and carrying the dictionary
 /// through — which every rewrite of a linearized source did — makes the new

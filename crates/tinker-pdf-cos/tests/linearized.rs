@@ -139,28 +139,8 @@ fn final_startxref(bytes: &[u8]) -> usize {
 ///
 /// Returns the in-use entries only, as (object number, offset).
 fn classic_xref(bytes: &[u8], at: usize) -> Vec<(u32, u64)> {
-    let head = bytes.get(at..).unwrap_or_default();
-    assert!(
-        head.starts_with(b"xref\n"),
-        "a cross-reference table begins at {at}"
-    );
-    let rest = &head[5..];
-    let eol = rest
-        .iter()
-        .position(|b| *b == b'\n')
-        .expect("a subsection header line");
-    let header = std::str::from_utf8(&rest[..eol]).expect("the header is ASCII");
-    let mut parts = header.split(' ');
-    let start: u32 = parts
-        .next()
-        .and_then(|t| t.parse().ok())
-        .expect("a first object number");
-    let count: usize = parts
-        .next()
-        .and_then(|t| t.parse().ok())
-        .expect("an entry count");
-
-    let entries = &rest[eol + 1..];
+    let (start, count, entries_at) = subsection_header(bytes, at);
+    let entries = bytes.get(entries_at..).unwrap_or_default();
     let mut out = Vec::with_capacity(count);
     for index in 0..count {
         // 7.5.4: exactly twenty bytes, and the field positions are fixed.
@@ -184,6 +164,114 @@ fn classic_xref(bytes: &[u8], at: usize) -> Vec<(u32, u64)> {
         out.push((start + index as u32, offset));
     }
     out
+}
+
+/// A classic cross-reference section's one subsection (7.5.4): the first
+/// object number it covers, how many entries follow, and where they begin.
+///
+/// The first number is read rather than assumed. Annex F reserves no object
+/// numbers, so a linearized file's front section starts wherever its head
+/// group does, and a test that expected `0 N` there would be testing one
+/// writer's habit rather than the format.
+fn subsection_header(bytes: &[u8], at: usize) -> (u32, usize, usize) {
+    let head = bytes.get(at..).unwrap_or_default();
+    assert!(
+        head.starts_with(b"xref\n"),
+        "a cross-reference table begins at {at}"
+    );
+    let rest = &head[5..];
+    let eol = rest
+        .iter()
+        .position(|b| *b == b'\n')
+        .expect("a subsection header line");
+    let header = std::str::from_utf8(&rest[..eol]).expect("the header is ASCII");
+    let mut parts = header.split(' ');
+    let start: u32 = parts
+        .next()
+        .and_then(|t| t.parse().ok())
+        .expect("a first object number");
+    let count: usize = parts
+        .next()
+        .and_then(|t| t.parse().ok())
+        .expect("an entry count");
+    (start, count, at + 5 + eol + 1)
+}
+
+/// How many of a section's entries are marked free (7.5.4: byte 17 is `f`).
+fn free_entries(bytes: &[u8], at: usize) -> usize {
+    let (_, count, entries_at) = subsection_header(bytes, at);
+    (0..count)
+        .filter(|index| bytes.get(entries_at + index * 20 + 17) == Some(&b'f'))
+        .count()
+}
+
+/// Reads an `N G obj` header beginning exactly at `at` (7.3.10), returning the
+/// object number and the offset just past the `obj` keyword.
+///
+/// Generic in the number on purpose. Annex F reserves none, so which object
+/// leads the file and which one the primary hint stream is are both
+/// consequences of the document's shape; a test that looked for `1 0 obj` or
+/// `2 0 obj` would be pinning this writer's arithmetic instead of the layout.
+fn object_header_at(bytes: &[u8], at: usize) -> Option<(u32, usize)> {
+    let mut cursor = at;
+    let number = read_number(bytes, &mut cursor)?;
+    read_spaces(bytes, &mut cursor)?;
+    read_number(bytes, &mut cursor)?;
+    read_spaces(bytes, &mut cursor)?;
+    if bytes.get(cursor..cursor.checked_add(3)?) != Some(&b"obj"[..]) {
+        return None;
+    }
+    Some((number, cursor + 3))
+}
+
+fn read_number(bytes: &[u8], cursor: &mut usize) -> Option<u32> {
+    let start = *cursor;
+    while bytes.get(*cursor).is_some_and(u8::is_ascii_digit) {
+        *cursor += 1;
+    }
+    if *cursor == start {
+        return None;
+    }
+    std::str::from_utf8(bytes.get(start..*cursor)?)
+        .ok()?
+        .parse()
+        .ok()
+}
+
+fn read_spaces(bytes: &[u8], cursor: &mut usize) -> Option<()> {
+    let start = *cursor;
+    while bytes.get(*cursor) == Some(&b' ') {
+        *cursor += 1;
+    }
+    (*cursor > start).then_some(())
+}
+
+/// The first indirect object in the file, by position: (number, where its
+/// header begins, where its body begins).
+///
+/// F.3.3 puts the linearization parameter dictionary there, whatever number
+/// the layout gave it.
+fn first_object(bytes: &[u8]) -> (u32, usize, usize) {
+    for at in 0..bytes.len() {
+        if at > 0 && !matches!(bytes[at - 1], b'\n' | b'\r') {
+            continue;
+        }
+        if let Some((number, end)) = object_header_at(bytes, at) {
+            return (number, at, end);
+        }
+    }
+    panic!("no indirect object in the file");
+}
+
+/// The object number a trailer's `/Encrypt` entry names.
+fn encrypt_reference(trailer: &str) -> u32 {
+    let at = trailer.find("/Encrypt ").expect("an /Encrypt entry");
+    trailer[at + 9..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("an object number")
 }
 
 /// Where the main cross-reference table's `xref` keyword is.
@@ -296,15 +384,22 @@ fn a_linearized_file_still_opens_and_reads() {
 // of the claims, so an encrypted file that cannot pass these has a layout
 // that describes bytes it does not contain.
 
-/// F.2.2: the parameter dictionary is the first object in the file, before
+/// F.3.3: the parameter dictionary is the first object in the file, before
 /// anything else a reader would have to skip.
+///
+/// Found by *position*, not by number. F.3.1 numbers the head group after the
+/// tail group, so the parameter dictionary's own number is whatever is left
+/// when parts 7, 8 and 9 have been numbered from 1 — and it is object 1 only
+/// in the degenerate case where there is no part 7, 8 or 9 at all.
 fn assert_the_parameter_dictionary_comes_first(bytes: &[u8]) {
     let head = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).into_owned();
-
     assert!(head.starts_with("%PDF-"), "the header: {head}");
+
+    let (number, _, body) = first_object(bytes);
+    let there = String::from_utf8_lossy(&bytes[body..bytes.len().min(body + 40)]).into_owned();
     assert!(
-        head.contains("1 0 obj\n<< /Linearized 1"),
-        "then the parameter dictionary, immediately: {head}"
+        there.trim_start().starts_with("<< /Linearized 1"),
+        "object {number} leads the file and is not the parameter dictionary: {head}"
     );
 }
 
@@ -320,11 +415,21 @@ fn assert_the_hint_stream_is_where_the_dictionary_says(bytes: &[u8]) {
     let at = hint_offset(bytes) as usize;
 
     let there = String::from_utf8_lossy(&bytes[at..bytes.len().min(at + 40)]).into_owned();
+    let (number, body) = object_header_at(bytes, at)
+        .unwrap_or_else(|| panic!("an indirect object begins at /H: {there}"));
+    let after = String::from_utf8_lossy(&bytes[body..bytes.len().min(body + 40)]).into_owned();
+    assert!(after.contains("stream"), "and it is a stream: {after}");
+
+    // And the front cross-reference section places that same object at that
+    // same byte. `/H` and the section are two statements about one object, and
+    // a reader that reached the stream through the section rather than through
+    // `/H` has to land on the same header — which is the half a check on `/H`
+    // alone cannot make.
+    let front = classic_xref(bytes, final_startxref(bytes));
     assert!(
-        there.starts_with("2 0 obj"),
-        "an indirect object begins at /H: {there}"
+        front.contains(&(number, at as u64)),
+        "the first-page section puts object {number} at {at}: {front:?}"
     );
-    assert!(there.contains("stream"), "and it is a stream: {there}");
 
     // The second element is the object's length, so the two together frame
     // exactly one object. On an encrypted file this is the assertion that
@@ -578,19 +683,34 @@ fn each_page_owns_a_consecutive_run_of_objects_led_by_its_page_object() {
         parameter(&bytes, "O"),
         "/O leads the first run"
     );
-    for pair in numbers.windows(2) {
+    // Table F.4 item 1, verbatim: *the first object of the second page shall
+    // have an object number of 1*. F.3.1 numbers parts 7, 8 and 9 sequentially
+    // from there, so the later page objects ascend among themselves and page
+    // one's sits above all of them, in the head group.
+    assert_eq!(numbers[1], 1, "page two leads part 7: {numbers:?}");
+    for pair in numbers[1..].windows(2) {
         assert!(
             pair[1] > pair[0],
-            "page objects ascend with page order: {numbers:?}"
+            "the remaining pages ascend with page order: {numbers:?}"
+        );
+    }
+    for num in &numbers[1..] {
+        assert!(
+            *num < numbers[0],
+            "page one's object {} is above every other page's: {numbers:?}",
+            numbers[0]
         );
     }
 
-    // F.3.6: part 6 *begins* at the page object, so nothing page one reaches
-    // is numbered below `/O`. The gap checks below cannot see this — an object
-    // placed in front of `/O` is outside every gap between two page objects —
-    // and it is exactly where the defect was: the writer numbered part 6 in
-    // old-object order, the font came first, and a reader taking three
-    // consecutive numbers from `/O` ran a number past the end of the file.
+    // Page one's run is the *top* of the file's numbering: part 6 is the last
+    // thing the head group holds, so nothing page one reaches is numbered
+    // below `/O` and nothing at all is numbered above its run.
+    //
+    // This is a property of this writer's partition rather than of Annex F. A
+    // conforming file may put a document-level object page one reaches below
+    // `/O` — `lin1.pdf` in the fetched qpdf corpus numbers its outline
+    // hierarchy above `/O` and its catalogue below — and the reader never
+    // derives numbers, so it opens either.
     for num in reachable(&doc, collected[0].reference) {
         assert!(
             num >= numbers[0],
@@ -612,10 +732,29 @@ fn each_page_owns_a_consecutive_run_of_objects_led_by_its_page_object() {
         .iter()
         .map(|page| reachable(&doc, page.reference))
         .collect();
-    let highest = doc.max_object_number();
+    // Where each run stops. Page one's is the last of the head group, so it
+    // runs to the hint stream — F.3.6 numbers that last of all, above the
+    // first page's objects, and the file says which object it is by putting
+    // `/H` at its header. The last of the remaining pages runs to the bottom
+    // of the head group, read off the front section's own subsection header
+    // rather than assumed. (Parts 8 and 9 would sit in that gap; this fixture
+    // has neither, and one that grew a part 8 would fail here rather than
+    // quietly claim a shared object for its last page.)
+    let head_first = subsection_header(&bytes, final_startxref(&bytes)).0;
+    let hint = object_header_at(&bytes, hint_offset(&bytes) as usize)
+        .expect("an object header at /H")
+        .0;
+    assert_eq!(
+        hint,
+        doc.max_object_number(),
+        "the hint stream is the last object number in the file (F.3.6)"
+    );
     let mut checked = 0usize;
     for (index, start) in numbers.iter().enumerate() {
-        let end = numbers.get(index + 1).copied().unwrap_or(highest + 1);
+        let end = match index {
+            0 => hint,
+            _ => numbers.get(index + 1).copied().unwrap_or(head_first),
+        };
         assert!(
             end > *start + 1,
             "page {index} owns more than its page object"
@@ -637,6 +776,71 @@ fn each_page_owns_a_consecutive_run_of_objects_led_by_its_page_object() {
         }
     }
     assert!(checked >= 12, "only {checked} objects were checked");
+}
+
+/// 7.5.4 and F.3.1: the first-page cross-reference section is one subsection
+/// over the head group, so it starts at the parameter dictionary's own object
+/// number, covers every head object, and contains no free entry at all.
+///
+/// A free entry in the newer section overrides the main table reached through
+/// `/Prev` (7.5.6). A section headed `0 N` therefore frees every number below
+/// the head that it does not carry — which, with the head numbered first, is
+/// every object the main table holds. That is the whole reason F.3.1 numbers
+/// the tail group first, and this is the assertion that says so in bytes.
+#[test]
+fn the_first_page_section_is_the_head_group_and_frees_nothing() {
+    for (case, bytes) in [
+        ("plain", linearized(6)),
+        ("encrypted", encrypted_linearized(6)),
+    ] {
+        let at = final_startxref(&bytes);
+        let (first, count, _) = subsection_header(&bytes, at);
+
+        let (parameters, _, _) = first_object(&bytes);
+        assert_eq!(
+            first, parameters,
+            "the section starts at part 2's own number ({case})"
+        );
+        assert_eq!(
+            free_entries(&bytes, at),
+            0,
+            "and frees nothing: header {first} {count} ({case})"
+        );
+
+        let doc = CosDocument::open(bytes.clone()).expect("it opens");
+        assert_eq!(
+            first as usize + count,
+            doc.max_object_number() as usize + 1,
+            "it reaches the top of the file's numbering ({case})"
+        );
+
+        let entries = classic_xref(&bytes, at);
+        assert_eq!(entries.len(), count, "every entry is in use ({case})");
+        for (index, (number, _)) in entries.iter().enumerate() {
+            assert_eq!(
+                *number,
+                first + index as u32,
+                "the head group is contiguous ({case}): {entries:?}"
+            );
+        }
+
+        // And the main section is the other half of the numbering, with no
+        // free entry of its own beyond object zero's — which is where 7.5.4's
+        // head of the free list lives, and where Table F.1 item 6's `/T`
+        // points.
+        let main_at = main_xref_offset(&bytes);
+        let (main_first, main_count, _) = subsection_header(&bytes, main_at);
+        assert_eq!(main_first, 0, "the main section starts at zero ({case})");
+        assert_eq!(
+            free_entries(&bytes, main_at),
+            1,
+            "and frees only object zero ({case})"
+        );
+        assert_eq!(
+            main_count, first as usize,
+            "the two sections meet exactly ({case})"
+        );
+    }
 }
 
 #[test]
@@ -882,13 +1086,7 @@ fn an_encrypted_linearized_file_is_byte_for_byte_reproducible() {
 #[test]
 fn the_parameter_dictionary_is_readable_without_the_password() {
     let bytes = encrypted_linearized(6);
-    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).into_owned();
-
-    assert!(head.starts_with("%PDF-"), "the header: {head}");
-    assert!(
-        head.contains("1 0 obj\n<< /Linearized 1"),
-        "then the parameter dictionary, immediately: {head}"
-    );
+    assert_the_parameter_dictionary_comes_first(&bytes);
 
     // Every field parses out of the raw bytes, with no key involved.
     for key in ["L", "O", "E", "N", "T"] {
@@ -923,19 +1121,27 @@ fn both_cross_reference_tables_are_readable_without_the_password() {
     let front_trailer = trailer_after(&bytes, front_at);
     assert!(front_trailer.contains("/Root "), "{front_trailer}");
     assert!(
-        front_trailer.contains("/Encrypt 3 0 R"),
-        "the first trailer names the encryption dictionary: {front_trailer}"
-    );
-    assert!(
         front_trailer.contains("/Prev "),
         "and chains to the main table: {front_trailer}"
     );
 
     let main_trailer = trailer_after(&bytes, main_at);
     assert!(main_trailer.contains("/Root "), "{main_trailer}");
+    let named = encrypt_reference(&front_trailer);
+    assert_eq!(
+        named,
+        encrypt_reference(&main_trailer),
+        "both trailers name the same encryption dictionary, for a reader that \
+         started at either end: {front_trailer} / {main_trailer}"
+    );
+
+    // And the front section carries it. The `/Encrypt` dictionary is numbered
+    // inside the head group for exactly this reason: a number outside it would
+    // leave `/Encrypt N 0 R` resolvable only through `/Prev`, which is a tail
+    // read before a streaming reader can decrypt anything at all.
     assert!(
-        main_trailer.contains("/Encrypt 3 0 R"),
-        "the main trailer names it too, for a reader that started at the back: {main_trailer}"
+        front.iter().any(|(number, _)| *number == named),
+        "the first-page section places object {named}: {front:?}"
     );
 }
 
@@ -946,7 +1152,13 @@ fn both_cross_reference_tables_are_readable_without_the_password() {
 fn the_encryption_dictionary_is_readable_without_the_password() {
     let bytes = encrypted_linearized(6);
 
-    let at = find(&bytes, b"\n3 0 obj\n").expect("object 3 is in the file") + 1;
+    // Which object it is comes from the trailer, not from a literal: the
+    // number is whatever the head group's second slot turned out to be.
+    let named = encrypt_reference(&trailer_after(&bytes, final_startxref(&bytes)));
+    let needle = format!("\n{named} 0 obj\n");
+    let at = find(&bytes, needle.as_bytes())
+        .unwrap_or_else(|| panic!("object {named} is in the file"))
+        + 1;
     let end = find(&bytes[at..], b"\nendobj\n").expect("and it ends") + at;
     let dict = String::from_utf8_lossy(&bytes[at..end]).into_owned();
 

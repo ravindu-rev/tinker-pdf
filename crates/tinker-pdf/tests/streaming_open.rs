@@ -323,8 +323,8 @@ const PAGE_ONE_ONLY_FROM_THE_HEAD: &[&str] = &[
 /// How many bytes a page-one render of the 60-page linearized fixture may
 /// read. A ratchet, measured and committed.
 ///
-/// 29,696 of 1,631,095 -- 1.8% -- and the shape of the number is the point:
-/// `/E` is 28,224, so page one costs the head up to `/E` rounded up to the
+/// 29,696 of 1,631,075 -- 1.8% -- and the shape of the number is the point:
+/// `/E` is 28,222, so page one costs the head up to `/E` rounded up to the
 /// chunk that contains it, and nothing else. A budget much below that would
 /// mean the render was not drawing the page; anything above it would mean
 /// something reached into the tail.
@@ -382,7 +382,7 @@ fn a_linearized_file_renders_page_one_without_touching_its_tail() {
 /// read, on a document nothing has opened past its head. A ratchet, measured
 /// and committed.
 ///
-/// 37,888 of 1,631,095 -- 2.3% -- and the shape of the number is the point, as
+/// 37,888 of 1,631,075 -- 2.3% -- and the shape of the number is the point, as
 /// it is for page one. Page 31 costs the head that carries the linearization
 /// dictionary and the first-page cross-reference section, the primary hint
 /// stream at `/H`, and its own run of objects. Nothing else: not the main
@@ -975,6 +975,43 @@ fn hint_stream_at(bytes: &[u8]) -> usize {
         .expect("an offset")
 }
 
+/// Reads an `N 0 obj` header beginning exactly at `at`, returning the object
+/// number and how many digits it is spelled with. `None` when there is no
+/// header there.
+///
+/// Generic in the number, because nothing reserves one. F.3.6 gives the
+/// primary hint stream *the last object number in the file*, so which number
+/// that is depends on how many objects the document has — a test that looked
+/// for `2 0 obj` would be pinning one fixture's arithmetic.
+fn object_header_at(bytes: &[u8], at: usize) -> Option<(u32, usize)> {
+    let digits: Vec<u8> = bytes
+        .get(at..)?
+        .iter()
+        .copied()
+        .take_while(u8::is_ascii_digit)
+        .collect();
+    if digits.is_empty() || !bytes.get(at + digits.len()..)?.starts_with(b" 0 obj") {
+        return None;
+    }
+    let number = std::str::from_utf8(&digits).ok()?.parse().ok()?;
+    Some((number, digits.len()))
+}
+
+fn object_number_at(bytes: &[u8], at: usize) -> (u32, usize) {
+    object_header_at(bytes, at).unwrap_or_else(|| panic!("an `N 0 obj` header begins at {at}"))
+}
+
+/// Where the first indirect object's header begins. F.3.3 puts the
+/// linearization parameter dictionary there, whatever number it carries.
+fn first_object_at(bytes: &[u8]) -> usize {
+    (0..bytes.len())
+        .find(|at| {
+            (*at == 0 || matches!(bytes[at - 1], b'\n' | b'\r'))
+                && object_header_at(bytes, *at).is_some()
+        })
+        .expect("an indirect object in the file")
+}
+
 /// Where the page offset hint table's own bytes begin (F.4: it is the first
 /// table in the stream and starts at offset 0).
 ///
@@ -984,16 +1021,13 @@ fn hint_stream_at(bytes: &[u8]) -> usize {
 /// patched in Table F.3.
 fn hint_table_at(bytes: &[u8]) -> usize {
     let object = hint_stream_at(bytes);
-    assert_eq!(
-        &bytes[object..object + 7],
-        b"2 0 obj",
-        "the writer numbers the hint stream 2 and /H points at its header"
-    );
-    let keyword = bytes[object..]
+    let (_, width) = object_number_at(bytes, object);
+    let from = object + width;
+    let keyword = bytes[from..]
         .windows(6)
         .position(|w| w == b"stream")
         .expect("the stream keyword")
-        + object
+        + from
         + 6;
     // 7.3.8.1: the keyword is followed by CRLF or LF, and the data follows.
     let mut data = keyword;
@@ -1116,13 +1150,24 @@ fn a_hint_stream_the_first_page_table_places_elsewhere_is_refused() {
     let want = buffered_page(&clean, 1);
 
     let mut bytes = clean.clone();
-    // The header at `/H` says `2 0 obj`. Object 1 is the linearization
-    // parameter dictionary, which F.3.3 requires the first-page section to
-    // carry an entry for -- at its own offset, near byte zero. So the two
-    // statements now disagree, and nothing else changes: every read of object
-    // 1 goes to the section's offset and finds object 1 there.
+    // `/H` points at the hint stream's own `N 0 obj` header. Overwriting that
+    // number with the linearization parameter dictionary's -- the first object
+    // in the file, which F.3.3 requires the first-page section to carry an
+    // entry for, at its own offset near byte zero -- makes the two statements
+    // disagree and changes nothing else: every read of that object goes to the
+    // section's offset and finds it there.
+    //
+    // Zero-padded to the header's own width, which 7.3.3 permits, so no offset
+    // moves. Overwriting one digit is what this did first, and the day the
+    // hint stream's number grew past nine that was a patch that changed
+    // nothing and a test that asserted nothing.
     let object = hint_stream_at(&bytes);
-    bytes[object] = b'1';
+    let (hint, width) = object_number_at(&bytes, object);
+    let parameters = object_number_at(&bytes, first_object_at(&bytes)).0;
+    assert_ne!(parameters, hint, "two different objects");
+    let spelled = format!("{parameters:0width$}");
+    assert_eq!(spelled.len(), width, "the patch keeps the header's width");
+    bytes[object..object + width].copy_from_slice(spelled.as_bytes());
     assert_ne!(bytes, clean, "the patch landed");
 
     let (document, got) = page_two_streamed(&bytes);

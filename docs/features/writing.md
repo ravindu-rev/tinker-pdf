@@ -111,13 +111,32 @@ the hint tables' bit widths derive from counts and lengths, so every
 offset is known before a byte is emitted. `/E` is the end of the
 first-page section and `/T` the offset of the main table's first entry.
 Hints are advisory and most viewers ignore them; the practical win is HTTP
-range serving. And it **combines with encryption**: each object is
-encrypted as it is serialised and the layout measured from the ciphertext,
-so the padding AES-CBC adds is inside every offset the file declares. The
-`/Encrypt` dictionary takes the reserved object number 3 — numbering it
-above the ordinary objects would put it in the front table's freeing
-range — and the parameter dictionary stays clear, sound because it
-contains no strings, which a test asserts rather than assumes.
+range serving.
+
+**The numbering is F.3.1's and not this writer's convenience.** Parts 7, 8
+and 9 — the remaining pages, the shared objects, everything no page
+reaches — are numbered sequentially starting at 1, which is what makes
+Table F.4 item 1's *the first object of the second page shall have an
+object number of 1* true by construction. Everything the head of the file
+must resolve without the tail is numbered after them, as one contiguous
+range: part 2, the `/Encrypt` dictionary, part 4, part 6, and last of all
+the primary hint stream, which F.3.6 gives *the last object number in the
+file* whatever its physical position. Contiguous because the first-page
+cross-reference section covers all of it with a single subsection, and
+7.5.4 makes a subsection a range — so that section starts at the parameter
+dictionary's own number, carries no object-0 entry and marks nothing free.
+The file's free head lives in the main section, which is also where Table
+F.1 item 6's `/T` points.
+
+It **combines with encryption**: each object is encrypted as it is
+serialised and the layout measured from the ciphertext, so the padding
+AES-CBC adds is inside every offset the file declares. The `/Encrypt`
+dictionary takes the number immediately after the parameter dictionary's,
+which keeps it inside the head group — a number outside it would leave the
+front trailer's `/Encrypt N 0 R` resolvable only through `/Prev`, and that
+is a tail read before a streaming reader can decrypt anything at all. The
+parameter dictionary stays clear, sound because it contains no strings,
+which a test asserts rather than assumes.
 
 ## API
 
@@ -177,7 +196,14 @@ own decryption is one level down, in
 
 `crates/tinker-pdf-cos/tests/linearized.rs` checks byte offsets against the
 bytes — a file can open perfectly with page one scattered through the
-middle, which a round-trip cannot see.
+middle, which a round-trip cannot see. `tests/linearized_numbering.rs` checks
+the *numbers* the same way: it derives every page's first object by Annex F's
+own arithmetic — `/O`, then object 1, then each page's declared count added to
+the one before — and asks the document whether the number it produced is the
+page it claims to be. Over files this project did not write, that sweep is
+`validate/hints.rs`'s `annex_f_numbering`, where the hint decoder lives; it
+finds every page of 31 linearized files in the fetched qpdf corpus and names
+the one it does not.
 `crates/tinker-pdf-cos/tests/strict_validator.rs` then reads the file again
 with the leniency ladder **off**: eighty injections over the frame, the
 cross-reference sections as the bytes spell them, the trailer's Table 15
