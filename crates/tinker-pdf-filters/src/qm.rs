@@ -148,8 +148,13 @@ const QE: [QeRow; 113] = [
 
 /// One adaptive context: a row of Table D.3 and the sense of the MPS.
 ///
-/// D.2.7: the statistics areas start "with an MPS sense of 0 and a Qe index of
-/// zero", which is [`Default`].
+/// D.2.7: "The statistics areas are initialized to an MPS sense of 0 and a Qe
+/// index of zero as defined by Table D.3" — which is [`Default`].
+///
+/// That sentence is quoted rather than paraphrased because the paraphrase was
+/// wrong here first: it read "start *with* an MPS sense of 0", and rule 8's
+/// second pass against the document caught the preposition. A wrong word in a
+/// citation is how a citation stops being checkable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QmContext {
     /// Row of Table D.3. Always below 113: every write comes from the table's

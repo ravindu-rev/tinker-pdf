@@ -1054,10 +1054,13 @@ mod tests {
         assert_eq!(stats.trace.unwrap(), bins(&decisions));
     }
 
-    /// **T.81 F.2.4.4 b): "decoding a magnitude beyond the range of values
-    /// allowed by the model is quite likely when the compressed data are
-    /// corrupted", and "for arithmetic decoders this error condition is
-    /// extremely important to detect".**
+    /// **T.81 F.2.4.4 b), quoted whole because it is an instruction rather
+    /// than an observation**: "Physically impossible data are decoded. For
+    /// example, decoding a magnitude beyond the range of values allowed by the
+    /// model is quite likely when the compressed data are corrupted by errors.
+    /// For arithmetic decoders this error condition is extremely important to
+    /// detect, as otherwise the decoder may reach a condition where it uses
+    /// the compressed data very slowly."
     ///
     /// Figure F.23's loop has fourteen bins, `X2` to `X15`. A fifteenth
     /// 1-decision asks for an `X16` that neither Table F.4 nor Table F.5 has,
