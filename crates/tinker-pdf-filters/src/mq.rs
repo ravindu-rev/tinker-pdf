@@ -111,6 +111,17 @@ const QE: [QeRow; 47] = [
     row(0x5601, 46, 46, false),
 ];
 
+/// Table E.1's `Qe` column, for `qm.rs`'s assertion that T.81 Table D.3 shares
+/// no value with it.
+///
+/// That claim is the reason the two coders are two modules, and a claim of
+/// that weight is worth being a test rather than a sentence in a header — so
+/// the table is readable from inside the crate at test time and nowhere else.
+#[cfg(test)]
+pub(crate) fn table_e_1_qe_values() -> Vec<u16> {
+    QE.iter().map(|r| r.qe).collect()
+}
+
 /// One adaptive probability state: a row of [`QE`] and the current sense of
 /// the more probable symbol.
 ///

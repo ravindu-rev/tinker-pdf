@@ -50,6 +50,7 @@ pub mod mq;
 mod packbits;
 mod png;
 mod predictors;
+mod qm;
 mod runlength;
 mod tiff;
 

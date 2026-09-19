@@ -32,8 +32,8 @@ its two font-bearing siblings:
 | `crop` held of asked | 4 929 of 5 075 |
 | `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 4 879 passed, 0 failed, 58 ignored across 218 suites as
-[verification.md](verification.md) records it, measured 15 September 2026 on
+The suite stands at 4 903 passed, 0 failed, 58 ignored across 218 suites as
+[verification.md](verification.md) records it, measured 20 September 2026 on
 `x86_64-pc-windows-msvc`.
 
 ## What "best" means here
@@ -135,13 +135,15 @@ range, so no budget separates those two populations.
 
 ## Tier 2 — close the named refusals, by measured reachability
 
-**What is left of this tier, stated plainly.** Every row that could be closed
-has been; **two remain, and both are now scheduled.** Three walls, each
-checkable — and re-checking them on 13 and 14 September 2026 moved two of the
-three for JPX and one of the three for JPEG arithmetic, leaving only zero corpus
-reachability standing against either. Ruling 3 makes that a scheduling input
-rather than a wall, and this tier's own rule is that any one wall moving
-schedules the row:
+**What is left of this tier, stated plainly.** The JPEG arithmetic row
+**closed on 20 September 2026** — SOF9 and SOF10 decode — and what closed it
+was the third wall coming down: T.81 Annex K.4.1 publishes a complete
+arithmetic-coder test vector, which nothing here had looked for. **Two rows are
+left and they are different kinds of thing**: JPX's capabilities, which are
+scheduled work, and the arithmetic JPEG *statistical model*, which is a named
+limit rather than work — it is transcribed, it is pinned as well as a reading
+can be, and nothing published will adjudicate it. Three walls, each checkable,
+and re-checking them is what has moved every one of them that has moved:
 
 - **Zero corpus reachability**, measured and pinned by a census that runs
   nightly — `jpeg_census.rs` walks 10 606 JPEG streams and finds no arithmetic
@@ -183,15 +185,32 @@ schedules the row:
   asserts them — the first check in this decoder that is neither a round trip
   through code written here nor a recording of what another program did once.
 
+  **And it was wrong for JPEG arithmetic too, which is what closed that row.**
+  T.81 **Annex K.4.1** publishes a 256-bit test sequence, the 32 bytes it
+  encodes to, and Tables K.7 and K.8 — a symbol-by-symbol trace of the encoder
+  and of the decoder, 256 events each, with `Qe`, `A`, `C` and `CT` per event.
+  `crates/tinker-pdf-filters/src/qm.rs` decodes the published bytes to the
+  published decisions and encodes the published decisions to the published
+  bytes. **That is three documents in a row whose annexes published a vector
+  this file had assumed did not exist**, and the assumption was never tested
+  before being written down. The rule that generalises: *read the annex list
+  before asserting that a standard publishes no data.*
+
 Any one of the three moving is what schedules the remaining rows. **Two moved
 for JPX**, so its row is scheduled: the specification is in hand and Annex J.10
 adjudicates a decode. Only zero corpus reachability still holds there, and
-ruling 3 makes that a scheduling input rather than a wall. **One moved for JPEG
-arithmetic** the following day: T.81 is readable, so Table D.3 and Annex D's
-procedures are transcribed rather than guessed. What that row still lacks is not
-a specification but an *adjudicator* — no corpus file reaches it and no encoder
-here emits one — so the first question it must answer is whether T.81 publishes
-a datastream the way T.88's Annex H.1 does.
+ruling 3 makes that a scheduling input rather than a wall. **All three moved
+for JPEG arithmetic**, so that row is closed rather than scheduled.
+
+**What the closed row's adjudication does and does not cover, because the two
+halves are not the same.** K.4.1 adjudicates Annex D's *coder* outright. It
+says nothing about the *statistical model* of F.1.4.4 and Table G.2 that picks
+the coder's contexts, and **T.81 publishes no arithmetic-coded image** to
+adjudicate that with — searched annex by annex on 20 September 2026, with the
+search written into `jpeg.rs`'s header so nobody repeats it. So the model is
+transcribed from its clauses, read twice, and pinned against hand-derived
+decision sequences that assert the statistics bin of every decision as well as
+the coefficients. That is weaker than K.4.1 and the row says so.
 
 The Annex B work remains the argument for not proceeding without a
 specification, and a second measurement now says the same thing from the other
@@ -217,7 +236,8 @@ decodes.**
 
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
-| **JPEG arithmetic coding** (SOF9, SOF10, SOF11, SOF13, SOF14, SOF15). Twelve-bit precision has landed and left this row, and so has a defect it uncovered: SOF3, SOF5, SOF6, SOF7 and the differential arithmetic frames were **skipped rather than refused** — stepped over as though they were a comment, so a lossless JPEG surfaced as a damaged file | `crates/tinker-pdf/tests/jpeg_census.rs` walks every `/DCTDecode` stream through the COS layer, so encrypted documents and object streams are seen: **688 files, 10 606 distinct streams, 10 603 frames, and every one of them is SOF0, SOF1 or SOF2 at eight bits**. Zero arithmetic, zero lossless, zero other precision. That is the largest population any census here measures | **one blocker left of three, and the row is scheduled.** (1) Zero corpus reachability holds, and ruling 3 makes that a scheduling input rather than a wall. (2) **T.81 is obtainable after all** — see the tier preamble. Table D.3's 113 states and Annex D's decoder procedures are legible when the page is rendered with a face supplied, so they are transcribed rather than guessed. (3) No arithmetic-JPEG encoder exists here, so a fixture still cannot be *built* — but T.81's own annexes have not been searched for a published datastream, and that assumption has been wrong three times running. Writing a 113-state table from memory is what the Annex B work priced; reading it off the page is not that | M, scheduled; the decoder is transcribable, and what must be settled first is whether anything can adjudicate it |
+| ~~**JPEG arithmetic coding**~~ **SOF9 and SOF10 decode, landed 20 September 2026. SOF11, SOF13, SOF14 and SOF15 are refused by the annex they need rather than by the coder they use, and that re-labelling is the row's other half** | `crates/tinker-pdf/tests/jpeg_census.rs` walks every `/DCTDecode` stream through the COS layer, so encrypted documents and object streams are seen: **688 files, 10 606 distinct streams, 10 603 frames, and every one of them is SOF0, SOF1 or SOF2 at eight bits**. Zero arithmetic, zero lossless, zero other precision — re-measured 20 September 2026 over 5 605 files, and unchanged over the 5 605 files `TINKER_CORPUS` held that day, which is the five corpora above plus what else the cache carries. That is the largest population any census here measures | **closed for SOF9 and SOF10.** The third blocker fell: **T.81 Annex K.4.1 publishes a 256-bit test sequence with the 32 bytes it encodes to**, plus Tables K.7 and K.8's per-event traces — so the coder is adjudicated by the standard's own bytes in both directions, and `qm.rs` holds it as a permanent fixture. Table D.3's 113 rows were read twice, off a rendered page and out of the text layer, and the two readings agree on every `Qe`; the 27 rows the text layer cannot disambiguate are named, because T.81's column rules extract as a literal `1`. `JpegError::Arithmetic` is **gone**: SOF11 and SOF15 report `Lossless` (Annex H's predictor) and SOF13 and SOF14 `Differential` (Annex J), which is what the refusal was always meant to name. A defect found on the way: the DAC marker `X'FFCC'` was **skipped** while a comment claimed it was handled — the same shape as the SOF3/SOF5/SOF6/SOF7 defect this row already recorded | closed; what is left open is named in the row below rather than here |
+| **The arithmetic JPEG statistical model is transcribed and not adjudicated, and nothing published will adjudicate it.** F.1.4.4's Tables F.4 and F.5, Table G.2, and B.2.4.3's DAC conditioning are read off the clause; the coder under them is pinned by K.4.1 | **The search, so nobody repeats it** (all 20 September 2026 unless noted). *T.81*: `https://www.w3.org/Graphics/JPEG/itu-t81.pdf` → **HTTP 200**, 1 058 883 bytes, SHA-256 `631031d4…768bf0`; Annex K read section by section — K.1/K.2 quantisation tables, K.3 Huffman tables and K.3.3's byte lists, **K.4.1 the arithmetic coder vector and K.4's only subsection**, K.5 to K.10 filters and guidance with no data; a sweep for hexadecimal runs over the whole document finds only those, plus `X'FFFF0000'` in D.1. *T.83* (ISO/IEC 10918-2, the compliance-test document): `https://www.itu.int/rec/dologin_pub.asp?...T-REC-T.83-199411-I!!PDF-E...` → **HTTP 500** again, and its own clause 4.4 says the data "are available on 3 diskettes" rather than in the document. *T.84* (ISO/IEC 10918-3): `https://www.itu.int/rec/dologin_pub.asp?...T-REC-T.84-199607-I!!PDF-E...` → **HTTP 200**, 419 607 bytes, 84 pages — read here, and clause 4.2.1 says compliance data is "available from ISO and ITU to parties who wish to determine compliance"; Annex G specifies the *structure* of the test streams and prints none | **stays open as a named limit rather than as work.** What would close it: a real document, and the census walked 5 605 of them on 20 September 2026 and found none; or published data, and three documents have now been searched. What would **not** close it is an arithmetic encoder written here — ruling 13, and it would only prove the two halves of one reading agree. What holds it meanwhile: the decisions of each model are hand-derived from T.81's own figures and the tests assert **which statistics bin every decision was taken against**, not only the coefficients, because a wrong bin decodes correctly until the bins have adapted | not sized; it is a limit, and it moves only if a document or a vector appears |
 | **JPX: the RGN, POC, PPM and PPT markers, the `BYPASS` and `TERMALL` code-block styles.** **Component precision above 16 bits has left this row and is a limit**, argued under Named non-goals: E.1's dequantisation clamps a coefficient to `2^(R_b + 2)` sample units and the coefficient plane is a Q12 `i32`, so 17 bits is where the plane's format runs out rather than where a policy begins — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. CRG has left this row for a different reason: ISO 19005 aside, T.800 A.9.1 says in as many words that it "has no effect on decoding the codestream", so it is parsed, carried and never applied, and refusing a file for carrying it refused a conforming file | **Zero corpus files reach any of them.** `jpx_attribution.rs` names every refusal in the 39 JPX-bearing files and not one is a coding capability: a ruling 1 budget, two deliberately non-conformant veraPDF `colr` fixtures, two `/JPXDecode` streams whose bytes are not JPEG 2000 at all, and two real documents that are truncated | **one blocker left of three, and the row is scheduled.** (1) Zero corpus reachability still holds, and under ruling 3 that is a scheduling input rather than a wall. (2) **T.800 is obtainable** and was fetched on 13 September 2026 — the claim that ISO and the ITU both sell it was never retested; B.10.7.2's rule for how many codeword segments a packet signals is at hand rather than written from memory. (3) **A fixture no longer needs an encoder**: T.800 Annex J.10 publishes a complete codestream with its decoded samples, and `jpx_annex_j.rs` decodes it. What the standard does *not* publish is a codestream exercising these particular capabilities, so each still needs a hand-authored one transcribed from its own clause — and the first measurement of that work says how carefully: of 182 citations drafted from T.800 for these seven capabilities, **37 were wrong** and only one of six specifications came back clean | scheduled; one capability at a time, each with the clause it is transcribed from checked against T.800 twice |
 
 ## Tier 3 — capabilities absent today

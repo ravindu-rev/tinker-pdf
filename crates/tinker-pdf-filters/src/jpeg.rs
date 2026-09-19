@@ -1,8 +1,51 @@
 //! JPEG decoding (DCTDecode, 7.4.8; ITU-T T.81).
 //!
-//! Huffman-coded baseline, extended sequential and **progressive** at 8 bits,
-//! which between them is what essentially every PDF carries. Arithmetic coding
-//! and 12-bit precision are reported rather than half-decoded.
+//! Baseline, extended sequential and **progressive**, each with either entropy
+//! coder — Annex C's Huffman codes or Annex D's arithmetic ones — at 8 or 12
+//! bits. That is SOF0, SOF1, SOF2, SOF9 and SOF10. The lossless frames of
+//! Annex H and the differential frames of Annex J are reported rather than
+//! half-decoded, each by the annex it needs.
+//!
+//! # The arithmetic frames, and what stands behind them
+//!
+//! SOF9 and SOF10 landed in September 2026. The coder is `crate::qm`, which
+//! T.81 K.4.1's published test sequence adjudicates outright. The statistical
+//! models that pick its contexts are in [`arith`], and **nothing published
+//! adjudicates those** — the search that establishes it is below, because a
+//! failed fixture hunt that is not written down gets repeated.
+//!
+//! **What was searched, on 20 September 2026.** *T.81 itself* —
+//! <https://www.w3.org/Graphics/JPEG/itu-t81.pdf>, the W3C's copy of CCITT
+//! Rec. T.81 (1992) | ISO/IEC 10918-1 : 1993, **HTTP 200** to `curl` that day,
+//! 1 058 883 bytes, SHA-256
+//! `631031d4ba56b06abee3e312a0f235b9422da9c7267d1c8f7604418795768bf0`, byte for
+//! byte the file `encode.rs`'s header names from 15 September. (That header
+//! records a 403 from `curl`; it answers 200 now, which is what bot protection
+//! does and is the fifth time a "not obtainable" here has needed retesting.)
+//! Searched: the contents list, then Annex K section by section. K.1 and K.2 are quantisation
+//! tables; K.3 is Huffman tables and K.3.3 their byte lists; **K.4.1 is the
+//! arithmetic coder test sequence — 256 decisions, the 32 bytes they encode
+//! to, and Tables K.7 and K.8's symbol-by-symbol encoder and decoder traces**;
+//! K.4 has no other subsection; K.5 to K.10 are downsampling filters,
+//! applicability guidance, AC prediction and a point-transform example, with
+//! no data. A sweep of the whole document for hexadecimal runs finds three
+//! places only: K.3.3's Huffman byte lists, K.4.1's two sequences, and
+//! `X'FFFF0000'` inside D.1. **So T.81 publishes an arithmetic *coder* vector
+//! and no arithmetic-coded *image*.**
+//!
+//! *The other two parts*: T.83 | ISO/IEC 10918-2 is the compliance-testing
+//! document and its clause 4.4 says its test data "are available on 3
+//! diskettes and are included with the copy of this ITU-T Recommendation"
+//! rather than inside it; T.84 | ISO/IEC 10918-3, fetched whole on 20
+//! September 2026, says in clause 4.2.1 that compliance test data is
+//! "available from ISO and ITU to parties who wish to determine compliance"
+//! and its Annex G specifies the *structure* of those streams without
+//! printing one. URLs and what each returned are in `encode.rs`'s header for
+//! T.83 and in [`arith`]'s for the rest.
+//!
+//! So the models are transcribed from F.1.4.4, Tables F.4 and F.5, and Table
+//! G.2, checked against the document a second time, and pinned against
+//! hand-derived decision sequences. [`arith`] says what that is worth.
 //!
 //! Every mode decodes into the same per-component coefficient buffer and is
 //! then rendered once, at the end, by a single dequantise-and-transform pass.
@@ -18,6 +61,7 @@
 //! The encoder is `encode`, which writes baseline and only baseline; what it
 //! excludes, what adjudicates it, and what does not, are that module's header.
 
+mod arith;
 mod encode;
 
 pub use encode::{
@@ -25,6 +69,7 @@ pub use encode::{
     JpegSourceColour,
 };
 
+use crate::qm::QmDecoder;
 use crate::Warning;
 
 /// What colour the decoded components represent.
@@ -71,29 +116,33 @@ pub struct JpegImage {
 pub enum JpegError {
     /// The bytes do not begin like a JPEG.
     NotJpeg,
-    /// An arithmetic-coded frame: SOF9, SOF10, SOF11, SOF13, SOF14 or SOF15.
-    ///
-    /// T.81 Annex D's QM coder, which is related to but not the same as the MQ
-    /// coder in `mq.rs` -- a different state table, a different
-    /// renormalisation, and a different byte-stuffing rule. Refused rather than
-    /// half-decoded, and see `docs/ROADMAP.md` for the three separate reasons
-    /// it is not built.
-    Arithmetic,
-    /// A lossless frame: SOF3 or SOF7.
+    /// A lossless frame: SOF3, SOF7, SOF11 or SOF15.
     ///
     /// Annex H's predictive coder, which shares nothing with the DCT path
-    /// below -- no quantisation tables, no blocks, no transform. Named apart
-    /// from [`JpegError::Arithmetic`] because a file needing one is not a file
-    /// needing the other, and until now both were **skipped rather than
-    /// refused**: the marker fell through to the unknown-segment arm, the
-    /// decoder found no frame it understood, and the failure surfaced as
-    /// `Truncated`.
+    /// below -- no quantisation tables, no blocks, no transform. Both entropy
+    /// coders are here because the predictor is what is missing either way:
+    /// SOF3 and SOF7 are Huffman-coded and SOF11 and SOF15 arithmetic, and
+    /// `crate::qm` decodes the latter's decisions perfectly well with nothing
+    /// to hand them to.
+    ///
+    /// SOF3 and SOF7 were once **skipped rather than refused** -- the marker
+    /// fell through to the unknown-segment arm, no frame was ever found, and
+    /// the failure surfaced as `Truncated`, so a lossless JPEG looked like a
+    /// damaged file.
     Lossless,
-    /// A differential frame: SOF5 or SOF6.
+    /// A differential frame: SOF5, SOF6, SOF13 or SOF14.
     ///
     /// The hierarchical progression of Annex J, where a frame codes the
-    /// difference from an upsampled earlier one. Same history as
-    /// [`JpegError::Lossless`]: skipped rather than refused.
+    /// difference from an upsampled earlier one. Same shape as
+    /// [`JpegError::Lossless`]: the entropy coder is not the gap, so the
+    /// Huffman pair and the arithmetic pair report together.
+    ///
+    /// **There was a third variant here, `Arithmetic`, and it is gone.** It
+    /// refused SOF9, SOF10, SOF11, SOF13, SOF14 and SOF15 together on the
+    /// grounds that Annex D's coder was not built. It is built (`crate::qm`),
+    /// SOF9 and SOF10 decode, and the remaining four are refused by the annex
+    /// they actually need rather than by the coder they happen to use -- which
+    /// is what this enum was always for.
     Differential,
     /// A sample precision T.81 B.2.2 does not allow: anything but 8 or 12.
     UnsupportedPrecision,
@@ -112,6 +161,11 @@ struct Component {
     dc_table: usize,
     ac_table: usize,
     dc_prediction: i32,
+    /// T.81 F.1.4.4.1.2's `Da`: the difference coded for the previous block of
+    /// this component, which conditions the next block's first three
+    /// arithmetic decisions. Zero at a scan and at every restart
+    /// (F.1.4.4.1.5), and untouched by the Huffman path.
+    da: i32,
     /// Blocks per line in the coefficient buffer, padded out to whole MCUs so
     /// an interleaved scan can address every block it codes.
     blocks_x: usize,
@@ -410,6 +464,9 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     let mut adobe_transform: Option<u8> = None;
     let mut adobe_seen = false;
     let mut progressive = false;
+    let mut arithmetic = false;
+    let mut conditioning = arith::Conditioning::default();
+    let mut arith_stats = arith::Stats::new();
     let mut sample_precision = 8u8;
     let mut mcus = (0usize, 0usize);
     let mut allocated = false;
@@ -445,9 +502,12 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
         };
 
         match marker {
-            // SOF0 baseline, SOF1 extended sequential, SOF2 progressive.
-            0xC0..=0xC2 => {
-                progressive = marker == 0xC2;
+            // SOF0 baseline, SOF1 extended sequential, SOF2 progressive, and
+            // SOF9 and SOF10, which are the same two DCT processes with
+            // Annex D's entropy coder in place of Annex C's.
+            0xC0..=0xC2 | 0xC9 | 0xCA => {
+                progressive = matches!(marker, 0xC2 | 0xCA);
+                arithmetic = matches!(marker, 0xC9 | 0xCA);
 
                 let (Some(&precision), Some(h), Some(w)) =
                     (segment.first(), segment.get(1..3), segment.get(3..5))
@@ -484,12 +544,14 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                     });
                 }
             }
-            // Every other SOF marker, refused by the family it belongs to.
-            // 0xC4 is DHT and 0xCC is DAC, which are tables rather than
-            // frames and are handled below.
-            0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF => return Err(JpegError::Arithmetic),
-            0xC3 | 0xC7 => return Err(JpegError::Lossless),
-            0xC5 | 0xC6 => return Err(JpegError::Differential),
+            // Every other SOF marker, refused by the annex it needs rather
+            // than by the entropy coder it uses: SOF3 and SOF11 are Annex H
+            // lossless, SOF7 and SOF15 differential lossless, SOF5, SOF6,
+            // SOF13 and SOF14 Annex J's hierarchical progression. 0xC4 is DHT
+            // and 0xCC is DAC, which are tables rather than frames and have
+            // their own arms below.
+            0xC3 | 0xC7 | 0xCB | 0xCF => return Err(JpegError::Lossless),
+            0xC5 | 0xC6 | 0xCD | 0xCE => return Err(JpegError::Differential),
 
             // DQT
             0xDB => {
@@ -554,6 +616,20 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                 }
             }
 
+            // DAC: the arithmetic conditioning tables (B.2.4.3).
+            //
+            // **This arm did not exist until September 2026**, and the comment
+            // beside the SOF refusals above said it did -- "0xCC is DAC, which
+            // [is a table] rather than [a frame] and [is] handled below". It
+            // was not: 0xCC fell through to the wildcard and was stepped over
+            // as though it were a comment. It did not matter while every
+            // arithmetic frame was refused before a DAC could be reached, but
+            // it is exactly the shape of the defect this decoder has already
+            // been caught by once, when SOF3, SOF5, SOF6 and SOF7 were skipped
+            // rather than refused and a lossless JPEG surfaced as a damaged
+            // file.
+            0xCC => conditioning.define(segment),
+
             // DRI
             0xDD => {
                 if let Some(pair) = segment.get(..2) {
@@ -611,8 +687,13 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                     scan,
                     &mut components,
                     &parts,
-                    &dc_tables,
-                    &ac_tables,
+                    Entropy {
+                        arithmetic,
+                        dc_tables: &dc_tables,
+                        ac_tables: &ac_tables,
+                        conditioning: &conditioning,
+                        stats: &mut arith_stats,
+                    },
                     restart_interval,
                     progressive,
                     (ss, se.max(ss)),
@@ -654,9 +735,34 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     )
 }
 
+/// Everything a scan's entropy decoding needs that is not the scan's bytes.
+///
+/// It is one struct rather than five parameters because the frame picks one
+/// half of it and never both: a Huffman frame reads `dc_tables` and
+/// `ac_tables` and leaves the conditioning alone, and an arithmetic frame does
+/// the reverse.
+struct Entropy<'a> {
+    /// The frame was SOF9 or SOF10, so the scan is coded by Annex D rather
+    /// than Annex C.
+    arithmetic: bool,
+    dc_tables: &'a [HuffmanTable],
+    ac_tables: &'a [HuffmanTable],
+    conditioning: &'a arith::Conditioning,
+    stats: &'a mut arith::Stats,
+}
+
+/// The live entropy decoder for one scan: one or the other, never both.
+enum Coder<'a> {
+    /// Annex C, through [`BitReader`].
+    Huffman(BitReader<'a>),
+    /// Annex D, through [`crate::qm::QmDecoder`].
+    Arithmetic(QmDecoder<'a>),
+}
+
 /// Decodes one scan into the components' coefficient buffers.
 ///
-/// Returns false when the entropy data ran out or a table was missing. What
+/// Returns false when the entropy data ran out, a table was missing, or the
+/// arithmetic decoder met T.81 F.2.4.4 b)'s "physically impossible data". What
 /// was decoded stays in place either way: a progressive file that loses its
 /// last refinement still shows an image, just a coarser one, which is exactly
 /// the degradation the format was designed around (ruling 2).
@@ -665,8 +771,7 @@ fn decode_scan(
     data: &[u8],
     components: &mut [Component],
     parts: &[usize],
-    dc_tables: &[HuffmanTable],
-    ac_tables: &[HuffmanTable],
+    entropy: Entropy<'_>,
     restart_interval: usize,
     progressive: bool,
     band: (usize, usize),
@@ -677,11 +782,28 @@ fn decode_scan(
         return false;
     }
 
-    let mut reader = BitReader::new(data);
+    let Entropy {
+        arithmetic,
+        dc_tables,
+        ac_tables,
+        conditioning,
+        stats,
+    } = entropy;
+
+    // E.2.3 and F.2.4: the entropy coder is initialised at the start of every
+    // scan, and for the arithmetic coder F.1.4.4.1.5 and F.1.4.4.2.2 return
+    // every statistics bin to Annex D's initial state at the same moment.
+    let mut coder = if arithmetic {
+        stats.reset();
+        Coder::Arithmetic(QmDecoder::new(data))
+    } else {
+        Coder::Huffman(BitReader::new(data))
+    };
     let mut eobrun = 0u32;
     for &index in parts {
         if let Some(component) = components.get_mut(index) {
             component.dc_prediction = 0;
+            component.da = 0;
         }
     }
 
@@ -704,11 +826,24 @@ fn decode_scan(
     'outer: for uy in 0..units_y {
         for ux in 0..units_x {
             if restart_interval > 0 && unit > 0 && unit % restart_interval == 0 {
-                reader.restart();
+                match &mut coder {
+                    Coder::Huffman(reader) => reader.restart(),
+                    Coder::Arithmetic(qm) => {
+                        // F.2.4.4: the RSTm markers "can be located without
+                        // decoding", and E.2.4 restarts the coder after each.
+                        // F.1.4.4.1.5 and F.1.4.4.2.2 reset the statistics at
+                        // "the beginning of each restart interval" too, which
+                        // is the difference from the Huffman path -- there is
+                        // no Huffman table to reset.
+                        qm.restart();
+                        stats.reset();
+                    }
+                }
                 eobrun = 0;
                 for &index in parts {
                     if let Some(component) = components.get_mut(index) {
                         component.dc_prediction = 0;
+                        component.da = 0;
                     }
                 }
             }
@@ -722,7 +857,9 @@ fn decode_scan(
                     break 'outer;
                 };
                 if !decode_block(
-                    &mut reader,
+                    &mut coder,
+                    conditioning,
+                    stats,
                     component,
                     ux,
                     uy,
@@ -748,7 +885,9 @@ fn decode_scan(
                             break 'outer;
                         };
                         if !decode_block(
-                            &mut reader,
+                            &mut coder,
+                            conditioning,
+                            stats,
                             component,
                             ux * h + bx,
                             uy * v + by,
@@ -768,13 +907,29 @@ fn decode_scan(
         }
     }
 
-    complete && !reader.exhausted
+    complete
+        && match &coder {
+            Coder::Huffman(reader) => !reader.exhausted,
+            // The scan's slice runs to the end of the file, so a healthy
+            // arithmetic scan stops at the marker that follows its
+            // entropy-coded segment (D.21) with bytes to spare. Running off
+            // the end instead means no marker was ever found, which is the
+            // same truncation `exhausted` reports on the other side.
+            Coder::Arithmetic(qm) => !qm.overran(),
+        }
 }
 
-/// Decodes one block, in whichever of the four codings this scan is using.
+/// Decodes one block, in whichever of the codings this scan is using.
+///
+/// The coding model -- sequential, progressive DC first or refined,
+/// progressive AC first or refined -- is chosen by the scan header and is the
+/// same on both sides of `coder`. Only the entropy coding differs, which is
+/// why the split is here and not higher up.
 #[allow(clippy::too_many_arguments)]
 fn decode_block(
-    reader: &mut BitReader,
+    coder: &mut Coder,
+    conditioning: &arith::Conditioning,
+    stats: &mut arith::Stats,
     component: &mut Component,
     bx: usize,
     by: usize,
@@ -798,14 +953,30 @@ fn decode_block(
     let (ss, se) = band;
     let (ah, al) = approximation;
 
-    let ok = if !progressive {
-        decode_sequential(reader, component, &mut block, dc_tables, ac_tables)
-    } else if ss == 0 {
-        decode_dc_progressive(reader, component, &mut block, dc_tables, ah, al)
-    } else {
-        decode_ac_progressive(
-            reader, component, &mut block, ac_tables, ss, se, ah, al, eobrun,
-        )
+    let ok = match coder {
+        Coder::Arithmetic(qm) => arith::decode_block(
+            qm,
+            stats,
+            conditioning,
+            (component.dc_table, component.ac_table),
+            &mut component.dc_prediction,
+            &mut component.da,
+            &mut block,
+            progressive,
+            (ss, se),
+            (ah, al),
+        ),
+        Coder::Huffman(reader) => {
+            if !progressive {
+                decode_sequential(reader, component, &mut block, dc_tables, ac_tables)
+            } else if ss == 0 {
+                decode_dc_progressive(reader, component, &mut block, dc_tables, ah, al)
+            } else {
+                decode_ac_progressive(
+                    reader, component, &mut block, ac_tables, ss, se, ah, al, eobrun,
+                )
+            }
+        }
     };
 
     if let Some(target) = component.block_mut(bx, by) {
@@ -1413,16 +1584,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn arithmetic_coding_is_reported_rather_than_half_decoded() {
-        let mut arithmetic = vec![0xFF, 0xD8, 0xFF, 0xC9, 0x00, 0x0B, 0x08];
-        arithmetic.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x01, 0x11, 0x00]);
-        assert_eq!(
-            decode(&arithmetic, 1 << 20).err(),
-            Some(JpegError::Arithmetic)
-        );
-    }
-
     /// [`tiny_gray`] with the frame marker and the sample precision chosen.
     ///
     /// The SOF sits after SOI and a 69-byte DQT, and is found rather than
@@ -1476,10 +1637,18 @@ mod tests {
     /// **Every frame type this build does not decode refuses by its own
     /// name**, rather than being skipped.
     ///
-    /// Until now only SOF9, SOF10 and SOF11 were named. SOF3, SOF5, SOF6,
-    /// SOF7, SOF13, SOF14 and SOF15 fell through to the unknown-segment arm,
-    /// were stepped over as though they were a comment, and the decode then
-    /// failed as `Truncated` -- a lossless JPEG reported as a damaged file.
+    /// Once only SOF9, SOF10 and SOF11 were named. SOF3, SOF5, SOF6, SOF7,
+    /// SOF13, SOF14 and SOF15 fell through to the unknown-segment arm, were
+    /// stepped over as though they were a comment, and the decode then failed
+    /// as `Truncated` -- a lossless JPEG reported as a damaged file.
+    ///
+    /// **The four arithmetic refusals moved in September 2026**, when SOF9 and
+    /// SOF10 started decoding. They are refused by the annex they need rather
+    /// than by the entropy coder they use: SOF11 and SOF15 need Annex H's
+    /// predictor and SOF13 and SOF14 Annex J's hierarchical progression, and
+    /// `crate::qm` decodes all four of their decision streams perfectly well
+    /// with nothing to hand them to. The two that decode are listed here too,
+    /// so the boundary is one table rather than two.
     #[test]
     fn every_frame_type_this_build_declines_refuses_by_its_own_name() {
         for (marker, expected) in [
@@ -1487,17 +1656,28 @@ mod tests {
             (0xC5, JpegError::Differential),
             (0xC6, JpegError::Differential),
             (0xC7, JpegError::Lossless),
-            (0xC9, JpegError::Arithmetic),
-            (0xCA, JpegError::Arithmetic),
-            (0xCB, JpegError::Arithmetic),
-            (0xCD, JpegError::Arithmetic),
-            (0xCE, JpegError::Arithmetic),
-            (0xCF, JpegError::Arithmetic),
+            (0xCB, JpegError::Lossless),
+            (0xCD, JpegError::Differential),
+            (0xCE, JpegError::Differential),
+            (0xCF, JpegError::Lossless),
         ] {
             assert_eq!(
                 decode(&tiny_gray_at(marker, 8), 1 << 20).err(),
                 Some(expected),
                 "SOF marker {marker:#04x}"
+            );
+        }
+
+        // SOF9 and SOF10 are frames now. `tiny_gray` carries a Huffman-coded
+        // scan, so relabelling its SOF does not make a decodable file -- what
+        // is asserted is only that neither marker is refused for its coder.
+        for marker in [0xC9u8, 0xCA] {
+            assert!(
+                !matches!(
+                    decode(&tiny_gray_at(marker, 8), 1 << 20).err(),
+                    Some(JpegError::Lossless) | Some(JpegError::Differential)
+                ),
+                "SOF marker {marker:#04x} is a frame this build decodes"
             );
         }
     }
@@ -2778,5 +2958,372 @@ mod tests {
             .1;
         assert!(dqt[1..].iter().all(|&q| q >= 1));
         assert_eq!(dqt[1], ANNEX_K1_LUMINANCE[0].div_ceil(2));
+    }
+    // ---- SOF9 and SOF10: the arithmetic frames ------------------------------
+
+    /// Encodes a hand-derived decision list into an entropy-coded segment.
+    ///
+    /// The same shape as `arith`'s own test helper and for the same reason:
+    /// what goes in is the test's reading of T.81's figures, and the coder it
+    /// goes through is pinned at both ends by K.4.1's published data.
+    fn arith_segment(decisions: &[(arith::Bin, u8)]) -> Vec<u8> {
+        let mut encoder = crate::qm::encoder::QmEncoder::new();
+        let mut dc = [crate::qm::QmContext::default(); 49];
+        let mut ac = [crate::qm::QmContext::default(); 245];
+        for &(bin, d) in decisions {
+            match bin {
+                arith::Bin::Dc(at) => encoder.encode(&mut dc[at], d),
+                arith::Bin::Ac(at) => encoder.encode(&mut ac[at], d),
+                arith::Bin::Fixed => encoder.encode_fixed(d),
+            }
+        }
+        encoder.finish()
+    }
+
+    /// A one-component arithmetic JPEG of `width` by `height` around already
+    /// entropy-coded scans.
+    ///
+    /// The quantisation table is all ones so a coefficient reaches the
+    /// transform unchanged and the expected pixels can be worked out from
+    /// A.3.3 alone. Each scan is `(Ss, Se, Ah/Al, bytes)`.
+    fn arithmetic_gray(
+        marker: u8,
+        width: u16,
+        height: u16,
+        restart: Option<u16>,
+        dac: Option<&[u8]>,
+        scans: &[(u8, u8, u8, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xD8];
+
+        out.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+        out.extend_from_slice(&[1u8; 64]);
+
+        if let Some(segment) = dac {
+            let length = u16::try_from(segment.len() + 2).expect("a short DAC segment");
+            out.extend_from_slice(&[0xFF, 0xCC]);
+            out.extend_from_slice(&length.to_be_bytes());
+            out.extend_from_slice(segment);
+        }
+        if let Some(interval) = restart {
+            out.extend_from_slice(&[0xFF, 0xDD, 0x00, 0x04]);
+            out.extend_from_slice(&interval.to_be_bytes());
+        }
+
+        // B.2.2: Lf = 8 + 3 * Nf.
+        out.extend_from_slice(&[0xFF, marker, 0x00, 0x0B, 0x08]);
+        out.extend_from_slice(&height.to_be_bytes());
+        out.extend_from_slice(&width.to_be_bytes());
+        out.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+
+        for (ss, se, a, data) in scans {
+            // B.2.3: Ls = 6 + 2 * Ns.
+            out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, *ss, *se, *a]);
+            out.extend_from_slice(data);
+        }
+
+        out.extend_from_slice(&[0xFF, 0xD9]);
+        out
+    }
+
+    /// The decisions for `DIFF = 8`, derived from Figures F.19 to F.24 with
+    /// `Da = 0`.
+    ///
+    /// `V = 8` means `Sz = 7`, so the category runs `X1`, `X2`, `X3` and stops
+    /// at "Sz < 8", and the two magnitude bits at `M3 = X3 + 14 = 36` are both
+    /// 1, making `Sz = 4 | 2 | 1`.
+    fn diff_of_eight() -> Vec<(arith::Bin, u8)> {
+        vec![
+            (arith::Bin::Dc(0), 1),
+            (arith::Bin::Dc(1), 0),
+            (arith::Bin::Dc(2), 1),
+            (arith::Bin::Dc(20), 1),
+            (arith::Bin::Dc(21), 1),
+            (arith::Bin::Dc(22), 0),
+            (arith::Bin::Dc(36), 1),
+            (arith::Bin::Dc(36), 1),
+        ]
+    }
+
+    /// The decisions for `DIFF = 128`.
+    ///
+    /// `V = 128` means `Sz = 127`, so the category climbs `X1` to `X7` — bins
+    /// 20 to 26 — before "Sz < 128" stops it, and the six magnitude bits at
+    /// `M7 = X7 + 14 = 40` are all 1.
+    ///
+    /// 128 rather than 8 because this engine's integer IDCT reaches a byte
+    /// through two truncating shifts and a DC of 8 does not survive them: the
+    /// exact sample is `8 / 8 = 1` and the transform yields 0, so mid-grey
+    /// would be the answer whether or not this decoded at all. 128 is sixteen
+    /// levels, which it cannot swallow.
+    fn diff_of_128() -> Vec<(arith::Bin, u8)> {
+        let mut decisions = vec![
+            (arith::Bin::Dc(0), 1),
+            (arith::Bin::Dc(1), 0),
+            (arith::Bin::Dc(2), 1),
+        ];
+        for bin in 20..=25usize {
+            decisions.push((arith::Bin::Dc(bin), 1));
+        }
+        decisions.push((arith::Bin::Dc(26), 0));
+        for _ in 0..6 {
+            decisions.push((arith::Bin::Dc(40), 1));
+        }
+        decisions
+    }
+
+    /// A flat grayscale JPEG of `value`, Huffman-coded by this crate's own
+    /// encoder against a quantisation table of ones.
+    ///
+    /// A.3.3's FDCT of a flat block leaves `S00 = 8 x (value - 128)` and every
+    /// other coefficient zero, and a quantiser of one passes that through — so
+    /// the caller knows which coefficient the file carries without decoding
+    /// it.
+    fn huffman_flat_gray(width: u32, height: u32, value: u8, restart_interval: u16) -> Vec<u8> {
+        let raster = vec![value; (width * height) as usize];
+        jpeg_encode(
+            &JpegSource {
+                width,
+                height,
+                colour: JpegSourceColour::Gray,
+                stride: width as usize,
+                data: &raster,
+            },
+            &JpegOptions {
+                quantisation: JpegQuantisation::Tables {
+                    luminance: [1; 64],
+                    chrominance: [1; 64],
+                },
+                sampling: JpegSampling::FourFourFour,
+                restart_interval,
+            },
+        )
+        .expect("a flat grayscale raster encodes")
+    }
+
+    /// **A SOF9 frame and a Huffman frame carrying the same coefficients
+    /// decode to the same image** — which is T.81 F.1.4's own claim about the
+    /// two entropy coders, tested rather than assumed:
+    ///
+    /// > As with the Huffman coding technique, the binary arithmetic coding
+    /// > technique is lossless. It is possible to transcode between the two
+    /// > systems without either FDCT or IDCT computations, and without
+    /// > modification of the reconstructed image.
+    ///
+    /// The Huffman side is this crate's baseline encoder over a flat raster of
+    /// 144, which A.3.3 puts at `S00 = 8 x 16 = 128` with every other
+    /// coefficient zero; the arithmetic side is [`diff_of_128`], hand-derived
+    /// from Figures F.19 to F.24. Nothing is shared between the two paths
+    /// below the coefficient buffer, so agreement is a statement about the
+    /// entropy decoding rather than about the transform.
+    #[test]
+    fn a_sof9_frame_and_a_huffman_frame_carry_the_same_block_t_81_f_1_4() {
+        let mut decisions = diff_of_128();
+        decisions.push((arith::Bin::Ac(0), 1));
+        let arithmetic = arithmetic_gray(
+            0xC9,
+            8,
+            8,
+            None,
+            None,
+            &[(0x00, 0x3F, 0x00, arith_segment(&decisions))],
+        );
+
+        let image = decode(&arithmetic, 1 << 20).expect("a SOF9 frame decodes");
+        assert_eq!((image.width, image.height), (8, 8));
+        assert_eq!(image.color, JpegColor::Gray);
+        assert_eq!(
+            image.warnings,
+            Vec::new(),
+            "a clean frame warns about nothing"
+        );
+
+        let huffman =
+            decode(&huffman_flat_gray(8, 8, 144, 0), 1 << 20).expect("the Huffman frame decodes");
+        assert_eq!(image.data, huffman.data);
+
+        // And it is not vacuously equal: both are the flat block the
+        // coefficient describes, well away from the mid-grey an undecoded
+        // frame would give.
+        assert!(image.data.iter().all(|&s| s == image.data[0]));
+        assert_ne!(image.data[0], 128);
+    }
+
+    /// **The DC predictor runs across blocks and `Da` conditions the next
+    /// one** (F.2.1.3.1 and F.1.4.4.1.2), over a two-MCU frame.
+    ///
+    /// The second block's difference is zero, so its DC coefficient is the
+    /// first block's 128 carried forward and both blocks come out at the same
+    /// grey. Its `Da` is 128, "large positive" under the default `L = 0`,
+    /// `U = 1`, so its one decision is at bin 12 — a bin nothing has touched —
+    /// and not at bin 0, which the first block left adapted.
+    #[test]
+    fn the_dc_predictor_and_da_carry_across_blocks_in_a_sof9_frame() {
+        let mut decisions = diff_of_128();
+        decisions.push((arith::Bin::Ac(0), 1));
+        decisions.push((arith::Bin::Dc(12), 0));
+        decisions.push((arith::Bin::Ac(0), 1));
+
+        let data = arithmetic_gray(
+            0xC9,
+            16,
+            8,
+            None,
+            None,
+            &[(0x00, 0x3F, 0x00, arith_segment(&decisions))],
+        );
+
+        let image = decode(&data, 1 << 20).expect("a two-block SOF9 frame decodes");
+        assert_eq!((image.width, image.height), (16, 8));
+        let huffman =
+            decode(&huffman_flat_gray(16, 8, 144, 0), 1 << 20).expect("the Huffman frame decodes");
+        assert_eq!(image.data, huffman.data);
+    }
+
+    /// **A restart interval re-runs `Initdec` and resets the statistics**
+    /// (E.2.4, F.1.4.4.1.5, F.1.4.4.2.2).
+    ///
+    /// Two blocks with `Ri = 1`, so an `RSTn` sits between them and the second
+    /// starts from scratch: its DC predictor is zero again, its `Da` is zero
+    /// again, and every statistics bin is back at Table D.3's index 0. So the
+    /// second interval's bytes are byte for byte the first's, which is what
+    /// lets this tell a reset from a missing one — a decoder that carried
+    /// either the predictor or the statistics across would decode the second
+    /// block to something else.
+    #[test]
+    fn a_restart_interval_resets_the_coder_and_the_statistics() {
+        let mut decisions = diff_of_128();
+        decisions.push((arith::Bin::Ac(0), 1));
+        let interval = arith_segment(&decisions);
+
+        let mut scan = interval.clone();
+        scan.extend_from_slice(&[0xFF, 0xD0]);
+        scan.extend_from_slice(&interval);
+
+        let data = arithmetic_gray(0xC9, 16, 8, Some(1), None, &[(0x00, 0x3F, 0x00, scan)]);
+
+        let image = decode(&data, 1 << 20).expect("a restarting SOF9 frame decodes");
+        let huffman =
+            decode(&huffman_flat_gray(16, 8, 144, 1), 1 << 20).expect("the Huffman frame decodes");
+        assert_eq!(image.data, huffman.data);
+    }
+
+    /// **The DAC marker is read, not stepped over.**
+    ///
+    /// Until September 2026 `X'FFCC'` fell through to the unknown-segment arm
+    /// while a comment beside the SOF refusals claimed it was "handled below".
+    /// It was invisible because every arithmetic frame was refused before a
+    /// DAC could matter.
+    ///
+    /// The block below has coefficients at `K = 3` and `K = 6`, and its
+    /// decisions were derived with `Kx = 6` — so both use the `X2` bin at 189
+    /// and the second inherits the adaptation the first left there. Under the
+    /// default `Kx = 5` the second would use 217 instead, which no decision
+    /// has touched, and the stream decodes to something else. So the two
+    /// decodes differing is the marker being parsed; what the conditioning
+    /// then *means* is `arith`'s own tests, which assert the bins directly.
+    #[test]
+    fn the_dac_marker_changes_what_a_sof9_frame_decodes_to() {
+        let decisions = vec![
+            (arith::Bin::Dc(0), 0),
+            (arith::Bin::Ac(0), 0),
+            (arith::Bin::Ac(1), 0),
+            (arith::Bin::Ac(4), 0),
+            (arith::Bin::Ac(7), 1),
+            (arith::Bin::Fixed, 0),
+            (arith::Bin::Ac(8), 1),
+            (arith::Bin::Ac(8), 1),
+            (arith::Bin::Ac(189), 0),
+            (arith::Bin::Ac(203), 0),
+            (arith::Bin::Ac(9), 0),
+            (arith::Bin::Ac(10), 0),
+            (arith::Bin::Ac(13), 0),
+            (arith::Bin::Ac(16), 1),
+            (arith::Bin::Fixed, 0),
+            (arith::Bin::Ac(17), 1),
+            (arith::Bin::Ac(17), 1),
+            (arith::Bin::Ac(189), 0),
+            (arith::Bin::Ac(203), 1),
+            (arith::Bin::Ac(18), 1),
+        ];
+        let scans = [(0x00u8, 0x3Fu8, 0x00u8, arith_segment(&decisions))];
+
+        // B.2.4.3: Tc = 1 selects an AC conditioning table, Tb = 0 the
+        // destination, and Cs is Kx.
+        let with_dac = arithmetic_gray(0xC9, 8, 8, None, Some(&[0x10, 0x06]), &scans);
+        let without = arithmetic_gray(0xC9, 8, 8, None, None, &scans);
+
+        let read = decode(&with_dac, 1 << 20).expect("with DAC");
+        let ignored = decode(&without, 1 << 20).expect("without DAC");
+        assert_ne!(
+            read.data, ignored.data,
+            "the DAC segment made no difference, so it was skipped"
+        );
+    }
+
+    /// **A SOF10 frame decodes across three scans** — a DC first scan, a DC
+    /// refinement and an AC band — which is the shape G.1.3 describes.
+    ///
+    /// The DC coefficient arrives in two pieces: the first scan sends 8 at
+    /// `Al = 4`, giving 128, and the refinement adds the bit below it at
+    /// `Al = 3`, giving 136. The AC band places nothing. A Huffman frame over
+    /// a flat raster of 145 carries that same `S00 = 8 x 17 = 136`, so
+    /// F.1.4's transcoding claim applies to it as much as to the sequential
+    /// frame above — and it is the refinement that makes the two match, since
+    /// the first scan alone would leave 128 and a visibly different grey.
+    #[test]
+    fn a_sof10_frame_decodes_across_three_scans() {
+        let first = arith_segment(&diff_of_eight());
+        // G.1.3.1: one decision at the fixed estimate, per block, per scan.
+        let refine = arith_segment(&[(arith::Bin::Fixed, 1)]);
+        // An AC band that is immediately at its end of band.
+        let band = arith_segment(&[(arith::Bin::Ac(0), 1)]);
+
+        let data = arithmetic_gray(
+            0xCA,
+            8,
+            8,
+            None,
+            None,
+            &[
+                (0x00, 0x00, 0x04, first),
+                (0x00, 0x00, 0x43, refine),
+                (0x01, 0x3F, 0x03, band),
+            ],
+        );
+
+        let image = decode(&data, 1 << 20).expect("a SOF10 frame decodes");
+        assert_eq!((image.width, image.height), (8, 8));
+        let huffman =
+            decode(&huffman_flat_gray(8, 8, 145, 0), 1 << 20).expect("the Huffman frame decodes");
+        assert_eq!(image.data, huffman.data);
+        assert_ne!(
+            image.data,
+            decode(&huffman_flat_gray(8, 8, 144, 0), 1 << 20)
+                .expect("the Huffman frame decodes")
+                .data,
+            "without the refinement scan the DC would still be 128"
+        );
+    }
+
+    /// An arithmetic scan that stops in the middle is reported as truncated
+    /// rather than silently completed (ruling 10), and what decoded stays
+    /// (ruling 2).
+    #[test]
+    fn a_truncated_arithmetic_scan_warns_rather_than_failing() {
+        let mut data = arithmetic_gray(
+            0xC9,
+            16,
+            8,
+            None,
+            None,
+            &[(0x00, 0x3F, 0x00, arith_segment(&diff_of_eight()))],
+        );
+        // Drop the EOI, so the coder runs off the end of the segment instead
+        // of stopping at a marker.
+        data.truncate(data.len() - 2);
+
+        let image = decode(&data, 1 << 20).expect("what decoded is kept");
+        assert!(image.warnings.contains(&Warning::TruncatedInput));
     }
 }

@@ -30,10 +30,12 @@ terminates the chain, handing back its still-encoded payload tagged with
 ceiling (`Limits`), because a 1 KB flate stream can legally expand to
 gigabytes (ruling 1).
 
-**JPEG** (DCTDecode, 7.4.8; T.81): Huffman-coded baseline (SOF0), extended
-sequential (SOF1) and progressive (SOF2) — spectral selection, successive
-approximation and EOB runs (T.81 G.1.1.1.1) all decode. **B.2.2's twelve-bit
-precision decodes too**, outside the baseline frame where the clause allows it:
+**JPEG** (DCTDecode, 7.4.8; T.81): baseline (SOF0), extended sequential
+(SOF1) and progressive (SOF2) — spectral selection, successive approximation
+and EOB runs (T.81 G.1.1.1.1) all decode — and, since 20 September 2026, the
+**arithmetic** frames beside them: **SOF9 and SOF10**, which are those same two
+DCT processes with Annex D's entropy coder in place of Annex C's. **B.2.2's
+twelve-bit precision decodes too**, outside the baseline frame where the clause allows it:
 A.3.1's level shift is `2^(P-1)` rather than 128, and the samples are narrowed
 to eight on the way out with `JpegPrecisionNarrowed` recorded, because every
 `PixelFormat` this engine rasters into is eight bits deep and a wider sample
@@ -44,6 +46,37 @@ single dequantise-and-transform pass with an integer separable IDCT.
 `JpegColor` names what came out: greyscale, YCbCr already converted to RGB,
 and CMYK with the Adobe transform undone — including the inverted-CMYK
 convention, reported as its own variant.
+
+**The arithmetic coder is `qm.rs`, and it is not `mq.rs`.** T.81 Annex D and
+T.88 Annex E are cousins rather than the same coder: Table D.3 has 113 rows
+against Table E.1's 47 and the two share exactly one `Qe` value, `X'0001'`,
+where both bottom out; the MPS sub-interval sits at the base rather than the
+LPS, so the comparison is `Cx < A` after `A = A - Qe` and the subtraction
+happens on the other path; `Initdec` loads two whole bytes and starts `A` at
+`X'10000'` rather than `X'8000'`; an `X'FF'` is followed by a stuffed **zero
+byte** rather than a stuffed bit; and at a marker the decoder is fed **0-bits**
+where T.88 feeds 1-bits. Each of those changes the decoded bits, so the two
+modules are two implementations on purpose, and the one-value overlap is a test
+rather than a sentence.
+
+**What adjudicates it, and what does not — the two halves have different
+answers.** The *coder* is adjudicated outright by published data: **T.81 K.4.1**
+prints a 256-bit test sequence, the 32 bytes it encodes to, and Tables K.7 and
+K.8's symbol-by-symbol traces of both directions. `qm.rs` decodes the published
+bytes to the published decisions and encodes the published decisions to the
+published bytes, which is the standing T.88 Annex H.2's fixture already has
+here. The *statistical model* — F.1.4.4's Tables F.4 and F.5, and Table G.2 for
+a refinement scan — has no such data behind it, because **T.81 publishes no
+arithmetic-coded image**: Annex K was read section by section on 20 September
+2026 and K.4.1 is the only data in it, T.83's own clause 4.4 says its test data
+ships on diskettes rather than inside the document, and T.84 clause 4.2.1 says
+compliance data is obtained from ISO and the ITU. So the model is transcribed
+from its clauses, read against the document twice, and pinned by **hand-derived
+decision sequences**: each test states the decisions T.81's figures say an
+encoder emits for a given block, and asserts both the coefficients that come
+back *and the statistics bin every decision was taken against* — because a
+model that uses the wrong bin still decodes correctly while every bin is in its
+initial state, and asserting coefficients alone would let it through.
 
 **CCITT** (CCITTFaxDecode, 7.4.6; T.4, T.6): G3 one-dimensional (`/K 0`), G3
 mixed two-dimensional (`/K > 0`, each line announcing its mode with the tag
@@ -315,8 +348,9 @@ process and only that**: sequential DCT, Huffman coding, 8-bit precision, one
 SOF0 frame, one scan, `Ss = 0`, `Se = 63`, `Ah = Al = 0`, SOI to EOI with no
 abbreviated form. Everything else T.81 defines is excluded rather than
 half-built, each named in the module header with its reason: progressive and
-extended sequential, arithmetic (Annex D's QM coder, which the decoder beside
-it already refuses), lossless, hierarchical and differential, 12-bit precision,
+extended sequential, arithmetic (Annex D's QM coder — which the decoder beside
+it **no longer** refuses, and writing one would need an encoder-side model this
+does not have), lossless, hierarchical and differential, 12-bit precision,
 four-component CMYK and YCCK — whose meaning comes from Adobe's APP14 and not
 from T.81 or T.871, so writing one would be inventing a convention — and K.2's
 procedure for optimising a Huffman table from an image's own statistics.
@@ -519,9 +553,8 @@ make both enums wrong.
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | **A limit, not a gap.** T.800 Table A.11 allows 38; E.1 clamps a coefficient to `2^(R_b + 2)` sample units and a coefficient plane is a Q12 `i32`, so 17 bits is where the plane format runs out — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. Argued in ROADMAP's Named non-goals | [ROADMAP](../ROADMAP.md) Named non-goals |
 | JPX tile-parts out of order, or a codestream with no complete tile | `Warning::JpxStructureInvalid` | Out of order is a codestream contradicting itself, and reassembling in stream order would produce a picture wrong in a way that looks like compression. A tile *short* of its declared parts is a different failure — a file that stopped — so it is left blank and reported as `JpxTruncated` wherever any tile survives, which is `JxrWarning::TileDroppedAsZero`'s bargain; only a codestream with no whole tile at all is refused | [ROADMAP](../ROADMAP.md) |
 | JPX work/sample/code-block budgets spent | `Warning::JpxBudgetSpent` | The budgets are totals, never refunded — a per-item cap is not a work cap once the structure branches (ruling 1) | [rulings](../rulings.md) |
-| JPEG arithmetic frames: SOF9, SOF10, SOF11, SOF13, SOF14, SOF15 | `JpegError::Arithmetic` | T.81 Annex D's QM coder — related to `mq.rs`'s MQ coder and not the same one. **Zero of 10 603 frames in five corpora**. T.81 itself *is* obtainable — it was fetched again for the baseline encoder above, and Table D.3 is legible off a rendered page — so what this row lacks is not the specification but an adjudicator: no corpus file reaches it, and the encoder written here is Huffman-only by design and emits no arithmetic frame to build a fixture from ([ROADMAP](../ROADMAP.md)) | [ROADMAP](../ROADMAP.md) |
-| JPEG lossless frames: SOF3, SOF7 | `JpegError::Lossless` | Annex H's predictive coder shares nothing with the DCT path — no quantisation, no blocks, no transform. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
-| JPEG differential frames: SOF5, SOF6 | `JpegError::Differential` | Annex J's hierarchical progression, where a frame codes the difference from an upsampled earlier one. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
+| JPEG lossless frames: SOF3, SOF7, SOF11, SOF15 | `JpegError::Lossless` | Annex H's predictive coder shares nothing with the DCT path — no quantisation, no blocks, no transform. Both entropy coders are on this row because the predictor is what is missing either way: `qm.rs` decodes SOF11's and SOF15's decisions perfectly well with nothing to hand them to. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
+| JPEG differential frames: SOF5, SOF6, SOF13, SOF14 | `JpegError::Differential` | Annex J's hierarchical progression, where a frame codes the difference from an upsampled earlier one. Same shape as the row above: the entropy coder is not the gap. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
 | JPEG precision other than 8 or 12 bits | `JpegError::UnsupportedPrecision` | B.2.2 allows 8 in a baseline frame and 8 or 12 elsewhere; anything else is a header this build will not guess at | [ROADMAP](../ROADMAP.md) |
 | TIFF `PhotometricInterpretation` 4, 5, 8, 32803, and 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | A CMYK or CIELab image read as RGB is not a degraded picture, it is a different one; YCbCr is read only where a JPEG has already undone it | — |
 | TIFF `Compression` 6 (old-style JPEG), 34712 (JPEG 2000) and the rest | `TiffError::UnsupportedCompression` | Named by code, so a refusal says which | — |
@@ -639,9 +672,13 @@ wants the reason to survive it.
   can reach is a claim rather than a check.
 - In-crate: `jbig2.rs` decodes T.88 Annex H.1's published datastream example
   byte for byte; `mq.rs` holds Annex H.2's test sequence as a permanent
-  fixture, because the coder serves two codecs; `src/jpx/tests/refusals.rs`
-  reaches every entry of the JPX refusal list, so "the refusals are the
-  feature" is checked, not claimed.
+  fixture, because the coder serves two codecs; **`qm.rs` holds T.81 K.4.1's,
+  in both directions** — the published bytes decode to the published decisions
+  and the published decisions encode to the published bytes — and that fixture
+  walks **26 of Table D.3's 113 rows**, counted rather than claimed, so what it
+  does *not* reach is visible too; `src/jpx/tests/refusals.rs` reaches every
+  entry of the JPX refusal list, so "the refusals are the feature" is checked,
+  not claimed.
 - Fuzzing: nine of the 25 fuzz targets exercise this crate —
   `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `png`,
   `tiff`. The last is the first target that reaches five other decoders
@@ -651,6 +688,6 @@ wants the reason to survive it.
 - Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
   15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
   bit-for-bit across targets ([determinism](determinism.md)), and the whole
-  workspace stands at 4 879 passed / 0 failed / 58 ignored
-  (Windows x86_64, 14 September 2026). See [verification](../verification.md) for
+  workspace stands at 4 903 passed / 0 failed / 58 ignored
+  (Windows x86_64, 20 September 2026). See [verification](../verification.md) for
   the full harness.
