@@ -36,7 +36,7 @@ use crate::jpx::boxes::{self, ChannelDef, ChannelMap, Jp2Header, Palette};
 use crate::jpx::codestream::{self, Component};
 use crate::jpx::colour::{self, ICT_B_CB, ICT_G_CB, ICT_G_CR, ICT_R_CR};
 use crate::jpx::wavelet::{into_samples, ladder, level_shift, Fixed, QC};
-use crate::jpx::{jpx_decode, tier1, tier2, JpxColour, Refusal};
+use crate::jpx::{jpx_decode, tier1, tier2, JpxColour, Refusal, MAX_JPX_PRECISION};
 use crate::Limits;
 
 // --- T.800 G.2.2, as decimals ---------------------------------------------
@@ -742,4 +742,50 @@ fn widening_a_narrow_channel_reaches_full_scale() {
     assert_eq!(normalise(-128, 8, 8, true), 0);
     assert_eq!(normalise(0, 8, 8, true), 128);
     assert_eq!(normalise(127, 8, 8, true), 255);
+}
+
+/// A `pclr` channel is held to the same depth ceiling SIZ is.
+///
+/// Three independent readers take a bit depth — `Ssiz` (A.5.1), `bpcc`'s
+/// `Bi` (I.5.3.2) and a `pclr` palette's per-channel `Bi` (I.5.3.4) — and
+/// `plan` then insists on one precision for the whole output. A palette that
+/// could declare a depth SIZ could not would reach `blit` with a `from`
+/// outside `normalise`'s own `debug_assert`, in a release build with no
+/// assertion to catch it: `(1u32 << from) - 1` at 32 is a shift overflow and
+/// at 17 to 31 it is an in-range divisor that scales every sample wrong. So
+/// this is the depth ceiling's *other* door, and it is checked through a
+/// whole file rather than through the private parser.
+///
+/// Self-consistency, stated plainly: nothing third-party adjudicates that a
+/// 17-bit palette channel should be refused. T.800 I.5.3.4 permits it; the
+/// refusal is this build's ceiling, argued in ROADMAP's Named non-goals.
+#[test]
+fn a_pclr_channel_is_held_to_the_same_depth_ceiling_as_siz() {
+    // `Bi` is `depth - 1` in the low seven bits, so this asks for one more
+    // bit than the ceiling.
+    let bi = MAX_JPX_PRECISION;
+    let pclr = vec![0x00, 0x01, 0x01, bi, 0, 0, 0];
+    let mut jp2h = boxed(*b"ihdr", &[0, 0, 0, 4, 0, 0, 0, 4, 0, 1, 7, 7, 0, 0]);
+    jp2h.extend_from_slice(&boxed(*b"colr", &[1, 0, 0, 0, 0, 0, 17]));
+    jp2h.extend_from_slice(&boxed(*b"pclr", &pclr));
+    jp2h.extend_from_slice(&boxed(*b"cmap", &[0, 0, 1, 0]));
+    let mut file = SIGNATURE.to_vec();
+    file.extend_from_slice(&boxed(*b"jp2h", &jp2h));
+    file.extend_from_slice(&boxed(
+        *b"jp2c",
+        &Spec::default().codestream(&[(0, &[0, 0])]),
+    ));
+
+    let mut warnings = Vec::new();
+    let refusal = jpx_decode(&file, &Limits::new(1 << 20), &mut warnings)
+        .expect_err("a 17-bit palette channel is refused rather than decoded");
+    assert!(
+        format!("{refusal:?}").contains("Jpx"),
+        "the refusal reaches the caller as a JPX capability: {refusal:?}"
+    );
+    assert_eq!(
+        warnings,
+        vec![crate::Warning::JpxPrecisionUnsupported],
+        "and it is named as a precision refusal rather than a structural one"
+    );
 }
