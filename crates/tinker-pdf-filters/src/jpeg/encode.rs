@@ -15,8 +15,12 @@
 //!   selection and successive approximation across many scans — and choosing
 //!   that schedule is a policy decision belonging to whoever wants it.
 //! - **Arithmetic coding** (SOF9 SOF10 SOF11 SOF13 SOF14 SOF15). Annex D's QM
-//!   coder, which [`super::JpegError::Arithmetic`] already refuses on the way
-//!   in, and `docs/ROADMAP.md` carries three separate reasons it is not built.
+//!   coder. **The decoder beside this reads SOF9 and SOF10 as of 20 September
+//!   2026** — `crate::qm` is the coder and `super::arith` the models — so what
+//!   is missing here is not the coder but an encoder-side model: Figures F.4
+//!   to F.6 and G.9 to G.11 are a second transcription of Annex F and Annex G,
+//!   and nothing published would adjudicate it any more than it adjudicates
+//!   the decoder's (ruling 13, and that file's header).
 //! - **Lossless (SOF3, SOF7)** and **hierarchical/differential (SOF5, SOF6,
 //!   SOF13..SOF15)**. Annexes H and J share no machinery with the DCT path.
 //! - **12-bit precision.** T.81 B.2.2 allows `P = 12` for the extended
@@ -217,7 +221,8 @@
 //!   third-party, so "held to this decoder" is worth less than it sounds.**
 //!   This was checked rather than assumed. Every fixture in `jpeg.rs`'s test
 //!   module is built by that module's own `BitWriter` and `marker` helpers;
-//!   `fuzz/corpus/jpeg/` is four files written out of those same fixtures;
+//!   `fuzz/corpus/jpeg/` is six files written out of those same fixtures,
+//!   two of them the arithmetic seeds added with `qm.rs`;
 //!   `crates/tinker-pdf/tests/cbz/source/page3.jpg` is 169 bytes and is one of
 //!   them; `crates/tinker-pdf/tests/jpeg_census.rs` walks 10 606 real streams
 //!   but counts *frame types* and never compares a pixel; and there is no JPEG

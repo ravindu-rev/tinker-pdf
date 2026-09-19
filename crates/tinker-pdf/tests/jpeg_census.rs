@@ -1,8 +1,12 @@
 //! **What JPEG frames the corpus actually carries** (roadmap Tier 2).
 //!
-//! Two capabilities are refused in `tinker-pdf-filters` by name — arithmetic
+//! Two capabilities were refused in `tinker-pdf-filters` by name — arithmetic
 //! coding and every frame type outside SOF0, SOF1 and SOF2 — and the roadmap
-//! row for them said *a count first*. This is that count, and it is taken
+//! row for them said *a count first*. **One of the two has since landed**:
+//! SOF9 and SOF10 decode as of 20 September 2026, which does not retire this
+//! census. A count of zero is what scheduled that work under ruling 3, and it
+//! is what would report the day a document arrives carrying one of the four
+//! frames still refused. This is that count, and it is taken
 //! through the COS layer rather than off the raw bytes: a `/DCTDecode` stream
 //! inside an object stream or an encrypted document is invisible to a byte
 //! scan, and both are ordinary. An earlier scan of the same corpora by raw
@@ -286,6 +290,12 @@ const STREAMS: u32 = 10606;
 /// SOF9, SOF10, SOF11, SOF13, SOF14 and SOF15 across five corpora, one of
 /// which is a thousand documents a crawler found on the open web. This is the
 /// number the roadmap row asked for.
+///
+/// **SOF9 and SOF10 decode now, and this number still matters.** It is what
+/// says the decoder for them was scheduled on evidence rather than on
+/// appetite, and it is the instrument that would report the first real
+/// document to reach either — or to reach SOF11, SOF13, SOF14 or SOF15, which
+/// are still refused.
 const ARITHMETIC: u32 = 0;
 
 /// **Lossless and differential frames: none.** SOF3, SOF5, SOF6 and SOF7.
