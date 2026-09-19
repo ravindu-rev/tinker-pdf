@@ -28,7 +28,10 @@
 //! Every one of A.5.1's constraints is checked here rather than assumed, and
 //! each violation refuses the file.
 
-use super::{Cursor, Refusal, MAX_JPX_COMPONENTS, MAX_JPX_LEVELS, MAX_JPX_SAMPLES, MAX_JPX_TILES};
+use super::{
+    Cursor, Refusal, MAX_JPX_COMPONENTS, MAX_JPX_LEVELS, MAX_JPX_PRECISION, MAX_JPX_SAMPLES,
+    MAX_JPX_TILES,
+};
 use crate::Limits;
 
 /// ITU-T T.800 Table A.2, in full. Every one of these is parsed below or
@@ -843,7 +846,7 @@ fn parse_siz(body: &[u8]) -> Result<Siz, Refusal> {
             return Err(Refusal::Truncated("a SIZ component"));
         };
         let precision = (ssiz & 0x7F) + 1;
-        if precision > 16 {
+        if precision > MAX_JPX_PRECISION {
             return Err(Refusal::Precision(precision));
         }
         if dx == 0 || dy == 0 {

@@ -16,7 +16,8 @@
 use crate::jpx::codestream::parse;
 use crate::jpx::tier1::{decode_code_block, initial_contexts, CodingStyle, MAX_PASSES};
 use crate::jpx::tier2::Orientation;
-use crate::jpx::{Refusal, MAX_JPX_CODE_BLOCKS, MAX_JPX_SAMPLES, MAX_JPX_WORK};
+use crate::jpx::wavelet::{PLANE_BOUND, Q};
+use crate::jpx::{Refusal, MAX_JPX_CODE_BLOCKS, MAX_JPX_PRECISION, MAX_JPX_SAMPLES, MAX_JPX_WORK};
 
 use super::writer::Spec;
 
@@ -214,5 +215,42 @@ fn the_sample_cap_is_spent_across_components_rather_than_per_tile() {
         stream.check_budget(&crate::Limits::new(usize::MAX)),
         Err(Refusal::Budget("tile-component samples")),
         "and 64 of it is not"
+    );
+}
+
+/// `MAX_JPX_PRECISION` is where the coefficient plane's format runs out, not
+/// a policy someone chose.
+///
+/// **Which link is adjudicated by what.** The clamp `2^(R_b + 2)` is
+/// transcribed from Recommendation ITU-T T.800 (11/2015) E.1.1 — E.1's
+/// nominal dynamic range plus one guard bit — and T.800 Table A.11 is what
+/// says a component may declare up to 38 bits at all. The Q12 `i32` plane is
+/// **this repository's own choice**, so the relation asserted below is
+/// self-consistency between a transcribed clamp and a chosen storage format.
+/// That is precisely the claim being made — this build's ceiling is its plane
+/// format's, not the standard's — and nothing here is a claim about what
+/// T.800 permits.
+///
+/// Asserted as a relation for this module's own reason: a test that restated
+/// 16 would agree with the constant however wrong it was. Raise
+/// `MAX_JPX_PRECISION` to 17 without widening [`PLANE_BOUND`] and its type
+/// and this fails, which is what makes ROADMAP's Named-non-goals entry a
+/// checked statement rather than a remembered one.
+#[test]
+fn the_coefficient_plane_is_what_caps_precision() {
+    // `dequantise` sets `bound = precision + 2` in sample units, and
+    // `Fixed::dyadic` stores a value `m * 2^e` as `m * 2^(e + Q)`. So a
+    // coefficient sitting exactly on E.1's clamp occupies this much of the
+    // plane's own format.
+    let on_the_clamp = |precision: u32| 1i64 << (precision + 2 + Q);
+
+    assert_eq!(
+        on_the_clamp(u32::from(MAX_JPX_PRECISION)),
+        PLANE_BOUND,
+        "PLANE_BOUND is E.1's clamp at MAX_JPX_PRECISION expressed in Q12,          and the two have drifted apart"
+    );
+    assert!(
+        on_the_clamp(u32::from(MAX_JPX_PRECISION) + 1) > i64::from(i32::MAX),
+        "one bit past MAX_JPX_PRECISION still fits an i32 plane entry, so the          ceiling is not the plane format's any more and Named non-goals is          arguing from a premise that has stopped being true"
     );
 }

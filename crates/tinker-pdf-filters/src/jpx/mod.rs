@@ -111,6 +111,35 @@ pub(crate) const MAX_JPX_TILES: u64 = 65_535;
 /// Decomposition levels, T.800 A.6.1's own bound. Resolutions are one more.
 pub(crate) const MAX_JPX_LEVELS: u8 = 32;
 
+/// Component sample precision, in bits.
+///
+/// **T.800 Table A.11 allows 1 to 38** — `Ssiz` is `x000 0000` to
+/// `x010 0101`, "component sample bit depth = value + 1", with the table's
+/// own footnote a) adding that "not all combinations of coding styles will
+/// allow the coding of 38-bit samples". This build stops at 16, and the
+/// reason is arithmetic rather than taste, which is why the figure has a
+/// name here instead of being a literal at each of the three places that
+/// reads a depth.
+///
+/// **The coefficient plane is what caps it, not the output.** E.1's
+/// dequantisation clamps a coefficient to `2^(R_b + 2)` sample units, where
+/// `R_b` is the component precision; [`wavelet::Fixed`] stores a plane entry
+/// at Q12 in an `i32`. So a clamped coefficient occupies `2^(R + 2 + 12)` of
+/// the plane's own format, which is `2^30` at 16 bits — exactly
+/// [`wavelet::PLANE_BOUND`] — and `2^31` at 17, which an `i32` does not
+/// hold. Seventeen bits is where the plane format runs out, not where a
+/// policy begins, and `the_coefficient_plane_is_what_caps_precision` in
+/// `tests::bounds` asserts that relation rather than restating the 16.
+///
+/// The output cannot carry it either: [`JpxImage::precision`] is 8 or 16 and
+/// ISO 32000-1 Table 89 gives `/BitsPerComponent` as 1, 2, 4, 8 or 16, so
+/// there is no member of the PDF image model above this to widen into. That
+/// is why this is a **limit** in ROADMAP's Named non-goals rather than a row
+/// — unlike JPEG's twelve-bit frames, which decode and are narrowed to eight
+/// on the way out, because there the coefficient path is fixed at the
+/// frame's own precision and only the *sample* needed narrowing.
+pub(crate) const MAX_JPX_PRECISION: u8 = 16;
+
 /// Code-blocks in one tile-component, across every resolution and precinct.
 ///
 /// **Not the work cap** — [`MAX_JPX_SAMPLES`] is. This bounds the *bookkeeping*
@@ -215,9 +244,15 @@ pub enum Refusal {
     /// a Table A.19 code-block style bit, a quantisation style, an `Rsiz`
     /// capability.
     Feature(&'static str),
-    /// Component precision above 16 bits. T.800 allows 38; PDF's sample path
-    /// reads at most 16 and the fixed-point format is proved for 16, so this
-    /// is refused rather than truncated.
+    /// Component precision above [`MAX_JPX_PRECISION`]. T.800 Table A.11
+    /// allows 38.
+    ///
+    /// **A limit rather than a gap**, and ROADMAP's Named non-goals is where
+    /// it is argued. The short form: E.1 clamps a coefficient to
+    /// `2^(R_b + 2)` sample units and the plane holds a Q12 `i32`, so 17 bits
+    /// is where the plane format runs out; and there is nowhere to hand the
+    /// result even if it were widened, because ISO 32000-1 Table 89 gives
+    /// `/BitsPerComponent` as 1, 2, 4, 8 or 16.
     Precision(u8),
     /// The data ended inside something that was still being read.
     Truncated(&'static str),
@@ -514,7 +549,7 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
     let header = container.header.as_ref();
     let plan = colour::plan(header, &stream.siz.components)?;
     let palette = header.and_then(|h| h.palette.as_ref());
-    if plan.precision > 16 {
+    if plan.precision > MAX_JPX_PRECISION {
         return Err(Refusal::Precision(plan.precision));
     }
     // **The output is 8 or 16 bits and nothing else**, which is what

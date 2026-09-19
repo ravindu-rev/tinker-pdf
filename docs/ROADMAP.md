@@ -218,7 +218,7 @@ decodes.**
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
 | **JPEG arithmetic coding** (SOF9, SOF10, SOF11, SOF13, SOF14, SOF15). Twelve-bit precision has landed and left this row, and so has a defect it uncovered: SOF3, SOF5, SOF6, SOF7 and the differential arithmetic frames were **skipped rather than refused** — stepped over as though they were a comment, so a lossless JPEG surfaced as a damaged file | `crates/tinker-pdf/tests/jpeg_census.rs` walks every `/DCTDecode` stream through the COS layer, so encrypted documents and object streams are seen: **688 files, 10 606 distinct streams, 10 603 frames, and every one of them is SOF0, SOF1 or SOF2 at eight bits**. Zero arithmetic, zero lossless, zero other precision. That is the largest population any census here measures | **one blocker left of three, and the row is scheduled.** (1) Zero corpus reachability holds, and ruling 3 makes that a scheduling input rather than a wall. (2) **T.81 is obtainable after all** — see the tier preamble. Table D.3's 113 states and Annex D's decoder procedures are legible when the page is rendered with a face supplied, so they are transcribed rather than guessed. (3) No arithmetic-JPEG encoder exists here, so a fixture still cannot be *built* — but T.81's own annexes have not been searched for a published datastream, and that assumption has been wrong three times running. Writing a 113-state table from memory is what the Annex B work priced; reading it off the page is not that | M, scheduled; the decoder is transcribable, and what must be settled first is whether anything can adjudicate it |
-| **JPX: the RGN, POC, PPM and PPT markers, the `BYPASS` and `TERMALL` code-block styles, component precision above 16 bits.** CRG has left this row: ISO 19005 aside, T.800 A.9.1 says in as many words that it "has no effect on decoding the codestream", so it is parsed, carried and never applied, and refusing a file for carrying it refused a conforming file | **Zero corpus files reach any of them.** `jpx_attribution.rs` names every refusal in the 39 JPX-bearing files and not one is a coding capability: a ruling 1 budget, two deliberately non-conformant veraPDF `colr` fixtures, two `/JPXDecode` streams whose bytes are not JPEG 2000 at all, and two real documents that are truncated | **one blocker left of three, and the row is scheduled.** (1) Zero corpus reachability still holds, and under ruling 3 that is a scheduling input rather than a wall. (2) **T.800 is obtainable** and was fetched on 13 September 2026 — the claim that ISO and the ITU both sell it was never retested; B.10.7.2's rule for how many codeword segments a packet signals is at hand rather than written from memory. (3) **A fixture no longer needs an encoder**: T.800 Annex J.10 publishes a complete codestream with its decoded samples, and `jpx_annex_j.rs` decodes it. What the standard does *not* publish is a codestream exercising these particular capabilities, so each still needs a hand-authored one transcribed from its own clause — and the first measurement of that work says how carefully: of 182 citations drafted from T.800 for these seven capabilities, **37 were wrong** and only one of six specifications came back clean | scheduled; one capability at a time, each with the clause it is transcribed from checked against T.800 twice |
+| **JPX: the RGN, POC, PPM and PPT markers, the `BYPASS` and `TERMALL` code-block styles.** **Component precision above 16 bits has left this row and is a limit**, argued under Named non-goals: E.1's dequantisation clamps a coefficient to `2^(R_b + 2)` sample units and the coefficient plane is a Q12 `i32`, so 17 bits is where the plane's format runs out rather than where a policy begins — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. CRG has left this row for a different reason: ISO 19005 aside, T.800 A.9.1 says in as many words that it "has no effect on decoding the codestream", so it is parsed, carried and never applied, and refusing a file for carrying it refused a conforming file | **Zero corpus files reach any of them.** `jpx_attribution.rs` names every refusal in the 39 JPX-bearing files and not one is a coding capability: a ruling 1 budget, two deliberately non-conformant veraPDF `colr` fixtures, two `/JPXDecode` streams whose bytes are not JPEG 2000 at all, and two real documents that are truncated | **one blocker left of three, and the row is scheduled.** (1) Zero corpus reachability still holds, and under ruling 3 that is a scheduling input rather than a wall. (2) **T.800 is obtainable** and was fetched on 13 September 2026 — the claim that ISO and the ITU both sell it was never retested; B.10.7.2's rule for how many codeword segments a packet signals is at hand rather than written from memory. (3) **A fixture no longer needs an encoder**: T.800 Annex J.10 publishes a complete codestream with its decoded samples, and `jpx_annex_j.rs` decodes it. What the standard does *not* publish is a codestream exercising these particular capabilities, so each still needs a hand-authored one transcribed from its own clause — and the first measurement of that work says how carefully: of 182 citations drafted from T.800 for these seven capabilities, **37 were wrong** and only one of six specifications came back clean | scheduled; one capability at a time, each with the clause it is transcribed from checked against T.800 twice |
 
 ## Tier 3 — capabilities absent today
 
@@ -454,6 +454,40 @@ and the difference matters under the goal this file now states.
   wrote accepting this engine's output, a second reading of an XPS package,
   a reference CSS implementation, an arbiter for an EPUB disagreement. Ruling
   13 retires them and [verification.md](verification.md) names them.
+- **JPEG 2000 component precision above 16 bits.** T.800 Table A.11 allows
+  1 to 38 — `Ssiz` runs `x000 0000` to `x010 0101`, "component sample bit
+  depth = value + 1" — and this build refuses past 16. **The coefficient
+  plane is what caps it, not the output sample.** E.1's dequantisation clamps
+  a coefficient to `2^(R_b + 2)` sample units, and a plane entry is Q12 in an
+  `i32`, so a coefficient on the clamp occupies `2^(R + 14)` of the plane's
+  own format: `2^30` at 16 bits, which is `PLANE_BOUND` exactly, and `2^31` at
+  17, which an `i32` does not hold. That is not the whole reason and it would
+  be revisitable on its own — an `i64` plane would hold it, at twice the 268 MB
+  a 4096 x 4096 four-component tile already costs, and at the price of
+  re-proving the `MAX_PRODUCT` bound the fixed-point 9/7 rests on. **What
+  makes it a limit is that there is nowhere to hand the result**: ISO 32000-1
+  Table 89 gives `/BitsPerComponent` as 1, 2, 4, 8 or 16 and nothing wider,
+  so a widened sample would be narrowed again one stage later, where the
+  narrowing is less visible rather than absent.
+
+  **Not the same bargain as JPEG's twelve-bit frames**, which decode and are
+  narrowed to eight on the way out with `JpegPrecisionNarrowed` recorded. That
+  works because a JPEG coefficient path is fixed at the frame's own precision
+  and only the *sample* needed narrowing; a JPEG 2000 coefficient's magnitude
+  grows with `R_b` by E.1, so there is no stage at which the wide value does
+  not have to exist. The comparison is drawn because it is the obvious
+  objection and it was checked rather than assumed.
+
+  T.800 says the same thing twice from its own side. Table A.11's footnote a)
+  warns that "not all combinations of coding styles will allow the coding of
+  38-bit samples", and **every profile T.800 names caps the depth at or below
+  this**: Table A.45's Profiles 0 and 1 at `7 <= Ssiz_i <= 11` (8-12 bits),
+  Tables A.48, A.51 and A.52's Broadcast Contribution and IMF profiles at
+  `7 <= Ssiz_i <= 15` (8-16 bits). Zero of the corpus's 39 JPX files reach it.
+  `the_coefficient_plane_is_what_caps_precision` in
+  `crates/tinker-pdf-filters/src/jpx/tests/bounds.rs` asserts the relation
+  rather than the figure, so this entry fails a test if its premise stops
+  being true ([features/filters.md](features/filters.md)).
 - **JPEG XR's unadjudicated list** — the quantised lossy path past QP 1, the
   first-level overlap filter across a soft tile boundary, `HARD_TILING_FLAG`,
   `SHIFT_BITS`, `TRIM_FLEXBITS`, more than one QP per tile, and a damaged
