@@ -1188,10 +1188,15 @@ They live in `crates/tinker-pdf/benches/engine.rs` instead — seven operations
 under criterion, which is exempt tooling by name and whose plotting stack is
 switched off so the dependency tree stays four crates deep. `cargo bench` runs
 weekly in `bench.yml` and keeps its numbers as artefacts; it is scheduled rather
-than gating, because a hosted runner swings 20 % between two runs of identical
-code and a benchmark that fails a pull request on that teaches people to ignore
-it. The useful mode is criterion's own comparison, which needs two revisions on
-one machine:
+than gating, because a hosted runner swings widely between two runs of
+identical code and a benchmark that fails a pull request on that teaches people
+to ignore it. This page said "20 %" there, unsourced, from the day the job was
+written until 19 September 2026, when fifteen runs of one revision put the
+figure at **88.36 %** for the worst of the seven operations and 22.61 % for the
+best. The guess was low, and low by enough that a band built on it would have
+failed on the machine rather than on the code — which is what
+`bench-check` refuses an entry for. The useful mode is criterion's own
+comparison, which needs two revisions on one machine:
 
 ```sh
 cargo bench -p tinker-pdf -- --save-baseline before
@@ -1207,18 +1212,30 @@ than gating, which is what the roadmap's speed row said. `bench-check` reads
 criterion's own `estimates.json` — its numbers, not a second timing — and holds
 each operation to a committed figure and a band.
 
-**And the weekly job had never passed at all.** Its guard read `time:+\[`,
-which is `time` followed by one-or-more colons and a bracket; criterion prints
-`time:` and then three spaces. The only scheduled run, 31 August 2026, printed
-all six figures and exited 1 on that line. It counts **seven** matches now:
-`engine.rs` gained a seventh operation on 5 September 2026, because six of the
-seven never enter the scanline rasteriser and the roadmap's vectorisation row
-had nothing to measure a speedup on.
+**And the weekly job had never passed at all, for two faults and not one.**
+Its guard read `time:+\[`, which is `time` followed by one-or-more colons and a
+bracket; criterion prints `time:` and then three spaces. It counts **seven**
+matches now: `engine.rs` gained a seventh operation on 5 September 2026,
+because six of the seven never enter the scanline rasteriser and the roadmap's
+vectorisation row had nothing to measure a speedup on.
 
-**No baseline is committed yet, and the reason is a measurement.** A band has to
-be above the machine's own swing or it fails on the machine rather than on the
-code, so `bench-check` refuses an entry that carries no measured swing. This
-desktop was measured twice, five runs each, with nothing else compiling:
+That fix landed on `develop` and the job went on failing weekly anyway. **A
+scheduled workflow runs the default branch**, whatever ref it was written on,
+and the default branch is `main` — hundreds of commits behind, still carrying
+the pattern that cannot match. So all three cron runs, 31 August and 7 and 14
+September 2026, benchmarked a months-old tree: six operations rather than
+seven, all six printing their figures, and then exit 1 on a guard that had
+been corrected on `develop` on 5 September, somewhere no cron could reach.
+Reading all three failures as the one fault was the mistake: the guard was
+corrected and the job kept failing, because the correction and the schedule
+were on different branches. Whether `main` should be moved to `develop` is a
+release decision and is not taken in this document.
+
+**The desktop this repository is written on cannot be the named machine, and
+that is a measurement rather than an excuse.** A band has to be above the
+machine's own swing or it fails on the machine rather than on the code, so
+`bench-check` refuses an entry that carries no measured swing. This desktop
+was measured twice, five runs each, with nothing else compiling:
 
 | Operation | Widest spread over five runs |
 | --- | ---: |
@@ -1229,13 +1246,100 @@ desktop was measured twice, five runs each, with nothing else compiling:
 | render text at 150 dpi | 105 % |
 | a full-page axial shading | **259 %** |
 
-A band above 259 % would admit any regression anybody could write. **So this
-machine cannot be the named machine**, and saying so is the measurement the row
-asked for rather than a failure to do it. The named machine has to be the
-weekly runner, which has one dated observation — 31 August, six figures, no
-spread — and needs several runs before a band is a number. `bench-check`
-reports and does not fail for a machine with no entry, so the job is useful
-today and becomes a gate the day `ubuntu-latest` has one.
+A band above 259 % would admit any regression anybody could write.
+
+### The named machine is `ubuntu-latest`, measured 19 September 2026
+
+The roadmap called this row *"blocked on runs of a machine nobody owns"*.
+`bench.yml` has a `workflow_dispatch` and `runs-on: ubuntu-latest`, so the
+machine was one command away: `gh workflow run bench.yml --ref develop`, on
+`develop` rather than on the default branch, fifteen times against one
+unchanged revision (`4aff8cc`). Every one of the fifteen reported all seven
+operations. The figures below are criterion's own `mean.point_estimate`, read
+out of the `estimates.json` each run uploaded as an artefact — nothing
+re-timed anything, and the runner hosted this code rather than judging it
+(ruling 13).
+
+| Operation | Fastest | Slowest | Spread | Band |
+| --- | ---: | ---: | ---: | ---: |
+| extract a page of text | 0.728 ms | 0.893 ms | 22.61 % | 35 % |
+| rewrite a document | 0.052 ms | 0.066 ms | 27.89 % | 45 % |
+| paginate a book at 432x648 pt | 12.365 ms | 16.102 ms | 30.22 % | 50 % |
+| open a 3-page document | 0.0145 ms | 0.0194 ms | 33.67 % | 55 % |
+| a full-page axial shading at 150 dpi | 123.662 ms | 171.645 ms | 38.80 % | 60 % |
+| fill 300 anti-aliased paths at 150 dpi | 31.739 ms | 45.193 ms | 42.39 % | 65 % |
+| render text at 150 dpi | 5.341 ms | 10.061 ms | **88.36 %** | 135 % |
+
+The runs are `workflow_dispatch` ids 35462488069, 35462702958, 35462705081,
+35462706950, 35462708751, 35462921377, 35462922858, 35462924746, 35462926404,
+35463256473, 35463258487, 35463260359, 35463262176, 35463264168 and
+35463266192, all on 19 September 2026, and `baseline.json` lists them.
+
+**Three choices in that table, and the reason for each.**
+
+*The recorded figure is the fastest of the fifteen, not their average.* The
+comparison is one-sided — faster is never a failure — so the bar worth
+recording is the best the machine has ever done, and a verdict then reads as
+*how much slower than that*. A middle figure would raise the bar by whatever
+the slow half of the fleet contributed and slacken the gate by the same
+amount, for nothing.
+
+*The band is per operation.* One band has to clear the worst spread in the
+table, and the worst is 3.9 times the best; a single machine-wide band would
+have held the text extractor, which swings 22.61 %, to the text renderer's
+88.36 % of slack — a doubling of the extractor would have passed without a
+word. `ratchet.json` already bands each corpus's peak separately rather than
+banding five on the worst, and this is the same argument. `baseline.json`
+still carries a machine-level pair: the widest swing any of its operations
+showed, and a ceiling no operation's band may exceed.
+
+*Each band is its operation's spread, half again as wide, rounded up to the
+next 5 %.* Half again because that is what the measurement itself did when the
+sample grew: the worst operation read 57.59 % over the first five runs,
+72.71 % over nine and **88.36 % over fifteen**, a factor of 1.53 for tripling
+the sample. The measured swing is a lower bound that has not converged, so a
+band set just above the observation would fail on the machine rather than on
+the code — which is the thing `bench-check` refuses an entry for. These bands
+are a floor, and a later measurement may have to raise them.
+
+**`ubuntu-latest` is a fleet and not a machine, and most of the table is that
+and not noise.** Score each run by the geometric mean of its seven operations
+against the fastest figure for each, and the fifteen fall into two groups with
+nothing between them: four at 1.00, 1.06, 1.14 and 1.16, and eleven at 1.30 to
+1.36. The runner image was the same on all fifteen — `ubuntu24/20260907.300`,
+checked on each — so the difference is hardware the log does not name. Within
+either group the operation that swings 88.36 % across the fifteen swings 20 %
+(the eleven) and 16 % (the four); the rest of it is the split. `bench.yml`
+writes `/proc/cpuinfo`'s model name into `bench.log` now, so the next
+measurement can attribute the split rather than band it.
+
+**What this does not catch.** The text renderer's band is 135 %: a change that
+makes it half again slower passes in silence. The 9× rasteriser regression of
+5 September 2026 would not have. This is a ratchet against the catastrophic
+and not against the incremental, and the finer instrument is still criterion's
+own `--baseline` between two revisions on one machine, which needs no band
+because it changes nothing but the code.
+
+**The entry is checked, not just written.** `cargo xtask baseline` — part of
+`cargo run -p xtask -- check`, so it fails a build — holds three files that
+carry the same list of operations to each other: `benches/engine.rs` defines
+them, `bench.yml`'s guard counts them, and `baseline.json` records a figure
+for each. Both ways they have already drifted apart are covered: a guard
+counting six when the file defines seven, and a baseline the path names that
+is not there at all. That second one was live until this measurement — there
+was no `baseline.json` — so the step that promises to "report and not fail for
+a machine with no entry" was exiting 1 on every dispatch, whatever the
+benchmarks had done. Every band in the committed file is pushed against from
+both sides by a unit test, because a band nobody has ever crossed is a number
+nobody has checked.
+
+All fifteen runs pass the entry they set, and so do three more — dispatches
+35463898109, 35463900276 and 35463902573, run after the figures were fixed and
+used for nothing else. Their widest verdict is "render text at 150 dpi" at
++68.88 % of its 135 % band; every other operation in the three sits between
++12 % and +35 % of a band between 35 % and 65 %. A baseline that only its own
+runs can satisfy is a baseline fitted to them, so it is worth having three
+that were not consulted.
 
 ## Seven examples, run rather than compiled
 

@@ -24,7 +24,10 @@ usage:
                         `publish = false` where publishing would be wrong
   cargo xtask fuzz      check the fuzz roster against `fuzz_targets`, the seed
                         corpora and `fuzz/Cargo.toml`, which must agree
-  cargo xtask check     all seven of the above
+  cargo xtask baseline  check the committed speed baseline against the
+                        operations `benches/engine.rs` defines and the count
+                        `bench.yml` guards — three files carrying one list
+  cargo xtask check     all eight of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -105,6 +108,7 @@ fn main() -> ExitCode {
         "conflicts" => report("conflicts", check_conflicts()),
         "fuzz" => report("fuzz", fuzzaudit::run(&repo_root(), rest).map(|_| ())),
         "versions" => report("versions", version::check(&repo_root())),
+        "baseline" => report("baseline", bench::check(&repo_root())),
         "check" => {
             let dag = check_dag();
             let libm = check_libm();
@@ -113,6 +117,7 @@ fn main() -> ExitCode {
             let versions = version::check(&repo_root());
             let conflicts = check_conflicts();
             let fuzz = fuzzaudit::check(&repo_root());
+            let baseline = bench::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
@@ -120,6 +125,7 @@ fn main() -> ExitCode {
             problems.extend(versions.err().unwrap_or_default());
             problems.extend(conflicts.err().unwrap_or_default());
             problems.extend(fuzz.err().unwrap_or_default());
+            problems.extend(baseline.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {
