@@ -601,13 +601,22 @@ mod corpus {
     /// Where `cargo xtask corpus-fetch` puts the qpdf corpus, and the override
     /// for a checkout that shares one fetch between worktrees.
     pub(super) fn corpus_dir() -> Option<PathBuf> {
-        let named = std::env::var_os("TINKER_QPDF_CORPUS").map(PathBuf::from);
+        // An override that names nothing is a typo, and falling back to the
+        // default would answer a question nobody asked: the run would measure
+        // the corpus it happened to find and report `RAN`, which is the shape
+        // of failure the `RAN`/`SKIPPED` discipline exists to stop. So a named
+        // directory that is not one fails here rather than later.
+        if let Some(named) = std::env::var_os("TINKER_QPDF_CORPUS").map(PathBuf::from) {
+            assert!(
+                named.is_dir(),
+                "TINKER_QPDF_CORPUS is set to {} and that is not a directory",
+                named.display()
+            );
+            return Some(named);
+        }
         let default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/files/qpdf/qpdf/qtest/qpdf");
-        named
-            .into_iter()
-            .chain(std::iter::once(default))
-            .find(|dir| dir.is_dir())
+        default.is_dir().then_some(default)
     }
 
     /// Every `.pdf` in the corpus, by name, so the order is the same on every
