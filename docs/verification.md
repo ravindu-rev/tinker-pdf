@@ -7,9 +7,10 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 20 September 2026. `cargo test --workspace --no-fail-fast`
-is **4 903 passed, 0 failed, 59 ignored** across 218 suites on
-`x86_64-pc-windows-msvc`. The 216th suite is `epub_images.rs`, which the
-replaced box brought with it. The same suite was 2 243 passed, 0 failed on
+is **4 922 passed, 0 failed, 59 ignored** across 219 suites on
+`x86_64-pc-windows-msvc`. The suite gained since the last count is
+`linearized_numbering.rs`, which Annex F's numbering brought with it. The
+same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
 tool-gated suites, and the Linux figure is a dated observation rather than a
