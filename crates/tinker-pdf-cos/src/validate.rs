@@ -2902,11 +2902,22 @@ impl Validator<'_> {
 
         let extents = self.extents(sections);
 
-        // Item 5: the end of the first page's section. Recomputed as the
-        // furthest byte any object of page one reaches, which is a weaker
-        // statement than the writer's own arithmetic and an independent one.
-        let run = self.page_run(0).unwrap_or_default();
-        let reaches = run
+        // Item 5: the end of the first page's section, recomputed as the
+        // furthest byte any object page one *reaches* occupies.
+        //
+        // Reachability rather than a run of consecutive object numbers, for
+        // two reasons. It is what `/E` promises a streaming reader —
+        // everything needed to draw page one is inside the first `/E` bytes —
+        // and it does not depend on the numbering, so it holds on a file this
+        // writer did not lay out. The numeric form was silently inert: F.3.1
+        // numbers page one's run above every other page's, so `page_run(0)`
+        // had no next page to measure against, came back `None`, and the
+        // `(_, None)` arm below swallowed this whole rule — on every
+        // conforming file in the fetched corpus as well as on this writer's
+        // own output once its numbering was corrected.
+        let reaches = first_page
+            .map(|page| self.page_reach(page))
+            .unwrap_or_default()
             .iter()
             .filter_map(|num| extents.get(num))
             .map(|(at, len)| at + len)
@@ -3176,14 +3187,78 @@ impl Validator<'_> {
 
     /// The consecutive run of object numbers page `index` owns (Table F.4
     /// item 1).
+    ///
+    /// `None` where the page order cannot bound the run, and the caller falls
+    /// back to the count the table declares. That is the last page — nothing
+    /// above it to measure against — and, under F.3.1's numbering, **page one
+    /// as well**: its run is the top of the file's numbering and every other
+    /// page is below it, so `pages[1].num > pages[0].num` is false. Both cases
+    /// take the declared-count branch, where the numbers the count produces
+    /// are then checked against the objects the file really carries.
     fn page_run(&self, index: usize) -> Option<Vec<u32>> {
         let page = self.pages.get(index)?;
         match self.pages.get(index + 1) {
             Some(next) if next.num > page.num => Some((page.num..next.num).collect()),
-            // The last page owns everything from its page object to whatever
-            // the layout put next, which the page order alone cannot say.
             _ => None,
         }
+    }
+
+    /// What F.3.7 puts in the first-page section, in that clause's own words:
+    /// *all objects that the page object refers to, to an arbitrary depth,
+    /// except page tree nodes or other page objects … including objects
+    /// referred to by its Contents, Resources, Annots, and B entries, but not
+    /// the Thumb entry*.
+    ///
+    /// Each exclusion is load-bearing and each was measured against the
+    /// fetched qpdf corpus rather than assumed.
+    ///
+    /// - **Page tree nodes and other page objects.** `/Parent` alone would
+    ///   reach the tree node, whose `/Kids` reach every page, and the claim
+    ///   below would be about the whole document. A destination or a
+    ///   structure tree reaches another page the same way.
+    /// - **`/Thumb`.** A thumbnail is a preview (12.3.4) and has a hint table
+    ///   of its own (Table F.2, `T`). Following it reported `lin5.pdf` and
+    ///   `lin7.pdf`, whose first pages each carry one: the images sit at
+    ///   bytes 14,473 and 14,159 of files whose `/E` is 4,213 and 1,865.
+    /// - **`/EF`.** An embedded file stream is the attachment's data rather
+    ///   than the page's, and like the thumbnail it has a hint table of its
+    ///   own (Table F.2, `B`). This is the one exclusion F.3.7 does not name;
+    ///   following it reported `nontrivial-crypt-filter.pdf`, whose one page
+    ///   carries a file attachment the linearizer placed at exactly `/E`.
+    fn page_reach(&self, start: ObjRef) -> BTreeSet<u32> {
+        let skipped = [
+            Name::PARENT,
+            self.doc.intern(b"Thumb"),
+            self.doc.intern(b"EF"),
+        ];
+        let page = self.doc.intern(b"Page");
+        let tree = self.doc.intern(b"Pages");
+
+        let mut live: BTreeSet<u32> = BTreeSet::new();
+        let mut queue = vec![start];
+        while let Some(reference) = queue.pop() {
+            if !live.insert(reference.num) {
+                continue;
+            }
+            let Ok(object) = self.doc.get(reference) else {
+                continue;
+            };
+            if reference != start {
+                let kind = object.as_dict().and_then(|d| d.get_name(Name::TYPE));
+                if kind == Some(page) || kind == Some(tree) {
+                    live.remove(&reference.num);
+                    continue;
+                }
+            }
+            let mut found = Vec::new();
+            refs_below(object.as_ref(), &mut found, 0, &skipped);
+            for r in found {
+                if !live.contains(&r.num) {
+                    queue.push(r);
+                }
+            }
+        }
+        live
     }
 
     /// Where every object begins and how many bytes it occupies.
@@ -3220,7 +3295,8 @@ impl Validator<'_> {
     }
 
     /// The first indirect object in the file, by position rather than by
-    /// number (F.3.3 asks for the first one *written*).
+    /// number (F.3.3 asks for the first one *written*, and Annex F reserves
+    /// no object numbers for it to carry).
     fn first_object(&self) -> Option<(ObjRef, Object)> {
         let mut at = 0usize;
         while at < self.buf.len() {
@@ -3232,7 +3308,7 @@ impl Validator<'_> {
             }
             at += 1;
             // The parameter dictionary is at the top of the file or nowhere:
-            // F.2.1 puts it before everything else, so a scan that has walked
+            // F.3.3 puts it before everything else, so a scan that has walked
             // past the header and a comment line has already failed.
             if at > 64 {
                 return None;
@@ -3247,6 +3323,34 @@ impl Validator<'_> {
         let mut sink = WarningSink::new();
         let parsed = parse_indirect_at(self.buf, offset, self.doc.names_table(), &mut sink)?;
         Some((reference, parsed.object))
+    }
+}
+
+/// An object's references, less the entries `skip` names.
+fn refs_below(object: &Object, out: &mut Vec<ObjRef>, depth: u32, skip: &[Name]) {
+    if depth > limits::MAX_NEST_DEPTH {
+        return;
+    }
+    let dict = match object {
+        Object::Ref(r) => {
+            out.push(*r);
+            return;
+        }
+        Object::Array(items) => {
+            for item in items {
+                refs_below(item, out, depth + 1, skip);
+            }
+            return;
+        }
+        Object::Dict(dict) => dict,
+        Object::Stream(stream) => &stream.dict,
+        _ => return,
+    };
+    for (key, value) in dict.iter() {
+        if skip.contains(key) {
+            continue;
+        }
+        refs_below(value, out, depth + 1, skip);
     }
 }
 

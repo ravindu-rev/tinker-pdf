@@ -104,7 +104,7 @@ leading object is not a page leaf carrying its own `/MediaBox` and
 `/Resources`, or whose runs do not begin one after another, gets
 `WarningKind::LinearizedHintsUnusable` or `LinearizedPageHintRejected` and the
 page tree walk instead. Page one of the
-60-page fixture costs **29,696 bytes of 1,631,095**, page 31 costs **37,888**,
+60-page fixture costs **29,696 bytes of 1,631,075**, page 31 costs **37,888**,
 and neither reads the main cross-reference table at `/T`; `main_table_fetched`
 and `whole_file_fetched` are the observables that say so. What still costs the
 tail is declared: the page *count*, `xref()`, a repair rescan, a save, and a

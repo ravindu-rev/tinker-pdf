@@ -128,9 +128,51 @@ on. One limitation is asserted rather than left to be rediscovered: a page
 saturated with diagonal edge costs 23.5 %, which is the defect class's own
 range, so no budget separates those two populations.
 
+**The Annex F numbering row closed on 20 September 2026, and reading the
+clause corrected the row three times.** The two groups are the other way round
+now — parts 7, 8 and 9 are numbered sequentially from 1, so Table F.4 item 1's
+"the first object of the second page shall have an object number of 1" is true
+by construction, and the head is numbered after them. The row's own text was
+wrong about what the head holds: it is not only the catalogue, the
+document-level objects and page one but **part 2 and the primary hint stream
+as well**, because the first-page cross-reference section is one subsection and
+7.5.4 makes a subsection a contiguous range. There was no conflict with
+"reserved" objects 1, 2 and 3 to resolve, either: Annex F reserves no object
+numbers, and the reservation was this writer's own device to keep a front
+section headed `0 N` from freeing everything the main table carried. The front
+section now starts at the head group's own first number and frees nothing,
+which makes the 60-page streaming fixture **twenty bytes shorter** — one
+cross-reference entry — and moves every offset in it. Third, F.3.6 gives the
+hint stream
+*the last object number in the file* whatever its physical position, which
+qpdf's `lin1.pdf` shows and nothing here had read — so it is numbered after
+page one's run and still written before it.
+
+The exit criterion is
+`crates/tinker-pdf-cos/tests/linearized_numbering.rs` and
+`validate/hints.rs`'s `annex_f_numbering`: Annex F's arithmetic — `/O`, then
+1, then each page's declared object count added to the one before — finds
+every page of this writer's output at one, two, three and six pages, plain and
+encrypted, and of **31 linearized files in the fetched qpdf corpus**. One does
+not, and it is named with the reason: `badlin1.pdf`, qpdf's deliberately
+damaged fixture, whose `/O` is one object late. The three streaming budgets
+were re-measured and none moved.
+
+**One thing the flip found that was not in the row.** The strict validator's
+`/E` rule recomputed page one's reach from a *run of consecutive object
+numbers*, and `page_run(0)` returns nothing when no page is numbered above page
+one — which is every conforming file, so the rule had been **inert on every
+corpus file it had ever seen** and only fired on this writer's own
+non-conforming numbering. It recomputes by reachability now, which is what `/E`
+promises a streaming reader and is independent of the numbering. F.3.7's own
+exclusions come with it — page tree nodes, other page objects, and `/Thumb` —
+plus `/EF`, which F.3.7 does not name and Table F.2's `B` hint table implies;
+each of the three was added because a file in the corpus reported without it,
+and each is named with that file in `validate.rs`. Measured 20 September 2026
+over the 45 linearized files in the fetched qpdf corpus: **none reports `/E`**.
+
 | Item | Evidence | Exit criterion | Size |
 | --- | --- | --- | --- |
-| **This linearizer numbers Annex F's two object groups the wrong way round.** F.3.1 puts the remaining pages, the shared objects and everything else in one group "numbered sequentially starting at 1", and the catalogue, the document-level objects and the first page's in a second group numbered after it; Table F.4 item 1 repeats the rule from the reader's side — "the first object of the second page shall have an object number of 1". `linearize.rs` numbers part 4 and part 6 first and part 7 after them, so a reader that derives page *N*'s object numbers the way Annex F says to lands on objects belonging to some other page. Found by reading F.3.1 against qpdf's output while putting the hint tables on the open path: `lin1.pdf` numbers its first-page section 60 to 78 and its remaining pages from 1, and this writer does the reverse | ISO 32000-1 F.3.1 and Table F.4 item 1; `crates/tinker-pdf-cos/src/linearize.rs`'s `mapping`; `lin1.pdf` in the fetched qpdf corpus states the conforming layout | a test that derives every page's first object number by Annex F's rule and finds the page it names, over this writer's output and over the corpus alike; the numbering flipped and every offset re-measured | S to change, M to re-measure — `/O` moves, so every committed fingerprint over linearized output moves with it |
 | The nine reviewed goldens have not been reviewed. The mechanism is done — `render_goldens.rs` parses each `.ppm`'s header, refuses a field that is absent, blank or whitespace, re-renders every family and compares byte for byte, and holds a size ceiling so reviewing one stays a real act — and `UNREVIEWED` lists all nine families because no person has read them | `UNREVIEWED` in `crates/tinker-pdf/tests/render_goldens.rs`, counted; the three injections on the mechanism are each caught by exactly the check written for them | a person reads each golden against the clause its header names, their name and the date replace `unreviewed` in that header, and `UNREVIEWED` empties | S, and it is a reading rather than work |
 
 ## Tier 2 — close the named refusals, by measured reachability
