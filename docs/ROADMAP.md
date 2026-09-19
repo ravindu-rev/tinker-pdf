@@ -49,9 +49,9 @@ what a reader of PDFs is entitled to expect.
 | Axis | Measured today | What gives it a ratchet |
 | --- | --- | --- |
 | Correctness on documents nobody here wrote | 5 525 files: three readers' test suites, one association's examples, and **1 000 documents a crawler found on the open web** spanning 462 distinct `/Producer` strings | **ratcheted**; `corpus/corpora.lock`'s fifth entry, run nightly, every failure attributed by producer |
-| Speed | seven criterion operations, weekly, reporting and not gating; no committed number anywhere | tier 0: a baseline from a named machine, compared inside a band that machine's own swing set |
+| Speed | seven criterion operations, weekly; `crates/tinker-pdf/benches/baseline.json` records each one's fastest figure on `ubuntu-latest` over **fifteen dispatches of one revision**, and each one's own band above its own measured swing — 22.61 % for the text extractor, 88.36 % for the text renderer | **ratcheted**; `cargo xtask bench-check --machine ubuntu-latest` in `bench.yml`, which fails where criterion's own comparison exits 0 |
 | Memory | 42 caps in `bounds_ledger.rs`, two of them the runtime bounds a *process* spends; every corpus child measures its own peak resident set, `report.json` carries it per file and `ratchet.json` bands the per-corpus maximum within a **measured 2 % tolerance** — a high-water mark swings 0.06 % to 0.76 % between two runs of one binary, and an exact band failed on that within a day of being recorded | ratcheted, over five corpora |
-| Fidelity | arithmetic fixtures, metamorphic relations, committed fingerprints | tier 1's differential pairs and reviewed goldens; tier 0's decision on dated outside measurements |
+| Fidelity | arithmetic fixtures, metamorphic relations, committed fingerprints | tier 1's differential pairs and reviewed goldens; ruling 13's amendment of 5 September 2026 on dated outside measurements |
 | Capability coverage | tiers 2 to 5 of this file | each row's exit criterion |
 | Footprint | 2.03 MB of wasm, 1.40 MB gzipped, gated at 2.5 MB in `release.yml` | already ratcheted |
 | Surface | 123 C functions; four bindings, none projecting the whole facade; nine CLI subcommands, every one read-only | tier 3's bindings row; tier 5's CLI and bindings rows |
@@ -59,9 +59,12 @@ what a reader of PDFs is entitled to expect.
 
 ## Tier 0 — measure what is not measured
 
-These come before any new feature, with tier 1. Each row is an axis the
-field judges an engine on and this repository has no number for, so a claim
-about it today would be the kind of claim ruling 13 exists to prevent.
+These came before any new feature, with tier 1. Each row was an axis the
+field judges an engine on and this repository had no number for, so a claim
+about it would have been the kind of claim ruling 13 exists to prevent.
+**All four are closed.** What closed them is kept here rather than deleted,
+because these measurements are the reason the rest of this file may quote a
+number at all.
 
 **Two of the four rows closed on 5-6 September 2026 and one of them paid for
 itself immediately.** The production-corpus row is closed: `corpus/corpora.lock`
@@ -88,13 +91,52 @@ and 4 440 text instances** — real OCR output, from documents scanned by people
 The caps stand at 100 000 symbols and 4 194 304 instances, which is 40 and 944
 times what a real document has asked for.
 
-| Item | Evidence | Exit criterion | Size |
-| --- | --- | --- | --- |
-| **Speed has no ratchet, and the machine to record one on is not this one.** The comparison exists — `cargo xtask bench-check --machine NAME` reads criterion's own estimates and fails outside a band, because `cargo bench -- --baseline` never exits non-zero when it loses — and the weekly job's guard is fixed, having never once matched criterion's output since it was written. What is missing is the baseline: a band must sit above its machine's measured swing, and this desktop was measured twice at five runs each with nothing else compiling and swings from 32 % to **259 %**. A band above 259 % admits any regression anybody could write | `xtask/src/bench.rs`, which refuses an entry carrying no measured swing; the two five-run measurements in [verification.md](verification.md) | several `bench.yml` runs on `ubuntu-latest` — it has one dated observation, 31 August, six figures and no spread — then that machine's swing recorded, a band set above it, and the entry committed. `bench-check` reports and does not fail for a machine with no entry, so the job is useful meanwhile | S, blocked on runs of a machine nobody owns |
+**And the fourth closed on 19 September 2026: speed has a ratchet.** The row
+said it was *"blocked on runs of a machine nobody owns"*, and it was not.
+`bench.yml` has a `workflow_dispatch` and runs on `ubuntu-latest`, so the
+machine was one command away the whole time. Fifteen dispatches of one
+unchanged revision measured that runner's own swing over the seven
+operations — 22.61 % for "extract a page of text", 88.36 % for "render text
+at 150 dpi" — and `crates/tinker-pdf/benches/baseline.json` now carries each
+operation's fastest figure of the fifteen and its own band above its own
+swing. `cargo xtask baseline` holds that file, `benches/engine.rs` and the
+weekly job's count to each other, and all fifteen runs pass the entry they
+set ([verification.md](verification.md), "Clocks: outside the suite, and not
+nowhere").
+
+**The row's diagnosis of why the weekly job had never worked was half wrong,
+and the half that was wrong is the one worth keeping.** The guard *was* the
+first fault and it *was* fixed, on 5 September. The job went on failing every
+week afterwards for a different reason entirely: **a scheduled workflow runs
+the default branch**, which is `main`, hundreds of commits behind `develop`
+and still carrying the `time:+\[` that cannot match. So the cron runs of 31
+August, 7 and 14 September each benchmarked a months-old tree — six
+operations, not seven — and the fix on `develop` could not reach them.
+Dispatched on `develop` instead, the job reported seven operations fifteen
+times out of fifteen. Whether `main` should be moved to `develop` is a
+release decision and is not taken here; until it is, the weekly run is a
+measurement of `main`.
+
+**What the ratchet does not do, said before anybody relies on it.**
+`ubuntu-latest` is a fleet and not a machine: scored by the geometric mean of
+their seven operations, the fifteen runs fall into two groups with nothing
+between them — four at 1.00 to 1.16 of the fastest and eleven at 1.30 to
+1.36 — on one and the same runner image, and nothing in the log said why. So
+the job records `/proc/cpuinfo`'s model name now, and the next measurement can
+attribute the split instead of banding it as noise. A band above that spread
+is wide. The
+text renderer's is 135 %, so a change that makes it half again slower passes
+in silence; the 9× rasteriser regression of 5 September would not have. And
+the swing has not converged — it read 57.59 % over the first five runs,
+72.71 % over nine and 88.36 % over fifteen — so these bands are a floor that
+a later measurement may have to raise. The finer comparison is still
+criterion's own `--baseline` between two revisions on one machine, which this
+does not replace and does not claim to.
 
 ## Tier 1 — prove correctness
 
-These come before any new feature, with tier 0. Ruling 13 says the engine agreeing with
+These come before any new feature, and with tier 0 closed they come first.
+Ruling 13 says the engine agreeing with
 itself is the only kind of proof this repository will have, which raises the
 bar on what the checks must be: answers computable in closed form, bitstreams
 transcribed from the standards' own annexes, published conformance data, and

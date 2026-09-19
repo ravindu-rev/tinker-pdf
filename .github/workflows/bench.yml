@@ -2,8 +2,10 @@
 #
 # Scheduled and dispatchable, never on the path between a push and a review.
 # A benchmark that gates a pull request measures the runner it happened to land
-# on: GitHub's hosted runners are shared machines, and a 20 % swing between two
-# runs of identical code is ordinary. So this reports rather than gates.
+# on: GitHub's hosted runners are shared machines, and fifteen runs of one
+# revision on 19 September 2026 swung 22.61 % to 88.36 % depending on the
+# operation. So this reports rather than gates, and what it holds the numbers
+# to is a band measured on that runner rather than a figure guessed for it.
 #
 # What it is for is the thing the test suite structurally cannot do. Clocks are
 # banned from assertions here — `bounds_ledger.rs` bans `Instant::now` from
@@ -23,6 +25,17 @@ on:
   schedule:
     # 05:00 UTC on Mondays. After the nightly corpus run, so the two are never
     # competing for a runner, and weekly because nothing here changes daily.
+    #
+    # **A scheduled run measures the default branch, whatever ref it was
+    # written on.** That is `main`, and `main` is hundreds of commits behind
+    # `develop`, so the three cron runs of 31 August, 7 and 14 September 2026
+    # benchmarked a months-old tree: six operations rather than seven, and
+    # `main`'s own copy of this file still carrying the `time:+\[` guard that
+    # cannot match. The band below was measured by dispatching this workflow
+    # on `develop` instead, which is what `workflow_dispatch` is here for.
+    # Whether `main` should be moved to `develop` is a release decision and
+    # not this file's to take; until it is taken, read the weekly run as a
+    # measurement of `main`.
     - cron: '0 5 * * 1'
   workflow_dispatch:
 
@@ -46,7 +59,16 @@ jobs:
       - name: Measure
         run: |
           set -o pipefail
-          cargo bench -p tinker-pdf 2>&1 | tee bench.log
+          # Which host this landed on. `ubuntu-latest` is a fleet and not a
+          # machine, and the fifteen runs of 19 September 2026 that set the
+          # band proved it: scored by the geometric mean of their seven
+          # operations they fell into two groups with nothing between them,
+          # four at 1.00 to 1.16 of the fastest and eleven at 1.30 to 1.36, on
+          # one and the same runner image. Nothing in the log said what the
+          # difference was, so the log says it now -- the next measurement can
+          # attribute the split instead of recording it as noise.
+          { grep -m1 'model name' /proc/cpuinfo; nproc; } > bench.log || true
+          cargo bench -p tinker-pdf 2>&1 | tee -a bench.log
           # The same hazard as everywhere else in this repository: a bench
           # target that compiled and measured nothing exits 0. Seven operations
           # are named in `benches/engine.rs`; if none of them reported a time,
@@ -55,10 +77,12 @@ jobs:
           # This guard read `time:+\[` until 5 September 2026, which is `time`
           # followed by one-or-more colons and then a bracket. Criterion prints
           # `time:` and then *three spaces*, so the pattern could not match and
-          # this job had never once passed: the only scheduled run, on 31
-          # August, printed all six figures and then exited 1 here. A guard
-          # against a silent pass that fails on every run is worse than none,
-          # because it teaches a reader to ignore the job.
+          # this job had never once passed: all three scheduled runs -- 31
+          # August, 7 and 14 September 2026 -- printed their six figures and
+          # then exited 1 here, because a cron runs the default branch and
+          # `main` still carries the old pattern. A guard against a silent
+          # pass that fails on every run is worse than none, because it
+          # teaches a reader to ignore the job.
           #
           # Counted, rather than one-or-more: the point is that every
           # operation reported, not that the file is not empty. Seven since
@@ -76,6 +100,15 @@ jobs:
       # A machine with no entry is reported and not failed, the way a corpus
       # with no recorded bar is, so this step is useful on a runner nobody has
       # recorded yet.
+      #
+      # That was true of a machine and not of the *file*. Until 19 September
+      # 2026 `crates/tinker-pdf/benches/baseline.json` did not exist, and a
+      # baseline that is not there is refused rather than reported -- so this
+      # step exited 1 on every dispatch, however well the benchmarks ran, and
+      # the sentence above described a leniency nothing could reach. The file
+      # is committed now, `ubuntu-latest` is the machine in it, and
+      # `cargo xtask baseline` holds the entry to `benches/engine.rs` and to
+      # the guard above so the three cannot drift apart again.
       - name: Hold it to the baseline
         run: cargo run -p xtask -- bench-check --machine ubuntu-latest
 
