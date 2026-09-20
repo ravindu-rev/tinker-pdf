@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 20 September 2026. `cargo test --workspace --no-fail-fast`
-is **4 922 passed, 0 failed, 59 ignored** across 219 suites on
+is **4 929 passed, 0 failed, 59 ignored** across 219 suites on
 `x86_64-pc-windows-msvc`. The suite gained since the last count is
 `linearized_numbering.rs`, which Annex F's numbering brought with it. The
 same suite was 2 243 passed, 0 failed on
