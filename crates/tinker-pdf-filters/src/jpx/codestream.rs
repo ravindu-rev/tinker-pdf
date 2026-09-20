@@ -8,11 +8,10 @@
 //! # Every marker in Table A.2, or a refusal that names it
 //!
 //! There are twenty markers in Table A.2 and this module accounts for all
-//! twenty: sixteen are parsed, three are refused **by name** (POC, PPM, PPT)
-//! and one — EPH — belongs to tier-2 and is refused here only when
-//! it appears in a header. Anything else is refused as an unknown marker,
-//! which is where every ISO/IEC 15444-2 marker lands, Part 2 being a
-//! non-goal.
+//! twenty: eighteen are parsed, one is refused **by name** (POC) and one —
+//! EPH — belongs to tier-2 and is refused here only when it appears in a
+//! header. Anything else is refused as an unknown marker, which is where
+//! every ISO/IEC 15444-2 marker lands, Part 2 being a non-goal.
 //!
 //! Skipping a marker whose length happens to be readable is the failure this
 //! guards against, and it is not hypothetical: POC changes the progression
@@ -25,6 +24,20 @@
 //! does to a coefficient. The refusal it leaves behind is narrower and named:
 //! Table A.25 defines one `Srgn` style and reserves every other value, so a
 //! reserved style is refused as a reserved style rather than stepped over.
+//!
+//! # Packed packet headers (A.7.4, A.7.5)
+//!
+//! PPM and PPT used to be the third and fourth names on that refusal list,
+//! for the same reason: they move every packet header out of the bit stream,
+//! so a decoder that skipped them read packet *bodies* as headers. They are
+//! now parsed here and consumed by tier-2, which reads a packet's header bits
+//! from the packed stream and its body bytes from the bit stream — through
+//! the one packet-header reader, not a second one.
+//!
+//! The mutual exclusion is this module's to enforce, because it is the one
+//! constraint that spans the main header and a tile-part header. T.800
+//! Table A.2's note c: *"If the PPM marker segment is used then PPT marker
+//! segments shall not be used, and vice versa."*
 //!
 //! # Where the arithmetic on attacker numbers is
 //!
@@ -74,11 +87,12 @@ pub(crate) mod marker {
     pub const PLM: u16 = 0xFF57;
     /// Packet length, tile-part header (A.7.3). An index.
     pub const PLT: u16 = 0xFF58;
-    /// Packed packet headers, main header (A.7.4). **Refused**: it moves
-    /// every packet header out of the packets, so ignoring it means reading
-    /// packet bodies as headers.
+    /// Packed packet headers, main header (A.7.4). Parsed: every tile's
+    /// packet headers live here, and tier-2 takes its header bits from this
+    /// stream instead of from the bit stream.
     pub const PPM: u16 = 0xFF60;
-    /// Packed packet headers, tile-part header (A.7.5). **Refused**, as PPM.
+    /// Packed packet headers, tile-part header (A.7.5). Parsed, as PPM, but
+    /// per tile rather than for the whole codestream.
     pub const PPT: u16 = 0xFF61;
     /// Start of packet (A.8.1). Inside the tile data, not the header.
     pub const SOP: u16 = 0xFF91;
@@ -104,8 +118,6 @@ const fn refused_by_design(code: u16) -> Option<&'static str> {
         // `Refusal::Feature("an Srgn ROI style Table A.25 reserves")`, from
         // `parse_rgn` — because Table A.25 defines only style 0.
         marker::POC => "POC, progression order change",
-        marker::PPM => "PPM, packed packet headers in the main header",
-        marker::PPT => "PPT, packed packet headers in a tile-part header",
         marker::SOP => "SOP outside tile data",
         marker::EPH => "EPH outside tile data",
         _ => return None,
@@ -465,8 +477,62 @@ pub(crate) struct TilePart<'a> {
     /// The tile-part header's RGN segments, by component. A.6.3 permits one
     /// per component and only in the first tile-part of a tile.
     pub(crate) rgn: Vec<(u16, Roi)>,
+    /// A.7.5: this tile-part header's PPT segments as `(Zppt, Ippt)`, in the
+    /// order they appeared. Empty unless the header carried one.
+    ///
+    /// Kept unsorted and unjoined here because the concatenation A.7.5
+    /// describes is per *tile* rather than per tile-part — a tile-part's
+    /// packet headers may sit in the header of a part with a lower `TPsot`
+    /// — so it is [`Codestream::packed_headers`] that joins them.
+    pub(crate) ppt: Vec<(u8, &'a [u8])>,
     /// Everything between SOD and the end of the tile-part: the packets.
     pub(crate) data: &'a [u8],
+}
+
+/// T.800 A.7.4: the main header's packed packet headers, joined.
+///
+/// `bytes` is every PPM segment's `Ippm` run concatenated in order of
+/// increasing `Zppm`, and `counts` is the `Nppm` series read out of it —
+/// *after* the join, because A.7.4 allows a run to straddle a segment
+/// boundary: "the series of Ippm parameters described by the Nppm does not
+/// have to be complete in a given marker segment. Therefore, it is possible
+/// that the next PPM marker segment will not have an Nppm parameter after
+/// Zppm, but the continuation of the Ippm series from the last PPM marker
+/// segment." A parser that read each segment independently would take the
+/// first four bytes of such a continuation for a length.
+///
+/// `counts[k]` is the header byte count of the **kth tile-part in codestream
+/// order**, not of the kth tile: "One value for each tile-part (not tile)."
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ppm {
+    /// `Nppm_i`, one per tile-part, as byte offsets: `runs[k]..runs[k + 1]`
+    /// is tile-part `k`'s slice of `bytes`. One longer than the tile-part
+    /// count, and the last entry is `bytes.len()`.
+    runs: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
+/// One tile's packed packet-header stream, and where its seams are.
+///
+/// `boundaries` is every offset into `bytes` that T.800 requires to fall
+/// *between* two packet headers, so tier-2 can check that its reading of the
+/// headers lands on each one rather than straddling it. They come from two
+/// sentences, one per marker:
+///
+/// - A.7.4, for PPM: "The kth entry in the resulting list contains the number
+///   of bytes and packet headers for the kth tile-part appearing in the
+///   codestream" — so each `Nppm` run ends on a packet-header boundary.
+/// - A.7.5, for PPT, and A.7.4 again for PPM: "Every marker segment in this
+///   series shall end with a completed packet header."
+///
+/// This is the packed half of the integrity check `read_tile_packets`
+/// already makes on the bit stream, and it is worth as much: tier-2 carries
+/// no image data, so a header read that has slipped by a few bytes still
+/// produces coefficients and still produces a photograph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Packed {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) boundaries: Vec<usize>,
 }
 
 /// A parsed codestream: the main header and every tile-part in stream order.
@@ -490,6 +556,11 @@ pub(crate) struct Codestream<'a> {
     /// almost every file.
     pub(crate) rgn: Vec<Option<Roi>>,
     pub(crate) tile_parts: Vec<TilePart<'a>>,
+    /// A.7.4's packed packet headers, when the main header carried PPM.
+    ///
+    /// `Some` here and a non-empty [`TilePart::ppt`] anywhere cannot both
+    /// happen: Table A.2's note c forbids it and [`parse`] refuses it.
+    pub(crate) ppm: Option<Ppm>,
     /// Per-component registration offsets from CRG (A.9.1), when the main
     /// header carried one. Read and never applied — see [`Registration`].
     pub(crate) registration: Option<Vec<Registration>>,
@@ -577,6 +648,70 @@ impl Codestream<'_> {
             .find(|p| p.tile == tile && p.index == 0)
     }
 
+    /// One tile's packed packet headers (A.7.4, A.7.5), or `None` when this
+    /// tile's headers are where B.10 puts them by default.
+    ///
+    /// B.10 states the three-way choice this resolves: "The packet headers
+    /// appear in the codestream immediately preceding the packet data, unless
+    /// one of the PPM or PPT marker segments has been used. If the PPM marker
+    /// segment is used, all of the packet headers are relocated to the main
+    /// header (see A.7.4). If the PPM is not used, then a PPT marker segment
+    /// may be used. In this case, all of the packet headers in that tile are
+    /// relocated to tile-part headers (see A.7.5)."
+    ///
+    /// **The choice is per tile, and only the PPT arm is.** PPM covers every
+    /// tile at once; PPT covers the tile whose parts carry it, and A.7.4
+    /// forbids only mixing *within* one tile — "The packet headers shall not
+    /// be in both a PPT marker segment and the codestream for the same
+    /// tile" — so one tile packed and its neighbour not is a conforming
+    /// codestream and is answered here per tile rather than per file.
+    pub(crate) fn packed_headers(&self, tile: u16) -> Result<Option<Packed>, Refusal> {
+        if let Some(ppm) = &self.ppm {
+            let mut out = Packed::default();
+            for (k, _) in self
+                .tile_parts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.tile == tile)
+            {
+                // `runs` is a prefix sum one longer than the tile-part count,
+                // built in `parse`, so both indices exist for every `k` that
+                // indexes `tile_parts`.
+                let (Some(&from), Some(&to)) = (ppm.runs.get(k), ppm.runs.get(k + 1)) else {
+                    return Err(Refusal::Structure(
+                        "a PPM with fewer Nppm entries than the codestream has tile-parts",
+                    ));
+                };
+                let run = ppm
+                    .bytes
+                    .get(from..to)
+                    .ok_or(Refusal::Structure("an Nppm run past the packed headers"))?;
+                out.bytes.extend_from_slice(run);
+                out.boundaries.push(out.bytes.len());
+            }
+            return Ok(Some(out));
+        }
+
+        // A.7.5 puts PPT in "any tile-part header before the packets whose
+        // headers are described herein", which A.7.4 spells out as "the same
+        // tile-part header or one with a lower TPsot value" — so the tile's
+        // stream runs across its parts in TPsot order, and `check_tile_parts`
+        // has already refused parts that arrive out of that order.
+        let mut out = Packed::default();
+        for part in self.tile_parts.iter().filter(|p| p.tile == tile) {
+            let mut segments: Vec<(u8, &[u8])> = part.ppt.clone();
+            // A.7.5: "concatenated, in the order of increasing Zppt". A
+            // repeated index is refused in `tile_part`, so the order is total
+            // and the stable sort has nothing left to decide.
+            segments.sort_by_key(|(z, _)| *z);
+            for (_, ippt) in segments {
+                out.bytes.extend_from_slice(ippt);
+                out.boundaries.push(out.bytes.len());
+            }
+        }
+        Ok((!out.boundaries.is_empty()).then_some(out))
+    }
+
     /// The budget of [`super::MAX_JPX_SAMPLES`], and the caller's own
     /// ceiling, both spent before any plane exists.
     ///
@@ -642,6 +777,9 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
     let mut rgn: Vec<Option<Roi>> = Vec::new();
     let mut registration: Option<Vec<Registration>> = None;
     let mut tile_parts: Vec<TilePart<'_>> = Vec::new();
+    // A.7.4: the PPM segments as `(Zppm, the bytes after Zppm)`, joined
+    // once the main header is finished rather than as they arrive.
+    let mut ppm_segments: Vec<(u8, &[u8])> = Vec::new();
 
     loop {
         let Some(code) = c.u16() else {
@@ -651,7 +789,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
             break;
         }
         if code == marker::SOT {
-            let part = tile_part(&mut c, siz.as_ref(), cod.as_ref())?;
+            let part = tile_part(&mut c, siz.as_ref(), cod.as_ref(), !ppm_segments.is_empty())?;
             if tile_parts.len() as u64 > MAX_JPX_TILES * 4 {
                 return Err(Refusal::Budget("tile-parts"));
             }
@@ -748,6 +886,27 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
             // checked above, so a lying one is a truncation rather than a
             // read past the end.
             marker::TLM | marker::PLM | marker::PLT => {}
+            // A.7.4: packed packet headers. Table A.38 gives Lppm as 7 to
+            // 65 535, and 7 is the shortest segment that can carry a Zppm
+            // and one 32-bit Nppm, so a shorter one is not a PPM segment.
+            marker::PPM => {
+                let Some((&zppm, ippm)) = body.split_first() else {
+                    return Err(Refusal::Structure("a PPM segment with no Zppm"));
+                };
+                if len < 7 {
+                    return Err(Refusal::Structure(
+                        "a PPM segment shorter than Table A.38's Lppm",
+                    ));
+                }
+                if ppm_segments.iter().any(|(z, _)| *z == zppm) {
+                    // A.7.4 orders the segments by Zppm and nothing else, so
+                    // two segments claiming one index leave the join with no
+                    // answer — and picking either one silently associates
+                    // the wrong headers with every packet after it.
+                    return Err(Refusal::Structure("two PPM segments with one Zppm"));
+                }
+                ppm_segments.push((zppm, ippm));
+            }
             // A.9.1: component registration. Parsed so that a file carrying
             // it is not refused for saying something true about itself, and
             // then not applied, because the clause says it changes nothing.
@@ -779,6 +938,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
         return Err(Refusal::Structure("a codestream with no QCD marker"));
     };
     let short_tiles = check_tile_parts(&siz, &tile_parts)?;
+    let ppm = join_ppm(ppm_segments, tile_parts.len())?;
 
     Ok(Codestream {
         short_tiles,
@@ -789,6 +949,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
         qcc,
         rgn,
         tile_parts,
+        ppm,
         registration,
     })
 }
@@ -834,6 +995,63 @@ fn parse_rgn(body: &[u8], siz: &Siz) -> Result<(u16, Roi), Refusal> {
         return Err(Refusal::Feature("an Srgn ROI style Table A.25 reserves"));
     }
     Ok((index, Roi { shift: sprgn }))
+}
+
+/// A.7.4: joins the main header's PPM segments and reads the `Nppm` series
+/// out of the join.
+///
+/// The order of the two steps is the whole point, and it is the clause's own:
+/// the segments are concatenated by `Zppm` **first**, and only then walked as
+/// alternating `Nppm` lengths and `Ippm` runs, because a run may end in a
+/// later segment than the one its length was written in.
+///
+/// Nothing here allocates on `Nppm`. It is a 32-bit count of bytes that are
+/// already in hand, so a lying one is a run that reaches past the join and is
+/// refused, never a reservation.
+fn join_ppm(mut segments: Vec<(u8, &[u8])>, parts: usize) -> Result<Option<Ppm>, Refusal> {
+    if segments.is_empty() {
+        return Ok(None);
+    }
+    segments.sort_by_key(|(z, _)| *z);
+    let mut joined = Vec::new();
+    for (_, ippm) in &segments {
+        joined.extend_from_slice(ippm);
+    }
+
+    // The lengths are dropped as the runs are copied out, so `bytes` is one
+    // contiguous stream of packet headers with nothing interleaved — which
+    // is what tier-2 reads — and `runs` is where each tile-part's slice of
+    // it starts and ends.
+    let mut bytes = Vec::new();
+    let mut runs = vec![0usize];
+    let mut at = 0usize;
+    while at < joined.len() {
+        let Some(head) = joined.get(at..at + 4) else {
+            return Err(Refusal::Truncated("an Nppm length"));
+        };
+        let nppm = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+        let from = at + 4;
+        let to = usize::try_from(nppm)
+            .ok()
+            .and_then(|n| from.checked_add(n))
+            .filter(|end| *end <= joined.len())
+            .ok_or(Refusal::Truncated("an Nppm run past the packed headers"))?;
+        bytes.extend_from_slice(&joined[from..to]);
+        runs.push(bytes.len());
+        at = to;
+    }
+
+    // A.7.4: "One value for each tile-part (not tile)." A series that is
+    // short of the codestream's tile-parts leaves a tile-part with no
+    // headers at all; one that is long describes tile-parts that never
+    // arrived. Either way the kth entry is no longer the kth tile-part's,
+    // and every packet after the slip reads the wrong header.
+    if runs.len() - 1 != parts {
+        return Err(Refusal::Structure(
+            "a PPM whose Nppm series does not have one entry per tile-part",
+        ));
+    }
+    Ok(Some(Ppm { runs, bytes }))
 }
 
 /// T.800 A.9.1 and Table A.42: the CRG marker segment.
@@ -1188,6 +1406,7 @@ fn tile_part<'a>(
     c: &mut Cursor<'a>,
     siz: Option<&Siz>,
     cod: Option<&Cod>,
+    main_header_has_ppm: bool,
 ) -> Result<TilePart<'a>, Refusal> {
     let start = c.position() - 2;
     let siz = siz.ok_or(Refusal::Structure("SOT before SIZ"))?;
@@ -1213,6 +1432,7 @@ fn tile_part<'a>(
         qcd: None,
         qcc: Vec::new(),
         rgn: Vec::new(),
+        ppt: Vec::new(),
         data: &[],
     };
 
@@ -1258,6 +1478,36 @@ fn tile_part<'a>(
                 ))
             }
             marker::PLT | marker::COM => {}
+            // A.7.5: packed packet headers for this tile. Table A.39 gives
+            // Lppt as 4 to 65 535 — a Zppt and at least one Ippt byte.
+            marker::PPT => {
+                if main_header_has_ppm {
+                    // Table A.2, note c: "If the PPM marker segment is used
+                    // then PPT marker segments shall not be used, and vice
+                    // versa." A.7.4 says the same in prose and adds what is
+                    // at stake: with PPM present "all the packet headers
+                    // shall be found in the main header", so a PPT here is a
+                    // second, contradictory account of where this tile's
+                    // headers are, and honouring either one is a guess.
+                    return Err(Refusal::Structure("a codestream carrying both PPM and PPT"));
+                }
+                let Some((&zppt, ippt)) = body.split_first() else {
+                    return Err(Refusal::Structure("a PPT segment with no Zppt"));
+                };
+                if len < 4 {
+                    return Err(Refusal::Structure(
+                        "a PPT segment shorter than Table A.39's Lppt",
+                    ));
+                }
+                if part.ppt.iter().any(|(z, _)| *z == zppt) {
+                    // As for Zppm: the join is ordered by Zppt and nothing
+                    // else, so a repeat leaves it with no answer.
+                    return Err(Refusal::Structure(
+                        "two PPT segments in one tile-part header with one Zppt",
+                    ));
+                }
+                part.ppt.push((zppt, ippt));
+            }
             _ => return Err(refuse_marker(code)),
         }
     }

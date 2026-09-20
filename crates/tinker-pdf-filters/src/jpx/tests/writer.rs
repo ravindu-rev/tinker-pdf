@@ -242,6 +242,32 @@ pub(crate) fn segment(code: u16, body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A.7.4's PPM segment: `Zppm`, then whatever follows it.
+///
+/// The tail is taken raw rather than as a list of runs, because A.7.4's
+/// continuation rule is the thing most worth testing: "the series of Ippm
+/// parameters described by the Nppm does not have to be complete in a given
+/// marker segment", so a test has to be able to cut the series anywhere.
+pub(crate) fn ppm(zppm: u8, tail: &[u8]) -> Vec<u8> {
+    let mut body = vec![zppm];
+    body.extend_from_slice(tail);
+    segment(super::super::codestream::marker::PPM, &body)
+}
+
+/// One `(Nppm_i, Ippm_i)` pair of A.7.4's series.
+pub(crate) fn nppm_run(ippm: &[u8]) -> Vec<u8> {
+    let mut out = (ippm.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(ippm);
+    out
+}
+
+/// A.7.5's PPT segment: `Zppt`, then `Ippt`.
+pub(crate) fn ppt(zppt: u8, ippt: &[u8]) -> Vec<u8> {
+    let mut body = vec![zppt];
+    body.extend_from_slice(ippt);
+    segment(super::super::codestream::marker::PPT, &body)
+}
+
 /// SOT, any extra header markers, SOD, and the tile-part's data (A.4.2).
 ///
 /// `Psot` is filled in from the finished length, which is what a conformant

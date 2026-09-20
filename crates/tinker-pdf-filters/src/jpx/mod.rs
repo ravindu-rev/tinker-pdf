@@ -228,13 +228,17 @@ pub(crate) const MAX_JPX_WORK: u64 = 3 << 30;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// A marker T.800 Table A.2 defines and this build does not decode:
-    /// POC, PPM, PPT. Carries the marker's name.
+    /// POC. Carries the marker's name.
     ///
-    /// CRG was the fifth until A.9.1 was read: the clause says it "has no
+    /// It was five, and the other four left one at a time, each for its own
+    /// reason. CRG went when A.9.1 was read: the clause says it "has no
     /// effect on decoding the codestream", so it is parsed and carried. RGN
-    /// was the fourth until Annex H was implemented; what is left of it is a
+    /// went when Annex H was implemented; what is left of it is a
     /// [`Refusal::Feature`] naming the one `Srgn` style Table A.25 reserves,
-    /// which is a value inside the segment rather than the segment.
+    /// which is a value inside the segment rather than the segment. PPM and
+    /// PPT went when packed packet headers were implemented (A.7.4, A.7.5);
+    /// they are parsed, and tier-2 reads a packet's header bits from the
+    /// packed stream.
     Marker(&'static str),
     /// A marker code Table A.2 does not define — which includes every marker
     /// ISO/IEC 15444-2 adds, since Part 2 is a non-goal.

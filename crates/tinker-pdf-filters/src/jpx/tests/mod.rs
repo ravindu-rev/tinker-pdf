@@ -23,6 +23,7 @@
 mod bounds;
 mod colour;
 mod headers;
+mod packed;
 mod refusals;
 mod tier1;
 mod tier2;
