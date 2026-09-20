@@ -7,13 +7,15 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 20 September 2026. `cargo test --workspace --no-fail-fast`
-is **4 947 passed, 0 failed, 59 ignored** across 220 suites on
+is **4 968 passed, 0 failed, 59 ignored** across 220 suites on
 `x86_64-pc-windows-msvc`. The suite gained since the last count is
-`jpx_annex_h.rs`, which T.800's region of interest brought with it; the
-count before it was 4 929 across 219, and the eighteen tests between the two
-figures are that file's eight plus ten unit tests for the RGN marker segment
-and H.1's branches. The
-same suite was 2 243 passed, 0 failed on
+`jpx_annex_h.rs`, which T.800's region of interest brought with it; the count
+before it was 4 929 across 219, and the thirty-nine tests between the two
+figures are two JPX capability lanes' — eighteen for RGN, being that file's
+eight plus ten unit tests for the marker segment and H.1's branches, and
+twenty-one for packed packet headers, which added no file of its own. This
+figure is the merged tree's: each lane measured a smaller one, because neither
+could see the other's tests. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
 tool-gated suites, and the Linux figure is a dated observation rather than a
