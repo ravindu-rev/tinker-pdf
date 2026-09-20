@@ -135,6 +135,16 @@ what it thinks it is:
   Set whatever the suite's own "required" switch is — for the EPUB corpus that
   is `TINKER_EPUB_CORPUS_REQUIRED=1`, and the path it is given must be
   absolute, because a test binary's working directory is its crate root.
+- **Setting the "required" switch does not make an `#[ignore]`d test run.**
+  Most corpus suites here are `#[ignore]`d so that `cargo test` stays
+  independent of fetched data, and `TINKER_CORPUS_REQUIRED` is read *inside the
+  test body*. Without `-- --ignored` the body never executes: the run exits 0,
+  prints no banner, and reads exactly like a pass. Write
+  `cargo test -p tinker-pdf --test jpx_attribution -- --ignored --nocapture`
+  and then grep your own output for the `RAN` line. The two switches answer
+  different questions — `--ignored` decides whether the test runs at all, and
+  `TINKER_CORPUS_REQUIRED` decides whether a missing corpus is a failure once
+  it has.
 - **A campaign that dies mid-run leaves the source injected.** The harness
   mutates a file in place and restores it, so an interruption between those
   two steps leaves a deliberate defect in the tree looking like ordinary
