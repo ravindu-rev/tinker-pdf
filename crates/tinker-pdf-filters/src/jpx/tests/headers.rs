@@ -261,7 +261,11 @@ fn bpcc_is_read_when_ihdr_says_the_components_differ() {
 /// warning.
 #[test]
 fn every_table_a2_marker_is_parsed_or_named() {
-    /// T.800 Table A.2, transcribed. Twenty markers.
+    /// T.800 Table A.2, transcribed. Twenty markers, each with whether this
+    /// build **acts on** it — which is what the loop below turns into a
+    /// demand rather than a note. SOP and EPH are `true`: both are
+    /// implemented, in tier-2, and refused only where this test puts them,
+    /// which is a header rather than the packet data they delimit.
     const TABLE_A2: [(u16, &str, bool); 20] = [
         (marker::SOC, "SOC", true),
         (marker::SOT, "SOT", true),
@@ -277,8 +281,8 @@ fn every_table_a2_marker_is_parsed_or_named() {
         (marker::TLM, "TLM", true),
         (marker::PLM, "PLM", true),
         (marker::PLT, "PLT", true),
-        (marker::PPM, "PPM", false),
-        (marker::PPT, "PPT", false),
+        (marker::PPM, "PPM", true),
+        (marker::PPT, "PPT", true),
         (marker::SOP, "SOP", true),
         (marker::EPH, "EPH", true),
         (marker::CRG, "CRG", true),
@@ -309,7 +313,7 @@ fn every_table_a2_marker_is_parsed_or_named() {
     }
 
     let spec = Spec::default();
-    for (code, name, _) in TABLE_A2 {
+    for (code, name, acted_on) in TABLE_A2 {
         // Every marker that may appear in a main header, put in one. The four
         // delimiters and the two in-packet markers are covered by their own
         // tests; what this asks of them is that reaching one here is still a
@@ -319,6 +323,19 @@ fn every_table_a2_marker_is_parsed_or_named() {
         bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &[]));
         bytes.extend_from_slice(&marker::EOC.to_be_bytes());
         let got = parse(&bytes);
+        // **The third column is a demand, not a note.** It used to be read
+        // as `_` in both loops of this test, so it recorded the decoder's
+        // refusal list without checking a word of it — and a row could have
+        // gone stale in either direction without a test moving. A marker
+        // flagged as one this build does not act on must be refused *by
+        // name*, here, in a main header, which is the property the whole
+        // refusal list exists to make checkable.
+        if !acted_on {
+            assert!(
+                matches!(got, Err(Refusal::Marker(_))),
+                "{name} is flagged as a marker this build does not act on,                  so it must be refused by name; it produced {got:?}"
+            );
+        }
         match got {
             // Parsed: TLM, PLM, PLT and COM carry no coding information, so a
             // main header holding one still parses.
@@ -364,16 +381,19 @@ fn a_marker_outside_table_a2_is_refused_by_code() {
     assert_eq!(parse(&bytes), Err(Refusal::UnknownMarker(0xFF74)));
 }
 
-/// The four Table A.2 markers this build refuses, each in a main header or a
-/// tile-part header, each naming itself.
+/// The two Table A.2 markers this build refuses, each in a main header, each
+/// naming itself.
+///
+/// **It was four.** PPM and PPT left the list when packed packet headers were
+/// implemented; they are now parsed here and read by tier-2, and the tests
+/// that hold them to their clauses are [`ppm_relocates_every_tile_part_s_headers`]
+/// and its neighbours below. SOP and EPH are named by the same table but are
+/// refused only *out of place*, which
+/// [`a_marker_outside_table_a2_is_refused_by_code`] covers.
 #[test]
-fn the_four_refused_markers_name_themselves() {
+fn the_two_refused_markers_name_themselves() {
     let spec = Spec::default();
-    for (code, name) in [
-        (marker::RGN, "RGN"),
-        (marker::POC, "POC"),
-        (marker::PPM, "PPM"),
-    ] {
+    for (code, name) in [(marker::RGN, "RGN"), (marker::POC, "POC")] {
         let mut bytes = spec.main_header();
         bytes.extend_from_slice(&segment(code, &[0, 0, 0]));
         bytes.extend_from_slice(&marker::EOC.to_be_bytes());
@@ -381,14 +401,6 @@ fn the_four_refused_markers_name_themselves() {
             Err(Refusal::Marker(text)) => assert!(text.starts_with(name), "{text:?}"),
             other => panic!("{name} produced {other:?}"),
         }
-    }
-    // PPT lives in a tile-part header rather than the main one.
-    let mut bytes = spec.main_header();
-    bytes.extend_from_slice(&tile_part(0, 0, 1, &segment(marker::PPT, &[0]), &[]));
-    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
-    match parse(&bytes) {
-        Err(Refusal::Marker(text)) => assert!(text.starts_with("PPT"), "{text:?}"),
-        other => panic!("PPT produced {other:?}"),
     }
 }
 

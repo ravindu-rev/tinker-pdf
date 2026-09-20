@@ -162,6 +162,12 @@ fn every_refused_jpx_file_is_attributed() {
 
     // Pinned against `corpus/corpora.lock` as it stands, September 2026.
     assert_eq!(bearing, BEARING, "the corpus's JPX population moved");
+    // **And how many files, not only how many reasons.** These were two
+    // different numbers and only the second was pinned, so
+    // `docs/features/filters.md` described seven refusing files as five for
+    // as long as anyone had read it — the reason count wearing the file
+    // count's sentence. Pinning both is what makes that prose checkable.
+    assert_eq!(rows.len(), REFUSING, "the number of refused files moved");
     let mut unique: Vec<String> = rows
         .iter()
         .flat_map(|(_, refusals)| refusals.iter().cloned())
@@ -176,6 +182,10 @@ fn every_refused_jpx_file_is_attributed() {
 
 /// JPX-bearing files, as this census counts them.
 const BEARING: u32 = 39;
+
+/// How many of those report a refusal. Distinct from [`REASONS`]'s length:
+/// seven files give five reasons between them.
+const REFUSING: usize = 7;
 
 /// **Every reason left, and not one of them is a coding capability.**
 ///
@@ -193,8 +203,13 @@ const BEARING: u32 = 39;
 /// - the two `colr` entries are veraPDF fixtures that are deliberately
 ///   non-conformant, and the budget is a ruling 1 limit rather than a gap.
 ///
-/// So RGN, POC, PPM, PPT, `BYPASS`, `TERMALL` and precision above sixteen
-/// bits are reached by **zero** corpus files, real or fixture.
+/// So RGN, POC, `BYPASS`, `TERMALL` and precision above sixteen bits are
+/// reached by **zero** corpus files, real or fixture. PPM and PPT were on
+/// that list until packed packet headers were implemented, and **this census
+/// did not move when they left it** — which is the expected result of
+/// closing a capability no corpus file reaches, and is recorded here because
+/// a census that had moved would have meant the reachability claim was
+/// wrong.
 const REASONS: [&str; 5] = [
     r#"Budget("tile-component samples")"#,
     r#"Feature("a colr EnumCS this build cannot map")"#,

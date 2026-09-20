@@ -39,7 +39,7 @@
 //! one; with EPH signalled every header must end with one; and in all cases
 //! the packets of a tile must consume its data exactly.
 
-use super::codestream::{Codestream, CodingStyle, Progression};
+use super::codestream::{Codestream, CodingStyle, Packed, Progression};
 use super::{Refusal, MAX_JPX_CODE_BLOCKS};
 
 /// Subband orientation (T.800 Table E.1's `b`), which decides both the
@@ -776,16 +776,95 @@ fn read_tile_packets(
         data.extend_from_slice(part.data);
     }
 
+    // A.7.4 and A.7.5: the headers may have been moved out of the bit
+    // stream. `packed_headers` answers which of B.10's three places this
+    // tile's headers are in; everything below is the same reader either way.
+    let packed = stream.packed_headers(tile.index)?;
+    let mut headers = match &packed {
+        Some(p) => HeaderSource::Packed {
+            bytes: &p.bytes,
+            at: 0,
+        },
+        None => HeaderSource::InStream,
+    };
+    let empty = Packed::default();
+    let seams = packed.as_ref().unwrap_or(&empty);
+
     let order = packet_order(stream, tile, &cod, budget)?;
     let mut at = 0usize;
+    let mut seam = 0usize;
+    // A run of zero bytes is a tile-part that carried no packets, and its
+    // seam falls before the first header rather than after one.
+    check_seams(&headers, seams, &mut seam)?;
     for packet in order {
-        at = read_packet(tile, &cod, &packet, &data, at)?;
+        at = read_packet(tile, &cod, &packet, &data, at, &mut headers)?;
+        check_seams(&headers, seams, &mut seam)?;
     }
     // The integrity check, in its plainest form: the packets of a tile
     // consume the tile's data exactly. A tier-2 parse that has gone wrong
     // almost never ends on the last byte by accident.
     if at != data.len() {
         return Err(Refusal::PacketLength);
+    }
+    // And its packed half. With the headers moved out, the bit-stream check
+    // above only covers the bodies, so on its own it would let a header read
+    // that stopped short of the packed stream through — which is exactly
+    // the mis-parse this decoder refuses everywhere else.
+    if let HeaderSource::Packed { bytes, at } = headers {
+        if at != bytes.len() || seam != seams.boundaries.len() {
+            return Err(Refusal::PacketLength);
+        }
+    }
+    Ok(())
+}
+
+/// Where a packet's header bits come from.
+///
+/// B.10 gives three places and this is the fork between them: the header
+/// immediately before its own body in the bit stream, or a packed stream
+/// filled from PPM or from PPT. **The fork is the byte source and nothing
+/// else** — [`read_packet`] below is one reader, and the packed case does
+/// not get a second copy of B.10's header syntax to drift away from the
+/// first.
+enum HeaderSource<'a> {
+    InStream,
+    Packed { bytes: &'a [u8], at: usize },
+}
+
+impl HeaderSource<'_> {
+    /// How far into the packed stream the headers have been read, or `None`
+    /// when they are in the bit stream and the bit stream's own cursor is
+    /// the answer.
+    const fn packed_at(&self) -> Option<usize> {
+        match self {
+            HeaderSource::InStream => None,
+            HeaderSource::Packed { at, .. } => Some(*at),
+        }
+    }
+}
+
+/// Checks the packed stream's seams as they are passed (A.7.4, A.7.5).
+///
+/// Each of [`Packed::boundaries`] is an offset the standard requires to fall
+/// between two packet headers. Landing on one advances past it; passing one
+/// without landing on it means the header read straddled a seam the
+/// standard says it cannot, which is a mis-parse and refused as one.
+fn check_seams(
+    headers: &HeaderSource<'_>,
+    seams: &Packed,
+    next: &mut usize,
+) -> Result<(), Refusal> {
+    let Some(at) = headers.packed_at() else {
+        return Ok(());
+    };
+    while let Some(&seam) = seams.boundaries.get(*next) {
+        if seam > at {
+            break;
+        }
+        if seam < at {
+            return Err(Refusal::PacketLength);
+        }
+        *next += 1;
     }
     Ok(())
 }
@@ -1064,12 +1143,17 @@ const SOP: [u8; 2] = [0xFF, 0x91];
 const EPH: [u8; 2] = [0xFF, 0x92];
 
 /// Reads one packet's header and body, returning where the next one starts.
+///
+/// `at` and the returned offset are always in the **bit stream**, because
+/// that is where a packet's body is in all three of B.10's arrangements.
+/// Only the header bits move, and `headers` says where they moved to.
 fn read_packet(
     tile: &mut Tile,
     cod: &super::codestream::Cod,
     packet: &Packet,
     data: &[u8],
     mut at: usize,
+    headers: &mut HeaderSource<'_>,
 ) -> Result<usize, Refusal> {
     if cod.sop {
         // Signalled and absent is a refusal, not a shrug: SOP is the one
@@ -1084,8 +1168,17 @@ fn read_packet(
         }
     }
 
-    let body = data.get(at..).ok_or(Refusal::Truncated("a packet"))?;
-    let mut bits = PacketBits::new(body);
+    // A.8.1 leaves SOP where it was: "If PPM or PPT marker segments are
+    // used, then the SOP marker segment may appear immediately before the
+    // packet data in the bit stream" — so the check above reads the bit
+    // stream in every case, and only the header bits below move.
+    let header_bytes = match &*headers {
+        HeaderSource::InStream => data.get(at..).ok_or(Refusal::Truncated("a packet"))?,
+        HeaderSource::Packed { bytes, at } => bytes
+            .get(*at..)
+            .ok_or(Refusal::Truncated("a packed packet header"))?,
+    };
+    let mut bits = PacketBits::new(header_bytes);
     let mut contributions: Vec<(usize, usize, usize, usize, u32)> = Vec::new();
 
     // B.10.3: the first bit says whether the packet carries anything at all.
@@ -1174,13 +1267,35 @@ fn read_packet(
     }
     bits.align()?;
     let header_len = bits.consumed();
-    at += header_len;
 
-    if cod.eph {
-        if data.get(at..at + 2) != Some(&EPH[..]) {
-            return Err(Refusal::PacketLength);
+    // A.8.2 moves EPH with the header it delimits: "If the packet headers
+    // are moved to a PPM or PPT marker segments (see A.7.4 and A.7.5), then
+    // the EPH markers shall appear after the packet headers in the PPM or
+    // PPT marker segments", and, in the same clause, "If packet headers are
+    // not in-bit stream (i.e., PPM or PPT marker segments are used), this
+    // marker shall not be used in the bit stream." B.10 says it once more:
+    // "In the event that the packet header appears in a PPM or PPT marker
+    // segment, the EPH marker (if used) must appear together with the packet
+    // header."
+    match headers {
+        HeaderSource::InStream => {
+            at += header_len;
+            if cod.eph {
+                if data.get(at..at + 2) != Some(&EPH[..]) {
+                    return Err(Refusal::PacketLength);
+                }
+                at += 2;
+            }
         }
-        at += 2;
+        HeaderSource::Packed { bytes, at: hat } => {
+            *hat += header_len;
+            if cod.eph {
+                if bytes.get(*hat..*hat + 2) != Some(&EPH[..]) {
+                    return Err(Refusal::PacketLength);
+                }
+                *hat += 2;
+            }
+        }
     }
 
     // The bodies follow the header in the same order the header listed them.

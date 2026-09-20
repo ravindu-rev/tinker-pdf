@@ -202,8 +202,9 @@ white page that reads as a successful decode of a blank scan.
 
 **JPEG 2000** (JPXDecode, 7.4.9; T.800): the JP2/JPX box container of Annex I
 and bare J2K codestreams, Annex A marker segments with COC and QCC overriding
-per component, Annex B tier-2 — tag trees, packet headers, precincts and all
-five progression orders (B.12) — Annex D tier-1 on the shared MQ coder,
+per component, Annex B tier-2 — tag trees, packet headers, precincts, all
+five progression orders (B.12) and A.7.4's and A.7.5's packed packet headers
+in both places they can live — Annex D tier-1 on the shared MQ coder,
 Annex E dequantisation, both Annex F inverse wavelets (the reversible 5/3 and
 the irreversible 9/7 in fixed point) and the Annex G and I colour pipeline,
 palettes and `cdef` included. Four of Table A.19's six code-block styles
@@ -218,16 +219,49 @@ coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
 symbol) catch a mis-parse before any pixel exists.
 
+**Packed packet headers are one reader, not two.** PPM (A.7.4) moves every
+tile's packet headers into the main header and PPT (A.7.5) moves one tile's
+into its tile-part headers; B.10 names all three places a header can be. A
+packed header is byte for byte the header that would have been in the bit
+stream — A.7.4: "The contents are exactly the packet header which would
+have been distributed in the bit stream as described in B.10" — so tier-2
+parameterises *where the header bits come from* and leaves B.10's syntax in
+one place. The bodies never move, so a packet's body still comes from the
+bit stream; SOP stays with the body and EPH moves with the header, which is
+A.8.1 and A.8.2 respectively. Both streams are then held to the same
+exact-consumption check, and the seams the clauses name — each `Nppm` run's
+end, each marker segment's end — must fall between two headers rather than
+inside one.
+
 **Measured over five corpora, September 2026**, by
 [`jpx_attribution.rs`](../../crates/tinker-pdf/tests/jpx_attribution.rs), which
 names the *internal* refusal rather than the coarse warning: **39 files carry a
-JPX stream and 5 report a refusal**, and **not one of the five is a coding
-capability**. One is a ruling 1 budget; two are veraPDF fixtures whose `colr`
-box is deliberately non-conformant; two are `/JPXDecode` streams whose bytes
-are not JPEG 2000 at all. Two further real documents are **truncated** — every
-tile short of its declared parts — and are drawn as far as they arrive rather
-than refused. So RGN, POC, PPM, PPT, `BYPASS`, `TERMALL` and precision
-above sixteen bits are reached by **zero** corpus files, fixture or real.
+JPX stream, 7 report a refusal, and those 7 give 5 distinct reasons** — and
+**not one of the five is a coding capability**. One file is a ruling 1 budget;
+two are veraPDF fixtures whose `colr` box is deliberately non-conformant; two
+are `/JPXDecode` streams whose bytes are not JPEG 2000 at all; and two are
+real documents that stop early, with **every** tile short of its declared
+parts, so there is no whole tile to degrade to. A truncated file with any
+tile whole is drawn as far as it arrives rather than refused, and none of
+these two is that case. So RGN, POC, `BYPASS`, `TERMALL` and precision above
+sixteen bits are reached by **zero** corpus files, fixture or real.
+
+*The counts in the sentence above were wrong until 20 September 2026*, and
+they are corrected here rather than overwritten because the shape of the
+error is the useful part. It read "5 report a refusal", which was the number
+of distinct **reasons** rather than of files, and it then described the two
+truncated documents as "drawn as far as they arrive rather than refused" —
+which is the rule but not what happens to those two, since neither has a
+whole tile. Re-measured on 20 September 2026 with `TINKER_CORPUS_REQUIRED=1`
+over 5 605 files: 39 bearing, 7 refusing, 5 reasons. `BEARING` and `REASONS`
+in the census are pinned and were right; the row count was never pinned,
+which is why only the prose drifted.
+
+PPM and PPT were on that list until packed packet headers were implemented,
+and **the census did not move when they left it**. That is the expected
+result of closing a capability no corpus file reaches, and it is recorded
+because the other outcome would have been the interesting one: a census that
+moved would have meant the zero-reachability claim was wrong.
 
 That paragraph used to read "the corpus's nineteen readable JPX files as of
 August 2026: 16 decode and 3 refuse", which was a count over four corpora
@@ -547,7 +581,7 @@ make both enums wrong.
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | T.88 7.4.3 |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
-| JPX markers RGN, POC, PPM, PPT (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it. **CRG left this row**: A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied | [ROADMAP](../ROADMAP.md) |
+| JPX markers RGN, POC (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it. **Three markers have left this row.** CRG: A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied. **PPM and PPT**: packed packet headers are implemented, so the marker that relocates a header is read rather than refused. What is refused there now is a codestream that contradicts itself — both markers at once (Table A.2 note c), a repeated `Zppm` or `Zppt`, an `Nppm` series that does not count the tile-parts — as `JpxStructureInvalid`, and a packed stream the packets do not consume exactly, as `JpxPacketLength` | [ROADMAP](../ROADMAP.md) |
 | JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
 | JPX coding features: two of Table A.19's six code-block styles — `BYPASS` and `TERMALL` — plus unmappable `colr` and unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. The two left both move where a coding pass's *bytes* start, so they need a length per pass out of the packet header (B.10.7) rather than anything tier-1 can do | [ROADMAP](../ROADMAP.md) |
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | **A limit, not a gap.** T.800 Table A.11 allows 38; E.1 clamps a coefficient to `2^(R_b + 2)` sample units and a coefficient plane is a Q12 `i32`, so 17 bits is where the plane format runs out — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. Argued in ROADMAP's Named non-goals | [ROADMAP](../ROADMAP.md) Named non-goals |
@@ -613,6 +647,21 @@ wants the reason to survive it.
   arbitrary bytes, and no decoder ever exceeds `Limits::max_output`.
 - `crates/tinker-pdf-filters/tests/containers.rs` — `inflate_raw` and CRC-32
   as their container consumers use them.
+- `crates/tinker-pdf-filters/tests/jpx_annex_j.rs` — T.800 Annex J.10's
+  published 100-byte codestream, decoded to the nine samples J.10.5 states,
+  and **the same codestream with its packet headers relocated into a PPM and
+  into a PPT**. That second pair is evidence rather than self-agreement
+  because J.10.3 and J.10.4 publish where each packet's header ends: Table
+  J.20 lists the first header's three bytes, J.10.4 gives its body's offset
+  as octal 0125, Table J.21 lists the second header's four bytes and J.10.4
+  gives its body's offset as octal 0137. The relocation moves published bytes
+  across a published boundary and is judged by published samples; only the
+  marker segments around them are this repository's, and they are asserted
+  against Tables A.38 and A.39 field by field before any decode runs. The
+  file also records a J.10 **erratum**: J.10.3's prose says the second packet
+  header begins at octal 0134, while Table J.21 immediately below it lists
+  `0xC0`, which is the byte at 0133 — and J.10.4's 0137 for the second body
+  agrees with 0133.
 - `crates/tinker-pdf-filters/tests/jpx_reference.rs` — the JPX decoder
   against committed reference decodes: codestreams made with `opj_compress`
   from this repository's own images, lossy references decoded once by
