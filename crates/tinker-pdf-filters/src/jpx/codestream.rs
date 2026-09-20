@@ -8,18 +8,23 @@
 //! # Every marker in Table A.2, or a refusal that names it
 //!
 //! There are twenty markers in Table A.2 and this module accounts for all
-//! twenty: fifteen are parsed, four are refused **by name** (RGN, POC, PPM,
-//! PPT) and one — EPH — belongs to tier-2 and is refused here only when
+//! twenty: sixteen are parsed, three are refused **by name** (POC, PPM, PPT)
+//! and one — EPH — belongs to tier-2 and is refused here only when
 //! it appears in a header. Anything else is refused as an unknown marker,
 //! which is where every ISO/IEC 15444-2 marker lands, Part 2 being a
 //! non-goal.
 //!
 //! Skipping a marker whose length happens to be readable is the failure this
-//! guards against, and it is not hypothetical: RGN scales a region's
-//! coefficients, and a decoder that skips it produces a picture with a bright
-//! rectangle in it rather than an error. POC changes the progression order
-//! *mid-stream*, so a decoder that skips it reads every packet after it in
-//! the wrong order and produces a soft, plausible image.
+//! guards against, and it is not hypothetical: POC changes the progression
+//! order *mid-stream*, so a decoder that skips it reads every packet after it
+//! in the wrong order and produces a soft, plausible image.
+//!
+//! RGN was the fourth refusal until Annex H was read. It is parsed here and
+//! applied in [`super::wavelet`], because A.6.3 carries nothing but a
+//! component index, a style and a shift, and H.1 says exactly what the shift
+//! does to a coefficient. The refusal it leaves behind is narrower and named:
+//! Table A.25 defines one `Srgn` style and reserves every other value, so a
+//! reserved style is refused as a reserved style rather than stepped over.
 //!
 //! # Where the arithmetic on attacker numbers is
 //!
@@ -51,8 +56,10 @@ pub(crate) mod marker {
     pub const COD: u16 = 0xFF52;
     /// Coding style component (A.6.2).
     pub const COC: u16 = 0xFF53;
-    /// Region of interest (A.6.3). **Refused**: it scales a rectangle's
-    /// coefficients, and ignoring it draws that rectangle too bright.
+    /// Region of interest (A.6.3). **Parsed and applied**: it carries the
+    /// Maxshift scaling value `s`, and H.1 realigns every coefficient of the
+    /// component against it. Ignoring it leaves the background 2^s too
+    /// small — a picture, not an error.
     pub const RGN: u16 = 0xFF5E;
     /// Quantization default (A.6.4).
     pub const QCD: u16 = 0xFF5C;
@@ -92,7 +99,10 @@ pub(crate) mod marker {
 /// will not act on, and the name is what makes "refused by name" checkable.
 const fn refused_by_design(code: u16) -> Option<&'static str> {
     Some(match code {
-        marker::RGN => "RGN, region of interest",
+        // RGN left this list when Annex H was implemented. What is refused
+        // now is a *value* inside the segment rather than the segment —
+        // `Refusal::Feature("an Srgn ROI style Table A.25 reserves")`, from
+        // `parse_rgn` — because Table A.25 defines only style 0.
         marker::POC => "POC, progression order change",
         marker::PPM => "PPM, packed packet headers in the main header",
         marker::PPT => "PPT, packed packet headers in a tile-part header",
@@ -420,6 +430,22 @@ pub(crate) struct Quant {
     pub(crate) steps: Vec<(u8, u16)>,
 }
 
+/// RGN (A.6.3 and Table A.26): one component's region-of-interest shift.
+///
+/// `Srgn` is not carried, and that is deliberate rather than an omission.
+/// Table A.25 gives exactly one ROI style — 0, "Implicit ROI (maximum
+/// shift)" — and reserves every other value, so [`parse_rgn`] refuses
+/// anything else and what survives is the one style's own parameter. A field
+/// that can only hold one value is a field a reader has to check.
+///
+/// `shift` is Table A.26's "implicit ROI shift", 0 to 255: the number of
+/// binary places the encoder put the ROI's coefficients above the
+/// background's, which H.1 calls `s`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Roi {
+    pub(crate) shift: u8,
+}
+
 /// One tile-part: its SOT fields, whatever its header overrode, and its data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TilePart<'a> {
@@ -436,6 +462,9 @@ pub(crate) struct TilePart<'a> {
     pub(crate) coc: Vec<(u16, CodingStyle)>,
     pub(crate) qcd: Option<Quant>,
     pub(crate) qcc: Vec<(u16, Quant)>,
+    /// The tile-part header's RGN segments, by component. A.6.3 permits one
+    /// per component and only in the first tile-part of a tile.
+    pub(crate) rgn: Vec<(u16, Roi)>,
     /// Everything between SOD and the end of the tile-part: the packets.
     pub(crate) data: &'a [u8],
 }
@@ -456,6 +485,10 @@ pub(crate) struct Codestream<'a> {
     pub(crate) qcd: Quant,
     /// Per-component QCC overrides from the main header.
     pub(crate) qcc: Vec<Option<Quant>>,
+    /// Per-component RGN from the main header (A.6.3). `None` for a
+    /// component with no region of interest, which is every component of
+    /// almost every file.
+    pub(crate) rgn: Vec<Option<Roi>>,
     pub(crate) tile_parts: Vec<TilePart<'a>>,
     /// Per-component registration offsets from CRG (A.9.1), when the main
     /// header carried one. Read and never applied — see [`Registration`].
@@ -512,6 +545,30 @@ impl Codestream<'_> {
             return q;
         }
         &self.qcd
+    }
+
+    /// The region of interest in force for component `c` of tile `t`, by
+    /// A.6.3's precedence.
+    ///
+    /// Two deep rather than [`Self::quant_for`]'s four, and the clause says
+    /// so in as many words: "The RGN marker segment for a particular
+    /// component which appears in a tile-part header overrides any marker for
+    /// that component in the main header, for the tile in which it appears."
+    /// There is no RGN default to fall back to — a component with no RGN
+    /// anywhere has no region of interest, and H.1 then applies to nothing.
+    ///
+    /// **The main header's RGN is not inherited by a tile that has its own.**
+    /// A.6.3's Usage paragraph says a main-header RGN is "valid for all tiles
+    /// except those with an RGN marker segment", which is the override read
+    /// from the other end, and a decoder that took the larger of the two, or
+    /// added them, would be inventing an arithmetic the clause does not have.
+    pub(crate) fn roi_for(&self, tile: u16, c: usize) -> Option<Roi> {
+        if let Some(part) = self.first_part(tile) {
+            if let Some((_, roi)) = part.rgn.iter().find(|(i, _)| usize::from(*i) == c) {
+                return Some(*roi);
+            }
+        }
+        self.rgn.get(c).copied().flatten()
     }
 
     fn first_part(&self, tile: u16) -> Option<&TilePart<'_>> {
@@ -582,6 +639,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
     let mut qcd: Option<Quant> = None;
     let mut coc: Vec<Option<CodingStyle>> = Vec::new();
     let mut qcc: Vec<Option<Quant>> = Vec::new();
+    let mut rgn: Vec<Option<Roi>> = Vec::new();
     let mut registration: Option<Vec<Registration>> = None;
     let mut tile_parts: Vec<TilePart<'_>> = Vec::new();
 
@@ -627,6 +685,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
                 let parsed = parse_siz(body)?;
                 coc = vec![None; parsed.components.len()];
                 qcc = vec![None; parsed.components.len()];
+                rgn = vec![None; parsed.components.len()];
                 siz = Some(parsed);
             }
             marker::COD => {
@@ -667,6 +726,21 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
                     return Err(Refusal::Structure("two QCC markers for one component"));
                 }
                 *slot = Some(q);
+            }
+            // A.6.3: region of interest. Table A.4 makes it optional in the
+            // main header with "no more than one RGN per component", and
+            // A.6.3 repeats it — "There may be at most one RGN marker segment
+            // for each component in either the main or tile-part headers".
+            marker::RGN => {
+                let s = siz.as_ref().ok_or(Refusal::Structure("RGN before SIZ"))?;
+                let (index, roi) = parse_rgn(body, s)?;
+                let slot = rgn
+                    .get_mut(usize::from(index))
+                    .ok_or(Refusal::Structure("RGN names a component SIZ did not"))?;
+                if slot.is_some() {
+                    return Err(Refusal::Structure("two RGN markers for one component"));
+                }
+                *slot = Some(roi);
             }
             // A.7.1 to A.7.3: pure indices into the codestream. A decoder
             // that ignores them decodes the same picture, which is exactly
@@ -713,9 +787,53 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
         coc,
         qcd,
         qcc,
+        rgn,
         tile_parts,
         registration,
     })
+}
+
+/// T.800 A.6.3 and Table A.24: the RGN marker segment.
+///
+/// Four fields after the length, in Figure A.12's order: `Crgn`, `Srgn`,
+/// `SPrgn`. `Crgn` is one byte when `Csiz < 257` and two above, which is the
+/// rule COC's `Ccoc` and QCC's `Cqcc` carry too, and Table A.24 spells it the
+/// same way in both rows: "0 to 255; if Csiz < 257 / 0 to 16 383;
+/// Csiz >= 257".
+///
+/// **The length is checked for equality rather than sufficiency.** Table A.24
+/// gives `Lrgn` as "5 to 6" — two for itself, one or two for `Crgn`, one for
+/// `Srgn`, one for `SPrgn` — so there is exactly one legal body length for a
+/// given `Csiz` and a segment that disagrees is malformed. A decoder that
+/// read the first fields out of a longer one would be inventing a tolerance
+/// the table does not give, which is the mistake `parse_crg` records for CRG.
+///
+/// **A reserved `Srgn` is refused rather than stepped over**, and that is the
+/// whole scope decision in one line. Table A.25 defines value 0, "Implicit
+/// ROI (maximum shift)", and says "All other values reserved". A style this
+/// build has never seen describes a realignment of the coefficients that
+/// H.1's Maxshift arithmetic is not, so applying H.1 to it would put the
+/// background at the wrong magnitude and draw a plausible picture — the exact
+/// failure the JPEG decoder in this tree had when SOF3, SOF5, SOF6 and SOF7
+/// were skipped rather than refused.
+fn parse_rgn(body: &[u8], siz: &Siz) -> Result<(u16, Roi), Refusal> {
+    let wide = siz.components.len() >= 257;
+    let want = if wide { 4 } else { 3 };
+    if body.len() != want {
+        return Err(Refusal::Structure(
+            "an RGN marker segment whose length is not Table A.24's",
+        ));
+    }
+    let mut c = Cursor::new(body);
+    let index = if wide { c.u16() } else { c.u8().map(u16::from) }
+        .ok_or(Refusal::Truncated("an RGN component index"))?;
+    let (Some(srgn), Some(sprgn)) = (c.u8(), c.u8()) else {
+        return Err(Refusal::Truncated("an RGN marker segment"));
+    };
+    if srgn != 0 {
+        return Err(Refusal::Feature("an Srgn ROI style Table A.25 reserves"));
+    }
+    Ok((index, Roi { shift: sprgn }))
 }
 
 /// T.800 A.9.1 and Table A.42: the CRG marker segment.
@@ -1094,6 +1212,7 @@ fn tile_part<'a>(
         coc: Vec::new(),
         qcd: None,
         qcc: Vec::new(),
+        rgn: Vec::new(),
         data: &[],
     };
 
@@ -1120,7 +1239,20 @@ fn tile_part<'a>(
             marker::QCD if tpsot == 0 => part.qcd = Some(parse_quant(body, "QCD")?),
             marker::COC if tpsot == 0 => part.coc.push(parse_coc(body, siz, cod)?),
             marker::QCC if tpsot == 0 => part.qcc.push(parse_qcc(body, siz)?),
-            marker::COD | marker::QCD | marker::COC | marker::QCC => {
+            // A.6.3: "If there are multiple tile-parts in a tile, then this
+            // marker segment shall be found only in the first tile-part
+            // header", and at most one per component in that header.
+            marker::RGN if tpsot == 0 => {
+                let (index, roi) = parse_rgn(body, siz)?;
+                if usize::from(index) >= siz.components.len() {
+                    return Err(Refusal::Structure("RGN names a component SIZ did not"));
+                }
+                if part.rgn.iter().any(|(i, _)| *i == index) {
+                    return Err(Refusal::Structure("two RGN markers for one component"));
+                }
+                part.rgn.push((index, roi));
+            }
+            marker::COD | marker::QCD | marker::COC | marker::QCC | marker::RGN => {
                 return Err(Refusal::Structure(
                     "a coding style marker in a tile-part after the first",
                 ))

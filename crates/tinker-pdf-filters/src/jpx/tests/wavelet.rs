@@ -25,9 +25,10 @@
 //! on a pixel path, which is what `cargo run -p xtask -- libm` exists to
 //! stop.
 
+use crate::jpx::codestream::Roi;
 use crate::jpx::wavelet::{
-    into_samples, ladder, level_shift, mul_q24, synthesise_97, Arith, Fixed, ALPHA, BETA, DELTA,
-    GAMMA, K, MAX_PRODUCT, PLANE_BOUND, Q, QC, TWO_OVER_K,
+    into_samples, ladder, level_shift, maxshift, mul_q24, synthesise_97, Arith, Fixed, Realigned,
+    ALPHA, BETA, DELTA, GAMMA, K, MAX_PRODUCT, PLANE_BOUND, Q, QC, TWO_OVER_K,
 };
 use crate::jpx::{boxes, codestream, tier1, tier2};
 
@@ -367,4 +368,146 @@ fn the_scaling_constants_are_k_and_two_over_k() {
         "K * 2/K is {product}, not the 2 that says the factor of two is on \
          the high band"
     );
+}
+
+// --- T.800 H.1's three branches, worked by hand ---------------------------
+
+/// **H.1 step by step, on cases derived from the clause rather than from a
+/// decode.**
+///
+/// This is a *transcription pin*, not an adjudication, and the difference is
+/// worth stating: T.800 publishes no ROI test data at all — Annex H is prose
+/// and seven equations, `0xFF5E` appears only in Tables A.2 and A.24, and no
+/// codestream the standard prints carries an RGN. What adjudicates the
+/// Maxshift decode against the standard is `tests/jpx_annex_h.rs`, which runs
+/// H.1 over the coefficients T.800 J.10.4 publishes and demands the samples
+/// J.10.5 publishes. What this test adds is reach: the branch boundaries, and
+/// the one case — (H-1)'s mask, which needs `s > Mb` — that no codestream in
+/// this repository produces and no fixture therefore covers.
+///
+/// Every case below is `(magnitude, half, align, s, Mb)` with the branch and
+/// the arithmetic named.
+#[test]
+fn h1s_three_branches_land_where_the_clause_puts_them() {
+    let at =
+        |magnitude, half, align, shift, mb| maxshift(magnitude, half, align, Roi { shift }, mb);
+
+    // **Step 2**, `Nb(u, v) < Mb`: "no modification takes place". That is
+    // `align + half > 0` — every decoded bit is of weight 2^1 or more, so
+    // there is no Maxshift headroom under the coefficient. A truncated
+    // stream, nothing to do with an ROI, and the shift must not touch it.
+    assert_eq!(
+        at(5, 0, 2, 7, 9),
+        Realigned {
+            magnitude: 5,
+            half: 0,
+            exponent: 2
+        },
+        "step 2 leaves the coefficient, its lowest plane and its alignment"
+    );
+    // The boundary is `align + half`, not `align`: a coefficient whose own
+    // passes stopped one plane early is still step 2's.
+    assert_eq!(
+        at(5, 1, 0, 7, 9),
+        Realigned {
+            magnitude: 5,
+            half: 1,
+            exponent: 0
+        },
+        "half is part of Nb(u, v) and so part of step 2's test"
+    );
+
+    // **Step 3**, the ROI branch: `Nb(u, v) >= Mb` and at least one of the
+    // first Mb MSBs is non-zero, so `Nb(u, v) = Mb`. The first Mb MSBs are
+    // the bits of weight 2^0 and above, so the test is `floor(|q|) != 0` and
+    // the action is that floor. With `align = -3` the value is `m / 8`:
+    // 26/8 -> 3, landing on 2^0 with its interval one whole unit wide.
+    assert_eq!(
+        at(26, 0, -3, 3, 6),
+        Realigned {
+            magnitude: 3,
+            half: 0,
+            exponent: 0
+        },
+        "step 3 truncates to the integer part and sets Nb(u, v) = Mb"
+    );
+    // The boundary: 8/8 is exactly 1, which has a bit among the first Mb
+    // MSBs, and 7/8 does not.
+    assert_eq!(at(8, 0, -3, 3, 6).magnitude, 1, "8/8 = 1 is step 3's");
+    assert_eq!(
+        at(7, 0, -3, 3, 6),
+        Realigned {
+            magnitude: 7,
+            half: 0,
+            exponent: 0
+        },
+        "7/8 < 1 is step 4's, and x 2^3 puts it back on 2^0"
+    );
+    // Step 3 is a truncation and **not** a shift by s: the two coincide only
+    // when `s` happens to equal the headroom. Here the headroom is 3 and the
+    // shift is 5, and the answer is the headroom's.
+    assert_eq!(at(26, 0, -3, 5, 6).magnitude, 3, "step 3 never reads s");
+
+    // **Step 4**, the background branch: all of the first Mb MSBs are zero,
+    // so H-1 shifts the rest s places and H-2 sets
+    // `Nb(u, v) = max(0, Nb(u, v) - s)`. That is a multiplication by 2^s,
+    // and the lowest decoded plane rides with it.
+    assert_eq!(
+        at(5, 0, -3, 3, 7),
+        Realigned {
+            magnitude: 5,
+            half: 0,
+            exponent: 0
+        },
+        "s equal to the headroom puts a background coefficient back on 2^0"
+    );
+    assert_eq!(
+        at(5, 0, -3, 4, 7),
+        Realigned {
+            magnitude: 5,
+            half: 0,
+            exponent: 1
+        },
+        "s and the headroom are independent: a truncated Maxshift stream has \
+         fewer planes than the shift it declares, and H-1 shifts by s anyway"
+    );
+    assert_eq!(
+        at(5, 2, -3, 3, 7).half,
+        2,
+        "step 4 keeps the coefficient's own lowest plane, which E.1.1.2's \
+         reconstruction offset is half of"
+    );
+
+    // **(H-1) discards, and only a malformed s makes it bite.** H-1 is
+    // `MSBi <- MSB(i+s)`, so the s most significant positions leave the
+    // coefficient. In step 4's branch the first Mb of them are known to be
+    // zero, so while `s <= Mb` nothing is lost. With `Mb = 3`, `align = -6`
+    // and `s = 6`, positions 4, 5 and 6 are discarded although they are set:
+    // bit b of the magnitude carries E-1 index `Mb - align - b`, so the bits
+    // that survive are `b < Mb - align - s = 3`.
+    //
+    // 26 is `0b11010`, whose bits 1, 3 and 4 are set; masking to `b < 3`
+    // leaves bit 1 alone, which is 2.
+    assert_eq!(
+        at(26, 0, -6, 6, 3),
+        Realigned {
+            magnitude: 2,
+            half: 0,
+            exponent: 0
+        },
+        "H-1 keeps the MSB positions above s and discards the rest"
+    );
+    // And when the mask takes everything, the coefficient is zero rather
+    // than an arbitrary remainder.
+    assert_eq!(at(26, 0, -6, 9, 0).magnitude, 0, "every position discarded");
+
+    // Ruling 1: `SPrgn` is one attacker-controlled byte and Table A.26 lets
+    // it be 255. Nothing here may shift past what an `i64` holds, index a
+    // shift by a negative amount, or return a negative magnitude.
+    for shift in [0u8, 1, 31, 32, 63, 64, 200, 255] {
+        for align in [-80i32, -37, -1, 0, 1, 37] {
+            let r = maxshift(u32::MAX, 31, align, Roi { shift }, 37);
+            assert!(r.magnitude >= 0, "shift {shift}, align {align}");
+        }
+    }
 }

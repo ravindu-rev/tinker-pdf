@@ -7,9 +7,12 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 20 September 2026. `cargo test --workspace --no-fail-fast`
-is **4 929 passed, 0 failed, 59 ignored** across 219 suites on
+is **4 947 passed, 0 failed, 59 ignored** across 220 suites on
 `x86_64-pc-windows-msvc`. The suite gained since the last count is
-`linearized_numbering.rs`, which Annex F's numbering brought with it. The
+`jpx_annex_h.rs`, which T.800's region of interest brought with it; the
+count before it was 4 929 across 219, and the eighteen tests between the two
+figures are that file's eight plus ten unit tests for the RGN marker segment
+and H.1's branches. The
 same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
@@ -1043,6 +1046,16 @@ The JPEG 2000 row is not a replacement so much as a correction.
 files committed once, with the commands, the tool version and the date in
 its header. It was described here and in its own name as an oracle, and it
 was not one.
+
+**What has since replaced part of it is first-party in the strongest sense
+available: the standard's own published numbers.** T.800 Annex J.10 states a
+100-byte codestream, its intermediate coefficients (J.10.4) and its nine
+decoded samples (J.10.5), and `jpx_annex_j.rs` asserts them.
+`jpx_annex_h.rs` extends the same numbers to Annex H's region of interest,
+which T.800 publishes no test data for at all: H.1 rewrites exactly the
+coefficients J.10.4 prints, so the clause can be run over the standard's own
+values and held to the standard's own samples. Neither file invokes anything
+and neither is a round trip through code written here.
 
 **Whether a picture may be compared against an outside viewer, decided.**
 *5 September 2026, ruling 13's amendment.* The first of the four properties

@@ -193,8 +193,14 @@ const BEARING: u32 = 39;
 /// - the two `colr` entries are veraPDF fixtures that are deliberately
 ///   non-conformant, and the budget is a ruling 1 limit rather than a gap.
 ///
-/// So RGN, POC, PPM, PPT, `BYPASS`, `TERMALL` and precision above sixteen
-/// bits are reached by **zero** corpus files, real or fixture.
+/// So POC, PPM, PPT, `BYPASS`, `TERMALL` and precision above sixteen bits are
+/// reached by **zero** corpus files, real or fixture.
+///
+/// RGN was on that list until T.800 Annex H was implemented on 20 September
+/// 2026. This census was re-run afterwards and is unchanged — same 39 bearing
+/// files, same five reasons — which is the expected answer and is recorded
+/// rather than assumed: a capability leaving the refused set can only move
+/// these rows if a corpus file was reaching it, and none was.
 const REASONS: [&str; 5] = [
     r#"Budget("tile-component samples")"#,
     r#"Feature("a colr EnumCS this build cannot map")"#,

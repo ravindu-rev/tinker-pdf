@@ -205,8 +205,9 @@ and bare J2K codestreams, Annex A marker segments with COC and QCC overriding
 per component, Annex B tier-2 — tag trees, packet headers, precincts and all
 five progression orders (B.12) — Annex D tier-1 on the shared MQ coder,
 Annex E dequantisation, both Annex F inverse wavelets (the reversible 5/3 and
-the irreversible 9/7 in fixed point) and the Annex G and I colour pipeline,
-palettes and `cdef` included. Four of Table A.19's six code-block styles
+the irreversible 9/7 in fixed point), **Annex H's region of interest** and the
+Annex G and I colour pipeline, palettes and `cdef` included. Four of Table
+A.19's six code-block styles
 decode: segmentation symbols (D.5's integrity check), `RESET`'s return to
 Table D.7's states at every pass boundary, `VERTICALLY_CAUSAL`'s stripe that
 depends on nothing beneath it, and `PREDICTABLE`, which constrains an encoder
@@ -221,13 +222,29 @@ symbol) catch a mis-parse before any pixel exists.
 **Measured over five corpora, September 2026**, by
 [`jpx_attribution.rs`](../../crates/tinker-pdf/tests/jpx_attribution.rs), which
 names the *internal* refusal rather than the coarse warning: **39 files carry a
-JPX stream and 5 report a refusal**, and **not one of the five is a coding
-capability**. One is a ruling 1 budget; two are veraPDF fixtures whose `colr`
-box is deliberately non-conformant; two are `/JPXDecode` streams whose bytes
-are not JPEG 2000 at all. Two further real documents are **truncated** — every
-tile short of its declared parts — and are drawn as far as they arrive rather
-than refused. So RGN, POC, PPM, PPT, `BYPASS`, `TERMALL` and precision
-above sixteen bits are reached by **zero** corpus files, fixture or real.
+JPX stream and 7 report a refusal, for 5 distinct reasons**, and **not one of
+the five is a coding capability**. One file is a ruling 1 budget; two are
+veraPDF fixtures whose `colr` box is deliberately non-conformant; two are
+`/JPXDecode` streams whose bytes are not JPEG 2000 at all; and two are real
+documents in which **no tile arrived whole**, which is the one truncation this
+decoder refuses rather than draws around — a tile short of its declared parts
+costs pixels and is drawn as far as it arrives, and only a codestream with no
+complete tile has nothing to degrade to. So POC, PPM, PPT, `BYPASS`, `TERMALL`
+and precision above sixteen bits are reached by **zero** corpus files, fixture
+or real.
+
+*The file count in that sentence read 5 until September 2026, against a test
+that prints 7.* It was counting the five files whose reasons are not
+truncation and taking the test's five **reasons** for its five **files**; the
+two `a codestream with no complete tile` documents are refusals and are in the
+census rows, where the old text had them among the truncations that decode.
+The two numbers are now both given and both say which they are.
+
+RGN was on the zero-reachability list until Annex H was implemented, and its
+leaving moved nothing: the census was re-run afterwards and reports the same
+39 bearing files and the same five reasons, because no corpus file carried an
+RGN to begin with. Under ruling 3 that is a scheduling input rather than a
+justification, and the roadmap row it belongs to says so.
 
 That paragraph used to read "the corpus's nineteen readable JPX files as of
 August 2026: 16 decode and 3 refuse", which was a count over four corpora
@@ -547,7 +564,8 @@ make both enums wrong.
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | T.88 7.4.3 |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
-| JPX markers RGN, POC, PPM, PPT (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped RGN draws a bright rectangle and a skipped POC mis-parses every packet after it. **CRG left this row**: A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied | [ROADMAP](../ROADMAP.md) |
+| JPX markers POC, PPM, PPT (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped POC changes the packet order mid-stream and mis-parses every packet after it. **CRG left this row** because A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied; **RGN left it** because Annex H was implemented | [ROADMAP](../ROADMAP.md) |
+| JPX ROI style: an `Srgn` T.800 Table A.25 reserves | `Warning::JpxFeatureUnsupported` | Table A.25 defines one ROI style — 0, "Implicit ROI (maximum shift)" — and reserves the rest. A reserved style is some other realignment of the coefficients, so running H.1's Maxshift arithmetic over it would put the background at the wrong magnitude and draw a plausible picture. Refused by name rather than stepped over, which is the SOF3/SOF5/SOF6/SOF7 lesson on this page | T.800 A.6.3, Table A.25 |
 | JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
 | JPX coding features: two of Table A.19's six code-block styles — `BYPASS` and `TERMALL` — plus unmappable `colr` and unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. The two left both move where a coding pass's *bytes* start, so they need a length per pass out of the packet header (B.10.7) rather than anything tier-1 can do | [ROADMAP](../ROADMAP.md) |
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | **A limit, not a gap.** T.800 Table A.11 allows 38; E.1 clamps a coefficient to `2^(R_b + 2)` sample units and a coefficient plane is a Q12 `i32`, so 17 bits is where the plane format runs out — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. Argued in ROADMAP's Named non-goals | [ROADMAP](../ROADMAP.md) Named non-goals |
@@ -623,6 +641,21 @@ wants the reason to survive it.
   it for a banner it does not print could not pass. Corrected with ruling 13,
   which keeps the committed decodes as a dated measurement and rules out ever
   regenerating them as a check.
+- `crates/tinker-pdf-filters/tests/jpx_annex_j.rs` and
+  `jpx_annex_h.rs` — **the two JPX checks the standard itself
+  adjudicates.** T.800 Annex J.10 publishes a complete 100-byte codestream,
+  annotated field by field, with its intermediate coefficients in J.10.4 and
+  its nine decoded samples in J.10.5; `jpx_annex_j.rs` transcribes the
+  codestream from the annotated field listings rather than from the hex dump
+  and asserts each named field sits at J.10's own octal offset *before* any
+  decode runs. `jpx_annex_h.rs` builds Annex H's region of interest on top of
+  it: T.800 publishes no ROI test data anywhere, but H.1 rewrites exactly the
+  coefficients J.10.4 prints, so the fixtures are J.10's codestream with
+  `SPqcd` exponents lowered and an RGN inserted, and H.1's own arithmetic
+  says what comes out. The link from coefficients to samples is checked by a
+  second transcription of (F-3) to (F-6) and G.1 living in that file, which
+  the standard adjudicates — it must reproduce J.10.5 from J.10.4 — before it
+  is used to predict anything.
 - `crates/tinker-pdf-filters/tests/png_suite.rs` — the PNG decoder **and the
   encoder** against PngSuite, 176 files in the 2017jul19 release, re-fetched
   and run in September 2026: all fifteen legal
