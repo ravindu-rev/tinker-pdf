@@ -114,16 +114,20 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
     );
 
     // "an RGN marker, a Part 2 marker, or a marker the standard defines and
-    // this build does not". Three separate claims and three cases: RGN and
-    // POC are Table A.2's, and 0xFF74 is ISO/IEC 15444-2's MCT — Part 2 is a
-    // non-goal, and every Part 2 marker lands in the same place, as a code
-    // Table A.2 does not define.
+    // this build does not". Three separate claims, and the first of them has
+    // moved: **RGN is decoded now** (T.800 Annex H), so what is left of that
+    // entry is the one value inside the segment the standard reserves. Table
+    // A.25 defines `Srgn` 0, "Implicit ROI (maximum shift)", and reserves
+    // every other value, and a reserved style is refused rather than run
+    // through H.1's arithmetic as though it were Maxshift.
+    //
+    // CRG stood on this row before RGN did, and left for the same kind of
+    // reason: A.9.1 says it "has no effect on decoding the codestream", so
+    // it is parsed and carried, and a marker this build accepts cannot
+    // demonstrate a refusal.
     assert_eq!(
-        // CRG stood where POC stands now. A.9.1 says it "has no effect on
-        // decoding the codestream", so it is parsed and carried rather than
-        // refused, and a marker this build accepts cannot demonstrate a refusal.
-        refuse(&with_marker(marker::RGN, &[0, 0, 0])),
-        Warning::JpxMarkerUnsupported,
+        refuse(&with_marker(marker::RGN, &[0, 1, 0])),
+        Warning::JpxFeatureUnsupported,
     );
     assert_eq!(
         refuse(&with_marker(marker::POC, &[0, 0])),
@@ -285,7 +289,7 @@ fn every_jpx_warning_is_reachable() {
     // Every `Refusal` variant's `warning()`, which is the only way one of the
     // nine refusal warnings can arise, plus the one leniency.
     let produced = [
-        Refusal::Marker("RGN").warning(),
+        Refusal::Marker("POC").warning(),
         Refusal::UnknownMarker(0xFF74).warning(),
         Refusal::Structure("").warning(),
         Refusal::Feature("").warning(),
@@ -318,11 +322,34 @@ fn every_jpx_warning_is_reachable() {
 /// million bad markers cannot turn leniency into an allocation attack.
 #[test]
 fn a_decode_leaves_at_most_one_warning() {
-    let bytes = with_marker(marker::RGN, &[0, 0, 0]);
+    let bytes = with_marker(marker::POC, &[0, 0, 0]);
     let mut warnings = Vec::new();
     let _ = jpx_decode(&bytes, &Limits::new(1 << 20), &mut warnings);
     let _ = jpx_decode(&bytes, &Limits::new(1 << 20), &mut warnings);
     assert_eq!(warnings, vec![Warning::JpxMarkerUnsupported]);
+}
+
+/// **An RGN this build understands is not a refusal at all**, which is the
+/// other half of the entry above and is worth its own assertion: the whole
+/// risk of implementing a marker is that the refusal list quietly keeps it.
+///
+/// `Srgn` 0 with a shift of zero is the degenerate region of interest — H.1
+/// step 3 floors a value that is already an integer and step 4 multiplies by
+/// `2^0` — so the samples must be exactly what the same codestream without
+/// the marker produces.
+#[test]
+fn an_rgn_with_table_a25s_one_style_decodes() {
+    let spec = Spec::default();
+    let plain = stream(&spec, &EMPTY_PACKETS);
+    let with_roi = with_marker(marker::RGN, &[0, 0, 0]);
+
+    let mut warnings = Vec::new();
+    let want = jpx_decode(&plain, &Limits::new(1 << 20), &mut warnings)
+        .expect("the minimal fixture decodes");
+    let got = jpx_decode(&with_roi, &Limits::new(1 << 20), &mut warnings)
+        .expect("an RGN with Table A.25's one style decodes");
+    assert_eq!(got.samples, want.samples, "a zero shift moves nothing");
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 /// The default main header with one extra marker segment before EOC.
