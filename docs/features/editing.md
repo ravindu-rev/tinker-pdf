@@ -76,7 +76,8 @@ and is wrong four ways, which `emit_array`'s doc comment sets out. A glyph
 the rectangle covers only *partly* is removed, because a content stream can
 show a glyph or not show it and only one of those two can leak. What
 redaction cannot **measure** it still leaves whole and names in
-`RedactionReport::warnings` — the four classes in the refusal table below —
+`RedactionReport::warnings` — four of that type's five classes, in the
+refusal table below; the fifth is the form placement one further down —
 because a redaction that silently fails to redact is worse than one that
 refuses: the caller believes the content is gone and distributes the file.
 A warning says the run was not measured, not that it was covered, so
@@ -84,13 +85,27 @@ warnings are raised only when there is at least one rectangle to fall under.
 Form XObjects are rewritten recursively, each
 resolving names against its own `/Resources` (8.10.1), because forms are how
 most producers place repeated content and a redaction driven straight
-through one would leave the secret in the form. Each form is rewritten
-**once**, which is right when a form is drawn once or twice under the same
-transform and wrong when the same form is drawn in two places: only the first
-placement is measured, and that under-redaction is pinned by
-`a_form_drawn_twice_is_cut_only_at_its_first_placement` and carries a
-[roadmap](../ROADMAP.md) row of its own. An image a redaction touches
-is scrubbed whole to a blank sample: cutting a hole would mean decoding,
+through one would leave the secret in the form. A form is rewritten **once
+per distinct placement**, each pass reading the bytes the pass before it
+left, so a rectangle over a form's second placement is measured against that
+placement rather than against nothing. The guard that stops a
+self-referential form recursing is keyed by the transform as well as by the
+object, which is what separates "the same form again" from "the same form
+somewhere else"; bitwise and not by tolerance, because two transforms an ulp
+apart are two placements and calling them one is a decision not to cut, and
+what bounds the walk is a cap on placements per form (`MAX_PLACEMENTS`)
+rather than any comparison of floats. Until September 2026 the guard was
+keyed by the object alone and only the first placement was ever measured —
+a silent under-redaction that reported `glyphs: 0` with no warning,
+indistinguishable from a rectangle that covered nothing. **What that costs
+is the other direction, and it is named.** A form is one stream however
+often it is drawn, so a glyph cut because a rectangle covered it at one
+placement is gone at all of them, including placements no rectangle touched;
+`RedactionWarning::RepeatedForm` names the form and how many placements it
+had, and is raised only when a cut was actually made, since a repeated form
+nothing was cut from is exact. Making it exact means a copy of the form per
+placement, which is a [roadmap](../ROADMAP.md) row of its own. An image a
+redaction touches is scrubbed whole to a blank sample: cutting a hole would mean decoding,
 editing and re-encoding through a codec this build may have no encoder for,
 and leaving the rest is not a redaction. `mark` paints the area black
 afterwards — cosmetic, because the content is already gone; it tells a
@@ -234,6 +249,8 @@ let bytes = editor.save(&tinker_pdf::WriteOptions {
 | Redacting a run whose `Tf` named a font the resources in scope do not have | left whole, `UnknownFont` (`a_run_whose_font_is_not_in_scope_is_left_uncut_and_reported`) | no metrics at all, so no glyph can be placed. Permanent, and it was silent before: the run was kept, nothing was counted, and the report looked like a rectangle that covered nothing | — |
 | Redacting a run whose text rendering matrix is not finite | left whole, `UnmeasurableFrame` (`a_non_finite_text_matrix_is_left_uncut_and_reported`) | a position that is not a number cannot be compared with a rectangle. Permanent. The whole showing operand is left, never half of it | — |
 | Partial image redaction | the whole image is scrubbed (`RedactionReport::images`) | a hole needs a re-encode through a codec this build may not write | [filters](filters.md) |
+| Cutting a form XObject at one placement only, when it is drawn at several | the cut is the union over every placement and `RedactionWarning::RepeatedForm` names the form and its placement count (`a_form_drawn_twice_is_cut_at_the_placement_the_rectangle_covers`); a repeated form nothing was cut from is exact and says nothing (`a_form_drawn_twice_that_nothing_is_cut_from_raises_no_warning`) | a form is one stream however often it is drawn, so a cut made for one placement shows at all of them. Over-removal is the direction this module errs in everywhere; the alternative here is the leak. Exactness needs a copy of the form per placement, which is a [roadmap](../ROADMAP.md) row | 8.10 |
+| Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
 | Appearance synthesis for other subtypes | `add_annotation` inserts the dictionary; no `/AP` is generated | seven subtypes cover the common producer gap; others render only if they carry their own `/AP` | — |
 | Redaction of text inside a Type 3 glyph procedure or an annotation appearance | not rewritten | content streams reachable from a page are rewritten; glyph procedures and `/AP` streams are separate objects | — |
 | Subsetting a program `tinker_pdf_font::subset` will not rebuild — a Type 1 program, a CFF whose charstrings cannot be renumbered without guessing, bytes that are neither | the program is written through exactly as it arrived, `UntouchedReason::ProgramNotRebuildable` | ruling 2: a document that renders is worth more than one that is small | [fonts](fonts.md) |
@@ -257,14 +274,20 @@ let bytes = editor.save(&tinker_pdf::WriteOptions {
   appearances render and flatten.
 - Redaction tests live beside `crates/tinker-pdf/src/redact.rs`: multi-page
   fixtures (a two-page file once redacted page 0's image and left page 1's
-  secret), text inside form XObjects and a self-referential form that
-  terminates, scaled runs, and the needle-bytes-absent assertion over every
+  secret), text inside form XObjects, a self-referential form that
+  terminates and one that does so under a transform that moves each round,
+  a form drawn twice cut at the placement the rectangle covers and at both
+  when both are covered, a nested form measured at every placement of its
+  parent, an image drawn twice scrubbed from its second placement, scaled
+  runs, and the needle-bytes-absent assertion over every
   decompressed stream. Three further modules carry the rotated cut: a
   quarter turn, an oblique rotation, a skew, a rotation that lives in the
   `cm` rather than the `Tm`, and the matrix and the `TJ` gaps re-emitted in
   the run's own units (`rotated_runs`); `'`, `"` and an existing `TJ`
   adjustment surviving a cut (`showing_operators`); and one test per
-  `RedactionWarning` variant (`refusals`). Their fixtures are a Type 3 font
+  unmeasurable-run `RedactionWarning` variant (`refusals`) — the fifth
+  variant, `RepeatedForm`, is about a form rather than a run and its tests
+  sit with the other form ones. Their fixtures are a Type 3 font
   whose every glyph fills its em square, so the geometry a test computes by
   hand from 9.4.2 to 9.4.4 and the ink the renderer draws are the same
   rectangle — which is what lets each of them assert the safety property at

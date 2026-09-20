@@ -69,19 +69,43 @@
 //! which is the whole reason it will not cut one. That is why warnings are
 //! raised only when there is at least one rectangle to fall under.
 //!
-//! # One under-redaction this module does *not* name
+//! # A form drawn twice, and the fifth warning
 //!
-//! A form XObject drawn twice is rewritten once, so only its first placement
-//! is ever measured against the rectangles. The `visited` set in [`follow`] is
-//! there to stop a self-referential form recursing forever, and it stops the
-//! second `Do` as well — right when both invocations share a transform,
-//! wrong when they do not. What that case reports is `glyphs: 0` with no
-//! warning, which is exactly what a rectangle covering nothing reports.
+//! A form XObject drawn in two places is two placements of **one stream**
+//! (8.10), and until September 2026 only the first was ever measured: the
+//! `visited` set in [`follow`] was there to stop a self-referential form
+//! recursing forever and it stopped the second `Do` as well. A rectangle over
+//! the second placement was tested against nothing, the text stayed, and the
+//! report said `glyphs: 0` with no warning — indistinguishable from a
+//! rectangle that covered nothing. That was the one under-redaction this
+//! module did not name, and it is gone.
 //!
-//! It is pinned by `a_form_drawn_twice_is_cut_only_at_its_first_placement` and
-//! carries a roadmap row of its own. It is written here rather than left in
-//! the test because somebody reading this module to decide whether to trust it
-//! should not have to go and find it.
+//! [`Placements`] now keys the guard by the object **and** the transform in
+//! force, so a form is entered once per distinct placement and each pass
+//! rewrites what the pass before it left. Nothing a rectangle covers at any
+//! placement survives. A form that invokes itself arrives back at the same
+//! object under the same matrix, which is a placement already done, so the
+//! cycle guard still holds; what bounds a matrix that creeps by an ulp a
+//! round is [`MAX_PLACEMENTS`] rather than any comparison of floats, because
+//! two transforms an ulp apart are two placements and calling them one would
+//! be a decision not to cut.
+//!
+//! What that costs is the other direction, and it is named rather than
+//! absorbed. The placements share one stream, so a glyph removed because a
+//! rectangle covered it at one of them is gone at all of them — including
+//! placements no rectangle touched. [`RedactionWarning::RepeatedForm`] says
+//! so, naming the form and how many placements it had, and it is raised only
+//! when a cut was actually made (a form drawn twice that nothing was cut from
+//! is exact, and says nothing). The exact answer is a copy of the form per
+//! placement; it is a roadmap row of its own, and what it waits on is that
+//! [`crate::subset`]'s glyph-usage walk resolves `/XObject` names through the
+//! *document* and cannot see an object an editor has only just allocated.
+//!
+//! The same guard covered images, with the same hole: an image drawn twice
+//! and covered only at its second placement was left whole and reported
+//! `images: 0`. An image is replaced whole or not at all, so it needs no copy
+//! and no warning — every placement is tested and the first covered one
+//! scrubs it.
 //!
 //! # The injections that were counted
 //!
@@ -104,6 +128,23 @@
 //! | the warning not emitted when a run is skipped | 6 |
 //! | the non-showing half of `'` and `"` dropped from a cut run | 2 |
 //! | an existing `TJ` adjustment re-emitted with its sign flipped | **1** |
+//!
+//! The form-placement defects were counted the same way on
+//! 20 September 2026, against a suite of 1 593 tests, and none of the seven
+//! reports zero:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the placement key built from `a b c d` only, so two placements one `cm` apart read as one — the defect above, put back | 4 |
+//! | the form's content read from the file rather than from the editor, so each placement's pass undoes the one before it | 3 |
+//! | the image deduplicated by object number *before* the coverage test, which is how it used to be | **1** |
+//! | [`RedactionWarning::RepeatedForm`] never raised | 4 |
+//! | `RepeatedForm` raised for any form at two placements, cut or not | 2 |
+//! | the placement key forgetting the object number, so two different forms at one placement collide | **1** |
+//! | [`MAX_PLACEMENTS`] removed, so a form at more placements than the cap no longer saturates its count | **1** |
+//!
+//! The three caught by exactly one test are each caught by the test written
+//! for them, which is what a count of one is supposed to mean here.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -127,24 +168,34 @@ pub struct Redaction {
     pub mark: bool,
 }
 
-/// A run redaction left whole because it could not measure it (ruling 10).
+/// Something a redaction could not do exactly, named rather than left silent
+/// (ruling 10).
 ///
-/// Every variant names the resource name of the font in force and how many
-/// bytes of showing operand were left in place, because "a run was skipped"
-/// with neither is a sentence a caller cannot act on — and this is the
-/// leniency that is invisible from outside, since what it costs is content
-/// the caller believes was removed.
+/// Four of the five are a **run left whole** because this module could not
+/// measure it, and each names the resource name of the font in force and how
+/// many bytes of showing operand were left in place, because "a run was
+/// skipped" with neither is a sentence a caller cannot act on — and this is
+/// the leniency that is invisible from outside, since what it costs is
+/// content the caller believes was removed.
 ///
 /// `bytes` rather than glyphs: a run whose font is unknown cannot be decoded
 /// into glyphs at all, and a count that is a guess for one variant and a
 /// measurement for the other three is a count nobody can compare. Warnings
-/// with the same cause and the same font are merged, so a page of vertical
-/// text yields one entry per font rather than one per operator.
+/// with the same cause and the same resource are merged, so a page of
+/// vertical text yields one entry per font rather than one per operator.
+///
+/// The fifth, [`RedactionWarning::RepeatedForm`], is the other direction and
+/// is the reason this type is no longer only about runs left whole: it says a
+/// cut was made *wider* than the rectangles asked for. Both are leniencies
+/// and both are things a caller must be told, so both live here; use
+/// [`RedactionWarning::resource`] to name whichever of the two kinds of
+/// resource a warning is about, since [`RedactionWarning::font`] and
+/// [`RedactionWarning::bytes`] have nothing to say about a form.
 ///
 /// Closed rather than `#[non_exhaustive]`, for `WarningKind`'s reason: a new
-/// class of run this module will not measure is a deliberate change to
-/// documented behaviour, and a caller matching exhaustively should be made to
-/// notice it rather than fall through an arm that says "some other reason".
+/// class this module will not do exactly is a deliberate change to documented
+/// behaviour, and a caller matching exhaustively should be made to notice it
+/// rather than fall through an arm that says "some other reason".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RedactionWarning {
     /// The `Tf` in force named a font that the resource dictionary in scope
@@ -208,10 +259,44 @@ pub enum RedactionWarning {
         /// How many bytes of showing operand were left in place.
         bytes: usize,
     },
+    /// One form XObject is drawn at more than one placement and the redaction
+    /// cut it, so the cut is **wider** than the rectangles asked for.
+    ///
+    /// 8.10: a `Do` executes one stream, and a form drawn in two places is
+    /// two placements of *one object*. Every placement is measured against
+    /// the rectangles — a glyph under a rectangle at any of them is removed,
+    /// which is what keeps a second placement from leaking — but the removal
+    /// happens in the one stream all of them share, so a glyph cut because
+    /// the rectangle covered it at one placement is also gone at placements
+    /// no rectangle touched.
+    ///
+    /// Over-removal is the direction this module errs in everywhere (a partly
+    /// covered glyph goes whole, a partly covered image goes whole), because
+    /// the alternative is the leak. But it is not free, and it is not
+    /// something a caller can see from `glyphs` alone — so it is named here.
+    /// The exact answer is a copy of the form per placement, which is a
+    /// roadmap row of its own.
+    ///
+    /// `placements` **saturates** at [`MAX_PLACEMENTS`]. A form drawn at more
+    /// than that many distinct transforms has the placements past the cap
+    /// measured against nothing at all, which is the one case where this
+    /// warning still means text may have *survived* under a rectangle rather
+    /// than only that too much went; a saturated count is how to tell.
+    RepeatedForm {
+        /// The resource name the `Do` gave the form.
+        form: Vec<u8>,
+        /// How many distinct placements of it were measured, saturating at
+        /// [`MAX_PLACEMENTS`].
+        placements: usize,
+    },
 }
 
 impl RedactionWarning {
     /// The resource name of the font the run was showing in.
+    ///
+    /// Empty for [`RedactionWarning::RepeatedForm`], which is about a form
+    /// XObject and not about a font. [`RedactionWarning::resource`] is the
+    /// accessor that answers for every variant.
     #[must_use]
     pub fn font(&self) -> &[u8] {
         match self {
@@ -219,10 +304,28 @@ impl RedactionWarning {
             | RedactionWarning::VerticalRun { font, .. }
             | RedactionWarning::RescaledType3Font { font, .. }
             | RedactionWarning::UnmeasurableFrame { font, .. } => font,
+            RedactionWarning::RepeatedForm { .. } => &[],
+        }
+    }
+
+    /// The resource name this warning is about — a font for four of the five
+    /// variants, a form XObject for [`RedactionWarning::RepeatedForm`].
+    ///
+    /// This is what distinguishes two warnings of the same kind, so it is
+    /// never empty except where the document gave no name to quote.
+    #[must_use]
+    pub fn resource(&self) -> &[u8] {
+        match self {
+            RedactionWarning::RepeatedForm { form, .. } => form,
+            other => other.font(),
         }
     }
 
     /// How many bytes of showing operand this warning accounts for.
+    ///
+    /// Zero for [`RedactionWarning::RepeatedForm`], which leaves no operand
+    /// in place — it counts placements instead
+    /// ([`RedactionWarning::placements`]).
     #[must_use]
     pub fn bytes(&self) -> usize {
         match self {
@@ -230,22 +333,44 @@ impl RedactionWarning {
             | RedactionWarning::VerticalRun { bytes, .. }
             | RedactionWarning::RescaledType3Font { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => *bytes,
+            RedactionWarning::RepeatedForm { .. } => 0,
         }
     }
 
-    /// Whether two warnings are the same cause in the same font.
-    fn same_cause(&self, other: &RedactionWarning) -> bool {
-        std::mem::discriminant(self) == std::mem::discriminant(other) && self.font() == other.font()
+    /// How many distinct placements this warning accounts for, and zero for
+    /// every variant that is about a run rather than about a form.
+    #[must_use]
+    pub fn placements(&self) -> usize {
+        match self {
+            RedactionWarning::RepeatedForm { placements, .. } => *placements,
+            _ => 0,
+        }
     }
 
-    /// Adds another run's operand length to this warning.
-    fn absorb(&mut self, more: usize) {
+    /// Whether two warnings are the same cause over the same resource.
+    fn same_cause(&self, other: &RedactionWarning) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+            && self.resource() == other.resource()
+    }
+
+    /// Folds another warning of the same cause into this one.
+    ///
+    /// Each variant absorbs its own count — operand bytes for the four run
+    /// classes, placements for a form — because a single `usize` that means
+    /// bytes in one arm and placements in another is a number nobody can
+    /// read.
+    fn absorb(&mut self, other: &RedactionWarning) {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
             | RedactionWarning::VerticalRun { bytes, .. }
             | RedactionWarning::RescaledType3Font { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => {
-                *bytes = bytes.saturating_add(more);
+                *bytes = bytes.saturating_add(other.bytes());
+            }
+            RedactionWarning::RepeatedForm { placements, .. } => {
+                *placements = placements
+                    .saturating_add(other.placements())
+                    .min(MAX_PLACEMENTS);
             }
         }
     }
@@ -253,17 +378,32 @@ impl RedactionWarning {
 
 /// How many distinct warnings one redaction keeps.
 ///
-/// Four causes times the fonts on a page: a document that reaches this cap has
-/// a resource dictionary a caller is not going to read through anyway, and the
-/// bytes of the ones past it are lost rather than the list growing with the
-/// file (ruling 1).
+/// Five causes times the resources on a page: a document that reaches this cap
+/// has a resource dictionary a caller is not going to read through anyway, and
+/// the counts of the ones past it are lost rather than the list growing with
+/// the file (ruling 1).
 const MAX_WARNINGS: usize = 64;
 
-/// Records a warning, merging it into one with the same cause and font.
+/// How many distinct placements of one XObject a redaction measures.
+///
+/// A form drawn at more than this many *different* transforms has the
+/// placements past the cap measured against nothing, and
+/// [`RedactionWarning::RepeatedForm`] then reports a count saturated at this
+/// value, which is what tells a caller the difference.
+///
+/// The cap is what bounds the work, and it has to be a cap rather than a
+/// float comparison. Two transforms that differ in the last ulp are not the
+/// same placement and are not treated as one ([`placement_key`]), so a form
+/// that invokes itself under a matrix that changes by a hair each time
+/// generates a fresh placement every round; [`MAX_FORM_DEPTH`] bounds one
+/// such chain and this bounds the rest (ruling 1).
+pub const MAX_PLACEMENTS: usize = 64;
+
+/// Records a warning, merging it into one with the same cause and resource.
 fn note(warnings: &mut Vec<RedactionWarning>, warning: RedactionWarning) {
     for existing in warnings.iter_mut() {
         if existing.same_cause(&warning) {
-            existing.absorb(warning.bytes());
+            existing.absorb(&warning);
             return;
         }
     }
@@ -416,7 +556,7 @@ pub fn apply(
     // stops at the page stream leaves whatever a form drew exactly where it
     // was. Images the redaction covers are scrubbed for the same reason: a
     // black rectangle over a photograph removes nothing.
-    let mut visited: HashSet<u32> = HashSet::new();
+    let mut placements = Placements::default();
     // The resources of the page being redacted, not of page zero.
     let resources = page_resources(editor.document(), reference).unwrap_or_default();
     follow(
@@ -425,9 +565,23 @@ pub fn apply(
         &uses,
         areas,
         &mut report,
-        &mut visited,
+        &mut placements,
         0,
     );
+
+    // Raised here rather than inside the walk, because whether a form's cut
+    // is wider than the rectangles asked for is only knowable once every
+    // placement of it has been measured — the second placement may be the one
+    // that cuts anything at all.
+    //
+    // Only when there is a rectangle to fall under, which is the rule every
+    // other warning in this module follows: with no rectangles nothing was
+    // cut and nothing was widened.
+    if !areas.is_empty() {
+        for warning in placements.warnings() {
+            note(&mut report.warnings, warning);
+        }
+    }
 
     if areas.iter().any(|r| r.mark) {
         // Painted last, so it covers whatever remains beneath it.
@@ -560,6 +714,124 @@ fn type3_matrices(doc: &CosDocument, resources: &Dict) -> HashMap<Name, bool> {
 /// How deep form XObjects may nest before recursion is refused (8.10).
 const MAX_FORM_DEPTH: u32 = 12;
 
+/// One placement of an XObject: the six entries of the transform in force,
+/// bit for bit.
+///
+/// **Bitwise, and deliberately not a tolerance.** Two transforms that differ
+/// in the last ulp place a form in two slightly different spots, so they are
+/// two placements and each has to be measured against the rectangles; a
+/// tolerance that called them one would decide, by arithmetic nobody
+/// specified, that a glyph a rectangle covers at one of them need not be cut.
+/// Bitwise equality is exact, total and free of that judgement — and it is
+/// safe to use for a *cycle guard* only because termination does not rest on
+/// it: [`MAX_PLACEMENTS`] bounds how many distinct placements of one object
+/// are ever entered, so a matrix that creeps by an ulp a round stops at the
+/// cap rather than running forever.
+///
+/// `+ 0.0` normalises `-0.0` to `0.0` — the same point, two bit patterns —
+/// and is exact for every other value, so it costs nothing under ruling 4.
+type PlacementKey = [u64; 6];
+
+fn placement_key(m: Matrix) -> PlacementKey {
+    [
+        (m.a + 0.0).to_bits(),
+        (m.b + 0.0).to_bits(),
+        (m.c + 0.0).to_bits(),
+        (m.d + 0.0).to_bits(),
+        (m.e + 0.0).to_bits(),
+        (m.f + 0.0).to_bits(),
+    ]
+}
+
+/// Which placements of which XObjects this redaction has already handled.
+///
+/// This replaced a `HashSet<u32>` of object numbers, which was both the cycle
+/// guard and — silently — a rule that a form drawn twice is measured once.
+/// Keying by the transform as well as by the object separates the two: a form
+/// that invokes itself arrives at the same object under the same matrix and
+/// is still entered once, and a form drawn somewhere else arrives under a
+/// different matrix and is measured there too.
+#[derive(Default)]
+struct Placements {
+    /// Every (object, transform) pair already rewritten.
+    done: HashSet<(u32, PlacementKey)>,
+    /// How many distinct placements of each form were entered, saturating at
+    /// [`MAX_PLACEMENTS`].
+    count: HashMap<u32, usize>,
+    /// Forms with a placement refused because the cap was reached — the one
+    /// case where a placement is not measured at all.
+    refused: HashSet<u32>,
+    /// Glyphs cut from each form's own content, summed over its placements.
+    cut: HashMap<u32, usize>,
+    /// The resource name each form was first invoked by.
+    ///
+    /// The *first*, because one object can be reached by different names from
+    /// different scopes and a caller needs a name that appears in the file,
+    /// not a list of the ones that do.
+    name: HashMap<u32, Vec<u8>>,
+    /// Images already scrubbed, so one image is reported once however many
+    /// placements asked for it.
+    scrubbed: HashSet<u32>,
+}
+
+impl Placements {
+    /// Whether this placement of this form is one to rewrite now.
+    fn enter_form(&mut self, num: u32, name: &[u8], key: PlacementKey) -> bool {
+        if self.done.contains(&(num, key)) {
+            return false;
+        }
+        let seen = self.count.entry(num).or_insert(0);
+        if *seen >= MAX_PLACEMENTS {
+            self.refused.insert(num);
+            return false;
+        }
+        *seen += 1;
+        self.done.insert((num, key));
+        self.name.entry(num).or_insert_with(|| name.to_vec());
+        true
+    }
+
+    /// Records what one placement's pass removed from a form.
+    fn record_cut(&mut self, num: u32, glyphs: usize) {
+        let total = self.cut.entry(num).or_insert(0);
+        *total = total.saturating_add(glyphs);
+    }
+
+    /// Whether this image still needs scrubbing.
+    fn scrub(&mut self, num: u32) -> bool {
+        self.scrubbed.insert(num)
+    }
+
+    /// The forms whose cut is not exactly what the rectangles asked for.
+    ///
+    /// A form at one placement is exact. A form at several that nothing was
+    /// cut from is exact too — the file is byte-identical to what a copy per
+    /// placement would have produced — so it says nothing. What is left is a
+    /// form whose one shared stream lost glyphs on behalf of one placement,
+    /// and a form with a placement past the cap, which is the case where
+    /// something may instead have survived.
+    fn warnings(&self) -> Vec<RedactionWarning> {
+        let mut out: Vec<RedactionWarning> = Vec::new();
+        let mut numbers: Vec<u32> = self.count.keys().copied().collect();
+        // Sorted, because a report that depends on a `HashMap`'s iteration
+        // order is a report two runs can disagree about (ruling 4).
+        numbers.sort_unstable();
+        for num in numbers {
+            let placements = self.count.get(&num).copied().unwrap_or(0);
+            let cut = self.cut.get(&num).copied().unwrap_or(0);
+            let refused = self.refused.contains(&num);
+            if placements < 2 || (cut == 0 && !refused) {
+                continue;
+            }
+            out.push(RedactionWarning::RepeatedForm {
+                form: self.name.get(&num).cloned().unwrap_or_default(),
+                placements,
+            });
+        }
+        out
+    }
+}
+
 /// Recurses into the XObjects a stream invoked.
 ///
 /// A form is rewritten the way the page was, with the transform in force at
@@ -567,12 +839,18 @@ const MAX_FORM_DEPTH: u32 = 12;
 /// form's own coordinates are brought into it rather than the other way round.
 /// An image the redaction covers is scrubbed.
 ///
-/// `visited` stops a form that invokes itself, directly or through another,
-/// from recursing forever. It also means a form used twice is rewritten once,
-/// which is correct only while both invocations share a transform: the first
-/// pass removed the glyphs that were under a rectangle *at the first
-/// placement*, and a form drawn somewhere else as well has its second
-/// placement measured against nothing at all. See the module header.
+/// **Every placement is measured.** A form drawn in two places is rewritten
+/// once per distinct placement, each pass reading the bytes the pass before
+/// it left ([`DocumentEditor::stream_bytes`], not the file), so the surviving
+/// content is what no rectangle covered at *any* placement. That is what
+/// keeps a rectangle over a second placement from being tested against
+/// nothing — and, because a form is one object however often it is drawn, it
+/// is also why a cut made for one placement shows at the others, which
+/// [`RedactionWarning::RepeatedForm`] names.
+///
+/// [`Placements`] is still the cycle guard: a form that invokes itself
+/// arrives back at the same object under the same matrix, which is a
+/// placement already done.
 #[allow(clippy::too_many_arguments)]
 fn follow(
     editor: &mut DocumentEditor,
@@ -580,7 +858,7 @@ fn follow(
     uses: &[XObjectUse],
     areas: &[Redaction],
     report: &mut RedactionReport,
-    visited: &mut HashSet<u32>,
+    placements: &mut Placements,
     depth: u32,
 ) {
     if depth > MAX_FORM_DEPTH {
@@ -591,9 +869,6 @@ fn follow(
         let Some((reference, dict)) = resolve_xobject(editor, resources, &used.name) else {
             continue;
         };
-        if !visited.insert(reference.num) {
-            continue;
-        }
 
         let doc = editor.document();
         let subtype = doc
@@ -604,7 +879,13 @@ fn follow(
 
         match subtype.as_deref() {
             Some(b"Image") => {
-                if covers_unit_square(used, areas) {
+                // Tested at **every** placement, and scrubbed once. An image
+                // is replaced whole or not at all, so the two placements of
+                // one image do not need two objects the way two placements of
+                // a form need two streams — the only question is whether any
+                // of them is covered, and stopping at the first left an image
+                // covered only at its second in the file with `images: 0`.
+                if covers_unit_square(used, areas) && placements.scrub(reference.num) {
                     scrub_image(editor, reference, &dict);
                     report.images += 1;
                 }
@@ -625,7 +906,16 @@ fn follow(
                     None => used.ctm,
                 };
 
-                let Ok(content) = doc.stream_decoded(reference) else {
+                if !placements.enter_form(reference.num, &used.name, placement_key(inner)) {
+                    continue;
+                }
+
+                // The bytes this redaction has **now**, not the file's. A
+                // second placement of the same form rewrites what the first
+                // placement left, so the cuts accumulate in the one stream
+                // all the placements share; reading the file here would throw
+                // the earlier placement's cut away and put its text back.
+                let Some(content) = editor.stream_bytes(reference) else {
                     continue;
                 };
                 // 8.10.1: a form's own `/Resources` is what its content
@@ -643,6 +933,7 @@ fn follow(
                 report.operations += inner_report.operations;
                 report.glyphs += inner_report.glyphs;
                 report.images += inner_report.images;
+                placements.record_cut(reference.num, inner_report.glyphs);
                 for warning in inner_report.warnings {
                     note(&mut report.warnings, warning);
                 }
@@ -657,7 +948,7 @@ fn follow(
                     &inner_uses,
                     areas,
                     report,
-                    visited,
+                    placements,
                     depth + 1,
                 );
             }
@@ -1719,28 +2010,13 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
         assert!(streams.contains("PUBLIC"), "the rest survives");
     }
 
-    /// **A pinned defect.** A form drawn twice is rewritten once, so only its
-    /// first placement is ever measured against the rectangles.
+    /// One form drawing `SECRET`, invoked at page y 50 and again at y 200.
     ///
-    /// `visited` is there to stop a self-referential form recursing forever,
-    /// and it makes the second `Do` a no-op as well. That is right when both
-    /// invocations share a transform and wrong when they do not. The form
-    /// below draws `SECRET` at page y 50 and again at page y 200; the
-    /// rectangle covers the second placement only; the first pass finds
-    /// nothing under it and marks the form done. The text is left whole, no
-    /// warning names it, and the report is indistinguishable from a rectangle
-    /// that covered nothing — which is the silent under-redaction the rest of
-    /// this module exists to refuse, reached by a different road.
-    ///
-    /// Asserted as it behaves rather than as it should, because a test that
-    /// fails is a test somebody turns off. The fix is a decision this row does
-    /// not own — either each placement gets its own copy of the form, which
-    /// changes what the saved file looks like, or a form invoked twice under
-    /// different transforms refuses and reports — so it is a roadmap row of
-    /// its own and this pin is its evidence.
-    #[test]
-    fn a_form_drawn_twice_is_cut_only_at_its_first_placement() {
-        let bytes: &[u8] = b"%PDF-1.7\n\
+    /// The fixture the pinned defect was written against, kept because it is
+    /// the evidence: the same bytes that used to demonstrate the second
+    /// placement going unmeasured now demonstrate it being measured.
+    fn twice_placed_form() -> &'static [u8] {
+        b"%PDF-1.7\n\
 1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
 2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
 3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n\
@@ -1754,9 +2030,38 @@ endstream\nendobj\n\
 BT /F0 12 Tf 10 50 Td (SECRET) Tj ET\n\
 endstream\nendobj\n\
 6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
-trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n"
+    }
 
-        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+    /// **The pin, flipped.** A form drawn twice is measured at *both*
+    /// placements, and the fixture is the one that used to prove it was not.
+    ///
+    /// The form below draws `SECRET` at page y 50 and again at page y 200;
+    /// the rectangle covers the second placement only. Until September 2026
+    /// the `visited` set — there to stop a self-referential form recursing
+    /// forever — made the second `Do` a no-op too, so the first pass found
+    /// nothing under the rectangle and marked the form done. The text stayed,
+    /// no warning named it, and the report was `glyphs: 0` with no warnings,
+    /// which is exactly what a rectangle covering nothing reports: a silent
+    /// under-redaction reached by a different road from the ones this module
+    /// refuses by name.
+    ///
+    /// Now the guard is keyed by the transform as well as by the object, so
+    /// the second placement is a placement of its own and is measured. Two
+    /// things follow and both are asserted here, because only the pair of
+    /// them is the property:
+    ///
+    /// - `SECRET` is gone from every stream, and the page draws no ink inside
+    ///   the rectangle.
+    /// - The one stream both placements share lost it, so the *first*
+    ///   placement lost it too although no rectangle covered that one. That
+    ///   is wider than what was asked for, so
+    ///   [`RedactionWarning::RepeatedForm`] names the form — the report is no
+    ///   longer able to look like a rectangle that covered nothing, in either
+    ///   direction.
+    #[test]
+    fn a_form_drawn_twice_is_cut_at_the_placement_the_rectangle_covers() {
+        let doc = Arc::new(CosDocument::open(twice_placed_form()).expect("it opens"));
         assert!(
             all_streams(&doc).contains("SECRET"),
             "the needle starts present"
@@ -1773,19 +2078,272 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             mark: false,
         };
 
-        let (streams, report) = redact_to_streams(doc, &[over_the_second]);
+        let (bytes, report) = redact(doc, &[over_the_second]);
+        let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
+        let streams = all_streams(&reopened);
+
         assert_eq!(
-            report.glyphs, 0,
-            "PINNED DEFECT: the second placement was never measured"
+            report.glyphs, 6,
+            "the second placement was measured: every glyph of SECRET went"
+        );
+        assert!(
+            !streams.contains("SECRET"),
+            "and the text under the rectangle is gone from every stream: {streams}"
+        );
+
+        // The stream check on its own would pass a build that left the glyph
+        // in a second, unreferenced copy. The page has to draw nothing there.
+        let bitmap = super::tests_support::render(bytes);
+        assert_eq!(
+            super::tests_support::ink_in(&bitmap, 300.0, over_the_second.area),
+            0,
+            "and the page draws no ink inside the rectangle"
+        );
+
+        // One stream, two placements: the first placement lost `SECRET` as
+        // well, though no rectangle covered it. That is the cost of the fix
+        // and it is not allowed to be silent.
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"Fm0".to_vec(),
+                placements: 2,
+            }],
+            "the form is named, with how many placements it had"
+        );
+    }
+
+    /// A form drawn twice under the **same** transform is still one
+    /// measurement, because it is one placement.
+    ///
+    /// This is the half the old `visited` set got right, and the half a fix
+    /// that copied a form per `Do` unconditionally would have broken: two
+    /// invocations in the same frame are the same rectangle test over the
+    /// same geometry, so a second pass has nothing to find and a second copy
+    /// would bloat every ordinary file for no gain. No `RepeatedForm` either
+    /// — the output is exactly what the rectangles asked for.
+    #[test]
+    fn a_form_drawn_twice_under_one_transform_is_measured_once() {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> /Font << /F0 6 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 56 >>\nstream\n\
+q 1 0 0 1 0 150 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q\n\
+endstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 300]\n\
+   /Resources << /Font << /F0 6 0 R >> >> /Length 39 >>\nstream\n\
+BT /F0 12 Tf 10 50 Td (SECRET) Tj ET\n\
+endstream\nendobj\n\
+6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+        let band = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 190.0,
+                x1: 400.0,
+                y1: 230.0,
+            },
+            mark: false,
+        };
+
+        let (streams, report) = redact_to_streams(doc, &[band]);
+        assert_eq!(report.glyphs, 6, "the six glyphs of SECRET, counted once");
+        assert_eq!(
+            report.operations, 1,
+            "one showing operator was rewritten, not the same one twice"
+        );
+        assert!(!streams.contains("SECRET"), "got: {streams}");
+        assert!(
+            report.warnings.is_empty(),
+            "one placement is exact, so nothing is reported: {:?}",
+            report.warnings
+        );
+    }
+
+    /// Both placements covered: each is measured in its own frame, and the
+    /// report counts the glyphs each one removed rather than one placement's
+    /// twice.
+    ///
+    /// The rectangle is the full height of the page, so it takes `SECRET` at
+    /// page y 50 and at page y 200. The first pass removes all six; the
+    /// second pass rewrites what the first left and finds nothing, which is
+    /// the arithmetic that keeps `glyphs` a count of glyphs rather than of
+    /// passes.
+    #[test]
+    fn a_form_drawn_twice_with_both_placements_covered_is_cut_at_both() {
+        let doc = Arc::new(CosDocument::open(twice_placed_form()).expect("it opens"));
+        let whole_page = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 400.0,
+                y1: 300.0,
+            },
+            mark: false,
+        };
+
+        let (bytes, report) = redact(doc, &[whole_page]);
+        let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
+        assert!(
+            !all_streams(&reopened).contains("SECRET"),
+            "the text is gone from every stream"
+        );
+        assert_eq!(report.glyphs, 6, "six glyphs, not twelve");
+
+        let bitmap = super::tests_support::render(bytes);
+        assert_eq!(
+            super::tests_support::ink_in(&bitmap, 300.0, whole_page.area),
+            0,
+            "and neither placement draws anything"
+        );
+    }
+
+    /// A form drawn twice that no rectangle touches is exact, so it raises no
+    /// warning.
+    ///
+    /// The guard this pins is that `RepeatedForm` reports a *widened cut*
+    /// rather than the mere existence of a second placement. A warning on
+    /// every repeated form would fire on most real files, where a header or a
+    /// logo is placed on every page, and a warning that is always present is
+    /// one nobody reads.
+    #[test]
+    fn a_form_drawn_twice_that_nothing_is_cut_from_raises_no_warning() {
+        let doc = Arc::new(CosDocument::open(twice_placed_form()).expect("it opens"));
+        // Between the two baselines: page y 50 and page y 200 are both clear
+        // of it.
+        let between = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 100.0,
+                x1: 400.0,
+                y1: 120.0,
+            },
+            mark: false,
+        };
+
+        let (streams, report) = redact_to_streams(doc, &[between]);
+        assert_eq!(report.glyphs, 0, "the rectangle covers neither placement");
+        assert!(
+            streams.contains("SECRET"),
+            "so the text stays, at both placements"
         );
         assert!(
             report.warnings.is_empty(),
-            "PINNED DEFECT: and nothing told the caller: {:?}",
+            "and there is nothing to report: {:?}",
             report.warnings
         );
+    }
+
+    /// A form inside a form, the outer one drawn at two placements.
+    ///
+    /// The inner form is where the text is, and the rectangle covers it only
+    /// through the outer form's second placement. Both the transform composed
+    /// down through two levels and the guard at the inner level have to be
+    /// right for this to be found: the inner form is reached twice, under two
+    /// different composed transforms, and the second reach is a placement of
+    /// its own.
+    #[test]
+    fn a_nested_form_is_measured_at_every_placement_of_its_parent() {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 56 >>\nstream\n\
+q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q\n\
+endstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 300]\n\
+   /Resources << /XObject << /Fm1 7 0 R >> >> /Length 10 >>\nstream\n\
+/Fm1 Do\n\
+endstream\nendobj\n\
+6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 300]\n\
+   /Resources << /Font << /F0 6 0 R >> >> /Length 39 >>\nstream\n\
+BT /F0 12 Tf 10 50 Td (SECRET) Tj ET\n\
+endstream\nendobj\n\
+trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
         assert!(
-            streams.contains("SECRET"),
-            "PINNED DEFECT: the text under the rectangle is still in the file"
+            all_streams(&doc).contains("SECRET"),
+            "the needle starts present"
+        );
+
+        let over_the_second = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 190.0,
+                x1: 400.0,
+                y1: 230.0,
+            },
+            mark: false,
+        };
+
+        let (streams, report) = redact_to_streams(doc, &[over_the_second]);
+        assert_eq!(report.glyphs, 6, "the inner form was measured at depth two");
+        assert!(!streams.contains("SECRET"), "got: {streams}");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"Fm1".to_vec(),
+                placements: 2,
+            }],
+            "the form the cut was made in is the one named, not its parent"
+        );
+    }
+
+    /// An image drawn twice and covered only at its **second** placement is
+    /// scrubbed.
+    ///
+    /// The same `visited` set caused this, and it is the same silent failure
+    /// — `images: 0`, reading exactly like a rectangle over nothing. An image
+    /// needs no copy to fix it: it is replaced whole or not at all, so every
+    /// placement is tested and the first covered one scrubs it, once.
+    #[test]
+    fn an_image_drawn_twice_is_scrubbed_from_its_second_placement() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"%PDF-1.7\n");
+        bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        bytes.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        bytes.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n\
+              /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        // The first placement sits at page y 10..40, the second at y 210..240.
+        let content = b"q 30 0 0 30 60 10 cm /Im0 Do Q q 30 0 0 30 60 210 cm /Im0 Do Q\n";
+        bytes.extend_from_slice(
+            format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+        );
+        bytes.extend_from_slice(content);
+        bytes.extend_from_slice(b"endstream\nendobj\n");
+        bytes.extend_from_slice(
+            b"5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+              /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\nstream\n",
+        );
+        bytes.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+        bytes.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+
+        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+        let over_the_second = Redaction {
+            area: Rect {
+                x0: 50.0,
+                y0: 200.0,
+                x1: 120.0,
+                y1: 250.0,
+            },
+            mark: false,
+        };
+
+        let (_, report) = redact(doc, &[over_the_second]);
+        assert_eq!(
+            report.images, 1,
+            "the second placement was tested and the samples went"
         );
     }
 
@@ -1809,6 +2367,135 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
         let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
         let (_, report) = redact_to_streams(doc, &[second_word()]);
         assert_eq!(report.glyphs, 0, "there is no text, and it terminated");
+    }
+
+    /// A form that invokes itself under a transform that **moves each round**
+    /// must terminate too, and this is the case the object-number guard used
+    /// to cover for free.
+    ///
+    /// Every round is a genuinely different placement — the form lands ten
+    /// points further up the page each time — so no comparison of matrices
+    /// may call two of them one, and none does. What stops it is a pair of
+    /// counts: `MAX_FORM_DEPTH` bounds a chain that recurses, which is this
+    /// one, and `MAX_PLACEMENTS` bounds one that spreads
+    /// (`a_form_placed_more_times_than_the_cap_saturates_its_count`). That is
+    /// the whole reason the placement key is bitwise rather than a tolerance:
+    /// a tolerance would have to be loose enough to stop this, and would then
+    /// be loose enough to call two real placements one and leave one of them
+    /// uncut.
+    ///
+    /// Each round is a `Do` inside the form, so the chain is bounded by the
+    /// depth and the count is `MAX_FORM_DEPTH` placements plus the one the
+    /// page itself made.
+    #[test]
+    fn a_self_referential_form_under_a_moving_transform_terminates() {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> /Font << /F0 6 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 10 >>\nstream\n\
+/Fm0 Do\n\
+endstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 200]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> /Font << /F0 6 0 R >> >>\n\
+   /Length 60 >>\nstream\n\
+BT /F0 12 Tf 10 50 Td (SECRET) Tj ET\n\
+q 1 0 0 1 0 10 cm /Fm0 Do Q\n\
+endstream\nendobj\n\
+6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
+        let band = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 45.0,
+                x1: 400.0,
+                y1: 65.0,
+            },
+            mark: false,
+        };
+
+        let (streams, report) = redact_to_streams(doc, &[band]);
+        assert_eq!(
+            report.glyphs, 6,
+            "the placement under the rectangle was measured"
+        );
+        assert!(!streams.contains("SECRET"), "and cut: {streams}");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"Fm0".to_vec(),
+                placements: MAX_FORM_DEPTH as usize + 1,
+            }],
+            "the page's placement and one per level of depth, and then it stops"
+        );
+    }
+
+    /// A form placed more times than [`MAX_PLACEMENTS`] has the placements
+    /// past the cap measured against nothing, and the saturated count in the
+    /// warning is what says so.
+    ///
+    /// This is the one case where `RepeatedForm` still means content may have
+    /// *survived* under a rectangle rather than only that too much went, so
+    /// the two have to be tellable apart from the report alone — a count
+    /// equal to the cap is the signal, and it is why the field is a count
+    /// rather than a flag.
+    #[test]
+    fn a_form_placed_more_times_than_the_cap_saturates_its_count() {
+        let placements = MAX_PLACEMENTS + 6;
+        let mut content = String::new();
+        for i in 0..placements {
+            // Each one four points further up: every placement distinct, and
+            // all of them clear of the rectangle except the first.
+            content.push_str(&format!("q 1 0 0 1 0 {} cm /Fm0 Do Q\n", i * 4));
+        }
+
+        let form = "BT /F0 12 Tf 10 50 Td (SECRET) Tj ET";
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 600]\n\
+             /Resources << /XObject << /Fm0 5 0 R >> /Font << /F0 6 0 R >> >>\n\
+             /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{content}endstream\nendobj\n",
+            content.len()
+        ));
+        out.push_str(&format!(
+            "5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 600]\n\
+             /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\nstream\n\
+             {form}\nendstream\nendobj\n",
+            form.len() + 1
+        ));
+        out.push_str("6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        out.push_str("trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n");
+
+        let doc = Arc::new(CosDocument::open(out.into_bytes()).expect("it opens"));
+        let over_the_first = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 45.0,
+                x1: 400.0,
+                y1: 65.0,
+            },
+            mark: false,
+        };
+
+        let (streams, report) = redact_to_streams(doc, &[over_the_first]);
+        assert!(!streams.contains("SECRET"), "got: {streams}");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"Fm0".to_vec(),
+                placements: MAX_PLACEMENTS,
+            }],
+            "the count saturates at the cap rather than reporting {placements}"
+        );
     }
 
     /// An image under a redaction is scrubbed, not covered. A rectangle
