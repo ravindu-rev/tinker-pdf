@@ -311,6 +311,12 @@ fn expected(node: &BoxNode, out: &mut String) {
                 expected(child, out);
             }
         }
+        // CSS 2.2 §3.1: a replaced element's content is "outside the scope of
+        // the CSS formatting model", so it contributes no characters and the
+        // conservation equality must not expect any. Written out rather than
+        // caught by a wildcard, because a wildcard here is what would let the
+        // *next* variant be added without anyone deciding what it conserves.
+        Content::Replaced(_) => {}
     }
 }
 

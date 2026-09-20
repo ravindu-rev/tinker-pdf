@@ -337,6 +337,20 @@ fuzz_target!(|data: &[u8]| {
                 Declaration::Unknown { property } => {
                     assert!(!is_named(property), "a named property was reported unknown");
                 }
+                // §7.1's defaulting keywords land on a longhand this build
+                // implements, so the name carries the same obligation
+                // `Known` does: it may not also be listed as unsupported.
+                Declaration::Defaulted { longhand, .. } => assert!(
+                    !UNSUPPORTED_PROPERTIES.contains(&longhand.name()),
+                    "a longhand is both implemented and listed as unsupported"
+                ),
+                // `content` is read rather than refused — a declaration on a
+                // selector with no pseudo-element legitimately does nothing,
+                // which is not the same as one this build cannot read. It is
+                // reported as `Unsupported { property: "content", .. }` only
+                // at a value this build does not implement, and that arm
+                // above already holds it to the tables.
+                Declaration::Content(_) => {}
             }
         }
     }

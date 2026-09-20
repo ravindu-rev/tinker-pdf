@@ -196,6 +196,34 @@ Two seeds look wrong and are not: `shape/gdef-every-structure` and
 second path — `Layout::from_tables` and the bidi walk — that runs without
 one.
 
+### A fuzz run that never happened means less still
+
+**The fuzzers stopped compiling and nothing said so for a month.** `fuzz/` is
+its own workspace, deliberately — it pulls in `libfuzzer-sys` and builds under
+a sanitizer, and neither belongs in the engine's dependency graph. The price of
+that separation is that `cargo test --workspace`, `cargo clippy --workspace`
+and every other command a contributor runs step straight past it. So when
+`tinker_pdf_layout::Content` gained a `Replaced` variant and
+`tinker_pdf_css::Declaration` gained `Defaulted` and `Content`, three
+exhaustive matches in `fuzz/fuzz_targets/` stopped building, every local gate
+stayed green, and `fuzz/Cargo.lock` drifted a dependency behind the workspace
+it locks.
+
+It was found on 20 September 2026 by the CI job that builds them, the first
+time that job had run since 24 August — `ci.yml` fires on a push to `main` and
+on a pull request, and the work had been landing on `develop`.
+
+Ruling 1 says a fuzz crash is a release blocker. **A fuzzer that does not build
+cannot crash**, so for that month the rule was unenforceable and read as
+satisfied, which is the failure mode this page exists to name. The guard is now
+local: `cargo xtask fuzz` — and therefore `cargo xtask check` — runs
+`cargo check` over `fuzz/`'s own manifest and fails with the compiler's own
+error. It is `cargo check` rather than `cargo fuzz build` because the question
+is whether the *types* still agree; it runs on stable and needs no sanitizer,
+and CI still builds them for real. Proved by injection: removing the
+`Content::Replaced` arm again makes `xtask check` report three problems and
+exit 1.
+
 ### What a green fuzz run does not mean
 
 **Not one of the thirty-nine targets checks that a decode is right.** They

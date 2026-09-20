@@ -448,11 +448,62 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
     if let Err(stale) = check_pasted_table(root, &rows) {
         problems.push(stale);
     }
+    problems.extend(compiles(root).err().unwrap_or_default());
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems)
     }
+}
+
+/// Every fuzz target still compiles against the crates it drives.
+///
+/// **This exists because the fuzzers stopped compiling and nothing said so
+/// for a month.** `fuzz/` is its own workspace, deliberately — it pulls in
+/// `libfuzzer-sys` and builds under a sanitizer, and neither belongs in the
+/// engine's dependency graph. The cost of that separation is that
+/// `cargo test --workspace`, `cargo clippy --workspace` and every other
+/// command a contributor runs step straight past it. So when
+/// `tinker_pdf_layout::Content` gained a `Replaced` variant and
+/// `tinker_pdf_css::Declaration` gained `Defaulted` and `Content`, three
+/// exhaustive matches in `fuzz/fuzz_targets/` stopped building and every
+/// local gate stayed green. Ruling 1 says a fuzz crash is a release blocker;
+/// a fuzzer that does not build cannot crash, so the rule had quietly become
+/// unenforceable.
+///
+/// `cargo check` rather than `cargo fuzz build`: this is about the *types*
+/// agreeing, it runs on stable, and it needs no sanitizer. CI still builds
+/// them for real.
+fn compiles(root: &Path) -> Result<(), Vec<String>> {
+    let manifest = root.join("fuzz").join("Cargo.toml");
+    if !manifest.is_file() {
+        return Err(vec![format!("{} is missing", manifest.display())]);
+    }
+    let out = std::process::Command::new("cargo")
+        .args(["check", "--quiet", "--bins", "--manifest-path"])
+        .arg(&manifest)
+        .output();
+    let out = match out {
+        Ok(out) => out,
+        Err(e) => return Err(vec![format!("could not run cargo check on fuzz/: {e}")]),
+    };
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut problems = vec![concat!(
+        "fuzz/: a fuzz target does not compile, so it cannot crash, ",
+        "and ruling 1 is unenforceable for it"
+    )
+    .to_string()];
+    problems.extend(
+        stderr
+            .lines()
+            .filter(|l| l.starts_with("error"))
+            .take(10)
+            .map(|l| format!("fuzz/: {l}")),
+    );
+    Err(problems)
 }
 
 /// The audit as a markdown table, for `docs/verification.md`.

@@ -976,6 +976,10 @@ const SPAWNERS: &[(&str, &str)] = &[
          unpacked",
     ),
     (
+        "xtask/src/fuzzaudit.rs",
+        "PERMANENT: `cargo check` over `fuzz/`, which is its own workspace and          so is stepped past by every `--workspace` command. Build machinery,          which reads no document and adjudicates none",
+    ),
+    (
         "xtask/src/release.rs",
         "PERMANENT: `cargo`, and the packaging tools, to build and publish. \
          Build machinery, which reads no document",
