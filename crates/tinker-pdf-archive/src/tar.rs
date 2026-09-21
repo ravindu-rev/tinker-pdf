@@ -569,19 +569,41 @@ fn octal(field: &[u8]) -> Option<u64> {
 /// is ordinary rather than damaged, and the fallback has to be total and
 /// deterministic (ruling 4) rather than lossy.
 fn decode_name(raw: &[u8], index: usize, limits: &Limits, warnings: &mut Vec<Warning>) -> String {
-    let raw = if raw.len() > limits.max_name_len {
-        warnings.push(Warning::NameTruncated { index });
-        raw.get(..limits.max_name_len).unwrap_or_default()
+    let cap = limits.max_name_len;
+    // The field is cut first so that a GNU long name of a megabyte is bounded
+    // before it is decoded, and the *name* is cut again below.
+    let mut truncated = raw.len() > cap;
+    let raw = if truncated {
+        raw.get(..cap).unwrap_or_default()
     } else {
         raw
     };
-    match core::str::from_utf8(raw) {
+    let mut name = match core::str::from_utf8(raw) {
         Ok(name) => name.to_owned(),
         Err(_) => {
             warnings.push(Warning::NameNotUtf8 { index });
             raw.iter().map(|&b| char::from(b)).collect()
         }
+    };
+    // **The cap bounds the name, not the field it was cut from**, and cutting
+    // only the field does not bound the name: ISO-8859-1 is one byte in and
+    // two bytes out above U+007F, so a field already cut to the cap still
+    // decodes to twice it. `tinker-pdf-zip`'s `decode_name` has bounded the
+    // decoded string since it was written — CP437 expands the same way — and
+    // this did not. Cut on a character boundary; a name split inside a code
+    // point is not a name.
+    if name.len() > cap {
+        let mut at = cap;
+        while at > 0 && !name.is_char_boundary(at) {
+            at -= 1;
+        }
+        name.truncate(at);
+        truncated = true;
     }
+    if truncated {
+        warnings.push(Warning::NameTruncated { index });
+    }
+    name
 }
 
 /// PAX extended-header records: `length keyword=value\n`, repeated.

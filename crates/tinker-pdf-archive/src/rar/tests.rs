@@ -557,6 +557,55 @@ fn a_damaged_name_costs_the_name_and_not_the_page() {
     assert_eq!(a.read(0).as_deref(), Ok(&b"a page"[..]));
 }
 
+/// **The cap bounds the name, not the field it was cut from** — the same
+/// defect `tar::decode_name` carried, reached here by reading the sibling
+/// rather than by the fuzzer, and fixed in the same commit.
+///
+/// `String::from_utf8_lossy` is one byte in and *three* bytes out, because
+/// every unpaired byte becomes `U+FFFD` — so a name cut to `max_name_len`
+/// bytes of field still reached a caller three times that long.
+/// `a_damaged_name_costs_the_name_and_not_the_page` cannot see it: its long
+/// name is ASCII, which the decode leaves the length it found.
+#[test]
+fn a_name_the_lossy_decode_expands_is_still_bounded_by_the_cap() {
+    const CAP: usize = 16;
+    let name = vec![0xFFu8; 80];
+
+    let mut rebuilt = Vec::from(SIGNATURE_5);
+    rebuilt.extend(header(TYPE_MAIN, 0, &vint_of(0), &[], 0));
+    let mut body = Vec::new();
+    body.extend(vint_of(FILE_HAS_CRC));
+    body.extend(vint_of(6));
+    body.extend(vint_of(0x20));
+    body.extend_from_slice(&crc32(b"a page").to_le_bytes());
+    body.extend(vint_of(0));
+    body.extend(vint_of(0));
+    body.extend(vint_of(name.len() as u64));
+    body.extend_from_slice(&name);
+    let mut file = header(TYPE_FILE, HAS_DATA, &body, &[], 6);
+    file.extend_from_slice(b"a page");
+    rebuilt.extend_from_slice(&file);
+    rebuilt.extend(header(TYPE_END, 0, &vint_of(0), &[], 0));
+
+    let limits = Limits {
+        max_name_len: CAP,
+        ..Limits::DEFAULT
+    };
+    let a = Archive::open(&rebuilt, &limits).expect("it opens");
+    let got = &a.entries()[0].name;
+    assert!(
+        got.len() <= CAP,
+        "{got:?} is {} bytes against a {CAP}-byte cap",
+        got.len()
+    );
+    assert!(a.warnings().contains(&Warning::NameTruncated { index: 0 }));
+    assert_eq!(
+        a.read(0).as_deref(),
+        Ok(&b"a page"[..]),
+        "and it still reads"
+    );
+}
+
 /// Each cap is refused by name, and each can actually fire.
 #[test]
 fn every_cap_is_refused_by_name_and_can_actually_fire() {

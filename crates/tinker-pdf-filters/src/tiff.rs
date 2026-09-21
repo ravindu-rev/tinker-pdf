@@ -71,8 +71,22 @@ use crate::{
 
 // --- the budgets --------------------------------------------------------
 
-/// Samples in the **output** raster — `width x height x components` — checked
-/// with a saturating multiply before any buffer exists.
+/// Samples **read or written**, whichever is more — `width x height x` the
+/// wider of the output's components and the file's own `SamplesPerPixel` —
+/// checked with a saturating multiply before any buffer exists.
+///
+/// *Amended 21 September 2026.* It was charged on the output raster alone,
+/// and that left the decode's own work uncounted: `segment_samples` reads
+/// `SamplesPerPixel` samples for every pixel of a chunky image and keeps only
+/// the ones the photometric names, so a file declaring 65 530 samples per
+/// pixel read 65 530 of them and discarded all but three. The `tiff` fuzz
+/// target timed out on **240 bytes** spending 16.6 billion sample reads to
+/// produce a one-megabyte picture, every byte of which was inside this cap.
+/// A cap over the output of a loop whose *input* the file chooses is the
+/// shape `MAX_JPX_WORK` had — a number with a `MAX_` prefix that reads as a
+/// defence and is not one — which `crates/tinker-pdf/tests/bounds_ledger.rs`
+/// and `tinker_pdf_archive::tar::limits` both record as the failure to look
+/// for.
 ///
 /// The same `1 << 26` as [`crate::MAX_PNG_SAMPLES`] and `jpx`'s
 /// `MAX_JPX_SAMPLES`, for the same arithmetic: at 16 bits a component it is
@@ -1488,6 +1502,12 @@ fn build_scan<'a>(
     } else {
         u64::from(colour_channels as u32).saturating_add(1)
     };
+    // **And on what the decode reads, which is not the same number.** TIFF 6.0
+    // p.31 lets `ExtraSamples` carry channels the photometric does not name;
+    // `segment_samples` reads every one of them per pixel and keeps only the
+    // named ones, so the file — not the photometric — chooses how long the
+    // loop is.
+    let widest = widest.max(u64::from(samples_per_pixel));
     let samples = u64::from(width)
         .saturating_mul(u64::from(height))
         .saturating_mul(widest);

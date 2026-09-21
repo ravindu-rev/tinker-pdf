@@ -1,6 +1,7 @@
 //! The committed JBIG2 fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/jbig2/` is twenty-two inputs a fuzzer found or a person wrote,
+//! `fuzz/corpus/jbig2/` is twenty-three inputs a fuzzer found or a person
+//! wrote,
 //! and the target that consumes them needs nightly. So the seeds were only ever
 //! exercised when somebody ran `cargo fuzz`, which is not on every commit — and
 //! a seed corpus nothing reads is a corpus that stops describing the decoder
@@ -11,6 +12,15 @@
 //! be: it is a regression test over inputs that were once interesting, which is
 //! what a seed corpus is. It prints `RAN` or `SKIPPED` for the reason every
 //! check that can be absent does ([verification](../../../docs/verification.md)).
+//!
+//! **This test takes about twelve seconds in a debug build and seven of them
+//! are one seed**, `symbol-dictionary-spends-the-pixel-budget`, which is the
+//! input the 20 September 2026 CI run timed out on. It spends
+//! `MAX_JBIG2_SYMBOL_PIXELS` in full — 67 219 222 decoded pixels across 546
+//! symbols, from 105 bytes — and that is the cap working rather than failing.
+//! The seconds are the point: remove the cap and this test does not get
+//! slower, it stops finishing. `docs/verification.md` records why the cap is
+//! not lowered to buy them back.
 
 use std::path::{Path, PathBuf};
 

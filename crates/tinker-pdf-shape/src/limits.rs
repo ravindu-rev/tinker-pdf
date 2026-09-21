@@ -81,12 +81,23 @@ pub struct Limits {
     /// shipped face, costs exactly one as it always has.
     pub max_operations: u32,
 
-    /// How long the buffer may grow.
+    /// How long the buffer may **grow**.
     ///
     /// Multiple substitution (GSUB type 2) is the only lookup that adds
     /// glyphs, and it can add up to 65 535 of them per input glyph. Two such
     /// lookups in sequence is 65 535 squared, which is why the ceiling is on
     /// the *buffer* rather than on any one lookup.
+    ///
+    /// **It is not a cap on the shaped run's length**, and the distinction is
+    /// worth stating because a reader has already got it wrong. `Shaper::shape`
+    /// fills the buffer one glyph per character *before* the limits are
+    /// consulted, and [`Limits::for_glyphs`] — the factory used whenever a
+    /// caller supplies none — returns a ceiling at or above that fill by
+    /// construction. A caller who sets this below the run's own length has not
+    /// asked for a shorter run; they have asked for no substitution, and
+    /// [`crate::Warning::GlyphBudgetExceeded`] is what says so (ruling 10).
+    /// The `shape_text` fuzz target asserted the other reading and failed on
+    /// every run of more than eight characters.
     pub max_glyphs: usize,
 }
 
@@ -149,6 +160,21 @@ mod tests {
         let small = Limits::for_glyphs(0);
         assert_eq!(small.max_operations, Limits::DEFAULT.max_operations);
         assert_eq!(small.max_glyphs, Limits::DEFAULT.max_glyphs);
+    }
+
+    /// **A ceiling derived from a run is never below that run**, which is the
+    /// property `Shaper::shape` relies on: it fills the buffer before it asks
+    /// for the limits, so a `for_glyphs` ceiling that could land under the
+    /// fill would make `may_grow` refuse every substitution on an ordinary
+    /// paragraph.
+    #[test]
+    fn the_scaled_ceiling_is_never_below_the_run_it_was_made_for() {
+        for count in [0usize, 1, 7, 64, 2_048, 65_536, 1 << 20, 1 << 26] {
+            assert!(
+                Limits::for_glyphs(count).max_glyphs >= count,
+                "a run of {count} glyphs got a ceiling below itself"
+            );
+        }
     }
 
     #[test]
