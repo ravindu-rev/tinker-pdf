@@ -48,12 +48,19 @@
 //! type crosses into here (ruling 8).
 //!
 //! **What is refused is enumerated rather than defaulted**, and the list is
-//! the plan's: a progression order or code-block style this build does not
-//! implement, POC, RGN, any Part 2 marker, tile-parts out of order, a
-//! `colr` this build cannot map, precision above 16 bits, channels of
-//! differing bit depth, and any of the three budgets above. Every entry is
-//! reached by a test in `tests::refusals`, because "the refusals are the
-//! feature" is only a claim if something checks that they fire.
+//! the plan's, three entries shorter than it was written: a progression order
+//! Table A.16 does not define or a code-block style this build does not
+//! implement, an `Srgn` Table A.25 reserves, any Part 2 marker, SOP or EPH
+//! outside the bit stream, tile-parts out of order, a `colr` this build
+//! cannot map, precision above 16 bits, channels of differing bit depth, and
+//! any of the three budgets above. Every entry is reached by a test in
+//! `tests::refusals`, because "the refusals are the feature" is only a claim
+//! if something checks that they fire.
+//!
+//! POC and RGN stood on that list as whole markers and no longer do — A.6.6's
+//! progressions are B.12.2's progression order volumes in tier-2, and A.6.3's
+//! shift is H.1's Maxshift in the dequantiser — so what is left of each is a
+//! *value inside* a segment rather than the segment.
 //!
 //! Measured against gap 23's nineteen real JPX files: fourteen decode, four
 //! refuse by name, and one is never asked for — its image sits two form
@@ -227,18 +234,24 @@ pub(crate) const MAX_JPX_WORK: u64 = 3 << 30;
 /// carries the name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// A marker T.800 Table A.2 defines and this build does not decode:
-    /// POC. Carries the marker's name.
+    /// A marker T.800 Table A.2 defines, refused **where it stands**: SOP or
+    /// EPH in a header. Carries the marker's name.
     ///
-    /// It was five, and the other four left one at a time, each for its own
-    /// reason. CRG went when A.9.1 was read: the clause says it "has no
-    /// effect on decoding the codestream", so it is parsed and carried. RGN
-    /// went when Annex H was implemented; what is left of it is a
-    /// [`Refusal::Feature`] naming the one `Srgn` style Table A.25 reserves,
-    /// which is a value inside the segment rather than the segment. PPM and
-    /// PPT went when packed packet headers were implemented (A.7.4, A.7.5);
-    /// they are parsed, and tier-2 reads a packet's header bits from the
-    /// packed stream.
+    /// **No Table A.2 marker is refused as a capability any more**, and the
+    /// last one left on 21 September 2026. It was five, and they went one at
+    /// a time, each for its own reason. CRG went when A.9.1 was read: the
+    /// clause says it "has no effect on decoding the codestream", so it is
+    /// parsed and carried. RGN went when Annex H was implemented; what is
+    /// left of it is a [`Refusal::Feature`] naming the one `Srgn` style Table
+    /// A.25 reserves, which is a value inside the segment rather than the
+    /// segment. PPM and PPT went when packed packet headers were implemented
+    /// (A.7.4, A.7.5); they are parsed, and tier-2 reads a packet's header
+    /// bits from the packed stream. POC went last, when A.6.6's progressions
+    /// became B.12.2's progression order volumes in tier-2's packet sequence.
+    ///
+    /// What is left is the two markers A.8 puts inside the bit stream. Both
+    /// are implemented there; a header is the one place they have no meaning,
+    /// and that is what this variant now names.
     Marker(&'static str),
     /// A marker code Table A.2 does not define — which includes every marker
     /// ISO/IEC 15444-2 adds, since Part 2 is a non-goal.

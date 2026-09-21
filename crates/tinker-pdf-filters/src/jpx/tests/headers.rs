@@ -268,12 +268,15 @@ fn every_table_a2_marker_is_parsed_or_named() {
     /// in either direction without a test moving. It is asserted now, in both
     /// directions: a marker flagged acted-on may not come back as
     /// `Refusal::Marker`, and a marker flagged refused must. RGN, PPM and PPT
-    /// all moved from `false` to `true` on 20 September 2026, and a flag
-    /// nothing reads would have recorded those moves without checking them.
+    /// all moved from `false` to `true` on 20 September 2026 and POC on the
+    /// 21st, and a flag nothing reads would have recorded those moves without
+    /// checking them.
     ///
-    /// SOP and EPH are `true` for a different reason: both are implemented,
-    /// in tier-2, and are refused only where this test puts them, which is a
-    /// header rather than the packet data they delimit.
+    /// **Every row is `true` now**, which is a statement about the decoder
+    /// rather than about this table: no Table A.2 marker is refused as a
+    /// capability. SOP and EPH are `true` and still refuse where this test
+    /// puts them, because A.8 puts both inside the bit stream, tier-2 reads
+    /// them there, and a header is the one place they have no meaning.
     const TABLE_A2: [(u16, &str, bool); 20] = [
         (marker::SOC, "SOC", true),
         (marker::SOT, "SOT", true),
@@ -285,7 +288,7 @@ fn every_table_a2_marker_is_parsed_or_named() {
         (marker::RGN, "RGN", true),
         (marker::QCD, "QCD", true),
         (marker::QCC, "QCC", true),
-        (marker::POC, "POC", false),
+        (marker::POC, "POC", true),
         (marker::TLM, "TLM", true),
         (marker::PLM, "PLM", true),
         (marker::PLT, "PLT", true),
@@ -405,35 +408,374 @@ fn a_marker_outside_table_a2_is_refused_by_code() {
     assert_eq!(parse(&bytes), Err(Refusal::UnknownMarker(0xFF74)));
 }
 
-/// The one Table A.2 marker this build refuses, in a main header, naming
-/// itself.
+/// **No Table A.2 marker is refused as a capability, and the two that name
+/// themselves name a *place* instead.**
 ///
-/// **It was four, and the other three left on the same day.** RGN went when
-/// T.800 Annex H was implemented, and what took its place is narrower and
-/// lives inside the segment rather than at it: Table A.25 defines one `Srgn`
-/// style and reserves the rest, so a reserved style is refused as a reserved
-/// style ([`a_reserved_srgn_style_is_refused_by_name`]) and style 0 is
-/// decoded. PPM and PPT went when packed packet headers were implemented;
-/// they are parsed here and read by tier-2, and the tests that hold them to
-/// their clauses are [`ppm_relocates_every_tile_part_s_headers`] and its
-/// neighbours below.
+/// This test was `the_one_refused_marker_names_itself` and before that a loop
+/// over four, and what it asserts has changed shape rather than shrunk again.
+/// The list is empty of capabilities now:
 ///
-/// SOP and EPH are named by the same table and are not on this list: they are
-/// implemented, and refused only *out of place*, which
-/// [`a_marker_outside_table_a2_is_refused_by_code`] covers.
+/// - CRG went first: A.9.1 says it "has no effect on decoding the
+///   codestream", so it is parsed, carried and never applied.
+/// - RGN went when T.800 Annex H was implemented, and what took its place is
+///   narrower and lives inside the segment rather than at it — Table A.25
+///   defines one `Srgn` style and reserves the rest, so a reserved style is
+///   refused as a reserved style ([`a_reserved_srgn_style_is_refused_by_name`])
+///   and style 0 is decoded.
+/// - PPM and PPT went when packed packet headers were implemented; they are
+///   parsed here and read by tier-2
+///   ([`ppm_relocates_every_tile_part_s_headers`] and its neighbours below).
+/// - POC went last, on 21 September 2026: A.6.6's progressions are B.12.2's
+///   progression order volumes and tier-2 sequences the packets from them.
+///   `crates/tinker-pdf-filters/tests/jpx_poc.rs` holds it to T.800's own
+///   bytes, and what is left of it here is a *value* — a `Ppoc` Table A.16
+///   does not define, a bound outside Table A.32, a length that is not
+///   equation (A-6)'s.
+///
+/// What still refuses **by name** is SOP and EPH, and for a reason that is
+/// about placement rather than capability: A.8 puts both inside the bit
+/// stream, tier-2 reads them there, and a header is the one place in a
+/// codestream where neither has a meaning.
 #[test]
-fn the_one_refused_marker_names_itself() {
+fn the_markers_that_name_themselves_are_the_two_out_of_place_ones() {
     let spec = Spec::default();
-    // One marker, so this is written out rather than looped. It was a loop
-    // over four, and the list shrinking to one is the point of the test
-    // rather than an accident of it.
-    let mut bytes = spec.main_header();
-    bytes.extend_from_slice(&segment(marker::POC, &[0, 0, 0]));
-    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
-    match parse(&bytes) {
-        Err(Refusal::Marker(text)) => assert!(text.starts_with("POC"), "{text:?}"),
-        other => panic!("POC produced {other:?}"),
+    for (code, name) in [(marker::SOP, "SOP"), (marker::EPH, "EPH")] {
+        let mut bytes = spec.main_header();
+        bytes.extend_from_slice(&segment(code, &[0, 0]));
+        bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+        match parse(&bytes) {
+            Err(Refusal::Marker(text)) => {
+                assert!(text.starts_with(name), "{text:?}");
+                assert!(
+                    text.contains("outside tile data"),
+                    "{name} should be refused for where it is, not for what it \
+                     is: {text:?}"
+                );
+            }
+            other => panic!("{name} produced {other:?}"),
+        }
     }
+
+    // And the marker that used to stand here: a POC whose body is the seven
+    // bytes (A-6) requires now parses, so the refusal it leaves behind is a
+    // value inside the segment rather than the segment.
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, 0)])));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    let stream = parse(&bytes).expect("a POC at Table A.32's widths parses");
+    assert_eq!(stream.poc.as_ref().map(Vec::len), Some(1));
+}
+
+// --- A.6.6's progression order change ------------------------------------
+
+/// One POC progression, in Figure A.15's field order — `RSpoc`, `CSpoc`,
+/// `LYEpoc`, `REpoc`, `CEpoc`, `Ppoc`.
+///
+/// The narrow `CSpoc` and `CEpoc`, because every fixture here has far fewer
+/// than 257 components (Table A.32), which is also why one progression is
+/// seven bytes rather than nine.
+type PocFields = (u8, u8, u16, u8, u8, u8);
+
+/// A POC body: one seven-byte progression per [`PocFields`].
+fn poc_body(progressions: &[PocFields]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &(rs, cs, lye, re, ce, ppoc) in progressions {
+        out.extend_from_slice(&[rs, cs]);
+        out.extend_from_slice(&lye.to_be_bytes());
+        out.extend_from_slice(&[re, ce, ppoc]);
+    }
+    out
+}
+
+/// A codestream with `main` in its main header and `tile` in its only
+/// tile-part header.
+fn with_headers(main: &[u8], tile: &[u8]) -> Vec<u8> {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(main);
+    bytes.extend_from_slice(&tile_part(0, 0, 1, tile, &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    bytes
+}
+
+/// **Equation (A-6) leaves exactly one legal `Lpoc` for a progression
+/// count**, so the length is checked for equality rather than sufficiency.
+///
+/// ```text
+/// Lpoc = 2 + 7 * number_progression_order_change   Csiz <  257
+/// Lpoc = 2 + 9 * number_progression_order_change   Csiz >= 257
+/// ```
+///
+/// Table A.32 gives `Lpoc` as "9 to 65 535", whose lower bound is the
+/// one-progression case — so a zero-progression POC is a segment describing
+/// nothing while A.6.6 requires "the progression of every packet in the
+/// codestream ... shall be defined in one or more POC marker segments".
+#[test]
+fn a_poc_length_equation_a6_does_not_allow_is_refused() {
+    for body in [Vec::new(), vec![0; 6], vec![0; 8], vec![0; 13], vec![0; 15]] {
+        let len = body.len();
+        assert_eq!(
+            parse(&with_headers(&segment(marker::POC, &body), &[])),
+            Err(Refusal::Structure(
+                "a POC marker segment whose length is not equation A-6's"
+            )),
+            "a {len}-byte POC body",
+        );
+    }
+    // Seven and fourteen are one and two progressions.
+    for n in [1usize, 2] {
+        let body = poc_body(&vec![(0, 0, 1, 2, 1, 0); n]);
+        assert_eq!(body.len(), 7 * n);
+        let bytes = with_headers(&segment(marker::POC, &body), &[]);
+        let stream = parse(&bytes).expect("(A-6)'s own length parses");
+        assert_eq!(stream.poc.as_ref().map(Vec::len), Some(n));
+    }
+}
+
+/// **Every one of Table A.32's ranges, checked rather than assumed.**
+///
+/// | Parameter | Values |
+/// | --- | --- |
+/// | `RSpoc` | 0 to 32 |
+/// | `LYEpoc` | 1 to 65 535 |
+/// | `REpoc` | (`RSpoc` + 1) to 33 |
+/// | `CEpoc` | (`CSpoc` + 1) to 255, 0; if Csiz < 257 |
+///
+/// A volume whose bounds run backwards is not a volume, and clamping one into
+/// shape would decode a packet sequence the codestream never described —
+/// which is the same failure as skipping the marker, reached from the other
+/// side.
+#[test]
+fn a_poc_outside_table_a32s_ranges_is_refused() {
+    let cases: &[(PocFields, &str)] = &[
+        (
+            (33, 0, 1, 34, 1, 0),
+            "a POC RSpoc above Table A.32's thirty-two",
+        ),
+        (
+            (1, 0, 1, 1, 1, 0),
+            "a POC REpoc outside Table A.32's (RSpoc + 1) to 33",
+        ),
+        (
+            (0, 0, 1, 0, 1, 0),
+            "a POC REpoc outside Table A.32's (RSpoc + 1) to 33",
+        ),
+        (
+            (0, 0, 1, 34, 1, 0),
+            "a POC REpoc outside Table A.32's (RSpoc + 1) to 33",
+        ),
+        ((0, 0, 0, 2, 1, 0), "a POC LYEpoc of zero"),
+        // The default spec has one component, so `CSpoc` = 1 names one SIZ
+        // never declared. `CEpoc` = 2 keeps Table A.32's (CSpoc + 1) rule
+        // satisfied, so this reaches the check it is about.
+        (
+            (0, 1, 1, 2, 2, 0),
+            "a POC CSpoc naming a component SIZ did not",
+        ),
+    ];
+    for &(fields, why) in cases {
+        assert_eq!(
+            parse(&with_headers(
+                &segment(marker::POC, &poc_body(&[fields])),
+                &[]
+            )),
+            Err(Refusal::Structure(why)),
+            "{fields:?}",
+        );
+    }
+    // `CEpoc` <= `CSpoc` needs a component to start from, so it gets its own
+    // fixture with two of them.
+    let spec = Spec {
+        components: vec![(8, false, 1, 1), (8, false, 1, 1)],
+        ..Spec::default()
+    };
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&segment(marker::POC, &poc_body(&[(0, 1, 1, 2, 1, 0)])));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&bytes),
+        Err(Refusal::Structure(
+            "a POC CEpoc outside Table A.32's (CSpoc + 1) to its ceiling"
+        ))
+    );
+}
+
+/// Table A.32's `CEpoc` footnote: "(0 is interpreted as 256)".
+///
+/// Zero is the *largest* legal `CEpoc` and not the smallest, so it is read
+/// before the range check rather than after — a decoder that ordered the two
+/// the other way would refuse the one value the table adds a note for.
+#[test]
+fn a_cepoc_of_zero_is_table_a32s_two_hundred_and_fifty_six() {
+    let bytes = with_headers(&segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 0, 0)])), &[]);
+    let stream = parse(&bytes).expect("CEpoc = 0 is Table A.32's 256");
+    let volumes = stream.poc.expect("a main-header POC");
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].component_end, 256);
+}
+
+/// `Ppoc` is Table A.16's eight bits, which is the same table `SGcod` uses —
+/// so a sixth progression order is refused here exactly as it is in a COD.
+#[test]
+fn a_ppoc_table_a16_does_not_define_is_refused() {
+    for ppoc in [5u8, 6, 255] {
+        assert_eq!(
+            parse(&with_headers(
+                &segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, ppoc)])),
+                &[]
+            )),
+            Err(Refusal::Feature(
+                "a progression order Table A.16 does not define"
+            )),
+            "Ppoc = {ppoc}",
+        );
+    }
+    for ppoc in 0..=4u8 {
+        assert!(
+            parse(&with_headers(
+                &segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, ppoc)])),
+                &[]
+            ))
+            .is_ok(),
+            "Ppoc = {ppoc} is one of Table A.16's five",
+        );
+    }
+}
+
+/// A.6.6: "At most one POC marker segment may appear in any header."
+///
+/// B.12.3 says it again with the scope spelled out — "There can only be one
+/// POC marker segment in a given header (main or tile-part) but that marker
+/// segment can describe many progression order changes" — so both headers are
+/// checked, and a segment with two progressions in it is the legal way to say
+/// what two segments cannot.
+#[test]
+fn two_poc_segments_in_one_header_are_refused() {
+    let one = segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, 0)]));
+    let mut two = one.clone();
+    two.extend_from_slice(&one);
+    assert_eq!(
+        parse(&with_headers(&two, &[])),
+        Err(Refusal::Structure(
+            "a second POC marker segment in one header"
+        ))
+    );
+    assert_eq!(
+        parse(&with_headers(&[], &two)),
+        Err(Refusal::Structure(
+            "a second POC marker segment in one header"
+        ))
+    );
+    // One segment describing two progressions is what A.6.6 offers instead.
+    let both = segment(
+        marker::POC,
+        &poc_body(&[(0, 0, 1, 1, 1, 0), (1, 0, 1, 2, 1, 0)]),
+    );
+    assert_eq!(
+        parse(&with_headers(&both, &[]))
+            .expect("two progressions in one segment")
+            .poc
+            .map(|v| v.len()),
+        Some(2)
+    );
+}
+
+/// **A.6.6's precedence, at the parser rather than through a decode.**
+///
+/// > Tile-part POC > Main POC > Tile-part COD > Main COD
+///
+/// B.12.3 states the override from the other end: with a tile-part POC, "The
+/// COD progression order and the main header POC marker segment (if there is
+/// one) are overridden" — so a tile's own volumes *replace* the main
+/// header's rather than extending them.
+#[test]
+fn a_tile_part_poc_replaces_the_main_headers_rather_than_extending_it() {
+    let main = segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, 0)]));
+    let tile = segment(
+        marker::POC,
+        &poc_body(&[(1, 0, 1, 2, 1, 1), (0, 0, 1, 1, 1, 1)]),
+    );
+
+    let main_only_bytes = with_headers(&main, &[]);
+    let only_main = parse(&main_only_bytes).expect("a main-header POC");
+    let volumes = only_main
+        .progression_volumes(0)
+        .expect("the main header's reach every tile");
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].resolution_start, 0);
+    assert_eq!(volumes[0].order, Progression::Lrcp);
+
+    let both_bytes = with_headers(&main, &tile);
+    let both = parse(&both_bytes).expect("both headers may carry one");
+    let volumes = both.progression_volumes(0).expect("the tile-part's win");
+    assert_eq!(
+        volumes.len(),
+        2,
+        "two, not three: this replaces, not appends"
+    );
+    assert_eq!(volumes[0].resolution_start, 1);
+    assert_eq!(volumes[0].order, Progression::Rlcp);
+    // The main header's is still parsed and still there for any other tile.
+    assert_eq!(both.poc.as_ref().map(Vec::len), Some(1));
+}
+
+/// B.12.3: "If a POC marker segment is used for an individual tile, **there
+/// shall be a POC marker in the first tile-part header of that tile**."
+///
+/// A.6.6 requires the same thing in its own words. A later part carrying the
+/// first of a tile's volumes is a codestream whose packets began before
+/// anything said in what order, so it is refused rather than read as though
+/// the volumes had started at the top.
+///
+/// **The other placement B.12.3 allows is not refused**, and the difference
+/// is the whole reason this is checked after every part has arrived rather
+/// than inside the tile-part parser: Figure B.15b draws volumes 1 and 2 in
+/// the first tile-part header with volume 3 in the third, and that is a
+/// conforming arrangement.
+#[test]
+fn a_tile_part_poc_needs_one_in_the_tiles_first_tile_part_header() {
+    let poc = segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, 0)]));
+    let spec = Spec::default();
+
+    let mut late_only = spec.main_header();
+    late_only.extend_from_slice(&tile_part(0, 0, 2, &[], &EMPTY_PACKETS));
+    late_only.extend_from_slice(&tile_part(0, 1, 2, &poc, &[]));
+    late_only.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&late_only),
+        Err(Refusal::Structure(
+            "a tile-part POC with none in the tile's first tile-part header"
+        ))
+    );
+
+    // Figure B.15b's arrangement: the first part opens the series and a later
+    // part continues it. The volumes join in TPsot order.
+    let mut both = spec.main_header();
+    both.extend_from_slice(&tile_part(
+        0,
+        0,
+        2,
+        &segment(marker::POC, &poc_body(&[(0, 0, 1, 1, 1, 0)])),
+        &EMPTY_PACKETS,
+    ));
+    both.extend_from_slice(&tile_part(
+        0,
+        1,
+        2,
+        &segment(marker::POC, &poc_body(&[(1, 0, 1, 2, 1, 0)])),
+        &[],
+    ));
+    both.extend_from_slice(&marker::EOC.to_be_bytes());
+    let stream = parse(&both).expect("Figure B.15b's placement is conforming");
+    let volumes = stream.progression_volumes(0).expect("the tile's own");
+    assert_eq!(volumes.len(), 2, "joined across the tile's parts");
+    assert_eq!(
+        (volumes[0].resolution_start, volumes[1].resolution_start),
+        (0, 1),
+        "B.12.3: the volumes are described in order"
+    );
 }
 
 // --- A.6.3's region of interest -----------------------------------------
