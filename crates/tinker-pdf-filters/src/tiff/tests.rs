@@ -1784,6 +1784,77 @@ fn an_image_past_the_sample_cap_is_refused_before_it_allocates() {
     }
 }
 
+/// **The cap is charged on what the decode reads, not only on what it
+/// writes** — which is what the `tiff` fuzz target timed out proving.
+///
+/// An image 63 239 by 4 whose `SamplesPerPixel` is 65 530 produces a
+/// one-megabyte RGBA raster, inside every cap in this module, by reading
+/// **16.6 billion** samples to get it: `segment_samples` reads every declared
+/// sample of every pixel and keeps only the three the photometric names.
+/// `SamplesPerPixel` is a `SHORT`, so the file buys that multiplier in two
+/// bytes. `an_image_past_the_sample_cap_is_refused_before_it_allocates`
+/// cannot see it — its `samples` is 3, and its refusal comes from the
+/// dimensions.
+#[test]
+fn an_image_whose_declared_samples_dwarf_its_output_is_refused_before_it_reads_them() {
+    let file = image(
+        Simple {
+            little: true,
+            width: 63_239,
+            height: 4,
+            depth: 1,
+            samples: 65_530,
+            photometric: 2,
+            compression: 1,
+        },
+        vec![0; 4],
+    );
+    match tiff_decode(&file, &Limits::new(1 << 22)) {
+        Err(TiffError::TooManySamples { samples, max }) => {
+            assert_eq!(max, MAX_TIFF_SAMPLES);
+            assert!(samples > MAX_TIFF_SAMPLES, "{samples} against {max}");
+        }
+        other => panic!("expected a sample-cap refusal, got {other:?}"),
+    }
+}
+
+/// The seed itself, at the bounds the target was running.
+///
+/// `fuzz/corpus/tiff/samples-per-pixel-past-any-ink-set` is the input
+/// libFuzzer built, control byte and all. Before the cap was charged on the
+/// read, this decode took **45 seconds** in a debug build and returned a
+/// picture; the assertion is that it now answers at all, and the wall clock
+/// is not asserted on because a test that fails on a slow machine is a
+/// different kind of defect.
+#[test]
+fn the_seed_that_found_the_unread_sample_multiplier_is_refused() {
+    let data: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fuzz/corpus/tiff/samples-per-pixel-past-any-ink-set"
+    ));
+    let (control, body) = data.split_at(data.len().min(1));
+    let knobs = control.first().copied().unwrap_or(0);
+    assert_eq!(
+        knobs & 3,
+        3,
+        "the seed's own control byte picks this ceiling"
+    );
+    let limits = Limits::new(1 << 22);
+
+    let scan = tiff_scan(body).expect_err("the scan refuses it");
+    match scan {
+        TiffError::TooManySamples { samples, max } => {
+            assert_eq!(max, MAX_TIFF_SAMPLES);
+            assert!(samples > MAX_TIFF_SAMPLES, "{samples} against {max}");
+        }
+        other => panic!("expected a sample-cap refusal, got {other:?}"),
+    }
+    assert!(
+        tiff_decode(body, &limits).is_err(),
+        "and the decode refuses it too"
+    );
+}
+
 #[test]
 fn a_raster_past_the_callers_own_ceiling_is_refused_under_the_callers_number() {
     let file = image(
@@ -2123,7 +2194,7 @@ fn mutated_fixtures_never_panic() {
 
 // ---- the fuzz corpus ---------------------------------------------------
 
-/// Writes the six seeds `fuzz/corpus/tiff/` carries, so the seeds and the
+/// Writes six of the seven seeds `fuzz/corpus/tiff/` carries, so the seeds and the
 /// fixtures here cannot drift apart.
 ///
 /// Run with `--ignored` when a fixture changes; the corpus is committed, and a
@@ -2133,6 +2204,14 @@ fn mutated_fixtures_never_panic() {
 /// first byte is what picks the output ceiling. One of the six carries a
 /// control byte of zero — a ceiling of one byte — since that is the only value
 /// from which `ExceedsOutputLimit` fires on an otherwise perfectly good file.
+///
+/// **The seventh is not written here and must not be deleted by a run of this
+/// test.** `samples-per-pixel-past-any-ink-set` is the input libFuzzer built
+/// on 20 September 2026, kept byte for byte because a generated input is
+/// evidence about what the mutator reached and a transcription of it is not.
+/// `the_seed_that_found_the_unread_sample_multiplier_is_refused` reads it, and
+/// `docs/verification.md` records what it found: a sample cap charged on the
+/// output raster while the decode read `SamplesPerPixel` samples per pixel.
 #[test]
 #[ignore = "writes into fuzz/corpus/tiff, which is committed"]
 fn write_the_fuzz_seeds() {

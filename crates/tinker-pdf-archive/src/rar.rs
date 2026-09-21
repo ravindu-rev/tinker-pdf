@@ -632,19 +632,37 @@ fn vint(bytes: &[u8], at: &mut usize) -> Option<u64> {
 /// pages, so the decode is lossy and total (ruling 4) and the warning is what
 /// says so.
 fn decode_name(raw: &[u8], index: usize, limits: &Limits, warnings: &mut Vec<Warning>) -> String {
-    let raw = if raw.len() > limits.max_name_len {
-        warnings.push(Warning::NameTruncated { index });
-        raw.get(..limits.max_name_len).unwrap_or_default()
+    let cap = limits.max_name_len;
+    let mut truncated = raw.len() > cap;
+    let raw = if truncated {
+        raw.get(..cap).unwrap_or_default()
     } else {
         raw
     };
-    match core::str::from_utf8(raw) {
+    let mut name = match core::str::from_utf8(raw) {
         Ok(name) => name.to_owned(),
         Err(_) => {
             warnings.push(Warning::NameNotUtf8 { index });
             String::from_utf8_lossy(raw).into_owned()
         }
+    };
+    // **The cap bounds the name, not the field it was cut from.** The lossy
+    // decode is one byte in and three bytes out — every unpaired byte becomes
+    // `U+FFFD` — so a field already cut to the cap still decodes to three
+    // times it. The same defect, and the same fix, as `tar::decode_name`; the
+    // reader that had it right all along is `tinker-pdf-zip`.
+    if name.len() > cap {
+        let mut at = cap;
+        while at > 0 && !name.is_char_boundary(at) {
+            at -= 1;
+        }
+        name.truncate(at);
+        truncated = true;
     }
+    if truncated {
+        warnings.push(Warning::NameTruncated { index });
+    }
+    name
 }
 
 #[cfg(test)]

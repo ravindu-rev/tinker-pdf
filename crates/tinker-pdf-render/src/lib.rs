@@ -3149,7 +3149,33 @@ pub fn page_pixels(width_pt: f64, height_pt: f64, scale: f64) -> (u32, u32) {
     // and stays recognisable rather than becoming a stripe of itself.
     let shrink = (MAX_PAGE_PIXELS as f64 / area as f64).sqrt();
     let clamp = |v: u32| (f64::from(v) * shrink).floor().max(1.0) as u32;
-    (clamp(w), clamp(h))
+    let (w, h) = (clamp(w), clamp(h));
+
+    // **A side raised back to the one-pixel floor did not shrink by `shrink`,
+    // and the product is over the cap by however much it was raised.**
+    // `w * shrink` and `h * shrink` multiply to exactly the cap only while
+    // both are above 1. A `/MediaBox` of `[0 0 20 9.2e18]` at 12 dpi reaches
+    // the two lines above as 1 x 4 294 967 295 — the height having already
+    // taken the `u32::MAX` clamp — whose `shrink` is 0.125; the width shrinks
+    // to 0.125 and the floor raises it back to 1, a factor of eight the
+    // height never gives back, and the pair comes back at 1 x 536 870 911,
+    // eight times the ceiling. The `render_page` fuzz target found it as a
+    // single 1.6 GB allocation from 755 bytes.
+    //
+    // Spend what is left on the other side rather than leaving it over. The
+    // aspect ratio is already gone at this point — a side is at the floor —
+    // so there is nothing left to keep, and the cap is what must hold.
+    let area = u64::from(w) * u64::from(h);
+    if area <= MAX_PAGE_PIXELS {
+        return (w, h);
+    }
+    let fit =
+        |keep: u32| (MAX_PAGE_PIXELS / u64::from(keep).max(1)).clamp(1, u64::from(u32::MAX)) as u32;
+    if w >= h {
+        (fit(h), h)
+    } else {
+        (w, fit(w))
+    }
 }
 
 /// Convenience: a white canvas of the right size for a page.
@@ -5025,7 +5051,7 @@ mod tests {
 
 #[cfg(test)]
 mod page_size_tests {
-    use super::{page_pixels, MAX_PAGE_PIXELS};
+    use super::{page_pixels, page_scale, MAX_PAGE_PIXELS};
 
     /// The pinned contract, which callers depend on.
     #[test]
@@ -5062,6 +5088,72 @@ mod page_size_tests {
             (ratio - 2.0).abs() < 0.01,
             "expected a 2:1 page, got {w}x{h}"
         );
+    }
+
+    /// **A page that is nearly all one dimension is clamped too.**
+    ///
+    /// `page_pixels` shrinks both sides by `sqrt(cap / area)`, which lands on
+    /// the cap only while both sides stay above the one-pixel floor. A
+    /// `/MediaBox` twenty points wide and 9.2e18 tall shrinks to a width of
+    /// 0.125; the floor raises it back to 1 — a factor of eight the height
+    /// never gave back — and the canvas came back at **eight times** the
+    /// ceiling, 1 x 536 870 911, which is one 1.6 GB allocation in `Rgb8`.
+    /// The `render_page` fuzz target found it as an OOM on 755 bytes.
+    ///
+    /// Nothing else in this module could see it: every other fixture here is
+    /// square or 2:1, and both sides of those shrink well clear of the floor.
+    #[test]
+    fn a_page_that_is_nearly_all_one_dimension_is_clamped_too() {
+        for (w, h) in [
+            (20.0, 9.223_372_036_854_776e18),
+            (9.223_372_036_854_776e18, 20.0),
+            (1.0, 1e300),
+            (1e300, 1.0),
+            (3.0, 1e12),
+        ] {
+            for scale in [1.0, 12.0 / 72.0, 150.0 / 72.0, 4.0] {
+                let used = page_scale(w, h, scale);
+                let (pw, ph) = page_pixels(w, h, used);
+                let area = u64::from(pw) * u64::from(ph);
+                assert!(
+                    area <= MAX_PAGE_PIXELS,
+                    "{w}x{h} at {scale} gave {pw}x{ph} = {area} pixels,                      {}x the {MAX_PAGE_PIXELS}-pixel ceiling",
+                    area / MAX_PAGE_PIXELS
+                );
+                assert!(pw >= 1 && ph >= 1, "{w}x{h} at {scale} gave {pw}x{ph}");
+            }
+        }
+    }
+
+    /// The ceiling over a lattice of shapes rather than over a handful, so a
+    /// future change to the shrink cannot leave one aspect ratio over it.
+    #[test]
+    fn no_shape_of_page_passes_the_ceiling() {
+        let sides = [
+            1.0,
+            2.0,
+            17.0,
+            595.0,
+            9_000.0,
+            1e6,
+            1e9,
+            1e15,
+            1e18,
+            f64::from(u32::MAX),
+        ];
+        for w in sides {
+            for h in sides {
+                for scale in [1e-6, 12.0 / 72.0, 1.0, 150.0 / 72.0, 1e6] {
+                    let (pw, ph) = page_pixels(w, h, page_scale(w, h, scale));
+                    let area = u64::from(pw) * u64::from(ph);
+                    assert!(
+                        area <= MAX_PAGE_PIXELS,
+                        "{w}x{h} at {scale} gave {pw}x{ph} = {area} pixels"
+                    );
+                    assert!(pw >= 1 && ph >= 1);
+                }
+            }
+        }
     }
 
     #[test]

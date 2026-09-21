@@ -150,12 +150,20 @@ jobs:
     # whole corpus before it mutates anything, so the replay alone is the
     # regression check, and the seconds after it are a free look around.
     #
+    # **The seconds after it are not free, and the step below is not a
+    # replay.** `-max_total_time=20` is a twenty-second *mutating* session
+    # seeded from the corpus, so an input it reports was generated here and
+    # was never committed — which is why the step is named for what it does.
+    # Five findings on 20 September 2026 were all of that kind, and calling
+    # them "the committed seeds crash" would have sent five investigations to
+    # the wrong files (docs/verification.md).
+    #
     # Bounded on purpose, and bounded per target rather than in total, so
     # adding a target adds a known amount of time instead of quietly taking
-    # it from the others: thirty-one targets, twenty seconds each, one build.
-    # Unlike the nightly this is one runner rather than thirty-one, because
-    # holding thirty-one machines for twenty seconds each is worse for everyone
-    # queueing behind it than holding one for five minutes.
+    # it from the others: thirty-nine targets, twenty seconds each, one build.
+    # Unlike the nightly this is one runner rather than thirty-nine, because
+    # holding thirty-nine machines for twenty seconds each is worse for
+    # everyone queueing behind it than holding one for thirteen minutes.
     #
     # `crypt` is the one target for which twenty seconds is not twenty seconds
     # of fuzzing: 7.6.4.3.3's hardened hash is meant to be slow, and the seed
@@ -197,7 +205,10 @@ jobs:
         # that has nothing to do with the code under test.
         env:
           RUSTFLAGS: ''
-      - name: Replay the seed corpora
+      # Named for the command rather than for the corpus: this replays every
+      # seed and then mutates from them for the rest of the twenty seconds, so
+      # what it reports may be an input no file in this repository holds.
+      - name: Mutate for twenty seconds from each seed corpus
         run: |
           set -uo pipefail
           failed=()

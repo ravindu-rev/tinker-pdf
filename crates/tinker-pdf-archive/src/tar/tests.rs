@@ -465,6 +465,78 @@ fn a_name_past_the_cap_is_truncated_and_says_so() {
         .contains(&Warning::NameTruncated { index: 0 }));
 }
 
+/// **The cap bounds the name, not the field it was cut from.**
+///
+/// The `tar` fuzz target found this on its first CI run: a name is cut to
+/// [`MAX_TAR_NAME_LEN`] *bytes of field* and then decoded, and the
+/// ISO-8859-1 fallback is one byte in and two bytes out above `U+007F` — so
+/// the `String` a caller was handed was twice the cap it had been promised.
+/// Every byte of the name here is `0xFF`, so the expansion is the whole of
+/// it; the ASCII name in
+/// `a_name_past_the_cap_is_truncated_and_says_so` cannot see it, which is why
+/// that test passed throughout.
+#[test]
+fn a_name_the_fallback_expands_is_still_bounded_by_the_cap() {
+    let long = vec![0xFFu8; MAX_TAR_NAME_LEN + 64];
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&header(b"././@LongLink", long.len() as u64, b'L', GNU, b""));
+    bytes.extend_from_slice(&long);
+    bytes.extend(std::iter::repeat_n(
+        0u8,
+        (BLOCK - long.len() % BLOCK) % BLOCK,
+    ));
+    bytes.extend_from_slice(&header(b"short.png", 0, b'0', GNU, b""));
+    bytes.extend(std::iter::repeat_n(0u8, BLOCK * 2));
+
+    let tar = open(&bytes);
+    let name = &tar.entries()[0].name;
+    assert!(
+        name.len() <= MAX_TAR_NAME_LEN,
+        "a name the fallback expanded came back {} bytes against a {MAX_TAR_NAME_LEN}-byte cap",
+        name.len()
+    );
+    assert!(tar
+        .warnings()
+        .contains(&Warning::NameTruncated { index: 0 }));
+    assert!(tar.warnings().contains(&Warning::NameNotUtf8 { index: 0 }));
+}
+
+/// The seed itself, at the bounds the target was running: the entry list a
+/// caller is handed never carries a name past the cap it asked for.
+///
+/// `fuzz/corpus/tar/name-the-fallback-expands-past-the-cap` is the input
+/// libFuzzer built, control byte and all, so the knobs here are the ones it
+/// was running under — `max_name_len` of 16, against a PAX path of bytes
+/// above `U+007F`.
+#[test]
+fn the_seed_that_found_the_expanding_name_stays_inside_its_cap() {
+    let data: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fuzz/corpus/tar/name-the-fallback-expands-past-the-cap"
+    ));
+    let (control, body) = data.split_at(data.len().min(1));
+    let knobs = control.first().copied().unwrap_or(0);
+    let limits = Limits {
+        max_entries: 64,
+        max_name_len: 16,
+    };
+    assert_eq!(
+        knobs, 0x56,
+        "the seed's own control byte picks these bounds"
+    );
+
+    let archive = Archive::open(body, &limits).expect("the seed opens");
+    for entry in archive.entries() {
+        assert!(
+            entry.name.len() <= limits.max_name_len,
+            "{:?} is {} bytes against a {}-byte cap",
+            entry.name,
+            entry.name.len(),
+            limits.max_name_len
+        );
+    }
+}
+
 /// An archive that stops mid-file keeps what it has and refuses the entry that
 /// was cut (ruling 2), rather than handing back a short read as if it were the
 /// file.
@@ -562,6 +634,15 @@ fn hostile_headers_produce_answers_rather_than_panics() {
 ///
 /// Run with `--ignored` when a fixture changes; the corpus is committed, and a
 /// run that rewrites it is a diff to look at rather than to apply blindly.
+///
+/// **The eighth seed is not written here and must not be deleted by a run of
+/// this test.** `name-the-fallback-expands-past-the-cap` is the input
+/// libFuzzer built on 20 September 2026, kept byte for byte because a
+/// generated input is evidence about what the mutator reached and a
+/// transcription of it is not. It is the seed
+/// `the_seed_that_found_the_expanding_name_stays_inside_its_cap` reads, and
+/// `docs/verification.md` records what it found: a name cut to the cap as a
+/// *field* and then expanded past it by the ISO-8859-1 fallback.
 #[test]
 #[ignore = "writes into fuzz/corpus/tar, which is committed"]
 fn write_the_fuzz_seeds() {

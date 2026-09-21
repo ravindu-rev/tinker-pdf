@@ -185,7 +185,7 @@ fn the_committed_tar_seeds_replay() {
     );
     assert_eq!(
         seeds.len(),
-        7,
+        8,
         "the seed count changed; `write_the_fuzz_seeds` is what should have \
          changed it, and the new file needs a reason in that test's comment"
     );

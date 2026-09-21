@@ -49,6 +49,12 @@
 //!   backwards. This is what milestone 7's `/ToUnicode` is built on: after a
 //!   ligature there is nothing left but the cluster to say which characters
 //!   went into it.
+//! - **Substitution does not run away.** A shaped run is never longer than
+//!   the greater of [`Limits::max_glyphs`] and the run's own byte length —
+//!   the ceiling is a budget for what `GSUB` *adds*, and the buffer it is
+//!   spent against is filled one glyph per character before any lookup runs.
+//!   Asserting the ceiling alone is asserting something this API does not
+//!   promise, which is what this target did until 21 September 2026.
 
 //! # What this target cannot find, and what covers it instead
 //!
@@ -168,9 +174,33 @@ fn check_runs(text: &str, runs: &[tinker_pdf_shape::shape::Run]) {
 
 /// The properties a caller of `Shaper` is entitled to rely on.
 fn check_glyphs(run: &tinker_pdf_shape::shape::Run, glyphs: &[ShapedGlyph], limits: Limits) {
+    // **`max_glyphs` bounds what `GSUB` may add, not what the run arrives
+    // with**, and the difference is what the first CI fuzz run since
+    // 24 August reported as a crash here.
+    //
+    // `Shaper::shape` maps one glyph per character before any lookup runs,
+    // and `Limits::for_glyphs` — the crate's own factory, used whenever a
+    // caller does not supply limits — returns `max(count * 32, 65 536)`,
+    // which sits above the run's own length by construction. `may_grow` is
+    // the only place the ceiling is spent, and it is named for what it does.
+    // So a run longer than an explicitly-set ceiling starts above it and
+    // every substitution is then refused; the glyphs are the text, not a
+    // budget overrun.
+    //
+    // This read `glyphs.len() <= limits.max_glyphs.max(1)`, which is a claim
+    // the API never made: against the `max_glyphs: 8` this target sets from
+    // one knob bit, every run of more than eight characters failed it. The
+    // growth is still worth asserting, and the bound that holds is the run's
+    // byte length — `characters` decomposes a code point into its canonical
+    // parts, and every character that has one is at least as many UTF-8 bytes
+    // as it has parts, so the initial buffer is never longer than the run is
+    // wide in bytes.
+    let started = run.text.len();
+    let ceiling = limits.max_glyphs.max(started);
     assert!(
-        glyphs.len() <= limits.max_glyphs.max(1),
-        "the glyph ceiling was exceeded rather than refused"
+        glyphs.len() <= ceiling,
+        "a run of {started} bytes shaped to {} glyphs, past a ceiling of {ceiling}",
+        glyphs.len()
     );
     let mut previous = None::<u32>;
     for glyph in glyphs {
