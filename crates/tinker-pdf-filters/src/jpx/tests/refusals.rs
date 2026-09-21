@@ -74,10 +74,23 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
         Warning::JpxFeatureUnsupported,
     );
 
-    // "and any POC marker, which changes the order mid-stream"
+    // "and any POC marker, which changes the order mid-stream" — **this
+    // entry has moved**, on 21 September 2026, and with it went the last
+    // Table A.2 marker refused as a capability. A.6.6's progressions are
+    // B.12.2's progression order volumes and tier-2 sequences the packets
+    // from them, held to T.800's own bytes by
+    // `crates/tinker-pdf-filters/tests/jpx_poc.rs`. What is left of the entry
+    // is a *value* inside the segment, the same shape RGN's refusal took:
+    // `Ppoc` is Table A.16's eight bits, so a sixth progression order is
+    // refused in a POC exactly as it is in a COD.
     assert_eq!(
-        refuse(&with_marker(marker::POC, &[0; 7])),
-        Warning::JpxMarkerUnsupported,
+        refuse(&with_marker(marker::POC, &[0, 0, 0, 1, 2, 1, 5])),
+        Warning::JpxFeatureUnsupported,
+    );
+    // And a POC whose length is not equation (A-6)'s.
+    assert_eq!(
+        refuse(&with_marker(marker::POC, &[0; 8])),
+        Warning::JpxStructureInvalid,
     );
 
     // "any code-block style bit in COD/COC Table A.19 this build does not
@@ -129,10 +142,17 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
         refuse(&with_marker(marker::RGN, &[0, 1, 0])),
         Warning::JpxFeatureUnsupported,
     );
-    assert_eq!(
-        refuse(&with_marker(marker::POC, &[0, 0])),
-        Warning::JpxMarkerUnsupported,
-    );
+    // The third claim, "a marker the standard defines and this build does
+    // not", has no *capability* left to demonstrate — every Table A.2 marker
+    // is decoded. What still refuses by name is the two A.8 puts inside the
+    // bit stream, where a header is the one place they mean nothing.
+    for code in [marker::SOP, marker::EPH] {
+        assert_eq!(
+            refuse(&with_marker(code, &[0, 0])),
+            Warning::JpxMarkerUnsupported,
+            "{code:#06X} in a main header",
+        );
+    }
     assert_eq!(
         refuse(&with_marker(0xFF74, &[0])),
         Warning::JpxMarkerUnknown,
@@ -289,7 +309,7 @@ fn every_jpx_warning_is_reachable() {
     // Every `Refusal` variant's `warning()`, which is the only way one of the
     // nine refusal warnings can arise, plus the one leniency.
     let produced = [
-        Refusal::Marker("POC").warning(),
+        Refusal::Marker("SOP outside tile data").warning(),
         Refusal::UnknownMarker(0xFF74).warning(),
         Refusal::Structure("").warning(),
         Refusal::Feature("").warning(),
@@ -322,11 +342,42 @@ fn every_jpx_warning_is_reachable() {
 /// million bad markers cannot turn leniency into an allocation attack.
 #[test]
 fn a_decode_leaves_at_most_one_warning() {
-    let bytes = with_marker(marker::POC, &[0, 0, 0]);
+    let bytes = with_marker(marker::SOP, &[0, 0]);
     let mut warnings = Vec::new();
     let _ = jpx_decode(&bytes, &Limits::new(1 << 20), &mut warnings);
     let _ = jpx_decode(&bytes, &Limits::new(1 << 20), &mut warnings);
     assert_eq!(warnings, vec![Warning::JpxMarkerUnsupported]);
+}
+
+/// **A POC this build understands is not a refusal at all**, the other half
+/// of the entry above and the same assertion
+/// [`an_rgn_with_table_a25s_one_style_decodes`] makes for RGN: the risk of
+/// implementing a marker is that the refusal list quietly keeps it.
+///
+/// One progression covering everything is B.12.2's own description of the
+/// default — "The progression loops of B.12.1 all go from zero to the maximum
+/// value" — so the samples must be exactly what the same codestream without
+/// the marker produces. The reordering that a POC is *for* is adjudicated
+/// against T.800's published codestream in
+/// `crates/tinker-pdf-filters/tests/jpx_poc.rs`; what this pins is that the
+/// marker no longer costs a warning.
+#[test]
+fn a_poc_covering_everything_decodes() {
+    let spec = Spec::default();
+    let plain = stream(&spec, &EMPTY_PACKETS);
+    // RSpoc 0, CSpoc 0, LYEpoc 1, REpoc 2, CEpoc 1, Ppoc 0 — Figure A.15's
+    // field order, the default spec's one layer, two resolutions and one
+    // component.
+    let with_poc = with_marker(marker::POC, &[0, 0, 0, 1, 2, 1, 0]);
+
+    let mut plain_warnings = Vec::new();
+    let a = jpx_decode(&plain, &Limits::new(1 << 20), &mut plain_warnings)
+        .expect("the fixture decodes");
+    let mut poc_warnings = Vec::new();
+    let b = jpx_decode(&with_poc, &Limits::new(1 << 20), &mut poc_warnings)
+        .expect("a POC restating B.12.1's loops decodes");
+    assert!(poc_warnings.is_empty(), "{poc_warnings:?}");
+    assert_eq!(a.samples, b.samples);
 }
 
 /// **An RGN this build understands is not a refusal at all**, which is the

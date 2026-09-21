@@ -6,16 +6,22 @@ fingerprint, render quality is a perceptual budget, coverage of the real
 world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
-Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 20 September 2026. `cargo test --workspace --no-fail-fast`
-is **4 968 passed, 0 failed, 59 ignored** across 220 suites on
+Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 21 September 2026. `cargo test --workspace --no-fail-fast`
+is **4 991 passed, 0 failed, 59 ignored** across 221 suites on
 `x86_64-pc-windows-msvc`. The suite gained since the last count is
-`jpx_annex_h.rs`, which T.800's region of interest brought with it; the count
-before it was 4 929 across 219, and the thirty-nine tests between the two
-figures are two JPX capability lanes' — eighteen for RGN, being that file's
-eight plus ten unit tests for the marker segment and H.1's branches, and
-twenty-one for packed packet headers, which added no file of its own. This
-figure is the merged tree's: each lane measured a smaller one, because neither
-could see the other's tests. The same suite was 2 243 passed, 0 failed on
+`jpx_poc.rs`, which T.800's progression order change brought with it; the
+count before it was 4 968 across 220, and the twenty-three tests between the
+two figures are one JPX capability lane's — that file's thirteen, plus seven
+unit tests for A.6.6's marker segment and Table A.32's ranges, two in tier-2
+for B.12.2's progression order volumes, and one that a POC covering
+everything is no refusal at all.
+
+The count before *that* was 4 929 across 219, and the thirty-nine tests
+between 4 929 and 4 968 are two JPX capability lanes' — eighteen for RGN,
+being `jpx_annex_h.rs`'s eight plus ten unit tests for the marker segment and
+H.1's branches, and twenty-one for packed packet headers, which added no file
+of its own. That figure was the merged tree's: each lane measured a smaller
+one, because neither could see the other's tests. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
 tool-gated suites, and the Linux figure is a dated observation rather than a
@@ -1084,8 +1090,23 @@ decoded samples (J.10.5), and `jpx_annex_j.rs` asserts them.
 `jpx_annex_h.rs` extends the same numbers to Annex H's region of interest,
 which T.800 publishes no test data for at all: H.1 rewrites exactly the
 coefficients J.10.4 prints, so the clause can be run over the standard's own
-values and held to the standard's own samples. Neither file invokes anything
-and neither is a round trip through code written here.
+values and held to the standard's own samples.
+
+`jpx_poc.rs` extends them a second way, and it is a different lever worth
+naming. A.6.6's progression order change acts on packet *order* rather than
+on coefficients, and T.800 publishes no codestream carrying one — `0xFF5F`
+occurs exactly twice in the 231 pages, in Table A.2 and Table A.32. What
+J.10 publishes instead is **where each of its two packets begins and ends**
+(J.10.3's Table J.20 and J.10.4's octal 0125; Table J.21 and octal 0137), and
+a published packet boundary is what a reordering needs: the file swaps
+J.10's own nine and seven bytes, describes the swap in a two-volume POC, and
+demands J.10.5's nine samples back. It also measures what the refusal that
+stood there for a year was protecting against — the identical swapped bytes
+with the POC removed decode **cleanly and silently** to nine different
+samples.
+
+None of the three files invokes anything and none is a round trip through
+code written here.
 
 **Whether a picture may be compared against an outside viewer, decided.**
 *5 September 2026, ruling 13's amendment.* The first of the four properties

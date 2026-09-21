@@ -203,7 +203,8 @@ white page that reads as a successful decode of a blank scan.
 **JPEG 2000** (JPXDecode, 7.4.9; T.800): the JP2/JPX box container of Annex I
 and bare J2K codestreams, Annex A marker segments with COC and QCC overriding
 per component, Annex B tier-2 — tag trees, packet headers, precincts, all
-five progression orders (B.12) and A.7.4's and A.7.5's packed packet headers
+five progression orders (B.12) over B.12.2's **progression order volumes**,
+and A.7.4's and A.7.5's packed packet headers
 in both places they can live — Annex D tier-1 on the shared MQ coder,
 Annex E dequantisation, both Annex F inverse wavelets (the reversible 5/3 and
 the irreversible 9/7 in fixed point), **Annex H's region of interest** and the
@@ -219,6 +220,38 @@ JPEG 2000 decode looks like a photograph — the inverse wavelet smooths wrong
 coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
 symbol) catch a mis-parse before any pixel exists.
+
+**The progression order change is a bound on the loops, not a second
+sequencer.** A POC marker segment (A.6.6) is a list of progressions, and
+B.12.2 says what each one is: B.12.1's "for loops" limited by (B-21)'s start
+and end points — `CSpod <= i < CEpod`, `RSpod <= r < REpod`, `0 <= l < LEpod`
+— with its own Table A.16 order. So tier-2 walks a list of *volumes*, and a
+codestream with no POC is one volume covering everything, which is B.12.2's
+own first sentence rather than a special case. Two rules of the clause are
+easy to miss and both are implemented: every volume's layer loop starts at
+zero and a packet already emitted is not emitted again (A.6.6 on `LYEpoc`),
+which is what makes "the layer always starts with the next one"; and a tile's
+own volumes may be spread across its tile-part headers (B.12.3's Figure
+B.15b), joined in `TPsot` order, provided the first tile-part header carries
+one.
+
+*What a skipped POC costs is measured rather than argued.* T.800 J.10's own
+two published packets, swapped and described by a two-volume POC, decode to
+J.10.5's nine published samples; the identical bytes with the POC removed
+decode **cleanly, with no warning**, to `128, 130, 132, 139, 128, 124, 143,
+97, 153` instead of `101, 103, 104, 105, 96, 97, 96, 102, 109`
+([`jpx_poc.rs`](../../crates/tinker-pdf-filters/tests/jpx_poc.rs)). That is
+the "a wrong JPEG 2000 decode looks like a photograph" claim above, on the
+standard's own bytes.
+
+*One limit, named.* B.12.3 allows a POC to "describe more progression order
+volumes than exist in the codestream" and lets "the last progression order
+volume in each tile" be incomplete. A volume naming resolution levels or
+components the tile does not have is clamped and contributes no packets, so
+the common form of that is decoded. A codestream whose volumes describe more
+*packets* than its tile data holds is refused on the exact-consumption check
+— the same refusal a truncated codestream with no POC already earns here, so
+this is one rule rather than two.
 
 **Packed packet headers are one reader, not two.** PPM (A.7.4) moves every
 tile's packet headers into the main header and PPT (A.7.5) moves one tile's
@@ -244,7 +277,7 @@ veraPDF fixtures whose `colr` box is deliberately non-conformant; two are
 documents in which **no tile arrived whole**, which is the one truncation this
 decoder refuses rather than draws around — a tile short of its declared parts
 costs pixels and is drawn as far as it arrives, and only a codestream with no
-complete tile has nothing to degrade to. So POC, `BYPASS`, `TERMALL` and
+complete tile has nothing to degrade to. So `BYPASS`, `TERMALL` and
 precision above sixteen bits are reached by **zero** corpus files, fixture or
 real.
 
@@ -255,11 +288,12 @@ two `a codestream with no complete tile` documents are refusals and are in the
 census rows, where the old text had them among the truncations that decode.
 The two numbers are now both given and both say which they are.
 
-RGN, PPM and PPT were on the zero-reachability list until 20 September 2026,
-and their leaving moved nothing: the census was re-run after each and reports
-the same 39 bearing files and the same five reasons, because no corpus file
-carried any of the three to begin with. Under ruling 3 that is a scheduling input rather than a
-justification, and the roadmap row it belongs to says so.
+RGN, PPM and PPT were on the zero-reachability list until 20 September 2026
+and POC until the 21st, and their leaving moved nothing: the census was re-run
+after each and reports the same 39 bearing files and the same five reasons,
+because no corpus file carried any of the four to begin with. Under ruling 3
+that is a scheduling input rather than a justification, and the roadmap row it
+belongs to says so.
 
 That paragraph used to read "the corpus's nineteen readable JPX files as of
 August 2026: 16 decode and 3 refuse", which was a count over four corpora
@@ -579,7 +613,8 @@ make both enums wrong.
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | T.88 7.4.3 |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
-| JPX marker POC (T.800 Table A.2) | `Warning::JpxMarkerUnsupported` | Never skipped: a skipped POC changes the packet order mid-stream and mis-parses every packet after it. **Four markers have left this row**: CRG, RGN, PPM and PPT. **CRG left this row** because A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied; **RGN left it** because Annex H was implemented | [ROADMAP](../ROADMAP.md) |
+| JPX markers SOP and EPH in a header (T.800 A.8) | `Warning::JpxMarkerUnsupported` | **No Table A.2 marker is refused as a capability any more, and these two are refused for where they are rather than for what they are.** A.8 puts both inside the bit stream and tier-2 reads them there; a header is the one place neither has a meaning. **Five markers have left this row, each for its own reason**: CRG, because A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied; RGN, because Annex H was implemented; PPM and PPT, because A.7.4 and A.7.5 were; and POC last, on 21 September 2026, because A.6.6's progressions are B.12.2's progression order volumes and tier-2 sequences the packets from them | T.800 A.8.1, A.8.2 |
+| JPX POC field values: a `Ppoc` Table A.16 does not define, a bound outside Table A.32, an `Lpoc` that is not equation (A-6)'s, two POC segments in one header, a tile-part POC with none in the tile's first tile-part header | `Warning::JpxFeatureUnsupported`, `Warning::JpxStructureInvalid` | What is left of POC after the marker was implemented, and the same shape RGN's refusal took: a *value inside* the segment rather than the segment. A volume whose bounds run backwards is not a volume, and clamping one into shape would decode a packet sequence the codestream never described — the same failure as skipping the marker, reached from the other side | T.800 A.6.6, Table A.32, B.12.3 |
 | JPX ROI style: an `Srgn` T.800 Table A.25 reserves | `Warning::JpxFeatureUnsupported` | Table A.25 defines one ROI style — 0, "Implicit ROI (maximum shift)" — and reserves the rest. A reserved style is some other realignment of the coefficients, so running H.1's Maxshift arithmetic over it would put the background at the wrong magnitude and draw a plausible picture. Refused by name rather than stepped over, which is the SOF3/SOF5/SOF6/SOF7 lesson on this page | T.800 A.6.3, Table A.25 |
 | JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
 | JPX coding features: two of Table A.19's six code-block styles — `BYPASS` and `TERMALL` — plus unmappable `colr` and unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. The two left both move where a coding pass's *bytes* start, so they need a length per pass out of the packet header (B.10.7) rather than anything tier-1 can do | [ROADMAP](../ROADMAP.md) |

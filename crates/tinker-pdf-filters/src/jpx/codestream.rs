@@ -8,22 +8,32 @@
 //! # Every marker in Table A.2, or a refusal that names it
 //!
 //! There are twenty markers in Table A.2 and this module accounts for all
-//! twenty: eighteen are parsed, one is refused **by name** (POC) and one —
-//! EPH — belongs to tier-2 and is refused here only when it appears in a
-//! header. Anything else is refused as an unknown marker, which is where
+//! twenty: **all twenty are parsed**, and the only two that ever refuse by
+//! name — SOP and EPH — refuse for being in a header rather than for being
+//! undecodable, since A.8 puts both in the bit stream and tier-2 reads them
+//! there. Anything else is refused as an unknown marker, which is where
 //! every ISO/IEC 15444-2 marker lands, Part 2 being a non-goal.
 //!
 //! Skipping a marker whose length happens to be readable is the failure this
-//! guards against, and it is not hypothetical: POC changes the progression
-//! order *mid-stream*, so a decoder that skips it reads every packet after it
-//! in the wrong order and produces a soft, plausible image.
+//! guards against, and it is not hypothetical. Three markers left the refusal
+//! list because reading the clause was cheaper than the failure it prevents:
 //!
-//! RGN was the fourth refusal until Annex H was read. It is parsed here and
-//! applied in [`super::wavelet`], because A.6.3 carries nothing but a
-//! component index, a style and a shift, and H.1 says exactly what the shift
-//! does to a coefficient. The refusal it leaves behind is narrower and named:
-//! Table A.25 defines one `Srgn` style and reserves every other value, so a
+//! RGN was one, until Annex H was read. It is parsed here and applied in
+//! [`super::wavelet`], because A.6.3 carries nothing but a component index, a
+//! style and a shift, and H.1 says exactly what the shift does to a
+//! coefficient. The refusal it leaves behind is narrower and named: Table
+//! A.25 defines one `Srgn` style and reserves every other value, so a
 //! reserved style is refused as a reserved style rather than stepped over.
+//!
+//! POC was the last, and it is the one that could not be parsed and carried.
+//! A.6.6's segment is a list of *progression order volumes*, and B.12.2 says
+//! what a volume is: B.12.1's "for loops", bounded by (B-21)'s start and end
+//! points, with its own progression order. A decoder that read the segment
+//! and left the packet sequence alone would read every packet after it in the
+//! wrong order and produce a soft, plausible image — so the volumes are
+//! handed to [`super::tier2`], which walks them in place of the single
+//! unbounded loop nest. The default is not a special case there: no POC is
+//! one volume covering everything, which is B.12.2's own first sentence.
 //!
 //! # Packed packet headers (A.7.4, A.7.5)
 //!
@@ -78,8 +88,10 @@ pub(crate) mod marker {
     pub const QCD: u16 = 0xFF5C;
     /// Quantization component (A.6.5).
     pub const QCC: u16 = 0xFF5D;
-    /// Progression order change (A.6.6). **Refused**: it changes the packet
-    /// order mid-stream, so ignoring it mis-parses every packet after it.
+    /// Progression order change (A.6.6). **Parsed and applied**: each of its
+    /// progressions is one of B.12.2's progression order volumes, and tier-2
+    /// walks the volumes in place of B.12.1's single unbounded loop nest.
+    /// Ignoring it reads every packet after it in the wrong order.
     pub const POC: u16 = 0xFF5F;
     /// Tile-part lengths (A.7.1). An index; skipping it changes nothing.
     pub const TLM: u16 = 0xFF55;
@@ -117,7 +129,13 @@ const fn refused_by_design(code: u16) -> Option<&'static str> {
         // now is a *value* inside the segment rather than the segment —
         // `Refusal::Feature("an Srgn ROI style Table A.25 reserves")`, from
         // `parse_rgn` — because Table A.25 defines only style 0.
-        marker::POC => "POC, progression order change",
+        //
+        // POC left it on 21 September 2026, and with it went the last Table
+        // A.2 marker this build refused *as a capability*. What remains is
+        // two markers refused for being **out of place** rather than for
+        // being undecodable: A.8 puts SOP and EPH in the bit stream, and a
+        // header is the one place they have no meaning. Both are implemented
+        // where the clause puts them.
         marker::SOP => "SOP outside tile data",
         marker::EPH => "EPH outside tile data",
         _ => return None,
@@ -186,6 +204,166 @@ impl Progression {
             }
         })
     }
+}
+
+/// One progression order volume, from one progression of a POC marker
+/// segment (A.6.6, Figure A.15, Table A.32).
+///
+/// B.12.2 is what makes this a *volume* rather than six loose numbers: "the
+/// 'for loops' described in B.12.1 are limited by start points (CSpoc, RSpoc,
+/// Layer = 0, inclusive) and end points (CEpoc, REpoc and LEpoc, exclusive)",
+/// and equation (B-21) writes the three bounds out:
+///
+/// ```text
+/// CSpod <= i <  CEpod
+/// RSpod <= r <  REpod
+///     0 <= l <  LEpod
+/// ```
+///
+/// *(B-21) really does spell them `CSpod`, `CEpod`, `RSpod`, `REpod` and
+/// `LEpod`, with a `d`, where A.6.6, Figure A.15 and Table A.32 spell the
+/// same five fields `CSpoc`, `CEpoc`, `RSpoc`, `REpoc` and `LYEpoc` — and
+/// B.12.2's own prose, one paragraph above the equation, spells the layer
+/// bound `LEpoc`. Three spellings of one field across two clauses; the field
+/// names below follow Table A.32, which is the one the bytes are read from.*
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Poc {
+    /// `RSpoc`: "Resolution level index (inclusive) for the start of a
+    /// progression."
+    pub(crate) resolution_start: u8,
+    /// `CSpoc`: "Component index (inclusive) for the start of a
+    /// progression."
+    pub(crate) component_start: u16,
+    /// `LYEpoc`: "Layer index (exclusive) for the end of a progression. The
+    /// layer index always starts at zero for every progression. Packets that
+    /// have already been included in the codestream are not included again."
+    ///
+    /// That last sentence is the whole reason tier-2 carries a set of the
+    /// packets it has already emitted: every volume's layer loop starts at
+    /// zero, so without it two overlapping volumes would each emit the low
+    /// layers and the sequence would double-read them.
+    pub(crate) layer_end: u16,
+    /// `REpoc`: "Resolution level index (exclusive) for the end of a
+    /// progression."
+    pub(crate) resolution_end: u8,
+    /// `CEpoc`: "Component index (exclusive) for the end of a progression",
+    /// with Table A.32's zero already read as 256 — the table gives the
+    /// range as "(CSpoc + 1) to 255, 0" and then says "(0 is interpreted as
+    /// 256)", so the wrap is the table's and not this decoder's.
+    pub(crate) component_end: u16,
+    /// `Ppoc`, this volume's own progression order (Table A.16, the same
+    /// eight bits `SGcod` carries).
+    pub(crate) order: Progression,
+}
+
+/// T.800 A.6.6 and Table A.32: the POC marker segment.
+///
+/// Figure A.15 gives the field order inside one progression — `RSpoc`,
+/// `CSpoc`, `LYEpoc`, `REpoc`, `CEpoc`, `Ppoc` — which is **not** the order
+/// the parameter list above the figure explains them in for `LYEpoc` and
+/// `REpoc`; the figure and Table A.32's row order agree with each other and
+/// are what the bytes follow.
+///
+/// **The length is checked for equality rather than sufficiency**, because
+/// equation (A-6) leaves exactly one legal length for a given progression
+/// count:
+///
+/// ```text
+/// Lpoc = 2 + 7 * number_progression_order_change   Csiz <  257
+/// Lpoc = 2 + 9 * number_progression_order_change   Csiz >= 257
+/// ```
+///
+/// and Table A.32 gives `Lpoc` as "9 to 65 535", whose lower bound is the
+/// one-progression case. So a body whose length is not a whole number of
+/// progressions is malformed, and a zero-progression POC is a segment
+/// describing nothing while A.6.6 requires that "the progression of every
+/// packet in the codestream ... shall be defined in one or more POC marker
+/// segments".
+///
+/// **Every one of Table A.32's ranges is checked rather than assumed**, and
+/// each violation refuses the file. A volume whose bounds run backwards is
+/// not a volume, and clamping one into shape would silently decode a packet
+/// sequence the codestream never described — which is the same failure as
+/// skipping the marker, arrived at from the other side.
+fn parse_poc(body: &[u8], siz: &Siz) -> Result<Vec<Poc>, Refusal> {
+    // A.6.6's CSpoc and CEpoc are "either 8 or 16 bits depending on Csiz
+    // value", the same rule Crgn, Ccoc and Cqcc carry.
+    let wide = siz.components.len() >= 257;
+    let each = if wide { 9 } else { 7 };
+    if body.is_empty() || body.len() % each != 0 {
+        return Err(Refusal::Structure(
+            "a POC marker segment whose length is not equation A-6's",
+        ));
+    }
+    let components = u16::try_from(siz.components.len()).unwrap_or(u16::MAX);
+    let mut c = Cursor::new(body);
+    let mut out = Vec::with_capacity(body.len() / each);
+    while c.remaining() > 0 {
+        let Some(resolution_start) = c.u8() else {
+            return Err(Refusal::Truncated("a POC progression"));
+        };
+        let component_start = if wide { c.u16() } else { c.u8().map(u16::from) }
+            .ok_or(Refusal::Truncated("a POC progression"))?;
+        let (Some(layer_end), Some(resolution_end)) = (c.u16(), c.u8()) else {
+            return Err(Refusal::Truncated("a POC progression"));
+        };
+        let component_end = if wide { c.u16() } else { c.u8().map(u16::from) }
+            .ok_or(Refusal::Truncated("a POC progression"))?;
+        let order = c.u8().ok_or(Refusal::Truncated("a POC progression"))?;
+        // Table A.32: "(0 is interpreted as 256)". Read before the range
+        // check, because 0 is the *largest* legal CEpoc and not the smallest.
+        let component_end = if component_end == 0 {
+            256
+        } else {
+            component_end
+        };
+        // Table A.32's own ranges, row by row: RSpoc 0 to 32, LYEpoc 1 to
+        // 65 535, REpoc (RSpoc + 1) to 33, CEpoc (CSpoc + 1) to 255 or
+        // 16 384. CSpoc's own range — 0 to 255, or 0 to 16 383 — is the width
+        // it was read at, so the only part of it left to check is that a
+        // component index fits the 16 383 ceiling in the wide case.
+        if resolution_start > 32 {
+            return Err(Refusal::Structure(
+                "a POC RSpoc above Table A.32's thirty-two",
+            ));
+        }
+        if resolution_end <= resolution_start || resolution_end > 33 {
+            return Err(Refusal::Structure(
+                "a POC REpoc outside Table A.32's (RSpoc + 1) to 33",
+            ));
+        }
+        if layer_end == 0 {
+            return Err(Refusal::Structure("a POC LYEpoc of zero"));
+        }
+        if wide && component_start > 16_383 {
+            return Err(Refusal::Structure("a POC CSpoc above Table A.32's 16 383"));
+        }
+        if component_end <= component_start || component_end > if wide { 16_384 } else { 256 } {
+            return Err(Refusal::Structure(
+                "a POC CEpoc outside Table A.32's (CSpoc + 1) to its ceiling",
+            ));
+        }
+        // A volume naming a component SIZ never declared describes packets
+        // that cannot exist. The start is refused — it is the codestream
+        // contradicting its own SIZ — while the *end* is left alone, because
+        // Table A.32's ceiling is a constant 256 or 16 384 rather than
+        // `Csiz`, so an encoder writing "to the last component" writes the
+        // ceiling and B.12.3 expects the surplus to describe no packets.
+        if component_start >= components {
+            return Err(Refusal::Structure(
+                "a POC CSpoc naming a component SIZ did not",
+            ));
+        }
+        out.push(Poc {
+            resolution_start,
+            component_start,
+            layer_end,
+            resolution_end,
+            component_end,
+            order: Progression::from_byte(order)?,
+        });
+    }
+    Ok(out)
 }
 
 /// T.800 Table A.19, the code-block style bits.
@@ -485,6 +663,17 @@ pub(crate) struct TilePart<'a> {
     /// packet headers may sit in the header of a part with a lower `TPsot`
     /// — so it is [`Codestream::packed_headers`] that joins them.
     pub(crate) ppt: Vec<(u8, &'a [u8])>,
+    /// A.6.6: this tile-part header's POC segment, as progression order
+    /// volumes. `None` unless the header carried one.
+    ///
+    /// Per tile-part rather than per tile, because B.12.3 puts the volumes in
+    /// more than one of a tile's headers on purpose: "It is possible to
+    /// describe many progression order volumes in a tile-part header even
+    /// though these progression order volumes do not appear until later
+    /// tile-parts", and Figure B.15b draws the other arrangement — volumes 1
+    /// and 2 in the first tile-part header and volume 3 in the third. The
+    /// join is per tile and is [`Codestream::progression_volumes`]'s.
+    pub(crate) poc: Option<Vec<Poc>>,
     /// Everything between SOD and the end of the tile-part: the packets.
     pub(crate) data: &'a [u8],
 }
@@ -555,6 +744,11 @@ pub(crate) struct Codestream<'a> {
     /// component with no region of interest, which is every component of
     /// almost every file.
     pub(crate) rgn: Vec<Option<Roi>>,
+    /// A.6.6's main-header POC, as progression order volumes, when the main
+    /// header carried one. B.12.3: "If the POC marker segment is found in the
+    /// main header, it overrides the progression found in the COD for all
+    /// tiles."
+    pub(crate) poc: Option<Vec<Poc>>,
     pub(crate) tile_parts: Vec<TilePart<'a>>,
     /// A.7.4's packed packet headers, when the main header carried PPM.
     ///
@@ -640,6 +834,44 @@ impl Codestream<'_> {
             }
         }
         self.rgn.get(c).copied().flatten()
+    }
+
+    /// The progression order volumes in force for tile `t` (A.6.6, B.12.3),
+    /// or `None` when no POC reaches it and B.12.1's unbounded loops stand.
+    ///
+    /// **A.6.6's precedence, written out in the clause as a chain**:
+    ///
+    /// > Tile-part POC > Main POC > Tile-part COD > Main COD
+    /// >
+    /// > where the "greater than" sign > means that the greater overrides the
+    /// > lesser marker segment.
+    ///
+    /// This answers the first two terms; the COD terms are
+    /// [`Codestream::cod_for`]'s, and they are consulted only when this
+    /// returns `None`. B.12.3 says the same thing from the other end — "The
+    /// main header POC marker segment is used for tiles that do not have POC
+    /// marker segments in their tile-part headers" — and adds what happens
+    /// when a tile has its own: "The COD progression order **and the main
+    /// header POC marker segment (if there is one) are overridden**", so a
+    /// tile-part POC replaces the main one rather than extending it.
+    ///
+    /// **A tile's own volumes run across its tile-parts.** B.12.3: "all of
+    /// the progression order changes shall be signalled in the tile-part
+    /// headers of that tile", and Figure B.15b draws volumes 1 and 2 in the
+    /// first tile-part header with volume 3 in the third. The parts are in
+    /// `TPsot` order — `check_tile_parts` refuses any other — so
+    /// concatenating in that order is "in order" as B.12.3 requires.
+    pub(crate) fn progression_volumes(&self, tile: u16) -> Option<Vec<Poc>> {
+        let mut own: Vec<Poc> = Vec::new();
+        for part in self.tile_parts.iter().filter(|p| p.tile == tile) {
+            if let Some(poc) = &part.poc {
+                own.extend_from_slice(poc);
+            }
+        }
+        if !own.is_empty() {
+            return Some(own);
+        }
+        self.poc.clone()
     }
 
     fn first_part(&self, tile: u16) -> Option<&TilePart<'_>> {
@@ -775,6 +1007,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
     let mut coc: Vec<Option<CodingStyle>> = Vec::new();
     let mut qcc: Vec<Option<Quant>> = Vec::new();
     let mut rgn: Vec<Option<Roi>> = Vec::new();
+    let mut poc: Option<Vec<Poc>> = None;
     let mut registration: Option<Vec<Registration>> = None;
     let mut tile_parts: Vec<TilePart<'_>> = Vec::new();
     // A.7.4: the PPM segments as `(Zppm, the bytes after Zppm)`, joined
@@ -880,6 +1113,26 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
                 }
                 *slot = Some(roi);
             }
+            // A.6.6: the progression order changes. Parsed here and applied
+            // in tier-2, which walks the volumes in place of B.12.1's single
+            // loop nest.
+            marker::POC => {
+                let s = siz.as_ref().ok_or(Refusal::Structure("POC before SIZ"))?;
+                if poc.is_some() {
+                    // A.6.6: "At most one POC marker segment may appear in
+                    // any header." B.12.3 repeats it — "There can only be one
+                    // POC marker segment in a given header (main or
+                    // tile-part) but that marker segment can describe many
+                    // progression order changes" — so two here is a
+                    // codestream giving two accounts of one packet sequence,
+                    // and either choice reads packets in an order the file
+                    // does not describe.
+                    return Err(Refusal::Structure(
+                        "a second POC marker segment in one header",
+                    ));
+                }
+                poc = Some(parse_poc(body, s)?);
+            }
             // A.7.1 to A.7.3: pure indices into the codestream. A decoder
             // that ignores them decodes the same picture, which is exactly
             // what makes them safe to skip — and their lengths are still
@@ -938,6 +1191,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
         return Err(Refusal::Structure("a codestream with no QCD marker"));
     };
     let short_tiles = check_tile_parts(&siz, &tile_parts)?;
+    check_tile_pocs(&tile_parts)?;
     let ppm = join_ppm(ppm_segments, tile_parts.len())?;
 
     Ok(Codestream {
@@ -948,10 +1202,56 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
         qcd,
         qcc,
         rgn,
+        poc,
         tile_parts,
         ppm,
         registration,
     })
+}
+
+/// B.12.3's one placement rule for a tile's own progression order changes.
+///
+/// > If a POC marker segment is used for an individual tile, **there shall be
+/// > a POC marker in the first tile-part header of that tile** and all of the
+/// > progression order changes shall be signalled in the tile-part headers of
+/// > that tile.
+///
+/// A.6.6 states the same requirement from its own side: "If a POC is used to
+/// describe the progression of a particular tile, a POC marker segment must
+/// appear in the first tile-part header of that tile."
+///
+/// **What this checks and what it does not.** It checks the sentence above,
+/// which is the part that is decidable from the headers alone. It does not
+/// check B.12.3's other placement sentence — "The POC marker segments shall
+/// describe progression order volumes in order in any tile-part header before
+/// the first included packet appears" — because the packets of a tile are
+/// read as one joined sequence across its parts (B.9), so which part a packet
+/// arrived in is not a thing this decoder has after the join. For a
+/// conforming codestream the two agree; for one that violates only the
+/// unchecked sentence, the volumes are still taken in `TPsot` order and the
+/// exact-consumption check in tier-2 is what catches the disagreement.
+fn check_tile_pocs(parts: &[TilePart<'_>]) -> Result<(), Refusal> {
+    let mut first_had: Vec<(u16, bool)> = Vec::new();
+    for part in parts {
+        if part.index == 0 {
+            first_had.push((part.tile, part.poc.is_some()));
+        }
+    }
+    for part in parts {
+        if part.poc.is_none() {
+            continue;
+        }
+        let opened = first_had
+            .iter()
+            .find(|(t, _)| *t == part.tile)
+            .is_some_and(|(_, had)| *had);
+        if !opened {
+            return Err(Refusal::Structure(
+                "a tile-part POC with none in the tile's first tile-part header",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// T.800 A.6.3 and Table A.24: the RGN marker segment.
@@ -1433,6 +1733,7 @@ fn tile_part<'a>(
         qcc: Vec::new(),
         rgn: Vec::new(),
         ppt: Vec::new(),
+        poc: None,
         data: &[],
     };
 
@@ -1476,6 +1777,24 @@ fn tile_part<'a>(
                 return Err(Refusal::Structure(
                     "a coding style marker in a tile-part after the first",
                 ))
+            }
+            // A.6.6: a POC in *any* tile-part header of the tile, not only
+            // the first. B.12.3's Figure B.15b is the case: "Progression
+            // order volumes 1 and 2 are described in the POC marker segments
+            // in the first tile-part header, progression order volume 3
+            // described in the third tile-part header". `check_tile_pocs`
+            // holds the rule that does bind — the first tile-part header must
+            // carry one — and it holds it after every part has arrived,
+            // because that is the earliest a tile is whole.
+            marker::POC => {
+                if part.poc.is_some() {
+                    // A.6.6: "At most one POC marker segment may appear in
+                    // any header", and a tile-part header is a header.
+                    return Err(Refusal::Structure(
+                        "a second POC marker segment in one header",
+                    ));
+                }
+                part.poc = Some(parse_poc(body, siz)?);
             }
             marker::PLT | marker::COM => {}
             // A.7.5: packed packet headers for this tile. Table A.39 gives

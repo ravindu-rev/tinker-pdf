@@ -15,7 +15,7 @@
 //!
 //! So: the numbers below come from the standard.
 
-use super::writer::Spec;
+use super::writer::{segment, tile_part, Spec};
 use crate::jpx::codestream::Progression;
 use crate::jpx::tier2;
 use crate::jpx::{codestream, Refusal};
@@ -249,4 +249,87 @@ fn code_block_extents_are_anchored_to_the_reference_grid() {
             }
         }
     }
+}
+
+// --- B.12.2's progression order volumes ----------------------------------
+
+/// A codestream with a main-header POC carrying `body`, and `data` as the
+/// only tile's packets.
+fn with_poc(spec: &Spec, body: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut out = spec.main_header();
+    out.extend_from_slice(&segment(codestream::marker::POC, body));
+    out.extend_from_slice(&tile_part(0, 0, 1, &[], data));
+    out.extend_from_slice(&codestream::marker::EOC.to_be_bytes());
+    out
+}
+
+/// **B.12.2's default is one progression order volume, not a second code
+/// path** — so a POC that restates B.12.1's own loops must produce the
+/// identical tile, for every one of the five orders.
+///
+/// > The progression order default is signalled in the COD marker segment in
+/// > the main header or tile headers (see A.6.1). The progression loops of
+/// > B.12.1 all go from zero to the maximum value.
+///
+/// This is the equivalence the POC work rests on. The sequencer was one loop
+/// nest per order and is now one loop nest per order *inside a volume*; if
+/// the volume standing for "no POC" were bounded even slightly differently
+/// from the old unbounded loops, this fails for at least one order — and the
+/// three positional orders, whose bounds also steer the reference-grid walk
+/// and the step it takes, are the ones most able to differ.
+#[test]
+fn a_poc_restating_b121s_loops_decodes_the_same_tile() {
+    for order in 0..=4u8 {
+        let spec = Spec {
+            progression: order,
+            layers: 2,
+            ..Spec::default()
+        };
+        // One layer needs one empty packet per resolution per component per
+        // precinct, so two layers of a 1-component, 2-resolution,
+        // 1-precinct tile need four — and B.10 pads each header to a byte.
+        let data = [0u8; 4];
+
+        let plain = spec.codestream(&[(0, &data)]);
+        let parsed = codestream::parse(&plain).expect("well formed");
+        let want = tier2::decode_tiles(&parsed).expect("the fixture decodes");
+
+        // Figure A.15's field order: RSpoc 0, CSpoc 0, LYEpoc 2, REpoc 2,
+        // CEpoc 1, Ppoc = this order.
+        let whole = with_poc(&spec, &[0, 0, 0, 2, 2, 1, order], &data);
+        let parsed = codestream::parse(&whole).expect("a POC at Table A.32's widths");
+        let got = tier2::decode_tiles(&parsed).expect("a whole-volume POC decodes");
+        assert_eq!(got, want, "progression order {order}");
+    }
+}
+
+/// **A.6.6's "not included again", on a sequence long enough to show it.**
+///
+/// > LYEpoc: ... The layer index always starts at zero for every progression.
+/// > Packets that have already been included in the codestream are not
+/// > included again.
+///
+/// B.12.1.1's LRCP loop over two layers emits every layer-0 packet and then
+/// every layer-1 packet. Two volumes with `LYEpoc` 1 and 2 describe exactly
+/// that: the first emits the layer-0 packets, and the second — whose own
+/// layer loop starts at zero again, as the clause says it must — contributes
+/// only the layer-1 ones. A decoder without the rule would want six packets
+/// from four bytes that hold four, and would refuse the tile.
+#[test]
+fn overlapping_volumes_emit_each_packet_once() {
+    let spec = Spec {
+        layers: 2,
+        ..Spec::default()
+    };
+    let data = [0u8; 4];
+    let plain = spec.codestream(&[(0, &data)]);
+    let parsed = codestream::parse(&plain).expect("well formed");
+    let want = tier2::decode_tiles(&parsed).expect("the fixture decodes");
+
+    let mut body = vec![0, 0, 0, 1, 2, 1, 0];
+    body.extend_from_slice(&[0, 0, 0, 2, 2, 1, 0]);
+    let split = with_poc(&spec, &body, &data);
+    let parsed = codestream::parse(&split).expect("two progressions in one segment");
+    let got = tier2::decode_tiles(&parsed).expect("the layer split decodes");
+    assert_eq!(got, want);
 }

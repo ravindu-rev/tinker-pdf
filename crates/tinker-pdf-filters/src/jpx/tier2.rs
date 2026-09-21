@@ -25,9 +25,18 @@
 //! stuffing rule: after a `0xFF` byte the next byte carries seven bits, so a
 //! header can never accidentally contain a marker.
 //!
-//! **The progression orders** (B.12), all five. A decoder that implements one
-//! and defaults the rest reads every packet of an RPCL stream in LRCP order —
-//! all the packets are there, none is missing, and the picture is wrong.
+//! **The progression orders** (B.12), all five, over B.12.2's progression
+//! order volumes. A decoder that implements one and defaults the rest reads
+//! every packet of an RPCL stream in LRCP order — all the packets are there,
+//! none is missing, and the picture is wrong.
+//!
+//! A POC marker segment (A.6.6) is what makes a *volume* out of each of
+//! B.12.1's loop nests: (B-21) bounds the component, resolution and layer
+//! loops, and the packets of one volume all appear before the next volume's.
+//! The default is not a second code path — B.12.2's opening sentence, "The
+//! progression loops of B.12.1 all go from zero to the maximum value", is one
+//! volume covering everything, and that is literally how a codestream with no
+//! POC is sequenced here.
 //!
 //! # The integrity check
 //!
@@ -39,7 +48,9 @@
 //! one; with EPH signalled every header must end with one; and in all cases
 //! the packets of a tile must consume its data exactly.
 
-use super::codestream::{Codestream, CodingStyle, Packed, Progression};
+use std::collections::BTreeSet;
+
+use super::codestream::{Codestream, CodingStyle, Packed, Poc, Progression};
 use super::{Refusal, MAX_JPX_CODE_BLOCKS};
 
 /// Subband orientation (T.800 Table E.1's `b`), which decides both the
@@ -754,12 +765,74 @@ fn charge(budget: &mut u64, n: u64) -> Result<(), Refusal> {
 // --- the packet sequence (B.12) -----------------------------------------
 
 /// One packet's address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Packet {
     layer: u16,
     resolution: u8,
     component: u16,
     precinct: u32,
+}
+
+/// One progression order volume (B.12.2), resolved against this tile.
+///
+/// A volume is [`Progression`] plus (B-21)'s three bounds, already clamped to
+/// what the tile actually has — so the loops below are the ones B.12.1
+/// writes, with `0` and the maximum replaced by the volume's own ends.
+///
+/// **The default is a volume, not a special case.** B.12.2 opens with "The
+/// progression order default is signalled in the COD marker segment ... The
+/// progression loops of B.12.1 all go from zero to the maximum value", which
+/// is exactly [`Volume::whole`]. A codestream with no POC therefore runs the
+/// same code as one with a single-progression POC covering everything, and
+/// there is no second sequencer to drift from the first.
+#[derive(Clone, Copy, Debug)]
+struct Volume {
+    /// `CSpod <= i < CEpod`.
+    components: (usize, usize),
+    /// `RSpod <= r < REpod`.
+    resolutions: (usize, usize),
+    /// `0 <= l < LEpod`.
+    layers: u16,
+    order: Progression,
+}
+
+impl Volume {
+    /// B.12.2's default: every loop from zero to the maximum value.
+    fn whole(cod: &super::codestream::Cod, tile: &Tile, max_res: usize) -> Volume {
+        Volume {
+            components: (0, tile.components.len()),
+            resolutions: (0, max_res),
+            layers: cod.layers,
+            order: cod.progression,
+        }
+    }
+
+    /// One POC progression, with (B-21)'s bounds clamped to the tile.
+    ///
+    /// **Clamping is the whole of what B.12.3 licenses here**, and it is
+    /// worth being exact about which sentence: "the POC marker segments may
+    /// describe more progression order volumes than exist in the codestream".
+    /// A volume naming resolution levels or components the tile does not have
+    /// describes no packets, so its surplus is dropped rather than refused —
+    /// Table A.32's ceilings are constants (33, 256, 16 384) rather than this
+    /// tile's geometry, so an encoder asking for "everything" writes the
+    /// constant.
+    ///
+    /// The layer end is clamped the same way and for the same reason: COD's
+    /// `SGcod` fixes the layer count, and Table A.32 lets `LYEpoc` run to
+    /// 65 535 regardless.
+    fn of(poc: &Poc, cod: &super::codestream::Cod, tile: &Tile, max_res: usize) -> Volume {
+        let cs = usize::from(poc.component_start).min(tile.components.len());
+        let ce = usize::from(poc.component_end).min(tile.components.len());
+        let rs = usize::from(poc.resolution_start).min(max_res);
+        let re = usize::from(poc.resolution_end).min(max_res);
+        Volume {
+            components: (cs, ce),
+            resolutions: (rs, re),
+            layers: poc.layer_end.min(cod.layers),
+            order: poc.order,
+        }
+    }
 }
 
 /// Reads every packet of one tile, over the concatenation of its tile-parts.
@@ -790,7 +863,11 @@ fn read_tile_packets(
     let empty = Packed::default();
     let seams = packed.as_ref().unwrap_or(&empty);
 
-    let order = packet_order(stream, tile, &cod, budget)?;
+    // A.6.6 and B.12.3's precedence, resolved once for the whole tile: a
+    // tile-part POC, else the main header's, else nothing and B.12.1's
+    // unbounded loops stand.
+    let poc = stream.progression_volumes(tile.index);
+    let order = packet_order(stream, tile, &cod, poc.as_deref(), budget)?;
     let mut at = 0usize;
     let mut seam = 0usize;
     // A run of zero bytes is a tile-part that carried no packets, and its
@@ -869,72 +946,121 @@ fn check_seams(
     Ok(())
 }
 
-/// B.12's five progression orders.
+/// The packet sequence of one tile: B.12's five progression orders, over
+/// B.12.2's progression order volumes.
+///
+/// One volume when no POC reaches this tile, and one per progression of the
+/// POC that does. **The volumes run in the order the segment lists them**
+/// (B.12.2: "All the packets included in the entire progression order volume
+/// are found in order in the codestream before the next progression order
+/// change takes effect"), and a packet emitted by an earlier volume is not
+/// emitted again (A.6.6's `LYEpoc`: "Packets that have already been included
+/// in the codestream are not included again").
+///
+/// That last rule is why [`Emitter`] carries a set. Every volume's layer loop
+/// starts at zero — A.6.6 says so in as many words — so two volumes over the
+/// same `(component, resolution, precinct)` with different `LYEpoc` both walk
+/// the low layers, and only the set makes the second one pick up where the
+/// first stopped. B.12.2 states the consequence rather than the mechanism:
+/// "Therefore, the layer always starts with the next one for a given
+/// tile-component, resolution level and precinct. The decoder is required to
+/// determine the next layer."
 fn packet_order(
     stream: &Codestream<'_>,
     tile: &Tile,
     cod: &super::codestream::Cod,
+    poc: Option<&[Poc]>,
     budget: &mut u64,
 ) -> Result<Vec<Packet>, Refusal> {
-    let layers = cod.layers;
-    let components = tile.components.len();
     let max_res = tile
         .components
         .iter()
         .map(|c| c.resolutions.len())
         .max()
         .unwrap_or(0);
-    let mut out = Vec::new();
+    let volumes: Vec<Volume> = match poc {
+        Some(progressions) => progressions
+            .iter()
+            .map(|p| Volume::of(p, cod, tile, max_res))
+            .collect(),
+        None => vec![Volume::whole(cod, tile, max_res)],
+    };
 
-    match cod.progression {
-        Progression::Lrcp => {
-            for l in 0..layers {
-                for r in 0..max_res {
-                    for c in 0..components {
-                        for p in 0..precinct_count(tile, c, r) {
-                            emit(&mut out, l, r, c, p, budget)?;
+    let mut out = Emitter::default();
+    for volume in volumes {
+        let (c0, c1) = volume.components;
+        let (r0, r1) = volume.resolutions;
+        match volume.order {
+            Progression::Lrcp => {
+                for l in 0..volume.layers {
+                    for r in r0..r1 {
+                        for c in c0..c1 {
+                            for p in 0..precinct_count(tile, c, r) {
+                                out.emit(l, r, c, p, budget)?;
+                            }
                         }
                     }
                 }
             }
-        }
-        Progression::Rlcp => {
-            for r in 0..max_res {
-                for l in 0..layers {
-                    for c in 0..components {
-                        for p in 0..precinct_count(tile, c, r) {
-                            emit(&mut out, l, r, c, p, budget)?;
+            Progression::Rlcp => {
+                for r in r0..r1 {
+                    for l in 0..volume.layers {
+                        for c in c0..c1 {
+                            for p in 0..precinct_count(tile, c, r) {
+                                out.emit(l, r, c, p, budget)?;
+                            }
                         }
                     }
                 }
             }
-        }
-        // The three positional orders walk the reference grid rather than a
-        // precinct index, so a packet's address has to be recovered from a
-        // coordinate. B.12.1.3 to B.12.1.5.
-        Progression::Rpcl | Progression::Pcrl | Progression::Cprl => {
-            positional_order(stream, tile, cod, &mut out, budget)?;
+            // The three positional orders walk the reference grid rather than
+            // a precinct index, so a packet's address has to be recovered
+            // from a coordinate. B.12.1.3 to B.12.1.5.
+            Progression::Rpcl | Progression::Pcrl | Progression::Cprl => {
+                positional_order(stream, tile, &volume, &mut out, budget)?;
+            }
         }
     }
-    Ok(out)
+    Ok(out.packets)
 }
 
-fn emit(
-    out: &mut Vec<Packet>,
-    l: u16,
-    r: usize,
-    c: usize,
-    p: u32,
-    budget: &mut u64,
-) -> Result<(), Refusal> {
-    charge(budget, 1)?;
-    out.push(Packet {
-        layer: l,
-        resolution: u8::try_from(r).map_err(|_| Refusal::Budget("resolutions"))?,
-        component: u16::try_from(c).map_err(|_| Refusal::Budget("components"))?,
-        precinct: p,
-    });
-    Ok(())
+/// The packet sequence as it is built, with A.6.6's "not included again"
+/// rule.
+///
+/// The set is a `BTreeSet` rather than a hash set for the reason every
+/// ordered container in this tree is one: nothing here depends on its
+/// iteration order, but a container whose behaviour is a hash seed is a
+/// container ruling 4 has to argue about, and this one never has to.
+#[derive(Default)]
+struct Emitter {
+    packets: Vec<Packet>,
+    seen: BTreeSet<Packet>,
+}
+
+impl Emitter {
+    fn emit(
+        &mut self,
+        l: u16,
+        r: usize,
+        c: usize,
+        p: u32,
+        budget: &mut u64,
+    ) -> Result<(), Refusal> {
+        // Charged before the duplicate is dropped, because the budget is a
+        // work budget: a POC describing a thousand overlapping volumes costs
+        // the walk whether or not the packets are new.
+        charge(budget, 1)?;
+        let packet = Packet {
+            layer: l,
+            resolution: u8::try_from(r).map_err(|_| Refusal::Budget("resolutions"))?,
+            component: u16::try_from(c).map_err(|_| Refusal::Budget("components"))?,
+            precinct: p,
+        };
+        if self.seen.insert(packet) {
+            self.packets.push(packet);
+        }
+        Ok(())
+    }
 }
 
 fn precinct_count(tile: &Tile, c: usize, r: usize) -> u32 {
@@ -955,15 +1081,16 @@ fn precinct_count(tile: &Tile, c: usize, r: usize) -> u32 {
 fn positional_order(
     stream: &Codestream<'_>,
     tile: &Tile,
-    cod: &super::codestream::Cod,
-    out: &mut Vec<Packet>,
+    volume: &Volume,
+    out: &mut Emitter,
     budget: &mut u64,
 ) -> Result<(), Refusal> {
     let (tx0, ty0, tx1, ty1) = stream.siz.tile_bounds(u32::from(tile.index));
     if tx0 >= tx1 || ty0 >= ty1 {
         return Ok(());
     }
-    let components = tile.components.len();
+    let (vc0, vc1) = volume.components;
+    let (vr0, vr1) = volume.resolutions;
 
     // The projection of one precinct onto the reference grid, per
     // (component, resolution).
@@ -983,23 +1110,26 @@ fn positional_order(
 
     // CPRL walks each component's own positions; RPCL and PCRL share one
     // walk across all of them, which is why the step is a minimum over
-    // whichever components the order is about.
-    let ranges: Vec<(usize, usize)> = match cod.progression {
-        Progression::Cprl => (0..components).map(|c| (c, c + 1)).collect(),
-        _ => vec![(0, components)],
+    // whichever components the order is about. With a POC in force the
+    // component axis is (B-21)'s `CSpod <= i < CEpod` rather than every
+    // component of the tile, so the split is over the volume.
+    let ranges: Vec<(usize, usize)> = match volume.order {
+        Progression::Cprl => (vc0..vc1).map(|c| (c, c + 1)).collect(),
+        _ => vec![(vc0, vc1)],
     };
-    let max_res = tile
-        .components
-        .iter()
-        .map(|c| c.resolutions.len())
-        .max()
-        .unwrap_or(0);
 
     for (c0, c1) in ranges {
         let mut dx = u64::MAX;
         let mut dy = u64::MAX;
         for c in c0..c1 {
-            for r in 0..tile.components[c].resolutions.len() {
+            // The step is the finest precinct the volume will actually visit.
+            // Taking it over resolutions outside `RSpod..REpod` would step
+            // the walk in units no packet of this volume is anchored to, and
+            // the surplus positions would be dropped by `precinct_at`
+            // anyway — but a *coarser* step than the volume needs would skip
+            // precinct origins, so the minimum is over the volume's own
+            // resolutions and not over the tile's.
+            for r in vr0..vr1.min(tile.components[c].resolutions.len()) {
                 if let Some((sx, sy)) = step(c, r) {
                     dx = dx.min(sx.max(1));
                     dy = dy.min(sy.max(1));
@@ -1022,15 +1152,15 @@ fn positional_order(
             y += dy - (y % dy);
         }
 
-        match cod.progression {
+        match volume.order {
             // B.12.1.3: resolution, then position, then component, then
             // layer.
             Progression::Rpcl => {
-                for r in 0..max_res {
+                for r in vr0..vr1 {
                     for &(x, y) in &positions {
                         for c in c0..c1 {
-                            for l in layers_of(cod, tile, c, r, x, y, stream, tx0, ty0) {
-                                emit(out, l.0, r, c, l.1, budget)?;
+                            for l in layers_of(volume, tile, c, r, x, y, stream, tx0, ty0) {
+                                out.emit(l.0, r, c, l.1, budget)?;
                             }
                         }
                     }
@@ -1041,9 +1171,9 @@ fn positional_order(
             Progression::Pcrl => {
                 for &(x, y) in &positions {
                     for c in c0..c1 {
-                        for r in 0..tile.components[c].resolutions.len() {
-                            for l in layers_of(cod, tile, c, r, x, y, stream, tx0, ty0) {
-                                emit(out, l.0, r, c, l.1, budget)?;
+                        for r in vr0..vr1.min(tile.components[c].resolutions.len()) {
+                            for l in layers_of(volume, tile, c, r, x, y, stream, tx0, ty0) {
+                                out.emit(l.0, r, c, l.1, budget)?;
                             }
                         }
                     }
@@ -1054,9 +1184,9 @@ fn positional_order(
             _ => {
                 for &(x, y) in &positions {
                     for c in c0..c1 {
-                        for r in 0..tile.components[c].resolutions.len() {
-                            for l in layers_of(cod, tile, c, r, x, y, stream, tx0, ty0) {
-                                emit(out, l.0, r, c, l.1, budget)?;
+                        for r in vr0..vr1.min(tile.components[c].resolutions.len()) {
+                            for l in layers_of(volume, tile, c, r, x, y, stream, tx0, ty0) {
+                                out.emit(l.0, r, c, l.1, budget)?;
                             }
                         }
                     }
@@ -1072,7 +1202,7 @@ fn positional_order(
 /// loop, so it is written once.
 #[allow(clippy::too_many_arguments)]
 fn layers_of(
-    cod: &super::codestream::Cod,
+    volume: &Volume,
     tile: &Tile,
     c: usize,
     r: usize,
@@ -1083,7 +1213,10 @@ fn layers_of(
     ty0: u32,
 ) -> Vec<(u16, u32)> {
     match precinct_at(stream, tile, c, r, x, y, tx0, ty0) {
-        Some(p) => (0..cod.layers).map(|l| (l, p)).collect(),
+        // (B-21)'s `0 <= l < LEpod`, which for a tile with no POC is
+        // `0 <= l < L` — B.12.1's own bound, since `Volume::whole` puts the
+        // COD's layer count here.
+        Some(p) => (0..volume.layers).map(|l| (l, p)).collect(),
         None => Vec::new(),
     }
 }

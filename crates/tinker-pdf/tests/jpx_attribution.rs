@@ -203,13 +203,15 @@ const REFUSING: usize = 7;
 /// - the two `colr` entries are veraPDF fixtures that are deliberately
 ///   non-conformant, and the budget is a ruling 1 limit rather than a gap.
 ///
-/// So POC, `BYPASS`, `TERMALL` and precision above sixteen bits are reached
+/// So `BYPASS`, `TERMALL` and precision above sixteen bits are reached
 /// by **zero** corpus files, real or fixture.
 ///
 /// RGN, PPM and PPT were on that list until 20 September 2026, when Annex H
-/// and packed packet headers were implemented. **This census did not move
-/// when any of them left it** — same 39 bearing files, same five reasons —
-/// which is the expected answer and is recorded rather than assumed: a
+/// and packed packet headers were implemented, and POC until the 21st, when
+/// A.6.6's progressions became B.12.2's progression order volumes in tier-2.
+/// **This census did not move when any of them left it** — same 39 bearing
+/// files, same 7 refusals, same five reasons, re-run over 5 605 files after
+/// each — which is the expected answer and is recorded rather than assumed: a
 /// capability leaving the refused set can only move these rows if a corpus
 /// file was reaching it, and a census that *had* moved would have meant the
 /// reachability claim was wrong.
