@@ -7,14 +7,19 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 21 September 2026. `cargo test --workspace --no-fail-fast`
-is **4 991 passed, 0 failed, 59 ignored** across 221 suites on
+is **4 999 passed, 0 failed, 59 ignored** across 221 suites on
 `x86_64-pc-windows-msvc`. The suite gained since the last count is
 `jpx_poc.rs`, which T.800's progression order change brought with it; the
-count before it was 4 968 across 220, and the twenty-three tests between the
-two figures are one JPX capability lane's — that file's thirteen, plus seven
-unit tests for A.6.6's marker segment and Table A.32's ranges, two in tier-2
-for B.12.2's progression order volumes, and one that a POC covering
-everything is no refusal at all.
+count before it was 4 968 across 220, and the thirty-one tests between the two
+figures are two lanes' run in parallel. Twenty-three are the JPX capability's —
+that file's thirteen, plus seven unit tests for A.6.6's marker segment and
+Table A.32's ranges, two in tier-2 for B.12.2's progression order volumes, and
+one that a POC covering everything is no refusal at all. The other eight are
+the fuzz findings below, one regression test per finding plus the pins on the
+two contracts they turned out to be about.
+
+This figure is the merged tree's, and neither lane's own was wrong: each
+measured a tree that could not see the other's tests.
 
 The count before *that* was 4 929 across 219, and the thirty-nine tests
 between 4 929 and 4 968 are two JPX capability lanes' — eighteen for RGN,
