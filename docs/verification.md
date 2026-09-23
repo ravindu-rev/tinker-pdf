@@ -352,6 +352,20 @@ did not have the same standing:
   `SDNUMNEWSYMS`. Without that number the bound is a guess, and T.88 does not
   forbid a symbol larger than its page.
 
+  **And the census cannot supply it today, which was found by printing it.**
+  `jbig2_census.rs`'s `Tally` has carried a `max_symbol_pixels` field since it
+  was written, merged across files by `add` and reported by nothing. Printed
+  for the first time on 23 September 2026 it reads **0 over all 117
+  JBIG2-bearing files**, and the reason is that no walk in that file ever
+  reaches a symbol's width and height: the field is declared, merged, and never
+  assigned. So the three yardsticks that section prints — largest
+  `SDNUMNEWSYMS` 2 468, largest `SDNUMEXSYMS` 2 478, largest `SBNUMINSTANCES`
+  4 440 — are every one of them *counts*, and `MAX_JBIG2_SYMBOL_PIXELS` is the
+  one cap of the four with no corpus figure behind it at all. The census now
+  prints `not measured` rather than a zero, and asserts the field is still
+  unassigned, because a zero reads as "no real document comes close" when what
+  it means is "nobody looked".
+
 ### What a green fuzz run does not mean
 
 **Not one of the thirty-nine targets checks that a decode is right.** They
