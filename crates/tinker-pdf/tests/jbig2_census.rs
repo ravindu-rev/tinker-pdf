@@ -686,6 +686,27 @@ fn census_of_the_corpus_jbig2() {
         total.max_exported_symbols
     );
     println!("largest SBNUMINSTANCES    {:>10}", total.max_instances);
+    // **The fourth yardstick is missing, and saying so is the point.**
+    //
+    // `MAX_JBIG2_SYMBOL_PIXELS` is a *pixel* budget, and the three figures
+    // above are counts — of symbols and of instances. Neither bounds the
+    // pixels, so none of them is this cap's yardstick. `Tally` carries a
+    // `max_symbol_pixels` field for it, `add` merges it across files, and
+    // **nothing ever assigns it**: no walk here reaches a symbol's width and
+    // height, so it is structurally zero over all 117 files and always has
+    // been. A cap whose census reports a measurement it never took is worse
+    // than one with no census, because the zero reads as "no real document
+    // comes close" rather than as "nobody looked".
+    //
+    // It is printed as absent rather than as a number, and asserted so, until
+    // something measures it — which is what the jbig2 row in
+    // `docs/verification.md` says has to happen before that row can close.
+    println!("largest symbol pixels       not measured (see the jbig2 row in verification.md)");
+    assert_eq!(
+        total.max_symbol_pixels, 0,
+        "`max_symbol_pixels` is now assigned somewhere — print the figure and \
+         retire this assertion, and take the jbig2 row's measurement with it"
+    );
     let mut worst: Vec<(u32, &str)> = per_file
         .iter()
         .map(|(name, t)| (t.max_instances, name.as_str()))
