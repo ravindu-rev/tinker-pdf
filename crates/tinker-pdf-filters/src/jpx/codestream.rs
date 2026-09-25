@@ -57,8 +57,8 @@
 //! each violation refuses the file.
 
 use super::{
-    Cursor, Refusal, MAX_JPX_COMPONENTS, MAX_JPX_LEVELS, MAX_JPX_PRECISION, MAX_JPX_SAMPLES,
-    MAX_JPX_TILES,
+    passes::Schedule, Cursor, Refusal, MAX_JPX_COMPONENTS, MAX_JPX_LEVELS, MAX_JPX_PRECISION,
+    MAX_JPX_SAMPLES, MAX_JPX_TILES,
 };
 use crate::Limits;
 
@@ -368,12 +368,22 @@ fn parse_poc(body: &[u8], siz: &Siz) -> Result<Vec<Poc>, Refusal> {
 
 /// T.800 Table A.19, the code-block style bits.
 ///
-/// Five of the six change how tier-1 reads a code-block and are refused; the
-/// sixth, `SEGMENTATION_SYMBOLS`, is implemented, because decoding the four
-/// UNIFORM decisions at the end of each cleanup pass and **checking** them is
-/// the one integrity check the format offers for free. A build that decoded
-/// them and discarded them would have thrown away the only thing in JPEG 2000
-/// that says the arithmetic decoder has gone out of step.
+/// **All six are implemented**, and the last two landed together because they
+/// share one mechanism rather than because they are one capability. The note
+/// that used to stand here said `BYPASS` and `TERMALL` both "change where a
+/// coding pass's *bytes* are, not how its decisions are read", and that
+/// half of it was wrong: `TERMALL` really is only about segment boundaries,
+/// but D.6 makes `BYPASS` read some passes as raw bits, which is squarely a
+/// tier-1 change. What they share is B.10.7.2's multiple codeword segments in
+/// the packet header; [`super::passes`] carries the split and says which part
+/// belongs to which bit.
+///
+/// The names are this build's shorthand and not the standard's. T.800 never
+/// writes "BYPASS" or "TERMALL"; Table A.19 spells bit 0 "Selective
+/// arithmetic coding bypass" and bit 2 "Termination on each coding pass", and
+/// D.6 and D.4 are the clauses that say what each one does. Table A.45 spells
+/// the whole byte a second way, as the mnemonic `00sp vtra`, and
+/// `tests::code_block_styles` asserts these six constants against both.
 pub(crate) mod cb_style {
     /// Selective arithmetic coding bypass: raw bits instead of MQ decisions
     /// for some passes.
@@ -389,23 +399,17 @@ pub(crate) mod cb_style {
     pub const PREDICTABLE: u8 = 0x10;
     /// Segmentation symbols at the end of each cleanup pass (D.5).
     pub const SEGMENTATION_SYMBOLS: u8 = 0x20;
-    /// The two this build refuses, and they are refused together for one
-    /// reason: both change where a coding pass's *bytes* are, not how its
-    /// decisions are read. `TERMALL` restarts the arithmetic coder at every
-    /// pass and `BYPASS` codes some passes as raw bits, so a decoder needs a
-    /// length per pass rather than one per code-block — which is a packet
-    /// header change (B.10.7's multiple codeword segments), not a tier-1 one.
-    /// The other three are decisions about context state and are implemented.
-    pub const UNSUPPORTED: u8 = BYPASS | TERMALL;
     /// Every bit Table A.19 defines. A `Scod` byte with anything outside
     /// this is a codestream using a table this build has not read.
     ///
-    /// Enumerated rather than derived from [`UNSUPPORTED`]. It was
+    /// Enumerated rather than derived from a set of unsupported bits. It was
     /// `UNSUPPORTED | SEGMENTATION_SYMBOLS`, which was the same set only while
     /// this build refused five of the six — so implementing three of them
     /// dropped them out of *defined* as well, and a codestream setting nothing
-    /// but `RESET` was refused for using a bit the table does not define. The
-    /// two sets answer different questions and now say so separately.
+    /// but `RESET` was refused for using a bit the table does not define. That
+    /// is the mistake this constant exists to prevent, and it is worth more
+    /// now than it was then: `UNSUPPORTED` is gone entirely, so a set derived
+    /// from it would have emptied out and refused every style bit at once.
     pub const DEFINED: u8 =
         BYPASS | RESET | TERMALL | VERTICALLY_CAUSAL | PREDICTABLE | SEGMENTATION_SYMBOLS;
 }
@@ -553,6 +557,24 @@ impl CodingStyle {
     /// it.
     pub(crate) const fn vertically_causal(&self) -> bool {
         self.cb_style & cb_style::VERTICALLY_CAUSAL != 0
+    }
+
+    /// Table A.19 bit 0, "Selective arithmetic coding bypass" (D.6): the
+    /// significance propagation and magnitude refinement passes from the
+    /// fifth bit-plane down carry raw bits rather than MQ decisions.
+    pub(crate) const fn bypass(&self) -> bool {
+        self.cb_style & cb_style::BYPASS != 0
+    }
+
+    /// Table A.19 bit 2, "Termination on each coding pass" (D.4, Table D.8):
+    /// every pass is its own codeword segment.
+    pub(crate) const fn terminate_all(&self) -> bool {
+        self.cb_style & cb_style::TERMALL != 0
+    }
+
+    /// The two bits above as one value, which is all tier-1 and tier-2 want.
+    pub(crate) const fn schedule(&self) -> Schedule {
+        Schedule::new(self.bypass(), self.terminate_all())
     }
 
     /// `(PPx, PPy)` at resolution `r`.
@@ -1594,11 +1616,6 @@ fn parse_style(c: &mut Cursor<'_>, precincts: bool, siz: &Siz) -> Result<CodingS
         ));
     }
     let (cb_width, cb_height) = (cb_width as u8, cb_height as u8);
-    if style & cb_style::UNSUPPORTED != 0 {
-        return Err(Refusal::Feature(
-            "a Table A.19 code-block style this build does not implement",
-        ));
-    }
     if style & !cb_style::DEFINED != 0 {
         return Err(Refusal::Feature(
             "a code-block style bit Table A.19 does not define",

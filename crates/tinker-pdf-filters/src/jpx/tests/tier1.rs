@@ -27,7 +27,7 @@ use crate::jpx::tier1::{
     zero_coding_context, CodingStyle, Pass, MAGNITUDE_REFINEMENT, MAX_PASSES, RUN_LENGTH,
     SIGN_CODING, UNIFORM, ZERO_CODING,
 };
-use crate::jpx::tier2::Orientation;
+use crate::jpx::tier2::{Orientation, Segment};
 use crate::mq::MqDecoder;
 
 /// Table D.1, the LL and LH column, all nine rows.
@@ -402,7 +402,7 @@ fn a_code_block_round_trips_through_all_three_passes() {
             let mut contexts = initial_contexts();
             let mut work = u64::MAX;
             let got = decode_code_block(
-                &data,
+                &Segment::single(&data, passes),
                 w as u32,
                 h as u32,
                 passes,
@@ -465,7 +465,7 @@ fn a_segmentation_symbol_catches_a_decoder_out_of_step() {
     let mut contexts = initial_contexts();
     let mut work = u64::MAX;
     let got = decode_code_block(
-        &corrupted,
+        &Segment::single(&corrupted, passes),
         4,
         4,
         passes,
@@ -526,7 +526,7 @@ fn a_truncated_code_block_records_the_depth_each_coefficient_reached() {
         let mut contexts = initial_contexts();
         let mut work = u64::MAX;
         let got = decode_code_block(
-            &data,
+            &Segment::single(&data, cut),
             4,
             4,
             cut,
@@ -567,7 +567,7 @@ fn a_truncated_code_block_records_the_depth_each_coefficient_reached() {
         let mut contexts = initial_contexts();
         let mut work = u64::MAX;
         let got = decode_code_block(
-            &data,
+            &Segment::single(&data, cut),
             4,
             4,
             cut,
@@ -708,7 +708,7 @@ fn a_code_block_style_that_changes_context_state_changes_what_is_decoded() {
             let mut contexts = initial_contexts();
             let mut work = u64::MAX;
             decode_code_block(
-                &data,
+                &Segment::single(&data, passes),
                 8,
                 8,
                 passes,
@@ -754,7 +754,7 @@ fn predictable_termination_is_accepted_and_decodes_identically() {
     let mut contexts = initial_contexts();
     let mut work = u64::MAX;
     let got = decode_code_block(
-        &data,
+        &Segment::single(&data, passes),
         4,
         4,
         passes,

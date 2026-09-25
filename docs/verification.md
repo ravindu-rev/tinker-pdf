@@ -6,12 +6,28 @@ fingerprint, render quality is a perceptual budget, coverage of the real
 world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
-Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 21 September 2026. `cargo test --workspace --no-fail-fast`
-is **4 999 passed, 0 failed, 59 ignored** across 221 suites on
-`x86_64-pc-windows-msvc`. The suite gained since the last count is
-`jpx_poc.rs`, which T.800's progression order change brought with it; the
-count before it was 4 968 across 220, and the thirty-one tests between the two
-figures are two lanes' run in parallel. Twenty-three are the JPX capability's —
+Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 23 September 2026. `cargo test --workspace --no-fail-fast`
+is **5 018 passed, 0 failed, 59 ignored** across 221 suites on
+`x86_64-pc-windows-msvc`. The count before it was 4 999, and the **nineteen**
+tests between the two are Table A.19's last two code-block styles: fifteen in
+`tinker-pdf-filters`'s `jpx::tests::code_block_styles` for B.10.7.1's and
+B.10.7.2's worked examples, J.10's two published packet headers, the bracket
+they put on D.6's boundary and the three paths the injection campaign found
+uncovered, and four in `jpx::passes` for Tables D.8 and D.9 row by row. The
+suite count is unchanged at 221 because both live in the filters crate's lib
+binary rather than in a file of their own — which is where the evidence is: a
+five-byte bit string and one code-block's coefficients both sit below
+`jpx_decode`.
+
+**This one is a lane's own tree and not the merged one**, which is the
+difference the paragraph below had to record the last time two lanes ran at
+once. It is `230296c` plus this change, and it does not include the JBIG2
+census work that reached `develop` the same day.
+
+The count before *that* was 4 968 across 220, and the suite gained between
+them was `jpx_poc.rs`, which T.800's progression order change brought with it;
+the thirty-one tests between those two figures are two lanes' run in
+parallel. Twenty-three are the JPX capability's —
 that file's thirteen, plus seven unit tests for A.6.6's marker segment and
 Table A.32's ranges, two in tier-2 for B.12.2's progression order volumes, and
 one that a POC covering everything is no refusal at all. The other eight are
@@ -1241,8 +1257,49 @@ stood there for a year was protecting against — the identical swapped bytes
 with the POC removed decode **cleanly and silently** to nine different
 samples.
 
-None of the three files invokes anything and none is a round trip through
-code written here.
+`code_block_styles.rs` extends them a third way, and this lever is Annex B's
+rather than Annex J's. Table A.19's last two code-block styles — D.6's
+selective arithmetic coding bypass and D.4's termination on each coding pass —
+act *inside* a packet, which no rearrangement of J.10 can reach. But
+**B.10.7.2's own NOTE publishes a worked example**: a code-block's five
+included passes, the set `T` of terminated ones D.6 produces, the four lengths
+that are then signalled, their pass counts, and a valid 39-bit sequence coding
+all of it. That is the standard's bits in and the standard's numbers out, fed
+to the shipped packet-header reader, with `T` derived from this build's Table
+D.9 transcription rather than written into the test — so the four lengths only
+come back in order if the transcription puts terminations where Table D.9
+does. B.10.7.1's NOTE 1 does the same for the single-segment case, four layers
+deep, including two `Lblock` increments.
+
+J.10 then brackets D.6's boundary without moving a byte, because `K` — how
+many lengths a packet header signals — is a function of the pass count. J.10's
+second code-block has seven coding passes, all before the boundary, so its
+published header must read identically with the style bit set and its three
+published bytes must still give J.10.4's "1, 5, 1, 0"; its first has sixteen,
+which straddle it, so B.10.7.2 wants five lengths where Table J.20 prints one
+and the published header stops parsing. Together those put the boundary in
+7..=15, and ten is transcribed from D.6 and Table D.9.
+
+**What this does not cover is `TERMALL`, and the file says so in its header.**
+T.800 publishes no codestream with a raw or per-pass-terminated coding pass in
+it, and J.10's two code-blocks carry sixteen and seven passes against headers
+printing one length each, so `TERMALL` cannot be flipped onto them: sixteen
+and seven lengths would have to be re-encoded, and an encoder this repository
+wrote agreeing with a decoder this repository wrote is a statement about this
+repository. `TERMALL` is held up by Table D.8 transcribed and asserted as data,
+by B.10.7.2's rule turning that table into `K`, and by sharing that one
+function with the half B.10.7.2's NOTE does adjudicate. That is weaker, and
+naming the weaker half is the point of this section.
+
+None of the four files invokes anything and none is a round trip through an
+encoder written here. One test in the fourth is nonetheless a comparison of
+two inputs this repository authored — `a_contribution_split_across_two_layers`
+builds the same twelve code-block bytes as a one-layer and a two-layer
+codestream and requires the same picture — and it says so in its own doc
+comment. It is there because B.10.7.2's multi-layer merge is stated in prose
+with no bytes published for it, and because the injection campaign fired
+nothing against that path until it existed. A statement about bookkeeping,
+checked against itself, is worth having and is not worth calling evidence.
 
 **Whether a picture may be compared against an outside viewer, decided.**
 *5 September 2026, ruling 13's amendment.* The first of the four properties

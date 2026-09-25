@@ -48,9 +48,14 @@
 //! type crosses into here (ruling 8).
 //!
 //! **What is refused is enumerated rather than defaulted**, and the list is
-//! the plan's, three entries shorter than it was written: a progression order
-//! Table A.16 does not define or a code-block style this build does not
-//! implement, an `Srgn` Table A.25 reserves, any Part 2 marker, SOP or EPH
+//! the plan's with three of its entries narrowed from *a capability this
+//! build lacks* to *a value the standard reserves* — POC, RGN and, on
+//! 23 September 2026, Table A.19's code-block styles. Each narrowing is
+//! visible in the refusal string itself and in `tests::refusals`, which is
+//! why they are named here rather than counted against a plan no longer in
+//! the tree. What is refused: a progression order
+//! Table A.16 does not define or a code-block style bit Table A.19 does not
+//! define, an `Srgn` Table A.25 reserves, any Part 2 marker, SOP or EPH
 //! outside the bit stream, tile-parts out of order, a `colr` this build
 //! cannot map, precision above 16 bits, channels of differing bit depth, and
 //! any of the three budgets above. Every entry is reached by a test in
@@ -62,6 +67,16 @@
 //! shift is H.1's Maxshift in the dequantiser — so what is left of each is a
 //! *value inside* a segment rather than the segment.
 //!
+//! **Table A.19 has left it entirely**, and it is the one entry that went to
+//! zero rather than narrowing. All six code-block styles are decoded: the
+//! three that are decisions about context state, the segmentation symbol that
+//! is an integrity check, and — last, on 23 September 2026 — the selective
+//! arithmetic coding bypass of D.6 and the termination on each coding pass of
+//! D.4, which together are B.10.7.2's multiple codeword segments plus a raw
+//! bit reader. What is left of the entry is a style **bit** Table A.19 does
+//! not define, which is bits 6 and 7 and a value rather than a capability.
+//! [`passes`] holds the split and says which half belonged to which bit.
+//!
 //! Measured against gap 23's nineteen real JPX files: fourteen decode, four
 //! refuse by name, and one is never asked for — its image sits two form
 //! XObjects deep and a form's own `/Resources` are consulted nowhere in this
@@ -71,6 +86,7 @@
 pub(crate) mod boxes;
 pub(crate) mod codestream;
 pub(crate) mod colour;
+pub(crate) mod passes;
 pub(crate) mod tier1;
 pub(crate) mod tier2;
 pub(crate) mod wavelet;
@@ -261,8 +277,10 @@ pub enum Refusal {
     /// runs past its parent.
     Structure(&'static str),
     /// A coding feature this build does not implement: a progression order,
-    /// a Table A.19 code-block style bit, a quantisation style, an `Rsiz`
-    /// capability.
+    /// a quantisation style, an `Rsiz` capability — or a **value** a table
+    /// reserves, which is what most of this variant now carries. Table A.19's
+    /// code-block styles were the last capability here and all six are
+    /// decoded; what fires for A.19 now is a bit the table does not define.
     Feature(&'static str),
     /// Component precision above [`MAX_JPX_PRECISION`]. T.800 Table A.11
     /// allows 38.
