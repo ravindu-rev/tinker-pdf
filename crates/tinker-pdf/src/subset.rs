@@ -242,6 +242,17 @@ pub enum UntouchedReason {
     /// The font is written directly into a resource dictionary rather than by
     /// reference, so there is no object for a rewrite to address.
     NotAnObject,
+    /// A `/FontDescriptor` embeds the program and **no font dictionary in the
+    /// document names that descriptor**, so there is no font, no encoding and
+    /// no glyph usage — nothing to subset it against.
+    ///
+    /// It is reported rather than passed over because a rewrite keeps it:
+    /// unreferenced objects survive a `Rewrite` unless `garbage_collect` is
+    /// asked for, so the file that comes out still carries every outline the
+    /// program has. A caller reading this list for disclosure has to see it,
+    /// and until the corpus census looked, nothing said it was there — 73
+    /// programs across eight documents of the fetched corpora.
+    NoFontNamesIt,
 }
 
 impl core::fmt::Display for UntouchedReason {
@@ -258,6 +269,7 @@ impl core::fmt::Display for UntouchedReason {
             UntouchedReason::ScopeNotWalked => "no walked resource dictionary names it",
             UntouchedReason::Type3Resource => "a Type 3 font's own /Resources names it (9.6.5)",
             UntouchedReason::NotAnObject => "it is written directly into a resource dictionary",
+            UntouchedReason::NoFontNamesIt => "no font dictionary in the document names it",
         })
     }
 }
@@ -870,6 +882,14 @@ fn rewrite(editor: &mut DocumentEditor, doc: &Arc<CosDocument>, usage: &Usage) -
         }
     }
 
+    // Every program some font in the document reaches, before the jobs are
+    // consumed below. What is left over is what `orphans` reports.
+    let covered: BTreeSet<u32> = jobs
+        .keys()
+        .chain(usage.direct.keys())
+        .map(|program| program.num)
+        .collect();
+
     for (program, job) in jobs {
         let Some(bytes) = editor.stream_bytes(program) else {
             continue;
@@ -915,6 +935,8 @@ fn rewrite(editor: &mut DocumentEditor, doc: &Arc<CosDocument>, usage: &Usage) -
             glyphs: job.glyphs.len(),
         });
     }
+    report.untouched.extend(orphans(editor, doc, &covered));
+
     // Object order, as both fields promise. The jobs are already in it — a
     // `BTreeMap` keyed by the program — but the directly-written fonts above
     // were appended before the loop ran.
@@ -1010,6 +1032,92 @@ fn sweep(editor: &DocumentEditor, doc: &Arc<CosDocument>) -> Vec<Site> {
     // would make every composite font's program `ScopeNotWalked`.
     sites.retain(|site| !descendants.contains(&site.font.num));
     sites
+}
+
+/// Font programs the document embeds that no font dictionary reaches.
+///
+/// [`sweep`] starts at `/Type /Font` and walks down to the program, so a
+/// program whose descriptor nothing names is invisible to it — there is no
+/// font, so there is no encoding and no glyph usage, and nothing to subset
+/// against. That much is correct. What was wrong is that such a program was
+/// also **unreported**: a `Rewrite` keeps unreferenced objects unless
+/// `garbage_collect` asks otherwise, so the outlines are still in the output
+/// and the one list a caller reads to find out did not mention them.
+///
+/// Found by the corpus census rather than by a fixture (73 programs in eight
+/// of the 5 605 fetched documents), which is the half of this a document this
+/// project wrote could not have shown: this project's writer does not emit
+/// descriptors nothing names.
+///
+/// The test is "carries a `/FontFile*` reference and is not itself a font
+/// dictionary", not "`/Type /FontDescriptor`". The key that names a program is
+/// the evidence that there is one; Table 122 requires the `/Type` and real
+/// producers omit it, and a descriptor skipped for a missing `/Type` is
+/// exactly the disclosure this is here to name.
+fn orphans(
+    editor: &DocumentEditor,
+    doc: &Arc<CosDocument>,
+    covered: &BTreeSet<u32>,
+) -> Vec<Untouched> {
+    let mut out: Vec<Untouched> = Vec::new();
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+
+    let numbers: Vec<u32> = doc
+        .xref()
+        .iter()
+        .map(|(number, _)| number)
+        .take(MAX_SWEPT_OBJECTS)
+        .collect();
+
+    for number in numbers {
+        let Some(object) = editor.get(ObjRef::new(number, 0)) else {
+            continue;
+        };
+        // A plain dictionary, never a stream: a descriptor is one (9.8.1), and
+        // a stream's dictionary carrying a `/FontFile*` would be a stream that
+        // embeds a font program, which is not a thing.
+        let Object::Dict(dict) = &object else {
+            continue;
+        };
+        let kind = dict
+            .get_name(doc.intern(b"Type"))
+            .and_then(|n| doc.name_bytes(n));
+        if kind.as_deref() == Some(b"Font".as_slice()) {
+            continue;
+        }
+        let Some(key) = program_key(doc, dict) else {
+            continue;
+        };
+        let name = match key {
+            cos_font::ProgramKey::FontFile => b"FontFile".as_slice(),
+            cos_font::ProgramKey::FontFile2 => b"FontFile2",
+            cos_font::ProgramKey::FontFile3 => b"FontFile3",
+        };
+        let Some(program) = dict.get_ref(doc.intern(name)) else {
+            continue;
+        };
+        if covered.contains(&program.num) || !seen.insert(program.num) {
+            continue;
+        }
+        let Some(bytes) = editor.stream_bytes(program) else {
+            continue;
+        };
+        // 9.8.1: the descriptor's own `/FontName`, since there is no font
+        // dictionary to take a `/BaseFont` from.
+        let base_font = dict
+            .get_name(doc.intern(b"FontName"))
+            .and_then(|n| doc.name_bytes(n))
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+
+        out.push(Untouched {
+            program,
+            base_font,
+            bytes: bytes.len(),
+            reason: UntouchedReason::NoFontNamesIt,
+        });
+    }
+    out
 }
 
 /// Which `/FontFile*` key a descriptor carries (9.9, Table 126).
@@ -1170,7 +1278,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests_support {
+pub(crate) mod tests_support {
     use super::*;
 
     pub use tinker_pdf_cos::{DocumentBuilder, WriteMode, WriteOptions};
@@ -2135,6 +2243,53 @@ mod document_refusals {
             only_program(&open(after)).len(),
             whole,
             "the program went through as it was"
+        );
+    }
+
+    /// A descriptor whose font dictionary is gone.
+    ///
+    /// There is then no font, no encoding and no glyph usage — nothing to
+    /// subset the program against — but a `Rewrite` keeps the object, so
+    /// every outline it has is in the output. Ruling 10: it is named.
+    ///
+    /// **The corpus found this, not this fixture.** 73 programs across eight
+    /// of the 5 605 fetched documents are embedded by a descriptor no font
+    /// dictionary names, and nothing here emits such a document — which is
+    /// why the fixture below has to delete the font by hand, and why the
+    /// census in `crates/tinker-pdf/tests/cff_subset_census.rs` is the
+    /// evidence that real producers write them.
+    #[test]
+    fn a_program_no_font_dictionary_names_is_left_whole_and_reported() {
+        let built = whole_face_document(&[(40.0, "Handgloves")]);
+        let doc = open(built);
+        let whole = only_program(&doc).len();
+        let font = only_font(&doc);
+
+        // The font dictionary alone. Its descriptor and the program stream
+        // stay exactly as they were, which is the shape the corpus has.
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        editor.delete(font);
+
+        let (after, report) = subset(saved(&editor));
+        assert_eq!(report.subsetted, Vec::new());
+        assert_eq!(report.untouched.len(), 1, "{:?}", report.untouched);
+        assert_eq!(report.untouched[0].reason, UntouchedReason::NoFontNamesIt);
+        assert_eq!(report.untouched[0].bytes, whole);
+        assert_eq!(
+            report.untouched[0].base_font, "LiberationSerif",
+            "9.8.1: the descriptor's own /FontName, since there is no /BaseFont"
+        );
+        assert_eq!(
+            report.untouched[0].to_string(),
+            format!(
+                "/LiberationSerif left whole ({whole} bytes): no font dictionary in the \
+                 document names it"
+            )
+        );
+        assert_eq!(
+            only_program(&open(after)).len(),
+            whole,
+            "and it is still in the file, which is the reason to say so"
         );
     }
 

@@ -12,6 +12,14 @@
 pub struct Sfnt<'a> {
     data: &'a [u8],
     tables: Vec<(u32, u32, u32)>,
+    /// The `sfntVersion` of the directory these tables came from.
+    ///
+    /// **Of the directory, not of the file**, and for a collection those are
+    /// different: the file begins `ttcf` and the face begins `0x00010000`.
+    /// Anything rebuilding a single font out of these tables has to declare
+    /// the second, and the only way to get the first was to read byte zero —
+    /// which is what [`crate::subset`] used to do.
+    version: u32,
     /// Units per em from `head`; 1000 when the table is missing or absurd.
     pub units_per_em: u16,
     /// Number of `hmtx` entries with their own advance, from `hhea`.
@@ -62,6 +70,7 @@ impl<'a> Sfnt<'a> {
         let mut sfnt = Sfnt {
             data,
             tables,
+            version: tag,
             units_per_em: 1000,
             num_h_metrics: 0,
         };
@@ -77,6 +86,16 @@ impl<'a> Sfnt<'a> {
         }
 
         Some(sfnt)
+    }
+
+    /// The `sfntVersion` of the directory the tables came from: `0x00010000`,
+    /// `true` or `OTTO`, and never `ttcf`.
+    ///
+    /// [`Sfnt::parse`] refuses anything else, so this is one of exactly three
+    /// values and is the right thing for a rebuilt single font to declare.
+    #[must_use]
+    pub fn version(&self) -> u32 {
+        self.version
     }
 
     /// One table's bytes, by tag.

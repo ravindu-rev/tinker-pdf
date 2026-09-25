@@ -164,6 +164,72 @@ Encrypting or linearizing takes the same call with `encryption:
 Some(Encryption { .. })` or `linearize: true` on a `Rewrite`
 ([encryption](encryption.md) shows the encrypted form).
 
+**Two doors, and the second one subsets.** `DocumentEditor::save` above is
+`tinker-pdf-cos`'s, and it writes every embedded font program through exactly
+as it arrived. `tinker_pdf::write::save(&mut editor, &SaveOptions) -> Saved` is
+the facade's, and it runs `subset::apply` first **unless asked not to** —
+cutting every embedded program down to the glyphs the document still draws
+([fonts](fonts.md), [editing](editing.md)). `SaveOptions` is `WriteOptions`
+verbatim plus one field, `fonts: FontPolicy`, whose default is
+`FontPolicy::Subset`; `FontPolicy::Keep` is the other value and there is no
+third.
+
+```rust
+use tinker_pdf::write::{save, SaveOptions};
+
+let mut editor = doc.editor();
+// ... edits, a redaction, whatever ...
+let saved = save(&mut editor, &SaveOptions::default());
+if !saved.fonts.removed() {
+    // Some program went through whole; the report names each and why.
+    for whole in saved.fonts.report().into_iter().flat_map(|r| &r.untouched) {
+        eprintln!("{whole}");
+    }
+}
+std::fs::write("out.pdf", &saved.bytes)?;
+```
+
+**Why the switch is not on `WriteOptions`,** which is the obvious place.
+`WriteOptions` lives in `tinker-pdf-cos`; the subsetting pass lives in the
+facade, because it is driven by the interpreter's own glyph walk — pages, form
+XObjects at any depth, Type 3 glyph procedures, every state of every `/AP`.
+`tinker-pdf-cos` depends on neither the interpreter nor the facade and
+`cargo xtask dag` holds that direction, so a `WriteOptions::subset_fonts: bool`
+would be a flag the crate carrying it cannot act on. Every caller who wrote
+through `DocumentEditor::save` — the door this page documents — would set it,
+get no subsetting, and be told nothing; and the caller who reaches for that
+flag is by definition the caller redacting something. A silent flag on the
+disclosure path is worse than no flag, so there is none: `WriteOptions` has
+seven fields, all of them about bytes on disk, and its own documentation says
+why there is no eighth. Moving the subsetting down into `tinker-pdf-cos`
+instead would mean moving the interpreter down or writing a second glyph
+resolver there, and a second answer to "what does this code decode to" is a
+second engine.
+
+**`Saved` states what happened**, because the caller has no other way to find
+out. It is `#[must_use]`, and `Saved::fonts` is a `SubsetOutcome` with three
+values rather than a `bool`: `Kept` (nothing was asked for), `Cut(report)` (the
+pass ran and this was a rewrite) and `CutButTheOriginalsRemain(report)` — a
+subset taken before an **incremental** save, which appends, so every original
+program is still in the prefix at its original offset. That combination is not
+refused, because a caller may want a viewer to use the smaller program while a
+signature over the prefix survives; it is named, and
+`SubsetOutcome::removed()` is false for it.
+
+**`removed()` is a question about the file, not about whether the pass ran.**
+It is true only for a `Cut` whose report leaves *nothing* whole, because a
+program written through entire carries every outline it had — including the
+ones a redaction has just removed the text of. All eight `UntouchedReason`s
+are good reasons to keep a program and none of them is a reason to tell a
+caller the disclosure is gone, so a non-empty `untouched` is `false` here
+whatever is in it. `false` is the ordinary answer rather than a failure: over
+the fetched corpora 4 950 of 10 832 programs went through whole, 3 406 of them
+because the rebuild came out no smaller than the producer's own subset. It is
+an instruction to read the report, which names each one (ruling 10).
+`DocumentEditor::save_signed` has no facade door of its own for the same
+reason: signing is incremental by definition, so subsetting into it could never
+remove anything.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
@@ -172,6 +238,8 @@ Some(Encryption { .. })` or `linearize: true` on a `Rewrite`
 | Linearizing a document with no catalog or no pages | none — `linearize` returns no layout and the ordinary rewrite is emitted | there is no first page to put first, and a file claiming `/Linearized` falsely is worse than an ordinary one | Annex F |
 | `object_streams` under `linearize` | none — ignored when linearization succeeds | packing page one's objects into a container with everything else is the opposite of the layout's point | 7.5.7 |
 | Re-compressing a stream that declares a `/Filter` | none — handed through untouched, asserted in both directions | the dictionary is the only signal the bytes are already encoded; wrapping them again yields a stream no reader can undo | [filters](filters.md) |
+| A font-subsetting switch on `WriteOptions` | none, and deliberately — the field does not exist and `WriteOptions`' own doc comment says why | the pass is driven by the interpreter, which `tinker-pdf-cos` is below; a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts` | [fonts](fonts.md) |
+| Subsetting that *removes* anything on an incremental save | `SubsetOutcome::CutButTheOriginalsRemain`, and `removed()` is false | 7.5.6: the output starts with the original bytes, the original font programs among them. The pass still runs, because the smaller programs are what a reader resolves — but nothing has left the file | 7.5.6 |
 
 ## Verified
 
@@ -220,6 +288,28 @@ parser reading this project's own writer, so the one thing it cannot
 establish is that anybody else accepts these files. The qpdf oracle that
 used to make that claim is gone under ruling 13
 ([verification](../verification.md)).
+
+The facade's door carries seven of its own in
+`crates/tinker-pdf/src/write.rs`. `the_default_save_cuts_the_programs_down`
+and `keeping_is_asked_for_by_name_and_reported_as_kept` are the two policies;
+`the_two_doors_differ_and_the_difference_is_pinned` holds them apart — the
+same editor written through `DocumentEditor::save` carries the whole vendored
+face and written through `write::save` does not, so the difference between the
+two doors is a tested fact rather than a sentence on this page — and
+`an_incremental_save_says_the_originals_are_still_in_the_file` asserts the
+prefix invariant and the outcome variant together.
+
+The other three are about disclosure, which is what the door is for.
+`a_redaction_saved_the_ordinary_way_does_not_carry_the_removed_glyphs` redacts
+a line and then saves with `SaveOptions::default()` — no policy named, nothing
+asked for — and reads the removed letters' absence out of the output program's
+own `loca` and `glyf`;
+`keeping_the_programs_leaves_the_redacted_letters_outlines_in_the_file` is the
+counterfactual under `FontPolicy::Keep`, so "the default is what changes this"
+is measured rather than asserted; and
+`a_program_left_whole_means_the_disclosure_is_not_out_of_the_file` pins
+`removed()` against a report with one `FieldResource` entry in it, which is
+the case where "the pass ran" and "the file is clean" come apart.
 
 `crates/tinker-pdf-cos/tests/encrypt_on_save.rs` round-trips encrypted
 output ([encryption](encryption.md)); `tests/page_operations.rs` and the

@@ -39,6 +39,7 @@ pub mod signature;
 pub mod structure;
 pub mod subset;
 pub mod verdict;
+pub mod write;
 pub mod xps;
 
 use std::sync::Arc;
@@ -311,6 +312,14 @@ pub use verdict::{
     Chain, CmsState, DocumentDigest, SignatureCheck, SignerDescription, TrustAnchors, Unchecked,
     Verdict, Weakness,
 };
+/// Saving, with the font policy attached to the save rather than left to the
+/// caller's memory.
+///
+/// The function stays behind [`write::save`], as [`subset::apply`] does: a
+/// bare `save` at the crate root next to [`tinker_pdf_cos::DocumentEditor`]'s
+/// own `save` would be two doors with one name, and which door you used is
+/// the thing this module exists to make visible.
+pub use write::{FontPolicy, SaveOptions, Saved, SubsetOutcome};
 /// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
 pub use xps::{Dialect, XpsElementDefect, XpsPageDefect};
 

@@ -211,13 +211,13 @@ pub fn subset(program: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
         return crate::cff_subset::subset_cff(program, glyphs);
     };
     if sfnt.table(TAG_GLYF).is_none() && sfnt.table(TAG_CFF).is_some() {
-        return subset_opentype_cff(program, &sfnt, glyphs);
+        return subset_opentype_cff(&sfnt, glyphs);
     }
-    subset_truetype(program, &sfnt, glyphs)
+    subset_truetype(&sfnt, glyphs)
 }
 
 /// The `OpenType/CFF` route: the `CFF ` table subsetted, the sfnt rebuilt.
-fn subset_opentype_cff(program: &[u8], sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
+fn subset_opentype_cff(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
     let cff = crate::cff_subset::subset_cff(sfnt.table(TAG_CFF)?, glyphs)?;
 
     let mut tables: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -242,11 +242,11 @@ fn subset_opentype_cff(program: &[u8], sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) 
         tables.push((tag, data));
     }
     tables.sort_by_key(|(tag, _)| *tag);
-    Some(assemble(program, &tables))
+    Some(assemble(sfnt.version(), &tables))
 }
 
 /// The `glyf`/`loca` route.
-fn subset_truetype(program: &[u8], sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
+fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
     let glyf = sfnt.table(TAG_GLYF)?;
     sfnt.table(TAG_LOCA)?;
     let head = sfnt.table(TAG_HEAD)?;
@@ -322,18 +322,25 @@ fn subset_truetype(program: &[u8], sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> O
     }
     tables.sort_by_key(|(tag, _)| *tag);
 
-    Some(assemble(program, &tables))
+    Some(assemble(sfnt.version(), &tables))
 }
 
 /// Writes the table directory and the tables, with the checksums a validator
 /// will look at.
-fn assemble(program: &[u8], tables: &[(u32, Vec<u8>)]) -> Vec<u8> {
+///
+/// `version` is the `sfntVersion` the output declares, and it is the *face's*
+/// rather than the file's. The two differ for a TrueType Collection, and
+/// taking it from byte zero of the original was a defect the corpus census
+/// found: a `/FontFile2` carrying a `ttcf` came out of here as a single-font
+/// directory that still said `ttcf`, so [`Sfnt::parse`] read the first table
+/// record's tag as a font offset and refused the program this crate had just
+/// written. Two documents in the fetched corpora embed one, and the text they
+/// draw through it would have rendered as nothing at all. [`Sfnt::version`]
+/// is the directory's own, which is what every table here came from.
+fn assemble(version: u32, tables: &[(u32, Vec<u8>)]) -> Vec<u8> {
     let count = tables.len() as u16;
     let mut out = Vec::new();
 
-    // The version the original declared, so a collection's first face stays
-    // whatever it was.
-    let version = be32(program, 0).unwrap_or(0x0001_0000);
     out.extend_from_slice(&version.to_be_bytes());
     out.extend_from_slice(&count.to_be_bytes());
 
@@ -550,7 +557,7 @@ mod tests {
             t.sort_by_key(|(tag, _)| *tag);
             t
         };
-        assemble(&0x0001_0000u32.to_be_bytes(), &tables)
+        assemble(0x0001_0000, &tables)
     }
 
     #[test]
@@ -704,16 +711,89 @@ mod tests {
         );
     }
 
+    /// `face` as the only member of a TrueType Collection.
+    ///
+    /// The header is 16 bytes — `ttcf`, a version, the number of fonts and
+    /// one offset — and every table record in the face then has to move by
+    /// those 16, because a member's table offsets are measured from the start
+    /// of the **collection** and not of the member. That layout is the
+    /// OpenType specification's; what this file adjudicates is only what this
+    /// crate writes when it is handed one.
+    ///
+    /// The bug this exists for is not hypothetical and was not found here:
+    /// `crates/tinker-pdf/tests/cff_subset_census.rs` found it in two
+    /// documents of the fetched corpora, which is third-party bytes and the
+    /// only evidence that says real producers embed collections at all.
+    fn collection_of(face: &[u8]) -> Vec<u8> {
+        const HEADER: u32 = 16;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"ttcf");
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.extend_from_slice(&HEADER.to_be_bytes());
+        out.extend_from_slice(face);
+
+        let count = be16(face, 4).expect("the face has a table count");
+        for index in 0..usize::from(count) {
+            let at = HEADER as usize + 12 + index * 16;
+            let offset = be32(&out, at + 8).expect("the record is present");
+            out[at + 8..at + 12].copy_from_slice(&(offset + HEADER).to_be_bytes());
+        }
+        out
+    }
+
+    /// A collection comes out a *font*, not a collection.
+    ///
+    /// `Sfnt::parse` reads a `ttcf` by taking the first member, so everything
+    /// assembled here came from that member's directory — and the output is a
+    /// single flat directory, which must therefore declare that member's own
+    /// `sfntVersion`. Declaring the file's instead produced bytes claiming to
+    /// be a collection whose first member began at the offset spelled by its
+    /// own first table tag: unreadable, by this crate and by any other.
+    #[test]
+    fn a_collection_is_rebuilt_as_the_face_it_was_read_as() {
+        let collection = collection_of(&font(8));
+        assert_eq!(&collection[..4], b"ttcf", "the fixture is a collection");
+        assert!(
+            Sfnt::parse(&collection).is_some(),
+            "and one this crate reads, or the test below proves nothing"
+        );
+
+        let wanted: BTreeSet<u16> = [1u16, 3].into_iter().collect();
+        let out = subset(&collection, &wanted).expect("a collection subsets");
+
+        assert_eq!(
+            be32(&out, 0),
+            Some(0x0001_0000),
+            "the output declares the member's version, not the file's"
+        );
+        let sfnt = Sfnt::parse(&out).expect("the subset is a font this crate can read");
+        assert_eq!(
+            be16(sfnt.table(0x6D61_7870).expect("maxp"), 4),
+            Some(8),
+            "and the glyph identifiers did not move"
+        );
+        for glyph in &wanted {
+            let outline = crate::glyf::outline(&sfnt, *glyph).unwrap_or_default();
+            assert!(
+                !outline.segments.is_empty(),
+                "glyph {glyph} was asked for and must still draw"
+            );
+        }
+        let dropped = crate::glyf::outline(&sfnt, 5).unwrap_or_default();
+        assert!(
+            dropped.segments.is_empty(),
+            "glyph 5 was not asked for and must draw nothing"
+        );
+    }
+
     #[test]
     fn a_program_that_is_not_truetype_is_refused_rather_than_mangled() {
         assert!(subset(b"", &BTreeSet::new()).is_none());
         assert!(subset(b"not a font at all", &BTreeSet::new()).is_none());
         // A valid directory with no `glyf`: a CFF-flavoured OpenType, which
         // needs its own charstring index rebuilt and is not this.
-        let stripped = assemble(
-            &0x4F54_544Fu32.to_be_bytes(),
-            &[(0x6865_6164, vec![0u8; 54])],
-        );
+        let stripped = assemble(0x4F54_544F, &[(0x6865_6164, vec![0u8; 54])]);
         assert!(subset(&stripped, &BTreeSet::new()).is_none());
     }
 

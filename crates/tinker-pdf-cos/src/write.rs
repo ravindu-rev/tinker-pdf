@@ -46,6 +46,28 @@ pub struct Encryption {
 }
 
 /// Options for writing.
+///
+/// Seven fields, all of them about **bytes on disk**: layout, declared
+/// version, containers, compression, encryption and what is dropped on the
+/// way. That is deliberate and there is one absence worth naming, because it
+/// is the field the next person will reach for.
+///
+/// **There is no font-subsetting switch here, and there must not be.**
+/// Subsetting a rewrite's embedded font programs means walking every content
+/// stream the document draws — pages, form XObjects at any depth, every state
+/// of every `/AP`, Type 3 glyph procedures — through the interpreter, so that
+/// the glyphs kept are the glyphs the engine actually shows. That walk lives
+/// in the facade (`tinker_pdf::subset`), which depends on this crate and not
+/// the other way round; `cargo xtask dag` holds that direction against a
+/// declared graph. A `subset_fonts: bool` on this struct would therefore be a
+/// flag the crate carrying it cannot act on, and the caller most likely to set
+/// it is a caller redacting a document — who would get a file that still
+/// carries the removed letters' outlines and nothing saying so.
+///
+/// The switch is on `tinker_pdf::write::SaveOptions` instead, where the type
+/// that carries it is the one that can act on it. This door writes every
+/// embedded program through exactly as it arrived, always has, and does not
+/// offer to do anything else.
 #[derive(Clone, Debug)]
 pub struct WriteOptions {
     /// Which shape of output.

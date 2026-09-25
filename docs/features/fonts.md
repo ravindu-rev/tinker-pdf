@@ -154,6 +154,29 @@ glyph identifiers are never renumbered; only `/BaseFont`, the descendant's
 editing operation and lives with the rest of them: see
 [editing](editing.md).
 
+**And it is now arranged rather than asked for.** `tinker_pdf::write::save`,
+the facade's save door, runs the pass by default — `SaveOptions::fonts` is a
+`FontPolicy` whose default is `Subset` — so the common case no longer depends
+on a caller remembering, which is what it depended on while the only door was
+`DocumentEditor::save`. That door is `tinker-pdf-cos`'s, it writes every
+program through as it arrived, and it carries no font switch **and must not**:
+the pass is driven by the interpreter, which sits above that crate, so a flag
+there would be one the crate carrying it cannot act on. [writing](writing.md)
+argues the boundary; the part that belongs on this page is what it buys — a
+redacted document's embedded face no longer keeps the removed letters' outlines
+unless somebody asked it to.
+
+**A collection is rebuilt as the face it was read as.** `Sfnt::parse` takes a
+`ttcf` by its first member, since a PDF embedding a collection has no way to
+say which member it means, and `subset` used to copy the *file's* leading tag
+into the subset it assembled — so a `/FontFile2` carrying a collection came out
+as a single flat table directory still declaring `ttcf`, which this crate and
+every other then refused to read. It now declares `Sfnt::version`, the
+directory the tables actually came from. Two of the 5 605 fetched documents
+embed one, and the corpus census
+(`crates/tinker-pdf/tests/cff_subset_census.rs`) is what found it: nothing in
+this repository writes a collection, so no fixture here could have.
+
 **WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2018]). `woff.rs` unpacks
 both to the sfnt inside them; nothing else in the crate knows they exist, and
 `Sfnt::parse` is what reads what comes out. The two are not variations on each

@@ -224,20 +224,44 @@ glyphs were asked for; `untouched` carries every program written through whole
 with its `UntouchedReason`, and `bytes_before()`/`bytes_after()` total both.
 An empty `untouched` is the answer a caller wants; a non-empty one is not an
 error list, since a document whose every face is already a tight subset reports
-all of them and is right to.
+all of them and is right to. Over the fetched corpora it is usually non-empty:
+4 950 of 10 832 programs went through whole, 3 406 of them because a rebuild
+came out no smaller than the producer's own subset.
+
+**A caller no longer has to remember.** `tinker_pdf::write::save` is the
+facade's save door and runs this pass by default, in the one order that is
+right — after every other edit, before the serializer
+([writing](writing.md)). Calling `apply` by hand is still correct and is what
+a caller wants when the report has to be read before the bytes are written.
 
 ```rust
-let report = tinker_pdf::subset::apply(&mut editor); // after every other edit
-for whole in &report.untouched {
-    // "/LiberationSerif left whole (393 576 bytes): a form field's /DA may
-    //  draw it at any character (12.7.3.3)" — ruling 10, so a caller checking
-    //  for disclosure can see what is still in the file
-    println!("{whole}");
+// The arranged form: a rewrite that subsets, with the report on the way out.
+use tinker_pdf::write::{save, SaveOptions};
+
+let saved = save(&mut editor, &SaveOptions::default());
+if !saved.fonts.removed() {
+    // Not a failure. `removed()` is false whenever *any* program went through
+    // whole, because such a program still carries every outline it had.
+    for whole in saved.fonts.report().into_iter().flat_map(|r| &r.untouched) {
+        // "/LiberationSerif left whole (393 576 bytes): a form field's /DA may
+        //  draw it at any character (12.7.3.3)" — ruling 10, so a caller
+        //  checking for disclosure can see what is still in the file
+        println!("{whole}");
+    }
 }
-let bytes = editor.save(&tinker_pdf::WriteOptions {
-    mode: tinker_pdf::WriteMode::Rewrite, // an incremental save keeps the old program's bytes
-    ..Default::default()
-});
+std::fs::write("out.pdf", &saved.bytes)?;
+```
+
+```rust
+// The asked-for form, unchanged: the report in hand before anything is
+// serialized, for a caller who decides whether to write at all from it.
+let report = tinker_pdf::subset::apply(&mut editor); // after every other edit
+if report.untouched.is_empty() {
+    let bytes = editor.save(&tinker_pdf::WriteOptions {
+        mode: tinker_pdf::WriteMode::Rewrite, // an incremental save keeps the old bytes
+        ..Default::default()
+    });
+}
 ```
 
 ## Refused by name
@@ -260,7 +284,10 @@ let bytes = editor.save(&tinker_pdf::WriteOptions {
 | Subsetting a font no walked resource dictionary names — one reached only from a form XObject nothing draws | whole face, `ScopeNotWalked` (`a_font_no_walked_scope_names_is_left_whole_and_reported`) | "no glyphs were shown through it" is then ignorance rather than a measurement | — |
 | Subsetting a font a **Type 3 font's own `/Resources`** names | whole face, `Type3Resource` (`a_font_a_type3_fonts_own_resources_name_is_left_whole_and_reported`) | this engine runs a glyph procedure in the *enclosing* scope, so a `/F0` inside a procedure is credited to the enclosing `/F0`; the enclosing font merely gains glyphs it does not need, the Type 3 font's own would lose every glyph it does | 9.6.5 |
 | Subsetting a font written **directly** into a resource dictionary rather than by reference | whole face, `NotAnObject` (`a_font_written_directly_into_the_resources_is_left_whole_and_reported`) | there is no object to key glyph usage by; the refusal also protects a program such a font *shares* with one that does have an object, which would otherwise be cut to the other font's glyphs | — |
-| Running the subsetter automatically on `save`, or from `tpdf` | a caller calls `subset::apply` | whole-document and order-dependent — it must run after every other edit — and it costs a full interpretation of every page, which a save that changed one annotation should not pay. A `WriteOptions` switch is a [roadmap](../ROADMAP.md) row | — |
+| Subsetting a program a `/FontDescriptor` embeds that **no font dictionary names** | whole face, `NoFontNamesIt` (`a_program_no_font_dictionary_names_is_left_whole_and_reported`) | there is no font, so no encoding and no glyph usage — nothing to subset it against. It is *reported* because a `Rewrite` keeps unreferenced objects unless `garbage_collect` asks otherwise, so every outline is still in the output; it was silently invisible until the corpus census counted 73 of them across eight of 5 605 documents | 9.8.1 |
+| Running the subsetter automatically from `DocumentEditor::save` | it cannot: `save` takes `&self` and the pass rewrites the editor, and `WriteOptions` is a crate below the interpreter that drives the walk. That door writes every program through as it arrived and does not offer to do otherwise | a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts`, which **defaults to subsetting** | [writing](writing.md) |
+| Running the subsetter from `tpdf` | nowhere to put it: all nine subcommands are read-only, so the CLI has no write path for a flag to attach to | tier 5's "A user-facing CLI" [roadmap](../ROADMAP.md) row owns the write half and now carries the font policy in its exit criterion, so the flag arrives with the door rather than before it (ruling 11: a subcommand is a wrapper over the facade with no logic of its own) | — |
+| Paying for the walk on a save that changed one annotation | `FontPolicy::Keep` on `write::save`, or `DocumentEditor::save`, which is unchanged | the pass is whole-document and order-dependent and costs a full interpretation of every page. The default is still `Subset`, because forgetting costs a disclosure and paying costs time | [writing](writing.md) |
 
 ## Verified
 
@@ -294,7 +321,7 @@ let bytes = editor.save(&tinker_pdf::WriteOptions {
   both levels, the covered glyph's code absent from every stream **and** no
   ink inside the rectangle.
 - Subsetting-on-rewrite tests live beside `crates/tinker-pdf/src/subset.rs` —
-  25 of them over the **vendored Liberation faces**, which are third-party
+  26 of them over the **vendored Liberation faces**, which are third-party
   bytes: which of their glyphs are composite, what those are built from and
   where `loca` puts them are facts about the face and not about a fixture
   written to pass. The document around them is this engine's own writer, which
@@ -313,7 +340,22 @@ let bytes = editor.save(&tinker_pdf::WriteOptions {
   The disclosure property has its own: after redacting one of two lines, the
   removed letters' outlines are **absent** from the embedded program, read back
   through its own `loca` and `glyf`, while the kept line's are there and render
-  unchanged.
+  unchanged. `crates/tinker-pdf/src/write.rs` repeats that one through the
+  **arranged** door, where nobody asked for a subset at all, and carries the
+  counterfactual beside it: the same redaction under `FontPolicy::Keep` still
+  has every removed letter's outline in the file.
+- **The same pass, over the corpus**:
+  `crates/tinker-pdf/tests/cff_subset_census.rs` now runs
+  `subset::apply` over all 5 605 fetched documents, not just
+  `tinker_pdf_font::subset` over a program pulled out of one. 2 180 of them
+  carry an embedded program; 5 882 programs are cut and 4 950 written through
+  whole, and seven properties are asserted over documents nobody here wrote —
+  every font dictionary identical but for `/BaseFont`, every descriptor but
+  for `/FontName`, every cut program still declaring the same glyph count and
+  still parsing, none larger than it was, `/Length1` describing the bytes it
+  is on (Table 126), and every embedded program in one list or the other.
+  Three of the seven failed the first time it ran; the constants at the foot
+  of that file say what each was and where it was fixed.
 - **Counted injection over the subsetter's rewrite path**
   (`docs/verification.md`'s house practice). Nineteen defects put back one at a
   time, `cargo test --no-fail-fast -p tinker-pdf` run for each, and the
