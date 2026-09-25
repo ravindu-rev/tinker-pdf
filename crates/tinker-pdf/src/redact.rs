@@ -21,6 +21,23 @@
 //! black-rectangle non-redaction this module exists to refuse. Neither half
 //! is the property. Both together are.
 //!
+//! # What this module does not remove
+//!
+//! The **glyphs**. This removes the text; the embedded font program still
+//! carries an outline for every character the producer embedded, and a face
+//! the producer had already subset to the characters its document used names
+//! the redacted ones exactly: a `glyf` with entries for nothing but `J`, `o`,
+//! `h`, `n`, `S`, `m`, `i`, `t` and `h` says what the redaction was for.
+//! Neither acceptance test above sees it — there is no needle in a stream and
+//! no ink on the page.
+//!
+//! [`crate::subset::apply`] is the pass that cuts them out, and
+//! [`crate::write::save`] is the door that runs it **by default**, so the
+//! ordinary way of writing a redacted document out is one that does not carry
+//! them. Saving through [`tinker_pdf_cos::DocumentEditor::save`] instead does
+//! not, and does not claim to; [`crate::SubsetOutcome::removed`] is how a
+//! caller asks whether this file is finished.
+//!
 //! # The cut happens in the run's own frame
 //!
 //! A redaction rectangle is given in page space. A glyph is placed in *text*

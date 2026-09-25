@@ -28,8 +28,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use tinker_pdf::subset::UntouchedReason;
 use tinker_pdf::Document;
-use tinker_pdf_cos::{ObjRef, Object, XrefEntry};
+use tinker_pdf_cos::{CosDocument, ObjRef, Object, XrefEntry};
 use tinker_pdf_font::Cff;
 
 // ---------------------------------------------------------------------------
@@ -252,6 +253,16 @@ fn corpus_root() -> Option<PathBuf> {
     guess.is_dir().then_some(guess)
 }
 
+/// Whether a census that finds no corpus should fail rather than skip.
+///
+/// A skip exits 0 and reads exactly like a pass (CONTRIBUTING, "the `RAN` /
+/// `SKIPPED` discipline"), so a job that means to walk the corpora sets this
+/// and gets a failure when there is nothing under them. `0` is an explicit
+/// off, matching `cmap_census.rs` and the rest.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
+}
+
 fn pdfs_under(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -274,6 +285,11 @@ fn pdfs_under(root: &Path, out: &mut Vec<PathBuf>) {
 fn census_of_the_corpus_cff_subsets() {
     let Some(root) = corpus_root() else {
         println!("cff-subset-census: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "TINKER_CORPUS_REQUIRED is set and there is no corpus at \
+             TINKER_CORPUS: this census would have passed over nothing"
+        );
         return;
     };
     let mut files = Vec::new();
@@ -282,7 +298,8 @@ fn census_of_the_corpus_cff_subsets() {
     println!("cff-subset-census: RAN over {} files", files.len());
     assert!(
         files.len() >= 4500,
-        "the fetched corpora carried 4 605 files when this was written; found {}",
+        "the fetched corpora carry 5 605 files at the lock this was last \
+         re-pinned against; found {}",
         files.len()
     );
 
@@ -443,3 +460,522 @@ const SUBSETTED: u32 = 3311;
 const DECLINED: u32 = 2;
 const NOT_SMALLER: usize = 1936;
 const CID_KEYED: u32 = 551;
+
+// ---------------------------------------------------------------------------
+// The rewrite path.
+//
+// Everything above drives `tinker_pdf_font::subset` on a program pulled out of
+// a document. That answers "does the subsetter survive the shapes real
+// producers emit". It does not touch `tinker_pdf::subset::apply`, which is the
+// pass a *save* runs (`tinker_pdf::write::save`), and which has a whole second
+// half the census above cannot see: the glyph walk that decides which glyphs a
+// document draws, and the dictionaries around the program that have to still
+// describe it afterwards.
+//
+// That half is where a self-built fixture is weakest, and it is exactly what
+// the fixtures in `crates/tinker-pdf/src/subset.rs` are built on. A document
+// this project wrote has an encoding this project chose: `/Encoding` absent or
+// `/WinAnsiEncoding`, `/FirstChar` at 32, no `/Differences`, no CID-keyed
+// descendant with a `/W` array, no `/CIDToGIDMap` stream. Real producers emit
+// all of those, and the pass's central claim — **the encoding is correct after
+// the cut because it is unchanged** — is a claim about exactly those
+// dictionaries.
+//
+// So this census asserts that claim over the corpus rather than over a
+// fixture: every font dictionary comes out of the pass identical except
+// `/BaseFont`, every descriptor except `/FontName`, and every program that was
+// cut keeps its glyph count, so no identifier any of those dictionaries names
+// has moved.
+//
+// This file's name is CFF's and this test is not CFF-only — the rewrite path
+// subsets TrueType too, and most of the corpus is TrueType. The name is kept
+// rather than corrected because the first census is what it says, and renaming
+// a test file loses the name every commit that touched it cites.
+// ---------------------------------------------------------------------------
+
+/// What one document's fonts looked like before the pass.
+struct Snapshot {
+    /// Every `/Type /Font` dictionary, by object number.
+    fonts: BTreeMap<u32, Object>,
+    /// Every `/Type /FontDescriptor` dictionary, by object number.
+    descriptors: BTreeMap<u32, Object>,
+    /// Every embedded program a descriptor named, and its decoded bytes.
+    programs: BTreeMap<u32, Vec<u8>>,
+}
+
+/// The number of glyphs a program declares, which is the number that must not
+/// move.
+///
+/// `maxp`'s `numGlyphs` for an sfnt — its offset 4, a `u16` big-endian — and
+/// the CharStrings INDEX count for a bare CFF. Both are what every glyph
+/// identifier in the document is an index into: `/FirstChar`, `/Widths`,
+/// `/Differences`, `/W` and `/CIDToGIDMap` are correct after a subset only
+/// because this number, and the meaning of every index below it, is unchanged.
+fn declared_glyphs(program: &[u8]) -> Option<usize> {
+    if let Some(sfnt) = tinker_pdf_font::Sfnt::parse(program) {
+        let maxp = sfnt.table(0x6d61_7870)?;
+        let count = maxp.get(4..6)?;
+        return Some(usize::from(u16::from_be_bytes([count[0], count[1]])));
+    }
+    Cff::parse(program).map(|cff| cff.glyph_count())
+}
+
+/// The eight reasons a program is written through whole, in declaration order.
+///
+/// An array rather than a map because `UntouchedReason` is deliberately not
+/// `Ord` — it is a reason, not a rank — and because a new variant should break
+/// this rather than land in an "other" bucket nobody reads.
+const REASONS: [UntouchedReason; 8] = [
+    UntouchedReason::ProgramNotRebuildable,
+    UntouchedReason::SubsetNotSmaller,
+    UntouchedReason::CodeNotMapped,
+    UntouchedReason::FieldResource,
+    UntouchedReason::ScopeNotWalked,
+    UntouchedReason::Type3Resource,
+    UntouchedReason::NotAnObject,
+    UntouchedReason::NoFontNamesIt,
+];
+
+/// Every font dictionary, descriptor and embedded program in one document.
+fn snapshot(doc: &CosDocument) -> Snapshot {
+    let mut out = Snapshot {
+        fonts: BTreeMap::new(),
+        descriptors: BTreeMap::new(),
+        programs: BTreeMap::new(),
+    };
+    let font = doc.intern(b"Font");
+    let descriptor = doc.intern(b"FontDescriptor");
+    let type_key = doc.intern(b"Type");
+
+    for (number, entry) in doc.xref().iter() {
+        if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
+            continue;
+        }
+        let Ok(object) = doc.get(ObjRef::new(number, 0)) else {
+            continue;
+        };
+        // A plain dictionary, never a stream — and this is not pedantry. A
+        // `/FontFile2` stream in safedocs/0000215.pdf carries `/Type /Font`
+        // on the *stream*, and `Object::as_dict` hands back a stream's
+        // dictionary as readily as a dictionary. Six of them were compared
+        // against the program stream the pass had just rewritten, and reported
+        // as six font dictionaries whose `/Filter` and `/Length` had changed.
+        // A font dictionary is a dictionary (9.5) and a descriptor is a
+        // dictionary (9.8.1); neither is ever a stream.
+        let Object::Dict(dict) = object.as_ref() else {
+            continue;
+        };
+        let kind = dict.get(type_key);
+        if kind == Some(&Object::Name(font)) {
+            out.fonts.insert(number, (*object).clone());
+            continue;
+        }
+        // A descriptor by `/Type` (Table 122 requires it) **or** by carrying a
+        // program, because the second is the set the pass can touch and real
+        // producers do omit the first. Taking only the typed ones would have
+        // made every check below quietly skip the files most worth checking.
+        let mut programs = Vec::new();
+        for key in [b"FontFile2".as_slice(), b"FontFile3", b"FontFile"] {
+            if let Some(reference) = dict.get_ref(doc.intern(key)) {
+                programs.push(reference);
+            }
+        }
+        if kind != Some(&Object::Name(descriptor)) && programs.is_empty() {
+            continue;
+        }
+        out.descriptors.insert(number, (*object).clone());
+        for reference in programs {
+            if let Ok(bytes) = doc.stream_decoded(reference) {
+                out.programs.insert(reference.num, bytes);
+            }
+        }
+    }
+    out
+}
+
+/// A dictionary's entries, with the keys that are allowed to move dropped from
+/// both sides.
+///
+/// Compared as a whole rather than key by key so that an *added* or *removed*
+/// key counts as a difference too — a pass that dropped `/ToUnicode` would
+/// otherwise slip through a loop over the keys that are still there.
+fn without(doc: &CosDocument, object: &Object, allowed: &[&[u8]]) -> Vec<(Vec<u8>, Object)> {
+    let Some(dict) = object.as_dict() else {
+        return Vec::new();
+    };
+    let allowed: Vec<_> = allowed.iter().map(|k| doc.intern(k)).collect();
+    dict.iter()
+        .filter(|(key, _)| !allowed.contains(key))
+        .map(|(key, value)| {
+            (
+                doc.name_bytes(*key)
+                    .map(|bytes| bytes.to_vec())
+                    .unwrap_or_default(),
+                value.clone(),
+            )
+        })
+        .collect()
+}
+
+/// How one document's fonts came through the pass.
+#[derive(Default)]
+struct Divergences {
+    /// A font dictionary changed in a key that is not `/BaseFont`.
+    font_dicts: Vec<String>,
+    /// A descriptor changed in a key that is not `/FontName`.
+    descriptors: Vec<String>,
+    /// A cut program no longer declares the same number of glyphs, so every
+    /// identifier the dictionaries name may point elsewhere.
+    glyph_counts: Vec<String>,
+    /// A cut program does not parse at all.
+    unreadable: Vec<String>,
+    /// A cut program came out no smaller, which the pass is supposed to
+    /// decline rather than write.
+    grew: Vec<String>,
+    /// A `/FontFile2` stream's `/Length1` is not the decoded length of the
+    /// program it now carries (Table 126).
+    length1: Vec<String>,
+    /// A program a descriptor embeds that the pass reported in neither list.
+    ///
+    /// Ruling 10: leniency names what it touched. A program neither cut nor
+    /// named in `untouched` is a program a caller checking for disclosure
+    /// cannot see at all, which is the one outcome the report is supposed to
+    /// make impossible.
+    unreported: Vec<String>,
+}
+
+#[test]
+#[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
+fn census_of_the_corpus_rewrite_subsets() {
+    let Some(root) = corpus_root() else {
+        println!("rewrite-subset-census: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "TINKER_CORPUS_REQUIRED is set and there is no corpus at \
+             TINKER_CORPUS: this census would have passed over nothing"
+        );
+        return;
+    };
+    let mut files = Vec::new();
+    pdfs_under(&root, &mut files);
+    files.sort();
+    println!("rewrite-subset-census: RAN over {} files", files.len());
+    assert!(
+        files.len() >= 4500,
+        "the fetched corpora carry 5 605 files at the lock this was pinned \
+         against; found {}",
+        files.len()
+    );
+
+    let mut documents = 0u32;
+    let mut carriers = 0u32;
+    let mut cut = 0u32;
+    let mut whole = 0u32;
+    let mut reasons = [0u32; REASONS.len()];
+    let (mut before_bytes, mut after_bytes) = (0u64, 0u64);
+    let mut divergences = Divergences::default();
+    // How many times two of the checks below actually compared something.
+    //
+    // Pinned with the rest, because an empty divergence list has two causes
+    // and only one of them is good news: a check that never ran reports
+    // nothing exactly as loudly as a check that ran and found nothing. Both
+    // of these read a value that may be absent — a program that does not
+    // parse, a stream with no `/Length1` — so both can go quiet without
+    // anybody noticing.
+    let mut glyph_counts_compared = 0u32;
+    let mut length1_checked = 0u32;
+    // Printed, never asserted. The pass costs a full interpretation of every
+    // page and `docs/features/editing.md` says so; this is where that sentence
+    // gets a number, measured rather than guessed. A clock is not a property.
+    let mut walking = std::time::Duration::ZERO;
+
+    for path in &files {
+        let name = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(doc) = Document::open(bytes) else {
+            continue;
+        };
+        if doc.is_encrypted() {
+            let _ = doc.authenticate("");
+        }
+        documents += 1;
+
+        let before = snapshot(doc.cos());
+        if before.programs.is_empty() {
+            continue;
+        }
+        carriers += 1;
+
+        let mut editor = doc.editor();
+        let started = std::time::Instant::now();
+        let report = tinker_pdf::subset::apply(&mut editor);
+        walking += started.elapsed();
+
+        // The dictionaries. This is the claim the module makes, and the one a
+        // self-built fixture cannot support: every key the encoding rests on
+        // survives the cut *because nothing touches it*.
+        for (&number, original) in &before.fonts {
+            let Some(after) = editor.get(ObjRef::new(number, 0)) else {
+                divergences
+                    .font_dicts
+                    .push(format!("{name}: font {number} vanished"));
+                continue;
+            };
+            if without(doc.cos(), original, &[b"BaseFont"])
+                != without(doc.cos(), &after, &[b"BaseFont"])
+            {
+                divergences
+                    .font_dicts
+                    .push(format!("{name}: font {number}"));
+            }
+        }
+        for (&number, original) in &before.descriptors {
+            let Some(after) = editor.get(ObjRef::new(number, 0)) else {
+                divergences
+                    .descriptors
+                    .push(format!("{name}: descriptor {number} vanished"));
+                continue;
+            };
+            if without(doc.cos(), original, &[b"FontName"])
+                != without(doc.cos(), &after, &[b"FontName"])
+            {
+                divergences
+                    .descriptors
+                    .push(format!("{name}: descriptor {number}"));
+            }
+        }
+
+        // The programs.
+        for subsetted in &report.subsetted {
+            cut += 1;
+            before_bytes += subsetted.before as u64;
+            after_bytes += subsetted.after as u64;
+            let Some(after) = editor.stream_bytes(subsetted.program) else {
+                divergences
+                    .unreadable
+                    .push(format!("{name}: {} has no bytes", subsetted.program.num));
+                continue;
+            };
+            if after.len() >= subsetted.before {
+                divergences.grew.push(format!(
+                    "{name}: {} {} -> {}",
+                    subsetted.program.num,
+                    subsetted.before,
+                    after.len()
+                ));
+            }
+            let was = before
+                .programs
+                .get(&subsetted.program.num)
+                .and_then(|bytes| declared_glyphs(bytes));
+            match (was, declared_glyphs(&after)) {
+                (Some(was), Some(now)) => {
+                    glyph_counts_compared += 1;
+                    if was != now {
+                        divergences.glyph_counts.push(format!(
+                            "{name}: {} declared {was} glyphs, now {now}",
+                            subsetted.program.num
+                        ));
+                    }
+                }
+                (_, None) => divergences
+                    .unreadable
+                    .push(format!("{name}: {} does not parse", subsetted.program.num)),
+                // The subset parses and the original did not. That is not a
+                // defect — the pass reads the original through
+                // `tinker_pdf_font::subset`, which has its own opinion of
+                // what it can rebuild — but it is a comparison not made, and
+                // `glyph_counts_compared` is what keeps it from reading as
+                // one that was.
+                (None, Some(_)) => {}
+            }
+            // Table 126: `/Length1` is the decoded length of a `/FontFile2`.
+            //
+            // Through `as_dict` rather than a `Object::Dict(_)` pattern: the
+            // editor hands back a *written* stream as its dictionary alone
+            // and an untouched one as an `Object::Stream`, so matching the
+            // first shape only would make this check silently dead the day a
+            // program reached here without having been rewritten.
+            if let Some(dict) = editor
+                .get(subsetted.program)
+                .as_ref()
+                .and_then(Object::as_dict)
+            {
+                if let Some(declared) = dict.get_int(doc.cos().intern(b"Length1")) {
+                    length1_checked += 1;
+                    if declared != after.len() as i64 {
+                        divergences.length1.push(format!(
+                            "{name}: {} declares /Length1 {declared} over {} bytes",
+                            subsetted.program.num,
+                            after.len()
+                        ));
+                    }
+                }
+            }
+        }
+        for untouched in &report.untouched {
+            whole += 1;
+            before_bytes += untouched.bytes as u64;
+            after_bytes += untouched.bytes as u64;
+            if let Some(index) = REASONS.iter().position(|r| *r == untouched.reason) {
+                reasons[index] += 1;
+            }
+        }
+
+        // Ruling 10, over documents nobody here wrote: every program a
+        // descriptor embeds is in one list or the other.
+        let reported: BTreeSet<u32> = report
+            .subsetted
+            .iter()
+            .map(|s| s.program.num)
+            .chain(report.untouched.iter().map(|u| u.program.num))
+            .collect();
+        for number in before.programs.keys() {
+            if !reported.contains(number) {
+                divergences
+                    .unreported
+                    .push(format!("{name}: {number} is in neither list"));
+            }
+        }
+    }
+
+    println!("\n{documents} documents opened; {carriers} carry an embedded program\n");
+    println!("  {cut} programs cut down, {whole} written through whole");
+    println!(
+        "  the pass itself took {:.1} s over those {carriers} documents, \
+         {:.0} ms each\n",
+        walking.as_secs_f64(),
+        walking.as_secs_f64() * 1000.0 / f64::from(carriers.max(1)),
+    );
+    println!("  {:<52} {:>6}", "reason a program was left whole", "count");
+    for (reason, count) in REASONS.iter().zip(reasons.iter()) {
+        println!("  {:<52} {count:>6}", reason.to_string());
+    }
+    println!(
+        "\n{before_bytes} bytes of font program became {after_bytes} ({}%)",
+        after_bytes
+            .saturating_mul(100)
+            .checked_div(before_bytes)
+            .unwrap_or(0)
+    );
+    println!(
+        "\n{glyph_counts_compared} glyph counts compared, \
+         {length1_checked} /Length1 declarations checked"
+    );
+
+    for (what, rows) in [
+        ("font dictionaries changed", &divergences.font_dicts),
+        ("descriptors changed", &divergences.descriptors),
+        ("glyph counts moved", &divergences.glyph_counts),
+        ("programs unreadable", &divergences.unreadable),
+        ("programs that grew", &divergences.grew),
+        ("/Length1 wrong", &divergences.length1),
+        ("programs in neither list", &divergences.unreported),
+    ] {
+        if rows.is_empty() {
+            continue;
+        }
+        println!("\n{what}: {}", rows.len());
+        for row in rows.iter().take(20) {
+            println!("  {row}");
+        }
+    }
+
+    // Seven properties, over documents nobody here wrote. Each is a statement
+    // about *their* encoding surviving *our* pass; none of them is this engine
+    // agreeing with itself about a document it also built.
+    assert!(
+        divergences.font_dicts.is_empty(),
+        "a font dictionary changed in a key that is not /BaseFont"
+    );
+    assert!(
+        divergences.descriptors.is_empty(),
+        "a descriptor changed in a key that is not /FontName"
+    );
+    assert!(
+        divergences.glyph_counts.is_empty(),
+        "a cut program declares a different number of glyphs, so identifiers moved"
+    );
+    assert!(
+        divergences.unreadable.is_empty(),
+        "a cut program is not a font"
+    );
+    assert!(
+        divergences.grew.is_empty(),
+        "a cut program is no smaller, which the pass declines rather than writes"
+    );
+    assert!(
+        divergences.length1.is_empty(),
+        "/Length1 does not describe the program it is on (Table 126)"
+    );
+    assert!(
+        divergences.unreported.is_empty(),
+        "a program is in neither list, so the report cannot be read for disclosure"
+    );
+
+    // Recorded against the corpora `corpus/corpora.lock` pins, so a shrinking
+    // result cannot read as a passing one.
+    assert_eq!(documents, DOCUMENTS, "documents that opened");
+    assert_eq!(carriers, PROGRAM_CARRIERS, "documents carrying a program");
+    assert_eq!(cut, CUT, "programs cut down");
+    assert_eq!(whole, LEFT_WHOLE, "programs written through whole");
+    assert_eq!(reasons, REASON_COUNTS, "why programs were left whole");
+    assert_eq!(before_bytes, PROGRAM_BYTES_BEFORE, "font program bytes in");
+    assert_eq!(after_bytes, PROGRAM_BYTES_AFTER, "font program bytes out");
+    assert_eq!(
+        glyph_counts_compared, GLYPH_COUNTS_COMPARED,
+        "glyph counts actually compared, so an empty divergence list is a \
+         measurement rather than a check that stopped running"
+    );
+    assert_eq!(
+        length1_checked, LENGTH1_CHECKED,
+        "/Length1 declarations actually read, for the same reason"
+    );
+}
+
+// The numbers this stood at when it was written; see the assertions above.
+//
+// Measured 23 September 2026 over the 5 605 files `corpus/corpora.lock` pins,
+// with `--release`, because a debug walk of them costs the better part of an
+// hour. The counts are the profile's to be independent of and are: the same
+// harness over the 976 pdf.js documents gives 455 carriers, 565 cut, 681
+// whole and 71 032 402 -> 27 311 032 bytes in both profiles, byte for byte.
+//
+// **Three of the seven properties above failed on the first run**, which is
+// what this census was written to find out and what no fixture in the tree
+// could have told anybody:
+//
+// - Six "font dictionaries" changed in a key that is not `/BaseFont`, in
+//   safedocs/0000215.pdf. That one was the census's own fault and `snapshot`
+//   says what it was.
+// - Two cut programs did not parse: pdfjs issue13193 and issue9262_reduced
+//   embed a **TrueType Collection** as a `/FontFile2`, and
+//   `tinker_pdf_font::subset` was writing the subset's `sfntVersion` from byte
+//   zero of the original — so the output said `ttcf` while being a single flat
+//   directory, and no reader on earth could open it. Fixed in
+//   `crates/tinker-pdf-font/src/subset.rs`; `assemble`'s doc comment carries
+//   the argument.
+// - Seventy-three programs were in neither list: a `/FontDescriptor` embeds
+//   them and no font dictionary names the descriptor, so the pass never saw
+//   them and the report never mentioned them — while a `Rewrite` kept every
+//   one of their outlines in the output. `UntouchedReason::NoFontNamesIt` now
+//   names them.
+//
+// The pass took 93 seconds over the 2 180 documents that carry a program,
+// which is the number `docs/features/editing.md` means by "a full
+// interpretation of every page".
+const DOCUMENTS: u32 = 5597;
+const PROGRAM_CARRIERS: u32 = 2180;
+const CUT: u32 = 5882;
+const LEFT_WHOLE: u32 = 4950;
+const REASON_COUNTS: [u32; 8] = [553, 3406, 581, 176, 151, 0, 10, 73];
+const PROGRAM_BYTES_BEFORE: u64 = 669_086_159;
+const PROGRAM_BYTES_AFTER: u64 = 401_630_511;
+const GLYPH_COUNTS_COMPARED: u32 = 5882;
+const LENGTH1_CHECKED: u32 = 5481;
