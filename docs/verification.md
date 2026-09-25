@@ -7,9 +7,13 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 23 September 2026. `cargo test --workspace --no-fail-fast`
-is **5 018 passed, 0 failed, 59 ignored** across 221 suites on
-`x86_64-pc-windows-msvc`. The count before it was 4 999, and the **nineteen**
-tests between the two are Table A.19's last two code-block styles: fifteen in
+is **5 028 passed, 0 failed, 60 ignored** across 221 suites on
+`x86_64-pc-windows-msvc`, 26 September 2026, two lanes' work merged. Ten of
+the twenty-nine tests since 4 999 are the facade's save path — the font policy,
+the three-valued `SubsetOutcome`, and the rewrite-path census, which is the
+sixtieth ignored test because it walks the fetched corpora.
+
+The other **nineteen** are Table A.19's last two code-block styles: fifteen in
 `tinker-pdf-filters`'s `jpx::tests::code_block_styles` for B.10.7.1's and
 B.10.7.2's worked examples, J.10's two published packet headers, the bracket
 they put on D.6's boundary and the three paths the injection campaign found

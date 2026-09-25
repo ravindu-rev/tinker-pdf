@@ -32,7 +32,7 @@ its two font-bearing siblings:
 | `crop` held of asked | 4 929 of 5 075 |
 | `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 4 999 passed, 0 failed, 59 ignored across 221 suites as
+The suite stands at 5 028 passed, 0 failed, 60 ignored across 221 suites as
 [verification.md](verification.md) records it, measured 21 September 2026 on
 `x86_64-pc-windows-msvc`.
 
