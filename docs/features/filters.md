@@ -208,18 +208,35 @@ and A.7.4's and A.7.5's packed packet headers
 in both places they can live — Annex D tier-1 on the shared MQ coder,
 Annex E dequantisation, both Annex F inverse wavelets (the reversible 5/3 and
 the irreversible 9/7 in fixed point), **Annex H's region of interest** and the
-Annex G and I colour pipeline, palettes and `cdef` included. Four of Table
-A.19's six code-block styles
-decode: segmentation symbols (D.5's integrity check), `RESET`'s return to
-Table D.7's states at every pass boundary, `VERTICALLY_CAUSAL`'s stripe that
-depends on nothing beneath it, and `PREDICTABLE`, which constrains an encoder
-and leaves a decoder's reading unchanged. An opacity channel is carried out separately in
+Annex G and I colour pipeline, palettes and `cdef` included. **All six of
+Table A.19's code-block styles decode**: segmentation symbols (D.5's integrity
+check), `RESET`'s return to Table D.7's states at every pass boundary,
+`VERTICALLY_CAUSAL`'s stripe that depends on nothing beneath it, `PREDICTABLE`,
+which constrains an encoder and leaves a decoder's reading unchanged, and — the
+last two, on 23 September 2026 — D.6's selective arithmetic coding bypass and
+D.4's termination on each coding pass. An opacity channel is carried out separately in
 `JpxOpacity` because what it is *for* is `/SMaskInData`'s rule (8.9.5.4) and
 that decision stays outside the crate. The decoder's stance is that a wrong
 JPEG 2000 decode looks like a photograph — the inverse wavelet smooths wrong
 coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
 symbol) catch a mis-parse before any pixel exists.
+
+**`BYPASS` and `TERMALL` are two capabilities over one mechanism.** What
+they share is B.10.7.2's *multiple codeword segments*: with either set, a
+code-block's contribution to a packet is signalled as `K` lengths rather than
+one, where `K` counts the coding passes Tables D.8 and D.9 terminate plus the
+last pass the packet includes. Tier-2 therefore hands tier-1 a **list** of
+segments rather than one byte range, and tier-1 opens a fresh reader on each —
+an MQ decoder re-initialised per D.4.2, or D.6's raw one. That is not the same
+thing as `RESET`: the decoder's registers are re-initialised and Table D.7's
+context states are not. What they do *not* share is D.6's raw
+reader. `TERMALL` adds no new way of reading a decision; `BYPASS` makes the
+significance propagation and magnitude refinement passes from the fifth
+bit-plane down carry raw bits, with their sign taken straight from the stream
+by equation (D-2) rather than through D.2.2's context and XOR. The note this
+decoder used to carry said both were "not a tier-1 change", and half of that
+was wrong.
 
 **The progression order change is a bound on the loops, not a second
 sequencer.** A POC marker segment (A.6.6) is a list of progressions, and
@@ -277,9 +294,10 @@ veraPDF fixtures whose `colr` box is deliberately non-conformant; two are
 documents in which **no tile arrived whole**, which is the one truncation this
 decoder refuses rather than draws around — a tile short of its declared parts
 costs pixels and is drawn as far as it arrives, and only a codestream with no
-complete tile has nothing to degrade to. So `BYPASS`, `TERMALL` and
-precision above sixteen bits are reached by **zero** corpus files, fixture or
-real.
+complete tile has nothing to degrade to. So precision above sixteen bits —
+the one coding-side entry left, and a limit rather than a gap — is reached by
+**zero** corpus files, fixture or real, as `BYPASS` and `TERMALL` were until
+they landed.
 
 *The file count in that sentence read 5 until September 2026, against a test
 that prints 7.* It was counting the five files whose reasons are not
@@ -288,12 +306,13 @@ two `a codestream with no complete tile` documents are refusals and are in the
 census rows, where the old text had them among the truncations that decode.
 The two numbers are now both given and both say which they are.
 
-RGN, PPM and PPT were on the zero-reachability list until 20 September 2026
-and POC until the 21st, and their leaving moved nothing: the census was re-run
-after each and reports the same 39 bearing files and the same five reasons,
-because no corpus file carried any of the four to begin with. Under ruling 3
-that is a scheduling input rather than a justification, and the roadmap row it
-belongs to says so.
+RGN, PPM and PPT were on the zero-reachability list until 20 September 2026,
+POC until the 21st and `BYPASS` and `TERMALL` until the 23rd, and their leaving
+moved nothing: the census was re-run after each and reports the same 39 bearing
+files, the same 7 refusals and the same five reasons, because no corpus file
+carried any of the six to begin with. Under ruling 3 that is a scheduling input
+rather than a justification. The tier-2 roadmap row they belonged to is gone
+with the last of them; what is left of the story is in that tier's preamble.
 
 That paragraph used to read "the corpus's nineteen readable JPX files as of
 August 2026: 16 decode and 3 refuse", which was a count over four corpora
@@ -617,7 +636,7 @@ make both enums wrong.
 | JPX POC field values: a `Ppoc` Table A.16 does not define, a bound outside Table A.32, an `Lpoc` that is not equation (A-6)'s, two POC segments in one header, a tile-part POC with none in the tile's first tile-part header | `Warning::JpxFeatureUnsupported`, `Warning::JpxStructureInvalid` | What is left of POC after the marker was implemented, and the same shape RGN's refusal took: a *value inside* the segment rather than the segment. A volume whose bounds run backwards is not a volume, and clamping one into shape would decode a packet sequence the codestream never described — the same failure as skipping the marker, reached from the other side | T.800 A.6.6, Table A.32, B.12.3 |
 | JPX ROI style: an `Srgn` T.800 Table A.25 reserves | `Warning::JpxFeatureUnsupported` | Table A.25 defines one ROI style — 0, "Implicit ROI (maximum shift)" — and reserves the rest. A reserved style is some other realignment of the coefficients, so running H.1's Maxshift arithmetic over it would put the background at the wrong magnitude and draw a plausible picture. Refused by name rather than stepped over, which is the SOF3/SOF5/SOF6/SOF7 lesson on this page | T.800 A.6.3, Table A.25 |
 | JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
-| JPX coding features: two of Table A.19's six code-block styles — `BYPASS` and `TERMALL` — plus unmappable `colr` and unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. The two left both move where a coding pass's *bytes* start, so they need a length per pass out of the packet header (B.10.7) rather than anything tier-1 can do | [ROADMAP](../ROADMAP.md) |
+| JPX coding features: a code-block style **bit** T.800 Table A.19 does not define, an unmappable `colr`, unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. **Table A.19 has left this row as a capability**: all six code-block styles decode as of 23 September 2026, and what fires for A.19 now is bit 6 or bit 7, which the table reserves — a *value* the standard does not define rather than a capability this build lacks, the same shape as the `Srgn` row above | [ROADMAP](../ROADMAP.md) |
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | **A limit, not a gap.** T.800 Table A.11 allows 38; E.1 clamps a coefficient to `2^(R_b + 2)` sample units and a coefficient plane is a Q12 `i32`, so 17 bits is where the plane format runs out — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. Argued in ROADMAP's Named non-goals | [ROADMAP](../ROADMAP.md) Named non-goals |
 | JPX tile-parts out of order, or a codestream with no complete tile | `Warning::JpxStructureInvalid` | Out of order is a codestream contradicting itself, and reassembling in stream order would produce a picture wrong in a way that looks like compression. A tile *short* of its declared parts is a different failure — a file that stopped — so it is left blank and reported as `JpxTruncated` wherever any tile survives, which is `JxrWarning::TileDroppedAsZero`'s bargain; only a codestream with no whole tile at all is refused | [ROADMAP](../ROADMAP.md) |
 | JPX work/sample/code-block budgets spent | `Warning::JpxBudgetSpent` | The budgets are totals, never refunded — a per-item cap is not a work cap once the structure branches (ruling 1) | [rulings](../rulings.md) |

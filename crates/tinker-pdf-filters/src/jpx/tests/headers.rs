@@ -1147,33 +1147,30 @@ fn cod_reads_the_five_progression_orders_and_refuses_a_sixth() {
     ));
 }
 
-/// The five Table A.19 code-block style bits this build does not implement,
-/// each refused. Segmentation symbols are the sixth and are implemented, so
-/// they are not here.
+/// Every Table A.19 code-block style is accepted, and only a bit the table
+/// does not define is refused.
+///
+/// **This test used to assert the opposite for two of the six**, and the
+/// inversion is the point rather than an edit: it looped over `BYPASS` and
+/// `TERMALL` demanding a refusal, and then — the half that kept it honest —
+/// over the other three demanding acceptance, so that a build which refused
+/// an implemented style again could not pass by only checking refusals. Both
+/// halves are still here; the membership moved.
+///
+/// A style bit accepted in the header is not a style bit decoded, so this
+/// test claims only what it checks. What decodes them is
+/// [`super::tier1`]'s and [`super::tier2`]'s, and what adjudicates that is
+/// `tests/jpx_code_block_styles.rs` against T.800's own published lengths and
+/// coefficients.
 #[test]
-fn the_unsupported_code_block_styles_are_refused_one_by_one() {
-    // BYPASS and TERMALL, and only those two. Both move where a coding pass's
-    // *bytes* start rather than how its decisions are read, so both need a
-    // length per pass out of the packet header (B.10.7's multiple codeword
-    // segments) rather than anything tier-1 can do alone.
-    for bit in [cb_style::BYPASS, cb_style::TERMALL] {
-        let spec = Spec {
-            cb_style: bit,
-            ..Spec::default()
-        };
-        assert!(
-            matches!(parse(&spec.codestream(&[])), Err(Refusal::Feature(_))),
-            "code-block style bit {bit:#04X} was not refused"
-        );
-    }
-
-    // The three that are now decoded are *accepted* here, which is the half of
-    // this test that would otherwise quietly stop meaning anything: a build
-    // that refused them again would pass a test that only checked refusals.
+fn every_table_a19_code_block_style_is_accepted() {
     for bit in [
+        cb_style::BYPASS,
         cb_style::RESET,
+        cb_style::TERMALL,
         cb_style::VERTICALLY_CAUSAL,
         cb_style::PREDICTABLE,
+        cb_style::SEGMENTATION_SYMBOLS,
     ] {
         let spec = Spec {
             cb_style: bit,
@@ -1185,15 +1182,30 @@ fn the_unsupported_code_block_styles_are_refused_one_by_one() {
         );
     }
 
-    // And a bit the table does not define at all.
+    // And all six at once, which is a legal `Scod` byte and not merely six
+    // legal ones: A.19's bits are independent and a parser that accepted each
+    // alone could still reject the combination.
     let spec = Spec {
-        cb_style: 0x40,
+        cb_style: cb_style::DEFINED,
         ..Spec::default()
     };
-    assert!(matches!(
-        parse(&spec.codestream(&[])),
-        Err(Refusal::Feature(_))
-    ));
+    assert!(
+        parse(&spec.codestream(&[])).is_ok(),
+        "Table A.19's six bits together"
+    );
+
+    // The two bits the table leaves as "All other values reserved", each
+    // alone and together. These are what the refusal means now.
+    for bit in [0x40, 0x80, 0xC0] {
+        let spec = Spec {
+            cb_style: bit,
+            ..Spec::default()
+        };
+        assert!(
+            matches!(parse(&spec.codestream(&[])), Err(Refusal::Feature(_))),
+            "code-block style bit {bit:#04X} is outside Table A.19"
+        );
+    }
 }
 
 /// Table A.18's code-block bounds: exponents 2 to 10 with a sum at most 12.

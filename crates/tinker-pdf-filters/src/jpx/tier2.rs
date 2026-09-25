@@ -51,6 +51,7 @@
 use std::collections::BTreeSet;
 
 use super::codestream::{Codestream, CodingStyle, Packed, Poc, Progression};
+use super::passes::Schedule;
 use super::{Refusal, MAX_JPX_CODE_BLOCKS};
 
 /// Subband orientation (T.800 Table E.1's `b`), which decides both the
@@ -77,6 +78,48 @@ impl Orientation {
     }
 }
 
+/// One of B.10.7's codeword segments: a span of bytes and the coding passes
+/// coded into it.
+///
+/// T.800 calls it "the number of bytes contributed to a packet by a
+/// code-block" in B.10.7.1, which is the single-segment case; B.10.7.2
+/// generalises it to the span between two terminations. The passes matter as
+/// well as the bytes, because (B-19) widens the length field by
+/// `floor(log2(coding passes added))` and because tier-1 has to know how many
+/// passes to run out of this reader before opening the next.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Segment {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) passes: u32,
+    /// Whether a coding pass in Tables D.8 or D.9's terminated set closed
+    /// this, as opposed to the packet simply ending.
+    ///
+    /// False means the next packet's contribution continues the same segment
+    /// and the same reader. Treating B.10.7.2's "final coding pass included
+    /// in the packet is ... added to T" as a real termination would restart
+    /// the MQ decoder part way through a segment, which decodes every layer
+    /// after the first as noise.
+    pub(crate) terminated: bool,
+}
+
+impl Segment {
+    /// B.10.7.1's case as a one-element list: one segment holding every byte
+    /// and every pass.
+    ///
+    /// What a code-block with neither Table A.19 bit set always ends up with,
+    /// and the shape every caller that has bytes rather than a packet wants —
+    /// which in the shipped decoder is none of them, because there the shape
+    /// comes out of the packet header. Tests only.
+    #[cfg(test)]
+    pub(crate) fn single(bytes: &[u8], passes: u32) -> [Segment; 1] {
+        [Segment {
+            bytes: bytes.to_vec(),
+            passes,
+            terminated: true,
+        }]
+    }
+}
+
 /// One code-block, and everything tier-2 learned about it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CodeBlock {
@@ -90,10 +133,24 @@ pub(crate) struct CodeBlock {
     pub(crate) zero_planes: u8,
     /// Coding passes accumulated over every layer that included this block.
     pub(crate) passes: u32,
-    /// The MQ codeword segment, concatenated across layers. One segment,
-    /// because the code-block styles that split it — TERMALL and BYPASS —
-    /// are refused in the header parser.
-    pub(crate) data: Vec<u8>,
+    /// B.10.7's codeword segments, in order, each with the coding passes it
+    /// carries.
+    ///
+    /// Usually one, holding every byte the code-block contributed across
+    /// every layer — that is B.10.7.1's case and it is what a codestream with
+    /// neither Table A.19 bit 0 nor bit 2 always produces. With either set,
+    /// B.10.7.2 splits the contribution at the passes Tables D.8 and D.9
+    /// terminate, and tier-1 opens a fresh reader on each one.
+    ///
+    /// **A segment is not the same thing as a signalled length**, and keeping
+    /// them apart is the whole reason this is a list of segments rather than
+    /// a list of lengths. B.10.7.2 signals a length for the final pass
+    /// included in a packet whether or not that pass terminated, so a
+    /// code-block whose passes span two layers gets two lengths for one
+    /// segment. [`Segment::terminated`] records which of the two closed it,
+    /// and a contribution that arrives against an unterminated segment is
+    /// appended to it rather than starting a new one.
+    pub(crate) segments: Vec<Segment>,
     /// Tier-1's output: signed coefficients in scan order, whose magnitudes
     /// occupy [`CodeBlock::planes`] bits. Empty until tier-1 has run.
     pub(crate) coefficients: Vec<i32>,
@@ -125,6 +182,35 @@ impl CodeBlock {
 
     pub(crate) const fn height(&self) -> u32 {
         self.y1 - self.y0
+    }
+
+    /// Adds one packet's contribution to this code-block.
+    ///
+    /// The merge is the whole of B.10.7.2's multi-layer case. A segment the
+    /// previous packet left open — closed because the packet ended rather
+    /// than because Tables D.8 or D.9 terminate that pass — is *continued*
+    /// here: same segment, same bytes, same reader. Only a contribution
+    /// arriving against a terminated segment, or against none, starts a new
+    /// one.
+    ///
+    /// Getting this wrong is invisible without a multi-layer codestream and
+    /// silent when it happens: a fresh MQ decoder mid-segment produces
+    /// coefficients rather than an error, and the inverse wavelet turns those
+    /// into a photograph.
+    fn append(&mut self, bytes: &[u8], passes: u32, terminated: bool) {
+        match self.segments.last_mut() {
+            Some(open) if !open.terminated => {
+                open.bytes.extend_from_slice(bytes);
+                open.passes += passes;
+                open.terminated = terminated;
+            }
+            _ => self.segments.push(Segment {
+                bytes: bytes.to_vec(),
+                passes,
+                terminated,
+            }),
+        }
+        self.passes += passes;
     }
 }
 
@@ -468,7 +554,7 @@ impl<'a> PacketBits<'a> {
         Ok((self.buf >> self.ct) & 1)
     }
 
-    fn bits(&mut self, n: u32) -> Result<u32, Refusal> {
+    pub(crate) fn bits(&mut self, n: u32) -> Result<u32, Refusal> {
         if n > 32 {
             return Err(Refusal::Structure(
                 "a packet header field wider than 32 bits",
@@ -496,7 +582,7 @@ impl<'a> PacketBits<'a> {
         Ok(())
     }
 
-    fn consumed(&self) -> usize {
+    pub(crate) fn consumed(&self) -> usize {
         self.at
     }
 }
@@ -868,13 +954,18 @@ fn read_tile_packets(
     // unbounded loops stand.
     let poc = stream.progression_volumes(tile.index);
     let order = packet_order(stream, tile, &cod, poc.as_deref(), budget)?;
+    // Table A.19's bits 0 and 2 per component, with A.6.2's four-deep
+    // precedence applied once rather than per packet.
+    let schedules: Vec<Schedule> = (0..tile.components.len())
+        .map(|c| stream.style_for(tile.index, c).schedule())
+        .collect();
     let mut at = 0usize;
     let mut seam = 0usize;
     // A run of zero bytes is a tile-part that carried no packets, and its
     // seam falls before the first header rather than after one.
     check_seams(&headers, seams, &mut seam)?;
     for packet in order {
-        at = read_packet(tile, &cod, &packet, &data, at, &mut headers)?;
+        at = read_packet(tile, &cod, &schedules, &packet, &data, at, &mut headers)?;
         check_seams(&headers, seams, &mut seam)?;
     }
     // The integrity check, in its plainest form: the packets of a tile
@@ -1283,6 +1374,7 @@ const EPH: [u8; 2] = [0xFF, 0x92];
 fn read_packet(
     tile: &mut Tile,
     cod: &super::codestream::Cod,
+    schedules: &[Schedule],
     packet: &Packet,
     data: &[u8],
     mut at: usize,
@@ -1312,12 +1404,18 @@ fn read_packet(
             .ok_or(Refusal::Truncated("a packed packet header"))?,
     };
     let mut bits = PacketBits::new(header_bytes);
-    let mut contributions: Vec<(usize, usize, usize, usize, u32)> = Vec::new();
+    let mut contributions: Vec<Contribution> = Vec::new();
 
     // B.10.3: the first bit says whether the packet carries anything at all.
     if bits.bit()? == 1 {
         let component = usize::from(packet.component);
         let resolution = usize::from(packet.resolution);
+        // A.6.2's precedence is already resolved in `schedules`, one entry
+        // per component: a COC may set Table A.19's bits for one component
+        // and not for another, and reading the main COD's byte for every
+        // component would split a chroma plane's packets at a luma plane's
+        // terminations.
+        let schedule = schedules.get(component).copied().unwrap_or_default();
         let bands = tile
             .components
             .get(component)
@@ -1377,24 +1475,51 @@ fn read_packet(
                     pb.blocks[i].included = true;
                 }
                 let passes = read_pass_count(&mut bits)?;
-                // B.10.7: `Lblock` grows by one per signalled 1-bit and never
-                // shrinks, across every layer of this code-block.
-                while bits.bit()? == 1 {
-                    pb.blocks[i].lblock += 1;
-                    if pb.blocks[i].lblock > 32 {
-                        return Err(Refusal::Structure(
-                            "an Lblock past any legal segment length",
-                        ));
-                    }
+                // `first` is where this packet's passes start in the
+                // code-block's own numbering, which is every pass an earlier
+                // layer already contributed. Without it the schedule would be
+                // read at packet-local indices and a second layer would split
+                // in the wrong places.
+                let first = pb.blocks[i].passes;
+                // The cap on what *earlier layers* already contributed, and it
+                // is deliberately on `first` rather than on `first + passes`.
+                //
+                // Tier-1 refuses a code-block carrying more than
+                // [`tier1::MAX_PASSES`] coding passes, and that refusal is
+                // unchanged and still the one a single over-long packet gets.
+                // What this stops is the accumulation *reaching* it: a
+                // code-block's contribution is now a list of [`Segment`]s
+                // rather than one byte vector, and B.10.7.2 gives `TERMALL`
+                // one segment per pass, so with `Acod`'s `u16` layer count
+                // 65 535 packets each declaring B.10.6's largest pass count
+                // would build ten million segments out of about a megabyte of
+                // header bits before tier-1 was reached to say no. The bytes
+                // were always bounded by the codestream; the segment *count*
+                // was not.
+                //
+                // `first > MAX_PASSES` cannot fire for a code-block tier-1
+                // would have accepted, because the total is at least `first`.
+                // So this narrows nothing and pre-empts no other refusal —
+                // which a looser bound did, taking a hand-built tile away
+                // from the packet-length check that is meant to catch it.
+                if first > super::tier1::MAX_PASSES {
+                    return Err(Refusal::Structure(
+                        "more coding passes than any legal bit-plane count allows",
+                    ));
                 }
-                let width = pb.blocks[i].lblock + floor_log2(passes);
-                let length = bits.bits(width)? as usize;
-                contributions.push((component, resolution, b, i, passes));
-                // Reuse the tuple's last slot for the length by pushing it
-                // separately would cost a second vector; the length rides in
-                // the block's own accumulator instead.
-                pb.blocks[i].data.reserve(length);
-                lengths_push(&mut contributions, length);
+                let block = &mut pb.blocks[i];
+                for segment in read_lengths(&mut bits, &mut block.lblock, schedule, first, passes)?
+                {
+                    contributions.push(Contribution {
+                        component,
+                        resolution,
+                        band: b,
+                        block: i,
+                        passes: segment.passes,
+                        length: segment.length,
+                        terminated: segment.terminated,
+                    });
+                }
             }
         }
     }
@@ -1432,35 +1557,124 @@ fn read_packet(
     }
 
     // The bodies follow the header in the same order the header listed them.
-    let mut i = 0;
-    while i < contributions.len() {
-        let (component, resolution, b, blk, passes) = contributions[i];
-        let length = contributions[i + 1].0;
-        i += 2;
+    for c in contributions {
         let end = at
-            .checked_add(length)
+            .checked_add(c.length)
             .ok_or(Refusal::Structure("a code-block length past addressable"))?;
         let bytes = data
             .get(at..end)
             .ok_or(Refusal::Truncated("a code-block segment"))?;
-        let block = &mut tile.components[component].resolutions[resolution].bands[b].precincts
-            [usize::try_from(packet.precinct).unwrap_or(0)]
-        .blocks[blk];
-        block.data.extend_from_slice(bytes);
-        block.passes += passes;
+        let block = &mut tile.components[c.component].resolutions[c.resolution].bands[c.band]
+            .precincts[usize::try_from(packet.precinct).unwrap_or(0)]
+        .blocks[c.block];
+        block.append(bytes, c.passes, c.terminated);
         at = end;
     }
     Ok(at)
 }
 
-/// A length pushed as a second tuple, so the contribution list stays one
-/// vector. See [`read_packet`].
-fn lengths_push(list: &mut Vec<(usize, usize, usize, usize, u32)>, length: usize) {
-    list.push((length, 0, 0, 0, 0));
+/// One codeword segment's worth of a code-block's contribution to a packet.
+///
+/// A struct rather than the pair of tuples this used to be. The header names
+/// a code-block and then B.10.7.2's K lengths, and the bodies follow in the
+/// same order — but "same order" is only checkable if a contribution carries
+/// everything about itself, and the previous shape carried a length in a
+/// second tuple whose other four slots were zero.
+struct Contribution {
+    component: usize,
+    resolution: usize,
+    band: usize,
+    block: usize,
+    /// (B-19)'s "coding passes added" for this segment.
+    passes: u32,
+    length: usize,
+    /// Whether Tables D.8 or D.9 terminate the pass this segment ends on.
+    terminated: bool,
+}
+
+/// One signalled length out of a packet header: B.10.7's `(bytes, passes)`
+/// for one codeword segment, and which rule closed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SignalledLength {
+    pub(crate) length: usize,
+    pub(crate) passes: u32,
+    pub(crate) terminated: bool,
+}
+
+/// B.10.7: the `Lblock` signalling bits and then B.10.7.2's K lengths.
+///
+/// Split out of [`read_packet`] so that T.800's own worked examples can be
+/// fed to it. B.10.7.1's NOTE 1 and B.10.7.2's NOTE each print a complete
+/// valid bit sequence with the lengths it codes, which makes this one of the
+/// few things in the decoder the standard adjudicates directly rather than
+/// describes — see `tests::code_block_styles`.
+///
+/// `first` is the index, in the code-block's own pass numbering, of the first
+/// pass this packet contributes; `passes` how many it contributes. `lblock`
+/// is the code-block's running state variable and is updated in place.
+pub(crate) fn read_lengths(
+    bits: &mut PacketBits<'_>,
+    lblock: &mut u32,
+    schedule: Schedule,
+    first: u32,
+    passes: u32,
+) -> Result<Vec<SignalledLength>, Refusal> {
+    // B.10.7.1: "The value of Lblock is initially set to three. The number of
+    // bytes contributed by each code-block is preceded by signalling bits
+    // that increase the value of Lblock, as needed. A signalling bit of zero
+    // indicates the current value of Lblock is sufficient. If there are k
+    // ones followed by a zero, the value of Lblock is incremented by k."
+    //
+    // Once per code-block contribution and **not** once per codeword segment,
+    // which is the half of B.10.7.2 easiest to get wrong: its own worked
+    // example ends "Notice that the value of Lblock is incremented only at
+    // the start of the sequence".
+    while bits.bit()? == 1 {
+        *lblock += 1;
+        if *lblock > 32 {
+            return Err(Refusal::Structure(
+                "an Lblock past any legal segment length",
+            ));
+        }
+    }
+
+    // B.10.7.2: "Let T be the set of indices of terminated coding passes
+    // included for the code-block in the packet as indicated in Tables D.8
+    // and D.9. If the index final coding pass included in the packet is not a
+    // member of T, then it is added to T. Let n1 < ... < nK be the indices in
+    // T. K lengths are signalled consecutively with each length using the
+    // mechanism described in B.10.7.1."
+    let last = first.checked_add(passes).ok_or(Refusal::Structure(
+        "more coding passes than a code-block has",
+    ))?;
+    let mut out = Vec::new();
+    let mut start = first;
+    for p in first..last {
+        let terminated = schedule.terminates(p);
+        // The two ways a segment closes, and they are kept apart: `p + 1 ==
+        // last` is the "final coding pass included in the packet" rule, which
+        // closes a *signalled length* without the coder having terminated.
+        if !terminated && p + 1 != last {
+            continue;
+        }
+        // (B-19): the width is `Lblock` plus the floor of the base-2 log of
+        // the passes *in this segment*, which B.10.7.2 gives as "the number
+        // of passes in the packet up through n1" for the first and "n2 - n1"
+        // after it — the same quantity both times.
+        let in_segment = p - start + 1;
+        let width = *lblock + floor_log2(in_segment);
+        out.push(SignalledLength {
+            length: bits.bits(width)? as usize,
+            passes: in_segment,
+            terminated,
+        });
+        start = p + 1;
+    }
+    Ok(out)
 }
 
 /// B.10.6's variable-length code for the number of coding passes.
-fn read_pass_count(bits: &mut PacketBits<'_>) -> Result<u32, Refusal> {
+pub(crate) fn read_pass_count(bits: &mut PacketBits<'_>) -> Result<u32, Refusal> {
     if bits.bit()? == 0 {
         return Ok(1);
     }

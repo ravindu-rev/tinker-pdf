@@ -94,14 +94,19 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
     );
 
     // "any code-block style bit in COD/COC Table A.19 this build does not
-    // implement" — two of the six now, and the list shrank rather than the
-    // claim weakening. RESET, VERTICALLY_CAUSAL and PREDICTABLE are decisions
-    // about context state and are decoded; SEGMENTATION_SYMBOLS always was,
-    // because checking it is the only free integrity check the format offers.
-    // What is left is the pair that moves where a coding pass's *bytes* start,
-    // which needs a length per pass out of the packet header rather than
-    // anything tier-1 can do alone.
-    for bit in [cb_style::BYPASS, cb_style::TERMALL] {
+    // implement" — **zero of the six now**, and this entry has left the
+    // refusal list as a capability rather than narrowing again. RESET,
+    // VERTICALLY_CAUSAL and PREDICTABLE are decisions about context state and
+    // are decoded; SEGMENTATION_SYMBOLS always was, because checking it is the
+    // only free integrity check the format offers; and BYPASS and TERMALL
+    // went together on 23 September 2026 with B.10.7.2's multiple codeword
+    // segments and D.6's raw bit reader.
+    //
+    // What is left is a style **bit** outside the table, which is a value the
+    // standard reserves rather than a capability this build lacks — the same
+    // shape as the `Srgn` entry below and RGN's before it. Table A.19's six
+    // bits are 0 to 5, so the reserved ones are 6 and 7.
+    for bit in [0x40u8, 0x80] {
         assert_eq!(
             refuse(&stream(
                 &Spec {
@@ -111,20 +116,32 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
                 &EMPTY_PACKETS
             )),
             Warning::JpxFeatureUnsupported,
-            "Table A.19 bit {bit:#04x}",
+            "a code-block style bit Table A.19 does not define ({bit:#04x})",
         );
     }
-    // And a bit Table A.19 does not define at all.
-    assert_eq!(
-        refuse(&stream(
-            &Spec {
-                cb_style: 0x40,
-                ..Spec::default()
-            },
-            &EMPTY_PACKETS
-        )),
-        Warning::JpxFeatureUnsupported,
-    );
+    // And the half of this that would otherwise stop meaning anything: the
+    // six the table *does* define no longer refuse. Without this, a build
+    // that put the old blanket refusal back would still pass the loop above.
+    for bit in [
+        cb_style::BYPASS,
+        cb_style::RESET,
+        cb_style::TERMALL,
+        cb_style::VERTICALLY_CAUSAL,
+        cb_style::PREDICTABLE,
+        cb_style::SEGMENTATION_SYMBOLS,
+    ] {
+        assert!(
+            crate::jpx::codestream::parse(&stream(
+                &Spec {
+                    cb_style: bit,
+                    ..Spec::default()
+                },
+                &EMPTY_PACKETS
+            ))
+            .is_ok(),
+            "Table A.19 bit {bit:#04x} is implemented and must not refuse",
+        );
+    }
 
     // "an RGN marker, a Part 2 marker, or a marker the standard defines and
     // this build does not". Three separate claims, and the first of them has

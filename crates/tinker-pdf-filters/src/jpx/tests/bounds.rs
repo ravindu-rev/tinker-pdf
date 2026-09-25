@@ -15,7 +15,7 @@
 
 use crate::jpx::codestream::parse;
 use crate::jpx::tier1::{decode_code_block, initial_contexts, CodingStyle, MAX_PASSES};
-use crate::jpx::tier2::Orientation;
+use crate::jpx::tier2::{Orientation, Segment};
 use crate::jpx::wavelet::{PLANE_BOUND, Q};
 use crate::jpx::{Refusal, MAX_JPX_CODE_BLOCKS, MAX_JPX_PRECISION, MAX_JPX_SAMPLES, MAX_JPX_WORK};
 
@@ -98,7 +98,7 @@ fn the_work_charge_is_the_whole_block_before_any_of_it() {
     let mut exact = cost;
     assert!(
         decode_code_block(
-            &data,
+            &Segment::single(&data, passes),
             width,
             height,
             passes,
@@ -115,7 +115,7 @@ fn the_work_charge_is_the_whole_block_before_any_of_it() {
     let mut short = cost - 1;
     assert_eq!(
         decode_code_block(
-            &data,
+            &Segment::single(&data, passes),
             width,
             height,
             passes,
@@ -173,7 +173,7 @@ fn a_stream_inside_every_per_item_cap_is_refused_by_the_total() {
     let data = [0x80u8; 256];
     assert_eq!(
         decode_code_block(
-            &data,
+            &Segment::single(&data, MAX_PASSES),
             width,
             height,
             MAX_PASSES,

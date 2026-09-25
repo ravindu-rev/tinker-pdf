@@ -222,12 +222,14 @@ over the 45 linearized files in the fetched qpdf corpus: **none reports `/E`**.
 **What is left of this tier, stated plainly.** The JPEG arithmetic row
 **closed on 20 September 2026** — SOF9 and SOF10 decode — and what closed it
 was the third wall coming down: T.81 Annex K.4.1 publishes a complete
-arithmetic-coder test vector, which nothing here had looked for. **Two rows are
-left and they are different kinds of thing**: JPX's capabilities, which are
-scheduled work, and the arithmetic JPEG *statistical model*, which is a named
-limit rather than work — it is transcribed, it is pinned as well as a reading
-can be, and nothing published will adjudicate it. Three walls, each checkable,
-and re-checking them is what has moved every one of them that has moved:
+arithmetic-coder test vector, which nothing here had looked for. **The JPX row
+closed on 23 September 2026**, when `BYPASS` and `TERMALL` landed and Table
+A.19 left the refusal list entirely — the last of the capabilities that row
+named, after RGN, PPM, PPT and POC on the 20th and 21st. **One row is left, and it is
+not scheduled work**: the arithmetic JPEG *statistical model*, which is a named
+limit — it is transcribed, it is pinned as well as a reading can be, and
+nothing published will adjudicate it. Three walls, each checkable, and
+re-checking them is what has moved every one of them that has moved:
 
 - **Zero corpus reachability**, measured and pinned by a census that runs
   nightly — `jpeg_census.rs` walks 10 606 JPEG streams and finds no arithmetic
@@ -299,11 +301,30 @@ and re-checking them is what has moved every one of them that has moved:
   J.10 has one each — and never checked against the fourth, which is the one
   it has two of.
 
-  What survives of it is narrower and still worth saying: a capability whose
-  effect is confined to *inside* a packet cannot be reached this way, because
-  rearranging packets does not change what is in one. `BYPASS` and `TERMALL`
-  are both of that kind — B.10.7's multiple codeword segments — so they are
-  still expected to need a hand-authored codestream.
+  *What survived of it was narrower, and on 23 September 2026 that was wrong
+  too.* It read: a capability whose effect is confined to *inside* a packet
+  cannot be reached this way, because rearranging packets does not change what
+  is in one — and `BYPASS` and `TERMALL` are both of that kind, so both still
+  expect to need a hand-authored codestream. **Neither needed one for its own
+  semantics.** The one codestream this lane did author by hand carries two
+  layers, and it is there for B.10.7.2's *bookkeeping* — that a layer boundary
+  is not a codeword segment boundary — rather than for either style bit; the
+  injection campaign asked for it, by firing nothing without it. The old
+  premise is sound and the conclusion does not follow, because these two
+  capabilities are not confined to inside a packet: B.10.7.2 makes the
+  *number of lengths a packet header signals* a function of Tables D.8 and
+  D.9, so a style bit that changes nothing about where a packet sits changes
+  how its header parses. J.10 publishes two packet headers field by field
+  (Tables J.20 and J.21), and that is enough to bracket D.6's boundary from
+  both sides without moving a byte: its second code-block's seven coding
+  passes are all before the boundary, so with `BYPASS` set the header must
+  still signal Table J.21's single three-byte length and those three published
+  bytes must still decode to J.10.4's "1, 5, 1, 0"; its first code-block's
+  sixteen passes straddle it, so with `BYPASS` set B.10.7.2 wants five lengths
+  where J.10 prints one and the published header stops being readable at all.
+  **The lever was lever 2 the whole time** — it just reads the header rather
+  than locating it. `TERMALL` is the one that really is out of reach, and the
+  closure paragraph after the levers says so in its own words.
 
   The same transcription found an **erratum** in J.10.3: its closing sentence
   puts the second packet header at octal 0134, where Table J.21 immediately
@@ -342,23 +363,81 @@ and re-checking them is what has moved every one of them that has moved:
   A.45's Profile-0 constraint ("If the POC marker is present, the POC marker
   shall have RSPOC0 = 0 and CSPOC0 = 0") and Table A.46's parameter sets for
   the digital-cinema profiles, and both are values for a profile with no
-  image, no bytes and no decoded result. So there are now **three** levers,
-  and a capability should be asked which one it fits before anything is
-  hand-authored:
+  image, no bytes and no decoded result.
+
+  **The seventh came back full, and it is the one that closed the row.** On
+  23 September 2026 every annex was searched for published code-block style
+  data before `BYPASS` and `TERMALL` were written, and the clause numbers are
+  worth writing down either way. *Normative, and all in Annexes A, B and D:*
+  Table A.19 defines the six style bits and reserves bits 6 and 7; Table A.45
+  spells the same byte a second way as Profile-0's mnemonic `00sp vtra` with
+  `a = r = v = 0`; D.4 and Table D.8 give the two termination patterns;
+  D.6 and Table D.9 give the bypass schedule bit-plane by bit-plane, D.4.1 the
+  0xFF extension, (D-2) the raw sign and D.6's NOTE 2 the raw stream's own
+  0xFF extension; B.10.7.1 and B.10.7.2 give the length signalling. *And two
+  of those clauses publish worked examples*, which is what no earlier search
+  found in Annex B: B.10.7.1's NOTE 1 prints four layers' lengths, pass counts
+  and a valid bit sequence, and **B.10.7.2's NOTE prints a bypassed
+  code-block's five included passes, the set `T` they produce, the four
+  lengths signalled, their pass counts and a valid 39-bit sequence coding
+  them**. That is the standard's bytes in and the standard's numbers out for
+  the mechanism both capabilities share.
+
+  So there are now **four** levers — the fourth found on that search, in
+  Annex B rather than Annex J — and a capability should be asked which one it
+  fits before anything is hand-authored:
 
   1. *It acts on coefficients* — J.10.4's published intermediate values
      adjudicate it (`jpx_annex_h.rs`, RGN).
   2. *It acts on where a packet's header or body sits* — J.10.3's and
      J.10.4's published packet extents adjudicate it (`jpx_annex_j.rs` for
      PPM and PPT, `jpx_poc.rs` for POC).
-  3. *It acts inside a packet's codeword segments* — neither lever reaches
-     it, and `BYPASS` and `TERMALL` are both here.
+  3. *It acts inside a packet's codeword segments* — B.10.7.2 makes this
+     visible in the packet *header*, because `K`, the number of lengths
+     signalled, is a function of Tables D.8 and D.9. So lever 2 reaches it
+     whenever the standard publishes a header with a pass count, which J.10
+     does twice (`code_block_styles.rs`, `BYPASS`). It reaches `TERMALL` only
+     if `K` can come out as it was published, and for J.10's sixteen- and
+     seven-pass code-blocks `TERMALL` makes `K` sixteen and seven against a
+     printed one and one — so that half is transcribed and not adjudicated.
+  4. *It is a rule about the packet header's own bits* — B.10.7.1's NOTE 1 and
+     B.10.7.2's NOTE each print a complete valid bit sequence with the lengths
+     and pass counts it codes, and those are the standard's bytes in and the
+     standard's numbers out. This is the fourth lever and the one the seventh
+     annex search turned up; it is the strongest evidence either of these two
+     capabilities has.
 
-Any one of the three moving is what schedules the remaining rows. **Two moved
-for JPX**, so its row is scheduled: the specification is in hand and Annex J.10
-adjudicates a decode. Only zero corpus reachability still holds there, and
-ruling 3 makes that a scheduling input rather than a wall. **All three moved
-for JPEG arithmetic**, so that row is closed rather than scheduled.
+Any one of the three moving is what schedules the remaining rows. **All three
+moved for JPEG arithmetic**, so that row is closed. **Two moved for JPX** — the
+specification is in hand and Annex J.10 adjudicates a decode — which scheduled
+its row, and the row then closed on 23 September 2026 with `BYPASS` and
+`TERMALL`. Zero corpus reachability never moved for either, and under ruling 3
+that was a scheduling input rather than a wall throughout; the census says the
+same thing after this closure as before the first.
+
+**What the JPX row left behind, since the row itself is gone.** Its last six
+capabilities left in four days — RGN, PPM, PPT and POC on 20 and 21
+September 2026, `BYPASS` and `TERMALL` on the 23rd — and Table A.19 is the one
+entry that went to **zero** rather than narrowing: all six code-block styles
+decode, and what fires for A.19 now is a style *bit* the table does not
+define, which is bits 6 and 7 and a value rather than a capability. The two
+were **two capabilities over one mechanism**, which is what the old note in
+`cb_style` had half right: it called the pair one change and "not a tier-1
+change". `TERMALL` really is only about where a codeword segment ends, so that
+half held; D.6 makes `BYPASS` read some passes as raw bits, which is squarely
+tier-1, so the other half did not. What they share is B.10.7.2's multiple codeword segments, and that is
+the part T.800 adjudicates — B.10.7.2's own NOTE prints a bit sequence, the
+set `T` it implies under D.6, and the four lengths and pass counts it codes,
+all of which `code_block_styles.rs` requires back out of the shipped reader
+with `T` derived from this build's Table D.9 transcription rather than written
+in. **`TERMALL` has no link whose expected output is T.800's** and the roadmap
+should not pretend otherwise: Table D.8 publishes the pattern and no bytes,
+and J.10's two code-blocks carry sixteen and seven coding passes against
+headers that print one length each, so `TERMALL` cannot be flipped onto them.
+What holds it up is Table D.8 transcribed and asserted as data, plus the fact
+that it shares `read_lengths` with the half B.10.7.2 does adjudicate. The
+census after the closure is the fifth unchanged run: **same 39 bearing files,
+same 7 refusals, same five reasons**.
 
 **What the closed row's adjudication does and does not cover, because the two
 halves are not the same.** K.4.1 adjudicates Annex D's *coder* outright. It
@@ -396,7 +475,6 @@ decodes.**
 | --- | --- | --- | --- |
 | ~~**JPEG arithmetic coding**~~ **SOF9 and SOF10 decode, landed 20 September 2026. SOF11, SOF13, SOF14 and SOF15 are refused by the annex they need rather than by the coder they use, and that re-labelling is the row's other half** | `crates/tinker-pdf/tests/jpeg_census.rs` walks every `/DCTDecode` stream through the COS layer, so encrypted documents and object streams are seen: **688 files, 10 606 distinct streams, 10 603 frames, and every one of them is SOF0, SOF1 or SOF2 at eight bits**. Zero arithmetic, zero lossless, zero other precision — re-measured 20 September 2026 over 5 605 files, and unchanged over the 5 605 files `TINKER_CORPUS` held that day, which is the five corpora above plus what else the cache carries. That is the largest population any census here measures | **closed for SOF9 and SOF10.** The third blocker fell: **T.81 Annex K.4.1 publishes a 256-bit test sequence with the 32 bytes it encodes to**, plus Tables K.7 and K.8's per-event traces — so the coder is adjudicated by the standard's own bytes in both directions, and `qm.rs` holds it as a permanent fixture. Table D.3's 113 rows were read twice, off a rendered page and out of the text layer, and the two readings agree on every `Qe`; the 27 rows the text layer cannot disambiguate are named, because T.81's column rules extract as a literal `1`. `JpegError::Arithmetic` is **gone**: SOF11 and SOF15 report `Lossless` (Annex H's predictor) and SOF13 and SOF14 `Differential` (Annex J), which is what the refusal was always meant to name. A defect found on the way: the DAC marker `X'FFCC'` was **skipped** while a comment claimed it was handled — the same shape as the SOF3/SOF5/SOF6/SOF7 defect this row already recorded | closed; what is left open is named in the row below rather than here |
 | **The arithmetic JPEG statistical model is transcribed and not adjudicated, and nothing published will adjudicate it.** F.1.4.4's Tables F.4 and F.5, Table G.2, and B.2.4.3's DAC conditioning are read off the clause; the coder under them is pinned by K.4.1 | **The search, so nobody repeats it** (all 20 September 2026 unless noted). *T.81*: `https://www.w3.org/Graphics/JPEG/itu-t81.pdf` → **HTTP 200**, 1 058 883 bytes, SHA-256 `631031d4…768bf0`; Annex K read section by section — K.1/K.2 quantisation tables, K.3 Huffman tables and K.3.3's byte lists, **K.4.1 the arithmetic coder vector and K.4's only subsection**, K.5 to K.10 filters and guidance with no data; a sweep for hexadecimal runs over the whole document finds only those, plus `X'FFFF0000'` in D.1. *T.83* (ISO/IEC 10918-2, the compliance-test document): `https://www.itu.int/rec/dologin_pub.asp?...T-REC-T.83-199411-I!!PDF-E...` → **HTTP 500** again; the standards-preview extract `https://cdn.standards.iteh.ai/samples/20689/…/ISO-IEC-10918-2-1995.pdf` → **HTTP 200**, 2 642 839 bytes, SHA-256 `6ceaa9ff…b636f358`, and `tpdf info` counts **15 pages** — the front matter and numbered pages 1 to 11, exactly as this file recorded in September, and clause 4.4 is in it: the data "are available on 3 diskettes and are included with the copy of this ITU-T Recommendation" rather than in the document. *T.84* (ISO/IEC 10918-3): `https://www.itu.int/rec/dologin_pub.asp?...T-REC-T.84-199607-I!!PDF-E...` → **HTTP 200**, 419 607 bytes, SHA-256 `cd714dd1…89f6173f`, and `tpdf info` counts 84 pages — read here, and clause 4.2.1 says compliance data is "available from ISO and ITU to parties who wish to determine compliance"; Annex G specifies the *structure* of the test streams and prints none | **stays open as a named limit rather than as work.** What would close it: a real document, and the census walked 5 605 of them on 20 September 2026 and found none; or published data, and three documents have now been searched. What would **not** close it is an arithmetic encoder written here — ruling 13, and it would only prove the two halves of one reading agree. What holds it meanwhile: the decisions of each model are hand-derived from T.81's own figures and the tests assert **which statistics bin every decision was taken against**, not only the coefficients, because a wrong bin decodes correctly until the bins have adapted | not sized; it is a limit, and it moves only if a document or a vector appears |
-| **JPX: the `BYPASS` and `TERMALL` code-block styles — two capabilities, and the row does not close until both land.** **POC has left this row**, on 21 September 2026, and it is the one that could not be parsed and carried: A.6.6's progressions are B.12.2's *progression order volumes*, so tier-2 walks a list of volumes bounded by (B-21) — `CSpod <= i < CEpod`, `RSpod <= r < REpod`, `0 <= l < LEpod` — each with its own Table A.16 order, in the order the segment lists them. The default is not a second code path: a codestream with no POC is one volume covering everything, which is B.12.2's own opening sentence. Scope is the whole of what Part 1 defines, and the three rules easiest to skip are all in: A.6.6's precedence chain "Tile-part POC > Main POC > Tile-part COD > Main COD"; the rule that makes overlapping volumes work, "Packets that have already been included in the codestream are not included again", which B.12.2 turns into "the layer always starts with the next one"; and B.12.3's Figure B.15b, where a tile's volumes are spread across its tile-part headers and joined in `TPsot` order, with the first tile-part header required to carry one. What is refused is a *value inside* the segment, as for RGN: a `Ppoc` Table A.16 does not define, a bound outside Table A.32, an `Lpoc` that is not equation (A-6)'s, two POC segments in one header. **PPM and PPT left this row the day before**: packed packet headers (T.800 A.7.4, A.7.5) are implemented, in both places the mechanism lives, through tier-2's one packet-header reader with the byte source parameterised rather than a second reader. **RGN left it the same day**: A.6.3's marker segment is parsed at Table A.24's widths and precedence, and Annex H.1's Maxshift realignment runs at the head of the dequantiser, where D.2.2 puts it — "modifications need to be made to the decoded bits, as well as the number of decoded bits `Nb(u, v)` … specified in H.1" — with Table A.25's one ROI style decoding and a reserved style refused **by name** rather than stepped over, the SOF3/SOF5/SOF6/SOF7 lesson two rows down. **Component precision above 16 bits has left this row and is a limit**, argued under Named non-goals: E.1's dequantisation clamps a coefficient to `2^(R_b + 2)` sample units and the coefficient plane is a Q12 `i32`, so 17 bits is where the plane's format runs out rather than where a policy begins — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. CRG left for a different reason again: ISO 19005 aside, T.800 A.9.1 says in as many words that it "has no effect on decoding the codestream", so it is parsed, carried and never applied, and refusing a file for carrying it refused a conforming file | **Zero corpus files reach either of them, and closing RGN, PPM, PPT and now POC did not move that.** `jpx_attribution.rs` names every refusal in the 39 JPX-bearing files and not one is a coding capability: a ruling 1 budget, two deliberately non-conformant veraPDF `colr` fixtures, two `/JPXDecode` streams whose bytes are not JPEG 2000 at all, and two real documents that are truncated. Re-run after each of the four landed — the fourth over 5 605 files on 21 September 2026 — the census is unchanged: **same 39 bearing files, same 7 refusals, same five reasons**, which is what closing an unreached capability should do. **What POC's closure adds is a measurement rather than an argument.** This file and three source comments have said for a year that a skipped POC "mis-parses every packet after it" and produces a picture rather than an error. It does: T.800 J.10's two published packets, swapped and described by a two-volume POC, decode to J.10.5's nine published samples, and the identical bytes with the POC segment removed decode **cleanly, with no warning**, to `128, 130, 132, 139, 128, 124, 143, 97, 153` against J.10.5's `101, 103, 104, 105, 96, 97, 96, 102, 109` | **one blocker left of three, and the row is scheduled.** (1) Zero corpus reachability still holds, and under ruling 3 that is a scheduling input rather than a wall. (2) **T.800 is obtainable** and was fetched on 13 September 2026 — the claim that ISO and the ITU both sell it was never retested; B.10.7.2's rule for how many codeword segments a packet signals is at hand rather than written from memory. (3) **A fixture no longer needs an encoder, and for the third capability in a row it did not need to be hand-authored either.** T.800 Annex J.10 publishes a complete codestream with its decoded samples, and `jpx_annex_j.rs` decodes it — **and, in J.10.3 and J.10.4, where each packet's header ends**: Table J.20's three bytes with its body at octal 0125, Table J.21's four bytes with its body at octal 0137. That published boundary relocated the headers into a PPM and a PPT; **for POC it did more, and the sentence this row used to carry was wrong.** It read "what the standard does *not* publish is a codestream exercising POC, `BYPASS` or `TERMALL`, so each still needs a hand-authored one". The first half holds — `0xFF5F` occurs exactly twice in the 231 pages, in Table A.2 and Table A.32, the string "POC" does not occur anywhere outside Annexes A and B, and the only POC field values the standard prints are Table A.45's Profile-0 constraint and Table A.46's digital-cinema parameter sets, which are values for a profile with no image and no bytes. The second half does not: J.10.1's COD declares one decomposition level, so B.12 gives that codestream **two resolution levels and exactly two packets**, and a published packet boundary is all a *reordering* needs. `jpx_poc.rs` swaps J.10's own nine and seven bytes, describes the swap in a two-volume POC, and demands J.10.5's samples back — no hand-authored codestream, and every link adjudicated. **The trick generalises differently from Annex H's.** ROI was adjudicable because J.10.4 publishes its intermediate coefficients ("-26, -22, -30, -32, -19" and "1, 5, 1, 0"), which is available to any capability acting on *coefficients*; POC acts on packet *order*, and what served there is J.10.3's and J.10.4's published packet extents, which is available to any capability acting on where a packet is. `BYPASS` and `TERMALL` act on neither — both move where a coding pass's bytes start, which is B.10.7's multiple codeword segments — so the next lane should expect to hand-author, and the first measurement of that work says how carefully: of 182 citations drafted from T.800 for these capabilities, **37 were wrong**, and this lane's own second pass found the standard spelling one field three ways (`LYEpoc` in A.6.6 and Table A.32, `LEpoc` in B.12.2's prose, `LEpod` in (B-21) itself) | scheduled; one capability at a time, each with the clause it is transcribed from checked against T.800 twice |
 
 ## Tier 3 — capabilities absent today
 
