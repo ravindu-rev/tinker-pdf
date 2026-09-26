@@ -131,6 +131,17 @@ on. The doctest on the re-export names all five through the facade and nothing
 else, so deleting any one of them fails `cargo test --doc` rather than quietly
 reopening the gap.
 
+**`ImageFilter::Jpx` places a JPEG 2000 file as `/JPXDecode`**, bare
+codestream or JP2 alike (7.4.9), and it is the one filter whose image
+dictionary carries **no `/BitsPerComponent` and no `/ColorSpace`**: Table 89
+makes both optional for it alone, the codestream states both, and a
+`/ColorSpace` would override a JP2's own `colr` box. The two
+`CompressedImage` fields are still filled in and checked — as a description
+of what a decode produces — and are not written; a colour-key mask with it is
+refused, having no stated depth to be ranges over. `ImageFilter` is not
+`#[non_exhaustive]`, so the variant was a break, and the workspace's one
+exhaustive match on it (the writer's own `/Filter` name) took the arm.
+
 **The archival profile.** `DocumentBuilder::archival` takes an ISO 19005
 profile and turns this whole surface into one that says no: the standard 14,
 transparency under part 1, a device colour the output intent cannot reproduce

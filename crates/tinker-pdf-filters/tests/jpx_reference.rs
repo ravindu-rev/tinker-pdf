@@ -171,12 +171,34 @@ fn decode(name: &str) -> tinker_pdf_filters::JpxImage {
     let path = fixture(name);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
     let mut warnings = Vec::new();
-    tinker_pdf_filters::jpx_decode(
-        &bytes,
-        &tinker_pdf_filters::Limits::new(1 << 24),
-        &mut warnings,
-    )
-    .unwrap_or_else(|e| panic!("{name} refused: {e:?}, warnings {warnings:?}"))
+    let limits = tinker_pdf_filters::Limits::new(1 << 24);
+    let image = tinker_pdf_filters::jpx_decode(&bytes, &limits, &mut warnings)
+        .unwrap_or_else(|e| panic!("{name} refused: {e:?}, warnings {warnings:?}"));
+    // `jpx_header` stands in for this decode on the comic path, which places
+    // a `.jp2` page on the strength of the header alone — so over every real
+    // encoder's file here, the two must describe the same image.
+    let header = tinker_pdf_filters::jpx_header(&bytes, &limits)
+        .unwrap_or_else(|e| panic!("{name}: the header read refused a file that decodes: {e:?}"));
+    assert_eq!(
+        (
+            header.width,
+            header.height,
+            header.components,
+            header.precision,
+            header.colour,
+            header.opacity
+        ),
+        (
+            image.width,
+            image.height,
+            image.components,
+            image.precision,
+            image.colour,
+            image.opacity.is_some()
+        ),
+        "{name}: the header read and the decode describe different images"
+    );
+    image
 }
 
 /// Every committed fixture decodes to exactly the samples it was made from.

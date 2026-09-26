@@ -59,6 +59,25 @@ fn a_synthesised_comic_validates() {
     valid("the synthesised document", &pdf);
 }
 
+/// A comic of JPEG 2000 pages validates too, and it is the one whose image
+/// dictionaries carry no `/ColorSpace` and no `/BitsPerComponent` — Table 89
+/// makes both optional for `/JPXDecode` alone, so a validator that required
+/// them of every image would fire here and nowhere else.
+#[test]
+fn a_synthesised_jpeg_2000_comic_validates() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cbz/python-jpx.cbz"),
+    )
+    .expect("the committed JPEG 2000 comic");
+    let (pdf, report) =
+        cbz::synthesise(Container::Zip, &bytes, &cbz::Limits::DEFAULT).expect("it synthesises");
+    assert!(
+        report.pages().iter().all(|p| p.defect.is_none()),
+        "both pages are pictures"
+    );
+    valid("the synthesised JPEG 2000 comic", &pdf);
+}
+
 /// And so does the same document saved back through the writer, in both
 /// layouts.
 ///

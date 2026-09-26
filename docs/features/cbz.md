@@ -146,6 +146,19 @@ expressed that way, so they take the decoder and are split into samples and an
 multiple of its own size to open, not *w × h × 3* per page — about 3.6 GB for
 200 pages at 2000 × 3000, had every page been decoded.
 
+**A JPEG 2000 file is the argument at its simplest.** 7.4.9 takes a
+`/JPXDecode` stream as a whole JP2 file or as a bare codestream, which are the
+two shapes a `.jp2` or `.j2k` page arrives in, so the entry's bytes *are* the
+image stream and are placed untouched. Only the header is read at open —
+`tinker_pdf_filters::jpx_header`, which is every stage of the decoder before
+tier-2 — for the page's size and to refuse, as a named placeholder, a file
+whose declared structure the decoder would refuse anyway; damage inside the
+packets is found when the page is drawn, as it is for any PDF's JPX stream.
+The image dictionary carries **no `/ColorSpace` and no `/BitsPerComponent`**:
+Table 89 lets a JPX image omit both, and a `/ColorSpace` would override the
+JP2's own `colr` box. A channel a `cdef` box types as opacity is dropped with
+`ArchiveWarning::DegradedImage`, since a page is painted over nothing.
+
 **And a TIFF is four more of the same argument.** Four of TIFF 6.0's codings
 already have a `/Filter` name, so a single-strip file of any of them is placed
 rather than decoded: compressions 2, 3 and 4 become `/CCITTFaxDecode` with
@@ -327,8 +340,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | One encrypted or checksum-failed entry | `PageDefect::EntryRefused(ZipEntryError)` | placeholder page; the page count and every number after it are unchanged | — |
 | Compression method other than stored, deflated or LZMA | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, bzip2, Zstandard — named by code so a refusal says which | — |
 | A method-14 entry whose APPNOTE 5.8.8 header is damaged | `ZipEntryError::LzmaHeader` | placeholder page; fewer than nine bytes, a properties size other than five, or a property byte outside what LZMA encodes — a wrong offset or a different coder shows here first | — |
-| GIF, WebP, BMP, AVIF, JPEG 2000 entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
-| A JPEG, PNG or TIFF that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a `Compression` or `PhotometricInterpretation` refused by name, a raster past the ceiling | [filters](filters.md) |
+| GIF, WebP, BMP, AVIF entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
+| A JPEG, PNG, TIFF or JPEG 2000 file that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a `Compression` or `PhotometricInterpretation` refused by name, a JPEG 2000 header the decoder refuses or a channel count other than 1, 3 or 4, a raster past the ceiling | [filters](filters.md) |
 | A `ComicInfo.xml` that will not read | `ArchiveWarning::ComicInfo(ComicInfoDefect)` | past 64 KiB, an entry the archive refused, markup that is not well formed, or a root that is not `ComicInfo`; the pages are unaffected | — |
 
 ## Verified
@@ -381,7 +394,13 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   the archive joins the cross-producer identity. It is not in `INVENTORY.tsv`,
   whose second reader is .NET's and would infer `deflate` from the lengths;
   `a_damaged_lzma_header_is_a_placeholder_page_naming_it` changes one header
-  byte and asserts the placeholder names `LzmaHeader`. `tests/cbz/README.md` records what that
+  byte and asserts the placeholder names `LzmaHeader`. `python-jpx.cbz` is
+  T.800 Annex J.10's 100-byte codestream as a bare `.j2k` page and inside
+  Annex I's JP2 boxes as a `.jp2` one (`tests/cbz/make-jpx.py`);
+  `a_jpeg_2000_page_is_placed_as_jpxdecode_and_draws_the_samples_t800_publishes`
+  asserts each page's image is `/JPXDecode` over the entry's bytes with no
+  `/ColorSpace` or `/BitsPerComponent`, and that each renders to J.10.5's nine
+  published samples — an expected picture no decoder here produced. `tests/cbz/README.md` records what that
   still does not buy: a second 7z *writer*, which this machine cannot produce.
 - `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
   archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 28 unit tests over

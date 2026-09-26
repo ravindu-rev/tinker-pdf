@@ -36,7 +36,10 @@
 //! codings: a G3 or G4 strip is a `/CCITTFaxDecode` stream, an LZW strip is a
 //! `/LZWDecode` one, a DEFLATE strip is `/FlateDecode`, and a JPEG strip is
 //! `/DCTDecode` — so a scanned comic costs its own bytes rather than its own
-//! pixels, the same as every other entry here.
+//! pixels, the same as every other entry here. A JPEG 2000 file, JP2 or bare
+//! codestream, is the simplest of them: it *is* a `/JPXDecode` stream (7.4.9
+//! takes both shapes), so its bytes are placed whole and only its header is
+//! read, for the page's size.
 //! Decoding every page instead would cost *w x h x 3* each — about 3.6 GB for
 //! a 200-page archive at 2000 x 3000 — and the failure would arrive only at
 //! the size that matters.
@@ -74,9 +77,10 @@ use std::cmp::Ordering;
 
 use tinker_pdf_archive::{rar, sevenz, tar};
 use tinker_pdf_cos::{
-    png_image, tiff_image, DocumentBuilder, ImageData, PngImageData, TiffImageData,
+    png_image, tiff_image, CompressedImage, DocumentBuilder, ImageColorSpace, ImageData,
+    ImageFilter, PngImageData, TiffImageData,
 };
-use tinker_pdf_filters::Limits as FilterLimits;
+use tinker_pdf_filters::{JpxHeader, Limits as FilterLimits};
 use tinker_pdf_zip::{Archive, ArchiveError};
 
 pub use tinker_pdf_archive::tar::{
@@ -531,9 +535,11 @@ pub enum ImageFormat {
     Tiff,
     /// AVIF. Not read here.
     Avif,
-    /// JPEG 2000, in the JP2 wrapper or as a bare codestream. Not read here —
-    /// this engine has a JPX decoder for PDF streams and no route from a
-    /// container entry to it.
+    /// JPEG 2000, in the JP2 wrapper or as a bare codestream. Read on the
+    /// comic path since tier 4's archive row: placed as a `/JPXDecode` stream
+    /// with its own bytes, its header read for the page's size. An EPUB
+    /// `<img>` still does not take it — it is not one of EPUB 3.3 §3.2's core
+    /// image media types.
     Jpeg2000,
 }
 
@@ -617,9 +623,10 @@ pub enum PageDefect {
     /// stores every entry, so a decoder for it would have nothing first-party
     /// to be held to.
     RarEntryRefused(RarEntryError),
-    /// The bytes are a JPEG or a PNG and could not be made into an image —
-    /// an unreadable header, a colour type outside Table 11.1, a raster past
-    /// the ceiling.
+    /// The bytes are a JPEG, a PNG, a TIFF or a JPEG 2000 file and could not
+    /// be made into an image — an unreadable header, a colour type outside
+    /// Table 11.1, a JPEG 2000 header this build's decoder refuses, a raster
+    /// past the ceiling.
     Undecodable,
 }
 
@@ -1551,6 +1558,9 @@ enum Content<'a> {
     Png(Box<PngImageData>),
     /// A TIFF, through the chooser that is that one's sibling.
     Tiff(Box<TiffImageData>),
+    /// A JPEG 2000 file, placed as the archive holds it, with what its header
+    /// said about the decode.
+    Jpx(Cow<'a, [u8]>, JpxHeader),
     /// Nothing usable; the page is the neutral placeholder.
     Placeholder,
 }
@@ -1915,6 +1925,10 @@ fn pages_from_reader(
             Content::Jpeg(data) => builder.add_image(IMAGE_RESOURCE, &ImageData::Jpeg(data)),
             Content::Png(png) => builder.add_image(IMAGE_RESOURCE, &png.image()),
             Content::Tiff(tiff) => builder.add_image(IMAGE_RESOURCE, &tiff.image()),
+            Content::Jpx(data, header) => builder.add_image(
+                IMAGE_RESOURCE,
+                &ImageData::Compressed(jpx_image(data, header)),
+            ),
             Content::Placeholder => false,
         };
 
@@ -2101,10 +2115,79 @@ fn plan_entry<'a>(
                 charge,
             })
         }
+        ImageFormat::Jpeg2000 => {
+            // The header and nothing past it: the box walk, the main and
+            // tile-part headers, the budgets and Annex I's channel plan. That
+            // is everything the file *declares*, so a codestream the decoder
+            // would refuse by name is a placeholder here, before it becomes a
+            // page. Damage inside the packets is found where every PDF's JPX
+            // stream has it found, when the page is drawn.
+            //
+            // The ceiling is the PNG and TIFF routes' — the largest entry this
+            // build will read — because the raster a decode would produce is
+            // what it bounds, and a decode happens later at render time.
+            let Ok(header) = tinker_pdf_filters::jpx_header(
+                &data,
+                &FilterLimits::new(limits.zip.max_entry_bytes),
+            ) else {
+                return Some(placeholder(PageDefect::Undecodable));
+            };
+            // What the renderer draws a JPX image from: one, three or four
+            // colour channels (`resources.rs`'s `jpx_image`). A two-channel
+            // file would open and then draw as the renderer's own grey, with
+            // the report calling it a picture.
+            if header.width == 0 || header.height == 0 || jpx_space(&header).is_none() {
+                return Some(placeholder(PageDefect::Undecodable));
+            }
+            Some(Plan {
+                name: name.to_owned(),
+                size: Some((f64::from(header.width), f64::from(header.height))),
+                charge: PAGE_OVERHEAD.saturating_add(data.len()),
+                // A channel `cdef` typed as opacity is dropped: a comic page
+                // is painted over nothing, and `CompressedImage` carries no
+                // `/SMaskInData`. The picture reaches the page and the report
+                // says it is not the whole of what the file held.
+                degraded: header.opacity,
+                content: Content::Jpx(data, header),
+                defect: None,
+            })
+        }
         // Recognised, named, and refused at the page level rather than the
         // archive's: an archive of a hundred JPEGs and one GIF keeps its
         // hundred readable pages, and the GIF keeps its page number.
         other => Some(placeholder(PageDefect::UnsupportedFormat(other))),
+    }
+}
+
+/// The device space a JPEG 2000 file's decode lands in, by its channel count
+/// — the three counts the renderer draws — or `None` for any other.
+fn jpx_space(header: &JpxHeader) -> Option<ImageColorSpace<'static>> {
+    match header.components {
+        1 => Some(ImageColorSpace::DeviceGray),
+        3 => Some(ImageColorSpace::DeviceRgb),
+        4 => Some(ImageColorSpace::DeviceCmyk),
+        _ => None,
+    }
+}
+
+/// A JPEG 2000 page's image: the file's own bytes under `/JPXDecode`.
+///
+/// `bits_per_component` and `color_space` are the decode's description, from
+/// the header, and [`ImageFilter::Jpx`] is why neither reaches the dictionary:
+/// the codestream states both, and a `/ColorSpace` would override a JP2's own
+/// `colr` box.
+fn jpx_image<'b>(data: &'b [u8], header: &JpxHeader) -> CompressedImage<'b> {
+    CompressedImage {
+        width: header.width,
+        height: header.height,
+        bits_per_component: header.precision,
+        // `plan_entry` refused every count `jpx_space` does not map, so this
+        // default is never taken; it keeps the function total.
+        color_space: jpx_space(header).unwrap_or(ImageColorSpace::DeviceGray),
+        filter: Some(ImageFilter::Jpx),
+        data,
+        color_key_mask: None,
+        soft_mask: None,
     }
 }
 

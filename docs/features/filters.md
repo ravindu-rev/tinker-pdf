@@ -591,7 +591,12 @@ Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 `predictor_decode`. The image codecs are `jpeg_decode` (returns `JpegImage`),
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
-`JpxImage`). The encoder half is `deflate`, `zlib_compress`, `png_encode`
+`JpxImage`), with `jpx_header` beside it: every stage of that decode before
+tier-2 and none after, returning a `JpxHeader` — the geometry, output channel
+count, precision, stated colour and opacity a decode would produce. The comic
+path places a `.jp2` page's own bytes as `/JPXDecode` on the strength of it,
+and `jpx_reference.rs`, the seed replay and the `jpx` fuzz target each hold it
+to agree with the decode it stands in for. The encoder half is `deflate`, `zlib_compress`, `png_encode`
 (takes a `PngSource`, returns the file or a `PngEncodeError`), `ccitt_g4_encode`
 (takes a `CcittSource`, returns the coded bits or a `CcittEncodeError`),
 `jbig2_generic_encode` / `jbig2_generic_region_segment` (take a
