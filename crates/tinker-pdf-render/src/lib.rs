@@ -4034,6 +4034,94 @@ mod tests {
         assert_eq!(evenodd.pixel(10, 10).map(|c| c.r), Some(255), "a hole");
     }
 
+    /// Which side of the triangle `a b c` a point is on, with a margin.
+    ///
+    /// `Some(true)` when the point is inside by more than `margin` from every
+    /// edge line, `Some(false)` when it is outside by more than `margin` from
+    /// at least one, and `None` in the band along the outline where
+    /// anti-aliasing decides. Half-plane arithmetic and nothing else: the
+    /// answer is the geometry's, not the rasterizer's.
+    fn in_triangle(p: (f64, f64), tri: [(f64, f64); 3], margin: f64) -> Option<bool> {
+        let [a, b, c] = tri;
+        let orient = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+        let sign = if orient < 0.0 { -1.0 } else { 1.0 };
+        let mut inside = true;
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            let (dx, dy) = (v.0 - u.0, v.1 - u.1);
+            let distance =
+                sign * (dx * (p.1 - u.1) - dy * (p.0 - u.0)) / (dx * dx + dy * dy).sqrt();
+            if distance < -margin {
+                return Some(false);
+            }
+            if distance <= margin {
+                inside = false;
+            }
+        }
+        inside.then_some(true)
+    }
+
+    /// **ISO 32000-1 8.5.3.1: before filling, each open subpath is implicitly
+    /// closed** — and 8.5.4 says the same of a clipping path.
+    ///
+    /// `90 10 m 150 30 l 110 60 l f` names two segments and no `h`. Both of its
+    /// edges run the same way in `y`, so a filler that only builds the edges a
+    /// path states holds one crossing per sub-scanline and paints **nothing**,
+    /// which is what this engine did until September 2026. Every pixel whose
+    /// centre is more than a pixel inside the triangle the implicit close
+    /// makes must be painted and every pixel more than a pixel outside it must
+    /// not, decided by half-plane arithmetic rather than by comparing with a
+    /// closed render (which would pass a filler that ignored `h` as well). The
+    /// same holds for `f*`, for a clip, and for the first of two subpaths,
+    /// which a second `m` ends without closing.
+    #[test]
+    fn an_open_subpath_is_closed_before_it_is_filled_or_clipped() {
+        const SIDE: u32 = 160;
+        let triangle = [(90.0, 10.0), (150.0, 30.0), (110.0, 60.0)];
+        let other = [(10.0, 100.0), (60.0, 150.0), (20.0, 140.0)];
+        type Triangle = [(f64, f64); 3];
+        let cases: [(&str, &[u8], &[Triangle]); 4] = [
+            ("f", b"90 10 m 150 30 l 110 60 l f", &[triangle]),
+            ("f*", b"90 10 m 150 30 l 110 60 l f*", &[triangle]),
+            (
+                "W n",
+                b"90 10 m 150 30 l 110 60 l W n 0 0 160 160 re f",
+                &[triangle],
+            ),
+            (
+                "two subpaths",
+                b"10 100 m 60 150 l 20 140 l 90 10 m 150 30 l 110 60 l f",
+                &[other, triangle],
+            ),
+        ];
+        for (what, content, shapes) in cases {
+            let (canvas, _) = render(content, SIDE);
+            let (mut inside, mut outside) = (0, 0);
+            for y in 0..SIDE {
+                for x in 0..SIDE {
+                    // The pixel's centre in PDF user space: `render` flips y.
+                    let p = (f64::from(x) + 0.5, f64::from(SIDE - y) - 0.5);
+                    let verdicts: Vec<_> = shapes.iter().map(|t| in_triangle(p, *t, 1.0)).collect();
+                    let red = canvas.pixel(x, y).map(|c| c.r);
+                    if verdicts.contains(&Some(true)) {
+                        inside += 1;
+                        assert_eq!(red, Some(0), "{what}: ({x}, {y}) is inside and unpainted");
+                    } else if verdicts.iter().all(|v| *v == Some(false)) {
+                        outside += 1;
+                        assert_eq!(red, Some(255), "{what}: ({x}, {y}) is outside and painted");
+                    }
+                }
+            }
+            assert!(
+                inside > 700,
+                "{what}: only {inside} pixels were deep inside"
+            );
+            assert!(
+                outside > 20_000,
+                "{what}: only {outside} pixels were outside"
+            );
+        }
+    }
+
     /// A source that answers with one solid-colour image.
     struct OneImage {
         color: (u8, u8, u8),

@@ -77,6 +77,18 @@ there is this table's `analytic_blend`, copied. Those hashes were recorded on
 `x86_64-unknown-linux-gnu` in September 2026 and are *claimed*, not measured, for
 the other three targets until a run there says otherwise.
 
+**One fingerprint moved on purpose in September 2026, and the reason is the
+commit's rather than a target's.** `curves` fills `20 20 m 60 75 l 100 25 l f`,
+an open triangle, and the filler used to leave its third side out; ISO
+32000-1 8.5.3.1 closes an open subpath before a fill
+([rasterizer](rasterizer.md)), and fixing that moved exactly this one hash. The
+new value was produced on `x86_64-unknown-linux-gnu` and reproduced under
+`wasm32-wasip1` before it was committed, so the table's cross-target claim for
+that row rests on those two until the Windows and macOS legs next run. This is
+the first of this file's two failure modes — the same target renders
+differently — and not the second, which is why the hash was updated rather than
+investigated.
+
 Beside them, **three document byte-hashes** pin the writer as well as the
 renderer: a synthesised PDF, a synthesised fixed-layout document and a
 synthesised book are each hashed as *bytes*, which is where object

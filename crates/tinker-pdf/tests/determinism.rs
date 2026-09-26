@@ -2003,9 +2003,21 @@ fn rendering_is_stable_across_targets() {
             "text",
             "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
         ),
+        // Moved September 2026, deliberately, and not because two targets
+        // disagreed. The fixture's red triangle is `20 20 m 60 75 l 100 25 l
+        // f` -- an **open** subpath, filled -- and until then the filler built
+        // only the two edges the path states, so the third side of the
+        // triangle was missing and the old hash had that defect baked in.
+        // ISO 32000-1 8.5.3.1 closes every open subpath before a fill (8.5.4
+        // before a clip); `an_open_subpath_is_closed_before_it_is_filled_or_clipped`
+        // in `tinker-pdf-render` holds the new behaviour by half-plane
+        // arithmetic, and the new value agreed on x86_64 and wasm32-wasip1.
+        // No other fingerprint here moved, and instrumenting the filler over
+        // all nineteen pages -- tiling cells included -- found this triangle
+        // the only open subpath any of them fills or clips.
         (
             "curves",
-            "48b65e520b0649c6d19deb779f0213f4ba5cb6fbbc9ca546b35b1c603050f380",
+            "414e3f05ee05718fc243993506458dcb0f8aca243cdff7bf21bd059a6f1e9f55",
         ),
         (
             "shading",

@@ -34,6 +34,19 @@ choice ruling 4 pays for over analytic exact-area coverage. The sweep keeps
 an active-edge list and visits only the rows a shape reaches, so a glyph-tall
 fill on a page-tall region does the shape's work, not the paper's.
 
+*Every subpath is closed before it is filled* (8.5.3.1), and before it clips
+(8.5.4), which reaches the same `fill`: the segment from a polyline's last point
+back to its first is an edge whether or not the path said `h`. **Until
+September 2026 it was not.** `90 10 m 150 30 l 110 60 l f` painted nothing —
+both stated edges run downward, so every sub-scanline held one crossing and no
+span — and an open triangle whose edges did not happen to run the same way
+painted a wrong shape instead. The `curves` fingerprint in
+[determinism](determinism.md) had that defect baked in and moved when it was
+fixed; instrumenting the filler over all nineteen fingerprinted pages found its
+triangle the only open subpath any of them fills or clips.
+`an_open_subpath_is_closed_before_it_is_filled_or_clipped` holds the fix by
+half-plane arithmetic over `f`, `f*`, `W n` and two subpaths.
+
 *What the fixed grid costs, measured rather than asserted.* This paragraph
 used to end "and the difference stays below one 8-bit level at every edge
 angle". It does not, and never did. Measured 15 September 2026 against the

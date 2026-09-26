@@ -533,9 +533,25 @@ fn add_span(accumulator: &mut [u16], x0: i32, width: u32, from: i64, to: i64) {
 }
 
 /// Turns a polyline into edges, dropping horizontal ones (they contribute no
-/// crossings).
+/// crossings), and **closes it**.
+///
+/// ISO 32000-1 8.5.3.1: "before filling, each open subpath is implicitly
+/// closed" — and 8.5.4 applies the same to a clipping path, which reaches this
+/// function through the same `fill`. So the segment from the last point back
+/// to the first is an edge whether or not the path said `h`. Until September
+/// 2026 it was not, and `90 10 m 150 30 l 110 60 l f` painted nothing at all:
+/// its two edges both run downward, every sub-scanline holds one crossing and
+/// never a span. A subpath the stroker or a `re` closed already ends on its
+/// first point, so the closing pair is degenerate there and adds no edge.
 fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
-    for pair in poly.windows(2) {
+    let closing = match (poly.first(), poly.last()) {
+        (Some(first), Some(last)) if first != last => Some([*last, *first]),
+        _ => None,
+    };
+    for pair in poly
+        .windows(2)
+        .chain(closing.as_ref().map(|pair| &pair[..]))
+    {
         let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
             continue;
         };
@@ -753,6 +769,25 @@ mod tests {
         let a = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1, None);
         let b = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1, None);
         assert_eq!(a.data, b.data, "ruling 4: the same input, the same bytes");
+    }
+
+    /// 8.5.3.1: a subpath is closed before it is filled, whether or not it
+    /// said so. The open triangle's two stated edges both run downward, so
+    /// without the implicit third edge no sub-scanline holds a span and the
+    /// mask is empty; with it, the mask is the closed triangle's exactly.
+    #[test]
+    fn an_open_subpath_fills_as_if_it_were_closed() {
+        let mut open = Path::new();
+        open.move_to(9.0, 1.0);
+        open.line_to(15.0, 3.0);
+        open.line_to(11.0, 6.0);
+        let mut closed = open.clone();
+        closed.close();
+
+        let a = fill(&open, FillRule::NonZero, 0, 0, 16, 8, 0.1, None);
+        let b = fill(&closed, FillRule::NonZero, 0, 0, 16, 8, 0.1, None);
+        assert!(b.data.contains(&255), "the fixture has an inside");
+        assert_eq!(a.data, b.data, "the open subpath is the closed one");
     }
 
     #[test]
