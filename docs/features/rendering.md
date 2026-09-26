@@ -241,6 +241,25 @@ the caller did not name; one that misses entirely comes back with no pixels.
 Both trims are reported as `RenderWarning::RegionClamped`. Ruling 5's
 byte-equality guard and its fixtures are in [rulings](../rulings.md).
 
+**A retained page.** `Page::display_list` interprets a page once and keeps
+what it drew: every call the interpreter made, with the graphics state it saw,
+in the space the interpreter runs in — nothing recorded is a pixel — and the
+page's resources beside it, so the images, outlines and form scopes a render
+resolves are resolved once for every render. `DisplayList::render` takes the
+same `RenderOptions` as `Page::render` and returns the same bitmap, because it
+is the same pipeline (`render_layer_with`) with the interpretation replaced by
+`tinker_pdf_content::replay`. The one thing a transcript cannot carry by
+itself is the renderer's answer to the interpreter's three questions — enter
+this form, this transparency group, this soft mask — on which the states
+recorded afterwards depend; so those answers are `Admission`, one type the
+renderer and the recording device (`DisplayRecorder`) both ask, and they
+depend on the content stream alone (hidden optional content, how many groups
+are open, the group-buffer budget), never on a pixel or a scale. A group or
+soft mask whose buffer misses the canvas is accepted over no pixels for the
+same reason ([rulings](../rulings.md) 5). Annotations are recorded with the
+resource scope each appearance resolves in and replayed when the options ask
+for them.
+
 **Anti-aliasing off.** `RenderOptions::antialias` is on by default; off, every
 pixel of every shape is wholly covered or not covered at all. It is one
 threshold — `Mask::harden`, half a pixel's coverage — applied wherever a
@@ -321,6 +340,13 @@ nothing painted rather than white) and `premultiplied` (off) — and returns a
 `Bitmap`: `width`, `height`, `format`, `stride`, `data`, `warnings`, the
 `Vec<RenderWarning>` that carries every named degradation, and `premultiplied`,
 which says whether `data` is. Rendering never fails; it degrades and reports.
+
+`Page::display_list()` returns a `DisplayList` — the page interpreted once —
+whose `render(&RenderOptions)` returns what `Page::render` returns for the
+same options, at any scale and for any region, without interpreting the page
+again; `len`, `is_empty` and `page_index` say what it holds. It owns what it
+needs (the page, its recorded calls and its resources), so it outlives the
+`Page` it came from and crosses threads.
 
 `Page::render_form(name, options)` and `Page::render_annotation(index,
 options)` return `Result<Bitmap, RenderPartError>`: one part of the page,
@@ -455,6 +481,18 @@ a defect to hide in.
   decoded layout, both refusals, and a fixed-seed campaign of random and
   mutated files that must never panic and must reach both a picture and a
   refusal more than five hundred times each.
+- The retained page: `determinism.rs`'s
+  `a_display_list_replays_every_fingerprinted_page_byte_for_byte` records
+  every fingerprinted page once and replays it at 1× (the fingerprints'
+  scale), 0.5×, 1.5× and 2.25×, with and without annotations, byte-equal to a
+  direct render in pixels, size, format and warnings;
+  `render_regions.rs`'s `a_display_list_tiles_as_the_page_does` tiles a
+  replay of every region fixture and an annotated page against the direct
+  render; `display_list.rs` holds the answers on the pages where the renderer
+  says no — past the group budget, inside hidden content — and a cancelled
+  replay against a cancelled render; `tinker-pdf-content`'s `replay.rs`
+  holds a replay into a recorder equal to the recording, and what a replay
+  does when the device answers differently.
 - Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Sixteen
   fixtures over four rasterizer paths and the three kinds of canvas that stand
   somewhere in the page — transparency and soft-mask groups, a tiling

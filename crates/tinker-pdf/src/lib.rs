@@ -25,6 +25,7 @@
 mod annotations;
 mod annots;
 pub mod cbz;
+mod display;
 pub mod epub;
 pub mod fontlist;
 pub mod fonts;
@@ -140,6 +141,8 @@ pub use annotations::{
     AnnotationList, AnnotationPayload, Border, BorderEffect, FileSpec, Linked, RichText,
     MAX_ANNOTATION_BYTES,
 };
+/// A page recorded once and replayed at any scale, behind [`Page::display_list`].
+pub use display::DisplayList;
 /// Images a page draws, with their samples before any colour conversion and
 /// the space they are in, behind [`Page::images`].
 pub use images::{ImageMask, ImageSpace, PageImage, SampleCodec};
@@ -1983,6 +1986,23 @@ impl Page {
             &resources::PageResources,
         ),
     ) -> Bitmap {
+        let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
+        self.render_layer_with(options, frame, &resources, paint)
+    }
+
+    /// [`Page::render_layer`] over resources the caller keeps — a
+    /// [`DisplayList`], whose decoded images, glyph outlines and nested
+    /// scopes outlive one render so the next one does not pay for them again.
+    pub(crate) fn render_layer_with(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+        resources: &resources::PageResources,
+        paint: impl FnOnce(
+            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
+            &resources::PageResources,
+        ),
+    ) -> Bitmap {
         let (w, h) = self.size();
         let (scale, applied) = self.scales(options);
 
@@ -2023,8 +2043,6 @@ impl Page {
         let crop = self.crop_box();
         let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), applied);
 
-        let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
-
         // 11.4.7: the page itself may declare a transparency group, and its
         // `/CS` is the space the *whole page* composites in. Nothing invokes
         // it, so it is read here rather than reaching the device through a
@@ -2052,13 +2070,13 @@ impl Page {
             tinker_pdf_render::region_canvas_in(view, canvas_format)
         };
 
-        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources)
+        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, resources)
             .with_page_size(full_width, full_height)
             .with_antialias(options.antialias);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }
-        paint(&mut renderer, &resources);
+        paint(&mut renderer, resources);
         let (canvas, mut warnings) = renderer.finish();
         // A glyph a font could not name is reported here rather than by the
         // renderer, which counts only the glyphs it was handed nothing for.

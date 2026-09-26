@@ -8,6 +8,7 @@ pub mod device;
 pub mod interpret;
 pub mod plain;
 pub mod record;
+pub mod replay;
 pub mod search;
 pub mod serialize;
 pub mod state;
@@ -19,6 +20,7 @@ pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 pub use interpret::{interpret, FontSource, Form, Group, GroupSpace, Layer, MaskGroup, SoftMask};
 pub use plain::{HyphenCounts, PlainText, PlainTextOptions};
 pub use record::{Answers, Capture, Event, EventKind, MarkedScope, RecordingDevice};
+pub use replay::{replay, Replayed};
 pub use search::{fold_diacritics, SearchOptions};
 pub use serialize::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
 pub use state::{

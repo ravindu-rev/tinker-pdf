@@ -13,12 +13,14 @@
 use core::mem;
 use tinker_pdf_raster::blend::BlendMode as RasterBlend;
 
+pub mod display;
 pub mod mesh;
 pub mod shading;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub use display::{Admission, DisplayRecorder};
 pub use mesh::{Mesh, MeshParams};
 pub use shading::Shading;
 use tinker_pdf_content::{
@@ -699,26 +701,15 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// keying that off the accumulated path alone cannot tell "clipped to
     /// nothing" from "never clipped".
     text_clip_requested: bool,
-    /// Marked-content scopes currently open, innermost last: whether each one
-    /// hides what it encloses (8.11.3.2, 14.6.2).
+    /// The answers to the interpreter's three questions, and what they
+    /// depend on: marked-content visibility, how many groups and masks are
+    /// open, and the group-buffer budget.
     ///
-    /// A stack rather than a counter, because `EMC` has to know whether the
-    /// scope it closes was one of the hiding ones. Bounded by the
-    /// interpreter's own nesting cap, which is why there is no second cap
-    /// here.
-    marked_content: Vec<bool>,
-    /// How many of `marked_content` hide, so the question every paint asks
-    /// is a comparison rather than a scan.
-    hidden_depth: u32,
-    /// Group buffers opened so far, at any depth, against
-    /// [`MAX_GROUP_BUFFERS`]. Spent and never refunded: unwinding a group
-    /// returns its memory but not its budget, because the cost this bounds
-    /// is the work already done rather than the memory still held.
-    group_buffers: u32,
-    /// Whether the budget above ever declined a group, reported once at
-    /// `finish` rather than per decline: a page that has run out asks
-    /// repeatedly, and forty thousand identical warnings is not a report.
-    group_budget_spent: bool,
+    /// Its own type rather than fields here because a page recorded for a
+    /// retained display list has to be recorded with *these* answers, and
+    /// [`DisplayRecorder`] asks the same type rather than a copy of it. See
+    /// [`display`].
+    admission: Admission,
     /// Transparency groups open, innermost last (11.6.6).
     ///
     /// While one is open `canvas` is the group's own buffer, standing at its
@@ -806,10 +797,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             run: None,
             pushed_scopes: Vec::new(),
             form_scopes: Vec::new(),
-            marked_content: Vec::new(),
-            hidden_depth: 0,
-            group_buffers: 0,
-            group_budget_spent: false,
+            admission: Admission::new(),
             groups: Vec::new(),
             soft: None,
             mask_frames: Vec::new(),
@@ -899,7 +887,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// not draw and one which does cannot disagree about what a page
     /// contains.
     fn hidden(&self) -> bool {
-        self.hidden_depth > 0
+        self.admission.hidden()
     }
 
     /// Turns anti-aliasing off, or back on: `false` makes every pixel of
@@ -1033,12 +1021,6 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         );
     }
 
-    /// Record that the group budget declined one, for a single report at
-    /// `finish`.
-    fn note_group_budget(&mut self) {
-        self.group_budget_spent = true;
-    }
-
     /// The canvas and everything the render had to tolerate.
     #[must_use]
     pub fn finish(mut self) -> (Canvas, Vec<RenderWarning>) {
@@ -1055,9 +1037,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if self.missing_fonts > 0 {
             self.warnings.push(RenderWarning::UnreadableFont);
         }
-        if self.group_budget_spent {
+        if self.admission.budget_spent() {
             self.warnings.push(RenderWarning::GroupBudgetSpent {
-                opened: self.group_buffers,
+                opened: self.admission.buffers(),
             });
         }
         // The flag, not the token. Asking the token here reports a page that
@@ -1111,16 +1093,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     }
 
     fn open_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
-        if self.groups.len() >= MAX_GROUP_DEPTH {
+        // Hidden content, `MAX_GROUP_DEPTH` and — because depth is not work
+        // once the recursion branches — `MAX_GROUP_BUFFERS`. Asked of the
+        // admission rather than decided here, so that a page recorded for a
+        // display list was recorded with this answer.
+        if !self.admission.begin_group() {
             return false;
         }
-        // Depth is not work once the recursion branches. See
-        // `MAX_GROUP_BUFFERS`.
-        if self.group_buffers >= MAX_GROUP_BUFFERS {
-            self.note_group_budget();
-            return false;
-        }
-        self.group_buffers = self.group_buffers.saturating_add(1);
         let (x0, y0, width, height) = self.clip.as_ref().map_or(self.device(), |clip| {
             let (ox, oy) = self.canvas.origin();
             let (x0, y0, x1, y1) = clip.overlap_at((ox, oy), self.canvas.width, self.canvas.height);
@@ -1232,6 +1211,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let Some(frame) = self.groups.pop() else {
             return;
         };
+        self.admission.end_group();
         self.clip_stack.truncate(frame.clip_depth);
         let mut buffer = std::mem::replace(&mut self.canvas, frame.parent);
         self.clip = frame.clip;
@@ -1285,16 +1265,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         mask: &tinker_pdf_content::MaskGroup,
         bbox: &[PathSegment],
     ) -> bool {
-        if self.mask_frames.len() + self.groups.len() >= MAX_GROUP_DEPTH {
+        // Depth, counting the groups open as well as the masks, and the
+        // group-buffer budget: a mask group is a group buffer and spends from
+        // the same budget -- and it is the one the campaign's timeout actually
+        // recursed through.
+        if !self.admission.begin_soft_mask() {
             return false;
         }
-        // A mask group is a group buffer and spends from the same budget --
-        // and it is the one the campaign's timeout actually recursed through.
-        if self.group_buffers >= MAX_GROUP_BUFFERS {
-            self.note_group_budget();
-            return false;
-        }
-        self.group_buffers = self.group_buffers.saturating_add(1);
         // The group's own bounding box bounds the buffer, and the current
         // clip deliberately does *not*: the mask applies to whatever is
         // painted after the `gs`, which may be anywhere, and clipping the
@@ -1377,6 +1354,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let Some(frame) = self.mask_frames.pop() else {
             return;
         };
+        self.admission.end_soft_mask();
         self.clip_stack.truncate(frame.clip_depth);
         let buffer = std::mem::replace(&mut self.canvas, frame.parent);
         self.clip = frame.clip;
@@ -2964,10 +2942,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         hidden_layer: Option<&str>,
         _props: Option<&tinker_pdf_content::MarkedProps>,
     ) {
-        self.marked_content.push(!visible);
-        if !visible {
-            self.hidden_depth = self.hidden_depth.saturating_add(1);
-        }
+        self.admission.begin_marked_content(visible);
         // Ruling 10. Raised once per layer rather than once per scope: a CAD
         // drawing marks every construction line, and a hundred identical
         // warnings say nothing the first one did not.
@@ -2982,9 +2957,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_marked_content(&mut self) {
-        if self.marked_content.pop() == Some(true) {
-            self.hidden_depth = self.hidden_depth.saturating_sub(1);
-        }
+        self.admission.end_marked_content();
     }
 
     fn begin_form(&mut self, _id: u64, name: &[u8]) -> bool {

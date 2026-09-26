@@ -192,6 +192,25 @@ operator runs in, and the answer rides on `Glyph::font_name` into
 `crates/tinker-pdf/tests/text_serialize.rs` holds, with a page and a form
 that both call their font `/F0`.
 
+**The retained page has landed, and it is the first consumer that replays.**
+`replay.rs` beside `record.rs` hands a `Device` every call a transcript kept,
+in order and with its state, with no interpreter involved; `Page::display_list`
+records a page once and `DisplayList::render` replays it into the renderer
+at any scale ([rendering](rendering.md)). What the transcript alone could not
+carry is the answer to the three questions a device is asked —
+`begin_form`, `begin_group`, `begin_soft_mask` — because the interpreter acts
+on the answer and the states it records afterwards depend on it. So a
+recorder's answers can now be set a call at a time
+(`RecordingDevice::set_answers`), and the retained page records through
+`tinker-pdf-render`'s `DisplayRecorder`, which asks the renderer's own
+`Admission` before each question. A replay that meets a different answer from
+the one recorded counts it (`Replayed::disagreed`), skips a bracket the device
+declined and closes at once one the recording declined; the module header
+says which of those an interpreter would also have done and which lose
+something. With the replay in the tree, the two designs below that were
+waiting for one — inferred reading order and table reconstruction — no longer
+need a second interpretation per page.
+
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a

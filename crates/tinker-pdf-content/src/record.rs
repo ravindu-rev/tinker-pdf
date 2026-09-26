@@ -14,7 +14,12 @@
 //!
 //! 1. **A retained page — a display list replayed at any scale.** The one row
 //!    that *does* say the words: its "what it would take" column reads "a
-//!    recording `Device`". Everything below is the same object.
+//!    recording `Device`". Everything below is the same object. **Landed
+//!    September 2026**: [`crate::replay`] replays a transcript into any
+//!    device, and the facade's `Page::display_list` records through
+//!    `tinker-pdf-render`'s `DisplayRecorder`, which sets this recorder's
+//!    [`Answers`] a question at a time ([`RecordingDevice::set_answers`]) so
+//!    that every `entered` is the renderer's.
 //! 2. **PDF to SVG.** A `Device` that writes SVG 1.1 has to see paths, clips,
 //!    groups and soft masks in the order the stream asked for them.
 //! 3. **Structured text serialisation — JSON, XML, HTML.** Glyphs with their
@@ -493,6 +498,23 @@ impl RecordingDevice {
     pub fn answering(mut self, answers: Answers) -> RecordingDevice {
         self.answers = answers;
         self
+    }
+
+    /// What the recorder answers now.
+    #[must_use]
+    pub fn answers(&self) -> Answers {
+        self.answers
+    }
+
+    /// Changes what the recorder answers from the next question on.
+    ///
+    /// For a recorder whose answers are some other device's, decided a call
+    /// at a time: the retained page's recorder asks the renderer's own
+    /// admission before each `begin_group` and `begin_soft_mask`, so that
+    /// every [`Event::BeginGroup::entered`] is the answer the renderer will
+    /// give when the recording is replayed into it.
+    pub fn set_answers(&mut self, answers: Answers) {
+        self.answers = answers;
     }
 
     /// Every event, in the order the interpreter produced it.

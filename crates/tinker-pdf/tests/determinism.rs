@@ -2487,6 +2487,78 @@ fn rendering_is_stable_within_one_process() {
     }
 }
 
+/// **A retained page is the page**: every fingerprinted page, recorded once
+/// with `Page::display_list` and replayed at the fingerprints' own scale and
+/// at three others, is byte-equal to a direct render — pixels, size, format
+/// and warnings — with and without its annotations.
+///
+/// Added with the retained-page row, September 2026, and **not a new
+/// fingerprint**: the table above is untouched, and a hash here would be
+/// wrong in kind. This is an equality between two paths through the same
+/// renderer, which is `streaming_determinism.rs`'s shape, and it sits here
+/// rather than there because the row's exit criterion names these pages —
+/// every operator family this file has ever enrolled, groups, soft masks,
+/// tiling cells, meshes, both image codecs and all three synthesised formats.
+/// One recording serves all four scales, which is the property the row is
+/// about: nothing recorded is a pixel.
+#[test]
+fn a_display_list_replays_every_fingerprinted_page_byte_for_byte() {
+    for fixture in GOLDEN {
+        let (document, at) = match fixture.open {
+            Open::Closed => (Document::open((fixture.build)()).expect("it opens"), 0),
+            Open::Book { page, at } => (
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::at_page(page.0, page.1).with_fonts(book_face()),
+                )
+                .expect("it opens"),
+                at,
+            ),
+        };
+        let page = document.page(at).expect("a page");
+        let list = page.display_list();
+        assert!(
+            !list.is_empty(),
+            "{}: the page recorded no calls",
+            fixture.name
+        );
+        // 1.0 is the scale every fingerprint above is taken at.
+        for scale in [1.0, 0.5, 1.5, 2.25] {
+            for annotations in [true, false] {
+                let options = RenderOptions {
+                    scale,
+                    annotations,
+                    ..RenderOptions::default()
+                };
+                let direct = page.render(&options);
+                let replayed = list.render(&options);
+                let what = format!("{} at {scale}x, annotations {annotations}", fixture.name);
+                assert_eq!(
+                    (replayed.width, replayed.height, replayed.format),
+                    (direct.width, direct.height, direct.format),
+                    "{what}: a different bitmap shape"
+                );
+                if replayed.data != direct.data {
+                    let differing = replayed
+                        .data
+                        .iter()
+                        .zip(direct.data.iter())
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    panic!(
+                        "{what}: the replay is not the page -- {differing} of {} bytes differ",
+                        direct.data.len()
+                    );
+                }
+                assert_eq!(
+                    replayed.warnings, direct.warnings,
+                    "{what}: the replay reported differently"
+                );
+            }
+        }
+    }
+}
+
 /// The bytes the EPUB reader hands `CosDocument::open`, hashed.
 ///
 /// *Added August 2026, with gap 31 milestone 13,* in the pair gap 29's

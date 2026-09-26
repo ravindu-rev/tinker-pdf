@@ -151,9 +151,11 @@ What it does not give: **bounding boxes** (computed from segments; a path
 with a curve is not a rule and is not one), **classification** (a rule is the
 consumer's threshold — axis-aligned to within 0.5 pt over its length, at
 least two ems long, at most 2 pt thick or a filled rectangle at most 2 pt in
-one dimension), **line assembly** (`TextDevice`'s, as ever), and **a
-replay** — the second interpretation per page until the retained-page row
-lands, exactly as the reading-order design records.
+one dimension), **line assembly** (`TextDevice`'s, as ever), and — until
+September 2026 — **a replay**. The retained-page row landed then:
+`tinker_pdf_content::replay` hands a transcript to any device, so the
+`TextDevice` can be fed the recording rather than a second interpretation of
+the page.
 
 ### The lattice
 
@@ -250,8 +252,9 @@ sentence.
 
 - **`RecordingDevice`** — exists; this consumer is the one that pays for
   `state: true`.
-- **A replay of a transcript into a device** — does not exist (the
-  retained-page row); two interpretations per page until it does.
+- **A replay of a transcript into a device** — exists since September
+  2026 (`tinker_pdf_content::replay`, the retained-page row's deliverable);
+  one interpretation per page.
 - **`structure.rs`** — exists; **reads no attributes**, and milestone 1 is
   where the reader lands for both this design and
   [design/pdfua.md](pdfua.md).

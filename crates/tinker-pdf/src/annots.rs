@@ -13,9 +13,9 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_content::{interpret, Matrix};
+use tinker_pdf_content::{interpret, Event, Matrix};
 use tinker_pdf_cos::{pages as cos_pages, CosDocument, Dict, Object, Rect};
-use tinker_pdf_render::Renderer;
+use tinker_pdf_render::{DisplayRecorder, Renderer};
 
 use crate::fonts::FontProvider;
 use crate::render_part::NotDrawn;
@@ -31,6 +31,61 @@ pub fn draw(
     page: &cos_pages::Page,
     provider: Option<&Arc<dyn FontProvider>>,
     device: &mut Renderer<'_, PageResources>,
+) {
+    each_appearance(doc, page, |appearance| {
+        draw_prepared(doc, appearance, provider, device);
+    });
+}
+
+/// One annotation's appearance as a retained page keeps it: the scope the
+/// renderer resolves its names in, and the calls its content makes.
+pub(crate) struct Recorded {
+    pub(crate) scope: Arc<PageResources>,
+    pub(crate) events: Vec<Event>,
+}
+
+/// Every visible annotation of a page, recorded rather than drawn.
+///
+/// The same appearances [`draw`] draws, in the same order, through the same
+/// [`prepare`] and the same interpretation — only the device differs, and it
+/// is the `recorder` the page's content was recorded through, so the answers
+/// it gives carry on from where the content left them exactly as a renderer's
+/// do when it draws the annotations after the content.
+pub(crate) fn record(
+    doc: &Arc<CosDocument>,
+    page: &cos_pages::Page,
+    provider: Option<&Arc<dyn FontProvider>>,
+    recorder: &mut DisplayRecorder,
+) -> Vec<Recorded> {
+    let mut out = Vec::new();
+    each_appearance(doc, page, |appearance| {
+        // Two resource objects over one dictionary, as `draw_prepared` makes
+        // them: the interpreter's, used up here, and the renderer's, kept.
+        let resources = PageResources::from_dict(doc, appearance.resources.clone(), provider);
+        let scope = Arc::new(PageResources::from_dict(
+            doc,
+            appearance.resources.clone(),
+            provider,
+        ));
+        interpret(
+            &appearance.content,
+            appearance.transform,
+            recorder,
+            &resources,
+        );
+        out.push(Recorded {
+            scope,
+            events: recorder.take(),
+        });
+    });
+    out
+}
+
+/// Every annotation of a page that draws, prepared, in `/Annots` order.
+fn each_appearance(
+    doc: &Arc<CosDocument>,
+    page: &cos_pages::Page,
+    mut each: impl FnMut(&Appearance),
 ) {
     let Ok(object) = doc.get(page.reference) else {
         return;
@@ -52,23 +107,12 @@ pub fn draw(
             Object::Dict(d) => Some(d.clone()),
             _ => None,
         };
-        if let Some(annotation) = annotation {
-            draw_one(doc, &annotation, provider, device);
+        // Every reason `prepare` gives for drawing nothing is a reason a page
+        // draws nothing there and says nothing: ruling 2, a page renders what
+        // it can. `Page::render_annotation` is the caller that names them.
+        if let Some(Ok(appearance)) = annotation.map(|a| prepare(doc, &a)) {
+            each(&appearance);
         }
-    }
-}
-
-fn draw_one(
-    doc: &Arc<CosDocument>,
-    annotation: &Dict,
-    provider: Option<&Arc<dyn FontProvider>>,
-    device: &mut Renderer<'_, PageResources>,
-) {
-    // Every reason `prepare` gives for drawing nothing is a reason a page
-    // draws nothing there and says nothing: ruling 2, a page renders what it
-    // can. `Page::render_annotation` is the caller that names them.
-    if let Ok(appearance) = prepare(doc, annotation) {
-        draw_prepared(doc, &appearance, provider, device);
     }
 }
 

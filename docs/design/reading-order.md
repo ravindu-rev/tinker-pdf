@@ -147,12 +147,13 @@ corrected when milestone 3 lands; the design here follows the first sentence.
 What the recorder does **not** give: line and block assembly, which stays
 `TextDevice`'s — one assembler, or the structured and flat views drift; page
 boxes and page count, which are the page's; anything across pages, since a
-transcript is one interpretation of one page; and a replay. The retained-page
-row's exit criterion is a replay of a transcript into a device, and "nothing
-replays it yet". Until it does, the inference costs a second interpretation
-of the page — `TextDevice` for the lines and `RecordingDevice` for the rest —
-which ruling 4 makes identical and which is a cost, not a correctness
-question. When the replay lands, one interpretation feeds both.
+transcript is one interpretation of one page; and — until September 2026 — a
+replay. The retained-page row landed then, and `tinker_pdf_content::replay`
+hands a transcript to any device, the `TextDevice` included. Before it did,
+the inference was costed at a second interpretation of the page —
+`TextDevice` for the lines and `RecordingDevice` for the rest — which ruling
+4 makes identical and which is a cost, not a correctness question. Now one
+interpretation feeds both.
 
 ### The three inferences
 
@@ -276,8 +277,9 @@ the column-crossings score is computed over the rest.
 - **`TextDevice` and `TextPage`** — the one assembler. Exists; unchanged.
 - **`RecordingDevice`** — exists; needs `structure: true`, not `GLYPHS`,
   and its module doc corrected to say so.
-- **A replay of a transcript into a device** — does not exist; the
-  retained-page row's deliverable. Two interpretations per page until then.
+- **A replay of a transcript into a device** — exists since September
+  2026 (`tinker_pdf_content::replay`, the retained-page row's deliverable);
+  one interpretation per page.
 - **`StructureTree::text_for_page`** — the claimed-character join the
   scores are computed over. Exists.
 - **`corpus/ratchet.json` and `xtask/src/ratchet.rs`** — a sixth axis with

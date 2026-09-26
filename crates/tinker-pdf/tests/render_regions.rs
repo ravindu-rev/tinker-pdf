@@ -573,6 +573,20 @@ fn compare(
 /// or in the translation lands.
 #[track_caller]
 fn tile_divergence(page: &Page, options: &RenderOptions, tile: u32, what: &str) -> Option<String> {
+    tile_divergence_through(page, options, tile, what, &|asked| page.render(asked))
+}
+
+/// [`tile_divergence`] with the tiles drawn by `draw` rather than by
+/// [`Page::render`] — a [`tinker_pdf::DisplayList`]'s replay, say — and the
+/// page they are compared with still drawn directly.
+#[track_caller]
+fn tile_divergence_through(
+    page: &Page,
+    options: &RenderOptions,
+    tile: u32,
+    what: &str,
+    draw: &dyn Fn(&RenderOptions) -> tinker_pdf::Bitmap,
+) -> Option<String> {
     assert!(options.region.is_none(), "{what}: the whole page, to tile");
     let full = page.render(options);
     let (width, height) = page.pixel_size(options);
@@ -589,7 +603,7 @@ fn tile_divergence(page: &Page, options: &RenderOptions, tile: u32, what: &str) 
     for top in (0..height).step_by(tile as usize) {
         for left in (0..width).step_by(tile as usize) {
             let asked = PixelRegion::new(left, top, tile, tile);
-            let bitmap = page.render(&RenderOptions {
+            let bitmap = draw(&RenderOptions {
                 region: Some(asked),
                 ..options.clone()
             });
@@ -1210,4 +1224,41 @@ fn annotations_are_tiled_with_the_page() {
         "the annotation fixture painted {drawn} pixels and draws nothing else"
     );
     tiles_are_the_page(&page, &options, 29, "annotations");
+}
+
+/// **A retained page tiles as the page does.** Every fixture here and the
+/// annotated page, recorded once with [`Page::display_list`], then drawn a
+/// tile at a time *from the recording* at two scales, each tile byte-equal to
+/// its rectangle of a direct render of the whole page.
+///
+/// Two claims at once, which is the point of putting them together: the
+/// replay is the page (the retained-page row), and a region of a replay is a
+/// region of the page (ruling 5) — so a viewer that records a page once and
+/// tiles it while zooming is drawing the same pixels a direct render would.
+/// The annotated page is here because no determinism fixture draws an
+/// annotation, and a replay that forgot the appearance's resource scope would
+/// pass every other test in the tree.
+#[test]
+fn a_display_list_tiles_as_the_page_does() {
+    let annotated = Document::open(annotated_page()).expect("it opens");
+    let annotated = annotated.page(0).expect("a page");
+    let check = |page: &Page, name: &str| {
+        let list = page.display_list();
+        for scale in [1.0f64, 1.5] {
+            let options = RenderOptions {
+                scale,
+                ..RenderOptions::default()
+            };
+            let what = format!("{name} replayed at {scale}x");
+            if let Some(message) =
+                tile_divergence_through(page, &options, 37, &what, &|asked| list.render(asked))
+            {
+                panic!("{message}: a tile of the recording is not the page under it");
+            }
+        }
+    };
+    check(&annotated, "annotations");
+    for fixture in fixtures() {
+        with_page(&fixture, |page| check(page, fixture.name));
+    }
 }
