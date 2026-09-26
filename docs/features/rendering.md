@@ -273,6 +273,31 @@ losing only what premultiplying lost, so multiplying the file's samples by their
 alpha again returns the premultiplied bytes exactly, which
 `a_premultiplied_page_writes_a_png_that_multiplies_back_exactly` holds.
 
+**One part of a page.** `Page::render_form` draws one form XObject the page
+names in its `/XObject` dictionary, and `Page::render_annotation` one entry of
+its `/Annots`, each on its own over the page's white. Neither is a second
+renderer: `Page::render` is a paint over one private pipeline,
+`Page::render_layer`, and the two parts are two more paints over it — the same
+scale clamp, view transform, canvas, `Renderer`, warnings and conversion at the
+end — differing only in what is painted and in the default viewport. A form is
+painted by interpreting `/Name Do` at the identity, so the interpreter reaches
+it exactly as the page's content does (`/Matrix`, the `/BBox` clip, a group,
+`/OC`, its own resources), and its viewport is its box on the page: `/BBox`
+through `/Matrix` and the page's view transform, rounded outward and trimmed to
+the page. An annotation is painted by the code the page draws every annotation
+with (`annots.rs`, now split into `prepare` and `draw_prepared` so that one
+piece of code does both), and its viewport is its `/Rect`. `options.region`, if
+set, wins over either. A form is named by its resource name — the only name
+that means "as this page places it"; a form reachable only inside another
+form's resources has no placement to render at — and an annotation by its index
+in `/Annots`, which is its index in `Page::annotations()`, because
+`Annotation::reference` is `None` for a direct dictionary. **Each is byte-equal
+to its rectangle of a page that draws it there and nothing else**, against the
+page rendered with that rectangle as its region and against the whole page
+cropped, at 1x, 1.5x and 2x (`render_parts.rs`). Where a page skips an
+annotation silently, a caller who asked for that one is told why:
+`RenderPartError::AnnotationNotDrawn` with a `NotDrawn` reason.
+
 ## API
 
 The facade is the whole public surface (ruling 11): `Page::render` takes a
@@ -287,6 +312,13 @@ nothing painted rather than white) and `premultiplied` (off) — and returns a
 `Bitmap`: `width`, `height`, `format`, `stride`, `data`, `warnings`, the
 `Vec<RenderWarning>` that carries every named degradation, and `premultiplied`,
 which says whether `data` is. Rendering never fails; it degrades and reports.
+
+`Page::render_form(name, options)` and `Page::render_annotation(index,
+options)` return `Result<Bitmap, RenderPartError>`: one part of the page,
+through the same pipeline, over the part's own rectangle unless
+`options.region` names another. The error is the only way either draws
+nothing — a caller who asked for one part is owed the reason rather than a
+white rectangle.
 
 `Bitmap::to_png` writes the page out as a PNG file (ISO/IEC 15948), eight bits
 a component, through `tinker_pdf_filters::png_encode` — which is where the
@@ -372,6 +404,8 @@ un-tiled spelling left for a defect to hide in.
 | A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |
 | The document's own CMYK components on a page asked for in ink | stated on `RenderOptions::allow_cmyk` | Colour is flattened to sRGB where a resource is read, so an ink page is light converted back with maximum undercolour removal: a rich black arrives as pure `K`. Separations want the file's components, carried through the resource seam, which is its own row | [ROADMAP](../ROADMAP.md) |
 | A PNG read back whose raster stops short of its declared height | `PngReadError::Incomplete`, carrying the decoder's own identifiers | The decoder degrades for a comic page; a file read back to be *compared* would have its missing rows scored as a rendering difference. Every refusal the decoder makes is `PngReadError::Refused` with its own reason | [filters](filters.md) |
+| A form render naming an XObject the page does not have, one that is not a form, or one whose stream cannot be read | `RenderPartError::NoSuchXObject`, `NotAForm { subtype }`, `UnreadableForm` | The page renders what it can; a caller who asked for one form asked about that form, and a blank bitmap is a wrong answer that looks right | — |
+| An annotation render at an index past `/Annots`, or of an entry that draws nothing | `RenderPartError::NoSuchAnnotation { count }`, `AnnotationNotDrawn { why }` with `NotDrawn::{NotADictionary, Hidden, Popup, NoRect, NoAppearance, UnreadableAppearance, Degenerate}` | Every reason `Page::render` skips an annotation silently, named where a caller asked for that one | [document model](document-model.md) |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -382,6 +416,12 @@ un-tiled spelling left for a defect to hide in.
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
   `annotation_appearances.rs` — each asserting pixels, not absence of error.
+- Parts: `crates/tinker-pdf/tests/render_parts.rs` holds a form — one with
+  text, a fill cut by its `/BBox` and a curve, one with a `/Matrix` and a name
+  that needs escaping — and an annotation drawn at its own `/Rect` and one
+  fitted onto another size, each byte-equal to the page's own render of its
+  rectangle at three scales; every refusal by name; and a fixed-seed campaign
+  of mutated documents that must never panic either entry point.
 - Output options: `crates/tinker-pdf/tests/render_options.rs` pins each
   `RenderOptions` field that changes what a page's bytes are with its own
   SHA-256, computed as `determinism.rs` computes one and floored by ink the same

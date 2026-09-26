@@ -608,6 +608,24 @@ impl PageResources {
         )))
     }
 
+    /// Whether this scope's `/XObject` dictionary names `name` and, if it
+    /// does, the XObject's `/Subtype` — `Some(None)` for one with none.
+    ///
+    /// The one question `Page::render_form` needs answered that `form` cannot:
+    /// `form` answers `None` alike for a name that is not there, an image and a
+    /// stream that will not decode, and a caller who asked for one form is owed
+    /// the difference.
+    pub(crate) fn xobject_subtype(&self, name: &[u8]) -> Option<Option<Vec<u8>>> {
+        let (dict, _) = self.xobject(name)?;
+        Some(
+            self.doc
+                .resolve_key(&dict, self.doc.intern(b"Subtype"))
+                .as_name()
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|bytes| bytes.to_vec()),
+        )
+    }
+
     fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
         let resources = self.resources.as_ref()?;
         let value = self.doc.resolve_key(resources, self.doc.intern(b"XObject"));

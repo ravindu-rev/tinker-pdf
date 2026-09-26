@@ -34,6 +34,7 @@ mod optional;
 pub mod pdfa;
 mod png_read;
 pub mod redact;
+mod render_part;
 mod resources;
 pub mod shaping;
 pub mod signature;
@@ -133,6 +134,8 @@ const CONTAINER_SNIFF: u64 = 1024;
 /// named rather than collapsed, because "not a PNG" and "a colour type Table
 /// 11.1 does not permit" are different answers to show a person.
 pub use png_read::PngReadError;
+/// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
+pub use render_part::{NotDrawn, RenderPartError};
 /// Writing: creation, editing and saving.
 ///
 /// Without these on the facade a caller depending only on this crate could
@@ -1837,6 +1840,36 @@ impl Page {
     /// those pixels, and then the bitmap is that rectangle's size.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
+        let content = cos_pages::content_bytes(&self.doc, &self.inner);
+        self.render_layer(options, None, |renderer, resources| {
+            interpret(&content, Matrix::IDENTITY, renderer, resources);
+            if options.annotations {
+                // After the content, because an annotation sits on top of the
+                // page rather than under it.
+                annots::draw(&self.doc, &self.inner, self.fonts.as_ref(), renderer);
+            }
+        })
+    }
+
+    /// **The one pipeline every render of this page goes through** — the page
+    /// itself, a form on it ([`Page::render_form`]) and one of its annotations
+    /// ([`Page::render_annotation`]) — differing only in what `paint` draws and
+    /// in `frame`, the rectangle of default user space that is the viewport
+    /// when `options.region` names none.
+    ///
+    /// Ruling 5 is the reason there is one: a part of a page is the page with
+    /// less in it, never a second implementation, so a part and the page under
+    /// it cannot disagree about the scale clamp, the view transform, the canvas,
+    /// the warnings or the conversion at the end.
+    pub(crate) fn render_layer(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+        paint: impl FnOnce(
+            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
+            &resources::PageResources,
+        ),
+    ) -> Bitmap {
         let (w, h) = self.size();
         let (scale, applied) = self.scales(options);
 
@@ -1855,9 +1888,17 @@ impl Page {
         // page take one code path here as well as in the renderer, and there is
         // no un-tiled spelling left for a defect to hide in.
         let (full_width, full_height) = tinker_pdf_render::page_pixels(w, h, applied);
+        let full = PixelRegion::new(0, 0, full_width, full_height);
+        // A part's own rectangle, as the page's pixels it covers, when the
+        // caller named no region. Already trimmed to the page, so it is never
+        // "clamped" in `RegionClamped`'s sense: what lies off the page is what
+        // the page render does not show either.
+        let frame =
+            frame.map(|rect| frame_region(self.crop_box(), self.rotation(), applied, rect, full));
         let asked = options.region;
         let view = asked
-            .unwrap_or(PixelRegion::new(0, 0, full_width, full_height))
+            .or(frame)
+            .unwrap_or(full)
             .clamped_to(full_width, full_height);
 
         // The rotation and the crop-box origin belong in the transform, not
@@ -1869,7 +1910,6 @@ impl Page {
         let crop = self.crop_box();
         let base = tinker_pdf_render::region_view_transform(crop, self.rotation(), applied, view);
 
-        let content = cos_pages::content_bytes(&self.doc, &self.inner);
         let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
 
         // 11.4.7: the page itself may declare a transparency group, and its
@@ -1904,12 +1944,7 @@ impl Page {
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }
-        interpret(&content, Matrix::IDENTITY, &mut renderer, &resources);
-        if options.annotations {
-            // After the content, because an annotation sits on top of the
-            // page rather than under it.
-            annots::draw(&self.doc, &self.inner, self.fonts.as_ref(), &mut renderer);
-        }
+        paint(&mut renderer, &resources);
         let (canvas, mut warnings) = renderer.finish();
         // A glyph a font could not name is reported here rather than by the
         // renderer, which counts only the glyphs it was handed nothing for.
@@ -2079,6 +2114,48 @@ impl Page {
         let tree = structure::bind(&self.doc)?;
         Some(tree.text_for_page(self.index(), &self.text()))
     }
+}
+
+/// A rectangle of the page's default user space as the pixels of the page's
+/// own render it covers: its corners through the page's view transform — the
+/// same one `Page::render` draws with — bounded, rounded outward and trimmed to
+/// the page.
+///
+/// A rectangle with a non-finite corner is the whole page, which is what a
+/// form with no usable `/BBox` draws over; one wholly off the page is no
+/// pixels, which is what the page render shows of it.
+fn frame_region(
+    crop: (f64, f64, f64, f64),
+    rotation: u16,
+    applied: f64,
+    rect: (f64, f64, f64, f64),
+    full: PixelRegion,
+) -> PixelRegion {
+    let view = tinker_pdf_render::page_view_transform(crop, rotation, applied);
+    let (x0, y0, x1, y1) = rect;
+    let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| view.apply(x, y));
+    if corners
+        .iter()
+        .any(|(x, y)| !x.is_finite() || !y.is_finite())
+    {
+        return full;
+    }
+    let lo = |pick: fn(&(f64, f64)) -> f64| corners.iter().map(pick).fold(f64::INFINITY, f64::min);
+    let hi =
+        |pick: fn(&(f64, f64)) -> f64| corners.iter().map(pick).fold(f64::NEG_INFINITY, f64::max);
+    // `floor`, `ceil` and the clamp are all exact (ruling 4), and a clamped
+    // value is inside `0..=limit`, so the casts cannot wrap.
+    let within = |v: f64, limit: u32| v.clamp(0.0, f64::from(limit)) as u32;
+    let left = within(lo(|c| c.0).floor(), full.width);
+    let right = within(hi(|c| c.0).ceil(), full.width);
+    let top = within(lo(|c| c.1).floor(), full.height);
+    let bottom = within(hi(|c| c.1).ceil(), full.height);
+    PixelRegion::new(
+        left,
+        top,
+        right.saturating_sub(left),
+        bottom.saturating_sub(top),
+    )
 }
 
 impl core::fmt::Debug for Page {
