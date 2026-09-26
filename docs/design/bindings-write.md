@@ -67,7 +67,7 @@ that cross FFI:
 
 - *Editor checkpoints.* `DocumentEditor::checkpoint() -> EditCheckpoint` and
   `DocumentEditor::restore(&mut self, &EditCheckpoint)` make the private
-  `Snapshot` in `tinker-pdf-cos/src/edit.rs` (overlay, deletions, object
+  `Snapshot` in `tinker-pdf-cos/src/edit.rs` (now `edit/mod.rs`) (overlay, deletions, object
   counter, page order) a public opaque value; `transaction()` becomes
   checkpoint → body → restore-on-`Err`, which is what it already is
   internally. The doc comment on `transaction` rejects a
@@ -147,7 +147,7 @@ bytes must survive as a prefix, the property signatures depend on per 12.8.1).
 `testdata/` holds no form today (simple-text, outline-3level,
 permissions-noprint, encrypted-aes256), so milestone 1 commits
 `testdata/form-fields.pdf` — the hand-written `/AcroForm` shape
-`edit.rs`'s own inline test fixtures already use, with one widget
+`edit/tests.rs`'s own inline test fixtures already use, with one widget
 deliberately lacking `/Rect` so the skipped-widget report leg is exercised,
 not just possible. *Build-a-document*
 registers a base font and an image, draws two pages, sets info and outline,

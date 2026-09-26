@@ -337,7 +337,7 @@ one returning a *positive* verdict is a forgery accepted. Both tests that catch 
 **What already exists, and is load-bearing.** Three seams built earlier were built for this.
 First: `incremental_update` (`crates/tinker-pdf-cos/src/write.rs`) appends after the
 original bytes, adding a newline only when the base lacks one, and the test
-`an_incremental_save_keeps_the_original_bytes` (`crates/tinker-pdf-cos/src/edit.rs`) asserts
+`an_incremental_save_keeps_the_original_bytes` (`crates/tinker-pdf-cos/src/edit/tests.rs`) asserts
 `starts_with(original)` — "the signable prefix must survive an edit" is already a committed
 assertion, so the byte-identical prefix a signature needs is not new work. A second, older
 assertion of the same invariant sits in `write.rs` as
@@ -592,7 +592,7 @@ failure mode a chain walk should have.
 ## Dependencies
 
 - **Existing:** `incremental_update` and the `starts_with(original)` invariant
-  (`tinker-pdf-cos/src/write.rs`, `edit.rs`); `Revision.byte_range` from open
+  (`tinker-pdf-cos/src/write.rs`, `edit/save.rs`); `Revision.byte_range` from open
   (`xref.rs`, [opening](../features/opening.md)); `FieldKind::Signature` and field
   classification (`form.rs`); SHA-2 digests and the published-vector convention
   (`tinker-pdf-crypto`); the strict structural validator

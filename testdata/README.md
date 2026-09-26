@@ -13,7 +13,7 @@ owner `owner-secret`; permissions-noprint.pdf user `user`, owner `owner`
 `/AcroForm` and the write-parity suite's fill-and-save script had nothing to
 open. It is a one-page form with four fields — a text field `name`, a checkbox
 `agree` whose on state is `/On` rather than `/Yes`, a radio pair `colour`, and
-a second text field `notes` — which are the shapes `edit.rs`'s own inline
+a second text field `notes` — which are the shapes `edit/tests.rs`'s own inline
 fixtures use, plus **one deliberate defect**: `name`'s second widget (object 7)
 carries no `/Rect`, which 12.5.2 Table 164 requires, so filling `name` reports
 exactly one `SkippedWidget`. That widget is left out of the page's `/Annots` on
