@@ -16,6 +16,10 @@ use std::borrow::Cow;
 
 use crate::{Construct, Encoding, Error, Warning};
 
+// `XHTML_ENTITIES`: XHTML 1.0's three entity sets, compiled by `build.rs` from
+// the vendored `data/xhtml-entities/*.ent` and sorted by name.
+include!(concat!(env!("OUT_DIR"), "/xhtml_entities.rs"));
+
 /// XML 1.0 §2.2, the `Char` production.
 ///
 /// Not "any Unicode scalar value": `NUL` is not a character, the C0 controls
@@ -181,9 +185,15 @@ pub(crate) fn illegal_character(text: &str) -> Option<usize> {
 ///
 /// Nothing here can expand: every reference is at least four source bytes and
 /// yields exactly one character, so the result is never longer than the input.
-/// That is the structural half of this crate's answer to entity expansion; the
-/// other half is that `<!DOCTYPE` never gets parsed at all.
-pub(crate) fn value(raw: &str, attribute: bool) -> Result<Cow<'_, str>, Error> {
+/// That holds for a named reference from [`XHTML_ENTITIES`] too, which
+/// `build.rs` checks row by row. It is the structural half of this crate's
+/// answer to entity expansion; the other half is that `<!DOCTYPE` never gets
+/// parsed at all.
+///
+/// `xhtml` is whether the document's declaration named an XHTML 1.x DTD, and
+/// it decides one thing: whether a name outside XML's five is looked up in
+/// that table or refused.
+pub(crate) fn value(raw: &str, attribute: bool, xhtml: bool) -> Result<Cow<'_, str>, Error> {
     let plain = !raw.as_bytes().iter().any(|b| match b {
         b'&' | b'\r' => true,
         b'\n' | b'\t' => attribute,
@@ -198,7 +208,7 @@ pub(crate) fn value(raw: &str, attribute: bool) -> Result<Cow<'_, str>, Error> {
     while let Some(c) = rest.chars().next() {
         match c {
             '&' => {
-                let (produced, used) = reference(rest)?;
+                let (produced, used) = reference(rest, xhtml)?;
                 out.push(produced);
                 rest = rest.get(used..).unwrap_or("");
             }
@@ -259,14 +269,15 @@ pub(crate) fn line_ends(raw: &str) -> Cow<'_, str> {
 
 /// One reference at the head of `rest`, and how many bytes it took.
 ///
-/// The five predefined entities are the only names admitted. There is no table
-/// to look a sixth up in, because building one would mean having parsed a
-/// document type declaration, which this crate refuses before it reads a byte
-/// past `<!DOCTYPE` (ECMA-388 9.3.2 [M2.71]). So `&nbsp;` is
-/// [`Error::UnknownEntity`] — refused rather than guessed at, and refused by a
+/// The five predefined entities are admitted everywhere. A sixth name is
+/// admitted only when `xhtml` says the document's declaration named an XHTML
+/// 1.x DTD, and then only if it is one of the 253 that DTD's three entity sets
+/// declare — looked up in [`XHTML_ENTITIES`], never computed and never
+/// expanded. Anything else, `&nbsp;` in a document with no such declaration
+/// included, is [`Error::UnknownEntity`]: refused rather than guessed at, by a
 /// name that says the entity was never declared rather than one that says the
 /// markup is broken.
-fn reference(rest: &str) -> Result<(char, usize), Error> {
+fn reference(rest: &str, xhtml: bool) -> Result<(char, usize), Error> {
     let body = rest.get(1..).unwrap_or("");
     let Some(end) = body.find(';') else {
         // An unterminated reference and a stray ampersand are the same input.
@@ -281,9 +292,21 @@ fn reference(rest: &str) -> Result<(char, usize), Error> {
         "apos" => '\'',
         "quot" => '"',
         numeric if numeric.starts_with('#') => character_reference(numeric)?,
+        named if xhtml => xhtml_entity(named).ok_or(Error::UnknownEntity)?,
         _ => return Err(Error::UnknownEntity),
     };
     Ok((produced, used))
+}
+
+/// The character XHTML 1.0's entity sets declare for `name`, if they declare
+/// one. Case-sensitive, as XML names are: `&Eacute;` and `&eacute;` are two
+/// entries, and `&NBSP;` is none.
+pub(crate) fn xhtml_entity(name: &str) -> Option<char> {
+    XHTML_ENTITIES
+        .binary_search_by(|(entry, _)| entry.as_bytes().cmp(name.as_bytes()))
+        .ok()
+        .and_then(|at| XHTML_ENTITIES.get(at))
+        .map(|&(_, c)| c)
 }
 
 /// `&#38;` and `&#x26;`, in both radixes, refusing what §4.1 does not allow.

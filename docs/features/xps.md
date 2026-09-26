@@ -42,6 +42,10 @@ refuses `<!DOCTYPE` with an internal subset *by name* before reading one
 byte past it — entity expansion is a refusal, not a budget — with a
 two-valued doctype mode that [EPUB](epub.md) uses for `<!DOCTYPE html>`.
 Every parse is bounded by `Limits` (depth, attribute count, text length).
+An XPS part is read in the strict mode, `Doctype::Refuse` (ECMA-388 9.3.2
+[M2.71] forbids DTD content outright), so the XHTML named-reference table the
+relaxed mode consults for an EPUB never applies to one: `&nbsp;` in a fixed
+page is `Error::UnknownEntity` exactly as before.
 
 **Markup to content stream** (`markup`, `geometry`, `brush`, `paint`). One
 XPS unit is 1/96 inch (18.1) against PDF's 1/72, so a page opens with one
