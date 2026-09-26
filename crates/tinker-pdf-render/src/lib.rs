@@ -3220,7 +3220,9 @@ pub fn group_format(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
 /// So a caller asking for either gets `Rgba8`, which carries the same alpha and
 /// the colours the name promises. Silently, because there is nothing for the
 /// caller to do about it: the request was for pixels, and pixels are what comes
-/// back.
+/// back. The facade's `RenderOptions::allow_cmyk` is the one way past this for
+/// ink, and it is a second, explicit field rather than a reading of this one,
+/// so that a caller has to say they know the bytes are ink.
 ///
 /// *`LabA8` was let through until September 2026*, while its own documentation
 /// and this function's both said a page never came back in it: the `match`

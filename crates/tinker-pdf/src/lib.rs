@@ -417,6 +417,38 @@ pub struct RenderOptions {
     /// # }
     /// ```
     pub region: Option<PixelRegion>,
+    /// Whether a page asked for in [`PixelFormat::CmykA8`] comes back in it.
+    ///
+    /// Off by default, and with it off `format: CmykA8` still returns
+    /// `Rgba8`, as it always has. A `Bitmap` says how many components it has
+    /// and nothing about what they mean, so a consumer handed five bytes of
+    /// ink and reading the first three as red, green and blue produces a
+    /// picture that looks almost right — which is why ink is not a page
+    /// format by accident. This is the caller saying they know it is ink. It
+    /// changes nothing for any other `format`.
+    ///
+    /// # What the ink is
+    ///
+    /// The page is composited **over ink** — a `/Multiply` darkens by adding
+    /// ink, 11.3.5's separable formulas applied to complemented components —
+    /// on a canvas that starts with none (`0, 0, 0, 0`, opaque), and the
+    /// buffer is handed back as it stands instead of being converted to light
+    /// at the end.
+    ///
+    /// **It is not the document's own ink.** Every colour in this engine is
+    /// flattened to sRGB where the resource is read, long before a buffer sees
+    /// it, and a CMYK buffer turns that light back into ink by 8.6.4.4's
+    /// relation inverted with maximum undercolour removal: `K` takes all the
+    /// grey it can. So `1 0 0 0 k` arrives as exactly `(255, 0, 0, 0)`, and a
+    /// rich black `1 1 1 1 k` arrives as pure `K` — the same colour, not the
+    /// same ink. A caller preparing separations wants the components the file
+    /// wrote, and that is a different and larger piece of work that the
+    /// roadmap carries.
+    ///
+    /// [`Bitmap::to_png`] writes an ink page as the light it stands for,
+    /// under colour type 6 — PNG has no CMYK — and those are exactly the bytes
+    /// the same render without this switch returns.
+    pub allow_cmyk: bool,
 }
 
 impl Default for RenderOptions {
@@ -427,6 +459,7 @@ impl Default for RenderOptions {
             cancel: None,
             annotations: true,
             region: None,
+            allow_cmyk: false,
         }
     }
 }
@@ -503,12 +536,14 @@ impl Bitmap {
     /// many components it has and **nothing about what they mean**, so a
     /// consumer reading three bytes and calling them red, green and blue is
     /// handed ink and produces a picture that looks almost right. That is why
-    /// `CmykA8` is not a page format at all. It is still constructible — the
-    /// fields are public, and a transparency group compositing over ink
+    /// `CmykA8` is a page format only for a caller who asks for it by name
+    /// *and* sets [`RenderOptions::allow_cmyk`]. It is constructible besides —
+    /// the fields are public, and a transparency group compositing over ink
     /// (11.6.6) is a real buffer of this shape — so this method has to be
-    /// total over all six rather than over the two a page comes back in, and
-    /// writing four components under colour type 6 would put cyan, magenta and
-    /// yellow into a file labelled RGB.
+    /// total over all six, and writing four components under colour type 6
+    /// would put cyan, magenta and yellow into a file labelled RGB. An ink page
+    /// written here is the light it stands for, byte for byte what the same
+    /// render without `allow_cmyk` would have returned.
     ///
     /// # Eight bits, and what the round trip is therefore at
     ///
@@ -1746,8 +1781,13 @@ impl Page {
         }
 
         // Back to something a caller can read. A page group composited over
-        // ink comes back as light, which is 11.4.7's own last step.
-        let wanted = tinker_pdf_render::page_format(options.format);
+        // ink comes back as light, which is 11.4.7's own last step — unless
+        // the caller asked for ink by name *and* said they know it is ink.
+        let wanted = if options.allow_cmyk && options.format == PixelFormat::CmykA8 {
+            PixelFormat::CmykA8
+        } else {
+            tinker_pdf_render::page_format(options.format)
+        };
         let canvas = if canvas.format == wanted {
             canvas
         } else {

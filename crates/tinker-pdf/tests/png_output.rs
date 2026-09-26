@@ -1,10 +1,11 @@
 //! `Bitmap::to_png` over all six pixel formats, and what a rendered page does
 //! when it goes out through it.
 //!
-//! # Why every format, when a page comes back in only two
+//! # Why every format
 //!
-//! `tinker_pdf_render::page_format` keeps `CmykA8` off a page, and nothing in
-//! this engine hands a caller a `LabA8` page either. But `Bitmap`'s fields are
+//! `tinker_pdf_render::page_format` keeps `CmykA8` off a page unless the caller
+//! opts in with `RenderOptions::allow_cmyk`, and nothing in this engine hands a
+//! caller a `LabA8` page at all. But `Bitmap`'s fields are
 //! **public**, a transparency group compositing over ink (11.6.6) is a real
 //! buffer of exactly that shape, and a caller who has one is entitled to write
 //! it out. PNG has colour types 0, 2, 3, 4 and 6 and **no CMYK and no Lab**, so

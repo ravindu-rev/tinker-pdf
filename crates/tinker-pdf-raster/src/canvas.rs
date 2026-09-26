@@ -29,8 +29,9 @@ pub enum PixelFormat {
     ///
     /// It exists for transparency groups that declare `/DeviceCMYK` as their
     /// `/Group /CS` (11.6.6), which is a group whose blends the specification
-    /// says happen over ink. It is not offered as a page format: see
-    /// `Page::render`.
+    /// says happen over ink. A page comes back in it only when the caller
+    /// asks for it by name and opts in (`RenderOptions::allow_cmyk` in the
+    /// facade): see `Page::render`.
     CmykA8,
     /// Lightness, `a`, `b` and alpha.
     ///
