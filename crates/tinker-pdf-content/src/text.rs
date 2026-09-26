@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use crate::device::{Device, Glyph, MarkedProps};
+use crate::plain::{PlainText, PlainTextOptions};
 use crate::state::GraphicsState;
 
 /// Four corners, in device space (9.4.4).
@@ -212,6 +213,26 @@ impl TextPage {
             }
         }
         out
+    }
+
+    /// The page's text, assembled as `options` asks, with a count of what
+    /// assembling it changed.
+    ///
+    /// With [`PlainTextOptions::default`] the text is [`TextPage::plain_text`]
+    /// to the byte and every count is zero. With
+    /// [`PlainTextOptions::rejoin_hyphens`] soft hyphens are removed and words
+    /// hyphenated across a line end are rejoined — the rule, and why the
+    /// inferred joins are counted apart from the certain ones, is in
+    /// [`crate::plain`].
+    #[must_use]
+    pub fn plain_text_with(&self, options: &PlainTextOptions) -> PlainText {
+        crate::plain::assemble(
+            self.blocks
+                .iter()
+                .flat_map(|b| b.lines.iter())
+                .map(|l| l.text.as_str()),
+            options,
+        )
     }
 
     /// Finds `needle`, case-insensitively and literally.
@@ -933,6 +954,42 @@ mod tests {
         assert!(p.blocks.is_empty());
         assert_eq!(p.plain_text(), "");
         assert!(p.search("anything").is_empty());
+    }
+
+    /// A run of glyphs, one per character, half an em apart on one baseline.
+    fn run(text: &str, x: f64, y: f64) -> Vec<Glyph> {
+        text.chars()
+            .enumerate()
+            .map(|(i, c)| glyph(&c.to_string(), x + i as f64 * 5.0, y, 10.0))
+            .collect()
+    }
+
+    /// Hyphen rejoining through a page the device assembled, not only through
+    /// [`crate::plain::assemble`]: the lines it joins are the lines
+    /// extraction made, and the default is `plain_text` to the byte.
+    #[test]
+    fn plain_text_with_rejoins_hyphens_across_the_lines_extraction_made() {
+        let mut glyphs = run("a hyphen-", 0.0, 700.0);
+        glyphs.extend(run("ation and a soft\u{AD}", 0.0, 688.0));
+        glyphs.extend(run("ware well-", 0.0, 676.0));
+        glyphs.extend(run("Known", 0.0, 664.0));
+        let p = page(&glyphs);
+        assert_eq!(p.lines().len(), 4);
+
+        let default = p.plain_text_with(&PlainTextOptions::default());
+        assert_eq!(default.text, p.plain_text(), "the default changes nothing");
+        assert_eq!(default.hyphens.joins(), 0);
+
+        let joined = p.plain_text_with(&PlainTextOptions {
+            rejoin_hyphens: true,
+        });
+        assert_eq!(
+            joined.text, "a hyphenation and a software well-\nKnown\n",
+            "the soft hyphen joined, the hard one before a capital did not"
+        );
+        assert_eq!(joined.hyphens.hard_joins, 1);
+        assert_eq!(joined.hyphens.soft_joins, 1);
+        assert_eq!(joined.hyphens.soft_removed, 1);
     }
 
     #[test]
