@@ -232,6 +232,28 @@ reported as `RenderWarning::RegionClamped`. Ruling 5's byte-equality guard,
 its fixtures and the one scale-dependent exception are in
 [rulings](../rulings.md).
 
+**Anti-aliasing off.** `RenderOptions::antialias` is on by default; off, every
+pixel of every shape is wholly covered or not covered at all. It is one
+threshold — `Mask::harden`, half a pixel's coverage — applied wherever a
+coverage value is produced, and there are four such places rather than one:
+`Renderer::coverage`, through which every fill, stroke, glyph, clip, text clip
+and pattern shape passes; an image's unit square, hardened inside the
+rasterizer through `ImageDraw::antialias`; a mesh shading's silhouette after
+`draw_mesh`; and a tiling pattern's cell, drawn by a renderer of its own and
+handed the same answer on `TileRequest::antialias`. `sh` and a shading pattern
+paint through a clip or a shape that was hardened when it was made. Because the
+threshold is on coverage `fill` already measured, a hard edge lands where the
+soft one is half-way and a shape keeps its area, two shapes sharing an edge
+split its pixels rather than leaving a gap, and a tile still equals the page
+under it. What is not coverage stays as the document wrote it: a constant
+alpha, a soft mask, an image's own alpha and the colours inside an image. A
+stroke is at least a whole pixel wide with the switch off — 8.4.3.2's thinnest
+line, on a device that cannot draw part of one — because a hairline eight
+tenths of a pixel wide straddling two rows leaves each less than half covered
+and vanishes; `a_hard_edged_hairline_leaves_no_column_it_crosses_empty` sweeps
+eight slopes for it. A glyph feature narrower than half a pixel can still
+vanish where it straddles a pixel edge, which is what any threshold costs.
+
 ## API
 
 The facade is the whole public surface (ruling 11): `Page::render` takes a
@@ -240,7 +262,8 @@ The facade is the whole public surface (ruling 11): `Page::render` takes a
 checked between operations and scanline bands), `annotations` (on by
 default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
-light) — and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
+light) and `antialias` (on; off makes every pixel of every shape whole or
+empty) — and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
 `data`, and `warnings`, the `Vec<RenderWarning>` that carries every named
 degradation. Rendering never fails; it degrades and reports.
 
@@ -343,6 +366,14 @@ un-tiled spelling left for a defect to hide in.
   SHA-256, computed as `determinism.rs` computes one and floored by ink the same
   way, beside the claim that the default render is unchanged — the blend grid's
   default render still hashes to `determinism.rs`'s `analytic_blend` value.
+  The anti-aliasing switch's exit criterion is
+  `with_anti_aliasing_off_every_pixel_is_wholly_covered_or_not_at_all`: text,
+  a diagonal fill, a stroked curve, a hairline and a rotated image's edge, each
+  in its own opaque colour, at 1x, 1.7x and 3x, where every pixel of the
+  hard-edged render must be one of six colours and every element must still be
+  there by its own; `with_anti_aliasing_off_a_shading_is_wholly_covered_or_not_at_all`
+  does the same for a mesh, a clipped `sh`, a shading pattern and a tiling
+  pattern whose cell is drawn by a renderer of its own.
 - Output: `png_output.rs` holds `Bitmap::to_png` over all six formats, and
   `png_input.rs` holds `Bitmap::from_png` — the round trip over every page
   format, 16-bit rounding at the samples where truncation would differ, every

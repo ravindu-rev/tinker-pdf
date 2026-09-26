@@ -275,6 +275,11 @@ pub struct TileRequest {
     /// How many tiling patterns are already open above this one, for the
     /// recursion cap.
     pub depth: u32,
+    /// Whether the cell's own edges are anti-aliased, which is the page's
+    /// answer: a cell drawn soft and composited onto a hard page would put
+    /// partial pixels on a page that asked for none. See
+    /// [`Renderer::with_antialias`].
+    pub antialias: bool,
 }
 
 /// One rasterized tiling-pattern cell.
@@ -654,6 +659,9 @@ pub struct Renderer<'g, G: GlyphSource> {
     skipped: Arc<AtomicBool>,
     /// Curve flattening tolerance in device pixels.
     tolerance: f64,
+    /// Whether coverage is anti-aliased, or every pixel is whole or empty.
+    /// See [`Renderer::with_antialias`].
+    antialias: bool,
     missing_fonts: u32,
     /// Glyph outlines accumulated by text clipping modes 4–7, applied at `ET`.
     text_clip: Option<Path>,
@@ -761,6 +769,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             cancel: CancelToken::new(),
             skipped: Arc::new(AtomicBool::new(false)),
             tolerance: 0.2,
+            antialias: true,
             missing_fonts: 0,
             text_clip: None,
             text_clip_requested: false,
@@ -802,6 +811,53 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// contains.
     fn hidden(&self) -> bool {
         self.hidden_depth > 0
+    }
+
+    /// Turns anti-aliasing off, or back on: `false` makes every pixel of
+    /// every shape either wholly covered or not covered at all.
+    ///
+    /// **One threshold, applied wherever this crate decides coverage**, so
+    /// that no path through the rasterizer is left soft on a page that asked
+    /// for hard edges:
+    ///
+    /// - every fill, stroke, glyph, clip, text clip and pattern shape goes
+    ///   through `Renderer::coverage`, which hardens the mask `fill` returns
+    ///   before the clip multiplies into it;
+    /// - an image's edge is hardened inside the rasterizer
+    ///   ([`ImageDraw::antialias`]);
+    /// - a mesh shading's silhouette is hardened after `draw_mesh`;
+    /// - a tiling pattern's cell is drawn by a renderer of its own, which is
+    ///   handed the same answer through [`TileRequest::antialias`];
+    /// - `sh` and a shading pattern paint through the clip or the shape, which
+    ///   were hardened when they were made.
+    ///
+    /// The threshold is [`Mask::harden`]'s — half a pixel's coverage — and the
+    /// doc there says why. What is **not** coverage is left alone: a soft
+    /// mask's levels, a constant alpha, an image's own alpha channel and the
+    /// colours of its samples are the document's, not the rasterizer's
+    /// approximation of an edge.
+    ///
+    /// A stroke is at least a whole pixel wide when this is off, where it is
+    /// eight tenths of one otherwise. 8.4.3.2 asks for the thinnest line the
+    /// device can render and a hard-edged device can render a pixel; a line
+    /// narrower than that, straddling two pixels, would leave each less than
+    /// half covered and vanish.
+    #[must_use]
+    pub fn with_antialias(mut self, antialias: bool) -> Self {
+        self.antialias = antialias;
+        self
+    }
+
+    /// The thinnest stroke this render draws, in device pixels: 8.4.3.2's
+    /// "thinnest line that can be rendered", which is `soft` with
+    /// anti-aliasing on and a whole pixel with it off. See
+    /// [`Renderer::with_antialias`].
+    fn thinnest(&self, soft: f64) -> f64 {
+        if self.antialias {
+            soft
+        } else {
+            1.0
+        }
     }
 
     /// Installs a cancellation token.
@@ -1482,6 +1538,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let Some(mut buffer) = draw_mesh(&draw, x0, y0, width, height) else {
             return false;
         };
+        if !self.antialias {
+            buffer.coverage.harden();
+        }
 
         // The element's coverage is the mesh's own, not the clip's: 11.4.5's
         // restore has to know where this element actually painted, and `sh`
@@ -1699,6 +1758,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             color: tiling.uncolored.then_some((color.r, color.g, color.b)),
             cancel: self.cancel.clone(),
             depth: self.pattern_depth + 1,
+            antialias: self.antialias,
         };
         let Some(tile) = self.glyphs.tile(name, &request) else {
             return false;
@@ -1767,6 +1827,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .saturating_add(u64::from(width) * u64::from(height));
         }
         let mut mask = fill(path, rule, x0, y0, width, height, self.tolerance, stop);
+        // Before the clip, so the clip multiplies into a hard shape and the
+        // product of two hard masks stays hard. See `with_antialias`.
+        if !self.antialias {
+            mask.harden();
+        }
         // 8.5.4: the clip multiplies rather than replaces, so an anti-aliased
         // edge clipped by another stays soft on both. In place, because the
         // region above is already no larger than the clip: the destination
@@ -1917,6 +1982,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             clip,
             tint,
             stop: Some(&stop),
+            antialias: self.antialias,
         };
         // Built here and dropped here. The levels are the caller's to keep,
         // and keeping them needs an identity for the image rather than a
@@ -2273,7 +2339,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // pattern measured in user space and applied in device space comes out
         // at the wrong pitch under any zoom.
         let scale = state.ctm.then(&self.base).expansion();
-        let width = (state.line_width * scale).max(0.8);
+        let width = (state.line_width * scale).max(self.thinnest(0.8));
         let style = StrokeStyle {
             width,
             cap: match state.line_cap {
@@ -2460,7 +2526,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if mode.strokes() {
             let scale = state.ctm.then(&self.base).expansion();
             let style = StrokeStyle {
-                width: (state.line_width * scale).max(0.6),
+                width: (state.line_width * scale).max(self.thinnest(0.6)),
                 ..StrokeStyle::default()
             };
             let stop = self.stop_predicate();

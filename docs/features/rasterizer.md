@@ -73,6 +73,17 @@ Table 55); dashes follow 8.4.3.6, with an empty or zero-sum array meaning a
 solid line, and a width of zero drawing the thinnest device line — one
 pixel (8.4.3.2).
 
+**Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
+empty at every pixel: at least half becomes 255, less becomes 0. It is what
+turning anti-aliasing off means one layer up ([rendering](rendering.md)), and
+`ImageDraw::antialias` applies it to an image's unit square before the samples
+are read. A mask value is `floor(units / 16)` of the 4 096 units a pixel holds,
+so it is at least 128 exactly when the shape holds half the units; two shapes
+that split a pixel's units between them split the pixel too, except at an
+exact half, where both take it — which is the property
+`hardened_shapes_sharing_an_edge_partition_its_pixels` holds, and the reason
+the threshold is a half and not anything above it.
+
 **Clipping.** A clip is a `Mask` like any other, and a clip stack composes by
 multiplication: `Mask::intersect_in_place` multiplies coverages, which is
 what keeps a clipped anti-aliased edge looking right rather than doubly
