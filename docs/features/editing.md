@@ -383,7 +383,13 @@ editor's view, where the copies resolve, so a glyph drawn only in a copy
 stays in the program (`subset.rs`'s `redacted_copies`). An image a
 redaction touches is scrubbed whole to a blank sample: cutting a hole would mean decoding,
 editing and re-encoding through a codec this build may have no encoder for,
-and leaving the rest is not a redaction. `mark` paints the area black
+and leaving the rest is not a redaction — an inline image (8.9.7) as much as
+an XObject, and a stencil mask to a stencil sample that paints nothing. An
+inline image the rectangles do not touch is written back byte for byte:
+until September 2026 the rewrite tokenized its samples like the rest of the
+stream and wrote back whatever tokens they spelled, corrupting every inline
+image on a redacted page and scrubbing none (`an_inline_image_is_carried_through_a_rewrite_byte_for_byte`,
+`an_inline_image_under_a_redaction_is_scrubbed`). `mark` paints the area black
 afterwards — cosmetic, because the content is already gone; it tells a
 reader something was removed rather than leaving a gap that reads as if
 nothing was there. The acceptance test is not "does it look right" but two

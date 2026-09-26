@@ -163,6 +163,12 @@
 //! and no warning — every placement is tested and the first covered one
 //! scrubs it, at all of them.
 //!
+//! An **inline** image (8.9.7) is scrubbed the same way where it stands in
+//! the stream, and one no rectangle covers is written back byte for byte:
+//! its samples are not tokens, and until September 2026 the rewrite
+//! tokenized them anyway and wrote back whatever tokens they spelled — every
+//! inline image on a redacted page corrupted, none of them ever scrubbed.
+//!
 //! # The injections that were counted
 //!
 //! Each defect below was reintroduced on its own and
@@ -1753,6 +1759,36 @@ fn scrub_image(editor: &mut DocumentEditor, reference: ObjRef, dict: &Dict) {
     );
 }
 
+/// The inline image that replaces one a redaction covered: a single blank
+/// sample, as [`scrub_image`] writes for an XObject, and a stencil mask kept a
+/// stencil mask whose one sample paints nothing (8.9.6.2).
+///
+/// `span` is the original's, from after `BI` through `EI`; only its
+/// dictionary is read, for `/IM` (or `/ImageMask`), and none of it is kept.
+fn blank_inline_image(span: &[u8]) -> &'static [u8] {
+    let dictionary = span
+        .windows(2)
+        .position(|w| w == b"ID")
+        .and_then(|end| span.get(..end))
+        .unwrap_or(span);
+    let mut tokens = Tokenizer::new(dictionary);
+    let mut previous: Option<Token> = None;
+    let mut mask = false;
+    while let Some(token) = tokens.next_token() {
+        if let (Some(Token::Name(key)), Token::Bool(true)) = (&previous, &token) {
+            if key.as_slice() == b"IM" || key.as_slice() == b"ImageMask" {
+                mask = true;
+            }
+        }
+        previous = Some(token);
+    }
+    if mask {
+        b"BI /IM true /W 1 /H 1 /BPC 1 ID \x80 EI"
+    } else {
+        b"BI /W 1 /H 1 /CS /G /BPC 8 ID \xFF EI"
+    }
+}
+
 /// One `Do` invocation, and the transform in force when it happened.
 struct XObjectUse {
     name: Vec<u8>,
@@ -2026,6 +2062,37 @@ fn rewrite(
         let mut recorded = false;
 
         match op.as_slice() {
+            b"BI" => {
+                // 8.9.7: an inline image's samples are not tokens, so the
+                // span through `EI` is taken whole — where the interpreter
+                // says it ends — and written back byte for byte. Tokenizing
+                // it re-serialized the samples as whatever tokens they
+                // happened to spell, which corrupted every inline image on a
+                // redacted page and scrubbed none of them.
+                let rest = tokens.rest();
+                let consumed = tinker_pdf_content::interpret::skip_inline_image(rest);
+                let span = rest.get(..consumed).unwrap_or(rest);
+                let at = tokens.position();
+                tokens.seek(at.saturating_add(consumed));
+
+                // 8.9.7: it occupies the unit square of the transform in
+                // force, as an XObject image does, and goes whole or not at
+                // all for the same reason ([`scrub_image`]).
+                let placed = XObjectUse {
+                    name: Vec::new(),
+                    ctm: pen.ctm,
+                    at: 0..0,
+                };
+                if covers_unit_square(&placed, areas) {
+                    report.images += 1;
+                    out.extend_from_slice(blank_inline_image(span));
+                } else {
+                    out.extend_from_slice(b"BI");
+                    out.extend_from_slice(span);
+                }
+                out.push(b'\n');
+                rewritten = true;
+            }
             b"Do" => {
                 // 8.8: the operand names an XObject. Which kind it is, and
                 // what to do about it, is the caller's business — this crate
@@ -3656,6 +3723,122 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             !streams.contains("SECRETPIXEL"),
             "and its samples are gone from every stream: {streams}"
         );
+    }
+
+    /// A page with an inline image of four gray samples at x 100..150,
+    /// y 100..150, and `SECRET` in the boxed Type 3 font at x 10..70, y 10..20.
+    fn inline_image_page(dictionary: &str) -> Vec<u8> {
+        let mut content = format!("q 50 0 0 50 100 100 cm BI {dictionary} ID ").into_bytes();
+        content.extend_from_slice(&[0x10, 0x20, 0x30, 0x40]);
+        content.extend_from_slice(b" EI Q BT /F0 10 Tf 10 10 Td (SECRET) Tj ET");
+        let body = String::from_utf8(content).expect("ASCII");
+        super::tests_support::boxed_glyph_document(
+            200.0,
+            200.0,
+            super::tests_support::DEFAULT_FONT_MATRIX,
+            &body,
+        )
+    }
+
+    /// An inline image on a redacted page comes back **byte for byte**.
+    ///
+    /// 8.9.7's samples are not tokens. Until September 2026 the rewrite
+    /// tokenized them like the rest of the stream and wrote back whatever
+    /// tokens they spelled: these four samples — a control byte, a space, a
+    /// `0` and an `@` — came back as three bytes, and every inline image on
+    /// every redacted page was corrupted, the redaction reporting success.
+    #[test]
+    fn an_inline_image_is_carried_through_a_rewrite_byte_for_byte() {
+        let bytes = inline_image_page("/W 2 /H 2 /CS /G /BPC 8");
+        let text = Rect {
+            x0: 0.0,
+            y0: 5.0,
+            x1: 200.0,
+            y1: 25.0,
+        };
+        let before = super::tests_support::render(bytes.clone());
+
+        let (after, report) = redact(
+            Arc::new(CosDocument::open(bytes).expect("it opens")),
+            &[Redaction {
+                area: text,
+                mark: false,
+            }],
+        );
+        assert_eq!((report.glyphs, report.images), (6, 0));
+        let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("ID \u{10} 0@ EI"),
+            "the samples are there as they were: {streams:?}"
+        );
+        assert_eq!(
+            super::tests_support::differing_outside(
+                &before,
+                &super::tests_support::render(after),
+                200.0,
+                text
+            ),
+            0,
+            "and the image draws exactly as it did"
+        );
+    }
+
+    /// An inline image under a rectangle is scrubbed, as an XObject image is:
+    /// whole, to one blank sample, and counted.
+    #[test]
+    fn an_inline_image_under_a_redaction_is_scrubbed() {
+        for (dictionary, what) in [
+            ("/W 2 /H 2 /CS /G /BPC 8", "an image"),
+            ("/IM true /W 2 /H 2 /BPC 1", "a stencil mask"),
+        ] {
+            let bytes = inline_image_page(dictionary);
+            let over = Rect {
+                x0: 120.0,
+                y0: 120.0,
+                x1: 130.0,
+                y1: 130.0,
+            };
+            let image = Rect {
+                x0: 101.0,
+                y0: 101.0,
+                x1: 149.0,
+                y1: 149.0,
+            };
+            assert!(
+                super::tests_support::ink_in(
+                    &super::tests_support::render(bytes.clone()),
+                    200.0,
+                    image
+                ) > 0,
+                "{what} starts inked"
+            );
+
+            let (after, report) = redact(
+                Arc::new(CosDocument::open(bytes).expect("it opens")),
+                &[Redaction {
+                    area: over,
+                    mark: false,
+                }],
+            );
+            assert_eq!((report.glyphs, report.images), (0, 1), "{what}");
+            let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+            assert!(
+                !streams.contains("\u{10} 0@"),
+                "{what}'s samples are gone: {streams:?}"
+            );
+            // A stencil stays a stencil: a gray sample in its place would
+            // paint a white square over whatever the mask left showing.
+            assert_eq!(
+                streams.contains("BI /IM true /W 1 /H 1 /BPC 1 ID"),
+                dictionary.starts_with("/IM"),
+                "{what} is replaced by its own kind: {streams:?}"
+            );
+            assert_eq!(
+                super::tests_support::ink_in(&super::tests_support::render(after), 200.0, image),
+                0,
+                "{what} draws nothing"
+            );
+        }
     }
 
     /// An image the redaction does not touch is left alone. Scrubbing every

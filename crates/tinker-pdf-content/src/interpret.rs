@@ -1896,7 +1896,16 @@ fn is_inline_space(b: &u8) -> bool {
     b.is_ascii_whitespace() || *b == 0
 }
 
-fn skip_inline_image(rest: &[u8]) -> usize {
+/// How many bytes of `rest` — what follows a `BI` operator — the inline
+/// image takes, through its `EI` (8.9.7).
+///
+/// Public for the other reader of content streams that must not tokenize an
+/// inline image's samples: the facade's redaction, which rewrites a stream
+/// token by token and would otherwise re-serialize the samples as whatever
+/// tokens they happened to spell. One answer to where an inline image ends,
+/// so the interpreter and the rewrite cannot disagree about it.
+#[must_use]
+pub fn skip_inline_image(rest: &[u8]) -> usize {
     let mut i = 0usize;
     while i + 1 < rest.len() {
         if rest.get(i) == Some(&b'E') && rest.get(i + 1) == Some(&b'I') {
