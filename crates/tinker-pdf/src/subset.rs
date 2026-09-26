@@ -189,10 +189,10 @@
 //!   six redacted letters' outlines are not among what is left.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tinker_pdf_content::record::{Capture, Event, RecordingDevice};
-use tinker_pdf_content::{interpret, FontSource, Form, Matrix};
+use tinker_pdf_content::{interpret, FontSource, Matrix};
 use tinker_pdf_cos::{
     font as cos_font, pages as cos_pages, subset_tag, CosDocument, Dict, DocumentEditor, Name,
     ObjRef, Object, StreamData,
@@ -233,7 +233,8 @@ pub enum UntouchedReason {
     FieldResource,
     /// No walked resource dictionary named this font, so nothing was measured
     /// about it — a font reached only from a form XObject nothing draws, or
-    /// from a scope this pass never opened.
+    /// from a scope this pass never opened. Every font, when the editor's
+    /// state could not be viewed as a document to walk ([`apply`]).
     ScopeNotWalked,
     /// A Type 3 font's own `/Resources` names this font (9.6.5), and this
     /// engine's interpreter runs a glyph procedure in the enclosing scope, so
@@ -349,19 +350,44 @@ impl SubsetReport {
 /// two's glyphs however thoroughly page one was redacted, so there is no
 /// per-page form of this operation that is not wrong.
 ///
-/// **Run it after every other edit.** It reads the content streams as the
-/// editor now has them — [`DocumentEditor::stream_bytes`], not the file — so a
-/// redaction applied first is a redaction this sees, and the glyphs it removed
-/// are glyphs this drops. Run the other way round, it would keep exactly what
-/// the redaction was for.
+/// **Run it after every other edit.** It walks the document as the editor now
+/// has it — [`DocumentEditor::view`], not the file — so a redaction applied
+/// first is a redaction this sees, and the glyphs it removed are glyphs this
+/// drops. Run the other way round, it would keep exactly what the redaction
+/// was for.
+///
+/// The view is the whole of the editor's state, not only its rewritten
+/// streams: the editor's page order, a page it inserted, and every object it
+/// allocated resolve in it, at the numbers the editor gave them. That is what
+/// lets the walk enter the **copy of a form** a redaction makes for a
+/// placement cut differently from the others ([`crate::redact`]'s
+/// "A form drawn twice"): the copy is an object the file never had, named by
+/// a resource the file's page never carried, and a glyph drawn only there is
+/// a glyph this must keep. Until September 2026 the walk resolved names
+/// through the file and substituted the editor's bytes for a stream the
+/// editor had rewritten — which saw a form rewritten in place and could not
+/// see a copy at all.
+///
+/// A view that cannot be built — the editor's own update failing to reopen,
+/// which is a defect rather than a property of the input — walks nothing, and
+/// every program is then written through whole as
+/// [`UntouchedReason::ScopeNotWalked`]: the rule here is to include.
 ///
 /// **Save with [`tinker_pdf_cos::WriteMode::Rewrite`]** if the removal has to
 /// be real. An incremental save appends, leaving the original program's bytes
 /// in the file where anyone scanning it finds them — the same caveat
 /// [`crate::redact`] carries, for the same reason.
 pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
+    // Everything the walk reads, it reads from the view and nothing else: the
+    // view's names are its own table's, and a name from it looked up in a
+    // dictionary the editor holds would find nothing (or the wrong thing).
+    // What crosses back is object numbers and glyph ids, which the view
+    // shares with the editor by construction.
+    let usage = match editor.view() {
+        Ok(view) => collect(&view),
+        Err(_) => Usage::default(),
+    };
     let doc = editor.shared_document();
-    let usage = collect(editor, &doc);
     rewrite(editor, &doc, &usage)
 }
 
@@ -397,108 +423,30 @@ impl Usage {
     }
 }
 
-/// A scope of the walk: one resource dictionary, with the editor's current
-/// content substituted for any stream it has already rewritten.
-///
-/// The one thing this adds to [`PageResources`] is that seam. Everything else
-/// delegates, because a second answer to "what does this code decode to" is a
-/// second engine, and the glyphs kept have to be the glyphs *this* engine
-/// draws.
-struct Walk<'a> {
-    inner: Arc<PageResources>,
-    editor: &'a DocumentEditor,
-    /// The object number of every form XObject the interpreter entered.
-    ///
-    /// Recorded here rather than derived from the event log because
-    /// [`Event::BeginForm`] carries the resource *name*, and resolving each
-    /// name again afterwards would decode every form's content a second time.
-    entered: Arc<Mutex<HashSet<u32>>>,
-}
-
-impl<'a> Walk<'a> {
-    fn new(inner: Arc<PageResources>, editor: &'a DocumentEditor) -> Arc<Walk<'a>> {
-        Arc::new(Walk {
-            inner,
-            editor,
-            entered: Arc::new(Mutex::new(HashSet::new())),
-        })
-    }
-
-    fn nested(&self, inner: Arc<PageResources>) -> Arc<Walk<'a>> {
-        Arc::new(Walk {
-            inner,
-            editor: self.editor,
-            entered: Arc::clone(&self.entered),
-        })
-    }
-}
-
-impl FontSource for Walk<'_> {
-    fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
-        self.inner.decode(font, bytes)
-    }
-
-    fn is_vertical(&self, font: &[u8]) -> bool {
-        self.inner.is_vertical(font)
-    }
-
-    fn vertical_metrics(&self, font: &[u8], code: u32) -> (f64, f64, f64) {
-        self.inner.vertical_metrics(font, code)
-    }
-
-    fn font_id(&self, font: &[u8]) -> u64 {
-        self.inner.font_id(font)
-    }
-
-    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
-        self.inner.type3_glyph(font, code)
-    }
-
-    fn form(&self, name: &[u8]) -> Option<Form> {
-        let mut form = self.inner.form(name)?;
-        let reference = ObjRef::new(
-            u32::try_from(form.stream >> 16).unwrap_or(0),
-            u16::try_from(form.stream & 0xffff).unwrap_or(0),
-        );
-        if let Ok(mut entered) = self.entered.lock() {
-            entered.insert(reference.num);
-        }
-        // The editor's own rewrite of this form, when it has one. Without
-        // this the walk reads the form's *original* text out of the file and
-        // credits the font with every glyph a redaction just removed.
-        if let Some(bytes) = self.editor.stream_bytes(reference) {
-            form.content = bytes;
-        }
-        Some(form)
-    }
-
-    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>> {
-        let inner = FontSource::form_scope(&*self.inner, name)?;
-        Some(self.nested(inner))
-    }
-}
-
 /// Walks every content stream the document draws and records what it showed.
-fn collect(editor: &DocumentEditor, doc: &Arc<CosDocument>) -> Usage {
+///
+/// `doc` is the editor's view ([`apply`]), so every page, stream and
+/// resource here is the editor's.
+fn collect(doc: &Arc<CosDocument>) -> Usage {
     let mut usage = Usage::default();
 
     for page in cos_pages::collect(doc) {
         let resources = Arc::new(PageResources::new(doc, &page, None));
-        let content = page_content(editor, doc, page.reference);
-        walk(&mut usage, editor, doc, &content, resources);
+        let content = cos_pages::content_bytes(doc, &page);
+        walk(&mut usage, doc, &content, resources);
 
-        for appearance in appearances_of(editor, doc, page.reference) {
-            let Some(content) = editor.stream_bytes(appearance.stream) else {
+        for appearance in appearances_of(doc, page.reference) {
+            let Ok(content) = doc.stream_decoded(appearance.stream) else {
                 continue;
             };
             let resources = Arc::new(PageResources::from_dict(doc, appearance.resources, None));
-            walk(&mut usage, editor, doc, &content, resources);
+            walk(&mut usage, doc, &content, resources);
         }
     }
 
     // 12.7.3.3: a field's `/DA` names a font from the AcroForm `/DR`, and what
     // it will be asked to draw is whatever the field is next given.
-    for font in default_resource_fonts(editor, doc) {
+    for font in default_resource_fonts(doc) {
         usage.refuse(font, UntouchedReason::FieldResource);
     }
 
@@ -506,15 +454,14 @@ fn collect(editor: &DocumentEditor, doc: &Arc<CosDocument>) -> Usage {
 }
 
 /// Interprets one content stream and folds what it showed into `usage`.
-fn walk(
-    usage: &mut Usage,
-    editor: &DocumentEditor,
-    doc: &CosDocument,
-    content: &[u8],
-    resources: Arc<PageResources>,
-) {
-    let root = Walk::new(resources, editor);
-
+///
+/// Straight over [`PageResources`]: a second answer to "what does this code
+/// decode to" would be a second engine, and the glyphs kept have to be the
+/// glyphs *this* engine draws. A wrapper used to sit between the two to hand
+/// the interpreter the editor's bytes for a form the editor had rewritten;
+/// the view has those bytes already, and has the forms the editor added,
+/// which the wrapper could not give it.
+fn walk(usage: &mut Usage, doc: &CosDocument, content: &[u8], root: Arc<PageResources>) {
     // Glyphs and the form brackets that say which scope a glyph's font id is
     // relative to — see this module's note on `Capture::GLYPHS`, which is not
     // enough on its own. Nothing else is recorded: no state copies, no paths,
@@ -526,8 +473,8 @@ fn walk(
     });
     interpret(content, Matrix::IDENTITY, &mut device, &*root);
 
-    let mut stack: Vec<Arc<Walk<'_>>> = vec![Arc::clone(&root)];
-    note_scope(usage, doc, &root.inner);
+    let mut stack: Vec<Arc<PageResources>> = vec![Arc::clone(&root)];
+    note_scope(usage, doc, &root);
 
     for event in device.events() {
         match event {
@@ -541,7 +488,7 @@ fn walk(
                 // `None` means and what the interpreter does with it.
                 let next = match FontSource::form_scope(&*current, name) {
                     Some(scope) => {
-                        note_scope(usage, doc, &scope.inner);
+                        note_scope(usage, doc, &scope);
                         scope
                     }
                     None => current,
@@ -557,7 +504,7 @@ fn walk(
                 let Some(scope) = stack.last() else {
                     continue;
                 };
-                show(usage, &scope.inner, glyph.font_id, glyph.code);
+                show(usage, scope, glyph.font_id, glyph.code);
             }
             _ => {}
         }
@@ -651,28 +598,6 @@ fn show(usage: &mut Usage, scope: &PageResources, font_id: u64, code: u32) {
     }
 }
 
-/// A page's content as the editor now has it.
-fn page_content(editor: &DocumentEditor, doc: &CosDocument, page: ObjRef) -> Vec<u8> {
-    let Some(Object::Dict(dict)) = editor.get(page) else {
-        return Vec::new();
-    };
-    let refs: Vec<ObjRef> = match dict.get(Name::CONTENTS) {
-        Some(Object::Ref(r)) => vec![*r],
-        Some(Object::Array(items)) => items.iter().filter_map(Object::as_objref).collect(),
-        _ => Vec::new(),
-    };
-    let _ = doc;
-
-    let mut out = Vec::new();
-    for r in refs {
-        if let Some(bytes) = editor.stream_bytes(r) {
-            out.extend_from_slice(&bytes);
-        }
-        out.push(b'\n');
-    }
-    out
-}
-
 /// One appearance stream to walk.
 struct Appearance {
     stream: ObjRef,
@@ -686,32 +611,31 @@ struct Appearance {
 /// so a subset cut to today's state loses tomorrow's tick. [`crate::annots`]
 /// picks one because it draws one; this counts them all because it is deciding
 /// what the file must still be able to draw.
-fn appearances_of(editor: &DocumentEditor, doc: &CosDocument, page: ObjRef) -> Vec<Appearance> {
+fn appearances_of(doc: &CosDocument, page: ObjRef) -> Vec<Appearance> {
     let mut out = Vec::new();
-    let Some(Object::Dict(dict)) = editor.get(page) else {
+    let Ok(page) = doc.get(page) else {
+        return out;
+    };
+    let Some(dict) = page.as_dict() else {
         return out;
     };
     let page_resources = doc
-        .resolve_key(&dict, Name::RESOURCES)
+        .resolve_key(dict, Name::RESOURCES)
         .as_dict()
         .cloned()
         .unwrap_or_default();
 
-    let annots = doc.resolve_key(&dict, doc.intern(b"Annots"));
+    let annots = doc.resolve_key(dict, doc.intern(b"Annots"));
     let Some(entries) = annots.as_array() else {
         return out;
     };
 
     for entry in entries {
-        let annotation = match entry {
-            Object::Ref(r) => editor.get(*r).and_then(|o| o.as_dict().cloned()),
-            Object::Dict(d) => Some(d.clone()),
-            _ => None,
-        };
-        let Some(annotation) = annotation else {
+        let annotation = doc.resolve(entry);
+        let Some(annotation) = annotation.as_dict() else {
             continue;
         };
-        let ap = doc.resolve_key(&annotation, doc.intern(b"AP"));
+        let ap = doc.resolve_key(annotation, doc.intern(b"AP"));
         let Some(ap) = ap.as_dict() else { continue };
 
         for key in [b"N".as_slice(), b"D", b"R"] {
@@ -753,22 +677,13 @@ fn appearance_streams(doc: &CosDocument, value: &Object) -> Vec<ObjRef> {
 }
 
 /// Every font the AcroForm `/DR` puts in scope for a `/DA` (12.7.3.3).
-fn default_resource_fonts(editor: &DocumentEditor, doc: &CosDocument) -> Vec<ObjRef> {
+fn default_resource_fonts(doc: &CosDocument) -> Vec<ObjRef> {
     let Some(catalog) = doc.catalog() else {
         return Vec::new();
     };
-    let Some(acro) = catalog.get_ref(doc.intern(b"AcroForm")) else {
-        // A directly written AcroForm is read from the catalog itself.
-        let form = doc.resolve_key(&catalog, doc.intern(b"AcroForm"));
-        return form
-            .as_dict()
-            .map(|form| default_resource_fonts_in(doc, form))
-            .unwrap_or_default();
-    };
-    editor
-        .get(acro)
-        .and_then(|o| o.as_dict().cloned())
-        .map(|form| default_resource_fonts_in(doc, &form))
+    let form = doc.resolve_key(&catalog, doc.intern(b"AcroForm"));
+    form.as_dict()
+        .map(|form| default_resource_fonts_in(doc, form))
         .unwrap_or_default()
 }
 
@@ -1890,6 +1805,91 @@ mod disclosure {
             "cutting the program changed what the remaining text draws"
         );
         assert!(before.data.iter().any(|b| *b < 200), "there is ink to lose");
+    }
+}
+
+/// The walk enters the **copies of a form** a redaction makes, which are
+/// objects the file never had.
+///
+/// The fixture is `redact`'s exit fixture for the row: one form drawing
+/// `PUBLIC SECRET` in the vendored Liberation Serif, at two placements cut
+/// differently — `SECRET` taken from the lower, `PUBLIC` from the upper. No
+/// placement is uncut, so the form's own object keeps the lower outcome
+/// (`PUBLIC`) and the upper draws a copy holding `SECRET`. `S`, `E`, `R` and
+/// `T` are then drawn by the copy and by nothing else: a walk that resolved
+/// names through the file, as this one did until September 2026, never enters
+/// it, and cuts those four letters out of the program the copy still draws
+/// them from — blank glyphs, with nothing in the file saying so.
+#[cfg(test)]
+mod redacted_copies {
+    use super::tests_support::*;
+    use super::*;
+
+    use crate::redact::{apply as redact_apply, Redaction};
+    use tinker_pdf_cos::pages::Rect;
+
+    fn cuts() -> [Redaction; 2] {
+        [
+            Redaction {
+                area: Rect {
+                    x0: 56.0,
+                    y0: 45.0,
+                    x1: 400.0,
+                    y1: 70.0,
+                },
+                mark: false,
+            },
+            Redaction {
+                area: Rect {
+                    x0: 0.0,
+                    y0: 195.0,
+                    x1: 52.0,
+                    y1: 220.0,
+                },
+                mark: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_glyph_drawn_only_in_a_copy_survives_the_subset() {
+        let built = crate::redact::tests_support::public_secret_twice();
+        let mut editor = DocumentEditor::new(open(built));
+        let report = redact_apply(&mut editor, 0, &cuts()).expect("the page exists");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.glyphs, 12);
+        let redacted_only = saved(&editor);
+
+        let subset = apply(&mut editor);
+        assert_eq!(subset.subsetted.len(), 1, "the face was cut: {subset:?}");
+        let and_subsetted = saved(&editor);
+
+        let program = only_program(&open(and_subsetted.clone()));
+        for ch in "PUBLICSERT".chars() {
+            let glyph = glyph_of(&program, ch);
+            assert!(
+                draws(&program, glyph),
+                "{ch:?} is still drawn at one placement or the other, and its outline \
+                 (glyph {glyph}) is gone"
+            );
+        }
+        for ch in "QXZ".chars() {
+            let glyph = glyph_of(&program, ch);
+            assert!(
+                !draws(&program, glyph),
+                "{ch:?} is drawn nowhere and was kept"
+            );
+        }
+
+        // What that means on the page: both placements draw what they drew
+        // before the program was cut.
+        let before = render(redacted_only);
+        let after = render(and_subsetted);
+        assert!(before.data.iter().any(|b| *b < 200), "there is ink to lose");
+        assert!(
+            before.data == after.data,
+            "cutting the program changed what a placement draws"
+        );
     }
 }
 

@@ -353,26 +353,34 @@ back as plain operators with the encoding keys of its dictionary dropped
 September 2026 a compressed form kept `/Filter /FlateDecode` over bytes that
 were never deflated, and the saved form drew nothing at all
 (`a_compressed_form_is_written_back_as_a_stream_that_decodes`, which holds
-the saved file to the strict validator). A form is rewritten **once
-per distinct placement**, each pass reading the bytes the pass before it
-left, so a rectangle over a form's second placement is measured against that
-placement rather than against nothing. The guard that stops a
-self-referential form recursing is keyed by the transform as well as by the
-object, which is what separates "the same form again" from "the same form
-somewhere else"; bitwise and not by tolerance, because two transforms an ulp
-apart are two placements and calling them one is a decision not to cut, and
-what bounds the walk is a cap on placements per form (`MAX_PLACEMENTS`)
-rather than any comparison of floats. Until September 2026 the guard was
-keyed by the object alone and only the first placement was ever measured —
-a silent under-redaction that reported `glyphs: 0` with no warning,
-indistinguishable from a rectangle that covered nothing. **What that costs
-is the other direction, and it is named.** A form is one stream however
-often it is drawn, so a glyph cut because a rectangle covered it at one
-placement is gone at all of them, including placements no rectangle touched;
-`RedactionWarning::RepeatedForm` names the form and how many placements it
-had, and is raised only when a cut was actually made, since a repeated form
-nothing was cut from is exact. Making it exact means a copy of the form per
-placement, which is a [roadmap](../ROADMAP.md) row of its own. An image a
+the saved file to the strict validator). A form drawn at several placements
+is **cut exactly at each**: every placement is measured against the form as
+it was, and each distinct outcome gets a stream of its own — a copy of the
+form cut in that placement's frame, which the placement's `Do` is pointed at
+through a fresh resource name (`Rd` and the copy's object number) in a
+resources dictionary of the page's, or of the enclosing copy's, own. A form
+drawn inside a copied form is decided first, because a form whose `Do` names
+a copy is itself a different outcome. Placements that cut the same share one
+stream, and a form nothing was cut from is not written at all. The form's
+own object keeps an uncut outcome when there is one, so another page that
+draws it draws it as it was; when every placement cut something it takes the
+first placement's outcome, so it is still drawn by the redacted page and
+never left in the file holding covered text with nothing drawing it. The
+guard that stops a self-referential form recursing is keyed by the transform
+as well as by the object — bitwise and not by tolerance, because two
+transforms an ulp apart are two placements and calling them one is a
+decision not to cut — and what bounds the walk is a cap on placements per
+form (`MAX_PLACEMENTS`) rather than any comparison of floats. This is the
+third form of this answer in September 2026: first the guard was keyed by
+the object alone and only the first placement was measured (a silent
+under-redaction reporting `glyphs: 0`); then every placement was cut in the
+one stream they share and `RedactionWarning::RepeatedForm` named the widened
+cut; now `RepeatedForm` is raised only for the two kinds of form that still
+go that way, with everything they draw — one that draws itself, directly or
+through another, and one placed past the cap (`a_form_whose_placements_are_cut_differently_is_cut_exactly_at_each`,
+and the tests beside it in `redact.rs`'s `tests`). The subsetter walks the
+editor's view, where the copies resolve, so a glyph drawn only in a copy
+stays in the program (`subset.rs`'s `redacted_copies`). An image a
 redaction touches is scrubbed whole to a blank sample: cutting a hole would mean decoding,
 editing and re-encoding through a codec this build may have no encoder for,
 and leaving the rest is not a redaction. `mark` paints the area black
@@ -410,7 +418,11 @@ section above ends here:
 page two's glyphs however thoroughly page one was redacted, so there is no
 per-page form of the operation that is not wrong; and it reads the content the
 *editor* now has rather than the file, so an edit applied first is an edit this
-sees. Run the other way round it would keep exactly what the redaction removed.
+sees — through `DocumentEditor::view`, the editor's state as a document of its
+own, so the page order it has, a page it inserted and a copy of a form a
+redaction made all resolve (until September 2026 the walk resolved names
+through the file with the editor's bytes substituted, and could not see a
+copy). Run the other way round it would keep exactly what the redaction removed.
 Save with `WriteMode::Rewrite` if the removal has to be real — an incremental
 save appends and leaves the original program's bytes in the file, the same
 caveat redaction carries.
@@ -556,7 +568,8 @@ if report.untouched.is_empty() {
 | Redacting a run whose `Tf` named a font the resources in scope do not have | left whole, `UnknownFont` (`a_run_whose_font_is_not_in_scope_is_left_uncut_and_reported`) | no metrics at all, so no glyph can be placed. Permanent, and it was silent before: the run was kept, nothing was counted, and the report looked like a rectangle that covered nothing | — |
 | Redacting a run whose text rendering matrix is not finite | left whole, `UnmeasurableFrame` (`a_non_finite_text_matrix_is_left_uncut_and_reported`) | a position that is not a number cannot be compared with a rectangle. Permanent. The whole showing operand is left, never half of it | — |
 | Partial image redaction | the whole image is scrubbed (`RedactionReport::images`) | a hole needs a re-encode through a codec this build may not write | [filters](filters.md) |
-| Cutting a form XObject at one placement only, when it is drawn at several | the cut is the union over every placement and `RedactionWarning::RepeatedForm` names the form and its placement count (`a_form_drawn_twice_is_cut_at_the_placement_the_rectangle_covers`); a repeated form nothing was cut from is exact and says nothing (`a_form_drawn_twice_that_nothing_is_cut_from_raises_no_warning`) | a form is one stream however often it is drawn, so a cut made for one placement shows at all of them. Over-removal is the direction this module errs in everywhere; the alternative here is the leak. Exactness needs a copy of the form per placement, which is a [roadmap](../ROADMAP.md) row | 8.10 |
+| Cutting exactly, a copy per placement, a form that **draws itself** (directly or through another form) or one **placed past `MAX_PLACEMENTS`** — and every form either draws | the cut is the union over every placement, in the one stream, and `RedactionWarning::RepeatedForm` names the form and its placement count when a cut was made or a placement went unmeasured (`a_self_referential_form_under_a_moving_transform_terminates`, `a_form_drawn_by_one_placed_past_the_cap_is_cut_the_old_way_too`) | a copy per placement of a form that draws itself would be a copy per round of a recursion, and a placement past the cap was never measured, so no copy could say what it should hold; what such a form draws goes the same way because its one stream names its children by their own objects. Over-removal is the direction this module errs in everywhere; the alternative here is the leak | 8.10 |
+| Leaving a form another page draws untouched when **every** placement of it on the redacted page was cut | the form's own object takes the first placement's outcome, so the other page loses what this page's rectangles covered, and nothing reports it | which pages or forms elsewhere draw an object is not something a redaction of one page reads; the object has to hold something this page draws, or it is left in the file holding the covered text with nothing drawing it. When some placement here is uncut the object is left whole, and the other page is exact (`a_form_another_page_draws_is_left_whole_when_a_placement_here_is_uncut`). A [roadmap](../ROADMAP.md) row | 8.10 |
 | Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
 | Appearance synthesis for other subtypes | `add_annotation` inserts the dictionary; no `/AP` is generated | seven subtypes cover the common producer gap; others render only if they carry their own `/AP` | — |
 | Redaction of text inside a Type 3 glyph procedure or an annotation appearance | not rewritten | content streams reachable from a page are rewritten; glyph procedures and `/AP` streams are separate objects | — |
@@ -680,8 +693,13 @@ if report.untouched.is_empty() {
   secret), text inside form XObjects, a self-referential form that
   terminates and one that does so under a transform that moves each round,
   a form drawn twice cut at the placement the rectangle covers and at both
-  when both are covered, a nested form measured at every placement of its
-  parent, an image drawn twice scrubbed from its second placement, scaled
+  when both are covered, two placements cut differently each cut exactly at
+  its own rectangle (read back by extraction and by ink), placements that cut
+  the same sharing one copy, a nested form measured and copied at every
+  placement of its parent, a second redaction cutting the copy the first
+  made and keeping a form's in-place cut, a form another page draws left
+  whole, a form placed past the cap cut the old way with everything it
+  draws, an image drawn twice scrubbed from its second placement, scaled
   runs, and the needle-bytes-absent assertion over every
   decompressed stream. Three further modules carry the rotated cut: a
   quarter turn, an oblique rotation, a skew, a rotation that lives in the

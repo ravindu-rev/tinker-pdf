@@ -115,43 +115,53 @@
 //! a skewed or rotated glyph space is cut where its procedures draw rather
 //! than where an upright em would have been.
 //!
-//! # A form drawn twice, and the warning about forms
+//! # A form drawn twice
 //!
 //! A form XObject drawn in two places is two placements of **one stream**
-//! (8.10), and until September 2026 only the first was ever measured: the
-//! `visited` set in [`follow`] was there to stop a self-referential form
-//! recursing forever and it stopped the second `Do` as well. A rectangle over
-//! the second placement was tested against nothing, the text stayed, and the
-//! report said `glyphs: 0` with no warning — indistinguishable from a
-//! rectangle that covered nothing. That was the one under-redaction this
-//! module did not name, and it is gone.
+//! (8.10), and until September 2026 only the first was ever measured: a
+//! `visited` set keyed by the object was there to stop a self-referential
+//! form recursing forever, and it stopped the second `Do` as well. A
+//! rectangle over the second placement was tested against nothing, the text
+//! stayed, and the report said `glyphs: 0` with no warning — indistinguishable
+//! from a rectangle that covered nothing.
 //!
-//! [`Placements`] now keys the guard by the object **and** the transform in
-//! force, so a form is entered once per distinct placement and each pass
-//! rewrites what the pass before it left. Nothing a rectangle covers at any
-//! placement survives. A form that invokes itself arrives back at the same
-//! object under the same matrix, which is a placement already done, so the
-//! cycle guard still holds; what bounds a matrix that creeps by an ulp a
-//! round is [`MAX_PLACEMENTS`] rather than any comparison of floats, because
-//! two transforms an ulp apart are two placements and calling them one would
-//! be a decision not to cut.
+//! The guard was then keyed by the object **and** the transform in force
+//! ([`placement_key`]), so every placement was measured — and cut, in the one
+//! stream they share, so a glyph a rectangle covered at one placement was
+//! gone at all of them. `RedactionWarning::RepeatedForm` named that widened
+//! cut. What bounds a matrix that creeps by an ulp a round is still
+//! [`MAX_PLACEMENTS`] rather than any comparison of floats, because two
+//! transforms an ulp apart are two placements and calling them one would be a
+//! decision not to cut.
 //!
-//! What that costs is the other direction, and it is named rather than
-//! absorbed. The placements share one stream, so a glyph removed because a
-//! rectangle covered it at one of them is gone at all of them — including
-//! placements no rectangle touched. [`RedactionWarning::RepeatedForm`] says
-//! so, naming the form and how many placements it had, and it is raised only
-//! when a cut was actually made (a form drawn twice that nothing was cut from
-//! is exact, and says nothing). The exact answer is a copy of the form per
-//! placement; it is a roadmap row of its own, and what it waits on is that
-//! [`crate::subset`]'s glyph-usage walk resolves `/XObject` names through the
-//! *document* and cannot see an object an editor has only just allocated.
+//! **Now each placement is cut exactly at its own rectangles.** [`Walk`]
+//! measures every placement against the form as it was, without writing
+//! anything; [`settle`] then gives each distinct outcome a stream of its own
+//! — a copy of the form, cut in that placement's frame — and points each
+//! `Do` at its placement's stream through a fresh resource name
+//! ([`with_names`]). A form whose placements cut the same shares one stream,
+//! and a form nothing was cut from is not written at all. The form's own
+//! object keeps an uncut outcome when there is one, so another page that
+//! draws the form draws it as it was; when every placement cut something it
+//! takes the first placement's outcome, so it is still drawn by this page and
+//! is never left in the file holding what a rectangle covered with nothing
+//! drawing it. [`crate::subset`] walks the editor's
+//! [`view`](tinker_pdf_cos::DocumentEditor::view), where the copies resolve,
+//! so a glyph drawn only in a copy stays in the program.
+//!
+//! Two kinds of form still go the old way — every placement's cut in the one
+//! stream, named by [`RedactionWarning::RepeatedForm`] when that was wider
+//! than a placement asked for — and everything they draw goes with them
+//! ([`settle`] says why): a form that draws itself, directly or through
+//! another, where a copy per placement would be a copy per round of a
+//! recursion; and a form with a placement past [`MAX_PLACEMENTS`], which was
+//! never measured, so no copy could say what it should hold.
 //!
 //! The same guard covered images, with the same hole: an image drawn twice
 //! and covered only at its second placement was left whole and reported
 //! `images: 0`. An image is replaced whole or not at all, so it needs no copy
 //! and no warning — every placement is tested and the first covered one
-//! scrubs it.
+//! scrubs it, at all of them.
 //!
 //! # The injections that were counted
 //!
@@ -209,8 +219,28 @@
 //! | `/FontBBox` alone, not joined with the em | **1** |
 //! | `/FontBBox`'s bottom ignored | **1** |
 //! | the font selected inside a `q` surviving its `Q` | **1** |
+//!
+//! The copy-per-placement defects were counted the same way the same day,
+//! over 323 tests. The first campaign found one zero: a guard that marked a
+//! form met again on its own recursion stack as cyclic fired nothing when
+//! removed, because [`settle`]'s ordering already refuses a form that links
+//! to itself; the guard was deleted rather than kept for a count, and the
+//! injection that removes what does the work is the one below.
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the page's `Do`s never pointed at copies | 8 |
+//! | each placement cut from what the one before it left, which is how it used to be | 7 |
+//! | the form's own object given to the first placement even when another is uncut | **1** |
+//! | a copy per placement rather than per outcome | **1** |
+//! | a form decided before the forms it draws | **1** |
+//! | a form that draws itself neither ordered nor cut the old way | **1** |
+//! | a form placed past the cap cut exactly | 2 |
+//! | the old way not carried down to what such a form draws | **1** |
+//! | a form's content read from the file rather than from the editor | 2 |
+//! | [`crate::subset`]'s walk put back over the file, with the editor's bytes for a rewritten stream | **1** |
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use tinker_pdf_content::{Token, Tokenizer};
@@ -256,7 +286,10 @@ pub struct Redaction {
 ///
 /// The third, [`RedactionWarning::RepeatedForm`], is the other direction and
 /// is the reason this type is no longer only about runs left whole: it says a
-/// cut was made *wider* than the rectangles asked for. Both are leniencies
+/// cut was made *wider* than the rectangles asked for, which since September
+/// 2026 happens only to a form that draws itself or is placed past
+/// [`MAX_PLACEMENTS`] — every other form drawn twice is cut exactly, a copy
+/// per placement that needs one. Both are leniencies
 /// and both are things a caller must be told, so both live here; use
 /// [`RedactionWarning::resource`] to name whichever of the two kinds of
 /// resource a warning is about, since [`RedactionWarning::font`] and
@@ -290,23 +323,26 @@ pub enum RedactionWarning {
         /// How many bytes of showing operand were left in place.
         bytes: usize,
     },
-    /// One form XObject is drawn at more than one placement and the redaction
-    /// cut it, so the cut is **wider** than the rectangles asked for.
+    /// One form XObject is drawn at more than one placement, it could not be
+    /// given a copy per placement, and the redaction cut it — so the cut is
+    /// **wider** than the rectangles asked for.
     ///
-    /// 8.10: a `Do` executes one stream, and a form drawn in two places is
-    /// two placements of *one object*. Every placement is measured against
-    /// the rectangles — a glyph under a rectangle at any of them is removed,
+    /// A form is ordinarily cut exactly: each placement that cuts differently
+    /// draws a copy of the form cut in its own frame, and this is not raised
+    /// (the module's "A form drawn twice"). Two kinds go the old way instead,
+    /// with everything they draw: a form that draws itself, directly or
+    /// through another, and one with a placement past [`MAX_PLACEMENTS`].
+    /// Every placement of such a form is still measured against the
+    /// rectangles — a glyph under a rectangle at any of them is removed,
     /// which is what keeps a second placement from leaking — but the removal
-    /// happens in the one stream all of them share, so a glyph cut because
-    /// the rectangle covered it at one placement is also gone at placements
-    /// no rectangle touched.
+    /// happens in the one stream all of them share (8.10: a `Do` executes one
+    /// stream), so a glyph cut because the rectangle covered it at one
+    /// placement is also gone at placements no rectangle touched.
     ///
     /// Over-removal is the direction this module errs in everywhere (a partly
     /// covered glyph goes whole, a partly covered image goes whole), because
     /// the alternative is the leak. But it is not free, and it is not
     /// something a caller can see from `glyphs` alone — so it is named here.
-    /// The exact answer is a copy of the form per placement, which is a
-    /// roadmap row of its own.
     ///
     /// `placements` **saturates** at [`MAX_PLACEMENTS`]. A form drawn at more
     /// than that many distinct transforms has the placements past the cap
@@ -575,36 +611,31 @@ pub fn apply(
     } = EditorPage::read(editor, reference)?;
     let fonts = fonts_in(editor.document(), &resources);
 
-    let (mut data, mut report, uses) = rewrite(&content, areas, &fonts, Matrix::IDENTITY);
+    let (data, mut report, uses) = rewrite(&content, areas, &fonts, Matrix::IDENTITY);
 
     // 8.10: a form XObject holds content like any other, and a redaction that
     // stops at the page stream leaves whatever a form drew exactly where it
     // was. Images the redaction covers are scrubbed for the same reason: a
     // black rectangle over a photograph removes nothing.
-    let mut placements = Placements::default();
-    follow(
-        editor,
-        &resources,
-        &uses,
-        areas,
-        &mut report,
-        &mut placements,
-        0,
-    );
-
-    // Raised here rather than inside the walk, because whether a form's cut
-    // is wider than the rectangles asked for is only knowable once every
-    // placement of it has been measured — the second placement may be the one
-    // that cuts anything at all.
     //
-    // Only when there is a rectangle to fall under, which is the rule every
-    // other warning in this module follows: with no rectangles nothing was
-    // cut and nothing was widened.
-    if !areas.is_empty() {
-        for warning in placements.warnings() {
-            note(&mut report.warnings, warning);
-        }
-    }
+    // Measured first and written after: every placement of a form is cut
+    // from the form as it was, and only once all of them are known is it
+    // decided which placements share a stream and which need a copy of their
+    // own ([`settle`]).
+    let mut walk = Walk::default();
+    let children = walk.uses(editor, &resources, &uses, areas, &mut report, 0);
+    let targets = settle(editor, &walk, areas, &mut report);
+
+    // The page's own `Do`s that draw a copy name it by a resource name the
+    // page did not have, so the page gets a resources dictionary of its own
+    // that carries one.
+    let renames = renames_of(&children, &uses, &targets);
+    let (mut data, scope) = if renames.is_empty() {
+        (data, None)
+    } else {
+        let (data, scope) = with_names(editor, &data, &resources, &renames);
+        (data, Some(scope))
+    };
 
     if areas.iter().any(|r| r.mark) {
         // Painted last, so it covers whatever remains beneath it.
@@ -652,6 +683,12 @@ pub fn apply(
     };
     let contents = editor.intern(b"Contents");
     dict.insert(contents, Object::Ref(content_ref));
+    // Direct, and on this page alone: the dictionary it replaces may be
+    // inherited from the page tree or shared by other pages (7.7.3.4), none
+    // of which draws the copies.
+    if let Some(scope) = scope {
+        dict.insert(Name::RESOURCES, Object::Dict(scope));
+    }
     editor.put(reference, Object::Dict(dict));
 
     Some(report)
@@ -920,133 +957,122 @@ fn placement_key(m: Matrix) -> PlacementKey {
     ]
 }
 
-/// Which placements of which XObjects this redaction has already handled.
-///
-/// This replaced a `HashSet<u32>` of object numbers, which was both the cycle
-/// guard and — silently — a rule that a form drawn twice is measured once.
-/// Keying by the transform as well as by the object separates the two: a form
-/// that invokes itself arrives at the same object under the same matrix and
-/// is still entered once, and a form drawn somewhere else arrives under a
-/// different matrix and is measured there too.
-#[derive(Default)]
-struct Placements {
-    /// Every (object, transform) pair already rewritten.
-    done: HashSet<(u32, PlacementKey)>,
-    /// How many distinct placements of each form were entered, saturating at
-    /// [`MAX_PLACEMENTS`].
-    count: HashMap<u32, usize>,
-    /// Forms with a placement refused because the cap was reached — the one
-    /// case where a placement is not measured at all.
-    refused: HashSet<u32>,
-    /// Glyphs cut from each form's own content, summed over its placements.
-    cut: HashMap<u32, usize>,
-    /// The resource name each form was first invoked by.
+/// A form XObject this redaction met, as it was before anything was written.
+struct FormEntry {
+    reference: ObjRef,
+    /// The resource name that first invoked it.
     ///
     /// The *first*, because one object can be reached by different names from
     /// different scopes and a caller needs a name that appears in the file,
     /// not a list of the ones that do.
-    name: HashMap<u32, Vec<u8>>,
+    name: Vec<u8>,
+    /// Its stream dictionary, as the editor had it.
+    dict: Dict,
+    /// Its decoded content, as the editor had it. Every placement is cut from
+    /// **this**, never from what another placement's cut left: each
+    /// placement's result is its own, and which of them share a stream is
+    /// decided afterwards ([`settle`]).
+    content: Vec<u8>,
+    /// The distinct outcomes of cutting `content`, one per outcome rather
+    /// than per placement — most placements of most forms cut nothing, and
+    /// all of those share one entry.
+    cuts: Vec<FormCut>,
+    /// Its placements, in the order they were entered.
+    nodes: Vec<usize>,
+    /// A placement was refused because [`MAX_PLACEMENTS`] was reached, so at
+    /// least one `Do` of it was measured against nothing.
+    refused: bool,
+}
+
+/// One outcome of cutting a form's content.
+struct FormCut {
+    data: Vec<u8>,
+    /// Where each `Do`'s operand sits in `data`, one per [`XObjectUse`] the
+    /// cut recorded, so that a `Do` can be pointed at a copy afterwards.
+    names: Vec<std::ops::Range<usize>>,
+    glyphs: usize,
+    operations: usize,
+}
+
+/// One placement of a form: which form, under which transform, and what it
+/// drew.
+struct FormPlacement {
+    /// Index into [`Walk::forms`].
+    form: usize,
+    /// The transform mapping the form's space to the page's, its `/Matrix`
+    /// included.
+    ctm: Matrix,
+    /// What the form's content names things in at this placement: its own
+    /// `/Resources`, or the scope that invoked it when it has none (8.10.1).
+    resources: Dict,
+    /// Index into the form's [`FormEntry::cuts`].
+    cut: usize,
+    /// For each `Do` in the cut, the placement it made, when it drew a form
+    /// this walk entered.
+    children: Vec<Option<usize>>,
+}
+
+/// Every form placement one page draws, measured and not yet written.
+///
+/// This replaced a guard that rewrote each form in place, placement after
+/// placement, so the cuts accumulated in the one stream every placement
+/// shared — a glyph a rectangle covered at one placement was gone at all of
+/// them, and `RepeatedForm` said so. Keyed by the object **and** the
+/// transform, as that guard was ([`placement_key`]): a form that invokes
+/// itself arrives back at a placement already entered, and a form drawn
+/// somewhere else arrives under a different matrix and is a placement of its
+/// own.
+#[derive(Default)]
+struct Walk {
+    /// Every form met, in the order first met.
+    forms: Vec<FormEntry>,
+    /// Form object number to index into `forms`.
+    by_number: HashMap<u32, usize>,
+    /// Every placement, in the order entered.
+    nodes: Vec<FormPlacement>,
+    /// The placement guard: (object, transform) to placement.
+    placed: HashMap<(u32, PlacementKey), usize>,
     /// Images already scrubbed, so one image is reported once however many
     /// placements asked for it.
     scrubbed: HashSet<u32>,
 }
 
-impl Placements {
-    /// Whether this placement of this form is one to rewrite now.
-    fn enter_form(&mut self, num: u32, name: &[u8], key: PlacementKey) -> bool {
-        if self.done.contains(&(num, key)) {
-            return false;
-        }
-        let seen = self.count.entry(num).or_insert(0);
-        if *seen >= MAX_PLACEMENTS {
-            self.refused.insert(num);
-            return false;
-        }
-        *seen += 1;
-        self.done.insert((num, key));
-        self.name.entry(num).or_insert_with(|| name.to_vec());
-        true
-    }
-
-    /// Records what one placement's pass removed from a form.
-    fn record_cut(&mut self, num: u32, glyphs: usize) {
-        let total = self.cut.entry(num).or_insert(0);
-        *total = total.saturating_add(glyphs);
-    }
-
-    /// Whether this image still needs scrubbing.
-    fn scrub(&mut self, num: u32) -> bool {
-        self.scrubbed.insert(num)
-    }
-
-    /// The forms whose cut is not exactly what the rectangles asked for.
+impl Walk {
+    /// Follows the XObjects one stream invoked, returning for each `Do` the
+    /// form placement it made, if any.
     ///
-    /// A form at one placement is exact. A form at several that nothing was
-    /// cut from is exact too — the file is byte-identical to what a copy per
-    /// placement would have produced — so it says nothing. What is left is a
-    /// form whose one shared stream lost glyphs on behalf of one placement,
-    /// and a form with a placement past the cap, which is the case where
-    /// something may instead have survived.
-    fn warnings(&self) -> Vec<RedactionWarning> {
-        let mut out: Vec<RedactionWarning> = Vec::new();
-        let mut numbers: Vec<u32> = self.count.keys().copied().collect();
-        // Sorted, because a report that depends on a `HashMap`'s iteration
-        // order is a report two runs can disagree about (ruling 4).
-        numbers.sort_unstable();
-        for num in numbers {
-            let placements = self.count.get(&num).copied().unwrap_or(0);
-            let cut = self.cut.get(&num).copied().unwrap_or(0);
-            let refused = self.refused.contains(&num);
-            if placements < 2 || (cut == 0 && !refused) {
-                continue;
-            }
-            out.push(RedactionWarning::RepeatedForm {
-                form: self.name.get(&num).cloned().unwrap_or_default(),
-                placements,
-            });
+    /// A form is cut the way the page was, with the transform in force at the
+    /// `Do` as its starting one — the rectangles stay in page space, so the
+    /// form's own coordinates are brought into it rather than the other way
+    /// round. An image the redaction covers is scrubbed here and now: it is
+    /// replaced whole or not at all, so its placements need no copies.
+    fn uses(
+        &mut self,
+        editor: &mut DocumentEditor,
+        resources: &Dict,
+        uses: &[XObjectUse],
+        areas: &[Redaction],
+        report: &mut RedactionReport,
+        depth: u32,
+    ) -> Vec<Option<usize>> {
+        if depth > MAX_FORM_DEPTH {
+            return vec![None; uses.len()];
         }
-        out
-    }
-}
-
-/// Recurses into the XObjects a stream invoked.
-///
-/// A form is rewritten the way the page was, with the transform in force at
-/// the `Do` as its starting one — the rectangles stay in page space, so the
-/// form's own coordinates are brought into it rather than the other way round.
-/// An image the redaction covers is scrubbed.
-///
-/// **Every placement is measured.** A form drawn in two places is rewritten
-/// once per distinct placement, each pass reading the bytes the pass before
-/// it left ([`DocumentEditor::stream_bytes`], not the file), so the surviving
-/// content is what no rectangle covered at *any* placement. That is what
-/// keeps a rectangle over a second placement from being tested against
-/// nothing — and, because a form is one object however often it is drawn, it
-/// is also why a cut made for one placement shows at the others, which
-/// [`RedactionWarning::RepeatedForm`] names.
-///
-/// [`Placements`] is still the cycle guard: a form that invokes itself
-/// arrives back at the same object under the same matrix, which is a
-/// placement already done.
-#[allow(clippy::too_many_arguments)]
-fn follow(
-    editor: &mut DocumentEditor,
-    resources: &Dict,
-    uses: &[XObjectUse],
-    areas: &[Redaction],
-    report: &mut RedactionReport,
-    placements: &mut Placements,
-    depth: u32,
-) {
-    if depth > MAX_FORM_DEPTH {
-        return;
+        uses.iter()
+            .map(|used| self.one(editor, resources, used, areas, report, depth))
+            .collect()
     }
 
-    for used in uses {
-        let Some((reference, dict)) = resolve_xobject(editor, resources, &used.name) else {
-            continue;
-        };
-
+    fn one(
+        &mut self,
+        editor: &mut DocumentEditor,
+        resources: &Dict,
+        used: &XObjectUse,
+        areas: &[Redaction],
+        report: &mut RedactionReport,
+        depth: u32,
+    ) -> Option<usize> {
+        let (reference, dict) = resolve_xobject(editor, resources, &used.name)?;
         let subtype = Resolve::resolve_key(editor, &dict, editor.intern(b"Subtype"))
             .as_name()
             .and_then(|n| editor.document().name_bytes(n))
@@ -1054,84 +1080,530 @@ fn follow(
 
         match subtype.as_deref() {
             Some(b"Image") => {
-                // Tested at **every** placement, and scrubbed once. An image
-                // is replaced whole or not at all, so the two placements of
-                // one image do not need two objects the way two placements of
-                // a form need two streams — the only question is whether any
-                // of them is covered, and stopping at the first left an image
-                // covered only at its second in the file with `images: 0`.
-                if covers_unit_square(used, areas) && placements.scrub(reference.num) {
+                // Tested at **every** placement, and scrubbed once. The only
+                // question is whether any placement is covered, and stopping
+                // at the first left an image covered only at its second in
+                // the file with `images: 0`.
+                if covers_unit_square(used, areas) && self.scrubbed.insert(reference.num) {
                     scrub_image(editor, reference, &dict);
                     report.images += 1;
                 }
+                None
             }
             Some(b"Form") => {
-                // 8.10.2: the form's own /Matrix sits between its space and the
-                // one that invoked it, so it composes with the transform the
-                // `Do` was made under.
-                let matrix = Resolve::resolve_key(editor, &dict, editor.intern(b"Matrix"))
-                    .as_array()
-                    .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
-                    .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()))
-                    .and_then(|v| Matrix::from_operands(&v));
-
-                let inner = match matrix {
-                    Some(m) => m.then(used.ctm),
-                    None => used.ctm,
+                let placement = Placing {
+                    reference,
+                    dict,
+                    used,
+                    scope: resources,
                 };
-
-                if !placements.enter_form(reference.num, &used.name, placement_key(inner)) {
-                    continue;
-                }
-
-                // The bytes this redaction has **now**, not the file's. A
-                // second placement of the same form rewrites what the first
-                // placement left, so the cuts accumulate in the one stream
-                // all the placements share; reading the file here would throw
-                // the earlier placement's cut away and put its text back.
-                let Some(content) = editor.stream_bytes(reference) else {
-                    continue;
-                };
-                // 8.10.1: a form's own `/Resources` is what its content
-                // names things in. A form that omits the dictionary inherits
-                // the scope that invoked it, which is why the fallback is the
-                // caller's rather than the page's.
-                let inner_resources = Resolve::resolve_key(editor, &dict, Name::RESOURCES)
-                    .as_dict()
-                    .cloned()
-                    .unwrap_or_else(|| resources.clone());
-                let fonts = fonts_in(editor.document(), &inner_resources);
-
-                let (data, inner_report, inner_uses) = rewrite(&content, areas, &fonts, inner);
-                report.operations += inner_report.operations;
-                report.glyphs += inner_report.glyphs;
-                report.images += inner_report.images;
-                placements.record_cut(reference.num, inner_report.glyphs);
-                for warning in inner_report.warnings {
-                    note(&mut report.warnings, warning);
-                }
-
-                // Overwritten in place, for the same reason the page's content
-                // is: a freshly allocated object leaves the original text in
-                // the file, unreferenced and perfectly readable.
-                //
-                // The operators are plain, so the dictionary must stop saying
-                // otherwise ([`plain_stream_dict`]).
-                let dict = plain_stream_dict(editor, &dict);
-                editor.put_stream(reference, StreamData { dict, data });
-                follow(
-                    editor,
-                    &inner_resources,
-                    &inner_uses,
-                    areas,
-                    report,
-                    placements,
-                    depth + 1,
-                );
+                self.form(editor, placement, areas, report, depth)
             }
-            _ => {}
+            _ => None,
         }
     }
+
+    fn form(
+        &mut self,
+        editor: &mut DocumentEditor,
+        placing: Placing<'_>,
+        areas: &[Redaction],
+        report: &mut RedactionReport,
+        depth: u32,
+    ) -> Option<usize> {
+        let Placing {
+            reference,
+            dict,
+            used,
+            scope,
+        } = placing;
+
+        // 8.10.2: the form's own /Matrix sits between its space and the one
+        // that invoked it, so it composes with the transform the `Do` was
+        // made under.
+        let matrix = Resolve::resolve_key(editor, &dict, editor.intern(b"Matrix"))
+            .as_array()
+            .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
+            .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()))
+            .and_then(|v| Matrix::from_operands(&v));
+        let inner = match matrix {
+            Some(m) => m.then(used.ctm),
+            None => used.ctm,
+        };
+
+        let form = match self.by_number.get(&reference.num) {
+            Some(&index) => index,
+            None => {
+                // The bytes this editor has **now**, not the file's: an
+                // earlier redaction of this page, or of another page that
+                // draws the same form, is an edit this one must keep.
+                let content = editor.stream_bytes(reference)?;
+                let index = self.forms.len();
+                self.forms.push(FormEntry {
+                    reference,
+                    name: used.name.clone(),
+                    dict: dict.clone(),
+                    content,
+                    cuts: Vec::new(),
+                    nodes: Vec::new(),
+                    refused: false,
+                });
+                self.by_number.insert(reference.num, index);
+                index
+            }
+        };
+
+        // A placement already entered is the same placement again — two
+        // `Do`s under one transform, or a form that invokes itself arriving
+        // back where it started, which is what ends that recursion. Either
+        // way the link is recorded, and a form that links to itself is one
+        // [`settle`] cannot order, which is how it knows.
+        let key = (reference.num, placement_key(inner));
+        if let Some(&node) = self.placed.get(&key) {
+            return Some(node);
+        }
+        let entry = self.forms.get_mut(form)?;
+        if entry.nodes.len() >= MAX_PLACEMENTS {
+            entry.refused = true;
+            return None;
+        }
+
+        // 8.10.1: a form's own `/Resources` is what its content names things
+        // in. A form that omits the dictionary inherits the scope that
+        // invoked it, which is why the fallback is the caller's rather than
+        // the page's.
+        let inner_resources = Resolve::resolve_key(editor, &dict, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .unwrap_or_else(|| scope.clone());
+        let fonts = fonts_in(editor.document(), &inner_resources);
+        let (data, pass, inner_uses) = rewrite(&entry.content, areas, &fonts, inner);
+        for warning in pass.warnings {
+            note(&mut report.warnings, warning);
+        }
+        let cut = match entry.cuts.iter().position(|c| c.data == data) {
+            Some(index) => index,
+            None => {
+                entry.cuts.push(FormCut {
+                    data,
+                    names: inner_uses.iter().map(|u| u.at.clone()).collect(),
+                    glyphs: pass.glyphs,
+                    operations: pass.operations,
+                });
+                entry.cuts.len() - 1
+            }
+        };
+
+        let node = self.nodes.len();
+        entry.nodes.push(node);
+        self.nodes.push(FormPlacement {
+            form,
+            ctm: inner,
+            resources: inner_resources.clone(),
+            cut,
+            children: Vec::new(),
+        });
+        self.placed.insert(key, node);
+
+        let children = self.uses(
+            editor,
+            &inner_resources,
+            &inner_uses,
+            areas,
+            report,
+            depth + 1,
+        );
+        if let Some(placement) = self.nodes.get_mut(node) {
+            placement.children = children;
+        }
+        Some(node)
+    }
+}
+
+/// A form `Do` about to be entered.
+struct Placing<'a> {
+    reference: ObjRef,
+    dict: Dict,
+    used: &'a XObjectUse,
+    /// The resources the `Do` was resolved in.
+    scope: &'a Dict,
+}
+
+/// Which object a placement draws once the redaction is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// The form's own object, as it was or rewritten.
+    Original,
+    /// A copy of the form, cut at this placement alone.
+    Copy(ObjRef),
+}
+
+/// What one placement needs its stream to be: which cut, and which of its
+/// `Do`s point at copies.
+type Outcome = (usize, Vec<(usize, ObjRef)>);
+
+/// Decides which object each placement draws, and writes every form stream
+/// that changed.
+///
+/// **Each placement is cut exactly at its own rectangles.** A form drawn at
+/// several placements that cut differently gets a copy per distinct outcome
+/// (8.10: a `Do` executes one stream, so two outcomes need two streams), and
+/// each `Do` is pointed at the stream holding its placement's outcome. Which
+/// outcome keeps the form's own object is chosen so that the object is never
+/// left holding anything no placement on this page draws:
+///
+/// - an **uncut** outcome keeps it untouched, when some placement cut nothing
+///   — so every other page that draws the form draws it as it was;
+/// - otherwise the **first** placement's outcome is written into it, which
+///   that placement then draws.
+///
+/// Either way the form's own object is drawn by this page, so it never
+/// becomes an unreferenced stream still holding what a rectangle covered —
+/// which a copy for every placement would have made it.
+///
+/// Children are decided before the forms that draw them, because a form
+/// whose `Do` must point at a child's copy is itself a different outcome. A
+/// form this cannot order that way — one that draws itself, directly or
+/// through another, or draws one that does — or one with a placement past
+/// [`MAX_PLACEMENTS`] is cut the old way instead, and so is everything it
+/// draws: every placement's cut in the one stream, and
+/// [`RedactionWarning::RepeatedForm`] naming it when that was wider than a
+/// placement asked for or when a placement went unmeasured ([`union`]). A
+/// copy per placement of a form that draws itself would be a copy per round
+/// of a recursion, and a placement past the cap was never measured, so no
+/// copy could say what it should hold. Everything such a form draws goes
+/// the old way with it because its one stream names its children by their
+/// own objects: a child given copies would be drawn, through that stream,
+/// from an object some other placement left uncut.
+fn settle(
+    editor: &mut DocumentEditor,
+    walk: &Walk,
+    areas: &[Redaction],
+    report: &mut RedactionReport,
+) -> Vec<Target> {
+    let count = walk.forms.len();
+    let mut targets = vec![Target::Original; walk.nodes.len()];
+
+    // The forms each form draws.
+    let mut kids: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); count];
+    for node in &walk.nodes {
+        for child in node.children.iter().flatten() {
+            if let (Some(set), Some(c)) = (kids.get_mut(node.form), walk.nodes.get(*child)) {
+                set.insert(c.form);
+            }
+        }
+    }
+
+    let mut old_way: Vec<bool> = walk.forms.iter().map(|f| f.refused).collect();
+    close_downward(&mut old_way, &kids);
+
+    // Children first (Kahn's algorithm over the forms still cut exactly).
+    let mut parents: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (form, set) in kids.iter().enumerate() {
+        for &kid in set {
+            if let Some(list) = parents.get_mut(kid) {
+                list.push(form);
+            }
+        }
+    }
+    let exact = |old_way: &[bool], f: usize| !old_way.get(f).copied().unwrap_or(true);
+    let mut waiting: Vec<usize> = kids
+        .iter()
+        .map(|set| set.iter().filter(|&&k| exact(&old_way, k)).count())
+        .collect();
+    let mut ready: VecDeque<usize> = (0..count)
+        .filter(|&f| exact(&old_way, f) && waiting.get(f) == Some(&0))
+        .collect();
+    let mut order = Vec::new();
+    while let Some(form) = ready.pop_front() {
+        order.push(form);
+        for &parent in parents.get(form).map(Vec::as_slice).unwrap_or_default() {
+            if !exact(&old_way, parent) {
+                continue;
+            }
+            if let Some(left) = waiting.get_mut(parent) {
+                *left = left.saturating_sub(1);
+                if *left == 0 {
+                    ready.push_back(parent);
+                }
+            }
+        }
+    }
+    // A form the order never reached is in a cycle, or draws one: a form
+    // that invokes itself links a placement to itself or to its own
+    // descendant, so it never runs out of undecided children.
+    let mut ordered = vec![false; count];
+    for &form in &order {
+        if let Some(slot) = ordered.get_mut(form) {
+            *slot = true;
+        }
+    }
+    for (form, slot) in old_way.iter_mut().enumerate() {
+        if !ordered.get(form).copied().unwrap_or(false) {
+            *slot = true;
+        }
+    }
+    close_downward(&mut old_way, &kids);
+
+    for &form in &order {
+        if exact(&old_way, form) {
+            decide(editor, walk, form, &mut targets, report);
+        }
+    }
+
+    // Sorted by object number, because a report that depends on the order a
+    // page happened to invoke its forms in is one two equivalent files can
+    // disagree about.
+    let mut rest: Vec<usize> = (0..count).filter(|&f| !exact(&old_way, f)).collect();
+    rest.sort_by_key(|&f| walk.forms.get(f).map_or(0, |e| e.reference.num));
+    for form in rest {
+        union(editor, walk, form, areas, report);
+    }
+    targets
+}
+
+/// Marks everything a marked form draws, at any depth.
+fn close_downward(marked: &mut [bool], kids: &[BTreeSet<usize>]) {
+    let mut stack: Vec<usize> = (0..marked.len())
+        .filter(|&f| marked.get(f).copied().unwrap_or(false))
+        .collect();
+    while let Some(form) = stack.pop() {
+        for &kid in kids.get(form).into_iter().flatten() {
+            if let Some(slot) = marked.get_mut(kid) {
+                if !*slot {
+                    *slot = true;
+                    stack.push(kid);
+                }
+            }
+        }
+    }
+}
+
+/// Decides one exactly-cut form's placements and writes its streams.
+fn decide(
+    editor: &mut DocumentEditor,
+    walk: &Walk,
+    form: usize,
+    targets: &mut [Target],
+    report: &mut RedactionReport,
+) {
+    let Some(entry) = walk.forms.get(form) else {
+        return;
+    };
+    let outcomes: Vec<Outcome> = entry
+        .nodes
+        .iter()
+        .map(|&n| {
+            let Some(node) = walk.nodes.get(n) else {
+                return (0, Vec::new());
+            };
+            let renames = node
+                .children
+                .iter()
+                .enumerate()
+                .filter_map(|(i, child)| match targets.get((*child)?) {
+                    Some(Target::Copy(copy)) => Some((i, *copy)),
+                    _ => None,
+                })
+                .collect();
+            (node.cut, renames)
+        })
+        .collect();
+
+    let unchanged = |outcome: &Outcome| {
+        outcome.1.is_empty() && entry.cuts.get(outcome.0).is_none_or(|c| c.glyphs == 0)
+    };
+    let Some(home) = outcomes
+        .iter()
+        .find(|o| unchanged(o))
+        .or_else(|| outcomes.first())
+        .cloned()
+    else {
+        return;
+    };
+
+    // (object, the placement whose scope it is written in, its outcome)
+    let mut writes: Vec<(ObjRef, usize, Outcome)> = Vec::new();
+    let mut copies: Vec<(Outcome, ObjRef)> = Vec::new();
+    let mut home_written = unchanged(&home);
+    for (&n, outcome) in entry.nodes.iter().zip(&outcomes) {
+        if *outcome == home {
+            if !home_written {
+                writes.push((entry.reference, n, home.clone()));
+                home_written = true;
+            }
+            continue;
+        }
+        let copy = match copies.iter().find(|(o, _)| o == outcome) {
+            Some((_, copy)) => *copy,
+            None => {
+                let copy = editor.allocate();
+                copies.push((outcome.clone(), copy));
+                writes.push((copy, n, outcome.clone()));
+                copy
+            }
+        };
+        if let Some(slot) = targets.get_mut(n) {
+            *slot = Target::Copy(copy);
+        }
+    }
+
+    for (at, n, (cut, renames)) in writes {
+        let (Some(node), Some(cut)) = (walk.nodes.get(n), entry.cuts.get(cut)) else {
+            continue;
+        };
+        // The operators are plain, so the dictionary must stop saying
+        // otherwise ([`plain_stream_dict`]).
+        let mut dict = plain_stream_dict(editor, &entry.dict);
+        let data = if renames.is_empty() {
+            cut.data.clone()
+        } else {
+            let renames: Vec<(std::ops::Range<usize>, ObjRef)> = renames
+                .iter()
+                .filter_map(|(i, copy)| Some((cut.names.get(*i)?.clone(), *copy)))
+                .collect();
+            let (data, scope) = with_names(editor, &cut.data, &node.resources, &renames);
+            dict.insert(Name::RESOURCES, Object::Dict(scope));
+            data
+        };
+        editor.put_stream(at, StreamData { dict, data });
+        report.glyphs += cut.glyphs;
+        report.operations += cut.operations;
+    }
+}
+
+/// Cuts a form the old way: every placement's cut in its one stream.
+///
+/// For a form that draws itself, and for one with a placement past
+/// [`MAX_PLACEMENTS`] — and everything either draws ([`settle`] says why).
+/// Overwritten in place, for the same reason the page's content is: a freshly
+/// allocated object would leave the original text in the file, unreferenced
+/// and perfectly readable.
+///
+/// Nothing a rectangle covers at any placement survives; what that costs is
+/// named rather than absorbed. A glyph removed because a rectangle covered
+/// it at one placement is gone at all of them, and
+/// [`RedactionWarning::RepeatedForm`] says so — raised only when a cut was
+/// actually made, or when a placement went unmeasured, since a form drawn
+/// twice that nothing was cut from is exact.
+fn union(
+    editor: &mut DocumentEditor,
+    walk: &Walk,
+    form: usize,
+    areas: &[Redaction],
+    report: &mut RedactionReport,
+) {
+    let Some(entry) = walk.forms.get(form) else {
+        return;
+    };
+    let mut data = entry.content.clone();
+    let mut glyphs = 0usize;
+    for &n in &entry.nodes {
+        let Some(node) = walk.nodes.get(n) else {
+            continue;
+        };
+        let fonts = fonts_in(editor.document(), &node.resources);
+        let (next, pass, _) = rewrite(&data, areas, &fonts, node.ctm);
+        data = next;
+        glyphs += pass.glyphs;
+        report.operations += pass.operations;
+    }
+    report.glyphs += glyphs;
+    if glyphs > 0 {
+        let dict = plain_stream_dict(editor, &entry.dict);
+        editor.put_stream(entry.reference, StreamData { dict, data });
+    }
+
+    // Only when there is a rectangle to fall under, which is the rule every
+    // other warning in this module follows: with no rectangles nothing was
+    // cut and nothing was widened.
+    let placements = entry.nodes.len();
+    if !areas.is_empty() && placements >= 2 && (glyphs > 0 || entry.refused) {
+        note(
+            &mut report.warnings,
+            RedactionWarning::RepeatedForm {
+                form: entry.name.clone(),
+                placements: placements.min(MAX_PLACEMENTS),
+            },
+        );
+    }
+}
+
+/// The `Do`s of one stream that must draw a copy, and the copy each draws.
+fn renames_of(
+    children: &[Option<usize>],
+    uses: &[XObjectUse],
+    targets: &[Target],
+) -> Vec<(std::ops::Range<usize>, ObjRef)> {
+    children
+        .iter()
+        .zip(uses)
+        .filter_map(|(child, used)| match targets.get((*child)?)? {
+            Target::Copy(copy) => Some((used.at.clone(), *copy)),
+            Target::Original => None,
+        })
+        .collect()
+}
+
+/// Points `Do`s at copies: a fresh resource name for each copy, added to a
+/// copy of `scope`'s `/XObject`, and written over each `Do`'s operand.
+///
+/// Returns the stream with the names replaced and the resources dictionary
+/// that resolves them — everything in `scope` as it was, with `/XObject` a
+/// direct dictionary holding the old names and the new.
+///
+/// The name is `Rd` and the copy's object number, which no two copies share,
+/// lengthened while `scope` already uses it.
+fn with_names(
+    editor: &DocumentEditor,
+    data: &[u8],
+    scope: &Dict,
+    renames: &[(std::ops::Range<usize>, ObjRef)],
+) -> (Vec<u8>, Dict) {
+    let key = editor.intern(b"XObject");
+    let mut table = Resolve::resolve_key(editor, scope, key)
+        .as_dict()
+        .cloned()
+        .unwrap_or_default();
+
+    let mut chosen: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
+    for (range, copy) in renames {
+        let name = match chosen.get(&copy.num) {
+            Some(name) => name.clone(),
+            None => {
+                let mut name = format!("Rd{}", copy.num).into_bytes();
+                // Terminates: each round lengthens the name, and the table
+                // has finitely many.
+                while table.get(editor.intern(&name)).is_some() {
+                    name.push(b'x');
+                }
+                table.insert(editor.intern(&name), Object::Ref(*copy));
+                chosen.insert(copy.num, name.clone());
+                name
+            }
+        };
+        edits.push((range.clone(), name));
+    }
+
+    // Back to front, so each range still means what it meant.
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut out = data.to_vec();
+    for (range, name) in edits {
+        // Every range is one `rewrite` recorded around a name it wrote, so
+        // it is inside the data and not empty; checked rather than trusted.
+        if range.start >= range.end || range.end > out.len() {
+            continue;
+        }
+        let mut token = Vec::with_capacity(name.len() + 1);
+        token.push(b'/');
+        token.extend_from_slice(&name);
+        out.splice(range, token);
+    }
+
+    let mut resources = scope.clone();
+    resources.insert(key, Object::Dict(table));
+    (out, resources)
 }
 
 /// A stream dictionary made fit for bytes this module wrote.
@@ -1286,6 +1758,9 @@ struct XObjectUse {
     name: Vec<u8>,
     /// The transform mapping the XObject's space to the page's.
     ctm: Matrix,
+    /// Where the rewritten stream wrote the `Do`'s operand, `/` included, so
+    /// that it can be pointed at a copy of the form afterwards.
+    at: std::ops::Range<usize>,
 }
 
 /// The text state needed to place a glyph: everything in 9.4.4's displacement
@@ -1547,6 +2022,8 @@ fn rewrite(
         };
 
         let mut rewritten = false;
+        // Whether this operator is a `Do` that was recorded as a use.
+        let mut recorded = false;
 
         match op.as_slice() {
             b"Do" => {
@@ -1558,7 +2035,9 @@ fn rewrite(
                         uses.push(XObjectUse {
                             name: name.clone(),
                             ctm: pen.ctm,
+                            at: 0..0,
                         });
+                        recorded = true;
                     }
                 }
             }
@@ -1705,9 +2184,19 @@ fn rewrite(
         }
 
         if !rewritten {
+            let mut last = 0..0;
             for operand in &operands {
+                let start = out.len();
                 write_token(&mut out, operand);
+                last = start..out.len();
                 out.push(b' ');
+            }
+            // A `Do` is never rewritten, so its operand is always written
+            // here, and it is the last one.
+            if recorded {
+                if let Some(used) = uses.last_mut() {
+                    used.at = last;
+                }
             }
             out.extend_from_slice(op);
             out.push(b'\n');
@@ -2333,32 +2822,26 @@ endstream\nendobj\n\
 trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n"
     }
 
-    /// **The pin, flipped.** A form drawn twice is measured at *both*
-    /// placements, and the fixture is the one that used to prove it was not.
+    /// **The pin, flipped twice.** A form drawn twice is measured at *both*
+    /// placements and cut **only** at the one the rectangle covers, and the
+    /// fixture is the one that used to prove the second placement was not
+    /// measured at all.
     ///
-    /// The form below draws `SECRET` at page y 50 and again at page y 200;
-    /// the rectangle covers the second placement only. Until September 2026
-    /// the `visited` set — there to stop a self-referential form recursing
-    /// forever — made the second `Do` a no-op too, so the first pass found
-    /// nothing under the rectangle and marked the form done. The text stayed,
-    /// no warning named it, and the report was `glyphs: 0` with no warnings,
-    /// which is exactly what a rectangle covering nothing reports: a silent
-    /// under-redaction reached by a different road from the ones this module
-    /// refuses by name.
+    /// The form draws `SECRET` at page y 50 and again at page y 200; the
+    /// rectangle covers the second placement only. Until the September 2026
+    /// guard keyed by the transform, the second `Do` was a no-op: the text
+    /// stayed and the report said `glyphs: 0`, the silent under-redaction.
+    /// That guard then measured it, and cut it out of the one stream both
+    /// placements shared — so the first placement lost `SECRET` too, and
+    /// `RepeatedForm` named the widened cut.
     ///
-    /// Now the guard is keyed by the transform as well as by the object, so
-    /// the second placement is a placement of its own and is measured. Two
-    /// things follow and both are asserted here, because only the pair of
-    /// them is the property:
+    /// Now the covered placement draws a copy of the form cut at its own
+    /// frame, and the uncovered one draws the form as it was. So, together:
     ///
-    /// - `SECRET` is gone from every stream, and the page draws no ink inside
-    ///   the rectangle.
-    /// - The one stream both placements share lost it, so the *first*
-    ///   placement lost it too although no rectangle covered that one. That
-    ///   is wider than what was asked for, so
-    ///   [`RedactionWarning::RepeatedForm`] names the form — the report is no
-    ///   longer able to look like a rectangle that covered nothing, in either
-    ///   direction.
+    /// - the page draws no ink inside the rectangle, and the form object that
+    ///   still carries `SECRET` is the one the *first* placement draws;
+    /// - the first placement still draws its text, where it was;
+    /// - nothing is reported, because nothing was cut wider than asked.
     #[test]
     fn a_form_drawn_twice_is_cut_at_the_placement_the_rectangle_covers() {
         let doc = Arc::new(CosDocument::open(twice_placed_form()).expect("it opens"));
@@ -2379,37 +2862,42 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n"
         };
 
         let (bytes, report) = redact(doc, &[over_the_second]);
-        let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
-        let streams = all_streams(&reopened);
-
         assert_eq!(
             report.glyphs, 6,
             "the second placement was measured: every glyph of SECRET went"
         );
         assert!(
-            !streams.contains("SECRET"),
-            "and the text under the rectangle is gone from every stream: {streams}"
+            report.warnings.is_empty(),
+            "and nothing was cut wider than asked: {:?}",
+            report.warnings
         );
 
         // The stream check on its own would pass a build that left the glyph
         // in a second, unreferenced copy. The page has to draw nothing there.
-        let bitmap = super::tests_support::render(bytes);
+        let bitmap = super::tests_support::render(bytes.clone());
         assert_eq!(
             super::tests_support::ink_in(&bitmap, 300.0, over_the_second.area),
             0,
-            "and the page draws no ink inside the rectangle"
+            "the page draws no ink inside the rectangle"
+        );
+        // Helvetica is not embedded and this build carries no standard
+        // faces, so the page draws no glyph of it anywhere: the ink check
+        // above is the stream check's partner, not evidence of what stayed.
+        // Extraction is that evidence.
+        assert_eq!(
+            super::tests_support::lines_of(bytes.clone()),
+            vec![(50.0, "SECRET".to_string())],
+            "the first placement, which no rectangle covered, still shows SECRET, \
+             and only there"
         );
 
-        // One stream, two placements: the first placement lost `SECRET` as
-        // well, though no rectangle covered it. That is the cost of the fix
-        // and it is not allowed to be silent.
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::RepeatedForm {
-                form: b"Fm0".to_vec(),
-                placements: 2,
-            }],
-            "the form is named, with how many placements it had"
+        // The page now draws the second placement from a copy: its content
+        // names the copy, and the form object itself is untouched.
+        let reopened = CosDocument::open(bytes).expect("it reopens");
+        let page = super::tests_support::page_content(&reopened);
+        assert!(
+            page.contains("/Fm0 Do") && page.contains("/Rd"),
+            "one `Do` names the form and the other its copy: {page}"
         );
     }
 
@@ -2547,9 +3035,349 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
     /// right for this to be found: the inner form is reached twice, under two
     /// different composed transforms, and the second reach is a placement of
     /// its own.
+    ///
+    /// And cut there only: the inner form's second placement is a copy, and
+    /// the outer form's second placement, whose `Do` has to name that copy,
+    /// is a copy too — a copy of a form is a different outcome for every form
+    /// that draws it. The first placement of both is the file's own objects,
+    /// untouched, and still draws `SECRET`.
     #[test]
     fn a_nested_form_is_measured_at_every_placement_of_its_parent() {
-        let bytes: &[u8] = b"%PDF-1.7\n\
+        let doc = Arc::new(CosDocument::open(bytes_of_nested()).expect("it opens"));
+        assert!(
+            all_streams(&doc).contains("SECRET"),
+            "the needle starts present"
+        );
+
+        let over_the_second = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 190.0,
+                x1: 400.0,
+                y1: 230.0,
+            },
+            mark: false,
+        };
+
+        let (bytes, report) = redact(doc, &[over_the_second]);
+        assert_eq!(report.glyphs, 6, "the inner form was measured at depth two");
+        assert!(
+            report.warnings.is_empty(),
+            "and cut exactly: {:?}",
+            report.warnings
+        );
+
+        let bitmap = super::tests_support::render(bytes.clone());
+        assert_eq!(
+            super::tests_support::ink_in(&bitmap, 300.0, over_the_second.area),
+            0,
+            "no ink under the rectangle"
+        );
+        assert_eq!(
+            super::tests_support::lines_of(bytes.clone()),
+            vec![(50.0, "SECRET".to_string())],
+            "the first placement still draws SECRET, where it was"
+        );
+
+        // Two copies: the inner form's, and the outer form's that names it.
+        let after = CosDocument::open(bytes).expect("it reopens");
+        assert_eq!(
+            super::tests_support::forms_in(&after),
+            4,
+            "the two forms and one copy of each, and no more"
+        );
+    }
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// **The row's exit fixture.** A form whose two placements are cut
+    /// differently is cut exactly at each: one rectangle over `SECRET` at
+    /// the lower placement, another over `PUBLIC` at the upper, and each
+    /// placement loses exactly the word its own rectangle covered.
+    ///
+    /// No placement is uncut, so the form's own object takes the first
+    /// placement's outcome and the second draws a copy. Nothing anywhere
+    /// holds `PUBLIC SECRET` whole: an object no placement draws would still
+    /// be in the file, and a copy for every placement would have left the
+    /// original exactly that.
+    #[test]
+    fn a_form_whose_placements_are_cut_differently_is_cut_exactly_at_each() {
+        let lower = area(56.0, 45.0, 400.0, 70.0);
+        let upper = area(0.0, 195.0, 52.0, 220.0);
+
+        let (bytes, report) = redact(
+            Arc::new(
+                CosDocument::open(super::tests_support::public_secret_twice()).expect("it opens"),
+            ),
+            &[lower, upper],
+        );
+        assert_eq!(report.glyphs, 12, "SECRET below and PUBLIC above");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let lines = super::tests_support::lines_of(bytes.clone());
+        assert_eq!(
+            lines,
+            vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())],
+            "each placement kept exactly what its own rectangle did not cover"
+        );
+
+        let bitmap = super::tests_support::render(bytes.clone());
+        for (covered, what) in [(lower, "SECRET below"), (upper, "PUBLIC above")] {
+            assert_eq!(
+                super::tests_support::ink_in(&bitmap, 300.0, covered.area),
+                0,
+                "no ink where {what} was"
+            );
+        }
+        let kept_below = Rect {
+            x0: 11.0,
+            y0: 51.0,
+            x1: 51.0,
+            y1: 58.0,
+        };
+        let kept_above = Rect {
+            x0: 57.0,
+            y0: 201.0,
+            x1: 99.0,
+            y1: 208.0,
+        };
+        for (kept, what) in [(kept_below, "PUBLIC below"), (kept_above, "SECRET above")] {
+            assert!(
+                super::tests_support::ink_in(&bitmap, 300.0, kept) > 20,
+                "{what} is still drawn"
+            );
+        }
+
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(
+            !streams.contains("PUBLIC SECRET"),
+            "no stream holds the uncut text: {streams}"
+        );
+    }
+
+    /// Placements whose outcomes are the same share one stream: a copy is
+    /// per distinct outcome, not per `Do`.
+    ///
+    /// Three placements, at page y 50, 125 and 200; one tall rectangle takes
+    /// `SECRET` from the upper two, which cut identically. The lowest is
+    /// uncut and keeps the form's own object, and the upper two share one
+    /// copy — one object more than the file had, not two.
+    #[test]
+    fn placements_that_cut_the_same_share_one_copy() {
+        let bytes = super::tests_support::public_secret_drawn_by(
+            "q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 75 cm /Fm0 Do Q \
+             q 1 0 0 1 0 150 cm /Fm0 Do Q",
+        );
+        let (after, report) = redact(open_arc(bytes), &[area(56.0, 120.0, 400.0, 215.0)]);
+        assert_eq!(report.glyphs, 6, "one copy's six, not twelve");
+        assert_eq!(
+            super::tests_support::lines_of(after.clone()),
+            vec![
+                (50.0, "PUBLIC SECRET".to_string()),
+                (125.0, "PUBLIC".to_string()),
+                (200.0, "PUBLIC".to_string()),
+            ]
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            super::tests_support::forms_in(&reopened),
+            2,
+            "the form and one copy for the two placements that cut the same"
+        );
+    }
+
+    fn open_arc(bytes: Vec<u8>) -> Arc<CosDocument> {
+        Arc::new(CosDocument::open(bytes).expect("it opens"))
+    }
+
+    /// A second redaction of the page keeps the copies the first one made,
+    /// and cuts them where they are drawn.
+    ///
+    /// The first takes `SECRET` from the lower placement, which gets a copy;
+    /// the second takes `PUBLIC` from the upper, which draws the form's own
+    /// object. Read back, each placement has lost what its rectangle covered
+    /// and nothing else — the same answer as the two rectangles at once.
+    #[test]
+    fn a_second_redaction_keeps_the_copies_the_first_made() {
+        let mut editor = DocumentEditor::new(open_arc(super::tests_support::public_secret_twice()));
+        let first = apply(&mut editor, 0, &[area(56.0, 45.0, 400.0, 70.0)]).expect("page 0");
+        let second = apply(&mut editor, 0, &[area(0.0, 195.0, 52.0, 220.0)]).expect("page 0");
+        assert_eq!((first.glyphs, second.glyphs), (6, 6));
+        assert!(first.warnings.is_empty() && second.warnings.is_empty());
+
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        assert_eq!(
+            super::tests_support::lines_of(bytes),
+            vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())]
+        );
+    }
+
+    /// A second redaction reaches a copy the first one made, and cuts it.
+    ///
+    /// The first takes `SECRET` from the lower placement, which is given a
+    /// copy holding `PUBLIC`; the second takes `PUBLIC` from the same
+    /// placement, which now means from the copy — an object only the editor
+    /// has, so a walk that read forms out of the file would not find it and
+    /// would leave `PUBLIC` under the second rectangle.
+    #[test]
+    fn a_second_redaction_cuts_the_copy_the_first_made() {
+        let mut editor = DocumentEditor::new(open_arc(super::tests_support::public_secret_twice()));
+        let first = apply(&mut editor, 0, &[area(56.0, 45.0, 400.0, 70.0)]).expect("page 0");
+        let second = apply(&mut editor, 0, &[area(0.0, 45.0, 52.0, 70.0)]).expect("page 0");
+        assert_eq!((first.glyphs, second.glyphs), (6, 6));
+
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        assert_eq!(
+            super::tests_support::lines_of(bytes),
+            vec![(200.0, "PUBLIC SECRET".to_string())],
+            "the lower placement lost both words, the upper neither"
+        );
+    }
+
+    /// A second redaction of a form cut in place keeps the first cut: it
+    /// reads the form as the editor has it, not as the file had it.
+    #[test]
+    fn a_second_redaction_of_a_form_keeps_the_first_cut() {
+        let mut editor = DocumentEditor::new(open_arc(
+            super::tests_support::public_secret_drawn_by("/Fm0 Do"),
+        ));
+        apply(&mut editor, 0, &[area(56.0, 45.0, 400.0, 70.0)]).expect("page 0");
+        apply(&mut editor, 0, &[area(0.0, 45.0, 52.0, 70.0)]).expect("page 0");
+
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        let streams = all_streams(&CosDocument::open(bytes.clone()).expect("it reopens"));
+        assert!(
+            !streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "neither word is anywhere: {streams}"
+        );
+        assert!(super::tests_support::lines_of(bytes).is_empty());
+    }
+
+    /// When a placement on the page is uncut, the form's own object is left
+    /// exactly as it was — so another page that draws the same form still
+    /// draws all of it.
+    ///
+    /// Page one draws the form at y 50 and y 200, page two once at y 50. The
+    /// rectangle takes `SECRET` from page one's **first** placement, so the
+    /// placement that could keep the form's object is the second: choosing by
+    /// order rather than by "uncut" would write page one's cut into the object
+    /// page two draws, and page two would lose a word no rectangle on it
+    /// covered.
+    #[test]
+    fn a_form_another_page_draws_is_left_whole_when_a_placement_here_is_uncut() {
+        let mut builder = DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        assert!(builder.add_form(
+            b"Fm0",
+            &tinker_pdf_cos::FormXObject {
+                bbox: [0.0, 0.0, 400.0, 300.0],
+                matrix: None,
+                group: None,
+                content: b"BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET",
+            }
+        ));
+        builder.add_page(400.0, 300.0, |p| {
+            p.raw(b"q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q");
+        });
+        builder.add_page(400.0, 300.0, |p| p.raw(b"/Fm0 Do"));
+
+        let (bytes, report) = redact(open_arc(builder.finish()), &[area(56.0, 45.0, 400.0, 70.0)]);
+        assert_eq!(report.glyphs, 6);
+        assert_eq!(
+            super::tests_support::lines_of(bytes.clone()),
+            vec![
+                (50.0, "PUBLIC".to_string()),
+                (200.0, "PUBLIC SECRET".to_string())
+            ]
+        );
+        assert_eq!(
+            super::tests_support::lines_on(bytes, 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())],
+            "page two was not redacted and lost nothing"
+        );
+    }
+
+    /// A form placed more times than [`MAX_PLACEMENTS`] is cut the old way,
+    /// in its one stream — and so is **every form it draws**.
+    ///
+    /// The text is in `Fm1`, drawn only through `Fm0`, and `Fm0` is placed
+    /// past the cap, so `Fm0`'s placements share one stream whose `/Fm1 Do`
+    /// is never pointed at a copy. Were `Fm1` cut exactly, its covered
+    /// placement would get a copy nothing draws, and the stream every `Fm0`
+    /// placement draws would still name `Fm1`'s own object — uncut, because
+    /// most of its placements are. So it is not: `Fm1` is cut in place too,
+    /// `SECRET` is in no stream, and both forms are named.
+    #[test]
+    fn a_form_drawn_by_one_placed_past_the_cap_is_cut_the_old_way_too() {
+        let placements = MAX_PLACEMENTS + 2;
+        let mut content = String::new();
+        for i in 0..placements {
+            content.push_str(&format!("q 1 0 0 1 0 {} cm /Fm0 Do Q\n", i * 4));
+        }
+        let inner = "BT /F0 12 Tf 10 50 Td (SECRET) Tj ET";
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 600]\n\
+             /Resources << /XObject << /Fm0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&super::tests_support::stream_object(4, &content));
+        out.push_str(
+            "5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 600]\n\
+             /Resources << /XObject << /Fm1 7 0 R >> >> /Length 8 >>\nstream\n\
+             /Fm1 Do\nendstream\nendobj\n",
+        );
+        out.push_str("6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        out.push_str(&format!(
+            "7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 600]\n\
+             /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\nstream\n\
+             {inner}\nendstream\nendobj\n",
+            inner.len() + 1
+        ));
+        out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+
+        let (streams, report) =
+            redact_to_streams(open_arc(out.into_bytes()), &[area(0.0, 45.0, 400.0, 65.0)]);
+        assert!(!streams.contains("SECRET"), "got: {streams}");
+        assert_eq!(
+            report.warnings,
+            vec![
+                RedactionWarning::RepeatedForm {
+                    form: b"Fm0".to_vec(),
+                    placements: MAX_PLACEMENTS,
+                },
+                RedactionWarning::RepeatedForm {
+                    form: b"Fm1".to_vec(),
+                    placements: MAX_PLACEMENTS,
+                },
+            ]
+        );
+    }
+
+    /// `SECRET` in `Fm1`, drawn only through `Fm0`, which the page draws at
+    /// page y 0 and again 150 points up.
+    fn bytes_of_nested() -> Vec<u8> {
+        b"%PDF-1.7\n\
 1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
 2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
 3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n\
@@ -2566,35 +3394,8 @@ endstream\nendobj\n\
    /Resources << /Font << /F0 6 0 R >> >> /Length 39 >>\nstream\n\
 BT /F0 12 Tf 10 50 Td (SECRET) Tj ET\n\
 endstream\nendobj\n\
-trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n";
-
-        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
-        assert!(
-            all_streams(&doc).contains("SECRET"),
-            "the needle starts present"
-        );
-
-        let over_the_second = Redaction {
-            area: Rect {
-                x0: 0.0,
-                y0: 190.0,
-                x1: 400.0,
-                y1: 230.0,
-            },
-            mark: false,
-        };
-
-        let (streams, report) = redact_to_streams(doc, &[over_the_second]);
-        assert_eq!(report.glyphs, 6, "the inner form was measured at depth two");
-        assert!(!streams.contains("SECRET"), "got: {streams}");
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::RepeatedForm {
-                form: b"Fm1".to_vec(),
-                placements: 2,
-            }],
-            "the form the cut was made in is the one named, not its parent"
-        );
+trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n"
+            .to_vec()
     }
 
     /// An image drawn twice and covered only at its **second** placement is
@@ -4412,7 +5213,7 @@ mod showing_operators {
 /// glyph procedure is a different question and is still refused — see
 /// `docs/features/editing.md`.
 #[cfg(test)]
-mod tests_support {
+pub(crate) mod tests_support {
     use super::*;
 
     /// 9.6.5's conventional Type 3 glyph space, and the one every other font
@@ -4749,6 +5550,89 @@ mod tests_support {
         }
         out.push('>');
         out
+    }
+
+    /// Each line the facade's extractor reads on page zero: the page y of its
+    /// first character's baseline, rounded to a hundredth, and its text with
+    /// the ends trimmed — bottom to top.
+    ///
+    /// Extraction reports PDF user space, y upward, so the y is the page's.
+    pub fn lines_of(bytes: Vec<u8>) -> Vec<(f64, String)> {
+        lines_on(bytes, 0)
+    }
+
+    /// [`lines_of`] for any page.
+    pub fn lines_on(bytes: Vec<u8>, page: u32) -> Vec<(f64, String)> {
+        let doc = crate::Document::open(bytes).expect("it reopens");
+        let text = doc.page(page).expect("a page").text();
+        let mut out: Vec<(f64, String)> = text
+            .lines()
+            .into_iter()
+            .filter_map(|line| {
+                let y = line.chars.first()?.origin.1;
+                Some(((y * 100.0).round() / 100.0, line.text.trim().to_string()))
+            })
+            .filter(|(_, text)| !text.is_empty())
+            .collect();
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out
+    }
+
+    /// One form drawing `PUBLIC SECRET` in 12-point Liberation Serif from
+    /// x 10, at page y 50 and again at page y 200.
+    ///
+    /// The face is embedded — the vendored third-party bytes the subsetting
+    /// tests use — so the page both draws ink and extracts, and neither is
+    /// this repository's arithmetic about its own fixture. Its widths are
+    /// Times', so `PUBLIC` is x 10..52.67, the space 52.67..55.67 and `SECRET`
+    /// 55.67..100.35.
+    pub fn public_secret_twice() -> Vec<u8> {
+        public_secret_drawn_by("q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q")
+    }
+
+    /// The same form, drawn by `page`.
+    pub fn public_secret_drawn_by(page: &str) -> Vec<u8> {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        assert!(builder.add_form(
+            b"Fm0",
+            &tinker_pdf_cos::FormXObject {
+                bbox: [0.0, 0.0, 400.0, 300.0],
+                matrix: None,
+                group: None,
+                content: b"BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET",
+            }
+        ));
+        builder.add_page(400.0, 300.0, |p| p.raw(page.as_bytes()));
+        builder.finish()
+    }
+
+    /// How many form XObjects a document holds.
+    pub fn forms_in(doc: &CosDocument) -> usize {
+        doc.xref()
+            .iter()
+            .filter_map(|(number, _)| doc.get(ObjRef::new(number, 0)).ok())
+            .filter(|object| {
+                object
+                    .as_dict()
+                    .and_then(|d| d.get_name(doc.intern(b"Subtype")))
+                    .and_then(|n| doc.name_bytes(n))
+                    .as_deref()
+                    == Some(b"Form".as_slice())
+            })
+            .count()
+    }
+
+    /// Page zero's content, decoded, as text.
+    pub fn page_content(doc: &CosDocument) -> String {
+        let pages = tinker_pdf_cos::pages::collect(doc);
+        let page = pages.first().expect("a page");
+        String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(doc, page)).into_owned()
     }
 
     /// Every character the facade's extractor reports on page zero, with the
