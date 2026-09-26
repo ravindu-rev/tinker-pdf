@@ -105,7 +105,7 @@ const ZIPS: &[&str] = &[
 /// check of their own: what is worth asserting about a `.cbt` is not that it
 /// opens, it is that it opens as *the same five pictures* a `.cbz` of the same
 /// pages does.
-/// The three `.cb7`s are one producer asked for three *shapes* rather than
+/// 7-Zip's three `.cb7`s are one producer asked for three *shapes* rather than
 /// three producers, and the difference is stated here because it is the row's
 /// own caveat: `-m0=LZMA2` writes one folder holding one LZMA2 chunk, so the
 /// folder walk and the chunk loop each ran exactly once for every committed
@@ -118,11 +118,16 @@ const ZIPS: &[&str] = &[
 /// that wrote it — infers a method from two lengths and would call a method-14
 /// entry `deflate`. Its entries are held to the files that went into them in
 /// `a_real_archiver_s_lzma_entries_are_the_files_that_went_in` instead.
+///
+/// The `py7zr-*.cb7`s are the second 7z writer (`tests/cbz/make-py7zr.py`),
+/// each asked for a coder 7-Zip's three were not: `py7zr-bcj.cb7` puts BCJ in
+/// front of LZMA2, and lists the two coders in the opposite order from 7-Zip.
 const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-tar.cbt", Container::Tar),
     ("7z-lzma2.cb7", Container::SevenZip),
     ("7z-nonsolid.cb7", Container::SevenZip),
     ("7z-dictreset.cb7", Container::SevenZip),
+    ("py7zr-bcj.cb7", Container::SevenZip),
     ("python-lzma.cbz", Container::Zip),
 ];
 

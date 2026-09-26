@@ -1,8 +1,9 @@
 //! The committed `tar`, `sevenz` and `rar` fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each, written
-//! by this crate's own `write_the_fuzz_seeds` tests, and the targets that
-//! consume them need nightly and
+//! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each written
+//! by this crate's own `write_the_fuzz_seeds` tests — plus, in `sevenz/`, one
+//! per coder a real writer made, by `tests/coders/make-coders.py` — and the
+//! targets that consume them need nightly and
 //! a sanitizer runtime. So the seeds were only ever exercised when somebody
 //! ran `cargo fuzz`, which is not on every commit — and a seed corpus nothing
 //! reads is a corpus that stops describing the parser without anybody
@@ -368,10 +369,13 @@ fn the_committed_sevenz_seeds_replay() {
         }
     }
     println!("RAN: {} sevenz seeds, {read_ok} entries read, {crc_checked} CRC-checked, {refused} refused outright", seeds.len());
+    // Seven hand-built by `write_the_fuzz_seeds`, and one per coder a real
+    // writer made, by `tests/coders/make-coders.py`: `bcj-lzma2`.
     assert_eq!(
         seeds.len(),
-        7,
-        "the seed count changed; `write_the_fuzz_seeds` is what should have          changed it, and the new file needs a reason in that test's comment"
+        8,
+        "the seed count changed; `write_the_fuzz_seeds` or `make-coders.py` is \
+         what should have changed it, and the new file needs a reason there"
     );
     assert!(
         crc_checked > 0,
@@ -406,6 +410,39 @@ fn the_crc_mismatch_seed_still_mismatches() {
         "the seed that exists to carry a flipped bit no longer carries one"
     );
     println!("RAN: the crc-mismatch seed refuses entry 0 by name");
+}
+
+/// The seeds a real writer made for one coder **reach** that coder: each opens
+/// and every entry reads, CRC-checked, under the bounds its control byte
+/// picks. A seed refused at open would keep the fuzzer on the header grammar
+/// and never hand it a stream for the coder it is named after.
+#[test]
+fn the_coder_seeds_reach_their_coders() {
+    let Some(seeds) = corpus("sevenz") else {
+        println!("SKIPPED: fuzz/corpus/sevenz is not in this tree");
+        return;
+    };
+    let named = ["bcj-lzma2"];
+    for want in named {
+        let Some((_, data)) = seeds.iter().find(|(name, _)| name == want) else {
+            panic!("the {want} seed is missing");
+        };
+        let (control, body) = data.split_at(data.len().min(1));
+        let limits = sevenz_bounds(control.first().copied().unwrap_or(0));
+        let mut archive = sevenz::Archive::open(body, &limits)
+            .unwrap_or_else(|e| panic!("{want}: the seed opens: {e}"));
+        for index in 0..archive.entries().len() {
+            let crc = archive.entries()[index].crc;
+            let bytes = archive
+                .read(index)
+                .unwrap_or_else(|e| panic!("{want}: entry {index}: {e}"));
+            assert_eq!(Some(crc32(&bytes)), crc, "{want}: entry {index}");
+        }
+    }
+    println!(
+        "RAN: {} coder seeds decode to their recorded CRC-32s",
+        named.len()
+    );
 }
 
 // ---- RAR --------------------------------------------------------------------

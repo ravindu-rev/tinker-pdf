@@ -58,6 +58,15 @@
 *.cb7 binary
 *.cbt binary
 
+# The coder fixtures (tier 4's archive row): archives real writers made over
+# `input/`, whose files are held byte for byte against what each entry decodes
+# to. `prose.txt` is text, and a normalised line ending in it would make every
+# decode "wrong" against an original that had changed underneath it.
+crates/tinker-pdf-archive/tests/coders/input/** binary
+*.7z binary
+*.zst binary
+*.zip binary
+
 # Fuzz seeds are bytes chosen for what they make a parser do; a normalized
 # line ending is a different input, and several of them have no extension.
 fuzz/corpus/** binary

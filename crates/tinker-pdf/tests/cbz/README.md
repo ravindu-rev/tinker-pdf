@@ -23,10 +23,10 @@ implementation's idea of a ZIP over content nobody else owns.
 
 ## What produced them
 
-Twelve archives, seven of them ZIPs, from four independent implementations —
-ten on the machine described below, and `python-lzma.cbz` and `python-jpx.cbz`
-later, on the one their own rows name. Eleven hold the same five pages;
-`python-jpx.cbz` holds a picture T.800 publishes instead.
+Thirteen archives, seven of them ZIPs, from five independent implementations —
+ten on the machine described below, and `python-lzma.cbz`, `python-jpx.cbz`
+and `py7zr-bcj.cb7` later, on the one their own rows name. Twelve hold the
+same five pages; `python-jpx.cbz` holds a picture T.800 publishes instead.
 
 | Producer | Files | What it is |
 | --- | --- | --- |
@@ -36,6 +36,7 @@ later, on the one their own rows name. Eleven hold the same five pages;
 | **CPython 3.12 `zipfile`** | `python.cbz` | The standard library's writer, and the one most tooling that touches comics is written against. |
 | **CPython 3.11.15 `zipfile`**, `ZIP_LZMA`, over liblzma 5.4.5 (Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`) | `python-lzma.cbz` | The same writer asked for APPNOTE method 14 — the one writer on hand that emits it — by `make-lzma.py`, on Linux x86_64, 26 September 2026. Added later; see *The LZMA ZIP* below. |
 | **CPython 3.11.15 `zipfile`**, `ZIP_STORED` | `python-jpx.cbz` | T.800 Annex J.10's codestream as two JPEG 2000 pages, by `make-jpx.py`, on Linux x86_64, 26 September 2026. See *The JPEG 2000 ZIP* below. |
+| **py7zr 1.1.3** on CPython 3.11.15, over liblzma 5.4.5 | `py7zr-bcj.cb7` | The second 7z writer, a separate implementation of the container, by `make-py7zr.py`, on Linux x86_64, 26 September 2026. LGPL-2.1-or-later. See *The py7zr `.cb7`s* below. |
 
 **RAR 4 cannot be produced on this machine, and that is recorded rather than
 worked around.** RAR 7.20's `rar.exe` has no `-ma` switch at all: `-ma4`
@@ -74,12 +75,13 @@ rerunning a producer.
 
 ## What is committed
 
-211 189 bytes, which is the sum of the Bytes column below and nothing else —
+228 832 bytes, which is the sum of the Bytes column below and nothing else —
 the pages in `source/` are another 18 483 and the four text files here are not
 counted at all. (The figure that stood here before the two later `.cb7`s landed
 was 183 776, which was the sum of nothing: the eight archives it described came
 to 155 074. Re-measured rather than carried, and again when `python-lzma.cbz`
-added 18 939 to 191 755 and `python-jpx.cbz` 495 more.) `sha256` is the first sixteen hex
+added 18 939 to 191 755, `python-jpx.cbz` 495 more and `py7zr-bcj.cb7`
+17 643.) `sha256` is the first sixteen hex
 digits, enough to tell a file from a regeneration of it.
 
 | File | Bytes | Producer | What it demonstrates | sha256 |
@@ -94,6 +96,7 @@ digits, enough to tell a file from a regeneration of it.
 | `7z-lzma2.cb7` | 17 663 | 7-Zip `-t7z -m0=LZMA2` | A CB7 holding the same five pages, in one solid LZMA2 block under an **LZMA-compressed header**. Read since tier 4 | `f211476cb9b199d9` |
 | `7z-nonsolid.cb7` | 18 608 | 7-Zip `-t7z -m0=LZMA2 -ms=off` | The same five pages in **five folders**, one per page: the folder walk runs past folder 0 and sets a coder up five times | `6a10817c1df4905f` |
 | `7z-dictreset.cb7` | 18 073 | 7-Zip `-t7z -m0=LZMA2:d8k:c8k` | The same five pages in one folder of **three LZMA2 chunks**, each opening with a dictionary reset — two of them mid-stream | `7e9caaa4ff5fc706` |
+| `py7zr-bcj.cb7` | 17 643 | py7zr, `[FILTER_X86, FILTER_LZMA2]` | The same five pages from **a second 7z writer**, BCJ (`03030103`) fed by LZMA2 in one solid folder, the two coders listed in the opposite order from 7-Zip's | `e4042a54e44e9a66` |
 | `7z-tar.cbt` | 23 552 | 7-Zip `-ttar` | A CBT holding the same five pages, in GNU's tar dialect. Read since tier 4 | `97911001905ea8b5` |
 | `winrar-rar5.cbr` | 18 860 | `Rar.exe` (RAR 5) | A CBR holding the same five pages, and the fifth finding below: **four stored, one compressed with method 3**, plus a `QO` service record. Container read since tier 4; the compressed entry is a placeholder page | `b8f7d4de4b0933a1` |
 
@@ -228,28 +231,60 @@ name to do the arguing. That check earned itself immediately: the obvious flag,
 size does not split a solid block; the LZMA2 *block* size (`c`) does, and `d8k`
 is set beside it only so the dictionary cannot outlive the block it belongs to.
 
-### What is still missing, and why it is not here
+### What was missing, and what closed it
 
 **A second real archiver's 7z.** The row that asked for these two fixtures asked
-for a *second archiver*, and this machine cannot supply one. 7-Zip 26.02 is the
-same program that wrote `7z-lzma2.cb7`, so all three `.cb7`s are one
-implementation asked for three shapes — which buys coverage of this decoder's
-loops and buys **nothing** against a shared misreading of the format, because
-there is only one writer to misread it. `py7zr` is not installed here and no
-other 7z writer is. This is the same shape as the RAR 4 note above: recorded,
-with the reason, rather than quietly redefined into something that was
-achievable. A `.cb7` from any second writer would close it, and the exit
-criterion is already written — the file joins `READ_CONTAINERS` and
+for a *second archiver*, and the Windows machine could not supply one. 7-Zip
+26.02 is the same program that wrote `7z-lzma2.cb7`, so all three `.cb7`s are
+one implementation asked for three shapes — which buys coverage of this
+decoder's loops and buys **nothing** against a shared misreading of the format,
+because there is only one writer to misread it. That stayed recorded as unmet,
+with the reason, until tier 4's coder rows needed py7zr anyway: see *The py7zr
+`.cb7`s* below. The exit criterion written here was the one it met —
+`py7zr-bcj.cb7` joins `READ_CONTAINERS` and
 `five_zip_writers_produce_the_same_five_pictures` passes over it.
 
-**A BCJ filter chain**, which the same row also named, is deliberately absent
-and is not the same kind of gap. `-mf=BCJ` writes coder id `03030103`, which is
-outside the allow-list in `sevenz.rs` and would be **refused at open** — so a
-BCJ fixture would not test the decoder that exists, it would sit in the tree
-waiting for the capability that does not. That belongs with the work that adds
-it, in tier 4's archive row, where the same argument already parks PPMd and
-bzip2. BCJ2 stays refused by `Error::NotAChain` by design: it takes four input
-streams and is not a chain.
+**A BCJ filter chain**, which the same row also named, was deliberately absent
+and was not the same kind of gap. `-mf=BCJ` writes coder id `03030103`, which
+was outside the allow-list in `sevenz.rs` and would have been **refused at
+open** — so a BCJ fixture would not have tested the decoder that existed, it
+would have sat in the tree waiting for the capability that did not. It arrived
+with the work that added it, from the second writer. BCJ2 stays refused by
+`Error::NotAChain` by design: it takes four input streams and is not a chain.
+
+## The py7zr `.cb7`s
+
+py7zr is a pure-Python 7z writer — its own header writer and folder layout,
+sharing no code with 7-Zip's container — that hands the coding to libraries:
+liblzma for LZMA, LZMA2 and the x86 filter. So a `.cb7` from it is a second
+writer's container over a second implementation of BCJ (xz's, where `-mf=BCJ`
+would have been 7-Zip's). Obtained on Linux x86_64 with py7zr 1.1.3 on CPython
+3.11.15 over liblzma 5.4.5, on 26 September 2026:
+
+```
+pip install --user py7zr
+cd crates/tinker-pdf/tests/cbz && python3 make-py7zr.py
+```
+
+py7zr stamps entries with the current time; `make-py7zr.py` pins its clock to
+one instant, so a rerun writes the same bytes — `py7zr-bcj.cb7` is SHA-256
+`e4042a54e44e9a66d7ea7507082deb1585969df633fe1e4df4edb7c07dadd174`, measured
+twice. It packs in `make-corpus.ps1`'s order.
+
+**The first thing it showed was a difference between the two writers**, which
+is what a second writer is for: py7zr lists a BCJ folder's coders as LZMA2 then
+BCJ, bound `(in 1, out 0)`, where 7-Zip lists the filter first. A reader that
+walked coders in list order would have run the filter before the decompressor
+and handed back noise; the bind pairs are what say the order, and
+`tinker-pdf-archive`'s `the_bcj_fixture_is_a_filter_chain_that_rewrote_operands`
+pins py7zr's layout.
+
+Five pictures carry almost nothing for BCJ to convert — one `E8` in these five
+pages has an operand whose top byte is `00` or `FF` — so this archive is the
+second writer's *container*, and the filter itself is held elsewhere:
+`tinker-pdf-archive/tests/coders/py7zr-bcj.7z` is the same writer over
+`x86.bin`, a file shaped for the filter, and `tests/coders.rs` holds it to that
+file byte for byte.
 
 ## The LZMA ZIP
 
@@ -314,8 +349,8 @@ in `INVENTORY.tsv` either: that table describes the archives of the five pages.
 
 `make-corpus.ps1` writes the ten archives and prints a hash for each;
 `inventory.ps1` regenerates `INVENTORY.tsv` from the five ZIPs through .NET's
-reader; `make-lzma.py` and `make-jpx.py` write the other two. None runs in
-CI — they are how these files were obtained.
+reader; `make-lzma.py` and `make-jpx.py` write two more, and `make-py7zr.py`
+the py7zr `.cb7`s. None runs in CI — they are how these files were obtained.
 
 ```
 cargo test -p tinker-pdf --test cbz_real -- --ignored write_the_source_pages
@@ -360,15 +395,16 @@ is no way back.
   having: five implementations that share no code, disagree about what to
   store and what to deflate, and lay their directories out differently, must
   still give this reader the same five pictures at the same five sizes.
-  Nothing outside this repository renders any of it. It runs over **nine**
-  archives now rather than five — the four non-ZIPs this build reads join it
-  rather than getting a check of their own, because what is worth asserting
+  Nothing outside this repository renders any of it. It runs over **eleven**
+  archives now rather than five — the five non-ZIPs this build reads, and
+  `python-lzma.cbz`, join it rather than getting a check of their own, because
+  what is worth asserting
   about a `.cbt` or a `.cb7` is not that it opens, it is that it opens as *the
   same pictures* a `.cbz` of the same pages does.
 - `the_tar_a_real_archiver_wrote_pages_in_natural_order` and
   `the_7z_a_real_archiver_wrote_pages_in_natural_order` add the order
   assertion for the two containers with no central directory to re-order
-  things behind; the `.cb7` one runs over all three `.cb7`s.
+  things behind; the `.cb7` one runs over all four `.cb7`s.
 - `the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`
   is the one that holds `winrar-rar5.cbr` to four pictures and one placeholder
   **named by method number**, which is what stops the CBR row closing quietly.

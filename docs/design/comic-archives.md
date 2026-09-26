@@ -50,8 +50,8 @@ because a `-sys` crate's manifest says whatever its author typed.
 - **Sparse files.** Refused rather than returned with their holes closed up,
   which is what a reader that ignored the flag would hand back: bytes in the
   wrong places are a picture that decodes to the wrong thing.
-- **7z coders beyond the four listed**, and **folders whose coder graph is not
-  a chain**. BCJ2 is the one that exists in the wild and it takes four input
+- **7z coders beyond the ones listed** (BCJ joined the four on 26 September
+  2026), and **folders whose coder graph is not a chain**. BCJ2 is the one that exists in the wild and it takes four input
   streams; a reader that walked it as a chain would hand back a quarter of a
   file.
 - **RAR 5 compression methods 1–5**, and **RAR 4 entirely.** Both have a
@@ -369,31 +369,35 @@ because a dictionary size does not split a solid block and the LZMA2 block size
 (`c`) does. A fixture named for a shape it does not have is worse than no
 fixture, since the name would be doing the arguing.
 
-**What is not closed: a second real archiver.** The gap this risk names has two
-halves, and the fixtures above close only one of them. Five folders and three
-chunks buy coverage of *this decoder's* loops. They buy nothing against a
-misreading of the format shared between writer and reader, because there is
-still only one writer: 7-Zip 26.02 wrote all three `.cb7`s. **This machine
-cannot supply a second 7z writer** — `py7zr` is not installed and no other is
-available — so the clause is recorded as unmet rather than redefined into the
-part that was achievable, exactly as `tests/cbz/README.md` records RAR 4 and
-`tests/xps/README.md` records the printer route neither could use. A `.cb7` from
-any second implementation would close it and the exit criterion is already
-written: the file joins `READ_CONTAINERS` and
-`five_zip_writers_produce_the_same_five_pictures` passes over it.
+**What was not closed then: a second real archiver.** The gap this risk names
+has two halves, and the fixtures above close only one of them. Five folders
+and three chunks buy coverage of *this decoder's* loops. They buy nothing
+against a misreading of the format shared between writer and reader, because
+there was still only one writer: 7-Zip 26.02 wrote all three `.cb7`s, and the
+Windows machine that made them could not supply a second, so the clause was
+recorded as unmet rather than redefined into the part that was achievable,
+exactly as `tests/cbz/README.md` records RAR 4. *Closed 26 September 2026*, by
+the exit criterion written here: py7zr 1.1.3 — its own container writer, over
+liblzma — wrote `py7zr-bcj.cb7`, the file joins `READ_CONTAINERS`, and
+`five_zip_writers_produce_the_same_five_pictures` passes over it. The second
+writer found a real difference on its first archive: it lists a folder's
+coders in the opposite order from 7-Zip, which a walk by list position rather
+than by bind pair would have read backwards.
 
-**What is not a gap in this decoder at all: BCJ.** A BCJ filter chain was named
-in the same breath as the other two and it does not belong there. `-mf=BCJ`
-writes coder id `03030103`, which is outside the allow-list `sevenz.rs`
-enforces at open, so such an archive is **refused before any coder runs** — a
-fixture for it would test nothing about the LZMA decoder and would sit in the
-tree waiting for a capability. That is a capability row, and it is in
-[ROADMAP.md](../ROADMAP.md)'s tier-4 archive entry beside PPMd and bzip2, where
-the fixture arrives with the decoder rather than ahead of it. This is the one
-place in this corpus where "the fixture before the reader" is *not* the right
-move, and the difference is that a refused-at-open archive proves nothing about
-the coder it would have run. BCJ2 stays refused by `Error::NotAChain` by
-design: four input streams is not a chain.
+**What was not a gap in this decoder at all: BCJ.** A BCJ filter chain was named
+in the same breath as the other two and it did not belong there. `-mf=BCJ`
+writes coder id `03030103`, which was outside the allow-list `sevenz.rs`
+enforces at open, so such an archive was **refused before any coder ran** — a
+fixture for it would have tested nothing about the LZMA decoder and would have
+sat in the tree waiting for a capability. That was a capability row, in
+[ROADMAP.md](../ROADMAP.md)'s tier-4 archive entry beside PPMd and bzip2, and
+the fixture arrived with the decoder rather than ahead of it: `sevenz.rs` reads
+BCJ now, and `tinker-pdf-archive/tests/coders/py7zr-bcj.7z` is a real writer's
+BCJ over a file shaped for the filter. This is the one place in this corpus
+where "the fixture before the reader" was *not* the right move, and the
+difference is that a refused-at-open archive proves nothing about the coder it
+would have run. BCJ2 stays refused by `Error::NotAChain` by design: four input
+streams is not a chain.
 
 The residual risk after all of that is unchanged in kind and smaller in size:
 the unit tests cover the container's grammar with the Copy coder and the

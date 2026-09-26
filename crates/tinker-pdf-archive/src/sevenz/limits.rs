@@ -67,7 +67,7 @@ pub const MAX_7Z_FOLDERS: usize = 4_096;
 ///
 /// | | Coders |
 /// | --- | --- |
-/// | The most any fixture here spends | 1 (every `.cb7` here — no fixture has a filter, and one written with `-mf=BCJ` would be refused by the coder allow-list before it counted) |
+/// | The most any fixture here spends | 2 (`py7zr-bcj.cb7` and `tests/coders/py7zr-bcj.7z`: BCJ fed by LZMA2) |
 /// | `-mf=BCJ -m0=LZMA2` with a delta filter | 3 |
 /// | **This cap** | **32** |
 ///

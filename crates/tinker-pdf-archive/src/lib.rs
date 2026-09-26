@@ -19,7 +19,9 @@
 //! compression [`sevenz`] carries rather than a container, it has no `Archive`
 //! and no entries, and it is public because a `.7z`'s coder list names it and
 //! a caller reading a refusal deserves to reach the error type that refusal
-//! carries.
+//! carries. The coders beside it follow the same rule the other way round:
+//! `bcj`, the x86 branch filter, is private, because it cannot fail and has
+//! no error for a caller to reach — `sevenz` is the only door to it.
 //!
 //! What [`tar`], `sevenz` and `rar` have in common is a *negative* — they
 //! are the archive containers that are not ZIP — which is a weaker binding
@@ -78,6 +80,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bcj;
 pub mod lzma;
 pub mod rar;
 pub mod sevenz;

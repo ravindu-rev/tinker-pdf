@@ -35,6 +35,15 @@
 //! with, which is what ruling 13 asks for. `docs/design/comic-archives.md`
 //! carries the argument in full.
 //!
+//! # Coders read
+//!
+//! Copy (`00`), LZMA (`030101`), LZMA2 (`21`), Deflate (`040108`) and BCJ
+//! (`03030103`, the x86 branch filter `-mf=BCJ` puts in front of LZMA2, in the
+//! crate's private `bcj` module). A folder is walked by its bind pairs and
+//! never by the order its coders are listed in: 7-Zip lists a filter before
+//! the compressor feeding it and py7zr lists it after, and both are the same
+//! chain.
+//!
 //! # Refused by name
 //!
 //! **Encrypted archives** (coder `06F10701`, AES-256 + SHA-256):
@@ -46,7 +55,7 @@
 
 use tinker_pdf_filters::{crc32, inflate_raw, Limits as InflateLimits};
 
-use crate::lzma;
+use crate::{bcj, lzma};
 
 pub mod limits;
 
@@ -80,6 +89,10 @@ const K_ANTI: u8 = 0x10;
 const K_NAME: u8 = 0x11;
 const K_ENCODED_HEADER: u8 = 0x17;
 const K_DUMMY: u8 = 0x19;
+
+/// 7z method `03030103`, BCJ: the x86 branch converter (`DOC/Methods.txt`:
+/// `03` branch, `03` x86, `01` version, `03` BCJ).
+const BCJ_X86: &[u8] = &[0x03, 0x03, 0x01, 0x03];
 
 /// Why an archive could not be opened at all.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -483,6 +496,7 @@ impl<'a> Archive<'a> {
                 FolderError::Unsupported => EntryError::UnsupportedCoder,
                 FolderError::TooLarge => EntryError::TooLarge,
                 FolderError::Lzma(e) => EntryError::FolderFailed(e),
+                FolderError::SizeMismatch => EntryError::Truncated,
             })?;
             self.cached = Some((folder_index, bytes));
         }
@@ -503,6 +517,10 @@ enum FolderError {
     Unsupported,
     TooLarge,
     Lzma(lzma::Error),
+    /// A coder produced a length other than the one the header declared for
+    /// its output — for a filter, whose output is its input, the header and
+    /// the stream disagreeing about one number.
+    SizeMismatch,
 }
 
 /// Runs a folder's coder chain over its packed bytes.
@@ -559,6 +577,18 @@ fn run_coder(
                 .copied()
                 .ok_or(FolderError::Unsupported)?;
             lzma::decode(input, props, out_size, &limits.lzma()).map_err(FolderError::Lzma)
+        }
+        // BCJ, the x86 branch converter `-mf=BCJ` puts in front of LZMA2. A
+        // filter rather than a compressor: the output is the input with its
+        // call and jump operands rewritten, so the two lengths are one length
+        // and a header that says otherwise is not describing this coder.
+        BCJ_X86 => {
+            if input.len() != out_size {
+                return Err(FolderError::SizeMismatch);
+            }
+            let mut data = input.to_vec();
+            bcj::x86_decode(&mut data);
+            Ok(data)
         }
         // Deflate: 7z method `040108` is RFC 1951 with no wrapper, exactly as
         // ZIP method 8 is, which is the second half of this crate's edge into
@@ -884,10 +914,15 @@ fn folder(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Folder, Error> {
     // Refused here rather than at read, so an unreadable method is one
     // sentence about the archive rather than five identical page defects.
     for coder in &coders {
-        if !matches!(
+        let known = matches!(
             coder.id.as_slice(),
-            [0x00] | [0x21] | [0x03, 0x01, 0x01] | [0x04, 0x01, 0x08]
-        ) {
+            [0x00] | [0x21] | [0x03, 0x01, 0x01] | [0x04, 0x01, 0x08] | BCJ_X86
+        );
+        // BCJ has no properties, and 7-Zip since 23 refuses a coder handed
+        // properties it has no use for rather than ignoring them: a header
+        // that carries some is describing a different filter.
+        let bare = coder.id.as_slice() != BCJ_X86 || coder.props.is_empty();
+        if !known || !bare {
             return Err(Error::UnsupportedCoder {
                 id: coder.id.clone(),
             });

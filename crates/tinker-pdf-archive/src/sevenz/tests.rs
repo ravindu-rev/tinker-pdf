@@ -111,7 +111,11 @@
 //! What none of these four rows measures is a *second producer*. All three
 //! `.cb7`s were written by 7-Zip 26.02, so a misreading of the format shared
 //! between that writer and this reader would survive every one of them.
-//! `docs/design/comic-archives.md` records that as unmet rather than closed.
+//! `docs/design/comic-archives.md` recorded that as unmet rather than closed,
+//! and it stayed unmet until tier 4's coder rows brought py7zr: its archives
+//! are a second implementation of the container, and the first thing one of
+//! them showed is that it lists a folder's coders in the opposite order from
+//! 7-Zip (`the_bcj_fixture_is_a_filter_chain_that_rewrote_operands`).
 
 use super::*;
 
@@ -1030,4 +1034,75 @@ fn packed_of<'a>(bytes: &'a [u8], folder: &Folder) -> &'a [u8] {
     bytes
         .get(folder.packed_at..folder.packed_at + folder.packed_len)
         .expect("a folder's packed range is inside the file")
+}
+
+// ---- The coder fixtures, and what they were made to reach -------------------
+
+/// One archive of `tests/coders/`, which real writers made over this crate's
+/// own inputs (`tests/coders/README.md`).
+fn coder_fixture(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/coders")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// **`py7zr-bcj.7z` really is BCJ in front of LZMA2, and BCJ really had work
+/// to do in it.**
+///
+/// `tests/coders.rs` holds the decoded entries to the files that went in,
+/// which proves the pair decodes. It cannot say the filter was *needed*: a
+/// writer that listed BCJ and then converted nothing would pass there too,
+/// and a fixture named for a coder that never runs is the `7z-dictreset.cb7`
+/// lesson again. So the folder is taken apart here: two coders, the filter
+/// first, one bind pair feeding it the LZMA2 output — and that LZMA2 output,
+/// the filter's input, differs from the folder's output in hundreds of
+/// places, every one of them inside an `E8`/`E9` operand.
+#[test]
+fn the_bcj_fixture_is_a_filter_chain_that_rewrote_operands() {
+    let bytes = coder_fixture("py7zr-bcj.7z");
+    let archive = open(&bytes);
+    assert_eq!(archive.folders.len(), 1, "one solid folder");
+    let folder = &archive.folders[0];
+    // py7zr lists LZMA2 first and BCJ second, where 7-Zip lists the filter
+    // first: the bind pair, not the list order, says which feeds which, and a
+    // walk that assumed 7-Zip's order would have read this archive backwards.
+    let ids: Vec<&[u8]> = folder.coders.iter().map(|c| c.id.as_slice()).collect();
+    assert_eq!(
+        ids,
+        [&[0x21][..], BCJ_X86],
+        "py7zr's order: LZMA2, then BCJ"
+    );
+    assert_eq!(
+        folder.bind_pairs,
+        vec![(1, 0)],
+        "LZMA2's output is BCJ's input"
+    );
+    assert_eq!(folder.packed, vec![0], "the packed stream feeds LZMA2");
+    assert_eq!(folder.final_out(), Some(1), "BCJ's output is the folder's");
+
+    let lzma2 = lzma::decode_lzma2(
+        packed_of(&bytes, folder),
+        folder.unpack_sizes[0] as usize,
+        &Limits::DEFAULT.lzma(),
+    )
+    .expect("the LZMA2 half decodes");
+    let whole = decode_folder(&bytes, folder, &Limits::DEFAULT)
+        .ok()
+        .expect("the folder decodes");
+    assert_eq!(lzma2.len(), whole.len(), "a filter keeps the length");
+    let differing: Vec<usize> = (0..whole.len()).filter(|&i| lzma2[i] != whole[i]).collect();
+    assert!(
+        differing.len() > 500,
+        "BCJ rewrote operands: {} bytes differ",
+        differing.len()
+    );
+    // Every rewritten byte sits in the four bytes after an `E8`/`E9` of the
+    // decoded output — an operand, never an opcode or anything else.
+    for &at in &differing {
+        assert!(
+            (1..=4).any(|back| at >= back && whole[at - back] & 0xFE == 0xE8),
+            "byte {at} changed and is not inside a branch operand"
+        );
+    }
 }
