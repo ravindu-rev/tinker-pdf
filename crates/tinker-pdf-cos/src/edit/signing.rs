@@ -55,7 +55,7 @@ impl DocumentEditor {
             self.certify(signature_ref);
         }
         let set = self.changed_set();
-        let trailer = self.merged_trailer();
+        let trailer = self.update_trailer();
         let key = self.doc.file_key();
         let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
         let catalog = trailer.get_ref(Name::ROOT);

@@ -13,13 +13,25 @@
 //!
 //! # What counts as an action
 //!
-//! A dictionary whose `/S` is one of ISO 32000-2 Table 198's action types,
-//! whose `/Type`, if any, is `/Action`, and which carries neither `/P` nor
-//! `/K` — the two keys every structure element has (14.7.2 Table 355) and no
-//! action does, so a role-mapped structure type that happens to be spelled
-//! `URI` is not mistaken for one. A value that *is* such an action, directly
-//! or by reference, is removed wherever it sits: `/A`, `/OpenAction`, every
-//! entry of an `/AA`, and elements of an action's `/Next` array.
+//! Where a viewer runs one, whatever else it carries. A viewer looks at the
+//! place a dictionary sits and at its `/S`, resolving a reference, and at
+//! nothing more: an extra `/K`, a `/Type /Whatever` or an `/S 9 0 R` does not
+//! stop it running the script. So in an **action slot** — `/A`, `/PA`, `/NA`,
+//! `/OpenAction`, every entry of an `/AA`, and an action's `/Next`, a single
+//! action or an array of them — a dictionary whose `/S` names one of ISO
+//! 32000-2 Table 198's action types is an action, and nothing else about it
+//! is asked. An object written on its own sits in every slot a reference to
+//! it sits in, found by following the slots out from every object before
+//! anything is cleaned, so an indirect `/AA` dictionary or `/Next` array is
+//! swept as what it is.
+//!
+//! Anywhere else, a stricter test finds actions a producer put in a place
+//! that list does not name: the `/S` as before, a `/Type` of `/Action` or
+//! none, and neither `/P` nor `/K` — the two keys every structure element has
+//! (14.7.2 Table 355) and no action needs, so a structure element role-mapped
+//! to `URI` in the structure tree, where no viewer runs anything, is not
+//! mistaken for one. A value that is an action by the test its place calls
+//! for, directly or by reference, is removed wherever it sits.
 //!
 //! # A link whose action goes, goes with it
 //!
@@ -27,8 +39,8 @@
 //! removed and which has no `/Dest` is a hot spot that goes nowhere — the
 //! strict validator refuses it as `LinkWithoutTarget` — so it leaves its
 //! page's `/Annots` with its action, for the action's reason. A widget whose
-//! `/A` goes stays: it is a form field first. `/Annots` and an action's
-//! `/Next` are the only arrays anything is removed from, because a name
+//! `/A` goes stays: it is a form field first. `/Annots` and an array in an
+//! action slot are the only arrays anything is removed from, because a name
 //! tree's `/Names` pairs are positional and taking one element out elsewhere
 //! could shift every key onto the wrong value.
 //!
@@ -36,14 +48,17 @@
 //!
 //! An entry removed is a *reference* removed; what it referred to is deleted
 //! only when nothing still in the document reaches it afterwards, which is
-//! decided on the document as it will be rather than as it was. So a
-//! JavaScript action and its `/JS` stream go, a page an action's `/Next`
-//! pointed at stays, and no reference anywhere is left dangling. An action
-//! removed takes its `/Next` chain with it — the chain is part of the action
-//! (12.6.2) — except for whatever else still reaches.
+//! decided on the document as it will be rather than as it was — the pending
+//! page order included, so a page `import_page` added, which only a save
+//! writes into `/Kids`, keeps what it draws. So a JavaScript action and its
+//! `/JS` stream go, a page an action's `/Next` pointed at stays, and no
+//! reference anywhere is left dangling. An action removed takes its `/Next`
+//! chain with it — the chain is part of the action (12.6.2) — except for
+//! whatever else still reaches.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use super::save::refs_in;
 use super::DocumentEditor;
 use crate::limits;
 use crate::name::Name;
@@ -225,16 +240,48 @@ enum Role {
     Other,
 }
 
-/// Which array a value is, where that decides whether an element may go.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Slot {
-    /// Any array: nothing is removed from it, only cleaned inside.
-    Plain,
-    /// An action's `/Next` (12.6.2): an element that is an action this pass
-    /// removes goes.
-    Next,
+/// Where a value sits, where that decides what it is and what may be
+/// removed from it. Flags rather than one kind, because an object written on
+/// its own sits wherever a reference to it does, and a file may name one
+/// object from two places: it is swept as everything it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Slot {
+    /// A viewer runs what sits here as an action (12.6): a dictionary here
+    /// is judged by its `/S` alone, and an array here — an action's `/Next`
+    /// (12.6.2) — is a list of actions, each of which may go.
+    action: bool,
+    /// An additional-actions dictionary (12.6.3): every entry is an action
+    /// slot.
+    triggers: bool,
     /// A page's `/Annots` (12.5.2): a link this pass leaves targetless goes.
-    Annots,
+    annots: bool,
+}
+
+impl Slot {
+    /// Anywhere else: an array here loses nothing, only is cleaned inside.
+    const PLAIN: Slot = Slot {
+        action: false,
+        triggers: false,
+        annots: false,
+    };
+
+    fn union(self, other: Slot) -> Slot {
+        Slot {
+            action: self.action || other.action,
+            triggers: self.triggers || other.triggers,
+            annots: self.annots || other.annots,
+        }
+    }
+
+    /// The slot an element of an array in this one sits in: an action's
+    /// again when this is a list of actions, and nothing in particular
+    /// otherwise — an annotation in `/Annots` is a dictionary like any other.
+    fn element(self) -> Slot {
+        Slot {
+            action: self.action,
+            ..Slot::PLAIN
+        }
+    }
 }
 
 /// The names the sweep compares against, interned once.
@@ -243,6 +290,10 @@ struct Keys {
     p: Name,
     k: Name,
     next: Name,
+    pa: Name,
+    na: Name,
+    open_action: Name,
+    aa: Name,
     js: Name,
     uri: Name,
     metadata: Name,
@@ -277,8 +328,9 @@ struct Sweep<'e> {
     /// their action does — found before the sweep, since a page is swept
     /// before the annotations its `/Annots` names.
     links: HashMap<u32, Removal>,
-    /// Arrays held by reference under an `/Annots` key.
-    annots_arrays: HashSet<u32>,
+    /// The slot every object written on its own sits in, where that is not
+    /// a plain one — found before the sweep, for the same reason.
+    placed: HashMap<u32, Slot>,
     /// Removals inside the object being cleaned.
     removed: Vec<Found>,
     /// Every value removed anywhere, for the deletion pass to follow.
@@ -294,41 +346,112 @@ impl Sweep<'_> {
     }
 
     /// Why `value` is removed, when it is an action this pass removes —
-    /// written in place or reached through one reference.
+    /// written in place or reached through one reference. `slotted` when it
+    /// sits in an action slot (see the module documentation for the two
+    /// tests).
     ///
     /// Through [`Resolve::get`], which lends the file's objects from its cache
     /// rather than copying them: this is asked of every reference in every
     /// dictionary, `/Parent` included, and a copy of a page tree node per
     /// page is quadratic in the page count.
-    fn verdict_of(&self, value: &Object) -> Option<Removal> {
+    fn verdict_of(&self, value: &Object, slotted: bool) -> Option<Removal> {
         match value {
-            Object::Dict(dict) => self.verdict(dict),
+            Object::Dict(dict) => self.verdict(dict, slotted),
             Object::Ref(r) => {
                 let object = Resolve::get(self.editor, *r).ok()?;
-                self.verdict(object.as_dict()?)
+                self.verdict(object.as_dict()?, slotted)
             }
             _ => None,
         }
     }
 
-    /// The action type `dict` is, when it is an action (see the module
-    /// documentation for the test).
-    fn action_type(&self, dict: &Dict) -> Option<Vec<u8>> {
-        if dict.contains_key(self.keys.p) || dict.contains_key(self.keys.k) {
-            return None;
-        }
-        if let Some(t) = dict.get(Name::TYPE) {
-            if t.as_name() != Some(self.keys.action) {
+    /// The action type `dict` is, when it is an action: in an action slot
+    /// (`slotted`) by its `/S` alone, and elsewhere by the stricter test the
+    /// module documentation gives.
+    ///
+    /// The `/S` is resolved when it is a reference, as a viewer resolves it
+    /// (7.3.10: any value may be written as one).
+    fn action_type(&self, dict: &Dict, slotted: bool) -> Option<Vec<u8>> {
+        if !slotted {
+            if dict.contains_key(self.keys.p) || dict.contains_key(self.keys.k) {
                 return None;
             }
+            if let Some(t) = dict.get(Name::TYPE) {
+                if t.as_name() != Some(self.keys.action) {
+                    return None;
+                }
+            }
         }
-        let s = self.bytes(dict.get_name(self.keys.s)?);
+        let s = match dict.get(self.keys.s)? {
+            Object::Name(name) => *name,
+            Object::Ref(r) => Resolve::get(self.editor, *r).ok()?.as_name()?,
+            _ => return None,
+        };
+        let s = self.bytes(s);
         ACTION_TYPES.contains(&s.as_slice()).then_some(s)
     }
 
-    /// Why `dict` is removed, if it is an action this pass removes.
-    fn verdict(&self, dict: &Dict) -> Option<Removal> {
-        let s = self.action_type(dict)?;
+    /// Whether a dictionary in `slot` is an action for the purpose of its
+    /// `/Next`: one in an action slot is, whatever its `/S` says, because a
+    /// viewer follows the chain of whatever it was handed there.
+    fn chains(&self, dict: &Dict, slot: Slot) -> bool {
+        slot.action || self.action_type(dict, false).is_some()
+    }
+
+    /// The slot the value under `key` sits in, in a dictionary in `slot`
+    /// that [`Sweep::chains`] (`chains`) or not.
+    fn entry_slot(&self, slot: Slot, chains: bool, key: Name) -> Slot {
+        let keys = &self.keys;
+        Slot {
+            // 12.6.3's triggers, 12.5.6.5's `/A` and `/PA`, 12.4.4.2's
+            // navigation node `/NA` and `/PA`, 12.3.3's outline item `/A`,
+            // 12.7.4's widget `/A`, 7.7.2's `/OpenAction`, 12.6.2's `/Next`.
+            action: slot.triggers
+                || key == keys.a
+                || key == keys.pa
+                || key == keys.na
+                || key == keys.open_action
+                || (chains && key == keys.next),
+            triggers: key == keys.aa,
+            annots: key == keys.annots,
+        }
+    }
+
+    /// Every reference inside `value`, sitting in `slot`, that is in a slot
+    /// other than a plain one — with that slot, for the object it names to be
+    /// swept as what it is.
+    fn mark(&self, value: &Object, slot: Slot, depth: u32, out: &mut Vec<(u32, Slot)>) {
+        if depth > limits::MAX_NEST_DEPTH {
+            return;
+        }
+        match value {
+            Object::Ref(r) => {
+                if slot != Slot::PLAIN {
+                    out.push((r.num, slot));
+                }
+            }
+            Object::Dict(_) | Object::Stream(_) => {
+                let Some(dict) = value.as_dict() else {
+                    return;
+                };
+                let chains = self.chains(dict, slot);
+                for (key, entry) in dict.iter() {
+                    self.mark(entry, self.entry_slot(slot, chains, *key), depth + 1, out);
+                }
+            }
+            Object::Array(items) => {
+                for item in items {
+                    self.mark(item, slot.element(), depth + 1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Why `dict` is removed, if it is an action this pass removes;
+    /// `slotted` as for [`Sweep::verdict_of`].
+    fn verdict(&self, dict: &Dict, slotted: bool) -> Option<Removal> {
+        let s = self.action_type(dict, slotted)?;
         if self.what.javascript && self.is_javascript(dict, &s) {
             return Some(Removal::JavaScript);
         }
@@ -370,7 +493,7 @@ impl Sweep<'_> {
         {
             return None;
         }
-        self.verdict_of(dict.get(self.keys.a)?)
+        self.verdict_of(dict.get(self.keys.a)?, true)
     }
 
     /// The same for one element of an `/Annots` array: a link written in
@@ -383,9 +506,24 @@ impl Sweep<'_> {
         }
     }
 
+    /// Why one element of an array in `slot` goes, if it does: an action
+    /// this pass removes from a list of actions, a link it leaves targetless
+    /// from `/Annots`, and nothing from any other array.
+    fn element_verdict(&self, slot: Slot, item: &Object) -> Option<Removal> {
+        if slot.action {
+            if let Some(why) = self.verdict_of(item, true) {
+                return Some(why);
+            }
+        }
+        if slot.annots {
+            return self.annots_verdict(item);
+        }
+        None
+    }
+
     /// Why the entry `key` of a dictionary in `role` is removed whole, if it
-    /// is.
-    fn entry_verdict(&self, role: Role, key: Name, value: &Object) -> Option<Removal> {
+    /// is; `inner` is the slot the entry's value sits in.
+    fn entry_verdict(&self, role: Role, key: Name, value: &Object, inner: Slot) -> Option<Removal> {
         let keys = &self.keys;
         let what = self.what;
         match role {
@@ -408,15 +546,15 @@ impl Sweep<'_> {
         if what.embedded_files && (key == keys.ef || key == keys.rf) {
             return Some(Removal::EmbeddedFile);
         }
-        self.verdict_of(value)
+        self.verdict_of(value, inner.action)
     }
 
-    /// Whether a whole object is itself something this pass takes out, found
-    /// on its own rather than through a reference — an orphan the file still
-    /// carries.
-    fn object_verdict(&self, object: &Object) -> Option<Removal> {
+    /// Whether a whole object, sitting in `slot`, is itself something this
+    /// pass takes out, found on its own rather than through a reference — an
+    /// orphan the file still carries.
+    fn object_verdict(&self, object: &Object, slot: Slot) -> Option<Removal> {
         let dict = object.as_dict()?;
-        if let Some(verdict) = self.verdict(dict) {
+        if let Some(verdict) = self.verdict(dict, slot.action) {
             return Some(verdict);
         }
         let kind = dict.get_name(Name::TYPE);
@@ -447,12 +585,13 @@ impl Sweep<'_> {
             // as one: the data is not this pass's to change.
             Object::Dict(_) | Object::Stream(_) => {
                 let dict = value.as_dict()?;
-                let is_action = self.action_type(dict).is_some();
+                let chains = self.chains(dict, slot);
                 let mut out = Dict::with_capacity(dict.len());
                 let mut changed = false;
                 for (key, entry) in dict.iter() {
                     path.push(PathStep::Key(self.bytes(*key)));
-                    if let Some(why) = self.entry_verdict(role, *key, entry) {
+                    let inner_slot = self.entry_slot(slot, chains, *key);
+                    if let Some(why) = self.entry_verdict(role, *key, entry, inner_slot) {
                         self.removed.push((path.clone(), why.clone()));
                         self.roots.push((entry.clone(), why));
                         changed = true;
@@ -462,14 +601,7 @@ impl Sweep<'_> {
                             (Role::Catalog, k) if k == self.keys.acro_form => Role::AcroForm,
                             _ => Role::Other,
                         };
-                        let slot = if is_action && *key == self.keys.next {
-                            Slot::Next
-                        } else if *key == self.keys.annots {
-                            Slot::Annots
-                        } else {
-                            Slot::Plain
-                        };
-                        match self.clean(entry, inner, slot, path, depth + 1) {
+                        match self.clean(entry, inner, inner_slot, path, depth + 1) {
                             Some(cleaned) => {
                                 out.insert(*key, cleaned);
                                 changed = true;
@@ -491,17 +623,12 @@ impl Sweep<'_> {
                     // 12.6.2: `/Next` may be an array of actions, and 12.5.2's
                     // `/Annots` is a list of annotations; see the module
                     // documentation for why no other array loses an element.
-                    let verdict = match slot {
-                        Slot::Next => self.verdict_of(item),
-                        Slot::Annots => self.annots_verdict(item),
-                        Slot::Plain => None,
-                    };
-                    if let Some(why) = verdict {
+                    if let Some(why) = self.element_verdict(slot, item) {
                         self.removed.push((path.clone(), why.clone()));
                         self.roots.push((item.clone(), why));
                         changed = true;
                     } else {
-                        match self.clean(item, Role::Other, Slot::Plain, path, depth + 1) {
+                        match self.clean(item, Role::Other, slot.element(), path, depth + 1) {
                             Some(cleaned) => {
                                 out.push(cleaned);
                                 changed = true;
@@ -515,32 +642,6 @@ impl Sweep<'_> {
             }
             _ => None,
         }
-    }
-}
-
-/// Every indirect reference inside `value`, not following any.
-fn refs_in(value: &Object, out: &mut Vec<ObjRef>, depth: u32) {
-    if depth > limits::MAX_NEST_DEPTH {
-        return;
-    }
-    match value {
-        Object::Ref(r) => out.push(*r),
-        Object::Array(items) => {
-            for item in items {
-                refs_in(item, out, depth + 1);
-            }
-        }
-        Object::Dict(dict) => {
-            for (_, item) in dict.iter() {
-                refs_in(item, out, depth + 1);
-            }
-        }
-        Object::Stream(stream) => {
-            for (_, item) in stream.dict.iter() {
-                refs_in(item, out, depth + 1);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -577,6 +678,10 @@ impl DocumentEditor {
             p: intern(b"P"),
             k: intern(b"K"),
             next: intern(b"Next"),
+            pa: intern(b"PA"),
+            na: intern(b"NA"),
+            open_action: intern(b"OpenAction"),
+            aa: intern(b"AA"),
             js: intern(b"JS"),
             uri: intern(b"URI"),
             metadata: intern(b"Metadata"),
@@ -625,34 +730,47 @@ impl DocumentEditor {
             names: names_ref.map(|r| r.num),
             acro_form: acro_form_ref.map(|r| r.num),
             links: HashMap::new(),
-            annots_arrays: HashSet::new(),
+            placed: HashMap::new(),
             removed: Vec::new(),
             roots: Vec::new(),
         };
-        // First, the links that leave with their actions, and the `/Annots`
-        // arrays written as objects of their own.
+        // First, the links that leave with their actions, and the slot every
+        // object written on its own sits in: marked out from every object,
+        // then again from each object as it is placed, until nothing new is
+        // placed. A slot only gains flags, so each object is walked at most
+        // once per flag.
+        let mut work: Vec<(u32, Slot)> = Vec::new();
         for &num in &numbers {
             let Ok(object) = Resolve::get(sweep.editor, ObjRef::new(num, 0)) else {
                 continue;
             };
-            let Some(dict) = object.as_dict() else {
-                continue;
-            };
-            if let Some(why) = sweep.link_verdict(dict) {
+            if let Some(why) = object.as_dict().and_then(|d| sweep.link_verdict(d)) {
                 sweep.links.insert(num, why);
             }
-            if let Some(Object::Ref(annots)) = dict.get(sweep.keys.annots) {
-                sweep.annots_arrays.insert(annots.num);
+            sweep.mark(&object, Slot::PLAIN, 0, &mut work);
+        }
+        while let Some((num, slot)) = work.pop() {
+            let known = sweep.placed.get(&num).copied().unwrap_or_default();
+            let joined = known.union(slot);
+            if joined == known {
+                continue;
+            }
+            sweep.placed.insert(num, joined);
+            if let Ok(object) = Resolve::get(sweep.editor, ObjRef::new(num, 0)) {
+                sweep.mark(&object, joined, 0, &mut work);
             }
         }
-        let mut pending: BTreeMap<u32, (Object, Vec<Found>)> = BTreeMap::new();
+
+        let mut pending: BTreeMap<u32, Object> = BTreeMap::new();
+        let mut found: BTreeMap<u32, Vec<Found>> = BTreeMap::new();
         for &num in &numbers {
             let Ok(object) = Resolve::get(sweep.editor, ObjRef::new(num, 0)) else {
                 continue;
             };
+            let slot = sweep.placed.get(&num).copied().unwrap_or_default();
             // An orphan the file carries — a script nothing runs, a stream
             // nothing names — is found by what it is.
-            if let Some(why) = sweep.object_verdict(&object) {
+            if let Some(why) = sweep.object_verdict(&object, slot) {
                 sweep.roots.push((Object::Ref(ObjRef::new(num, 0)), why));
             }
             let role = if Some(num) == sweep.catalog {
@@ -664,14 +782,10 @@ impl DocumentEditor {
             } else {
                 Role::Other
             };
-            let slot = if sweep.annots_arrays.contains(&num) {
-                Slot::Annots
-            } else {
-                Slot::Plain
-            };
             let mut path = Vec::new();
             if let Some(cleaned) = sweep.clean(&object, role, slot, &mut path, 0) {
-                pending.insert(num, (cleaned, std::mem::take(&mut sweep.removed)));
+                pending.insert(num, cleaned);
+                found.insert(num, std::mem::take(&mut sweep.removed));
             }
             sweep.removed.clear();
         }
@@ -706,23 +820,9 @@ impl DocumentEditor {
         }
 
         // What the document will still reach, read through the pending
-        // changes: the deletion is decided on the document as it will be.
-        let mut live: HashSet<u32> = HashSet::new();
-        let mut queue = Vec::new();
-        refs_in(&Object::Dict(trailer), &mut queue, 0);
-        while let Some(r) = queue.pop() {
-            if !live.insert(r.num) {
-                continue;
-            }
-            match pending.get(&r.num) {
-                Some((object, _)) => refs_in(object, &mut queue, 0),
-                None => {
-                    if let Ok(object) = Resolve::get(self, r) {
-                        refs_in(&object, &mut queue, 0);
-                    }
-                }
-            }
-        }
+        // changes and the pending page order: the deletion is decided on the
+        // document as it will be.
+        let live = self.reached(&trailer, &pending);
 
         // The writing half.
         if trailer_removed {
@@ -746,7 +846,7 @@ impl DocumentEditor {
                 what: why.clone(),
             });
         }
-        for (num, (cleaned, removals)) in pending {
+        for (num, cleaned) in pending {
             if doomed.contains_key(&num) && !live.contains(&num) {
                 continue;
             }
@@ -754,6 +854,7 @@ impl DocumentEditor {
             if !self.replace_keeping_data(r, cleaned) {
                 continue;
             }
+            let removals = found.remove(&num).unwrap_or_default();
             report
                 .removed
                 .extend(removals.into_iter().map(|(path, what)| RemovedEntry {
@@ -819,6 +920,10 @@ mod tests {
                 p: i(b"P"),
                 k: i(b"K"),
                 next: i(b"Next"),
+                pa: i(b"PA"),
+                na: i(b"NA"),
+                open_action: i(b"OpenAction"),
+                aa: i(b"AA"),
                 js: i(b"JS"),
                 uri: i(b"URI"),
                 metadata: i(b"Metadata"),
@@ -843,25 +948,63 @@ mod tests {
             names: None,
             acro_form: None,
             links: HashMap::new(),
-            annots_arrays: HashSet::new(),
+            placed: HashMap::new(),
             removed: Vec::new(),
             roots: Vec::new(),
         }
     }
 
-    /// A structure element role-mapped to a name that is also an action type
-    /// is not an action: it has `/P` and `/K`, which no action has.
+    /// Outside an action slot, a structure element role-mapped to a name
+    /// that is also an action type is not an action: it has `/P` and `/K`,
+    /// which no action needs.
     #[test]
     fn a_structure_element_named_like_an_action_is_not_one() {
         let editor = editor();
         let sweep = sweep(&editor, Sanitise::ALL);
         let mut element = action(&editor, b"URI");
         element.insert(editor.intern(b"P"), Object::Null);
-        assert_eq!(sweep.verdict(&element), None);
-        assert!(sweep.verdict(&action(&editor, b"URI")).is_some());
+        assert_eq!(sweep.verdict(&element, false), None);
+        assert!(sweep.verdict(&action(&editor, b"URI"), false).is_some());
         let mut typed = action(&editor, b"Launch");
         typed.insert(Name::TYPE, Object::Name(editor.intern(b"StructElem")));
-        assert_eq!(sweep.verdict(&typed), None, "/Type other than /Action");
+        assert_eq!(
+            sweep.verdict(&typed, false),
+            None,
+            "/Type other than /Action"
+        );
+    }
+
+    /// In an action slot, a viewer asks an action for its `/S` and nothing
+    /// else, so neither does the sweep: `/K`, `/P` and an odd `/Type` do not
+    /// hide one, and an `/S` written as a reference is resolved. An `/S` no
+    /// action type spells is still no action there.
+    #[test]
+    fn in_an_action_slot_only_the_s_is_asked() {
+        let editor = editor();
+        let first = sweep(&editor, Sanitise::ALL);
+        for (key, value) in [
+            (&b"K"[..], Object::Int(0)),
+            (b"P", Object::Null),
+            (b"Type", Object::Name(editor.intern(b"Whatever"))),
+        ] {
+            let mut dressed = action(&editor, b"JavaScript");
+            dressed.insert(editor.intern(key), value);
+            assert_eq!(first.verdict(&dressed, false), None, "strict elsewhere");
+            assert_eq!(
+                first.verdict(&dressed, true),
+                Some(Removal::JavaScript),
+                "/{}",
+                String::from_utf8_lossy(key)
+            );
+        }
+        let mut editor = editor;
+        let name = editor.allocate();
+        editor.put(name, Object::Name(editor.intern(b"JavaScript")));
+        let second = sweep(&editor, Sanitise::ALL);
+        let mut indirect = Dict::new();
+        indirect.insert(editor.intern(b"S"), Object::Ref(name));
+        assert_eq!(second.verdict(&indirect, true), Some(Removal::JavaScript));
+        assert_eq!(second.verdict(&action(&editor, b"D"), true), None);
     }
 
     /// A border style's `/S /D` (dashed) and a page label's `/S /r` are not
@@ -871,7 +1014,7 @@ mod tests {
         let editor = editor();
         let sweep = sweep(&editor, Sanitise::ALL);
         for s in [&b"D"[..], b"r", b"Transparency", b"Alpha"] {
-            assert_eq!(sweep.verdict(&action(&editor, s)), None);
+            assert_eq!(sweep.verdict(&action(&editor, s), false), None);
         }
     }
 
@@ -896,10 +1039,10 @@ mod tests {
             dict
         };
         assert_eq!(
-            only_js.verdict(&uri(b" \tJavaScript:app.alert(1)")),
+            only_js.verdict(&uri(b" \tJavaScript:app.alert(1)"), false),
             Some(Removal::JavaScript)
         );
-        assert_eq!(only_js.verdict(&uri(b"https://example.org/")), None);
+        assert_eq!(only_js.verdict(&uri(b"https://example.org/"), false), None);
         let only_actions = sweep(
             &editor,
             Sanitise {
@@ -908,11 +1051,11 @@ mod tests {
             },
         );
         assert_eq!(
-            only_actions.verdict(&uri(b"https://example.org/")),
+            only_actions.verdict(&uri(b"https://example.org/"), false),
             Some(Removal::Action(b"URI".to_vec()))
         );
         assert_eq!(
-            only_actions.verdict(&action(&editor, b"GoTo")),
+            only_actions.verdict(&action(&editor, b"GoTo"), false),
             None,
             "navigation stays"
         );

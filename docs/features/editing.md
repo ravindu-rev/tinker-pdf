@@ -47,7 +47,11 @@ incremental, rewrite and signed — so it is editor state like the overlay: a
 checkpoint takes it and a rollback restores it. The writer's own keys are
 refused (`/Size`, `/Prev`, `/XRefStm`, `/ID`, `/Encrypt` and the
 cross-reference stream's), since a value for them would be overwritten or
-believed. `set_info(key, value)` is the use it exists for: an existing
+believed. A null value removes the entry (7.3.9): a rewrite leaves the key
+out, and an incremental update writes it as null, because a reader that
+merges each revision's trailer with the ones before it — this crate's does —
+would otherwise find the earlier revision's value and bring it back.
+`set_info(key, value)` is the use it exists for: an existing
 `/Info` is updated where it is, and a document with none gets one, which
 until September 2026 no save could name — `save` wrote the document's own
 trailer and nothing else. The value is a text string, encoded as the
@@ -165,20 +169,36 @@ catalog's and `/Names /JavaScript`, and never a page's `/AA`, an
 annotation's `/AA` or `/A`, an outline item's `/A` or an action's `/Next` —
 each of which a viewer runs. The walkers are how the tests prove the sweep
 left nothing *they* can see; the fixture carries the places they cannot see
-as well and asserts those by hand. An action is a dictionary whose `/S` is a
-Table 198 type, whose `/Type` if any is `/Action`, and which has neither `/P`
-nor `/K` — the keys every structure element has — and a value that is one,
-in place or by reference, is removed wherever it sits. Arrays lose elements in
-two places only, an action's `/Next` and a page's `/Annots`: a name tree's
-`/Names` is positional, and taking an element out elsewhere could shift every
-key onto the wrong value. A `/Link` whose `/A` goes and which has no `/Dest`
+as well and asserts those by hand.
+
+**An action is what sits where a viewer runs one.** A viewer looks at the
+place a dictionary sits and at its `/S`, resolving a reference, and at
+nothing more, so in an *action slot* — `/A`, `/PA`, `/NA`, `/OpenAction`,
+every entry of an `/AA`, and an action's `/Next`, one action or an array of
+them — a dictionary whose `/S` names a Table 198 type is an action whatever
+else it carries: an extra `/K` or `/P`, a `/Type /Whatever` or an `/S 9 0 R`
+does not hide it. An object written on its own sits in every slot a reference
+to it does, found by following the slots out from every object before
+anything is cleaned, so an indirect `/AA` dictionary or `/Next` array is
+swept as what it is. Anywhere else a stricter test finds actions in places
+that list does not name — the `/S`, a `/Type` of `/Action` or none, and
+neither `/P` nor `/K`, the keys every structure element has — so a structure
+element role-mapped to `URI` in the structure tree, where nothing runs, is
+not mistaken for one. A value that is an action by the test its place calls
+for, in place or by reference, is removed wherever it sits. Arrays lose
+elements in two kinds of place only, an array in an action slot and a page's
+`/Annots`: a name tree's `/Names` is positional, and taking an element out
+elsewhere could shift every key onto the wrong value. A `/Link` whose `/A` goes and which has no `/Dest`
 goes with it, out of `/Annots` — a link to nowhere is a hot spot the strict
 validator refuses (12.5.6.5) — while a widget whose `/A` goes stays, because
 it is a field first.
 
 **What is deleted is decided on the document as it will be.** An entry
 removed is a reference removed; an object only removed entries reached is
-deleted, and one anything else still reaches is not — so a script and its
+deleted, and one anything else still reaches is not — reached through the
+pending page order too, since a page `import_page` or `insert_page` added is
+written into `/Kids` only by a save, and a walk that missed it once deleted an
+imported page's content and fonts when its link's `/P` led there. So a script and its
 `/JS` stream go, the page a removed action's `/Next` pointed at stays, and no
 reference is left dangling. An orphan the file carries — a script object
 nothing names, an embedded file stream, a metadata stream — is found by what
@@ -465,7 +485,7 @@ if report.untouched.is_empty() {
 | A viewer preference page range from page 0 or backwards, or zero copies | `set_viewer_preferences` returns false (`ViewerPreferences::is_writable`) | Table 147 numbers pages from 1; which of two numbers the caller meant is theirs to say | 12.2 |
 | Sanitising the bytes an incremental save keeps | nothing is refused; the original objects stay in the prefix, as redaction's do | 7.5.6: an update appends. The report says what left the *document*; only a rewrite makes that what left the *file* | [writing](writing.md) |
 | A link left with neither `/A` nor `/Dest` after sanitising | the link leaves its page's `/Annots` with its action, for its action's reason (`actions_alone_leave_the_scripts`) | 12.5.6.5: a link exists to be followed, and the strict validator refuses one that goes nowhere | 12.5.6.5 |
-| Removing an element from an array other than `/Next` or `/Annots` | never done; an action found there stays | a name tree's `/Names` is positional pairs, and one element out would shift every key onto the wrong value | 7.9.6 |
+| Removing an element from an array other than one in an action slot or `/Annots` | never done; an action found there stays | a name tree's `/Names` is positional pairs, and one element out would shift every key onto the wrong value | 7.9.6 |
 | Removing an action's `/Next` successors that are not themselves removed | they go with the action when nothing else reaches them | the chain is part of the action (12.6.2); what else still reaches stays | 12.6.2 |
 | Reading an XFA form's scripts to decide what to keep | `/XFA` is removed whole under `javascript` (`Removal::XfaForm`) | XFA is a named non-goal and its packets carry `<script>` elements this engine does not parse | [forms](forms.md) |
 | Paying for the walk on a save that changed one annotation | `FontPolicy::Keep` on `write::save`, or `DocumentEditor::save`, which is unchanged | the pass is whole-document and order-dependent and costs a full interpretation of every page. The default is still `Subset`, because forgetting costs a disclosure and paying costs time | [writing](writing.md) |
@@ -518,7 +538,22 @@ if report.untouched.is_empty() {
   `/Metadata` kept 3, `/EF` kept 2, nothing deleted 5, deletion ignoring what
   still reaches 3, a cleaned stream losing its data 1, the trailer's `/Info`
   kept 3, a null trailer entry written rather than dropped 2, orphans not
-  found 2, one removal per object left unreported 5.
+  found 2, one removal per object left unreported 5. Added after review:
+  `an_action_dressed_as_something_else_is_still_taken_out` — an `/AA` entry
+  with an extra `/K`, one with `/Type /Whatever`, an `/OpenAction` whose `/S`
+  is a reference, a navigation action with `/P` whose `/Next` is script, and
+  an indirect action with an odd `/Type` whose `/Next` is an indirect array,
+  all taken out by `Sanitise::ALL` with `script_summary` empty after, beside
+  a structure element role-mapped to `URI` that stays;
+  `an_imported_page_keeps_its_content_when_its_link_goes` — the content and
+  font of a page `import_page` added survive sanitising its link, and both
+  saves draw what the source drew; and
+  `info_taken_out_does_not_come_back_from_an_earlier_trailer` — an
+  incremental update writes `/Info null`, so an `/Info` something else still
+  names does not come back through the earlier trailer. Injections: the
+  strict test used in action slots fires 2, an `/S` reference not resolved 2,
+  an indirect object's slot not found 1, the page order left out of what is
+  reached 1, the null entry dropped from an update's trailer 1.
 - Redaction tests live beside `crates/tinker-pdf/src/redact.rs`: multi-page
   fixtures (a two-page file once redacted page 0's image and left page 1's
   secret), text inside form XObjects, a self-referential form that

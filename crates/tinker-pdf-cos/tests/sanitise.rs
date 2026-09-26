@@ -649,3 +649,297 @@ fn nothing_asked_for_is_nothing_done_and_a_second_pass_finds_nothing() {
     assert!(!editor.sanitise(&Sanitise::ALL).is_empty());
     assert!(editor.sanitise(&Sanitise::ALL).is_empty(), "idempotent");
 }
+
+// ---- actions dressed as something else ---------------------------------------
+
+/// Every action here is one a viewer runs — a viewer looks at where a
+/// dictionary sits and at its `/S`, resolving a reference, and at nothing
+/// else — and each is dressed so that a test asking more of an action than
+/// that lets it through: an extra `/K` or `/P` (the keys a structure element
+/// has), a `/Type` other than `/Action`, an `/S` written as a reference, an
+/// indirect action with an odd `/Type` whose `/Next` is an indirect array,
+/// and a navigation action carrying `/P` whose `/Next` is script. Beside
+/// them, a structure element role-mapped to `URI` under the structure tree —
+/// in no place a viewer runs an action — stays.
+const DRESSED: &str = "%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /OpenAction 10 0 R /StructTreeRoot 30 0 R
+   /AA << /WC << /S /JavaScript /JS (close) /K 0 >>
+          /DP << /Type /Whatever /S /JavaScript /JS (didprint) >>
+          /WS 12 0 R >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [20 0 R]
+   /AA << /O << /S /GoTo /D [3 0 R /Fit] /P 3 0 R
+                /Next [<< /S /JavaScript /JS (chained) /K 0 >>] >> >> >>
+endobj
+9 0 obj
+/JavaScript
+endobj
+10 0 obj
+<< /S 9 0 R /JS (opened) >>
+endobj
+11 0 obj
+[<< /S /JavaScript /JS (listed) /P 3 0 R >>]
+endobj
+12 0 obj
+<< /Type /Whatever /S /GoTo /D [3 0 R /Fit] /Next 11 0 R >>
+endobj
+20 0 obj
+<< /Type /Annot /Subtype /Link /Rect [10 10 100 30]
+   /A << /S /Launch /F (calc.exe) /P 3 0 R >> >>
+endobj
+30 0 obj
+<< /Type /StructTreeRoot /K 31 0 R /RoleMap << /URI /Span >> >>
+endobj
+31 0 obj
+<< /Type /StructElem /S /URI /P 30 0 R /Pg 3 0 R >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+";
+
+fn dressed() -> Arc<CosDocument> {
+    let raw = Arc::new(CosDocument::open(DRESSED.as_bytes().to_vec()).expect("the fixture opens"));
+    let written = DocumentEditor::new(raw).save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
+}
+
+/// An action is what sits where a viewer runs one: `Sanitise::ALL` takes
+/// every dressed action out, `script_summary` reads nothing afterwards, and
+/// none of their scripts is left in the rewrite's bytes.
+#[test]
+fn an_action_dressed_as_something_else_is_still_taken_out() {
+    let doc = dressed();
+    assert_eq!(
+        script_summary(&doc).catalog_actions,
+        2,
+        "the premise: the walkers see the /K and the /Type /Whatever scripts"
+    );
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let report = editor.sanitise(&Sanitise::ALL);
+
+    let catalog = removed_at(&report, 1);
+    for expected in [
+        (vec![k("OpenAction")], Removal::JavaScript),
+        (vec![k("AA"), k("WC")], Removal::JavaScript),
+        (vec![k("AA"), k("DP")], Removal::JavaScript),
+    ] {
+        assert!(catalog.contains(&expected), "{expected:?} in {catalog:?}");
+    }
+    assert!(
+        !catalog.iter().any(|(path, _)| path == &[k("AA"), k("WS")]),
+        "the navigation action stays: {catalog:?}"
+    );
+    assert_eq!(
+        removed_at(&report, 3),
+        [
+            (
+                vec![k("Annots"), PathStep::Index(0)],
+                Removal::Action(b"Launch".to_vec())
+            ),
+            (
+                vec![k("AA"), k("O"), k("Next"), PathStep::Index(0)],
+                Removal::JavaScript
+            ),
+        ]
+    );
+    assert_eq!(
+        removed_at(&report, 11),
+        [(vec![PathStep::Index(0)], Removal::JavaScript)],
+        "an indirect /Next array of an indirect action with an odd /Type"
+    );
+    let gone = deleted(&report);
+    for num in [9, 10, 20] {
+        assert!(gone.contains(&num), "object {num} is deleted: {gone:?}");
+    }
+    for num in [11, 12, 30, 31] {
+        assert!(
+            !gone.contains(&num),
+            "object {num} is still reached: {gone:?}"
+        );
+    }
+
+    for mode in [WriteMode::Incremental, WriteMode::Rewrite] {
+        let (bytes, after) = saved(&editor, mode);
+        let summary = script_summary(&after);
+        assert!(summary.is_empty(), "{mode:?}: {}", summary.describe());
+        let view = DocumentEditor::new(Arc::new(after));
+        let catalog = view.catalog().expect("a catalog");
+        assert!(catalog.get(view.intern(b"OpenAction")).is_none());
+        let element = view.get(r(31)).expect("the structure element stays");
+        assert_eq!(
+            key(&view, &element, b"S").and_then(|s| s.as_name()),
+            Some(view.intern(b"URI")),
+            "a structure element is not an action"
+        );
+        if mode == WriteMode::Rewrite {
+            for needle in [
+                &b"close"[..],
+                b"didprint",
+                b"opened",
+                b"chained",
+                b"listed",
+                b"calc.exe",
+            ] {
+                assert!(
+                    !bytes.windows(needle.len()).any(|w| w == needle),
+                    "{} is still in the rewrite",
+                    String::from_utf8_lossy(needle)
+                );
+            }
+        }
+    }
+}
+
+// ---- pages a save has not yet put in the tree --------------------------------
+
+/// A page with text in a font, and a link whose `/P` names the page — which
+/// `import_page` follows, so the copied link's `/P` names a copy of the
+/// source page that shares the imported page's content and font.
+const LINKED: &str = "%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 5 0 R
+   /Resources << /Font << /F1 6 0 R >> >> /Annots [7 0 R] >>
+endobj
+5 0 obj
+<< /Length 35 >>
+stream
+BT /F1 12 Tf 10 10 Td (Hello) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+7 0 obj
+<< /Type /Annot /Subtype /Link /Rect [10 40 100 60] /P 3 0 R
+   /A << /S /URI /URI (https://example.org/) >> >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+";
+
+/// A page `import_page` put in the order is in the document, though only a
+/// save writes it into `/Kids`: sanitising takes its link and keeps its
+/// content and font, and both saves draw what the source drew.
+#[test]
+fn an_imported_page_keeps_its_content_when_its_link_goes() {
+    let source = CosDocument::open(LINKED.as_bytes().to_vec()).expect("the source opens");
+    let source_page = &tinker_pdf_cos::pages::collect(&source)[0];
+    let drawn = tinker_pdf_cos::pages::content_bytes(&source, source_page);
+
+    let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+    builder.add_page(200.0, 200.0, |_| {});
+    let target = Arc::new(CosDocument::open(builder.finish()).expect("the target opens"));
+    let mut editor = DocumentEditor::new(target);
+    let imported = editor.import_page(&source, 0, 1).expect("the page imports");
+    let page = editor.get(imported).expect("the imported page");
+    let contents = key(&editor, &page, b"Contents")
+        .and_then(|c| c.as_objref())
+        .expect("an indirect /Contents");
+
+    let report = editor.sanitise(&Sanitise {
+        actions: true,
+        ..Sanitise::default()
+    });
+    assert_eq!(
+        removed_at(&report, imported.num),
+        [(
+            vec![k("Annots"), PathStep::Index(0)],
+            Removal::Action(b"URI".to_vec())
+        )]
+    );
+    let gone = deleted(&report);
+    assert!(
+        !gone.contains(&contents.num) && !gone.contains(&imported.num),
+        "the imported page and its content are still in the document: {gone:?}"
+    );
+
+    for mode in [WriteMode::Incremental, WriteMode::Rewrite] {
+        let (_, after) = saved(&editor, mode);
+        let pages = tinker_pdf_cos::pages::collect(&after);
+        assert_eq!(pages.len(), 2, "{mode:?}");
+        assert_eq!(
+            tinker_pdf_cos::pages::content_bytes(&after, &pages[1]),
+            drawn,
+            "{mode:?}: the imported page draws what it drew"
+        );
+    }
+}
+
+// ---- a trailer entry taken out stays out -------------------------------------
+
+/// An information dictionary something else still names, so taking `/Info`
+/// out of the trailer leaves the object in the file.
+const NAMED_INFO: &str = "%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]
+   /PieceInfo << /Example << /LastModified (D:20260926) /Private 70 0 R >> >> >>
+endobj
+70 0 obj
+<< /Title (Secret) >>
+endobj
+trailer
+<< /Root 1 0 R /Info 70 0 R >>
+%%EOF
+";
+
+/// A reader that merges an update's trailer with the ones before it — this
+/// crate's does, newest first — would find `/Info` in the earlier trailer
+/// if the update's trailer merely left the key out. So an incremental
+/// update writes `/Info null` (7.3.9: the entry absent), and a rewrite,
+/// which has no earlier trailer, leaves it out.
+#[test]
+fn info_taken_out_does_not_come_back_from_an_earlier_trailer() {
+    let raw = Arc::new(CosDocument::open(NAMED_INFO.as_bytes().to_vec()).expect("it opens"));
+    let doc = Arc::new(
+        CosDocument::open(DocumentEditor::new(raw).save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        }))
+        .expect("the rewrite reopens"),
+    );
+    assert_eq!(metadata(&doc).title.as_deref(), Some("Secret"), "premise");
+    let mut editor = DocumentEditor::new(doc);
+    let report = editor.sanitise(&Sanitise {
+        metadata: true,
+        ..Sanitise::default()
+    });
+    assert!(
+        report.deleted.is_empty(),
+        "the page still names it: {report:?}"
+    );
+    for mode in [WriteMode::Incremental, WriteMode::Rewrite] {
+        let (_, after) = saved(&editor, mode);
+        assert_eq!(
+            metadata(&after),
+            tinker_pdf_cos::Metadata::default(),
+            "{mode:?}"
+        );
+        let info = after.trailer().get(tinker_pdf_cos::Name::INFO);
+        match mode {
+            WriteMode::Incremental => assert_eq!(info, Some(&Object::Null)),
+            _ => assert_eq!(info, None, "{mode:?}"),
+        }
+    }
+}

@@ -1,10 +1,39 @@
 //! Serialising the edits: an incremental update or a whole rewrite.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use super::{without, DocumentEditor};
+use crate::limits;
 use crate::object::{Dict, ObjRef, Object};
+use crate::resolve::Resolve;
 use crate::write::{self, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
+
+/// Every indirect reference inside `value`, not following any, nested no
+/// deeper than [`limits::MAX_NEST_DEPTH`].
+pub(super) fn refs_in(value: &Object, out: &mut Vec<ObjRef>, depth: u32) {
+    if depth > limits::MAX_NEST_DEPTH {
+        return;
+    }
+    match value {
+        Object::Ref(r) => out.push(*r),
+        Object::Array(items) => {
+            for item in items {
+                refs_in(item, out, depth + 1);
+            }
+        }
+        Object::Dict(dict) => {
+            for (_, item) in dict.iter() {
+                refs_in(item, out, depth + 1);
+            }
+        }
+        Object::Stream(stream) => {
+            for (_, item) in stream.dict.iter() {
+                refs_in(item, out, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Every indirect reference inside an object, pushed onto `queue`.
 fn references_of(object: &Object, queue: &mut Vec<ObjRef>) {
@@ -30,6 +59,43 @@ fn references_of(object: &Object, queue: &mut Vec<ObjRef>) {
 }
 
 impl DocumentEditor {
+    /// Every object a save of this editor reaches from `trailer`, reading each
+    /// object as `pending` has it where it has it, and as the editor does
+    /// otherwise — for an edit deciding what it may delete.
+    ///
+    /// The page order counts. A page [`DocumentEditor::insert_page`] or
+    /// [`DocumentEditor::import_page`] put in it is in the document, though
+    /// only a save writes it into `/Kids` ([`DocumentEditor::page_tree_updates`]),
+    /// and a walk that read `/Kids` as the editor has it found that page, and
+    /// everything it draws, nowhere — which is how sanitising once deleted an
+    /// imported page's content. A page the order dropped is still found
+    /// through the old `/Kids`, so the answer can hold more than a save keeps
+    /// and never less: the safe side for a caller deciding what to delete.
+    pub(super) fn reached(&self, trailer: &Dict, pending: &BTreeMap<u32, Object>) -> HashSet<u32> {
+        let mut live = HashSet::new();
+        let mut queue = Vec::new();
+        for (_, value) in trailer.iter() {
+            refs_in(value, &mut queue, 0);
+        }
+        if let Some(order) = &self.page_order {
+            queue.extend(order.iter().copied());
+        }
+        while let Some(r) = queue.pop() {
+            if !live.insert(r.num) {
+                continue;
+            }
+            match pending.get(&r.num) {
+                Some(object) => refs_in(object, &mut queue, 0),
+                None => {
+                    if let Ok(object) = Resolve::get(self, r) {
+                        refs_in(&object, &mut queue, 0);
+                    }
+                }
+            }
+        }
+        live
+    }
+
     /// Keeps only the objects something reaches from the trailer.
     ///
     /// A mark from the trailer's own references, then a sweep. Without it a
@@ -105,6 +171,9 @@ impl DocumentEditor {
         let trailer = self.merged_trailer();
         match options.mode {
             WriteMode::Incremental => {
+                // With every entry removed here written as null, so an earlier
+                // revision's trailer does not bring it back.
+                let trailer = self.update_trailer();
                 // 7.6.2: the update is sealed with the key the document was
                 // opened with, because it appends into a file whose /Encrypt
                 // still stands. An unencrypted document, or one never

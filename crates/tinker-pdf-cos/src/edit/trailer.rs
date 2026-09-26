@@ -31,8 +31,9 @@ impl DocumentEditor {
     /// revisions), with every entry this editor has set laid over it.
     ///
     /// An entry set to null is left out: 7.3.9 makes a null value the entry
-    /// being absent, and writing `/Info null` would leave a reader to know
-    /// that — this is how [`DocumentEditor::sanitise`] takes `/Info` out.
+    /// being absent — this is how [`DocumentEditor::sanitise`] takes `/Info`
+    /// out. That is the trailer a rewrite writes; an incremental update
+    /// writes [`DocumentEditor::update_trailer`].
     pub(crate) fn merged_trailer(&self) -> Dict {
         let mut trailer = self.doc.trailer().clone();
         for (key, value) in self.trailer.iter() {
@@ -40,6 +41,28 @@ impl DocumentEditor {
                 trailer = super::without(&trailer, *key);
             } else {
                 trailer.insert(*key, value.clone());
+            }
+        }
+        trailer
+    }
+
+    /// The trailer an incremental update writes: [`Self::merged_trailer`],
+    /// with every entry this editor removed written as null where an earlier
+    /// revision's trailer has it.
+    ///
+    /// Left out, the entry would be absent from the update's trailer, which
+    /// 7.5.6 makes the whole story — but a reader that merges each revision's
+    /// trailer with the ones before it, as this crate's does (newest first,
+    /// so a key an update dropped is still found), would find the earlier
+    /// revision's value and bring it back: an incremental sanitise left
+    /// `/Info` readable whenever something else kept the dictionary alive.
+    /// Written as null, the key is present in the newest trailer and 7.3.9
+    /// reads it as absent, which both kinds of reader agree on.
+    pub(crate) fn update_trailer(&self) -> Dict {
+        let mut trailer = self.merged_trailer();
+        for (key, value) in self.trailer.iter() {
+            if matches!(value, Object::Null) && self.doc.trailer().contains_key(*key) {
+                trailer.insert(*key, Object::Null);
             }
         }
         trailer
@@ -53,6 +76,12 @@ impl DocumentEditor {
     /// cross-reference stream's `/Type`, `/W`, `/Index`, `/Length`,
     /// `/Filter`, `/DecodeParms`): a value set here would be overwritten or,
     /// worse, believed.
+    ///
+    /// [`Object::Null`] **removes** the entry (7.3.9: a null value is the
+    /// entry absent): a rewrite leaves the key out, and an incremental update
+    /// writes it as null, so a reader that falls back to an earlier
+    /// revision's trailer for a missing key does not find the old value
+    /// there.
     ///
     /// Part of the editor's state, so a [`crate::edit::EditCheckpoint`] and a
     /// rolled-back [`DocumentEditor::transaction`] restore it.
