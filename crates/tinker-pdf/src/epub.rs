@@ -92,10 +92,11 @@ pub mod ocf;
 pub mod package;
 pub mod paint;
 pub mod read;
+pub mod svg;
 pub mod typeface;
 pub mod xhtml;
 
-use tinker_pdf_cos::build::{OutlineEntry, Target};
+use tinker_pdf_cos::build::{ImageData, OutlineEntry, Target};
 use tinker_pdf_cos::dest::is_writable_uri;
 use tinker_pdf_cos::DocumentBuilder;
 use tinker_pdf_css::cascade::ComputedStyle;
@@ -107,11 +108,12 @@ use tinker_pdf_layout::{
     layout_with, Budget as LayoutBudget, Limits as LayoutLimits, Options as LayoutOptions,
     Page as LayoutPage, Warning as LayoutWarning,
 };
+use tinker_pdf_svg::Limits as SvgLimits;
 use tinker_pdf_xml::Limits as XmlLimits;
 use tinker_pdf_zip::{limits as zip_limits, Archive};
 
 use crate::cbz::{
-    ArchiveRefusal, ArchiveReport, ArchiveWarning, PageOrigin, DOCUMENT_OVERHEAD,
+    ArchiveRefusal, ArchiveReport, ArchiveWarning, ImageDefect, PageOrigin, DOCUMENT_OVERHEAD,
     MAX_SYNTHESISED_PDF, PAGE_OVERHEAD, PLACEHOLDER_GREY,
 };
 use ocf::resolve_reference;
@@ -310,6 +312,12 @@ pub struct Limits {
     pub css: CssLimits,
     /// What layout and fragmentation are allowed to spend, per book.
     pub layout: LayoutLimits,
+    /// What one SVG content document may cost (Tier 4's SVG lane).
+    ///
+    /// Held whole for `css`'s reason exactly: `tinker_pdf_svg::Limits` already
+    /// says what each of its five numbers bounds, and a copy of that reasoning
+    /// in a second struct is a copy that goes out of date.
+    pub svg: SvgLimits,
 }
 
 impl Limits {
@@ -322,6 +330,7 @@ impl Limits {
         xml: XmlLimits::DEFAULT,
         css: CssLimits::DEFAULT,
         layout: LayoutLimits::DEFAULT,
+        svg: SvgLimits::DEFAULT,
     };
 }
 
@@ -547,13 +556,15 @@ pub enum SpineDefect {
     /// package document being wrong, and a path naming no entry is the
     /// container missing a file.
     ResourceMissing,
-    /// The item is an SVG content document (§6.2).
+    /// An SVG content document (§6.2) that would not read at all.
     ///
-    /// A named non-goal rather than a defect in the book: this build reads no
-    /// SVG, and six spine items in the fetched corpus are one. Named separately
-    /// from [`SpineDefect::NotLaidOut`] because milestone 8 removes that one and
-    /// leaves this one standing.
-    SvgContentDocument,
+    /// **Not "this build reads no SVG"** — it does, since Tier 4's SVG lane.
+    /// This is one of `tinker_pdf_svg::Refusal`'s six: markup that is not XML,
+    /// a root that is not an `<svg>`, a `<use>` that reaches its own ancestor,
+    /// or one of the four ceilings. The refusal travels so a caller can tell a
+    /// bomb from a truncated file, which is ruling 10 applied to the one place
+    /// an SVG produces no picture at all.
+    SvgUnreadable(tinker_pdf_svg::Refusal),
     /// §3.5.1's fallback chain does not reach an EPUB content document.
     Fallback(FallbackDefect),
     /// The cascade refused the document: one of `tinker-pdf-css`'s caps fired.
@@ -670,6 +681,14 @@ struct Chapter {
     defect: Option<SpineDefect>,
     /// The element tree and its computed styles.
     reading: Option<read::Reading>,
+    /// An SVG content document's display list, for a spine item that is one.
+    ///
+    /// Beside `reading` rather than inside it, because the two are different
+    /// readers of different languages: a chapter has one or the other and never
+    /// both, and a build that made an SVG pretend to be a `Reading` would have
+    /// to answer `dom`, `census` and `font_faces` for a document with no
+    /// elements a cascade has ever heard of.
+    svg: Option<tinker_pdf_svg::Scene>,
     /// The pages this chapter's text needed, or empty for a placeholder.
     pages: Vec<LayoutPage>,
     /// The index of this chapter's first page in the whole document.
@@ -840,10 +859,41 @@ pub fn synthesise(
     let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
     let mut declared: Vec<FontFace> = Vec::new();
     for itemref in package.spine() {
-        let (name, path, mut defect) = plan_page(book, package, &itemref.idref);
+        let (name, path, mut defect, is_svg) = plan_page(book, package, &itemref.idref);
         let fixed = itemref.layout(book_layout) == RenditionLayout::PrePaginated;
         let mut reading = None;
-        if defect.is_none() {
+        let mut scene = None;
+        if defect.is_none() && is_svg {
+            // §6.2's other content-document language. The viewport handed in is
+            // the caller's page **in CSS pixels**, because that is the unit an
+            // SVG's own lengths are in — a root that says `width="100%"` is
+            // asking for the box it was placed in, and this is that box.
+            let source = path.clone().unwrap_or_default();
+            let bytes = book
+                .index_of(&source)
+                .and_then(|index| book.read(index).ok().map(<[u8]>::to_vec));
+            match bytes {
+                None => defect = Some(SpineDefect::ResourceMissing),
+                Some(bytes) => {
+                    let box_ = (
+                        layout.page.0 / read::PX_TO_PT,
+                        layout.page.1 / read::PX_TO_PT,
+                    );
+                    match tinker_pdf_svg::read(&bytes, Some(box_), &limits.svg) {
+                        Err(refusal) => defect = Some(SpineDefect::SvgUnreadable(refusal)),
+                        Ok(read) => {
+                            for warning in &read.warnings {
+                                warnings.push(ArchiveWarning::Svg {
+                                    item: name.clone(),
+                                    warning: warning.clone(),
+                                });
+                            }
+                            scene = Some(read);
+                        }
+                    }
+                }
+            }
+        } else if defect.is_none() {
             let source = path.clone().unwrap_or_default();
             let bytes = book
                 .index_of(&source)
@@ -900,7 +950,18 @@ pub fn synthesise(
         // pre-paginated item that states none is named rather than silently
         // laid into the caller's.
         let mut frame = reflowable_frame;
-        if fixed {
+        // An SVG **is** its own viewport (§7.2), so a pre-paginated one never
+        // reaches `FixedLayoutWithoutViewport`: there is no `<meta>` to look
+        // for and nothing was left unsaid. Its page is the size its root
+        // states, in points.
+        if let Some(read) = &scene {
+            if fixed {
+                frame = Frame {
+                    page: (read.size.0 * read::PX_TO_PT, read.size.1 * read::PX_TO_PT),
+                    margin: 0.0,
+                };
+            }
+        } else if fixed {
             match reading.as_ref().and_then(|read| read.viewport) {
                 Some(view) => {
                     frame = Frame {
@@ -924,6 +985,7 @@ pub fn synthesise(
             path,
             defect,
             reading,
+            svg: scene,
             pages: Vec::new(),
             first_page: 0,
         });
@@ -964,9 +1026,20 @@ pub fn synthesise(
         // reflowable one is the caller's and for a pre-paginated one is its
         // §8.2.2.6 viewport.
         let (chapter_width, chapter_height) = chapter.frame.content_px();
-        let chapter_options = LayoutOptions::new(chapter_width, chapter_height);
         let chapter_options = if chapter.fixed {
-            chapter_options
+            // EPUB RS 3.3 §8.1: *"exactly one page per spine itemref"*, and
+            // §8.1.2: the viewport is the initial containing block and what
+            // falls outside it is **clipped**. Both sentences are in this one
+            // call — the box is the viewport, and the flow is not cut at it.
+            //
+            // It used to be cut at it and the pages after the first dropped,
+            // which is a third rule neither sentence says: content that
+            // overflows by a hair is not clipped, it is *moved* to a page that
+            // is then thrown away. A picture in a viewport sized to the picture
+            // overflows by exactly the strut's descender (CSS 2.2 §10.8.1), so
+            // that reading lost the whole of every page of every comic — see
+            // `epub_fixed_layout.rs`.
+            LayoutOptions::new(chapter_width, chapter_height).unpaginated()
         } else {
             options
         };
@@ -985,20 +1058,30 @@ pub fn synthesise(
                         None => layout_warnings.push((warning, count)),
                     }
                 }
-                if chapter.fixed && laid.pages.len() > 1 {
-                    // EPUB RS 3.3 §8.1.2: the viewport is the initial
-                    // containing block and what falls outside it is clipped.
-                    // Everything that would have been a second page is outside
-                    // it, so it is dropped here -- and counted, because those
-                    // characters are gone from `Page::text()` as well as from
-                    // the picture.
-                    let lost: usize = laid.pages[1..]
-                        .iter()
-                        .flat_map(|page| page.runs.iter())
-                        .filter(|run| !run.generated)
-                        .map(|run| run.text.chars().count())
-                        .sum();
-                    laid.pages.truncate(1);
+                if chapter.fixed {
+                    // §8.1.2's clip, counted. The flow was not cut, so every
+                    // run is on the one page and the ones below the viewport's
+                    // bottom edge are the ones the clip path will hide: they
+                    // are **drawn and clipped** rather than dropped, which is
+                    // what §8.1.2 asks for and is why they are still in
+                    // `Page::text()`. A host is told how many characters a
+                    // reader will not see.
+                    //
+                    // The baseline and not the top, because a run's `y` is its
+                    // baseline: a line whose baseline is past the edge has at
+                    // most its ascenders showing, and counting by the top would
+                    // call a fully visible last line clipped.
+                    let lost: usize = laid
+                        .pages
+                        .first()
+                        .map(|page| {
+                            page.runs
+                                .iter()
+                                .filter(|run| !run.generated && run.y > chapter_height)
+                                .map(|run| run.text.chars().count())
+                                .sum()
+                        })
+                        .unwrap_or(0);
                     if lost > 0 {
                         clipped.push((chapter.name.clone(), lost));
                     }
@@ -1025,6 +1108,14 @@ pub fn synthesise(
                 }
             }
         }
+        // An SVG's characters need codes on the same terms and in the same
+        // pass: a PDF's font resources belong to the document rather than to a
+        // page, and a character outside `WinAnsiEncoding` needs a code chosen
+        // before anything is drawn. Doing it here rather than at the drawing is
+        // what makes SVG text and book text share one encoding decision.
+        if let Some(scene) = &chapter.svg {
+            svg::note(scene, &mut fonts);
+        }
     }
 
     // ---- what the caller is told, before any of it is drawn ----------------
@@ -1042,6 +1133,30 @@ pub fn synthesise(
             item: item.clone(),
             characters: *characters,
         });
+    }
+    // Ruling 10 for the `<img>` this build could not put on a page, and the
+    // reason it is counted per item and per defect rather than per element is
+    // `UnimplementedProperty`'s: a comic whose forty pictures are all WebP is
+    // one sentence a host can act on and forty identical warnings is not.
+    for chapter in &chapters {
+        let Some(reading) = &chapter.reading else {
+            continue;
+        };
+        let mut ranked: Vec<(ImageDefect, usize)> = Vec::new();
+        for (_, defect) in &reading.pictures.refused {
+            match ranked.iter_mut().find(|(seen, _)| seen == defect) {
+                Some(slot) => slot.1 += 1,
+                None => ranked.push((*defect, 1)),
+            }
+        }
+        ranked.sort_by_key(|(_, images)| std::cmp::Reverse(*images));
+        for (defect, images) in ranked {
+            warnings.push(ArchiveWarning::ImageNotDrawn {
+                item: chapter.name.clone(),
+                defect,
+                images,
+            });
+        }
     }
     if fonts.unrepresented() > 0 {
         warnings.push(ArchiveWarning::UnrepresentedCharacters {
@@ -1067,11 +1182,13 @@ pub fn synthesise(
         builder.set_info(b"Author", creator);
     }
     fonts.register(&mut builder);
+    let pictures = register_pictures(&mut builder, &chapters, &mut warnings);
 
     let links = cross_references(&chapters, limits, total_pages);
 
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
-    for chapter in &chapters {
+    let mut unwritable_runs = 0usize;
+    for (spine_at, chapter) in chapters.iter().enumerate() {
         if let Some(defect) = chapter.defect {
             let page = u32::try_from(chapter.first_page).unwrap_or(u32::MAX);
             warnings.push(ArchiveWarning::SpinePage { page, defect });
@@ -1084,9 +1201,58 @@ pub fn synthesise(
             });
             continue;
         }
+        // §6.2's other content-document language, drawn rather than paginated:
+        // an SVG is one page by construction, because it has no line boxes to
+        // break and no overflow to carry.
+        if let Some(scene) = &chapter.svg {
+            let (page_width, page_height) = chapter.frame.page;
+            let placement = svg::Placement {
+                page: (page_width, page_height),
+                entry_limit: zip_limits::MAX_ZIP_ENTRY_BYTES,
+            };
+            let source = chapter.path.clone().unwrap_or_default();
+            // **Registered before the page is begun, and that ordering is the
+            // whole of it.** `begin_page` snapshots the document's resource
+            // set, so a pattern, an `/ExtGState` or an image added afterwards is
+            // invisible to the page that names it — the operator is written,
+            // the reader cannot resolve the name, and the gradient, the
+            // transparency or the photograph is silently gone while every solid
+            // stroke still draws. `svg::Registry` is that ordering as a type.
+            let registry = svg::register(&mut builder, scene, placement, |href: &str| {
+                // §5.7's reference, resolved against the container the document
+                // was read from — the caller's job, and the reason the leaf
+                // crate carries the href unread.
+                let target = resolve_reference(&source, href.split('#').next()?, limits).ok()?;
+                let index = book.index_of(&target)?;
+                book.read(index).ok().map(<[u8]>::to_vec)
+            });
+            let mut page = builder.begin_page(page_width, page_height);
+            let drawn = svg::draw(
+                &mut builder,
+                &mut page,
+                scene,
+                &registry,
+                placement,
+                &fonts,
+                &metrics,
+            );
+            unwritable_runs += drawn.refused;
+            if drawn.images_unresolved > 0 {
+                warnings.push(ArchiveWarning::SvgImageUnresolved {
+                    item: chapter.name.clone(),
+                    images: drawn.images_unresolved,
+                });
+            }
+            builder.push_page(page);
+            pages.push(PageOrigin {
+                name: chapter.name.clone(),
+                defect: None,
+            });
+            continue;
+        }
         // A content document whose text fitted nowhere — a cover whose only
-        // content is an SVG, which four of the six committed books have — still
-        // gets its page, for the same reason a placeholder does.
+        // content is an `<img>` — still gets its page, for the same reason a
+        // placeholder does.
         if chapter.pages.is_empty() {
             let (page_width, page_height) = chapter.frame.page;
             builder.add_page(page_width, page_height, |_| {});
@@ -1102,28 +1268,54 @@ pub fn synthesise(
             let chapter_frame = chapter.frame;
             let (page_width, page_height) = chapter_frame.page;
             let clip = chapter.fixed;
-            builder.add_page(page_width, page_height, |page| {
-                // EPUB RS 3.3 §8.1.2's initial containing block, as a clip
-                // path. Pagination has already dropped whatever fell below it;
-                // this is what stops a box that is **wider** than the viewport
-                // from being drawn beside the page it belongs to, which
-                // pagination cannot see.
-                if clip {
-                    page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
-                }
-                draw_page(page, laid, &chapter_frame, &fonts);
-                if clip {
-                    page.raw(b"Q");
-                }
-                for (rect, target) in on_page {
-                    page.link(rect.0, rect.1, rect.2, rect.3, target);
-                }
-            });
+            // `begin_page` / `push_page` rather than `add_page`'s closure, and
+            // the reason is [`paint::draw_shaped`]: a shaped run is written
+            // through `DocumentBuilder::glyph_run`, which needs the document
+            // *and* the page at once. `begin_page` takes `&self` and hands
+            // back an owned page, so the two borrows do not meet. The pair is
+            // documented as being exactly what `add_page` does, so nothing
+            // about when a page's resources are snapshotted changes here.
+            let mut page = builder.begin_page(page_width, page_height);
+            // EPUB RS 3.3 §8.1.2's initial containing block, as a clip path.
+            // Pagination has already dropped whatever fell below it; this is
+            // what stops a box that is **wider** than the viewport from being
+            // drawn beside the page it belongs to, which pagination cannot
+            // see.
+            if clip {
+                page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
+            }
+            unwritable_runs += draw_page(
+                &mut builder,
+                &mut page,
+                laid,
+                &chapter_frame,
+                &fonts,
+                &pictures[spine_at],
+                chapter.reading.as_ref().map(|reading| &reading.dom),
+                // **A base per content document.** Both an element index and a
+                // reading-order stamp restart at every spine item, so two
+                // chapters would otherwise name the same element and sort into
+                // each other.
+                (spine_at as u64) << 32,
+            );
+            if clip {
+                page.raw(b"Q");
+            }
+            for (rect, target) in on_page {
+                page.link(rect.0, rect.1, rect.2, rect.3, target);
+            }
+            builder.push_page(page);
             pages.push(PageOrigin {
                 name: chapter.name.clone(),
                 defect: None,
             });
         }
+    }
+
+    if unwritable_runs > 0 {
+        warnings.push(ArchiveWarning::UnwritableTextRun {
+            runs: unwritable_runs,
+        });
     }
 
     let entries = outline(book, package, &chapters, limits, total_pages);
@@ -1236,6 +1428,82 @@ fn resolve_target(
         None => chapter.first_page,
     };
     (page < total_pages).then(|| page_target(u32::try_from(page).unwrap_or(u32::MAX)))
+}
+
+/// Every picture in the book, registered as an `/XObject` **before the first
+/// page begins**, indexed by spine item and then by element.
+///
+/// # The ordering is the whole of it
+///
+/// `DocumentBuilder::begin_page` *snapshots* the document's resource set, so an
+/// `/XObject` added after that call is invisible to the page that names it: the
+/// `Do` is written, the reader cannot resolve the name, and the photograph is
+/// silently gone while every word on the page still sets. That is the bug
+/// [`svg::Registry`] exists to make impossible for an SVG `<image>`, and this
+/// is the same sentence for an XHTML `<img>` — a pass of its own, run before
+/// the page loop, handing back names rather than a builder anything could add
+/// to.
+///
+/// # Only the pictures that reached a page
+///
+/// The set is taken from the **laid-out pages** rather than from the box tree,
+/// which is not an optimisation: an `<img>` inside a `display: none` subtree,
+/// or below a pre-paginated document's viewport, produces no fragment, and
+/// embedding it anyway would put a picture no page draws into every synthesised
+/// document and charge the caller's `max_synthesised` for it.
+fn register_pictures(
+    builder: &mut DocumentBuilder,
+    chapters: &[Chapter],
+    warnings: &mut Vec<ArchiveWarning>,
+) -> Vec<Vec<(u32, Vec<u8>)>> {
+    let mut out: Vec<Vec<(u32, Vec<u8>)>> = vec![Vec::new(); chapters.len()];
+    let mut next = 0usize;
+    for (at, chapter) in chapters.iter().enumerate() {
+        let Some(reading) = &chapter.reading else {
+            continue;
+        };
+        let mut refused = 0usize;
+        for picture in &reading.pictures.drawn {
+            let anchor = u32::try_from(picture.element).unwrap_or(u32::MAX);
+            let drawn = chapter
+                .pages
+                .iter()
+                .flat_map(|page| page.replaced.iter())
+                .any(|fragment| fragment.anchor == Some(anchor));
+            if !drawn {
+                continue;
+            }
+            // One name per picture across the whole document, unlike
+            // `cbz.rs`'s single `/Im` per page: a book's pages may hold several
+            // pictures each and two of them on one page would collide.
+            let name = format!("Im{next}").into_bytes();
+            next += 1;
+            let registered = match &picture.data {
+                read::PictureData::Jpeg(bytes) => builder.add_image(&name, &ImageData::Jpeg(bytes)),
+                read::PictureData::Png(png) => builder.add_image(&name, &png.image()),
+            };
+            if registered {
+                out[at].push((anchor, name));
+            } else {
+                // The one case where this build does leave **a box of the right
+                // size with nothing in it**: the picture read, the box was laid
+                // out to its dimensions, and the writer then refused the bytes.
+                // By that point the box cannot be unmade — every line after it
+                // is already placed — so the honest answer is the geometry the
+                // page would have had with the picture, and a warning saying
+                // the picture is not in it.
+                refused += 1;
+            }
+        }
+        if refused > 0 {
+            warnings.push(ArchiveWarning::ImageNotDrawn {
+                item: chapter.name.clone(),
+                defect: ImageDefect::Undecodable,
+                images: refused,
+            });
+        }
+    }
+    out
 }
 
 /// One page's link annotations: a rectangle in the page's own points, and
@@ -1390,9 +1658,14 @@ fn plan_page(
     book: &ocf::Ocf<'_>,
     package: &Package,
     idref: &str,
-) -> (String, Option<String>, Option<SpineDefect>) {
+) -> (String, Option<String>, Option<SpineDefect>, bool) {
     let Some(item) = package.item_by_id(idref) else {
-        return (idref.to_owned(), None, Some(SpineDefect::IdrefUnresolved));
+        return (
+            idref.to_owned(),
+            None,
+            Some(SpineDefect::IdrefUnresolved),
+            false,
+        );
     };
     // §3.5.1 before §4.2.5: which resource a spine item stands for is decided by
     // the fallback chain, and the *terminus* is the file that would be read.
@@ -1400,21 +1673,37 @@ fn plan_page(
     // would report the wrong name.
     let target = match package.content_document(item) {
         Ok(target) => target,
-        Err(defect) => return (item.href.clone(), None, Some(SpineDefect::Fallback(defect))),
+        Err(defect) => {
+            return (
+                item.href.clone(),
+                None,
+                Some(SpineDefect::Fallback(defect)),
+                false,
+            )
+        }
     };
     let Some(path) = target.path.as_deref() else {
-        return (target.href.clone(), None, Some(SpineDefect::HrefUnusable));
+        return (
+            target.href.clone(),
+            None,
+            Some(SpineDefect::HrefUnusable),
+            false,
+        );
     };
     if book.index_of(path).is_none() {
-        return (path.to_owned(), None, Some(SpineDefect::ResourceMissing));
+        return (
+            path.to_owned(),
+            None,
+            Some(SpineDefect::ResourceMissing),
+            false,
+        );
     }
-    // An SVG content document (§6.2) is a named non-goal: this build reads no
-    // SVG, six spine items in the fetched corpus are one, and laying one out as
-    // though its markup were XHTML would set the `<title>` and the `<desc>` as
-    // body text. It keeps its page and its position.
-    let defect = matches!(target.core, Some(package::CoreMediaType::Svg))
-        .then_some(SpineDefect::SvgContentDocument);
-    (path.to_owned(), Some(path.to_owned()), defect)
+    // An SVG content document (§6.2) takes the other reader. It is a fact
+    // about the item rather than a defect: laying its markup out as though it
+    // were XHTML would set the `<title>` and the `<desc>` as body text, which
+    // is what made it a refusal until Tier 4's SVG lane.
+    let svg = matches!(target.core, Some(package::CoreMediaType::Svg));
+    (path.to_owned(), Some(path.to_owned()), None, svg)
 }
 
 #[cfg(test)]

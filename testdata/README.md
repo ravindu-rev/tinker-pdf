@@ -7,3 +7,31 @@ cannot generate its own). Passwords: encrypted-aes256.pdf user `open-sesame`,
 owner `owner-secret`; permissions-noprint.pdf user `user`, owner `owner`
 (/P -2056: printing denied). These are the fixtures for
 `tinker_parity.rs`; do not modify them, regenerate in Tinker if ever needed.
+
+`form-fields.pdf` is this repository's own, added with gap 32 milestone 1
+(`docs/design/bindings-write.md`) because none of the four carries an
+`/AcroForm` and the write-parity suite's fill-and-save script had nothing to
+open. It is a one-page form with four fields — a text field `name`, a checkbox
+`agree` whose on state is `/On` rather than `/Yes`, a radio pair `colour`, and
+a second text field `notes` — which are the shapes `edit.rs`'s own inline
+fixtures use, plus **one deliberate defect**: `name`'s second widget (object 7)
+carries no `/Rect`, which 12.5.2 Table 164 requires, so filling `name` reports
+exactly one `SkippedWidget`. That widget is left out of the page's `/Annots` on
+purpose, so the file itself stays clean and every artefact saved from it can be
+held to the strict structural validator.
+
+`notes` is the control, and it is not decoration: it is a text field whose one
+widget is well formed, so filling it must report **nothing**. Without it the
+only fill in the fixture is the damaged one, and "the report came back
+non-empty" would be indistinguishable from "the report is always non-empty" —
+which is exactly what a binding that inverted the test would look like from
+outside.
+
+`form-fields.py` writes it. The aid computes cross-reference offsets and
+nothing else — every object is spelled out in it by hand — and it adjudicates
+nothing (ruling 13); what adjudicates is
+`crates/tinker-pdf-cos/tests/form_fixture.rs`, which opens the committed bytes
+with this engine and asserts the ladder level, the validator's verdict, the
+field shapes and the skipped-widget report. Regenerate with
+`python testdata/form-fields.py testdata/form-fields.pdf`; the bytes are fixed,
+so a regeneration that changes them is a change to the aid.

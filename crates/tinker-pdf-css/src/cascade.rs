@@ -19,9 +19,12 @@
 //! 3. **Element-attached styles.** `style=""` beats every selector at the same
 //!    origin and importance, whatever its specificity. Real books use it
 //!    constantly.
-//! 4. **Layers.** `@layer` is refused at the at-rule, by name, because a build
-//!    that read an unknown at-rule's block as ordinary rules would silently
-//!    invert this criterion.
+//! 4. **Layers**, and the second reversal. `@layer` orders declarations
+//!    *below* specificity, so a layered rule loses to an unlayered one of lower
+//!    specificity — unlayered styles are the implicit last layer. And
+//!    `!important` turns the layer order round exactly as it turns the origin
+//!    order round: an important declaration in the **first** layer beats one in
+//!    the last, and an important unlayered declaration loses to every layer.
 //! 5. **Specificity**, `selectors-4` §15's tuple.
 //! 6. **Order of appearance**, last wins.
 //!
@@ -43,9 +46,10 @@
 //! implementation, written so `a_lazy_resolution_and_the_single_pass_agree` can
 //! compare the two; it is not the shipped route and its doc comment says so.
 
-use crate::parser::{Declared, Report, StyleRule, Stylesheet};
+use crate::longhand::Longhand;
+use crate::parser::{Declared, LayerPart, Report, StyleRule, Stylesheet};
 use crate::property::*;
-use crate::selector::{self, Index, Specificity};
+use crate::selector::{self, Index, PseudoElement, Specificity};
 use crate::{Budget, Element, Limits, Refusal};
 
 /// Where a declaration came from, `css-cascade-5` §6.2.
@@ -91,6 +95,15 @@ struct CascadeKey {
     /// §6.1 criterion 3: an element-attached declaration beats a selector-
     /// matched one at the same origin and importance.
     attached: bool,
+    /// §6.1 criterion 4, already turned the right way round for `!important`
+    /// by [`Layers::key`] — higher wins, like every field here.
+    ///
+    /// It sits **between** `attached` and `specificity` and not next to
+    /// `specificity` because that is where the specification puts it: a layered
+    /// `#id` rule loses to an unlayered `p` rule, and an implementation that
+    /// sorted the two the other way round would be right about every book that
+    /// uses one layer and wrong about every book that uses two.
+    layer: u32,
     /// §6.1 criterion 5.
     specificity: Specificity,
     /// §6.1 criterion 6: later in the document order of the sheets wins.
@@ -202,6 +215,43 @@ pub struct ComputedStyle {
     pub align_content: AlignContent,
     /// `order`, §5.4.
     pub order: i32,
+    /// `min-width`, CSS 2.2 §10.4.
+    pub min_width: MinSize,
+    /// `max-width`, §10.4.
+    pub max_width: MaxSize,
+    /// `min-height`, §10.7.
+    pub min_height: MinSize,
+    /// `max-height`, §10.7.
+    pub max_height: MaxSize,
+    /// `vertical-align`, §10.8.1 and §17.5.4. A percentage is still a
+    /// percentage: it is a percentage of the element's **own** used
+    /// `line-height`, which is not a number until `line-height: normal` has met
+    /// a face.
+    pub vertical_align: VerticalAlign,
+    /// `position`, §9.3.1.
+    pub position: Position,
+    /// `top`, `right`, `bottom` and `left`, §9.3.2.
+    pub inset: Sides<Inset>,
+    /// `z-index`, §9.9.1.
+    pub z_index: ZIndex,
+    /// `column-count`, `css-multicol-1` §3.2.
+    pub column_count: ColumnCount,
+    /// `column-width`, §3.1, in CSS pixels.
+    pub column_width: ColumnWidth,
+    /// `column-gap`, `css-align-3` §8.1.
+    pub column_gap: Gap,
+    /// `row-gap`, §8.1.
+    pub row_gap: Gap,
+    /// `column-rule-width`, `css-multicol-1` §5.1, in CSS pixels.
+    pub column_rule_width: f64,
+    /// `column-rule-style`, §5.2.
+    pub column_rule_style: BorderStyle,
+    /// `column-rule-color`, §5.3.
+    pub column_rule_color: Color,
+    /// `column-span`, §6.
+    pub column_span: ColumnSpan,
+    /// `column-fill`, §4.
+    pub column_fill: ColumnFill,
     // <<< the layout proof injects a field directly above this line >>>
 }
 
@@ -269,6 +319,33 @@ impl ComputedStyle {
             align_self: AlignSelf::Auto,
             align_content: AlignContent::Stretch,
             order: 0,
+            // CSS 2.2 §10.4 gives `min-width` the initial value `0` and
+            // `css-sizing-3` §5.1 replaced it with `auto`, which is the value
+            // taken here: the two agree everywhere but on a flex item, where
+            // `auto` is §4.5's automatic minimum and `0` is not. Taking the
+            // older number would let every flex item in every book shrink below
+            // its own longest word.
+            min_width: MinSize::Auto,
+            max_width: MaxSize::None,
+            min_height: MinSize::Auto,
+            max_height: MaxSize::None,
+            vertical_align: VerticalAlign::Baseline,
+            position: Position::Static,
+            inset: Sides::all(Inset::Auto),
+            z_index: ZIndex::Auto,
+            column_count: ColumnCount::Auto,
+            column_width: ColumnWidth::Auto,
+            column_gap: Gap::Normal,
+            row_gap: Gap::Normal,
+            // §5.1's initial value is `medium`, which is `border-width`'s
+            // `medium` and therefore the same three pixels — §5.1 defines the
+            // property *"as for `border-width`"* and a second number here would
+            // be a second answer to one question.
+            column_rule_width: 3.0,
+            column_rule_style: BorderStyle::None,
+            column_rule_color: Color::BLACK,
+            column_span: ColumnSpan::None,
+            column_fill: ColumnFill::Balance,
             // <<< the layout proof's initial value goes here >>>
         }
     }
@@ -461,6 +538,79 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::AlignItems(value) => style.align_items = *value,
         Property::AlignSelf(value) => style.align_self = *value,
         Property::AlignContent(value) => style.align_content = *value,
+        // CSS 2.2 §10.4 and §10.7. The parser already refuses a negative one,
+        // so the clamp is `border-spacing`'s: a computed style is not the place
+        // to discover that a grammar changed.
+        Property::MinWidth(value) => {
+            style.min_width = min_size(value, font_size, root_font_size);
+        }
+        Property::MinHeight(value) => {
+            style.min_height = min_size(value, font_size, root_font_size);
+        }
+        Property::MaxWidth(value) => {
+            style.max_width = max_size(value, font_size, root_font_size);
+        }
+        Property::MaxHeight(value) => {
+            style.max_height = max_size(value, font_size, root_font_size);
+        }
+        // §10.8.1: *"percentages refer to the `line-height` of the element
+        // itself"*, which is the one length in this function that cannot be
+        // resolved here — `line-height: normal` is a face's answer and this
+        // crate has no face. So a percentage survives computation, and
+        // `tinker_pdf_layout::style::consume` resolves it where the used
+        // `line-height` already is.
+        Property::VerticalAlign(value) => {
+            style.vertical_align = match value {
+                SpecifiedVerticalAlign::Baseline => VerticalAlign::Baseline,
+                SpecifiedVerticalAlign::Sub => VerticalAlign::Sub,
+                SpecifiedVerticalAlign::Super => VerticalAlign::Super,
+                SpecifiedVerticalAlign::Top => VerticalAlign::Top,
+                SpecifiedVerticalAlign::Middle => VerticalAlign::Middle,
+                SpecifiedVerticalAlign::Bottom => VerticalAlign::Bottom,
+                SpecifiedVerticalAlign::TextTop => VerticalAlign::TextTop,
+                SpecifiedVerticalAlign::TextBottom => VerticalAlign::TextBottom,
+                SpecifiedVerticalAlign::Length(len) => {
+                    VerticalAlign::Length(len.compute(font_size, root_font_size))
+                }
+            }
+        }
+        Property::Position(value) => style.position = *value,
+        Property::Inset(side, value) => {
+            let computed = match value {
+                SpecifiedInset::Auto => Inset::Auto,
+                SpecifiedInset::Length(len) => {
+                    Inset::Length(len.compute(font_size, root_font_size))
+                }
+            };
+            style.inset.set(*side, computed);
+        }
+        Property::ZIndex(value) => style.z_index = *value,
+        Property::ColumnCount(value) => style.column_count = *value,
+        // §3.1's grammar has no percentage in it, so the `Percent` arm is
+        // unreachable from the parser and resolves to `auto` rather than
+        // panicking — `px`'s reasoning, one property over.
+        Property::ColumnWidth(value) => {
+            style.column_width = match value {
+                SpecifiedColumnWidth::Auto => ColumnWidth::Auto,
+                SpecifiedColumnWidth::Length(len) => match len.compute(font_size, root_font_size) {
+                    LengthPercentage::Px(px) => ColumnWidth::Px(px.max(0.0)),
+                    LengthPercentage::Percent(_) => ColumnWidth::Auto,
+                },
+            }
+        }
+        Property::ColumnGap(value) => {
+            style.column_gap = gap(value, font_size, root_font_size);
+        }
+        Property::RowGap(value) => {
+            style.row_gap = gap(value, font_size, root_font_size);
+        }
+        Property::ColumnRuleWidth(value) => {
+            style.column_rule_width = px(*value, font_size, root_font_size).max(0.0);
+        }
+        Property::ColumnRuleStyle(value) => style.column_rule_style = *value,
+        Property::ColumnRuleColor(value) => style.column_rule_color = *value,
+        Property::ColumnSpan(value) => style.column_span = *value,
+        Property::ColumnFill(value) => style.column_fill = *value,
         Property::Order(value) => style.order = *value,
         // <<< the compile-time proof's fourth arm goes here >>>
     }
@@ -476,6 +626,45 @@ fn px(len: Len, font_size: f64, root_font_size: f64) -> f64 {
     match len.compute(font_size, root_font_size) {
         LengthPercentage::Px(value) => value,
         LengthPercentage::Percent(_) => 0.0,
+    }
+}
+
+/// A specified `min-width`/`min-height` to a computed one.
+fn min_size(value: &SpecifiedMinSize, font_size: f64, root_font_size: f64) -> MinSize {
+    match value {
+        SpecifiedMinSize::Auto => MinSize::Auto,
+        SpecifiedMinSize::Length(len) => {
+            MinSize::Length(clamp_zero(len.compute(font_size, root_font_size)))
+        }
+    }
+}
+
+/// A specified `max-width`/`max-height` to a computed one.
+fn max_size(value: &SpecifiedMaxSize, font_size: f64, root_font_size: f64) -> MaxSize {
+    match value {
+        SpecifiedMaxSize::None => MaxSize::None,
+        SpecifiedMaxSize::Length(len) => {
+            MaxSize::Length(clamp_zero(len.compute(font_size, root_font_size)))
+        }
+    }
+}
+
+/// A specified `column-gap`/`row-gap` to a computed one.
+fn gap(value: &SpecifiedGap, font_size: f64, root_font_size: f64) -> Gap {
+    match value {
+        SpecifiedGap::Normal => Gap::Normal,
+        SpecifiedGap::Length(len) => {
+            Gap::Length(clamp_zero(len.compute(font_size, root_font_size)))
+        }
+    }
+}
+
+/// A computed length floored at zero, for the grammars that have no negative
+/// value in them.
+fn clamp_zero(value: LengthPercentage) -> LengthPercentage {
+    match value {
+        LengthPercentage::Px(px) => LengthPercentage::Px(px.max(0.0)),
+        LengthPercentage::Percent(percent) => LengthPercentage::Percent(percent.max(0.0)),
     }
 }
 
@@ -502,6 +691,81 @@ pub struct StyleTree {
     /// declaration: *"`float`, unimplemented, affected 412 elements"* is a
     /// sentence a host can show, and four hundred identical warnings is not.
     pub report: Report,
+    /// The generated boxes, one entry per element, parallel to `styles`.
+    ///
+    /// Parallel rather than sparse because the consumer walks the element tree
+    /// and asks about every element it reaches; a map would turn a hot loop
+    /// into a lookup for the sake of a book that has none. `Generated::default`
+    /// is two `None`s and costs two words.
+    pub generated: Vec<Generated>,
+}
+
+impl StyleTree {
+    /// The box `which` generated for `element`, if any rule generated one.
+    ///
+    /// **This is the whole door between the cascade and box generation, and
+    /// there is deliberately only one.** `tinker-pdf-layout` has no selector
+    /// engine and is never going to have one -- it takes a box tree and lays it
+    /// out -- so the box has to exist before layout sees anything, which means
+    /// `epub::read::build` has to be able to ask this question while it walks
+    /// the DOM. Everything a generated box needs is on the far side of this
+    /// call: the style, already inherited from the originating element, and the
+    /// text, with `attr()` already resolved.
+    ///
+    /// Returns `None` for `::first-line` and `::first-letter`, which generate
+    /// nothing here and are counted by
+    /// [`crate::Warning::PseudoElementUnsupported`].
+    #[must_use]
+    pub fn pseudo(&self, element: usize, which: PseudoElement) -> Option<&PseudoBox> {
+        let generated = self.generated.get(element)?;
+        match which {
+            PseudoElement::Before => generated.before.as_ref(),
+            PseudoElement::After => generated.after.as_ref(),
+            PseudoElement::FirstLine | PseudoElement::FirstLetter => None,
+        }
+    }
+}
+
+/// What a generated box is computed against.
+///
+/// Three references that always travel together, bundled because they do: the
+/// originating element's computed style (§12.1 inherits from it *and* resolves
+/// `inherit` against it), the initial style `initial` reads, and the root font
+/// size `rem` needs.
+struct Generating<'a> {
+    origin_style: &'a ComputedStyle,
+    initial: &'a ComputedStyle,
+    root_font_size: f64,
+}
+
+/// A box `::before` or `::after` generated, and everything needed to lay it
+/// out.
+///
+/// Only ever produced when `content` cascaded to something other than `none`.
+/// CSS 2.1 §12.2 makes that the condition for the box existing at all, so an
+/// `Option<PseudoBox>` and "does this element have a `::before`" are the same
+/// question, and there is no state where a box exists with nothing in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PseudoBox {
+    /// The generated box's own computed style. Inherited from the
+    /// **originating element**, per §12.1, and not from its parent.
+    pub style: ComputedStyle,
+    /// The text to lay out, with every `attr()` already resolved.
+    ///
+    /// A `String` and not a value tree: `attr()` needs the originating element
+    /// and the cascade is the last place that has one, so resolving it here is
+    /// what keeps `epub::read` from needing a DOM lookup it has no business
+    /// doing.
+    pub text: String,
+}
+
+/// The two pseudo-elements an element can generate a box for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Generated {
+    /// `::before`, laid out ahead of the element's own children.
+    pub before: Option<PseudoBox>,
+    /// `::after`, laid out behind them.
+    pub after: Option<PseudoBox>,
 }
 
 /// One sheet and where in the cascade it sits.
@@ -568,6 +832,7 @@ pub fn cascade_from<E: Element>(
     let matcher = Matcher::build(sheets);
     let mut report = Report::default();
     let mut styles: Vec<ComputedStyle> = Vec::with_capacity(elements.len());
+    let mut generated: Vec<Generated> = Vec::with_capacity(elements.len());
     let mut root_font_size = initial.font_size;
 
     for index in 0..elements.len() {
@@ -576,14 +841,81 @@ pub fn cascade_from<E: Element>(
             None => initial.clone(),
         };
         let winners = matcher.winners(elements, index, &mut report, budget)?;
-        apply_winners(&winners, &mut style, root_font_size);
+        // The parent for §7.1's `inherit`. The root has none, and §7.2 gives
+        // it the initial values -- which is the same style `initial` reads, so
+        // an `inherit` on the root element and an `initial` on it agree, as
+        // they must.
+        let parent = match elements[index].parent() {
+            Some(parent) => styles[parent].clone(),
+            None => initial.clone(),
+        };
+        apply_winners(&winners, &mut style, &parent, initial, root_font_size);
         if elements[index].parent().is_none() {
             root_font_size = style.font_size;
         }
+        // After the element's own style and not before: §12.1 inherits the
+        // generated box from the originating element's **computed** style, so
+        // there is nothing to inherit from until this line has run.
+        let generating = Generating {
+            origin_style: &style,
+            initial,
+            root_font_size,
+        };
+        generated.push(Generated {
+            before: matcher.pseudo_winners(
+                elements,
+                index,
+                PseudoElement::Before,
+                &generating,
+                &mut report,
+                budget,
+            )?,
+            after: matcher.pseudo_winners(
+                elements,
+                index,
+                PseudoElement::After,
+                &generating,
+                &mut report,
+                budget,
+            )?,
+        });
         styles.push(style);
     }
 
-    Ok(StyleTree { styles, report })
+    Ok(StyleTree {
+        styles,
+        report,
+        generated,
+    })
+}
+
+/// What the cascade decided for one property, before it is written down.
+///
+/// Two shapes because §7.1's defaulting keywords carry no value: a declaration
+/// that won with `inherit` names a property and a *place to read it from*, and
+/// the reading needs the parent's computed style, which the matcher does not
+/// have.
+///
+/// `revert` and `revert-layer` never reach here. They are resolved inside
+/// [`Matcher::winners`], where the losing declarations are still in hand --
+/// rolling back to a previous origin means *taking that origin's winner*, and
+/// there is nowhere else the loser is still known.
+#[derive(Clone, Debug)]
+enum Winner {
+    /// A declaration with a value.
+    Value(Property),
+    /// One of §7.1's first three keywords, on a named property.
+    Default(Longhand, Defaulting),
+}
+
+impl Winner {
+    /// Whether this is `font-size`, which [`apply_winners`] applies first.
+    fn is_font_size(&self) -> bool {
+        match self {
+            Winner::Value(property) => matches!(property, Property::FontSize(_)),
+            Winner::Default(longhand, _) => *longhand == Longhand::FontSize,
+        }
+    }
 }
 
 /// Applies the winning declarations, `font-size` first.
@@ -593,40 +925,296 @@ pub fn cascade_from<E: Element>(
 /// `font-size` won. A single pass in cascade order resolves the em against
 /// whatever the parent had whenever `font-size` happens to sort later, which is
 /// right about half the time and wrong silently the rest.
-fn apply_winners(winners: &[Property], style: &mut ComputedStyle, root_font_size: f64) {
-    for property in winners {
-        if matches!(property, Property::FontSize(_)) {
-            apply(property, style, root_font_size);
+fn apply_winners(
+    winners: &[Winner],
+    style: &mut ComputedStyle,
+    parent: &ComputedStyle,
+    initial: &ComputedStyle,
+    root_font_size: f64,
+) {
+    for winner in winners {
+        if winner.is_font_size() {
+            apply_winner(winner, style, parent, initial, root_font_size);
         }
     }
-    for property in winners {
-        if !matches!(property, Property::FontSize(_)) {
-            apply(property, style, root_font_size);
+    for winner in winners {
+        if !winner.is_font_size() {
+            apply_winner(winner, style, parent, initial, root_font_size);
         }
     }
 }
 
-/// The rules of every sheet, bucketed, with their origin and source order.
+/// One winner, written into the style.
+///
+/// The three keywords that reach here read a **computed** value out of another
+/// style, so there is no `root_font_size` in that path and there cannot be: the
+/// value was resolved on the element it is being taken from.
+///
+/// `unset` looks like a no-op through this code and very nearly is one:
+/// [`ComputedStyle::inherit_from`] has already started this element from the
+/// parent's inherited properties and the initial values of the rest, which is
+/// exactly what §7.1 defines `unset` to mean. It is written out anyway rather
+/// than skipped, because "it happens to be what the starting state already is"
+/// is a fact about `inherit_from`, and a build that relied on it silently would
+/// be wrong the day that function changes.
+fn apply_winner(
+    winner: &Winner,
+    style: &mut ComputedStyle,
+    parent: &ComputedStyle,
+    initial: &ComputedStyle,
+    root_font_size: f64,
+) {
+    match winner {
+        Winner::Value(property) => apply(property, style, root_font_size),
+        Winner::Default(longhand, keyword) => {
+            let from = match keyword {
+                Defaulting::Inherit => parent,
+                Defaulting::Initial => initial,
+                // §7.1: `unset` is `inherit` for an inherited property and
+                // `initial` for the rest. The one keyword whose answer depends
+                // on the property it is written on.
+                Defaulting::Unset => {
+                    if longhand.inherited() {
+                        parent
+                    } else {
+                        initial
+                    }
+                }
+                // Resolved in `winners`; see [`Winner`].
+                Defaulting::Revert | Defaulting::RevertLayer => initial,
+            };
+            copy_computed(*longhand, from, style);
+        }
+    }
+}
+
+/// One node of an origin's layer tree.
+struct LayerNode {
+    key: LayerKey,
+    /// Sub-layers, in the order their names were first seen — which is
+    /// §6.4.2's order, and the reason the parser records first mention rather
+    /// than every mention.
+    children: Vec<usize>,
+}
+
+/// What makes two layer parts the same layer.
+#[derive(PartialEq, Eq)]
+enum LayerKey {
+    /// The origin itself: the implicit outer layer that unlayered styles are
+    /// in, and the parent of every named one.
+    Root,
+    /// A name, which two sheets of the same origin share — that is the whole
+    /// point of `@layer a` appearing in two files.
+    Named(String),
+    /// `@layer { … }`, keyed by the sheet that wrote it as well as by its
+    /// ordinal, because an anonymous layer in one sheet is **not** the
+    /// anonymous layer in the next: nothing can name either, so nothing can
+    /// put a rule in both.
+    Anonymous { sheet: usize, ordinal: usize },
+}
+
+/// One origin's layer tree, flattened into §6.4.2's order.
+#[derive(Default)]
+struct LayerTree {
+    nodes: Vec<LayerNode>,
+    /// A node's position in the order, **higher winning**, which is the shape
+    /// every field of [`CascadeKey`] is in.
+    position: Vec<u32>,
+    /// The root's position, which is the largest of them. Subtracting from it
+    /// is §6.1's `!important` layer reversal, and it is one subtraction rather
+    /// than a second sort because reversing an order is what it is.
+    top: u32,
+}
+
+impl LayerTree {
+    /// The node one layer name resolves to, creating what is not there yet.
+    fn insert(&mut self, sheet: usize, name: &[LayerPart]) -> usize {
+        let mut at = 0;
+        for part in name {
+            let key = match part {
+                LayerPart::Named(name) => LayerKey::Named(name.clone()),
+                LayerPart::Anonymous(ordinal) => LayerKey::Anonymous {
+                    sheet,
+                    ordinal: *ordinal,
+                },
+            };
+            let mut found = None;
+            for &child in &self.nodes[at].children {
+                if self.nodes[child].key == key {
+                    found = Some(child);
+                    break;
+                }
+            }
+            at = match found {
+                Some(child) => child,
+                None => {
+                    let child = self.nodes.len();
+                    self.nodes.push(LayerNode {
+                        key,
+                        children: Vec::new(),
+                    });
+                    self.nodes[at].children.push(child);
+                    child
+                }
+            };
+        }
+        at
+    }
+
+    /// §6.4.2's order, as a number per node: **sub-layers first, then the layer
+    /// itself**, and the root last of all.
+    ///
+    /// A layer's own rules are the implicit last sub-layer of it, exactly as
+    /// unlayered rules are the implicit last layer of the origin — the same
+    /// clause one level down, which is why one post-order walk produces both
+    /// and why the root's position is the unlayered one.
+    ///
+    /// The walk carries its own stack rather than recursing.
+    /// [`Stylesheet::layers`] is a public field, so a caller can hand this a
+    /// tree deeper than the parser would ever build, and a leaf crate does not
+    /// get to overflow the stack over it (ruling 1).
+    fn flatten(&mut self) {
+        self.position = vec![0; self.nodes.len()];
+        let mut next = 0u32;
+        let mut stack = vec![(0usize, 0usize)];
+        while let Some((at, child)) = stack.pop() {
+            match self.nodes[at].children.get(child) {
+                Some(&descend) => {
+                    stack.push((at, child + 1));
+                    stack.push((descend, 0));
+                }
+                None => {
+                    self.position[at] = next;
+                    next = next.saturating_add(1);
+                }
+            }
+        }
+        self.top = next.saturating_sub(1);
+    }
+}
+
+/// Every origin's layer tree, and the map from a sheet's own layer list into
+/// the tree of the origin that sheet belongs to.
+///
+/// **Per origin**, because that is what §6.4.2 says a layer name is scoped to:
+/// the author's `@layer a` and the user-agent sheet's `@layer a` are two
+/// different layers, and a build with one global table would let a book's
+/// stylesheet reorder this engine's own.
+#[derive(Default)]
+struct Layers {
+    trees: [LayerTree; 3],
+    /// `[sheet][the sheet's own layer index]` — the node it resolves to.
+    placed: Vec<Vec<usize>>,
+}
+
+/// Which tree an origin's layers live in. Not [`Origin`]'s cascade weight —
+/// [`rank`] is that — but a slot, and the two are different numbers on purpose.
+fn slot(origin: Origin) -> usize {
+    match origin {
+        Origin::UserAgent => 0,
+        Origin::User => 1,
+        Origin::Author => 2,
+    }
+}
+
+impl Layers {
+    fn build(sheets: &[Sheet<'_>]) -> Self {
+        let mut layers = Layers::default();
+        for tree in &mut layers.trees {
+            tree.nodes.push(LayerNode {
+                key: LayerKey::Root,
+                children: Vec::new(),
+            });
+        }
+        for (at, (origin, sheet)) in sheets.iter().enumerate() {
+            let tree = &mut layers.trees[slot(*origin)];
+            let mut placed = Vec::with_capacity(sheet.layers.len());
+            for name in &sheet.layers {
+                placed.push(tree.insert(at, name));
+            }
+            layers.placed.push(placed);
+        }
+        for tree in &mut layers.trees {
+            tree.flatten();
+        }
+        layers
+    }
+
+    /// The node a rule's layer resolves to; the root, which is the unlayered
+    /// position, for a rule in no layer.
+    ///
+    /// An index a caller-built sheet does not have resolves to the root rather
+    /// than panicking, which is the same answer as *unlayered* — the honest
+    /// reading of a sheet that names a layer it did not declare.
+    fn node(&self, sheet: usize, layer: Option<usize>) -> usize {
+        let Some(layer) = layer else { return 0 };
+        self.placed
+            .get(sheet)
+            .and_then(|placed| placed.get(layer))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// §6.1's fourth criterion for one declaration, higher winning.
+    ///
+    /// **The `!important` half is the mirror image and not a special case.**
+    /// The root — unlayered — is the highest position, so a normal unlayered
+    /// declaration beats every layer and an important one loses to every layer,
+    /// which is the answer a build that reversed only the origins gets exactly
+    /// backwards.
+    fn key(&self, origin: Origin, node: usize, important: bool) -> u32 {
+        let tree = &self.trees[slot(origin)];
+        let position = tree.position.get(node).copied().unwrap_or(0);
+        if important {
+            tree.top.saturating_sub(position)
+        } else {
+            position
+        }
+    }
+}
+
+/// One rule with everything §6.1 sorts it by that does not depend on the
+/// element: its origin, its layer both ways round, and its source order.
+struct Placed<'a> {
+    origin: Origin,
+    /// §6.1 criterion 4, for a normal declaration.
+    layer: u32,
+    /// §6.1 criterion 4, for an `!important` one.
+    layer_important: u32,
+    /// §6.1 criterion 6: counts up across every sheet in the order the caller
+    /// gave them.
+    order: usize,
+    rule: &'a StyleRule,
+}
+
+/// The rules of every sheet, bucketed, with their origin, layer and order.
 struct Matcher<'a> {
-    /// `(origin, order, rule)` — `order` counts up across every sheet in the
-    /// order the caller gave them, which is §6.1's sixth criterion.
-    rules: Vec<(Origin, usize, &'a StyleRule)>,
+    rules: Vec<Placed<'a>>,
     /// `handle` is an index into a flattened `(rule index, selector index)`
     /// list, so one bucket entry names one selector.
     selectors: Vec<(usize, usize)>,
     index: Index,
+    layers: Layers,
 }
 
 impl<'a> Matcher<'a> {
     fn build(sheets: &[Sheet<'a>]) -> Self {
+        let layers = Layers::build(sheets);
         let mut rules = Vec::new();
         let mut selectors = Vec::new();
         let mut index = Index::default();
         let mut order = 0usize;
-        for (origin, sheet) in sheets {
+        for (at, (origin, sheet)) in sheets.iter().enumerate() {
             for rule in &sheet.rules {
                 let rule_at = rules.len();
-                rules.push((*origin, order, rule));
+                let node = layers.node(at, rule.layer);
+                rules.push(Placed {
+                    origin: *origin,
+                    layer: layers.key(*origin, node, false),
+                    layer_important: layers.key(*origin, node, true),
+                    order,
+                    rule,
+                });
                 order += 1;
                 for (selector_at, selector) in rule.selectors.iter().enumerate() {
                     let handle = selectors.len();
@@ -639,6 +1227,7 @@ impl<'a> Matcher<'a> {
             rules,
             selectors,
             index,
+            layers,
         }
     }
 
@@ -648,29 +1237,175 @@ impl<'a> Matcher<'a> {
     /// laziness: a `style=""` attribute is parsed inside this function and its
     /// declarations do not outlive it, so a borrowed return would tie every
     /// element's style to a vector that dies at the end of the call.
+    /// The declarations that reach `element`'s `which` box, cascaded.
+    ///
+    /// The same sort as [`Matcher::winners`] over a different candidate set:
+    /// selectors whose trailing pseudo-element is `which` and whose subject is
+    /// this element. `selector::matches` says no to every one of those --
+    /// deliberately, so `p::before { color: red }` does not colour the
+    /// paragraph -- so this asks `selector::matches_originating` instead, which
+    /// is the same matching with a different subject.
+    ///
+    /// Inline `style=""` is not consulted. There is no syntax for a
+    /// pseudo-element in an attribute, so a `style=""` declaration cannot
+    /// address one; including them would give every generated box the
+    /// element's own inline styles, which is §6.1 criterion 3 applied to
+    /// something it was not written about.
+    ///
+    /// Returns `None` unless `content` cascaded to something. §12.2 makes that
+    /// the condition for the box existing, and the style of a box that does not
+    /// exist is not a thing worth computing.
+    fn pseudo_winners<E: Element>(
+        &self,
+        elements: &[E],
+        at: usize,
+        which: PseudoElement,
+        from: &Generating<'_>,
+        report: &mut Report,
+        budget: &mut Budget,
+    ) -> Result<Option<PseudoBox>, Refusal> {
+        let mut matched: Vec<(CascadeKey, Origin, &Declared)> = Vec::new();
+        for handle in self.index.candidates(&elements[at]) {
+            let (rule_at, selector_at) = self.selectors[handle];
+            let placed = &self.rules[rule_at];
+            let selector = &placed.rule.selectors[selector_at];
+            if selector.pseudo_element != Some(which) {
+                continue;
+            }
+            if !selector::matches_originating(selector, elements, at, budget)? {
+                continue;
+            }
+            for declared in &placed.rule.declarations {
+                matched.push((
+                    CascadeKey {
+                        rank: rank(placed.origin, declared.important),
+                        attached: false,
+                        layer: if declared.important {
+                            placed.layer_important
+                        } else {
+                            placed.layer
+                        },
+                        specificity: selector.specificity,
+                        order: placed.order,
+                    },
+                    placed.origin,
+                    declared,
+                ));
+            }
+        }
+        if matched.is_empty() {
+            return Ok(None);
+        }
+        matched.sort_by_key(|(key, _, _)| *key);
+
+        // The gaps are counted **before** the early return below, and that
+        // ordering is the whole of it. `Matcher::winners` walks the same rules
+        // but reaches them through `selector::matches`, which says no to every
+        // pseudo-element selector — so a `content: url(a.png)` or a
+        // `float: left` inside `p::before` is a gap no other pass can see. And
+        // the commonest such rule is one whose `content` this build refused,
+        // which is exactly the rule that generates no box: counting after the
+        // return reported none of them. This file's own test caught it.
+        for (_, _, declared) in &matched {
+            match &declared.declaration {
+                crate::property::Declaration::Unsupported { property, .. } => {
+                    note(&mut report.unsupported, property);
+                }
+                crate::property::Declaration::Unknown { property } => {
+                    note_owned(&mut report.unknown, property);
+                }
+                _ => {}
+            }
+        }
+
+        // `content` next: a box whose content is `none` is not generated, and
+        // computing a style for it would be work with nothing to show for it.
+        let mut content: Option<&ContentValue> = None;
+        for (_, _, declared) in &matched {
+            if let crate::property::Declaration::Content(value) = &declared.declaration {
+                content = Some(value);
+            }
+        }
+        let items = match content {
+            Some(ContentValue::Items(items)) => items,
+            // No `content` at all, or `content: none`. §12.2: no box.
+            _ => return Ok(None),
+        };
+
+        let mut text = String::new();
+        for item in items {
+            match item {
+                ContentItem::Text(literal) => text.push_str(literal),
+                // §2.4: an attribute the element does not carry contributes the
+                // empty string, which is the specification's own answer and not
+                // a fallback invented here.
+                ContentItem::Attr(name) => {
+                    text.push_str(elements[at].attribute(name).unwrap_or(""));
+                }
+            }
+        }
+
+        let mut winners: Vec<(Longhand, usize)> = Vec::new();
+        for (index, (_, _, declared)) in matched.iter().enumerate() {
+            match &declared.declaration {
+                crate::property::Declaration::Known(property) => {
+                    note_winner(&mut winners, property.longhand(), index);
+                }
+                crate::property::Declaration::Defaulted { longhand, .. } => {
+                    note_winner(&mut winners, *longhand, index);
+                }
+                _ => {}
+            }
+        }
+        let resolved: Vec<Winner> = winners
+            .into_iter()
+            .map(|(longhand, index)| resolve_rollbacks(longhand, index, &matched))
+            .collect();
+
+        // §12.1: a generated box inherits from its **originating element**, not
+        // from that element's parent. So the parent for both inheritance and
+        // `inherit` is `origin_style`, and `em` resolves against the originating
+        // element's font size, which is what `inherit_from` carries over.
+        let mut style = ComputedStyle::inherit_from(from.origin_style);
+        apply_winners(
+            &resolved,
+            &mut style,
+            from.origin_style,
+            from.initial,
+            from.root_font_size,
+        );
+        Ok(Some(PseudoBox { style, text }))
+    }
+
     fn winners<E: Element>(
         &self,
         elements: &[E],
         at: usize,
         report: &mut Report,
         budget: &mut Budget,
-    ) -> Result<Vec<Property>, Refusal> {
-        let mut matched: Vec<(CascadeKey, &Declared)> = Vec::new();
+    ) -> Result<Vec<Winner>, Refusal> {
+        let mut matched: Vec<(CascadeKey, Origin, &Declared)> = Vec::new();
         for handle in self.index.candidates(&elements[at]) {
             let (rule_at, selector_at) = self.selectors[handle];
-            let (origin, order, rule) = self.rules[rule_at];
-            let selector = &rule.selectors[selector_at];
+            let placed = &self.rules[rule_at];
+            let selector = &placed.rule.selectors[selector_at];
             if !selector::matches(selector, elements, at, budget)? {
                 continue;
             }
-            for declared in &rule.declarations {
+            for declared in &placed.rule.declarations {
                 matched.push((
                     CascadeKey {
-                        rank: rank(origin, declared.important),
+                        rank: rank(placed.origin, declared.important),
                         attached: false,
+                        layer: if declared.important {
+                            placed.layer_important
+                        } else {
+                            placed.layer
+                        },
                         specificity: selector.specificity,
-                        order,
+                        order: placed.order,
                     },
+                    placed.origin,
                     declared,
                 ));
             }
@@ -688,9 +1423,17 @@ impl<'a> Matcher<'a> {
                 CascadeKey {
                     rank: rank(Origin::Author, declared.important),
                     attached: true,
+                    // A `style=""` attribute cannot be in a layer — there is no
+                    // syntax for it — so it takes the unlayered position, which
+                    // is the root's. Criterion 3 already sorts it above every
+                    // layered declaration at the same rank, so this decides
+                    // nothing; it is here because a field left at zero would
+                    // *look* like the weakest layer to the next reader.
+                    layer: self.layers.key(Origin::Author, 0, declared.important),
                     specificity: Specificity::ZERO,
                     order: usize::MAX,
                 },
+                Origin::Author,
                 declared,
             ));
         }
@@ -698,18 +1441,22 @@ impl<'a> Matcher<'a> {
         // A stable sort, so two declarations with an identical key keep the
         // order they were pushed in — which for two declarations of the same
         // property inside one rule is the order the author wrote them.
-        matched.sort_by_key(|(key, _)| *key);
+        matched.sort_by_key(|(key, _, _)| *key);
 
-        let mut winners: Vec<(&'static str, Property)> = Vec::new();
-        for (_, declared) in &matched {
+        let mut winners: Vec<(Longhand, usize)> = Vec::new();
+        for (index, (_, _, declared)) in matched.iter().enumerate() {
             match &declared.declaration {
                 crate::property::Declaration::Known(property) => {
-                    let name = property.name();
-                    match winners.iter_mut().find(|(n, _)| *n == name) {
-                        Some(slot) => slot.1 = property.clone(),
-                        None => winners.push((name, property.clone())),
-                    }
+                    note_winner(&mut winners, property.longhand(), index);
                 }
+                crate::property::Declaration::Defaulted { longhand, .. } => {
+                    note_winner(&mut winners, *longhand, index);
+                }
+                // §12.2 applies `content` to `::before` and `::after` only, so
+                // one that reached an ordinary element is a declaration that
+                // legitimately does nothing. Not counted, because it is not
+                // this build's gap; `pseudo_winners` is where it is read.
+                crate::property::Declaration::Content(_) => {}
                 // Counted **here**, where it is known to have reached an
                 // element, rather than only at parse time. A `float: left` in
                 // a rule that matches nothing is not a gap this book noticed.
@@ -721,8 +1468,115 @@ impl<'a> Matcher<'a> {
                 }
             }
         }
-        Ok(winners.into_iter().map(|(_, property)| property).collect())
+
+        Ok(winners
+            .into_iter()
+            .map(|(longhand, index)| resolve_rollbacks(longhand, index, &matched))
+            .collect())
     }
+}
+
+/// Records that `index` is the strongest declaration seen so far for
+/// `longhand`.
+fn note_winner(winners: &mut Vec<(Longhand, usize)>, longhand: Longhand, index: usize) {
+    match winners.iter_mut().find(|(l, _)| *l == longhand) {
+        Some(slot) => slot.1 = index,
+        None => winners.push((longhand, index)),
+    }
+}
+
+/// §7.1's two rollback keywords, resolved against the declarations that lost.
+///
+/// A `revert` **is** the cascaded value -- it beat everything else -- and what
+/// it means is *compute this property as though a whole cascade origin had said
+/// nothing about it*. So the answer is the winner of what is left after that
+/// origin is removed, which is why this runs here, over the sorted list, and
+/// not in `apply`: by the time a style is being written the losers are gone.
+///
+/// The two differ in what they remove, and this is the distinction that makes
+/// them two keywords:
+///
+/// * `revert` removes **its own origin and every origin above it**. An author
+///   `revert` leaves the user and user-agent declarations, which is §7.1's
+///   "as if no author-level rules were specified".
+/// * `revert-layer` removes **only what sorts at or above it inside its own
+///   cascade level** -- the same origin and importance, at its layer or a later
+///   one. Everything in an earlier layer of that level survives, and so does
+///   every lower level, which is what makes an unlayered `revert-layer` roll
+///   back to the previous origin rather than to nothing.
+///
+/// Rollbacks chain: the declaration a `revert` lands on may itself be one.
+/// Each step strictly shrinks the candidate set, so the loop ends; the bound is
+/// the list length and it is written down rather than assumed.
+///
+/// When nothing is left the property is `unset`, which §7.1 gives as the
+/// meaning of a `revert` with no origin beneath it.
+fn resolve_rollbacks(
+    longhand: Longhand,
+    from: usize,
+    matched: &[(CascadeKey, Origin, &Declared)],
+) -> Winner {
+    let mut at = from;
+    for _ in 0..=matched.len() {
+        let (key, origin, declared) = &matched[at];
+        let keyword = match &declared.declaration {
+            crate::property::Declaration::Known(property) => {
+                return Winner::Value(property.clone())
+            }
+            crate::property::Declaration::Defaulted { keyword, .. } => *keyword,
+            // Nothing else can be a winner: `note_winner` is only reached from
+            // the two arms above.
+            _ => return Winner::Default(longhand, Defaulting::Unset),
+        };
+        let (rank, layer, origin) = (key.rank, key.layer, *origin);
+        match keyword {
+            Defaulting::Inherit | Defaulting::Initial | Defaulting::Unset => {
+                return Winner::Default(longhand, keyword)
+            }
+            Defaulting::Revert => {
+                match strongest_below(longhand, &matched[..at], |_, other, _| other < origin) {
+                    Some(next) => at = next,
+                    None => return Winner::Default(longhand, Defaulting::Unset),
+                }
+            }
+            Defaulting::RevertLayer => {
+                let keep = |key: &CascadeKey, other: Origin, _: &Declared| {
+                    if other != origin {
+                        return other < origin;
+                    }
+                    key.rank < rank || (key.rank == rank && key.layer < layer)
+                };
+                match strongest_below(longhand, &matched[..at], keep) {
+                    Some(next) => at = next,
+                    None => return Winner::Default(longhand, Defaulting::Unset),
+                }
+            }
+        }
+    }
+    Winner::Default(longhand, Defaulting::Unset)
+}
+
+/// The strongest declaration for `longhand` among `earlier` that `keep` admits.
+///
+/// `earlier` is the already-sorted prefix, weakest first, so the last match is
+/// the strongest one.
+fn strongest_below(
+    longhand: Longhand,
+    earlier: &[(CascadeKey, Origin, &Declared)],
+    keep: impl Fn(&CascadeKey, Origin, &Declared) -> bool,
+) -> Option<usize> {
+    earlier
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, (key, origin, declared))| {
+            let names = match &declared.declaration {
+                crate::property::Declaration::Known(property) => property.longhand() == longhand,
+                crate::property::Declaration::Defaulted { longhand: l, .. } => *l == longhand,
+                _ => false,
+            };
+            (names && keep(key, *origin, declared)).then_some(i)
+        })
 }
 
 fn note(counts: &mut Vec<(&'static str, usize)>, name: &'static str) {
@@ -771,11 +1625,12 @@ fn lazily<E: Element>(
     report: &mut Report,
     budget: &mut Budget,
 ) -> Result<ComputedStyle, Refusal> {
+    let parent_style = match elements[at].parent() {
+        Some(parent) => lazily(matcher, elements, parent, report, budget)?,
+        None => ComputedStyle::initial(),
+    };
     let mut style = match elements[at].parent() {
-        Some(parent) => {
-            let parent_style = lazily(matcher, elements, parent, report, budget)?;
-            ComputedStyle::inherit_from(&parent_style)
-        }
+        Some(_) => ComputedStyle::inherit_from(&parent_style),
         None => ComputedStyle::initial(),
     };
     let root_font_size = {
@@ -793,6 +1648,143 @@ fn lazily<E: Element>(
         }
     };
     let winners = matcher.winners(elements, at, report, budget)?;
-    apply_winners(&winners, &mut style, root_font_size);
+    let initial = ComputedStyle::initial();
+    apply_winners(
+        &winners,
+        &mut style,
+        &parent_style,
+        &initial,
+        root_font_size,
+    );
     Ok(style)
+}
+
+/// Copies one property's **computed** value from one style into another.
+///
+/// This is what §7.1's defaulting keywords do once the cascade has decided
+/// which style to take the value from: `inherit` reads the parent's, `initial`
+/// reads the initial style's, and `unset` reads whichever of the two
+/// [`Longhand::inherited`] names.
+///
+/// Computed to computed, never specified to computed. `font-size: inherit`
+/// takes the parent's **resolved pixels**: turning that back into a
+/// `SpecifiedFontSize` would re-resolve `em` against the wrong element, and no
+/// specified value can express "whatever the parent computed" at all.
+///
+/// Exhaustive over [`Longhand`], so a property cannot be added that defaulting
+/// silently skips.
+fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedStyle) {
+    match longhand {
+        Longhand::Color => into.color = from.color,
+        // The one field that is not `Copy`, and therefore the one clone.
+        Longhand::FontFamily => into.font_family.clone_from(&from.font_family),
+        Longhand::FontSize => into.font_size = from.font_size,
+        Longhand::FontStyle => into.font_style = from.font_style,
+        Longhand::FontVariant => into.font_variant = from.font_variant,
+        Longhand::FontWeight => into.font_weight = from.font_weight,
+        Longhand::LineHeight => into.line_height = from.line_height,
+        Longhand::LetterSpacing => into.letter_spacing = from.letter_spacing,
+        Longhand::WordSpacing => into.word_spacing = from.word_spacing,
+        Longhand::TextAlign => into.text_align = from.text_align,
+        Longhand::TextIndent => into.text_indent = from.text_indent,
+        Longhand::TextDecoration => into.text_decoration = from.text_decoration,
+        Longhand::WhiteSpace => into.white_space = from.white_space,
+        Longhand::ListStyleType => into.list_style_type = from.list_style_type,
+        Longhand::Visibility => into.visibility = from.visibility,
+        Longhand::Display => into.display = from.display,
+        Longhand::Float => into.float = from.float,
+        Longhand::Clear => into.clear = from.clear,
+        Longhand::BoxSizing => into.box_sizing = from.box_sizing,
+        Longhand::Width => into.width = from.width,
+        Longhand::Height => into.height = from.height,
+        Longhand::MarginTop => into.margin.set(Side::Top, from.margin.get(Side::Top)),
+        Longhand::MarginRight => into.margin.set(Side::Right, from.margin.get(Side::Right)),
+        Longhand::MarginBottom => into.margin.set(Side::Bottom, from.margin.get(Side::Bottom)),
+        Longhand::MarginLeft => into.margin.set(Side::Left, from.margin.get(Side::Left)),
+        Longhand::PaddingTop => into.padding.set(Side::Top, from.padding.get(Side::Top)),
+        Longhand::PaddingRight => into.padding.set(Side::Right, from.padding.get(Side::Right)),
+        Longhand::PaddingBottom => into
+            .padding
+            .set(Side::Bottom, from.padding.get(Side::Bottom)),
+        Longhand::PaddingLeft => into.padding.set(Side::Left, from.padding.get(Side::Left)),
+        Longhand::BorderWidthTop => into
+            .border_width
+            .set(Side::Top, from.border_width.get(Side::Top)),
+        Longhand::BorderWidthRight => into
+            .border_width
+            .set(Side::Right, from.border_width.get(Side::Right)),
+        Longhand::BorderWidthBottom => into
+            .border_width
+            .set(Side::Bottom, from.border_width.get(Side::Bottom)),
+        Longhand::BorderWidthLeft => into
+            .border_width
+            .set(Side::Left, from.border_width.get(Side::Left)),
+        Longhand::BorderStyleTop => into
+            .border_style
+            .set(Side::Top, from.border_style.get(Side::Top)),
+        Longhand::BorderStyleRight => into
+            .border_style
+            .set(Side::Right, from.border_style.get(Side::Right)),
+        Longhand::BorderStyleBottom => into
+            .border_style
+            .set(Side::Bottom, from.border_style.get(Side::Bottom)),
+        Longhand::BorderStyleLeft => into
+            .border_style
+            .set(Side::Left, from.border_style.get(Side::Left)),
+        Longhand::BorderColorTop => into
+            .border_color
+            .set(Side::Top, from.border_color.get(Side::Top)),
+        Longhand::BorderColorRight => into
+            .border_color
+            .set(Side::Right, from.border_color.get(Side::Right)),
+        Longhand::BorderColorBottom => into
+            .border_color
+            .set(Side::Bottom, from.border_color.get(Side::Bottom)),
+        Longhand::BorderColorLeft => into
+            .border_color
+            .set(Side::Left, from.border_color.get(Side::Left)),
+        Longhand::BackgroundColor => into.background_color = from.background_color,
+        Longhand::PageBreakBefore => into.page_break_before = from.page_break_before,
+        Longhand::PageBreakAfter => into.page_break_after = from.page_break_after,
+        Longhand::PageBreakInside => into.page_break_inside = from.page_break_inside,
+        Longhand::Orphans => into.orphans = from.orphans,
+        Longhand::Widows => into.widows = from.widows,
+        Longhand::OverflowWrap => into.overflow_wrap = from.overflow_wrap,
+        Longhand::LineBreak => into.line_break = from.line_break,
+        Longhand::WordBreak => into.word_break = from.word_break,
+        Longhand::BorderCollapse => into.border_collapse = from.border_collapse,
+        Longhand::BorderSpacing => into.border_spacing = from.border_spacing,
+        Longhand::TableLayout => into.table_layout = from.table_layout,
+        Longhand::FlexDirection => into.flex_direction = from.flex_direction,
+        Longhand::FlexWrap => into.flex_wrap = from.flex_wrap,
+        Longhand::FlexGrow => into.flex_grow = from.flex_grow,
+        Longhand::FlexShrink => into.flex_shrink = from.flex_shrink,
+        Longhand::FlexBasis => into.flex_basis = from.flex_basis,
+        Longhand::JustifyContent => into.justify_content = from.justify_content,
+        Longhand::AlignItems => into.align_items = from.align_items,
+        Longhand::AlignSelf => into.align_self = from.align_self,
+        Longhand::AlignContent => into.align_content = from.align_content,
+        Longhand::Order => into.order = from.order,
+        Longhand::MinWidth => into.min_width = from.min_width,
+        Longhand::MaxWidth => into.max_width = from.max_width,
+        Longhand::MinHeight => into.min_height = from.min_height,
+        Longhand::MaxHeight => into.max_height = from.max_height,
+        Longhand::VerticalAlign => into.vertical_align = from.vertical_align,
+        Longhand::Position => into.position = from.position,
+        Longhand::InsetTop => into.inset.set(Side::Top, from.inset.get(Side::Top)),
+        Longhand::InsetRight => into.inset.set(Side::Right, from.inset.get(Side::Right)),
+        Longhand::InsetBottom => into.inset.set(Side::Bottom, from.inset.get(Side::Bottom)),
+        Longhand::InsetLeft => into.inset.set(Side::Left, from.inset.get(Side::Left)),
+        Longhand::ZIndex => into.z_index = from.z_index,
+        Longhand::ColumnCount => into.column_count = from.column_count,
+        Longhand::ColumnWidth => into.column_width = from.column_width,
+        Longhand::ColumnGap => into.column_gap = from.column_gap,
+        Longhand::RowGap => into.row_gap = from.row_gap,
+        Longhand::ColumnRuleWidth => into.column_rule_width = from.column_rule_width,
+        Longhand::ColumnRuleStyle => into.column_rule_style = from.column_rule_style,
+        Longhand::ColumnRuleColor => into.column_rule_color = from.column_rule_color,
+        Longhand::ColumnSpan => into.column_span = from.column_span,
+        Longhand::ColumnFill => into.column_fill = from.column_fill,
+        // <<< the compile-time proof's eighth arm goes here >>>
+    }
 }

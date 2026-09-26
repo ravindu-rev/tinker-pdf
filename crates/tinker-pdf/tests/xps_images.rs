@@ -1,5 +1,5 @@
-//! `ImageBrush`, its two rectangles, its five tile modes and the two formats
-//! this build refuses (gap 30, milestone 8).
+//! `ImageBrush`, its two rectangles, its five tile modes and all four of
+//! 9.1.5's image formats, every one of which now reaches the page.
 //!
 //! # Why the route is asserted and not only the picture
 //!
@@ -16,7 +16,7 @@
 //! Five milestones running have found the same defect shape, stated in gap 30
 //! milestone 5's progress section as one rule: *when a thing has two
 //! independent consequences, a test for one of them is not a test.* This file
-//! has four such pairs and each gets two tests:
+//! has five such pairs and each gets two tests:
 //!
 //! - `Viewbox` and `Viewport` are two rectangles in two spaces, and swapping
 //!   them is a defect no single-rectangle assertion sees.
@@ -25,6 +25,10 @@
 //!   part is a TIFF, and gap 30 milestone 3's survivor was exactly this shape.
 //! - a refused image has two consequences: it is named, **and** the rest of the
 //!   page still draws.
+//! - a **lenient** image has two as well: the disagreement between the two
+//!   identification rules is named, **and** it is named once however many
+//!   times the page uses the part — which is `State::warn`'s deduplication and
+//!   is invisible to any package that draws its picture once.
 
 mod xps_support;
 
@@ -57,6 +61,15 @@ fn package_with(image: Part, attributes: &str, types: Option<&str>) -> Vec<u8> {
         parts = with(parts, "[Content_Types].xml", types);
     }
     archive(before_content_types(parts, image))
+}
+
+/// A package whose one page carries `body` verbatim, with the 4 x 2 PNG in it.
+fn package_body(body: &str) -> Vec<u8> {
+    let markup = format!(
+        r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
+    );
+    let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
+    archive(before_content_types(parts, png_part()))
 }
 
 /// A 4 × 2 PNG, which passes through, and its part.
@@ -570,23 +583,23 @@ fn a_content_type_in_another_case_still_names_its_format() {
     assert_eq!(defects(&bytes), [], "IMAGE/PNG is image/png");
 }
 
-/// An `ImageSource` behind a colour profile is refused by its own name.
+/// A real RGB profile, the same fixture the `ContextColor` tests use.
+const RGB_PROFILE: &[u8] = include_bytes!("../../../fuzz/corpus/icc_profile/rgb-gamma-curve.icc");
+
+/// An `ImageSource` behind a colour profile is **read**, and the profile goes
+/// with the picture.
 ///
-/// 9.1.5's `{ColorConvertedBitmap ...}` names an ICC profile, which is a
-/// non-goal of this whole plan, and the syntax has nowhere to put an sRGB
-/// fallback — so drawing the picture unconverted would be colours the file did
-/// not ask for, which is the shape gap 18a's plausible photograph had.
+/// 9.1.5's `{ColorConvertedBitmap picture profile}` names two parts in one
+/// attribute. The picture is drawn and the profile is embedded as the
+/// `/ICCBased` space its samples are values in (8.6.5.5), so the reader does
+/// the colour management — the same translation-not-conversion a
+/// `ContextColor` gets, and for the same reason: nothing here evaluates a
+/// profile, so nothing here can be wrong about one.
+///
+/// This test asserted the opposite until 14 September 2026, when the write
+/// surface it was waiting on arrived.
 #[test]
-fn a_colour_converted_bitmap_is_refused_by_its_own_name() {
-    let bytes = package_with(
-        png_part(),
-        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
-           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
-        None,
-    );
-    // The helper writes a plain `ImageSource`; this rewrites it in place.
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let _ = text;
+fn a_colour_converted_bitmap_is_read_with_its_profile() {
     let body = r#"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
         <ImageBrush ImageSource="{ColorConvertedBitmap /Resources/i.png /Resources/p.icc}"
                     Viewbox="0,0,4,2" Viewport="0,0,200,100"
@@ -596,8 +609,62 @@ fn a_colour_converted_bitmap_is_refused_by_its_own_name() {
         r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
     );
     let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
-    let bytes = archive(before_content_types(parts, png_part()));
-    assert_eq!(defects(&bytes), [XpsElementDefect::ImageProfileUnsupported]);
+    let mut parts = before_content_types(parts, png_part());
+    parts.push(binary_part("Resources/p.icc", RGB_PROFILE.to_vec()));
+    let bytes = archive(parts);
+
+    assert_eq!(defects(&bytes), [], "no refusal: {:?}", defects(&bytes));
+
+    // **And the profile went with the picture.** Drawing the picture and
+    // dropping the profile is the failure this whole path exists to prevent,
+    // and it is silent: the page looks right and the colours are a guess. A
+    // counted injection that removed the registration entirely failed nothing
+    // at all until these three assertions existed.
+    let document = Document::open(bytes).expect("the package opens");
+    let saved = document.editor().save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    let holds = |needle: &[u8]| saved.windows(needle.len()).any(|w| w == needle);
+    assert!(holds(b"/ICCBased"), "the space is an ICCBased one");
+    assert!(holds(b"/N 3"), "declaring the profile's own channel count");
+    assert!(
+        holds(RGB_PROFILE),
+        "and the profile is in the file byte for byte"
+    );
+}
+
+/// A wrapper this build does not know is still refused by name.
+///
+/// The references inside one cannot be told apart — a wrapper with three of
+/// them is not `ColorConvertedBitmap`, and reading its first two would be
+/// drawing a picture in a profile the file never paired it with. So an
+/// unknown wrapper keeps the refusal the known one used to have.
+#[test]
+fn a_wrapper_this_build_does_not_know_is_refused_by_its_own_name() {
+    for source in [
+        "{SomeOtherWrapper /Resources/i.png /Resources/p.icc}",
+        "{ColorConvertedBitmap /Resources/i.png}",
+        "{ColorConvertedBitmap /Resources/i.png /Resources/p.icc /Resources/q.icc}",
+    ] {
+        let body = format!(
+            r#"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
+        <ImageBrush ImageSource="{source}"
+                    Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                    ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+        </Path.Fill></Path>"#
+        );
+        let markup = format!(
+            r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
+        );
+        let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
+        let bytes = archive(before_content_types(parts, png_part()));
+        assert_eq!(
+            defects(&bytes),
+            [XpsElementDefect::ImageProfileUnsupported],
+            "{source}"
+        );
+    }
 }
 
 /// A viewport with no extent paints nothing, so it is refused at the brush
@@ -630,15 +697,152 @@ fn a_rectangle_with_no_extent_is_refused_at_the_brush() {
 
 // ---- the two ways to know a part is a TIFF -------------------------------
 
-/// A TIFF **the content type names** is refused, and the rest of the page still
-/// draws.
+/// A minimal baseline TIFF, written from TIFF 6.0's own field layouts.
 ///
-/// Two assertions and they are two consequences of one refusal: the picture is
-/// named, and the `Path` that wanted it is still on the page in the placeholder
-/// grey. Gap 30 milestone 3's survivor was a clause with two consequences
-/// tested on one side, so both are here.
+/// Little-endian, 2 x 2, 8 bits, three samples, `PhotometricInterpretation` 2,
+/// `Compression` 1, one strip. Uncompressed on purpose: it is the one coding
+/// with no `/Filter` name, so it takes the **decoded** route and this fixture
+/// exercises the arm a placed strip skips.
+fn baseline_tiff() -> Vec<u8> {
+    // Header 0..8, directory 8..122 (nine entries), BitsPerSample 122..128,
+    // pixels at 128.
+    const BITS_AT: u32 = 122;
+    const PIXELS_AT: u32 = 128;
+
+    /// One twelve-byte directory entry. A SHORT sits in the first two bytes of
+    /// the four-byte value field and a LONG fills it, so little-endian makes
+    /// both the same write.
+    fn entry(tag: u16, kind: u16, count: u32, value: u32) -> [u8; 12] {
+        let mut field = [0u8; 12];
+        field[0..2].copy_from_slice(&tag.to_le_bytes());
+        field[2..4].copy_from_slice(&kind.to_le_bytes());
+        field[4..8].copy_from_slice(&count.to_le_bytes());
+        field[8..12].copy_from_slice(&value.to_le_bytes());
+        field
+    }
+
+    let mut out = b"II\x2A\x00".to_vec();
+    out.extend_from_slice(&8u32.to_le_bytes());
+    out.extend_from_slice(&9u16.to_le_bytes());
+    for field in [
+        entry(256, 3, 1, 2),         // ImageWidth
+        entry(257, 3, 1, 2),         // ImageLength
+        entry(258, 3, 3, BITS_AT),   // BitsPerSample, three shorts, out of line
+        entry(259, 3, 1, 1),         // Compression: none
+        entry(262, 3, 1, 2),         // PhotometricInterpretation: RGB
+        entry(273, 4, 1, PIXELS_AT), // StripOffsets
+        entry(277, 3, 1, 3),         // SamplesPerPixel
+        entry(278, 3, 1, 2),         // RowsPerStrip
+        entry(279, 4, 1, 12),        // StripByteCounts
+    ] {
+        out.extend_from_slice(&field);
+    }
+    out.extend_from_slice(&0u32.to_le_bytes()); // no next directory
+
+    assert_eq!(
+        out.len(),
+        BITS_AT as usize,
+        "the directory ends where it says"
+    );
+    for _ in 0..3 {
+        out.extend_from_slice(&8u16.to_le_bytes());
+    }
+    assert_eq!(
+        out.len(),
+        PIXELS_AT as usize,
+        "the pixels start where it says"
+    );
+    out.extend_from_slice(&[
+        0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00, // red, green
+        0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, // blue, yellow
+    ]);
+    out
+}
+
+/// A TIFF **the bytes say** reaches the page as a picture.
+///
+/// This test asserted a refusal until a TIFF decoder existed. It is rewritten
+/// rather than deleted, because what it is *for* has not changed: a part whose
+/// format only the magic bytes name has to be classified from them, and the
+/// only thing that moved is what classification then does.
 #[test]
-fn a_tiff_named_by_its_content_type_is_refused_and_the_page_draws() {
+fn a_tiff_named_by_its_magic_bytes_is_drawn() {
+    // The content type says PNG; only the bytes say TIFF.
+    let bytes = package_with(
+        binary_part("Resources/i.png", baseline_tiff()),
+        r#"Viewbox="0,0,2,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        None,
+    );
+
+    // The two rules disagree here, so the leniency is owed — and it is the
+    // *only* thing owed, which is the assertion that matters: a TIFF this
+    // build reads is drawn, and nothing else about it is degraded.
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "the bytes decided, and said so; a TIFF this build reads owes nothing else"
+    );
+    let content = stream(&bytes);
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "the shape is not the placeholder grey: {content}"
+    );
+    assert!(
+        content.contains("/Pattern cs"),
+        "the picture reached the page through a tiling pattern: {content}"
+    );
+}
+
+/// A TIFF whose bytes are a header and nothing else is **unreadable**, which is
+/// a different sentence from a format this build does not read.
+///
+/// The distinction is the whole of what the decoder bought. Before it existed
+/// both answered `ImageFormatUnsupported`, and a caller could not tell "this
+/// engine has no TIFF decoder" from "this TIFF is broken".
+#[test]
+fn a_tiff_that_is_only_a_header_is_unreadable_rather_than_unsupported() {
+    let mut stub = b"II\x2A\x00".to_vec();
+    stub.extend_from_slice(&[0u8; 32]);
+    let bytes = package_with(
+        binary_part("Resources/i.png", stub),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        None,
+    );
+
+    assert_eq!(defects(&bytes), [XpsElementDefect::ImageUnreadable]);
+    let content = stream(&bytes);
+    assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
+    assert!(
+        content.contains("200 0 l"),
+        "and the shape still draws: {content}"
+    );
+}
+
+/// **A content type and magic bytes that disagree draw the bytes, and say so.**
+///
+/// `Images::place_one` resolves the disagreement in favour of the bytes — a
+/// decoder reads bytes — and ruling 10 wants the leniency that follows to be
+/// named. It was not, for three milestones, and the reason was the channel
+/// rather than the will: `Images::get` returns
+/// `Result<&Image, XpsElementDefect>`, so the only thing it could report was a
+/// *refusal*, and a refusal here would lose a picture the package plainly
+/// holds. The leniency rides the **success** side instead, on
+/// `Image::lenience`, and `State::tile` pushes it into the page's defects.
+///
+/// This test carried the hole under a different name until then. It is renamed
+/// rather than replaced, because the fixture is the same fixture and the two
+/// halves it asserts are still the two halves that matter: the picture the
+/// **bytes** describe is drawn, and the disagreement is **reported**.
+///
+/// The direction is deliberate. Here the content type says TIFF and only the
+/// bytes say PNG, which is the mirror of
+/// `a_tiff_named_by_its_magic_bytes_is_drawn` — the same arm reached from the
+/// other side, so a build that named the disagreement in one direction only
+/// fails one of the two.
+#[test]
+fn a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named() {
     // The bytes say PNG; only the content type says TIFF.
     let types =
         content_types_with(r#"<Override PartName="/Resources/i.png" ContentType="image/tiff" />"#);
@@ -649,50 +853,205 @@ fn a_tiff_named_by_its_content_type_is_refused_and_the_page_draws() {
         Some(&types),
     );
 
-    assert_eq!(defects(&bytes), [XpsElementDefect::ImageFormatUnsupported]);
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "the disagreement is reported, exactly once and as itself"
+    );
     let content = stream(&bytes);
     assert!(
-        content.contains("0.749 0.749 0.749 rg"),
-        "the shape is grey: {content}"
-    );
-    assert!(
-        content.contains("200 0 l"),
-        "and the shape is still drawn: {content}"
+        !content.contains("0.749 0.749 0.749 rg"),
+        "the PNG the bytes describe is drawn: {content}"
     );
 }
 
-/// A TIFF **the bytes say** is refused, whatever the content type claims.
+/// **And it is said once, however many times the picture is used.**
+///
+/// The pair to the test above, and the reason it is a pair: the leniency is a
+/// fact about the *part* and is recorded where the part is placed, which runs
+/// once — but it is *read* in `State::tile`, which runs once per use. A build
+/// that pushed it without `warn`'s deduplication would report one
+/// mis-declared picture as many times as the page happened to draw it, which
+/// is the failure `Drawn::defects` exists to prevent.
 #[test]
-fn a_tiff_named_by_its_magic_bytes_is_refused_and_the_page_draws() {
-    // The content type says PNG; only the bytes say TIFF.
-    let mut tiff = b"II\x2A\x00".to_vec();
-    tiff.extend_from_slice(&[0u8; 32]);
+fn one_mis_declared_part_used_twice_is_named_once() {
+    let types =
+        content_types_with(r#"<Override PartName="/Resources/i.png" ContentType="image/tiff" />"#);
+    let body = r#"<Path Data="M0,0L100,0 100,100 0,100Z"><Path.Fill>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,100,50"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.Fill></Path>
+           <Path Data="M100,0L200,0 200,100 100,100Z"><Path.Fill>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,100,50"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.Fill></Path>"#;
+    let markup = format!(
+        r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
+    );
+    let parts = with(one_page_package(), "Documents/1/Pages/1.fpage", &markup);
+    let parts = with(parts, "[Content_Types].xml", &types);
+    let bytes = archive(before_content_types(parts, png_part()));
+
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "two uses of one mis-declared part, one report"
+    );
+    let content = stream(&bytes);
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "and both shapes carry the picture: {content}"
+    );
+}
+
+/// One of the committed JPEG XR fixtures, whose rasters this repository
+/// authored and whose decode is held to them bit-for-bit by
+/// `crates/tinker-pdf-filters/tests/jxr_fixtures.rs`.
+///
+/// Read across the crate boundary rather than copied: a second copy of a
+/// fixture is a second thing to keep in step with the raster that defines it.
+fn jpeg_xr(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tinker-pdf-filters/tests/jxr")
+        .join(format!("{name}.jxr"));
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// **A JPEG XR reaches the page.** 9.1.5.1 recommends the format and nothing
+/// outside Microsoft's stack implements it, which is why it was the last of
+/// 9.1.5's four still refused here.
+///
+/// The content type says PNG; only the magic bytes say JPEG XR. That is
+/// deliberate — it exercises the identification rule *and* the decoder in one
+/// package, and it is the case the old pre-emptive refusal loop caught before
+/// either rule had spoken.
+///
+/// Which makes this package a *disagreement*, so it owes the leniency
+/// `ImageMediaTypeMismatch` names. The assertion is "exactly this and nothing
+/// else", which is a stronger claim than the `== []` it replaced: it says the
+/// decode succeeded, that the one thing degraded is the producer's statement
+/// about the part, and that nothing else about the picture was approximated.
+/// The sibling below carries the agreeing case, where nothing at all is owed.
+#[test]
+fn a_jpeg_xr_named_by_its_magic_bytes_is_drawn() {
     let bytes = package_with(
-        binary_part("Resources/i.png", tiff),
+        binary_part("Resources/i.png", jpeg_xr("rgb24")),
         r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
            ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
         None,
     );
 
-    assert_eq!(defects(&bytes), [XpsElementDefect::ImageFormatUnsupported]);
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "the bytes decided against the content type, and nothing else is owed"
+    );
+    let content = stream(&bytes);
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "the shape is not the placeholder grey: {content}"
+    );
+    assert!(
+        content.contains("/Pattern cs"),
+        "the picture reached the page through a tiling pattern: {content}"
+    );
+}
+
+/// And 9.1.5.1's own content type is recognised, which is the other half of
+/// the same pair.
+///
+/// `image/vnd.ms-photo` is what Windows writes. This package names it *and*
+/// carries the matching bytes, because that is the only way a content type can
+/// decide anything: where the two rules disagree the bytes win, so a package
+/// naming the type over some other format's bytes would prove the opposite of
+/// what it looks like it proves.
+///
+/// It is also the **agreeing** half of the pair the test above opens: two
+/// rules that say the same thing owe nothing, so a build that reported
+/// `ImageMediaTypeMismatch` whenever both rules spoke — rather than only when
+/// they differ — fails here and passes there.
+#[test]
+fn the_jpeg_xr_content_type_is_recognised() {
+    let types = content_types_with(
+        r#"<Override PartName="/Resources/i.png" ContentType="image/vnd.ms-photo" />"#,
+    );
+    let bytes = package_with(
+        binary_part("Resources/i.png", jpeg_xr("rgb24")),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        Some(&types),
+    );
+
+    assert_eq!(defects(&bytes), []);
+    let content = stream(&bytes);
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "the shape is not the placeholder grey: {content}"
+    );
+}
+
+/// A JPEG XR whose bytes are a header and nothing else is **unreadable**,
+/// which is a different sentence from a format this build does not read.
+///
+/// The distinction is the whole of what the decoder bought, and it is the same
+/// pair TIFF got when its decoder landed: before it existed both answered
+/// `ImageFormatUnsupported`, and a caller could not tell "this engine has no
+/// JPEG XR decoder" from "this JPEG XR is broken". Only one of those is worth
+/// re-exporting the package to fix.
+#[test]
+fn a_jpeg_xr_that_is_only_a_header_is_unreadable_rather_than_unsupported() {
+    let mut stub = vec![0x49, 0x49, 0xBC, 0x01];
+    stub.extend_from_slice(&[0u8; 32]);
+    let bytes = package_with(
+        binary_part("Resources/i.png", stub),
+        r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
+           ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
+        None,
+    );
+
+    assert_eq!(defects(&bytes), [XpsElementDefect::ImageUnreadable]);
     let content = stream(&bytes);
     assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
-    assert!(content.contains("200 0 l"), "{content}");
+    assert!(
+        content.contains("200 0 l"),
+        "and the shape still draws: {content}"
+    );
 }
 
-/// A JPEG XR, which 9.1.5.1 recommends and nothing outside Microsoft's stack
-/// implements, is refused by the same name.
+/// A JPEG XR carrying A.3.2's separate alpha plane reaches the page with an
+/// `/SMask`.
+///
+/// The pair to the test above, and the reason it is a pair: an image that
+/// draws and an image that draws *with its transparency* are two claims. A
+/// build that dropped the alpha plane would pass every assertion in
+/// `a_jpeg_xr_named_by_its_magic_bytes_is_drawn` and put an opaque rectangle
+/// where the package asked for a cut-out.
 #[test]
-fn a_jpeg_xr_is_refused_by_name() {
-    let mut jxr = vec![0x49, 0x49, 0xBC, 0x01];
-    jxr.extend_from_slice(&[0u8; 32]);
+fn a_jpeg_xr_with_an_alpha_plane_reaches_the_page_with_a_soft_mask() {
     let bytes = package_with(
-        binary_part("Resources/i.png", jxr),
+        binary_part("Resources/i.png", jpeg_xr("bgra32")),
         r#"Viewbox="0,0,4,2" Viewport="0,0,200,100"
            ViewboxUnits="Absolute" ViewportUnits="Absolute""#,
         None,
     );
-    assert_eq!(defects(&bytes), [XpsElementDefect::ImageFormatUnsupported]);
+
+    // The same disagreement `a_jpeg_xr_named_by_its_magic_bytes_is_drawn`
+    // carries — `.png` over JPEG XR bytes — and the same one leniency. The
+    // alpha plane is what this test is about, so the assertion is that the
+    // list has not grown: splitting out an `/SMask` degrades nothing.
+    assert_eq!(
+        defects(&bytes),
+        [XpsElementDefect::ImageMediaTypeMismatch],
+        "the disagreement, and nothing the alpha plane added"
+    );
+    let saved = saved(&bytes);
+    assert!(
+        saved.contains("/SMask"),
+        "the alpha plane became an /SMask image XObject"
+    );
+    // And the colour half is still `/DeviceRGB` rather than the four-channel
+    // raster the file interleaves.
+    assert!(saved.contains("/DeviceRGB"), "the colour half is RGB");
 }
 
 // ---- JPEG, and the resolution --------------------------------------------
@@ -712,6 +1071,56 @@ fn a_jpeg_part_is_placed_verbatim() {
     assert!(
         saved(&bytes).contains("/DCTDecode"),
         "the JPEG's own bytes are the stream"
+    );
+}
+
+/// An `ImageBrush` asked to **stroke** takes the tiling pattern a fill takes.
+///
+/// 8.7.3.2 makes a pattern a *colour* and `SCN` takes one, so a picture reaches
+/// a stroke through the same pattern a fill reaches it through and neither
+/// needs a second implementation. Written down as its own fixture because the
+/// two brushes that can now stroke are independent: a build that wired the
+/// gradient into `SCN` and left the picture grey passes every gradient test.
+#[test]
+fn an_image_brush_stroke_is_the_tiling_pattern_a_fill_would_take() {
+    let bytes = package_body(
+        r#"<Path Data="M0,0L200,0" StrokeThickness="4"><Path.Stroke>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.Stroke></Path>"#,
+    );
+    assert_eq!(defects(&bytes), []);
+    let content = stream(&bytes);
+    assert!(content.contains("/Pattern CS /"), "{content}");
+    assert!(content.contains(" SCN"), "{content}");
+    assert!(!content.contains("0.749 G"), "{content}");
+    assert!(content.contains("4 w"), "the width is still the file's");
+}
+
+/// An `ImageBrush` used as an **opacity mask** is an `/Alpha` soft mask, not a
+/// `/Luminosity` one.
+///
+/// 14.3's mask is the brush's alpha channel, and a picture keeps its alpha in
+/// the picture. A `/Luminosity` mask would read the *colours* instead — a
+/// plausible, wrong picture that no content stream can tell apart from the
+/// right one, since both are one `gs`.
+#[test]
+fn an_image_brush_opacity_mask_reads_the_pictures_alpha_and_not_its_colours() {
+    let bytes = package_body(
+        r##"<Path Fill="#FF0000" Data="M0,0L200,0 200,100 0,100Z"><Path.OpacityMask>
+             <ImageBrush ImageSource="/Resources/i.png" Viewbox="0,0,4,2" Viewport="0,0,200,100"
+                         ViewboxUnits="Absolute" ViewportUnits="Absolute" />
+           </Path.OpacityMask></Path>"##,
+    );
+    assert_eq!(defects(&bytes), []);
+    let content = stream(&bytes);
+    assert!(content.contains("0 0 m"), "the shape draws: {content}");
+    assert!(content.contains(" gs"), "a state is set: {content}");
+    let text = saved(&bytes);
+    assert!(text.contains("/S /Alpha"), "the mask reads the alpha");
+    assert!(
+        !text.contains("/S /Luminosity"),
+        "and not the picture's colours"
     );
 }
 
@@ -737,33 +1146,4 @@ fn a_page_with_an_image_brush_draws_ink() {
         .filter(|px| *px != [0xFF, 0xFF, 0xFF])
         .count();
     assert!(ink > 1_000, "the picture is on the page: {ink} pixels");
-}
-
-/// A `VisualBrush` is refused **by name**, and the plan's row 8 is amended
-/// rather than claimed.
-///
-/// Its cell is a subtree of markup rather than a part, so painting one means
-/// re-entering the drawing walk from inside a brush and carrying 18.2's
-/// cross-part depth with it. That is a milestone's worth of work on its own and
-/// it is not done, so the brush says so and the shape keeps the grey — which is
-/// the same answer every other unpainted brush gets, rather than a picture the
-/// file never described.
-#[test]
-fn a_visual_brush_is_refused_by_name_and_the_shape_survives() {
-    let body = r##"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
-        <VisualBrush Viewbox="0,0,1,1" Viewport="0,0,1,1">
-          <VisualBrush.Visual><Path Data="M0,0L1,0Z" Fill="#FF00FF00" /></VisualBrush.Visual>
-        </VisualBrush></Path.Fill></Path>"##;
-    let markup = format!(
-        r#"<FixedPage xmlns="{XPS_NS}" xmlns:x="{KEY_NS}" Width="816" Height="1056">{body}</FixedPage>"#
-    );
-    let bytes = archive(with(
-        one_page_package(),
-        "Documents/1/Pages/1.fpage",
-        &markup,
-    ));
-    assert_eq!(defects(&bytes), [XpsElementDefect::BrushUnsupported]);
-    let content = stream(&bytes);
-    assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
-    assert!(content.contains("200 0 l"), "{content}");
 }

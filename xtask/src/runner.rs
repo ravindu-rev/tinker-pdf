@@ -147,6 +147,55 @@ pub struct FileResult {
     /// of can be a function of the corpus rather than of the machine. Zero
     /// from a child that did not say.
     pub cost: Cost,
+    /// The child's peak resident set in bytes, or `None` where it did not say.
+    ///
+    /// Measured **by the child, of itself**, and `None` carries that fact
+    /// rather than hiding it. Two things produce a `None` and both must stay
+    /// visible: a platform whose `tpdf` cannot read a high-water mark, which
+    /// makes the run incomplete; and a child that died before it could print
+    /// the line, which is already a crash. A zero would merge them into a
+    /// measurement, and a measurement of zero is a ceiling nothing can exceed.
+    pub peak: Option<u64>,
+    /// `/Producer` as the document states it, or `None` from a child that did
+    /// not say.
+    ///
+    /// **Not defaulted to an empty string**, and the distinction is the one
+    /// the whole field exists for: `Some("(none stated)")` is a document that
+    /// declares no producer, which is a population worth counting, and `None`
+    /// is a record that predates this key or a file that never opened. A
+    /// report that merged them would attribute every crash to the same
+    /// imaginary producer.
+    pub producer: Option<String>,
+    /// What the structure tree walk found, or `None` where the document has
+    /// no `/StructTreeRoot` this engine could read.
+    ///
+    /// `None` and "no tree" are the same answer here and deliberately so: the
+    /// child says `tagged tree no` in that case, and a record that mentions
+    /// the key not at all is refused earlier, by the version check.
+    pub tagged: Option<Tagged>,
+}
+
+/// What one document's structure tree yielded (ISO 32000-1 14.7).
+///
+/// Counts rather than rates, for the reason [`Cost`] holds counts: a rate
+/// computed per file and averaged is not the rate over the corpus, and the
+/// bar in `corpus/ratchet.json` is over the corpus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tagged {
+    /// Structure elements reached by the `/K` walk.
+    pub elements: u64,
+    /// Marked-content kids — `/MCID` integers and `/MCR` dictionaries.
+    pub content: u64,
+    /// `/OBJR` kids: annotations and XObjects a structure element claims.
+    pub objects: u64,
+    /// Characters a structure element claimed, over the pages the child
+    /// rendered.
+    pub matched: u64,
+    /// Characters carrying an `/MCID` no element on their page claimed.
+    pub orphans: u64,
+    /// Characters carrying no `/MCID` at all, inside a document that has a
+    /// structure tree.
+    pub unmarked: u64,
 }
 
 /// A document's size, in the three dimensions that bound work on it.
@@ -168,8 +217,16 @@ pub struct Cost {
 /// by declining the hard files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetaVerdict {
-    /// The relation held.
-    Held,
+    /// The relation held, and this is how far it was from not holding —
+    /// `12 of 501832` pixels, as the child measured it.
+    ///
+    /// A child that predates the measurement says only `held` and the string
+    /// is empty, which is why this is not an `Option` of a pair: an older
+    /// record is not a newer record with a field missing, it is a record that
+    /// did not measure. Nothing reads the number back into arithmetic; it is
+    /// there so `report.json` carries the distribution a budget is re-sited
+    /// from, rather than only its tail.
+    Held(String),
     /// It did not, and this is what the child measured.
     Broke(String),
     /// It was not asked, and this is why.
@@ -184,13 +241,13 @@ impl MetaVerdict {
 
     /// Whether it held.
     pub fn held(&self) -> bool {
-        matches!(self, MetaVerdict::Held)
+        matches!(self, MetaVerdict::Held(_))
     }
 
     /// The word the report writes.
     pub fn label(&self) -> &'static str {
         match self {
-            MetaVerdict::Held => "held",
+            MetaVerdict::Held(_) => "held",
             MetaVerdict::Broke(_) => "broke",
             MetaVerdict::Skipped(_) => "skipped",
         }
@@ -199,8 +256,9 @@ impl MetaVerdict {
     /// What the child said, where it said anything.
     pub fn detail(&self) -> &str {
         match self {
-            MetaVerdict::Held => "",
-            MetaVerdict::Broke(detail) | MetaVerdict::Skipped(detail) => detail,
+            MetaVerdict::Held(detail)
+            | MetaVerdict::Broke(detail)
+            | MetaVerdict::Skipped(detail) => detail,
         }
     }
 }
@@ -249,7 +307,17 @@ impl FileResult {
 }
 
 /// Runs one file in its own process and waits, with a limit.
-pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) -> FileResult {
+/// `extra` is appended after the child's own arguments and before the file —
+/// today only `--password P`, from `corpus/passwords.tsv`. It is a slice
+/// rather than an `Option<&str>` so the next thing a single file needs of the
+/// child does not change this signature again.
+pub fn run_one(
+    child: &Child,
+    file: &Path,
+    relative: &str,
+    timeout: Duration,
+    extra: &[String],
+) -> FileResult {
     let started = Instant::now();
     let empty = |outcome: Outcome, millis: u64| FileResult {
         path: relative.to_string(),
@@ -266,6 +334,16 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         metamorphic: BTreeMap::new(),
         bundled_faces: false,
         cost: Cost::default(),
+        // A child that wrote no record measured no peak. `None` rather than a
+        // zero for the reason the field carries: this file is already counted
+        // as a crash, and a zero here would be a measurement.
+        peak: None,
+        // A child that wrote no record did not look at a structure tree, and
+        // `None` is the same answer as "there was none". They aggregate the
+        // same way, and the file is already counted as failed.
+        tagged: None,
+        // And it never read an `/Info` dictionary either.
+        producer: None,
     };
 
     // Both streams go to temporary files rather than to pipes. A pipe whose
@@ -304,6 +382,7 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
 
     let spawned = Command::new(&child.program)
         .args(&child.args)
+        .args(extra)
         .arg(file)
         .stdin(Stdio::null())
         .stdout(Stdio::from(out_file))
@@ -386,7 +465,22 @@ pub fn run_one(child: &Child, file: &Path, relative: &str, timeout: Duration) ->
         None => {
             let detail = last_meaningful_line(&stderr)
                 .unwrap_or_else(|| "the child wrote no complete record".to_string());
-            empty(Outcome::Crashed(detail), millis)
+            let mut empty = empty(Outcome::Crashed(detail), millis);
+            // **The producer survives an incomplete record, and nothing else
+            // does.** Everything else in a record is a *result* -- what the
+            // relations said, what the strict pass found -- and a result from
+            // a child that did not finish is not a result. `/Producer` is not:
+            // it is a property of the document, printed before any of the work
+            // that then failed to finish.
+            //
+            // Keeping it is the difference between a producer table that
+            // attributes failures and one that cannot. Measured on the
+            // production corpus's first run: eighteen files did not pass and
+            // all eighteen read `(unread: the file did not open)`, because
+            // fourteen of them were killed at the timeout with the producer
+            // line already in the capture file and thrown away here.
+            empty.producer = producer_line(&stdout);
+            empty
         }
     };
 
@@ -435,6 +529,18 @@ pub fn last_phase(text: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The `producer` line out of a record that may be incomplete.
+///
+/// Scanned rather than parsed, because the record this reads is by definition
+/// one `parse_record` refused: there is no `done`, the last line may be half
+/// written, and every other key in it is untrustworthy for that reason.
+fn producer_line(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("producer "))
+        .map(|rest| rest.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn last_meaningful_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
@@ -455,7 +561,18 @@ fn hash(text: &str) -> u64 {
 
 /// The record format's version. A record announcing anything else is refused
 /// rather than half-read.
-const PROBE_VERSION: u32 = 3;
+///
+/// Version 4 adds the `signature` capability: reading a signature produces no
+/// warning when it succeeds, so a count is the only thing that can say whether
+/// the reader is still finding them all.
+///
+/// Version 6 adds `peak`, the child's own peak resident set. An unknown key is
+/// ordinarily ignored, so a new key alone would not need a bump — but this one
+/// is *required*: a corpus where no child reports a peak makes the run
+/// incomplete. Without the bump, running against a version-5 binary would look
+/// like a platform that cannot measure memory rather than like a `tpdf` nobody
+/// rebuilt, and `corpus.rs`'s handshake exists precisely to name the second.
+pub const PROBE_VERSION: u32 = 6;
 
 /// Reads a child's record, or `None` if it is not complete.
 ///
@@ -482,6 +599,9 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut metamorphic: BTreeMap<String, MetaVerdict> = BTreeMap::new();
     let mut cost = Cost::default();
     let mut bundled_faces = false;
+    let mut peak: Option<u64> = None;
+    let mut tagged: Option<Tagged> = None;
+    let mut producer: Option<String> = None;
 
     for line in text.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -496,6 +616,10 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         match key {
             "probe" => version = rest.trim().parse::<u32>().ok(),
             "pages" => pages = rest.trim().parse().unwrap_or(0),
+            // Taken whole rather than split: a producer string contains
+            // anything at all -- spaces, tabs the child has already folded,
+            // and in this corpus a pipe character where one tool recorded two.
+            "producer" => producer = Some(rest.trim().to_string()),
             "rendered" => rendered = rest.trim().parse().unwrap_or(0),
             "ms" => millis = rest.trim().parse().unwrap_or(0),
             "opened" => {
@@ -514,6 +638,10 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                     bundled_faces = true;
                 }
             }
+            // Unparseable stays `None` rather than becoming a zero: the whole
+            // value of the field is that "not measured" and "measured as
+            // nothing" are different answers.
+            "peak" => peak = rest.trim().parse::<u64>().ok(),
             "cost" => {
                 let mut rest = rest.split_whitespace();
                 while let (Some(field), Some(value)) = (rest.next(), rest.next()) {
@@ -524,6 +652,46 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                         "pixels" => cost.pixels = value,
                         _ => {}
                     }
+                }
+            }
+            "tagged" => {
+                let (what, rest) = rest.split_once(' ').unwrap_or((rest.trim(), ""));
+                match what.trim() {
+                    // `tree no` leaves `tagged` at `None`, which is what a
+                    // document with no structure tree means.
+                    "tree" => {
+                        let mut fields = rest.split_whitespace();
+                        if fields.next() == Some("yes") {
+                            let slot = tagged.get_or_insert_with(Tagged::default);
+                            while let (Some(field), Some(value)) = (fields.next(), fields.next()) {
+                                let value = value.parse().unwrap_or(0);
+                                match field {
+                                    "elements" => slot.elements = value,
+                                    "content" => slot.content = value,
+                                    "objects" => slot.objects = value,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    // Only ever printed by a child that already printed
+                    // `tree yes`, so a `chars` line with no tree before it is
+                    // a child bug and is dropped rather than inventing a tree.
+                    "chars" => {
+                        if let Some(slot) = tagged.as_mut() {
+                            let mut fields = rest.split_whitespace();
+                            while let (Some(field), Some(value)) = (fields.next(), fields.next()) {
+                                let value = value.parse().unwrap_or(0);
+                                match field {
+                                    "matched" => slot.matched = value,
+                                    "orphans" => slot.orphans = value,
+                                    "unmarked" => slot.unmarked = value,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             "cap" => {
@@ -539,7 +707,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                 let (verdict, detail) = rest.split_once(' ').unwrap_or((rest.trim(), ""));
                 let detail = detail.trim().to_string();
                 let verdict = match verdict.trim() {
-                    "held" => MetaVerdict::Held,
+                    "held" => MetaVerdict::Held(detail),
                     "broke" => MetaVerdict::Broke(detail),
                     // An unknown word is a skip with the word in it rather than
                     // a hold: a runner that read a verdict it did not know as
@@ -623,6 +791,9 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         metamorphic,
         bundled_faces,
         cost,
+        peak,
+        producer,
+        tagged,
     })
 }
 
@@ -630,10 +801,112 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "probe 3\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
+    const GOOD: &str = "probe 6\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
                         cap jbig2\nrendered 3\nstrict eligible\nstrict structure 0\n\
                         strict semantics 2\nstrict kind annot-rect-unordered 2\n\
                         warn render:UnreadableFont 2\nms 40\ndone\n";
+
+    /// A record built line by line, so a test's expectations are readable as
+    /// the child's own output rather than as one escaped string.
+    fn record(lines: &[&str]) -> String {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    }
+
+    /// The structure counts arrive on two lines because they are measured at
+    /// two different times -- the tree once per document, the join once per
+    /// page -- and a child that printed the first and died before the second
+    /// must not have its zero read as a measurement.
+    #[test]
+    fn the_structure_counts_read_off_both_lines() {
+        let text = record(&[
+            "probe 6",
+            "opened yes",
+            "pages 1",
+            "tagged tree yes elements 12 content 5 objects 2",
+            "rendered 1",
+            "tagged chars matched 40 orphans 1 unmarked 7",
+            "ms 5",
+            "done",
+        ]);
+        let tagged = parse_record(&text)
+            .expect("complete")
+            .tagged
+            .expect("a tree");
+        assert_eq!(tagged.elements, 12);
+        assert_eq!(tagged.content, 5);
+        assert_eq!(tagged.objects, 2);
+        assert_eq!(tagged.matched, 40);
+        assert_eq!(tagged.orphans, 1);
+        assert_eq!(tagged.unmarked, 7);
+    }
+
+    /// The peak is read where the child printed one, and stays `None` where it
+    /// did not -- which is the whole distinction the field exists for. A child
+    /// on a platform with no high-water mark to read omits the line, and that
+    /// omission becomes a `limits` entry rather than a peak of zero bytes.
+    #[test]
+    fn a_peak_is_a_measurement_and_its_absence_is_not_a_zero() {
+        let lines = ["probe 6", "opened yes", "pages 1", "rendered 1", "ms 5"];
+        let mut with = lines.to_vec();
+        with.push("peak 21069824");
+        with.push("done");
+        assert_eq!(
+            parse_record(&record(&with)).expect("complete").peak,
+            Some(21_069_824)
+        );
+
+        let mut without = lines.to_vec();
+        without.push("done");
+        assert_eq!(
+            parse_record(&record(&without)).expect("complete").peak,
+            None
+        );
+
+        // And a line that is not a number is an absence too, never a zero: a
+        // child that garbled its own measurement did not measure nothing.
+        let mut broken = lines.to_vec();
+        broken.push("peak lots");
+        broken.push("done");
+        assert_eq!(parse_record(&record(&broken)).expect("complete").peak, None);
+    }
+
+    /// `tree no` is a measurement -- this engine looked and found no structure
+    /// tree -- and it reads as `None`, which is the same value a corpus of
+    /// untagged files produces. The distinction that matters is against a
+    /// child too old to look at all, and the version check refuses that record
+    /// entirely rather than letting it aggregate as untagged.
+    #[test]
+    fn a_document_with_no_structure_tree_reads_as_none() {
+        let text = record(&[
+            "probe 6",
+            "opened yes",
+            "pages 1",
+            "tagged tree no",
+            "rendered 1",
+            "ms 5",
+            "done",
+        ]);
+        assert!(parse_record(&text).expect("complete").tagged.is_none());
+    }
+
+    /// A `chars` line with no `tree yes` before it is a child bug. Reading it
+    /// would invent a structure tree with zero elements and forty matched
+    /// characters, which no document can have.
+    #[test]
+    fn a_char_count_without_a_tree_invents_nothing() {
+        let text = record(&[
+            "probe 6",
+            "opened yes",
+            "pages 1",
+            "tagged chars matched 40 orphans 0 unmarked 0",
+            "rendered 1",
+            "ms 5",
+            "done",
+        ]);
+        assert!(parse_record(&text).expect("complete").tagged.is_none());
+    }
 
     #[test]
     fn a_complete_record_reads() {
@@ -694,22 +967,22 @@ mod tests {
     fn a_record_without_its_sentinel_is_not_a_record() {
         let truncated = GOOD.replace("done\n", "");
         assert!(parse_record(&truncated).is_none());
-        let cut = "probe 3\nopened yes\npages 3\nrendered 1\n";
+        let cut = "probe 6\nopened yes\npages 3\nrendered 1\n";
         assert!(parse_record(cut).is_none());
     }
 
     #[test]
     fn a_record_in_an_unknown_format_is_refused() {
-        assert!(parse_record(&GOOD.replace("probe 3", "probe 7")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 6", "probe 8")).is_none());
         // And the version the strict pass replaced: a record without that
         // pass means something else by the same keys.
-        assert!(parse_record(&GOOD.replace("probe 3", "probe 1")).is_none());
-        assert!(parse_record(&GOOD.replace("probe 3\n", "")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 6", "probe 1")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 6\n", "")).is_none());
     }
 
     #[test]
     fn a_file_that_would_not_open_is_a_failure_and_not_a_crash() {
-        let text = "probe 3\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
+        let text = "probe 6\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("not a PDF")),
@@ -722,7 +995,7 @@ mod tests {
     /// passed; it is degraded, which is the other number.
     #[test]
     fn a_degraded_page_passed() {
-        let text = "probe 3\nopened yes\npages 1\nrendered 1\n\
+        let text = "probe 6\nopened yes\npages 1\nrendered 1\n\
                     warn render:UnsupportedImage(JBIG2Decode) 1\ncap jbig2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert_eq!(result.outcome, Outcome::Passed);
@@ -731,7 +1004,7 @@ mod tests {
 
     #[test]
     fn a_page_that_produced_nothing_did_not_pass() {
-        let text = "probe 3\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
+        let text = "probe 6\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("2 of 4")),
@@ -745,18 +1018,21 @@ mod tests {
     #[test]
     fn a_metamorphic_verdict_reads_its_three_states() {
         let text = concat!(
-            "probe 3\n",
+            "probe 6\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",
-            "meta rotate held\n",
+            "meta rotate held 12 of 501832\n",
             "meta crop broke 12 of 400 pixels of the crop are not the page under it\n",
             "meta dpi skipped the page is too large to render twice\n",
             "ms 1\n",
             "done\n",
         );
         let result = parse_record(text).expect("a record");
-        assert_eq!(result.metamorphic["rotate"], MetaVerdict::Held);
+        assert_eq!(
+            result.metamorphic["rotate"],
+            MetaVerdict::Held("12 of 501832".to_string())
+        );
         assert!(result.metamorphic["rotate"].held());
         assert!(result.metamorphic["rotate"].compared());
 
@@ -774,6 +1050,66 @@ mod tests {
         assert!(!result.metamorphic["dpi"].held());
     }
 
+    /// A child that predates the measurement still says its relation held.
+    ///
+    /// The bare word is the older shape and it must keep counting, because the
+    /// alternative — reading `held` with nothing after it as a verdict this
+    /// runner does not know — turns every hold of an older binary into a skip
+    /// and empties the denominators the ratchet compares.
+    #[test]
+    fn a_hold_with_no_measurement_is_still_a_hold() {
+        let text = concat!(
+            "probe 6\n",
+            "opened yes\n",
+            "pages 1\n",
+            "rendered 1\n",
+            "meta rotate held\n",
+            "ms 1\n",
+            "done\n",
+        );
+        let result = parse_record(text).expect("a record");
+        assert!(result.metamorphic["rotate"].held());
+        assert!(result.metamorphic["rotate"].compared());
+        assert_eq!(
+            result.metamorphic["rotate"].detail(),
+            "",
+            "a record that did not measure reports no measurement"
+        );
+    }
+
+    /// A killed child still says who wrote the file.
+    ///
+    /// This is the producer table's whole usefulness. Its first run over the
+    /// production corpus attributed all eighteen non-passing files to
+    /// "(unread)", because fourteen were killed at the timeout with the
+    /// producer line already written and this runner threw the partial record
+    /// away whole. The line is a property of the document and is printed
+    /// before any of the work that then did not finish.
+    #[test]
+    fn a_producer_survives_a_record_that_never_finished() {
+        let partial = concat!(
+            "probe 6\n",
+            "file x.pdf\n",
+            "opened yes\n",
+            "producer Microsoft(R) PowerPoint(R) for Microsoft 365\n",
+            "pages 1\n",
+            "phase render\n",
+        );
+        assert!(
+            parse_record(partial).is_none(),
+            "a record with no `done` is not a record"
+        );
+        assert_eq!(
+            producer_line(partial).as_deref(),
+            Some("Microsoft(R) PowerPoint(R) for Microsoft 365")
+        );
+        assert_eq!(
+            producer_line("probe 6\nopened no nope\n"),
+            None,
+            "a file that never opened states no producer"
+        );
+    }
+
     /// A verdict this runner does not know is **not** a hold.
     ///
     /// The direction matters, and it is the version check's: a newer child that
@@ -783,7 +1119,7 @@ mod tests {
     #[test]
     fn an_unknown_metamorphic_verdict_is_not_a_hold() {
         let text = concat!(
-            "probe 3\n",
+            "probe 6\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",

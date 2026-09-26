@@ -16,8 +16,9 @@
 //! and reporting nonsense calmly is the whole point of the leniency ladder.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::{Document, RenderOptions, ShreddedSource, SliceSource};
 
 /// A hand-rolled xorshift, so the corpus is identical everywhere.
 ///
@@ -170,12 +171,40 @@ fn exercise(bytes: Vec<u8>) {
     // bytes itself, which is a second parser over hostile input and belongs
     // here for exactly that reason.
     let _ = doc.validate();
+    // The PDF/A rule engine walks every object in the cross-reference table,
+    // follows the nesting inside each one, and pull-parses whatever the
+    // metadata stream turned out to hold. Three parsers over hostile input,
+    // and the design doc puts the call here for that reason. Each rule group
+    // is asked for on its own as well as together, because a group that only
+    // ever ran beside another has never been shown to survive alone.
+    let _ = doc.validate_pdfa();
+    let _ = doc.validate_pdfa_with(tinker_pdf::PdfACoverage::SYNTAX);
+    let _ = doc.validate_pdfa_with(tinker_pdf::PdfACoverage::METADATA);
     let _ = doc.metadata();
     let _ = doc.pdf_version();
     let _ = doc.page_count();
     let _ = doc.outline();
     let _ = doc.page_labels();
     let _ = doc.form_fields();
+    // 14.7: `/K` is a graph with no promise of acyclicity and `/RoleMap` is a
+    // rewriting system the file writes for itself, so the structure walk is
+    // one of the few readers here whose *input shape* is chosen by the
+    // attacker rather than merely corrupted by them.
+    let structure = doc.structure();
+    if let Some(tree) = &structure {
+        let _ = tree.element_count();
+        let _ = tree.content_count();
+        let _ = tree.object_count();
+        let _ = tree.elements().len();
+    }
+    // The signature reader indexes the raw file buffer with offsets the
+    // document supplies, which is the shape ruling 1 exists for. Digesting
+    // each one exercises the span arithmetic as well as the parse.
+    for signature in doc.signatures() {
+        let _ = signature.digest(&doc, tinker_pdf::DigestAlgorithm::Sha256);
+        let _ = signature.digest(&doc, tinker_pdf::DigestAlgorithm::Sha1);
+        let _ = signature.covers_whole_file();
+    }
     let _ = doc.permissions();
     let _ = doc.is_encrypted();
     let _ = doc.auth_level();
@@ -199,6 +228,17 @@ fn exercise(bytes: Vec<u8>) {
         let _ = text.search("e");
         let _ = text.lines();
         let _ = text.blocks.len();
+
+        // The join, over the same `TextPage`. Reached through the tree bound
+        // above rather than through `Page::structured_text` so the walk is
+        // not repeated per page, which on a mutated file claiming a thousand
+        // pages is the difference between a sweep and a timeout.
+        if let Some(tree) = &structure {
+            let joined = tree.text_for_page(index, &text);
+            let _ = joined.plain_text();
+            let _ = joined.orphans;
+            let _ = joined.unmarked;
+        }
 
         // Deliberately coarse: a mutated file may claim a vast page box, and
         // the interesting failures are in the operators rather than in how
@@ -230,6 +270,63 @@ fn mutated_fixtures_never_panic() {
             let label = format!("{name} case {case}");
             let _guard = Guard(&label);
             exercise(mutated);
+        }
+    }
+}
+
+/// The same document, over a source that answers one byte at a time.
+///
+/// Ruling 1 binds the streaming path as much as the buffered one, and the
+/// streaming path has arithmetic the buffered one does not: window bases,
+/// offsets rebased from window to document, chunk boundaries, and a growth
+/// loop that must terminate. A hostile file drives all of it.
+///
+/// Fewer operations than [`exercise`] on purpose. The point here is the read
+/// path -- open, page tree, render -- rather than every reader in the facade,
+/// which the buffered sweep already covers over the same inputs.
+fn exercise_streamed(bytes: Vec<u8>) {
+    if bytes.is_empty() {
+        return;
+    }
+    let source = Arc::new(ShreddedSource::new(SliceSource::new(bytes)));
+    let Ok(doc) = Document::open_streaming(source) else {
+        return;
+    };
+    let _ = doc.ladder_level();
+    let _ = doc.warnings();
+    let _ = doc.is_streamed();
+    let _ = doc.first_page_end();
+    let _ = doc.page_count();
+    if let Some(page) = doc.page(0) {
+        let _ = page.size();
+        let _ = page.render(&RenderOptions {
+            scale: 0.25,
+            ..RenderOptions::default()
+        });
+        let _ = page.text();
+    }
+    let _ = doc.cos().complete_validation();
+    let _ = doc.whole_file_fetched();
+}
+
+/// The mutated corpus again, streamed.
+#[test]
+fn mutated_fixtures_never_panic_over_a_shredded_source() {
+    let fixtures = fixtures();
+    assert!(
+        !fixtures.is_empty(),
+        "the fixtures are missing, so this test proves nothing"
+    );
+
+    for (name, original) in &fixtures {
+        // The same seeds as the buffered sweep, so the two see the same
+        // inputs and a case number means the same thing in both.
+        let mut rng = Rng(0x5DEE_CE66_D1CE_4001 ^ name.len() as u64);
+        for case in 0..sweep(120) {
+            let mutated = mutate(original, &mut rng);
+            let label = format!("{name} case {case} shredded");
+            let _guard = Guard(&label);
+            exercise_streamed(mutated);
         }
     }
 }
@@ -333,6 +430,36 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
 1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
 2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
 startxref\n999999999\n%%EOF\n",
+        ),
+        (
+            "a structure element that is its own kid",
+            b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 5 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /StructParents 0 >>\nendobj\n\
+5 0 obj\n<< /Type /StructTreeRoot /K 6 0 R /RoleMap << /A /B /B /A >> >>\nendobj\n\
+6 0 obj\n<< /S /A /Pg 3 0 R /K [6 0 R 0 6 0 R] >>\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        ),
+        (
+            "a parent tree that points at the structure root",
+            b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 5 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /StructParents 0 >>\nendobj\n\
+5 0 obj\n<< /Type /StructTreeRoot /K [<< /S /P /Pg 3 0 R /K 0 >>] /ParentTree 5 0 R >>\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        ),
+        (
+            "an inline property list with no end",
+            b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 9 9] /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 62 >>\nstream\n\
+/P << /MCID << /MCID << /MCID 1 >> BDC 0 0 1 1 re f EMC EMC\n\
+endstream\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         ),
         (
             "nested dictionaries far past any real depth",

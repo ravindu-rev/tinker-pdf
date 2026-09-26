@@ -1,0 +1,1 @@
+‡<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><g id="loop"><rect width="1" height="1"/><use href="#loop"/></g><g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g></svg>

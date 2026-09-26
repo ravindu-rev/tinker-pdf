@@ -55,6 +55,19 @@
 //!   The second half needs a pair that agrees on its first byte and differs at
 //!   its last, which the obvious pair — a prefix and a suffix of one buffer —
 //!   is not; the injection matrix is what said so, by surviving.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a key AES refused did not
+//! encrypt, one it accepted did, and AES-CBC survives its own round trip.
+//! None of them asks whether the result is the one the input describes, so an
+//! answer that is well-formed and *wrong* passes exactly as a correct one
+//! does.
+//!
+//! Same residual as `crypt`, and it matters more here: a block cipher that is
+//! self-inverse but not AES passes every assertion in this file while
+//! producing documents no other reader can open. Correctness lives in
+//! `crates/tinker-pdf-crypto`'s own tests against published vectors.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

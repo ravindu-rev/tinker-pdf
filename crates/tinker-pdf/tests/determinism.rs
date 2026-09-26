@@ -59,8 +59,12 @@
 use std::sync::Arc;
 
 use tinker_pdf::{
-    Bitmap, Document, DocumentBuilder, OpenOptions, RenderOptions, RenderWarning,
-    SimpleFontProvider,
+    Document, DocumentBuilder, OpenOptions, RenderOptions, RenderWarning, SimpleFontProvider,
+};
+
+mod render_support;
+use render_support::{
+    axial_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink, radial_page,
 };
 
 /// How a fixture's document is opened, and which of its pages is hashed.
@@ -102,15 +106,6 @@ struct Fixture {
     /// that "the fingerprints did not move" cannot again be evidence about a
     /// path the fixture never exercised.
     least_ink: usize,
-}
-
-/// Pixels that are not the white the page started as.
-fn ink(bitmap: &Bitmap) -> usize {
-    bitmap
-        .data
-        .chunks_exact(bitmap.components())
-        .filter(|pixel| pixel.iter().any(|value| *value != 255))
-        .count()
 }
 
 /// The face every reflowable fixture here is set in.
@@ -215,289 +210,6 @@ fn text_page() -> Vec<u8> {
         page.text(b"F0", 9.0, 10.5, 40.0, "quick brown fox jumps 0123456789");
     });
     builder.finish()
-}
-
-/// One outline point: its position in font units, and whether it lies on the
-/// curve.
-type Point = (i16, i16, bool);
-/// A closed contour.
-type Contour = &'static [Point];
-/// One glyph, as its contours.
-type Shape = &'static [Contour];
-
-/// The six outlines of [`curvy_font`], glyph 1 upward; glyph 0 is `.notdef`
-/// and empty.
-///
-/// Chosen for what they make the rasteriser do, not for looking like letters.
-/// A box outline — four axis-aligned edges — exercises almost nothing: every
-/// span is full or empty and no coverage value between 0 and 1 ever arises.
-/// These do, in six different ways:
-///
-/// 1. a chevron: long diagonals meeting at a thin apex, with a notch;
-/// 2. a ring: two curved contours wound in opposite directions, so the hole
-///    depends on the fill rule as well as on the arithmetic;
-/// 3. a wedge: one quadratic spanning the whole em against two straight
-///    edges, which is flattening tolerance on its own;
-/// 4. a slash: a parallelogram at a shallow angle, nothing but partial
-///    coverage down both sides;
-/// 5. a ribbon: consecutive off-curve points, so the implied on-curve
-///    midpoint rule decides where the curve actually goes;
-/// 6. a dot over a stem: two contours of very different size in one glyph,
-///    the small one curved and the thin one diagonal.
-const SHAPES: &[Shape] = &[
-    // 1. Chevron.
-    &[&[
-        (20, 0, true),
-        (240, 700, true),
-        (320, 700, true),
-        (540, 0, true),
-        (420, 0, true),
-        (280, 380, true),
-        (140, 0, true),
-    ]],
-    // 2. Ring: the outer contour runs clockwise and the inner one
-    // anticlockwise, which is what makes the middle a hole.
-    &[
-        &[
-            (280, 630, true),
-            (560, 630, false),
-            (560, 350, true),
-            (560, 70, false),
-            (280, 70, true),
-            (0, 70, false),
-            (0, 350, true),
-            (0, 630, false),
-        ],
-        &[
-            (280, 500, true),
-            (130, 500, false),
-            (130, 350, true),
-            (130, 200, false),
-            (280, 200, true),
-            (430, 200, false),
-            (430, 350, true),
-            (430, 500, false),
-        ],
-    ],
-    // 3. Wedge.
-    &[&[
-        (0, 0, true),
-        (560, 0, true),
-        (560, 700, false),
-        (0, 700, true),
-    ]],
-    // 4. Slash.
-    &[&[
-        (0, 0, true),
-        (200, 0, true),
-        (560, 700, true),
-        (360, 700, true),
-    ]],
-    // 5. Ribbon. Each edge is two quadratics meeting at a point the font
-    // never states — halfway between the two off-curve points.
-    &[&[
-        (40, 0, true),
-        (40, 340, false),
-        (520, 360, false),
-        (520, 700, true),
-        (400, 700, true),
-        (360, 300, false),
-        (200, 260, false),
-        (160, 0, true),
-    ]],
-    // 6. Dot over a stem.
-    &[
-        &[
-            (140, 680, true),
-            (260, 680, false),
-            (260, 560, true),
-            (260, 440, false),
-            (140, 440, true),
-            (20, 440, false),
-            (20, 560, true),
-            (20, 680, false),
-        ],
-        &[
-            (240, 0, true),
-            (380, 0, true),
-            (560, 420, true),
-            (420, 420, true),
-        ],
-    ],
-];
-
-/// How many glyphs the face has, `.notdef` included.
-const GLYPHS: u16 = SHAPES.len() as u16 + 1;
-/// The advance of every shape, in font units, and of the space.
-const ADVANCE: u16 = 640;
-const SPACE_ADVANCE: u16 = 320;
-
-/// Which glyph a character code selects: the space is empty, and every other
-/// printable code takes the six shapes in turn.
-fn glyph_for(code: u16) -> u16 {
-    if code == 0x20 {
-        return 0;
-    }
-    1 + (code - 0x21) % (GLYPHS - 1)
-}
-
-/// A synthetic TrueType face of curves and diagonals.
-///
-/// Built here rather than read from the system, because ruling 4 is a claim
-/// about every target — including `wasm32-unknown-unknown`, where there are
-/// no font directories to read — and because a repository that carries no
-/// font carries nobody's licence.
-fn curvy_font() -> Vec<u8> {
-    // Glyph 0 is `.notdef` and has no outline: an empty `loca` range, which
-    // is how a font says "no shape" (a repeated offset, rather than a zero
-    // one).
-    let mut glyf: Vec<u8> = Vec::new();
-    let mut loca: Vec<u32> = vec![0, 0];
-    for shape in SHAPES {
-        glyf.extend_from_slice(&glyph_data(shape));
-        loca.push(glyf.len() as u32);
-    }
-
-    let mut loca_bytes = Vec::new();
-    for offset in &loca {
-        loca_bytes.extend_from_slice(&offset.to_be_bytes());
-    }
-
-    let mut head = vec![0u8; 54];
-    head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
-    head[50..52].copy_from_slice(&1i16.to_be_bytes()); // long loca offsets
-
-    let mut maxp = vec![0u8; 32];
-    maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    maxp[4..6].copy_from_slice(&GLYPHS.to_be_bytes());
-
-    let mut hhea = vec![0u8; 36];
-    hhea[34..36].copy_from_slice(&GLYPHS.to_be_bytes()); // numberOfHMetrics
-
-    // The advances the builder reads out to write /Widths with, so the text
-    // is spaced by the same numbers the outlines are drawn from.
-    let mut hmtx = Vec::new();
-    for glyph in 0..GLYPHS {
-        let advance = if glyph == 0 { SPACE_ADVANCE } else { ADVANCE };
-        hmtx.extend_from_slice(&advance.to_be_bytes());
-        hmtx.extend_from_slice(&0i16.to_be_bytes()); // left side bearing
-    }
-
-    let cmap = cmap();
-    let tables: [(&[u8; 4], &[u8]); 7] = [
-        (b"cmap", &cmap),
-        (b"glyf", &glyf),
-        (b"head", &head),
-        (b"hhea", &hhea),
-        (b"hmtx", &hmtx),
-        (b"loca", &loca_bytes),
-        (b"maxp", &maxp),
-    ];
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
-    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
-    out.extend_from_slice(&[0; 6]); // search hints, unread
-
-    let mut offset = 12 + tables.len() * 16;
-    let mut body = Vec::new();
-    for (tag, data) in tables {
-        out.extend_from_slice(tag);
-        out.extend_from_slice(&0u32.to_be_bytes()); // checksum
-        out.extend_from_slice(&(offset as u32).to_be_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        offset += data.len();
-        body.extend_from_slice(data);
-    }
-    out.extend_from_slice(&body);
-    out
-}
-
-/// One glyph's `glyf` entry.
-fn glyph_data(shape: Shape) -> Vec<u8> {
-    let points: Vec<Point> = shape.iter().flat_map(|c| c.iter().copied()).collect();
-    let xs = || points.iter().map(|p| p.0);
-    let ys = || points.iter().map(|p| p.1);
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&(shape.len() as i16).to_be_bytes());
-    out.extend_from_slice(&xs().min().unwrap_or(0).to_be_bytes()); // xMin
-    out.extend_from_slice(&ys().min().unwrap_or(0).to_be_bytes()); // yMin
-    out.extend_from_slice(&xs().max().unwrap_or(0).to_be_bytes()); // xMax
-    out.extend_from_slice(&ys().max().unwrap_or(0).to_be_bytes()); // yMax
-
-    let mut end = 0usize;
-    for contour in shape {
-        end += contour.len();
-        out.extend_from_slice(&((end - 1) as u16).to_be_bytes());
-    }
-    out.extend_from_slice(&0u16.to_be_bytes()); // no hinting instructions
-
-    // Bit 0 is the on-curve flag. None of the short-coordinate or repeat bits
-    // are set, so every delta below is a signed 16-bit word — larger than a
-    // real font would write, and far easier to read.
-    for (_, _, on_curve) in &points {
-        out.push(u8::from(*on_curve));
-    }
-    let mut previous = 0i16;
-    for (x, _, _) in &points {
-        out.extend_from_slice(&(x - previous).to_be_bytes());
-        previous = *x;
-    }
-    let mut previous = 0i16;
-    for (_, y, _) in &points {
-        out.extend_from_slice(&(y - previous).to_be_bytes());
-        previous = *y;
-    }
-
-    while out.len() % 4 != 0 {
-        out.push(0);
-    }
-    out
-}
-
-/// A `cmap` covering printable ASCII (9.6.6.4).
-///
-/// Format 4 through its `idRangeOffset` branch — the one where the segment
-/// points into a glyph index array at an offset measured from its own slot,
-/// which is the awkward part of the format and the part a real font uses.
-/// Going through the array rather than a plain delta is what lets every
-/// character in the fixture's text draw, out of a face with six shapes.
-fn cmap() -> Vec<u8> {
-    const FIRST: u16 = 0x20;
-    const LAST: u16 = 0x7E;
-    // The real segment, and the terminating one at 0xFFFF the format requires.
-    const SEGMENTS: u16 = 2;
-
-    let mut sub = Vec::new();
-    for value in [4u16, 0, 0, SEGMENTS * 2, 0, 0, 0] {
-        sub.extend_from_slice(&value.to_be_bytes());
-    }
-    sub.extend_from_slice(&LAST.to_be_bytes()); // endCode
-    sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
-    sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
-    sub.extend_from_slice(&FIRST.to_be_bytes()); // startCode
-    sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
-    sub.extend_from_slice(&0u16.to_be_bytes()); // idDelta: the array is absolute
-    sub.extend_from_slice(&1u16.to_be_bytes());
-    // idRangeOffset: the glyph array begins immediately after this array, and
-    // the offset is counted from this slot, so it is the distance to the end
-    // of the array — two bytes for each segment from this one on.
-    sub.extend_from_slice(&(SEGMENTS * 2).to_be_bytes());
-    sub.extend_from_slice(&0u16.to_be_bytes());
-    for code in FIRST..=LAST {
-        sub.extend_from_slice(&glyph_for(code).to_be_bytes());
-    }
-
-    let mut cmap = Vec::new();
-    // One (3,1) Windows Unicode BMP subtable, which is the one a reader
-    // prefers and the one a Latin face would carry.
-    for value in [0u16, 1, 3, 1] {
-        cmap.extend_from_slice(&value.to_be_bytes());
-    }
-    cmap.extend_from_slice(&12u32.to_be_bytes());
-    cmap.extend_from_slice(&sub);
-    cmap
 }
 
 /// Curves and strokes at an angle, where flattening tolerance and the
@@ -1527,7 +1239,12 @@ trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n",
 ///   than none";
 /// - `page10.jpg` is a baseline JPEG, placed verbatim. No other fixture in this
 ///   file embeds one at all;
-/// - `ComicInfo.xml` is metadata: not a page, not a warning.
+/// - `ComicInfo.xml` is metadata: not a page and not a warning, and **since
+///   tier 4's W-ARCHIVE milestone 1 it is read**. Its `<Title>None</Title>`
+///   reaches the synthesised document's `/Info`, which is why the document
+///   hash below moved in that commit and the render fingerprint above did
+///   not — the attribution this test's own doc comment asks for, made in the
+///   direction it describes.
 ///
 /// The names are **unpadded** on purpose. `page001` and `page010` sort
 /// identically under lexicographic and natural order, so a padded fixture
@@ -1968,6 +1685,75 @@ fn epub_book() -> Vec<u8> {
 /// Every entry is a claim that this page renders to these exact bytes on
 /// every supported target. Changing one is a deliberate act; see the module
 /// documentation for which of the two failures you are looking at.
+///
+/// # The book hash moved once, deliberately
+///
+/// `352adfa4…` became `ed6ba37c…` when EPUB output gained a **structure
+/// tree**: `/MarkInfo`, `/StructTreeRoot`, a `/ParentTree`, `/StructParents`
+/// on every page, and a `BDC`/`EMC` pair around every run. None of that is on
+/// a rendered page — the raster fingerprints did not move and could not have —
+/// which is exactly the class of change this hash exists to catch, and the
+/// same reason milestone 5's annotations are named above it.
+///
+/// **Three hashes moved and no raster one did**, which is the shape that says
+/// it was one change: the synthesised book and the 432x648 page box moved to
+/// the *same* value, because they are the same bytes, and the 600x800 box to
+/// its own. A structure tree that had touched the page content would have
+/// moved a raster fingerprint too, and none of them shifted.
+///
+/// # Eight raster hashes moved once, deliberately, and eleven did not
+///
+/// *15 September 2026, with ruling 5's region row.* `fill` used to hold an
+/// edge's slope as a whole number of 1/256 pixel per sub-scanline, which
+/// truncated every slope below one pixel of x per sixteen of y to **zero** and
+/// left every steeper edge walking `h/16` pixels off the line over an edge `h`
+/// tall; and it truncated an edge's x toward zero rather than taking the
+/// nearest unit. Both are fixed, `analytic_coverage.rs` adjudicates the fix
+/// against the line's own equation rather than against a picture, and the
+/// eight pages here that rasterise a path or a glyph moved.
+///
+/// The shape of the move is the evidence that it is the one change, so it is
+/// recorded rather than described. Pixels differing, and the worst component
+/// difference of 255, between the previous entry and this one:
+///
+/// | Page | Pixels | Of | Worst |
+/// | --- | ---: | ---: | ---: |
+/// | `curves` | 786 | 13 000 | 239 |
+/// | `epub` | 22 042 | 279 936 | 109 |
+/// | `text` | 814 | 20 000 | 74 |
+/// | `tiling` | 1 621 | 9 600 | 182 |
+/// | `mesh` | 305 | 9 600 | 53 |
+/// | `pattern` | 103 | 9 600 | 20 |
+/// | `optional` | 37 | 9 600 | 10 |
+/// | `xps` | 154 | 484 704 | 24 |
+///
+/// *Re-measured on the committed tree before this entry was written, and the
+/// eight rows all moved by a few pixels from the draft that first carried
+/// them: 789, 21 612, 799, 1 601, 306, 101, 40, 149, and a worst of 183 for
+/// `tiling`. The draft's numbers came from a working tree that still had a
+/// clamp in `build_edges` that the committed one does not. A table nobody
+/// re-runs is a dated measurement (ruling 13's own distinction), so the date
+/// above is load-bearing and the numbers are the tree's, not a previous
+/// tree's.*
+///
+/// The slope is almost all of it. Taking the nearest unit rather than the one
+/// below accounts for the rest and never for more than **two** levels: on its
+/// own it moves 139 pixels of `curves`, 8 825 of `epub`, 369 of `text`, 432 of
+/// `tiling`, 85 of `mesh`, 26 of `pattern`, 14 of `optional` and 85 of `xps`.
+///
+/// **`shading`, `blend`, `image`, `transparency`, `jbig2`, `jpx`, `cbz` and the
+/// four `analytic_` pages did not move at all**, which is the half that says it
+/// was the scanline filler: those pages are sampled or composited per pixel and
+/// never ask `fill` for a coverage. A change that had reached the compositor,
+/// the colour path or a decoder could not have left them alone.
+///
+/// They moved a **second** time, in the same three places and again with no
+/// raster movement, when the tree became document-level: an element's kids may
+/// now name different pages, so a paragraph broken across a page break is one
+/// `/P` rather than two and a kid on another page is written as an `/MCR`
+/// dictionary. That is what closed the float reading-order row -- Beowulf
+/// conserves exactly in logical order where content order still shows 2 182 --
+/// and it changes which objects the file holds without changing one glyph.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
     // 9600, 3600 and 3230 pixels.
@@ -2161,6 +1947,38 @@ const GOLDEN: &[Fixture] = &[
         },
         least_ink: 22_000,
     },
+    // ---- the analytic pages (milestone 2 of design/render-verification.md) --
+    //
+    // `render_analytic.rs` holds each of these four to the equation ISO 32000
+    // publishes for it, per pixel, over the whole page. What it cannot say is
+    // that the same page comes out the same on wasm32 and on x86_64 — that is
+    // this file's claim, and these are the fixtures where the two tiers meet:
+    // the bytes hashed here are the bytes that file evaluates, through
+    // `render_support`, rather than a second page built to look like them.
+    Fixture {
+        name: "analytic_axial",
+        build: axial_page,
+        open: Open::Closed,
+        least_ink: 128,
+    },
+    Fixture {
+        name: "analytic_radial",
+        build: radial_page,
+        open: Open::Closed,
+        least_ink: 100,
+    },
+    Fixture {
+        name: "analytic_blend",
+        build: blend_grid_page,
+        open: Open::Closed,
+        least_ink: 800,
+    },
+    Fixture {
+        name: "analytic_image",
+        build: analytic_image_page,
+        open: Open::Closed,
+        least_ink: 64,
+    },
 ];
 
 #[test]
@@ -2183,11 +2001,11 @@ fn rendering_is_stable_across_targets() {
         // what says this is a rendering change and not a determinism bug.
         (
             "text",
-            "b0bc9383d116d84d7a104afc67b3d5dc8e727323ba30262f67121a32b89004c2",
+            "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
         ),
         (
             "curves",
-            "7924b1b282589efa4bbfc39055af40d9f29c9405d0c95381420706b97163968b",
+            "48b65e520b0649c6d19deb779f0213f4ba5cb6fbbc9ca546b35b1c603050f380",
         ),
         (
             "shading",
@@ -2201,13 +2019,13 @@ fn rendering_is_stable_across_targets() {
         // `fill_with_pattern` at all.
         (
             "pattern",
-            "18765f39455bc173f00fc6272449402d0c5db445963b5334e3d511a766199af2",
+            "e02ff91587f4a82c2273f7980e42d953878eead57026dd863de757241217cd5c",
         ),
         // Added August 2026 with gap 06. No existing fixture has an
         // `/OCProperties`, so none of them would move if 8.11 stopped working.
         (
             "optional",
-            "e0f2bc33f56dcb85beb7a1770f9cb33e22a1a2cdba1cbb4b838be656370035a1",
+            "e2e801543a390458985e5f42aa3e7526ef8af413e24234dfbd0252904e65a6a8",
         ),
         // Added August 2026 with gap 12. No existing fixture drew an image,
         // so the whole of image sampling — every row of the policy matrix,
@@ -2221,9 +2039,18 @@ fn rendering_is_stable_across_targets() {
         // have said on its own — a fingerprint pins the engine against itself,
         // so it reports that an answer changed and never that it was wrong.
         // `tinker-pdf-raster/tests/analytic_sampling.rs` is what says which.
+        //
+        // Re-recorded again when the box-filter pyramid stopped engaging below
+        // 128:1 and the destination pixel's true source rectangle began to be
+        // integrated instead. `pdfcmp` between the two renders of this page:
+        // **0.0833 % of pixels differ at all, worst 1 level of 255, none by
+        // more than twelve** — the minified placement again, and only it. The
+        // same caveat as above applies and the same file answers it, now with
+        // `a_downscale_agrees_with_itself_at_twice_the_scale`, which fails by
+        // eight levels if the pyramid is put back.
         (
             "image",
-            "58eedf585a421b601f2d0c4c435c44a94ec6bbe5fae517060b4d691e5f234ed1",
+            "33c71f2d05f951f3bf604eab03d9968c6f7245a8f8f86209410ded99670574db",
         ),
         // Added August 2026 with gap 11. Groups, isolation, knockout and an
         // ExtGState soft mask reach no other fixture here at all.
@@ -2236,7 +2063,7 @@ fn rendering_is_stable_across_targets() {
         // rasterised cell, a lattice, or `PaintType 2`.
         (
             "tiling",
-            "aa7b2df6bd7613fb53c696ed4b9018a00d1aa4dece2ffe82775c40bfaa1a5011",
+            "274c17e359636faacafe251c7f71ca3b48d85f98a7b2251642048ea8897b5bd6",
         ),
         // Added August 2026 with gap 17. Nothing above decodes a JBIG2
         // stream, and the MQ arithmetic coder underneath it is shared with
@@ -2245,7 +2072,7 @@ fn rendering_is_stable_across_targets() {
         // only the filter crate's own tests standing in front of it.
         (
             "jbig2",
-            "cd20bc1e5c786e245402ba94d700f2a91a267c36e0922d2bc98be5e897839abd",
+            "2b430170b06618741ae1c6051f3fce687f716bc2655488a8cdf0956d173127c7",
         ),
         // Added August 2026 with gap 10. Nothing above draws a mesh, so the
         // whole of 8.7.4.5.5 to 8.7.4.5.8 -- the packed vertex stream, the
@@ -2257,7 +2084,7 @@ fn rendering_is_stable_across_targets() {
         // a rounding difference.
         (
             "mesh",
-            "546f7f9e61572460b1b76610719e772b69625651d6a6b3b820ab30538be7d693",
+            "7faa166696c1283b6fb7556185d6e2f2a73bc49365a19bcf6797ad60e47c8c27",
         ),
         // Added August 2026 with gap 18a. Nothing above decodes a JPEG 2000
         // stream, so the whole of T.800 -- the container, tier-2's packets,
@@ -2271,7 +2098,7 @@ fn rendering_is_stable_across_targets() {
         // show up here and nowhere else.
         (
             "jpx",
-            "d9d0a1f733de50ca06fae32655bc240854d573679698ce7a8e8095640972ef4d",
+            "4da27b74f85dbec9e9891499c2d082009cec5e838efeefc371d77e1bf0659de8",
         ),
         // Added August 2026 with gap 29 milestone 6, and the first entry here
         // whose document is *synthesised* rather than parsed -- so it is the
@@ -2296,7 +2123,7 @@ fn rendering_is_stable_across_targets() {
         // wrote, as well as the renderer every other row here covers.
         (
             "xps",
-            "3e91e30f90903a7b5a91f0442c965acc2519ab22ce7e1c9c5f9b6392e2f74751",
+            "5dd016599f8b550f523f7faa189b0d2c9edfcaf35860ac286caec4d71da56b11",
         ),
         // Added August 2026 with gap 31 milestone 13, and **the first entry
         // here whose page number is not a property of the file**: this is page
@@ -2311,7 +2138,27 @@ fn rendering_is_stable_across_targets() {
         // what it wrote, as well as the renderer every other row here covers.
         (
             "epub",
-            "601b099fe7ff948adda1e1d8649c383cc7f8e9a999e64b9d7cda7d1a2c745b3e",
+            "a0cc8fd3b519745300b0b3eba14cfc5c2fb516b6af9c692801b8031f5585fbd6",
+        ),
+        // Enrolled with the analytic tier's own pages (milestone 2). Their
+        // right answer is an equation `render_analytic.rs` evaluates per pixel;
+        // what a hash adds is that the equation comes out the same on every
+        // target.
+        (
+            "analytic_axial",
+            "487f59336860e7edeb1854aa566de4a5964f14d2ba67c464b990dee393e1f8a1",
+        ),
+        (
+            "analytic_radial",
+            "8966418e8e900c6aca4de8682702e615d5e68ea066cb3bc2c25352a535943204",
+        ),
+        (
+            "analytic_blend",
+            "e1d056a15ae8cb7f18fd1524dfcc419893f4a5283c2f56b3f7307380aee43560",
+        ),
+        (
+            "analytic_image",
+            "37360b0c61ca919d525b75922112580518965e5f4ad12d52ce75953f46061872",
         ),
     ];
     assert_eq!(
@@ -2469,7 +2316,7 @@ fn the_synthesised_document_is_the_same_bytes_on_every_target() {
         .collect();
     assert_eq!(
         hash,
-        "775c5c8126e1e566df503cad9086292563302d499951ed1d76b22ec95e9858db",
+        "c72d64d37f0f087f5cd5b51404304c82a1493e539018ce67bd8723917a74008e",
         "the synthesised document is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2745,7 +2592,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "352adfa42ef1e3e4bd44d7b939523232453289986de083f0c4594886f4d360fb",
+        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2831,12 +2678,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "352adfa42ef1e3e4bd44d7b939523232453289986de083f0c4594886f4d360fb",
+        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "7bfc3ef059ba6e2c1233f2e9cc0e23f2db572dca82e69e23f2f0b2d312f46e9b",
+        "51748067f1d7534bebe50bf891a591e2fc36618f3b76e0daaf149774ad1f9901",
         "the book at 600 x 800 is not the bytes it was"
     );
 

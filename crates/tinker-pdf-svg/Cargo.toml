@@ -1,0 +1,37 @@
+[package]
+name = "tinker-pdf-svg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SVG 1.1 geometry and paint, hand-rolled: markup in, a display list of filled and stroked paths out. No PDF types"
+
+# Three edges, and all three point down.
+#
+# `xml`, because an SVG *is* XML and there is exactly one XML parser in this
+# repository. Taking it also inherits what that parser refuses by name --
+# `<!DOCTYPE` with an internal subset, before one byte past it is read -- and an
+# SVG is the document type in this tree a caller is most likely to be handed by
+# a stranger. A second parser here would be a second answer to the entity
+# expansion question, which is the failure `deny.toml` records for `html5ever`.
+#
+# `css`, for the tokenizer and the colour grammar. An SVG carries presentation
+# attributes *and* `style=""` *and* `<style>` elements, and all three are CSS
+# values. What is deliberately NOT taken from that crate is `ComputedStyle`:
+# its forty-seven fields are HTML's property set and an SVG wants a different
+# dozen, so this crate resolves its own and the edge buys the parsing rather
+# than the model.
+#
+# `math`, and this one is ruling 4 rather than convenience. SVG 1.1 F.6.5's
+# endpoint-to-centre conversion for the elliptical-arc command needs `cos`,
+# `sin` and an `atan2`, and a platform transcendental on a path that decides
+# where ink lands is exactly what `cargo xtask libm` fails the build over. The
+# alternative considered was refusing `A` with a non-zero x-axis-rotation, which
+# would have avoided the edge and made this crate unable to read a rotated
+# ellipse that every drawing program emits.
+[dependencies]
+tinker-pdf-xml = { path = "../tinker-pdf-xml", version = "0.0.1" }
+tinker-pdf-css = { path = "../tinker-pdf-css", version = "0.0.1" }
+tinker-pdf-math = { path = "../tinker-pdf-math", version = "0.0.1" }

@@ -1,5 +1,4 @@
-//! Image parts: 9.1.5's four formats, two of which this engine refuses by name
-//! (gap 30, milestone 8).
+//! Image parts: 9.1.5's four formats, all four of which reach the page.
 //!
 //! # XPS has no image element
 //!
@@ -16,7 +15,7 @@
 //! file chooses. A pass over the markup before the walk costs time proportional
 //! to the part and **no** memory.
 //!
-//! # Nothing here decodes a picture
+//! # Almost nothing here decodes a picture
 //!
 //! Gap 29 built the pass-through this consumes, and its whole argument carries
 //! over unchanged: a JPEG's bytes are placed verbatim by `ImageData::Jpeg`, and
@@ -24,6 +23,14 @@
 //! which is what `/FlateDecode` with `/Predictor 15` expects. So a page's peak
 //! cost is a multiple of the *part* rather than *w × h × 3*, and a ten-page
 //! report with a photograph on every page costs what the package costs.
+//!
+//! **JPEG XR is the exception, and it is not one this engine chose.** No
+//! `/Filter` in ISO 32000-2 Table 6 reads an ITU-T T.832 codestream —
+//! `/JPXDecode` is JPEG 2000, a different format with a different syntax — so
+//! there is no route to choose and every JPEG XR image costs its pixels. That
+//! is stated here rather than buried in [`jxr_image`] because it is the one
+//! place a caller's peak memory depends on which of 9.1.5's formats a package
+//! happened to use.
 //!
 //! `png_image` is the one door, and it decides for itself which of the two
 //! routes a given PNG takes — Adam7 and interleaved alpha cannot pass through.
@@ -44,7 +51,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tinker_pdf_cos::{jpeg_shape, png_image, DocumentBuilder, ImageData, PngRoute};
+use tinker_pdf_color::icc;
+use tinker_pdf_cos::{
+    jpeg_shape, jxr_image, png_image, tiff_image, CompressedImage, DocumentBuilder,
+    ImageColorSpace, ImageData, ImageFilter, PngRoute,
+};
 use tinker_pdf_filters::Limits as FilterLimits;
 use tinker_pdf_xml::{Doctype, Event, Source};
 
@@ -126,6 +137,17 @@ pub struct Image {
     pub px: (f64, f64),
     /// Dots per inch, horizontally and vertically, defaulting to 13.4.1's 96.
     pub dpi: (f64, f64),
+    /// What this part reached the document **approximately**, if anything.
+    ///
+    /// The success channel for ruling 10, and it exists because `place_one`
+    /// returns `Result<Image, XpsElementDefect>`: a refusal has the `Err` side
+    /// and a leniency had nowhere to go, so a disagreement between 7.2.3.5's
+    /// content type and the magic bytes was resolved silently. It rides here
+    /// instead and `paint.rs`'s `State::tile` pushes it into the page's
+    /// defects, where `warn` deduplicates it — this is set once per *part* and
+    /// read once per *use*, so a page tiling one picture forty times says it
+    /// once.
+    pub lenience: Option<XpsElementDefect>,
 }
 
 impl Image {
@@ -180,11 +202,11 @@ impl Images {
         if wanted.len() > limits.max_parts {
             return Err(Trouble::Exhausted);
         }
-        for name in wanted {
+        for (name, profile) in wanted {
             if self.placed.contains_key(&name) {
                 continue;
             }
-            let placed = self.place_one(package, &name, builder, limits);
+            let placed = self.place_one(package, &name, profile.as_ref(), builder, limits);
             self.placed.insert(name, placed);
         }
         Ok(())
@@ -200,15 +222,20 @@ impl Images {
     /// One [`XpsElementDefect`] per way an `ImageSource` can fail to be a
     /// picture, each by its own name.
     pub fn get(&self, page: &PartName, uri: &str) -> Result<&Image, XpsElementDefect> {
-        // 9.1.5's `ImageSource` may carry a `{ColorConvertedBitmap …}` wrapper
-        // naming an ICC profile. The profile is a non-goal of this whole plan,
-        // and the wrapper's syntax has nowhere to put an sRGB fallback, so it
-        // is refused rather than unwrapped and drawn in the wrong colours.
-        if uri.trim_start().starts_with('{') {
-            return Err(XpsElementDefect::ImageProfileUnsupported);
-        }
+        // 9.1.5's `ImageSource` may carry a `{ColorConvertedBitmap picture
+        // profile}` wrapper. The picture is what this names; the profile went
+        // into the document as an `/ICCBased` space when the part was placed,
+        // and the samples are values in it. A wrapper this build does not know
+        // is still refused, because its references cannot be told apart.
+        let reference = match colour_converted_bitmap(uri) {
+            Some((picture, _)) => picture,
+            None if uri.trim_start().starts_with('{') => {
+                return Err(XpsElementDefect::ImageProfileUnsupported)
+            }
+            None => source_reference(uri),
+        };
         let name = page
-            .resolve(source_reference(uri))
+            .resolve(reference)
             .ok_or(XpsElementDefect::ImageUnresolved)?;
         match self.placed.get(&name) {
             Some(Ok(image)) => Ok(image),
@@ -217,16 +244,61 @@ impl Images {
         }
     }
 
+    /// Reads the ICC profile a `{ColorConvertedBitmap}` names and registers it
+    /// as an `/ICCBased` space, returning the resource name and channel count.
+    ///
+    /// The same three narrowings [`super::profiles`] makes for a
+    /// `ContextColor`, for the same reasons and with the same names: a part
+    /// that is not there, a header §7.2 cannot read, and a channel count
+    /// Table 66 does not spell. The space is registered under `XCS…` rather
+    /// than `CS…` so the two passes cannot collide on a name — they run over
+    /// the same page and both allocate from zero.
+    fn place_profile(
+        &mut self,
+        package: &mut Package<'_>,
+        part: &PartName,
+        builder: &mut DocumentBuilder,
+    ) -> Result<(Vec<u8>, u8), XpsElementDefect> {
+        if !package.has(part) {
+            return Err(XpsElementDefect::ColourProfileUnresolved);
+        }
+        let bytes = package
+            .read_part(part)
+            .map_err(|_| XpsElementDefect::ColourProfileUnresolved)?;
+        let channels = icc::data_space(bytes)
+            .and_then(icc::channels)
+            .ok_or(XpsElementDefect::ColourProfileUnresolved)?;
+        if !matches!(channels, 1 | 3 | 4) {
+            return Err(XpsElementDefect::ColourProfileChannels);
+        }
+        let profile = bytes.to_vec();
+        let resource = format!("XCS{}", self.next).into_bytes();
+        if !builder.add_icc_color_space(&resource, &profile, channels) {
+            return Err(XpsElementDefect::ColourProfileUnresolved);
+        }
+        Ok((resource, channels))
+    }
+
     fn place_one(
         &mut self,
         package: &mut Package<'_>,
         name: &PartName,
+        profile: Option<&PartName>,
         builder: &mut DocumentBuilder,
         limits: &Limits,
     ) -> Result<Image, XpsElementDefect> {
         if !package.has(name) {
             return Err(XpsElementDefect::ImageUnresolved);
         }
+        // The profile is read and registered **before** the picture's bytes,
+        // because both borrow the package and the picture's borrow is held for
+        // the rest of this function. What is kept is the resource name the
+        // space went in under and its channel count; `in_icc_space` needs no
+        // more than that, and nothing here evaluates the profile.
+        let icc = match profile {
+            Some(part) => Some(self.place_profile(package, part, builder)?),
+            None => None,
+        };
         // Read and copied before the bytes, because both borrow the package.
         let declared = match package.media_type(name) {
             Ok(Some(media)) => Kind::from_media(media),
@@ -239,24 +311,47 @@ impl Images {
             .map_err(|_| XpsElementDefect::ImageUnresolved)?;
         let actual = Kind::from_magic(bytes);
 
-        // The two rules, and either one refusing is a refusal. A part whose
-        // content type says PNG and whose bytes say TIFF is not a PNG, and a
-        // part whose bytes say PNG and whose content type says TIFF is a
-        // package this build declines to guess about.
-        for kind in [declared, actual].into_iter().flatten() {
-            if matches!(kind, Kind::Tiff | Kind::JpegXr) {
-                return Err(XpsElementDefect::ImageFormatUnsupported);
-            }
-        }
-        let kind = match (declared, actual) {
-            // They agree, or only one of them spoke.
-            (Some(a), Some(b)) if a == b => a,
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            // They disagree about two formats this build *can* draw. The bytes
-            // win, because a decoder reads bytes — but it is a leniency and it
-            // is named, so "it opened" and "it opened cleanly" stay apart.
-            (Some(_), Some(b)) => b,
+        // **The pre-emptive refusal loop is gone, and its absence is the
+        // wiring.** It refused a format *before* either identification rule
+        // had decided what the part was, so a `Kind` named there could never
+        // reach a decoder however it was identified. TIFF left it when a TIFF
+        // decoder arrived; JPEG XR was the last one in it, and it leaves for
+        // the same reason. There is now no format 9.1.5 admits that this
+        // function declines before looking.
+        //
+        // What remains is the ordinary agreement between the two rules, and
+        // the one case where they disagree.
+        let (kind, lenience) = match (declared, actual) {
+            // They agree, or only one of them spoke — and silence from a rule
+            // is not disagreement with it. A part 7.2.3.5 resolved to no
+            // content type has one witness, and so has one whose first bytes
+            // are no signature `from_magic` knows; a single witness is
+            // believed, because the alternative is refusing every part that
+            // one of the two rules happens not to cover.
+            (Some(a), Some(b)) if a == b => (a, None),
+            (Some(a), None) => (a, None),
+            (None, Some(b)) => (b, None),
+            // They disagree about two formats this build can draw. The bytes
+            // win, because a decoder reads bytes — and the leniency is named,
+            // which is ruling 10 and is what this arm owed for three
+            // milestones.
+            //
+            // **The name rides the success side**, on `Image::lenience`, for
+            // the reason the gap existed at all: this function returns
+            // `Result<Image, XpsElementDefect>`, so its `Err` is a *refusal*
+            // and a leniency reported there would lose the picture. The push
+            // into the page's defects is `paint.rs`'s `State::tile`.
+            //
+            // **This arm is fully ordinary now.** It was nearly dead when TIFF
+            // and JPEG XR were both refused before the two rules were
+            // compared, so only PNG-versus-JPEG could arrive. Wiring TIFF made
+            // it ordinary for three formats. Wiring JPEG XR — and deleting the
+            // loop that used to refuse it — makes every one of 9.1.5's four
+            // formats reachable on both sides, so twelve ordered pairs take it
+            // where two did. Pinned by
+            // `a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named`
+            // in `tests/xps_images.rs`.
+            (Some(_), Some(b)) => (b, Some(XpsElementDefect::ImageMediaTypeMismatch)),
             (None, None) => return Err(XpsElementDefect::ImageFormatUnsupported),
         };
 
@@ -264,13 +359,21 @@ impl Images {
         let image = match kind {
             Kind::Jpeg => {
                 let (w, h, _) = jpeg_shape(bytes).ok_or(XpsElementDefect::ImageUnreadable)?;
-                if !builder.add_image(&resource, &ImageData::Jpeg(bytes)) {
+                let data = match &icc {
+                    Some((space, channels)) => {
+                        in_icc_space(ImageData::Jpeg(bytes), space, *channels, (w, h))
+                            .ok_or(XpsElementDefect::ImageProfileUnsupported)?
+                    }
+                    None => ImageData::Jpeg(bytes),
+                };
+                if !builder.add_image(&resource, &data) {
                     return Err(XpsElementDefect::ImageUnreadable);
                 }
                 Image {
                     resource,
                     px: (f64::from(w), f64::from(h)),
                     dpi: jfif_dpi(bytes).unwrap_or((DEFAULT_DPI, DEFAULT_DPI)),
+                    lenience,
                 }
             }
             Kind::Png => {
@@ -279,6 +382,11 @@ impl Images {
                 self.routes.insert(name.clone(), png.route());
                 let data = png.image();
                 let (w, h) = shape_of(&data).ok_or(XpsElementDefect::ImageUnreadable)?;
+                let data = match &icc {
+                    Some((space, channels)) => in_icc_space(data, space, *channels, (w, h))
+                        .ok_or(XpsElementDefect::ImageProfileUnsupported)?,
+                    None => data,
+                };
                 if !builder.add_image(&resource, &data) {
                     return Err(XpsElementDefect::ImageUnreadable);
                 }
@@ -286,19 +394,74 @@ impl Images {
                     resource,
                     px: (f64::from(w), f64::from(h)),
                     dpi: phys_dpi(bytes).unwrap_or((DEFAULT_DPI, DEFAULT_DPI)),
+                    lenience,
                 }
             }
-            // Refused above, before either decoder was reached — so this arm
-            // is unreachable, and it is here because the alternative is a
-            // `match` that does not cover its own type.
+            // 9.1.5's TIFF. Most of one reaches the page as its own bytes:
+            // four of TIFF 6.0's codings already have a `/Filter` name, so a
+            // single-strip file of any of them is placed rather than decoded
+            // ([`tinker_pdf_cos::tiff_image`]).
+            Kind::Tiff => {
+                let tiff = tiff_image(bytes, &FilterLimits::new(limits.max_synthesised))
+                    .map_err(|_| XpsElementDefect::ImageUnreadable)?;
+                let data = tiff.image();
+                let (w, h) = (tiff.width(), tiff.height());
+                // A resolution the file states, in the units it states them
+                // in; 13.4.1's 96 where it states none. The other two formats
+                // read their own headers for this and TIFF's is read off the
+                // directory, which is why all three defaults sit here rather
+                // than in the decoders.
+                let dpi = tiff.dpi().unwrap_or((DEFAULT_DPI, DEFAULT_DPI));
+                let data = match &icc {
+                    Some((space, channels)) => in_icc_space(data, space, *channels, (w, h))
+                        .ok_or(XpsElementDefect::ImageProfileUnsupported)?,
+                    None => data,
+                };
+                if !builder.add_image(&resource, &data) {
+                    return Err(XpsElementDefect::ImageUnreadable);
+                }
+                Image {
+                    resource,
+                    px: (f64::from(w), f64::from(h)),
+                    dpi,
+                    lenience,
+                }
+            }
+            // 9.1.5.1's JPEG XR, the format OPC recommends and nothing
+            // outside Microsoft's stack implements. Always decoded: see the
+            // module note on why there is no pass-through route for it.
             //
-            // The redundancy is measured rather than assumed: the injection
-            // matrix's "a TIFF the magic bytes say is drawn" removes the loop's
-            // `actual` and **survives**, because this arm refuses the same file
-            // a line later. That is the one injection of twenty-eight that
-            // changes no answer, and it says the rule is enforced twice rather
-            // than that a test is missing.
-            Kind::Tiff | Kind::JpegXr => return Err(XpsElementDefect::ImageFormatUnsupported),
+            // `jxr_image` does the three rearrangements PDF needs — the BGR
+            // rows permuted into `/DeviceRGB` order, 16-bit samples swapped
+            // from A.7.3's little-endian to 8.9.5.2's big-endian, and A.3.2's
+            // alpha split out into an `/SMask` — so what arrives here is
+            // already an image XObject's worth of samples.
+            Kind::JpegXr => {
+                let jxr = jxr_image(bytes, &FilterLimits::new(limits.max_synthesised))
+                    .map_err(|_| XpsElementDefect::ImageUnreadable)?;
+                let data = jxr.image();
+                let (w, h) = (jxr.width(), jxr.height());
+                // Annex A's `WIDTH_RESOLUTION` and `HEIGHT_RESOLUTION` where
+                // the file states them, 13.4.1's 96 where it does not — the
+                // same rule the other three formats follow, and the reason
+                // all four defaults sit in this file rather than in four
+                // decoders.
+                let dpi = jxr.dpi().unwrap_or((DEFAULT_DPI, DEFAULT_DPI));
+                let data = match &icc {
+                    Some((space, channels)) => in_icc_space(data, space, *channels, (w, h))
+                        .ok_or(XpsElementDefect::ImageProfileUnsupported)?,
+                    None => data,
+                };
+                if !builder.add_image(&resource, &data) {
+                    return Err(XpsElementDefect::ImageUnreadable);
+                }
+                Image {
+                    resource,
+                    px: (f64::from(w), f64::from(h)),
+                    dpi,
+                    lenience,
+                }
+            }
         };
         self.next += 1;
         Ok(image)
@@ -396,6 +559,103 @@ fn source_reference(uri: &str) -> &str {
     uri.split('#').next().unwrap_or(uri)
 }
 
+/// Restates an image in a registered `/ICCBased` space (8.9.5.4).
+///
+/// Every route above hands `add_image` an [`ImageData`], and what a
+/// `{ColorConvertedBitmap}` changes is one field of it: the samples are the
+/// same bytes, and what moves is the statement about what they *mean*. So this
+/// is a rewrite of the colour space and nothing else — no sample is touched,
+/// no profile is evaluated, and the reader does the colour management exactly
+/// as it does for a `ContextColor`.
+///
+/// The JPEG arm is the one that changes shape rather than a field: a
+/// pass-through JPEG reaches the writer as [`ImageData::Jpeg`], which carries
+/// no colour space because a JPEG states its own. 8.9.5.4 lets an image
+/// dictionary say otherwise, so it becomes a [`CompressedImage`] whose
+/// `/Filter` is `/DCTDecode` and whose `/ColorSpace` is the profile's — the
+/// same bytes, with the space the package asked for.
+fn in_icc_space<'a>(
+    data: ImageData<'a>,
+    resource: &'a [u8],
+    channels: u8,
+    shape: (u32, u32),
+) -> Option<ImageData<'a>> {
+    let space = ImageColorSpace::Icc {
+        resource,
+        components: channels,
+    };
+    Some(match data {
+        ImageData::Compressed(image) => ImageData::Compressed(CompressedImage {
+            color_space: space,
+            ..image
+        }),
+        ImageData::Jpeg(bytes) => ImageData::Compressed(CompressedImage {
+            width: shape.0,
+            height: shape.1,
+            bits_per_component: 8,
+            color_space: space,
+            filter: Some(ImageFilter::Dct),
+            data: bytes,
+            color_key_mask: None,
+            soft_mask: None,
+        }),
+        ImageData::Rgb8 {
+            width,
+            height,
+            data,
+        }
+        | ImageData::Gray8 {
+            width,
+            height,
+            data,
+        } => ImageData::Compressed(CompressedImage {
+            width,
+            height,
+            bits_per_component: 8,
+            color_space: space,
+            filter: None,
+            data,
+            color_key_mask: None,
+            soft_mask: None,
+        }),
+        // `ImageData` is `#[non_exhaustive]`, so a road added later arrives
+        // here. **It refuses rather than passing the image through**, because
+        // passing it through would draw the samples in whatever space the
+        // variant states while the package said they are values in a profile —
+        // which is the one outcome this whole path exists to prevent, and it
+        // would be silent.
+        _ => return None,
+    })
+}
+
+/// 9.1.5's `{ColorConvertedBitmap <image> <profile>}` wrapper, split into the
+/// two parts it names.
+///
+/// The syntax is a brace, the keyword, and **two** whitespace-separated
+/// references: the picture, and the ICC profile its samples are values in.
+/// Anything else in the braces is a wrapper this build does not know, and it
+/// returns `None` rather than guessing which reference is which — a wrapper
+/// with three references is not this one, and reading its first two would be
+/// drawing a picture in a profile the file did not pair it with.
+///
+/// The keyword is matched case-sensitively, as 9.1.5 spells it. A fragment on
+/// either reference is dropped the way [`source_reference`] drops one.
+fn colour_converted_bitmap(uri: &str) -> Option<(&str, &str)> {
+    let inner = uri.trim().strip_prefix('{')?.strip_suffix('}')?;
+    let rest = inner.trim().strip_prefix("ColorConvertedBitmap")?;
+    // A keyword that merely *starts* with the name is a different wrapper.
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut parts = rest.split_whitespace();
+    let image = parts.next()?;
+    let profile = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((source_reference(image), source_reference(profile)))
+}
+
 /// Every part an `ImageBrush` of one fixed page part names, deduplicated and in
 /// markup order.
 ///
@@ -403,15 +663,17 @@ fn source_reference(uri: &str) -> &str {
 /// which image gets `/XI0`, and a resource name that depended on a hash's
 /// iteration order would make the synthesised document differ between two runs
 /// over one package — which the determinism fingerprint hashes.
+type ImageReference = (PartName, Option<PartName>);
+
 fn image_references(
     bytes: &[u8],
     page: &PartName,
     limits: &Limits,
-) -> Result<Vec<PartName>, Trouble> {
+) -> Result<Vec<ImageReference>, Trouble> {
     let Ok(source) = Source::new(bytes) else {
         return Ok(Vec::new());
     };
-    let mut out: Vec<PartName> = Vec::new();
+    let mut out: Vec<ImageReference> = Vec::new();
     let mut seen: HashSet<PartName> = HashSet::new();
     for event in source.reader_with(&limits.xml, Doctype::Refuse) {
         let element = match event {
@@ -428,14 +690,24 @@ fn image_references(
         let Some(uri) = element.attribute(None, "ImageSource") else {
             continue;
         };
-        if uri.trim_start().starts_with('{') {
-            continue;
-        }
-        let Some(name) = page.resolve(source_reference(uri)) else {
+        // 9.1.5's `{ColorConvertedBitmap picture profile}` names two parts in
+        // one attribute, and both are read here for `Images::load`'s reason:
+        // `read_part` borrows the package and the drawing walk is already
+        // holding a borrow, so every part a page needs is read in this pass.
+        let (reference, profile) = match colour_converted_bitmap(uri) {
+            Some((picture, profile)) => (picture, page.resolve(profile)),
+            // A wrapper that is not one this build knows names no part it can
+            // resolve, and guessing which of its references is the picture is
+            // how a page ends up drawn in a profile the file did not pair it
+            // with.
+            None if uri.trim_start().starts_with('{') => continue,
+            None => (source_reference(uri), None),
+        };
+        let Some(name) = page.resolve(reference) else {
             continue;
         };
         if seen.insert(name.clone()) {
-            out.push(name);
+            out.push((name, profile));
             if out.len() > limits.max_parts {
                 return Err(Trouble::Exhausted);
             }

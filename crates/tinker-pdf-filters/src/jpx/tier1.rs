@@ -46,7 +46,8 @@
 //! clamped before they reach a plane.
 
 use super::codestream::Codestream;
-use super::tier2::{CodeBlock, Orientation, Tile};
+use super::passes::Schedule;
+use super::tier2::{CodeBlock, Orientation, Segment, Tile};
 use super::{Refusal, MAX_JPX_WORK};
 use crate::mq::{MqContexts, MqDecoder};
 
@@ -312,6 +313,16 @@ pub(crate) struct Block {
     /// at the end of every cleanup pass.
     visited: Vec<bool>,
     magnitude: Vec<u32>,
+    /// Table A.19 bit 3, and the row the current stripe stops at.
+    ///
+    /// Vertically causal context formation treats everything in the *next*
+    /// stripe as insignificant, so a stripe can be decoded knowing nothing
+    /// below it. Only a coefficient in a stripe's last row has a neighbour
+    /// there at all, and the four passes reach those neighbours through one
+    /// function, so this is one field and one branch rather than four
+    /// context rules.
+    causal: bool,
+    stripe_end: usize,
 }
 
 impl Block {
@@ -327,7 +338,23 @@ impl Block {
             known: vec![0; n],
             visited: vec![false; n],
             magnitude: vec![0; n],
+            causal: false,
+            stripe_end: usize::MAX,
         }
+    }
+
+    /// Turns on vertically causal context formation (Table A.19 bit 3).
+    fn set_causal(&mut self, causal: bool) {
+        self.causal = causal;
+    }
+
+    /// Names the stripe now being coded, for [`Block::significant`].
+    fn enter_stripe(&mut self, top: usize) {
+        // A stripe is four rows whatever the last one holds, and the bound is
+        // the *stripe's*, not the rows present in it: a code-block whose
+        // height is not a multiple of four has a short final stripe with
+        // nothing below it either way.
+        self.stripe_end = top.saturating_add(4);
     }
 
     const fn at(&self, x: usize, y: usize) -> usize {
@@ -343,6 +370,12 @@ impl Block {
     /// free to hand them over in any order.
     fn significant(&self, x: isize, y: isize) -> bool {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
+            return false;
+        }
+        if self.causal && y as usize >= self.stripe_end {
+            // Table A.19 bit 3: the stripe below this one does not exist for
+            // context formation. Every one of D.2's context rules reaches its
+            // neighbours through here, so this is the whole of the mode.
             return false;
         }
         self.sigma[self.at(x as usize, y as usize)]
@@ -451,20 +484,132 @@ impl Block {
 
 // --- the three passes (T.800 D.2.1 to D.2.4) ----------------------------
 
+/// D.6's raw bit reader: the bits a bypassed pass gets instead of MQ
+/// decisions.
+///
+/// "(A routine that undoes the effects of bit stuffing precedes the return of
+/// bits. Specifically, this routine throws out the first bit after an 0xFF
+/// byte value.)" — which is the same stuffing rule B.10.1 applies to packet
+/// header bits, written in a different clause for a different stream.
+/// [`super::tier2::PacketBits`] implements the other one, and
+/// `the_two_stuffed_bit_readers_agree` pins that they agree, because two
+/// copies of one rule is exactly the shape that drifts.
+///
+/// **Past the end the byte stream continues with 0xFF, and that is the
+/// standard's answer rather than this build's.** D.4.1 gives it for the
+/// arithmetic decoder — "the decoder shall extend the input bit stream to the
+/// arithmetic coder with 0xFF bytes, as necessary, until all symbols have
+/// been decoded" — and D.6 extends it to the raw stream in its own words, in
+/// NOTE 2: "Since the decoder appends 0xFF values, as necessary, to the bit
+/// stream representing the coding pass (see D.4.1), truncation of the bit
+/// stream may be possible."
+///
+/// An earlier draft of this reader returned zero past the end and said in
+/// this comment that "D.6 says nothing at all about a raw one". That was a
+/// transcription failure rather than a judgement call: the sentence above is
+/// two paragraphs below Equation (D-2) on the same page. It matters because a
+/// truncated raw segment is exactly the case D.6's NOTE 2 says an encoder may
+/// *deliberately* produce, so it is reachable from a conforming file and not
+/// only from a damaged one.
+///
+/// The extension needs no bound: 0xFF's bits are all ones, and an 0xFF after
+/// an 0xFF is unstuffed to seven of them, so every bit past the end is one
+/// whichever byte preceded it. `at` stops at the end of the slice rather than
+/// running on.
+struct RawBits<'a> {
+    data: &'a [u8],
+    at: usize,
+    buf: u8,
+    ct: u32,
+}
+
+impl<'a> RawBits<'a> {
+    const fn new(data: &'a [u8]) -> RawBits<'a> {
+        RawBits {
+            data,
+            at: 0,
+            buf: 0,
+            ct: 0,
+        }
+    }
+
+    fn bit(&mut self) -> u8 {
+        if self.ct == 0 {
+            let next = match self.data.get(self.at) {
+                Some(&byte) => {
+                    self.at += 1;
+                    byte
+                }
+                // D.4.1 and D.6's NOTE 2: the decoder appends 0xFF.
+                None => 0xFF,
+            };
+            // The stuffing rule: a byte following an 0xFF carries seven bits,
+            // its most significant having been stuffed by the encoder.
+            self.ct = if self.buf == 0xFF { 7 } else { 8 };
+            self.buf = next;
+        }
+        self.ct -= 1;
+        (self.buf >> self.ct) & 1
+    }
+}
+
+/// [`RawBits`] as a closure, for `tests::code_block_styles`.
+///
+/// The reader is private because nothing outside this module decodes a raw
+/// pass, and it stays private: what the test needs is a stream of bits to
+/// compare against [`super::tier2::PacketBits`], not the type.
+#[cfg(test)]
+pub(crate) fn raw_bits_for_test(data: &[u8]) -> impl FnMut() -> u8 + '_ {
+    let mut raw = RawBits::new(data);
+    move || raw.bit()
+}
+
+/// Where one codeword segment's decisions come from.
+///
+/// Table D.9 makes a segment wholly raw or wholly arithmetic — a raw
+/// significance propagation pass is never terminated, so it always shares its
+/// segment with the raw magnitude refinement pass after it, and a cleanup
+/// pass is always arithmetic and always ends a segment once bypass is on.
+/// `passes::tests::a_codeword_segment_never_mixes_raw_and_arithmetic_passes`
+/// is that invariant, and it is what lets this be one enum per segment rather
+/// than a branch inside every decision.
+enum Source<'a> {
+    Mq(MqDecoder<'a>),
+    Raw(RawBits<'a>),
+}
+
 /// Everything one code-block decode needs that is not the block itself.
 struct Coder<'a, 'b> {
-    mq: MqDecoder<'a>,
+    source: Source<'a>,
     contexts: &'b mut MqContexts,
     segmentation_symbols: bool,
 }
 
 impl Coder<'_, '_> {
     fn decode(&mut self, context: usize) -> u8 {
-        self.mq.decode_at(self.contexts, context)
+        match &mut self.source {
+            Source::Mq(mq) => mq.decode_at(self.contexts, context),
+            // D.6: "the bits that would have been returned from the
+            // arithmetic coder are instead returned directly from the bit
+            // stream". The context is computed and discarded rather than not
+            // computed, because a raw pass leaves the context states
+            // untouched and the next arithmetic pass must find them as the
+            // last arithmetic pass left them.
+            Source::Raw(raw) => raw.bit(),
+        }
     }
 
     /// D.2.2: the sign of a coefficient that has just become significant.
+    ///
+    /// In a raw pass this is **not** D.2.2's context-and-XOR decode. Equation
+    /// (D-2) replaces the whole of it: "signbit = raw_value, where raw_value
+    /// = 1 is a negative sign bit and raw_value = 0 is a positive sign bit".
+    /// Running the XOR bit over a raw sign inverts roughly half the signs of
+    /// every bypassed pass, which is a picture rather than an error.
     fn sign(&mut self, block: &Block, x: usize, y: usize) -> bool {
+        if let Source::Raw(raw) = &mut self.source {
+            return raw.bit() == 1;
+        }
         let (context, xorbit) = block.sign_coding(x, y);
         (self.decode(context) ^ xorbit) == 1
     }
@@ -473,6 +618,7 @@ impl Coder<'_, '_> {
     /// neighbour.
     fn significance_pass(&mut self, block: &mut Block, plane: u32) {
         for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
+            block.enter_stripe(top);
             for y in top..top + rows {
                 let i = block.at(x, y);
                 if block.sigma[i] {
@@ -502,6 +648,7 @@ impl Coder<'_, '_> {
     /// bit-plane's significance propagation pass.
     fn refinement_pass(&mut self, block: &mut Block, plane: u32) {
         for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
+            block.enter_stripe(top);
             for y in top..top + rows {
                 let i = block.at(x, y);
                 // π excludes the coefficients this plane's significance pass
@@ -529,6 +676,7 @@ impl Coder<'_, '_> {
     /// run-length mode for a column of four that is entirely quiet.
     fn cleanup_pass(&mut self, block: &mut Block, plane: u32) -> Result<(), Refusal> {
         for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
+            block.enter_stripe(top);
             let mut y = top;
             // The run-length mode. Four rows, none significant, none coded by
             // this plane's significance pass, and every one of the four with
@@ -602,12 +750,12 @@ impl Coder<'_, '_> {
 // the contexts, the decoder and the budget.
 #[allow(clippy::too_many_arguments, reason = "T.800 D.4's own parameter list")]
 pub(crate) fn decode_code_block(
-    data: &[u8],
+    segments: &[Segment],
     width: u32,
     height: u32,
     passes: u32,
     orientation: Orientation,
-    segmentation_symbols: bool,
+    style: CodingStyle,
     contexts: &mut MqContexts,
     work: &mut u64,
 ) -> Result<Decoded, Refusal> {
@@ -662,18 +810,55 @@ pub(crate) fn decode_code_block(
     // half of `set_state` that had to exist for this line to be right.
     contexts.reset();
     let mut block = Block::new(width as usize, height as usize, orientation);
-    let mut coder = Coder {
-        mq: MqDecoder::new(data),
-        contexts,
-        segmentation_symbols,
-    };
+    block.set_causal(style.vertically_causal);
 
-    for i in 0..passes {
-        let (pass, plane) = pass_at(i, planes);
-        match pass {
-            Pass::Significance => coder.significance_pass(&mut block, plane),
-            Pass::Refinement => coder.refinement_pass(&mut block, plane),
-            Pass::Cleanup => coder.cleanup_pass(&mut block, plane)?,
+    // One reader per codeword segment (B.10.7). With neither Table A.19 bit
+    // set there is exactly one, holding every byte, and this loop is the loop
+    // that was here before.
+    //
+    // **What is re-initialised at a segment boundary, and what is not.** A
+    // new [`MqDecoder`] is INITDEC on the new segment's bytes (T.88 E.3.5),
+    // which is what "terminate" means on the encoder's side: D.4.2 requires a
+    // termination to leave the decoder needing no backtracking. The *context
+    // states* are untouched, because D.4's termination says nothing about
+    // them and Table D.7's reset is a different bit — `RESET`, handled below.
+    // Resetting contexts at every termination decodes a `TERMALL` stream's
+    // second pass as noise; not re-initialising the decoder decodes it as
+    // noise the other way.
+    let mut i = 0u32;
+    for segment in segments {
+        // The kind is taken from the segment's first pass. The passes in one
+        // segment are all of a kind — see [`Source`] — so any of them would
+        // answer, and the first is the one that exists whatever the count.
+        let source = if Schedule::new(style.bypass, style.terminate_all).raw(i) {
+            Source::Raw(RawBits::new(&segment.bytes))
+        } else {
+            Source::Mq(MqDecoder::new(&segment.bytes))
+        };
+        let mut coder = Coder {
+            source,
+            contexts: &mut *contexts,
+            segmentation_symbols: style.segmentation_symbols,
+        };
+        for _ in 0..segment.passes {
+            if i >= passes {
+                break;
+            }
+            let (pass, plane) = pass_at(i, planes);
+            match pass {
+                Pass::Significance => coder.significance_pass(&mut block, plane),
+                Pass::Refinement => coder.refinement_pass(&mut block, plane),
+                Pass::Cleanup => coder.cleanup_pass(&mut block, plane)?,
+            }
+            if style.reset_contexts {
+                // Table A.19 bit 1: back to Table D.7's states at every pass
+                // boundary. The arithmetic decoder's own registers are *not*
+                // reset — that is `TERMALL`, a different bit and a different
+                // question, and conflating the two decodes the second pass of
+                // every block as noise.
+                coder.contexts.reset();
+            }
+            i += 1;
         }
     }
     Ok(Decoded {
@@ -681,6 +866,30 @@ pub(crate) fn decode_code_block(
         half_planes: block.half_planes(),
         planes,
     })
+}
+
+/// The Table A.19 code-block style bits that change how decisions are read.
+///
+/// A struct rather than three `bool` parameters: they arrive together, they are
+/// all `bool`, and two of them transposed at a call site decodes plausibly
+/// wrong rather than visibly so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CodingStyle {
+    /// D.5's four-decision check at the end of each cleanup pass.
+    pub(crate) segmentation_symbols: bool,
+    /// Table A.19 bit 1.
+    pub(crate) reset_contexts: bool,
+    /// Table A.19 bit 3.
+    pub(crate) vertically_causal: bool,
+    /// Table A.19 bit 0, D.6. Read here only to decide whether a segment's
+    /// passes are raw; the *segmentation* it causes is tier-2's, and arrives
+    /// as the shape of [`Segment`].
+    pub(crate) bypass: bool,
+    /// Table A.19 bit 2, D.4. Read here for the same reason and with the same
+    /// division of labour — and it is here rather than absent because a
+    /// segment's kind is a function of both bits together, not of `bypass`
+    /// alone.
+    pub(crate) terminate_all: bool,
 }
 
 /// What one code-block decode yields.
@@ -725,20 +934,20 @@ pub(crate) fn decode_tiles(stream: &Codestream<'_>, tiles: &mut [Tile]) -> Resul
     for tile in tiles.iter_mut() {
         let index = tile.index;
         for (c, component) in tile.components.iter_mut().enumerate() {
-            let style = stream.style_for(index, c);
-            let segmentation_symbols = style.segmentation_symbols();
+            let coding = stream.style_for(index, c);
+            let style = CodingStyle {
+                segmentation_symbols: coding.segmentation_symbols(),
+                reset_contexts: coding.reset_contexts(),
+                vertically_causal: coding.vertically_causal(),
+                bypass: coding.bypass(),
+                terminate_all: coding.terminate_all(),
+            };
             for resolution in &mut component.resolutions {
                 for band in &mut resolution.bands {
                     let orientation = band.orientation;
                     for precinct in &mut band.precincts {
                         for block in &mut precinct.blocks {
-                            decode_one(
-                                block,
-                                orientation,
-                                segmentation_symbols,
-                                &mut contexts,
-                                &mut work,
-                            )?;
+                            decode_one(block, orientation, style, &mut contexts, &mut work)?;
                         }
                     }
                 }
@@ -751,17 +960,17 @@ pub(crate) fn decode_tiles(stream: &Codestream<'_>, tiles: &mut [Tile]) -> Resul
 fn decode_one(
     block: &mut CodeBlock,
     orientation: Orientation,
-    segmentation_symbols: bool,
+    style: CodingStyle,
     contexts: &mut MqContexts,
     work: &mut u64,
 ) -> Result<(), Refusal> {
     let decoded = decode_code_block(
-        &block.data,
+        &block.segments,
         block.width(),
         block.height(),
         block.passes,
         orientation,
-        segmentation_symbols,
+        style,
         contexts,
         work,
     )?;
@@ -794,19 +1003,34 @@ pub(crate) mod encoder {
 
     /// Encodes `values` — signed coefficients whose magnitudes fit `planes`
     /// bits — as `3 * planes - 2` coding passes.
+    /// Table D.7's initial states, which the coder starts from and which
+    /// `RESET` returns to at every coding pass boundary.
+    fn initial_states(mq: &mut MqEncoder) {
+        for index in 0..super::CONTEXTS {
+            mq.set_state(index, 0, 0);
+        }
+        for (index, state_) in [(super::ZERO_CODING, 4u8), (RUN_LENGTH, 3), (UNIFORM, 46)] {
+            mq.set_state(index, state_, 0);
+        }
+    }
+
     pub(crate) fn encode_code_block(
         values: &[i32],
         w: usize,
         h: usize,
         planes: u32,
         orientation: Orientation,
-        segmentation_symbols: bool,
+        style: super::CodingStyle,
     ) -> (Vec<u8>, u32) {
+        let segmentation_symbols = style.segmentation_symbols;
         let mut state = super::Block::new(w, h, orientation);
+        // The encoder forms its contexts from the same neighbourhood the
+        // decoder will, so a mode that changes context formation has to be
+        // mirrored here or the round trip proves only that both are wrong in
+        // the same way.
+        state.set_causal(style.vertically_causal);
         let mut mq = MqEncoder::new(super::CONTEXTS);
-        for (index, state_) in [(super::ZERO_CODING, 4u8), (RUN_LENGTH, 3), (UNIFORM, 46)] {
-            mq.set_state(index, state_, 0);
-        }
+        initial_states(&mut mq);
 
         let magnitude: Vec<u32> = values.iter().map(|v| v.unsigned_abs()).collect();
         let negative: Vec<bool> = values.iter().map(|v| *v < 0).collect();
@@ -817,6 +1041,7 @@ pub(crate) mod encoder {
             match pass {
                 Pass::Significance => {
                     for (top, rows, x) in state.stripes().collect::<Vec<_>>() {
+                        state.enter_stripe(top);
                         for y in top..top + rows {
                             let at = state.at(x, y);
                             if state.sigma[at] {
@@ -841,6 +1066,7 @@ pub(crate) mod encoder {
                 }
                 Pass::Refinement => {
                     for (top, rows, x) in state.stripes().collect::<Vec<_>>() {
+                        state.enter_stripe(top);
                         for y in top..top + rows {
                             let at = state.at(x, y);
                             if !state.sigma[at] || state.visited[at] {
@@ -856,6 +1082,7 @@ pub(crate) mod encoder {
                 }
                 Pass::Cleanup => {
                     for (top, rows, x) in state.stripes().collect::<Vec<_>>() {
+                        state.enter_stripe(top);
                         let mut y = top;
                         if rows == 4
                             && (top..top + 4).all(|y| {
@@ -908,6 +1135,9 @@ pub(crate) mod encoder {
                         }
                     }
                 }
+            }
+            if style.reset_contexts {
+                initial_states(&mut mq);
             }
         }
         (mq.flush(), passes)

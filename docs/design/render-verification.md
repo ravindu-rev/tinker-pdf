@@ -2,8 +2,8 @@
 
 When this is done, a page will be checkable against something other than
 this engine's own opinion of it. Today it is not:
-[verification.md](../verification.md) states the limit — 2 952 tests prove
-the engine agrees with itself, the 4 525-file corpus run proves a bitmap
+[verification.md](../verification.md) states the limit — 4 879 tests prove
+the engine agrees with itself, the 5 525-file corpus run proves a bitmap
 came back, and nothing proves the bitmap is *right*.
 
 The design that used to sit here closed that by rendering the same page with
@@ -88,7 +88,7 @@ fixture that catches nothing when its defect is injected is not a fixture.
 ### 2. Metamorphic probes — breadth, over documents nobody here wrote
 
 Analytic fixtures are exact but narrow: they cover pages built to be
-provable. The corpus is the opposite — 4 525 real files with no known
+provable. The corpus is the opposite — 5 525 real files with no known
 answer. What can still be asserted there is a *relation between two renders*
 of the same file, which needs no ground truth at all:
 
@@ -99,7 +99,12 @@ of the same file, which needs no ground truth at all:
 - **Cropping.** A render of a translated `CropBox` must equal the
   corresponding sub-rectangle of the full render. This is ruling 5's
   tile-equality property, generalised from tiles to the page box and applied
-  corpus-wide rather than to fixtures.
+  corpus-wide rather than to fixtures. *Since September 2026 the property it
+  generalises is itself pinned in-tree*, on fixtures and at tile sizes that do
+  not divide the page: `crates/tinker-pdf/tests/render_regions.rs`. The two are
+  worth keeping apart — this one is breadth over documents nobody here wrote
+  and no known answer, that one is a byte-equality assertion with one measured
+  exception ([rulings](../rulings.md)).
 - **Resolution coherence.** A render at 144 dpi, box-filtered down by two,
   must agree with the direct 72 dpi render within a budget measured and
   ratcheted rather than guessed. Sampling-grid and rounding bugs move this;
@@ -155,11 +160,11 @@ quietly stopped proving something is not.
 
 | # | Deliverable | Exit criteria (concrete, testable) | Size |
 | --- | --- | --- | --- |
-| 1 | Analytic coverage and fill-rule fixtures in `tinker-pdf-raster` | **Done.** `tests/analytic_coverage.rs`: expected coverage computed from the sampling grid by an in-test function, byte-equal; the injections on the coverage rounding and on the nonzero rule are each caught, and the rounding one is what the first draft missed | S |
-| 2 | Analytic operator fixtures at the facade (`tests/render_analytic.rs`): strokes, axial and radial shadings, separable blend modes, integer image scaling | **Done**, except the least-ink floor and the fingerprint enrolment: both shadings are compared per pixel over the whole page, the twelve separable modes over nine pairs, and the injections on the blend expression and on the shading parametric are each caught. Strokes live with the coverage fixtures rather than here, since they need no content stream | M |
+| 1 | Analytic coverage and fill-rule fixtures in `tinker-pdf-raster` | **Done.** `tests/analytic_coverage.rs`: expected coverage computed from the sampling grid by an in-test function, byte-equal; the injections on the coverage rounding and on the nonzero rule are each caught, and the rounding one is what the first draft missed. **Extended September 2026**, and it took an outside prompt: every slope in the file was a whole number of units per sub-scanline, so the file could not see that `fill` stored a slope as one — flattening every edge shallower than one pixel of `x` per sixteen of `y` to vertical. `a_shallow_edge_keeps_the_slope_the_line_states` is the fixture that can, and it answers to the line's own equation rather than to how an edge is stored, which is why it is adjudication and not agreement. Ruling 5's tile guard is what asked the question; the file's header now separates the half of that change this tier adjudicates from the half it merely agrees with | S |
+| 2 | Analytic operator fixtures at the facade (`tests/render_analytic.rs`): strokes, axial and radial shadings, separable blend modes, integer image scaling | **Done.** Both shadings are compared per pixel over the whole page, the twelve separable modes over nine pairs, and the injections on the blend expression and on the shading parametric are each caught. Strokes live with the coverage fixtures rather than here, since they need no content stream. The two halves that were owed landed **apart**, and deliberately: the least-ink floor is local to `render_analytic.rs`, where the fixtures are, and the four fingerprints are in `determinism.rs`, because that is the only test the wasm and Linux legs run on their own — a fingerprint anywhere else is not evidence about ruling 4. The pages are built by one function each in `tests/render_support/`, so the document the equation adjudicates is the document the hash covers. The twelve modes needed a thirteenth page for that: the per-mode fixture builds a hundred and eight documents and samples one pixel of each, which cannot be enrolled, so `blend_grid_page` lays the same arithmetic out as one picture and is held to the clause cell by cell | M |
 | 3 | Metamorphic probe modes in `tpdf probe` | **Done.** The probe emits `meta rotate`, `meta crop` and `meta dpi`, each checked in-process so no image leaves the child, on the first page | S |
 | 4 | `corpus-run` rows and ratchet entries for the three relations | **Done.** `corpus/ratchet.json` carries per-corpus `compared` and `held` for each relation and the comparator ratchets both; every budget is recorded with the measurement that set it, and `crop` has none because it was exact on all 119 files measured | M |
-| 5 | Differential in-tree pairs | Type 3 glyph against path, tiling pattern against unrolled content, form XObject against inlined operators, shading pattern against `sh` — each pair byte-equal, each catching an injected divergence | S |
+| 5 | Differential in-tree pairs | **Done.** `tests/render_differential.rs`: a Type 3 glyph against the same path, a tiling pattern against its unrolled cells, a form XObject against its inlined operators, a shading pattern against `sh` in the same region. Each asserts the whole bitmap with no budget, and each half carries an ink floor, because two blank pages agree perfectly. Two of the four were insensitive to their own defect in the first draft and the injection matrix is what found it — a step equal to its cell, and an identity pattern `/Matrix`, each collapsing the two readings the pair exists to part | S |
 | 6 | Reviewed goldens per operator family | Each golden's header names the reviewer, the date and the clause; a golden missing any of the three fails a test that reads the headers, in the style of `bounds_ledger.rs` | S |
 
 ## Dependencies
@@ -168,7 +173,7 @@ quietly stopped proving something is not.
   defined in one place. No metric changes.
 - `xtask` plumbing: `ratchet::holds`, `report.rs` serialization,
   `runner.rs`'s per-file timeout discipline, `corpus.rs::pdfs_under`.
-- The four fetched corpora, which ruling 13 keeps: they are inputs, not
+- The five fetched corpora, which ruling 13 keeps: they are inputs, not
   adjudicators.
 - `crates/tinker-pdf/tests/determinism.rs` for the fingerprint mechanism the
   analytic fixtures reuse.

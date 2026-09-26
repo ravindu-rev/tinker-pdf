@@ -302,25 +302,68 @@ fn an_encrypted_documents_text_is_readable_once_unlocked() {
     );
 }
 
+/// One document, shared by reference, read and *rendered* from four threads
+/// at once, agreeing with the serial answer page for page.
+///
+/// The property that dissolves the actor model the previous engine forced —
+/// and it is `Sync`, not `Send`. This test used to hand every thread its own
+/// `clone()` and have all four read page 0, which proves only that a
+/// `Document` can be moved between threads: four independent documents racing
+/// nothing. `std::thread::scope` over a shared `&doc` is the shape that
+/// proves the claim `docs/architecture.md` makes, and each thread walks every
+/// page so that the object cache, the font cache and the page-tree walk are
+/// all being hit concurrently rather than merely reached.
+///
+/// It renders because rendering is where the caches are, and because
+/// `docs/architecture.md` says "concurrent reads **and renders**". Comparing
+/// against the serial result makes it an answer test rather than a crash
+/// test: a race that produced a wrong page rather than a torn one would pass
+/// a test that only checked nothing panicked.
 #[test]
-fn documents_are_usable_from_several_threads() {
-    // The property that dissolves the actor model the previous engine forced:
-    // a Document is Send + Sync and readable concurrently.
+fn one_document_is_read_and_rendered_by_several_threads_at_once() {
     let doc = open("simple-text.pdf");
-    let handles: Vec<_> = (0..4)
-        .map(|_| {
-            let doc = doc.clone();
-            std::thread::spawn(move || {
-                for _ in 0..5 {
-                    let page = doc.page(0).expect("a page");
-                    assert!(page.text().plain_text().contains("Tinker"));
-                }
-            })
-        })
-        .collect();
+    let pages = doc.page_count();
+    assert!(pages >= 2, "the fixture needs pages to spread: {pages}");
 
-    for handle in handles {
-        handle.join().expect("no thread panicked");
+    let render = |index: u32| {
+        let page = doc.page(index).expect("a page");
+        let bitmap = page.render(&tinker_pdf::RenderOptions::at_dpi(36.0));
+        (
+            page.text().plain_text(),
+            bitmap.width,
+            bitmap.height,
+            bitmap.data,
+        )
+    };
+
+    let serial: Vec<_> = (0..pages).map(render).collect();
+    assert!(
+        serial[0].0.contains("Tinker"),
+        "the first page reads: {:?}",
+        serial[0].0
+    );
+
+    // Scoped, so every thread borrows the *same* document rather than a clone
+    // of it. This is the line that would not compile if `Document` were only
+    // `Send`.
+    let concurrent: Vec<Vec<_>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let render = &render;
+                scope.spawn(move || (0..pages).map(render).collect::<Vec<_>>())
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("no thread panicked"))
+            .collect()
+    });
+
+    for (thread, seen) in concurrent.iter().enumerate() {
+        assert_eq!(
+            seen, &serial,
+            "thread {thread} must read and draw what a serial reader does"
+        );
     }
 }
 

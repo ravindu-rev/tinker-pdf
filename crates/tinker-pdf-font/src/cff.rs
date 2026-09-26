@@ -64,13 +64,13 @@ struct Private<'a> {
 
 /// A CFF INDEX: a count, offsets, then the data.
 #[derive(Clone, Debug, Default)]
-struct Index<'a> {
+pub(crate) struct Index<'a> {
     offsets: Vec<usize>,
     data: &'a [u8],
 }
 
 impl<'a> Index<'a> {
-    fn parse(data: &'a [u8], at: usize) -> Option<(Index<'a>, usize)> {
+    pub(crate) fn parse(data: &'a [u8], at: usize) -> Option<(Index<'a>, usize)> {
         let count = usize::from(u16::from_be_bytes([*data.get(at)?, *data.get(at + 1)?]));
         if count == 0 {
             return Some((Index::default(), at + 2));
@@ -108,19 +108,19 @@ impl<'a> Index<'a> {
         ))
     }
 
-    fn get(&self, index: usize) -> Option<&'a [u8]> {
+    pub(crate) fn get(&self, index: usize) -> Option<&'a [u8]> {
         let start = self.offsets.get(index)?.checked_sub(1)?;
         let end = self.offsets.get(index + 1)?.checked_sub(1)?;
         (end >= start).then(|| self.data.get(start..end))?
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.offsets.len().saturating_sub(1)
     }
 }
 
 /// Reads a DICT into `(operator, operands)` pairs.
-fn parse_dict(data: &[u8]) -> Vec<(u16, Vec<f64>)> {
+pub(crate) fn parse_dict(data: &[u8]) -> Vec<(u16, Vec<f64>)> {
     let mut out = Vec::new();
     let mut operands: Vec<f64> = Vec::new();
     let mut at = 0usize;
@@ -206,7 +206,7 @@ fn parse_real(data: &[u8], mut at: usize) -> (f64, usize) {
     (text.parse::<f64>().unwrap_or(0.0), at)
 }
 
-fn dict_get(dict: &[(u16, Vec<f64>)], op: u16) -> Option<&[f64]> {
+pub(crate) fn dict_get(dict: &[(u16, Vec<f64>)], op: u16) -> Option<&[f64]> {
     dict.iter()
         .find(|(o, _)| *o == op)
         .map(|(_, v)| v.as_slice())
@@ -351,6 +351,23 @@ impl<'a> Cff<'a> {
     pub fn gid_for_code(&self, code: u8) -> Option<u16> {
         let glyph = *self.encoding.get(usize::from(code))?;
         (glyph != 0).then_some(glyph)
+    }
+
+    /// The glyph the **standard** encoding gives a code, whatever the font's
+    /// own encoding says.
+    ///
+    /// This is not a second spelling of [`Cff::gid_for_code`]. It exists for
+    /// one caller: `endchar` with four operands is the deprecated `seac`
+    /// (Type 2 charstring specification, appendix C), whose two components are
+    /// named by **StandardEncoding** codes and by nothing else — the font's
+    /// own encoding does not enter into it. A subsetter that resolved those
+    /// through `gid_for_code` would drop the wrong component and an accented
+    /// letter would come out as bare space in every reader that draws `seac`.
+    pub(crate) fn gid_for_standard_code(&self, code: u8) -> Option<u16> {
+        let sid = STANDARD_ENCODING
+            .iter()
+            .find_map(|(c, sid)| (*c == code).then_some(*sid))?;
+        self.gid_for_sid(sid)
     }
 
     /// The matrix that maps one glyph's space into text space.
@@ -723,7 +740,7 @@ fn read_fd_array(data: &[u8], offset: f64) -> Vec<(Private<'_>, Option<[f64; 6]>
 }
 
 /// Reads FDSelect: which Font DICT each glyph belongs to, formats 0 and 3.
-fn read_fd_select(data: &[u8], offset: f64, glyphs: usize) -> Vec<u8> {
+pub(crate) fn read_fd_select(data: &[u8], offset: f64, glyphs: usize) -> Vec<u8> {
     let mut out = vec![0u8; glyphs.min(1 << 16)];
     if !(0.0..=(usize::MAX as f64)).contains(&offset) || glyphs == 0 {
         return out;
@@ -1542,7 +1559,7 @@ const EXPERT_SUBSET_CHARSET: &[u16] = &[
 ];
 
 /// The bias applied to subroutine indices (Type 2 charstring specification).
-fn bias(count: usize) -> i32 {
+pub(crate) fn bias(count: usize) -> i32 {
     if count < 1240 {
         107
     } else if count < 33900 {

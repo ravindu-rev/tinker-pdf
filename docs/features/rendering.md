@@ -17,10 +17,45 @@ convert as 8.6.4 says; `/Indexed` reads its palette over any base space
 (8.6.6.3); `/Separation` and `/DeviceN` run their real tint transforms into
 the alternate space (8.6.6.4, 8.6.6.5); `/Lab` converts through XYZ at the
 D50 white point (8.6.5.4), kept separate because its components are not in
-0..1 and clamping them there renders the whole space black. ICC and CIE
-spaces are `ColorSpace::Approximated` — read by component count, which is the
-alternate-space reading 8.6.5.5 permits, and the approximation is stated on
-the type rather than hidden. `[/Pattern base]` carries the underlying space
+0..1 and clamping them there renders the whole space black. An `ICCBased` space is converted
+through **its own profile** (ICC.1): the header and tag table are read, the
+three `XYZ` columns and three tone curves compile once into fixed-point
+tables, and each colour is a lookup plus an integer matrix multiply, so
+nothing on the pixel path evaluates a transcendental and ruling 4 holds. Grey
+profiles are the same with one curve. A printer profile carries a multi-dimensional lookup table
+instead — `mft1` or `mft2` at an `A2B*` tag, three stages of curve with an
+interpolated grid between them. **v4's `mAB ` reads too**, which is five
+optional stages where v2 has three fixed ones — A curves, a grid whose axes may
+each carry their own point count, M curves, a matrix and B curves, run in that
+order although the header lists their offsets in the reverse. A grey profile
+whose connection space is `Lab` rather than `XYZ` reads as well: its one curve
+gives lightness instead of luminance, and the two differ by 8.6.5.4's cube
+root.
+
+Measured against the corpus's **3 235** real profiles, September 2026:
+**3 229 compile, 99.8 %** — and 682 of the 5 525 files name an `ICCBased` space
+that paints through one, which the corpus report counts as `iccbased`. **The
+six that do not are profiles contradicting themselves**, and the census names
+each: a monitor profile whose data space is `LAB` carrying the `rXYZ` columns a
+matrix applies to linear RGB; one naming a three-channel space no registry
+defines; and a CMYK printer profile with a single `kTRC` and no matrix — one
+curve for four channels of ink. Those are `ColorSpace::Approximated`, read by
+component count, which is the alternate-space reading 8.6.5.5 permits.
+
+**`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.1,
+8.6.5.2): the components go through `/Gamma`, `/Matrix` takes them into XYZ
+relative to `/WhitePoint`, and the white point is adapted to D50 before the
+sRGB matrix. They were aliased to `DeviceGray` and `DeviceRGB` until September
+2026, which read neither the white point nor the gamma and left *nothing*
+recording that an approximation had happened — unlike an ICC profile this build
+refuses, where `Approximated` says so on the type.
+
+The adaptation is **von Kries in XYZ**, scaling each axis by the ratio of the
+two whites, and not the Bradford transform baked into the profile path's
+matrix. Named rather than hidden: the two differ on saturated colours far from
+the neutral axis. A bare `/CalGray` or `/CalRGB` *name*, with no parameter
+dictionary behind it, is still the device space — there is nothing else the
+file has said. `[/Pattern base]` carries the underlying space
 of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
 Initial colours follow 8.6.8 — CMYK starts at full black ink, not all zeros.
 Out-of-range components clamp rather than wrap.
@@ -69,9 +104,54 @@ does not decode draws a placeholder and is named; an image that decoded with
 damage tolerated is drawn *and* reported, so a half-decoded fax stays
 distinguishable from a blank one.
 
+**Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
+pasted in from another document resolves its names in the dictionary it brought
+rather than in the page's. Both seams change scope together — the interpreter
+resolves fonts, colours and ExtGState, the device resolves images, shadings and
+patterns — because they are asked about the same form, by the same name, at the
+same moment. A form that omits the key falls back to the invoking scope, which
+is what its producer is relying on. An annotation's appearance stream gets the
+same treatment by a different route: it is reached by reference rather than by
+name, so `Page::render` announces it instead of the interpreter, and until it
+did an appearance's images resolved against the page while its text resolved
+against the appearance.
+
 **Transparency.** `/Group /S /Transparency` on a form XObject composites as
 a unit (11.6.6), with isolation (11.4.4), knockout (11.4.5) and backdrop
-removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. ExtGState
+removal at close (11.4.7.2), read from Table 147's `/I` and `/K`. `/CS` is read and
+**honoured** — on a form's group and on the **page's own** group (11.4.7),
+which reaches no `Do` and so is read off the page dictionary.
+
+A group composites in the space it declared: its buffer holds that space's
+components, and conversion happens at the group's boundaries rather than per
+element. `/DeviceCMYK` gets a `CmykA8` buffer, and because 11.3.5's separable
+formulas are written for additive components, a subtractive channel enters and
+leaves them complemented — only the blend function, since 11.3.6's weighting
+averages colour values in the group's own space. The four non-separable modes
+(11.3.5.3) reason about hue and luminosity, which ink quantities do not have,
+so on a CMYK buffer their operands convert to light, blend, and convert back.
+A page-level group decides the format of the page canvas itself and is
+converted for the caller at the end, which is 11.4.7's own last step; a page is
+never handed back in CMYK, because a `Bitmap` says how many components it has
+and nothing about what they mean.
+
+**`/Lab` composites in Lab too**, which was the last space that did not. Its
+components are not in the unit interval — `L*` runs 0..100 and `a`/`b` roughly
+−128..127 — so `LabA8` encodes them into bytes (`L/100`, `(a + 128)/255`,
+`(b + 128)/255`) and 11.3.5's separable formulas apply to *that*. The encoding
+is a choice the clause does not make, and it is stated on the format rather
+than buried: blending in the encoded domain is what makes a `/Lab` group
+composite in Lab rather than in RGB, and it is not the same as blending the
+unencoded values.
+
+Every space a group can declare now has a buffer, so
+`RenderWarning::UnsupportedGroupSpace` is gone — a variant nothing can reach is
+a claim rather than a check. **No corpus file declares a `/Lab` group**: over
+the 5 525 files of September 2026 it was reported zero times in all three
+recorded bars, so this capability is held by fixtures rather than by demand,
+which the [roadmap](../ROADMAP.md) records. The count of 35 `/DeviceCMYK`
+groups is an earlier measurement over a smaller corpus and is left attributed
+to it rather than restated as current. ExtGState
 `/SMask` works in both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with
 `/BC` read in the mask group's own `/Group /CS` and defaulting to black
 (fully masked, the default that does not invert every drop shadow), and
@@ -111,16 +191,57 @@ its last row or column; A4 at 150 dpi is 1240×1755. A page whose area would
 exceed `MAX_PAGE_PIXELS` (67.1 Mpx) renders whole at a smaller scale and
 says so, because a complete page at lower resolution beats a fragment.
 Annotation appearance streams draw over the content when asked (12.5.5).
+`Page::pixel_size` returns that size without rendering, because a caller who
+tiles has to compute a lattice against the same three rules the renderer
+applies — outward rounding, a non-finite or non-positive scale read as 1.0,
+and the `MAX_PAGE_PIXELS` clamp — and a lattice computed against different
+ones leaves a strip of the page that nothing ever asks for.
+
+**Regions.** `RenderOptions::region` narrows the render to a `PixelRegion`,
+a rectangle of **the rendered bitmap's own pixels** counting down from its
+top-left — not points, and not PDF user space's upward `y`. The bitmap is
+already turned and already cropped, so a region indexes the picture a reader
+sees: `(0, 0, 32, 32)` of a `/Rotate 90` page is the top-left of the sideways
+picture, never the corner of the upright sheet. The mechanism is ruling 5's
+translated viewport and nothing else — `region_view_transform` composes a
+pixel translation *after* `page_view_transform`, so the same interpreter,
+the same glyphs, the same sampler and a smaller canvas draw the tile. A
+region reaching past the page is **intersected**, never slid back on, because
+a moved rectangle returns real pixels from coordinates the caller did not
+name; one that misses entirely comes back with no pixels. Both trims are
+reported as `RenderWarning::RegionClamped`. Ruling 5's byte-equality guard,
+its fixtures and the one scale-dependent exception are in
+[rulings](../rulings.md).
 
 ## API
 
 The facade is the whole public surface (ruling 11): `Page::render` takes a
 `RenderOptions` — `scale` (pixels per point, or `RenderOptions::at_dpi`),
 `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
-checked between operations and scanline bands) and `annotations` (on by
-default) — and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
+checked between operations and scanline bands), `annotations` (on by
+default) and `region` (an optional `PixelRegion`, `None` for the whole page)
+— and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
 `data`, and `warnings`, the `Vec<RenderWarning>` that carries every named
 degradation. Rendering never fails; it degrades and reports.
+
+`Bitmap::to_png` writes the page out as a PNG file (ISO/IEC 15948), eight bits
+a component, through `tinker_pdf_filters::png_encode` — which is where the
+zlib stream, the chunk CRC-32 and 9.2's row filters a PNG is made of already
+lived. It is **total over all six `PixelFormat`s**, which matters because a
+page comes back in two of them and the fields are public: `Gray8`, `Rgb8`,
+`GrayA8` and `Rgba8` are colour types 0, 2, 4 and 6 byte for byte, and the two
+PNG has no colour type for are converted rather than relabelled — `CmykA8`
+through 8.6.4.4's device relation and `LabA8` back out of `L*a*b*`, both
+keeping their alpha and both landing on type 6. Writing ink under a label
+saying RGB is the failure `page_format` exists to prevent one layer up, and it
+would be just as invisible here. `None` comes back only for a bitmap that is
+not a picture: a zero dimension, a stride narrower than a row, or a buffer
+shorter than the rows the other fields promise. `Page::render` produces a
+picture for every page at every scale and for every `region` that meets the
+page; the one way to get a bitmap that is not one is to ask for a region
+wholly off the page, which trims to nothing and says so. `Bitmap`'s fields
+are public besides, so a caller may always build one by hand. `tpdf render`
+writes `.png` through it, and so does `examples/render.rs`.
 
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
@@ -140,7 +261,11 @@ interpreter's `Device` trait and pulls outlines, images, shadings, patterns
 and tiles through the `GlyphSource` seam — implemented by the facade's
 `PageResources`, so no COS type enters the render crate. `page_scale`,
 `page_pixels`, `page_canvas` and `page_view_transform` are the geometry
-helpers `Page::render` composes.
+helpers `Page::render` composes, with `region_view_transform` and
+`region_canvas_in` the two that take a `PixelRegion`. `None` is not a special
+case in the facade: it becomes the region covering the whole page, whose
+translation is zero, so a tile and a page take one code path and there is no
+un-tiled spelling left for a defect to hide in.
 
 ## Refused by name
 
@@ -156,9 +281,8 @@ helpers `Page::render` composes.
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
-| Transparency-group colour spaces; page-level `/Group` | none — composites in RGB silently | A group declared in CMYK or Lab blends in the wrong space (11.4.7) | [ROADMAP](../ROADMAP.md) |
-| A form XObject's own `/Resources` | none — recorded non-goal; inherited resources only | The reason one corpus JPX file is never asked for | [ROADMAP](../ROADMAP.md) |
-| Exact ICC/CIE colour | `ColorSpace::Approximated`, stated on the type | Component count decides the reading, the 8.6.5.5 fallback | [ROADMAP](../ROADMAP.md) |
+| A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |
+| An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
 
@@ -168,13 +292,23 @@ helpers `Page::render` composes.
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
   `annotation_appearances.rs` — each asserting pixels, not absence of error.
+- Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Ten
+  fixtures over four rasterizer paths, three of them turned and three cropped,
+  tiled at 64, 37, 23 and 53 pixels against a 91×131 page and down to a
+  one-pixel lattice, each tile asserted **byte-equal** to its rectangle of the
+  whole render with no tolerance; plus the trim at the page edge and its
+  warning, a region wholly off the page, and — because tile equality alone is
+  satisfied by a *consistent* mistake — two fixtures that assert which quadrant
+  of the displayed picture one mark lands in, on a rotated page and on a
+  cropped one. Every fixture carries an ink floor, because a blank page tiles
+  perfectly.
 - In-crate: unit tests in `tinker-pdf-render/src/lib.rs` (among them
   `a_small_fill_on_a_large_page_stays_small`, which counts mask pixels asked
   for so an O(canvas) regression fails rather than merely costs, and
   `a_cancelled_clip_and_text_clip_rasterize_nothing`), `shading.rs`,
   `mesh.rs`, and `tinker-pdf-color`'s tests over conversion, palettes, tint
   transforms and all function types.
-- Determinism: ten of the 15 render fingerprints in
+- Determinism: ten of the 19 render fingerprints in
   `crates/tinker-pdf/tests/determinism.rs` — `text`, `curves`, `shading`,
   `blend`, `pattern`, `optional`, `image`, `transparency`, `tiling`, `mesh`
   — pin this device's output bit-for-bit across x86_64 Windows, Linux and
@@ -183,7 +317,7 @@ helpers `Page::render` composes.
 - Fuzzing: `render_page` among the 24 fuzz targets renders whole hostile
   documents; `crates/tinker-pdf/tests/hostile_input.rs` replays the sweep on
   stable.
-- Corpus, as of August 2026: 4 525 files, 4 484 rendered every page, zero
+- Corpus, as of September 2026: 5 525 files, 5 516 rendered every page, zero
   crashes.
-- The workspace stands at 2 952 passed / 0 failed / 8 ignored
-  (Windows x86_64, August 2026). See [verification](../verification.md).
+- The workspace stands at 4 879 passed / 0 failed / 58 ignored
+  (Windows x86_64, 14 September 2026). See [verification](../verification.md).

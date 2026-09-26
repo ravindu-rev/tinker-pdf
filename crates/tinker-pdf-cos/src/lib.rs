@@ -52,6 +52,7 @@ pub mod edit;
 pub mod fill;
 pub mod font;
 pub mod form;
+pub mod jxr_embed;
 pub mod lexer;
 pub mod limits;
 pub mod linearize;
@@ -61,9 +62,13 @@ pub mod outline;
 pub mod pages;
 pub mod parse;
 pub mod png_embed;
+pub mod pubsec;
 pub mod script;
 pub mod security;
+pub mod sign;
+pub mod source;
 pub mod text_string;
+pub mod tiff_embed;
 pub mod trees;
 pub mod validate;
 pub mod warn;
@@ -80,23 +85,36 @@ mod streams;
 
 pub use appearance::synthesize as synthesize_appearance;
 pub use build::{
-    jpeg_shape, BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, ExtGState, FormXObject,
-    Function, Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind, OutlineEntry, PageBuilder,
-    PlacedGlyph, Shading, SoftMask, StateMask, Target, TilingPattern, TilingType,
-    TransparencyGroup,
+    jpeg_shape, subset_tag, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal,
+    BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, EmbeddedWhole, ExtGState,
+    FormXObject, Function, Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind, OutlineEntry,
+    PageBuilder, PlacedGlyph, Shading, ShadingPattern, SoftMask, StateMask, SubsetRefusal, Target,
+    TilingPattern, TilingType, TransparencyGroup,
 };
-pub use calc::{formatted_value, recalculate, CalcError, Recalculation};
+// `calc::keystroke` and `calc::validate` are deliberately *not* re-exported
+// here: this root already has a `validate`, which is the strict structural
+// validator, and a second meaning of that word at the same path would be
+// worse than the clash it causes. Both are reached as
+// `DocumentEditor::keystroke` / `::validate`, which is the surface a caller
+// wants anyway, or module-qualified as `calc::validate`.
+pub use calc::{
+    formatted_value, formatted_value_under, recalculate, recalculate_under, CalcError,
+    DisplayString, EventVerdict, Keystroke, Recalculation,
+};
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
-pub use edit::{annot, DocumentEditor, FillError, FillRejection, SkippedWidget, WidgetDefect};
-pub use fill::{text_appearance, TextLayout};
-pub use font::{DecodedCode, Font, FontKind};
-pub use form::{
-    acro_form, calculation_order, catalog_scripts, document_scripts, field_value, fields,
-    script_summary, DocumentScript, Field, FieldKind, FieldScripts, FieldValue, Script,
-    ScriptSummary,
+pub use edit::{
+    annot, DocumentEditor, EditCheckpoint, FillError, FillRejection, SkippedWidget, WidgetDefect,
 };
+pub use fill::{text_appearance, TextLayout};
+pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
+pub use form::{
+    acro_form, calculation_order, catalog_scripts, catalog_scripts_within, document_scripts,
+    document_scripts_within, field_value, fields, fields_within, script_summary, DocumentScript,
+    Field, FieldKind, FieldScripts, FieldValue, Script, ScriptBudget, ScriptSummary,
+};
+pub use jxr_embed::{jxr_image, JxrImageData};
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
 pub use object::{Dict, ObjRef, Object, PdfString, StreamObj};
@@ -107,9 +125,16 @@ pub use outline::{
 pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
-pub use script::{Budget, Host, ScriptError};
+pub use pubsec::{PubSecError, Recipient};
+pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
+pub use sign::{
+    digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer,
+    SigningRequest, SigningTarget,
+};
+pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
 pub use text_string::{decode_text_string, parse_date, Date};
+pub use tiff_embed::{tiff_image, TiffImageData, TiffRoute};
 pub use trees::{name_tree, name_tree_lookup, number_tree};
 pub use validate::{kind_counts, tier_counts, validate, Defect, DefectKind, Tier};
 pub use warn::{Warning, WarningKind, WarningSink};

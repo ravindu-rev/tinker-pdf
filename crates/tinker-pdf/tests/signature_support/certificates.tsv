@@ -1,0 +1,82 @@
+# Expected values for the X.509 certificates the fetched corpora carry, one
+# per line, tab-separated.
+#
+# WHERE THESE NUMBERS COME FROM, AND WHY THAT MATTERS
+#
+# Milestone 2 of docs/design/signatures.md asks for "the subject/issuer/
+# validity/SPKI values committed in its sidecar, transcribed once from the
+# certificate's own DER and reviewed". Transcribing by hand from a hex dump is
+# how the RFC 5280 appendix certificates were done and it does not scale to
+# twenty-four; producing them with `tinker-pdf-pki` would be the parser
+# agreeing with itself, which is the one thing a sidecar must not be.
+#
+# So they were produced ONCE by OpenSSL 3.5.5 (27 Jan 2026) on 28 August 2026,
+# and committed. Ruling 13 permits exactly this and no more: a third-party
+# program may supply data, and the committed output of a tool that was run
+# once is a dated measurement rather than a check. Nothing re-runs OpenSSL;
+# `cargo xtask oracles` would refuse a test that tried.
+#
+# The commands, for anyone regenerating them:
+#
+#   openssl x509 -inform DER -in <cert> -noout #     -subject -issuer -serial -startdate -enddate -nameopt RFC2253
+#   openssl x509 -inform DER -in <cert> -noout -pubkey #     | openssl pkey -pubin -outform DER | sha256sum
+#
+# The certificates themselves are NOT here: they come from corpora that
+# `corpus/corpora.lock` pins by hash and that nothing from ever enters git
+# (corpus/README.md). `sha256` identifies each one, so a row that stops
+# matching any certificate is a corpus that moved and says so.
+#
+# FIELDS
+#
+#   sha256       of the certificate's DER, which is the key
+#   serial       the INTEGER's content octets, uppercase hex, read from the
+#                DER by an independent scanner rather than taken from OpenSSL
+#
+#                THREE OF THESE DIFFER FROM WHAT OPENSSL PRINTS, and the
+#                difference is a real one about real certificates. Their top
+#                bit is set with no leading zero, so the serial *is* a negative
+#                INTEGER in DER — RFC 5280 4.1.2.2 says it "MUST be a positive
+#                integer" and those issuers emitted one that is not. OpenSSL
+#                reads the number and prints `-0603E746C0C547A1789F`; this
+#                crate does the same. The octets `F9FC18B93F3AB85E8761` are
+#                what `issuerAndSerialNumber` matching actually compares, so
+#                they are what is recorded here — the identity rather than
+#                either side's rendering of the value.
+#   not_before   validity start, seconds since the Unix epoch
+#   not_after    validity end, the same
+#   spki_sha256  of the DER of the SubjectPublicKeyInfo
+#   self_issued  whether subject and issuer render identically
+#   subject_cn   the subject's common name, or empty where it has none
+#   issuer_cn    the issuer's
+#
+# Two fields are deliberately absent. The full distinguished names are not
+# compared, because RFC 4514 leaves the escaping of several characters to the
+# renderer and two correct implementations disagree about them — a difference
+# that would make this file a test of string formatting rather than of
+# parsing. The public key's own modulus is not compared either; the SPKI
+# digest covers it and cannot be satisfied by a partly-right answer.
+sha256	serial	not_before	not_after	spki_sha256	self_issued	subject_cn	issuer_cn
+1146fd49d50ba505ef047bed8561137447f44db0940dd6fe37e20c338c000ea2	24C1B431C91FF5130000000055650716	1507231060	1601971200	cc41bb25587e47bdb852899104011dee0c05dcffca6e4daf62b24b9411b7a777	false	Immigration\	Entrust Class 3 Client CA - SHA256
+1e4ed672f8f0bc9c49a7d295acebe4d6c4cc13ed991cf4eab0eab9c9588ae9a0	3E1CBDCC	1080931125	1673164800	f410636985a7fd0ad5ea0a3c50fb1a9c4488f7ee64ad02f86d415792c7b8889f	false	Product Services	Adobe Root CA
+2247c63ca0e83b255f75d4aae33f35cb8a425b41b5c83c5ecf4244d40b506547	F9FC18B93F3AB85E8761	1466852475	1624618875	5fffaa427ec02950ff5f7fb3837f6d49eb3b837918fdd59390e5d957f0a04357	true	veraPDF	veraPDF
+2cabeafe37d06ca22aba7391c0033d25982952c453647349763a3ab5ad6ccf69	45E6BB038333C3856548E6FF4551	1418169600	2049321600	682747f8ba621b87cdd3bc295ed5cabce722a1c0c0363d1d68b38928d2787f1e	true	GlobalSign	GlobalSign
+337f56a6083db36f0ba659ae1350f2524c807463e7d6078eec3f9554c3090a81	1548A46957D27D8C84466DAC	1672980980	1708860696	ec5f2dec7010b41d8ca4ac172f9f0a5e5e0d13d4c40204507b0c75f1859b847a	false	OneSpan (TM)	GlobalSign GCC R6 AATL CA 2020
+33857338361ecfc4858ddff6b9ef6273e3db856ab9cea1c0e2c65925d1c87978	551615150000000051CE160E	1456423696	1877107096	f649b4d37b863f70935dd510f1164c5526f4a98c00ca1538a01321f1723dc667	false	Entrust Class 3 Client CA - SHA256	Entrust.net Certification Authority (2048)
+38d4f0f6e632d0b40a14ed7c3da3bb06f1898055633eafefd7d39d709b8dbf14	09930917D7E2AF0DF12B06C2D2395AA512B3256F	1732665600	1801785600	54222598f33d36480542daece0e6b94de15c0eee8c5914ca48d75e3c484e803f	false	test-pdf-signer	pdf-sign-ca
+44dfcd2c573110e74bf4e85903595f660650ed925b7306542c54e87396671f03	58DA13FF0000000051CE0DF7	1437591774	1876851174	d9946550c3fa2a7096b5bd640f0cd4bc5332ec7164eddef9ce83a7c198a422ca	false	Entrust Timestamping CA - TS1	Entrust.net Certification Authority (2048)
+458e0e219698b18d2d4093d6336a12547953a54c05dd967c3a5a268b772d1b22	5DF12F5F57A7C3E1B002D893270CDDE1	1480377600	2427062399	a237af573f8646bb51eb30d63a99f047383311cfaff5cc5a1eb12b4aae4ca35c	true	Adobe Root CA G2	Adobe Root CA G2
+5b7017b80f97c621af1163b04bebafd2f932a42b85f4b9fec71b38609f564922	421FD596	1269367848	1584987048	d7be2e387d4cef15aec9b3bba1543f4a21be7b9ea2f07d110b684e745d9bdfd1	false	QuoVadis SuisseID Qualified CA	QuoVadis Root Certification Authority
+6dc47172e01cbcb0bf62580d895fe2b8ac9ad4f873801e0c10b9c837d21eb177	3863DEF8	946057851	1879596912	1ea3c5e43ed66c2da2983a42a4a79b1e906786ce9f1b58621419a00463a87d38	true	Entrust.net Certification Authority (2048)	Entrust.net Certification Authority (2048)
+75cc6021036890eac71853fae8382cf8db33dc41706f42aafe421e98ad38174c	784AA90AFB8FFBBC545B4B28B7FCA353	1600214400	1915747200	b87ea8a4a0cabcd51795c48c0b49cb3bb4088dd91e8424c9dc0598bc799e73bb	false	GlobalSign GCC R6 AATL CA 2020	GlobalSign CA for AATL - SHA384 - G4
+79426b61b15898b6afd9db1f6f161e1ea4ea2b7ceb797cd92efd434208f88914	01	1395154877	1426690877	fa6587bffc17d1079ddf1f5bb24ea01cd2e6a4f8c49616441bd50f0f8fbda386	false	Phil Smith	REPSE Inc Signing
+944e66aa967bd390952d22426bf1dfcd379a2c87a21b942fbca79f41f0354aac	3E1CBD28	1042069043	1673222843	41885701b51efcb9bf3b4babfce2361235cffd6abe7910f6f03f436780ef756a	true	Adobe Root CA	Adobe Root CA
+9b23a077f32157179c2eae4ead922bc99a5d0f1010bb116a89cb2979aca4928a	89839B114E3FE6FB56C0	1569582238	1727435038	fcfa92d7a372d7d2c44085c8b28c3f27a6ebdb63b443ee777c908c64a2aee58a	true	John Doe	John Doe
+a45ede3bbbf09c8ae15c72efc07268d693a21c996fd51e67ca079460fd6d8873	3AB6508B	985026813	1616006013	be3db7b79bfe579dcf9b07ca4cad75aff16975568e5b45cfcae4d61fb63175a8	true	QuoVadis Root Certification Authority	QuoVadis Root Certification Authority
+ac0ab963bb5f3da05fbc8687f98c2b6ea0bb499e6118c1a9136b1bc7c3c71a6b	01E9D8A4A62D2B28113982A94D	1524009600	2049321600	797c92cc2b0158321f986174d5cc0326074076df078fb0f8dbdaa02f668dfb35	false	GlobalSign CA for AATL - SHA384 - G4	GlobalSign
+ad973c5193d2c90801addd3a196a82ceccfc578e29209cdabb52e421fcc6f21f	00A38913A67B136C66	1283264179	1377958576	43871c7107e4f7e4c6037f4e0f9f0756175fdb46182d0bd3c02162e43c54c620	false	Paul Frey (Qualified Signature)	QuoVadis SuisseID Qualified CA
+bc864fc004ed9e503d1d63100a58cb0e68936cedfde4402df4ccc1a4cce17031	3C4E692CFB741FC9E2D2199656E6F3A6	1671494400	1766188799	cf8f895c2226c55c4d6e31a402ca8bf0319bb19ee598389a7c0f8b2258cc8c9e	false	Adobe Acrobat Sign	Adobe CDS CA
+bd145107a7d67a82dc5bd2272bff3809861f7f13711c9d21e55f93ca21d044f5	08EA	1150832911	1673164800	f6dc4bfbfd7ee48cf366dff0c87fa5526b6297dff294cb418de3b513aa54e705	false	ARE Acrobat Product v8.0 P23 0002337	Product Services
+c94b5203b7fcb0368dc028c1ab6168580ec00dfc648c7ad2e257264216c4aebc	476248D99C01FE1C0000000055656514	1552506519	1647202719	cd84cb1fe6de2d4ca92ab14d93837f1e587ccc819bd6a9cdcc44cf14409fb7a2	false	Entrust Validation Authority	Entrust Class 3 Client CA - SHA256
+d48879196449abd773b7e6dcc1fffc28a84d1412f3942a23a188340f42095b42	0A915E54FD303BF3FE783EC40E3ABCCB	1480377600	2269295999	708157ffccba76225fcf610f7296dea25e48eb0930d2494e94a613d23fefe9c6	false	Adobe CDS CA	Adobe Root CA G2
+e94ff4d0f57e35d843c708ec00ff562168ffc0e501e6de38b95c48376212cc69	421FD27F	1188305458	1503924599	32b1ecff74415122b8d938a47126ae193fae3d547b13ab7212d3b7ef2e7926e5	false	tsa01.quovadisglobal.com	QuoVadis Root Certification Authority
+f5f143ae6f8073998f8f4170e955ff646e1697b995291cb2237913f7cdb9331e	2BB174169B8C4256000000005591E90E	1538771603	1893877403	112a1a6149ffb5719f7b7f05e1ddada1fad3a280bf5a19e2fad8819355cfcd9f	false	Entrust Time Stamping Authority	Entrust Timestamping CA - TS1

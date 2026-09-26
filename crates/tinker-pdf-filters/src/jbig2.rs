@@ -45,8 +45,14 @@
 //! already uses. A region declaring 2^32 pixels is refused rather than
 //! attempted (ruling 1).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::mq::{MqContexts, MqDecoder};
 use crate::{Capability, FilterError, Warning};
+
+mod encode;
+
+pub use encode::{generic_encode, generic_region_segment, Jbig2EncodeError, Jbig2GenericSource};
 
 /// Segment types (T.88 7.3, Table 34) this decoder distinguishes by name.
 mod kind {
@@ -95,20 +101,87 @@ pub struct Jbig2Params<'a> {
     pub height: u32,
 }
 
+/// **What one stream's symbol dictionaries asked for, in pixels.**
+///
+/// The measurement `MAX_JBIG2_SYMBOL_PIXELS` never had. That cap is a *pixel*
+/// budget and the three figures `crates/tinker-pdf/tests/jbig2_census.rs`
+/// could take off a segment header — `SDNUMNEWSYMS`, `SDNUMEXSYMS`,
+/// `SBNUMINSTANCES` — are every one of them counts, so none of them is its
+/// yardstick. A symbol's width and height are not in any header: 6.5.5
+/// accumulates both from `IADH` and `IADW` deltas *inside* the arithmetic
+/// coder, so nothing short of decoding the dictionary can say how large its
+/// symbols are. This is that decode's own tally, and
+/// [`decode_measured`] is how a census reads it.
+///
+/// Every figure is **what the dictionary asked for**, which includes the
+/// symbol that tripped a cap: a dictionary refused at its 546th symbol is
+/// recorded as having asked for 546, because the question a bound is chosen
+/// against is what the file wanted rather than what it got.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Jbig2SymbolExtent {
+    /// The widest single symbol any dictionary in the stream asked for.
+    pub widest: u32,
+    /// The tallest single symbol.
+    pub tallest: u32,
+    /// The most pixels any *one* symbol occupies — which is a third symbol
+    /// again, since the widest need not be the tallest.
+    pub largest_pixels: u64,
+    /// The width and height of that symbol, so a census can name it.
+    pub largest: (u32, u32),
+    /// The most pixels any one dictionary asked for in total — the quantity
+    /// [`MAX_JBIG2_SYMBOL_PIXELS`] bounds.
+    pub total_pixels: u64,
+    /// How many symbols were asked for, over every dictionary in the stream.
+    pub symbols: u64,
+    /// How many symbol dictionary segments were decoded to the end.
+    pub dictionaries: u32,
+}
+
+impl Jbig2SymbolExtent {
+    /// One symbol's dimensions, as 6.5.5 has just accumulated them.
+    fn record(&mut self, width: u32, height: u32, spent: u64) {
+        self.widest = self.widest.max(width);
+        self.tallest = self.tallest.max(height);
+        let pixels = u64::from(width) * u64::from(height);
+        if pixels > self.largest_pixels {
+            self.largest_pixels = pixels;
+            self.largest = (width, height);
+        }
+        self.total_pixels = self.total_pixels.max(spent);
+        self.symbols += 1;
+    }
+}
+
 /// A parsed segment header (T.88 7.2) and the data block that follows it.
 ///
-/// The segment *number* is not kept: 7.2.5 uses it only to decide how wide
-/// the referred-to numbers in this same header are, and nothing this build
-/// decodes follows a reference. Keeping a field nothing reads is how a
-/// half-parsed header comes to look complete.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The number and the referred-to list are both kept now. They were both
+/// dropped while the generic-region lineage was all this decoded, because
+/// nothing followed a reference — but 7.4.3 makes a text region's symbol list
+/// *the concatenation of its referred-to dictionaries' exports, in reference
+/// order*, and custom tables are reached the same way. Neither is unbounded:
+/// the referred-to numbers already had to fit inside this header for it to be
+/// a header at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Segment<'a> {
+    /// 7.2.2, and 7.2.5's input: it decides how wide the referred-to numbers
+    /// in this same header are.
+    number: u32,
     /// 7.2.3, the low six bits of the header flags.
     kind: u8,
+    /// 7.2.4 and 7.2.5, in the order the header gives them, which is the
+    /// order 7.4.3 concatenates their exports in.
+    referred: Vec<u32>,
     /// 7.2.6.
     page: u32,
     /// 7.2.7 through 7.2.8: the segment's own data.
     data: &'a [u8],
+    /// 7.2.7: the header declared an unknown data length, so the extent above
+    /// was found by scanning for the row terminator rather than read.
+    ///
+    /// The consequence is not the length but the *height*: a segment whose
+    /// length is unknown carries a region whose height is unknown too, and the
+    /// real row count is the four bytes after the terminator.
+    unknown_length: bool,
 }
 
 /// A big-endian cursor that runs out rather than panicking.
@@ -171,9 +244,275 @@ impl<'a> Reader<'a> {
 
 /// Records a leniency once. Same contract as the rest of the crate: one entry
 /// per condition per decode, not one per occurrence.
-fn note(warnings: &mut Vec<Warning>, warning: Warning) {
+fn note(refusals: &mut Vec<Jbig2Refusal>, refusal: Jbig2Refusal) {
+    if !refusals.contains(&refusal) {
+        refusals.push(refusal);
+    }
+}
+
+/// The same contract for the outward sink: one entry per condition per decode.
+///
+/// Two refusals can map to one [`Warning`] -- a cap and a malformed dimension
+/// are both `Jbig2SymbolLimitHit` -- so the deduplication has to happen again
+/// after the mapping, or a caller would see the same warning twice and the
+/// crate's stated contract would be broken by an internal distinction.
+fn note_warning(warnings: &mut Vec<Warning>, warning: Warning) {
     if !warnings.contains(&warning) {
         warnings.push(warning);
+    }
+}
+
+/// Why a JBIG2 stream, segment or region was refused.
+///
+/// The public surface of a refusal is [`FilterError::Unsupported`] plus one
+/// [`Warning`], because that is the whole degradation contract (ruling 2) and
+/// a caller draws the same placeholder for all of it. This type is the
+/// *reason* underneath, in the shape [`crate::JxrRefusal`] already uses: a
+/// closed list a test can assert against, so "every refusal this decoder
+/// performs is named" is checkable rather than claimed.
+///
+/// It exists because the four `Warning` variants are too coarse to schedule
+/// against. [`Warning::Jbig2SegmentSkipped`] alone covers the random-access
+/// organisation, an unknown segment data length, a segment type nobody has
+/// implemented, and a region whose callee already refused for a reason of its
+/// own — four different sentences to show a human, and four different answers
+/// to the question that decides a roadmap row: is this a capability this
+/// build lacks, or a file that is broken?
+///
+/// The mapping in [`Jbig2Refusal::warning`] is what keeps the outward
+/// behaviour unchanged by this type existing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Jbig2Refusal {
+    // --- file organisation and segment headers (clause 7.2, Annex D) ---
+    /// Annex D.1's random-access organisation — all headers, then all data.
+    /// It cannot appear in a PDF, and parsing it as sequential would read
+    /// data blocks as headers and invent segments the file does not have.
+    RandomAccessOrganisation,
+    /// 7.2.7's unknown data length (`0xFFFFFFFF`). Legal only for an
+    /// immediate generic region, and finding the end means scanning for a row
+    /// terminator that depends on the region's own coding, so nothing after
+    /// this segment can be located.
+    UnknownDataLength,
+    /// A segment type this build does not decode, carrying content. The type
+    /// number is carried, because a halftone region and a colour palette are
+    /// different sentences to show a human.
+    UnhandledSegmentType(u8),
+    /// 7.4.8: the page information segment's size disagrees with the size the
+    /// caller asked for. Recorded rather than repaired — the region segments
+    /// carry their own placement — and also what a stream pasted in from
+    /// another file looks like.
+    PageSizeDisagrees,
+
+    // --- coding variants, named apart from a lineage nobody has started ---
+    /// 7.4.3.1.1: the `SDHUFFDH` selector chose clause 7.4.13's custom table.
+    HuffmanDhSelector,
+    /// 7.4.3.1.1: the `SDHUFFDW` selector chose a custom table.
+    HuffmanDwSelector,
+    /// 7.4.3.1.1 bits 6 and 7: `SDHUFFBMSIZE` or `SDHUFFAGGINST` chose one.
+    HuffmanBmSizeOrAggInstSelector,
+    /// 7.4.2: a dictionary consuming a retained bitmap-coding context that
+    /// no segment it refers to left behind.
+    ///
+    /// The contexts themselves decode now. What is left is the file saying it
+    /// takes adaptive state from a segment that never retained any -- and
+    /// state that does not exist cannot be started from zero instead, because
+    /// the encoder's arithmetic decisions were made against it. A dictionary
+    /// decoded from the initial state would come out as noise that looks like
+    /// a picture.
+    RetainedContextMissing,
+    /// 7.4.2: a retained context of the wrong shape for the dictionary
+    /// consuming it.
+    ///
+    /// The array is indexed by a template's pixel neighbourhood, so its length
+    /// is `1 << template_bits(SDTEMPLATE)`. A dictionary at template 0 taking
+    /// a template 2 dictionary's contexts is reading 65 536 states out of
+    /// 1 024, which is a file contradicting itself rather than a capability.
+    RetainedContextMismatch,
+    /// 7.4.4.1.2: a text region's `SBHUFFFS`, `SBHUFFDS`, `SBHUFFDT` or
+    /// `SBHUFFRSIZE` selector chose a custom table.
+    TextTableSelector,
+    /// 6.4.11 over the Huffman road with no refinement tables selected.
+    RefinementTablesAbsent,
+    /// 7.4.3: a text region whose referred-to dictionary is absent or was
+    /// refused. Refused *whole*, because the numbering is shared and drawing
+    /// it renumbered produces a page that looks like text and says something
+    /// else.
+    DanglingReference,
+
+    // --- hardening caps: this build's number, rather than the file's fault ---
+    /// [`MAX_JBIG2_SYMBOLS`] would be spent by `SDNUMNEWSYMS`/`SDNUMEXSYMS`.
+    SymbolCountCap,
+    /// [`MAX_JBIG2_SYMBOL_PIXELS`] would be spent by one dictionary.
+    SymbolPixelCap,
+    /// One symbol spans the page it will be composited onto more than
+    /// [`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`] times, in width or in height.
+    ///
+    /// The one refusal here that reads two things at once: the symbol 6.5.5
+    /// has just sized, and the page 7.4.7 says it will be drawn onto. T.88
+    /// permits the combination, so this is this build's number and not the
+    /// file's fault — which is why it sits with the caps and not with the
+    /// contradictions below.
+    SymbolLargerThanPage,
+    /// 6.5.8.2's `REFAGGNINST` past [`MAX_JBIG2_TEXT_INSTANCES`].
+    AggregateInstanceCap,
+    /// 6.5.10's export-run loop ran longer than [`MAX_JBIG2_SYMBOLS`] turns.
+    ExportRunGuard,
+    /// 7.4.4.5's `SBNUMINSTANCES` past [`MAX_JBIG2_TEXT_INSTANCES`].
+    TextInstanceCap,
+    /// A region or page above the caller's output ceiling.
+    RegionTooLarge,
+
+    // --- the file contradicts itself: broken, rather than unsupported ---
+    /// A symbol's accumulated height is zero, negative or past `u32::MAX`.
+    SymbolHeightOutOfRange,
+    /// A symbol's accumulated width is zero, negative or past `u32::MAX`.
+    SymbolWidthOutOfRange,
+    /// 6.4.11's deltas size a refined instance to nothing or past `u32::MAX`.
+    RefinedSizeOutOfRange,
+    /// A dictionary produced more symbols than `SDNUMNEWSYMS` promised. The
+    /// header is what sized everything downstream.
+    MoreSymbolsThanDeclared,
+    /// A text region placed more instances than `SBNUMINSTANCES` promised.
+    MoreInstancesThanDeclared,
+    /// 6.5.10's export runs did not select `SDNUMEXSYMS` symbols. A text
+    /// region indexes against that count, so a disagreement is not a smaller
+    /// dictionary — it renumbers every symbol after the gap.
+    ExportCountMismatch,
+    /// A symbol identifier that no symbol in the pool answers to.
+    SymbolIndexOutOfRange,
+    /// 6.5.8.2.1's fixed-width symbol code could not be built for the pool.
+    SymbolCodeUnbuildable,
+    /// A selector asked for clause 7.4.13's custom table and the segment
+    /// referred to fewer Tables segments than its selectors need.
+    ///
+    /// 7.4.3.1.6 and 7.4.4.1.2 hand the referred-to tables out by *position*,
+    /// so a segment one short does not lose the last selector's table -- every
+    /// selector after the gap takes the wrong one, which decodes to a
+    /// plausible wrong picture. Refused whole, for `DanglingReference`'s
+    /// reason.
+    CustomTableMissing,
+
+    // --- data that would not decode as what it claims to be ---
+    /// 6.5.9's collective bitmap yielded not one T.6 row, so it is not MMR
+    /// data and the height class has no symbols in it.
+    CollectiveBitmapNotMmr,
+    /// 6.2.6: a generic region's MMR data yielded not one row. Compositing
+    /// the blank bitmap that was just sized would count as a region and turn
+    /// the refusal into a blank page reported as success.
+    GenericRegionNotMmr,
+    /// A text region with instances to place and no symbols behind them.
+    TextRegionWithoutSymbols,
+    /// A pattern dictionary whose patterns are zero wide or zero high.
+    PatternDictionaryEmpty,
+    /// A halftone region with no pattern dictionary behind it. Every cell of
+    /// the grid names a pattern, so there is nothing to stamp.
+    HalftoneWithoutPatterns,
+    /// The data ended inside something that was still being read.
+    Truncated,
+
+    // --- a callee refused, and the caller has nothing to add ---
+    /// A symbol dictionary segment refused; the reason is the refusal
+    /// recorded before this one.
+    SymbolDictionaryRefused,
+    /// A text region segment refused; the reason is the refusal before it.
+    TextRegionRefused,
+    /// A generic region segment refused; the reason is the refusal before it.
+    GenericRegionRefused,
+    /// A refinement region segment refused; likewise.
+    RefinementRegionRefused,
+    /// A pattern dictionary segment refused; likewise.
+    PatternDictionaryRefused,
+    /// A halftone region segment refused; likewise.
+    HalftoneRegionRefused,
+
+    /// No region was composited onto the page: the whole-stream refusal.
+    NoRegion,
+}
+
+impl Jbig2Refusal {
+    /// The one typed leniency record this refusal leaves behind (ruling 10).
+    ///
+    /// Coarser than the refusal itself on purpose: [`Warning`] is a closed set
+    /// recorded at most once per decode, and a variant per condition would
+    /// make it neither. The grouping is the one this decoder has always
+    /// reported, so adding this type moved no corpus number.
+    #[must_use]
+    pub const fn warning(self) -> Warning {
+        match self {
+            Self::RandomAccessOrganisation
+            | Self::UnknownDataLength
+            | Self::UnhandledSegmentType(_)
+            | Self::PageSizeDisagrees
+            | Self::CollectiveBitmapNotMmr
+            | Self::GenericRegionNotMmr
+            | Self::TextRegionWithoutSymbols
+            | Self::PatternDictionaryEmpty
+            | Self::HalftoneWithoutPatterns
+            | Self::SymbolDictionaryRefused
+            | Self::TextRegionRefused
+            | Self::GenericRegionRefused
+            | Self::RefinementRegionRefused
+            | Self::PatternDictionaryRefused
+            | Self::HalftoneRegionRefused
+            | Self::NoRegion => Warning::Jbig2SegmentSkipped,
+
+            Self::HuffmanDhSelector
+            | Self::HuffmanDwSelector
+            | Self::HuffmanBmSizeOrAggInstSelector
+            | Self::RetainedContextMissing
+            | Self::RetainedContextMismatch
+            | Self::TextTableSelector
+            | Self::RefinementTablesAbsent
+            | Self::DanglingReference
+            | Self::CustomTableMissing => Warning::Jbig2VariantSkipped,
+
+            Self::SymbolCountCap
+            | Self::SymbolPixelCap
+            | Self::SymbolLargerThanPage
+            | Self::AggregateInstanceCap
+            | Self::ExportRunGuard
+            | Self::TextInstanceCap
+            | Self::SymbolHeightOutOfRange
+            | Self::SymbolWidthOutOfRange
+            | Self::RefinedSizeOutOfRange
+            | Self::MoreSymbolsThanDeclared
+            | Self::MoreInstancesThanDeclared
+            | Self::ExportCountMismatch
+            | Self::SymbolIndexOutOfRange
+            | Self::SymbolCodeUnbuildable => Warning::Jbig2SymbolLimitHit,
+
+            Self::RegionTooLarge => Warning::Jbig2RegionTooLarge,
+            Self::Truncated => Warning::TruncatedInput,
+        }
+    }
+
+    /// Whether this refusal says the *file* is inconsistent, rather than that
+    /// this build is short of a capability.
+    ///
+    /// The distinction the coarse warning throws away, and the one that
+    /// decides whether a corpus file is a roadmap row or a bug report.
+    #[must_use]
+    pub const fn is_malformed(self) -> bool {
+        matches!(
+            self,
+            Self::SymbolHeightOutOfRange
+                | Self::SymbolWidthOutOfRange
+                | Self::RefinedSizeOutOfRange
+                | Self::MoreSymbolsThanDeclared
+                | Self::MoreInstancesThanDeclared
+                | Self::ExportCountMismatch
+                | Self::SymbolIndexOutOfRange
+                | Self::SymbolCodeUnbuildable
+                | Self::CustomTableMissing
+                | Self::RetainedContextMissing
+                | Self::RetainedContextMismatch
+                | Self::CollectiveBitmapNotMmr
+                | Self::GenericRegionNotMmr
+                | Self::TextRegionWithoutSymbols
+                | Self::PatternDictionaryEmpty
+                | Self::HalftoneWithoutPatterns
+                | Self::Truncated
+        )
     }
 }
 
@@ -188,7 +527,7 @@ fn note(warnings: &mut Vec<Warning>, warning: Warning) {
 /// appear in a PDF and is not guessed at: it is recorded and the stream ends
 /// there, because parsing it as sequential would read data blocks as headers
 /// and invent segments that are not in the file.
-fn segments<'a>(data: &'a [u8], warnings: &mut Vec<Warning>) -> Vec<Segment<'a>> {
+fn segments<'a>(data: &'a [u8], warnings: &mut Vec<Jbig2Refusal>) -> Vec<Segment<'a>> {
     let mut reader = Reader::new(data);
     if data.starts_with(&FILE_HEADER) {
         let _ = reader.skip(FILE_HEADER.len());
@@ -196,7 +535,7 @@ fn segments<'a>(data: &'a [u8], warnings: &mut Vec<Warning>) -> Vec<Segment<'a>>
         // D.4.2 bit 0: 1 is sequential, 0 is random access. Bit 1: 0 means
         // the number of pages is known and follows as four bytes.
         if flags & 1 == 0 {
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::RandomAccessOrganisation);
             return Vec::new();
         }
         if flags & 2 == 0 {
@@ -221,7 +560,10 @@ fn segments<'a>(data: &'a [u8], warnings: &mut Vec<Warning>) -> Vec<Segment<'a>>
 }
 
 /// One segment header and its data (T.88 7.2).
-fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Option<Segment<'a>> {
+fn read_segment<'a>(
+    reader: &mut Reader<'a>,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<Segment<'a>> {
     let number = reader.u32()?;
     let flags = reader.u8()?;
     let kind = flags & 0x3F;
@@ -255,9 +597,21 @@ fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Opt
     };
     // A count is up to 2^29, and the referred-to numbers are the only thing
     // between here and the data, so the whole run has to fit in what is left
-    // or the header is not a header.
+    // or the header is not a header — which is also what bounds the vector
+    // below without a cap of its own.
     let referred_bytes = (count as usize).checked_mul(width)?;
+    let start = reader.at;
     reader.skip(referred_bytes)?;
+    let mut referred = Vec::with_capacity(count as usize);
+    for index in 0..count as usize {
+        let at = start + index * width;
+        let bytes = reader.data.get(at..at + width)?;
+        referred.push(match width {
+            1 => u32::from(bytes[0]),
+            2 => u32::from(u16::from_be_bytes([bytes[0], bytes[1]])),
+            _ => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        });
+    }
 
     let page = if long_page {
         reader.u32()?
@@ -267,20 +621,2543 @@ fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Opt
 
     let length = reader.u32()?;
     if length == u32::MAX {
-        // 7.2.7: an unknown data length is legal only for an immediate
-        // generic region, and finding its end means scanning for a row
-        // terminator that depends on the region's own coding. Nothing after
-        // this segment can be located, so the stream ends here rather than
-        // being guessed at.
-        note(warnings, Warning::Jbig2SegmentSkipped);
-        return None;
+        // 7.2.7: an unknown data length is legal only for an immediate generic
+        // region, and its end is found by scanning for the row terminator the
+        // region's own coding uses. Any other segment type saying this is a
+        // header nothing after it can be located from, so the stream ends
+        // there rather than being guessed at.
+        if !matches!(
+            kind,
+            kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
+        ) {
+            note(warnings, Jbig2Refusal::UnknownDataLength);
+            return None;
+        }
+        let Some(length) = unknown_length_extent(reader.rest()) else {
+            note(warnings, Jbig2Refusal::UnknownDataLength);
+            return None;
+        };
+        let (data, whole) = reader.take(length);
+        if !whole {
+            note(warnings, Jbig2Refusal::Truncated);
+        }
+        return Some(Segment {
+            number,
+            kind,
+            referred,
+            page,
+            data,
+            unknown_length: true,
+        });
     }
     let (data, whole) = reader.take(length as usize);
     if !whole {
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
     }
 
-    Some(Segment { kind, page, data })
+    Some(Segment {
+        number,
+        kind,
+        referred,
+        page,
+        data,
+        unknown_length: false,
+    })
+}
+
+/// **7.2.7: where a segment of unknown data length ends.**
+///
+/// The clause gives the layout rather than a length: the region segment
+/// information field, the generic region flags, the adaptive pixels if the
+/// region is not MMR, then the coded data, then a two-byte terminator, then
+/// four bytes of row count. So the end is found by searching for the
+/// terminator — `FF AC` for the arithmetic coder and `00 00` for MMR — and
+/// taking six bytes more.
+///
+/// The search starts *after* the adaptive pixels rather than at the top of the
+/// segment, because a nominal AT pair of `(-1, -2)` is the bytes `FF FE` and a
+/// template-0 region carries four of them: beginning at zero would find a
+/// terminator inside the header of a perfectly ordinary region.
+///
+/// Returns the whole segment's length, including the row count, so the caller
+/// can hand the slice on unchanged.
+fn unknown_length_extent(data: &[u8]) -> Option<usize> {
+    // 17 bytes of region information, then the flags byte.
+    let flags = *data.get(17)?;
+    let mmr = flags & 0x01 != 0;
+    let template = (flags >> 1) & 0x03;
+    let mut at = 18;
+    if !mmr {
+        at += if template == 0 { 8 } else { 2 };
+    }
+    let terminator: [u8; 2] = if mmr { [0x00, 0x00] } else { [0xFF, 0xAC] };
+    let mut cursor = at;
+    while cursor + 2 <= data.len() {
+        if data[cursor..cursor + 2] == terminator {
+            // The terminator, then 7.2.7's four bytes of row count.
+            return cursor.checked_add(6);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+/// # Annex A, ahead of its caller
+///
+/// The three items below are read only by this module's tests until the
+/// symbol dictionary that drives them lands (milestone 3 of
+/// `docs/design/jbig2-symbol-text.md`). They arrive first deliberately: their
+/// round trips are what says they are right, and a decoder whose arithmetic is
+/// only exercised through the thing that consumes it cannot be told apart from
+/// a consumer that compensates for it.
+///
+/// How many contexts A.2's integer decoder keeps.
+///
+/// Nine bits of `PREV`, and `PREV` is held to that width by the folding in
+/// [`decode_int`] rather than by the array's length — the array is sized to
+/// match it so the fold is the only thing deciding, and an index can never be
+/// the thing that is wrong.
+#[allow(dead_code)]
+const INT_CONTEXTS: usize = 512;
+
+/// **A.2: the integer arithmetic decoding procedure.**
+///
+/// Reads a sign, then a prefix that says how many magnitude bits follow and
+/// what to add to them. `None` is OOB — the out-of-band value A.2 spells as a
+/// negative zero, which is how a symbol dictionary's height class says it has
+/// ended and how a text region says a strip has.
+///
+/// # Why `PREV` folds rather than grows
+///
+/// The context for each bit is the value decoded so far, so `PREV` doubles per
+/// bit and would run past the array after nine of them. A.2 folds it back
+/// instead: once it reaches 256 the top bit is pinned and the rest rotate
+/// under it, so the last eight bits decoded pick the context and the value
+/// keeps its place in the tree. A build that let it grow would index out of
+/// the array on the tenth bit of a 32-bit magnitude — which is every large
+/// coordinate in a real text region, not an edge case.
+#[allow(dead_code)]
+fn decode_int(coder: &mut MqDecoder<'_>, cx: &mut MqContexts) -> Option<i32> {
+    let mut prev = 1usize;
+    let bit = |coder: &mut MqDecoder<'_>, cx: &mut MqContexts, prev: &mut usize| -> u32 {
+        let d = u32::from(coder.decode_at(cx, *prev));
+        // A.2 step 2: nine bits wide, top bit pinned once it is reached.
+        *prev = if *prev < 256 {
+            (*prev << 1) | d as usize
+        } else {
+            (((*prev << 1) | d as usize) & 511) | 256
+        };
+        d
+    };
+
+    let sign = bit(coder, cx, &mut prev);
+    // The prefix is unary-ish: each 1 buys a wider field and a larger offset.
+    let (width, offset) = if bit(coder, cx, &mut prev) == 0 {
+        (2, 0i64)
+    } else if bit(coder, cx, &mut prev) == 0 {
+        (4, 4)
+    } else if bit(coder, cx, &mut prev) == 0 {
+        (6, 20)
+    } else if bit(coder, cx, &mut prev) == 0 {
+        (8, 84)
+    } else if bit(coder, cx, &mut prev) == 0 {
+        (12, 340)
+    } else {
+        (32, 4436)
+    };
+
+    let mut value = 0i64;
+    for _ in 0..width {
+        value = (value << 1) | i64::from(bit(coder, cx, &mut prev));
+    }
+    value += offset;
+
+    // A.2 step 4: a negative zero is not a value, it is the end of something.
+    if sign == 1 && value == 0 {
+        return None;
+    }
+    let value = if sign == 1 { -value } else { value };
+    // 32 magnitude bits plus the offset exceed `i32` by design; the callers
+    // are coordinates and counts that a region's own bounds reject anyway, so
+    // saturating here keeps the arithmetic downstream in one type.
+    Some(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+}
+
+/// **A.3: the IAID decoding procedure**, which reads a symbol's index.
+///
+/// Unlike A.2 this is a plain fixed-width read down a context *tree*: the
+/// contexts are the prefix decoded so far, so the array is twice as wide as
+/// the code length and `PREV` never needs folding. `code_len` is
+/// `SBSYMCODELEN`, and it is the caller's to derive from the symbol count.
+#[allow(dead_code)]
+fn decode_iaid(coder: &mut MqDecoder<'_>, cx: &mut MqContexts, code_len: u32) -> u32 {
+    let mut prev = 1usize;
+    for _ in 0..code_len.min(31) {
+        let d = usize::from(coder.decode_at(cx, prev));
+        prev = (prev << 1) | d;
+    }
+    (prev as u32).wrapping_sub(1 << code_len.min(31))
+}
+
+/// How many contexts [`decode_iaid`] needs for a given code length.
+#[allow(dead_code)]
+fn iaid_contexts(code_len: u32) -> usize {
+    1usize << (code_len.min(31) + 1)
+}
+
+/// 7.4.1.5's external combination operators, over one pixel.
+///
+/// Shared by [`Bitmap::composite`] and the clipped placement a text region
+/// needs, so the two cannot come to disagree about what XNOR means.
+fn combine(destination: u32, source: u32, op: u8) -> u32 {
+    match op {
+        1 => source & destination,
+        2 => source ^ destination,
+        3 => !(source ^ destination) & 1,
+        4 => source,
+        // 0 is OR, and so is anything 7.4.1.5 leaves undefined: a region drawn
+        // with an operator nobody defined should still appear rather than
+        // erase what is under it.
+        _ => source | destination,
+    }
+}
+
+// ---- Annex B: Huffman coding -----------------------------------------------
+//
+// The other half of T.88's symbol lineage. Where the arithmetic variant reads
+// decisions from the MQ coder, this one reads *prefix codes* out of the
+// bitstream, and the standard publishes fifteen tables of them.
+//
+// **Where these numbers come from, stated plainly.** All fifteen are
+// transcribed from Tables B.1 to B.15 of ITU-T Rec. T.88 (02/2000), which is
+// published free of charge and which this repository could not reach until
+// September 2026 -- the earlier attempt was refused, and the tables were
+// *reconstructed* instead, from Annex H's datastream and from the corpus.
+// Eleven of the fifteen survived that transcription unchanged, which is the
+// measure of how far reconstruction got. Four did not:
+//
+// - **B.7** had eleven lines where the standard has fifteen. Its whole
+//   positive side was one line where the standard splits it into six, so a
+//   value above zero read the wrong number of offset bits.
+// - **B.12** had ten lines where the standard has thirteen, and started at 0
+//   where the standard starts at 1.
+// - **B.10** had the right lines and five wrong prefix lengths, in the run
+//   from 134 upwards.
+// - **B.15** had eleven lines where the standard has thirteen, split
+//   differently either side of zero.
+//
+// The first three were *known* wrong before the standard arrived, by a
+// property that needs no copy of it: B.3 assigns canonical codes from prefix
+// lengths alone, so a table decodes every input if and only if its lengths
+// satisfy Kraft's equality, and those three summed to 0.640, 0.945 and 0.921
+// of one. **B.15 summed to exactly one and was wrong anyway**, which is the
+// lesson worth keeping: a necessary condition is not a sufficient one, and no
+// invariant this repository could state would have found it.
+//
+// What holds them now, beside the transcription: `annex_b_tables_are_complete_
+// prefix_codes` re-checks Kraft's equality, `the_codes_b3_assigns_are_the_ones_
+// the_standard_prints` checks the assignment against the bit strings the
+// standard prints in its own Encoding column, `annex_h_codes_the_same_symbols_
+// two_ways` requires the standard's datastream to decode identically through
+// both roads, and `jbig2_lineages.rs` requires every corpus file selecting one
+// of them to draw the same picture as the files that do not. A single wrong
+// prefix length desynchronises the reader and yields noise rather than a
+// glyph, so there is no outcome where a wrong table produces a plausible
+// picture.
+
+/// A bit reader, most significant bit first, over a segment's data.
+///
+/// Separate from [`Reader`], which is byte-oriented: a Huffman-coded segment
+/// interleaves bit-aligned prefix codes with byte-aligned bitmaps, and the two
+/// readers meet at [`BitReader::align`].
+struct BitReader<'a> {
+    bytes: &'a [u8],
+    /// The next bit to read, counted from the start of `bytes`.
+    at: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(bytes: &'a [u8]) -> BitReader<'a> {
+        BitReader { bytes, at: 0 }
+    }
+
+    /// One bit, or `None` past the end.
+    fn bit(&mut self) -> Option<u32> {
+        let byte = *self.bytes.get(self.at / 8)?;
+        let shift = 7 - (self.at % 8);
+        self.at += 1;
+        Some(u32::from((byte >> shift) & 1))
+    }
+
+    /// `n` bits, most significant first. `n` above 32 is a caller error and
+    /// answers `None` rather than wrapping.
+    fn bits(&mut self, n: u32) -> Option<u32> {
+        if n > 32 {
+            return None;
+        }
+        let mut value = 0u32;
+        for _ in 0..n {
+            value = (value << 1) | self.bit()?;
+        }
+        Some(value)
+    }
+
+    /// Moves to the next byte boundary, which is where a collective bitmap
+    /// starts (6.5.9) and where 7.4.3.1.7's symbol codes stop.
+    fn align(&mut self) {
+        self.at = self.at.div_ceil(8) * 8;
+    }
+
+    /// How many whole bytes have been consumed, for handing the rest to a
+    /// byte-oriented decoder.
+    const fn byte_position(&self) -> usize {
+        self.at.div_ceil(8)
+    }
+
+    /// Continue reading at `byte`, which 6.4.11 needs after a refinement:
+    /// its arithmetic sub-stream is `BMSIZE` bytes that the bit reader must
+    /// step over rather than decode.
+    fn seek_byte(&mut self, byte: usize) -> Option<()> {
+        self.at = byte.checked_mul(8)?;
+        (byte <= self.bytes.len()).then_some(())
+    }
+}
+
+/// What one line of an Annex B table says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HuffLine {
+    /// The number of bits in this line's prefix code. Zero means the line is
+    /// not present in the table at all, which is how B.3's and B.5's optional
+    /// lines are spelled.
+    prefix_len: u8,
+    /// How many bits of offset follow the prefix. 32 marks the two open-ended
+    /// lines, which is why this is not a range in the ordinary sense.
+    range_len: u8,
+    /// The value the offset is added to — or, for [`LineKind::Lower`],
+    /// subtracted from.
+    range_low: i32,
+    kind: LineKind,
+}
+
+/// Which of B.2's three shapes a line is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineKind {
+    /// `range_low + offset`.
+    Normal,
+    /// `range_low - offset`: the open-ended line running downwards.
+    Lower,
+    /// Out of band, which carries no offset at all and ends a run.
+    Oob,
+}
+
+impl HuffLine {
+    const fn normal(prefix_len: u8, range_len: u8, range_low: i32) -> HuffLine {
+        HuffLine {
+            prefix_len,
+            range_len,
+            range_low,
+            kind: LineKind::Normal,
+        }
+    }
+
+    const fn lower(prefix_len: u8, range_low: i32) -> HuffLine {
+        HuffLine {
+            prefix_len,
+            range_len: 32,
+            range_low,
+            kind: LineKind::Lower,
+        }
+    }
+
+    const fn oob(prefix_len: u8) -> HuffLine {
+        HuffLine {
+            prefix_len,
+            range_len: 0,
+            range_low: 0,
+            kind: LineKind::Oob,
+        }
+    }
+}
+
+/// One decoded value, or the out-of-band marker that ends a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HuffValue {
+    Value(i32),
+    Oob,
+}
+
+/// An Annex B table with its prefix codes assigned.
+///
+/// `Clone` because clause 7.4.13's tables are owned by the page and handed to
+/// whichever selector asks for one, and two selectors of one segment may name
+/// the same referred-to table.
+#[derive(Clone)]
+struct HuffTable {
+    lines: Vec<HuffLine>,
+    /// The prefix code of each line, in the same order.
+    codes: Vec<u32>,
+}
+
+impl HuffTable {
+    /// B.3's assignment procedure: canonical codes, shortest first, in table
+    /// order within a length.
+    ///
+    /// The same construction every canonical prefix code uses, and it is
+    /// written out rather than borrowed from `inflate.rs` because that one
+    /// speaks RFC 1951's conventions and this one speaks B.3's — the two agree
+    /// today and a shared helper would be a place for them to stop agreeing.
+    fn new(lines: Vec<HuffLine>) -> HuffTable {
+        let max = lines.iter().map(|l| l.prefix_len).max().unwrap_or(0);
+        let mut counts = vec![0u32; usize::from(max) + 1];
+        for line in &lines {
+            if line.prefix_len > 0 {
+                counts[usize::from(line.prefix_len)] += 1;
+            }
+        }
+        let mut first = vec![0u32; usize::from(max) + 2];
+        for len in 1..=usize::from(max) {
+            first[len + 1] = (first[len] + counts[len]) << 1;
+        }
+        let mut next = first.clone();
+        let mut codes = Vec::with_capacity(lines.len());
+        for line in &lines {
+            if line.prefix_len == 0 {
+                codes.push(0);
+                continue;
+            }
+            let len = usize::from(line.prefix_len);
+            codes.push(next[len]);
+            next[len] += 1;
+        }
+        HuffTable { lines, codes }
+    }
+
+    /// Reads one value, growing a candidate prefix a bit at a time.
+    ///
+    /// Linear in the table's length per bit, which for tables of at most
+    /// twenty lines is cheaper than the structure a faster search would need.
+    fn decode(&self, reader: &mut BitReader<'_>) -> Option<HuffValue> {
+        let mut code = 0u32;
+        let mut len = 0u8;
+        while len < 32 {
+            code = (code << 1) | reader.bit()?;
+            len += 1;
+            for (line, assigned) in self.lines.iter().zip(&self.codes) {
+                if line.prefix_len != len || *assigned != code {
+                    continue;
+                }
+                return Some(match line.kind {
+                    LineKind::Oob => HuffValue::Oob,
+                    LineKind::Lower => {
+                        let offset = reader.bits(u32::from(line.range_len))?;
+                        HuffValue::Value(line.range_low.checked_sub(offset as i32)?)
+                    }
+                    LineKind::Normal => {
+                        let offset = reader.bits(u32::from(line.range_len))?;
+                        HuffValue::Value(line.range_low.checked_add(offset as i32)?)
+                    }
+                });
+            }
+        }
+        None
+    }
+
+    /// The value, refusing the out-of-band marker a caller did not expect.
+    fn value(&self, reader: &mut BitReader<'_>) -> Option<i32> {
+        match self.decode(reader)? {
+            HuffValue::Value(v) => Some(v),
+            HuffValue::Oob => None,
+        }
+    }
+}
+
+/// Table B.1, which counts sizes: bitmap sizes, aggregate instance counts and
+/// the export runs of 6.5.10.
+fn table_b1() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 4, 0),
+        HuffLine::normal(2, 8, 16),
+        HuffLine::normal(3, 16, 272),
+        HuffLine::normal(3, 32, 65_808),
+    ])
+}
+
+/// Table B.2, the symbol-width deltas, which needs an out-of-band value to end
+/// a height class.
+fn table_b2() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(2, 0, 1),
+        HuffLine::normal(3, 0, 2),
+        HuffLine::normal(4, 3, 3),
+        HuffLine::normal(5, 6, 11),
+        HuffLine::normal(6, 32, 75),
+        HuffLine::oob(6),
+    ])
+}
+
+/// Table B.3, the symbol-width deltas over a range that runs both ways.
+fn table_b3() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(8, 8, -256),
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(2, 0, 1),
+        HuffLine::normal(3, 0, 2),
+        HuffLine::normal(4, 3, 3),
+        HuffLine::normal(5, 6, 11),
+        HuffLine::lower(8, -257),
+        HuffLine::normal(7, 32, 75),
+        HuffLine::oob(6),
+    ])
+}
+
+/// Table B.4, the height-class deltas.
+fn table_b4() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(2, 0, 2),
+        HuffLine::normal(3, 0, 3),
+        HuffLine::normal(4, 3, 4),
+        HuffLine::normal(5, 6, 12),
+        HuffLine::normal(5, 32, 76),
+    ])
+}
+
+/// Table B.5, the height-class deltas over a range that runs both ways.
+fn table_b5() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(7, 8, -255),
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(2, 0, 2),
+        HuffLine::normal(3, 0, 3),
+        HuffLine::normal(4, 3, 4),
+        HuffLine::normal(5, 6, 12),
+        HuffLine::lower(7, -256),
+        HuffLine::normal(6, 32, 76),
+    ])
+}
+
+/// Table B.6, a text region's first-symbol coordinate, which runs both ways.
+fn table_b6() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(5, 10, -2048),
+        HuffLine::normal(4, 9, -1024),
+        HuffLine::normal(4, 8, -512),
+        HuffLine::normal(4, 7, -256),
+        HuffLine::normal(5, 6, -128),
+        HuffLine::normal(5, 5, -64),
+        HuffLine::normal(4, 5, -32),
+        HuffLine::normal(2, 7, 0),
+        HuffLine::normal(3, 7, 128),
+        HuffLine::normal(3, 8, 256),
+        HuffLine::normal(4, 9, 512),
+        HuffLine::normal(4, 10, 1024),
+        HuffLine::lower(6, -2049),
+        HuffLine::normal(6, 32, 2048),
+    ])
+}
+
+/// Table B.7, a text region's first-symbol coordinate over a wider range.
+fn table_b7() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(4, 9, -1024),
+        HuffLine::normal(3, 8, -512),
+        HuffLine::normal(4, 7, -256),
+        HuffLine::normal(5, 6, -128),
+        HuffLine::normal(5, 5, -64),
+        HuffLine::normal(4, 5, -32),
+        HuffLine::normal(4, 5, 0),
+        HuffLine::normal(5, 5, 32),
+        HuffLine::normal(5, 6, 64),
+        HuffLine::normal(4, 7, 128),
+        HuffLine::normal(3, 8, 256),
+        HuffLine::normal(3, 9, 512),
+        HuffLine::normal(3, 10, 1024),
+        HuffLine::lower(5, -1025),
+        HuffLine::normal(5, 32, 2048),
+    ])
+}
+
+/// Table B.8, the gap between symbols along a strip.
+fn table_b8() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(8, 3, -15),
+        HuffLine::normal(9, 1, -7),
+        HuffLine::normal(8, 1, -5),
+        HuffLine::normal(9, 0, -3),
+        HuffLine::normal(7, 0, -2),
+        HuffLine::normal(4, 0, -1),
+        HuffLine::normal(2, 1, 0),
+        HuffLine::normal(5, 0, 2),
+        HuffLine::normal(6, 0, 3),
+        HuffLine::normal(3, 4, 4),
+        HuffLine::normal(6, 1, 20),
+        HuffLine::normal(4, 4, 22),
+        HuffLine::normal(4, 5, 38),
+        HuffLine::normal(5, 6, 70),
+        HuffLine::normal(5, 7, 134),
+        HuffLine::normal(6, 7, 262),
+        HuffLine::normal(7, 8, 390),
+        HuffLine::normal(6, 10, 646),
+        HuffLine::lower(9, -16),
+        HuffLine::normal(9, 32, 1670),
+        HuffLine::oob(2),
+    ])
+}
+
+/// Table B.9, the gap between symbols at twice B.8's resolution.
+fn table_b9() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(8, 4, -31),
+        HuffLine::normal(9, 2, -15),
+        HuffLine::normal(8, 2, -11),
+        HuffLine::normal(9, 1, -7),
+        HuffLine::normal(7, 1, -5),
+        HuffLine::normal(4, 1, -3),
+        HuffLine::normal(3, 1, -1),
+        HuffLine::normal(3, 1, 1),
+        HuffLine::normal(5, 1, 3),
+        HuffLine::normal(6, 1, 5),
+        HuffLine::normal(3, 5, 7),
+        HuffLine::normal(6, 2, 39),
+        HuffLine::normal(4, 5, 43),
+        HuffLine::normal(4, 6, 75),
+        HuffLine::normal(5, 7, 139),
+        HuffLine::normal(5, 8, 267),
+        HuffLine::normal(6, 8, 523),
+        HuffLine::normal(7, 9, 779),
+        HuffLine::normal(6, 11, 1291),
+        HuffLine::lower(9, -32),
+        HuffLine::normal(9, 32, 3339),
+        HuffLine::oob(2),
+    ])
+}
+
+/// Table B.10, the gap between symbols over the widest range.
+fn table_b10() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(7, 4, -21),
+        HuffLine::normal(8, 0, -5),
+        HuffLine::normal(7, 0, -4),
+        HuffLine::normal(5, 0, -3),
+        HuffLine::normal(2, 2, -2),
+        HuffLine::normal(5, 0, 2),
+        HuffLine::normal(6, 0, 3),
+        HuffLine::normal(7, 0, 4),
+        HuffLine::normal(8, 0, 5),
+        HuffLine::normal(2, 6, 6),
+        HuffLine::normal(5, 5, 70),
+        HuffLine::normal(6, 5, 102),
+        HuffLine::normal(6, 6, 134),
+        HuffLine::normal(6, 7, 198),
+        HuffLine::normal(6, 8, 326),
+        HuffLine::normal(6, 9, 582),
+        HuffLine::normal(6, 10, 1094),
+        HuffLine::normal(7, 11, 2118),
+        HuffLine::lower(8, -22),
+        HuffLine::normal(8, 32, 4166),
+        HuffLine::oob(2),
+    ])
+}
+
+/// Table B.11, a strip's vertical coordinate at the finest resolution.
+fn table_b11() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(2, 1, 2),
+        HuffLine::normal(4, 0, 4),
+        HuffLine::normal(4, 1, 5),
+        HuffLine::normal(5, 1, 7),
+        HuffLine::normal(5, 2, 9),
+        HuffLine::normal(6, 2, 13),
+        HuffLine::normal(7, 2, 17),
+        HuffLine::normal(7, 3, 21),
+        HuffLine::normal(7, 4, 29),
+        HuffLine::normal(7, 5, 45),
+        HuffLine::normal(7, 6, 77),
+        HuffLine::normal(7, 32, 141),
+    ])
+}
+
+/// Table B.12, a strip's vertical coordinate.
+fn table_b12() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(2, 0, 2),
+        HuffLine::normal(3, 1, 3),
+        HuffLine::normal(5, 0, 5),
+        HuffLine::normal(5, 1, 6),
+        HuffLine::normal(6, 1, 8),
+        HuffLine::normal(7, 0, 10),
+        HuffLine::normal(7, 1, 11),
+        HuffLine::normal(7, 2, 13),
+        HuffLine::normal(7, 3, 17),
+        HuffLine::normal(7, 4, 25),
+        HuffLine::normal(8, 5, 41),
+        HuffLine::normal(8, 32, 73),
+    ])
+}
+
+/// **7.4.2's retained bitmap-coding contexts**: the adaptive state one symbol
+/// dictionary leaves behind for another to start from.
+///
+/// A symbol dictionary's flags carry two bits (7.4.3.1.1): one says this
+/// dictionary *consumes* a context, the other says it *retains* one. A file
+/// that codes a page as a run of dictionaries can then let the second start
+/// where the first finished, which is worth a few per cent on a scan and is
+/// why real encoders emit it.
+///
+/// Both arrays are kept even when the retaining dictionary did not aggregate,
+/// because whether the *consumer* aggregates is not knowable here. A consumer
+/// whose refinement array is a different length gets a fresh one: the states
+/// it wants were never touched, so the initial state is not a degradation but
+/// the only thing they can be.
+#[derive(Clone)]
+struct RetainedContexts {
+    /// 6.5.8.1's generic contexts, `1 << template_bits(SDTEMPLATE)` of them.
+    generic: MqContexts,
+    /// 6.5.8.2's refinement contexts, sized by `SDRTEMPLATE`.
+    refine: MqContexts,
+}
+
+/// A.1's integer decoders and 6.3's refinement states, as one bundle.
+///
+/// 6.5.8.2 is why this is a struct rather than a pile of locals: a symbol
+/// dictionary that aggregates runs 6.4's text region procedure **over its own
+/// decoder**, so every one of these has to survive from the dictionary into
+/// the text region and back out to the next symbol. Handing them over as a
+/// bundle is what makes that sharing hard to get wrong.
+struct ArithContexts {
+    iadh: MqContexts,
+    iadw: MqContexts,
+    iaex: MqContexts,
+    iaai: MqContexts,
+    iadt: MqContexts,
+    iafs: MqContexts,
+    iads: MqContexts,
+    iait: MqContexts,
+    iari: MqContexts,
+    iardw: MqContexts,
+    iardh: MqContexts,
+    iardx: MqContexts,
+    iardy: MqContexts,
+    iaid: MqContexts,
+}
+
+impl ArithContexts {
+    fn new(code_len: u32) -> ArithContexts {
+        ArithContexts {
+            iadh: MqContexts::new(INT_CONTEXTS),
+            iadw: MqContexts::new(INT_CONTEXTS),
+            iaex: MqContexts::new(INT_CONTEXTS),
+            iaai: MqContexts::new(INT_CONTEXTS),
+            iadt: MqContexts::new(INT_CONTEXTS),
+            iafs: MqContexts::new(INT_CONTEXTS),
+            iads: MqContexts::new(INT_CONTEXTS),
+            iait: MqContexts::new(INT_CONTEXTS),
+            iari: MqContexts::new(INT_CONTEXTS),
+            iardw: MqContexts::new(INT_CONTEXTS),
+            iardh: MqContexts::new(INT_CONTEXTS),
+            iardx: MqContexts::new(INT_CONTEXTS),
+            iardy: MqContexts::new(INT_CONTEXTS),
+            iaid: MqContexts::new(iaid_contexts(code_len)),
+        }
+    }
+}
+
+/// The most symbols one dictionary may export or decode.
+///
+/// `SDNUMNEWSYMS` and `SDNUMEXSYMS` are 32-bit and attacker-controlled, and
+/// each new symbol is an allocation.
+///
+/// | | Symbols |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 3 |
+/// | The most any file in the corpus spends | 2 478 |
+/// | A 200-page bilevel scan sharing one global dictionary | 20 000 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **100 000 (estimate)** |
+///
+/// **The third figure is arithmetic and the ledger says so.** Milestone 7 of
+/// `docs/design/jbig2-symbol-text.md` asked for a measurement against a real
+/// `jbig2enc`/OCRmyPDF file and the census taken to make it found the corpus's
+/// largest `SDNUMEXSYMS` was **11** across 102 JBIG2-bearing files — every one
+/// of them a synthetic fixture built to exercise one placement variant. A cap
+/// calibrated on that would let anything through, so the number here is
+/// argued instead: a 300 dpi A4 text page reduces to a few hundred distinct
+/// glyph bitmaps, and 200 pages of them saturate a shared dictionary in the
+/// low tens of thousands. That is the same currency
+/// `crates/tinker-pdf/tests/bounds_ledger.rs`'s comic and fixed-document
+/// yardsticks are already in — *arithmetic about a plausible file, written
+/// down so it can be argued with* — and the word **estimate** is in the
+/// published figure so a reader cannot mistake it for the other kind.
+///
+/// The second row is a measurement and was **11** until tier 0's production
+/// corpus arrived with real OCR JBIG2; the figure above it is that corpus's,
+/// re-measured 26 September 2026 by `crates/tinker-pdf/tests/jbig2_census.rs`
+/// over 118 JBIG2-bearing files. It corroborates the estimate from below — a
+/// real scanned document asks for a fortieth of this cap — which is the
+/// direction that makes an estimate safe rather than the one that makes it
+/// wrong.
+///
+/// Reachable: `SDNUMNEWSYMS` is a 32-bit field at 7.4.3.1.5, read straight off
+/// the segment header, so **twelve bytes of dictionary data** may ask for
+/// 4 294 967 295 symbols — which
+/// `a_dictionary_declaring_more_symbols_than_the_cap_is_refused_by_name`
+/// builds.
+pub const MAX_JBIG2_SYMBOLS: u32 = 100_000;
+
+/// The most pixels one dictionary's symbols may occupy in total.
+///
+/// A per-symbol bound is not a work bound once the count branches: ten thousand
+/// symbols of a thousand pixels each is a bitmap nobody asked for, and every
+/// one of them is individually reasonable.
+///
+/// | | Pixels |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 72 — Annex H's two six-by-six symbols |
+/// | The most any file in the corpus spends | 1 568 118 |
+/// | A 200-page bilevel scan sharing one global dictionary | 25 000 000 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **67 108 864 (estimate)** |
+///
+/// The third figure is [`MAX_JBIG2_SYMBOLS`]'s estimate carried through: 20 000
+/// glyph bitmaps at a 25 x 50 box, which is roughly what a 10-point glyph
+/// occupies at 300 dpi. The margin over it is 2.7x — the same order as
+/// [`crate::MAX_PNG_SAMPLES`]'s over a comic page, and the same `1 << 26`.
+///
+/// **The second row arrived on 26 September 2026 and was blank before it**, and
+/// the blank is worth a sentence because of how long it lasted. A symbol's
+/// width and height are nowhere in a segment header — 6.5.5 accumulates both
+/// inside the arithmetic coder — so `crates/tinker-pdf/tests/jbig2_census.rs`,
+/// which shares no code with this decoder on purpose, could count symbols and
+/// could not measure one. It carried a `max_symbol_pixels` field that nothing
+/// assigned, and printed `not measured` rather than the zero that field held.
+/// It now decodes instead, through [`decode_measured`], and the figure is the
+/// largest total any one dictionary in five corpora spends: **1 568 118**, in
+/// `safedocs/0000337.pdf`. This cap clears it by **42.8x** and the estimate
+/// above it by 16x, so the arithmetic was not wrong — a real scan spends a
+/// fortieth of it, exactly as [`MAX_JBIG2_SYMBOLS`]'s does.
+///
+/// It is also why this cap is **not** lowered to bound the time a dictionary
+/// spends, which `docs/verification.md`'s `jbig2` fuzz row records at length:
+/// the 25 000 000 is what a plausible 200-page scan sharing one dictionary
+/// asks for, the corpus's own worst is a 46-page one, and a cap set below the
+/// estimate on the strength of a smaller document is the failure
+/// `no_bound_refuses_a_real_book` exists to catch.
+///
+/// Reachable: a symbol's width and height each accumulate from Annex B deltas
+/// whose tables carry 32-bit ranges, and each is refused only above
+/// `u32::MAX`, so **one** symbol may ask for 18 446 744 065 119 617 025 pixels
+/// before a second is read — which
+/// `a_dictionary_past_the_symbol_pixel_cap_is_refused_before_it_allocates`
+/// builds, in two.
+pub const MAX_JBIG2_SYMBOL_PIXELS: u64 = 1 << 26;
+
+/// **The most times one symbol may span the page it will be drawn onto.**
+///
+/// The three caps above bound counts and totals. This one bounds a *single
+/// symbol*, and it is the only bound in this crate that is a property of the
+/// symbol and its page **together** — 7.4.7 makes the image dictionary's
+/// `/Width` and `/Height` the page an embedded stream's regions are composited
+/// onto, and a symbol wider or taller than that is drawable only by clipping.
+///
+/// | | Multiples of the page |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 1 |
+/// | The most any file in the corpus spends | 1 |
+/// | A 200-page bilevel scan sharing one global dictionary | 1 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **4** |
+///
+/// **Measured rather than argued, which is the difference between this row and
+/// the three above it.** `crates/tinker-pdf/tests/jbig2_census.rs` decodes
+/// every symbol of every JBIG2 image in the five fetched corpora and reports
+/// the smallest whole multiple of each image's own page that admits all of its
+/// symbols. Over 118 JBIG2-bearing files it is **1**: not one symbol in the
+/// corpus — synthetic fixture or real OCR scan — is wider or taller than the
+/// page it is drawn onto. The margin here is therefore **4x the worst real
+/// document**, which is the same order as
+/// [`MAX_JBIG2_SYMBOL_PIXELS`]'s 2.7x over its own yardstick and
+/// [`crate::MAX_PNG_SAMPLES`]'s over a comic page.
+///
+/// **T.88 does not forbid a symbol larger than its page**, so this is a bound
+/// this build chooses rather than one the format states — which under ruling 3
+/// is exactly why it needed the measurement first.
+///
+/// Charged **per dimension** rather than per area, deliberately. A symbol one
+/// row tall and a page's worth of pixels wide has the page's *area* and none
+/// of its shape, and clipping it to the page loses all but one row of it; an
+/// area bound admits that symbol and a per-dimension bound does not. The seed
+/// `fuzz/corpus/jbig2/symbol-dictionary-spends-the-pixel-budget` is that
+/// symbol, 246 988 by 1 against a page of 1 by 1.
+///
+/// Reachable: a symbol's width accumulates from Annex B deltas to `u32::MAX`
+/// while the page may be one pixel wide, so **one** symbol may span the page
+/// 4 294 967 295 times — which
+/// `a_symbol_larger_than_its_page_is_refused_at_the_first_symbol` builds.
+pub const MAX_JBIG2_SYMBOL_PAGE_MULTIPLE: u32 = 4;
+
+/// **What a symbol dictionary is decoded against.**
+///
+/// Three things that used to be two loose parameters and a field nobody
+/// carried: the caller's output ceiling, the page geometry every symbol in
+/// this dictionary will be composited onto, and the tally
+/// [`Jbig2SymbolExtent`] hands a census. They travel together because the
+/// second exists for the first time here — a dictionary decoded without
+/// knowing its page cannot tell a glyph from a symbol a quarter of a million
+/// pixels wide on a one-pixel page.
+struct SymbolPage {
+    /// [`Jbig2Params::width`]: the page's own width, which is the authority
+    /// for an embedded stream (ISO 32000-1 7.4.7) and not the page
+    /// information segment's.
+    width: u32,
+    /// [`Jbig2Params::height`], likewise.
+    height: u32,
+    /// The caller's output ceiling, unchanged.
+    ceiling: usize,
+    /// What this stream's dictionaries have asked for so far. Carried by value
+    /// because [`Jbig2SymbolExtent`] is `Copy` and a borrow of one field of
+    /// [`Page`] cannot live across a call that already holds references into
+    /// another.
+    extent: Jbig2SymbolExtent,
+}
+
+impl SymbolPage {
+    fn new(width: u32, height: u32, ceiling: usize, extent: Jbig2SymbolExtent) -> SymbolPage {
+        SymbolPage {
+            width,
+            height,
+            ceiling,
+            extent,
+        }
+    }
+
+    /// Whether one symbol spans this page more than
+    /// [`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`] times, in either dimension.
+    ///
+    /// `max(1)` on each side because a page of no pixels would refuse every
+    /// symbol there is, and a page of *one* pixel is a real thing a caller
+    /// asks for — the fuzz target's first knob bit chooses it.
+    ///
+    /// Computed in `u64` because the allowance is a product of two 32-bit
+    /// numbers and the point of the check is to be reached by the large ones.
+    fn oversized(&self, width: u32, height: u32) -> bool {
+        let multiple = u64::from(MAX_JBIG2_SYMBOL_PAGE_MULTIPLE);
+        u64::from(width) > u64::from(self.width.max(1)) * multiple
+            || u64::from(height) > u64::from(self.height.max(1)) * multiple
+    }
+}
+
+/// **Clause 6.5.9: a symbol dictionary, Huffman-coded.**
+///
+/// The shape of the loop is 6.5.5's — height classes, each a run of widths —
+/// but the symbols are not coded individually. Each class arrives as one
+/// *collective bitmap* as wide as its symbols laid side by side, and the
+/// symbols are cut out of it afterwards. That is why this is a separate
+/// function rather than a branch inside the arithmetic one: only the outer
+/// loop is shared, and sharing it would mean threading two decoders through
+/// every line of it.
+fn symbol_dictionary_huffman(
+    flags: u16,
+    reader: &mut Reader<'_>,
+    imported: &[Bitmap],
+    custom: &mut CustomTables<'_>,
+    page: &mut SymbolPage,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<Vec<Bitmap>> {
+    let ceiling = page.ceiling;
+    // 7.4.3.1.1 bits 2 to 7 pick the tables, and 7.4.3.1.6 says a selector
+    // asking for a custom one takes the next referred-to Tables segment in
+    // reference order -- so these four are read in the clause's own order and
+    // the cursor is only advanced by the ones that ask.
+    let dh = match (flags >> 2) & 0x0003 {
+        0 => table_b4(),
+        1 => table_b5(),
+        3 => custom.take(warnings)?,
+        _ => {
+            note(warnings, Jbig2Refusal::HuffmanDhSelector);
+            return None;
+        }
+    };
+    let dw = match (flags >> 4) & 0x0003 {
+        0 => table_b2(),
+        1 => table_b3(),
+        3 => custom.take(warnings)?,
+        _ => {
+            note(warnings, Jbig2Refusal::HuffmanDwSelector);
+            return None;
+        }
+    };
+    // Bit 6 is `SDHUFFBMSIZE` and bit 7 `SDHUFFAGGINST`, each one bit: B.1 or
+    // the next custom table. The export runs of 6.5.10 are always B.1, which
+    // is why `sizes` stays separate from both.
+    let bm_size = if (flags >> 6) & 0x0001 == 0 {
+        table_b1()
+    } else {
+        custom.take(warnings)?
+    };
+    let agg_inst = if (flags >> 7) & 0x0001 == 0 {
+        table_b1()
+    } else {
+        custom.take(warnings)?
+    };
+    let sizes = table_b1();
+    let refagg = flags & 0x0002 != 0;
+    let rtemplate = ((flags >> 12) & 0x0001) as u8;
+    // 6.5.8.2.2's own tables when the dictionary aggregates. Unlike a text
+    // region's, these are fixed by the clause rather than selected: the
+    // reference offsets come through B.15 and the count through B.1.
+    let offsets = table_b15();
+
+    // 7.4.3.1.3: the refinement AT pair sits between the flags and the two
+    // counts. 7.4.3.1.2's generic AT does not exist on this road — a Huffman
+    // dictionary codes no generic region — so this is the first thing read.
+    let mut refine_at = NOMINAL_REFINE_AT;
+    if refagg && rtemplate == 0 {
+        for slot in &mut refine_at {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Jbig2Refusal::Truncated);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
+    let template = refine_template(rtemplate, refine_at);
+
+    let num_ex = reader.u32()?;
+    let num_new = reader.u32()?;
+    if num_new > MAX_JBIG2_SYMBOLS || num_ex > MAX_JBIG2_SYMBOLS {
+        note(warnings, Jbig2Refusal::SymbolCountCap);
+        return None;
+    }
+
+    // 6.5.8.2.3, and `max(1)` because this road reads the symbol's identity as
+    // a plain field of that many bits: a zero-width field would read nothing
+    // and leave every reference pointing at symbol zero.
+    let code_len = symbol_code_length(imported.len().checked_add(num_new as usize)?).max(1);
+
+    let rest = reader.rest();
+    let mut bits = BitReader::new(rest);
+    // 6.5: imported and new share one index space, as on the arithmetic road,
+    // because 6.5.8.2 refines against both.
+    let base = imported.len();
+    let mut pool: Vec<Bitmap> = imported.to_vec();
+    // **One set of 6.3 states for the whole dictionary.** 6.5.8.1 says a
+    // dictionary carries its adaptive states from one symbol to the next, and
+    // that is as true of refinement as of the generic procedure — the coder
+    // restarts at each byte-aligned sub-stream because the stream does, but
+    // the statistics do not. Resetting these decodes the first refined symbol
+    // correctly and every one after it as noise, which reads exactly like a
+    // wrong context template and is why it took a corpus picture to find.
+    let mut refine_contexts = MqContexts::new(if refagg { 1 << template.bits() } else { 0 });
+    let mut spent: u64 = 0;
+    let mut height: i64 = 0;
+
+    while ((pool.len() - base) as u32) < num_new {
+        height = height.checked_add(i64::from(dh.value(&mut bits)?))?;
+        if height <= 0 || height > i64::from(u32::MAX) {
+            note(warnings, Jbig2Refusal::SymbolHeightOutOfRange);
+            return None;
+        }
+
+        // The widths of this class, and nothing else: the pixels come later.
+        let mut widths: Vec<u32> = Vec::new();
+        let mut width: i64 = 0;
+        let mut total: i64 = 0;
+        // Out of band ends the height class, which is why this is a
+        // `while let` over the value rather than a loop with a break.
+        while let HuffValue::Value(delta) = dw.decode(&mut bits)? {
+            width = width.checked_add(i64::from(delta))?;
+            if width <= 0 || width > i64::from(u32::MAX) {
+                note(warnings, Jbig2Refusal::SymbolWidthOutOfRange);
+                return None;
+            }
+            if ((pool.len() - base) + widths.len()) as u64 >= u64::from(num_new) {
+                note(warnings, Jbig2Refusal::MoreSymbolsThanDeclared);
+                return None;
+            }
+            total = total.checked_add(width)?;
+            spent = spent.checked_add((width as u64).checked_mul(height as u64)?)?;
+            page.extent.record(width as u32, height as u32, spent);
+            // Before the total, because this one is about *this* symbol and
+            // says so: a dictionary whose first symbol is larger than the page
+            // is refused at that symbol rather than after spending the budget.
+            if page.oversized(width as u32, height as u32) {
+                note(warnings, Jbig2Refusal::SymbolLargerThanPage);
+                return None;
+            }
+            if spent > MAX_JBIG2_SYMBOL_PIXELS {
+                note(warnings, Jbig2Refusal::SymbolPixelCap);
+                return None;
+            }
+            if !refagg {
+                widths.push(width as u32);
+                continue;
+            }
+
+            // 6.5.8.2 over Huffman: the symbol is refined one at a time rather
+            // than sliced out of a collective bitmap, so this height class
+            // never reaches 6.5.9's shared read below.
+            let instances = agg_inst.value(&mut bits)?;
+            if instances <= 0 || instances as u32 > MAX_JBIG2_TEXT_INSTANCES {
+                note(warnings, Jbig2Refusal::AggregateInstanceCap);
+                return None;
+            }
+            let Some(mut symbol) = Bitmap::new(width as u32, height as u32, ceiling) else {
+                note(warnings, Jbig2Refusal::RegionTooLarge);
+                return None;
+            };
+
+            if instances == 1 {
+                // 6.5.8.2.2: one instance, and the three values it needs come
+                // straight off this reader — the identity as a plain field of
+                // `SBSYMCODELEN` bits, the offsets through B.15.
+                let id = bits.bits(code_len)? as usize;
+                let rdx = offsets.value(&mut bits)?;
+                let rdy = offsets.value(&mut bits)?;
+                let bmsize = bm_size.value(&mut bits)?;
+                if bmsize < 0 {
+                    return None;
+                }
+                bits.align();
+                let start = bits.byte_position();
+                let end = start.checked_add(bmsize as usize)?;
+                let Some(bytes) = rest.get(start..end) else {
+                    note(warnings, Jbig2Refusal::Truncated);
+                    return None;
+                };
+                let Some(reference) = pool.get(id) else {
+                    note(warnings, Jbig2Refusal::SymbolIndexOutOfRange);
+                    return None;
+                };
+                // 6.5.8.2.2's offset is RDX and RDY themselves; see the
+                // arithmetic road's copy of this for what settled it.
+                let (dx, dy) = (i64::from(rdx), i64::from(rdy));
+                let mut coder = MqDecoder::new(bytes);
+                decode_refinement_into(
+                    &mut coder,
+                    &mut refine_contexts,
+                    &template,
+                    false,
+                    reference,
+                    (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?),
+                    &mut symbol,
+                );
+                bits.seek_byte(end)?;
+            } else {
+                // 6.5.8.2.1: more than one instance and the symbol is a text
+                // region in its own right, read over this same bit reader.
+                // The tables are fixed by the clause rather than selected,
+                // which is why none of them comes from the segment header.
+                let Some(codes) = flat_code(code_len, pool.len().max(1)) else {
+                    note(warnings, Jbig2Refusal::SymbolCodeUnbuildable);
+                    return None;
+                };
+                let tables = TextTables {
+                    refine: Some(RefineTables {
+                        rdw: table_b15(),
+                        rdh: table_b15(),
+                        rdx: table_b15(),
+                        rdy: table_b15(),
+                        rsize: table_b1(),
+                    }),
+                    fs: table_b6(),
+                    ds: table_b8(),
+                    dt: table_b11(),
+                };
+                let params = TextParams {
+                    symbols: &pool,
+                    instances: instances as u32,
+                    strips: 1,
+                    log_strips: 0,
+                    corner: corner::TOPLEFT,
+                    // 6.5.8.2.1 fixes every one of the aggregate's
+                    // parameters; TRANSPOSED is one of them, and it is 0.
+                    transposed: false,
+                    comb_op: 0,
+                    ds_offset: 0,
+                    refine: Some(refine_template(rtemplate, refine_at)),
+                    code_len,
+                };
+                let mut inner = Some((
+                    tables,
+                    codes,
+                    BitReader {
+                        bytes: rest,
+                        at: bits.at,
+                    },
+                ));
+                // The arithmetic decoder and its contexts are unreachable on
+                // this road — every read below goes through the tables — so
+                // they are empty rather than meaningful.
+                let mut coder = MqDecoder::new(&[]);
+                let mut cx = ArithContexts::new(code_len);
+                let drawn = text_region_procedure(
+                    &params,
+                    &mut Arith {
+                        coder: &mut coder,
+                        ints: &mut cx,
+                        refine: &mut refine_contexts,
+                    },
+                    &mut inner,
+                    ceiling,
+                    &mut symbol,
+                    warnings,
+                );
+                let (_, _, reader) = inner?;
+                bits.at = reader.at;
+                drawn?;
+            }
+            pool.push(symbol);
+        }
+        if widths.is_empty() {
+            continue;
+        }
+
+        // 6.5.9: the collective bitmap. `BMSIZE` of zero means it is stored
+        // uncompressed, one row of `total` bits padded to a byte; anything
+        // else is that many bytes of MMR, which is the same T.6 decoder a fax
+        // and a generic region already use.
+        let bmsize = bm_size.value(&mut bits)?;
+        if bmsize < 0 {
+            return None;
+        }
+        bits.align();
+        let start = bits.byte_position();
+        let Some(mut collective) = Bitmap::new(total as u32, height as u32, ceiling) else {
+            note(warnings, Jbig2Refusal::RegionTooLarge);
+            return None;
+        };
+        if bmsize == 0 {
+            let stride = (total as usize).div_ceil(8);
+            let needed = stride.checked_mul(height as usize)?;
+            let raw = rest.get(start..start.checked_add(needed)?)?;
+            for y in 0..height as usize {
+                for x in 0..total as usize {
+                    let byte = *raw.get(y * stride + x / 8)?;
+                    let bit = (byte >> (7 - (x % 8))) & 1;
+                    collective.set(x as u32, y as u32, u32::from(bit));
+                }
+            }
+            bits.at = (start + needed) * 8;
+        } else {
+            let end = start.checked_add(bmsize as usize)?;
+            let raw = rest.get(start..end)?;
+            if !decode_mmr(raw, &mut collective, warnings) {
+                note(warnings, Jbig2Refusal::CollectiveBitmapNotMmr);
+                return None;
+            }
+            bits.at = end * 8;
+        }
+
+        // And cut the class out of it, left to right.
+        let mut x = 0u32;
+        for w in widths {
+            let Some(mut symbol) = Bitmap::new(w, height as u32, ceiling) else {
+                note(warnings, Jbig2Refusal::RegionTooLarge);
+                return None;
+            };
+            for row in 0..height as u32 {
+                for col in 0..w {
+                    symbol.set(col, row, collective.get((x + col) as i32, row as i32));
+                }
+            }
+            x = x.checked_add(w)?;
+            pool.push(symbol);
+        }
+    }
+
+    // 6.5.10's export runs, over Table B.1, exactly as the arithmetic variant
+    // reads them over IAEX.
+    let total = pool.len();
+    let mut exported = Vec::new();
+    let mut index = 0usize;
+    let mut exporting = false;
+    let mut guard = 0u32;
+    while index < total {
+        guard += 1;
+        if guard > MAX_JBIG2_SYMBOLS {
+            note(warnings, Jbig2Refusal::ExportRunGuard);
+            return None;
+        }
+        let run = sizes.value(&mut bits)?;
+        if run < 0 {
+            return None;
+        }
+        let run = run as usize;
+        if exporting {
+            for offset in 0..run {
+                let at = index.checked_add(offset)?;
+                if at >= total {
+                    break;
+                }
+                exported.push(pool.get(at)?.clone());
+            }
+        }
+        index = index.checked_add(run)?;
+        exporting = !exporting;
+    }
+
+    if exported.len() as u32 != num_ex {
+        note(warnings, Jbig2Refusal::ExportCountMismatch);
+        return None;
+    }
+    Some(exported)
+}
+
+/// **Clause 6.5: a symbol dictionary**, arithmetic, without refinement.
+///
+/// Returns the symbols the dictionary *exports* (6.5.10), which is a selection
+/// over its imported symbols followed by its new ones — not the new ones alone.
+/// A dictionary that re-exports what it imported is ordinary, and a text region
+/// numbers its symbols across the whole exported run.
+///
+/// `None` is the refusal, and the caller turns it into the named warning.
+///
+/// `consumed` is 7.4.2's retained bitmap-coding context, from whichever
+/// referred-to segment left one; `retained` is where this dictionary leaves
+/// its own if its flags say it does. Both are `None` for a dictionary that
+/// neither takes nor gives, which is every dictionary in every fixture this
+/// file builds.
+fn symbol_dictionary(
+    segment: &Segment<'_>,
+    imported: &[Bitmap],
+    tables: &[&HuffTable],
+    consumed: Option<&RetainedContexts>,
+    retained: &mut Option<RetainedContexts>,
+    page: &mut SymbolPage,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<Vec<Bitmap>> {
+    let ceiling = page.ceiling;
+    let mut custom = CustomTables::new(tables);
+    let mut reader = Reader::new(segment.data);
+    // 7.4.3.1.1.
+    let flags = reader.u16()?;
+    let huff = flags & 0x0001 != 0;
+    let refagg = flags & 0x0002 != 0;
+    // 7.4.3.1.1 bits 8 and 9. Both are meaningless on the Huffman road --
+    // there are no arithmetic contexts to hand over -- so they are read here
+    // and acted on below, after the road has been chosen.
+    let context_used = flags & 0x0100 != 0;
+    let context_retained = flags & 0x0200 != 0;
+    let template = ((flags >> 10) & 0x0003) as u8;
+    let rtemplate = ((flags >> 12) & 0x0001) as u8;
+
+    if huff {
+        // 6.5.9: the Huffman variant does not code symbols one at a time. A
+        // whole height class arrives as one *collective* bitmap and the
+        // symbols are sliced out of it by the widths just read, so it is a
+        // different loop rather than a different decoder inside the same one.
+        return symbol_dictionary_huffman(
+            flags,
+            &mut reader,
+            imported,
+            &mut custom,
+            page,
+            warnings,
+        );
+    }
+
+    // 7.4.3.1.2: four AT pairs for template 0, one for the others. Reading the
+    // wrong number puts the coded data at the wrong offset, so this decodes as
+    // noise rather than as a slightly wrong picture.
+    let mut at = NOMINAL_AT[template as usize];
+    let pairs = if template == 0 { 4 } else { 1 };
+    for slot in at.iter_mut().take(pairs) {
+        let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+            note(warnings, Jbig2Refusal::Truncated);
+            return None;
+        };
+        *slot = (i32::from(dx), i32::from(dy));
+    }
+
+    // 7.4.3.1.3: and the refinement pair after them, present only for an
+    // aggregating dictionary at template 0. One more offset that has to be
+    // right before the coded data begins.
+    let mut refine_at = NOMINAL_REFINE_AT;
+    if refagg && rtemplate == 0 {
+        for slot in &mut refine_at {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Jbig2Refusal::Truncated);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
+
+    // 7.4.3.1.4 and 7.4.3.1.5.
+    let num_ex = reader.u32()?;
+    let num_new = reader.u32()?;
+    if num_new > MAX_JBIG2_SYMBOLS || num_ex > MAX_JBIG2_SYMBOLS {
+        note(warnings, Jbig2Refusal::SymbolCountCap);
+        return None;
+    }
+
+    let mut coder = MqDecoder::new(reader.rest());
+    let mut generic = MqContexts::new(1 << template_bits(template));
+    // 6.5.8.2.3: the symbol code is as wide as the *whole* dictionary needs —
+    // imported and new together — and not as wide as the symbols decoded so
+    // far. One bit too few decodes the first aggregate symbol correctly and
+    // every value after it as noise, which is a failure that looks like a
+    // wrong refinement template rather than like a wrong count.
+    let code_len = symbol_code_length(imported.len().checked_add(num_new as usize)?);
+    let refine_layout = refagg.then(|| refine_template(rtemplate, refine_at));
+    let refine_bits = refine_layout.as_ref().map_or(0, RefineTemplate::bits);
+    let mut cx = ArithContexts::new(code_len);
+    let mut refine_contexts = MqContexts::new(refine_states(refine_bits));
+
+    if context_used {
+        // 7.4.2: start from what another dictionary left rather than from
+        // E.3.6's initial state. Cloned, never aliased -- a segment that
+        // retains may be consumed by several later ones, and each has to see
+        // the state as it was left rather than as the previous consumer
+        // finished with it.
+        let Some(kept) = consumed else {
+            note(warnings, Jbig2Refusal::RetainedContextMissing);
+            return None;
+        };
+        if kept.generic.len() != generic.len() {
+            note(warnings, Jbig2Refusal::RetainedContextMismatch);
+            return None;
+        }
+        generic = kept.generic.clone();
+        // The refinement half only carries when both dictionaries refined at
+        // the same template; see [`RetainedContexts`] for why a mismatch is
+        // the initial state rather than a refusal.
+        if kept.refine.len() == refine_contexts.len() {
+            refine_contexts = kept.refine.clone();
+        }
+    }
+
+    // 6.5: imported and new symbols share one index space, so they share one
+    // vector. `pool[..base]` is what came in and the rest is what this
+    // dictionary decoded, which is also the order 6.5.10 exports in — and it
+    // is the array 6.5.8.2 refines against, which is why it has to be one.
+    let base = imported.len();
+    let mut pool: Vec<Bitmap> = imported.to_vec();
+    let mut spent: u64 = 0;
+    // 6.5.5: symbols arrive in height classes, each taller than the last.
+    let mut height: i64 = 0;
+    while ((pool.len() - base) as u32) < num_new {
+        let delta = decode_int(&mut coder, &mut cx.iadh)?;
+        height = height.checked_add(i64::from(delta))?;
+        if height <= 0 || height > i64::from(u32::MAX) {
+            note(warnings, Jbig2Refusal::SymbolHeightOutOfRange);
+            return None;
+        }
+
+        // Within a class the widths accumulate too, and OOB ends the class.
+        let mut width: i64 = 0;
+        // The `None` here is OOB — a value the format defines to end the
+        // height class — rather than the reader running out of anything.
+        while let Some(delta) = decode_int(&mut coder, &mut cx.iadw) {
+            width = width.checked_add(i64::from(delta))?;
+            if width <= 0 || width > i64::from(u32::MAX) {
+                note(warnings, Jbig2Refusal::SymbolWidthOutOfRange);
+                return None;
+            }
+            if ((pool.len() - base) as u32) >= num_new {
+                // More symbols than the header promised. The header is what
+                // sized everything downstream, so this is a broken stream
+                // rather than a longer dictionary.
+                note(warnings, Jbig2Refusal::MoreSymbolsThanDeclared);
+                return None;
+            }
+
+            spent = spent.checked_add((width as u64).checked_mul(height as u64)?)?;
+            page.extent.record(width as u32, height as u32, spent);
+            // The per-symbol bound, before the running total and before the
+            // allocation: on this road every symbol's pixels are decoded one
+            // decision at a time, so the symbol refused here is the one whose
+            // work has not been spent yet.
+            if page.oversized(width as u32, height as u32) {
+                note(warnings, Jbig2Refusal::SymbolLargerThanPage);
+                return None;
+            }
+            if spent > MAX_JBIG2_SYMBOL_PIXELS {
+                note(warnings, Jbig2Refusal::SymbolPixelCap);
+                return None;
+            }
+            let Some(mut symbol) = Bitmap::new(width as u32, height as u32, ceiling) else {
+                note(warnings, Jbig2Refusal::RegionTooLarge);
+                return None;
+            };
+
+            if refagg {
+                // 6.5.8.2: the symbol is built out of symbols already known
+                // rather than coded from nothing.
+                let instances = decode_int(&mut coder, &mut cx.iaai)?;
+                if instances <= 0 || instances as u32 > MAX_JBIG2_TEXT_INSTANCES {
+                    note(warnings, Jbig2Refusal::AggregateInstanceCap);
+                    return None;
+                }
+                if instances == 1 {
+                    // 6.5.8.2.2: a single instance is a plain refinement, and
+                    // its three values come straight off the dictionary's own
+                    // decoders rather than through 6.4's strip loop.
+                    let id = decode_iaid(&mut coder, &mut cx.iaid, code_len) as usize;
+                    let rdx = decode_int(&mut coder, &mut cx.iardx)?;
+                    let rdy = decode_int(&mut coder, &mut cx.iardy)?;
+                    let Some(reference) = pool.get(id) else {
+                        note(warnings, Jbig2Refusal::SymbolIndexOutOfRange);
+                        return None;
+                    };
+                    // **6.5.8.2.2's reference offset is RDX and RDY, and not
+                    // 6.4.11's.** The text region's road splits the size
+                    // difference between the two edges and adds the coded
+                    // offset on top -- `refinement_offset` -- because a symbol
+                    // placed in a strip is being *centred* on the instance it
+                    // refines. Here there is no instance and no strip: the
+                    // dictionary is building a symbol out of another symbol,
+                    // and the offset is the whole of what was coded.
+                    //
+                    // The two readings agree whenever the refined symbol is
+                    // its reference's size, which is every fixture in this
+                    // repository and every pdf.js file that reaches this road
+                    // -- the difference is one pixel per unit of size
+                    // difference, so it is invisible until a real encoder
+                    // refines something into a different shape.
+                    // `safedocs/0000337.pdf` is that encoder: 46 pages of OCR
+                    // whose first refined symbol is 13 by 22 against a 10 by
+                    // 23 reference. Under the centred reading its first symbol
+                    // came out one column over and the dictionary lost step
+                    // inside its first height class, which then presented as
+                    // an out-of-range width, an impossible refinement size, a
+                    // symbol index past the pool and an aggregate instance
+                    // count over the cap -- five names for one displacement.
+                    let dx = i64::from(rdx);
+                    let dy = i64::from(rdy);
+                    decode_refinement_into(
+                        &mut coder,
+                        &mut refine_contexts,
+                        refine_layout.as_ref()?,
+                        false,
+                        reference,
+                        (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?),
+                        &mut symbol,
+                    );
+                } else {
+                    // 6.5.8.2.1: more than one and the symbol is a text region
+                    // in its own right — one strip tall, top-left cornered,
+                    // OR-composited, over this same decoder.
+                    let params = TextParams {
+                        symbols: &pool,
+                        instances: instances as u32,
+                        strips: 1,
+                        log_strips: 0,
+                        corner: corner::TOPLEFT,
+                        // 6.5.8.2.1 fixes every one of the aggregate's
+                        // parameters; TRANSPOSED is one of them, and it is 0.
+                        transposed: false,
+                        comb_op: 0,
+                        ds_offset: 0,
+                        refine: Some(refine_template(rtemplate, refine_at)),
+                        code_len,
+                    };
+                    text_region_procedure(
+                        &params,
+                        &mut Arith {
+                            coder: &mut coder,
+                            ints: &mut cx,
+                            refine: &mut refine_contexts,
+                        },
+                        &mut None,
+                        ceiling,
+                        &mut symbol,
+                        warnings,
+                    )?;
+                }
+            } else {
+                // 6.5.8.1: the generic procedure, over the dictionary's own
+                // coder and context set. TPGDON is off for a symbol — 6.5.8.1
+                // says so, and a symbol is too short for it to pay anyway.
+                decode_generic_into(
+                    &mut coder,
+                    &mut generic,
+                    template,
+                    false,
+                    &at,
+                    None,
+                    &mut symbol,
+                );
+            }
+            pool.push(symbol);
+        }
+    }
+
+    // 6.5.10: the export flags are run lengths over the pool — the imported
+    // symbols followed by the new ones — alternating between runs that are not
+    // exported and runs that are, starting with the former.
+    let total = pool.len();
+    let mut exported = Vec::new();
+    let mut index = 0usize;
+    let mut exporting = false;
+    while index < total {
+        let run = decode_int(&mut coder, &mut cx.iaex)?;
+        if run < 0 {
+            return None;
+        }
+        let run = run as usize;
+        if exporting {
+            for offset in 0..run {
+                let at = index.checked_add(offset)?;
+                if at >= total {
+                    break;
+                }
+                exported.push(pool.get(at)?.clone());
+            }
+        }
+        index = index.checked_add(run)?;
+        exporting = !exporting;
+        if run == 0 && index == 0 && exported.is_empty() && !exporting {
+            // A pair of zero-length runs makes no progress and would spin.
+            break;
+        }
+    }
+
+    if exported.len() as u32 != num_ex {
+        // The count the header promised is what a text region will index
+        // against, so a disagreement is not a smaller dictionary.
+        note(warnings, Jbig2Refusal::ExportCountMismatch);
+        return None;
+    }
+    if context_retained {
+        // 7.4.2, and only on a dictionary that decoded: a refused one left its
+        // contexts somewhere between two symbols, and a later dictionary
+        // starting from there would decode noise rather than fail.
+        *retained = Some(RetainedContexts {
+            generic,
+            refine: refine_contexts,
+        });
+    }
+    Some(exported)
+}
+
+/// The most symbol instances one text region may place.
+///
+/// `SBNUMINSTANCES` is 32-bit and each instance is a composite over the region,
+/// so the count is work rather than memory and a per-instance bound would not
+/// bound it.
+///
+/// | | Instances |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 5 |
+/// | The most any file in the corpus spends | 4 440 |
+/// | One page of a 200-page bilevel scan | 5 000 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **4 194 304 (estimate)** |
+///
+/// The third figure is per **region**, which is what this cap is: `spent` here
+/// is one text region's own and a page carries one or a few. A dense 300 dpi A4
+/// text page sets a few thousand characters, so the estimate is a page's worth
+/// and not a document's — [`MAX_JBIG2_SYMBOLS`] carries the argument, and the
+/// word **estimate** is in the published figure for its reason.
+///
+/// The second row was **9** until tier 0's production corpus arrived, and the
+/// figure there now is `safedocs/0000425.pdf`'s, re-measured 26 September 2026
+/// over 118 JBIG2-bearing files. It is the one row in this set that lands
+/// *above* the estimate as it was first written — 4 440 real placements against
+/// a page's argued 4 000 — which is the yardstick being low rather than the cap
+/// being wrong, so the yardstick moved to 5 000 and `SCAN_TEXT_INSTANCES` in
+/// `crates/tinker-pdf/tests/bounds_ledger.rs` says why. This cap clears the
+/// real figure by 944x either way.
+///
+/// Reachable: `SBNUMINSTANCES` is a 32-bit field at 7.4.4.5, checked before a
+/// symbol is placed, so **twenty-three bytes of region data** may ask for
+/// 4 294 967 295 placements — which
+/// `a_text_region_declaring_more_instances_than_the_cap_is_refused_by_name`
+/// builds.
+pub const MAX_JBIG2_TEXT_INSTANCES: u32 = 1 << 22;
+
+/// The tables a Huffman text region reads its coordinates through (7.4.4.1.2).
+struct RefineTables {
+    rdw: HuffTable,
+    rdh: HuffTable,
+    rdx: HuffTable,
+    rdy: HuffTable,
+    rsize: HuffTable,
+}
+
+struct TextTables {
+    /// 7.4.4.1.2's four refinement tables and its size table, present only for
+    /// a region that refines.
+    refine: Option<RefineTables>,
+    fs: HuffTable,
+    ds: HuffTable,
+    dt: HuffTable,
+}
+
+impl TextTables {
+    /// Picks them from the selector field, refusing the custom-table settings
+    /// clause 7.4.13 defines and nothing here reads yet.
+    fn select(
+        selectors: u16,
+        refine: bool,
+        custom: &mut CustomTables<'_>,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) -> Option<TextTables> {
+        let refuse = |warnings: &mut Vec<Jbig2Refusal>| {
+            note(warnings, Jbig2Refusal::TextTableSelector);
+            None
+        };
+        // 7.4.4.1.2 lists the selectors in this order and 7.4.13 hands out the
+        // referred-to Tables segments in it, so the reads below are ordered by
+        // the clause rather than by convenience: moving one moves which table
+        // every selector after it gets.
+        let fs = match selectors & 0x0003 {
+            0 => table_b6(),
+            1 => table_b7(),
+            3 => custom.take(warnings)?,
+            _ => return refuse(warnings),
+        };
+        let ds = match (selectors >> 2) & 0x0003 {
+            0 => table_b8(),
+            1 => table_b9(),
+            2 => table_b10(),
+            _ => custom.take(warnings)?,
+        };
+        let dt = match (selectors >> 4) & 0x0003 {
+            0 => table_b11(),
+            1 => table_b12(),
+            2 => table_b13(),
+            _ => custom.take(warnings)?,
+        };
+        // 7.4.4.1.2's bits 6 to 14, read only by a refining region. Value 2 is
+        // reserved and stays refused; 3 is a custom table.
+        let refine = if refine {
+            let table = |shift: u32,
+                         custom: &mut CustomTables<'_>,
+                         warnings: &mut Vec<Jbig2Refusal>|
+             -> Option<HuffTable> {
+                match (selectors >> shift) & 0x0003 {
+                    0 => Some(table_b14()),
+                    1 => Some(table_b15()),
+                    3 => custom.take(warnings),
+                    _ => None,
+                }
+            };
+            let (Some(rdw), Some(rdh), Some(rdx), Some(rdy)) = (
+                table(6, custom, warnings),
+                table(8, custom, warnings),
+                table(10, custom, warnings),
+                table(12, custom, warnings),
+            ) else {
+                return refuse(warnings);
+            };
+            let rsize = if (selectors >> 14) & 0x0001 == 0 {
+                table_b1()
+            } else {
+                custom.take(warnings)?
+            };
+            Some(RefineTables {
+                rdw,
+                rdh,
+                rdx,
+                rdy,
+                rsize,
+            })
+        } else {
+            None
+        };
+        Some(TextTables { refine, fs, ds, dt })
+    }
+}
+
+/// 7.4.3.1.7: the symbol-ID code lengths, themselves run-length coded.
+///
+/// Thirty-five four-bit lengths build a *runcode* table; that table then reads
+/// one length per symbol, with three of its values meaning "repeat" rather
+/// than naming a length. A table of codes for reading a table of codes, which
+/// is what makes this the fiddliest field in the format.
+fn symbol_id_codes(bits: &mut BitReader<'_>, symbols: usize) -> Option<HuffTable> {
+    let mut runcodes = Vec::with_capacity(35);
+    for index in 0..35u8 {
+        let length = bits.bits(4)? as u8;
+        runcodes.push(HuffLine::normal(length, 0, i32::from(index)));
+    }
+    let runcode = HuffTable::new(runcodes);
+
+    let mut lengths: Vec<u8> = Vec::with_capacity(symbols);
+    let mut previous = 0u8;
+    while lengths.len() < symbols {
+        let code = runcode.value(bits)?;
+        match code {
+            0..=31 => {
+                previous = code as u8;
+                lengths.push(previous);
+            }
+            32 => {
+                // Repeat the last length, three to six times.
+                let repeat = 3 + bits.bits(2)?;
+                for _ in 0..repeat {
+                    if lengths.len() >= symbols {
+                        break;
+                    }
+                    lengths.push(previous);
+                }
+            }
+            33 => {
+                let repeat = 3 + bits.bits(3)?;
+                for _ in 0..repeat {
+                    if lengths.len() >= symbols {
+                        break;
+                    }
+                    lengths.push(0);
+                }
+            }
+            34 => {
+                let repeat = 11 + bits.bits(7)?;
+                for _ in 0..repeat {
+                    if lengths.len() >= symbols {
+                        break;
+                    }
+                    lengths.push(0);
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    // 7.4.3.1.7: the region's own data starts on the next byte boundary.
+    bits.align();
+    Some(HuffTable::new(
+        lengths
+            .into_iter()
+            .enumerate()
+            .map(|(index, length)| HuffLine::normal(length, 0, index as i32))
+            .collect(),
+    ))
+}
+
+/// 7.4.4.1.1's REFCORNER values.
+mod corner {
+    pub const BOTTOMLEFT: u8 = 0;
+    pub const TOPLEFT: u8 = 1;
+    pub const BOTTOMRIGHT: u8 = 2;
+    pub const TOPRIGHT: u8 = 3;
+
+    /// Whether the coordinate names the symbol's left edge.
+    ///
+    /// Transposed placement branches on left-versus-right where the ordinary
+    /// one branches on top-versus-bottom, so both need the pair named.
+    pub const fn is_left(corner: u8) -> bool {
+        !matches!(corner, BOTTOMRIGHT | TOPRIGHT)
+    }
+
+    /// Whether the coordinate names the symbol's top edge.
+    pub const fn is_top(corner: u8) -> bool {
+        !matches!(corner, BOTTOMLEFT | BOTTOMRIGHT)
+    }
+}
+
+/// A fixed-width code of `width` bits over `count` values.
+///
+/// 6.5.8.2.1's symbol identities are a plain field rather than a table, and
+/// B.3's canonical assignment turns equal prefix lengths into exactly the
+/// consecutive codes 0, 1, 2, ... — so a flat table *is* that field, and the
+/// aggregate can go through the same 6.4 procedure everything else uses
+/// instead of a second reader with its own conventions.
+fn flat_code(width: u32, count: usize) -> Option<HuffTable> {
+    let width = u8::try_from(width).ok()?;
+    let span = 1usize.checked_shl(u32::from(width))?;
+    if count > span {
+        return None;
+    }
+    Some(HuffTable::new(
+        (0..span)
+            .map(|value| HuffLine::normal(width, 0, i32::try_from(value).unwrap_or(0)))
+            .collect(),
+    ))
+}
+
+/// **Table B.14**, the narrow table for a refinement's size and position
+/// deltas (`SBHUFFRDW` and its three siblings).
+///
+/// Five values and nothing else: a refinement that moves a symbol by more than
+/// two pixels in any direction is coded through B.15 instead.
+///
+/// # It is reconstruction, and it is pinned rather than adjudicated
+///
+/// Like every table here it is reconstructed rather than transcribed, and
+/// unlike B.1 to B.13 **nothing outside this repository bears on it**: the two
+/// corpus files that reach it code every delta as zero, so the corpus
+/// exercises the one-bit code for 0 and no other line.
+///
+/// Every other line is exercised by
+/// `a_huffman_text_region_refines_through_b14_with_non_zero_deltas`, which
+/// codes one picture two ways — refined through all four of this table's
+/// three-bit lines, and placed plainly over the arithmetic road — and requires
+/// 0 pixels different. That fixture writes its deltas through the test
+/// module's **own** copy of this table, generated from the shape the clause
+/// states rather than called out of here, because an encoder that shared this
+/// function would move with it and prove nothing. So a wrong prefix length now
+/// fails a test; it does not follow that the right one is known.
+///
+/// The one internal check that does hold: the code is complete — the five
+/// prefix lengths sum to exactly 1 under Kraft — so no bit pattern is left
+/// unassigned or claimed twice.
+fn table_b14() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(3, 0, -2),
+        HuffLine::normal(3, 0, -1),
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(3, 0, 1),
+        HuffLine::normal(3, 0, 2),
+    ])
+}
+
+/// **Table B.15**, the wide table for the same four deltas.
+///
+/// Symmetric about zero, each step out doubling the range it covers and
+/// costing one more bit, with a lower range and an upper range at the ends.
+/// Complete under Kraft.
+///
+/// Reconstruction, and pinned the same way [`table_b14`] is:
+/// `a_huffman_dictionary_refines_at_every_non_zero_line_of_b15` refines through
+/// every line of it but the code for zero — which is the one line the corpus
+/// does reach — and compares each refined symbol against the same picture coded
+/// plainly. 6.5.8.2.2 fixes this table by the clause rather than by a selector,
+/// which is why the dictionary road reads it without one.
+fn table_b15() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(7, 4, -24),
+        HuffLine::normal(6, 2, -8),
+        HuffLine::normal(5, 1, -4),
+        HuffLine::normal(4, 0, -2),
+        HuffLine::normal(3, 0, -1),
+        HuffLine::normal(1, 0, 0),
+        HuffLine::normal(3, 0, 1),
+        HuffLine::normal(4, 0, 2),
+        HuffLine::normal(5, 1, 3),
+        HuffLine::normal(6, 2, 5),
+        HuffLine::normal(7, 4, 9),
+        HuffLine::lower(7, -25),
+        HuffLine::normal(7, 32, 25),
+    ])
+}
+
+/// The most lines one clause 7.4.13 code table may declare.
+///
+/// A custom table's lines are read from a bitstream until the running range low
+/// reaches `HTHIGH`, and both bounds are 32-bit fields the file chooses. A
+/// table declaring `HTLOW = i32::MIN`, `HTHIGH = i32::MAX` and a range length
+/// of zero asks for four billion lines out of nine bytes of header — so the
+/// loop is bounded before it allocates, the `packed_size` pattern of every
+/// other count in this module.
+///
+/// | | Lines |
+/// | --- | --- |
+/// | The widest of Annex B's own fifteen (B.9, B.10) | 22 |
+/// | The most any fixture in this repository spends | 22 |
+/// | The most any file in the corpus spends | 22 |
+/// | A 200-page bilevel scan | 22 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **4 096** |
+///
+/// The yardsticks are not a measurement of custom tables and say so: a code
+/// table's size is a property of the *format* rather than of the document, and
+/// Annex B's own fifteen are the population — the standard's widest has 22
+/// lines, and a custom table exists to be narrower and more specific than a
+/// standard one, not wider. So the cap is 186 times the widest table anybody
+/// has published, which is the same order of headroom the three rows beside it
+/// carry. A comic and a book spend zero for their reason: no CBZ or EPUB path
+/// decodes JBIG2 at all.
+///
+/// Reachable: `HTLOW` and `HTHIGH` are 32-bit fields at 7.4.13, and a range
+/// length of zero advances the running low by one, so **nine bytes of header**
+/// may ask for 4 294 967 295 lines — which
+/// `a_custom_table_declaring_more_lines_than_the_cap_is_refused` builds.
+pub const MAX_JBIG2_TABLE_LINES: usize = 4096;
+
+/// **Clause 7.4.13: a code table the file brought with it.**
+///
+/// Annex B's fifteen are built into this module; a Tables segment carries a
+/// sixteenth, written out as an explicit list of ranges. The shape is a header
+/// of three fields and then a bitstream of prefix and range lengths:
+///
+/// - one flags byte: `HTOOB` in bit 0, `HTPS − 1` in bits 1 to 3, `HTRS − 1`
+///   in bits 4 to 6, where `HTPS` and `HTRS` are how many bits each prefix
+///   length and each range length occupy;
+/// - `HTLOW` and `HTHIGH`, the bounds of the ranges the table names;
+/// - then a line per range, walking `HTLOW` upwards by `2^RANGELEN` until
+///   `HTHIGH` is reached, and finally the lower range, the upper range and —
+///   if `HTOOB` — the out-of-band line.
+///
+/// The result goes through [`HuffTable::new`] exactly as Annex B's do, because
+/// B.3's canonical assignment is the same procedure for a custom table as for
+/// a standard one. That is the whole reason [`HuffLine`] is general enough to
+/// hold one without a second representation: a table from a segment and a
+/// table from a constant are the same thing by the time anybody decodes with
+/// it.
+fn custom_table(data: &[u8]) -> Option<HuffTable> {
+    let mut reader = Reader::new(data);
+    let flags = reader.u8()?;
+    let has_oob = flags & 0x01 != 0;
+    let prefix_size = u32::from((flags >> 1) & 0x07) + 1;
+    let range_size = u32::from((flags >> 4) & 0x07) + 1;
+    let low = reader.u32()? as i32;
+    let high = reader.u32()? as i32;
+    // An empty or inverted span names no ranges at all, so the lower and upper
+    // lines would meet with nothing between them. Refused rather than read as
+    // a table of two lines, because it is a header that cannot describe one.
+    if high <= low {
+        return None;
+    }
+
+    let mut bits = BitReader::new(reader.rest());
+    let mut lines = Vec::new();
+    let mut current = i64::from(low);
+    let top = i64::from(high);
+    while current < top {
+        if lines.len() >= MAX_JBIG2_TABLE_LINES {
+            return None;
+        }
+        let prefix_len = u8::try_from(bits.bits(prefix_size)?).ok()?;
+        let range_len = u8::try_from(bits.bits(range_size)?).ok()?;
+        lines.push(HuffLine::normal(
+            prefix_len,
+            range_len,
+            i32::try_from(current).ok()?,
+        ));
+        // `1 << 62` is already past every 32-bit span, so the shift is clamped
+        // rather than checked: a range length of 200 is a table that covers
+        // everything left in one line, not an overflow.
+        current = current.checked_add(1i64 << u32::from(range_len).min(62))?;
+    }
+
+    // B.5's three trailing lines, in the order the clause writes them.
+    let lower = u8::try_from(bits.bits(prefix_size)?).ok()?;
+    lines.push(HuffLine::lower(lower, low.checked_sub(1)?));
+    let upper = u8::try_from(bits.bits(prefix_size)?).ok()?;
+    lines.push(HuffLine::normal(upper, 32, high));
+    if has_oob {
+        let oob = u8::try_from(bits.bits(prefix_size)?).ok()?;
+        lines.push(HuffLine::oob(oob));
+    }
+    Some(HuffTable::new(lines))
+}
+
+/// How many custom tables a run of selectors will consume, and which.
+///
+/// 7.4.3.1.6 and 7.4.4.1.2 both say the same thing in different words: a
+/// segment's referred-to Tables segments are handed out **in reference order**
+/// to the selectors that ask for one, in the fixed order the clause lists the
+/// selectors. So the reader is a cursor over the referred tables rather than a
+/// lookup, and a selector that does not ask for a custom table does not
+/// advance it.
+struct CustomTables<'a> {
+    tables: &'a [&'a HuffTable],
+    next: usize,
+}
+
+impl<'a> CustomTables<'a> {
+    const fn new(tables: &'a [&'a HuffTable]) -> CustomTables<'a> {
+        CustomTables { tables, next: 0 }
+    }
+
+    /// The next referred-to table, or `None` if the segment referred to fewer
+    /// than its selectors ask for — which is a file that cannot be decoded
+    /// rather than one this build declines.
+    fn take(&mut self, warnings: &mut Vec<Jbig2Refusal>) -> Option<HuffTable> {
+        let Some(table) = self.tables.get(self.next) else {
+            note(warnings, Jbig2Refusal::CustomTableMissing);
+            return None;
+        };
+        self.next += 1;
+        Some((*table).clone())
+    }
+}
+
+/// Table B.13, a strip's vertical coordinate at the coarsest resolution.
+fn table_b13() -> HuffTable {
+    HuffTable::new(vec![
+        HuffLine::normal(1, 0, 1),
+        HuffLine::normal(3, 0, 2),
+        HuffLine::normal(4, 0, 3),
+        HuffLine::normal(5, 0, 4),
+        HuffLine::normal(4, 1, 5),
+        HuffLine::normal(3, 3, 7),
+        HuffLine::normal(6, 1, 15),
+        HuffLine::normal(6, 2, 17),
+        HuffLine::normal(6, 3, 21),
+        HuffLine::normal(6, 4, 29),
+        HuffLine::normal(6, 5, 45),
+        HuffLine::normal(7, 6, 77),
+        HuffLine::normal(7, 32, 141),
+    ])
+}
+
+/// **Clause 6.4: a text region**, arithmetic, without refinement.
+///
+/// Symbols arrive in *strips*: a vertical coordinate shared by a run of them,
+/// then along each strip a horizontal coordinate that accumulates, ended by the
+/// out-of-band value. Both coordinates are deltas all the way down, so a single
+/// misread leaves everything after it displaced rather than absent — which is
+/// why the corpus census measured which of these knobs real files use before
+/// any of this was written. Fifty-five of the corpus's fifty-eight text regions
+/// use more than one strip.
+///
+/// # Where a symbol goes
+///
+/// `REFCORNER` names which corner of the symbol its coordinate refers to, and
+/// the useful consequence is that **the horizontal placement does not depend on
+/// it**. 6.4.5 advances the running coordinate past the symbol's width *before*
+/// drawing for the two right-hand corners and *after* drawing for the two
+/// left-hand ones, so the symbol's left edge is the value the coordinate held on
+/// entry either way, and it ends at the symbol's far edge either way. The corner
+/// decides only whether the other coordinate names the top of the symbol or its
+/// bottom.
+/// The parameters 6.4's procedure runs on, once its caller has worked out
+/// where they come from.
+///
+/// A text region segment reads them from its header; an aggregate symbol
+/// (6.5.8.2.1) has them fixed by the clause instead. Naming them in one place
+/// is what lets the strip loop below be 6.4.5 exactly once.
+struct TextParams<'a> {
+    symbols: &'a [Bitmap],
+    instances: u32,
+    strips: i64,
+    log_strips: u32,
+    corner: u8,
+    /// 6.4.5's `TRANSPOSED`: the strip runs down the region rather than
+    /// across it, so `S` is the vertical coordinate and `T` the horizontal.
+    transposed: bool,
+    comb_op: u8,
+    ds_offset: i32,
+    refine: Option<RefineTemplate<'a>>,
+    code_len: u32,
+}
+
+/// The arithmetic side of 6.4: the coder, A.1's integer states, and 6.3's.
+///
+/// Three parameters that are never meaningful apart — and 6.5.8's dictionary
+/// hands all three to the text region procedure so an aggregate symbol shares
+/// them, which is the whole reason they travel together.
+struct Arith<'a, 'd> {
+    coder: &'a mut MqDecoder<'d>,
+    ints: &'a mut ArithContexts,
+    /// 6.3's adaptive states. Separate from `ints` because 6.4.11's Huffman
+    /// road restarts the *coder* at each byte-aligned sub-stream without
+    /// restarting these.
+    refine: &'a mut MqContexts,
+}
+
+/// The Huffman road's state: the coordinate tables, the symbol-ID code, and
+/// the bit reader all three share.
+type TextHuffman<'a> = Option<(TextTables, HuffTable, BitReader<'a>)>;
+
+/// **T.88 6.4: the text region decoding procedure**, over a coder, contexts
+/// and output bitmap the caller owns.
+///
+/// Split out of [`text_region`] because 6.5.8.2.1 runs exactly this inside a
+/// symbol dictionary: an aggregate symbol *is* a text region, decoded over the
+/// dictionary's own arithmetic decoder onto a bitmap the size of the symbol.
+/// Sharing the decoder is not an optimisation — the adaptive state a symbol
+/// leaves behind is the state the next one is coded against, so a second
+/// decoder here would decode the first aggregate correctly and then noise.
+fn text_region_procedure(
+    params: &TextParams<'_>,
+    arith: &mut Arith<'_, '_>,
+    huffman: &mut TextHuffman<'_>,
+    ceiling: usize,
+    region: &mut Bitmap,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<()> {
+    // The two roads, each closing over its own reader. Everything below asks
+    // these rather than either decoder, so the strip loop is 6.4.5 once.
+    macro_rules! read_dt {
+        () => {
+            match huffman.as_mut() {
+                Some((tables, _, bits)) => tables.dt.value(bits)?,
+                None => decode_int(arith.coder, &mut arith.ints.iadt)?,
+            }
+        };
+    }
+    macro_rules! read_fs {
+        () => {
+            match huffman.as_mut() {
+                Some((tables, _, bits)) => tables.fs.value(bits)?,
+                None => decode_int(arith.coder, &mut arith.ints.iafs)?,
+            }
+        };
+    }
+
+    // 6.4.5 step 1: the first strip coordinate is the negative of what is
+    // coded, which is what lets a region's first strip begin above its origin.
+    let mut strip_t = -i64::from(read_dt!()) * params.strips;
+    let mut first_s: i64 = 0;
+    let mut placed = 0u32;
+
+    while placed < params.instances {
+        let delta = read_dt!();
+        strip_t = strip_t.checked_add(i64::from(delta).checked_mul(params.strips)?)?;
+
+        // A strip's first symbol is placed relative to the previous strip's
+        // first, not to the previous symbol.
+        first_s = first_s.checked_add(i64::from(read_fs!()))?;
+        let mut cur_s = first_s;
+        let mut first = true;
+
+        loop {
+            if !first {
+                // OOB ends the strip. Anything else is the gap to the next
+                // symbol, measured from the far edge of the last one.
+                let gap = match huffman.as_mut() {
+                    Some((tables, _, bits)) => match tables.ds.decode(bits)? {
+                        HuffValue::Value(gap) => gap,
+                        HuffValue::Oob => break,
+                    },
+                    None => match decode_int(arith.coder, &mut arith.ints.iads) {
+                        Some(gap) => gap,
+                        None => break,
+                    },
+                };
+                cur_s = cur_s
+                    .checked_add(i64::from(gap))?
+                    .checked_add(i64::from(params.ds_offset))?;
+            }
+            first = false;
+            if placed >= params.instances {
+                // More instances than the header promised, which is what sized
+                // the work; a longer region is a broken stream.
+                note(warnings, Jbig2Refusal::MoreInstancesThanDeclared);
+                return None;
+            }
+
+            let cur_t = if params.strips == 1 {
+                0
+            } else {
+                match huffman.as_mut() {
+                    // 6.4.5: with Huffman the strip offset is a plain field of
+                    // `log2(SBSTRIPS)` bits, not a table lookup — the only
+                    // coordinate in the region that is read the same way twice.
+                    Some((_, _, bits)) => i64::from(bits.bits(params.log_strips)?),
+                    None => i64::from(decode_int(arith.coder, &mut arith.ints.iait)?),
+                }
+            };
+            let t = strip_t.checked_add(cur_t)?;
+            let id = match huffman.as_mut() {
+                Some((_, codes, bits)) => codes.value(bits)?.max(0) as usize,
+                None => decode_iaid(arith.coder, &mut arith.ints.iaid, params.code_len) as usize,
+            };
+            // A code the dictionary does not define is a damaged stream rather
+            // than a reason to stop: the last symbol stands in, which keeps the
+            // strip's coordinates advancing by a plausible width.
+            let symbol = params.symbols.get(id).or_else(|| params.symbols.last())?;
+
+            // 6.4.11: with SBREFINE an instance may be a refinement of the
+            // symbol rather than the symbol itself, sized by its own deltas.
+            let refined;
+            let symbol = if let Some(template) = params.refine.as_ref() {
+                // The bytes the Huffman road's refinements live in, taken
+                // before the reader is borrowed again below.
+                let source = huffman.as_ref().map(|(_, _, bits)| bits.bytes);
+                let ri = match huffman.as_mut() {
+                    // 6.4.11: over Huffman "is this instance refined" is one
+                    // plain bit rather than a table lookup — the only field in
+                    // the region read that way.
+                    Some((_, _, bits)) => i32::try_from(bits.bit()?).ok()?,
+                    None => decode_int(arith.coder, &mut arith.ints.iari)?,
+                };
+                if ri == 0 {
+                    symbol
+                } else {
+                    // Where a Huffman refinement's arithmetic sub-stream
+                    // begins and ends, once its size has been read.
+                    let mut window = None;
+                    let (rdw, rdh, rdx, rdy) = match huffman.as_mut() {
+                        Some((tables, _, bits)) => {
+                            let Some(tables) = tables.refine.as_ref() else {
+                                note(warnings, Jbig2Refusal::RefinementTablesAbsent);
+                                return None;
+                            };
+                            let rdw = tables.rdw.value(bits)?;
+                            let rdh = tables.rdh.value(bits)?;
+                            let rdx = tables.rdx.value(bits)?;
+                            let rdy = tables.rdy.value(bits)?;
+                            // 6.4.11: the refinement is arithmetic even here.
+                            // `BMSIZE` is coded ahead of it and the sub-stream
+                            // is byte-aligned, precisely so a decoder can step
+                            // over one without decoding it.
+                            let size = usize::try_from(tables.rsize.value(bits)?).ok()?;
+                            bits.align();
+                            let start = bits.byte_position();
+                            window = Some((start, start.checked_add(size)?));
+                            (rdw, rdh, rdx, rdy)
+                        }
+                        None => (
+                            decode_int(arith.coder, &mut arith.ints.iardw)?,
+                            decode_int(arith.coder, &mut arith.ints.iardh)?,
+                            decode_int(arith.coder, &mut arith.ints.iardx)?,
+                            decode_int(arith.coder, &mut arith.ints.iardy)?,
+                        ),
+                    };
+                    let width = i64::from(symbol.width).checked_add(i64::from(rdw))?;
+                    let height = i64::from(symbol.height).checked_add(i64::from(rdh))?;
+                    if width <= 0 || height <= 0 || width > i64::from(u32::MAX) {
+                        note(warnings, Jbig2Refusal::RefinedSizeOutOfRange);
+                        return None;
+                    }
+                    if height > i64::from(u32::MAX) {
+                        note(warnings, Jbig2Refusal::RefinedSizeOutOfRange);
+                        return None;
+                    }
+                    let Some(mut target) = Bitmap::new(width as u32, height as u32, ceiling) else {
+                        note(warnings, Jbig2Refusal::RegionTooLarge);
+                        return None;
+                    };
+                    let dx = refinement_offset(width, symbol.width, rdx);
+                    let dy = refinement_offset(height, symbol.height, rdy);
+                    let offset = (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?);
+                    match window {
+                        Some((start, end)) => {
+                            // A fresh coder and a fresh context set, because
+                            // the sub-stream is self-contained: nothing before
+                            // it was coded against the same states, and the
+                            // reader resumes after it rather than inside it.
+                            let Some(bytes) = source.and_then(|all| all.get(start..end)) else {
+                                note(warnings, Jbig2Refusal::Truncated);
+                                return None;
+                            };
+                            let mut sub = MqDecoder::new(bytes);
+                            decode_refinement_into(
+                                &mut sub,
+                                arith.refine,
+                                template,
+                                false,
+                                symbol,
+                                offset,
+                                &mut target,
+                            );
+                            if let Some((_, _, bits)) = huffman.as_mut() {
+                                bits.seek_byte(end)?;
+                            }
+                        }
+                        None => decode_refinement_into(
+                            arith.coder,
+                            arith.refine,
+                            template,
+                            false,
+                            symbol,
+                            offset,
+                            &mut target,
+                        ),
+                    }
+                    refined = target;
+                    &refined
+                }
+            } else {
+                symbol
+            };
+
+            let width = i64::from(symbol.width);
+            let height = i64::from(symbol.height);
+            // 6.4.5 steps 3 c) iii to xi. The running coordinate advances past
+            // the symbol *before* drawing for two of the four corners and
+            // *after* it for the other two, and which two depends on
+            // `TRANSPOSED` -- the right-hand pair when the strip runs across
+            // the region, the bottom pair when it runs down. Either way the
+            // edge `CURS` named on entry is where that side of the symbol
+            // lands, so the coordinate the strip advances is corner-
+            // independent and only the *other* one branches. That is the
+            // whole difference between the two modes, and it is why one
+            // `composite_signed` serves both.
+            let (x, y, advance) = if params.transposed {
+                let x = if corner::is_left(params.corner) {
+                    t
+                } else {
+                    t.checked_sub(width - 1)?
+                };
+                (x, cur_s, height)
+            } else {
+                let y = if corner::is_top(params.corner) {
+                    t
+                } else {
+                    t.checked_sub(height - 1)?
+                };
+                (cur_s, y, width)
+            };
+            composite_signed(region, symbol, x, y, params.comb_op);
+
+            cur_s = cur_s.checked_add(advance - 1)?;
+            placed += 1;
+        }
+    }
+
+    Some(())
+}
+
+fn text_region(
+    segment: &Segment<'_>,
+    symbols: &[Bitmap],
+    tables: &[&HuffTable],
+    ceiling: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<(RegionInfo, Bitmap)> {
+    let mut custom = CustomTables::new(tables);
+    let mut reader = Reader::new(segment.data);
+    let info = RegionInfo::read(&mut reader)?;
+    // 7.4.4.1.1.
+    let flags = reader.u16()?;
+    let huff = flags & 0x0001 != 0;
+    let refine = flags & 0x0002 != 0;
+    let log_strips = u32::from((flags >> 2) & 0x0003);
+    let corner = ((flags >> 4) & 0x0003) as u8;
+    let transposed = flags & 0x0040 != 0;
+    let comb_op = ((flags >> 7) & 0x0003) as u8;
+    let default_pixel = flags & 0x0200 != 0;
+    // Bits 10 to 14 are a signed five-bit field.
+    let ds_offset = {
+        let raw = i32::from((flags >> 10) & 0x001F);
+        if raw > 15 {
+            raw - 32
+        } else {
+            raw
+        }
+    };
+    let rtemplate = ((flags >> 15) & 0x0001) as u8;
+
+    // 7.4.4.1.2 sits *before* 7.4.4.5, and reading them the other way round
+    // makes the instance count the two flag bytes followed by half of itself.
+    let selectors = if huff { Some(reader.u16()?) } else { None };
+
+    // 7.4.4.1.3 sits between them: the refinement AT pair, present only for a
+    // refining region at template 0.
+    let mut rat = NOMINAL_REFINE_AT;
+    if refine && rtemplate == 0 {
+        for slot in &mut rat {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Jbig2Refusal::Truncated);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
+
+    // 7.4.4.5.
+    let instances = reader.u32()?;
+    if instances > MAX_JBIG2_TEXT_INSTANCES {
+        note(warnings, Jbig2Refusal::TextInstanceCap);
+        return None;
+    }
+    if symbols.is_empty() && instances > 0 {
+        // Every instance names a symbol, and with no dictionary behind it
+        // there is nothing for one to name.
+        //
+        // **`instances > 0` is the whole of the condition.** 6.4 does not
+        // require a text region to place anything: `SBNUMINSTANCES` is a count
+        // like any other and zero is a legal value, at which point the region
+        // is its own default pixel value over its own extent and 6.4.5's strip
+        // loop never runs. `bitmap-symbol-empty.pdf` is exactly that -- a
+        // dictionary that exports nothing and a region that asks for nothing
+        // -- and refusing it reported a whole page as undecodable over a
+        // region that had already said it would draw nothing.
+        note(warnings, Jbig2Refusal::TextRegionWithoutSymbols);
+        return None;
+    }
+
+    let code_len = symbol_code_length(symbols.len());
+    let strips = 1i64 << log_strips;
+
+    let Some(mut region) = Bitmap::new(info.width, info.height, ceiling) else {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    };
+    if default_pixel {
+        region.fill_black();
+    }
+
+    // 7.4.4.1.2: a Huffman region names its tables in a second flags field,
+    // then carries the symbol-ID code lengths of 7.4.3.1.7 before its data.
+    let mut huffman = None;
+    if let Some(selectors) = selectors {
+        let tables = TextTables::select(selectors, refine, &mut custom, warnings)?;
+        let mut bits = BitReader::new(reader.rest());
+        let Some(symbol_codes) = symbol_id_codes(&mut bits, symbols.len()) else {
+            note(warnings, Jbig2Refusal::Truncated);
+            return None;
+        };
+        huffman = Some((tables, symbol_codes, bits));
+    }
+
+    let template = refine.then(|| refine_template(rtemplate, rat));
+    let refine_bits = template.as_ref().map_or(0, RefineTemplate::bits);
+
+    let mut coder = MqDecoder::new(reader.rest());
+    let mut cx = ArithContexts::new(code_len);
+    let mut refine_contexts = MqContexts::new(refine_states(refine_bits));
+    let params = TextParams {
+        symbols,
+        instances,
+        strips,
+        log_strips,
+        corner,
+        transposed,
+        comb_op,
+        ds_offset,
+        refine: template,
+        code_len,
+    };
+    text_region_procedure(
+        &params,
+        &mut Arith {
+            coder: &mut coder,
+            ints: &mut cx,
+            refine: &mut refine_contexts,
+        },
+        &mut huffman,
+        ceiling,
+        &mut region,
+        warnings,
+    )?;
+
+    Some((info, region))
+}
+
+/// 6.4.5's symbol code width: as many bits as the symbol count needs.
+fn symbol_code_length(count: usize) -> u32 {
+    let mut bits = 0u32;
+    while bits < 31 && (1usize << bits) < count {
+        bits += 1;
+    }
+    bits
+}
+
+/// [`Bitmap::composite`] at a coordinate that may be negative.
+///
+/// A symbol placed above or left of the region's origin is ordinary — 6.4.5's
+/// first strip coordinate is explicitly the negative of what is coded — and the
+/// part that falls outside is clipped rather than refused.
+fn composite_signed(into: &mut Bitmap, source: &Bitmap, x: i64, y: i64, op: u8) {
+    if x >= i64::from(into.width) || y >= i64::from(into.height) {
+        return;
+    }
+    if x >= 0 && y >= 0 {
+        into.composite(source, x as u32, y as u32, op);
+        return;
+    }
+    // The clipped case, pixel by pixel: `Bitmap::composite` takes an unsigned
+    // origin, and shifting the source instead would need a second bitmap.
+    for row in 0..source.height {
+        let Some(ty) = y.checked_add(i64::from(row)) else {
+            continue;
+        };
+        if ty < 0 || ty >= i64::from(into.height) {
+            continue;
+        }
+        for col in 0..source.width {
+            let Some(tx) = x.checked_add(i64::from(col)) else {
+                continue;
+            };
+            if tx < 0 || tx >= i64::from(into.width) {
+                continue;
+            }
+            let value = source.get(col as i32, row as i32);
+            let existing = into.get(tx as i32, ty as i32);
+            into.set(tx as u32, ty as u32, combine(existing, value, op));
+        }
+    }
 }
 
 /// Whether a segment type is one this build decodes.
@@ -288,16 +3165,384 @@ fn read_segment<'a>(reader: &mut Reader<'a>, warnings: &mut Vec<Warning>) -> Opt
 /// Everything else is skipped **and recorded**, which is what keeps the
 /// refusal honest: the skip is not silent, and it is not sufficient on its
 /// own — a page that ends with no region on it refuses regardless.
+/// **Clause 6.7: a pattern dictionary (segment type 16).**
+///
+/// A halftone region does not code pixels. It codes, per cell of a grid, which
+/// *pattern* to stamp there — and this is where the patterns come from. The
+/// dictionary is one bitmap with every pattern side by side, `GRAYMAX + 1` of
+/// them each `HDPW` wide, decoded by the ordinary generic procedure and then
+/// sliced.
+///
+/// 6.7.5 fixes the adaptive pixels rather than reading them, and the first is
+/// `(-HDPW, 0)`: one whole pattern to the left, so the context of a pixel sees
+/// the same pixel of the previous pattern. That is the one place in this
+/// module where an adaptive offset does not fit a signed byte, and it is why
+/// the generic template's `at` is a coordinate pair rather than the two bytes
+/// 7.4.6.3 reads them from.
+///
+/// No cap of its own: the collective bitmap is `(GRAYMAX + 1) × HDPW` by
+/// `HDPH`, and `Bitmap::new` refuses it against the caller's ceiling before a
+/// byte is allocated — which is the same guard every other region here has.
+fn pattern_dictionary(
+    segment: &Segment<'_>,
+    ceiling: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<Vec<Bitmap>> {
+    let mut reader = Reader::new(segment.data);
+    // 7.4.5.1.1: bit 0 is HDMMR, bits 1 and 2 the template.
+    let Some(flags) = reader.u8() else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let mmr = flags & 0x01 != 0;
+    let template = (flags >> 1) & 0x03;
+    let (Some(width), Some(height), Some(graymax)) = (reader.u8(), reader.u8(), reader.u32())
+    else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let (width, height) = (u32::from(width), u32::from(height));
+    if width == 0 || height == 0 {
+        note(warnings, Jbig2Refusal::PatternDictionaryEmpty);
+        return None;
+    }
+    let count = graymax.checked_add(1)?;
+    let Some(collective_width) = count.checked_mul(width) else {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    };
+
+    let Some(mut collective) = Bitmap::new(collective_width, height, ceiling) else {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    };
+    if mmr {
+        if !decode_mmr(reader.rest(), &mut collective, warnings) {
+            note(warnings, Jbig2Refusal::CollectiveBitmapNotMmr);
+            return None;
+        }
+    } else {
+        // 6.7.5's fixed adaptive pixels.
+        let at = [(-(width as i32), 0), (-3, -1), (2, -2), (-2, -2)];
+        decode_arithmetic(reader.rest(), template, false, &at, None, &mut collective);
+    }
+
+    // 6.7.5 step 4: pattern `i` is the columns `[i × HDPW, (i + 1) × HDPW)`.
+    let mut patterns = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let mut pattern = Bitmap::new(width, height, ceiling)?;
+        let left = index.checked_mul(width)?;
+        for y in 0..height {
+            for x in 0..width {
+                pattern.set(x, y, collective.get((left + x) as i32, y as i32));
+            }
+        }
+        patterns.push(pattern);
+    }
+    Some(patterns)
+}
+
+/// How Annex C's bitplanes are coded: the three parameters 6.6 hands down and
+/// that are never meaningful apart.
+struct GreyCoding<'a> {
+    mmr: bool,
+    template: u8,
+    /// 6.6.5.1's `HSKIP`, when the region asked for one.
+    skip: Option<&'a Bitmap>,
+}
+
+/// **Annex C: a grey-scale image, as Gray-coded bitplanes.**
+///
+/// The value at each cell is not coded directly. `GSBPP` bitplanes are, most
+/// significant first, and each plane after the first is exclusive-ored with the
+/// one above it — a Gray code, so that neighbouring values differ in one plane
+/// and the generic decoder's context sees a smooth picture rather than the
+/// carries of ordinary binary.
+///
+/// Every plane goes through the same coder and the same adaptive state, which
+/// is 6.5.8.1's rule met again in a different clause: restarting between planes
+/// decodes the first correctly and the rest as noise.
+fn grey_scale_image(
+    data: &[u8],
+    coding: GreyCoding<'_>,
+    planes: u32,
+    width: u32,
+    height: u32,
+    ceiling: usize,
+) -> Option<Vec<u32>> {
+    let GreyCoding {
+        mmr,
+        template,
+        skip,
+    } = coding;
+    if planes == 0 {
+        // One pattern, so every cell names it and no plane is coded at all.
+        return Some(vec![0; (width as usize).checked_mul(height as usize)?]);
+    }
+    // C.5's adaptive pixels, fixed by the clause like 6.7.5's.
+    let at = [
+        (if template <= 1 { 3 } else { 2 }, -1),
+        (-3, -1),
+        (2, -2),
+        (-2, -2),
+    ];
+
+    let mut decoded: Vec<Bitmap> = Vec::with_capacity(planes as usize);
+    if mmr {
+        // C.5: one MMR stream carries every plane in turn, each ended by
+        // T.6's EOFB. `T6Rows` reads rows rather than a whole bitmap, so the
+        // planes are pulled from one reader and the terminator stepped over
+        // between them.
+        let mut at_bit = 0usize;
+        for _ in 0..planes {
+            let mut plane = Bitmap::new(width, height, ceiling)?;
+            let mut rows = crate::T6Rows::new(data, at_bit, width);
+            let stride = plane.stride;
+            for y in 0..height {
+                let start = (y as usize) * stride;
+                let Some(row) = plane.bits.get_mut(start..start + stride) else {
+                    break;
+                };
+                if !rows.next_row(row) {
+                    break;
+                }
+            }
+            at_bit = skip_eofb(data, rows.bit_position());
+            decoded.push(plane);
+        }
+    } else {
+        let mut coder = MqDecoder::new(data);
+        let mut contexts = MqContexts::new(1 << template_bits(template));
+        for _ in 0..planes {
+            let mut plane = Bitmap::new(width, height, ceiling)?;
+            decode_generic_into(
+                &mut coder,
+                &mut contexts,
+                template,
+                false,
+                &at,
+                skip,
+                &mut plane,
+            );
+            decoded.push(plane);
+        }
+    }
+
+    // C.5 step 3: each plane below the top is the exclusive-or of what was
+    // decoded and the plane above it, and the value is their weighted sum.
+    for index in 1..decoded.len() {
+        for y in 0..height {
+            for x in 0..width {
+                let above = decoded[index - 1].get(x as i32, y as i32);
+                let here = decoded[index].get(x as i32, y as i32);
+                decoded[index].set(x, y, here ^ above);
+            }
+        }
+    }
+    let mut values = vec![0u32; (width as usize).checked_mul(height as usize)?];
+    for (index, plane) in decoded.iter().enumerate() {
+        // The first plane decoded is the most significant.
+        let shift = (planes as usize).checked_sub(index + 1)? as u32;
+        for y in 0..height {
+            for x in 0..width {
+                let at = (y as usize) * (width as usize) + x as usize;
+                values[at] |= plane.get(x as i32, y as i32) << shift;
+            }
+        }
+    }
+    Some(values)
+}
+
+/// T.6's end-of-facsimile-block, if one sits at `from`, stepped over.
+///
+/// Twenty-four bits, `000000000001` twice. A plane that ended exactly on it
+/// leaves the next plane starting after it; a stream that does not carry one
+/// is left where it was, because Annex C's own note allows an encoder to omit
+/// the terminator after the last plane.
+fn skip_eofb(data: &[u8], from: usize) -> usize {
+    let bit = |at: usize| -> u32 {
+        data.get(at / 8)
+            .copied()
+            .map_or(0, |byte| u32::from(byte >> (7 - (at % 8))) & 1)
+    };
+    if from + 24 > data.len() * 8 {
+        return from;
+    }
+    for offset in 0..24 {
+        let expected = u32::from(offset == 11 || offset == 23);
+        if bit(from + offset) != expected {
+            return from;
+        }
+    }
+    // 6.2.6: MMR data is byte aligned, so the plane after the terminator
+    // begins on the next byte rather than on the next bit.
+    (from + 24).div_ceil(8) * 8
+}
+
+/// **Clause 6.6: a halftone region (segment types 20, 22 and 23).**
+///
+/// The third lineage, after generic regions and symbol/text. A halftone region
+/// codes a *grid* of grey values and stamps a pattern from its dictionary at
+/// each cell, which is how a scanner's dithered photograph is coded compactly:
+/// the picture is a lattice of known shapes, and only which shape goes where
+/// has to be sent.
+///
+/// The grid is not axis-aligned. `HRX` and `HRY` are a vector in 8.8 fixed
+/// point, so the lattice can be rotated and sheared, and the two coordinates
+/// below are 6.6.5.2's own expressions rather than a simplification of them.
+fn halftone_region(
+    segment: &Segment<'_>,
+    patterns: &[Bitmap],
+    ceiling: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<(RegionInfo, Bitmap)> {
+    let mut reader = Reader::new(segment.data);
+    let Some(info) = RegionInfo::read(&mut reader) else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    // 7.4.5.1.1: HMMR, HTEMPLATE, HENABLESKIP, HCOMBOP, HDEFPIXEL.
+    let Some(flags) = reader.u8() else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let mmr = flags & 0x01 != 0;
+    let template = (flags >> 1) & 0x03;
+    let enable_skip = flags & 0x08 != 0;
+    let comb_op = (flags >> 4) & 0x07;
+    let default_pixel = flags & 0x80 != 0;
+
+    let (Some(grid_width), Some(grid_height), Some(grid_x), Some(grid_y)) =
+        (reader.u32(), reader.u32(), reader.u32(), reader.u32())
+    else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let (Some(step_x), Some(step_y)) = (reader.u16(), reader.u16()) else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let (grid_x, grid_y) = (grid_x as i32, grid_y as i32);
+
+    if patterns.is_empty() {
+        note(warnings, Jbig2Refusal::HalftoneWithoutPatterns);
+        return None;
+    }
+    let Some(mut region) = Bitmap::new(info.width, info.height, ceiling) else {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    };
+    if default_pixel {
+        region.fill_black();
+    }
+    // The grid is bounded by the same ceiling the region is: one grey value
+    // per cell, and a cell is at least one pattern's worth of compositing.
+    if Bitmap::new(grid_width, grid_height, ceiling).is_none() {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    }
+
+    // 6.6.5.2's placement, shared by the skip computation and the drawing so
+    // the two cannot disagree about where a cell lands.
+    let pattern_width = i64::from(patterns[0].width);
+    let pattern_height = i64::from(patterns[0].height);
+    let place = |m: u32, n: u32| -> (i64, i64) {
+        let (m, n) = (i64::from(m), i64::from(n));
+        let x = i64::from(grid_x) + m * i64::from(step_y) + n * i64::from(step_x);
+        let y = i64::from(grid_y) + m * i64::from(step_x) - n * i64::from(step_y);
+        (x >> 8, y >> 8)
+    };
+
+    // 6.6.5.1: a cell whose pattern would fall entirely outside the region is
+    // not coded at all, which is what makes a skewed grid cheap at its corners.
+    let skip = if enable_skip {
+        let mut map = Bitmap::new(grid_width, grid_height, ceiling)?;
+        for m in 0..grid_height {
+            for n in 0..grid_width {
+                let (x, y) = place(m, n);
+                let outside = x + pattern_width <= 0
+                    || x >= i64::from(region.width)
+                    || y + pattern_height <= 0
+                    || y >= i64::from(region.height);
+                if outside {
+                    map.set(n, m, 1);
+                }
+            }
+        }
+        Some(map)
+    } else {
+        None
+    };
+
+    // 6.6.5: as many planes as the pattern count needs.
+    let planes = bits_for(patterns.len());
+    let values = grey_scale_image(
+        reader.rest(),
+        GreyCoding {
+            mmr,
+            template,
+            skip: skip.as_ref(),
+        },
+        planes,
+        grid_width,
+        grid_height,
+        ceiling,
+    )?;
+
+    for m in 0..grid_height {
+        for n in 0..grid_width {
+            if skip
+                .as_ref()
+                .is_some_and(|map| map.get(n as i32, m as i32) == 1)
+            {
+                continue;
+            }
+            let at = (m as usize) * (grid_width as usize) + n as usize;
+            let value = *values.get(at)? as usize;
+            // C.5's values are bounded by the plane count rather than by the
+            // dictionary, so a grid may name a pattern that does not exist.
+            // The last one is the standard's own answer for that.
+            let pattern = patterns.get(value).unwrap_or(patterns.last()?);
+            let (x, y) = place(m, n);
+            composite_signed(&mut region, pattern, x, y, comb_op);
+        }
+    }
+
+    Some((info, region))
+}
+
+/// How many bits a count needs, which is 6.6.5's `HBPP`.
+fn bits_for(count: usize) -> u32 {
+    let mut bits = 0u32;
+    while bits < 32 && (1usize << bits) < count {
+        bits += 1;
+    }
+    bits
+}
+
 fn understood(kind: u8) -> bool {
     matches!(
         kind,
-        kind::IMMEDIATE_GENERIC_REGION
+        kind::SYMBOL_DICTIONARY
+            | kind::INTERMEDIATE_TEXT_REGION
+            | kind::IMMEDIATE_TEXT_REGION
+            | kind::IMMEDIATE_LOSSLESS_TEXT_REGION
+            | kind::IMMEDIATE_GENERIC_REGION
             | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
+            | kind::IMMEDIATE_REFINEMENT_REGION
+            | kind::IMMEDIATE_LOSSLESS_REFINEMENT_REGION
+            | kind::INTERMEDIATE_GENERIC_REGION
+            | kind::INTERMEDIATE_REFINEMENT_REGION
             | kind::PAGE_INFORMATION
             | kind::END_OF_PAGE
             | kind::END_OF_STRIPE
             | kind::END_OF_FILE
             | kind::PROFILES
+            | kind::TABLES
+            | kind::PATTERN_DICTIONARY
+            | kind::INTERMEDIATE_HALFTONE_REGION
+            | kind::IMMEDIATE_HALFTONE_REGION
+            | kind::IMMEDIATE_LOSSLESS_HALFTONE_REGION
             | kind::EXTENSION
     )
 }
@@ -310,30 +3555,14 @@ fn understood(kind: u8) -> bool {
 /// picture that will be missing from the page. Only the second kind is worth
 /// a warning naming a lineage.
 ///
-/// An **intermediate** generic region (type 36) is here rather than in
-/// [`understood`] even though its bits decode perfectly well. 7.4.6.1 says an
-/// intermediate result goes to an auxiliary buffer for a later segment to
-/// refer to, and the only thing that refers to one is a refinement region,
-/// which this build refuses. Compositing it onto the page would draw a
-/// working buffer as if it were finished content.
+/// Intermediate regions (types 4, 36 and 40) are in [`understood`] rather
+/// than here: 7.4.6.1 sends an intermediate result to an auxiliary buffer for
+/// a later segment to refer to, and a refinement region that refers to one
+/// reads it from that buffer instead of from the page. What is listed here is
+/// what no path reproduces — the halftone lineage, custom tables and colour
+/// palettes.
 fn carries_content(kind: u8) -> bool {
-    matches!(
-        kind,
-        kind::INTERMEDIATE_GENERIC_REGION
-            | kind::SYMBOL_DICTIONARY
-            | kind::INTERMEDIATE_TEXT_REGION
-            | kind::IMMEDIATE_TEXT_REGION
-            | kind::IMMEDIATE_LOSSLESS_TEXT_REGION
-            | kind::PATTERN_DICTIONARY
-            | kind::INTERMEDIATE_HALFTONE_REGION
-            | kind::IMMEDIATE_HALFTONE_REGION
-            | kind::IMMEDIATE_LOSSLESS_HALFTONE_REGION
-            | kind::INTERMEDIATE_REFINEMENT_REGION
-            | kind::IMMEDIATE_REFINEMENT_REGION
-            | kind::IMMEDIATE_LOSSLESS_REFINEMENT_REGION
-            | kind::TABLES
-            | kind::COLOUR_PALETTE
-    )
+    matches!(kind, kind::COLOUR_PALETTE)
 }
 
 /// Bytes a packed 1-bpp bitmap of these dimensions occupies, or `None` if it
@@ -371,6 +3600,14 @@ struct Bitmap {
 impl Bitmap {
     /// An all-white bitmap, or `None` if it would exceed `ceiling` — the
     /// checked multiply of [`packed_size`], before any allocation.
+    /// Paints every pixel black (1 in JBIG2's sense, 6.2.2).
+    ///
+    /// 7.4.4.1.1's default pixel value: a text region may start from a black
+    /// page and knock symbols out of it.
+    fn fill_black(&mut self) {
+        self.bits.iter_mut().for_each(|byte| *byte = 0xFF);
+    }
+
     fn new(width: u32, height: u32, ceiling: usize) -> Option<Bitmap> {
         let bytes = packed_size(width, height, ceiling)?;
         Some(Bitmap {
@@ -428,6 +3665,28 @@ impl Bitmap {
     /// A region whose placement puts it partly off the page is not an error —
     /// a striped page composites regions that overhang by design — so the
     /// clip is silent.
+    /// The rectangle at `(x, y)`, lifted out as its own bitmap.
+    ///
+    /// 6.3.2's reference for a refinement region that refers to no
+    /// intermediate one: whatever the page already holds under the region's
+    /// own box. Anything outside the page reads 0, which is what [`Bitmap::get`]
+    /// already answers, so a region hanging off an edge is ordinary.
+    fn window(&self, x: u32, y: u32, width: u32, height: u32, ceiling: usize) -> Option<Bitmap> {
+        let mut out = Bitmap::new(width, height, ceiling)?;
+        for row in 0..height {
+            for col in 0..width {
+                let (Ok(sx), Ok(sy)) = (
+                    i32::try_from(u64::from(x) + u64::from(col)),
+                    i32::try_from(u64::from(y) + u64::from(row)),
+                ) else {
+                    continue;
+                };
+                out.set(col, row, self.get(sx, sy));
+            }
+        }
+        Some(out)
+    }
+
     fn composite(&mut self, source: &Bitmap, x: u32, y: u32, op: u8) {
         for sy in 0..source.height {
             let Some(dy) = y.checked_add(sy) else { return };
@@ -441,17 +3700,7 @@ impl Bitmap {
                 }
                 let s = source.get(sx as i32, sy as i32);
                 let d = self.get(dx as i32, dy as i32);
-                let value = match op {
-                    1 => s & d,
-                    2 => s ^ d,
-                    3 => !(s ^ d),
-                    4 => s,
-                    // 0 is OR, and so is anything 7.4.1.5 leaves undefined:
-                    // a region drawn with an operator nobody defined should
-                    // still appear rather than erase what is under it.
-                    _ => s | d,
-                };
-                self.set(dx, dy, value);
+                self.set(dx, dy, combine(d, s, op));
             }
         }
     }
@@ -487,7 +3736,7 @@ impl RegionInfo {
 /// a default the wire format leans on — it is the answer to "what did the
 /// figure in the standard show", and having it here is what lets a test say
 /// that a custom AT pixel actually changed something.
-const NOMINAL_AT: [[(i8, i8); 4]; 4] = [
+const NOMINAL_AT: [[(i32, i32); 4]; 4] = [
     [(3, -1), (-3, -1), (2, -2), (-2, -2)],
     [(3, -1), (0, 0), (0, 0), (0, 0)],
     [(2, -1), (0, 0), (0, 0), (0, 0)],
@@ -537,9 +3786,231 @@ const fn tpgdon_context(template: u8) -> usize {
 /// Every template is written out rather than folded into a loop. A loop over
 /// a table of offsets would be shorter and would make the four layouts look
 /// interchangeable, which is exactly the thing that is not true about them.
-fn context(bitmap: &Bitmap, template: u8, at: &[(i8, i8); 4], x: i32, y: i32) -> usize {
+/// The destination layer's fixed positions, 6.3.5.3 template 0.
+///
+/// All are causal — the pixel being decoded is not written yet, so a position
+/// at or after it would read a zero that carries no information and would put
+/// this decoder out of step with any encoder.
+///
+/// **These four constants are now checked against T.88's own Figures 12 and
+/// 13**, read in September 2026 once the standard could be fetched. Both
+/// figures match position for position: Figure 12's left group is `RA₁` at
+/// (−1, −1) and these three; its right group is `RA₂` at (−1, −1) and
+/// [`REFINE_0_THERE`]'s eight, thirteen in all. Figure 13's left group is
+/// [`REFINE_1_HERE`]'s four and its right group is [`REFINE_1_THERE`]'s six
+/// in a plus shape, ten in all, and it has no adaptive pixels.
+///
+/// That is worth stating because `docs/design/jbig2-symbol-text.md` records
+/// **five** distinct templates that decoded Annex H page 3 into legible text
+/// and were all wrong, and because until the standard arrived the only thing
+/// holding these was the corpus coding one picture ten ways. The corpus was
+/// right.
+const REFINE_0_HERE: [(i8, i8); 3] = [(0, -1), (1, -1), (-1, 0)];
+
+/// The reference layer's fixed positions for template 0: its whole
+/// three-by-three neighbourhood bar the corner the adaptive pixel occupies.
+const REFINE_0_THERE: [(i8, i8); 8] = [
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (0, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
+/// Template 1's destination positions. It has no adaptive pixels, which is
+/// why 7.4.4.1.3's `SBRAT` is absent whenever `SBRTEMPLATE` is one.
+const REFINE_1_HERE: [(i8, i8); 4] = [(-1, -1), (0, -1), (1, -1), (-1, 0)];
+
+/// Template 1's reference positions.
+const REFINE_1_THERE: [(i8, i8); 6] = [(0, -1), (-1, 0), (0, 0), (1, 0), (0, 1), (1, 1)];
+
+/// 6.3.5.6's TPGRON pseudo-context for each template, **in this file's own
+/// bit order** — see [`refinement_context`] for why that is not the
+/// standard's, and `docs/design/jbig2-symbol-text.md` for how these two
+/// numbers were determined rather than transcribed.
+const TPGRON_0: usize = 0x0010;
+const TPGRON_1: usize = 0x0008;
+
+/// 6.3.5.3's nominal adaptive positions: `at[0]` in the destination layer,
+/// `at[1]` in the reference.
+const NOMINAL_REFINE_AT: [(i8, i8); 2] = [(-1, -1), (-1, -1)];
+
+/// The layout a refinement template names, as data: the destination-layer
+/// positions, the reference-layer positions, and whether two of them are
+/// adaptive.
+struct RefineTemplate<'a> {
+    here: &'a [(i8, i8)],
+    there: &'a [(i8, i8)],
+    at: Option<[(i8, i8); 2]>,
+    /// 6.3.5.6's TPGRON pseudo-context: the slot the typical-prediction
+    /// decision shares the context array with.
+    typical: usize,
+}
+
+impl RefineTemplate<'_> {
+    /// How many context bits the layout forms, which is how many adaptive
+    /// states 6.3 needs.
+    fn bits(&self) -> usize {
+        self.here.len() + self.there.len() + usize::from(self.at.is_some()) * 2
+    }
+}
+
+/// **T.88 6.3.5.3's refinement context.**
+///
+/// Two layers at once: what has already been decoded of the target, and the
+/// reference the target is a refinement *of*, shifted by the offset the caller
+/// decoded. Template 0 forms thirteen bits, two of them adaptive (7.4.3.1.3's
+/// `SDRAT`, 7.4.4.1.3's `SBRAT`); template 1 forms ten and has none.
+///
+/// # The bit order here is not the standard's, and that is sound
+///
+/// A context index is a label for an adaptive state slot and nothing more:
+/// [`MqDecoder::decode_at`] reads and writes `state[cx]`, every slot begins in
+/// the same state, and the A and C registers are global. Relabel every context
+/// through any bijection and each slot is still reached by exactly the same
+/// neighbourhoods in the same order, so the decision sequence is bit-for-bit
+/// unchanged. **Only the set of positions has to be right**, which is what
+/// lets this file hold a refinement decoder verified against Annex H rather
+/// than transcribed from two figures.
+///
+/// The one place that freedom stops is 6.3.5.6's TPGRON pseudo-context, which
+/// is a bare number in the standard's own ordering and does not survive a
+/// relabelling. [`decode_refinement_into`] therefore has no TPGRON, and the
+/// one caller that could set it refuses instead of guessing which slot it
+/// names.
+fn refinement_context(
+    into: &Bitmap,
+    reference: &Bitmap,
+    dx: i32,
+    dy: i32,
+    template: &RefineTemplate<'_>,
+    x: i32,
+    y: i32,
+) -> usize {
+    // The reference is read at the target pixel shifted by the offset the
+    // caller decoded, which is what makes a refinement a *difference* rather
+    // than a second picture.
+    let there = |ox: i8, oy: i8| reference.get(x - dx + i32::from(ox), y - dy + i32::from(oy));
+    let mut value = 0u32;
+    if let Some(at) = template.at {
+        value = into.get(x + i32::from(at[0].0), y + i32::from(at[0].1));
+        value = (value << 1) | there(at[1].0, at[1].1);
+    }
+    for (ox, oy) in template.here {
+        value = (value << 1) | into.get(x + i32::from(*ox), y + i32::from(*oy));
+    }
+    for (ox, oy) in template.there {
+        value = (value << 1) | there(*ox, *oy);
+    }
+    value as usize
+}
+
+/// **Clause 6.3: a generic refinement region**, over a coder the caller owns.
+///
+/// Decodes `into` as a refinement of `reference` shifted by `(dx, dy)`. The
+/// coder and context set are the caller's because 6.5.8.2 runs this inside a
+/// symbol dictionary, where the adaptive state has to survive from one symbol
+/// to the next.
+///
+/// TPGRON (6.3.5.6) is deliberately absent — see [`refinement_context`].
+fn decode_refinement_into(
+    coder: &mut MqDecoder<'_>,
+    contexts: &mut MqContexts,
+    template: &RefineTemplate<'_>,
+    tpgron: bool,
+    reference: &Bitmap,
+    // 6.3.5.3's GRREFERENCEDX/DY, as one value because they are never
+    // meaningful apart.
+    (dx, dy): (i32, i32),
+    into: &mut Bitmap,
+) {
+    let mut ltp = 0u8;
+    for y in 0..into.height {
+        if tpgron {
+            // 6.3.5.6: one decision per row toggling "this row is typical",
+            // which is the refinement analogue of TPGDON and is why refining a
+            // picture that barely changed costs almost nothing.
+            ltp ^= coder.decode_at(contexts, template.typical);
+        }
+        for x in 0..into.width {
+            let (sx, sy) = (x as i32, y as i32);
+            if ltp == 1 {
+                // In a typical row a pixel whose whole reference neighbourhood
+                // agrees is not coded at all: it is that value. Only the
+                // pixels on a boundary cost a decision.
+                let centre = reference.get(sx - dx, sy - dy);
+                let uniform = (-1..=1).all(|oy| {
+                    (-1..=1).all(|ox| reference.get(sx - dx + ox, sy - dy + oy) == centre)
+                });
+                if uniform {
+                    into.set(x, y, centre);
+                    continue;
+                }
+            }
+            let cx = refinement_context(into, reference, dx, dy, template, sx, sy);
+            let pixel = coder.decode_at(contexts, cx);
+            into.set(x, y, u32::from(pixel));
+        }
+    }
+}
+
+/// How many adaptive states a refinement of that width needs, and none at all
+/// for the many dictionaries and regions that never refine — 6.3's set is
+/// thousands of states and allocating it unread is pure weight.
+const fn refine_states(bits: usize) -> usize {
+    if bits == 0 {
+        0
+    } else {
+        1 << bits
+    }
+}
+
+/// The layout `SDRTEMPLATE` or `SBRTEMPLATE` selects, with the adaptive pair
+/// the header carried.
+fn refine_template(rtemplate: u8, at: [(i8, i8); 2]) -> RefineTemplate<'static> {
+    if rtemplate == 0 {
+        RefineTemplate {
+            here: &REFINE_0_HERE,
+            there: &REFINE_0_THERE,
+            at: Some(at),
+            typical: TPGRON_0,
+        }
+    } else {
+        RefineTemplate {
+            here: &REFINE_1_HERE,
+            there: &REFINE_1_THERE,
+            at: None,
+            typical: TPGRON_1,
+        }
+    }
+}
+
+/// **6.4.11's reference offset, and 6.4.11's alone**: the size difference is
+/// split evenly and the coded offset added.
+///
+/// `div_euclid` rather than `/`, because the difference is signed and the split
+/// has to floor: −1 halves to −1, not to 0. Annex H page 3 refuses to decode
+/// under either alternative — the coded offset alone, or a truncating `/2`.
+///
+/// **It used to be 6.5.8.2.2's too, and that was wrong.** A text region is
+/// *centring* a refined bitmap on the instance it replaces, so the size
+/// difference is shared between the two edges. A symbol dictionary refining
+/// one symbol into another is doing no such thing: there is no instance and no
+/// strip, and 6.5.8.2.2's offset is `RDX` and `RDY` as coded. The two agree
+/// whenever the refined symbol is its reference's size, which is every fixture
+/// in this repository and every pdf.js file that reaches the road —
+/// `safedocs/0000337.pdf` is the first thing in reach that refines a symbol
+/// into a different shape, and it is 46 pages of it.
+fn refinement_offset(target: i64, reference: u32, coded: i32) -> i64 {
+    (target - i64::from(reference)).div_euclid(2) + i64::from(coded)
+}
+
+fn context(bitmap: &Bitmap, template: u8, at: &[(i32, i32); 4], x: i32, y: i32) -> usize {
     let p = |dx: i32, dy: i32| bitmap.get(x + dx, y + dy);
-    let a = |i: usize| bitmap.get(x + i32::from(at[i].0), y + i32::from(at[i].1));
+    let a = |i: usize| bitmap.get(x + at[i].0, y + at[i].1);
     let value = match template {
         0 => {
             (a(3) << 15)
@@ -615,18 +4086,39 @@ fn decode_arithmetic(
     data: &[u8],
     template: u8,
     tpgdon: bool,
-    at: &[(i8, i8); 4],
+    at: &[(i32, i32); 4],
+    skip: Option<&Bitmap>,
     into: &mut Bitmap,
 ) {
     let mut coder = MqDecoder::new(data);
     let mut contexts = MqContexts::new(1 << template_bits(template));
+    decode_generic_into(&mut coder, &mut contexts, template, tpgdon, at, skip, into);
+}
+
+/// 6.2.5.7's row loop, over a coder and a context set the **caller** owns.
+///
+/// A region is one bitmap and can keep both to itself, which is what
+/// [`decode_arithmetic`] does. A symbol dictionary cannot: 6.5.8.1 decodes
+/// every symbol in the dictionary from one coder with one adaptive context set
+/// carried across all of them, so the state that makes symbol two cheap is the
+/// state symbol one left behind. Restarting either per symbol decodes the
+/// first one correctly and then noise.
+fn decode_generic_into(
+    coder: &mut MqDecoder<'_>,
+    contexts: &mut MqContexts,
+    template: u8,
+    tpgdon: bool,
+    at: &[(i32, i32); 4],
+    skip: Option<&Bitmap>,
+    into: &mut Bitmap,
+) {
     let mut ltp = 0u8;
 
     for y in 0..into.height {
         if tpgdon {
             // 6.2.5.7: one decision per row against a context the standard
             // fixes, toggling "this row is the same as the last one".
-            ltp ^= coder.decode_at(&mut contexts, tpgdon_context(template));
+            ltp ^= coder.decode_at(contexts, tpgdon_context(template));
             if ltp == 1 {
                 if y > 0 {
                     into.copy_row(y - 1, y);
@@ -635,8 +4127,16 @@ fn decode_arithmetic(
             }
         }
         for x in 0..into.width {
+            // 6.2.5.7's USESKIP: a pixel the caller has already decided is
+            // outside anything is not coded at all, so it is set to zero and
+            // the coder is not asked. Halftone's 6.6.5.1 is the only caller
+            // that supplies one.
+            if skip.is_some_and(|map| map.get(x as i32, y as i32) == 1) {
+                into.set(x, y, 0);
+                continue;
+            }
             let cx = context(into, template, at, x as i32, y as i32);
-            let pixel = coder.decode_at(&mut contexts, cx);
+            let pixel = coder.decode_at(contexts, cx);
             into.set(x, y, u32::from(pixel));
         }
     }
@@ -650,16 +4150,16 @@ fn decode_arithmetic(
 fn generic_region(
     segment: &Segment<'_>,
     ceiling: usize,
-    warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
     let mut reader = Reader::new(segment.data);
     let Some(info) = RegionInfo::read(&mut reader) else {
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
         return None;
     };
     // 7.4.6.2. Bit 0 selects MMR, bits 1-2 the template, bit 3 TPGDON.
     let Some(flags) = reader.u8() else {
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
         return None;
     };
     let mmr = flags & 0x01 != 0;
@@ -676,15 +4176,27 @@ fn generic_region(
         let pairs = if template == 0 { 4 } else { 1 };
         for slot in at.iter_mut().take(pairs) {
             let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
-                note(warnings, Warning::TruncatedInput);
+                note(warnings, Jbig2Refusal::Truncated);
                 return None;
             };
-            *slot = (dx, dy);
+            *slot = (i32::from(dx), i32::from(dy));
         }
     }
 
+    // 7.2.7: a region whose segment length was unknown carries an unknown
+    // height too, and the real row count is the last four bytes of the
+    // segment. Reading it here rather than in `RegionInfo::read` keeps that
+    // structure a plain seventeen-byte field, which is what every other region
+    // type has.
+    let mut info = info;
+    if segment.unknown_length {
+        let tail = segment.data.len().checked_sub(4)?;
+        let rows = u32::from_be_bytes(segment.data.get(tail..)?.try_into().ok()?);
+        info.height = rows;
+    }
+
     let Some(mut bitmap) = Bitmap::new(info.width, info.height, ceiling) else {
-        note(warnings, Warning::Jbig2RegionTooLarge);
+        note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     };
     if mmr {
@@ -693,11 +4205,11 @@ fn generic_region(
             // region here. Compositing the blank bitmap that was just sized
             // would count as a region and turn the refusal into a blank page
             // reported as success.
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::GenericRegionNotMmr);
             return None;
         }
     } else {
-        decode_arithmetic(reader.rest(), template, tpgdon, &at, &mut bitmap);
+        decode_arithmetic(reader.rest(), template, tpgdon, &at, None, &mut bitmap);
     }
     Some((info, bitmap))
 }
@@ -716,7 +4228,7 @@ fn generic_region(
 /// than PDF's, precisely so this caller has nothing to convert.
 ///
 /// Returns whether any row decoded at all.
-fn decode_mmr(data: &[u8], into: &mut Bitmap, warnings: &mut Vec<Warning>) -> bool {
+fn decode_mmr(data: &[u8], into: &mut Bitmap, warnings: &mut Vec<Jbig2Refusal>) -> bool {
     let mut rows = crate::T6Rows::new(data, 0, into.width);
     let stride = into.stride;
     let mut decoded = 0u32;
@@ -734,7 +4246,7 @@ fn decode_mmr(data: &[u8], into: &mut Bitmap, warnings: &mut Vec<Warning>) -> bo
         // A region whose coding ran out part way is still a region: the rows
         // that decoded are on the page and the rest stay white, which is the
         // same bargain the fax path strikes. Only "not one row" is a refusal.
-        note(warnings, Warning::TruncatedInput);
+        note(warnings, Jbig2Refusal::Truncated);
     }
     decoded > 0
 }
@@ -762,14 +4274,75 @@ pub fn decode(
     max_output: usize,
     warnings: &mut Vec<Warning>,
 ) -> Result<Vec<u8>, FilterError> {
+    let mut refusals = Vec::new();
+    let out = decode_attributed(data, params, max_output, &mut refusals);
+    for refusal in refusals {
+        note_warning(warnings, refusal.warning());
+    }
+    out
+}
+
+/// [`decode`], with the precise reason for every refusal it performed.
+///
+/// The same decode; the difference is the sink. [`decode`] maps each
+/// [`Jbig2Refusal`] to the one [`Warning`] its clause group reports, which is
+/// what a renderer acts on; this hands back the refusals themselves, which is
+/// what a corpus census needs to say *which* capability a file is waiting on.
+/// Without it a measurement can only report that four files were refused for
+/// something, which is the coarseness `Jbig2Refusal` exists to undo.
+///
+/// # Errors
+/// As [`decode`]: [`FilterError::Unsupported`] when no region was composited.
+pub fn decode_attributed(
+    data: &[u8],
+    params: &Jbig2Params<'_>,
+    max_output: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Result<Vec<u8>, FilterError> {
+    decode_measured(data, params, max_output, warnings).0
+}
+
+/// [`decode_attributed`], with what its symbol dictionaries asked for.
+///
+/// The same decode again; the difference is that the tally 6.5.5 accumulates
+/// on the way past comes back instead of being dropped. It exists because a
+/// symbol's width and height are **not in any segment header** — both come out
+/// of the arithmetic coder — so a census that walks headers can count symbols
+/// and cannot measure one, which is the hole
+/// `crates/tinker-pdf/tests/jbig2_census.rs` printed as `not measured` until
+/// this existed.
+///
+/// A decode that refuses still reports what it had asked for by then, because
+/// that is the honest figure for a bound to be chosen against.
+///
+/// # Errors
+/// As [`decode`]: [`FilterError::Unsupported`] when no region was composited.
+pub fn decode_measured(
+    data: &[u8],
+    params: &Jbig2Params<'_>,
+    max_output: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> (Result<Vec<u8>, FilterError>, Jbig2SymbolExtent) {
     let Some(bitmap) = Bitmap::new(params.width, params.height, max_output) else {
-        note(warnings, Warning::Jbig2RegionTooLarge);
-        return Err(FilterError::Unsupported(Capability::Jbig2));
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return (
+            Err(FilterError::Unsupported(Capability::Jbig2)),
+            Jbig2SymbolExtent::default(),
+        );
     };
     let mut page = Page {
+        intermediate: BTreeMap::new(),
+        symbols: BTreeMap::new(),
+        retained: BTreeMap::new(),
+        tables: BTreeMap::new(),
+        patterns: BTreeMap::new(),
+        declared_content: false,
+        seen: BTreeSet::new(),
+        refused: BTreeSet::new(),
         bitmap,
         number: None,
         regions: 0,
+        extent: Jbig2SymbolExtent::default(),
     };
 
     // D.3: the globals stream's segments are read first and are visible to
@@ -778,19 +4351,45 @@ pub fn decode(
     let globals = segments(params.globals, warnings);
     let own = segments(data, warnings);
     for segment in globals.iter().chain(own.iter()) {
+        if declares_content(segment.kind) {
+            page.declared_content = true;
+        }
         if !understood(segment.kind) {
             if carries_content(segment.kind) {
-                note(warnings, Warning::Jbig2SegmentSkipped);
+                note(warnings, Jbig2Refusal::UnhandledSegmentType(segment.kind));
             }
             continue;
         }
         if !page.owns(segment) {
             continue;
         }
+        page.seen.insert(segment.number);
         match segment.kind {
             kind::PAGE_INFORMATION => page.begin(segment, warnings),
             kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION => {
                 page.draw_generic(segment, max_output, warnings);
+            }
+            kind::INTERMEDIATE_GENERIC_REGION => page.keep_generic(segment, max_output, warnings),
+            kind::INTERMEDIATE_REFINEMENT_REGION => {
+                page.draw_refinement(segment, max_output, true, warnings);
+            }
+            kind::IMMEDIATE_REFINEMENT_REGION | kind::IMMEDIATE_LOSSLESS_REFINEMENT_REGION => {
+                page.draw_refinement(segment, max_output, false, warnings);
+            }
+            kind::SYMBOL_DICTIONARY => page.read_symbols(segment, max_output, warnings),
+            kind::TABLES => page.read_table(segment),
+            kind::PATTERN_DICTIONARY => page.read_patterns(segment, max_output, warnings),
+            kind::INTERMEDIATE_HALFTONE_REGION => {
+                page.draw_halftone(segment, max_output, true, warnings);
+            }
+            kind::IMMEDIATE_HALFTONE_REGION | kind::IMMEDIATE_LOSSLESS_HALFTONE_REGION => {
+                page.draw_halftone(segment, max_output, false, warnings);
+            }
+            kind::INTERMEDIATE_TEXT_REGION => {
+                page.draw_text(segment, max_output, true, warnings);
+            }
+            kind::IMMEDIATE_TEXT_REGION | kind::IMMEDIATE_LOSSLESS_TEXT_REGION => {
+                page.draw_text(segment, max_output, false, warnings);
             }
             _ => {}
         }
@@ -798,10 +4397,112 @@ pub fn decode(
 
     if page.regions == 0 {
         // The refusal. Not polish, and not a fallback: see the module note.
-        note(warnings, Warning::Jbig2SegmentSkipped);
-        return Err(FilterError::Unsupported(Capability::Jbig2));
+        //
+        // **What it is aimed at, exactly.** The note's argument is about a
+        // stream that carries content this build could not draw — a symbol
+        // dictionary and a text region, once — which would otherwise decode its
+        // page information segment, find no region it understood, and hand back
+        // a blank white page reported as success.
+        //
+        // A stream that carries *no content segment at all* is a different
+        // thing. Its page information segment declares the size and the default
+        // pixel value, and that is the whole of what the file says the page is:
+        // 7.4.8.5's default pixel is the page, and a producer that emits one
+        // page information segment and nothing else has told us the page is
+        // blank rather than failed to tell us anything. `safedocs/0000231.pdf`
+        // is that file — a 240-page scan whose last page is empty, whose other
+        // 240 pages decode, and which was refused whole for its blank one.
+        //
+        // So the refusal needs both halves: nothing was drawn, *and* either
+        // something was offered that this build did not draw, or the page never
+        // declared itself. A refusal recorded anywhere in the stream is the
+        // first half; `page.number` being unset is the second.
+        if page.declared_content || page.number.is_none() || !warnings.is_empty() {
+            note(warnings, Jbig2Refusal::NoRegion);
+            return (
+                Err(FilterError::Unsupported(Capability::Jbig2)),
+                page.extent,
+            );
+        }
     }
-    Ok(page.bitmap.bits)
+    (Ok(page.bitmap.bits), page.extent)
+}
+
+/// Whether a segment of this type is the page's *content* rather than its
+/// framing.
+///
+/// The page information segment, the end-of-page, end-of-stripe and end-of-file
+/// markers, the profiles segment and the extension segment all describe a page
+/// without putting anything on it. Everything else is something a producer put
+/// there and expects to see drawn — which is what makes the difference between
+/// a blank page and a page this build failed to draw.
+const fn declares_content(kind: u8) -> bool {
+    !matches!(
+        kind,
+        kind::PAGE_INFORMATION
+            | kind::END_OF_PAGE
+            | kind::END_OF_STRIPE
+            | kind::END_OF_FILE
+            | kind::PROFILES
+            | kind::EXTENSION
+    )
+}
+
+/// **One generic refinement region segment (T.88 7.4.7)**, decoded against a
+/// reference the caller supplies.
+///
+/// The reference is 6.3.2's: with no intermediate region referred to, it is
+/// what the page already holds under this region's own box. A refinement
+/// region improves a picture that is already there rather than drawing a new
+/// one, which is why it is the one region type that reads the page back.
+fn refinement_region(
+    segment: &Segment<'_>,
+    reference: &Bitmap,
+    ceiling: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> Option<(RegionInfo, Bitmap)> {
+    let mut reader = Reader::new(segment.data);
+    let Some(info) = RegionInfo::read(&mut reader) else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    // 7.4.7.2. Bit 0 selects the template, bit 1 TPGRON.
+    let Some(flags) = reader.u8() else {
+        note(warnings, Jbig2Refusal::Truncated);
+        return None;
+    };
+    let rtemplate = flags & 0x01;
+    let tpgron = flags & 0x02 != 0;
+    // 7.4.7.3: the adaptive pair, at template 0 only.
+    let mut at = NOMINAL_REFINE_AT;
+    if rtemplate == 0 {
+        for slot in &mut at {
+            let (Some(dx), Some(dy)) = (reader.i8(), reader.i8()) else {
+                note(warnings, Jbig2Refusal::Truncated);
+                return None;
+            };
+            *slot = (dx, dy);
+        }
+    }
+    let template = refine_template(rtemplate, at);
+    let Some(mut region) = Bitmap::new(info.width, info.height, ceiling) else {
+        note(warnings, Jbig2Refusal::RegionTooLarge);
+        return None;
+    };
+    let mut coder = MqDecoder::new(reader.rest());
+    let mut contexts = MqContexts::new(1 << template.bits());
+    // 6.3.5.3: the region and its reference are the same size and in the same
+    // place, so the offset between them is zero.
+    decode_refinement_into(
+        &mut coder,
+        &mut contexts,
+        &template,
+        tpgron,
+        reference,
+        (0, 0),
+        &mut region,
+    );
+    Some((info, region))
 }
 
 /// The page bitmap regions are composited onto, and what the page
@@ -809,6 +4510,64 @@ pub fn decode(
 struct Page {
     /// Packed 1-bpp rows, most significant bit first, 1 = black.
     bitmap: Bitmap,
+    /// 7.4.6.1's auxiliary buffers: what each *intermediate* region decoded
+    /// to, by segment number.
+    ///
+    /// An intermediate region is not drawn. It waits for the segment that
+    /// refers to it — in practice a refinement region, which takes it as the
+    /// reference 6.3.2 asks for — and that is the whole reason the two exist
+    /// as separate segment types.
+    intermediate: BTreeMap<u32, Bitmap>,
+    /// What each symbol dictionary exported, by its segment number (7.4.3).
+    ///
+    /// A `BTreeMap` rather than a hash map because a text region's symbol list
+    /// is the concatenation of its referred-to dictionaries' exports *in
+    /// reference order*, and anything that iterates has to do so the same way
+    /// on every target (ruling 4).
+    symbols: BTreeMap<u32, Vec<Bitmap>>,
+    /// 7.4.2's retained bitmap-coding contexts, by the segment number that
+    /// retained them.
+    ///
+    /// A `BTreeMap` for `symbols`' reason: which retained context a consuming
+    /// dictionary takes is decided by walking its referred-to list, and
+    /// anything that iterates has to do so the same way on every target
+    /// (ruling 4).
+    retained: BTreeMap<u32, RetainedContexts>,
+    /// What each Tables segment (7.4.13) declared, by its segment number.
+    ///
+    /// A `BTreeMap` for `symbols`' reason: the tables a segment refers to are
+    /// handed to its selectors *in reference order*, so anything that iterates
+    /// has to do so the same way on every target (ruling 4).
+    tables: BTreeMap<u32, HuffTable>,
+    /// What each pattern dictionary (6.7) declared, by its segment number.
+    ///
+    /// A halftone region's patterns are its referred-to dictionaries', in
+    /// reference order, for the same reason a text region's symbols are: the
+    /// grey values index across the concatenation.
+    patterns: BTreeMap<u32, Vec<Bitmap>>,
+    /// Whether any segment offered content rather than framing.
+    ///
+    /// See the refusal at the end of [`decode`]: a page that was offered
+    /// something and drew nothing is a failure, and a page that was offered
+    /// nothing is blank.
+    declared_content: bool,
+    /// Every segment number this stream has offered, whatever its type.
+    ///
+    /// A text region refers to its dictionaries *and* to its custom tables, and
+    /// the two have to be told apart: a table contributes no symbols and is not
+    /// a gap, while a dictionary that is absent or refused is. A number that
+    /// was never seen at all is the second case — T.88 Annex H.1's page 2 is
+    /// exactly that, referring to a dictionary that belongs to page 1.
+    seen: BTreeSet<u32>,
+    /// Symbol dictionaries that were offered and refused, by segment number.
+    ///
+    /// A text region numbers its symbols across the *concatenation* of every
+    /// dictionary it refers to (7.4.3), so one missing dictionary does not cost
+    /// its own symbols — it renumbers all of them, and every instance after the
+    /// gap draws the wrong glyph at the right place. That is worse than drawing
+    /// nothing and it looks like a working decoder, so a region that refers to
+    /// one of these is refused whole.
+    refused: BTreeSet<u32>,
     /// The page association of the page information segment, once one has
     /// been seen. A multi-page JBIG2 file pasted into a PDF stream carries
     /// segments for pages this image is not, and compositing those would
@@ -816,6 +4575,12 @@ struct Page {
     number: Option<u32>,
     /// How many regions were composited. Zero is the refusal.
     regions: usize,
+    /// What this stream's symbol dictionaries asked for, in pixels.
+    ///
+    /// Always accumulated rather than switched on: it is five integers and a
+    /// `max` per symbol, and a measurement that only the measuring entry point
+    /// collects is a measurement of a different decode.
+    extent: Jbig2SymbolExtent,
 }
 
 impl Page {
@@ -827,15 +4592,15 @@ impl Page {
     /// writes `0xFFFFFFFF` for its height precisely because it does not yet
     /// know. What is taken from here is the default pixel value, which
     /// decides whether the page starts black.
-    fn begin(&mut self, segment: &Segment<'_>, warnings: &mut Vec<Warning>) {
+    fn begin(&mut self, segment: &Segment<'_>, warnings: &mut Vec<Jbig2Refusal>) {
         let mut reader = Reader::new(segment.data);
         let (Some(width), Some(height)) = (reader.u32(), reader.u32()) else {
-            note(warnings, Warning::TruncatedInput);
+            note(warnings, Jbig2Refusal::Truncated);
             return;
         };
         let _ = (reader.u32(), reader.u32()); // x and y resolution
         let Some(flags) = reader.u8() else {
-            note(warnings, Warning::TruncatedInput);
+            note(warnings, Jbig2Refusal::Truncated);
             return;
         };
         self.number = Some(segment.page);
@@ -845,7 +4610,7 @@ impl Page {
             // composites at the coordinates it names. Worth recording,
             // because it is also what a stream pasted from another file looks
             // like.
-            note(warnings, Warning::Jbig2SegmentSkipped);
+            note(warnings, Jbig2Refusal::PageSizeDisagrees);
         }
         // 7.4.8.5 bit 2: the value every pixel starts at. A scan of a mostly
         // black page is coded as black-by-default with white regions on it,
@@ -862,10 +4627,212 @@ impl Page {
     /// decode — leaves the count alone, so a file whose only region could not
     /// be decoded still reaches the refusal instead of returning the blank
     /// page it was composited onto.
-    fn draw_generic(&mut self, segment: &Segment<'_>, ceiling: usize, warnings: &mut Vec<Warning>) {
+    fn draw_generic(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
         let Some((info, region)) = generic_region(segment, ceiling, warnings) else {
             return;
         };
+        self.bitmap.composite(&region, info.x, info.y, info.op);
+        self.regions += 1;
+    }
+
+    /// 7.4.7: decodes a generic refinement region and composites it.
+    ///
+    /// Unlike every other region, this one reads the page before it writes
+    /// it: 6.3.2 makes the reference whatever is already under the region's
+    /// box, so the window is lifted out first and the refinement decoded
+    /// against it.
+    fn draw_refinement(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        intermediate: bool,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
+        let Some(box_) = RegionInfo::read(&mut Reader::new(segment.data)) else {
+            note(warnings, Jbig2Refusal::Truncated);
+            return;
+        };
+        // 6.3.2: the reference is a referred-to intermediate region if there
+        // is one, and otherwise whatever the page already holds under this
+        // region's own box.
+        let referred = segment
+            .referred
+            .iter()
+            .find_map(|number| self.intermediate.get(number))
+            .cloned();
+        let reference = match referred {
+            Some(bitmap) => bitmap,
+            None => {
+                let Some(window) =
+                    self.bitmap
+                        .window(box_.x, box_.y, box_.width, box_.height, ceiling)
+                else {
+                    note(warnings, Jbig2Refusal::RegionTooLarge);
+                    return;
+                };
+                window
+            }
+        };
+        let Some((info, region)) = refinement_region(segment, &reference, ceiling, warnings) else {
+            note(warnings, Jbig2Refusal::RefinementRegionRefused);
+            return;
+        };
+        if intermediate {
+            // 7.4.6.1: it waits to be referred to rather than being drawn, and
+            // it is not a region for the purpose of the refusal.
+            self.intermediate.insert(segment.number, region);
+            return;
+        }
+        self.bitmap.composite(&region, info.x, info.y, info.op);
+        self.regions += 1;
+    }
+
+    /// 7.4.6 for an *intermediate* generic region: decoded and kept, not drawn.
+    fn keep_generic(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
+        let Some((_, region)) = generic_region(segment, ceiling, warnings) else {
+            note(warnings, Jbig2Refusal::GenericRegionRefused);
+            return;
+        };
+        self.intermediate.insert(segment.number, region);
+    }
+
+    /// 7.4.3: decodes a symbol dictionary and keeps what it exported.
+    ///
+    /// Nothing draws yet — a dictionary is not a region and does not count as
+    /// one, so a file of dictionaries alone still refuses. The text region that
+    /// reads these is the next milestone.
+    ///
+    /// Its imports are the concatenation of the dictionaries it refers to, in
+    /// reference order (7.4.3). A reference this file has not seen is not an
+    /// error here: it leaves the import list short, the export count then
+    /// disagrees with the header, and the dictionary refuses by name rather
+    /// than exporting symbols numbered against a list that was never built.
+    fn read_symbols(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
+        let mut imported = Vec::new();
+        for number in &segment.referred {
+            if let Some(exports) = self.symbols.get(number) {
+                imported.extend(exports.iter().cloned());
+            }
+        }
+        let tables = self.referred_tables(segment);
+        // 7.4.2: the context this dictionary consumes is the one the *last*
+        // segment it refers to retained. The referred-to list is in reference
+        // order and a dictionary may refer to several, only some of which
+        // retained; taking the last is what `bitmap-symbol-context-reuse.pdf`
+        // adjudicates -- three of its segments consume and two retain.
+        let consumed = segment
+            .referred
+            .iter()
+            .rev()
+            .find_map(|number| self.retained.get(number));
+        let mut retained = None;
+        // The page geometry the same call was given, threaded to the one place
+        // that can tell a glyph from a symbol larger than the page it is drawn
+        // onto. `self.bitmap` carries the caller's width and height and not the
+        // page information segment's, which [`Page::begin`] deliberately does
+        // not believe over them.
+        //
+        // Copied out and put back rather than borrowed in place: `tables` holds
+        // references into `self.tables` for the length of the call, so nothing
+        // else about `self` can be borrowed mutably across it.
+        let mut geometry =
+            SymbolPage::new(self.bitmap.width, self.bitmap.height, ceiling, self.extent);
+        let decoded = symbol_dictionary(
+            segment,
+            &imported,
+            &tables,
+            consumed,
+            &mut retained,
+            &mut geometry,
+            warnings,
+        );
+        self.extent = geometry.extent;
+        match decoded {
+            Some(exported) => {
+                self.extent.dictionaries += 1;
+                self.symbols.insert(segment.number, exported);
+                if let Some(kept) = retained {
+                    self.retained.insert(segment.number, kept);
+                }
+            }
+            None => {
+                self.refused.insert(segment.number);
+                note(warnings, Jbig2Refusal::SymbolDictionaryRefused);
+            }
+        }
+    }
+
+    /// 7.4.4: decodes a text region and composites it.
+    ///
+    /// Its symbols are the concatenation of the dictionaries it refers to, in
+    /// reference order (7.4.3) — the same rule a dictionary uses for its own
+    /// imports, and the reason both keep the referred-to list rather than the
+    /// set of it. The instance codes in the region are indices into that
+    /// concatenation, so a dictionary that was refused shortens the list and
+    /// every symbol after it would be the wrong one: a region whose referred-to
+    /// dictionaries did not all arrive is refused rather than drawn wrong.
+    ///
+    /// Like [`Page::draw_generic`], `regions` moves only when a bitmap actually
+    /// arrived, so a file whose only text region refused still reaches the
+    /// refusal instead of returning the blank page it was composited onto.
+    fn draw_text(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        intermediate: bool,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
+        let dangling = |number: &u32| {
+            !self.symbols.contains_key(number)
+                && (self.refused.contains(number) || !self.seen.contains(number))
+        };
+        if segment.referred.iter().any(dangling) {
+            // T.88 Annex H.1's own page 2 is this case: its arithmetic text
+            // region refers to page 1's *Huffman* dictionary as well as its
+            // own, so until the Huffman variant lands the numbering is short by
+            // that dictionary's exports and every instance would draw the wrong
+            // symbol. Named rather than attempted.
+            note(warnings, Jbig2Refusal::DanglingReference);
+            return;
+        }
+        let mut symbols = Vec::new();
+        for number in &segment.referred {
+            // A referred-to segment that is not a dictionary at all is
+            // ordinary — a text region refers to its custom tables the same
+            // way — and contributes nothing to the numbering.
+            if let Some(exports) = self.symbols.get(number) {
+                symbols.extend(exports.iter().cloned());
+            }
+        }
+        let tables = self.referred_tables(segment);
+        let Some((info, region)) = text_region(segment, &symbols, &tables, ceiling, warnings)
+        else {
+            note(warnings, Jbig2Refusal::TextRegionRefused);
+            return;
+        };
+        if intermediate {
+            // 7.4.6.1: an intermediate region is *not* drawn. It waits for the
+            // segment that refers to it — here a refinement region, which takes
+            // it as 6.3.2's reference — and compositing it as well would draw
+            // the picture twice, once unrefined.
+            self.intermediate.insert(segment.number, region);
+            return;
+        }
         self.bitmap.composite(&region, info.x, info.y, info.op);
         self.regions += 1;
     }
@@ -876,6 +4843,91 @@ impl Page {
     /// particular page — what a `/JBIG2Globals` stream carries — so it always
     /// matches; and until a page information segment has been seen there is
     /// nothing for a segment to disagree with.
+    /// **Clause 7.4.13: a Tables segment**, kept for whoever refers to it.
+    ///
+    /// A table that will not parse is simply not stored. That is not a silent
+    /// loss: the segment referring to it asks for one by position, gets `None`
+    /// from the cursor, and refuses -- so a malformed table costs the region
+    /// that wanted it and nothing else, which is the same bargain a refused
+    /// symbol dictionary strikes.
+    fn read_table(&mut self, segment: &Segment<'_>) {
+        if let Some(table) = custom_table(segment.data) {
+            self.tables.insert(segment.number, table);
+        }
+    }
+
+    /// **6.7: a pattern dictionary**, kept for the regions that refer to it.
+    fn read_patterns(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
+        match pattern_dictionary(segment, ceiling, warnings) {
+            Some(patterns) => {
+                self.patterns.insert(segment.number, patterns);
+            }
+            None => {
+                self.refused.insert(segment.number);
+                note(warnings, Jbig2Refusal::PatternDictionaryRefused);
+            }
+        }
+    }
+
+    /// **6.6: a halftone region**, stamped from its referred-to dictionaries.
+    ///
+    /// The dangling check is 7.4.3's, met a second time: the grey values index
+    /// across the concatenation of every dictionary the region refers to, so a
+    /// missing one does not cost its own patterns -- it renumbers all of them
+    /// and every cell stamps a different shape in the right place.
+    fn draw_halftone(
+        &mut self,
+        segment: &Segment<'_>,
+        ceiling: usize,
+        intermediate: bool,
+        warnings: &mut Vec<Jbig2Refusal>,
+    ) {
+        let dangling = |number: &u32| {
+            !self.patterns.contains_key(number)
+                && (self.refused.contains(number) || !self.seen.contains(number))
+        };
+        if segment.referred.iter().any(dangling) {
+            note(warnings, Jbig2Refusal::DanglingReference);
+            return;
+        }
+        let mut patterns = Vec::new();
+        for number in &segment.referred {
+            if let Some(declared) = self.patterns.get(number) {
+                patterns.extend(declared.iter().cloned());
+            }
+        }
+        let Some((info, region)) = halftone_region(segment, &patterns, ceiling, warnings) else {
+            note(warnings, Jbig2Refusal::HalftoneRegionRefused);
+            return;
+        };
+        if intermediate {
+            // 7.4.6.1, as for every other region kind: it waits to be referred
+            // to rather than being drawn.
+            self.intermediate.insert(segment.number, region);
+            return;
+        }
+        self.bitmap.composite(&region, info.x, info.y, info.op);
+        self.regions += 1;
+    }
+
+    /// The custom tables this segment refers to, **in reference order**.
+    ///
+    /// 7.4.3.1.6 and 7.4.4.1.2 both hand them out by position rather than by
+    /// number, so the order of `segment.referred` is load-bearing and is the
+    /// reason `read_segment` keeps that list at all.
+    fn referred_tables(&self, segment: &Segment<'_>) -> Vec<&HuffTable> {
+        segment
+            .referred
+            .iter()
+            .filter_map(|number| self.tables.get(number))
+            .collect()
+    }
+
     fn owns(&self, segment: &Segment<'_>) -> bool {
         segment.page == 0 || self.number.is_none_or(|n| n == segment.page)
     }
@@ -883,8 +4935,194 @@ impl Page {
 
 #[cfg(test)]
 mod tests {
+
+    /// A page every symbol in these tests fits comfortably inside.
+    ///
+    /// [`symbol_dictionary`] charges each symbol against the page it will be
+    /// composited onto, and almost every test here is about something else —
+    /// a template, a refinement offset, an export run, one of the other three
+    /// caps. `65 536` on each side is larger than any fixture in this file and
+    /// larger than the 8 193-wide symbol the pixel-budget test builds, so a
+    /// test that fails does so for the reason it was written for. The tests
+    /// that *are* about the page-relative bound name their own page.
+    fn test_page(ceiling: usize) -> SymbolPage {
+        SymbolPage::new(1 << 16, 1 << 16, ceiling, Jbig2SymbolExtent::default())
+    }
+
+    /// **B.3's code assignment is canonical**, checked against a table small
+    /// enough to write the answer out by hand.
+    ///
+    /// B.1's four lines have prefix lengths 1, 2, 3, 3, so the codes are 0,
+    /// 10, 110 and 111 — shortest first, and in table order within a length.
+    /// This is the one piece of Annex B that is a construction rather than a
+    /// datum, so it is worth pinning separately from the tables it is applied
+    /// to: if the assignment is wrong every table is wrong the same way, and
+    /// the page-level check could not say which.
+    #[test]
+    fn annex_b_assigns_canonical_prefix_codes() {
+        let table = table_b1();
+        assert_eq!(table.codes, vec![0b0, 0b10, 0b110, 0b111]);
+
+        // And a table carrying an out-of-band line still assigns in order:
+        // B.2's seven lines are 1, 2, 3, 4, 5, 6, 6.
+        let b2 = table_b2();
+        assert_eq!(
+            b2.codes,
+            vec![0b0, 0b10, 0b110, 0b1110, 0b11110, 0b111110, 0b111111]
+        );
+    }
+
+    /// A value reads its prefix and then its offset.
+    ///
+    /// B.1 line 1 is a two-bit prefix `10` and eight bits of offset over a low
+    /// of 16, so `10` followed by `00000101` is 21.
+    #[test]
+    fn a_huffman_line_adds_its_offset_to_its_low() {
+        let table = table_b1();
+        let bytes = [0b1000_0001, 0b0100_0000];
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(table.decode(&mut reader), Some(HuffValue::Value(16 + 5)));
+    }
+
+    /// And the out-of-band line carries no offset at all.
+    #[test]
+    fn the_out_of_band_line_ends_a_run() {
+        let table = table_b2();
+        let bytes = [0b1111_1100];
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(table.decode(&mut reader), Some(HuffValue::Oob));
+    }
     use super::*;
     use crate::mq::encoder::MqEncoder;
+
+    /// A.2's ranges, as `(first magnitude, field width, offset)`.
+    ///
+    /// Written from the clause rather than from [`decode_int`], because a
+    /// round trip against a table copied out of the decoder proves the two
+    /// copies agree and nothing else.
+    const INT_RANGES: [(i64, u32, i64); 6] = [
+        (0, 2, 0),
+        (4, 4, 4),
+        (20, 6, 20),
+        (84, 8, 84),
+        (340, 12, 340),
+        (4436, 32, 4436),
+    ];
+
+    /// The encoder's side of A.2, for the round trip below.
+    fn encode_int(encoder: &mut MqEncoder, prev: &mut usize, value: Option<i32>) {
+        let bit = |encoder: &mut MqEncoder, prev: &mut usize, d: u8| {
+            encoder.encode_at(*prev, d);
+            *prev = if *prev < 256 {
+                (*prev << 1) | usize::from(d)
+            } else {
+                (((*prev << 1) | usize::from(d)) & 511) | 256
+            };
+        };
+
+        // OOB is the negative zero: sign set, magnitude nothing.
+        let (sign, magnitude) = match value {
+            None => (1u8, 0i64),
+            Some(v) => (u8::from(v < 0), i64::from(v).abs()),
+        };
+        bit(encoder, prev, sign);
+
+        let which = INT_RANGES
+            .iter()
+            .rposition(|(first, _, _)| magnitude >= *first)
+            .unwrap_or(0);
+        for step in 0..which {
+            let _ = step;
+            bit(encoder, prev, 1);
+        }
+        if which < INT_RANGES.len() - 1 {
+            bit(encoder, prev, 0);
+        }
+
+        let (_, width, offset) = INT_RANGES[which];
+        let field = magnitude - offset;
+        for index in (0..width).rev() {
+            bit(encoder, prev, ((field >> index) & 1) as u8);
+        }
+    }
+
+    /// **Every range of A.2 round-trips, and so does the value that is not a
+    /// value.**
+    ///
+    /// The magnitudes are the first and last of each of the six fields and one
+    /// in the middle, so a build that got an offset or a width wrong fails at
+    /// the boundary rather than somewhere in the interior where two mistakes
+    /// can cancel. Both signs, because the sign is decoded first and shares the
+    /// context tree with everything after it.
+    ///
+    /// `None` is OOB — the negative zero that ends a height class (6.5.7) and a
+    /// text region's strip (6.4.5). It is in the same sequence as the ordinary
+    /// values on purpose: OOB must not disturb the contexts for what follows
+    /// it, and a test that decoded it alone could not tell.
+    #[test]
+    fn every_integer_range_and_oob_round_trips() {
+        let mut values: Vec<Option<i32>> = vec![None];
+        for (first, width, offset) in INT_RANGES {
+            let last = offset + (1i64 << width) - 1;
+            for magnitude in [first, first + 1, (first + last) / 2, last.min(1 << 30)] {
+                values.push(Some(magnitude as i32));
+                if magnitude != 0 {
+                    values.push(Some(-(magnitude as i32)));
+                }
+                values.push(None);
+            }
+        }
+
+        let mut encoder = MqEncoder::new(INT_CONTEXTS);
+        for value in &values {
+            let mut prev = 1usize;
+            encode_int(&mut encoder, &mut prev, *value);
+        }
+        let bytes = encoder.flush();
+
+        let mut coder = MqDecoder::new(&bytes);
+        let mut cx = MqContexts::new(INT_CONTEXTS);
+        for (index, want) in values.iter().enumerate() {
+            let got = decode_int(&mut coder, &mut cx);
+            assert_eq!(
+                got, *want,
+                "value {index} of the sequence: A.2 decoded {got:?} where {want:?} was encoded"
+            );
+        }
+    }
+
+    /// **A.3 reads back the symbol index it was given**, at every code length a
+    /// dictionary can ask for.
+    ///
+    /// The lengths bracket the byte boundaries and the single-symbol case,
+    /// where `SBSYMCODELEN` is zero and the procedure must read nothing at all
+    /// and answer nothing — a loop written with the wrong bound reads one bit
+    /// there and desynchronises everything after it.
+    #[test]
+    fn the_symbol_index_procedure_round_trips_at_every_code_length() {
+        for code_len in [0u32, 1, 2, 7, 8, 9, 15, 16] {
+            let count = 1u32 << code_len;
+            let ids: Vec<u32> = (0..count.min(64)).chain([count - 1]).collect();
+
+            let mut encoder = MqEncoder::new(iaid_contexts(code_len));
+            for id in &ids {
+                let mut prev = 1usize;
+                for index in (0..code_len).rev() {
+                    let d = ((id >> index) & 1) as u8;
+                    encoder.encode_at(prev, d);
+                    prev = (prev << 1) | usize::from(d);
+                }
+            }
+            let bytes = encoder.flush();
+
+            let mut coder = MqDecoder::new(&bytes);
+            let mut cx = MqContexts::new(iaid_contexts(code_len));
+            for want in &ids {
+                let got = decode_iaid(&mut coder, &mut cx, code_len);
+                assert_eq!(got, *want, "code length {code_len}");
+            }
+        }
+    }
 
     /// **ITU-T T.88 Annex H.1, "Datastream example" — the whole file, byte
     /// for byte.** Three pages, twenty-one segments, and the only JBIG2 in
@@ -991,8 +5229,20 @@ mod tests {
     ///
     /// The first thirteen bytes are D.4's file header and page count, which
     /// the embedded organisation a PDF uses (D.3) does not carry.
+    /// Segment 0: the symbol dictionary both pages' text regions refer to.
+    ///
+    /// It is declared on page 0, which is T.88's way of saying shared, and
+    /// ISO 32000-1 7.4.7 carries exactly this in .
+    const SHARED_DICTIONARY: std::ops::Range<usize> = 13..48;
+
     const PAGE_1: std::ops::Range<usize> = 13..400;
     const PAGE_2: std::ops::Range<usize> = 400..682;
+
+    /// Page 3, the refinement page. Segment 16 — the dictionary its own
+    /// dictionary refines against — sits inside this range rather than before
+    /// it, because it is declared on page 0 and the annex puts it where it is
+    /// first needed.
+    const PAGE_3: std::ops::Range<usize> = 682..860;
 
     /// **The picture T.88 Annex H.1 publishes for its generic region.**
     ///
@@ -1080,6 +5330,35 @@ mod tests {
             .collect()
     }
 
+    /// The generic region of one of Annex H's pages, decoded **on its own**.
+    ///
+    /// This used to be a window cut out of the finished page, and that was a
+    /// dependence on the rest of the page being skipped rather than a property
+    /// of the region. It held until the halftone lineage landed and drew a grey
+    /// ramp inside the frame -- at which point three tests failed and the
+    /// picture they were pinning had not changed at all.
+    ///
+    /// The same trap this file has already recorded twice: a whole-page
+    /// comparison that passes because both sides are blank, and a fixture that
+    /// agrees with five different templates. Comparing the segment the annex
+    /// publishes a bitmap *for* is what the assertion always meant.
+    fn annex_h_generic_region(page: &[u8]) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let segments = segments(page, &mut warnings);
+        let segment = segments
+            .iter()
+            .find(|segment| {
+                matches!(
+                    segment.kind,
+                    kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
+                )
+            })
+            .expect("the page carries a generic region");
+        let (_, bitmap) =
+            generic_region(segment, 1 << 20, &mut warnings).expect("the region decodes");
+        picture(&bitmap.bits, bitmap.width, bitmap.height)
+    }
+
     /// A picture with something in it for every template to get wrong.
     ///
     /// Forty by twenty-four, and deliberately awkward: a diagonal, solid
@@ -1122,7 +5401,7 @@ mod tests {
     /// Distance from the nominal set is the point. A decoder that read the
     /// AT bytes but ignored them, or never read them at all, forms different
     /// contexts from the encoder here and the picture does not come back.
-    const CUSTOM_AT: [(i8, i8); 4] = [(-5, 0), (4, -1), (-4, -2), (5, -2)];
+    const CUSTOM_AT: [(i32, i32); 4] = [(-5, 0), (4, -1), (-4, -2), (5, -2)];
 
     fn bitmap_from(rows: &[&str]) -> Bitmap {
         let height = rows.len() as u32;
@@ -1136,10 +5415,6 @@ mod tests {
         bitmap
     }
 
-    fn rows_identical(bitmap: &Bitmap, a: u32, b: u32) -> bool {
-        (0..bitmap.width).all(|x| bitmap.get(x as i32, a as i32) == bitmap.get(x as i32, b as i32))
-    }
-
     /// The exact inverse of [`decode_arithmetic`], through the encoder Annex
     /// H.2 pins.
     ///
@@ -1147,30 +5422,1433 @@ mod tests {
     /// bitmap, which is the same thing: every template reads only pixels
     /// above the current row or left of it on it, so by the time a decoder
     /// forms a context it holds exactly these values.
-    fn encode_arithmetic(
-        source: &Bitmap,
+    /// Encodes a symbol dictionary segment's data part (7.4.3 and 6.5), the
+    /// arithmetic variant, exporting every new symbol.
+    ///
+    /// The mirror of [`symbol_dictionary`], written from the clause: height
+    /// classes in ascending order, widths accumulating inside each, OOB to end
+    /// a class, and 6.5.10's alternating export runs. One coder and one
+    /// generic context set across the whole dictionary, which is the thing the
+    /// round trip is really checking.
+    fn symbol_dictionary_data(classes: &[&[&[&str]]], template: u8) -> Vec<u8> {
+        let count: usize = classes.iter().map(|class| class.len()).sum();
+        symbol_dictionary_with_exports(
+            classes,
+            template,
+            &[Some(0), Some(count as i32)],
+            count as u32,
+        )
+    }
+
+    /// The same, with 6.5.10's export runs and the promised count given
+    /// explicitly, so a test can select across imported symbols or promise a
+    /// count the data does not keep.
+    fn symbol_dictionary_with_exports(
+        classes: &[&[&[&str]]],
         template: u8,
-        tpgdon: bool,
-        at: &[(i8, i8); 4],
+        runs: &[Option<i32>],
+        num_ex: u32,
     ) -> Vec<u8> {
-        let mut encoder = MqEncoder::new(1 << template_bits(template));
-        let mut ltp = 0u8;
-        for y in 0..source.height {
-            if tpgdon {
-                let typical = y > 0 && rows_identical(source, y - 1, y);
-                let sltp = u8::from(typical != (ltp == 1));
-                encoder.encode_at(tpgdon_context(template), sltp);
-                ltp ^= sltp;
-                if ltp == 1 {
-                    continue;
+        let at = NOMINAL_AT[template as usize];
+        let count: usize = classes.iter().map(|class| class.len()).sum();
+
+        let mut data = Vec::new();
+        // 7.4.3.1.1: arithmetic, no refinement, this template.
+        data.extend_from_slice(&(u16::from(template) << 10).to_be_bytes());
+        for (dx, dy) in at.iter().take(if template == 0 { 4 } else { 1 }) {
+            data.push(*dx as u8);
+            data.push(*dy as u8);
+        }
+        data.extend_from_slice(&num_ex.to_be_bytes()); // SDNUMEXSYMS
+        data.extend_from_slice(&(count as u32).to_be_bytes()); // SDNUMNEWSYMS
+
+        // The decoder keeps one `MqContexts` array per procedure; the encoder
+        // has a single array, so the procedures are laid out end to end in it
+        // and each is given a base. Context states are per index either way,
+        // and the coder's own registers are shared either way, which is what
+        // makes the two arrangements the same stream.
+        let generic_len = 1usize << template_bits(template);
+        let mut encoder = MqEncoder::new(generic_len + INT_CONTEXTS * 3);
+        let mut height = 0i64;
+        let mut prevs = [1usize; 3]; // IADH, IADW, IAEX.
+        let iadh = generic_len;
+        let iadw = iadh + INT_CONTEXTS;
+        let iaex = iadw + INT_CONTEXTS;
+
+        for class in classes {
+            let class_height = class
+                .first()
+                .map(|rows| rows.len() as i64)
+                .unwrap_or_default();
+            encode_int_at(
+                &mut encoder,
+                iadh,
+                &mut prevs[0],
+                Some((class_height - height) as i32),
+            );
+            height = class_height;
+
+            let mut width = 0i64;
+            for rows in *class {
+                let symbol = bitmap_from(rows);
+                encode_int_at(
+                    &mut encoder,
+                    iadw,
+                    &mut prevs[1],
+                    Some((i64::from(symbol.width) - width) as i32),
+                );
+                width = i64::from(symbol.width);
+                for y in 0..symbol.height {
+                    for x in 0..symbol.width {
+                        let cx = context(&symbol, template, &at, x as i32, y as i32);
+                        encoder.encode_at(cx, symbol.get(x as i32, y as i32) as u8);
+                    }
                 }
             }
+            // OOB ends the height class.
+            encode_int_at(&mut encoder, iadw, &mut prevs[1], None);
+        }
+
+        // 6.5.10: alternating runs, the first of them not exported.
+        for run in runs {
+            encode_int_at(&mut encoder, iaex, &mut prevs[2], *run);
+        }
+
+        data.extend(encoder.flush());
+        data
+    }
+
+    /// The encoder's side of 6.3, written the way [`crate::jbig2_generic_encode`]
+    /// is: contexts come off the finished target rather than off a half-built
+    /// one.
+    ///
+    /// That is the same thing here because every *destination-layer* position
+    /// either template names — `REFINE_0_HERE`, `REFINE_1_HERE` and
+    /// `NOMINAL_REFINE_AT[0]` — is causal, so a decoder holds exactly these
+    /// values by the time it forms the context. The reference layer is fully
+    /// known to both sides from the start.
+    fn encode_refinement(
+        encoder: &mut MqEncoder,
+        base: usize,
+        template: &RefineTemplate<'_>,
+        reference: &Bitmap,
+        (dx, dy): (i32, i32),
+        source: &Bitmap,
+    ) {
+        for y in 0..source.height {
             for x in 0..source.width {
-                let cx = context(source, template, at, x as i32, y as i32);
-                encoder.encode_at(cx, source.get(x as i32, y as i32) as u8);
+                let cx =
+                    refinement_context(source, reference, dx, dy, template, x as i32, y as i32);
+                encoder.encode_at(base + cx, source.get(x as i32, y as i32) as u8);
             }
         }
-        encoder.flush()
+    }
+
+    /// **6.4.11's** reference offset, written from the clause rather than
+    /// called out of the decoder.
+    ///
+    /// It was 6.5.8.2.2's as well until `safedocs/0000337.pdf` said otherwise;
+    /// the dictionary encoders below now place a refined symbol at its coded
+    /// offset, and this stays for the text region's road.
+    ///
+    /// [`refinement_offset`] is what is under test; an encoder that called it
+    /// would move with it under injection and the round trip would prove that
+    /// two copies of one mistake agree. This is the same shape of separation
+    /// [`INT_RANGES`] keeps from [`decode_int`], and it is what makes the
+    /// fixture below tell three arithmetics apart.
+    fn split_offset(target: u32, reference: u32, coded: i32) -> i32 {
+        let difference = i64::from(target) - i64::from(reference);
+        // Floor division: -1 halves to -1, not to 0.
+        let half = if difference >= 0 {
+            difference / 2
+        } else {
+            -((-difference + 1) / 2)
+        };
+        (half + i64::from(coded)) as i32
+    }
+
+    /// One new symbol of a refining dictionary, for
+    /// [`symbol_dictionary_refining`].
+    struct Refined<'a> {
+        /// Which symbol of the pool it refines — imported symbols first.
+        id: u32,
+        /// 6.5.8.2.2's `RDX` and `RDY`, coded through IARDX and IARDY.
+        rdx: i32,
+        rdy: i32,
+        /// The picture the refinement decodes to. Its width and height are
+        /// the height class's, **not** the reference's: 6.5.8.2.2 has no
+        /// `RDW` or `RDH`, so a symbol that is not its reference's size is
+        /// spelled by the class rather than by a delta.
+        rows: &'a [&'a str],
+    }
+
+    /// Encodes an **arithmetic refining** symbol dictionary (7.4.3.1 with
+    /// `SDREFAGG` set), every new symbol of which is one instance of 6.5.8.2.2.
+    ///
+    /// The mirror of the `refagg` arm of [`symbol_dictionary`]. Each symbol is
+    /// given its own height class, because on this road the class is what
+    /// carries the symbol's size, and a size that differs from the reference's
+    /// is the whole point of the fixture that uses this.
+    ///
+    /// One `MqEncoder` array with a base per procedure, as
+    /// [`symbol_dictionary_with_exports`] lays one out — and **one refinement
+    /// base for the whole dictionary**, which is 6.5.8.1's rule and the reason
+    /// more than one refined symbol is worth coding here.
+    fn symbol_dictionary_refining(imported: &[Bitmap], symbols: &[Refined<'_>]) -> Vec<u8> {
+        let num_new = symbols.len();
+        let mut data = Vec::new();
+        // 7.4.3.1.1: arithmetic, SDREFAGG, generic template 0, refinement
+        // template 0.
+        data.extend_from_slice(&0x0002u16.to_be_bytes());
+        // 7.4.3.1.2's generic AT pairs are read on the arithmetic road whether
+        // or not a generic region is ever coded, so they are here even though
+        // every symbol below is refined.
+        for (dx, dy) in NOMINAL_AT[0] {
+            data.push(dx as u8);
+            data.push(dy as u8);
+        }
+        // 7.4.3.1.3's refinement pair, present because SDREFAGG is set and
+        // SDRTEMPLATE is zero.
+        for (dx, dy) in NOMINAL_REFINE_AT {
+            data.push(dx as u8);
+            data.push(dy as u8);
+        }
+        data.extend_from_slice(&(num_new as u32).to_be_bytes()); // SDNUMEXSYMS
+        data.extend_from_slice(&(num_new as u32).to_be_bytes()); // SDNUMNEWSYMS
+
+        // 6.5.8.2.3: as wide as the whole dictionary needs, imported included.
+        let code_len = symbol_code_length(imported.len() + num_new);
+        let template = refine_template(0, NOMINAL_REFINE_AT);
+        let (iadh, iadw, iaai, iardx, iardy, iaex) = (
+            0,
+            INT_CONTEXTS,
+            INT_CONTEXTS * 2,
+            INT_CONTEXTS * 3,
+            INT_CONTEXTS * 4,
+            INT_CONTEXTS * 5,
+        );
+        let iaid = INT_CONTEXTS * 6;
+        let refine = iaid + iaid_contexts(code_len);
+        let mut encoder = MqEncoder::new(refine + (1usize << template.bits()));
+        let mut prevs = [1usize; 6];
+
+        let mut pool: Vec<Bitmap> = imported.to_vec();
+        let mut height = 0i64;
+        for symbol in symbols {
+            let target = bitmap_from(symbol.rows);
+            let delta = i64::from(target.height) - height;
+            encode_int_at(&mut encoder, iadh, &mut prevs[0], Some(delta as i32));
+            height = i64::from(target.height);
+            // A class of one, so the first width delta is the whole width.
+            encode_int_at(&mut encoder, iadw, &mut prevs[1], Some(target.width as i32));
+            // 6.5.8.2: one instance, which is 6.5.8.2.2's plain refinement.
+            encode_int_at(&mut encoder, iaai, &mut prevs[2], Some(1));
+            let mut prev = 1usize;
+            for bit in (0..code_len).rev() {
+                let d = ((symbol.id >> bit) & 1) as u8;
+                encoder.encode_at(iaid + prev, d);
+                prev = (prev << 1) | usize::from(d);
+            }
+            encode_int_at(&mut encoder, iardx, &mut prevs[3], Some(symbol.rdx));
+            encode_int_at(&mut encoder, iardy, &mut prevs[4], Some(symbol.rdy));
+
+            let reference = pool.get(symbol.id as usize).expect("the reference exists");
+            // 6.5.8.2.2: the coded offset is the whole of it, unlike 6.4.11's.
+            let (dx, dy) = (symbol.rdx, symbol.rdy);
+            encode_refinement(
+                &mut encoder,
+                refine,
+                &template,
+                reference,
+                (dx, dy),
+                &target,
+            );
+            // OOB ends the height class.
+            encode_int_at(&mut encoder, iadw, &mut prevs[1], None);
+            pool.push(target);
+        }
+
+        // 6.5.10: skip the imported symbols, export every new one.
+        encode_int_at(
+            &mut encoder,
+            iaex,
+            &mut prevs[5],
+            Some(imported.len() as i32),
+        );
+        encode_int_at(&mut encoder, iaex, &mut prevs[5], Some(num_new as i32));
+
+        data.extend(encoder.flush());
+        data
+    }
+
+    /// A segment built in memory rather than parsed out of a stream, for the
+    /// dictionary tests that call [`symbol_dictionary`] directly.
+    fn dictionary_segment<'a>(number: u32, referred: &[u32], data: &'a [u8]) -> Segment<'a> {
+        Segment {
+            number,
+            kind: kind::SYMBOL_DICTIONARY,
+            referred: referred.to_vec(),
+            page: 1,
+            data,
+            unknown_length: false,
+        }
+    }
+
+    /// A six-by-six letter with ink on both edges of neither axis, so a
+    /// reference read one column out is a different picture on every row.
+    #[rustfmt::skip]
+    const REFERENCE_LETTER: [&str; 6] = [
+        "####..",
+        "#...#.",
+        "#...#.",
+        "####..",
+        "#..#..",
+        "#...#.",
+    ];
+
+    /// [`REFERENCE_LETTER`] moved one column right inside an eight-wide frame:
+    /// the picture 6.5.8.2.2's offset predicts exactly when the size
+    /// difference is split before `RDX` is added.
+    #[rustfmt::skip]
+    const WIDER_BY_TWO: [&str; 6] = [
+        ".####...",
+        ".#...#..",
+        ".#...#..",
+        ".####...",
+        ".#..#...",
+        ".#...#..",
+    ];
+
+    /// [`REFERENCE_LETTER`] with its first column cut away and a blank row
+    /// under it: five wide against a six-wide reference, so the size
+    /// difference is **odd and negative** and the two ways of halving it —
+    /// `div_euclid(2)` and `/2` — disagree.
+    #[rustfmt::skip]
+    const NARROWER_BY_ONE: [&str; 7] = [
+        "###..",
+        "...#.",
+        "...#.",
+        "###..",
+        "..#..",
+        "...#.",
+        ".....",
+    ];
+
+    /// **6.5.8.2.2's reference offset is `RDX` and `RDY`, and this fixture
+    /// used to say otherwise.**
+    ///
+    /// Two readings of the clause were live: the one [`refinement_offset`]
+    /// implements for 6.4.11 — *split the size difference, then add `RDX`* —
+    /// and `RDX` alone. They coincide whenever the refined symbol is its
+    /// reference's size, which is true of Annex H's refining dictionary and of
+    /// every pdf.js file that reaches this road, so nothing in the tree could
+    /// tell them apart and this fixture was built to.
+    ///
+    /// It was built under the wrong one. The encoder above and the decoder
+    /// share a reading by construction, so a round trip can prove a reading is
+    /// *load-bearing* and never that it is T.88's, and the old comment here
+    /// said exactly that and then let the fixture stand as the pin anyway.
+    ///
+    /// **What settled it is a document.** `safedocs/0000337.pdf` is 46 pages of
+    /// real OCR whose first refined symbol is 13 by 22 against a 10 by 23
+    /// reference. Under the centred reading it came out one column over, the
+    /// dictionary lost step inside its first height class, and every page of
+    /// the file refused — presenting as an out-of-range width, an impossible
+    /// refinement size, a symbol index past the pool, more symbols than
+    /// declared and an aggregate instance count over the cap, five names for
+    /// one displacement. Under `RDX` alone all 46 decode.
+    ///
+    /// So what this test is *for* has changed with it. It is no longer the
+    /// adjudicator; it is the guard that keeps 6.4.11's arithmetic from
+    /// leaking back into 6.5.8.2.2, and it can do that because `RDX` and `RDY`
+    /// are both zero here while the sizes differ — one symbol eight wide
+    /// against a six-wide reference, one five wide. Under the centred reading
+    /// the references would sit at +1 and −1; under a truncating `/2` at +1
+    /// and 0. Three arithmetics, three reference positions, and the one this
+    /// asserts is the one a real encoder emits.
+    ///
+    /// **The assertion is the picture and it has to be.** A refinement whose
+    /// reference sits one column out desynchronises the MQ decoder within a
+    /// row or two and everything after it is noise, which is the symptom
+    /// `docs/design/jbig2-symbol-text.md` records three separate defects
+    /// producing. A count, a size or a warning would not distinguish them.
+    ///
+    /// Two refined symbols in a row rather than one, because 6.5.8.1's shared
+    /// refinement states have nothing to carry across a dictionary that
+    /// refines once.
+    #[test]
+    fn a_refined_symbol_that_is_not_its_reference_s_size_pins_6_5_8_2_2() {
+        let class: [&[&str]; 1] = [&REFERENCE_LETTER];
+        let classes: [&[&[&str]]; 1] = [&class];
+        let base = symbol_dictionary_data(&classes, 0);
+        let imported = symbol_dictionary(
+            &dictionary_segment(1, &[], &base),
+            &[],
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut Vec::new(),
+        )
+        .expect("the reference dictionary decodes");
+        assert_eq!(bitmap_rows(&imported[0]), REFERENCE_LETTER);
+
+        let refining = symbol_dictionary_refining(
+            &imported,
+            &[
+                Refined {
+                    id: 0,
+                    rdx: 0,
+                    rdy: 0,
+                    rows: &WIDER_BY_TWO,
+                },
+                Refined {
+                    id: 0,
+                    rdx: 0,
+                    rdy: 0,
+                    rows: &NARROWER_BY_ONE,
+                },
+            ],
+        );
+        let mut warnings = Vec::new();
+        let exported = symbol_dictionary(
+            &dictionary_segment(2, &[1], &refining),
+            &imported,
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut warnings,
+        )
+        .expect("the refining dictionary decodes");
+
+        assert_eq!(exported.len(), 2, "both new symbols, and neither import");
+        assert_eq!(bitmap_rows(&exported[0]), WIDER_BY_TWO);
+        assert_eq!(bitmap_rows(&exported[1]), NARROWER_BY_ONE);
+        assert!(warnings.is_empty(), "the dictionary warned: {warnings:?}");
+    }
+
+    /// One symbol instance for [`text_region_segment`].
+    struct Instance {
+        /// Which exported symbol, by index.
+        id: u32,
+        /// The gap from the previous instance's far edge, or `None` for the
+        /// first in a strip — which takes 6.4.5's `FIRSTS` delta instead.
+        gap: Option<i32>,
+        /// The coordinate within the strip, ignored when there is one strip.
+        t: i32,
+    }
+
+    /// A text region segment (7.4.4) over an arithmetic coder, laid out the way
+    /// [`symbol_dictionary_with_exports`] lays a dictionary out: one context
+    /// array with a base per procedure, which is the same stream the decoder's
+    /// array-per-procedure reads.
+    ///
+    /// `strips` is `SBSTRIPS`, and each strip is `(first_s_delta, instances)`.
+    fn text_region_segment(
+        width: u32,
+        height: u32,
+        corner: u8,
+        strips: u32,
+        symbols: usize,
+        strip_t: &[i32],
+        strip_rows: &[(i32, Vec<Instance>)],
+    ) -> Vec<u8> {
+        let log_strips = strips.trailing_zeros();
+        let instances: u32 = strip_rows.iter().map(|(_, run)| run.len() as u32).sum();
+
+        let mut data = Vec::new();
+        // 7.4.1: the region segment information field.
+        data.extend_from_slice(&width.to_be_bytes());
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); // x
+        data.extend_from_slice(&0u32.to_be_bytes()); // y
+        data.push(0); // external combination operator: OR
+                      // 7.4.4.1.1: arithmetic, no refinement, no transposition, OR, and no
+                      // SBDSOFFSET — every knob this milestone does not implement is off, and
+                      // the ones it does are exercised by the fixtures rather than defaulted.
+        let flags = ((log_strips as u16) << 2) | (u16::from(corner) << 4);
+        data.extend_from_slice(&flags.to_be_bytes());
+        data.extend_from_slice(&instances.to_be_bytes());
+
+        let code_len = symbol_code_length(symbols);
+        let id_len = iaid_contexts(code_len);
+        let mut encoder = MqEncoder::new(INT_CONTEXTS * 4 + id_len);
+        let (iadt, iafs, iads, iait) = (0, INT_CONTEXTS, INT_CONTEXTS * 2, INT_CONTEXTS * 3);
+        let iaid = INT_CONTEXTS * 4;
+        let mut prevs = [1usize; 4];
+
+        // 6.4.5 step 1: the initial strip coordinate, negated by the decoder.
+        encode_int_at(&mut encoder, iadt, &mut prevs[0], Some(0));
+        for (index, (first_s, run)) in strip_rows.iter().enumerate() {
+            let delta = strip_t.get(index).copied().unwrap_or(0);
+            encode_int_at(&mut encoder, iadt, &mut prevs[0], Some(delta));
+            encode_int_at(&mut encoder, iafs, &mut prevs[1], Some(*first_s));
+            for instance in run {
+                if let Some(gap) = instance.gap {
+                    encode_int_at(&mut encoder, iads, &mut prevs[2], Some(gap));
+                }
+                if strips > 1 {
+                    encode_int_at(&mut encoder, iait, &mut prevs[3], Some(instance.t));
+                }
+                // A.3: the symbol code is a fixed-width tree walk rather than
+                // one of Annex A's integer procedures.
+                let mut prev = 1usize;
+                for bit in (0..code_len).rev() {
+                    let d = ((instance.id >> bit) & 1) as u8;
+                    encoder.encode_at(iaid + prev, d);
+                    prev = (prev << 1) | usize::from(d);
+                }
+            }
+            // OOB ends the strip.
+            encode_int_at(&mut encoder, iads, &mut prevs[2], None);
+        }
+
+        data.extend(encoder.flush());
+        data
+    }
+
+    /// **Milestone 4.** A text region places the symbols a dictionary exported,
+    /// at the coordinates 6.4.5 computes, across two strips.
+    ///
+    /// The fixture is a round trip against an encoder written from the same
+    /// clause, so what it proves is that the *plumbing* holds: the strip
+    /// coordinate accumulating, the out-of-band value ending a strip rather
+    /// than the region, the gap being measured from the previous symbol's far
+    /// edge rather than its origin, the symbol code being as wide as the count
+    /// needs, and the region landing where its segment says. It cannot prove
+    /// the placement convention itself — both sides share one reading of the
+    /// clause — and T.88 Annex H.1's own page cannot either, for a reason the
+    /// test below records.
+    #[test]
+    fn a_text_region_places_its_symbols_where_6_4_5_computes() {
+        // Two symbols, two and three wide, both two high.
+        let dictionary = symbol_dictionary_data(&[&[&["##", "##"], &["###", "###"]]], 0);
+        let region = text_region_segment(
+            12,
+            6,
+            corner::TOPLEFT,
+            1,
+            2,
+            &[0, 3],
+            &[
+                (
+                    0,
+                    vec![
+                        Instance {
+                            id: 0,
+                            gap: None,
+                            t: 0,
+                        },
+                        // The first symbol is two wide, so the running
+                        // coordinate stands at 1 and a gap of 3 puts this one
+                        // at 4 — which is what "from the far edge" means.
+                        Instance {
+                            id: 1,
+                            gap: Some(3),
+                            t: 0,
+                        },
+                    ],
+                ),
+                (
+                    1,
+                    vec![Instance {
+                        id: 0,
+                        gap: None,
+                        t: 0,
+                    }],
+                ),
+            ],
+        );
+
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(12, 6, 0));
+        stream.extend(header(1, kind::SYMBOL_DICTIONARY, 1, &dictionary));
+        stream.extend(header_referring(
+            2,
+            kind::IMMEDIATE_TEXT_REGION,
+            1,
+            &[1],
+            &region,
+        ));
+
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 12,
+            height: 6,
+        };
+        let bits = decode(&stream, &params, 1 << 20, &mut warnings)
+            .expect("an arithmetic text region is decoded");
+        assert_eq!(
+            picture(&bits, 12, 6),
+            [
+                "##..###.....",
+                "##..###.....",
+                "............",
+                ".##.........",
+                ".##.........",
+                "............",
+            ],
+            "warnings: {warnings:?}"
+        );
+    }
+
+    /// A text region whose dictionary refused is refused **whole**, by name.
+    ///
+    /// 7.4.3 numbers a region's symbols across the concatenation of every
+    /// dictionary it refers to, so a missing one does not cost its own symbols
+    /// — it renumbers all of them, and every instance after the gap draws the
+    /// wrong symbol at the right place. A decoder that carried on would produce
+    /// a page that looks like text and says something else.
+    ///
+    /// **T.88 Annex H.1's page 2 is exactly this case**, which is why the
+    /// annex cannot adjudicate this milestone: its arithmetic text region
+    /// (segment 10) refers to segments 0 and 9, and segment 0 is page 1's
+    /// *Huffman* dictionary. The published page appears when the Huffman
+    /// variant lands, and until then this is what correct looks like.
+    #[test]
+    fn a_text_region_whose_dictionary_refused_is_refused_by_name() {
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 64,
+            height: 56,
+        };
+        let bits = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut warnings)
+            .expect("the page's generic region still decodes");
+
+        assert!(
+            warnings.contains(&Warning::Jbig2VariantSkipped),
+            "the text region refers to a Huffman dictionary and must say so: \
+             {warnings:?}"
+        );
+        // And it drew nothing: the text region sits in the page's top rows,
+        // above the generic region this build does decode.
+        let page = picture(&bits, 64, 56);
+        assert!(
+            page[0..11].iter().all(|row| !row.contains('#')),
+            "a refused text region put ink on the page"
+        );
+    }
+
+    /// [`encode_int`] against a context array that begins at `base`.
+    fn encode_int_at(encoder: &mut MqEncoder, base: usize, prev: &mut usize, value: Option<i32>) {
+        *prev = 1;
+        let bit = |encoder: &mut MqEncoder, prev: &mut usize, d: u8| {
+            encoder.encode_at(base + *prev, d);
+            *prev = if *prev < 256 {
+                (*prev << 1) | usize::from(d)
+            } else {
+                (((*prev << 1) | usize::from(d)) & 511) | 256
+            };
+        };
+        let (sign, magnitude) = match value {
+            None => (1u8, 0i64),
+            Some(v) => (u8::from(v < 0), i64::from(v).abs()),
+        };
+        bit(encoder, prev, sign);
+        let which = INT_RANGES
+            .iter()
+            .rposition(|(first, _, _)| magnitude >= *first)
+            .unwrap_or(0);
+        for _ in 0..which {
+            bit(encoder, prev, 1);
+        }
+        if which < INT_RANGES.len() - 1 {
+            bit(encoder, prev, 0);
+        }
+        let (_, width, offset) = INT_RANGES[which];
+        let field = magnitude - offset;
+        for index in (0..width).rev() {
+            bit(encoder, prev, ((field >> index) & 1) as u8);
+        }
+    }
+
+    /// **A symbol dictionary decodes back the symbols it was built from**,
+    /// pixel for pixel, across several height classes.
+    ///
+    /// Clause 6.5's shape is two nested accumulations — heights across classes,
+    /// widths inside one — ended by an out-of-band value, and every symbol
+    /// after the first is decoded from adaptive state the ones before it left
+    /// behind (6.5.8.1). So the interesting failures are all *downstream*: a
+    /// build that restarts the contexts per symbol, or loses the width
+    /// accumulator, or reads OOB as a width, decodes symbol one correctly and
+    /// then noise. Three classes with several symbols each is the smallest
+    /// fixture where all three of those show.
+    ///
+    /// The symbols are asymmetric on both axes on purpose: a transposed
+    /// width and height, or a row and column swapped in the context, survives
+    /// any square fixture.
+    #[test]
+    fn a_symbol_dictionary_round_trips_its_symbols() {
+        let short: [&[&str]; 2] = [&["#..#", ".##.", "#..#"], &["####", "#...", "#..#"]];
+        let tall: [&[&str]; 3] = [
+            &["#.", "##", "#.", "..", "#."],
+            &["#####", ".#...", ".#...", ".#...", "..###"],
+            &["#", "#", "#", "#", "."],
+        ];
+        let taller: [&[&str]; 1] = [&[
+            "#..#..#", "......#", "#######", ".#...#.", "#.....#", "##...##", "....#..",
+        ]];
+        let classes: [&[&[&str]]; 3] = [&short, &tall, &taller];
+
+        for template in 0..4u8 {
+            let data = symbol_dictionary_data(&classes, template);
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data: &data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            let exported = symbol_dictionary(
+                &segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings,
+            )
+            .unwrap_or_else(|| panic!("template {template} did not decode: {warnings:?}"));
+
+            let expected: Vec<&[&str]> = classes.iter().flat_map(|c| c.iter().copied()).collect();
+            assert_eq!(exported.len(), expected.len(), "template {template}");
+            for (index, rows) in expected.iter().enumerate() {
+                let want = bitmap_from(rows);
+                let got = &exported[index];
+                assert_eq!(
+                    (got.width, got.height),
+                    (want.width, want.height),
+                    "template {template}, symbol {index}: dimensions"
+                );
+                for y in 0..want.height {
+                    for x in 0..want.width {
+                        assert_eq!(
+                            got.get(x as i32, y as i32),
+                            want.get(x as i32, y as i32),
+                            "template {template}, symbol {index}, pixel ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A dictionary exports what 6.5.10's runs select, out of its imported
+    /// symbols as well as its new ones.**
+    ///
+    /// The export flags run over the imported symbols *followed by* the new
+    /// ones, so a dictionary can re-export what it was given, drop what it
+    /// decoded, or interleave the two — and a text region numbers its symbols
+    /// across whatever comes out. A build that exported only the new symbols
+    /// passes every single-dictionary fixture and then puts the wrong glyph on
+    /// every page of a document whose dictionaries chain.
+    #[test]
+    fn export_runs_select_across_imported_and_new_symbols() {
+        let new_symbols: [&[&str]; 2] = [&["##", ".#"], &["#.", "##"]];
+        let classes: [&[&[&str]]; 1] = [&new_symbols];
+        let imported = [bitmap_from(&["#"]), bitmap_from(&[".."])];
+
+        // Skip one, take two, skip one: the second imported symbol and the
+        // first new one.
+        let runs = [Some(1), Some(2), Some(1)];
+        let data = symbol_dictionary_with_exports(&classes, 0, &runs, 2);
+
+        let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
+            kind: kind::SYMBOL_DICTIONARY,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let mut warnings = Vec::new();
+        let exported = symbol_dictionary(
+            &segment,
+            &imported,
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut warnings,
+        )
+        .unwrap_or_else(|| panic!("it did not decode: {warnings:?}"));
+
+        assert_eq!(exported.len(), 2, "two symbols were selected");
+        assert_eq!(
+            (exported[0].width, exported[0].height),
+            (2, 1),
+            "the first export is the second *imported* symbol, not a new one"
+        );
+        assert_eq!(
+            (exported[1].width, exported[1].height),
+            (2, 2),
+            "the second export is the first new symbol"
+        );
+    }
+
+    /// **A retained context of the wrong shape is refused, not quietly
+    /// dropped.**
+    ///
+    /// 7.4.2 lets a dictionary start from the adaptive state another left
+    /// behind, and the array is indexed by a template's pixel neighbourhood --
+    /// 65 536 states at template 0, 8 192 at template 1, 1 024 at 2 and 3. So
+    /// a consumer at one template and a retainer at another have nothing to
+    /// hand over.
+    ///
+    /// The tempting reading is to notice the mismatch and start fresh, which
+    /// costs nothing and produces a picture. It is the wrong one twice over:
+    /// the encoder made its decisions against *some* model and the initial
+    /// state is not it, so the symbols come out wrong; and a decoder that
+    /// degrades silently here leaves no record (ruling 10). Refused by name.
+    ///
+    /// This was a row reading zero in both columns of the counted table --
+    /// removing the check broke no test -- which is what that table is for.
+    #[test]
+    fn a_retained_context_of_the_wrong_shape_is_refused_by_name() {
+        // Template 1: 8 192 contexts, and one AT pair rather than four.
+        let mut data = Vec::new();
+        data.extend_from_slice(&(0x0100u16 | (1 << 10)).to_be_bytes());
+        data.extend_from_slice(&[2, -1i8 as u8]);
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        let segment = dictionary_segment(2, &[1], &data);
+
+        // A template 0 dictionary's contexts: sixteen bits, not thirteen.
+        let kept = RetainedContexts {
+            generic: MqContexts::new(1 << template_bits(0)),
+            refine: MqContexts::new(refine_states(0)),
+        };
+        let mut warnings = Vec::new();
+        assert!(symbol_dictionary(
+            &segment,
+            &[],
+            &[],
+            Some(&kept),
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut warnings
+        )
+        .is_none());
+        assert_eq!(warnings, vec![Jbig2Refusal::RetainedContextMismatch]);
+
+        // The same dictionary against a context of its own shape gets past
+        // this check, so the refusal above is the shape and not the road.
+        let matching = RetainedContexts {
+            generic: MqContexts::new(1 << template_bits(1)),
+            refine: MqContexts::new(refine_states(0)),
+        };
+        let mut warnings = Vec::new();
+        let _ = symbol_dictionary(
+            &segment,
+            &[],
+            &[],
+            Some(&matching),
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut warnings,
+        );
+        assert!(
+            !warnings.contains(&Jbig2Refusal::RetainedContextMismatch),
+            "{warnings:?}"
+        );
+    }
+
+    /// **Every variant this milestone does not decode refuses by its own
+    /// name**, rather than as the segment type nobody has started.
+    ///
+    /// `Jbig2SegmentSkipped` means a lineage with no work behind it;
+    /// `Jbig2VariantSkipped` means a file one scheduled milestone away. The
+    /// corpus census counted how many files each of those is, and folding them
+    /// together is how the residual after a capability lands comes to look
+    /// like the refusal it replaced.
+    #[test]
+    fn the_variants_this_build_does_not_decode_refuse_by_their_own_name() {
+        // **Both rows are now a reference that does not resolve rather than a
+        // capability nobody built.** What has left this list is the whole of
+        // the symbol lineage: SDHUFF, SDREFAGG, both refinement templates,
+        // SDHUFF together with SDREFAGG, clause 7.4.13's custom tables and now
+        // 7.4.2's retained bitmap-coding contexts. So `0x0100` refuses here
+        // because this segment refers to nothing that retained a context, and
+        // `0x000D` because it refers to no Tables segment while 7.4.3.1.6
+        // hands them out by position -- one short renumbers every selector
+        // after the gap. Neither is a road this build has not walked.
+        for (flags, expected) in [
+            (0x0100u16, Jbig2Refusal::RetainedContextMissing),
+            (0x000D, Jbig2Refusal::CustomTableMissing),
+        ] {
+            let mut data = Vec::new();
+            data.extend_from_slice(&flags.to_be_bytes());
+            data.extend_from_slice(&[0; 8]); // AT, template 0.
+            data.extend_from_slice(&1u32.to_be_bytes());
+            data.extend_from_slice(&1u32.to_be_bytes());
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data: &data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            assert!(
+                symbol_dictionary(
+                    &segment,
+                    &[],
+                    &[],
+                    None,
+                    &mut None,
+                    &mut test_page(1 << 20),
+                    &mut warnings
+                )
+                .is_none(),
+                "flags {flags:#06x} decoded"
+            );
+            assert_eq!(
+                warnings,
+                vec![expected],
+                "flags {flags:#06x} refused under the wrong name"
+            );
+            assert_eq!(
+                expected.warning(),
+                Warning::Jbig2VariantSkipped,
+                "flags {flags:#06x} reports the wrong warning outwardly"
+            );
+        }
+    }
+
+    /// **A dictionary promising more symbols than it holds is refused**, not
+    /// truncated.
+    ///
+    /// `SDNUMEXSYMS` is what a text region indexes against, so a dictionary
+    /// that comes up short would silently renumber every symbol after the gap.
+    #[test]
+    fn a_dictionary_that_does_not_keep_its_promised_count_is_refused() {
+        let new_symbols: [&[&str]; 1] = [&["#"]];
+        let classes: [&[&[&str]]; 1] = [&new_symbols];
+        // One symbol encoded, two exports promised.
+        let data = symbol_dictionary_with_exports(&classes, 0, &[Some(0), Some(1)], 2);
+        let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
+            kind: kind::SYMBOL_DICTIONARY,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let mut warnings = Vec::new();
+        assert!(symbol_dictionary(
+            &segment,
+            &[],
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut warnings
+        )
+        .is_none());
+        assert!(
+            warnings.contains(&Jbig2Refusal::ExportCountMismatch),
+            "{warnings:?}"
+        );
+    }
+
+    /// A symbol dictionary segment carrying nothing but a header.
+    ///
+    /// Template 1 rather than 0 so 7.4.3.1.2 asks for one AT pair instead of
+    /// four, which is what makes the whole thing twelve bytes: two of flags,
+    /// two of AT, and the two 32-bit counts the caps are read from.
+    fn dictionary_header(num_ex: u32, num_new: u32) -> Vec<u8> {
+        let mut data = Vec::new();
+        // 7.4.3.1.1: arithmetic, no refinement, no retained context, template 1.
+        data.extend_from_slice(&(1u16 << 10).to_be_bytes());
+        data.extend_from_slice(&[2, -1i8 as u8]); // the nominal AT pair
+        data.extend_from_slice(&num_ex.to_be_bytes());
+        data.extend_from_slice(&num_new.to_be_bytes());
+        data
+    }
+
+    /// **[`MAX_JBIG2_SYMBOLS`] fires, and it fires off the header.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving
+    /// this cap. `SDNUMNEWSYMS` and `SDNUMEXSYMS` are 32-bit fields at
+    /// 7.4.3.1.4 and 7.4.3.1.5 and nothing behind them is read first, so a
+    /// twelve-byte segment reaches the refusal — which is the point: the
+    /// allocation the cap exists to prevent is one `Vec` per symbol, and a
+    /// build that sized it from the count before checking would have asked for
+    /// four billion of them here.
+    ///
+    /// Both fields are charged, not just the new one, because 6.5.10's export
+    /// runs are counted against `SDNUMEXSYMS` and a dictionary may export more
+    /// than it decoded — it re-exports what it imported.
+    ///
+    /// No clock. The assertion is the named warning.
+    #[test]
+    fn a_dictionary_declaring_more_symbols_than_the_cap_is_refused_by_name() {
+        for (num_ex, num_new) in [
+            (2, MAX_JBIG2_SYMBOLS + 1),
+            (MAX_JBIG2_SYMBOLS + 1, 2),
+            (u32::MAX, u32::MAX),
+        ] {
+            let data = dictionary_header(num_ex, num_new);
+            assert_eq!(data.len(), 12, "the whole segment is twelve bytes");
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data: &data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            assert!(
+                symbol_dictionary(
+                    &segment,
+                    &[],
+                    &[],
+                    None,
+                    &mut None,
+                    &mut test_page(1 << 20),
+                    &mut warnings
+                )
+                .is_none(),
+                "{num_ex}/{num_new} was not refused"
+            );
+            assert!(
+                warnings.contains(&Jbig2Refusal::SymbolCountCap),
+                "{num_ex}/{num_new}: {warnings:?}"
+            );
+        }
+    }
+
+    /// **[`MAX_JBIG2_SYMBOL_PIXELS`] fires, before a bitmap is allocated.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving
+    /// this cap, and it is the interesting one of the three: the count caps
+    /// read a field, and this one accumulates.
+    ///
+    /// The Huffman road (6.5.9) is where it is easiest to say so in bytes.
+    /// Table B.4's last line carries a 32-bit range over a low of 76 and B.2's
+    /// carries one over 75, so two Annex B codes state a height class 8 192
+    /// tall holding one symbol 8 193 wide — 67 117 056 pixels, past the cap by
+    /// eight thousand — in a segment small enough to read. **Nothing is
+    /// allocated**: on this road the widths are collected first and the
+    /// collective bitmap is read afterwards, so the charge lands before
+    /// `Bitmap::new` is reached at all, which is what "a permit is what has
+    /// been promised" means here.
+    ///
+    /// The symbol is well under [`MAX_JBIG2_SYMBOLS`] and each of its
+    /// dimensions is well under `u32::MAX`, so what refuses it is this cap and
+    /// not one of the two standing beside it. The pair one step below the cap
+    /// proves the other direction.
+    ///
+    /// No clock. The assertion is the named warning.
+    #[test]
+    fn a_dictionary_past_the_symbol_pixel_cap_is_refused_before_it_allocates() {
+        // A Huffman dictionary: DH over B.4, DW over B.2, no refinement, no
+        // custom tables. 7.4.3.1.2's AT pair does not exist on this road.
+        let dictionary = |height: i32, width: i32| {
+            let mut data = Vec::new();
+            data.extend_from_slice(&1u16.to_be_bytes());
+            data.extend_from_slice(&4u32.to_be_bytes()); // SDNUMEXSYMS
+            data.extend_from_slice(&4u32.to_be_bytes()); // SDNUMNEWSYMS
+            let mut writer = BitWriter::new();
+            write_huff(&mut writer, &table_b4(), height);
+            write_huff(&mut writer, &table_b2(), width);
+            write_huff_oob(&mut writer, &table_b2());
+            data.extend(writer.finish());
+            data
+        };
+        let refused = |data: &[u8]| {
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            let out = symbol_dictionary(
+                &segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings,
+            );
+            (
+                out.is_none() && warnings.contains(&Jbig2Refusal::SymbolPixelCap),
+                warnings,
+            )
+        };
+
+        // 8 192 x 8 193 is 67 117 056, which is 8 192 past the cap.
+        let over = dictionary(8_192, 8_193);
+        assert!(
+            u64::from(8_192u32) * u64::from(8_193u32) > MAX_JBIG2_SYMBOL_PIXELS,
+            "the fixture has to be over the cap to prove anything"
+        );
+        let (fired, warnings) = refused(&over);
+        assert!(
+            fired,
+            "a symbol past the pixel cap was not refused: {warnings:?}"
+        );
+
+        // And one pixel column narrower is 67 108 864 exactly, which is the cap
+        // and not past it — so the dictionary gets as far as reading a
+        // collective bitmap that is not there, and refuses for that instead.
+        let at = dictionary(8_192, 8_192);
+        assert_eq!(
+            u64::from(8_192u32) * u64::from(8_192u32),
+            MAX_JBIG2_SYMBOL_PIXELS,
+            "8 192 squared is the cap, which is what makes this the boundary"
+        );
+        let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
+            kind: kind::SYMBOL_DICTIONARY,
+            page: 1,
+            data: &at,
+            unknown_length: false,
+        };
+        let mut warnings = Vec::new();
+        assert!(
+            symbol_dictionary(
+                &segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings
+            )
+            .is_none(),
+            "a truncated collective bitmap is still not a dictionary"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|r| r.warning() == Warning::Jbig2SymbolLimitHit),
+            "exactly at the cap is admitted, and this warning says it was not: \
+             {warnings:?}"
+        );
+    }
+
+    /// **[`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`] fires, at the first symbol.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving
+    /// this cap, and it is the only one of the four that reads the *page*: the
+    /// other three could be checked with no idea what the symbols were for.
+    ///
+    /// The Huffman road again, for the pixel budget's reason — two Annex B
+    /// codes state a height class and a width, so the whole segment is small
+    /// enough to read — and with the same property: on this road the widths of
+    /// a class are collected before its collective bitmap is read, so the
+    /// charge lands before `Bitmap::new` is reached and **nothing is
+    /// allocated**.
+    ///
+    /// Both dimensions are exercised, and the two symbols are chosen so that
+    /// **an area bound would admit both of them** — which is what makes this
+    /// test say something about the per-dimension choice rather than only about
+    /// the constant. Against a page of 8 by 8 the per-dimension allowance is 32
+    /// each way and the area allowance would be 1 024; 512 by 1 and 1 by 512
+    /// are 512 pixels each, so an area bound lets them through and this one
+    /// does not. 67 108 864 pixels is far away in both cases, so the total
+    /// budget is not what refuses them either — asserted, not assumed.
+    ///
+    /// **And the other direction**, which is the half that keeps this a bound
+    /// rather than a refusal of the format: 32 by 8 is exactly four times the
+    /// page's width and one times its height, so it is admitted, and the
+    /// dictionary then goes on to refuse for the collective bitmap that is not
+    /// there. The absence of `Jbig2SymbolLimitHit` is what says so.
+    ///
+    /// No clock. The assertion is the named warning — which matters more here
+    /// than anywhere else in this file, because the finding this cap closes was
+    /// found *by* a clock: `docs/verification.md`'s `jbig2` fuzz row, a
+    /// twenty-second libFuzzer timeout on 105 bytes.
+    #[test]
+    fn a_symbol_larger_than_its_page_is_refused_at_the_first_symbol() {
+        // A Huffman dictionary: DH over B.4, DW over B.2, no refinement, no
+        // custom tables — the shape the pixel-budget test above builds.
+        let dictionary = |height: i32, width: i32| {
+            let mut data = Vec::new();
+            data.extend_from_slice(&1u16.to_be_bytes());
+            data.extend_from_slice(&4u32.to_be_bytes()); // SDNUMEXSYMS
+            data.extend_from_slice(&4u32.to_be_bytes()); // SDNUMNEWSYMS
+            let mut writer = BitWriter::new();
+            write_huff(&mut writer, &table_b4(), height);
+            write_huff(&mut writer, &table_b2(), width);
+            write_huff_oob(&mut writer, &table_b2());
+            data.extend(writer.finish());
+            data
+        };
+        let decode = |data: &[u8], page: u32| {
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            let mut geometry = SymbolPage::new(page, page, 1 << 20, Jbig2SymbolExtent::default());
+            let out = symbol_dictionary(
+                &segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut geometry,
+                &mut warnings,
+            );
+            (out, warnings, geometry.extent)
+        };
+
+        assert_eq!(
+            MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, 4,
+            "the allowances written into this test are four times a side"
+        );
+
+        // Too wide, and too tall, against a page of 8 by 8 — and each of them
+        // inside the area an area bound would have allowed.
+        for (height, width) in [(1, 512), (512, 1)] {
+            assert!(
+                u64::from(width as u32) * u64::from(height as u32)
+                    < 8 * 8 * u64::from(MAX_JBIG2_SYMBOL_PAGE_MULTIPLE)
+                        * u64::from(MAX_JBIG2_SYMBOL_PAGE_MULTIPLE),
+                "{width} by {height} is outside the area allowance too, so it                  would not tell a per-dimension bound from an area one"
+            );
+            let (out, warnings, extent) = decode(&dictionary(height, width), 8);
+            assert!(
+                out.is_none(),
+                "{width} by {height} against a page of 8 by 8 decoded"
+            );
+            assert!(
+                warnings.contains(&Jbig2Refusal::SymbolLargerThanPage),
+                "{width} by {height}: {warnings:?}"
+            );
+            assert!(
+                !warnings.contains(&Jbig2Refusal::SymbolPixelCap),
+                "{width} by {height} is {} pixels, nowhere near the total \
+                 budget, and the total budget is what refused it: {warnings:?}",
+                u64::from(width as u32) * u64::from(height as u32)
+            );
+            // **At the first symbol**, which is the whole point: the fuzz seed
+            // this cap closes spent 67 219 222 pixels across 546 symbols
+            // before the total budget noticed.
+            assert_eq!(
+                extent.symbols, 1,
+                "{width} by {height} was refused after more than one symbol"
+            );
+            // And outwardly it is the cap warning rather than a variant or a
+            // truncation, because a caller acts on `Warning` and not on this.
+            assert_eq!(
+                Jbig2Refusal::SymbolLargerThanPage.warning(),
+                Warning::Jbig2SymbolLimitHit,
+                "the refusal reports the wrong warning outwardly"
+            );
+            assert!(
+                !Jbig2Refusal::SymbolLargerThanPage.is_malformed(),
+                "this is this build's number rather than the file's fault"
+            );
+        }
+
+        // Four times the width and once the height is the allowance itself, so
+        // it is admitted and the dictionary refuses for the collective bitmap
+        // that is not there instead.
+        let (out, warnings, extent) = decode(&dictionary(8, 32), 8);
+        assert!(
+            out.is_none(),
+            "a truncated collective bitmap is still not a dictionary"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|r| r.warning() == Warning::Jbig2SymbolLimitHit),
+            "exactly at the allowance is admitted, and this warning says it \
+             was not: {warnings:?}"
+        );
+        assert_eq!(
+            (extent.widest, extent.tallest),
+            (32, 8),
+            "the symbol was measured before it was judged"
+        );
+    }
+
+    /// **A text region that places nothing is blank, not broken.**
+    ///
+    /// The two halves of one condition, side by side, because they were one
+    /// check and should not have been. `SBNUMINSTANCES` is a count like any
+    /// other and zero is legal (6.4): the region is its own default pixel
+    /// value over its own extent and 6.4.5's strip loop never runs. What is
+    /// broken is instances with no symbols behind them, and that is the other
+    /// row.
+    ///
+    /// `bitmap-symbol-empty.pdf` is the first row, and refusing it reported a
+    /// whole page as undecodable over a region that had said it would draw
+    /// nothing.
+    #[test]
+    fn a_text_region_with_no_symbols_refuses_only_if_it_places_one() {
+        let region = |instances: u32| {
+            let mut data = Vec::new();
+            // 7.4.1: the region segment information field.
+            data.extend_from_slice(&8u32.to_be_bytes()); // width
+            data.extend_from_slice(&8u32.to_be_bytes()); // height
+            data.extend_from_slice(&0u32.to_be_bytes()); // x
+            data.extend_from_slice(&0u32.to_be_bytes()); // y
+            data.push(0); // external combination operator: OR
+                          // 7.4.4.1.1: arithmetic, one strip, TOPLEFT, OR, no offset.
+            data.extend_from_slice(&0u16.to_be_bytes());
+            data.extend_from_slice(&instances.to_be_bytes());
+            // 6.4.5 step 1 still reads STRIPT off the coder, so there has to
+            // be something for the decoder to read even when nothing is
+            // placed. A zero byte is a valid MQ stream prefix.
+            data.extend_from_slice(&[0u8; 4]);
+            data
+        };
+
+        let data = region(0);
+        let segment = Segment {
+            number: 2,
+            referred: Vec::new(),
+            kind: kind::IMMEDIATE_TEXT_REGION,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let mut warnings = Vec::new();
+        let (info, bitmap) = text_region(&segment, &[], &[], 1 << 20, &mut warnings)
+            .unwrap_or_else(|| panic!("a region placing nothing refused: {warnings:?}"));
+        assert_eq!((info.width, info.height), (8, 8));
+        assert!(
+            bitmap.bits.iter().all(|byte| *byte == 0),
+            "a region that placed nothing is not blank"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let data = region(1);
+        let segment = Segment {
+            number: 2,
+            referred: Vec::new(),
+            kind: kind::IMMEDIATE_TEXT_REGION,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let mut warnings = Vec::new();
+        assert!(text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
+        assert_eq!(warnings, vec![Jbig2Refusal::TextRegionWithoutSymbols]);
+    }
+
+    /// **[`MAX_JBIG2_TEXT_INSTANCES`] fires, and it fires off the header.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving
+    /// this cap. `SBNUMINSTANCES` is a 32-bit field at 7.4.4.5 and the check
+    /// sits **before** 6.4.5's placement loop and before the region bitmap is
+    /// made, so twenty-three bytes reach it: seventeen of region information,
+    /// two of flags, four of count.
+    ///
+    /// It also sits before the empty-dictionary check below it, which is why
+    /// this fixture can refer to no dictionary at all and still prove the cap
+    /// rather than proving `Jbig2SegmentSkipped`.
+    ///
+    /// No clock. The assertion is the named warning.
+    #[test]
+    fn a_text_region_declaring_more_instances_than_the_cap_is_refused_by_name() {
+        let region = |instances: u32| {
+            let mut data = Vec::new();
+            // 7.4.1: the region segment information field.
+            data.extend_from_slice(&64u32.to_be_bytes()); // width
+            data.extend_from_slice(&64u32.to_be_bytes()); // height
+            data.extend_from_slice(&0u32.to_be_bytes()); // x
+            data.extend_from_slice(&0u32.to_be_bytes()); // y
+            data.push(0); // external combination operator: OR
+                          // 7.4.4.1.1: arithmetic, one strip, TOPLEFT, OR, no offset.
+            data.extend_from_slice(&0u16.to_be_bytes());
+            data.extend_from_slice(&instances.to_be_bytes());
+            data
+        };
+
+        for instances in [MAX_JBIG2_TEXT_INSTANCES + 1, u32::MAX] {
+            let data = region(instances);
+            assert_eq!(data.len(), 23, "the whole segment is twenty-three bytes");
+            let segment = Segment {
+                number: 2,
+                referred: Vec::new(),
+                kind: kind::IMMEDIATE_TEXT_REGION,
+                page: 1,
+                data: &data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            assert!(
+                text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
+                "{instances} was not refused"
+            );
+            assert!(
+                warnings.contains(&Jbig2Refusal::TextInstanceCap),
+                "{instances}: {warnings:?}"
+            );
+        }
+
+        // And the cap itself is admitted to the check below it, so the
+        // constant is the boundary rather than one under it: with no
+        // dictionary behind it this region is skipped, by that check's own
+        // name and not this one's.
+        let data = region(MAX_JBIG2_TEXT_INSTANCES);
+        let segment = Segment {
+            number: 2,
+            referred: Vec::new(),
+            kind: kind::IMMEDIATE_TEXT_REGION,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let mut warnings = Vec::new();
+        assert!(text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
+        assert_eq!(
+            warnings,
+            vec![Jbig2Refusal::TextRegionWithoutSymbols],
+            "exactly at the cap is admitted"
+        );
+    }
+
+    /// One generic region's segment data, from the promoted encoder.
+    ///
+    /// This used to be a test-only `encode_arithmetic` beside a hand-written
+    /// 7.4.6 header, and both are now [`crate::jbig2_generic_region_segment`]
+    /// — which is the promotion the roadmap's image-encoder row asked for.
+    /// The fixtures below are therefore held to the *shipped* encoder, so a
+    /// defect in it cannot pass by agreeing with a second copy that only tests
+    /// could reach.
+    fn generic_region_data(
+        rows: &[&str],
+        template: u8,
+        tpgdon: bool,
+        at: [(i32, i32); 4],
+    ) -> Vec<u8> {
+        let source = bitmap_from(rows);
+        crate::jbig2_generic_region_segment(
+            &crate::Jbig2GenericSource {
+                width: source.width,
+                height: source.height,
+                template,
+                tpgdon,
+                at: at.map(|(x, y)| (x as i8, y as i8)),
+                stride: source.stride,
+                data: &source.bits,
+            },
+            0,
+            0,
+            0,
+        )
+        .expect("a test picture is a region")
     }
 
     /// A one-page embedded stream carrying one generic region at the origin.
@@ -1178,31 +6856,17 @@ mod tests {
         rows: &[&str],
         template: u8,
         tpgdon: bool,
-        at: [(i8, i8); 4],
+        at: [(i32, i32); 4],
     ) -> Vec<u8> {
         let source = bitmap_from(rows);
-        let mut data = Vec::new();
-        // 7.4.1, the region segment information field.
-        data.extend_from_slice(&source.width.to_be_bytes());
-        data.extend_from_slice(&source.height.to_be_bytes());
-        data.extend_from_slice(&0u32.to_be_bytes());
-        data.extend_from_slice(&0u32.to_be_bytes());
-        data.push(0); // OR
-                      // 7.4.6.2, the generic region flags.
-        data.push((u8::from(tpgdon) << 3) | (template << 1));
-        for (dx, dy) in at.iter().take(if template == 0 { 4 } else { 1 }) {
-            data.push(*dx as u8);
-            data.push(*dy as u8);
-        }
-        data.extend(encode_arithmetic(&source, template, tpgdon, &at));
-
+        let data = generic_region_data(rows, template, tpgdon, at);
         let info = page_info(source.width, source.height, 0);
         let mut stream = header(0, kind::PAGE_INFORMATION, 1, &info);
         stream.extend(header(1, kind::IMMEDIATE_GENERIC_REGION, 1, &data));
         stream
     }
 
-    fn round_trip(rows: &[&str], template: u8, tpgdon: bool, at: [(i8, i8); 4]) -> Vec<String> {
+    fn round_trip(rows: &[&str], template: u8, tpgdon: bool, at: [(i32, i32); 4]) -> Vec<String> {
         let stream = generic_region_stream(rows, template, tpgdon, at);
         let mut warnings = Vec::new();
         let params = Jbig2Params {
@@ -1215,6 +6879,167 @@ mod tests {
         picture(&bits, params.width, params.height)
     }
 
+    /// The exact inverse of [`BitReader`]: most significant bit first, and the
+    /// same meeting point with byte-aligned data at [`BitWriter::align`].
+    ///
+    /// It exists for the reason [`MqEncoder`] does. A Huffman-coded segment is
+    /// prefix codes and plain fields interleaved at the bit level, so a fixture
+    /// written as literal bytes would be unreadable and unmaintainable, and
+    /// there is no fixture at all for the parts of Annex B nothing in the
+    /// corpus reaches.
+    struct BitWriter {
+        bytes: Vec<u8>,
+        /// Bits written, counted from the start — [`BitReader::at`]'s twin.
+        at: usize,
+    }
+
+    impl BitWriter {
+        fn new() -> BitWriter {
+            BitWriter {
+                bytes: Vec::new(),
+                at: 0,
+            }
+        }
+
+        fn bit(&mut self, value: u32) {
+            if self.at % 8 == 0 {
+                self.bytes.push(0);
+            }
+            if value & 1 == 1 {
+                let shift = 7 - (self.at % 8);
+                if let Some(byte) = self.bytes.get_mut(self.at / 8) {
+                    *byte |= 1 << shift;
+                }
+            }
+            self.at += 1;
+        }
+
+        /// `n` bits of `value`, most significant first. `n` of zero writes
+        /// nothing, which is what a range length of zero means.
+        fn bits(&mut self, value: u32, n: u32) {
+            for index in (0..n).rev() {
+                self.bit(value >> index);
+            }
+        }
+
+        /// [`BitReader::align`]'s partner: pads to the next byte boundary.
+        fn align(&mut self) {
+            while self.at % 8 != 0 {
+                self.bit(0);
+            }
+        }
+
+        /// A byte-aligned run, which is how 6.4.11's arithmetic sub-stream and
+        /// 6.5.9's collective bitmap are carried inside a bit stream.
+        fn extend(&mut self, bytes: &[u8]) {
+            self.align();
+            self.bytes.extend_from_slice(bytes);
+            self.at += bytes.len() * 8;
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.bytes
+        }
+    }
+
+    /// Writes `value` through `table`, the inverse of [`HuffTable::decode`].
+    ///
+    /// The first line whose range covers the value. Every table in Annex B
+    /// puts its two open-ended lines last and the ranges above them are
+    /// disjoint, so "first" is also "only" everywhere it matters.
+    fn write_huff(writer: &mut BitWriter, table: &HuffTable, value: i32) {
+        for (line, code) in table.lines.iter().zip(&table.codes) {
+            if line.prefix_len == 0 {
+                continue;
+            }
+            let offset = match line.kind {
+                LineKind::Oob => continue,
+                LineKind::Normal => i64::from(value) - i64::from(line.range_low),
+                LineKind::Lower => i64::from(line.range_low) - i64::from(value),
+            };
+            let span = 1i64 << u32::from(line.range_len).min(32);
+            if offset < 0 || offset >= span {
+                continue;
+            }
+            writer.bits(*code, u32::from(line.prefix_len));
+            writer.bits(offset as u32, u32::from(line.range_len));
+            return;
+        }
+        panic!("no line of this Annex B table covers {value}");
+    }
+
+    /// The out-of-band code, which ends a height class (6.5.7) or a strip
+    /// (6.4.5) and carries no offset.
+    fn write_huff_oob(writer: &mut BitWriter, table: &HuffTable) {
+        for (line, code) in table.lines.iter().zip(&table.codes) {
+            if line.kind == LineKind::Oob && line.prefix_len > 0 {
+                writer.bits(*code, u32::from(line.prefix_len));
+                return;
+            }
+        }
+        panic!("this Annex B table has no out-of-band line");
+    }
+
+    /// **Table B.14, generated from the shape its clause describes** rather
+    /// than called out of [`table_b14`].
+    ///
+    /// Five values, −2 through 2, the code for zero one bit and the other four
+    /// three bits — which is the only assignment of five lengths over those
+    /// five values that is complete under Kraft.
+    ///
+    /// It is written here for the reason [`INT_RANGES`] and [`split_offset`]
+    /// are: an encoder that called `table_b14` would move with it under
+    /// injection, and the round trip would prove that two copies of one
+    /// mistake agree. With this separation a wrong prefix length in either
+    /// table desynchronises the reader and the fixtures fail; without it,
+    /// nothing in the tree notices.
+    ///
+    /// It does not make the reconstruction *right*. Nothing in this repository
+    /// can: it makes it load-bearing, so it cannot change without a fixture
+    /// **B.14 and B.15 for the encoder side, which are now the decoder's own.**
+    ///
+    /// These were generated here from a rule -- one bit for zero, then a
+    /// prefix bit per doubling either side of it -- so that a round trip could
+    /// not prove two copies of one mistake agree. The rule was wrong for B.15,
+    /// which the standard splits differently and closes at plus or minus 24
+    /// rather than 31, and nothing noticed until Tables B.1 to B.15 were
+    /// transcribed from T.88 itself.
+    ///
+    /// So the separation is retired rather than repaired. It bought
+    /// independence from the *decoder*, and what these fixtures need is
+    /// independence from the *standard*, which no second copy written in this
+    /// repository can give. What checks the tables now is T.88's own printed
+    /// Encoding column -- see `the_codes_b3_assigns_are_the_ones_the_standard_
+    /// prints` -- and what these fixtures check is the refinement path that
+    /// reads them.
+    fn writer_b14() -> HuffTable {
+        table_b14()
+    }
+
+    fn writer_b15() -> HuffTable {
+        table_b15()
+    }
+
+    /// 7.4.3.1.7's symbol-ID code lengths, for a region whose symbols each take
+    /// a one-bit code.
+    ///
+    /// Thirty-five four-bit runcode lengths, then one runcode per symbol.
+    /// Runcodes 0 and 1 are both given a length of one bit so the runcode table
+    /// is itself complete under Kraft, and runcode 1 — "the next symbol's code
+    /// is one bit" — is then written once per symbol.
+    ///
+    /// It does **not** align afterwards: the clause does, and so does
+    /// [`symbol_id_codes`], so the caller aligns and the two stay visibly
+    /// paired.
+    fn write_symbol_id_codes(writer: &mut BitWriter, symbols: usize) {
+        for index in 0..35u32 {
+            writer.bits(u32::from(index <= 1), 4);
+        }
+        for _ in 0..symbols {
+            writer.bit(1);
+        }
+    }
+
     /// A segment header (T.88 7.2) in its short form: no referred-to
     /// segments, one-byte page association.
     fn header(number: u32, kind: u8, page: u8, data: &[u8]) -> Vec<u8> {
@@ -1222,6 +7047,25 @@ mod tests {
         out.extend_from_slice(&number.to_be_bytes());
         out.push(kind & 0x3F);
         out.push(0); // no referred-to segments, no retain flags
+        out.push(page);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// [`header`], for a segment that refers to others (7.2.4, 7.2.5).
+    ///
+    /// The referred-to numbers are one byte each here, which 7.2.5 allows for
+    /// any segment numbered 256 or below — every fixture in this file is.
+    fn header_referring(number: u32, kind: u8, page: u8, refers: &[u32], data: &[u8]) -> Vec<u8> {
+        assert!(number <= 256 && refers.len() <= 4, "the short forms only");
+        let mut out = Vec::new();
+        out.extend_from_slice(&number.to_be_bytes());
+        out.push(kind & 0x3F);
+        out.push((refers.len() as u8) << 5);
+        for referred in refers {
+            out.push(*referred as u8);
+        }
         out.push(page);
         out.extend_from_slice(&(data.len() as u32).to_be_bytes());
         out.extend_from_slice(data);
@@ -1280,7 +7124,7 @@ mod tests {
 
         let mut warnings = Vec::new();
         assert!(segments(&stream, &mut warnings).is_empty());
-        assert_eq!(warnings, vec![Warning::Jbig2SegmentSkipped]);
+        assert_eq!(warnings, vec![Jbig2Refusal::RandomAccessOrganisation]);
     }
 
     #[test]
@@ -1341,7 +7185,7 @@ mod tests {
         let parsed = segments(&stream, &mut warnings);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].data, &[1, 2, 3]);
-        assert_eq!(warnings, vec![Warning::TruncatedInput]);
+        assert_eq!(warnings, vec![Jbig2Refusal::Truncated]);
     }
 
     #[test]
@@ -1352,7 +7196,7 @@ mod tests {
 
         let mut warnings = Vec::new();
         assert!(segments(&stream, &mut warnings).is_empty());
-        assert_eq!(warnings, vec![Warning::Jbig2SegmentSkipped]);
+        assert_eq!(warnings, vec![Jbig2Refusal::UnknownDataLength]);
     }
 
     /// The lineage this plan does not build, named rather than absorbed.
@@ -1391,10 +7235,17 @@ mod tests {
         );
         assert_eq!(
             warnings,
-            vec![Warning::Jbig2SegmentSkipped],
+            vec![Warning::TruncatedInput, Warning::Jbig2SegmentSkipped],
             "the globals' symbol dictionary has to be seen, or a file whose \
              whole payload is shared would refuse without saying why"
         );
+        // `TruncatedInput` is the stronger form of what this always
+        // asserted. The four bytes here stand in for a dictionary, and
+        // while nothing decoded one they were skipped unread; now that
+        // clause 6.5 runs, the same bytes are read far enough to be short
+        // of an AT pixel. A segment cannot be found truncated without
+        // having been reached, so the enumeration order this test is named
+        // for is what put it there.
     }
 
     /// 7.4.8.5 bit 2: a page that starts black.
@@ -1406,15 +7257,27 @@ mod tests {
     #[test]
     fn the_page_default_pixel_value_starts_the_page_black() {
         let mut page = Page {
+            intermediate: BTreeMap::new(),
+            symbols: BTreeMap::new(),
+            retained: BTreeMap::new(),
+            tables: BTreeMap::new(),
+            patterns: BTreeMap::new(),
+            declared_content: false,
+            seen: BTreeSet::new(),
+            refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,
+            extent: Jbig2SymbolExtent::default(),
         };
         let data = page_info(8, 8, 0x04);
         let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
             kind: kind::PAGE_INFORMATION,
             page: 1,
             data: &data,
+            unknown_length: false,
         };
         let mut warnings = Vec::new();
         page.begin(&segment, &mut warnings);
@@ -1427,28 +7290,46 @@ mod tests {
     fn a_segment_for_another_page_is_not_composited_onto_this_one() {
         let data = page_info(8, 8, 0);
         let mut page = Page {
+            intermediate: BTreeMap::new(),
+            symbols: BTreeMap::new(),
+            retained: BTreeMap::new(),
+            tables: BTreeMap::new(),
+            patterns: BTreeMap::new(),
+            declared_content: false,
+            seen: BTreeSet::new(),
+            refused: BTreeSet::new(),
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,
+            extent: Jbig2SymbolExtent::default(),
         };
         let mut warnings = Vec::new();
         page.begin(
             &Segment {
+                number: 1,
+                referred: Vec::new(),
                 kind: kind::PAGE_INFORMATION,
                 page: 1,
                 data: &data,
+                unknown_length: false,
             },
             &mut warnings,
         );
         let elsewhere = Segment {
+            number: 1,
+            referred: Vec::new(),
             kind: kind::IMMEDIATE_GENERIC_REGION,
             page: 2,
             data: &[],
+            unknown_length: false,
         };
         let globalish = Segment {
+            number: 1,
+            referred: Vec::new(),
             kind: kind::IMMEDIATE_GENERIC_REGION,
             page: 0,
             data: &[],
+            unknown_length: false,
         };
         assert!(!page.owns(&elsewhere));
         assert!(page.owns(&globalish));
@@ -1518,11 +7399,13 @@ mod tests {
             .expect("the page carries a generic region, so it is not refused");
 
         let page = picture(&bits, 64, 56);
-        assert_eq!(region_window(&page), ANNEX_H_REGION);
+        assert_eq!(annex_h_generic_region(&ANNEX_H[PAGE_2]), ANNEX_H_REGION);
 
-        // And nothing outside the region was touched: the rest of Annex H.1's
-        // page is a text region and a halftone region, neither of which this
-        // build draws.
+        // And nothing outside the region was touched. The halftone region on
+        // this page now draws -- inside the frame, which is why the assertion
+        // above is against the region's own decode -- but the text region is
+        // still missing, because it refers to a dictionary that belongs to
+        // page 1.
         assert!(
             page[0..11].iter().all(|row| !row.contains('#')),
             "a region composited above the coordinates its segment named"
@@ -1532,9 +7415,169 @@ mod tests {
             "a region composited left of the coordinates its segment named"
         );
         assert!(
-            warnings.contains(&Warning::Jbig2SegmentSkipped),
-            "the symbol dictionary, text region and halftone region on this \
-             page are all missing from it, and ruling 10 wants that recorded"
+            warnings.contains(&Warning::Jbig2VariantSkipped),
+            "the text region on this page refers to page 1's dictionary and is \
+             missing from it, and ruling 10 wants that recorded"
+        );
+    }
+
+    /// The region segment data of whichever generic region a page of
+    /// [`ANNEX_H`] carries, split into its 7.4.6 fields.
+    ///
+    /// Lifted out of the one authoritative copy of the annex rather than
+    /// transcribed a second time, for the reason [`ANNEX_H`]'s own header
+    /// gives: a sub-stream that disagreed with the whole would be a
+    /// transcription error nothing could catch.
+    fn annex_h_region_fields(page: &[u8]) -> (RegionInfo, u8, Vec<u8>) {
+        let mut warnings = Vec::new();
+        let segments = segments(page, &mut warnings);
+        let segment = segments
+            .iter()
+            .find(|segment| {
+                matches!(
+                    segment.kind,
+                    kind::IMMEDIATE_GENERIC_REGION | kind::IMMEDIATE_LOSSLESS_GENERIC_REGION
+                )
+            })
+            .expect("the page carries a generic region");
+        let mut reader = Reader::new(segment.data);
+        let info = RegionInfo::read(&mut reader).expect("seventeen bytes of 7.4.1");
+        let flags = reader.u8().expect("7.4.6.2's flags");
+        (info, flags, reader.rest().to_vec())
+    }
+
+    /// **ITU-T T.6, adjudicated by ITU-T T.88.** Annex H.1's page 1 codes the
+    /// frame as MMR — T.6 two-dimensional coding with none of 7.4.6's framing
+    /// around it (T.88 6.2.6) — and segment 4 carries the 26 bytes it produced.
+    /// The same annex publishes the picture as [`ANNEX_H_REGION`].
+    ///
+    /// **Both halves of this comparison are the standard's**, which is the
+    /// whole point. A round trip through [`crate::ccitt_decode`] would say
+    /// only that an encoder and a decoder written in the same room agree; this
+    /// says the encoder emits the bits a body that is not this repository
+    /// emitted for a bitmap that body also published. Every part of T.6 §2.2
+    /// that the frame reaches is pinned at once: pass mode (the two black rows
+    /// below the frame's interior), horizontal mode with its two run-length
+    /// codes (the frame's first row and the first interior row), vertical mode
+    /// V(0) (every repeated row), the imaginary all-white reference line of
+    /// §2.2.1, and §2.2.5.1's rule that the first run on a line is measured
+    /// from before the first element.
+    ///
+    /// What it does **not** pin is named rather than left implied: no run here
+    /// is longer than 54 pixels, so not one make-up code of T.4 Table 3a or 3b
+    /// is exercised by these bytes. Those are held by
+    /// [`super::super::ccitt::tests::the_run_tables_are_itu_t_t_4_s_own`],
+    /// which asserts every entry against the published tables directly, and by
+    /// the long-run round trips beside it.
+    ///
+    /// EOFB is off because the annex's segment carries none: T.88 6.2.6 gives
+    /// the row count in the region header, so the terminator has nothing to
+    /// say. The trailing four zero bits of the last byte are §2.4.1.2's pad.
+    #[test]
+    fn annex_h_mmr_region_re_encodes_to_the_published_bytes() {
+        let (info, flags, published) = annex_h_region_fields(&ANNEX_H[PAGE_1]);
+        assert_eq!(flags & 0x01, 1, "page 1's generic region is the MMR one");
+        assert_eq!((info.width, info.height), (54, 44));
+
+        let source = bitmap_from(&ANNEX_H_REGION);
+        let coded = crate::ccitt_g4_encode(&crate::CcittSource {
+            columns: info.width,
+            rows: info.height,
+            // JBIG2's own sense, 6.2.2, which is what `bitmap_from` packs.
+            black_is_1: true,
+            stride: source.stride,
+            end_of_block: false,
+            data: &source.bits,
+        })
+        .expect("the annex's own dimensions describe an image");
+
+        assert_eq!(
+            coded, published,
+            "T.88 Annex H.1 segment 4 did not re-encode; the G4 coder is not \
+             T.6's and no round trip built on it means anything"
+        );
+    }
+
+    /// **ITU-T T.88 Annex H.1 segment 11, from the other side.**
+    ///
+    /// The companion to [`Self::annex_h_generic_region_decodes_to_its_published_bitmap`]
+    /// and the strongest thing available to this row: the annex publishes a
+    /// bitmap *and* the nine bytes its own encoder produced for that bitmap at
+    /// template 0 with TPGDON on and the nominal AT pixels. Encoding the
+    /// published picture and comparing against the published bytes leaves an
+    /// encoder nowhere to hide — the MQ registers, `BYTEOUT`'s carry and 0xFF
+    /// stuffing, `FLUSH`'s trailing `FF AC`, *which* pixels template 0 reads,
+    /// and 6.2.5.7's SLTP rule are all in them.
+    ///
+    /// That last one is worth naming, because it is the one place T.88 leaves
+    /// an encoder a legitimate choice. TPGDON codes one decision a row saying
+    /// whether this row repeats the last; an encoder is *permitted* to answer
+    /// "no" on a row that does repeat and code its pixels out in full, and the
+    /// result decodes to the same picture. It would not produce these bytes.
+    /// So this test pins the canonical choice — toggle whenever typicality
+    /// changes — and what makes that legitimate to assert is that the annex
+    /// made it too, on this image, at this template.
+    ///
+    /// **What these bytes do not pin is the context numbering, and that was
+    /// measured rather than argued.** Two injections on 15 September 2026,
+    /// each run as `cargo test --no-fail-fast -p tinker-pdf-filters`:
+    /// transposing template 0's context bits 8 and 7 — `p(-1, -1)` and
+    /// `p(0, -1)` — and reading `p(-2, -2)` where Figure 8 draws `p(-2, -1)`.
+    /// Both left these nine bytes unchanged, left
+    /// [`Self::annex_h_generic_region_decodes_to_its_published_bitmap`]
+    /// passing, and left every round trip in this module passing. Each fired
+    /// exactly one test in the workspace:
+    /// [`Self::template_context_bits_match_the_figures`].
+    ///
+    /// The first is general and the second is this picture's: `mq.rs` records
+    /// that a context index is only a label into an array whose slots all
+    /// start identical, so *any* bijection of the numbering is invisible to a
+    /// coder — and a published bitstream is what a coder produced, so it
+    /// cannot see one either. The second is narrower: the annex's frame
+    /// repeats its rows, so the two neighbours hold the same bit everywhere
+    /// TPGDON leaves a row to code at all.
+    ///
+    /// So the division of labour is worth stating plainly, because the
+    /// temptation is to think one published datastream settles everything:
+    /// **the annex's bytes adjudicate the coder, the SLTP rule and the pixel
+    /// set; T.88's Figures 8 to 11 adjudicate the numbering**, transcribed in
+    /// [`Self::template_context_bits_match_the_figures`], which says the same
+    /// thing from the decoder's side and was right before this test existed.
+    #[test]
+    fn annex_h_generic_region_re_encodes_to_the_published_bytes() {
+        let (info, flags, mut published) = annex_h_region_fields(&ANNEX_H[PAGE_2]);
+        assert_eq!(flags, 0x08, "template 0, TPGDON on, not MMR");
+        assert_eq!((info.width, info.height), (54, 44));
+
+        // 7.4.6.3's four AT pairs precede the coded data at template 0, and
+        // the annex writes the nominal positions out in full.
+        let at: Vec<(i32, i32)> = published
+            .drain(..8)
+            .collect::<Vec<u8>>()
+            .chunks(2)
+            .map(|pair| (i32::from(pair[0] as i8), i32::from(pair[1] as i8)))
+            .collect();
+        assert_eq!(
+            at, NOMINAL_AT[0],
+            "the annex writes 6.2.5.3's own positions"
+        );
+
+        let source = bitmap_from(&ANNEX_H_REGION);
+        let coded = crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+            width: info.width,
+            height: info.height,
+            template: 0,
+            tpgdon: true,
+            at: NOMINAL_AT[0].map(|(x, y)| (x as i8, y as i8)),
+            stride: source.stride,
+            data: &source.bits,
+        })
+        .expect("the annex's own parameters describe a region");
+
+        assert_eq!(
+            coded, published,
+            "T.88 Annex H.1 segment 11 did not re-encode; template 0's pixel \
+             set, the SLTP rule or the MQ coder is not the standard's"
         );
     }
 
@@ -1557,15 +7600,84 @@ mod tests {
         assert_eq!(page[55], ".".repeat(64), "row 55 is below it");
     }
 
-    /// **The cross-check the annex was chosen for.** Annex H.1 codes one
-    /// picture twice — page 1 with MMR, page 2 with the arithmetic coder —
-    /// and the two decoders share no code whatsoever.
+    /// **Annex H codes the same two symbols both ways, and they come out
+    /// identical.** This is the standard adjudicating the Huffman variant.
+    ///
+    /// Segment 2 carries them with `SDHUFF = 1` — height classes, a collective
+    /// bitmap, and Tables B.1, B.2 and B.4 — and segment 9 carries them with
+    /// `SDHUFF = 0`, through the MQ coder and Annex A's integer decoders. The
+    /// two share no code below `Segment`, so agreeing on the exact pixels of a
+    /// 'c' and an 'a' is not something a wrong prefix length can do by
+    /// accident: a table off by one bit desynchronises the reader and produces
+    /// noise, not a glyph.
+    ///
+    /// It matters because the tables in this module are **reconstructed**
+    /// rather than transcribed from a copy of T.88, and this is what stands in
+    /// for the transcription. What it covers is exactly the dictionary: B.1's
+    /// sizes, B.2's width deltas, B.4's height deltas, 6.5.9's collective
+    /// bitmap and 6.5.10's export runs. The text region's own three tables are
+    /// **not** covered by it — see the note below.
+    #[test]
+    fn annex_h_codes_the_same_symbols_two_ways() {
+        let all = segments(&ANNEX_H[13..682], &mut Vec::new());
+        let decode_of = |number: u32| {
+            let segment = all
+                .iter()
+                .find(|s| s.number == number)
+                .expect("the segment");
+            let mut warnings = Vec::new();
+            let symbols = symbol_dictionary(
+                segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings,
+            )
+            .expect("a symbol dictionary");
+            assert!(warnings.is_empty(), "segment {number}: {warnings:?}");
+            symbols
+        };
+
+        let huffman = decode_of(2);
+        let arithmetic = decode_of(9);
+        assert_eq!(huffman.len(), 2, "the annex puts two symbols in each");
+        assert_eq!(
+            huffman, arithmetic,
+            "the Huffman and arithmetic symbol dictionaries disagree, which \
+             means a reconstructed Annex B table is wrong"
+        );
+
+        // And they are glyphs rather than noise, said as a shape so a failure
+        // shows what came out instead of a byte count.
+        assert_eq!(
+            (huffman[0].width, huffman[0].height),
+            (6, 6),
+            "the annex's symbols are six by six"
+        );
+    }
+
+    /// **The generic region is coded both ways and both agree**, pixel for
+    /// pixel, against the picture the annex publishes.
     ///
     /// One goes through [`T6Rows`] and the T.6 mode codes; the other through
-    /// the MQ coder and template 0. For them to agree on 2 376 pixels by
-    /// accident is not a thing that happens. This is the strongest single
-    /// assertion in the file, and it exists because the standard was thorough
-    /// enough to code its example both ways.
+    /// the MQ coder and template 0. For them to agree on the region by
+    /// accident is not a thing that happens.
+    ///
+    /// # What this test used to claim, and why it stopped
+    ///
+    /// It compared the two pages *whole* — and passed, which looked like the
+    /// strongest assertion in the file. It was not: both pages' text regions
+    /// were being skipped, so the comparison was over the generic region and
+    /// two identical expanses of white. The moment the Huffman variant landed
+    /// and page 1's text began to draw, the pages stopped matching, because
+    /// **Annex H's three pages do not draw the same text** — page 1 sets one
+    /// arrangement of its symbols and page 2 another. Only the generic region
+    /// is the same picture twice, and that is now all this claims.
+    ///
+    /// The cross-check the whole-page comparison was standing in for is
+    /// `annex_h_codes_the_same_symbols_two_ways`, which is a real one.
     #[test]
     fn annex_h_codes_one_picture_twice_and_both_ways_agree() {
         let params = Jbig2Params {
@@ -1576,20 +7688,30 @@ mod tests {
         let mut mmr_warnings = Vec::new();
         let mmr = decode(&ANNEX_H[PAGE_1], &params, 1 << 20, &mut mmr_warnings)
             .expect("page 1 carries an MMR generic region");
+        // Page 2's text region refers to segment 0, which sits on page 0 and is
+        // therefore shared: in a PDF it arrives through `/JBIG2Globals`, and
+        // here it is the bytes before page 1 begins.
+        let shared = Jbig2Params {
+            globals: &ANNEX_H[SHARED_DICTIONARY],
+            ..params
+        };
         let mut arithmetic_warnings = Vec::new();
-        let arithmetic = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut arithmetic_warnings)
+        let arithmetic = decode(&ANNEX_H[PAGE_2], &shared, 1 << 20, &mut arithmetic_warnings)
             .expect("page 2 carries an arithmetically coded one");
 
+        let _ = (&mmr, &arithmetic);
         assert_eq!(
-            region_window(&picture(&mmr, 64, 56)),
+            annex_h_generic_region(&ANNEX_H[PAGE_1]),
             ANNEX_H_REGION,
             "the MMR region does not match the annex's published picture"
         );
         assert_eq!(
-            mmr, arithmetic,
-            "T.6 and the MQ coder disagree about the same picture"
+            annex_h_generic_region(&ANNEX_H[PAGE_2]),
+            ANNEX_H_REGION,
+            "the arithmetic region does not match the annex's published picture"
         );
         assert!(!mmr_warnings.contains(&Warning::TruncatedInput));
+        assert!(!arithmetic_warnings.contains(&Warning::TruncatedInput));
     }
 
     /// The whole file, file header and all, the way a producer that pasted a
@@ -1607,11 +7729,12 @@ mod tests {
             height: 56,
         };
         let bits = decode(&ANNEX_H, &params, 1 << 20, &mut warnings).expect("page 1 decodes");
-        assert_eq!(region_window(&picture(&bits, 64, 56)), ANNEX_H_REGION);
-        assert!(
-            warnings.contains(&Warning::Jbig2SegmentSkipped),
-            "pages 2 and 3, and this page's text and halftone regions, are \
-             all missing from the result"
+        let page = picture(&bits, 64, 56);
+        assert_eq!(annex_h_generic_region(&ANNEX_H[PAGE_1]), ANNEX_H_REGION);
+        assert_eq!(
+            region_window(&page)[0],
+            ANNEX_H_REGION[0],
+            "the frame's first row is on the page where 7.4.1 puts it"
         );
     }
 
@@ -1690,6 +7813,15 @@ mod tests {
     /// permutation. Transposing bits 0 and 1 was injected here: Annex H.1
     /// still decoded to its published picture byte for byte, and every
     /// round-trip below still passed. Only this assertion moved.
+    ///
+    /// **Re-measured 15 September 2026, now that the encoder is shipped and
+    /// [`Self::annex_h_generic_region_re_encodes_to_the_published_bytes`]
+    /// compares against the annex's own nine bytes from the other side.** The
+    /// conclusion is unchanged and that is the finding: transposing bits 8 and
+    /// 7, and reading `p(-2, -2)` where the figure draws `p(-2, -1)`, each
+    /// still fired this test and nothing else in the workspace. A published
+    /// bitstream is produced by a coder, so it is blind to a relabelling in
+    /// exactly the way a round trip is.
     ///
     /// That does not make the order cosmetic, because 6.2.5.7's
     /// pseudo-context is a *literal* slot number. Once TPGDON is on, the SLTP
@@ -1838,6 +7970,279 @@ mod tests {
         }
     }
 
+    /// **7.4.1 and 7.4.6.2, byte for byte**, on a region that is neither
+    /// square nor at the origin.
+    ///
+    /// Every field of this header is a big-endian `u32` and every one of them
+    /// has a wrong version that decodes *something*. A byte-swapped width on a
+    /// 40 by 24 region is 671 088 640 and is refused loudly; a byte-swapped
+    /// width on a **square** region is the same number the right one is, and a
+    /// transposed picture comes back with no complaint at all. So the region
+    /// here is deliberately oblong and deliberately displaced, and the bytes
+    /// are asserted as bytes rather than only round-tripped.
+    ///
+    /// The AT count is asserted the same way and for the same reason: 7.4.6.3
+    /// writes four pairs at template 0 and one at every other, and writing the
+    /// wrong number puts the coded data six bytes out — which decodes as noise
+    /// rather than as a slightly wrong picture, and is therefore easy to
+    /// mistake for a coder defect.
+    #[test]
+    fn the_region_segment_header_is_the_fields_seven_four_one_names() {
+        let source = bitmap_from(&SPECIMEN);
+        let region = |template: u8, tpgdon: bool| {
+            crate::jbig2_generic_region_segment(
+                &crate::Jbig2GenericSource {
+                    width: source.width,
+                    height: source.height,
+                    template,
+                    tpgdon,
+                    at: NOMINAL_AT[template as usize].map(|(x, y)| (x as i8, y as i8)),
+                    stride: source.stride,
+                    data: &source.bits,
+                },
+                5,
+                7,
+                // 7.4.1.5's REPLACE, and the high bits of the byte are not
+                // part of the field.
+                0xF4,
+            )
+            .expect("a specimen is a region")
+        };
+
+        let data = region(0, true);
+        assert_eq!(
+            &data[..18],
+            &[
+                0, 0, 0, 40, // width
+                0, 0, 0, 24, // height
+                0, 0, 0, 5, // x
+                0, 0, 0, 7,    // y
+                4,    // REPLACE, masked out of 0xF4
+                0x08, // template 0, TPGDON on, MMR off
+            ],
+            "the seventeen bytes of 7.4.1 and the flags of 7.4.6.2"
+        );
+        assert_eq!(
+            &data[18..26],
+            &[3, 0xFF, 0xFD, 0xFF, 2, 0xFE, 0xFE, 0xFE],
+            "template 0 writes four AT pairs"
+        );
+
+        // Template 2's flags are `template << 1` with TPGDON clear, and it
+        // writes one pair.
+        let data = region(2, false);
+        assert_eq!(data[17], 0x04, "template 2, TPGDON off");
+        assert_eq!(&data[18..20], &[2, 0xFF], "one AT pair at template 2");
+
+        // And the whole thing is what this crate's own region reader consumes,
+        // at the coordinates it named.
+        let mut warnings = Vec::new();
+        let data = region(0, true);
+        let segment = Segment {
+            number: 1,
+            referred: Vec::new(),
+            kind: kind::IMMEDIATE_GENERIC_REGION,
+            page: 1,
+            data: &data,
+            unknown_length: false,
+        };
+        let (info, bitmap) =
+            generic_region(&segment, 1 << 20, &mut warnings).expect("the region decodes");
+        assert_eq!(
+            (info.width, info.height, info.x, info.y, info.op),
+            (40, 24, 5, 7, 4)
+        );
+        assert_eq!(picture(&bitmap.bits, bitmap.width, bitmap.height), SPECIMEN);
+    }
+
+    /// A stride wider than a row is padding and is not read as pixels.
+    ///
+    /// The same test `png/encode.rs` and `ccitt.rs` each carry, and it has to
+    /// be built rather than found for the same reason: [`Bitmap`] packs at
+    /// exactly `width.div_ceil(8)`, so every buffer this crate makes has the
+    /// stride equal to the row and a version that ignored the field would be
+    /// invisible here forever.
+    ///
+    /// The padding bytes are `0xFF` — black in JBIG2's sense — so a version
+    /// that read them would not merely shift the picture, it would fill it.
+    #[test]
+    fn a_padded_stride_is_not_read_as_pixels() {
+        let rows = ["#..##...", "..####..", "###...##"];
+        let packed: Vec<u8> = rows
+            .iter()
+            .map(|row| {
+                row.chars()
+                    .enumerate()
+                    .fold(0u8, |byte, (x, c)| byte | (u8::from(c == '#') << (7 - x)))
+            })
+            .collect();
+        let mut padded = Vec::new();
+        for byte in &packed {
+            padded.push(*byte);
+            padded.extend_from_slice(&[0xFF, 0xFF]);
+        }
+
+        let base = crate::Jbig2GenericSource {
+            width: 8,
+            height: 3,
+            template: 0,
+            tpgdon: false,
+            at: NOMINAL_AT[0].map(|(x, y)| (x as i8, y as i8)),
+            stride: 1,
+            data: &packed,
+        };
+        let tight = crate::jbig2_generic_encode(&base).expect("well formed");
+        let loose = crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+            stride: 3,
+            data: &padded,
+            ..base
+        })
+        .expect("well formed");
+        assert_eq!(tight, loose, "the two padding bytes a row are not pixels");
+    }
+
+    /// The bits past `width` in a row's last byte are outside the region, and
+    /// 6.2.5.2 says every position outside it reads 0 — so two rasters that
+    /// differ only there code identically, and a row of five pixels that ends
+    /// in three set padding bits is not a row that repeats itself.
+    ///
+    /// The second half is what makes this more than tidiness: TPGDON's
+    /// typicality test compares packed bytes, and dirty padding would make two
+    /// identical rows look different and cost the compression TPGDON exists
+    /// for — silently, because the picture would still be right.
+    #[test]
+    fn padding_bits_past_the_width_are_outside_the_region() {
+        let clean = [0b1010_1000u8, 0b1010_1000];
+        let dirty = [0b1010_1111u8, 0b1010_1001];
+        let base = crate::Jbig2GenericSource {
+            width: 5,
+            height: 2,
+            template: 0,
+            tpgdon: true,
+            at: NOMINAL_AT[0].map(|(x, y)| (x as i8, y as i8)),
+            stride: 1,
+            data: &clean,
+        };
+        assert_eq!(
+            crate::jbig2_generic_encode(&base).expect("well formed"),
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+                data: &dirty,
+                ..base
+            })
+            .expect("well formed"),
+        );
+    }
+
+    /// The four refusals, each on the input that earns it.
+    #[test]
+    fn a_region_that_is_not_an_image_is_refused_rather_than_coded() {
+        let data = [0u8; 64];
+        let base = crate::Jbig2GenericSource {
+            width: 8,
+            height: 2,
+            template: 0,
+            tpgdon: false,
+            at: NOMINAL_AT[0].map(|(x, y)| (x as i8, y as i8)),
+            stride: 1,
+            data: &data,
+        };
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource { width: 0, ..base }),
+            Err(crate::Jbig2EncodeError::BadDimensions {
+                width: 0,
+                height: 2
+            })
+        );
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource { height: 0, ..base }),
+            Err(crate::Jbig2EncodeError::BadDimensions {
+                width: 8,
+                height: 0
+            })
+        );
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+                template: 4,
+                ..base
+            }),
+            Err(crate::Jbig2EncodeError::BadTemplate(4)),
+            "there are four figures and no fifth"
+        );
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+                width: 32,
+                stride: 3,
+                ..base
+            }),
+            Err(crate::Jbig2EncodeError::ShortStride {
+                stride: 3,
+                row_bytes: 4
+            })
+        );
+        let short = [0u8; 1];
+        assert_eq!(
+            crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+                data: &short,
+                ..base
+            }),
+            Err(crate::Jbig2EncodeError::ShortData { have: 1, need: 2 })
+        );
+        // A buffer that stops exactly at the last pixel is enough, and the
+        // segment builder refuses exactly what the coder refuses.
+        let exact = [0u8; 2];
+        assert!(crate::jbig2_generic_encode(&crate::Jbig2GenericSource {
+            data: &exact,
+            ..base
+        })
+        .is_ok());
+        assert_eq!(
+            crate::jbig2_generic_region_segment(
+                &crate::Jbig2GenericSource {
+                    template: 4,
+                    ..base
+                },
+                0,
+                0,
+                0
+            ),
+            Err(crate::Jbig2EncodeError::BadTemplate(4))
+        );
+    }
+
+    /// **Typical prediction earns its bits.** With TPGDON on, a picture whose
+    /// rows repeat codes to less than the same picture coded without it, and
+    /// both decode to the same pixels.
+    ///
+    /// This is the property 6.2.5.7 exists for, and it is the one a wrong SLTP
+    /// rule breaks without breaking the picture: an encoder that answered
+    /// "this row is new" on every row would still round-trip — TPGDON would
+    /// simply cost one decision a row and save nothing — so only a size
+    /// comparison sees it. The direction it is asserted in matters: "smaller"
+    /// is the claim, and a fixed byte count would pin the coder rather than
+    /// the rule.
+    #[test]
+    fn typical_prediction_shortens_a_picture_whose_rows_repeat() {
+        let rows: Vec<String> = (0..40)
+            .map(|y| {
+                if y < 4 {
+                    "#.#.#.#.#.#.#.#.".to_string()
+                } else {
+                    "##....##....##..".to_string()
+                }
+            })
+            .collect();
+        let borrowed: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let with = generic_region_data(&borrowed, 0, true, NOMINAL_AT[0]);
+        let without = generic_region_data(&borrowed, 0, false, NOMINAL_AT[0]);
+        assert!(
+            with.len() < without.len(),
+            "typical prediction cost bytes instead of saving them: {} against {}",
+            with.len(),
+            without.len()
+        );
+        assert_eq!(round_trip(&borrowed, 0, true, NOMINAL_AT[0]), borrowed);
+    }
+
     /// A region one row tall, and one a single column wide.
     ///
     /// Every template reads two rows up and as many as four columns either
@@ -1874,5 +8279,1019 @@ mod tests {
             };
             let _ = decode(&bytes, &params, 1 << 16, &mut warnings);
         }
+    }
+
+    /// **T.88 Annex H.1's page 3 decodes, and it decodes as text.**
+    ///
+    /// Page 3 is the annex's refinement page, and reaching this picture needs
+    /// every part of clause 6.3 at once: 6.5.8.2.2's single refinement,
+    /// 6.5.8.2.1's aggregate — a symbol that is itself a text region —
+    /// 6.4.11's per-instance refinement inside the region that draws them, and
+    /// both of 6.3.5.3's templates, since the dictionary codes at `SDRTEMPLATE`
+    /// 0 and the region at `SBRTEMPLATE` 1.
+    ///
+    /// The assertion is the whole page rather than a count because the point
+    /// is *legibility*: a refinement template wrong in one position leaves the
+    /// arithmetic decoder in step for a while and then produces noise, and
+    /// noise is what this test exists to tell apart from letters. The third
+    /// glyph's descender is the useful detail — it is two rows below the
+    /// baseline that everything else sits on, so a decoder that had merely
+    /// stayed in step would not have put it there.
+    #[test]
+    fn annex_h_page_3_decodes_its_refined_text() {
+        let params = Jbig2Params {
+            globals: &[],
+            width: 37,
+            height: 8,
+        };
+        let mut warnings = Vec::new();
+        let bits = decode(&ANNEX_H[PAGE_3], &params, 1 << 20, &mut warnings)
+            .expect("page 3 carries a refined text region");
+        assert_eq!(
+            picture(&bits, 37, 8),
+            [
+                ".####....####...####....####....####.",
+                "#....#.......#..#...#.......#..#....#",
+                "#........#####..#...#...#####..#.....",
+                "#.......#....#..#...#..#....#..#.....",
+                "#....#..#....#..####...#....#..#....#",
+                ".####....#####..#.......#####...####.",
+                "................#....................",
+                "................#....................",
+            ]
+        );
+        assert!(warnings.is_empty(), "page 3 warned: {warnings:?}");
+    }
+
+    /// **6.5.8.2's two roads, told apart by what they produce.**
+    ///
+    /// Annex H's page 3 dictionary imports one symbol and decodes two, and the
+    /// two take different roads: `REFAGGNINST = 1` refines the imported letter
+    /// into another letter, and `REFAGGNINST = 2` builds a symbol that is a
+    /// whole text region — two instances placed side by side.
+    ///
+    /// Asserting the bitmaps rather than the count is what makes this evidence.
+    /// The aggregate is the pair of the other two, in order and correctly
+    /// spaced, which is a coincidence no desynchronised decoder produces.
+    #[test]
+    fn annex_h_page_3_refines_one_symbol_and_aggregates_another() {
+        let all = segments(&ANNEX_H[13..], &mut Vec::new());
+        let dictionary = |number: u32| {
+            all.iter()
+                .find(|segment| segment.number == number)
+                .expect("segment")
+        };
+        let imported = symbol_dictionary(
+            dictionary(16),
+            &[],
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut Vec::new(),
+        )
+        .expect("the shared dictionary decodes");
+        let mut warnings = Vec::new();
+        let exported = symbol_dictionary(
+            dictionary(17),
+            &imported,
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut warnings,
+        )
+        .expect("the refining dictionary decodes");
+
+        assert_eq!(exported.len(), 3, "one imported symbol and two new ones");
+        // The import, untouched.
+        assert_eq!(
+            bitmap_rows(&exported[0]),
+            [".####.", ".....#", ".#####", "#....#", "#....#", ".#####"]
+        );
+        // 6.5.8.2.2: a refinement of it, at `IARDX` = `IARDY` = 0.
+        assert_eq!(
+            bitmap_rows(&exported[1]),
+            [".####.", "#....#", "#.....", "#.....", "#....#", ".####."]
+        );
+        // 6.5.8.2.1: an aggregate of the two above, which is why it is exactly
+        // twice as wide plus the two columns between them.
+        assert_eq!(
+            bitmap_rows(&exported[2]),
+            [
+                ".####....####.",
+                ".....#..#....#",
+                ".#####..#.....",
+                "#....#..#.....",
+                "#....#..#....#",
+                ".#####...####.",
+            ]
+        );
+        assert!(warnings.is_empty(), "the dictionary warned: {warnings:?}");
+    }
+
+    /// **The refinement context's bit order is a free choice, and this proves
+    /// it** — which is the argument [`refinement_context`] rests on.
+    ///
+    /// A context index only ever names an adaptive state slot: the decoder
+    /// reads and writes `state[cx]`, every slot starts identical, and A and C
+    /// are global. So relabelling every context through a bijection cannot
+    /// change a single decision. Here the same thirteen positions are given to
+    /// the decoder in two different orders over the same coded bytes, and the
+    /// two bitmaps have to be identical.
+    ///
+    /// If this ever fails, the file's own bit order has stopped being a
+    /// bijection — a position repeated or dropped — and the templates below
+    /// are no longer the sets they claim to be.
+    #[test]
+    fn a_relabelled_refinement_template_decodes_identically() {
+        let reference = bitmap_from(&[".####.", ".....#", ".#####", "#....#", "#....#", ".#####"]);
+        // Any bytes will do: the claim is that two orders agree, not that
+        // either decodes anything in particular.
+        let coded: [u8; 24] = [
+            0x4F, 0xE7, 0x8D, 0x68, 0x1B, 0xA5, 0x3C, 0x91, 0x07, 0xF2, 0x40, 0x8E, 0xD3, 0x66,
+            0xAA, 0x19, 0x5C, 0xB0, 0x27, 0xE1, 0x74, 0x9F, 0x38, 0xC6,
+        ];
+        let straight = RefineTemplate {
+            here: &REFINE_0_HERE,
+            there: &REFINE_0_THERE,
+            at: Some(NOMINAL_REFINE_AT),
+            typical: TPGRON_0,
+        };
+        // The same set, read in the opposite order within each layer and with
+        // the layers swapped over — a different index for every neighbourhood.
+        let here: Vec<(i8, i8)> = REFINE_0_HERE.iter().rev().copied().collect();
+        let there: Vec<(i8, i8)> = REFINE_0_THERE.iter().rev().copied().collect();
+        let relabelled = RefineTemplate {
+            here: &here,
+            there: &there,
+            at: Some(NOMINAL_REFINE_AT),
+            typical: TPGRON_0,
+        };
+        assert_eq!(straight.bits(), relabelled.bits());
+
+        let decode_with = |template: &RefineTemplate<'_>| {
+            let mut coder = MqDecoder::new(&coded);
+            let mut contexts = MqContexts::new(1 << template.bits());
+            let mut into = Bitmap::new(6, 6, 1 << 20).expect("bitmap");
+            decode_refinement_into(
+                &mut coder,
+                &mut contexts,
+                template,
+                false,
+                &reference,
+                (0, 0),
+                &mut into,
+            );
+            bitmap_rows(&into)
+        };
+        assert_eq!(decode_with(&straight), decode_with(&relabelled));
+    }
+
+    /// 6.4.11's envelope, for [`huffman_text_region`].
+    struct Refinement<'a> {
+        /// The picture the instance decodes to, or `None` when `deltas` names
+        /// a size that cannot exist — then nothing is coded past `BMSIZE`,
+        /// because the decoder refuses before it reads the sub-stream.
+        target: Option<&'a Bitmap>,
+        /// `(RDW, RDH, RDX, RDY)`.
+        deltas: [i32; 4],
+        /// B.14 (0) or B.15 (1), for all four of them.
+        table: u16,
+    }
+
+    /// A **Huffman** text region (7.4.4) placing one instance of the single
+    /// symbol its dictionary exported, at `(s, t)`.
+    ///
+    /// 7.4.4.1.2's other selectors are fixed here: B.6 for `FS`, B.8 for `DS`,
+    /// B.11 for `DT` and B.1 for the refinement size.
+    ///
+    /// **No standard `SBHUFFDT` table can code zero.** B.11, B.12 and B.13 all
+    /// begin at 1, so 6.4.5 step 1's initial value is at least one and the
+    /// first strip therefore begins at `-SBSTRIPS` or above. This fixture used
+    /// to write a zero there and pick whichever table admitted it, which was a
+    /// property of a mis-transcribed B.12 rather than of the standard.
+    fn huffman_text_region(
+        size: (u32, u32),
+        (s, t): (i32, i32),
+        symbol: &Bitmap,
+        refined: Option<Refinement<'_>>,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        // 7.4.1: the region segment information field.
+        data.extend_from_slice(&size.0.to_be_bytes());
+        data.extend_from_slice(&size.1.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.push(0); // external combination operator: OR
+                      // 7.4.4.1.1: SBHUFF, SBREFINE, one strip, TOPLEFT, OR, no
+                      // SBDSOFFSET, refinement template 0.
+        let flags =
+            0x0001u16 | (u16::from(refined.is_some()) << 1) | (u16::from(corner::TOPLEFT) << 4);
+        data.extend_from_slice(&flags.to_be_bytes());
+        // 7.4.4.1.2's bits 0 to 14.
+        let choice = refined.as_ref().map_or(0, |r| r.table);
+        // FS, DS and DT all take selector 0 -- B.6, B.8 and B.11.
+        let selectors = (choice << 6) | (choice << 8) | (choice << 10) | (choice << 12);
+        data.extend_from_slice(&selectors.to_be_bytes());
+        // 7.4.4.1.3: the refinement AT pair, present at template 0.
+        if refined.is_some() {
+            for (dx, dy) in NOMINAL_REFINE_AT {
+                data.push(dx as u8);
+                data.push(dy as u8);
+            }
+        }
+        data.extend_from_slice(&1u32.to_be_bytes()); // SBNUMINSTANCES
+
+        let mut bits = BitWriter::new();
+        write_symbol_id_codes(&mut bits, 1);
+        bits.align();
+
+        let (dt, fs, ds) = (table_b11(), table_b6(), table_b8());
+        // 6.4.5 steps 1 and 3b: the decoder negates the first value and adds
+        // the second, both times SBSTRIPS, which is 1 here. So a 1 followed by
+        // `t + 1` puts the strip at `t`, and 1 is the smallest either can be.
+        write_huff(&mut bits, &dt, 1);
+        write_huff(&mut bits, &dt, t + 1);
+        write_huff(&mut bits, &fs, s);
+        // The symbol's one-bit code, from the table written above.
+        bits.bit(0);
+        if let Some(refinement) = &refined {
+            // 6.4.11: over Huffman "is this instance refined" is one plain bit.
+            bits.bit(1);
+            let table = if refinement.table == 0 {
+                writer_b14()
+            } else {
+                writer_b15()
+            };
+            for delta in refinement.deltas {
+                write_huff(&mut bits, &table, delta);
+            }
+            match refinement.target {
+                Some(target) => {
+                    assert_eq!(
+                        (target.width as i32, target.height as i32),
+                        (
+                            symbol.width as i32 + refinement.deltas[0],
+                            symbol.height as i32 + refinement.deltas[1]
+                        ),
+                        "RDW and RDH are what size the refined instance"
+                    );
+                    let layout = refine_template(0, NOMINAL_REFINE_AT);
+                    let mut encoder = MqEncoder::new(1usize << layout.bits());
+                    let dx = split_offset(target.width, symbol.width, refinement.deltas[2]);
+                    let dy = split_offset(target.height, symbol.height, refinement.deltas[3]);
+                    encode_refinement(&mut encoder, 0, &layout, symbol, (dx, dy), target);
+                    let sub = encoder.flush();
+                    // `BMSIZE`, then the sub-stream on the next byte boundary.
+                    write_huff(&mut bits, &table_b1(), sub.len() as i32);
+                    bits.extend(&sub);
+                }
+                // The decoder reads `BMSIZE` before it checks the size the
+                // deltas name, and refuses there — so there is nothing after it
+                // to code.
+                None => write_huff(&mut bits, &table_b1(), 0),
+            }
+        }
+        // OOB ends the strip, and the instance count ends the region.
+        write_huff_oob(&mut bits, &ds);
+
+        data.extend(bits.finish());
+        data
+    }
+
+    /// A one-page stream: a dictionary exporting `symbol`, and `region`
+    /// referring to it.
+    fn text_region_page(size: (u32, u32), symbol: &[&str], region: &[u8]) -> Vec<u8> {
+        let class: [&[&str]; 1] = [symbol];
+        let classes: [&[&[&str]]; 1] = [&class];
+        let dictionary = symbol_dictionary_data(&classes, 0);
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(size.0, size.1, 0));
+        stream.extend(header(1, kind::SYMBOL_DICTIONARY, 1, &dictionary));
+        stream.extend(header_referring(
+            2,
+            kind::IMMEDIATE_TEXT_REGION,
+            1,
+            &[1],
+            region,
+        ));
+        stream
+    }
+
+    /// Decodes a one-page stream, refusing to report a picture that warned.
+    fn clean_page(stream: &[u8], size: (u32, u32)) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let params = Jbig2Params {
+            globals: &[],
+            width: size.0,
+            height: size.1,
+        };
+        let bits = decode(stream, &params, 1 << 20, &mut warnings).expect("the page decodes");
+        assert!(warnings.is_empty(), "a clean stream warned: {warnings:?}");
+        picture(&bits, size.0, size.1)
+    }
+
+    /// How many pixels two pages disagree about.
+    ///
+    /// The budget is zero, for the reason `crates/tinker-pdf/tests/`'s
+    /// `jbig2_refinement.rs` records: a refinement is *defined* as reproducing
+    /// its reference where nothing was coded to change, so any non-zero count
+    /// is a wrong picture rather than a close one.
+    fn disagreements(a: &[String], b: &[String]) -> usize {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| x.chars().zip(y.chars()).filter(|(p, q)| p != q).count())
+            .sum()
+    }
+
+    /// The reference letter both Huffman refinement fixtures start from.
+    #[rustfmt::skip]
+    const HUFF_SYMBOL: [&str; 6] = [
+        ".####.",
+        "#....#",
+        "#.....",
+        "#.....",
+        "#....#",
+        ".####.",
+    ];
+
+    /// Eight by seven — `RDW` of 2 and `RDH` of 1 against [`HUFF_SYMBOL`].
+    #[rustfmt::skip]
+    const HUFF_B14_TARGET: [&str; 7] = [
+        "..#####.",
+        ".#.....#",
+        ".#......",
+        ".######.",
+        ".#......",
+        ".#.....#",
+        "..#####.",
+    ];
+
+    /// Ten by five — `RDW` of 4 and `RDH` of −1 against [`HUFF_SYMBOL`].
+    #[rustfmt::skip]
+    const HUFF_B15_TARGET: [&str; 5] = [
+        ".########.",
+        "#........#",
+        "#.####...#",
+        "#........#",
+        ".########.",
+    ];
+
+    /// The same picture coded twice — refined through **B.14** with all four
+    /// deltas non-zero, and placed plainly — at 0 pixels different.
+    ///
+    /// `(RDW, RDH, RDX, RDY)` is `(2, 1, -1, -2)`, which is every one of
+    /// B.14's four three-bit lines: −2, −1, 1 and 2. Before this the table's
+    /// one-bit code for zero was all any fixture read, and the four deltas were
+    /// **refused** rather than decoded, so a wrong prefix length or range low
+    /// anywhere else in it broke nothing.
+    ///
+    /// The comparison page is coded over the *arithmetic* road — a different
+    /// dictionary, a different region, a different coder — so agreement is
+    /// two roads meeting rather than one road agreeing with itself.
+    ///
+    /// The instance sits at (2, 3) rather than at the origin so that the bit
+    /// reader is **not** on a byte boundary when `BMSIZE` has been read: the
+    /// alignment 6.4.11 requires before the arithmetic sub-stream is a fact
+    /// this fixture depends on, and a fixture that happened to land aligned
+    /// would not notice it going.
+    #[test]
+    fn a_huffman_text_region_refines_through_b14_with_non_zero_deltas() {
+        let symbol = bitmap_from(&HUFF_SYMBOL);
+        let target = bitmap_from(&HUFF_B14_TARGET);
+        let size = (14u32, 12u32);
+
+        let refined = huffman_text_region(
+            size,
+            (2, 3),
+            &symbol,
+            Some(Refinement {
+                target: Some(&target),
+                deltas: [2, 1, -1, -2],
+                table: 0,
+            }),
+        );
+        let refined = clean_page(&text_region_page(size, &HUFF_SYMBOL, &refined), size);
+
+        let plain = text_region_segment(
+            size.0,
+            size.1,
+            corner::TOPLEFT,
+            1,
+            1,
+            &[3],
+            &[(
+                2,
+                vec![Instance {
+                    id: 0,
+                    gap: None,
+                    t: 0,
+                }],
+            )],
+        );
+        let plain = clean_page(&text_region_page(size, &HUFF_B14_TARGET, &plain), size);
+
+        assert_eq!(
+            disagreements(&refined, &plain),
+            0,
+            "refined:\n{}\nplain:\n{}",
+            refined.join("\n"),
+            plain.join("\n")
+        );
+        assert_eq!(
+            refined[3][2..10],
+            *"..#####.",
+            "the picture, not only a count"
+        );
+    }
+
+    /// The same, through **B.15**, reaching lines that carry a range.
+    ///
+    /// `(RDW, RDH, RDX, RDY)` is `(4, -1, -2, 1)`. B.15's line for 4 is four
+    /// prefix bits over a **two-bit range**, and the lines for −1, −2 and 1 are
+    /// three prefix bits over a one-bit range — so this reads offsets inside a
+    /// range as well as prefixes, which the zero code never does.
+    #[test]
+    fn a_huffman_text_region_refines_through_b15_with_non_zero_deltas() {
+        let symbol = bitmap_from(&HUFF_SYMBOL);
+        let target = bitmap_from(&HUFF_B15_TARGET);
+        let size = (14u32, 12u32);
+
+        let refined = huffman_text_region(
+            size,
+            (2, 3),
+            &symbol,
+            Some(Refinement {
+                target: Some(&target),
+                deltas: [4, -1, -2, 1],
+                table: 1,
+            }),
+        );
+        let refined = clean_page(&text_region_page(size, &HUFF_SYMBOL, &refined), size);
+
+        let plain = text_region_segment(
+            size.0,
+            size.1,
+            corner::TOPLEFT,
+            1,
+            1,
+            &[3],
+            &[(
+                2,
+                vec![Instance {
+                    id: 0,
+                    gap: None,
+                    t: 0,
+                }],
+            )],
+        );
+        let plain = clean_page(&text_region_page(size, &HUFF_B15_TARGET, &plain), size);
+
+        assert_eq!(
+            disagreements(&refined, &plain),
+            0,
+            "refined:\n{}\nplain:\n{}",
+            refined.join("\n"),
+            plain.join("\n")
+        );
+        assert_eq!(
+            refined[3][2..12],
+            *".########.",
+            "the picture, not only a count"
+        );
+    }
+
+    /// Encodes a **Huffman refining** symbol dictionary (7.4.3.1 with `SDHUFF`
+    /// and `SDREFAGG` both set) carrying one symbol, one instance of 6.5.8.2.2.
+    ///
+    /// 6.5.8.2.2 fixes this road's tables by the clause rather than by a
+    /// selector: the offsets come through **B.15** and the count and size
+    /// through B.1. The symbol's own size comes from the height class, so
+    /// `RDX` and `RDY` are the only deltas there are.
+    fn huffman_dictionary_refining(imported: &[Bitmap], symbol: &Refined<'_>) -> Vec<u8> {
+        let mut data = Vec::new();
+        // 7.4.3.1.1: SDHUFF and SDREFAGG, B.4 for DH, B.2 for DW, refinement
+        // template 0.
+        data.extend_from_slice(&0x0003u16.to_be_bytes());
+        // 7.4.3.1.3's refinement AT pair. 7.4.3.1.2's generic pair is absent
+        // on this road: a Huffman dictionary codes no generic region.
+        for (dx, dy) in NOMINAL_REFINE_AT {
+            data.push(dx as u8);
+            data.push(dy as u8);
+        }
+        data.extend_from_slice(&1u32.to_be_bytes()); // SDNUMEXSYMS
+        data.extend_from_slice(&1u32.to_be_bytes()); // SDNUMNEWSYMS
+
+        let target = bitmap_from(symbol.rows);
+        let mut bits = BitWriter::new();
+        let (dh, dw, sizes, offsets) = (table_b4(), table_b2(), table_b1(), writer_b15());
+        write_huff(&mut bits, &dh, target.height as i32);
+        write_huff(&mut bits, &dw, target.width as i32);
+        // 6.5.8.2: one instance, which is 6.5.8.2.2's plain refinement.
+        write_huff(&mut bits, &sizes, 1);
+        // 6.5.8.2.3, and `max(1)`: the identity is a plain field of that many
+        // bits on this road, and a zero-width field would read nothing.
+        let code_len = symbol_code_length(imported.len() + 1).max(1);
+        bits.bits(symbol.id, code_len);
+        // 6.5.8.2.2 fixes these two by the clause rather than by a selector.
+        write_huff(&mut bits, &offsets, symbol.rdx);
+        write_huff(&mut bits, &offsets, symbol.rdy);
+
+        let reference = imported
+            .get(symbol.id as usize)
+            .expect("the reference exists");
+        let layout = refine_template(0, NOMINAL_REFINE_AT);
+        let mut encoder = MqEncoder::new(1usize << layout.bits());
+        // 6.5.8.2.2: the coded offset is the whole of it, unlike 6.4.11's.
+        encode_refinement(
+            &mut encoder,
+            0,
+            &layout,
+            reference,
+            (symbol.rdx, symbol.rdy),
+            &target,
+        );
+        let sub = encoder.flush();
+        write_huff(&mut bits, &sizes, sub.len() as i32);
+        bits.extend(&sub);
+
+        // OOB ends the height class, and 6.5.10's runs follow over B.1.
+        write_huff_oob(&mut bits, &dw);
+        write_huff(&mut bits, &sizes, imported.len() as i32);
+        write_huff(&mut bits, &sizes, 1);
+
+        data.extend(bits.finish());
+        data
+    }
+
+    /// The picture the Huffman dictionary fixture refines its reference into,
+    /// and codes plainly beside it.
+    #[rustfmt::skip]
+    const HUFF_DICT_TARGET: [&str; 6] = [
+        "#....#",
+        "##..##",
+        "#.##.#",
+        "#.##.#",
+        "##..##",
+        "#....#",
+    ];
+
+    /// **A Huffman dictionary refines at a non-zero offset**, once for every
+    /// line of B.15 but the one-bit code for zero, and reaches the same symbol
+    /// a plain dictionary codes.
+    ///
+    /// Until this fixture existed the dictionary's Huffman road **refused** any
+    /// non-zero `(RDX, RDY)` rather than read lines of B.15 nothing exercised.
+    /// The offsets below walk the table outwards — a one-bit range, then two,
+    /// three and four bits either side of zero, then the two open-ended lines
+    /// at ±31 — so every line carries an offset inside a range as well as its
+    /// prefix. An offset far enough out moves the reference off the symbol
+    /// entirely, which is a legal refinement of nothing and still a picture.
+    ///
+    /// The refined symbol is its reference's size throughout, deliberately:
+    /// what is under test here is the table, and 6.5.8.2.2's reference offset
+    /// is pinned by its own fixture, where the sizes differ instead.
+    ///
+    /// One refined symbol per dictionary rather than several, because 6.5.8.2's
+    /// Huffman road gives each symbol its own byte-aligned sub-stream over
+    /// shared 6.3 states, and [`MqEncoder`] cannot carry states from one
+    /// sub-stream to the next. That rule is held by the corpus instead — see
+    /// the injection table in `docs/design/jbig2-symbol-text.md`.
+    #[test]
+    fn a_huffman_dictionary_refines_at_every_non_zero_line_of_b15() {
+        let class: [&[&str]; 1] = [&HUFF_SYMBOL];
+        let classes: [&[&[&str]]; 1] = [&class];
+        let imported = symbol_dictionary(
+            &dictionary_segment(1, &[], &symbol_dictionary_data(&classes, 0)),
+            &[],
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut Vec::new(),
+        )
+        .expect("the reference dictionary decodes");
+
+        // The same picture coded plainly, so the claim below is two codings
+        // meeting rather than one coding agreeing with a string.
+        let plain_class: [&[&str]; 1] = [&HUFF_DICT_TARGET];
+        let plain_classes: [&[&[&str]]; 1] = [&plain_class];
+        let plain = symbol_dictionary(
+            &dictionary_segment(3, &[], &symbol_dictionary_data(&plain_classes, 0)),
+            &[],
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut Vec::new(),
+        )
+        .expect("the plain dictionary decodes");
+
+        // Each pair lands on a different line of B.15, outwards from the
+        // centre and ending on the two that have no upper bound.
+        for (rdx, rdy) in [(1, -2), (-5, 4), (-10, 9), (-25, 20), (-40, 50)] {
+            let refining = huffman_dictionary_refining(
+                &imported,
+                &Refined {
+                    id: 0,
+                    rdx,
+                    rdy,
+                    rows: &HUFF_DICT_TARGET,
+                },
+            );
+            let mut warnings = Vec::new();
+            let exported = symbol_dictionary(
+                &dictionary_segment(2, &[1], &refining),
+                &imported,
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings,
+            )
+            .unwrap_or_else(|| panic!("({rdx}, {rdy}) did not decode: {warnings:?}"));
+            assert!(warnings.is_empty(), "({rdx}, {rdy}) warned: {warnings:?}");
+            assert_eq!(exported.len(), 1);
+            assert_eq!(
+                bitmap_rows(&exported[0]),
+                bitmap_rows(&plain[0]),
+                "({rdx}, {rdy}) refined to a different picture"
+            );
+        }
+    }
+
+    /// **What still refuses once the non-zero deltas are decoded.**
+    ///
+    /// Lifting a guard is only safe if the cases it happened to cover are
+    /// still covered by something narrower. Two are asserted here: a selector
+    /// of 3 is clause 7.4.13's custom table, which this build does not read and
+    /// which is refused by name; and a delta that sizes the refined instance
+    /// to nothing is refused rather than allocated, because `RDW` and `RDH` are
+    /// attacker-controlled and 7.4.4.1.2 does not bound them.
+    #[test]
+    fn a_refining_huffman_region_still_refuses_what_it_cannot_read() {
+        let symbol = bitmap_from(&HUFF_SYMBOL);
+        let target = bitmap_from(&HUFF_B14_TARGET);
+        let size = (14u32, 12u32);
+        let symbols = [bitmap_from(&HUFF_SYMBOL)];
+        let refuse = |data: &[u8]| {
+            let segment = Segment {
+                number: 2,
+                kind: kind::IMMEDIATE_TEXT_REGION,
+                referred: vec![1],
+                page: 1,
+                data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            assert!(
+                text_region(&segment, &symbols, &[], 1 << 20, &mut warnings).is_none(),
+                "the region decoded where it should have refused"
+            );
+            warnings
+        };
+
+        // 7.4.4.1.2: a selector of 3 for RDW is clause 7.4.13's custom table.
+        // The selector field starts 19 bytes into the segment, after the region
+        // information and the flags; its low byte carries bits 0 to 7, and
+        // RDW's are 6 and 7.
+        let mut region = huffman_text_region(
+            size,
+            (2, 3),
+            &symbol,
+            Some(Refinement {
+                target: Some(&target),
+                deltas: [2, 1, -1, -2],
+                table: 0,
+            }),
+        );
+        if let Some(byte) = region.get_mut(20) {
+            *byte |= 0xC0;
+        }
+        assert!(
+            refuse(&region).contains(&Jbig2Refusal::TextTableSelector),
+            "a custom table is refused by name"
+        );
+
+        // And `RDH` of −8 against a six-high symbol, which sizes the instance
+        // to nothing. B.15 codes it, 7.4.4.1.2 does not bound it, and the
+        // decoder refuses rather than allocating what the deltas name.
+        let region = huffman_text_region(
+            size,
+            (2, 3),
+            &symbol,
+            Some(Refinement {
+                target: None,
+                deltas: [0, -8, 0, 0],
+                table: 1,
+            }),
+        );
+        assert!(
+            refuse(&region).contains(&Jbig2Refusal::RefinedSizeOutOfRange),
+            "an impossible refinement size is refused by name"
+        );
+    }
+
+    /// The rows of a bitmap, as `#` and `.`.
+    fn bitmap_rows(bitmap: &Bitmap) -> Vec<String> {
+        (0..bitmap.height)
+            .map(|y| {
+                (0..bitmap.width)
+                    .map(|x| {
+                        if bitmap.get(x as i32, y as i32) == 1 {
+                            '#'
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// **Every one of Annex B's fifteen tables is a complete prefix code.**
+    ///
+    /// This test used to be called
+    /// `annex_b_tables_that_are_not_complete_prefix_codes_are_named` and it
+    /// listed three. Both what it caught and what it missed are worth keeping.
+    ///
+    /// B.3 assigns canonical codes from the prefix lengths alone. Such a code
+    /// decodes every bit pattern if and only if the lengths satisfy Kraft's
+    /// equality, `sum(2^-len) == 1`. Below one, some patterns decode to
+    /// nothing: [`HuffTable::decode`] returns `None`, the caller's `?` gives up,
+    /// and the file is refused with no reason recorded. Above one, two lines
+    /// share a code. While these tables were *reconstructed* -- this repository
+    /// could not reach a copy of T.88 until September 2026 -- this was the one
+    /// property checkable without one, and it found B.7, B.10 and B.12.
+    ///
+    /// **It did not find B.15, which was also wrong.** That table's eleven
+    /// lines summed to exactly one and split the range either side of zero
+    /// differently from the standard's thirteen. A necessary condition is not
+    /// a sufficient one. The tables are transcribed now, and this stays as the
+    /// cheap check that a later edit has not broken one.
+    ///
+    /// The sum is in units of `1 << 24`, so the comparison is exact integer
+    /// arithmetic rather than a float with a tolerance.
+    #[test]
+    fn annex_b_tables_are_complete_prefix_codes() {
+        const UNIT: u64 = 1 << 24;
+        let mut short: Vec<(&str, u64)> = Vec::new();
+        for (name, table) in annex_b_tables() {
+            let sum: u64 = table
+                .lines
+                .iter()
+                .filter(|line| line.prefix_len > 0)
+                .map(|line| UNIT >> line.prefix_len)
+                .sum();
+            assert!(
+                sum <= UNIT,
+                "{name} is over-subscribed at {sum}/{UNIT}, so two lines share a \
+                 code and every value after the collision is wrong"
+            );
+            if sum != UNIT {
+                // Parts per million of one, so a reader sees how far off it is.
+                short.push((name, sum * 1_000_000 / UNIT));
+            }
+        }
+        assert!(
+            short.is_empty(),
+            "these tables do not decode every bit pattern: {short:?}"
+        );
+    }
+
+    /// The fifteen, in order, for the two tests that walk all of them.
+    fn annex_b_tables() -> [(&'static str, HuffTable); 15] {
+        [
+            ("B.1", table_b1()),
+            ("B.2", table_b2()),
+            ("B.3", table_b3()),
+            ("B.4", table_b4()),
+            ("B.5", table_b5()),
+            ("B.6", table_b6()),
+            ("B.7", table_b7()),
+            ("B.8", table_b8()),
+            ("B.9", table_b9()),
+            ("B.10", table_b10()),
+            ("B.11", table_b11()),
+            ("B.12", table_b12()),
+            ("B.13", table_b13()),
+            ("B.14", table_b14()),
+            ("B.15", table_b15()),
+        ]
+    }
+
+    /// **The codes B.3 assigns are the ones T.88 prints beside each line.**
+    ///
+    /// Annex B gives every row an `Encoding` column -- the bit string itself,
+    /// written out. That column is redundant with the prefix lengths *if* B.3's
+    /// canonical assignment is right, and it is the only thing in the standard
+    /// that says so independently. The four tables here exercise every shape
+    /// the assignment has: B.7's fifteen lines interleave four lengths rather
+    /// than arriving sorted, B.10 has two ranges and the out-of-band marker
+    /// sharing the shortest length, B.12 runs from one bit to eight with no
+    /// four-bit line at all, and B.15 is symmetric about zero.
+    ///
+    /// The lengths and the encodings come from the same printed table, and that
+    /// is what makes the pair worth more than either: a transcription slip in
+    /// one column would have to be matched by a consistent slip in the other.
+    #[test]
+    fn the_codes_b3_assigns_are_the_ones_the_standard_prints() {
+        let expected: [(&str, &[(usize, &str)]); 4] = [
+            (
+                "B.7",
+                &[
+                    (0, "1000"),
+                    (1, "000"),
+                    (2, "1001"),
+                    (3, "11010"),
+                    (4, "11011"),
+                    (5, "1010"),
+                    (6, "1011"),
+                    (7, "11100"),
+                    (8, "11101"),
+                    (9, "1100"),
+                    (10, "001"),
+                    (11, "010"),
+                    (12, "011"),
+                    (13, "11110"),
+                    (14, "11111"),
+                ],
+            ),
+            (
+                "B.10",
+                &[
+                    (0, "1111010"),
+                    (1, "11111100"),
+                    (3, "11000"),
+                    (4, "00"),
+                    (9, "01"),
+                    (12, "111000"),
+                    (16, "111100"),
+                    (17, "1111101"),
+                    (18, "11111110"),
+                    (19, "11111111"),
+                    (20, "10"),
+                ],
+            ),
+            (
+                "B.12",
+                &[
+                    (0, "0"),
+                    (1, "10"),
+                    (2, "110"),
+                    (3, "11100"),
+                    (4, "11101"),
+                    (5, "111100"),
+                    (6, "1111010"),
+                    (10, "1111110"),
+                    (11, "11111110"),
+                    (12, "11111111"),
+                ],
+            ),
+            (
+                "B.15",
+                &[
+                    (0, "1111100"),
+                    (4, "100"),
+                    (5, "0"),
+                    (6, "101"),
+                    (11, "1111110"),
+                    (12, "1111111"),
+                ],
+            ),
+        ];
+        let tables = annex_b_tables();
+        for (name, rows) in &expected {
+            let (_, table) = tables
+                .iter()
+                .find(|(n, _)| n == name)
+                .expect("the table is in the list");
+            for (index, encoding) in *rows {
+                let line = table.lines[*index];
+                let code = table.codes[*index];
+                let printed = format!("{code:0width$b}", width = usize::from(line.prefix_len));
+                assert_eq!(
+                    printed.as_str(),
+                    *encoding,
+                    "{name} line {index}: B.3 assigns {printed}, T.88 prints {encoding}"
+                );
+            }
+        }
+    }
+
+    /// **6.4.5's four reference corners are Table 34's numbers**, and both
+    /// placement predicates agree with them.
+    ///
+    /// The two-bit field is read straight out of the flags, so a constant that
+    /// named the wrong number would place every symbol of that corner on the
+    /// wrong edge -- and the corpus census found all four in use, so none of
+    /// them is a branch nothing takes.
+    #[test]
+    fn the_four_reference_corners_are_table_34_s_numbers() {
+        assert_eq!(
+            [
+                corner::BOTTOMLEFT,
+                corner::TOPLEFT,
+                corner::BOTTOMRIGHT,
+                corner::TOPRIGHT
+            ],
+            [0, 1, 2, 3]
+        );
+        for (corner, left, top) in [
+            (corner::BOTTOMLEFT, true, false),
+            (corner::TOPLEFT, true, true),
+            (corner::BOTTOMRIGHT, false, false),
+            (corner::TOPRIGHT, false, true),
+        ] {
+            assert_eq!(corner::is_left(corner), left, "corner {corner}");
+            assert_eq!(corner::is_top(corner), top, "corner {corner}");
+        }
+    }
+
+    /// **A custom table asking for more lines than the cap is refused before
+    /// it allocates.**
+    ///
+    /// `HTLOW` and `HTHIGH` are 32-bit fields and a range length of zero
+    /// advances the running low by one, so nine bytes of header name four
+    /// billion lines. The bit reader would run out long before that on a short
+    /// segment, which is exactly why the guard cannot be left to it: the
+    /// segment below is nine bytes of header and enough coded lines to prove
+    /// the loop stops on the cap rather than on the data.
+    #[test]
+    fn a_custom_table_declaring_more_lines_than_the_cap_is_refused() {
+        // HTPS = 1 bit, HTRS = 1 bit, no OOB: two bits per line, so the whole
+        // cap is reachable inside a kilobyte of segment.
+        let mut data = vec![0u8];
+        data.extend_from_slice(&0i32.to_be_bytes());
+        data.extend_from_slice(&i32::MAX.to_be_bytes());
+        // Every line reads prefix length 0 and range length 0, so the running
+        // low advances by one and the table never reaches `HTHIGH`.
+        data.extend(std::iter::repeat_n(0u8, MAX_JBIG2_TABLE_LINES));
+        assert!(
+            custom_table(&data).is_none(),
+            "a table naming two billion ranges was read rather than refused"
+        );
+
+        // And the same header with a span the lines actually cover is a table,
+        // so the refusal above is the cap rather than the shape.
+        let mut small = vec![0u8];
+        small.extend_from_slice(&0i32.to_be_bytes());
+        small.extend_from_slice(&4i32.to_be_bytes());
+        small.extend(std::iter::repeat_n(0u8, 8));
+        assert!(
+            custom_table(&small).is_some(),
+            "a four-value table was refused, so the cap is not what fired"
+        );
+    }
+
+    /// **A page that declares itself and carries no content is blank, and a
+    /// page that was offered content and drew none is refused.**
+    ///
+    /// The module note's refusal is aimed at the second: a stream whose symbol
+    /// dictionary and text region this build could not draw would otherwise
+    /// hand back a white page reported as success. It was aimed at the first as
+    /// well, and should not have been -- 7.4.8.5's default pixel value *is* the
+    /// page, so a producer that emits one page information segment and nothing
+    /// else has said the page is blank rather than failed to say anything.
+    ///
+    /// `safedocs/0000231.pdf` is why this matters outside a fixture: a 240-page
+    /// scan whose last page is empty, whose other 240 pages decode, and which
+    /// was refused whole for the blank one.
+    #[test]
+    fn a_page_that_carries_no_content_segment_is_blank_rather_than_refused() {
+        let params = Jbig2Params {
+            globals: &[],
+            width: 16,
+            height: 16,
+        };
+
+        // One page information segment, and nothing else.
+        let blank = header(0, kind::PAGE_INFORMATION, 1, &page_info(16, 16, 0));
+        let mut warnings = Vec::new();
+        let bits = decode(&blank, &params, 1 << 20, &mut warnings)
+            .expect("a declared blank page is what the file says it is");
+        assert_eq!(bits, vec![0u8; 2 * 16], "the default pixel value is white");
+        assert!(warnings.is_empty(), "and nothing was skipped: {warnings:?}");
+
+        // The same page, plus a content segment this build cannot draw. Now
+        // something *was* offered and nothing was drawn, which is the refusal.
+        let mut offered = blank.clone();
+        offered.extend(header(1, kind::COLOUR_PALETTE, 1, &[0; 4]));
+        let mut warnings = Vec::new();
+        assert_eq!(
+            decode(&offered, &params, 1 << 20, &mut warnings),
+            Err(FilterError::Unsupported(Capability::Jbig2)),
+            "a page offered content it could not draw is not a blank page"
+        );
+        assert!(warnings.contains(&Warning::Jbig2SegmentSkipped));
+
+        // And a stream with no page information segment at all says nothing,
+        // so there is no default pixel value to hand back.
+        let mut warnings = Vec::new();
+        assert_eq!(
+            decode(&[], &params, 1 << 20, &mut warnings),
+            Err(FilterError::Unsupported(Capability::Jbig2)),
+            "a stream that declares no page is not a blank page"
+        );
     }
 }

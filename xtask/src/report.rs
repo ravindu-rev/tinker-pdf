@@ -117,6 +117,51 @@ impl CorpusReport {
         out
     }
 
+    /// What the structure tree walk reached over this corpus (14.7).
+    ///
+    /// Summed over files rather than averaged over them: a per-file rate
+    /// averaged is not the rate over the corpus, and most corpus files carry
+    /// no structure tree at all.
+    pub fn tagged(&self) -> crate::ratchet::TaggedBar {
+        let mut out = crate::ratchet::TaggedBar::default();
+        for file in &self.files {
+            let Some(tagged) = file.tagged else {
+                continue;
+            };
+            out.files += 1;
+            out.elements += tagged.elements;
+            out.matched += tagged.matched;
+            out.orphans += tagged.orphans;
+        }
+        out
+    }
+
+    /// The largest peak resident set any child in this corpus reached, and how
+    /// many children reported one at all.
+    ///
+    /// **A maximum rather than a sum or a mean**, and the reason is what the
+    /// number is for: the question memory asks is "what is the most this
+    /// engine ever needed for one file", because that is what decides whether
+    /// a machine can run it. A mean is dominated by the four thousand small
+    /// files and would not move if one file started needing a gigabyte; a sum
+    /// over a corpus of independent processes is not a quantity at all.
+    ///
+    /// The count beside it is the denominator, and it is recorded for
+    /// [`CorpusReport::strict_eligible`]'s reason: a maximum taken over fewer
+    /// children is a different measurement, and a run where the measurement
+    /// stopped happening must not read as a run that got smaller.
+    pub fn peak(&self) -> crate::ratchet::PeakBar {
+        let mut out = crate::ratchet::PeakBar::default();
+        for file in &self.files {
+            let Some(peak) = file.peak else {
+                continue;
+            };
+            out.files += 1;
+            out.bytes = out.bytes.max(peak);
+        }
+        out
+    }
+
     /// How many files each metamorphic relation was **asked** of, by name.
     ///
     /// Asked and held are two counts and both are recorded, for the reason the
@@ -280,6 +325,21 @@ impl Run {
                                 ),
                             ));
                         }
+                        // Per file, because the per-corpus maximum is one
+                        // number and the file that set it is the only thing
+                        // anybody can act on. Omitted where the child did not
+                        // measure, so a reader can tell a platform that says
+                        // nothing from one that says a small number.
+                        if let Some(peak) = file.peak {
+                            fields.push(("peak", Json::count(peak)));
+                        }
+                        // Who wrote the file. Per file for the same reason the
+                        // peak is: the per-corpus grouping below is a summary,
+                        // and the only thing anybody can act on is the row
+                        // naming a path and a producer together.
+                        if let Some(producer) = &file.producer {
+                            fields.push(("producer", Json::string(producer)));
+                        }
                         if file.cost != crate::runner::Cost::default() {
                             fields.push((
                                 "cost",
@@ -395,7 +455,7 @@ impl Run {
             .corpora
             .iter()
             .map(|corpus| {
-                Json::object([
+                let mut fields = vec![
                     ("name", Json::string(&corpus.name)),
                     ("total", Json::count(corpus.total())),
                     ("passed", Json::count(corpus.passed())),
@@ -439,7 +499,42 @@ impl Run {
                             },
                         )),
                     ),
-                ])
+                    // Tagged PDF milestone 4. Four counts, and the reason
+                    // `orphans` is recorded beside `matched` rather than on
+                    // its own is that a tree claiming fewer characters and a
+                    // corpus offering fewer marked characters are different
+                    // facts that a lone orphan count cannot tell apart.
+                    ("tagged", {
+                        let tagged = corpus.tagged();
+                        Json::object([
+                            ("files", Json::count(tagged.files)),
+                            ("elements", Json::count(tagged.elements)),
+                            ("matched", Json::count(tagged.matched)),
+                            ("orphans", Json::count(tagged.orphans)),
+                        ])
+                    }),
+                ];
+                // The sixth axis: the most memory any one child needed.
+                //
+                // Written only where something measured it. A run on a
+                // platform whose `tpdf` reads no high-water mark is already
+                // incomplete and can never be a bar, so writing
+                // `{"bytes": 0}` would put a ceiling nothing can clear into a
+                // file nothing can compare against — two ways of being wrong
+                // where an absent key is the honest one: this bar carries no
+                // memory measurement, exactly as the three bars recorded
+                // before the measurement existed do.
+                let peak = corpus.peak();
+                if peak.files > 0 {
+                    fields.push((
+                        "peak",
+                        Json::object([
+                            ("bytes", Json::count(peak.bytes)),
+                            ("files", Json::count(peak.files)),
+                        ]),
+                    ));
+                }
+                Json::object(fields)
             })
             .collect();
 
@@ -477,6 +572,22 @@ impl Run {
                 // non-terminating rewrite sit in the corpus unnoticed.
                 outcomes.get("stalled").copied().unwrap_or(0),
             ));
+            // The sixth axis, on its own line for the strict pass's reason: it
+            // is a maximum over children rather than a count of files, and
+            // putting a peak in the same row as a pass rate would invite it to
+            // be read as one more file column. A corpus nothing measured says
+            // so in words, because a blank would read as zero bytes.
+            let peak = corpus.peak();
+            lines.push(if peak.files == 0 {
+                format!("{:<14} no child reported a peak resident set", "  peak")
+            } else {
+                format!(
+                    "{:<14} {:>6} MiB  the largest peak resident set of {} children",
+                    "  peak",
+                    peak.bytes / (1 << 20),
+                    peak.files
+                )
+            });
         }
         lines.push(format!(
             "{:<14} {:>6} files  {:>6} passed",
@@ -508,6 +619,70 @@ impl Run {
     }
 
     /// The capability hit-rate table, as markdown, for gaps 10, 17 and 18.
+    /// **Every file that did not pass, and who wrote it.**
+    ///
+    /// The production corpus's argument is that its documents were emitted by
+    /// real producers for real readers rather than written to test a reader,
+    /// and the roadmap's exit criterion for that row is that every failure be
+    /// *attributed by producer*. This is that attribution, and it is a table
+    /// rather than a ratchet on purpose: the count of failures is already
+    /// ratcheted, and what a person needs when the count moves is the name of
+    /// the tool whose output moved it.
+    ///
+    /// Two failures from one generator and two from two different ones are
+    /// the same number and completely different findings. The first is one
+    /// bug in one producer's output; the second is a bug here.
+    ///
+    /// Printed only when something did not pass, because a table of nothing
+    /// is noise in a green run's log.
+    pub fn producer_table(&self) -> String {
+        let mut rows: Vec<(String, String, String, &'static str)> = Vec::new();
+        for corpus in &self.corpora {
+            for file in &corpus.files {
+                if matches!(file.outcome, crate::runner::Outcome::Passed) {
+                    continue;
+                }
+                rows.push((
+                    // A record that never opened the file states no producer,
+                    // and that is its own row rather than a blank: it is the
+                    // answer for a file this engine could not read at all.
+                    file.producer
+                        .clone()
+                        .unwrap_or_else(|| "(unread: the file did not open)".to_string()),
+                    corpus.name.clone(),
+                    file.path.clone(),
+                    file.outcome.label(),
+                ));
+            }
+        }
+        if rows.is_empty() {
+            return String::new();
+        }
+        rows.sort();
+
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        for (producer, _, _, _) in &rows {
+            *counts.entry(producer.clone()).or_default() += 1;
+        }
+
+        let mut out = format!(
+            "{} file(s) did not pass, from {} distinct producer(s):\n\n",
+            rows.len(),
+            counts.len()
+        );
+        out.push_str("| Producer | Corpus | File | Outcome |\n| --- | --- | --- | --- |\n");
+        for (producer, corpus, path, outcome) in &rows {
+            // The pipe is the table's own separator and a producer string may
+            // contain one -- SAFEDOCS has several where a tool recorded two
+            // names joined by it -- so it is escaped rather than trusted.
+            out.push_str(&format!(
+                "| {} | `{corpus}` | `{path}` | {outcome} |\n",
+                producer.replace('|', "\\|")
+            ));
+        }
+        out
+    }
+
     pub fn capability_table(&self) -> String {
         let mut names: Vec<String> = Vec::new();
         for corpus in &self.corpora {
@@ -572,6 +747,9 @@ mod tests {
             outcome,
             cost: crate::runner::Cost::default(),
             bundled_faces: false,
+            tagged: None,
+            producer: None,
+            peak: None,
             pages: 1,
             rendered: 1,
             warnings: warnings
@@ -661,6 +839,36 @@ mod tests {
         let hits = run().corpora[0].capabilities();
         assert_eq!(hits["jbig2"], 1);
         assert_eq!(hits["jpx"], 1);
+    }
+
+    /// The peak is a per-file number in the report and a per-corpus **maximum**
+    /// in the ratchet, and they answer different questions. The report's is a
+    /// lead — which file needed it — and the ratchet's is the band.
+    #[test]
+    fn the_peak_is_per_file_in_one_document_and_a_maximum_in_the_other() {
+        let mut run = run();
+        run.corpora[0].files[0].peak = Some(21_000_000);
+        run.corpora[0].files[1].peak = Some(120_000_000);
+
+        let report = run.to_report_json().to_pretty();
+        assert!(report.contains("\"peak\": 21000000"), "{report}");
+        assert!(report.contains("\"peak\": 120000000"), "{report}");
+
+        // A maximum and not a sum: 141 000 000 is what a total would say, and
+        // the question memory asks is what one file needs at once.
+        let ratchet = run.to_ratchet_json("n").to_pretty();
+        assert!(ratchet.contains("\"bytes\": 120000000"), "{ratchet}");
+        assert!(!ratchet.contains("141000000"), "{ratchet}");
+    }
+
+    /// And a corpus nothing measured writes no band at all rather than a band
+    /// of zero bytes, which is a ceiling nothing could sit under. Such a run
+    /// is incomplete anyway — `corpus::run` says so in `limits` — and this is
+    /// the half that keeps the file itself honest.
+    #[test]
+    fn a_corpus_nothing_measured_writes_no_band() {
+        let ratchet = run().to_ratchet_json("n").to_pretty();
+        assert!(!ratchet.contains("\"peak\""), "{ratchet}");
     }
 
     #[test]

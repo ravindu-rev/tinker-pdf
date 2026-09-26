@@ -1,0 +1,47 @@
+[package]
+name = "tinker-pdf-shape"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "OpenType Layout (ISO/IEC 14496-22): GDEF, GSUB and GPOS parsed and executed in integer font design units, hand-rolled. No PDF types"
+# `data/aots` **ships**, and `exclude = ["data/"]` was here until the release
+# pipeline refused it. The reasoning for excluding it was that the Adobe
+# fixture corpus is read by `tests/aots.rs` alone, and a published crate
+# carries its tests but nobody who downloads it runs them — which is true, and
+# beside the point twice over.
+#
+# `xtask`'s `a_crate_that_vendors_data_publishes_it` states the rule
+# mechanically — a crate with a non-empty `data/` must ship files from it —
+# because the *last* crate to reason its way out of that shipped a
+# `tinker-pdf-font` that built for nobody who downloaded it. A rule with an
+# exception for "data no build script reads" is a rule somebody has to
+# re-litigate on every crate, and this one is 1.1 MB against a 10 MiB ceiling.
+#
+# The second reason is better: the corpus is the evidence this crate is right,
+# and a `cargo test` run by whoever downloaded it should reach the same 272
+# cases it reaches here.
+exclude = ["target/"]
+
+[dependencies]
+# The sfnt table directory, and nothing else. `tinker_pdf_font::Sfnt` already
+# disbelieves every offset and length in a table directory, and a second
+# parser of the same twelve-byte header in this workspace would be a second
+# place for the same bug to live. `docs/design/shaping.md` argues the split
+# from the other side: the OpenType Layout tables are parsed *here* rather
+# than added to `tinker-pdf-font`, because that crate's charter is the tables
+# metrics need and a lookup is not a metric.
+#
+# The fifth leaf-to-leaf edge, written up beside `font -> filters`,
+# `zip -> filters` and `layout -> css` in `xtask`'s ALLOWED. It points
+# sideways rather than upward and cannot cycle: `tinker-pdf-font` depends on
+# `tinker-pdf-filters`, `tinker-pdf-filters` on nothing, and neither has any
+# reason to know that shaping exists.
+#
+# `default-features = false` is inherited from the workspace entry, which is
+# deliberate: the predefined CMap registry is a megabyte of tables for mapping
+# character codes to CIDs, and nothing here maps a character code to anything.
+# A caller that wants `cmap` turns the feature on in its own manifest.
+tinker-pdf-font = { workspace = true }

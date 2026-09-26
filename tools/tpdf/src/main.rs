@@ -11,11 +11,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tinker_pdf::{
     Bitmap, CosDocument, Dict, Document, LadderLevel, ObjRef, Object, Page, RenderOptions,
-    SimpleFontProvider, StreamObj, Tier, WriteMode, WriteOptions, XrefEntry,
+    SimpleFontProvider, StreamObj, StructureTree, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -24,11 +25,13 @@ tpdf — inspect and convert PDFs with the tinker-pdf engine
 usage:
   tpdf info    <file.pdf> [--password P]
   tpdf text    <file.pdf> [--page N] [--password P]
-  tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--no-annotations]
+  tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--jobs N]
+                                    [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
+  tpdf fonts   <file.pdf> [--out DIR] [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
-  tpdf check   <file.pdf>... [--strict]
+  tpdf check   <file.pdf>... [--strict] [--pdfa]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
 
 options:
@@ -37,13 +40,24 @@ options:
   --stream     with --object, write that object's stream data to stdout
   --raw        with --stream, before the filters rather than after
   --dpi D      resolution for render (default 150)
-  --out DIR    where render writes its PNMs
+  --jobs N     render N pages at once (default 1)
+  --out DIR    where render writes its PNGs
   --fonts PATH a face, or a directory of faces, for documents that embed none
   --fonts bundled
                the faces this build carries; refused unless it carries any
   --password P the password to open an encrypted file with
   --quiet      only report failures
   --strict     with check, also validate against ISO 32000 strictly
+  --pdfa       with check, also validate against ISO 19005 (PDF/A)
+
+`--jobs` is the one flag that is meant to change nothing but the clock. A
+`Document` is `Send + Sync` and the pages of one are independent — each
+writes its own file — so `render` walks them on a pool of threads. The pool
+lives here and not in the library: the engine spawns no thread on any
+target, so who renders on what is the caller's business, and this is a
+caller. Every page's output is buffered and printed in page order after the
+join, so `--jobs 8` and `--jobs 1` write the same bytes to the same files
+and to stdout. The default is 1.
 
 `check` opens each file and reports its warnings, exiting non-zero if any
 file failed to open at all. It never renders, so it is the fast pass over a
@@ -56,6 +70,15 @@ against `endstream`, the trailer against Table 15. Any defect exits non-zero,
 because the question `--strict` asks is not whether it opened but whether it
 is right.
 
+`--pdfa` asks a different question again: not whether the file is a valid
+PDF but whether it is a valid *archival* one. A file can be one and not the
+other in both directions, which is why this is a separate flag rather than a
+level of `--strict`. Each file prints the flavour it claims, every finding
+with its clause, and which rule groups ran -- the last of those because this
+build does not implement all of ISO 19005, and \"no findings\" from a partial
+sweep is not \"it conforms\". A file claiming no flavour is reported and is not
+a failure: most PDFs are not PDF/A and are not pretending to be.
+
 `probe` is the one the corpus runner spawns, one child process per file. It
 opens the file, renders every page, rewrites it and validates the rewrite, and
 writes a line-oriented record of what happened to stdout, ending in `done`. That last line is the whole point: a
@@ -67,6 +90,17 @@ It exits 0 whenever it finished, including for a file that would not open — a
 file that fails to open is a result to be counted, not an error in the tool,
 and an exit code that conflated them would make every unopenable file look
 like a crashed run.
+
+`fonts` lists every font the pages of a document can reach — once each,
+whatever number of pages and resource names arrive at it — with its family,
+its subset tag, whether the file carries its program, and the names it
+answered to. `--out DIR` additionally writes each embedded program to that
+directory, which is the only thing here that pays for a font program: the
+listing itself reads names and never a stream.
+
+Do not confuse it with the `--fonts` flag above. `fonts` *reads* the faces a
+document carries; `--fonts` *supplies* faces to `render` and `probe` for a
+document that carries none, which is the opposite direction.
 
 `objects` is the view underneath every other command: what the engine
 actually parsed, object by object. It is what a corpus failure gets looked
@@ -96,6 +130,7 @@ fn main() -> ExitCode {
         "text" => run(&options, text),
         "render" => run(&options, render),
         "fields" => run(&options, fields),
+        "fonts" => run(&options, fonts),
         "outline" => run(&options, outline),
         "objects" => run(&options, objects),
         "check" => check(&options),
@@ -117,6 +152,12 @@ struct Options {
     page: Option<u32>,
     object: Option<u32>,
     dpi: f64,
+    /// How many pages `render` draws at once.
+    ///
+    /// **One by default**, so nothing about an existing invocation changes
+    /// unless it is asked for — not the wall time, not the number of threads
+    /// in the process, and not one byte of the output either way.
+    jobs: usize,
     out: Option<String>,
     fonts: Option<String>,
     password: Option<String>,
@@ -125,6 +166,21 @@ struct Options {
     raw: bool,
     stream: bool,
     strict: bool,
+    /// Validate against ISO 19005 (PDF/A) as well, and exit by the verdict.
+    ///
+    /// Separate from `--strict` because they answer different questions and a
+    /// caller wants one or the other: `--strict` asks whether the file is a
+    /// valid PDF, `--pdfa` asks whether it is a valid *archival* PDF. A file
+    /// can be one and not the other in both directions.
+    pdfa: bool,
+    /// Print the record format version and stop, naming no file.
+    ///
+    /// The corpus runner asks before it spawns anything, because a child one
+    /// version behind writes a complete record the runner then refuses, once
+    /// per file — and four thousand refusals read as an engine that stopped
+    /// rendering rather than as a binary that needs rebuilding. Asking costs
+    /// one process at the start of a run that spawns thousands.
+    record_version: bool,
 }
 
 impl Options {
@@ -134,6 +190,7 @@ impl Options {
             page: None,
             object: None,
             dpi: 150.0,
+            jobs: 1,
             out: None,
             fonts: None,
             password: None,
@@ -142,6 +199,8 @@ impl Options {
             raw: false,
             stream: false,
             strict: false,
+            pdfa: false,
+            record_version: false,
         };
 
         let mut index = 0;
@@ -177,6 +236,18 @@ impl Options {
                     }
                     options.dpi = d;
                 }
+                // Zero is refused rather than clamped: `--jobs 0` is a person
+                // asking for something, and a run that silently did the
+                // opposite of what the number said would be the wrong kind of
+                // forgiving. Same spelling as `cargo xtask corpus-run`'s.
+                "--jobs" => {
+                    let raw = value()?;
+                    options.jobs = raw
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| format!("`--jobs {raw}` is not a positive number"))?;
+                }
                 "--object" => {
                     let raw = value()?;
                     let n: u32 = raw
@@ -192,13 +263,17 @@ impl Options {
                 "--raw" => options.raw = true,
                 "--stream" => options.stream = true,
                 "--strict" => options.strict = true,
+                "--pdfa" => options.pdfa = true,
+                "--record-version" => options.record_version = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }
             index += 1;
         }
 
-        if options.files.is_empty() {
+        // `--record-version` names no file by design: it asks what this
+        // binary writes, which is true before any document exists.
+        if options.files.is_empty() && !options.record_version {
             return Err("no input file".to_string());
         }
         Ok(options)
@@ -453,53 +528,138 @@ fn render(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "page".to_string());
 
-    for index in options.pages(doc) {
-        let Some(page) = doc.page(index) else {
-            continue;
-        };
-        let bitmap = page.render(&RenderOptions {
-            annotations: options.annotations,
-            ..RenderOptions::at_dpi(options.dpi)
-        });
-
-        let out = format!("{dir}/{stem}-{:04}.pnm", index + 1);
-        write_pnm(&out, &bitmap)?;
-        if !options.quiet {
-            println!("{out} {}x{}", bitmap.width, bitmap.height);
-            for warning in &bitmap.warnings {
-                println!("  {warning:?}");
+    // One page that will not write reports itself and the rest still render,
+    // which is `run`'s policy over files applied to pages. A `?` here used to
+    // abandon every page after the first failed write, and the pages are
+    // independent: a full disk on page 3 is no reason to have nothing for
+    // pages 4 onwards.
+    let mut failed = 0usize;
+    for report in render_pages(options, dir, &stem, doc) {
+        match report {
+            Ok(lines) => {
+                if !options.quiet {
+                    print!("{lines}");
+                }
+            }
+            Err(message) => {
+                eprintln!("tpdf: {message}");
+                failed += 1;
             }
         }
     }
-    Ok(())
+
+    match failed {
+        0 => Ok(()),
+        1 => Err("1 page failed".to_string()),
+        n => Err(format!("{n} pages failed")),
+    }
 }
 
-/// Writes a binary PNM, which needs no encoder and which every image tool
-/// reads. A PNG writer would mean a deflate encoder in a test tool, and the
-/// engine already has one it should not depend on from here.
-fn write_pnm(path: &str, bitmap: &tinker_pdf::Bitmap) -> Result<(), String> {
-    let components = bitmap.components();
-    let (magic, out_components) = match components {
-        1 | 2 => ("P5", 1),
-        _ => ("P6", 3),
-    };
+/// Renders the pages `--jobs` at a time and returns what each one has to say,
+/// in page order, whether or not it succeeded.
+///
+/// **The threads are here and not in the library.** `Document` is
+/// `Send + Sync` and `Document::page` hands back an owned `Page` — it clones
+/// an `Arc` rather than borrowing — so a worker needs one shared `&Document`
+/// and a page index and no lifetime work at all. What the engine will not do
+/// is spawn: it owns no runtime, on any target, wasm included, so the pool
+/// belongs to whoever is calling. See the Concurrency section of
+/// `docs/architecture.md`.
+///
+/// **Ordered afterwards**, for the reason `xtask`'s corpus pool sorts its own
+/// results: output that moves between runs is not diffable. Each worker
+/// buffers its page's lines and this hands them back sorted by the position
+/// they were claimed from the queue, so `--jobs 8` and `--jobs 1` print the
+/// same bytes. A `--jobs` that reordered stdout would be a flag that changes
+/// the answer, and this one is only allowed to change the clock.
+fn render_pages(
+    options: &Options,
+    dir: &str,
+    stem: &str,
+    doc: &Document,
+) -> Vec<Result<String, String>> {
+    let pages = options.pages(doc);
+    let next = AtomicUsize::new(0);
+    let reports: Mutex<Vec<(usize, Result<String, String>)>> =
+        Mutex::new(Vec::with_capacity(pages.len()));
 
-    let mut out = format!("{magic}\n{} {}\n255\n", bitmap.width, bitmap.height).into_bytes();
-    for y in 0..bitmap.height as usize {
-        let row = y * bitmap.stride;
-        for x in 0..bitmap.width as usize {
-            let at = row + x * components;
-            let Some(pixel) = bitmap.data.get(at..at + components) else {
-                continue;
-            };
-            // Alpha is dropped rather than composited: these are debugging
-            // images, and a surprising background would mislead more than a
-            // missing one.
-            out.extend_from_slice(&pixel[..out_components.min(pixel.len())]);
+    std::thread::scope(|scope| {
+        // Scoped, so the workers borrow the document and the queue rather
+        // than being handed clones of either: a clone per thread would prove
+        // only that a `Document` can be *sent*, and what is being relied on
+        // here is that one can be *shared*.
+        for _ in 0..options.jobs.max(1) {
+            let (next, reports, pages) = (&next, &reports, &pages);
+            scope.spawn(move || {
+                loop {
+                    let slot = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&index) = pages.get(slot) else {
+                        return;
+                    };
+                    // A page the document will not hand back is skipped
+                    // silently, as it was serially: `pages()` counts what the
+                    // catalog claims, and a page tree that stops short is
+                    // already a warning on the document.
+                    let Some(page) = doc.page(index) else {
+                        continue;
+                    };
+                    let bitmap = page.render(&RenderOptions {
+                        annotations: options.annotations,
+                        ..RenderOptions::at_dpi(options.dpi)
+                    });
+
+                    let out = format!("{dir}/{stem}-{:04}.png", index + 1);
+                    let report = write_png(&out, &bitmap).map(|()| {
+                        let mut lines = format!("{out} {}x{}\n", bitmap.width, bitmap.height);
+                        for warning in &bitmap.warnings {
+                            lines.push_str(&format!("  {warning:?}\n"));
+                        }
+                        lines
+                    });
+                    reports
+                        .lock()
+                        .expect("the reports lock")
+                        .push((slot, report));
+                }
+            });
         }
-    }
+    });
 
-    std::fs::write(path, out).map_err(|e| format!("writing {path}: {e}"))
+    let mut reports = reports.into_inner().expect("the reports lock");
+    reports.sort_by_key(|(slot, _)| *slot);
+    reports.into_iter().map(|(_, report)| report).collect()
+}
+
+/// Writes the page as a PNG, through the facade's own
+/// [`tinker_pdf::Bitmap::to_png`].
+///
+/// This used to write a binary PNM under a comment that said "a PNG writer
+/// would mean a deflate encoder in a test tool, and the engine already has one
+/// it should not depend on from here." The premise was right and the
+/// conclusion was the wrong way round: the encoder belongs **in** the engine,
+/// beside the zlib compressor, the CRC-32 and the row predictors a PNG is made
+/// of — all three of which already lived in `tinker-pdf-filters` and nowhere
+/// else — and the tool calls it, which is the direction everything else here
+/// already runs in. See `crates/tinker-pdf-filters/src/png/encode.rs`.
+///
+/// **PNG always, and no flag to ask for anything else.** The case for a
+/// `--format` switch is the one consumer in this repository that reads what
+/// this writes, `tools/pdfcmp`; the case against is that a debug tool with two
+/// output paths has one that is rarely taken and eventually wrong, and that
+/// PNM was only ever here because there was no encoder. `pdfcmp` still reads a
+/// `.pnm` from any source and takes a `.pdf` directly, which its own usage
+/// text calls the usual shape of a comparison.
+///
+/// Alpha is **kept** rather than dropped, which the PNM path could not do:
+/// `Bitmap::to_png` maps `Rgba8` onto colour type 6 and `Gray8` onto type 0.
+/// A page comes back `Rgb8` by default, so the ordinary invocation writes the
+/// same pixels it always did and the one that asks for alpha stops throwing it
+/// away.
+fn write_png(path: &str, bitmap: &tinker_pdf::Bitmap) -> Result<(), String> {
+    let bytes = bitmap
+        .to_png()
+        .ok_or_else(|| format!("writing {path}: the page is not a picture"))?;
+    std::fs::write(path, bytes).map_err(|e| format!("writing {path}: {e}"))
 }
 
 fn fields(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
@@ -536,6 +696,103 @@ fn fields(_options: &Options, path: &str, doc: &Document) -> Result<(), String> 
         );
     }
     Ok(())
+}
+
+/// Lists the fonts a document's pages can reach, and with `--out` writes the
+/// embedded programs out.
+///
+/// The listing half costs names and nothing else — `Document::fonts` reads no
+/// stream — which is what makes this cheap to run over a corpus. The
+/// extraction half is where the bytes are paid for, once per font, and only
+/// when a directory was named.
+fn fonts(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
+    let found = doc.fonts();
+    if found.is_empty() {
+        println!("{path}: no fonts");
+        return Ok(());
+    }
+
+    println!("{path}: {} fonts", found.len());
+    for font in &found {
+        let name = match font.name.is_empty() {
+            true => "(no /BaseFont)",
+            false => font.name.as_str(),
+        };
+        println!(
+            "  {:<32} {:<9} {:<13} {}",
+            name,
+            format!("{:?}", font.kind),
+            match font.program {
+                Some(program) => format!("{:?}", program.key),
+                None => "not embedded".to_string(),
+            },
+            match &font.subset_tag {
+                Some(tag) => format!("subset {tag} as {}", font.resource_names.join(", ")),
+                None => format!("as {}", font.resource_names.join(", ")),
+            }
+        );
+    }
+
+    let Some(directory) = options.out.as_deref() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(directory).map_err(|e| format!("creating {directory}: {e}"))?;
+    let mut written = 0usize;
+    for (index, font) in found.iter().enumerate() {
+        let Some(bytes) = font.program_bytes() else {
+            continue;
+        };
+        // Numbered as well as named: two subsets of one face share a name
+        // after the tag is stripped, and a run that silently overwrote the
+        // first with the second would report a count it did not write.
+        let stem = sanitised(&font.base_font);
+        let file = format!("{directory}/{index:03}-{stem}.{}", extension(&bytes));
+        std::fs::write(&file, &bytes).map_err(|e| format!("writing {file}: {e}"))?;
+        println!("  wrote {file} ({} bytes)", bytes.len());
+        written += 1;
+    }
+    println!("{path}: {written} embedded programs written to {directory}");
+    Ok(())
+}
+
+/// A file name that is safe on every host, from a `/BaseFont` that need not be.
+///
+/// 7.3.5 lets a name hold any byte but the delimiters, so a `/BaseFont` can
+/// carry a slash, a colon or a space. Anything outside the ASCII word
+/// characters becomes `_`, which is lossy on purpose: the exact spelling is on
+/// the line above, and this is only how the file is found afterwards.
+fn sanitised(base_font: &str) -> String {
+    let cleaned: String = base_font
+        .chars()
+        .map(
+            |c| match c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                true => c,
+                false => '_',
+            },
+        )
+        .collect();
+    match cleaned.is_empty() {
+        true => "font".to_string(),
+        false => cleaned,
+    }
+}
+
+/// What to call an extracted program, from the bytes rather than from the key.
+///
+/// `/FontFile3` holds a bare CFF *or* an OpenType wrapper (9.9 Table 126), and
+/// the listing does not read the stream's `/Subtype` — so naming the file from
+/// the descriptor key would write an OpenType face called `.cff`. The first
+/// four bytes say which it is without opening the question.
+fn extension(bytes: &[u8]) -> &'static str {
+    match bytes {
+        [0x00, 0x01, 0x00, 0x00, ..] | [b't', b'r', b'u', b'e', ..] => "ttf",
+        [b'O', b'T', b'T', b'O', ..] => "otf",
+        [b't', b't', b'c', b'f', ..] => "ttc",
+        [0x80, ..] => "pfb",
+        [b'%', b'!', ..] => "pfa",
+        [0x01, 0x00, ..] => "cff",
+        _ => "bin",
+    }
 }
 
 fn outline(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
@@ -801,6 +1058,8 @@ fn check(options: &Options) -> Result<(), String> {
     let mut failed = 0usize;
     let mut warned = 0usize;
     let mut invalid = 0usize;
+    let mut nonconforming = 0usize;
+    let mut unclaimed = 0usize;
 
     for path in &options.files {
         match open(path, options.password.as_deref(), fonts.as_ref()) {
@@ -831,6 +1090,40 @@ fn check(options: &Options) -> Result<(), String> {
                 for defect in &defects {
                     println!("      {} {defect}", defect.kind.tier().as_str());
                 }
+
+                if options.pdfa {
+                    let verdict = doc.validate_pdfa();
+                    match verdict.flavour {
+                        Some(flavour) => {
+                            if !verdict.found_nothing() {
+                                nonconforming += 1;
+                            }
+                            if !options.quiet {
+                                println!("      pdfa claims {flavour}");
+                            }
+                        }
+                        // Not a failure. Most PDFs are not PDF/A and are not
+                        // pretending to be, so a tool that exited non-zero on
+                        // them would be unusable over any real corpus.
+                        None => {
+                            unclaimed += 1;
+                            if !options.quiet {
+                                println!("      pdfa claims nothing");
+                            }
+                        }
+                    }
+                    for finding in &verdict.findings {
+                        println!("      pdfa {finding}");
+                    }
+                    // Which groups ran, always, even when nothing was found.
+                    // "No findings" from a partial sweep is not "it conforms",
+                    // and the only way a caller can tell the two apart is if
+                    // the coverage is printed beside the verdict rather than
+                    // documented somewhere else.
+                    if !options.quiet {
+                        println!("      pdfa ran {}", verdict.coverage);
+                    }
+                }
             }
             Err(message) => {
                 failed += 1;
@@ -848,11 +1141,19 @@ fn check(options: &Options) -> Result<(), String> {
     if options.strict {
         println!("{invalid} with defects");
     }
+    if options.pdfa {
+        println!("{nonconforming} with conformance findings, {unclaimed} claiming no flavour");
+    }
     if failed > 0 {
         return Err(format!("{failed} files could not be opened"));
     }
     if invalid > 0 {
         return Err(format!("{invalid} files did not validate"));
+    }
+    if nonconforming > 0 {
+        return Err(format!(
+            "{nonconforming} files did not conform to the flavour they claim"
+        ));
     }
     Ok(())
 }
@@ -880,38 +1181,105 @@ const DPI_BUDGET: f64 = 0.02;
 /// percent on 90 of them, and 0.29% at the ninetieth percentile, with one file
 /// at 14%.
 ///
-/// One percent sits above the noise and far below anything structural: a
+/// One percent sat above that noise and far below anything structural: a
 /// rotation applied to the geometry and not to the clip, or to the text and not
 /// to the images, moves whole regions rather than the rims of glyphs.
-const ROTATE_BUDGET: f64 = 0.01;
+///
+/// **Raised to two percent in August 2026, and the reason is that the noise it
+/// was measured against has changed.** Every figure above was taken when an
+/// image edge was quantised to whole device pixels: images alone did not
+/// anti-alias, so they alone transposed exactly, and the 0.29% was glyph rims
+/// and nothing else. Image edges are soft now
+/// (`docs/design/image-edges.md`), and a soft edge at a fractional offset does
+/// not transpose to the byte any more than a glyph's does — on long straight
+/// edges there is simply more of it. Two qpdf files sit at 1.7%: hundreds of
+/// separately placed, quarter-turned scans, measured at exactly 1.0% with hard
+/// edges and 1.7% with soft ones, which is the whole of the difference.
+///
+/// Two percent keeps the structural distance the original figure was chosen
+/// for — a misapplied rotation moves whole regions, tens of percent, and the
+/// one file at 14% is still caught — and it is the same figure `DPI_BUDGET`
+/// already carries for the same class of reason.
+///
+/// **Raised again to ten percent on 5 September 2026, and the reason is that
+/// the class was finally measured on a page rather than on a thumbnail.**
+///
+/// `crates/tinker-pdf/tests/metamorphic_classes.rs` puts seven constructs,
+/// each alone on a page, through this relation, and two of them move anything:
+/// a tiling pattern, which is a rounding of the lattice and a defect this
+/// budget must go on catching, and **anti-aliased edges that are not
+/// axis-aligned**, which is arithmetic. A quarter turn puts every mark on a
+/// transposed sampling grid; a rectangle on integers transposes exactly and a
+/// diagonal cannot.
+///
+/// The first figures for the second class were 2.81% for diagonals and 2.64%
+/// for text, and **both were fixture artefacts**: the pages are 64 points
+/// square with the construct in a corner, and a budget is a *share of a page*.
+/// Measured on pages the construct actually covers, and at sizes a document
+/// has:
+///
+/// | Page | `rotate` |
+/// | --- | ---: |
+/// | two triangles in a corner of 64 pt | 2.81% |
+/// | the same two triangles on 595 pt | 0.03% |
+/// | 11-point text filling 200 pt | 7.74% |
+/// | 11-point text filling 595 pt | **8.77%** |
+/// | 11-point text filling 842 pt | **8.74%** |
+/// | diagonal edges covering 595 pt | 23.52% |
+/// | a tiling pattern off the grid, 64 pt | 22.05% |
+///
+/// **A page of text costs 8.8% and the figure is stable across page sizes** —
+/// which the corner fixture could not show, because its cost fell with the
+/// page while a real document's text does not. So two percent was not
+/// slightly tight, it was out by a factor of four, and every text-heavy
+/// document in the corpus was failing this relation for arithmetic. That is
+/// the one thing a budget exists to prevent.
+///
+/// Ten percent is above the measured class and below the measured defects: the
+/// tiling class is 22%, and a rotation applied to the geometry and not to the
+/// clip moves whole regions. Fifteen corpus files still break it, from 10.9%
+/// to 75.4%.
+///
+/// **What this raise does not have, and the last one did: a gap to sit in.**
+/// One percent was sited where nothing sat — over 119 files the relation was
+/// exact on 83 and the worst was 14%. A whole-corpus run on 5 September, with
+/// every hold now carrying its own measurement, says that region is gone: of
+/// 4 032 files that hold, 109 hold above 1% and 47 above 1.5%, and of the 181
+/// that broke at two percent the smallest was 2.027% with no gap up to 4%. The
+/// ablated constructs still leave one — 8.8% for text against 22% for the
+/// pattern class — and that is the gap this figure sits in.
+///
+/// **And the cost is paid rather than waved away.** 166 files stop being
+/// reported by this relation, 107 of them between three and ten percent. That
+/// is why `ROTATE_WATCH` exists: the same measurement is judged a second time
+/// at three percent and recorded as its own relation, so the population that
+/// the wider budget stops failing is still counted and still ratcheted.
+const ROTATE_BUDGET: f64 = 0.10;
 
-/// How long a file may already have taken before its relations are skipped.
+/// The line the same measurement is *watched* against, which decides nothing.
 ///
-/// The relations cost roughly what opening and rendering the first page cost,
-/// twice over, so a file already well into the corpus runner's twenty-second
-/// budget is one where asking them risks the timeout — and a timeout would
-/// move the *pass* rate, which is a measurement this one must not disturb.
+/// **A budget wide enough to admit a page of text is too wide to see much,
+/// and this is what stops that being a loss.** At ten percent the relation
+/// breaks on 15 corpus files where two percent broke on 181, so 166 files
+/// stop being reported — and 107 of those sit between three and ten percent,
+/// which is a population worth knowing the size of even though no single one
+/// of them is a defect.
 ///
-/// **This is a clock, and a clock decides a number the ratchet compares.**
-/// That is worth saying plainly rather than burying: `compared` is the
-/// denominator of the metamorphic rate, so a file sitting near this line can
-/// be asked on one run and declined on the next, and the bar moves by one file
-/// for no reason anybody changed. It happened: a run recorded `dpi` at 572 of
-/// 579 and the next said 572 of 580.
+/// So the same `moved of total` is judged twice and reported under two names.
+/// `rotate` carries the budget and can fail a run; `rotate-tight` carries this
+/// and cannot, because the runner compares every relation it is given by name
+/// and the ratchet holds each one's count. A change that makes glyph edges
+/// noisier moves `rotate-tight` long before it moves `rotate`, and a change
+/// that turns the geometry without the clip moves both.
 ///
-/// Nothing deterministic replaces it. The `cost` line beside this reports the
-/// three properties of a document that ought to bound the work — bytes,
-/// objects and first-page pixels — and measured against the corpus they do
-/// not: `qpdf/numeric-and-string-2.pdf` is 16 KB with 22 objects and takes 4.9
-/// seconds, while files a hundred times its size take a tenth of that.
-///
-/// So the line is **sited** rather than chosen: 3 100 ms is the middle of the
-/// widest gap in the measured distribution. Every corpus file between one and
-/// six seconds was timed (4 525 files, 72 dpi, August 2026); the slowest
-/// admitted is 2 885 ms and the fastest declined is 3 385 ms, so the nearest
-/// file either side is 7 % away rather than the 3 % that two seconds gave.
-/// Moving this number re-records the bar, which is a commit somebody reviews.
-const META_BUDGET_MS: u64 = 3_100;
+/// Three percent rather than the old two: two was below the constructs this
+/// engine's own ablation measures — 2.81% for a page of diagonals on the
+/// smallest page — so a watch line there would spend its life above the noise
+/// it is watching.
+const ROTATE_WATCH: f64 = 0.03;
+
+/// What the watched judgement is called in the record.
+const ROTATE_WATCH_NAME: &str = "rotate-tight";
 
 /// A share of a page's pixels, for a relation's report.
 #[allow(
@@ -929,10 +1297,59 @@ fn share(moved: u64, total: u64) -> f64 {
 /// one measures nothing.
 const CHANNEL_TOLERANCE: i32 = 8;
 
+/// One relation's *measurement*, before a budget is applied to it.
+///
+/// Separated from [`Relation`] because one measurement now answers two
+/// questions. `rotate` is reported twice — once against the budget that
+/// decides pass or fail, and once against a tighter line that decides nothing
+/// and is watched — and rendering the page a second time to ask the second
+/// question would be a waste and a lie: two renders can differ.
+enum Measured {
+    /// `moved` pixels of `total` were not the transposition.
+    Moved(u64, u64),
+    /// The comparison could not be made at all — a turn that did not
+    /// transpose, a rewrite that would not reopen.
+    Broke(String),
+    /// It was not asked.
+    Skipped(&'static str),
+}
+
+impl Measured {
+    /// The verdict a budget draws from this measurement.
+    fn judged(&self, budget: f64) -> Relation {
+        match self {
+            Measured::Moved(moved, total) => {
+                if share(*moved, *total) <= budget {
+                    Relation::Held(*moved, *total)
+                } else {
+                    Relation::Broke(format!(
+                        "{moved} of {total} pixels ({:.1}%) are not the transposition, over a budget of {:.1}%",
+                        share(*moved, *total) * 100.0,
+                        budget * 100.0
+                    ))
+                }
+            }
+            Measured::Broke(detail) => Relation::Broke(detail.clone()),
+            Measured::Skipped(why) => Relation::Skipped(why),
+        }
+    }
+}
+
 /// One relation's verdict, in the record's own words.
 enum Relation {
-    /// The relation held.
-    Held,
+    /// The relation held, and this is how far it was from not holding:
+    /// the pixels that moved, of the pixels compared.
+    ///
+    /// **A hold carries its measurement because the budgets are sited from
+    /// the population and not from a principle.** `ROTATE_BUDGET`'s own
+    /// comment sites two percent against a distribution — exact on 83 files
+    /// of 119, 0.29 % at the ninetieth percentile — and that distribution
+    /// came from a run somebody instrumented by hand, because a record that
+    /// says only `held` throws the ninety-eight percent away and keeps the
+    /// tail. Re-siting a budget then has nothing to re-site against. Two
+    /// files that both held, one at 0 % and one at 1.9 %, are not the same
+    /// observation and the record now says so.
+    Held(u64, u64),
     /// It did not, and this is what was measured.
     Broke(String),
     /// It could not be asked — an empty page, a page too large to render
@@ -943,7 +1360,7 @@ enum Relation {
 impl Relation {
     fn print(&self, name: &str) {
         match self {
-            Relation::Held => println!("meta {name} held"),
+            Relation::Held(moved, total) => println!("meta {name} held {moved} of {total}"),
             Relation::Broke(detail) => println!("meta {name} broke {}", one_line(detail)),
             Relation::Skipped(why) => println!("meta {name} skipped {why}"),
         }
@@ -959,34 +1376,41 @@ impl Relation {
 ///
 /// Only the first page. Every relation costs at least one extra render and the
 /// rotation and crop ones cost a save and a reopen as well, so asking every
-/// page of a four-thousand-file corpus would turn a twenty-second timeout into
-/// the thing being measured.
-fn metamorphic(
-    doc: &Document,
-    options: &Options,
-    fonts: Option<&Arc<SimpleFontProvider>>,
-    spent: std::time::Duration,
-) {
-    // **The relations may not cost the file its outcome**, and this line is
-    // there because they did. Each one re-renders the first page and two of
-    // them save and reopen the document, so on a slow file the extra work ran
-    // the corpus runner's twenty-second timeout out: the first recorded run
-    // turned three pdf.js files that had always passed into timeouts, and
-    // wrote that in as the new bar.
-    //
-    // A file that has already spent this much of its budget opening and
-    // rendering is one whose relations are *not asked*, which the record says
-    // in its own words. The alternative — a longer timeout — would change what
-    // the pass rate means, and the pass rate is a different measurement that
-    // was here first.
-    if spent > std::time::Duration::from_millis(META_BUDGET_MS) {
-        for name in ["rotate", "crop", "dpi"] {
-            Relation::Skipped("the file spent its budget opening and rendering").print(name);
-        }
-        return;
-    }
+/// page of a four-thousand-file corpus would turn the timeout into the thing
+/// being measured. Asking the first page of every file costs 95 seconds over
+/// 4 525 of them, which is what made deleting the budget gate affordable.
+///
+/// **There used to be a clock here, and deleting it is what this comment is
+/// for.** `META_BUDGET_MS` declined the relations for any file that had
+/// already spent 3 100 ms opening and rendering, on the reasoning that the
+/// extra work risked the runner's twenty-second timeout and a timeout would
+/// move the *pass* rate. The cost of that was stated in the same comment and
+/// then paid every night: `compared` is the denominator of a ratcheted rate,
+/// so a file near the line was asked on one run and declined on the next, and
+/// the nightly corpus job failed for a week on ten regressions that were all
+/// denominators moving under load rather than the engine changing.
+///
+/// Nothing deterministic could replace it, and that was measured rather than
+/// assumed — `qpdf/numeric-and-string-2.pdf` is 16 KB with 22 objects and was
+/// declined at 6.3 s, while its sibling `numeric-and-string-1.pdf`, 18 KB and
+/// 15 objects, was admitted at 8.9 s. Cost does not predict time here.
+///
+/// So the gate is gone and the timeout is sixty seconds instead, which the old
+/// comment considered and rejected because *"a longer timeout would change what
+/// the pass rate means"*. It does, and the change was measured before it was
+/// taken (4 525 files, 72 dpi, 4-5 September 2026): the whole corpus runs in
+/// **95 seconds**, nothing times out, and every one of the twelve
+/// corpus-and-relation counts goes **up or stays equal** — pdf.js `rotate` 838
+/// compared to 840, `dpi` 944 to 948, veraPDF's ten-thousand-page
+/// implementation-limit fixture finishing for the first time. The pass rate did
+/// not fall; it rose by one.
+///
+/// What is left declining a relation is a property of the document — no pages,
+/// encrypted, opened with a warning, a page too large to render twice — so
+/// `compared` is a function of the corpus and not of the machine.
+fn metamorphic(doc: &Document, options: &Options, fonts: Option<&Arc<SimpleFontProvider>>) {
     if doc.page_count() == 0 {
-        for name in ["rotate", "crop", "dpi"] {
+        for name in ["rotate", ROTATE_WATCH_NAME, "crop", "dpi"] {
             Relation::Skipped("the document has no pages").print(name);
         }
         return;
@@ -1003,7 +1427,7 @@ fn metamorphic(
     // A page that came back empty is a page the relations cannot speak about:
     // every one of them holds trivially over nothing.
     if base.width == 0 || base.height == 0 {
-        for name in ["rotate", "crop", "dpi"] {
+        for name in ["rotate", ROTATE_WATCH_NAME, "crop", "dpi"] {
             Relation::Skipped("the page rendered to nothing").print(name);
         }
         return;
@@ -1029,12 +1453,15 @@ fn metamorphic(
             // which is several seconds of silence on a large file — and is
             // where a rewrite that does not terminate stops.
             println!("phase meta-rotate");
-            rotation(doc, &base, &render, fonts).print("rotate");
+            let turned = rotation(doc, &base, &render, fonts);
+            turned.judged(ROTATE_BUDGET).print("rotate");
+            turned.judged(ROTATE_WATCH).print(ROTATE_WATCH_NAME);
             println!("phase meta-crop");
             cropping(doc, &page, &base, &render, fonts).print("crop");
         }
         Some(why) => {
             Relation::Skipped(why).print("rotate");
+            Relation::Skipped(why).print(ROTATE_WATCH_NAME);
             Relation::Skipped(why).print("crop");
         }
     }
@@ -1068,13 +1495,13 @@ fn rotation(
     base: &Bitmap,
     render: &RenderOptions,
     fonts: Option<&Arc<SimpleFontProvider>>,
-) -> Relation {
+) -> Measured {
     let mut editor = doc.editor();
     if !editor.rotate_page(0, 90) {
-        return Relation::Skipped("the page would not rotate");
+        return Measured::Skipped("the page would not rotate");
     }
     let Ok(turned) = Document::open(editor.save(&WriteOptions::default())) else {
-        return Relation::Skipped("the rotated document would not reopen");
+        return Measured::Skipped("the rotated document would not reopen");
     };
     // **With the same faces**, and this is not a detail. The relation compares
     // two renders of one document, so the two must be rendered under the same
@@ -1087,12 +1514,12 @@ fn rotation(
         None => turned,
     };
     let Some(page) = turned.page(0) else {
-        return Relation::Skipped("the rotated document lost its page");
+        return Measured::Skipped("the rotated document lost its page");
     };
     let rotated = page.render(render);
 
     if rotated.width != base.height || rotated.height != base.width {
-        return Relation::Broke(format!(
+        return Measured::Broke(format!(
             "{}x{} turned is {}x{} and not {}x{}",
             base.width, base.height, rotated.width, rotated.height, base.height, base.width
         ));
@@ -1106,16 +1533,7 @@ fn rotation(
             }
         }
     }
-    let total = u64::from(rotated.width) * u64::from(rotated.height);
-    if share(moved, total) <= ROTATE_BUDGET {
-        Relation::Held
-    } else {
-        Relation::Broke(format!(
-            "{moved} of {total} pixels ({:.1}%) are not the transposition, over a              budget of {:.1}%",
-            share(moved, total) * 100.0,
-            ROTATE_BUDGET * 100.0
-        ))
-    }
+    Measured::Moved(moved, u64::from(rotated.width) * u64::from(rotated.height))
 }
 
 /// **A cropped render is the sub-rectangle of the full one** (ruling 5's tile
@@ -1197,10 +1615,10 @@ fn cropping(
     // files of the pdf.js corpus this relation was exact on all 119. Rotation
     // and resolution both change the grid and both need a budget; this does
     // not, and giving it one would hide the only kind of defect it can see.
+    let total = u64::from(small.width) * u64::from(small.height);
     if moved == 0 {
-        Relation::Held
+        Relation::Held(0, total)
     } else {
-        let total = u64::from(small.width) * u64::from(small.height);
         Relation::Broke(format!(
             "{moved} of {total} pixels of the crop are not the page under it"
         ))
@@ -1257,7 +1675,7 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
         }
     }
     if share(moved, total) <= DPI_BUDGET {
-        Relation::Held
+        Relation::Held(moved, total)
     } else {
         Relation::Broke(format!(
             "{moved} of {total} pixels ({:.1}%) differ, over a budget of {:.1}%",
@@ -1272,7 +1690,13 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
 /// The record's format version, bumped when a reader would misread the old
 /// shape. The runner refuses a record whose version it does not know rather
 /// than reading the fields it recognises and inventing the rest.
-const PROBE_VERSION: u32 = 3;
+///
+/// Version 6 adds `peak`: the child's own peak resident set. It is a bump
+/// rather than a quiet new key because the runner *requires* the measurement —
+/// a record without it makes the run incomplete — so a runner that read an
+/// older child's record would call every corpus unmeasurable rather than
+/// naming the stale binary.
+const PROBE_VERSION: u32 = 6;
 
 /// The `--fonts` value meaning "whatever faces this build carries".
 const BUNDLED: &str = "bundled";
@@ -1284,12 +1708,154 @@ const BUNDLED: &str = "bundled";
 /// than a flag anybody can pass.
 const BUNDLED_FACES: bool = cfg!(feature = "bundled-fonts");
 
+/// This process's peak resident set in bytes, or `None` where the platform
+/// will not say.
+///
+/// **Measured in the child rather than by a watcher over it**, which is the
+/// whole reason this is here and not in `xtask`. A parent that samples a
+/// child's memory sees whatever the scheduler let it see: a page allocated and
+/// released between two samples is invisible, and the figure a run records
+/// depends on how busy the machine was — which is the same defect as a timing
+/// assertion, in a number that is supposed to outlive the machine. Both
+/// branches below read a **high-water mark the kernel maintains**, so the
+/// answer is the same however often anybody asks for it.
+///
+/// Where neither branch applies the caller omits the line rather than printing
+/// a zero. The runner turns that omission into a `limits` entry, so a run that
+/// could not measure says so and is refused as a bar; a silent zero would be a
+/// ceiling nothing could ever exceed.
+fn peak_bytes() -> Option<u64> {
+    // Linux: a file read, and no FFI at all. `VmHWM` is the peak resident set
+    // size the kernel has tracked since exec (`fs/proc/task_mmu.c`), written
+    // in what the file calls `kB` and means KiB.
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                let kib: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                return Some(kib * 1024);
+            }
+        }
+        None
+    }
+
+    // Windows: `PeakWorkingSetSize` out of `PROCESS_MEMORY_COUNTERS`, which is
+    // the same high-water mark under another name.
+    //
+    // **Hand-written rather than a `windows-sys` dependency**, and the reason
+    // is this repository's own: `xtask`'s manifest says of its single
+    // dependency "the one dependency, and it is a sibling rather than a third
+    // party", and `tpdf` depends on nothing but `tinker-pdf`. Fifteen lines of
+    // declaration against a crate graph is not a close call in a workspace
+    // whose premise is that it implements its own primitives. `deny.toml` does
+    // not forbid `windows-sys` — it is already in the graph under
+    // `tempfile`/`proptest` — so this is a choice rather than a workaround.
+    //
+    // This is the workspace's only `unsafe`. Every library crate carries
+    // `#![forbid(unsafe_code)]`; the debug CLI does not, and the engine stays
+    // as it was.
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+
+        /// `PROCESS_MEMORY_COUNTERS`, psapi.h. `#[repr(C)]` and the field
+        /// order **are** the ABI; the names are ours. `cb` is the struct's own
+        /// size, which is how this API versions itself: a caller that passes a
+        /// smaller `cb` than the callee knows about gets the prefix it asked
+        /// for, so an older Windows cannot overrun this allocation.
+        #[repr(C)]
+        #[derive(Default)]
+        struct ProcessMemoryCounters {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+
+        // `K32GetProcessMemoryInfo` rather than psapi's `GetProcessMemoryInfo`:
+        // the K32 name is exported from kernel32.dll itself on Windows 7 and
+        // later, so no second import library is needed and there is no
+        // psapi/psapi_version split to get wrong.
+        #[link(name = "kernel32")]
+        extern "system" {
+            /// A pseudo-handle to the calling process. It needs no closing.
+            fn GetCurrentProcess() -> *mut c_void;
+            fn K32GetProcessMemoryInfo(
+                process: *mut c_void,
+                counters: *mut ProcessMemoryCounters,
+                cb: u32,
+            ) -> i32;
+        }
+
+        let mut counters = ProcessMemoryCounters {
+            cb: u32::try_from(std::mem::size_of::<ProcessMemoryCounters>()).ok()?,
+            ..Default::default()
+        };
+        // Safe because the pointer is to a live, fully initialised local of
+        // exactly the type and size named in `cb`, the handle is the process
+        // pseudo-handle, and the callee writes no further than `cb` bytes.
+        let ok = unsafe {
+            K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) != 0
+        };
+        // A zero return is a failure and is reported as "no measurement",
+        // never as a peak of zero.
+        ok.then_some(counters.peak_working_set_size as u64)
+    }
+
+    // Everywhere else — macOS and the two wasm targets among them — there is
+    // no answer this build is willing to invent, and the runner is told by the
+    // absence of the line rather than by a number that means nothing.
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
+}
+
+/// What the structure join reached, summed over the pages the probe rendered.
+///
+/// Three counts and never a rate: `matched` alone says nothing without the
+/// characters beside it that the tree did not claim. The two kinds of unclaimed
+/// character stay apart for the reason [`StructuredText`] keeps them apart —
+/// untagged text is a producer that never marked it, and a marked run nothing
+/// claims is a structure tree that lost track of it.
+///
+/// [`StructuredText`]: tinker_pdf::StructuredText
+#[derive(Default)]
+struct Join {
+    matched: usize,
+    orphans: usize,
+    unmarked: usize,
+}
+
+impl Join {
+    fn add(&mut self, tree: &StructureTree, index: u32, page: &Page) {
+        let structured = tree.text_for_page(index, &page.text());
+        self.matched += structured.matched;
+        self.orphans += structured.orphans;
+        self.unmarked += structured.unmarked;
+    }
+}
+
 /// Opens and renders one file at a time, writing a record per file.
 ///
 /// Never returns `Err` for anything the file did: the runner reads outcomes
 /// from the record, and reserves the exit code for "this process did not
 /// finish", which is the one thing a record cannot say about itself.
 fn probe(options: &Options) -> Result<(), String> {
+    // Before the font provider, so the answer does not depend on a `--fonts`
+    // path being resolvable: the question is what this binary writes, and it
+    // writes the same version whatever faces it was pointed at.
+    if options.record_version {
+        println!("probe {PROBE_VERSION}");
+        return Ok(());
+    }
     let fonts = options.font_provider()?;
     for path in &options.files {
         probe_one(options, path, fonts.as_ref());
@@ -1321,6 +1887,9 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
             // file did not open" is a different fact from "this build does not
             // run the pass".
             println!("strict ineligible the file did not open");
+            if let Some(peak) = peak_bytes() {
+                println!("peak {peak}");
+            }
             println!("ms {}", started.elapsed().as_millis());
             println!("done");
             return;
@@ -1332,6 +1901,28 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         println!("build bundled-fonts");
     }
     println!("ladder {:?}", doc.ladder_level());
+
+    // **Who wrote the file, when the file says.** The production corpus's
+    // whole argument is that its documents were emitted by real producers for
+    // real readers, and a failure there is worth nothing until it can be
+    // attributed to one of them: "eleven files fail" is a number, and "eleven
+    // files fail and nine of them came out of the same generator" is a lead.
+    //
+    // On one line, through `one_line`, and never omitted for being empty --
+    // `(none stated)` is a producer string too, and the commonest one after
+    // Adobe's in the SAFEDOCS sample. A file that states nothing is a
+    // population, not a gap in the data.
+    let producer = doc.metadata().producer.unwrap_or_default();
+    let producer = producer.trim();
+    println!(
+        "producer {}",
+        if producer.is_empty() {
+            "(none stated)".to_string()
+        } else {
+            one_line(producer)
+        }
+    );
+
     let pages = doc.page_count();
     println!("pages {pages}");
 
@@ -1349,16 +1940,40 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         println!("cap {capability}");
     }
 
+    // Bound once, outside the page loop. `Document::structure()` re-walks
+    // `/StructTreeRoot` on every call, so asking per page would make an
+    // N-page document cost N walks of a tree that did not change.
+    let tree = doc.structure();
+    match &tree {
+        Some(tree) => println!(
+            "tagged tree yes elements {} content {} objects {}",
+            tree.element_count(),
+            tree.content_count(),
+            tree.object_count()
+        ),
+        // Its own line rather than an omission: a record with no `tagged` key
+        // at all is one from a child that did not look, and that is a
+        // different fact from a document with no structure tree.
+        None => println!("tagged tree no"),
+    }
+
     let render = RenderOptions {
         annotations: options.annotations,
         ..RenderOptions::at_dpi(options.dpi)
     };
     println!("phase render");
     let mut rendered = 0u32;
+    let mut join = Join::default();
     for index in options.pages(&doc) {
         let Some(page) = doc.page(index) else {
             continue;
         };
+        // Only where there is a tree to join to. Text extraction is cheap
+        // beside rendering, but it is not free, and on the 3 800-odd corpus
+        // files carrying no structure tree it would measure nothing.
+        if let Some(tree) = &tree {
+            join.add(tree, index, &page);
+        }
         // Before the page rather than after it, so the line names the page
         // being worked on when a kill arrives rather than the last one that
         // finished. The runner never reads the number, only the fact that the
@@ -1375,10 +1990,22 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         }
     }
     println!("rendered {rendered}");
+    if tree.is_some() {
+        println!(
+            "tagged chars matched {} orphans {} unmarked {}",
+            join.matched, join.orphans, join.unmarked
+        );
+    }
 
     // What this document costs to work on, as properties of the document.
-    // Read by nothing yet; measured so the metamorphic gate can stop being a
-    // clock. See `META_BUDGET_MS`.
+    //
+    // Reported rather than acted on. It was measured so that the metamorphic
+    // gate could stop being a clock, and the measurement said it could not:
+    // bytes, objects and pixels do not predict the time a file takes, which is
+    // why the gate was deleted rather than replaced. The three numbers stay
+    // because a per-file report of what a corpus costs is worth having on its
+    // own, and because the next reader deserves the evidence rather than the
+    // conclusion.
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let objects = doc.cos().xref().len();
     let pixels = doc.page(0).map_or(0u64, |page| {
@@ -1396,10 +2023,21 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
 
     println!("phase strict");
     strict(&doc);
-    metamorphic(&doc, options, fonts, started.elapsed());
+    metamorphic(&doc, options, fonts);
 
     for (kind, count) in &kinds {
         println!("warn {kind} {count}");
+    }
+    // Last of the measurements and after every phase, so it is the peak of the
+    // whole file's work rather than of the part that had run when it was
+    // asked. One file per process is what makes this a per-file number at all:
+    // the runner spawns a child per path, so nothing another file allocated is
+    // in this high-water mark.
+    //
+    // Omitted where the platform will not say. See [`peak_bytes`] for why that
+    // is an omission rather than a zero.
+    if let Some(peak) = peak_bytes() {
+        println!("peak {peak}");
     }
     println!("ms {}", started.elapsed().as_millis());
     println!("done");
@@ -1520,7 +2158,9 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
         W::UnsupportedPattern { .. } => "UnsupportedPattern".to_string(),
         W::HiddenOptionalContent { .. } => "HiddenOptionalContent".to_string(),
         W::GroupBudgetSpent { .. } => "GroupBudgetSpent".to_string(),
+        W::ApproximatedGroupBlend => "ApproximatedGroupBlend".to_string(),
         W::Cancelled => "Cancelled".to_string(),
+        W::RegionClamped { .. } => "RegionClamped".to_string(),
     }
 }
 
@@ -1595,6 +2235,24 @@ fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'
                     }
                 }
             }
+            b"ColorSpace" | b"CS" => {
+                // An `ICCBased` space names its profile in the second element
+                // of an array (8.6.5.5). Counted because it is the highest
+                // reachability in the engine — half the corpus's files carry a
+                // profile — so the number is worth watching rather than
+                // inferring from a warning that no longer fires.
+                if names_iccbased(cos, value, depth) {
+                    found.insert("iccbased");
+                }
+            }
+            b"ByteRange" => {
+                // 12.8.1: only a signature dictionary has one. Counted here
+                // rather than inferred from a warning, because reading a
+                // signature produces no warning when it succeeds — and the
+                // number is what says whether the reader is still finding
+                // them all.
+                found.insert("signature");
+            }
             b"ShadingType" => {
                 // 8.7.4.5.5-8: types 4 to 7 are the mesh shadings, which is
                 // exactly gap 10's scope. 1 to 3 are built.
@@ -1605,6 +2263,46 @@ fn scan_dict(cos: &CosDocument, dict: &Dict, depth: u32, found: &mut BTreeSet<&'
             _ => {}
         }
         scan_capabilities(cos, value, depth + 1, found);
+    }
+}
+
+/// Whether a `/ColorSpace` value names an `ICCBased` space.
+///
+/// The value may be the array itself, a reference to one, or a dictionary of
+/// named spaces each of which is one — which is why this walks rather than
+/// pattern-matching a single shape.
+fn names_iccbased(cos: &CosDocument, value: &Object, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let resolved;
+    let value = match value {
+        Object::Ref(reference) => match cos.get(*reference) {
+            Ok(object) => {
+                resolved = object;
+                &*resolved
+            }
+            Err(_) => return false,
+        },
+        other => other,
+    };
+    match value {
+        Object::Array(items) => {
+            let first = items
+                .first()
+                .and_then(Object::as_name)
+                .and_then(|n| cos.name_bytes(n).map(|b| b.to_vec()));
+            if first.as_deref() == Some(b"ICCBased") {
+                return true;
+            }
+            items
+                .iter()
+                .any(|item| names_iccbased(cos, item, depth + 1))
+        }
+        Object::Dict(dict) => dict
+            .iter()
+            .any(|(_, entry)| names_iccbased(cos, entry, depth + 1)),
+        _ => false,
     }
 }
 
@@ -1649,6 +2347,252 @@ mod tests {
             page.text(b"F0", 12.0, 10.0, 50.0, "hello");
         });
         Document::open(builder.finish()).expect("it opens")
+    }
+
+    /// A document of `count` pages, each doing a different amount of work.
+    ///
+    /// Unequal on purpose: a pool over pages that all cost the same tends to
+    /// finish them in order anyway, and a test that cannot tell completion
+    /// order from page order cannot catch a `render` that prints in the first.
+    fn many_pages(count: u32) -> Document {
+        let mut builder = DocumentBuilder::new();
+        for page_number in 0..count {
+            builder.add_page(60.0, 40.0, |page| {
+                for n in 0..=page_number {
+                    page.fill_rect(f64::from(n % 24), 1.0, 2.0, 2.0, 0.25);
+                }
+            });
+        }
+        Document::open(builder.finish()).expect("it opens")
+    }
+
+    /// An empty directory of this test's own, named after it.
+    fn scratch(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("tpdf-render-{name}"));
+        // Emptied rather than reused: a file left by an earlier run would make
+        // "the page after the failure was written" true for the wrong reason.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir.to_string_lossy().replace('\\', "/")
+    }
+
+    fn render_options(dir: &str, jobs: &str) -> Options {
+        Options::parse(&[
+            "--out".to_string(),
+            dir.to_string(),
+            "--jobs".to_string(),
+            jobs.to_string(),
+            "doc.pdf".to_string(),
+        ])
+        .expect("parses")
+    }
+
+    /// `--jobs` changes the clock and nothing else.
+    ///
+    /// The pool's whole contract: `--jobs 8` renders the same pages to the
+    /// same files and prints the same bytes as `--jobs 1`. Workers finish in
+    /// whatever order the scheduler gives them, so the lines are buffered per
+    /// page and ordered by page afterwards — the same reason `xtask`'s corpus
+    /// pool sorts its results, that output which moves between runs is not
+    /// diffable.
+    ///
+    /// Repeated, because one pooled run finishing in page order by luck is not
+    /// evidence that it always would.
+    #[test]
+    fn jobs_changes_the_clock_and_not_one_byte_of_the_output() {
+        let doc = many_pages(48);
+        let dir = scratch("identical-output");
+
+        let serial = render_pages(&render_options(&dir, "1"), &dir, "doc", &doc);
+        assert_eq!(serial.len(), 48);
+        assert!(
+            serial.iter().all(Result::is_ok),
+            "the serial baseline must itself succeed: {serial:?}"
+        );
+        // Page order absolutely, not merely stably: the first line names page
+        // one and the last names page forty-eight.
+        assert!(
+            serial[0].as_ref().expect("page 1").contains("doc-0001.png"),
+            "{:?}",
+            serial[0]
+        );
+        assert!(
+            serial[47]
+                .as_ref()
+                .expect("page 48")
+                .contains("doc-0048.png"),
+            "{:?}",
+            serial[47]
+        );
+
+        for attempt in 0..5 {
+            let pooled = render_pages(&render_options(&dir, "8"), &dir, "doc", &doc);
+            assert_eq!(
+                serial, pooled,
+                "attempt {attempt}: `--jobs 8` must print exactly what `--jobs 1` printed"
+            );
+        }
+    }
+
+    /// One job unless asked, and a job count of zero is refused.
+    ///
+    /// The default matters as much as the parse: an existing invocation must
+    /// not start spawning threads because a flag it never passes was added.
+    /// Zero is an error rather than a clamp because `--jobs 0` is somebody
+    /// asking for something, and a run that quietly did the opposite would be
+    /// the wrong kind of forgiving.
+    #[test]
+    fn jobs_defaults_to_one_and_refuses_a_zero() {
+        let unasked = Options::parse(&["a.pdf".to_string()]).expect("parses");
+        assert_eq!(unasked.jobs, 1, "no flag, no threads");
+
+        let asked = Options::parse(&["--jobs".to_string(), "4".to_string(), "a.pdf".to_string()])
+            .expect("parses");
+        assert_eq!(asked.jobs, 4);
+
+        for raw in ["0", "-1", "some", ""] {
+            let refused =
+                Options::parse(&["--jobs".to_string(), raw.to_string(), "a.pdf".to_string()]);
+            assert_eq!(
+                refused.err().as_deref(),
+                Some(format!("`--jobs {raw}` is not a positive number").as_str()),
+                "`--jobs {raw}` must be refused"
+            );
+        }
+    }
+
+    /// A page that will not write is counted, and every other page still runs.
+    ///
+    /// `run`'s policy over files, applied to pages. Rendering used to `?` on
+    /// the first failed write and abandon the rest, which turns one full disk
+    /// into a directory missing everything after it — and the pages are
+    /// independent, each writing its own file.
+    ///
+    /// At **one** job as well as several, and that is not a formality: a
+    /// worker that gives up on the queue when its own page fails is invisible
+    /// at three jobs, because the other two drain the queue behind it. One
+    /// worker is the only arrangement in which giving up loses pages, so it is
+    /// the one that has to be checked.
+    #[test]
+    fn a_page_that_will_not_write_is_counted_and_the_rest_still_render() {
+        for jobs in ["1", "3"] {
+            let doc = many_pages(4);
+            let dir = scratch(&format!("write-failure-{jobs}"));
+            // A directory standing exactly where page two's file must go: no
+            // `write` on any platform goes through one, which is the cheap
+            // stand-in for the full disk this policy exists for.
+            std::fs::create_dir_all(format!("{dir}/doc-0002.png")).expect("the blocking directory");
+
+            let options = render_options(&dir, jobs);
+            let reports = render_pages(&options, &dir, "doc", &doc);
+            assert_eq!(
+                reports.len(),
+                4,
+                "--jobs {jobs}: every page is accounted for"
+            );
+            assert!(
+                reports[1].is_err(),
+                "--jobs {jobs}: page 2 cannot write: {:?}",
+                reports[1]
+            );
+            for (slot, report) in reports.iter().enumerate() {
+                if slot == 1 {
+                    continue;
+                }
+                assert!(
+                    report.is_ok(),
+                    "--jobs {jobs}: page {} still renders: {report:?}",
+                    slot + 1
+                );
+            }
+            assert!(
+                Path::new(&format!("{dir}/doc-0004.png")).exists(),
+                "--jobs {jobs}: the pages after the failure were still written"
+            );
+
+            // And the count reaches the exit code rather than being printed
+            // and forgotten: `run` turns this into a failed file, and `main`
+            // into a 1.
+            assert_eq!(
+                render(&options, "doc.pdf", &doc).err().as_deref(),
+                Some("1 page failed"),
+                "--jobs {jobs}: the failure must be counted, not swallowed"
+            );
+        }
+    }
+
+    /// `--pdfa` is off unless it is asked for, and asking for it does not
+    /// imply `--strict`.
+    ///
+    /// The two answer different questions — whether the file is a valid PDF,
+    /// and whether it is a valid *archival* PDF — and a flag that quietly
+    /// turned the other on would make one verdict's exit code depend on the
+    /// other's rules.
+    #[test]
+    fn the_two_validators_are_independent_flags() {
+        let neither = Options::parse(&["a.pdf".to_string()]).expect("parses");
+        assert!(!neither.strict && !neither.pdfa);
+
+        let archival =
+            Options::parse(&["--pdfa".to_string(), "a.pdf".to_string()]).expect("parses");
+        assert!(archival.pdfa, "--pdfa asks for it");
+        assert!(!archival.strict, "and does not imply --strict");
+
+        let strict =
+            Options::parse(&["--strict".to_string(), "a.pdf".to_string()]).expect("parses");
+        assert!(strict.strict && !strict.pdfa, "nor the other way round");
+    }
+
+    /// A finding prints its clause first, then its object when it has one.
+    ///
+    /// The clause leads because a person reading findings is checking them
+    /// against a standard organised by clause. An object-less finding must not
+    /// print a placeholder: a rule about the file as a whole has no object,
+    /// and saying so on every such line is noise.
+    #[test]
+    fn a_conformance_finding_reads_as_a_clause_and_then_its_object() {
+        let about_the_file = tinker_pdf::ConformanceFinding {
+            clause: tinker_pdf::Clause("6.1.2".to_string()),
+            object: None,
+            kind: tinker_pdf::FindingKind::MetadataMissing,
+        };
+        let text = about_the_file.to_string();
+        assert!(text.starts_with("6.1.2: "), "{text}");
+        assert!(!text.contains("object"), "{text}");
+
+        let about_an_object = tinker_pdf::ConformanceFinding {
+            object: Some(tinker_pdf::ObjRef::new(12, 0)),
+            ..about_the_file
+        };
+        assert!(
+            about_an_object
+                .to_string()
+                .starts_with("6.1.2 object 12 0: "),
+            "{about_an_object}"
+        );
+    }
+
+    /// Coverage names the groups that ran rather than counting them.
+    ///
+    /// "3 of 4" does not tell a caller *which* rules a clean verdict is silent
+    /// about, and that is the entire reason the type exists.
+    #[test]
+    fn coverage_names_the_groups_that_ran() {
+        // The list grows as the milestones land — `fonts` joined it at
+        // milestone 5 and `structure` when the strict validator was joined
+        // under ISO 19005's clauses — and this assertion is written to
+        // *notice* that rather than to pin it: a group that quietly appeared
+        // here would be a group this tool started claiming to have run without
+        // anybody deciding it should. It has noticed twice now.
+        assert_eq!(
+            tinker_pdf::PdfACoverage::IMPLEMENTED.to_string(),
+            "metadata, syntax, structure, fonts, colour"
+        );
+        assert_eq!(
+            tinker_pdf::PdfACoverage::default().to_string(),
+            "nothing",
+            "a verdict that ran nothing says so rather than printing an empty line"
+        );
     }
 
     /// The listing names every object the table claims, with what it is and

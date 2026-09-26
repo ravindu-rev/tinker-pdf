@@ -30,10 +30,40 @@ points are dropped at construction, so nothing downstream ever sees a NaN.
 non-zero winding (8.5.3.3.2) or even-odd (8.5.3.3.3) rule. Coverage is
 accumulated at sixteen sub-scanlines per pixel row with exact horizontal
 spans in 1/256-pixel fixed point, entirely in integer arithmetic — the
-choice ruling 4 pays for over analytic exact-area coverage, and the
-difference stays below one 8-bit level at every edge angle. The sweep keeps
+choice ruling 4 pays for over analytic exact-area coverage. The sweep keeps
 an active-edge list and visits only the rows a shape reaches, so a glyph-tall
 fill on a page-tall region does the shape's work, not the paper's.
+
+*What the fixed grid costs, measured rather than asserted.* This paragraph
+used to end "and the difference stays below one 8-bit level at every edge
+angle". It does not, and never did. Measured 15 September 2026 against the
+true area of a half-plane over a sweep of angles and sub-pixel offsets, the
+worst pixel is **14.7 levels of 255** at one degree off horizontal; the error
+sits between 8 and 10 levels from two degrees to forty-five and falls to 1.1
+at eighty-nine. Sixteen sub-scanlines quantise an edge's vertical position to
+a sixteenth of a pixel, and that is what those numbers are. The trade is still
+the right one — a fixed grid is what makes ruling 4's bit-identical output
+possible at all, and a floating-point area integrator would not be — but it is
+a trade, and `SAMPLES` is the knob that buys quality back at a linear cost and
+at the price of re-baselining every fingerprint in the tree.
+
+*An edge carries sixteen more bits than the spans do*, and the reason is
+worth stating because it was got wrong for as long as this file existed. An
+edge's slope is multiplied by the height of the edge and its position is not,
+so the slope needs far more precision. Held at a whole 1/256 unit per
+sub-scanline, a slope is stored as `trunc(slope × 16)`: **every slope
+shallower than one pixel of `x` per sixteen of `y` truncated to zero and the
+edge was drawn vertical**, and every steeper one walked its lower end `h/16`
+pixels off the line over an edge `h` tall. `SUBSTEP_BITS` puts sixteen bits
+under the 1/256 unit, which leaves a page-tall edge under a thousandth of a
+level from the line it states. The reduction back to 1/256 takes the
+**nearest** unit — `+ half, >> bits`, a `floor` of a shifted value — rather
+than truncating toward zero, which is a different operation on the two sides
+of the origin and so quantised a shape differently once it moved across one.
+That is the property a tile rests on (ruling 5), and it is also simply the
+closer answer: a span is linear in the crossing, so the nearest unit is the
+one whose span is nearest the geometry's. Both were found by ruling 5's tile
+guard and both were wrong for a whole page as much as for a tile.
 
 **Stroking.** `stroke` expands a path under a `StrokeStyle` pen into an
 outline filled with the non-zero rule, so a stroked edge anti-aliases
@@ -50,8 +80,18 @@ hard. `Mask::uniform` carries a soft mask's value outside the region its
 group covered, where the answer is the luminosity of `/BC` alone (11.6.5.2)
 — which is not zero unless `/BC` is black.
 
-**Compositing.** A `Canvas` stores pixels in one of four formats (`Gray8`,
-`GrayA8`, `Rgb8`, `Rgba8`) and composites in integer arithmetic throughout.
+**Compositing.** A `Canvas` stores pixels in one of five formats (`Gray8`,
+`GrayA8`, `Rgb8`, `Rgba8`, `CmykA8`) and composites in integer arithmetic
+throughout. `CmykA8` is the one **subtractive** format — its components are
+quantities of ink — and it exists for transparency groups that declare
+`/DeviceCMYK`, whose blends the specification says happen over ink rather than
+over light ([rendering](rendering.md)). It is not a format a page comes back
+in. The two device relations of 8.6.4.4 live here rather than in
+`tinker-pdf-color`, for the reason `Color::luma`'s coefficients do — a
+rasterizer turns stored components into light, and a leaf takes bytes and plain
+values in; a test holds the copy to the original so the two cannot drift. The
+inverse takes maximum undercolour removal, which makes it **exact**: every one
+of the sixteen million colours survives the round trip.
 `fill_mask_with` blends a colour through a mask under any of the sixteen
 `BlendMode`s — the twelve separable modes of 11.3.5.2 and the four
 non-separable ones of 11.3.5.3 — with the whole operation scaled by an
@@ -63,36 +103,84 @@ the alpha it needs.
 
 **Images.** `draw_image` maps every destination pixel backwards through the
 inverse transform into the samples — a forward map leaves seams and
-double-writes. The sampling policy is decided per draw by `sampling_for`: at
-or above 1:1 on both axes, one nearest tap unless the image asked to be
-smoothed (`/Interpolate`, Table 89, an opt-in defined for magnification —
-false means the author wanted hard pixels, and 1:1 stays byte-preserving);
-and on **any** downscale, the average of every sample the destination pixel
-covers, weighted by how much of it the pixel covers — with exact 2×2
-box-filter averaging into a `Pyramid` of halved levels first, until the
-residual is within 4:1, so the footprint is at most four samples per axis and
-the cost per pixel is bounded whatever the ratio.
+double-writes. Three things decide what a pixel gets: how much of it the image
+covers, which samples it reads, and whether it is composited alone.
 
-That average is the definition of a downscale rather than a choice, and
-`tinker-pdf-raster/tests/analytic_sampling.rs` evaluates it independently and
-compares. It used to be an interpolation — four taps weighted by distance,
-whatever the ratio — which is exact only at powers of two, where the pyramid
-has already done the work and the interpolation has nothing left to do.
-Between them it kept whichever samples the grid landed near: mean absolute
-error against the definition was 43 levels out of 255 at 1.5:1 and 26 at 3:1,
-against 0.16 and 0.25 now. That is most images on most pages, because a page
-scale is rarely a power of two, and no fingerprint could have found it — a
-fingerprint pins the engine against itself and every target was reproducing
-the same wrong answer.
+*Coverage.* The image occupies the unit square of its transform (8.9.5.2), and
+that square is rasterised through the same `fill` every path uses — same
+sixteen sub-scanlines a row, same exact spans in 1/256 of a pixel, same
+cancellation. So an image edge anti-aliases exactly as a filled edge does, and
+a pixel the image half covers takes half the paint. The quad's corners are
+snapped to that 1/256 grid first, because a rectangle placed by a translation
+lands on a grid line far more often than not and `a + (e - t)` need not equal
+`(a + e) - t` to the last bit; without the snap a cropped page and the page
+under it disagreed on 240 pixels.
 
-The level count branches on 16.16 fixed-point integers,
-because `log2` is a transcendental and a count one different is not a
-rounding difference — it is a different image. The weights are integers for
-the same reason: an area is a product of two overlaps, and in floats the
-accumulation order would decide the last bit. The pyramid belongs to the
-caller, so an image's lifetime is decided where it is known. A stencil's
-PDF name stayed behind as `ImageDraw::tint` (8.9.6.2): the image says
-where, the caller says what.
+*Sampling.* Decided per draw by `sampling_for` from the ratio alone, with
+`/Interpolate` (Table 89) the only thing the caller supplies. Above 1:1 the
+file gets what it asked for — `/Interpolate true` smooths four taps
+(`Bilinear`), false keeps hard samples — and below it, the average of every
+sample the pixel covers, weighted by how much of it the pixel covers —
+integrated over the destination pixel's **true source rectangle**, which is
+what makes a render at twice the scale, box-filtered down, the same picture.
+
+Past 128:1 that gives way to exact 2x2 box-filter averaging into a `Pyramid` of
+halved levels until the residual is within 4:1, which bounds the cost of the
+one case exact integration does not: the same image drawn many times at
+extreme minification, where the levels are built once and reused. The
+threshold is measured — the worst downscale any draw in the pdfjs corpus asks
+for is 72:1 — and the trade it makes is written up in
+[design/image-edges.md](../design/image-edges.md), because a pyramid is
+quantised to powers of two and therefore *scale-dependent*, which is what the
+`dpi` metamorphic relation had been reporting on strip-built scans.
+
+Hard samples are `Area` over the pixel's own footprint rather than one nearest
+tap, and above 1:1 that footprint is *smaller than a sample*: a pixel inside a
+sample reads that sample and nothing else, and only a pixel straddling two
+mixes them. That is the sample's edge anti-aliased, not the image blurred —
+`/Interpolate false` still gets its hard pixels, and a 1:1 blit is still
+byte-preserving. A nearest tap instead quantised every internal sample boundary
+to whole device pixels, which is the same defect as the outer edge one level
+down: a render at twice the scale resolves those boundaries twice as finely, so
+box-filtering it back down could not reproduce the coarser render. Measured on
+a 512-square source, share of pixels disagreeing between a render and the
+box-filtered render at twice the scale: **49.9 % before, 0.00 % after**, at
+every ratio tried.
+
+*Compositing, and the artefact anti-aliasing creates.* Two images that share an
+edge each cover the pixels along it partly, and compositing them one after the
+other lets the page through in between — a half-and-half boundary keeps a
+quarter of the backdrop, because source-over of two half-covered draws is not
+the average of them. That is conflation, and it is what every scan assembled
+from strips is made of. So a *run* of consecutive image draws accumulates in
+`fragments.rs` first — coverage adding rather than compositing, premultiplied,
+four bytes a pixel, integers throughout — and reaches the canvas once. Two
+strips each covering half a boundary pixel accumulate to one whole pixel of
+their average, which is what a render at twice the scale box-filters down to.
+
+Fragments are *added*, so a run holds only draws that do not overlap: a picture
+laid over another ends the run and composites, and so does any change of alpha,
+blend mode, clip or soft mask, and any other drawing operation. A run survives
+`q`, `Q` and a form boundary, because none of those paints — which matters,
+since real content brackets every image in `q`/`Q` and a run that ended there
+would never hold two of anything. Past `MAX_IMAGE_RUN_PIXELS`, a quarter of
+`MAX_PAGE_PIXELS`, images composite one at a time as before and abutting ones
+conflate again; that is bounded memory rather than a page that will not render.
+A knockout group composites image by image too, because 11.4.5 gives every
+element its own shape.
+
+*Determinism, throughout.* The level count branches on 16.16 fixed-point
+integers, because `log2` is a transcendental and a count one different is not a
+rounding difference — it is a different image. The averaging weights are
+integers for the same reason: an area is a product of two overlaps, and in
+floats the accumulation order would decide the last bit. So is the run's
+accumulation, and so is the coverage the quad contributes. The only floats left
+on the path are `sqrt`, division and `round`, which IEEE 754 pins exactly
+(ruling 4). The pyramid belongs to the caller, so an image's lifetime is
+decided where it is known. A stencil's PDF name stayed behind as
+`ImageDraw::tint` (8.9.6.2): the image says where, the caller says what.
+
+The trade is written down in [design/image-edges.md](../design/image-edges.md).
 
 **Meshes.** `draw_mesh` rasterizes a whole Gouraud-shaded triangle mesh into
 one `MeshBuffer` — coverage from a single non-zero fill over every triangle,
@@ -164,22 +252,44 @@ tiny pattern over a long line cannot generate millions of pieces.
   partial-mask stop; `stroke.rs` covers caps, joins, the miter limit and
   dash phase; `blend.rs` pins all sixteen modes in integers; `image.rs`
   measures the sampling policy against numbers — a magnified gradient's
-  largest step, a 2:1 checkerboard averaging to uniform 128; `mesh.rs`
+  largest step, a 2:1 checkerboard averaging to uniform 128, and an image
+  wholly off the canvas costing nothing; `mesh.rs`
   proves shared edges leave no seam; `canvas.rs` covers formats, backdrops
   and bounded compositing.
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
-  of the 15 committed render fingerprints, `text`, `curves`, `shading`,
+  of the 19 committed render fingerprints, `text`, `curves`, `shading`,
   `blend`, `pattern`, `image`, `transparency`, `tiling` and `mesh` exercise
   this crate directly, each a pixel hash plus dimensions and an ink floor,
   reproduced byte-for-byte on three measured targets
   ([determinism](determinism.md)).
+- **Analytic coverage** (`tinker-pdf-raster/tests/analytic_coverage.rs`):
+  every expectation a closed form of the sampling grid, evaluated in the test
+  from the path's own equation and compared byte for byte — both fill rules, a
+  half-covered edge, a diagonal against the area the line states, and
+  `a_shallow_edge_keeps_the_slope_the_line_states`, a parallelogram two pixels
+  wide and 256 tall drifting fourteen across, whose slope is 0.875 of a 1/256
+  unit per sub-scanline. That last one is the fixture the truncated slope
+  above had no answer for: it rasterised as a straight vertical bar, fourteen
+  pixels wrong at its lower end. What this tier adjudicates is the
+  implementation against the *stated sampling model*, which is this crate's
+  own contract rather than ISO 32000's — named here because that is a weaker
+  claim than a third-party vector and is worth not mistaking for one.
+- **Analytic sampling**
+  (`tinker-pdf-raster/tests/analytic_sampling.rs`): every expectation computed
+  in the test from the geometry. Minification against an independent box
+  average at six ratios; a half-covered edge against its area on either axis at
+  all fifteen sixteenths, and a corner against the product of its two
+  fractions; a 1:1 integer-aligned draw asserted byte-preserving so a coverage
+  off-by-one would show as a rim; and the conflation pair — two abutting black
+  strips leaving **63** composited one at a time and **0** as one run, which
+  states the defect and the fix in the same test.
 - **Integration tests** through the facade: `blend_modes.rs`,
   `stroke_parameters.rs`, `images.rs`, `inline_images.rs`,
   `mesh_shadings.rs` and `transparency_groups.rs` under
   `crates/tinker-pdf/tests/`.
 - **Fuzzing**: the `render_page` target (one of the 24) drives whole
   documents through the interpreter into this rasterizer under ruling 1;
-  the corpus run renders every page of 4 484 of 4 525 files with 0 crashes
+  the corpus run renders every page of 5 516 of 5 525 files with 0 crashes
   ([verification](../verification.md)).
 - **Cost regression**: `a_small_fill_on_a_large_page_stays_small` (in
   `crates/tinker-pdf-render/src/lib.rs`) asserts on mask pixels *asked for*

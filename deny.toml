@@ -75,6 +75,67 @@ deny = [
   { name = "image" },
   { name = "png" },
   { name = "fax" },
+  # TIFF, denied in the milestone that writes the reader rather than the one
+  # that finishes the plan -- gap 30's rule three sections below, applied where
+  # it bites hardest. A TIFF reader is a *directory walk* over six codings this
+  # repository already owns, so the crate a hurried author reaches for would
+  # bring a second inflate, a second LZW, a second CCITT and a second JPEG in
+  # behind it, and rule 1 would be broken four times by one line of Cargo.toml.
+  #
+  # `image` is denied twelve lines above and is named again here in prose
+  # rather than twice in the list, because it is the crate whose TIFF support
+  # is the reason somebody would add it. `tiff` is the one `image` itself uses.
+  { name = "tiff" },
+  { name = "tiff-decoder" },
+  # Brotli, and the WOFF containers that are the only reason this engine needs
+  # it. Gap 31's Tier 4 writes an RFC 7932 decoder so a book's `@font-face` can
+  # name a WOFF2, and these land in the milestone that writes the decoder
+  # rather than the one that finishes the plan -- the rule gap 30 wrote for XML
+  # and gap 31 repeated for CSS: the milestone that writes the parser is the
+  # window in which the temptation exists, and it is a wide window here.
+  # `brotli` is MIT/Apache-2.0 and `ttf-parser` (already denied below, for
+  # fonts) is MIT, so the licence gate would have waved every one of them
+  # through. The **data** is the opposite case and has the opposite answer:
+  # RFC 7932's static dictionary is vendored under THIRDPARTY.md and checked
+  # against this allowlist by `cargo xtask vendor`, because a table of
+  # published values is not an implementation.
+  { name = "brotli" },
+  { name = "brotli-decompressor" },
+  { name = "woff2" },
+  { name = "woff2-patched" },
+  # JPEG XR (ITU-T T.832), landing in the milestone that writes the decoder.
+  # The rule gap 30 wrote three blocks below this one holds here too -- these
+  # names arrive with the milestone that writes the parser rather than the one
+  # that finishes the plan, because that is the window in which the temptation
+  # exists -- and the window is unusually wide for this format.
+  #
+  # JPEG XR is the one codec in this engine with a *system* decoder sitting
+  # right there: `WmpBitmapEncoder` and its decoding twin ship with Windows,
+  # this repository already drives the encoder to build its fixtures, and
+  # calling the decoder instead of writing one would have been four lines.
+  # That is exactly the trade CONTRIBUTING rule 1 exists to refuse, and here
+  # it is worse than the usual case rather than better: a platform codec is
+  # not portable, so it would make the crate decode on Windows and refuse
+  # everywhere else -- a behaviour difference that no entry in this file can
+  # express and that ruling 4's four-target contract forbids outright.
+  #
+  # That route is therefore closed by policy rather than by a crate name, and
+  # deliberately so: the binding a contributor would reach for is `windows` or
+  # `windows-sys`, and `windows-sys` is already in the graph honestly, pulled
+  # in by `tempfile` under `proptest`. Denying it would fail this check over a
+  # dev dependency that implements nothing. What is denied below is every
+  # crate that would supply the *codec itself*.
+  #
+  # `image` is deliberately NOT repeated here: it is already denied nine lines
+  # above, for this same reason, and a second row for one crate would make the
+  # list read as though the two entries meant different things.
+  { name = "jpegxr" },
+  { name = "jxrlib-sys" },
+  { name = "jpegxr-sys" },
+  { name = "libjxl-sys" },
+  { name = "jpegxl-sys" },
+  { name = "jpegxl-rs" },
+  { name = "zune-jpegxl" },
   # Archive containers and checksums. `zip` is the one CONTRIBUTING rule 1
   # would have been most quietly broken by: gap 29 reads comic archives, and
   # reaching for the obvious crate would have added a third-party format
@@ -88,6 +149,31 @@ deny = [
   { name = "rc-zip" },
   { name = "rawzip" },
   { name = "tar" },
+  # RAR, 7z and the LZMA family, denied in the milestone that writes the
+  # decoders rather than the one that finishes the plan -- this file's own rule,
+  # three paragraphs down, and the window is wider here than it was for XML.
+  # Every name below would have passed every other check in this file, and two
+  # of them are the obvious reach: `sevenz-rust2` is maintained and permissive,
+  # and `lzma-rs` is a clean pure-Rust range decoder that does exactly what
+  # `tinker-pdf-archive::sevenz` had to be written to do.
+  #
+  # The RAR names carry a second reason on top of rule 1. There is one RAR
+  # implementation in the world -- RARLAB's unrar -- and every binding wraps it;
+  # its licence forbids using the source to write a compatible compressor, which
+  # is a restriction this repository's dual MIT/Apache-2.0 grant cannot pass on
+  # and which the licence allowlist here would not have caught, because a `-sys`
+  # crate's own manifest says whatever its author typed. The RAR 5 decoder in
+  # `tinker-pdf-archive` is written from the published format note and from the
+  # committed fixture, and nothing of unrar is vendored, linked or read.
+  { name = "unrar" },
+  { name = "unrar_rs" },
+  { name = "sevenz-rust" },
+  { name = "sevenz-rust2" },
+  { name = "lzma-rs" },
+  { name = "xz2" },
+  { name = "liblzma" },
+  { name = "compress-tools" },
+  { name = "libarchive" },
   { name = "crc32fast" },
   { name = "crc" },
   { name = "crc-any" },
@@ -138,6 +224,19 @@ deny = [
   # subset. An HTML5 tree builder is a *different* parser with a different
   # error-recovery model and a different threat surface, and adopting one would
   # quietly undo gap 30's whole defence against entity expansion.
+  # SVG, denied in the milestone that writes the parser -- this file's own rule
+  # about when the temptation exists. `usvg` and `resvg` are the obvious two and
+  # are excellent; `svgtypes` is the path and transform grammars alone, which is
+  # exactly the part `tinker-pdf-svg/src/path.rs` transcribes and therefore the
+  # most tempting of the four. `librsvg` is GPL and would not clear the licence
+  # gate anyway, which is not the reason it is here: the reason is rule 1.
+  { name = "usvg" },
+  { name = "resvg" },
+  { name = "svgtypes" },
+  { name = "svgfilters" },
+  { name = "librsvg" },
+  { name = "nsvg" },
+  { name = "svg" },
   { name = "cssparser" },
   { name = "lightningcss" },
   { name = "selectors" },

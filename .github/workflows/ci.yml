@@ -52,6 +52,19 @@ jobs:
           cargo test -p tinker-pdf --test determinism 2>&1 | tee determinism.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' determinism.log
           grep -Eq 'rendering_is_stable_across_targets [.]{3} ok' determinism.log
+      # The same claim for shaping, which `cargo test --workspace` above
+      # already runs — and which the same `#[ignore]`-one-afternoon hazard
+      # would silence just as quietly. `docs/design/shaping.md` milestone 2
+      # asks for the fingerprints to be *reproduced by the determinism CI
+      # legs*, so the leg has to say that it did.
+      - name: The shaping fingerprints were reproduced on this target
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf-shape --test fingerprints 2>&1 | tee shaping.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' shaping.log
+          grep -Eq 'shaping_is_stable_across_targets [.]{3} ok' shaping.log
+          grep -Eq 'bidi_is_stable_across_targets [.]{3} ok' shaping.log
       # `cmap-predefined` off, *run* rather than merely linked: a build
       # without the CJK tables keeps the codespaces and drops the CIDs, and
       # `tinker-pdf-font/tests/predefined_cmaps_absent.rs` is the only place
@@ -79,7 +92,7 @@ jobs:
       # The examples are ordinary cargo targets, so the clippy line above
       # already compiles them. This *runs* them, because an example that
       # compiles and draws nothing is the same green tick as one that works
-      # — the hazard verification.md names, applied to the six programs
+      # — the hazard verification.md names, applied to the seven programs
       # that are the documented end-to-end usage of this library.
       #
       # Each runs with no arguments against a committed fixture, so no
@@ -88,7 +101,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          for example in open render extract edit create convert; do
+          for example in open render extract edit create convert parallel; do
             echo "::group::$example"
             cargo run -p tinker-pdf --example "$example" \
               2>&1 | tee "example-$example.log"
@@ -106,6 +119,7 @@ jobs:
           grep -q 'the original, untouched' example-edit.log
           grep -q 'read back page 1 says' example-create.log
           grep -q 'as a document' example-convert.log
+          grep -q 'byte-identical to the serial render' example-parallel.log
       - run: cargo run -p xtask -- check
 
   fuzz-targets:
@@ -136,12 +150,20 @@ jobs:
     # whole corpus before it mutates anything, so the replay alone is the
     # regression check, and the seconds after it are a free look around.
     #
+    # **The seconds after it are not free, and the step below is not a
+    # replay.** `-max_total_time=20` is a twenty-second *mutating* session
+    # seeded from the corpus, so an input it reports was generated here and
+    # was never committed — which is why the step is named for what it does.
+    # Five findings on 20 September 2026 were all of that kind, and calling
+    # them "the committed seeds crash" would have sent five investigations to
+    # the wrong files (docs/verification.md).
+    #
     # Bounded on purpose, and bounded per target rather than in total, so
     # adding a target adds a known amount of time instead of quietly taking
-    # it from the others: twenty-four targets, twenty seconds each, one build.
-    # Unlike the nightly this is one runner rather than twenty-four, because
-    # holding twenty-four machines for twenty seconds each is worse for everyone
-    # queueing behind it than holding one for five minutes.
+    # it from the others: thirty-nine targets, twenty seconds each, one build.
+    # Unlike the nightly this is one runner rather than thirty-nine, because
+    # holding thirty-nine machines for twenty seconds each is worse for
+    # everyone queueing behind it than holding one for thirteen minutes.
     #
     # `crypt` is the one target for which twenty seconds is not twenty seconds
     # of fuzzing: 7.6.4.3.3's hardened hash is meant to be slow, and the seed
@@ -183,7 +205,10 @@ jobs:
         # that has nothing to do with the code under test.
         env:
           RUSTFLAGS: ''
-      - name: Replay the seed corpora
+      # Named for the command rather than for the corpus: this replays every
+      # seed and then mutates from them for the rest of the twenty seconds, so
+      # what it reports may be an input no file in this repository holds.
+      - name: Mutate for twenty seconds from each seed corpus
         run: |
           set -uo pipefail
           failed=()
@@ -227,6 +252,54 @@ jobs:
         with:
           dotnet-version: '8.0'
       - run: dotnet build bindings/dotnet/TinkerPdf.csproj
+
+  bindings-parity:
+    # Gap 32: the four write surfaces must produce byte-identical output, which
+    # is what makes ruling 11 ("a binding adds no logic of its own") a check
+    # rather than a claim. `--require-all` is what turns a missing artefact
+    # from a quiet skip into a failure here — the task prints SKIPPED with a
+    # reason either way, but a CI job that skipped three of four and went green
+    # would be exactly the silent pass it exists to prevent.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+      - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
+      # The wheel, installed rather than imported from the source tree.
+      - run: pip install maturin
+      - run: maturin build --release --out dist
+        working-directory: bindings/python
+      - run: pip install bindings/python/dist/*.whl
+      # The npm package, installed into the directory the task looks in.
+      - uses: jetli/wasm-pack-action@v0.4.0
+      - run: wasm-pack build --target web --release
+        working-directory: bindings/js
+      - name: Install the npm package where bindings-parity looks
+        run: |
+          set -euo pipefail
+          mkdir -p target/js-parity
+          tarball=$(cd bindings/js/pkg && npm pack --pack-destination "$PWD/../../../target/js-parity" | tail -1)
+          cd target/js-parity
+          npm init -y > /dev/null
+          npm pkg set type=module > /dev/null
+          npm install "./$tarball"
+      # The NuGet package, staged and packed as the release pipeline does.
+      - run: cargo build -p tinker-pdf-ffi --release
+      - run: cargo run -p xtask -- nuget-stage
+      - run: dotnet pack bindings/dotnet/TinkerPdf.csproj -c Release -o target/nuget
+      - name: All four surfaces, byte-identical
+        run: |
+          set -o pipefail
+          cargo run -p xtask -- bindings-parity --require-all 2>&1 | tee parity.log
+          grep -q 'bindings-parity: all four surfaces wrote the same bytes' parity.log
+          grep -q 'SKIPPED 0 (none)' parity.log
 
   wasm:
     # wasm32-unknown-unknown is a first-class target from day one. The ffi crate
@@ -276,6 +349,56 @@ jobs:
             determinism.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      # Shaping's fourth target. The corpora are `include_bytes!` rather than
+      # files on purpose: wasmtime grants no filesystem unless somebody
+      # remembers `--dir`, and a fingerprint test that could not read its own
+      # fonts would fail here rather than silently measuring nothing — but it
+      # would fail for the wrong reason, and this leg exists to catch the right
+      # one.
+      # The archival packet's byte-hash. It lives in `pdfa_writer.rs` rather
+      # than `determinism.rs` because the fixture it hashes is built from
+      # that file's own helpers, and its name claims "on every target" — a
+      # claim nothing checked until this step existed. Every other committed
+      # document hash is about geometry; this one is about a *claim*, and an
+      # XMP packet is the one part of a written document with an obvious
+      # route to nondeterminism, since a producer stamping `xmp:CreateDate`
+      # from a clock is the ordinary thing to do.
+      - name: Write a PDF/A document on wasm32-wasip1 and compare its hash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test pdfa_writer \
+            --target wasm32-wasip1 2>&1 | tee pdfa.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' pdfa.log
+          grep -q 'the_archival_fixture_hashes_the_same_on_every_target \.\.\. ok' \
+            pdfa.log
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      # Shaping's *rendered* fingerprint, as distinct from the shaper's own.
+      # `tinker-pdf-shape`'s fingerprints pin glyph ids and positions; this
+      # one pins the pixels an Arabic book paginates to, which is the whole
+      # path — itemization, joining, fallback, the painter's pen — rather
+      # than the shaper alone. It was recorded on one machine, so until this
+      # step ran it was a cross-target claim with one target behind it.
+      - name: Paginate an Arabic book on wasm32-wasip1 and compare its pixels
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test epub_shaped \
+            --target wasm32-wasip1 2>&1 | tee epub.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub.log
+          grep -q 'the_shaped_page_renders_to_the_bytes_it_always_did \.\.\. ok' \
+            epub.log
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      - name: Shape on wasm32-wasip1 and compare against the fingerprints
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf-shape --test fingerprints \
+            --target wasm32-wasip1 2>&1 | tee shaping.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' shaping.log
+          grep -q 'test shaping_is_stable_across_targets \.\.\. ok' shaping.log
+          grep -q 'test bidi_is_stable_across_targets \.\.\. ok' shaping.log
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
 
   epub-corpus:
     # Gap 31 milestone 1's second corpus, and the only one CI has to fetch.
@@ -302,6 +425,10 @@ jobs:
       - name: Read the fetched corpus
         env:
           TINKER_EPUB_CORPUS: ${{ github.workspace }}/target/epub-corpus
+          # A skip exits 0 and reads exactly like a pass, and the banner
+          # grep below only catches it if the output is what it expects.
+          # This makes the absence of a corpus a test failure instead.
+          TINKER_EPUB_CORPUS_REQUIRED: "1"
         run: |
           set -o pipefail
           cargo test -p tinker-pdf --test epub_fetched -- --nocapture \
@@ -327,3 +454,13 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check licenses bans sources
+
+      # The other half, and it had been claimed rather than run.
+      # `cargo deny` reads the *crate* graph and has nothing to say about a
+      # directory of fetched PDFs, so `corpus/README.md`'s licence table is
+      # what records their terms -- and that file said it was checked here
+      # when nothing checked it. `--check` regenerates the table from
+      # `corpus/corpora.lock` and fails on any difference, so a corpus cannot
+      # be added or repinned without its terms reaching the file a person
+      # reads.
+      - run: cargo run -p xtask -- corpus-licences --check

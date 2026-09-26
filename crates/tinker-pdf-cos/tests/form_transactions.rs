@@ -485,3 +485,183 @@ fn a_damaged_widget_is_carried_through_a_multi_field_apply() {
     assert_eq!(skipped[0].widget, ObjRef::new(12, 0));
     assert!(editor.is_dirty());
 }
+
+// ---------------------------------------------------------------------------
+// The closure-free pair the bindings project (gap 32 milestone 1)
+// ---------------------------------------------------------------------------
+//
+// `transaction` is sugar over `checkpoint` and `restore`, so the four
+// rollback tests above are the pair's proof of *what* is restored and are not
+// repeated here. What is left to prove is the part the closure form cannot
+// express and therefore never had a test: that a checkpoint is a value with
+// no open state, that restoring is idempotent, that one checkpoint can undo
+// several attempts, and that the two forms produce the same bytes.
+//
+// A closure does not cross a foreign-function boundary, which is why this
+// pair exists at all (ruling 11, docs/design/bindings-write.md).
+
+/// The property the whole design rests on: restore is idempotent, so a caller
+/// that cannot tell whether it already restored may simply restore.
+///
+/// Across an ABI this is not hypothetical. A host language's `finally` block
+/// can run after its own `catch` has already restored, and a
+/// `begin`/`rollback` triple would then either double-roll or need a flag
+/// nobody can see.
+#[test]
+fn restoring_a_checkpoint_twice_is_restoring_it_once() {
+    let mut editor = DocumentEditor::new(form_document());
+    assert!(editor.fill_field("name", "Ada").is_ok());
+    let clean = save(&editor, WriteMode::Incremental);
+
+    let mark = editor.checkpoint();
+    assert!(editor.fill_field("short", "abcd").is_ok());
+    assert_ne!(save(&editor, WriteMode::Incremental), clean);
+
+    editor.restore(&mark);
+    let once = save(&editor, WriteMode::Incremental);
+    assert_eq!(once, clean, "the first restore undoes the second fill");
+
+    editor.restore(&mark);
+    assert_eq!(
+        save(&editor, WriteMode::Incremental),
+        once,
+        "and the second restore is not a second undo"
+    );
+
+    editor.restore(&mark);
+    assert_eq!(
+        save(&editor, WriteMode::Incremental),
+        once,
+        "nor is the third"
+    );
+    assert_eq!(
+        value_of(&reopen(&editor, WriteMode::Rewrite), "name"),
+        "Ada"
+    );
+    assert_eq!(value_of(&reopen(&editor, WriteMode::Rewrite), "short"), "");
+}
+
+/// One checkpoint, several attempts -- the retry loop a closure cannot
+/// express, because `transaction` consumes its body once.
+#[test]
+fn one_checkpoint_undoes_each_of_several_attempts() {
+    let mut editor = DocumentEditor::new(form_document());
+    let mark = editor.checkpoint();
+
+    // `short` is capped at four characters, so both of these are refused by
+    // the field itself and the restore is what puts the editor back.
+    for attempt in ["far too long to fit", "also too long"] {
+        assert_eq!(
+            editor.fill_field("short", attempt),
+            Err(FillError::ValueRefused)
+        );
+        editor.restore(&mark);
+        assert!(
+            !editor.is_dirty(),
+            "each attempt starts from the same place"
+        );
+    }
+
+    assert!(editor.fill_field("short", "abcd").is_ok());
+    assert_eq!(
+        value_of(&reopen(&editor, WriteMode::Rewrite), "short"),
+        "abcd"
+    );
+}
+
+/// Nested checkpoints restore their own start, which is the same sentence
+/// `transaction`'s documentation makes about nesting -- held here for the
+/// pair, because a binding that offers `transaction` sugar nests these by
+/// hand.
+#[test]
+fn nested_checkpoints_each_restore_their_own_start() {
+    let mut editor = DocumentEditor::new(form_document());
+    let outer = editor.checkpoint();
+    assert!(editor.fill_field("name", "Ada").is_ok());
+
+    let inner = editor.checkpoint();
+    assert!(editor.fill_field("short", "abcd").is_ok());
+
+    editor.restore(&inner);
+    let saved = reopen(&editor, WriteMode::Rewrite);
+    assert_eq!(value_of(&saved, "name"), "Ada", "the outer edit survives");
+    assert_eq!(value_of(&saved, "short"), "", "the inner one does not");
+
+    editor.restore(&outer);
+    assert!(
+        !editor.is_dirty(),
+        "and the outer restore reaches the start"
+    );
+}
+
+/// Dropping a checkpoint commits nothing, because nothing was pending. That is
+/// the sentence that makes this a value rather than an open transaction, and
+/// it is the one a `begin` without a `commit` cannot say.
+#[test]
+fn dropping_a_checkpoint_changes_nothing() {
+    let mut editor = DocumentEditor::new(form_document());
+    assert!(editor.fill_field("name", "Ada").is_ok());
+    let before = save(&editor, WriteMode::Incremental);
+
+    drop(editor.checkpoint());
+    {
+        let _scoped = editor.checkpoint();
+    }
+
+    assert_eq!(save(&editor, WriteMode::Incremental), before);
+    assert!(
+        editor.is_dirty(),
+        "and the edit that was there is still there"
+    );
+}
+
+/// The two forms are byte-identical, which is what makes `transaction` sugar
+/// rather than a second implementation.
+#[test]
+fn the_closure_form_and_the_pair_write_the_same_bytes() {
+    let sugar = {
+        let mut editor = DocumentEditor::new(two_widget_form());
+        let outcome: Result<(), ()> = editor.transaction(|tx| {
+            assert!(tx.fill_field("name", "Ada").is_ok());
+            Ok(())
+        });
+        assert!(outcome.is_ok());
+        save(&editor, WriteMode::Incremental)
+    };
+
+    let primitive = {
+        let mut editor = DocumentEditor::new(two_widget_form());
+        let mark = editor.checkpoint();
+        let outcome: Result<(), ()> = {
+            assert!(editor.fill_field("name", "Ada").is_ok());
+            Ok(())
+        };
+        if outcome.is_err() {
+            editor.restore(&mark);
+        }
+        save(&editor, WriteMode::Incremental)
+    };
+
+    assert_eq!(fnv(&sugar), fnv(&primitive), "committed edits agree");
+    assert_eq!(sugar, primitive);
+
+    // And the rolled-back leg, whose bytes are the untouched document.
+    let sugar_rolled = {
+        let mut editor = DocumentEditor::new(two_widget_form());
+        let outcome: Result<(), ()> = editor.transaction(|tx| {
+            assert!(tx.fill_field("name", "Ada").is_ok());
+            Err(())
+        });
+        assert!(outcome.is_err());
+        save(&editor, WriteMode::Incremental)
+    };
+    let primitive_rolled = {
+        let mut editor = DocumentEditor::new(two_widget_form());
+        let mark = editor.checkpoint();
+        assert!(editor.fill_field("name", "Ada").is_ok());
+        editor.restore(&mark);
+        save(&editor, WriteMode::Incremental)
+    };
+    assert_eq!(sugar_rolled, primitive_rolled, "abandoned edits agree too");
+    assert_ne!(sugar_rolled, sugar, "and the two legs are different files");
+}

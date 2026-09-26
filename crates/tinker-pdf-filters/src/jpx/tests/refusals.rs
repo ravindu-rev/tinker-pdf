@@ -74,23 +74,39 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
         Warning::JpxFeatureUnsupported,
     );
 
-    // "and any POC marker, which changes the order mid-stream"
+    // "and any POC marker, which changes the order mid-stream" — **this
+    // entry has moved**, on 21 September 2026, and with it went the last
+    // Table A.2 marker refused as a capability. A.6.6's progressions are
+    // B.12.2's progression order volumes and tier-2 sequences the packets
+    // from them, held to T.800's own bytes by
+    // `crates/tinker-pdf-filters/tests/jpx_poc.rs`. What is left of the entry
+    // is a *value* inside the segment, the same shape RGN's refusal took:
+    // `Ppoc` is Table A.16's eight bits, so a sixth progression order is
+    // refused in a POC exactly as it is in a COD.
     assert_eq!(
-        refuse(&with_marker(marker::POC, &[0; 7])),
-        Warning::JpxMarkerUnsupported,
+        refuse(&with_marker(marker::POC, &[0, 0, 0, 1, 2, 1, 5])),
+        Warning::JpxFeatureUnsupported,
+    );
+    // And a POC whose length is not equation (A-6)'s.
+    assert_eq!(
+        refuse(&with_marker(marker::POC, &[0; 8])),
+        Warning::JpxStructureInvalid,
     );
 
     // "any code-block style bit in COD/COC Table A.19 this build does not
-    // implement" — five of the six. The sixth, segmentation symbols, is
-    // implemented on purpose, because checking them is the only free
-    // integrity check the format offers.
-    for bit in [
-        cb_style::BYPASS,
-        cb_style::RESET,
-        cb_style::TERMALL,
-        cb_style::VERTICALLY_CAUSAL,
-        cb_style::PREDICTABLE,
-    ] {
+    // implement" — **zero of the six now**, and this entry has left the
+    // refusal list as a capability rather than narrowing again. RESET,
+    // VERTICALLY_CAUSAL and PREDICTABLE are decisions about context state and
+    // are decoded; SEGMENTATION_SYMBOLS always was, because checking it is the
+    // only free integrity check the format offers; and BYPASS and TERMALL
+    // went together on 23 September 2026 with B.10.7.2's multiple codeword
+    // segments and D.6's raw bit reader.
+    //
+    // What is left is a style **bit** outside the table, which is a value the
+    // standard reserves rather than a capability this build lacks — the same
+    // shape as the `Srgn` entry below and RGN's before it. Table A.19's six
+    // bits are 0 to 5, so the reserved ones are 6 and 7.
+    for bit in [0x40u8, 0x80] {
         assert_eq!(
             refuse(&stream(
                 &Spec {
@@ -100,34 +116,60 @@ fn every_entry_of_the_refusal_list_is_reachable_and_named() {
                 &EMPTY_PACKETS
             )),
             Warning::JpxFeatureUnsupported,
-            "Table A.19 bit {bit:#04x}",
+            "a code-block style bit Table A.19 does not define ({bit:#04x})",
         );
     }
-    // And a bit Table A.19 does not define at all.
-    assert_eq!(
-        refuse(&stream(
-            &Spec {
-                cb_style: 0x40,
-                ..Spec::default()
-            },
-            &EMPTY_PACKETS
-        )),
-        Warning::JpxFeatureUnsupported,
-    );
+    // And the half of this that would otherwise stop meaning anything: the
+    // six the table *does* define no longer refuse. Without this, a build
+    // that put the old blanket refusal back would still pass the loop above.
+    for bit in [
+        cb_style::BYPASS,
+        cb_style::RESET,
+        cb_style::TERMALL,
+        cb_style::VERTICALLY_CAUSAL,
+        cb_style::PREDICTABLE,
+        cb_style::SEGMENTATION_SYMBOLS,
+    ] {
+        assert!(
+            crate::jpx::codestream::parse(&stream(
+                &Spec {
+                    cb_style: bit,
+                    ..Spec::default()
+                },
+                &EMPTY_PACKETS
+            ))
+            .is_ok(),
+            "Table A.19 bit {bit:#04x} is implemented and must not refuse",
+        );
+    }
 
     // "an RGN marker, a Part 2 marker, or a marker the standard defines and
-    // this build does not". Three separate claims and three cases: RGN and
-    // CRG are Table A.2's, and 0xFF74 is ISO/IEC 15444-2's MCT — Part 2 is a
-    // non-goal, and every Part 2 marker lands in the same place, as a code
-    // Table A.2 does not define.
+    // this build does not". Three separate claims, and the first of them has
+    // moved: **RGN is decoded now** (T.800 Annex H), so what is left of that
+    // entry is the one value inside the segment the standard reserves. Table
+    // A.25 defines `Srgn` 0, "Implicit ROI (maximum shift)", and reserves
+    // every other value, and a reserved style is refused rather than run
+    // through H.1's arithmetic as though it were Maxshift.
+    //
+    // CRG stood on this row before RGN did, and left for the same kind of
+    // reason: A.9.1 says it "has no effect on decoding the codestream", so
+    // it is parsed and carried, and a marker this build accepts cannot
+    // demonstrate a refusal.
     assert_eq!(
-        refuse(&with_marker(marker::RGN, &[0, 0, 0])),
-        Warning::JpxMarkerUnsupported,
+        refuse(&with_marker(marker::RGN, &[0, 1, 0])),
+        Warning::JpxFeatureUnsupported,
     );
-    assert_eq!(
-        refuse(&with_marker(marker::CRG, &[0, 0])),
-        Warning::JpxMarkerUnsupported,
-    );
+    // The third claim, "a marker the standard defines and this build does
+    // not", has no *capability* left to demonstrate — every Table A.2 marker
+    // is decoded. What still refuses by name is the two A.8 puts inside the
+    // bit stream, where a header is the one place they mean nothing.
+    for code in [marker::SOP, marker::EPH] {
+        assert_eq!(
+            refuse(&with_marker(code, &[0, 0])),
+            Warning::JpxMarkerUnsupported,
+            "{code:#06X} in a main header",
+        );
+    }
     assert_eq!(
         refuse(&with_marker(0xFF74, &[0])),
         Warning::JpxMarkerUnknown,
@@ -284,7 +326,7 @@ fn every_jpx_warning_is_reachable() {
     // Every `Refusal` variant's `warning()`, which is the only way one of the
     // nine refusal warnings can arise, plus the one leniency.
     let produced = [
-        Refusal::Marker("RGN").warning(),
+        Refusal::Marker("SOP outside tile data").warning(),
         Refusal::UnknownMarker(0xFF74).warning(),
         Refusal::Structure("").warning(),
         Refusal::Feature("").warning(),
@@ -317,11 +359,65 @@ fn every_jpx_warning_is_reachable() {
 /// million bad markers cannot turn leniency into an allocation attack.
 #[test]
 fn a_decode_leaves_at_most_one_warning() {
-    let bytes = with_marker(marker::RGN, &[0, 0, 0]);
+    let bytes = with_marker(marker::SOP, &[0, 0]);
     let mut warnings = Vec::new();
     let _ = jpx_decode(&bytes, &Limits::new(1 << 20), &mut warnings);
     let _ = jpx_decode(&bytes, &Limits::new(1 << 20), &mut warnings);
     assert_eq!(warnings, vec![Warning::JpxMarkerUnsupported]);
+}
+
+/// **A POC this build understands is not a refusal at all**, the other half
+/// of the entry above and the same assertion
+/// [`an_rgn_with_table_a25s_one_style_decodes`] makes for RGN: the risk of
+/// implementing a marker is that the refusal list quietly keeps it.
+///
+/// One progression covering everything is B.12.2's own description of the
+/// default — "The progression loops of B.12.1 all go from zero to the maximum
+/// value" — so the samples must be exactly what the same codestream without
+/// the marker produces. The reordering that a POC is *for* is adjudicated
+/// against T.800's published codestream in
+/// `crates/tinker-pdf-filters/tests/jpx_poc.rs`; what this pins is that the
+/// marker no longer costs a warning.
+#[test]
+fn a_poc_covering_everything_decodes() {
+    let spec = Spec::default();
+    let plain = stream(&spec, &EMPTY_PACKETS);
+    // RSpoc 0, CSpoc 0, LYEpoc 1, REpoc 2, CEpoc 1, Ppoc 0 — Figure A.15's
+    // field order, the default spec's one layer, two resolutions and one
+    // component.
+    let with_poc = with_marker(marker::POC, &[0, 0, 0, 1, 2, 1, 0]);
+
+    let mut plain_warnings = Vec::new();
+    let a = jpx_decode(&plain, &Limits::new(1 << 20), &mut plain_warnings)
+        .expect("the fixture decodes");
+    let mut poc_warnings = Vec::new();
+    let b = jpx_decode(&with_poc, &Limits::new(1 << 20), &mut poc_warnings)
+        .expect("a POC restating B.12.1's loops decodes");
+    assert!(poc_warnings.is_empty(), "{poc_warnings:?}");
+    assert_eq!(a.samples, b.samples);
+}
+
+/// **An RGN this build understands is not a refusal at all**, which is the
+/// other half of the entry above and is worth its own assertion: the whole
+/// risk of implementing a marker is that the refusal list quietly keeps it.
+///
+/// `Srgn` 0 with a shift of zero is the degenerate region of interest — H.1
+/// step 3 floors a value that is already an integer and step 4 multiplies by
+/// `2^0` — so the samples must be exactly what the same codestream without
+/// the marker produces.
+#[test]
+fn an_rgn_with_table_a25s_one_style_decodes() {
+    let spec = Spec::default();
+    let plain = stream(&spec, &EMPTY_PACKETS);
+    let with_roi = with_marker(marker::RGN, &[0, 0, 0]);
+
+    let mut warnings = Vec::new();
+    let want = jpx_decode(&plain, &Limits::new(1 << 20), &mut warnings)
+        .expect("the minimal fixture decodes");
+    let got = jpx_decode(&with_roi, &Limits::new(1 << 20), &mut warnings)
+        .expect("an RGN with Table A.25's one style decodes");
+    assert_eq!(got.samples, want.samples, "a zero shift moves nothing");
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 /// The default main header with one extra marker segment before EOC.

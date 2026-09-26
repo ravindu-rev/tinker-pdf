@@ -99,11 +99,12 @@ numerals capped so a hostile `/St` cannot emit a page of M's.
 
 Everything is on the facade `Document` and `Page`: `metadata()`,
 `pdf_version()`, `outline()`, `page_labels()`, `attachments()`,
-`xmp_metadata()`, `page_count()`, `pages()`, `page(index)`, and
-`Page::media_box()`, `crop_box()`, `rotation()`, `size()`, `links()`. The
-types they hand back — `Metadata`, `Trapped`, `OutlineItem`, `Destination`,
-`DestKind`, `Action`, `Link`, `Attachment` — are re-exported from the same
-crate. The writing side takes the same vocabulary: `Target` wraps a page
+`xmp_metadata()`, `page_count()`, `pages()`, `page(index)`, `layers()`,
+`fonts()`, and `Page::media_box()`, `crop_box()`, `rotation()`, `size()`,
+`links()`, `annotations()`. The types they hand back — `Metadata`, `Trapped`,
+`OutlineItem`, `Destination`, `DestKind`, `Action`, `Link`, `Attachment`,
+`OptionalGroup`, `Annotation`, `AnnotationKind`, `AnnotationFlags` — are
+re-exported from the same crate. The writing side takes the same vocabulary: `Target` wraps a page
 plus `DestKind` or a URI for `PageBuilder::link` and `OutlineEntry`, so a
 write followed by a read is an equality, not a translation.
 
@@ -116,6 +117,94 @@ for (depth, item) in tinker_pdf::OutlineItem::flatten(&doc.outline()) {
     println!("{:indent$}{}", "", item.title, indent = depth as usize * 2);
 }
 ```
+
+### Layers, as built
+
+`Document::layers()` is the read half of optional content (8.11). It returns
+the catalog's `/OCProperties /OCGs` in the catalog's own order — which is the
+order a producer's layer panel shows, not object-number order — each entry
+carrying the group's reference, its `/Name` decoded as a text string, and
+whether the default configuration `/D` shows it. `/BaseState` then `/ON` then
+`/OFF`, exactly 8.11.4.3 Table 101's order.
+
+The visibility comes **from the reader the renderer uses**, not from a second
+read of the dictionary: both call the one `OptionalContent::bind`, so the list
+and the painted page cannot disagree about the same file. A group with no
+`/Name` is listed with an empty one rather than dropped, because a caller
+toggling layers still has to see it. Most documents declare no optional
+content and get an empty list, which is an ordinary answer.
+
+Writing groups — `DocumentBuilder::add_layer`, and an editor that toggles a
+default configuration — is the other half of that roadmap row and is not in
+this build.
+
+### Annotations, as built
+
+`Page::annotations()` returns one `Annotation` per entry of the page's
+`/Annots`, in the array's own order (12.5.2). It is **total by construction up
+to ruling 1's bound of 4 096 entries per page**: a `/Subtype` no edition of ISO
+32000 defines comes back as `AnnotationKind::Other` carrying the name the file
+used, a dictionary with no `/Subtype` as `Unnamed`, and an entry that is not a
+dictionary at all as `Unreadable`. Nothing below the bound is dropped, which is
+how ruling 10's "name what you touched" is satisfied for a list: a caller
+auditing a file counts what this build does not model instead of comparing
+lengths to find out what went missing.
+
+Past 4 096 the list is shortened and **nothing says so**. That is forced
+rather than chosen: the only place a truncation could be reported is
+`Document::warnings()`, and appending to it from a read would make the
+warnings depend on whether anyone had called `annotations()` first — the same
+argument that keeps `fonts()` off `cos::font::read`. The bound is pinned by
+`a_hostile_annots_array_is_capped`, which exists because raising the constant
+to a hundred thousand previously failed nothing in the crate; the corpus's
+largest page carries 122, three orders of magnitude below it, so no real file
+is affected. Reporting the truncation is a roadmap row, not a claim made here.
+
+`AnnotationKind` covers ISO 32000-1 Table 169's twenty-six subtypes and ISO
+32000-2's two, and the table is transcribed a second time in the test beside
+it and compared. Each entry carries Table 164's common entries and Table 170's
+markup ones: `/Rect` normalised so `x0 <= x1` (7.9.5), `/Contents`, `/T`, `/M`
+both as the file's own text *and* as a parsed 7.9.4 date, `/F` as a raw
+`AnnotationFlags` with Table 165's ten bit accessors, `/Popup`, `/Parent`, and
+whether `/AP` carries an `/N`. A pop-up's `/Contents`, `/T` and `/M` come from
+its `/Parent` (12.5.6.14 Table 183) — and only that way: a markup annotation's
+text is never read through its own `/Popup`, which the clause does not licence
+and which would report a note's text as whatever its window happened to carry.
+
+`Page::links()` is unchanged and stays the narrower navigation view over the
+same array: `/Link` annotations with their destinations **resolved**, which is
+a question about targets rather than about annotations (ruling 6). What is
+*not* here is per-subtype geometry — `/QuadPoints`, `/InkList`, `/Vertices`,
+`/L` and their relatives — which is one payload per 12.5.6 family and has a
+roadmap row of its own.
+
+**Measured over the corpus.** `crates/tinker-pdf/tests/annotation_census.rs`,
+`#[ignore]`d and run with `-- --ignored --nocapture`, over the 1 012 fetched
+files whose raw bytes name `/Annots` (15 September 2026; all 1 012 opened,
+982 carried an annotation): **14 996 annotations read, 14 986 covered and 10
+refused**, across 28 distinct covered subtypes — every subtype the model
+defines appears in the corpus — and 6 refused names:
+
+| Refused subtype | Count | First seen in |
+| --- | --- | --- |
+| `FREETEXT` | 5 | `verapdf/PDF_UA-1/7.18 Annotations/7.18.1 General/7.18.1-t01-pass-c.pdf` |
+| `APEX:Zone` | 1 | `qpdf/examples/qtest/mod-info/files/source2.pdf` |
+| `SomePrivateCustomAnnotationType` | 1 | `verapdf/Isartor test files/PDFA-1b/6.5 Annotations/6.5.2 Annotation types/isartor-6-5-2-t01-fail-c.pdf` |
+| `line` | 1 | `verapdf/PDF_A-4/6.3 Annotations/6.3.1 Annotation types/veraPDF test suite 6-3-1-t01-fail-g.pdf` |
+| (no `/Subtype`) | 1 | `pdfjs/test/pdfs/issue7446.pdf` |
+| (not a dictionary) | 1 | `pdfjs/test/pdfs/annotation-text-without-popup.pdf` |
+
+That is 0.067% of the corpus refused, and the two case-shifted names —
+`FREETEXT` and `line` — are why 7.3.5's rule that a name's identity is its
+bytes is applied rather than a case-insensitive match: both are veraPDF
+fixtures that exist *because* the spelling is wrong, and folding the case
+would hide the defect they were written to expose.
+
+The largest `/Annots` on one page is 122, in
+`pdfjs/test/pdfs/prefilled_f1040.pdf` — three orders of magnitude under the
+4 096 cap. Of the 281 pop-ups, 276 have a `/Parent` and 140 report text
+through it. Every one of the 1 658 `/M` entries found parses as a 7.9.4 date,
+and 5 129 annotations carry a normal appearance.
 
 ## Refused by name
 
@@ -134,8 +223,27 @@ for (depth, item) in tinker_pdf::OutlineItem::flatten(&doc.outline()) {
 
 ## Verified
 
-As of August 2026, in the workspace suite of 2 952 passing tests:
+As of 15 September 2026, in the workspace suite of 4 779 passing tests
+(0 failed, 58 ignored, 218 suites, Windows x86_64, measured on this
+branch — other lanes are moving the total in parallel):
 
+- `crates/tinker-pdf/src/layers.rs` and `src/annotations.rs` — 6 and 13 unit
+  tests beside the code: `/BaseState` inverted by `/ON`, a nameless group
+  still listed, the listing reading the renderer's own bound configuration;
+  Table 169 transcribed a second time and compared against the enum, nothing
+  in `/Annots` dropped, 12.5.6.14 in both directions, a pop-up parent cycle
+  that terminates, Table 165 bit by bit, a reversed `/Rect` ordered, a
+  `/M` that is not a date carried as text, and a 4 097-entry `/Annots` array
+  cut to ruling 1's bound — the last written after an injection found the cap
+  guarded by nothing at all.
+- `crates/tinker-pdf/tests/facade_read.rs` — 7 tests over one fixture, run
+  from **outside** the crate the way ruling 11 makes the contract: each is
+  named for the defect it re-creates rather than for the feature, and one of
+  them asserts that listing fonts, layers and annotations leaves
+  `Document::warnings()` where it was.
+- `crates/tinker-pdf/tests/annotation_census.rs` — the two `#[ignore]`d corpus
+  censuses above, printing `RAN`/`SKIPPED` so a missing corpus cannot read as
+  a pass, with floors at the counts recorded here.
 - `crates/tinker-pdf/tests/tinker_parity.rs` — the ported parity tests
   ([ruling 12](../rulings.md)): `pdf_version()` returns exactly `"PDF 1.7"`, the three-level
   outline nests with zero-based page indices, and a document without an
@@ -163,7 +271,7 @@ As of August 2026, in the workspace suite of 2 952 passing tests:
 - The `cos_document` fuzz target — one of the 24 — walks the page tree and
   reads content bytes after every successful open, so a document that opens
   and then panics on use counts as a crash. The corpus run backs it at
-  scale: 4 525 files, 4 484 rendered every page, 0 crashes (August 2026).
+  scale: 5 525 files, 5 516 rendered every page, 0 crashes (September 2026).
 
 The document byte-hashes in [determinism](determinism.md) pin the writing
 half: a synthesised document's outline, links and page tree are part of the

@@ -11,7 +11,9 @@
 //! are not the same property, and conflating them makes both wrong. The
 //! engine reports them apart and lets the caller map as it needs.
 
-use crate::device::{Device, Glyph};
+use std::collections::BTreeMap;
+
+use crate::device::{Device, Glyph, MarkedProps};
 use crate::state::GraphicsState;
 
 /// Four corners, in device space (9.4.4).
@@ -64,6 +66,37 @@ pub struct TextChar {
     pub size: f64,
     /// The origin of the glyph, which is where the next one starts from.
     pub origin: (f64, f64),
+    /// The innermost `/MCID` in scope when it was shown (14.7.4.2).
+    ///
+    /// **Innermost, not outermost.** Marked content nests, and 14.7.4.2 makes
+    /// the enclosing sequence the one that owns the content: a `/Span` with
+    /// its own `/MCID` inside a `/P` with another belongs to the span, and
+    /// reporting the paragraph instead puts the span's words in the wrong
+    /// place in reading order while leaving the page's text unchanged — a
+    /// reordering that looks like a layout opinion rather than a bug.
+    ///
+    /// `None` outside every marked sequence, and also inside one whose
+    /// property list carried no `/MCID` — an `/Artifact` scope, a bare `BMC`,
+    /// a `/Span` that only sets `/Lang`. Those characters are not orphans;
+    /// they are content no structure element ever claimed, and
+    /// `Page::structured_text` counts the two apart.
+    pub mcid: Option<u32>,
+    /// Which content stream the sequence carrying [`TextChar::mcid`] was
+    /// opened in: a form XObject's packed indirect reference, or `0` for the
+    /// page's own stream.
+    ///
+    /// 14.7.4.2 numbers marked-content sequences within a content stream, so
+    /// this is half of the identifier and not decoration: a page invoking two
+    /// forms that each write `/MCID 0` has two sequences numbered 0, and a
+    /// structure join keyed on the number alone gives every element both.
+    ///
+    /// Taken from the enclosing `BDC` rather than from where the glyph was
+    /// drawn, which is the same distinction [`TextChar::mcid`] draws: a `BDC`
+    /// in the page's stream whose scope encloses a `Do` owns the form's
+    /// glyphs, and the sequence still resides in the page's stream.
+    ///
+    /// `0` whenever [`TextChar::mcid`] is `None`, where it means nothing.
+    pub stream: u64,
 }
 
 /// Which way a line runs.
@@ -111,6 +144,29 @@ pub struct TextBlock {
 pub struct TextPage {
     /// The blocks, in reading order.
     pub blocks: Vec<TextBlock>,
+    /// The 14.9 values each marked sequence's property list carried, keyed by
+    /// the pair 14.7.4.2 identifies a sequence with: the content stream the
+    /// `BDC` was written in — a form XObject's packed indirect reference, or
+    /// `0` for the page's own — and the `/MCID`.
+    ///
+    /// Keyed on the pair and not on the `/MCID` alone for the reason
+    /// [`TextChar::stream`] exists: two forms on one page may each number a
+    /// sequence 0, and a map keyed on the number would give whichever drew
+    /// first its `/ActualText` to both.
+    ///
+    /// 14.9 lets `/ActualText`, `/Alt`, `/Lang` and `/E` sit on a *property
+    /// list* as well as on a structure element, and a producer that writes
+    /// them there writes nothing about them in the structure tree. Without
+    /// this the two placements would not be equivalent, and a page whose soft
+    /// hyphens are removed by an `/ActualText` on the `BDC` would extract
+    /// them anyway.
+    ///
+    /// A `BTreeMap` because ruling 4 makes iteration order a correctness
+    /// question everywhere in this engine. **First writer wins**: 14.7.4.2
+    /// makes an `/MCID` unique within its content stream, so a repeat is a
+    /// malformation, and letting the later one overwrite would make what a
+    /// page says depend on how far down its own damage sits.
+    pub mcid_props: BTreeMap<(u64, u32), MarkedProps>,
     /// What extraction had to tolerate.
     ///
     /// Ruling 2 applies to text as much as to pixels: a page whose font could
@@ -239,14 +295,49 @@ pub struct TextDevice {
     /// text. The interpreter guarantees one `end_marked_content` per accepted
     /// begin, so this cannot go negative and cannot leak past a form XObject.
     artifacts: usize,
-    /// One `depth` entry per open scope: whether it was an artifact.
+    /// One entry per open scope, innermost last.
     ///
-    /// `EMC` names no tag, so closing correctly needs the stack rather than
-    /// the count — a `/Span` opened inside an `/Artifact` and closed first
-    /// would otherwise decrement the artifact count and let the rest of the
-    /// artifact through.
-    scopes: Vec<bool>,
+    /// `EMC` names no tag and carries no property list, so closing correctly
+    /// needs the stack rather than a pair of counts — a `/Span` opened inside
+    /// an `/Artifact` and closed first would otherwise decrement the artifact
+    /// count and let the rest of the artifact through, and the same mistake
+    /// with `/MCID` would attribute the rest of a paragraph to a span that
+    /// had already ended.
+    scopes: Vec<Scope>,
+    /// The `/MCID`s in scope, innermost last (14.7.4.2).
+    ///
+    /// Separate from [`TextDevice::scopes`] rather than searched for in it:
+    /// most scopes carry no `/MCID` at all, and the innermost one that does
+    /// is wanted per glyph. A stack answers that in one lookup; scanning the
+    /// scope stack backwards answers it in as many as the nesting is deep,
+    /// on the hottest path in extraction.
+    /// Paired with the stream each `BDC` was written in, because 14.7.4.2
+    /// numbers sequences *within* a stream: `/MCID 0` in one form XObject and
+    /// `/MCID 0` in another are two sequences, and the identifier alone
+    /// cannot say which one a glyph belongs to.
+    mcids: Vec<(u64, u32)>,
+    /// The 14.9 values seen per sequence, first writer winning.
+    mcid_props: BTreeMap<(u64, u32), MarkedProps>,
 }
+
+/// One open marked-content scope.
+struct Scope {
+    /// Whether its tag was `/Artifact` (14.8.2.2).
+    artifact: bool,
+    /// Whether it pushed onto [`TextDevice::mcids`], so `EMC` knows whether
+    /// to pop. A scope with no `/MCID` must not pop its parent's.
+    carried_mcid: bool,
+}
+
+/// How many distinct `/MCID`s one page retains 14.9 values for.
+///
+/// 14.7.4.2 numbers marked sequences within a content stream, so an honest
+/// page's count is its paragraph count. The cap is far above that and exists
+/// only so a stream of nothing but `BDC` cannot turn a bounded page into
+/// unbounded memory; past it the property lists are dropped and the
+/// characters keep their `/MCID`, which loses alternate descriptions and
+/// never loses text.
+const MAX_MCID_PROPS: usize = 1 << 16;
 
 struct PendingLine {
     chars: Vec<TextChar>,
@@ -348,6 +439,7 @@ impl TextDevice {
 
         TextPage {
             blocks,
+            mcid_props: std::mem::take(&mut self.mcid_props),
             warnings: std::mem::take(&mut self.warnings),
         }
     }
@@ -417,9 +509,34 @@ impl Device for TextDevice {
     /// renderer is deliberate and is the reason the tag is passed at all: an
     /// artifact is drawn and not read, and an invisible optional-content layer
     /// is read and not drawn.
-    fn begin_marked_content(&mut self, tag: &[u8], _visible: bool, _hidden_layer: Option<&str>) {
+    fn begin_marked_content(
+        &mut self,
+        tag: &[u8],
+        _visible: bool,
+        _hidden_layer: Option<&str>,
+        props: Option<&MarkedProps>,
+    ) {
         let artifact = tag == b"Artifact";
-        self.scopes.push(artifact);
+        // 14.7.4.2's `/MCID` is recorded even for an artifact scope. A
+        // producer that tags an artifact is writing something malformed, and
+        // dropping the identifier here would make it an *orphan* in the
+        // structured view — a character the structure tree claims and
+        // extraction cannot find — rather than what it is, which is content
+        // 14.8.2.2 excludes. The glyphs are still dropped; only the
+        // bookkeeping is honest about why.
+        let key = props.and_then(|p| p.mcid.map(|mcid| (p.stream, mcid)));
+        if let Some(key) = key {
+            self.mcids.push(key);
+            if let Some(props) = props.filter(|p| p.mcid.is_some()) {
+                if self.mcid_props.len() < MAX_MCID_PROPS {
+                    self.mcid_props.entry(key).or_insert_with(|| props.clone());
+                }
+            }
+        }
+        self.scopes.push(Scope {
+            artifact,
+            carried_mcid: key.is_some(),
+        });
         if artifact {
             // A line may not straddle the boundary: the artifact's glyphs are
             // dropped, and the ones before it must not be joined to the ones
@@ -430,7 +547,13 @@ impl Device for TextDevice {
     }
 
     fn end_marked_content(&mut self) {
-        if let Some(true) = self.scopes.pop() {
+        let Some(scope) = self.scopes.pop() else {
+            return;
+        };
+        if scope.carried_mcid {
+            self.mcids.pop();
+        }
+        if scope.artifact {
             self.flush();
             self.artifacts = self.artifacts.saturating_sub(1);
         }
@@ -471,6 +594,25 @@ impl Device for TextDevice {
         }
 
         let origin = (t.e, t.f);
+        // Which line this glyph belongs to is asked at the **baseline**: 9.4.3's
+        // `Ts` displaces the glyph and leaves the pen where it was, so a
+        // superscript marker, a subscript and a `GPOS` mark raised onto its base
+        // are all on the line they interrupt. Without this a base-mark-base
+        // sequence splits the line twice — once where the rise starts and once
+        // where it returns to zero, because `line.origin` below is the previous
+        // glyph's.
+        //
+        // The rule considered and **rejected** is *"a zero-advance glyph never
+        // starts a line"*. It is not equivalent and it is not safe: a producer
+        // that writes every `/W` as zero and positions with `TJ` is in the
+        // corpus, and that rule would collapse such a page into one line. The
+        // baseline rule is **monotone** — it changes nothing when the rise is
+        // zero, so it can only join lines a `Ts` splits today and can never
+        // split a line that is joined.
+        //
+        // `quad` and [`TextChar::origin`] keep the risen position, which is
+        // where the ink is, so nothing a caller reports moves.
+        let anchor = glyph.baseline.unwrap_or(origin);
         // The transform already carries the font size (9.4.4 builds it from
         // `Tf`), so its expansion *is* the device-space size. Multiplying by
         // `glyph.size` again would square it.
@@ -493,13 +635,13 @@ impl Device for TextDevice {
                 let expected_gap = size.max(1.0) * 3.0;
                 let far = match wmode {
                     WritingMode::Horizontal => {
-                        (origin.1 - line.origin.1).abs() > size.max(1.0) * 0.5
+                        (anchor.1 - line.origin.1).abs() > size.max(1.0) * 0.5
                     }
-                    WritingMode::Vertical => (origin.0 - line.origin.0).abs() > size.max(1.0) * 0.5,
+                    WritingMode::Vertical => (anchor.0 - line.origin.0).abs() > size.max(1.0) * 0.5,
                 };
                 let backwards = match wmode {
-                    WritingMode::Horizontal => origin.0 + expected_gap < line.origin.0,
-                    WritingMode::Vertical => origin.1 - expected_gap > line.origin.1,
+                    WritingMode::Horizontal => anchor.0 + expected_gap < line.origin.0,
+                    WritingMode::Vertical => anchor.1 - expected_gap > line.origin.1,
                 };
                 // A line that an `ET` closed is resumed only where the last one
                 // stopped. Half an em of slack, which is a space and is not a
@@ -521,10 +663,10 @@ impl Device for TextDevice {
                 chars: Vec::new(),
                 wmode,
                 direction,
-                origin,
+                origin: anchor,
                 pen: match wmode {
-                    WritingMode::Horizontal => origin.0,
-                    WritingMode::Vertical => origin.1,
+                    WritingMode::Horizontal => anchor.0,
+                    WritingMode::Vertical => anchor.1,
                 },
                 font_id: glyph.font_id,
                 closed: false,
@@ -532,7 +674,7 @@ impl Device for TextDevice {
         }
 
         if let Some(line) = &mut self.current {
-            line.origin = origin;
+            line.origin = anchor;
             line.font_id = glyph.font_id;
             line.closed = false;
             let (x0, y0, x1, y1) = quad.bounds();
@@ -545,6 +687,8 @@ impl Device for TextDevice {
                 quad,
                 size,
                 origin,
+                mcid: self.mcids.last().map(|(_, mcid)| *mcid),
+                stream: self.mcids.last().map_or(0, |(stream, _)| *stream),
             });
         }
     }
@@ -588,6 +732,7 @@ mod tests {
                 e: x,
                 f: y,
             },
+            baseline: None,
             advance: size * 0.5,
             size,
             vertical: false,
@@ -614,7 +759,7 @@ mod tests {
         let mut d = TextDevice::new();
         let state = GraphicsState::new(Matrix::IDENTITY);
         d.show_glyph(&glyph("a", 0.0, 700.0, 10.0), &state);
-        d.begin_marked_content(b"Artifact", true, None);
+        d.begin_marked_content(b"Artifact", true, None, None);
         d.show_glyph(&glyph("X", 20.0, 700.0, 10.0), &state);
         d.end_marked_content();
         d.show_glyph(&glyph("b", 40.0, 700.0, 10.0), &state);
@@ -635,9 +780,9 @@ mod tests {
     fn a_scope_inside_an_artifact_does_not_end_it() {
         let mut d = TextDevice::new();
         let state = GraphicsState::new(Matrix::IDENTITY);
-        d.begin_marked_content(b"Artifact", true, None);
+        d.begin_marked_content(b"Artifact", true, None, None);
         d.show_glyph(&glyph("X", 0.0, 700.0, 10.0), &state);
-        d.begin_marked_content(b"Span", true, None);
+        d.begin_marked_content(b"Span", true, None, None);
         d.show_glyph(&glyph("Y", 10.0, 700.0, 10.0), &state);
         d.end_marked_content();
         d.show_glyph(&glyph("Z", 20.0, 700.0, 10.0), &state);
@@ -659,7 +804,7 @@ mod tests {
     fn an_ordinary_marked_content_scope_extracts_normally() {
         let mut d = TextDevice::new();
         let state = GraphicsState::new(Matrix::IDENTITY);
-        d.begin_marked_content(b"Span", true, None);
+        d.begin_marked_content(b"Span", true, None, None);
         d.show_glyph(&glyph("k", 0.0, 700.0, 10.0), &state);
         d.end_marked_content();
         assert!(d.finish().plain_text().contains('k'));
@@ -796,5 +941,75 @@ mod tests {
         bad.transform.e = f64::NAN;
         let p = page(&[bad, glyph("A", 0.0, 700.0, 10.0)]);
         assert_eq!(p.plain_text(), "A\n");
+    }
+
+    /// Every byte is one code, half an em wide, standing for itself.
+    struct Simple;
+
+    impl crate::interpret::FontSource for Simple {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+    }
+
+    fn extract(content: &[u8]) -> TextPage {
+        let mut device = TextDevice::new();
+        crate::interpret::interpret(content, Matrix::IDENTITY, &mut device, &Simple);
+        device.finish()
+    }
+
+    /// **A rise is not a line break**, and one raised glyph between two
+    /// ordinary ones is the case that says so.
+    ///
+    /// `A`, then `B` twelve units up, then `C` back on the baseline, at a size
+    /// of ten — so the rise is more than half an em and a build that asked
+    /// where the *ink* was would split the line at `B` and again at `C`, since
+    /// the line's remembered origin is the previous glyph's. Three lines out
+    /// of one sentence, and the sentence is a footnote marker in the middle of
+    /// a paragraph or a `GPOS` mark on its base.
+    ///
+    /// The glyphs are counted as well as the lines, because a build that
+    /// dropped the raised glyph altogether would also produce one line.
+    #[test]
+    fn a_rise_does_not_start_a_new_line() {
+        let page = extract(b"BT /F0 10 Tf 0 700 Td (A) Tj 12 Ts (B) Tj 0 Ts (C) Tj ET");
+        let lines = page.lines();
+        assert_eq!(
+            lines.len(),
+            1,
+            "a superscript split the line: {:?}",
+            page.plain_text()
+        );
+        assert_eq!(page.plain_text(), "ABC\n");
+    }
+
+    /// And the geometry a caller reads back is still the **risen** one.
+    ///
+    /// The baseline is used to decide line membership and for nothing else: a
+    /// selection rectangle drawn on the baseline would not cover the
+    /// superscript it is selecting, so `TextChar::origin` and the quad keep
+    /// where the ink is.
+    #[test]
+    fn a_risen_glyph_keeps_the_position_it_was_drawn_at() {
+        let page = extract(b"BT /F0 10 Tf 0 700 Td (A) Tj 12 Ts (B) Tj 0 Ts (C) Tj ET");
+        let line = page.lines().first().copied().expect("one line");
+        let raised = line
+            .chars
+            .iter()
+            .find(|c| c.text == "B")
+            .expect("the raised glyph");
+        assert!(
+            (raised.origin.1 - 712.0).abs() < 1e-9,
+            "the raised glyph moved to {:?}",
+            raised.origin
+        );
+        let (_, y0, _, _) = raised.quad.bounds();
+        assert!(y0 > 700.0, "its quad is on the baseline: {y0}");
     }
 }

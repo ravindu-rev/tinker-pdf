@@ -64,19 +64,20 @@ use std::collections::HashMap;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, Display, Float,
-    LengthPercentage, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Side,
-    Sides, Size, TableLayout, TextAlign,
+    AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
+    ColumnSpan, ColumnWidth, Display, Float, LengthPercentage, ListStyleType, MarginValue,
+    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TableLayout, TextAlign,
+    VerticalAlign, ZIndex,
 };
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
-use crate::metrics::Metrics;
+use crate::metrics::{FontRequest, Metrics};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
 use crate::uax14;
-use crate::{BoxNode, Budget, Content, Limits, Options, Refusal, TextRun, Warning};
+use crate::{BoxNode, Budget, Content, Intrinsic, Limits, Options, Refusal, TextRun, Warning};
 
 /// Slack for the comparisons a float's geometry needs, in points.
 ///
@@ -116,6 +117,45 @@ pub(crate) struct BlockRecord {
     pub border_color: Sides<Color>,
     /// Whether anything about it would be painted at all.
     pub painted: bool,
+    /// The picture inside it, for a replaced box, CSS 2.2 §3.1.
+    ///
+    /// On the record rather than in [`Flow::items`] and that is not a filing
+    /// decision: a record is the one thing in this module that is already
+    /// carried through every context a box can end up in — a float, a band, an
+    /// atomic inline, a column — and every one of those already moves a
+    /// record's `x` when it moves the box. Putting the picture anywhere else
+    /// would mean four more places to move it and four ways to forget.
+    pub replaced: Option<ReplacedPaint>,
+    /// CSS 2.2 §9.4.3's relative offset, carried to **paint**.
+    ///
+    /// The horizontal half of the offset is folded into `x`, because a record's
+    /// `x` is already absolute; the vertical half cannot be, because a record's
+    /// `y` is its items' and its items are the flow's. §9.4.3 says the offset
+    /// *"does not affect the layout of any other box"*, and this field is that
+    /// sentence: the flow keeps the box where it was and only the ink moves.
+    pub dy: f64,
+}
+
+/// A replaced box's picture, as an inset from the box's own border-box corner.
+///
+/// **Insets and not absolute coordinates**, which is the whole reason this is
+/// three numbers rather than a rectangle: [`translate`] moves a record by
+/// adding to its `x`, and a picture stored at an absolute `x` would be left
+/// behind by every flex placement, every band and every float in the crate. An
+/// inset moves with the box for free.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReplacedPaint {
+    /// Border-box left edge to content-box left edge: `border-left` plus
+    /// `padding-left`.
+    pub left: f64,
+    /// Border-box top edge to content-box top edge.
+    pub top: f64,
+    /// The used `width`, CSS 2.2 §10.3.2.
+    pub width: f64,
+    /// The used `height`, §10.6.2.
+    pub height: f64,
+    /// The node's [`crate::BoxNode::anchor`], carried unchanged.
+    pub anchor: Option<u32>,
 }
 
 /// CSS 2.2 §13.3.3's first kind of break position: the margin between two
@@ -140,6 +180,9 @@ pub(crate) struct LineBox {
     pub baseline: f64,
     /// The runs on it, `x` already absolute and `y` relative to the baseline.
     pub runs: Vec<TextRun>,
+    /// The atomic inline boxes on it, §9.2.2, `x` already absolute and `dy`
+    /// relative to the baseline.
+    pub boxes: Vec<InlineBox>,
     /// Which line of its block container this is, counting from zero.
     pub index_in_block: usize,
     /// How many lines that block container has in total. Patched once the
@@ -156,9 +199,9 @@ pub(crate) struct LineBox {
 
 /// A set of boxes that sit **beside** one another and cannot be separated.
 ///
-/// Two things in this crate are that shape and they arrived one milestone
-/// apart, so the type is named for what it is rather than for the first of
-/// them:
+/// Three things in this crate are that shape and they arrived one milestone
+/// apart each, so the type is named for what it is rather than for the first
+/// of them:
 ///
 /// - **One band of table rows**, CSS 2.2 §17. A band and not a row, and the
 ///   difference is `rowspan`: a page may break between two rows and may not
@@ -169,6 +212,10 @@ pub(crate) struct LineBox {
 /// - **One flex line**, `css-flexbox-1` §9. A row container's items sit beside
 ///   each other along the main axis; a column container's whole content is one
 ///   of these, because its lines sit beside each other too.
+/// - **A whole multi-column container**, `css-multicol-1`. Its columns are the
+///   same content read top to bottom and then left to right, which is the one
+///   thing a flow whose `y` never goes backwards cannot express -- so the
+///   container is one item and its `N` columns are inside it.
 ///
 /// They are separate [`ItemKind`] variants over one payload rather than one
 /// variant, because the fragmenter has a different sentence to say about each
@@ -204,6 +251,11 @@ pub(crate) enum ItemKind {
     /// another along the main axis, so the page cutter cannot order them and
     /// they are kept out of the column for [`Abreast`]'s reason.
     FlexLine(Box<Abreast>),
+    /// One multi-column container, whole, `css-multicol-1`. Its columns are
+    /// `N` slices of one flow placed side by side, which is the same shape
+    /// again -- and being one item is what lets [`crate::fragment`] cut a
+    /// container taller than a page at one height across every column of it.
+    Columns(Box<Abreast>),
 }
 
 /// One piece of the continuous column.
@@ -235,6 +287,18 @@ pub(crate) struct FloatRecord {
     pub top: f64,
     /// Margin-box bottom.
     pub bottom: f64,
+    /// Whether a box that does not fit the page it started on may be moved
+    /// whole to the next one.
+    ///
+    /// True for a float, which is `css-break-3`'s rule. **False for an
+    /// absolutely positioned box**, and that is the one difference between the
+    /// two at pagination: pushing it is moving it, and where it is is the whole
+    /// of what `position: absolute` said.
+    pub pushable: bool,
+    /// `z-index`, CSS 2.2 §9.9.1's painting order, with `auto` read as zero —
+    /// §9.9.1 puts an `auto` positioned box in the same layer as a `z-index: 0`
+    /// one, so the two are one number here rather than two.
+    pub z: i32,
 }
 
 /// A whole book as one continuous column, before it is cut into pages.
@@ -245,6 +309,13 @@ pub(crate) struct Flow {
     /// The floats, in the order they were met — which is document order, and
     /// therefore the order their text has to be read back in.
     pub floats: Vec<FloatRecord>,
+    /// The absolutely positioned boxes, §9.6, sorted by `z-index` and then by
+    /// the order they were met — §9.9.1's painting order, and a **stable** sort
+    /// for the reason `Page::runs` is stably sorted: two boxes in one layer are
+    /// painted in document order.
+    pub positioned: Vec<FloatRecord>,
+    /// The `fixed` boxes, §9.6.1, which are drawn on **every** page.
+    pub fixed: Vec<FloatRecord>,
     pub warnings: Vec<(Warning, usize)>,
 }
 
@@ -337,6 +408,27 @@ struct Builder<'a, M: Metrics> {
     ceiling_line: f64,
     /// Rule 4: the content top of the block container being filled.
     content_top: f64,
+    /// The page box, which is `position: fixed`'s containing block — CSS 2.2
+    /// §9.6.1's *"fixed with respect to the page box"*.
+    page: (f64, f64),
+    /// Whether the very next box [`Builder::block`] lays out has **already**
+    /// been taken out of flow.
+    ///
+    /// A third one-shot slot beside [`Builder::cell`] and [`Builder::flex_pass`]
+    /// and for their reason: [`Builder::positioned_box`] lays the box out by
+    /// asking `block` for it, and `block` is where the out-of-flow branch is,
+    /// so without this the box is taken out of flow for ever. It is `take`n
+    /// rather than read, so it applies to exactly one box — a `position:
+    /// absolute` figure **inside** a `position: absolute` sidebar is still
+    /// taken out of the sidebar's flow, which is §9.6's own rule.
+    placed: bool,
+    /// §9.6's containing blocks: the innermost positioned ancestor, or the
+    /// initial containing block where there is none.
+    ///
+    /// A stack rather than one slot, because *nearest* is the whole of §9.6's
+    /// rule: an absolutely positioned figure inside a relatively positioned
+    /// chapter inside a relatively positioned book belongs to the chapter.
+    positioned: Vec<crate::position::Containing>,
     /// What the table driver has decided about the very next box
     /// [`Builder::block`] lays out, CSS 2.2 §17.5.3 and §17.6.2.
     ///
@@ -522,6 +614,25 @@ impl FlexPass {
     }
 }
 
+/// CSS 2.2 §10.8.1 leaves `super` to the user agent — *"the exact offset is
+/// not defined"* — and this is the number this build picked, as a fraction of
+/// the **parent's** font size, which is the box §10.8 says the offset is
+/// proper for the superscripts of.
+const SUPER_RISE: f64 = 1.0 / 3.0;
+
+/// The same for `sub`, and it is not the same number: a descender has less
+/// room under a baseline than an ascender has over it.
+const SUB_DROP: f64 = 1.0 / 5.0;
+
+/// `middle` needs an x-height and [`crate::Metrics`] does not carry one.
+///
+/// A face's `sxHeight` is an OS/2 field this crate's trait never asked for,
+/// and adding it would change every implementor for one value. Half the font
+/// size is the standing approximation, and it is written down **once** so that
+/// a milestone which adds the metric has one line to change rather than a
+/// search to do.
+const X_HEIGHT: f64 = 0.5;
+
 /// One flex item's box, which the document may not contain.
 ///
 /// `css-flexbox-1` §4: *"each contiguous sequence of child text runs is wrapped
@@ -589,10 +700,55 @@ struct FlexItem {
 struct Piece {
     text: String,
     style: Consumed,
+    /// The box this piece **is**, where it is not text at all.
+    ///
+    /// CSS 2.2 §9.2.2's atomic inline-level box: `display: inline-block`. Its
+    /// `text` is one U+FFFC OBJECT REPLACEMENT CHARACTER, which is what gives
+    /// it a position in the string the line breaker works over and a width the
+    /// measure can be asked for — and which never becomes a glyph, so text
+    /// conservation never sees it.
+    atomic: Option<Atomic>,
     /// The [`BoxNode::anchor`] of the node this piece's text came from.
     anchor: Option<u32>,
     /// Its position in document order. See [`Builder::sequence`].
     order: usize,
+}
+
+/// An atomic inline-level box, CSS 2.2 §9.2.2.
+///
+/// **Its own formatting context, placed on a line.** An `inline-block` is laid
+/// out once, at its own shrink-to-fit width, and then set on the line as a
+/// single unit that cannot be broken — which is the whole of what "atomic"
+/// means and the whole of the difference from what this build did before, which
+/// was to pour its text into the line and lose its width, its height and its
+/// vertical margins.
+#[derive(Clone, Debug)]
+pub(crate) struct Atomic {
+    /// Its own flow, at `x = 0` and `y = 0` until the line places it.
+    pub items: Vec<Item>,
+    /// Its own block records, indexing those items.
+    pub blocks: Vec<BlockRecord>,
+    /// The **margin-box** width, which is what it takes on the line.
+    pub width: f64,
+    /// The margin-box height.
+    pub height: f64,
+    /// From the margin-box top to the baseline it sits on.
+    ///
+    /// §10.8.1: an inline-block's baseline is *"the baseline of its last line
+    /// box"*, and its bottom margin edge where it has none — a box holding one
+    /// picture and no text sits on the line rather than hanging from it.
+    pub baseline: f64,
+}
+
+/// One atomic inline box, placed on a line.
+#[derive(Clone, Debug)]
+pub(crate) struct InlineBox {
+    /// Its own flow, already moved to its `x` on the line.
+    pub items: Vec<Item>,
+    /// Its records, likewise.
+    pub blocks: Vec<BlockRecord>,
+    /// From the line's baseline to the box's **top**.
+    pub dy: f64,
 }
 
 /// Lays a tree out into one continuous column.
@@ -621,6 +777,18 @@ pub(crate) fn build<M: Metrics>(
         ceiling_box: f64::NEG_INFINITY,
         ceiling_line: f64::NEG_INFINITY,
         content_top: 0.0,
+        page: (options.width, options.height),
+        placed: false,
+        // §10.1's initial containing block is the page box. Everything with no
+        // positioned ancestor is placed against this, which is what makes a
+        // `position: absolute` box in a book with no `position: relative`
+        // anywhere in it land where the stylesheet meant.
+        positioned: vec![crate::position::Containing {
+            left: 0.0,
+            top: 0.0,
+            width: options.width,
+            height: Some(options.height),
+        }],
         cell: None,
         flex_pass: None,
         sequence: 0,
@@ -635,6 +803,12 @@ pub(crate) fn build<M: Metrics>(
     // a warning list that changed between runs would change a report.
     warnings.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
     let mut flow = builder.flow;
+    // §9.9.1's painting order, and a **stable** sort: two positioned boxes in
+    // one layer are painted in the order the document generated them, which is
+    // the order this vector already holds. `z-index` decides the layer and
+    // nothing else decides anything.
+    flow.positioned.sort_by_key(|record| record.z);
+    flow.fixed.sort_by_key(|record| record.z);
     flow.warnings = warnings;
     Ok(flow)
 }
@@ -739,6 +913,16 @@ impl<M: Metrics> Builder<'_, M> {
             pass.apply(&mut style);
         }
         let style = style;
+        // §9.6: `absolute` and `fixed` are **out of flow**, so the box model
+        // below is not this box's -- it never becomes part of the column at
+        // all. The branch is here rather than lower for a float's own reason,
+        // one screen up in `gather`: everything after this line writes into the
+        // flow, and an out-of-flow box must not.
+        if matches!(style.position, Position::Absolute | Position::Fixed)
+            && !std::mem::take(&mut self.placed)
+        {
+            return self.positioned_box(node, &style, x, depth, avoid);
+        }
         self.budget.spend_box()?;
         let avoid = avoid || style.page_break_inside == PageBreakInside::Avoid;
 
@@ -758,34 +942,69 @@ impl<M: Metrics> Builder<'_, M> {
         // `border-box` measures it as content plus padding plus border. The
         // difference is invisible on a box with neither, which is why a fixture
         // for it must have both.
+        //
+        // **`css-ui-3` §5.1 puts `min-width` and `max-width` inside the same
+        // sentence**: `border-box` measures *"the width and height ... and the
+        // respective min/max properties"* from the border box, so the
+        // conversion is one closure over all three rather than a special case
+        // for `width`. A build that converted `width` and not `max-width` gets
+        // every `box-sizing: border-box; max-width: 40em` figure wrong by the
+        // padding and the page looks entirely reasonable.
         let extra = padding.left + padding.right + border.left + border.right;
-        let (content_width, mut left) = match style.width {
-            Size::Auto => {
-                let available = containing - margin_left - margin_right - extra;
-                (available.max(0.0), x + margin_left)
+        let to_content = |specified: f64| {
+            match style.box_sizing {
+                tinker_pdf_css::property::BoxSizing::ContentBox => specified,
+                tinker_pdf_css::property::BoxSizing::BorderBox => specified - extra,
             }
-            Size::Length(length) => {
-                let specified = match length {
-                    LengthPercentage::Px(px) => px,
-                    LengthPercentage::Percent(percent) => containing * percent / 100.0,
-                };
-                let content = match style.box_sizing {
-                    tinker_pdf_css::property::BoxSizing::ContentBox => specified,
-                    tinker_pdf_css::property::BoxSizing::BorderBox => specified - extra,
-                }
-                .max(0.0);
-                // §10.3.3: with a specified width, two `auto` margins centre
-                // the box and the leftover is otherwise put on the right.
-                let outer = content + extra;
-                let both_auto = style.margin.left == MarginValue::Auto
-                    && style.margin.right == MarginValue::Auto;
-                let left = if both_auto {
-                    x + ((containing - outer) / 2.0).max(0.0)
-                } else {
-                    x + margin_left
-                };
-                (content, left)
-            }
+            .max(0.0)
+        };
+        let auto_width = (containing - margin_left - margin_right - extra).max(0.0);
+        let stated_width = match style.width {
+            Size::Auto => None,
+            Size::Length(length) => Some(to_content(resolve_length(length, containing))),
+        };
+        // CSS 2.2 §3.1's replaced element, sized here rather than by everything
+        // below it. §10.3.4 says so in one sentence — *"the used value of
+        // `width` is determined as for inline replaced elements"* — and
+        // §10.6.2's title lists block-level replaced boxes beside inline ones,
+        // so one call answers both axes for every `display` a picture can have.
+        //
+        // **Before `is_table`, `is_flex` and `is_multicol` below**, which is
+        // `css-display-3` §2.2: *"replaced elements ... ignore the inner
+        // display type"*. `img { display: flex }` is a block-level picture and
+        // not an empty flex container, and a build that asked `is_flex` first
+        // would produce the second.
+        let replaced = replaced_box(node, &style, containing);
+        // §10.4: the tentative used width comes from §10.3, and then the whole
+        // of §10.3 is *"applied again"* with `max-width` as the width, and
+        // again with `min-width`. `style::clamp_size` is that order, which is
+        // not `f64::clamp`: a `min-width` larger than the `max-width` wins.
+        let tentative = stated_width.unwrap_or(auto_width);
+        let content_width = match replaced {
+            Some((width, _)) => width,
+            None => crate::style::clamp_size(
+                tentative,
+                crate::style::min_length(style.min_width, Some(containing)).map(to_content),
+                crate::style::max_length(style.max_width, Some(containing)).map(to_content),
+            ),
+        };
+        // §10.3.3: with a used width that is not `auto`, two `auto` margins
+        // centre the box and the leftover is otherwise put on the right. An
+        // `auto` width that §10.4's clamp has narrowed reaches this too, and
+        // that is §10.4's own instruction rather than an extra rule: the second
+        // pass runs *"as if `width` were the clamped value"*, and by then it is
+        // not `auto`.
+        let both_auto =
+            style.margin.left == MarginValue::Auto && style.margin.right == MarginValue::Auto;
+        // §10.3.4 sends a block-level replaced box through §10.3.3's margin
+        // rules with the width §10.3.2 gave it, which is never `auto` — so two
+        // `auto` margins centre a picture exactly as they centre a `<div>` with
+        // a stated width.
+        let definite = replaced.is_some() || stated_width.is_some() || content_width < tentative;
+        let mut left = if both_auto && definite {
+            x + ((containing - (content_width + extra)) / 2.0).max(0.0)
+        } else {
+            x + margin_left
         };
         if content_width + extra > containing + 0.001 {
             self.warn(Warning::ContentOverflowedPage);
@@ -808,6 +1027,9 @@ impl<M: Metrics> Builder<'_, M> {
             border_style: style.border_style,
             border_color: style.border_color,
             painted: painted && style.visible,
+            // Filled in below, once `content_x` and the used height exist.
+            replaced: None,
+            dy: 0.0,
         };
         let block = self.flow.blocks.len();
         self.flow.blocks.push(record);
@@ -835,6 +1057,20 @@ impl<M: Metrics> Builder<'_, M> {
         if style.page_break_inside == PageBreakInside::Avoid {
             self.open_avoid.push(block);
         }
+        // §9.6: a box with a `position` other than `static` is a containing
+        // block for its absolutely positioned descendants. Its **padding box**
+        // and not its content box, which §10.1 says in as many words and which
+        // a build reading `content_x` here would get wrong by the padding.
+        let anchors = style.position != Position::Static;
+        if anchors {
+            self.positioned.push(crate::position::Containing {
+                left: left + border.left,
+                top: self.cursor() + border.top,
+                width: (border_box_width - border.left - border.right).max(0.0),
+                height: None,
+            });
+        }
+        let floats_before = self.flow.floats.len();
         let top_edge = border.top + padding.top;
         if top_edge > 0.0 {
             // A border or a padding between the parent and its first child is
@@ -851,7 +1087,15 @@ impl<M: Metrics> Builder<'_, M> {
         // for the reason above: an uncommitted margin has not moved `self.y`
         // yet and it will.
         let outer_top = std::mem::replace(&mut self.content_top, before + self.pending.value());
-        if style.is_table() {
+        if let Some(size) = replaced {
+            self.replaced_content(
+                block,
+                node,
+                &style,
+                (border.left + padding.left, top_edge),
+                size,
+            );
+        } else if style.is_table() {
             // CSS 2.2 §17. Everything above this line -- the margins, the
             // border, the padding, `width`, `box-sizing`, the page-break
             // properties -- is the ordinary block box a table also is, and
@@ -865,28 +1109,19 @@ impl<M: Metrics> Builder<'_, M> {
                 self.warn(Warning::InlineFlexAsBlock);
             }
             self.flex(node, &style, content_x, content_width, depth, avoid)?;
+        } else if style.is_multicol() {
+            // `css-multicol-1`, and the same sentence a third time: a
+            // multi-column container is an ordinary block box on the outside,
+            // and everything above this line is that box.
+            self.columns(node, &style, content_x, content_width, depth, avoid)?;
         } else {
             self.children(node, &style, content_x, content_width, depth, avoid, block)?;
         }
         self.content_top = outer_top;
         let content_height = self.y - before;
 
-        // A specified height is honoured by padding the flow out to it; a
-        // content taller than the height overflows, which CSS 2.2 §10.6.3's
-        // `overflow: visible` initial value asks for.
-        if let Size::Length(length) = style.height {
-            let wanted = match length {
-                LengthPercentage::Px(px) => px,
-                // §10.5: a percentage height against an `auto` containing
-                // block behaves as `auto`, which is why this is not resolved
-                // against the page.
-                LengthPercentage::Percent(_) => content_height,
-            };
-            if wanted > content_height {
-                self.commit_margin();
-                self.emit(wanted - content_height, ItemKind::Edge, true);
-            }
-        }
+        // §10.6.3's height and §10.7's clamp. See [`Builder::fill_height`].
+        self.fill_height(&style, content_height);
 
         let bottom_edge = border.bottom + padding.bottom;
         if bottom_edge > 0.0 {
@@ -894,9 +1129,13 @@ impl<M: Metrics> Builder<'_, M> {
             self.emit(bottom_edge, ItemKind::Edge, true);
         }
         self.open.pop();
+        if anchors {
+            self.positioned.pop();
+        }
         if style.page_break_inside == PageBreakInside::Avoid {
             self.open_avoid.pop();
         }
+        self.offset_relative(&style, block, floats_before, content_x, before, containing);
 
         // The bottom margin joins the next adjoining position. When the box had
         // no border, no padding, no content and no height, its top margin is
@@ -914,6 +1153,168 @@ impl<M: Metrics> Builder<'_, M> {
         Ok(())
     }
 
+    /// §10.6.3's `height`, §10.7's clamp, and the padding that makes the flow
+    /// as tall as the box said it was.
+    ///
+    /// **A method and not fifteen lines inside [`Builder::block`]**, and the
+    /// reason is [`Builder::offset_relative`]'s below, word for word: `block`
+    /// recurses once per level of the document and its frame is what the depth
+    /// cap is measured in stack against. The four locals this holds went back
+    /// into `block` for one edit and
+    /// `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name` overflowed the
+    /// stack again.
+    ///
+    /// A specified height is honoured by padding the flow out to it; a content
+    /// taller than the height overflows, which CSS 2.2 §10.6.3's `overflow:
+    /// visible` initial value asks for.
+    ///
+    /// §10.7 then clamps that tentative height, and the two halves of the clamp
+    /// are not equally implementable here. `min-height` is padding and is
+    /// exactly what `height` already does. `max-height` can only make a box
+    /// **shorter**, and this module has already emitted the items its content
+    /// came to — the flow is one column whose `y` never goes backwards, so
+    /// there is no negative edge to emit. So it clamps the padding, which is
+    /// the whole of its effect on a box whose content fits, and says
+    /// `MaxHeightAsAuto` by name on the box whose content does not. A build
+    /// that stayed silent would draw a `max-height: 4em` figure at whatever
+    /// height its caption came to and nothing anywhere would say so.
+    ///
+    /// The percentages resolve against `None` for §10.5's reason: this box's
+    /// containing block has an `auto` height at this point in the pass, so a
+    /// percentage `min-height` or `max-height` behaves as `auto` and `none`.
+    fn fill_height(&mut self, style: &Consumed, content_height: f64) {
+        let stated_height = match style.height {
+            Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+            Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
+        };
+        let min_height = crate::style::min_length(style.min_height, None);
+        let max_height = crate::style::max_length(style.max_height, None);
+        let wanted = crate::style::clamp_size(
+            stated_height.unwrap_or(content_height),
+            min_height,
+            max_height,
+        );
+        if wanted > content_height {
+            self.commit_margin();
+            self.emit(wanted - content_height, ItemKind::Edge, true);
+        } else if max_height.is_some_and(|max| content_height > max + EPSILON) {
+            self.warn(Warning::MaxHeightAsAuto);
+        }
+    }
+
+    /// A replaced box's one flow item and the picture recorded against it.
+    ///
+    /// **A method and not fifteen lines inside [`Builder::block`]**, and the
+    /// reason is [`Builder::offset_relative`]'s below, word for word: `block`
+    /// recurses once per level of the document and its frame is what the depth
+    /// cap is measured in stack against. Written inline, this took
+    /// `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name` from a named
+    /// refusal to a stack overflow a second time. The fixture found it again;
+    /// this is where the frame went.
+    ///
+    /// A replaced box has no children to lay out — CSS 2.2 §3.1 puts its
+    /// content *"outside the scope of the CSS formatting model"* — so the flow
+    /// gets one item of the used height and the picture is recorded against the
+    /// box that item belongs to. An `ItemKind::Edge` rather than an item kind
+    /// of its own, which is what makes a picture page-breakable,
+    /// float-placeable and band-placeable for free: an edge is what a border
+    /// and a padding already are, and nothing in [`crate::fragment`] has to
+    /// learn a new shape.
+    ///
+    /// **`visibility` gates the picture and not the box.** CSS 2.2 §11.2 makes
+    /// `visibility: hidden` a box that is laid out and not painted, which is
+    /// exactly what `painted` does for a background, and a picture is ink like
+    /// any other.
+    fn replaced_content(
+        &mut self,
+        block: usize,
+        node: &BoxNode,
+        style: &Consumed,
+        inset: (f64, f64),
+        size: (f64, f64),
+    ) {
+        if size.1 > 0.0 {
+            self.commit_margin();
+            self.emit(size.1, ItemKind::Edge, true);
+        }
+        self.flow.blocks[block].replaced = style.visible.then_some(ReplacedPaint {
+            left: inset.0,
+            top: inset.1,
+            width: size.0,
+            height: size.1,
+            anchor: node.anchor,
+        });
+    }
+
+    /// CSS 2.2 §9.4.3's offset, applied once the box is closed.
+    ///
+    /// **A method and not five lines inside [`Builder::block`]**, which is not
+    /// a style choice: `block` recurses once per level of the document and its
+    /// frame is what the depth cap is measured in stack against. Five more
+    /// locals in it took `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
+    /// from a named refusal to a stack overflow — the cap counted the same
+    /// depth and the frames no longer fitted. The fixture found it; this is
+    /// where the frame went.
+    #[allow(clippy::too_many_arguments)]
+    fn offset_relative(
+        &mut self,
+        style: &Consumed,
+        block: usize,
+        floats_before: usize,
+        content_x: f64,
+        before: f64,
+        containing: f64,
+    ) {
+        // §9.4.3, and `css-position-3` §3.4 for the second value: `sticky` is
+        // offset by how far its nearest scrollport has scrolled, and a
+        // paginated document has no scrollport, so §3.4's own answer is that it
+        // *"is the same as `relative`"*. Not a degradation -- the value of a
+        // parameter this medium does not have.
+        //
+        // **The offset is applied to the ink and not to the flow.** §9.4.3 says
+        // it *"does not affect the layout of any other box"*, and here that is
+        // load-bearing rather than merely true: this module is one column whose
+        // `y` never goes backwards, and a box moved up by `top: -10px` would
+        // put an item above the one before it.
+        if !matches!(style.position, Position::Relative | Position::Sticky) {
+            return;
+        }
+        {
+            let against = crate::position::Containing {
+                left: content_x,
+                top: before,
+                width: containing,
+                height: None,
+            };
+            let (dx, dy) = crate::position::relative_offset(&style.inset, &against);
+            if dx != 0.0 || dy != 0.0 {
+                let range = self.flow.blocks[block]
+                    .first
+                    .map(|first| (first, self.flow.blocks[block].last));
+                if let Some((first, last)) = range {
+                    shift(&mut self.flow.items[first..last], dx, dy);
+                }
+                // Every record from this box's own onwards is this box or a
+                // descendant of it: records are pushed in tree order and this
+                // box's siblings do not exist yet.
+                for record in &mut self.flow.blocks[block..] {
+                    record.x += dx;
+                    record.dy += dy;
+                }
+                // A float inside a relatively positioned box moves with it, and
+                // the floats from this box's onwards are exactly the ones it
+                // placed -- the same tree-order argument as the records.
+                for float in &mut self.flow.floats[floats_before..] {
+                    shift(&mut float.items, dx, dy);
+                    for record in &mut float.blocks {
+                        record.x += dx;
+                        record.dy += dy;
+                    }
+                }
+            }
+        }
+    }
+
     /// A block container's children: block-level ones recursed into, runs of
     /// inline-level ones wrapped in an anonymous block box.
     #[allow(clippy::too_many_arguments)]
@@ -928,6 +1329,12 @@ impl<M: Metrics> Builder<'_, M> {
         block: usize,
     ) -> Result<(), Refusal> {
         match &node.content {
+            // Unreachable: [`Builder::block`] sizes a replaced box and emits
+            // its one item before the dispatch that calls this, for
+            // `css-display-3` §2.2's reason. An arm rather than a `_`, so that
+            // a fourth kind of content cannot be added without this file
+            // deciding what a block container does with it.
+            Content::Replaced(_) => Ok(()),
             Content::Text(source) => {
                 let mut pieces = Vec::new();
                 let mut collapser = Collapser::new();
@@ -937,6 +1344,7 @@ impl<M: Metrics> Builder<'_, M> {
                     style: style.clone(),
                     anchor: node.anchor,
                     order: self.order(),
+                    atomic: None,
                 });
                 self.lines(&pieces, style, block, content_x, content_width)
             }
@@ -1100,14 +1508,25 @@ impl<M: Metrics> Builder<'_, M> {
             return self.float_box(node, &style, content_width, content_x, depth, false);
         }
         self.budget.spend_box()?;
-        if style.display == Display::InlineBlock {
-            // Here rather than beside the block builder, which is where it was
-            // until milestone 10 and where it could not fire: an
-            // `inline-block` is not block-level, so it arrives in an inline
-            // formatting context and is set as text.
-            self.warn(Warning::InlineBlockAsInline);
+        // §9.2.2's own list: *"inline-level boxes that are not inline boxes
+        // (such as replaced inline-level elements, inline-block elements and
+        // inline-table elements) are called atomic inline-level boxes"*. A
+        // picture is the first of the three and takes the same path as the
+        // second — one box on the line, placed rather than set, with nothing
+        // inside it a line breaker may split.
+        if style.display == Display::InlineBlock || matches!(node.content, Content::Replaced(_)) {
+            // Here rather than beside the block builder for the reason the
+            // warning that used to stand here gave: an `inline-block` is not
+            // block-level, so it arrives in an inline formatting context — and
+            // this is where that context can give it a place on a line instead
+            // of pouring its text into one.
+            return self.atomic_inline(node, &style, out, depth, content_width);
         }
         match &node.content {
+            // Unreachable: the line above takes every replaced element, whether
+            // its `display` is `inline`, `inline-block` or anything else the
+            // block dispatch did not claim first.
+            Content::Replaced(_) => {}
             Content::Text(source) => {
                 let text = collapser.push(source, style.white_space);
                 if !text.is_empty() {
@@ -1116,6 +1535,7 @@ impl<M: Metrics> Builder<'_, M> {
                         style,
                         anchor: node.anchor,
                         order: self.order(),
+                        atomic: None,
                     });
                 }
             }
@@ -1203,7 +1623,7 @@ impl<M: Metrics> Builder<'_, M> {
         if depth > self.limits.max_depth {
             return Err(Refusal::TooDeep { depth });
         }
-        let outer_width = self.float_width(node, style, containing, depth, avoid)?;
+        let outer_width = self.float_width(node, style, containing, depth, avoid, false)?;
         let Sublayout {
             mut items,
             mut blocks,
@@ -1258,8 +1678,187 @@ impl<M: Metrics> Builder<'_, M> {
             blocks,
             top,
             bottom: top + height,
+            // `css-break-3`'s rule: a float that would fit a page of its own
+            // belongs whole on the next one.
+            pushable: true,
+            z: 0,
         });
         self.flow.floats.append(&mut nested);
+        Ok(())
+    }
+
+    /// One absolutely positioned or fixed box, CSS 2.2 §9.6.
+    ///
+    /// Out of flow, which this crate already has a shape for: a
+    /// [`FloatRecord`] is items that are **not** in the column, carried with
+    /// the `y` they were placed at. An out-of-flow positioned box is the same
+    /// thing with a different placement rule and one difference at pagination,
+    /// which is why the record grew a flag rather than a twin.
+    ///
+    /// **`fixed` is not a degradation here.** §9.6.1: *"in the case of paged
+    /// media, fixed boxes are repeated on every page, and are fixed with
+    /// respect to the page box"*. That is the specification's own paged answer,
+    /// it is what a stylesheet asking for a running header meant, and it is
+    /// what this does.
+    fn positioned_box(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        x: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<(), Refusal> {
+        if depth > self.limits.max_depth {
+            return Err(Refusal::TooDeep { depth });
+        }
+        self.budget.spend_box()?;
+        // §9.6.1 again: `fixed`'s containing block is the page box and
+        // `absolute`'s is the nearest positioned ancestor, which is what the
+        // stack's last entry is. The initial containing block sits at the
+        // bottom of that stack, so `absolute` with no positioned ancestor
+        // anywhere falls out of the same expression rather than a special case.
+        let against = if style.position == Position::Fixed {
+            crate::position::Containing {
+                left: 0.0,
+                top: 0.0,
+                width: self.page.0,
+                height: Some(self.page.1),
+            }
+        } else {
+            *self
+                .positioned
+                .last()
+                .expect("the initial containing block is never popped")
+        };
+
+        // §10.3.7: with **both** `left` and `right` stated and `width: auto`
+        // the box fills between them; otherwise the width is shrink-to-fit,
+        // which is a float's own rule and therefore a float's own function.
+        let left_inset =
+            crate::position::inset_px(style.inset.get(Side::Left), Some(against.width));
+        let right_inset =
+            crate::position::inset_px(style.inset.get(Side::Right), Some(against.width));
+        let outer_width = match (style.width, left_inset, right_inset) {
+            (Size::Auto, Some(left), Some(right)) => (against.width - left - right).max(0.0),
+            // Its two trial layouts go through `block` as well, so the
+            // one-shot has to be re-armed for each of them: that is what the
+            // last argument is, and it is a parameter rather than a field the
+            // trials read because a float's trials must **not** be armed.
+            _ => self.float_width(node, style, against.width, depth, avoid, true)?,
+        };
+
+        self.placed = true;
+        let Sublayout {
+            mut items,
+            mut blocks,
+            floats: nested,
+            height,
+        } = self.sublayout(node, outer_width, depth, avoid)?;
+
+        // §10.3.7's third case and §10.6.4's: with neither inset of a pair
+        // stated the box stays at its **static position** — where it would have
+        // been had it been `static`. That is the case nearly every real
+        // stylesheet takes and the one an implementation leaves out.
+        let left = crate::position::used_left(&style.inset, &against, x, outer_width);
+        let top = crate::position::used_top(&style.inset, &against, self.cursor(), height);
+        translate(&mut items, &mut blocks, left, top);
+        let mut nested = nested;
+        for record in &mut nested {
+            translate(&mut record.items, &mut record.blocks, left, top);
+            record.top += top;
+            record.bottom += top;
+        }
+        let z = match style.z_index {
+            ZIndex::Auto => 0,
+            ZIndex::Layer(layer) => layer,
+        };
+        let record = FloatRecord {
+            items,
+            blocks,
+            top,
+            bottom: top + height,
+            pushable: false,
+            z,
+        };
+        if style.position == Position::Fixed {
+            self.flow.fixed.push(record);
+        } else {
+            self.flow.positioned.push(record);
+        }
+        // A float **inside** an out-of-flow box belongs to that box's own
+        // formatting context and is drawn with it, so it joins the same list
+        // rather than the column's.
+        for mut inner in nested {
+            inner.pushable = false;
+            inner.z = z;
+            if style.position == Position::Fixed {
+                self.flow.fixed.push(inner);
+            } else {
+                self.flow.positioned.push(inner);
+            }
+        }
+        Ok(())
+    }
+
+    /// One `display: inline-block` box, CSS 2.2 §9.2.2.
+    ///
+    /// **Laid out once, in a formatting context of its own, and then set on the
+    /// line as one thing.** §10.3.9 gives it a float's width — shrink-to-fit
+    /// where `width` is `auto` — which is why it is a float's own function; and
+    /// §9.4.2 makes its inside a block formatting context, which is what
+    /// `sublayout` already produces.
+    ///
+    /// Its piece's text is one **U+FFFC OBJECT REPLACEMENT CHARACTER**. That is
+    /// not a placeholder for the box's text: it is the box's position in the
+    /// string the line breaker works over, so the breaker can put a line end
+    /// beside it and the measure can be asked what it costs. It never becomes a
+    /// glyph — [`Builder::line`] gives an atomic span an [`InlineBox`] and no
+    /// run at all — so text conservation never sees it, and the box's own runs
+    /// carry their own reading-order stamps.
+    fn atomic_inline(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        out: &mut Vec<Piece>,
+        depth: usize,
+        containing: f64,
+    ) -> Result<(), Refusal> {
+        let width = self.float_width(node, style, containing, depth, false, false)?;
+        let sub = self.sublayout(node, width, depth, false)?;
+        // §10.8.1: *"the baseline of the last line box in the normal flow"*,
+        // and the bottom margin edge where there is none. The **last** and not
+        // the first, which is the difference between a two-line inline-block
+        // sitting on the line and hanging from it.
+        let baseline = last_baseline(&sub).unwrap_or(sub.height);
+        // A float inside an inline-block belongs to the inline-block's own
+        // formatting context — §9.4.2 makes it one — so it is folded into the
+        // box rather than escaping to the paragraph's.
+        let mut items = sub.items;
+        let mut blocks = sub.blocks;
+        for float in sub.floats {
+            let base = items.len();
+            for mut record in float.blocks {
+                if let Some(first) = record.first {
+                    record.first = Some(first + base);
+                    record.last += base;
+                }
+                blocks.push(record);
+            }
+            items.extend(float.items);
+        }
+        out.push(Piece {
+            text: "\u{FFFC}".to_string(),
+            style: style.clone(),
+            anchor: node.anchor,
+            order: self.order(),
+            atomic: Some(Atomic {
+                items,
+                blocks,
+                width,
+                height: sub.height,
+                baseline,
+            }),
+        });
         Ok(())
     }
 
@@ -1282,6 +1881,7 @@ impl<M: Metrics> Builder<'_, M> {
         containing: f64,
         depth: usize,
         avoid: bool,
+        out_of_flow: bool,
     ) -> Result<f64, Refusal> {
         let margins =
             style.margin_px(Side::Left, containing) + style.margin_px(Side::Right, containing);
@@ -1289,6 +1889,15 @@ impl<M: Metrics> Builder<'_, M> {
             + style.padding_px(Side::Right, containing)
             + style.border_width.left
             + style.border_width.right;
+        // §10.3.6 for a floating replaced box and §10.3.5's sentence for an
+        // absolutely positioned one say the same thing in the same words:
+        // *"the used value of `width` is determined as for inline replaced
+        // elements"*. So a picture never reaches the shrink-to-fit trials
+        // below, which would measure it as nothing — they count the rightmost
+        // edge any **text** reached and a picture has none.
+        if let Some((width, _)) = replaced_box(node, style, containing) {
+            return Ok(width + extra + margins);
+        }
         if let Size::Length(length) = style.width {
             let specified = match length {
                 LengthPercentage::Px(px) => px,
@@ -1306,7 +1915,9 @@ impl<M: Metrics> Builder<'_, M> {
         let right = style.padding_px(Side::Right, containing)
             + style.border_width.right
             + style.margin_px(Side::Right, containing);
+        self.placed = out_of_flow;
         let preferred = self.measure_content(node, MAX_MEASURE, depth, avoid)? + right;
+        self.placed = out_of_flow;
         let minimum = self.measure_content(node, 0.0, depth, avoid)? + right;
         Ok(containing.max(minimum).min(preferred).max(minimum))
     }
@@ -1347,8 +1958,14 @@ impl<M: Metrics> Builder<'_, M> {
                         for run in &line.runs {
                             *width = width.max(run.x + run.width);
                         }
+                        // An atomic box's own text is inside it, so a trial
+                        // that did not look would measure a paragraph holding
+                        // an `inline-block` as the width of the words beside it.
+                        for placed in &line.boxes {
+                            extend(&placed.items, width);
+                        }
                     }
-                    ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+                    ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
                         extend(&band.items, width);
                     }
                     ItemKind::Margin(_) | ItemKind::Edge => {}
@@ -1377,6 +1994,23 @@ impl<M: Metrics> Builder<'_, M> {
         depth: usize,
         avoid: bool,
     ) -> Result<Sublayout, Refusal> {
+        self.subflow(node, None, measure, depth, avoid)
+    }
+
+    /// The same, for a box whose **own** box model has already been paid.
+    ///
+    /// `inside` lays out only the node's children at the stated width, which is
+    /// what a multi-column container needs: [`Builder::block`] has already
+    /// applied its margins, border, padding and width, and laying the box out
+    /// again would pay for every one of them twice.
+    fn subflow(
+        &mut self,
+        node: &BoxNode,
+        inside: Option<&Consumed>,
+        measure: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<Sublayout, Refusal> {
         let items = std::mem::take(&mut self.flow.items);
         let blocks = std::mem::take(&mut self.flow.blocks);
         let floats = std::mem::take(&mut self.flow.floats);
@@ -1389,7 +2023,21 @@ impl<M: Metrics> Builder<'_, M> {
         let ceiling_line = std::mem::replace(&mut self.ceiling_line, f64::NEG_INFINITY);
         let content_top = std::mem::replace(&mut self.content_top, 0.0);
 
-        let result = self.block(node, measure, 0.0, depth, avoid, 0);
+        let result = match inside {
+            None => self.block(node, measure, 0.0, depth, avoid, 0),
+            Some(style) => {
+                // A record for the container itself, so the sub-flow's records
+                // are numbered from zero exactly as `block` numbers them and
+                // the line filler has an index to patch. **Not painted**: this
+                // box's background and border belong to the flow that called
+                // this one, and a second copy would draw them once per column.
+                let mut record = decorate(node, 0.0, measure);
+                record.painted = false;
+                self.flow.blocks.push(record);
+                self.open.push(0);
+                self.children(node, style, 0.0, measure, depth, avoid, 0)
+            }
+        };
         if result.is_ok() {
             // The same reason `build` does it: without this the float's bottom
             // margin is not part of its height, and a float whose height is
@@ -1671,6 +2319,56 @@ impl<M: Metrics> Builder<'_, M> {
             laid[at] = Some(self.sublayout(cell.content.node(), width, depth + 1, avoid)?);
         }
 
+        // **§17.5.3's `vertical-align`, which is where the property does most
+        // of its work in a real book.** Four values apply to a cell -- `top`,
+        // `middle`, `bottom` and `baseline` -- and §17.5.3 says the other four
+        // *"behave as `baseline`"*, which is why the match below has no arm for
+        // them rather than an arm that guesses.
+        //
+        // `baseline` is the initial value and it is **not** the same as `top`:
+        // it puts every cell's first line on one row baseline, so a row holding
+        // a large heading and small body text has them sitting on a line rather
+        // than both starting at the row's top edge. It is also the one value
+        // that changes how tall the row has to be, which is why it is settled
+        // here, before the heights, and the other three below them.
+        let alignment: Vec<VerticalAlign> = grid
+            .slots
+            .iter()
+            .map(|slot| {
+                let cell = &tree.groups[slot.group].rows[slot.row].cells[slot.cell];
+                consume(&cell.content.node().style).vertical_align
+            })
+            .collect();
+        let cell_baseline: Vec<f64> = laid
+            .iter()
+            .map(|sub| sub.as_ref().and_then(first_baseline).unwrap_or(0.0))
+            .collect();
+        // How far each cell's content is pushed down inside its own box.
+        let mut lead = vec![0.0f64; grid.slots.len()];
+        let mut row_baseline = vec![0.0f64; grid.rows];
+        for (at, slot) in grid.slots.iter().enumerate() {
+            // A spanning cell has no single row to share a baseline with, so
+            // §17.5.3's alignment is taken over its whole box below instead.
+            if slot.rows == 1 && matches!(alignment[at], VerticalAlign::Top) {
+                continue;
+            }
+            if slot.rows == 1
+                && !matches!(alignment[at], VerticalAlign::Middle | VerticalAlign::Bottom)
+            {
+                row_baseline[slot.top] = row_baseline[slot.top].max(cell_baseline[at]);
+            }
+        }
+        for (at, slot) in grid.slots.iter().enumerate() {
+            if slot.rows == 1
+                && !matches!(
+                    alignment[at],
+                    VerticalAlign::Top | VerticalAlign::Middle | VerticalAlign::Bottom
+                )
+            {
+                lead[at] = (row_baseline[slot.top] - cell_baseline[at]).max(0.0);
+            }
+        }
+
         // §17.5.3's row heights: the rows a cell does not span first, then the
         // ones it does. The order is the same as the width algorithm's and for
         // the same reason -- a spanning cell met first would put its whole
@@ -1685,7 +2383,11 @@ impl<M: Metrics> Builder<'_, M> {
         }
         for (at, slot) in grid.slots.iter().enumerate() {
             if slot.rows == 1 {
-                let height = laid[at].as_ref().map_or(0.0, |sub| sub.height);
+                // The lead is part of the height: a cell pushed down to reach
+                // its row's baseline needs the room it was pushed into, and a
+                // build that added the two the other way round draws the last
+                // line of the tallest-baselined cell over the row below.
+                let height = laid[at].as_ref().map_or(0.0, |sub| sub.height) + lead[at];
                 heights[slot.top] = heights[slot.top].max(height);
             }
         }
@@ -1703,6 +2405,27 @@ impl<M: Metrics> Builder<'_, M> {
                 }
             }
         }
+        // And now the three values that are measured against the cell's box
+        // rather than against its row's baseline, which needs the heights.
+        for (at, slot) in grid.slots.iter().enumerate() {
+            let alignment = alignment[at];
+            if !matches!(
+                alignment,
+                VerticalAlign::Top | VerticalAlign::Middle | VerticalAlign::Bottom
+            ) {
+                continue;
+            }
+            let box_height = heights[slot.top..slot.top + slot.rows].iter().sum::<f64>()
+                + (slot.rows.saturating_sub(1)) as f64 * vspacing;
+            let content = laid[at].as_ref().map_or(0.0, |sub| sub.height);
+            let free = (box_height - content).max(0.0);
+            lead[at] = match alignment {
+                VerticalAlign::Bottom => free,
+                VerticalAlign::Middle => free / 2.0,
+                _ => 0.0,
+            };
+        }
+
         let mut tops = Vec::with_capacity(grid.rows + 1);
         let mut y = 0.0;
         for height in &heights {
@@ -1770,6 +2493,7 @@ impl<M: Metrics> Builder<'_, M> {
                 &grid,
                 &rows_of,
                 &mut laid,
+                &lead,
                 &heights,
                 &tops,
                 &lefts,
@@ -1791,6 +2515,217 @@ impl<M: Metrics> Builder<'_, M> {
         // And below the last one, which is what makes the table's own content
         // height include §17.6.1's last spacing.
         self.emit(vspacing, ItemKind::Margin(spacing_break), true);
+        Ok(())
+    }
+
+    /// A multi-column container's content, `css-multicol-1`.
+    ///
+    /// **One flow item, `N` columns inside it.** A column of a multi-column
+    /// container reads to its bottom and then jumps back to the top of the next
+    /// one, which is the one thing a flow whose `y` never goes backwards cannot
+    /// say — so the container is an [`Abreast`], the same answer a table band
+    /// and a flex line already are, and [`crate::fragment`] cuts it across
+    /// pages at one height over every column of it.
+    ///
+    /// The steps are §3's and §4's, and each has an answer of its own:
+    ///
+    /// 1. §3.4's pseudo-algorithm turns `column-count`, `column-width` and the
+    ///    gap into a used count and a used width — [`column_geometry`];
+    /// 2. the content is laid out **once**, at one column's width, in a flow of
+    ///    its own;
+    /// 3. §4's `column-fill: balance` finds the shortest height that still fits
+    ///    the content in that many columns — [`balance`] over [`fill_columns`];
+    /// 4. the flow is sliced at that height and the slices are placed side by
+    ///    side;
+    /// 5. §5's rule is drawn down the middle of each gap.
+    ///
+    /// The content is laid out once and sliced, rather than laid out per
+    /// column: a column is not a narrower rendering of the content, it is the
+    /// **same** rendering cut in a different place, and a build that re-laid
+    /// each column would break the same paragraph twice and lose the join.
+    fn columns(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        content_x: f64,
+        content_width: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<(), Refusal> {
+        // §5.1's gap is `css-align-3` §8.1's, and `normal` is one em **because
+        // this box turned out to be multi-column** — which is why the value is
+        // carried unresolved as far as here.
+        let gap = style.gap_px(style.column_gap, content_width);
+        let (count, width) = column_geometry(style, content_width, gap);
+        // §6's `column-span` is a property of a **child** of the container and
+        // not of the container, which is why this reads the children: a
+        // spanning box interrupts the columns and resumes them below itself,
+        // and this build has one column set per container. Counted per box, so
+        // a book with one spanning heading and a book with four hundred are
+        // different numbers.
+        if let Content::Children(children) = &node.content {
+            for child in children {
+                if consume(&child.style).column_span == ColumnSpan::All {
+                    self.warn(Warning::ColumnSpanAsNone);
+                }
+            }
+        }
+
+        let sub = self.subflow(node, Some(style), width, depth, avoid)?;
+        if sub.items.is_empty() {
+            return Ok(());
+        }
+        let Sublayout {
+            items: inner,
+            blocks: records,
+            floats: inner_floats,
+            height: inner_height,
+        } = sub;
+
+        // §4: `balance` is the shortest height that still fits; `auto` fills
+        // each column in turn, and a container with no stated height has no
+        // bottom for the first column to reach — so all of it is the first
+        // column, which is exactly what asking for the content's own height
+        // produces rather than a special case.
+        //
+        // **And both are capped at the page.** [`crate::fragment`]'s slicer
+        // cuts a band at one height across every column of it, which is right
+        // for a table row and wrong for a column set: it puts the top of
+        // column one and the top of column two on one page and the bottoms of
+        // both on the next, so the book reads *across* the columns instead of
+        // down them. The geometry it draws is right — that is what a
+        // multi-column container looks like over two pages — and the reading
+        // order is not, and a page's runs are sorted by a stamp that cannot
+        // repair it.
+        //
+        // So the slicer is never handed a band it has to cut. A container
+        // taller than a page becomes **several bands** stacked down the flow,
+        // one column set each, and each is short enough to be moved whole to
+        // the next page rather than divided. That is also what `css-break-3`
+        // §5 makes of a multi-column container across a fragmentainer
+        // boundary, so the cure and the specification are one sentence.
+        let ceiling = self.page.1.max(EPSILON);
+        let target = match style.column_fill {
+            ColumnFill::Balance => balance(&inner, count),
+            ColumnFill::Auto => inner_height,
+        }
+        .min(ceiling);
+        let starts = fill_columns(&inner, target);
+
+        // Every column's half-open range of items and its own top, in document
+        // order — which is the order the sets are emitted in and therefore the
+        // order the book reads in.
+        let mut ranges: Vec<(usize, usize, f64)> = Vec::with_capacity(starts.len());
+        for (column, &from) in starts.iter().enumerate() {
+            let to = starts.get(column + 1).copied().unwrap_or(inner.len());
+            ranges.push((from, to, inner[from].y));
+        }
+        // A float inside a column stays inside it: its formatting context is
+        // the container's own flow, so it belongs to the column its top fell
+        // in and there is nothing for the page cutter to carry forward. The
+        // same sentence a cell's float already carries. Decided once, here,
+        // because each column belongs to exactly one set below.
+        let mut per_column: Vec<Vec<FloatRecord>> = (0..ranges.len()).map(|_| Vec::new()).collect();
+        for float in inner_floats {
+            let column = ranges
+                .iter()
+                .rposition(|(_, _, top)| float.top + EPSILON >= *top)
+                .unwrap_or(0);
+            if let Some(slot) = per_column.get_mut(column) {
+                slot.push(float);
+            }
+        }
+
+        self.commit_margin();
+        for (set, chunk) in ranges.chunks(count).enumerate() {
+            let mut band = Abreast {
+                items: Vec::new(),
+                blocks: Vec::new(),
+            };
+            let mut height = 0.0f64;
+            for &(_, to, top) in chunk {
+                let tail = &inner[to - 1];
+                height = height.max(tail.y + tail.height - top);
+            }
+            // The rules first, so a column's own backgrounds are drawn over
+            // them rather than under. Their spacers are `Edge` items: nothing
+            // to read, divisible by the page cutter, and the anchor a
+            // `BlockRecord` needs for its height — the same device a table
+            // row's spacer is. One fewer than the set has columns, because a
+            // rule goes **between** two of them.
+            let ruled = style.column_rule_width > 0.0 && style.column_rule_color.a != 0;
+            let rules = if ruled {
+                chunk.len().saturating_sub(1)
+            } else {
+                0
+            };
+            for rule in 0..rules {
+                let spacer = band.items.len();
+                band.items.push(Item {
+                    y: 0.0,
+                    height,
+                    kind: ItemKind::Edge,
+                });
+                // §5.1: *"the column rule is drawn in the middle of the gap"*,
+                // so it is centred in the gap and not laid against either
+                // column.
+                let gap_left = content_x + (rule + 1) as f64 * width + rule as f64 * gap;
+                band.blocks.push(BlockRecord {
+                    x: gap_left + (gap - style.column_rule_width) / 2.0,
+                    width: style.column_rule_width,
+                    first: Some(spacer),
+                    last: spacer + 1,
+                    background: style.column_rule_color,
+                    border_width: Sides::all(0.0),
+                    border_style: Sides::all(BorderStyle::None),
+                    border_color: Sides::all(Color::TRANSPARENT),
+                    painted: true,
+                    replaced: None,
+                    dy: 0.0,
+                });
+            }
+            for (at, &(from, to, top)) in chunk.iter().enumerate() {
+                let base = band.items.len();
+                let dx = content_x + at as f64 * (width + gap);
+                let mut slice: Vec<Item> = inner[from..to].to_vec();
+                let mut copies: Vec<BlockRecord> = Vec::new();
+                // A box that spans a column boundary is two fragments, which is
+                // the page cutter's own rule met one level down: its record is
+                // clipped to the slice and copied into each column it reaches.
+                for record in &records {
+                    let Some(first) = record.first else {
+                        continue;
+                    };
+                    let lo = first.max(from);
+                    let hi = record.last.min(to);
+                    if lo >= hi {
+                        continue;
+                    }
+                    let mut copy = record.clone();
+                    copy.first = Some(lo - from + base);
+                    copy.last = hi - from + base;
+                    copies.push(copy);
+                }
+                translate(&mut slice, &mut copies, dx, -top);
+                band.items.append(&mut slice);
+                band.blocks.append(&mut copies);
+
+                let column = set * count + at;
+                for mut float in std::mem::take(&mut per_column[column]) {
+                    translate(&mut float.items, &mut float.blocks, dx, -top);
+                    let float_base = band.items.len();
+                    for mut record in float.blocks {
+                        if let Some(first) = record.first {
+                            record.first = Some(first + float_base);
+                            record.last += float_base;
+                        }
+                        band.blocks.push(record);
+                    }
+                    band.items.extend(float.items);
+                }
+            }
+            self.emit(height, ItemKind::Columns(Box::new(band)), true);
+        }
         Ok(())
     }
 
@@ -1855,6 +2790,25 @@ impl<M: Metrics> Builder<'_, M> {
             (stated_height, Some(content_width))
         };
 
+        // `css-align-3` §8.1's two gaps, sorted onto the two axes — and the
+        // mapping is the **axis** and not the direction: `column-gap` is always
+        // the inline-axis gap, so it separates the *items* of a row container
+        // and the *lines* of a column one, and `row-gap` is the other way. A
+        // build that read `column-gap` as "the gap between flex items" gets
+        // every row container right and every column container wrong.
+        //
+        // A percentage is of the container's own content box in that axis, and
+        // its block size is `auto` until its content is laid out — so a
+        // percentage `row-gap` here resolves against nothing and is zero, which
+        // is §8.1's answer for an indefinite size rather than a guess.
+        let inline_gap = style.gap_px(style.column_gap, content_width);
+        let block_gap = style.gap_px(style.row_gap, stated_height.unwrap_or(0.0));
+        let (main_gap, cross_gap) = if row {
+            (inline_gap, block_gap)
+        } else {
+            (block_gap, inline_gap)
+        };
+
         // ---- steps 1 and 2: the items, sized along the main axis ------------
         let mut items: Vec<FlexItem> = Vec::with_capacity(boxes.len());
         let mut cross_inner: Vec<f64> = Vec::with_capacity(boxes.len());
@@ -1897,11 +2851,28 @@ impl<M: Metrics> Builder<'_, M> {
             };
             // `box-sizing: border-box` measures `width` — and `flex-basis`,
             // which §7.2.3 sizes *"as for `width`"* — from the border box, and
-            // every size in §9 is a content one.
+            // every size in §9 is a content one. `css-ui-3` §5.1 puts the
+            // min/max properties in the same sentence as `width`, so the two
+            // conversions below are the same closure at two insets rather than
+            // a special case for the size property.
             let to_content = |value: f64| match consumed.box_sizing {
                 BoxSizing::ContentBox => value.max(0.0),
                 BoxSizing::BorderBox => (value - inset_main).max(0.0),
             };
+            // The two main-axis sizing properties, which are **not** the same
+            // pair in the two directions: `min-width` is a main minimum in a
+            // row container and a cross one in a column container. A build that
+            // read `min_width` on the main axis of both honours half the books
+            // and silently ignores the other half.
+            let (min_main_size, max_main_size) = if row {
+                (consumed.min_width, consumed.max_width)
+            } else {
+                (consumed.min_height, consumed.max_height)
+            };
+            let stated_min_main =
+                crate::style::min_length(min_main_size, container_main_definite).map(to_content);
+            let stated_max_main =
+                crate::style::max_length(max_main_size, container_main_definite).map(to_content);
             let specified_main = definite_main(main_property).map(to_content);
             // §9.2 step 3: `flex-basis` first, and the main size property only
             // where it is `auto`. The two are read in that order rather than
@@ -1938,23 +2909,43 @@ impl<M: Metrics> Builder<'_, M> {
                     == AlignItems::Stretch
                     && matches!(cross_property, Size::Auto)
                     && !wrap.wraps();
+                // §9.4 step 11's stretch and `css-sizing-3`'s fit-content are
+                // both *"clamped by the used min and max cross sizes"*, and
+                // **the clamp is not written here**, which is a finding and not
+                // an omission. Every flex item is laid out again through
+                // [`Builder::block`], which applies §10.4 to the width it is
+                // given; a column container's cross size is always definite, so
+                // the line's own cross extent is the container's either way;
+                // and the two content measurements above go through the same
+                // block path and come back clamped. A clamp added here was
+                // reverted when its counted injection fired **zero** — there is
+                // no fixture that can tell the two builds apart, which is the
+                // definition of code that is not doing anything.
                 let cross = if stretched { available_cross } else { fit };
                 let height = self.trial_height(inner, cross, depth + 1, avoid)?;
                 (height, height, cross)
             };
             let base = basis.unwrap_or(max_main);
-            // §4.5's automatic minimum main size, *"further clamped by"* the
-            // item's own specified size where it has one — without which a
-            // `flex: 0 0 40px` item holding one long word could not be made
-            // narrower than the word, which is not what the declaration says.
-            let min = match specified_main {
-                Some(specified) => min_main.min(specified),
-                None => min_main,
+            // §4.5 applies to `min-width: auto` and to nothing else, so a
+            // stated minimum **replaces** the automatic one rather than losing
+            // to it. Where the value is `auto`: §4.5's content-based minimum,
+            // *"further clamped by"* the item's own specified size where it has
+            // one — without which a `flex: 0 0 40px` item holding one long word
+            // could not be made narrower than the word, which is not what the
+            // declaration says.
+            let min = match stated_min_main {
+                Some(stated) => stated,
+                None => match specified_main {
+                    Some(specified) => min_main.min(specified),
+                    None => min_main,
+                },
             };
             // §9.2 step 4: the hypothetical main size is the base size clamped
-            // by the used minimum, which is what makes `flex: 1` on three items
-            // of different content lengths still wrap where they must.
-            let hypothetical = base.max(min);
+            // by the used minimum **and maximum**, which is what makes `flex: 1`
+            // on three items of different content lengths still wrap where they
+            // must — and what stops a `max-width` item claiming a line's worth
+            // of space at §9.3 step 5 and then shrinking away from it.
+            let hypothetical = crate::style::clamp_size(base, Some(min), stated_max_main);
 
             items.push(FlexItem {
                 sizes: flex::Item {
@@ -1963,6 +2954,7 @@ impl<M: Metrics> Builder<'_, M> {
                     base,
                     hypothetical,
                     min,
+                    max: stated_max_main.unwrap_or(f64::INFINITY),
                     extra: margin_main + inset_main,
                 },
                 order: consumed.order,
@@ -1987,10 +2979,13 @@ impl<M: Metrics> Builder<'_, M> {
         // using the sum of the hypothetical sizes as the measure produces.
         let total_hypothetical: f64 = sizes.iter().map(flex::Item::outer_hypothetical).sum();
         let available_main = container_main_definite.unwrap_or(total_hypothetical);
-        let ranges = flex::lines(&sizes, available_main, wrap);
+        let ranges = flex::lines(&sizes, available_main, wrap, main_gap);
         let mut used_main = vec![0.0f64; sizes.len()];
         for &(from, to) in &ranges {
-            for (offset, size) in flex::resolve(&sizes[from..to], available_main)
+            // §9.7 distributes what is left **after** the gaps: they are not
+            // free space, and an item that grew into one would close it.
+            let room = available_main - gaps_between(to - from, main_gap);
+            for (offset, size) in flex::resolve(&sizes[from..to], room)
                 .into_iter()
                 .enumerate()
             {
@@ -2067,7 +3062,8 @@ impl<M: Metrics> Builder<'_, M> {
         // container's cross size is definite, which is §8.4's *"has no effect
         // on a single-line flex container"* arriving as arithmetic rather than
         // as a special case.
-        let lines_total: f64 = line_cross.iter().sum();
+        let lines_total: f64 =
+            line_cross.iter().sum::<f64>() + gaps_between(ranges.len(), cross_gap);
         let container_cross = container_cross_definite.unwrap_or(lines_total);
         let (lead, gap, extra) = flex::align_content(
             style.align_content,
@@ -2120,7 +3116,8 @@ impl<M: Metrics> Builder<'_, M> {
         for (line, &(from, to)) in ranges.iter().enumerate() {
             let used: f64 = (from..to)
                 .map(|position| used_main[position] + sizes[position].extra)
-                .sum();
+                .sum::<f64>()
+                + gaps_between(to - from, main_gap);
             // §9 has no `overflow` in it: a line whose items do not fit is
             // drawn where they were put. Saying so is the difference between a
             // known gap and a figure that quietly runs off the page.
@@ -2135,7 +3132,7 @@ impl<M: Metrics> Builder<'_, M> {
                 let outer = used_main[position] + sizes[position].extra;
                 main_at[at] =
                     flex::main_position(style.flex_direction, running, outer, available_main);
-                running += outer + between;
+                running += outer + between + main_gap;
                 let inside = flex::align(
                     items[at].align,
                     line_cross[line],
@@ -2147,7 +3144,7 @@ impl<M: Metrics> Builder<'_, M> {
                     flex::cross_position(wrap, inside, outer_cross[at], line_cross[line]);
             }
             line_top[line] = flex::cross_position(wrap, logical, line_cross[line], container_cross);
-            logical += line_cross[line] + gap;
+            logical += line_cross[line] + gap + cross_gap;
         }
 
         if row {
@@ -2295,6 +3292,7 @@ impl<M: Metrics> Builder<'_, M> {
         grid: &Grid,
         rows_of: &[(usize, usize)],
         laid: &mut [Option<Sublayout>],
+        lead: &[f64],
         heights: &[f64],
         tops: &[f64],
         lefts: &[f64],
@@ -2365,7 +3363,10 @@ impl<M: Metrics> Builder<'_, M> {
                     floats,
                     height: _,
                 } = sub;
-                translate(&mut inner, &mut records, cell_x, cell_top);
+                // §17.5.3: the content moves inside the cell and the cell's
+                // own box does not. The spacer below is the box, which is why
+                // it is pushed at `cell_top` and this at `cell_top + lead`.
+                translate(&mut inner, &mut records, cell_x, cell_top + lead[at]);
                 // §17.5.3: a cell's box is its row's height, whatever its
                 // content came to. The spacer is what says so; without it a
                 // one-line cell in a five-line row is painted one line tall,
@@ -2395,7 +3396,12 @@ impl<M: Metrics> Builder<'_, M> {
                 // row it is in and there is nothing for the page cutter to
                 // carry forward.
                 for mut float in floats {
-                    translate(&mut float.items, &mut float.blocks, cell_x, cell_top);
+                    translate(
+                        &mut float.items,
+                        &mut float.blocks,
+                        cell_x,
+                        cell_top + lead[at],
+                    );
                     let float_base = items.len();
                     for mut record in float.blocks {
                         if let Some(first) = record.first {
@@ -2430,7 +3436,7 @@ impl<M: Metrics> Builder<'_, M> {
             return;
         };
         let font = style.font();
-        let width = self.metrics.measure(&text, &font);
+        let width = self.advance_of(&text, &font);
         for index in first..self.flow.blocks[block].last {
             if let ItemKind::Line(line) = &mut self.flow.items[index].kind {
                 // The marker reads before the first word of its own item, and
@@ -2773,13 +3779,44 @@ impl<M: Metrics> Builder<'_, M> {
             if lo >= hi {
                 continue;
             }
+            // An atomic box costs its own width and no glyph at all: the
+            // U+FFFC in the string is its position, not its ink. A build that
+            // measured the character would give a two-inch figure the width of
+            // one replacement glyph and overflow every line holding one.
+            if let Some(atomic) = &pieces[*index].atomic {
+                total += atomic.width;
+                continue;
+            }
             let style = &pieces[*index].style;
             let slice = &content[lo..hi];
-            total += self.metrics.measure(slice, &style.font());
+            total += self.advance_of(slice, &style.font());
             total += style.letter_spacing * slice.chars().count() as f64;
             total += style.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
         }
         total
+    }
+
+    /// The advance of one slice in one style, through **one** path.
+    ///
+    /// The single place this crate decides whether a run belongs to the shaper
+    /// or to `Metrics::measure`. `metrics.rs`'s [`Shaper`] documents why that
+    /// has to be one place: a ligature is narrower than its components and a
+    /// joined Arabic word is narrower still, so a run measured one way and
+    /// drawn the other breaks in the wrong place — the exact failure the
+    /// `Metrics` trait's own documentation warns about, now with a second path
+    /// that really does disagree.
+    ///
+    /// Direction is asked of the text rather than carried in, because a
+    /// paragraph's levels are not resolved in this crate; a run that is
+    /// entirely right-to-left is shaped as such and everything else is not.
+    /// That is a **coarse** answer and it is deliberate — `flow.rs` breaks
+    /// lines over logical text and never reorders, so what it needs from
+    /// direction is the run's *width*, which the two agree on.
+    fn advance_of(&self, text: &str, font: &FontRequest<'_>) -> f64 {
+        match self.metrics.shaper() {
+            Some(shaper) => shaper.shape(text, font, false).advance,
+            None => self.metrics.measure(text, font),
+        }
     }
 
     /// The advance of the collapsible spaces at the end of a range, which
@@ -2846,6 +3883,16 @@ impl<M: Metrics> Builder<'_, M> {
         let mut below = strut.descent + strut_leading;
 
         let mut runs: Vec<TextRun> = Vec::new();
+        // §10.8.1's alignment, kept beside each run rather than applied as it
+        // is met: **two of its values are defined by the line box** and the
+        // line box does not exist until every other value has had its say. So
+        // the shift a run knows now goes into `TextRun::y`, which [`LineBox`]
+        // documents as relative to the baseline, and the two that do not are
+        // decided below.
+        let mut aligned: Vec<(VerticalAlign, f64, f64)> = Vec::new();
+        // §9.2.2's atomic boxes, gathered beside the runs and given their `x`
+        // in the same pass that gives the runs theirs.
+        let mut boxes: Vec<(usize, InlineBox)> = Vec::new();
         let mut width = 0.0;
         for (span_start, span_end, index) in spans {
             let lo = (*span_start).max(start);
@@ -2855,17 +3902,106 @@ impl<M: Metrics> Builder<'_, M> {
             }
             let style = &pieces[*index].style;
             let font = style.font();
+            // §9.2.2: an atomic box's extent either side of the baseline is
+            // the box's own, not a font's — which is why the two `over`/`under`
+            // are read from it and every one of §10.8.1's eight values then
+            // works on it unchanged.
+            let atomic = pieces[*index].atomic.as_ref();
             let vertical = self.metrics.vertical(&font);
             let leading = (style.line_height - vertical.height()) / 2.0;
-            above = above.max(vertical.ascent + leading);
-            below = below.max(vertical.descent + leading);
+            // The inline box's own extent either side of **its** baseline,
+            // which is the content area plus §10.8.1's half-leading and is
+            // what every one of the eight values is stated against.
+            let (over, under) = match atomic {
+                Some(atomic) => (atomic.baseline, atomic.height - atomic.baseline),
+                None => (vertical.ascent + leading, vertical.descent + leading),
+            };
+            // §10.8.1's `text-top` and `text-bottom` are stated against the
+            // **content area**, which is the font's box and not the inline
+            // box: the half-leading is part of the line's height and not part
+            // of the letters. An atomic box has no such distinction — its
+            // margin box is all there is — so for it the two pairs are one.
+            let (face_over, face_under) = match atomic {
+                Some(_) => (over, under),
+                None => (vertical.ascent, vertical.descent),
+            };
+            // Positive is **down**, because that is the direction this module's
+            // `y` runs. §10.8.1 states its lengths the other way up -- a
+            // positive `vertical-align` length *raises* the box -- so the one
+            // place the sign is flipped is the arm that reads the length.
+            let shift = match style.vertical_align {
+                VerticalAlign::Baseline => 0.0,
+                VerticalAlign::Sub => SUB_DROP * container.font_size,
+                VerticalAlign::Super => -SUPER_RISE * container.font_size,
+                // *"the top of the box with the top of the parent's content
+                // area"*. The parent here is the block container, because this
+                // build flattens an inline subtree into spans rather than
+                // nesting boxes -- so the parent's content area is the strut's,
+                // which is exactly what §10.8.1's strut is.
+                VerticalAlign::TextTop => face_over - strut.ascent,
+                VerticalAlign::TextBottom => strut.descent - face_under,
+                // *"the vertical midpoint of the box with the baseline of the
+                // parent box plus half the x-height of the parent"*.
+                VerticalAlign::Middle => {
+                    -(X_HEIGHT * container.font_size) / 2.0 - (face_under - face_over) / 2.0
+                }
+                VerticalAlign::Length(LengthPercentage::Px(px)) => -px,
+                // A percentage is of this element's own `line-height` and
+                // `style::consume` has already resolved it to one, so this arm
+                // is unreachable rather than unhandled.
+                VerticalAlign::Length(LengthPercentage::Percent(_)) => 0.0,
+                // Decided below, against a line box that does not exist yet.
+                VerticalAlign::Top | VerticalAlign::Bottom => 0.0,
+            };
+            if !matches!(
+                style.vertical_align,
+                VerticalAlign::Top | VerticalAlign::Bottom
+            ) {
+                above = above.max(over - shift);
+                below = below.max(under + shift);
+            }
+            aligned.push((style.vertical_align, over, under));
+            // An atomic box is placed, not set: no run, no glyph, and a width
+            // that is the box's. Its `x` is filled in by the alignment pass
+            // below, in the same order the runs are.
+            if let Some(atomic) = atomic {
+                boxes.push((
+                    runs.len(),
+                    InlineBox {
+                        items: atomic.items.clone(),
+                        blocks: atomic.blocks.clone(),
+                        dy: shift - atomic.baseline,
+                    },
+                ));
+                runs.push(TextRun {
+                    x: 0.0,
+                    y: shift,
+                    width: atomic.width,
+                    text: String::new(),
+                    font_size: style.font_size,
+                    families: style.families.clone(),
+                    weight: style.font_weight,
+                    style: style.font_style,
+                    variant: style.font_variant,
+                    color: style.color,
+                    decoration: style.text_decoration,
+                    painted: false,
+                    letter_spacing: 0.0,
+                    word_spacing: 0.0,
+                    generated: true,
+                    anchor: pieces[*index].anchor,
+                    order: pieces[*index].order,
+                });
+                width += atomic.width;
+                continue;
+            }
             let text = content[lo..hi].to_string();
-            let advance = self.metrics.measure(&text, &font)
+            let advance = self.advance_of(&text, &font)
                 + style.letter_spacing * text.chars().count() as f64
                 + style.word_spacing * text.chars().filter(|c| *c == ' ').count() as f64;
             runs.push(TextRun {
                 x: 0.0,
-                y: 0.0,
+                y: shift,
                 width: advance,
                 text,
                 font_size: style.font_size,
@@ -2883,6 +4019,27 @@ impl<M: Metrics> Builder<'_, M> {
                 order: pieces[*index].order,
             });
             width += advance;
+        }
+
+        // §10.8.1's `top` and `bottom` are aligned to the **line box**, which
+        // is why they could not be decided above. A box taller than the line it
+        // is aligned to grows it -- downward for `top`, upward for `bottom` --
+        // and one pass over each is where §10.8.1 stops being an algorithm and
+        // starts being a description. Growing in the other direction is what
+        // keeps the aligned edge where it was put.
+        for (align, over, under) in &aligned {
+            match align {
+                VerticalAlign::Top => below = below.max(over + under - above),
+                VerticalAlign::Bottom => above = above.max(over + under - below),
+                _ => {}
+            }
+        }
+        for (run, (align, over, under)) in runs.iter_mut().zip(&aligned) {
+            match align {
+                VerticalAlign::Top => run.y = over - above,
+                VerticalAlign::Bottom => run.y = below - under,
+                _ => {}
+            }
         }
 
         // §6's alignment. Justification distributes the slack over the spaces
@@ -2914,10 +4071,25 @@ impl<M: Metrics> Builder<'_, M> {
             offset += run.width;
         }
 
+        // The placeholder runs carry the `x` the alignment pass computed, so
+        // the boxes take it from them and the placeholders go. One pass and not
+        // two, which is what keeps a box and the text beside it from ever
+        // disagreeing about where the line starts.
+        let mut boxes: Vec<InlineBox> = boxes
+            .into_iter()
+            .map(|(at, mut placed)| {
+                translate(&mut placed.items, &mut placed.blocks, runs[at].x, 0.0);
+                placed
+            })
+            .collect();
+        boxes.shrink_to_fit();
+        runs.retain(|run| !(run.generated && run.text.is_empty()));
+
         let height = above + below;
         let line = LineBox {
             baseline: above,
             runs,
+            boxes,
             index_in_block,
             lines_in_block: 0,
             orphans: container.orphans,
@@ -2939,6 +4111,242 @@ impl<M: Metrics> Builder<'_, M> {
         // rise above a line box that already holds earlier content.
         self.ceiling_line = self.ceiling_line.max(self.y);
         self.emit(height, ItemKind::Line(Box::new(line)), true);
+    }
+}
+
+/// CSS 2.2 §10.3.2's last case: the used `width` of a replaced box that has no
+/// intrinsic width and no ratio to derive one from, in CSS pixels.
+const REPLACED_DEFAULT_WIDTH: f64 = 300.0;
+
+/// §10.6.2's last case: *"the height of the largest rectangle that has a 2:1
+/// ratio, has a height not greater than 150px, and has a width not greater than
+/// the device width"*. The 150 is the cap; the 2:1 is applied against the used
+/// width beside it.
+const REPLACED_DEFAULT_HEIGHT: f64 = 150.0;
+
+/// A replaced box's used size, with every specified value resolved the way
+/// [`Builder::block`] resolves it for every other box.
+///
+/// `None` for anything that is not a replaced element, which is what lets the
+/// three callers — the block builder, the float width and the absolutely
+/// positioned box — ask the same question without first asking what kind of
+/// node they are holding.
+fn replaced_box(node: &BoxNode, style: &Consumed, containing: f64) -> Option<(f64, f64)> {
+    let Content::Replaced(intrinsic) = &node.content else {
+        return None;
+    };
+    let extra = style.padding_px(Side::Left, containing)
+        + style.padding_px(Side::Right, containing)
+        + style.border_width.left
+        + style.border_width.right;
+    let to_content = |specified: f64| {
+        match style.box_sizing {
+            BoxSizing::ContentBox => specified,
+            BoxSizing::BorderBox => specified - extra,
+        }
+        .max(0.0)
+    };
+    Some(replaced_size(
+        *intrinsic,
+        match style.width {
+            Size::Auto => None,
+            Size::Length(length) => Some(to_content(resolve_length(length, containing))),
+        },
+        match style.height {
+            // §10.5: a percentage height against a containing block whose own
+            // height is `auto` *"is treated as `auto`"*, and at this point in
+            // the pass every ancestor's height is still being accumulated. The
+            // same reading [`Builder::block`]'s `stated_height` takes, so a
+            // picture and a `<div>` agree about what a percentage height is.
+            Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+            Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
+        },
+        (
+            crate::style::min_length(style.min_width, Some(containing)).map(to_content),
+            crate::style::min_length(style.min_height, None),
+        ),
+        (
+            crate::style::max_length(style.max_width, Some(containing)).map(to_content),
+            crate::style::max_length(style.max_height, None),
+        ),
+    ))
+}
+
+/// CSS 2.2 §10.3.2 and §10.6.2: a replaced box's used `width` and `height`,
+/// with §10.4's and §10.7's constraints applied.
+///
+/// # Why this is one function and not two
+///
+/// The two sections are mutually recursive and the specification writes them
+/// that way: §10.3.2's second case is *"the used value of `width` is (used
+/// height) × (intrinsic ratio)"* and §10.6.2's second is *"(used width) ÷
+/// (intrinsic ratio)"*. Only one of the two can be the one that recurses, and
+/// which one it is depends on which of `width` and `height` the author stated.
+/// A build with a `used_width` and a `used_height` that each called the other
+/// either loops or silently picks a winner; this takes the pair at once and the
+/// cases are the specification's own, in its order.
+///
+/// # And why §10.4's table is here rather than [`crate::style::clamp_size`]
+///
+/// §10.4 has two algorithms. For every other box it is *"apply the rules again
+/// with `max-width` as the width, then again with `min-width`"*, which
+/// `clamp_size` is. For a replaced box **with an intrinsic ratio and both
+/// `width` and `height` auto** it is instead a table of eleven constraint
+/// violations, and the difference is the whole point of the table: clamping the
+/// width alone would leave the height at its intrinsic value and **stretch the
+/// picture**. `img { max-width: 100% }` — which is on almost every reflowable
+/// book's stylesheet — is exactly that case, so the table is the common path
+/// and not the exotic one.
+///
+/// Every argument is already resolved into content-box CSS pixels; `None` is
+/// `auto` for `width`/`height` and for `min-*`, and `none` for `max-*`.
+fn replaced_size(
+    intrinsic: Intrinsic,
+    width: Option<f64>,
+    height: Option<f64>,
+    min: (Option<f64>, Option<f64>),
+    max: (Option<f64>, Option<f64>),
+) -> (f64, f64) {
+    // The four constraints as numbers rather than as options, which is what
+    // lets §10.4's table be written in the specification's own words: every one
+    // of its rows reads `max(…, min-height)` or `min(…, max-width)`, and those
+    // expressions are only total once an absent minimum is zero and an absent
+    // maximum is infinite.
+    let min_width = min.0.unwrap_or(0.0).max(0.0);
+    let min_height = min.1.unwrap_or(0.0).max(0.0);
+    let max_width = max.0.unwrap_or(f64::INFINITY).max(0.0);
+    let max_height = max.1.unwrap_or(f64::INFINITY).max(0.0);
+
+    // ---- §10.3.2 and §10.6.2, before any constraint ------------------------
+    let (tentative_width, tentative_height) = match (width, height) {
+        (Some(w), Some(h)) => (w, h),
+        // `width` stated, `height` auto: §10.6.2's case 2, then 3, then 4.
+        (Some(w), None) => (w, height_from(w, intrinsic)),
+        // `height` stated, `width` auto: §10.3.2's *"`width` has a computed
+        // value of `auto`, `height` has some other computed value, and the
+        // element does have an intrinsic ratio"*, then case 4, then case 5.
+        (None, Some(h)) => {
+            let w = match (intrinsic.ratio, intrinsic.width) {
+                (Some(ratio), _) => h * ratio,
+                (None, Some(w)) => w,
+                (None, None) => REPLACED_DEFAULT_WIDTH,
+            };
+            (w, h)
+        }
+        (None, None) => {
+            let w = match (intrinsic.width, intrinsic.height, intrinsic.ratio) {
+                // §10.3.2 case 1.
+                (Some(w), _, _) => w,
+                // §10.3.2 case 2's first half: no intrinsic width, but an
+                // intrinsic height and a ratio.
+                (None, Some(h), Some(ratio)) => h * ratio,
+                // §10.3.2 calls this one *"undefined in CSS 2.2"*.
+                // `css-images-3` §5.3.2's default sizing algorithm defines it:
+                // the largest rectangle with the ratio that fits the default
+                // object size, which §5.3.1 fixes at 300 by 150.
+                (None, None, Some(ratio)) => {
+                    REPLACED_DEFAULT_WIDTH.min(REPLACED_DEFAULT_HEIGHT * ratio)
+                }
+                // §10.3.2's last case: *"none of the conditions above are met,
+                // then the used value of `width` becomes 300px"*. An intrinsic
+                // height with no ratio lands here and not in case 2, which
+                // needs both.
+                (None, _, None) => REPLACED_DEFAULT_WIDTH,
+            };
+            let h = match intrinsic.height {
+                // §10.6.2 case 1.
+                Some(h) => h,
+                None => height_from(w, intrinsic),
+            };
+            (w, h)
+        }
+    };
+
+    // ---- §10.4 and §10.7 ---------------------------------------------------
+    //
+    // The table governs only the case it is stated for. Everywhere else §10.4's
+    // ordinary instruction applies — *"the rules are applied again, but this
+    // time using the computed value of `max-width` as the computed value for
+    // `width`"* — and applying §10.3's rules again with a width that is no
+    // longer `auto` is exactly what recomputing the height from the clamped
+    // width does.
+    let governed = width.is_none()
+        && height.is_none()
+        && intrinsic.ratio.is_some()
+        && tentative_width > 0.0
+        && tentative_height > 0.0;
+    if !governed {
+        let used_width = crate::style::clamp_size(tentative_width, min.0, max.0).max(0.0);
+        // **Only a width the clamp actually moved re-derives the height**, and
+        // that condition is not a shortcut: §10.6.2's case 1 prefers an
+        // intrinsic *height* to a height derived through the ratio, so a box
+        // whose width nothing touched must keep the height §10.6.2 already gave
+        // it rather than have `height_from` answer a second time. Recomputing
+        // unconditionally is also what made the `(Some(w), None)` arm above
+        // unreadable — a counted injection that broke it caught **nothing**,
+        // because every value it produced was thrown away here.
+        let used_height = if height.is_some() || used_width == tentative_width {
+            tentative_height
+        } else {
+            height_from(used_width, intrinsic)
+        };
+        return (
+            used_width,
+            crate::style::clamp_size(used_height, min.1, max.1).max(0.0),
+        );
+    }
+
+    let (w, h) = (tentative_width, tentative_height);
+    let (over_w, under_w) = (w > max_width, w < min_width);
+    let (over_h, under_h) = (h > max_height, h < min_height);
+    // The two-violation rows first: each of them is also a single-violation row
+    // and would be answered wrongly by it.
+    let (used_width, used_height) = match (over_w, under_w, over_h, under_h) {
+        (true, _, true, _) if max_width / w <= max_height / h => {
+            (max_width, min_height.max(max_width * h / w))
+        }
+        (true, _, true, _) => (min_width.max(max_height * w / h), max_height),
+        (_, true, _, true) if min_width / w <= min_height / h => {
+            (max_width.min(min_height * w / h), min_height)
+        }
+        (_, true, _, true) => (min_width, max_height.min(min_width * h / w)),
+        // §10.4's *(w < min-width) and (h > max-height)* row and its
+        // *(w > max-width) and (h < min-height)* twin are **not written
+        // here**, and that is a proof rather than an omission: each is an
+        // identity of the single-violation row that answers it, for every
+        // input that could reach it.
+        //
+        // Reaching the first means `under_w && over_h`, with `over_w` and
+        // `under_h` both false — every earlier arm needs one of those two. So
+        // the *w < min-width* row below answers it, and its height reads
+        // `min(min-width × h ÷ w, max-height)`: `min-width ÷ w > 1` makes the
+        // left term greater than `h`, and `h > max-height` makes it greater
+        // than the right, so the minimum **is** `max-height` and the pair is
+        // `(min-width, max-height)` — the row. The twin is the same argument
+        // with every inequality turned round, against the *w > max-width* row.
+        //
+        // Measured, 16 September 2026: transcribing both rows and then
+        // deleting them again failed **0** tests in `tinker-pdf-layout` and
+        // **0** in `tinker-pdf`, and the proof above is why no fixture could
+        // raise either number. A row that cannot change an answer is not a
+        // guard, so it is gone and the answers it gave are asserted by
+        // `a_minimum_on_one_axis_and_a_maximum_on_the_other_are_both_honoured`.
+        (true, ..) => (max_width, min_height.max(max_width * h / w)),
+        (_, true, ..) => (min_width, max_height.min(min_width * h / w)),
+        (_, _, true, _) => (min_width.max(max_height * w / h), max_height),
+        (.., true) => (max_width.min(min_height * w / h), min_height),
+        _ => (w, h),
+    };
+    (used_width.max(0.0), used_height.max(0.0))
+}
+
+/// §10.6.2's cases 2, 3 and 4: a replaced box's `height` when `height` is
+/// `auto` and the used `width` is settled.
+fn height_from(width: f64, intrinsic: Intrinsic) -> f64 {
+    match (intrinsic.ratio, intrinsic.height) {
+        (Some(ratio), _) if ratio > 0.0 => width / ratio,
+        (_, Some(height)) => height,
+        _ => (width / 2.0).min(REPLACED_DEFAULT_HEIGHT),
     }
 }
 
@@ -2968,6 +4376,8 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         border_style: style.border_style,
         border_color: style.border_color,
         painted: painted && style.visible,
+        replaced: None,
+        dy: 0.0,
     }
 }
 
@@ -3222,6 +4632,10 @@ fn collapsed_borders(
 fn flex_boxes(container: &BoxNode) -> Vec<ItemBox<'_>> {
     let mut out: Vec<ItemBox<'_>> = Vec::new();
     match &container.content {
+        // Unreachable: `css-display-3` §2.2 makes a replaced element's inner
+        // display type ignored, so [`Builder::block`] never dispatches one to
+        // the flex driver. A picture has no flex items either way.
+        Content::Replaced(_) => {}
         Content::Text(text) => {
             if !text.trim().is_empty() {
                 out.push(ItemBox::Anonymous(Box::new(anonymous_flex_item(
@@ -3263,6 +4677,166 @@ fn flex_boxes(container: &BoxNode) -> Vec<ItemBox<'_>> {
     out
 }
 
+/// `css-multicol-1` §3.4's pseudo-algorithm: the used column count and width.
+///
+/// §3.4 is four cases over two properties and it is written out rather than
+/// folded, because the two-stated case is **not** the minimum of the two
+/// answers taken separately: `column-count: 3; column-width: 10em` in a box
+/// with room for five ten-em columns is three columns of a third of the box
+/// each, not three of ten em.
+///
+/// The `(auto, auto)` case cannot be reached — [`Consumed::is_multicol`] is
+/// exactly its negation — and is answered as one column rather than left to a
+/// panic, which is ruling 1.
+fn column_geometry(style: &Consumed, available: f64, gap: f64) -> (usize, f64) {
+    let stated = match style.column_count {
+        ColumnCount::Auto => None,
+        ColumnCount::Count(count) => Some(usize::from(count).max(1)),
+    };
+    let wanted = match style.column_width {
+        ColumnWidth::Auto => None,
+        // A zero or negative `column-width` would divide by zero below. §3.1
+        // makes the value non-negative and a zero one meaningless, so it is
+        // read as `auto` rather than obeyed.
+        ColumnWidth::Px(px) if px > 0.0 => Some(px),
+        ColumnWidth::Px(_) => None,
+    };
+    // §3.4's *"floor((available + gap) / (width + gap))"*, at least one.
+    let fits = |width: f64| -> usize {
+        let step = width + gap;
+        if step <= 0.0 {
+            return 1;
+        }
+        let count = ((available + gap) / step).floor();
+        if (1.0..1_000.0).contains(&count) {
+            count as usize
+        } else if count >= 1_000.0 {
+            // A container a thousand columns wide is a stylesheet accident and
+            // a work bomb. Ruling 2: it is capped rather than refused.
+            1_000
+        } else {
+            1
+        }
+    };
+    let count = match (stated, wanted) {
+        (Some(count), None) => count,
+        (None, Some(width)) => fits(width),
+        (Some(count), Some(width)) => count.min(fits(width)),
+        (None, None) => 1,
+    };
+    let count = count.max(1);
+    let width = ((available - (count - 1) as f64 * gap) / count as f64).max(0.0);
+    (count, width)
+}
+
+/// Fills columns of a stated height, greedily, and returns the first item index
+/// of each.
+///
+/// A column ends **before** the first item that would take it past the height,
+/// which is `css-break-3`'s class-2 break — between line boxes — with a box's
+/// own padding edge allowed as well, exactly as [`crate::fragment`]'s last tier
+/// allows it.
+///
+/// A column always takes at least one item, however tall it is. Without that
+/// clause a box taller than the target starts a new column for ever, which is
+/// §9.3's own `"if the very first uncollected item wouldn't fit, collect just
+/// it"` met in a different specification.
+fn fill_columns(items: &[Item], height: f64) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    let Some(first) = items.first() else {
+        return starts;
+    };
+    let mut top = first.y;
+    for (at, item) in items.iter().enumerate().skip(1) {
+        if item.y + item.height > top + height + EPSILON && at > *starts.last().unwrap_or(&0) {
+            starts.push(at);
+            top = item.y;
+        }
+    }
+    starts
+}
+
+/// `css-multicol-1` §4's `balance`: the shortest height that still fits the
+/// content in `count` columns.
+///
+/// **A search and not a division.** `total / count` is the answer only when the
+/// content can be cut anywhere, and it cannot: the cuts are between items, so
+/// the even share usually needs one more column than there is. The predicate
+/// — *does this height fit in `count` columns* — is monotone in the height, so
+/// a bisection finds the boundary.
+///
+/// Sixty-four halvings, which takes an interval of any real page height below
+/// the last bit of an `f64`. The number is stated rather than tuned: the value
+/// returned is only ever fed back through [`fill_columns`], whose comparisons
+/// carry `EPSILON`, so the last bits cannot reach the page.
+///
+/// Ruling 4: `floor` and halving are exact in IEEE-754 and identical on every
+/// target, which is why the balance is arithmetic rather than a transcendental.
+fn balance(items: &[Item], count: usize) -> f64 {
+    let (Some(first), Some(last)) = (items.first(), items.last()) else {
+        return 0.0;
+    };
+    let total = last.y + last.height - first.y;
+    if count <= 1 || total <= 0.0 {
+        return total.max(0.0);
+    }
+    let mut lo = 0.0f64;
+    let mut hi = total;
+    for _ in 0..64 {
+        let mid = lo + (hi - lo) / 2.0;
+        if fill_columns(items, mid).len() <= count {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    // **The bisection's answer is a hair too small and the hair is visible.**
+    // `fill_columns` keeps a line whose bottom lands on the boundary to within
+    // `EPSILON`, so the smallest height it *accepts* is a hair under the height
+    // it then comes to -- and at that height the first column drops its last
+    // line while the second still takes it. Seven lines into two columns split
+    // three and four instead of four and three, which is a page that looks
+    // deliberate.
+    //
+    // So the height is settled by asking the fill what it actually came to and
+    // filling again at that. The second answer is a fixed point of the first,
+    // and the loop is bounded rather than trusted.
+    let mut height = hi;
+    for _ in 0..4 {
+        let actual = tallest(items, &fill_columns(items, height));
+        if actual <= height + EPSILON {
+            break;
+        }
+        height = actual;
+    }
+    height
+}
+
+/// The tallest of the columns a fill produced.
+fn tallest(items: &[Item], starts: &[usize]) -> f64 {
+    let mut height = 0.0f64;
+    for (column, &from) in starts.iter().enumerate() {
+        let to = starts.get(column + 1).copied().unwrap_or(items.len());
+        if from >= to {
+            continue;
+        }
+        let bottom = items[to - 1].y + items[to - 1].height;
+        height = height.max(bottom - items[from].y);
+    }
+    height
+}
+
+/// `css-align-3` §8.1: what `count` things cost in gaps.
+///
+/// A gap goes **between** two things and not after the last, so `n` of them
+/// cost `n - 1` gaps and one of them costs none. Written once, because the
+/// off-by-one is the whole of what this property gets wrong: five places need
+/// the number and four of them would look right with `count * gap` on any
+/// fixture where the container was wide enough to hide it.
+fn gaps_between(count: usize, gap: f64) -> f64 {
+    count.saturating_sub(1) as f64 * gap
+}
+
 /// §4's anonymous block container around a run of text.
 fn anonymous_flex_item(parent: &ComputedStyle, run: Vec<BoxNode>) -> BoxNode {
     let mut style = ComputedStyle::inherit_from(parent);
@@ -3282,11 +4856,36 @@ fn anonymous_flex_item(parent: &ComputedStyle, run: Vec<BoxNode>) -> BoxNode {
 /// box — which §8.3 answers by synthesising a baseline from the box's cross-end
 /// edge. That is the caller's fallback and not this function's, because the
 /// box's size is the caller's to know.
+/// The distance from a sub-flow's top to its **last** baseline.
+///
+/// CSS 2.2 §10.8.1's rule for an `inline-block`, and the last rather than the
+/// first is the whole of it: a two-line inline-block aligned on its first
+/// baseline **hangs** from the line it is on, with its second line below the
+/// paragraph's, and every book that puts a two-line caption inline looks
+/// broken in a way nothing names.
+fn last_baseline(sub: &Sublayout) -> Option<f64> {
+    let mut found = None;
+    for item in &sub.items {
+        match &item.kind {
+            ItemKind::Line(line) => found = Some(item.y + line.baseline),
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                for inner in &band.items {
+                    if let ItemKind::Line(line) = &inner.kind {
+                        found = Some(item.y + inner.y + line.baseline);
+                    }
+                }
+            }
+            ItemKind::Margin(_) | ItemKind::Edge => {}
+        }
+    }
+    found
+}
+
 fn first_baseline(sub: &Sublayout) -> Option<f64> {
     for item in &sub.items {
         match &item.kind {
             ItemKind::Line(line) => return Some(item.y + line.baseline),
-            ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
                 for inner in &band.items {
                     if let ItemKind::Line(line) = &inner.kind {
                         return Some(item.y + inner.y + line.baseline);
@@ -3380,6 +4979,42 @@ fn anonymous_table(parent: &ComputedStyle, run: &[BoxNode]) -> BoxNode {
 /// A run's `y` is not touched because a run has not got one yet: it is written
 /// at pagination out of its line box's position, so moving the item moves the
 /// text with it.
+/// CSS 2.2 §9.4.3's offset, applied to the **ink** and not to the flow.
+///
+/// [`translate`]'s twin, and the difference is the whole of §9.4.3: that one
+/// moves an item, this one moves what an item draws. A relatively positioned
+/// box keeps its place in the column — so the page cutter still sees a `y` that
+/// never goes backwards — and every run and every decoration inside it is drawn
+/// somewhere else.
+///
+/// A run's `y` is already §10.8.1's shift from its line's baseline, so the two
+/// offsets add: a `vertical-align: super` inside a `position: relative` span is
+/// raised twice, by two different rules, and that is right.
+fn shift(items: &mut [Item], dx: f64, dy: f64) {
+    for item in items {
+        match &mut item.kind {
+            ItemKind::Line(line) => {
+                for run in &mut line.runs {
+                    run.x += dx;
+                    run.y += dy;
+                }
+                for placed in &mut line.boxes {
+                    translate(&mut placed.items, &mut placed.blocks, dx, 0.0);
+                    placed.dy += dy;
+                }
+            }
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                shift(&mut band.items, dx, dy);
+                for record in &mut band.blocks {
+                    record.x += dx;
+                    record.dy += dy;
+                }
+            }
+            ItemKind::Margin(_) | ItemKind::Edge => {}
+        }
+    }
+}
+
 fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
     for item in items {
         item.y += dy;
@@ -3388,11 +5023,14 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
                 for run in &mut line.runs {
                     run.x += dx;
                 }
+                for placed in &mut line.boxes {
+                    translate(&mut placed.items, &mut placed.blocks, dx, 0.0);
+                }
             }
             // A band's items are already relative to the band, so only the
             // horizontal half of the move reaches inside it. A build that
             // passed `dy` down as well would move a table inside a float twice.
-            ItemKind::Rows(band) | ItemKind::FlexLine(band) => {
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
                 translate(&mut band.items, &mut band.blocks, dx, 0.0);
             }
             ItemKind::Margin(_) | ItemKind::Edge => {}

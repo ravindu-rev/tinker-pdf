@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The classic SVG bomb: a `<use>` inside the subtree it references.
+
+     Expanding `#loop` draws the `<use>` inside it, which references `#loop`,
+     which draws the `<use>` inside it. It is well-formed XML, every element is
+     legal on its own, and a renderer that recursed would not return. Refused
+     by name -- `Refusal::TooManyUses` -- rather than by a stack that ran out
+     or a depth counter that happened to trip first. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <g id="loop">
+    <rect width="1" height="1"/>
+    <use href="#loop"/>
+  </g>
+</svg>

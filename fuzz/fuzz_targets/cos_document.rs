@@ -5,6 +5,26 @@
 //! panic. Walking the page tree afterwards is part of the target because a
 //! document that opens and then panics on use is no better than one that
 //! panics on open.
+//!
+//! # What this target checks, and what it does not
+//!
+//! **Only that the code did not panic, hang, or exhaust memory.** Eleven
+//! calls, every one discarded. A document whose xref was repaired *wrongly* —
+//! pointing at the wrong objects, losing a page, resolving a reference to the
+//! wrong generation — opens without a panic and passes. So a run that
+//! returned the *wrong* answer passes this target exactly as a correct one
+//! does, and a green `cargo fuzz` here is evidence about ruling 1 and about
+//! nothing else.
+//!
+//! That is worth writing down rather than leaving implied. Correctness lives
+//! in the corpus ratchet (`corpus/ratchet*.json`, which pins per-document
+//! outcomes across hundreds of real files) and in `crates/tinker-pdf`'s own
+//! document tests. This target is the broadest *crash* net in the tree and
+//! makes no claim beyond that.
+//!
+//! Recorded because the same shape has already cost this repository once: the
+//! `brotli` target asserts only self-consistency and could not have found the
+//! ring-buffer defect that a decoded-bytes comparison found immediately.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

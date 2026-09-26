@@ -34,7 +34,7 @@
 //! downstream can tell — and that is the failure this whole decoder is
 //! shaped around.
 
-use super::{Cursor, JpxColour, Refusal};
+use super::{Cursor, JpxColour, Refusal, MAX_JPX_PRECISION};
 
 /// Box types, as the four-character codes T.800 Annex I gives them.
 mod ty {
@@ -340,9 +340,10 @@ fn palette(bytes: &[u8]) -> Result<Palette, Refusal> {
         let b = c.u8().ok_or(Refusal::Truncated("a pclr channel depth"))?;
         let (precision, signed) = decode_bpc(b);
         // The same ceiling the codestream's own components get, and for the
-        // same reason: PDF's sample path reads at most 16 bits and this build
-        // refuses past it rather than truncating.
-        if precision > 16 {
+        // same reason [`MAX_JPX_PRECISION`] gives: 17 bits is where the
+        // coefficient plane's Q12 `i32` runs out, and the PDF image model has
+        // no member above 16 to widen into.
+        if precision > MAX_JPX_PRECISION {
             return Err(Refusal::Precision(precision));
         }
         channels.push((precision, signed));

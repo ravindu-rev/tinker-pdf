@@ -170,8 +170,28 @@ impl Inherited {
 /// makes a very deep legitimate tree terminate too.
 #[must_use]
 pub fn collect(doc: &CosDocument) -> Vec<Page> {
+    collect_upto(doc, limits::MAX_PAGES)
+}
+
+/// The first `limit` pages in document order.
+///
+/// The same walk, stopped early: same order, same cycle guard, same inherited
+/// attributes, and the same `index` on every page it yields. A caller that
+/// wants page one does not need the rest of the tree -- and on a streamed
+/// document opened through Annex F's head-only path, the rest of the tree is
+/// the rest of the file, so walking it would spend the whole file to answer a
+/// question about the first page.
+///
+/// Stopping early is not truncation and does not warn as if it were: a
+/// document whose tree is cyclic or deeper than the cap still says so, and a
+/// document that simply has more pages than the caller asked for does not.
+#[must_use]
+pub fn collect_upto(doc: &CosDocument, limit: usize) -> Vec<Page> {
     let mut pages = Vec::new();
     let mut visited = HashSet::new();
+    if limit == 0 {
+        return pages;
+    }
 
     let Some(root) = doc.catalog() else {
         return pages;
@@ -180,7 +200,15 @@ pub fn collect(doc: &CosDocument) -> Vec<Page> {
         return pages;
     };
 
-    walk(doc, tree, Inherited::default(), 0, &mut visited, &mut pages);
+    walk(
+        doc,
+        tree,
+        Inherited::default(),
+        0,
+        limit,
+        &mut visited,
+        &mut pages,
+    );
     pages
 }
 
@@ -189,9 +217,14 @@ fn walk(
     node: ObjRef,
     inherited: Inherited,
     depth: u32,
+    limit: usize,
     visited: &mut HashSet<u32>,
     out: &mut Vec<Page>,
 ) {
+    if out.len() >= limit {
+        // The caller has what it asked for. Not truncation, so not a warning.
+        return;
+    }
     if depth > limits::MAX_NEST_DEPTH || out.len() >= limits::MAX_PAGES {
         doc.warn(WarningKind::PageTreeTruncated);
         return;
@@ -216,7 +249,7 @@ fn walk(
         Some(kids) => {
             let kids: Vec<ObjRef> = kids.iter().filter_map(Object::as_objref).collect();
             for kid in kids {
-                walk(doc, kid, inherited.clone(), depth + 1, visited, out);
+                walk(doc, kid, inherited.clone(), depth + 1, limit, visited, out);
             }
         }
         // 7.7.3.3: a node without /Kids is a leaf, whatever its /Type says —
@@ -288,10 +321,80 @@ pub fn count(doc: &CosDocument) -> u32 {
     }
 }
 
+/// One page built from one object with nothing inherited, or nothing.
+///
+/// The page is built by [`leaf`], the same function the tree walk uses, which
+/// is only sound when the object is a leaf carrying its own `/MediaBox` and
+/// `/Resources`. When it is not, this declines and the walk runs, because a
+/// page laid out at US Letter because its ancestor was not fetched is the
+/// wrong page rather than a cheaper one.
+fn page_alone(doc: &CosDocument, reference: ObjRef, index: u32) -> Option<Page> {
+    let object = doc.get(reference).ok()?;
+    // Not a dictionary at all is the common way for this to be the wrong
+    // object: a run's leading object read a few bytes late is its content
+    // stream, and a stream is not a page.
+    let dict = object.as_dict()?;
+    let inherited = Inherited::default().extend(dict, doc);
+    // One test rather than two, because two were each other's shadow: a page
+    // with no `/MediaBox` key resolves to no media box, so whichever ran first
+    // declined and removing either alone changed nothing a test could see.
+    //
+    // 7.7.3.4 lets both attributes come from an ancestor, and an ancestor is
+    // exactly what neither route here fetched. `leaf` would default a missing
+    // media box to US Letter with a warning, which would be this function
+    // guessing rather than declining.
+    if inherited.media_box.is_none_or(|r| r.is_empty()) || inherited.resources.is_none() {
+        return None;
+    }
+    Some(leaf(reference, index, inherited, doc))
+}
+
+/// Page one of a linearized document, from `/O` (F.3.3, Table F.1).
+///
+/// Annex F names the first page's object number so a reader holding only the
+/// head can reach it **without the page tree**. That is not a shortcut: a
+/// linearized file is free to leave the page tree root in the tail and qpdf's
+/// linearizer does, so a page-one render that insisted on walking the tree
+/// would fetch the end of every such file to draw the front of it.
+fn linearized_first_page(doc: &CosDocument) -> Option<Page> {
+    page_alone(doc, ObjRef::new(doc.first_page_object()?, 0), 0)
+}
+
+/// Page `index` of a linearized document, from Annex F's page offset hint
+/// table.
+///
+/// `/O` names the first page and nothing else, so every page after it needed
+/// the main cross-reference table until the hint tables reached the open path.
+/// Table F.4 item 2 is what replaces it: a page's location is the accumulated
+/// lengths of the pages before it, and item 1 makes the page's own page object
+/// the first object of its run.
+///
+/// Only the *range* comes from the tables. The page is built here only when
+/// what the file's own object header names at the front of that range is a
+/// leaf with its own `/MediaBox` and `/Resources`; anything else declines with
+/// a typed warning naming what was found, and the tree walk runs. Hints
+/// accelerate and never decide (`docs/design/streaming-open.md`).
+fn hinted_page(doc: &CosDocument, index: u32) -> Option<Page> {
+    let reference = doc.hinted_page_object(index)?;
+    let page = page_alone(doc, reference, index);
+    if page.is_none() {
+        doc.warn_object(reference, WarningKind::LinearizedPageHintRejected);
+    }
+    page
+}
+
 /// Convenience: the page at `index`, if it exists.
 #[must_use]
 pub fn at(doc: &CosDocument, index: u32) -> Option<Page> {
-    collect(doc).into_iter().nth(index as usize)
+    if index == 0 {
+        if let Some(page) = linearized_first_page(doc) {
+            return Some(page);
+        }
+    } else if let Some(page) = hinted_page(doc, index) {
+        return Some(page);
+    }
+    let wanted = (index as usize).checked_add(1)?;
+    collect_upto(doc, wanted).into_iter().nth(index as usize)
 }
 
 /// The `/Contents` streams of a page, in order.

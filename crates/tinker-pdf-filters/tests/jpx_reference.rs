@@ -27,15 +27,21 @@
 //! level shift. Only the 9/7's fixed-point arithmetic is outside it, and that
 //! is milestone 5 with gates of its own.
 //!
-//! It carries more weight than an ordinary fixture because **T.800 publishes
-//! no datastream annex** — there is no equivalent of T.88's Annex H.1, which
-//! is the artefact gap 17 leaned on for JBIG2. These committed decodes carry
-//! that weight instead, and being a measurement rather than a check is the
-//! cost: they say what one decoder produced once, on these codestreams, and
-//! they cannot grow to cover a partition nobody has yet encoded. Ruling 13
-//! makes that a permanent property of this file, so new coverage means
-//! hand-authored codestreams transcribed from T.800 — the discipline JBIG2
-//! took from Annex H — rather than asking an encoder for one.
+//! Being a measurement rather than a check is the cost: these decodes say what
+//! one decoder produced once, on these codestreams, and they cannot grow to
+//! cover a partition nobody has yet encoded. Ruling 13 makes that a permanent
+//! property of this file, so new coverage means hand-authored codestreams
+//! transcribed from T.800 rather than asking an encoder for one.
+//!
+//! *Corrected 14 September 2026.* This note used to open by saying the file
+//! "carries more weight than an ordinary fixture because **T.800 publishes no
+//! datastream annex** — there is no equivalent of T.88's Annex H.1, which is
+//! the artefact gap 17 leaned on for JBIG2." That was false and it had been
+//! load-bearing: it is why a set of dated third-party decodes became this
+//! decoder's strongest gate. **T.800 Annex J.10 is that equivalent** — a
+//! complete codestream in hex, annotated field by field, with its nine decoded
+//! samples published in J.10.5 — and `jpx_annex_j.rs` now decodes it and
+//! asserts them. That check re-runs; this file still does not.
 //!
 //! # The fixtures
 //!

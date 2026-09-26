@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- §9's seven basic shapes, one each, at coordinates chosen so every expected
+     value below is arithmetic somebody can do in their head. The viewBox is
+     the identity so that the numbers a test asserts are the numbers written
+     here. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"
+     viewBox="0 0 200 200">
+  <rect id="plain" x="10" y="20" width="30" height="40"/>
+  <circle id="round" cx="100" cy="100" r="50"/>
+  <ellipse id="oval" cx="100" cy="100" rx="50" ry="25"/>
+  <line id="rule" x1="1" y1="2" x2="3" y2="4"/>
+  <polyline id="open" points="0,0 10,0 10,10"/>
+  <polygon id="shut" points="0,0 10,0 10,10"/>
+  <path id="drawn" d="M 5 5 L 15 5"/>
+  <!-- §9.7's error rule is §8.3.2's: the pairs that were complete are
+       rendered and the dangling coordinate is dropped. -->
+  <polyline id="odd" points="0,0 10,0 10"/>
+</svg>

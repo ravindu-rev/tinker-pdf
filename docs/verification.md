@@ -6,9 +6,47 @@ fingerprint, render quality is a perceptual budget, coverage of the real
 world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
-Numbers on this page were measured in August 2026. `cargo test --workspace`
-is **2 952 passed, 0 failed, 8 ignored** across 122 suites on
-`x86_64-pc-windows-msvc`. The same suite was 2 243 passed, 0 failed on
+Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 23 September 2026. `cargo test --workspace --no-fail-fast`
+is **5 030 passed, 0 failed, 60 ignored** across 221 suites on
+`x86_64-pc-windows-msvc`, 26 September 2026, two lanes' work merged. Ten of
+the twenty-nine tests since 4 999 are the facade's save path — the font policy,
+the three-valued `SubsetOutcome`, and the rewrite-path census, which is the
+sixtieth ignored test because it walks the fetched corpora.
+
+The other **nineteen** are Table A.19's last two code-block styles: fifteen in
+`tinker-pdf-filters`'s `jpx::tests::code_block_styles` for B.10.7.1's and
+B.10.7.2's worked examples, J.10's two published packet headers, the bracket
+they put on D.6's boundary and the three paths the injection campaign found
+uncovered, and four in `jpx::passes` for Tables D.8 and D.9 row by row. The
+suite count is unchanged at 221 because both live in the filters crate's lib
+binary rather than in a file of their own — which is where the evidence is: a
+five-byte bit string and one code-block's coefficients both sit below
+`jpx_decode`.
+
+**This one is a lane's own tree and not the merged one**, which is the
+difference the paragraph below had to record the last time two lanes ran at
+once. It is `230296c` plus this change, and it does not include the JBIG2
+census work that reached `develop` the same day.
+
+The count before *that* was 4 968 across 220, and the suite gained between
+them was `jpx_poc.rs`, which T.800's progression order change brought with it;
+the thirty-one tests between those two figures are two lanes' run in
+parallel. Twenty-three are the JPX capability's —
+that file's thirteen, plus seven unit tests for A.6.6's marker segment and
+Table A.32's ranges, two in tier-2 for B.12.2's progression order volumes, and
+one that a POC covering everything is no refusal at all. The other eight are
+the fuzz findings below, one regression test per finding plus the pins on the
+two contracts they turned out to be about.
+
+This figure is the merged tree's, and neither lane's own was wrong: each
+measured a tree that could not see the other's tests.
+
+The count before *that* was 4 929 across 219, and the thirty-nine tests
+between 4 929 and 4 968 are two JPX capability lanes' — eighteen for RGN,
+being `jpx_annex_h.rs`'s eight plus ten unit tests for the marker segment and
+H.1's branches, and twenty-one for packed packet headers, which added no file
+of its own. That figure was the merged tree's: each lane measured a smaller
+one, because neither could see the other's tests. The same suite was 2 243 passed, 0 failed on
 `x86_64-unknown-linux-gnu` when it was last observed there, against a
 Windows count of 2 790 at the time; the difference is Windows-only and
 tool-gated suites, and the Linux figure is a dated observation rather than a
@@ -16,23 +54,561 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **24 cargo-fuzz targets**
-cover every input format: `ascii_filters`, `ccitt`, `cff`, `cmap`,
-`content_tokenizer`, `cos_document`, `cos_object`, `crypt`,
-`crypt_ciphers`, `css`, `form_script`, `inflate`, `jbig2`, `jpeg`, `jpx`,
-`layout`, `lzw`, `png`, `render_page`, `sfnt`, `truetype`, `type1`, `xml`,
-`zip_archive` — each landing in the same PR as its parser. Short runs on
-every commit over committed seed corpora; a bounded nightly job runs
-longer. Six of the corpora are written by an `#[ignore]`d test in the crate
-that owns the fixtures, so the seeds and the fixtures cannot drift.
+Ruling 1 makes a fuzz crash a release blocker. **39 cargo-fuzz targets**
+cover every input format, each landing in the same PR as its parser. The
+list is not written out here any more, and that is deliberate: this sentence
+has carried the wrong number twice — it said 33 when there were 38, then 38
+when there were 39, and the 38-name list it carried was missing `woff`.
 
-Every target has had a real session: **186 159 981 recorded executions**,
-two crashes — one a real lexer defect (fixed, both inputs committed as
-seeds), one the crate being right and the harness's assertion wrong. The
-per-target numbers are recorded beside the results because coverage is
-uneven by design: a hardened password hash runs at 8 executions a second
-where an ASCII filter runs at 61 795, and a clean result at 8/s is not
-filed as the same evidence as a clean result at 61 795/s.
+`cargo run -p xtask -- fuzz` prints the roster instead, derived from
+`fuzz/fuzz_targets/`, `fuzz/corpus/` and `fuzz/Cargo.toml` and failing if the
+three disagree. It runs inside `cargo run -p xtask -- check`, so the three
+lists cannot drift apart again without a gate going red. The table below is
+its `--table` output, pasted whole.
+
+`cff_subset` is the one target that fuzzes a **writer**. Its assertion is
+not "it did not panic": whatever the subsetter emits must parse with this
+repository's own `Cff::parse`, every glyph asked for must still be at the
+id it was asked for, and subsetting twice must produce the same bytes. A
+subsetter that renumbered subroutine calls wrongly around the 107 / 1131 /
+32768 bias thresholds produces a *valid* font that draws the wrong glyphs,
+and no other check in the pipeline would see it — the embed path takes the
+bytes and writes them into a `/FontFile3`. 
+### The roster, and whether the seeds reach the code
+
+<!-- Generated by `cargo run -p xtask -- fuzz --table`. 39 targets, 410 seeds. -->
+
+| Target | Seeds | Control prefix | Signature check |
+| --- | ---: | ---: | --- |
+| `ascii_filters` | 6 | — | unsignatured |
+| `brotli` | 46 | 1 byte | unsignatured |
+| `ccitt` | 12 | 2 bytes | unsignatured |
+| `cff` | 4 | — | unsignatured |
+| `cff_subset` | 4 | — | unsignatured |
+| `cmap` | 12 | — | unsignatured |
+| `content_tokenizer` | 6 | — | unsignatured |
+| `cos_document` | 8 | — | 8/8 carried |
+| `cos_object` | 7 | — | unsignatured |
+| `crypt` | 7 | — | unsignatured |
+| `crypt_ciphers` | 4 | 2 bytes | unsignatured |
+| `css` | 7 | 1 byte | unsignatured |
+| `form_script` | 18 | — | unsignatured |
+| `icc_profile` | 6 | — | 6/6 carried |
+| `inflate` | 4 | — | unsignatured |
+| `jbig2` | 23 | 1 byte | unsignatured |
+| `jpeg` | 6 | — | 6/6 carried |
+| `jpx` | 25 | 1 byte | 25/25 carried |
+| `jxr` | 42 | 1 byte | 42/42 carried |
+| `layout` | 6 | 2 bytes | unsignatured |
+| `lzw` | 3 | — | unsignatured |
+| `pki_cms` | 10 | — | unsignatured |
+| `pki_der` | 13 | — | unsignatured |
+| `png` | 5 | 1 byte | 5/5 carried |
+| `rar` | 7 | 1 byte | 7/7 carried |
+| `render_page` | 15 | — | unsignatured |
+| `sevenz` | 7 | 1 byte | 7/7 carried |
+| `sfnt` | 5 | — | 5/5 carried |
+| `shape` | 9 | 2 bytes | unsignatured |
+| `shape_text` | 6 | 2 bytes | unsignatured |
+| `signatures` | 5 | — | unsignatured |
+| `svg` | 18 | 1 byte | unsignatured |
+| `tar` | 8 | 1 byte | 8/8 carried |
+| `tiff` | 7 | 1 byte | 7/7 carried |
+| `truetype` | 7 | — | 7/7 carried |
+| `type1` | 2 | — | unsignatured |
+| `woff` | 13 | — | 13/13 carried |
+| `xml` | 12 | 1 byte | unsignatured |
+| `zip_archive` | 5 | 1 byte | 5/5 carried |
+
+**"Control prefix" is the number of bytes the target takes off the front
+before decoding**, parsed out of its own `split_at(data.len().min(N))` rather
+than declared anywhere. It is the column that matters, because it is where a
+whole corpus can be silently worthless: if the seeds are written as *raw
+files* while the target eats a prefix, every seed has its first byte swallowed
+and its signature destroyed before the decoder sees it. The corpus then
+exercises the refusal path of every parser and nothing else — and `cargo fuzz`
+runs perfectly clean, because a refusal is a fine outcome for a fuzz target.
+
+That is not hypothetical. It has happened twice in this tree:
+
+- **`jxr`**: forty-two seeds, eighty-four decode attempts, **zero** successful
+  decodes. Found by writing `jxr_seeds.rs` and counting.
+- **`jpx`**: six of twenty-five seeds, every one a whole JP2 file added later
+  than the rest. Found by `xtask fuzz` immediately afterwards. Fixing them
+  took the corpus from 14 decodes to 20.
+
+Both are fixed, and the check is now mechanical for every corpus whose format
+has a signature to look for. "Signature check" reads `n/m carried` where the
+seeds put their magic where the target will still see it. A corpus this audit
+cannot check reads `unsignatured` — a raw coded stream, a structured
+generator, or text, all of which genuinely have no magic — and every one of
+those is listed by name in `xtask/src/fuzzaudit.rs`'s `UNSIGNED` table with
+the reason. **A target in neither table fails the audit**, so a new corpus
+cannot be silently unchecked.
+
+`unsignatured` is not the same as unmeasured. Fourteen corpora are replayed
+by two harnesses that count how many seeds reach the code under test and
+refuse a corpus that reaches none —
+`crates/tinker-pdf-filters/tests/fuzz_seeds.rs` and
+`crates/tinker-pdf-font/tests/fuzz_seeds.rs`:
+
+| Corpus | Seeds | Reach the code | Note |
+| --- | ---: | ---: | --- |
+| `ascii_filters` | 6 | 6 | |
+| `brotli` | 46 | 46 | |
+| `ccitt` | 12 | 12 | |
+| `cff` | 4 | 4 | |
+| `cff_subset` | 4 | 4 | |
+| `cmap` | 12 | 12 | |
+| `inflate` | 4 | 4 | |
+| `jpeg` | 6 | 6 | **2 are arithmetic frames**, added with `qm.rs`: nothing in the corpus reached SOF9 or SOF10 before |
+| `lzw` | 3 | 3 | |
+| `png` | 5 | 5 | |
+| `sfnt` | 5 | 5 | |
+| `tiff` | 6 | 6 | |
+| `truetype` | 7 | 7 | **4 carry an outline table, 2 of them composite** |
+| `type1` | 2 | 1 | one negative seed, deliberately |
+
+Two of those rows are worth reading rather than skimming.
+
+**`truetype`**: all seven seeds parse, and three of them — `directory-only`,
+`curvy-truncated` and `cmap12-glyph-id-overflow` — carry neither `glyf` nor
+`CFF `. The other four carry an outline table and **two of those four hold a
+composite glyph**, which is what the target's own header calls "the
+interesting part".
+
+That is a corrected count, and what it corrected is the point. This paragraph
+read *one* seed with an outline table and *one* reaching the recursion, which
+was true, was written down as a real coverage gap, and then stayed true —
+because nothing executed it. A sentence in this file is not a check. So
+`fuzz_seeds.rs` now asserts both numbers as floors and names the seeds it
+counted, and `crates/tinker-pdf-font/src/glyf.rs` writes the three that were
+added: `simple-contours.ttf` for the flag and delta encodings of a simple
+outline, `composite-transforms.ttf` for all five component forms `composite`
+reads — word and byte arguments, a scale, an x-and-y scale, a 2×2 and the
+point-matching placement that is rarest in the wild — and
+`composite-nested.ttf` for four levels of a composite drawing a composite.
+Deleting any one of them fails the test with the count rather than passing
+quietly, which is what the old sentence could not do.
+
+The floors are worth stating as floors rather than as an equality: a corpus
+should be free to grow without editing a test, and the failure this guards
+against is a seed *leaving* — deleted, or quietly stopped parsing and reaching
+the directory walk and nothing else. Composite-ness is read off `loca` and
+`glyf` inside the test, because it is not a question the public API can
+answer: `glyf::outline` returns an `Outline`, and by the time it does, a
+composite and the simple glyph it assembles are the same value.
+
+**`type1`**: one of two seeds is `truncated-eexec.pfb`, which does not parse
+on purpose. That is healthy — a corpus needs its refusal cases — and it is why
+these harnesses assert "at least one seed reaches" rather than "every seed
+reaches". The stronger rule was tried first and was simply false: it failed on
+that seed and on `cmap12-glyph-id-overflow.ttf`, both of which are exactly
+what their names say.
+
+`css`, `svg` and `xml` were checked by eye — every seed's body begins with
+`<`, `@`, `.`, `*` or a path command, so the knob byte is present — and `svg`
+has a replay of its own in `crates/tinker-pdf-svg/src/tests.rs`. They cannot
+be checked mechanically: a rule requiring the body to be valid UTF-8 was
+written, fired on `xml/utf16` (a UTF-16 document, which XML permits) and
+`css/repeated-class` (raw `0xFF` bytes, on purpose, to drive recovery), and
+was **removed rather than given an exception list**. `xtask/src/fuzzaudit.rs`
+records why.
+
+`crypt`, `crypt_ciphers`, `form_script`, `layout`, `render_page` and
+`signatures` are structured generators: the body is carved into fields rather
+than parsed as a format, so every seed reaches the code by construction and
+there is no reachability question of this shape to ask. `cos_document`,
+`cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
+by the signature check above or have no gate to fail at.
+
+Two seeds look wrong and are not: `shape/gdef-every-structure` and
+`shape_text/bidi-brackets` carry no readable face, and both targets have a
+second path — `Layout::from_tables` and the bidi walk — that runs without
+one.
+
+### A fuzz run that never happened means less still
+
+**The fuzzers stopped compiling and nothing said so for a month.** `fuzz/` is
+its own workspace, deliberately — it pulls in `libfuzzer-sys` and builds under
+a sanitizer, and neither belongs in the engine's dependency graph. The price of
+that separation is that `cargo test --workspace`, `cargo clippy --workspace`
+and every other command a contributor runs step straight past it. So when
+`tinker_pdf_layout::Content` gained a `Replaced` variant and
+`tinker_pdf_css::Declaration` gained `Defaulted` and `Content`, three
+exhaustive matches in `fuzz/fuzz_targets/` stopped building, every local gate
+stayed green, and `fuzz/Cargo.lock` drifted a dependency behind the workspace
+it locks.
+
+It was found on 20 September 2026 by the CI job that builds them, the first
+time that job had run since 24 August — `ci.yml` fires on a push to `main` and
+on a pull request, and the work had been landing on `develop`.
+
+Ruling 1 says a fuzz crash is a release blocker. **A fuzzer that does not build
+cannot crash**, so for that month the rule was unenforceable and read as
+satisfied, which is the failure mode this page exists to name. The guard is now
+local: `cargo xtask fuzz` — and therefore `cargo xtask check` — runs
+`cargo check` over `fuzz/`'s own manifest and fails with the compiler's own
+error. It is `cargo check` rather than `cargo fuzz build` because the question
+is whether the *types* still agree; it runs on stable and needs no sanitizer,
+and CI still builds them for real. Proved by injection: removing the
+`Content::Replaced` arm again makes `xtask check` report three problems and
+exit 1.
+
+### What the month of no CI had been hiding
+
+**The first fuzz run after the build was fixed failed five targets**, on
+20 September 2026: `jbig2`, `render_page`, `shape_text`, `tar` and `tiff`.
+That is the cost of the month above stated as a number — not one of the five
+needed a clever input, and every one of them was reachable in twenty seconds
+from seeds already in the repository.
+
+**The step that found them is not a replay, and its name said it was.**
+`-max_total_time=20` replays the corpus and then *mutates* from it for the
+rest of the twenty seconds, so all five inputs were generated on the runner
+and none was a committed seed. The step is now named
+"Mutate for twenty seconds from each seed corpus" for that reason: "the
+committed seeds crash" would have sent five investigations to the wrong
+files. All five inputs are now committed as seeds under their own names, so
+the thing that found them keeps finding them.
+
+**None of the five is a regression, and the way that is known is worth more
+than the finding.** The reasoning that says otherwise — *these targets passed
+on 24 August, so each broke since* — fails twice:
+
+- **Three of the five targets did not exist on 24 August.** `shape_text`
+  (`83fb22d`) and `tiff` (`77645fe`) landed on 29 August and `tar`
+  (`b646a40`) on 31 August, each in the same commit as the code it drives.
+  A target cannot have passed a run it was not in.
+- **The two that did exist passed *over* what was found.** `render_page`'s
+  clamp and `render_page` itself arrived in one commit, `0041439`, on
+  10 August; the defect below was in the tree for the 24 August run and that
+  run went green. Only `jbig2`'s is new work in the window — the symbol
+  dictionary it spends its budget in landed on 25 August (`6660ad5`).
+
+So a green twenty-second mutating session is **not** evidence that a defect
+is absent, and treating the last green run as a bisection bound reads three
+missing targets and one missed input as four regressions. It is a record of
+what that session happened to reach.
+
+#### The five, and what each one was
+
+**Two were `crash-` — libFuzzer's classification for a panic — and neither
+was the engine panicking.** Both were a fuzz target's own `assert!`, and they
+did not have the same standing:
+
+- **`tar`: the cap was applied to the field and the name expanded past it
+  afterwards.** `Limits::max_name_len` is documented as bytes of stored path,
+  and `decode_name` cut the *raw header field* to it and then decoded — and
+  the fallback is ISO-8859-1, one byte in and two bytes out above `U+007F`.
+  A name cut to sixteen bytes reached the caller at twenty-three. The
+  assertion was right and the reader was wrong. `tinker-pdf-zip` has bounded
+  the decoded string since it was written, because CP437 expands the same
+  way; **`rar` had the identical defect** — `from_utf8_lossy` is one byte in
+  and three out — and was found by reading the sibling rather than by the
+  fuzzer, and fixed in the same commit.
+- **`shape_text`: the target asserted something the API does not promise.**
+  `Limits::max_glyphs` bounds what `GSUB` *adds*: `Shaper::shape` fills the
+  buffer one glyph per character before the limits are consulted, and
+  `Limits::for_glyphs` — the crate's own factory — returns a ceiling at or
+  above that fill by construction. The target asserted the shaped run was no
+  longer than the ceiling, so against the `max_glyphs: 8` it sets from one
+  knob bit, every run of more than eight characters failed. The assertion now
+  bounds the *growth*, against the greater of the ceiling and the run's byte
+  length, and `max_glyphs`'s own doc says which of the two readings is
+  right.
+
+**The other three were bounds questions, and they answered differently:**
+
+- **`render_page` (`oom-`): the cap was set right and not enforced.**
+  `page_pixels` shrinks both sides by `sqrt(cap / area)`, which lands on
+  `MAX_PAGE_PIXELS` only while both sides stay above the one-pixel floor. A
+  `/MediaBox` of `[0 0 20 9.2e18]` shrinks to a width of 0.125, the floor
+  raises it back to 1 — a factor of eight the height never gives back — and
+  the canvas came back at 1 x 536 870 911, **eight times the ceiling** and a
+  single 1.6 GB allocation from 755 bytes. The cap does not move; it is now
+  spent on the other side once a side is at the floor, and the same page
+  clamps to 1 x 67 108 864. The four clamp tests that already existed could
+  not see it: every one of them is square or 2:1.
+- **`tiff` (`timeout-`): the cap was charged on the wrong quantity.**
+  `MAX_TIFF_SAMPLES` counted the *output* raster, and the decode reads
+  `SamplesPerPixel` samples for every pixel of a chunky image and keeps only
+  the ones the photometric names. 240 bytes declaring 63 239 x 4 with
+  `SamplesPerPixel` of 65 530 produced a one-megabyte picture — inside every
+  cap here — by reading **16.6 billion** samples to get it, in 45 seconds. A
+  cap over the output of a loop whose input the file chooses is the shape
+  `MAX_JPX_WORK` had. The number does not move; it is now charged on the
+  wider of what is read and what is written, and the same file is refused at
+  247 times the cap before anything is allocated.
+- **`jbig2` (`timeout-`): the cap was right, was spent against, and was not the
+  whole answer — closed 26 September 2026 by a bound on one symbol against its
+  page.** 105 bytes made a symbol dictionary decode **67 219 222 pixels**
+  across 546 symbols before `MAX_JBIG2_SYMBOL_PIXELS` (67 108 864) refused it:
+  **564 ms measured in release and 6.49 s in a debug build**, and past libFuzzer's
+  twenty-second timeout under coverage and sanitizer instrumentation. The memory
+  was never the problem — 2^26 *bits* is 8 MiB — and the cap's number is the one
+  its ledger argues, 2.7x a 200-page bilevel scan's shared dictionary. What was
+  missing was a bound on the dictionary's *work*.
+
+  **The two obvious fixes were both blocked, and the reasoning is kept because
+  it is what the answer had to get past.** A separate work cap could not be
+  added: work here is counted in decoded pixels, which is the quantity
+  `MAX_JBIG2_SYMBOL_PIXELS` already bounds, and `bounds_ledger.rs` refuses a cap
+  set under another cap over a quantity that other cap has already bounded —
+  "the other cap wearing a second name". And lowering
+  `MAX_JBIG2_SYMBOL_PIXELS` to bound the time would put it under the 25 000 000
+  its own yardstick says a plausible 200-page scan spends. **Production was more
+  exposed than the fuzz target, not less**: `resources.rs` passes
+  `MAX_DECODED_STREAM` as the ceiling, so one image stream per page bought
+  0.65 s per page.
+
+  **What closed it is `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`: a per-symbol bound
+  against the page geometry the same call was given.** A symbol wider or taller
+  than the page it will be composited onto is drawable only by clipping, and
+  this seed's symbols run to 246 988 x 1 against a page of 1 x 1. Charged per
+  dimension rather than per area — a symbol one row tall and a page's worth of
+  pixels wide has the page's area and none of its shape — so it refuses that
+  dictionary at its *first* symbol while leaving the total budget a shared
+  dictionary needs untouched, which is the distinction the
+  `MAX_JBIG2_SYMBOL_PIXELS` row already draws between a per-item cap and a
+  total. It is a bound this build chooses rather than one the format states:
+  **T.88 does not forbid a symbol larger than its page**, which under ruling 3
+  is exactly why it needed the corpus first.
+
+  **The evidence, and the instrument that had to be built to take it.** The
+  measurement wanted was the largest symbol relative to its page across the
+  JBIG2-bearing files, and `jbig2_census.rs` could not take it. Its `Tally` had
+  carried a `max_symbol_pixels` field since the day it was written, merged
+  across files by `add` and **assigned by nothing**; printed for the first time
+  on 23 September 2026 it read 0 over all 117 files, so it was made to print
+  `not measured` and to assert the field was still unassigned — because a zero
+  reads as "no real document comes close" when what it means is "nobody looked".
+  The reason no walk could assign it is now written down: **neither of a
+  symbol's dimensions is in any segment header.** 6.5.5 accumulates both from
+  `IADH` and `IADW` deltas inside the arithmetic coder, and on the Huffman road
+  from Annex B deltas inside the bit stream, so a census that shares no code
+  with the decoder — which this one does on purpose — can count symbols and
+  cannot measure one. So the census now *decodes*, through a new
+  `jbig2_decode_measured` that hands back 6.5.5's own tally, and keeps its
+  property rather than dropping it: an image whose decode refused is counted as
+  refused and its figures read as a floor.
+
+  **What it found, 26 September 2026, over 118 JBIG2-bearing files:** 502
+  images, 243 dictionaries, **88 736 symbols, and not one of them wider or
+  taller than the page it is drawn onto.** The whole-multiple figure is **1**,
+  and the tightest fit in the population is *exactly* 1 —
+  `pdfjs/test/pdfs/bitmap-symbol-big-segmentid.pdf` holds a symbol 399 pixels
+  wide on a page 399 pixels wide. The largest single symbol anywhere is
+  713 x 437 (311 581 pixels), the widest is 2 242 and the tallest 3 200, each on
+  a page far larger than itself. **The cap is 4**, a margin of 4x over the worst
+  real document — sixteen times the page's area — chosen the way this table's
+  other tail-free rows are: `MAX_JBIG2_SYMBOL_PIXELS` is 2.7x its yardstick and
+  `MAX_JBIG2_SYMBOLS` 5x its own, and 4 sits between them. It is not 1, because
+  the population's ceiling *is* its tightest fit and a bound set at the worst
+  real document is the failure `no_bound_refuses_a_real_book` exists to catch.
+
+  **The seed: 564 ms to 23.5 µs in release, and 6.49 s to 0.99 ms in a debug
+  build** (each measured here, best of three), refused at its first symbol
+  — 69 pixels wide against a page one pixel wide — by `SymbolLargerThanPage`
+  rather than by the total budget. `jbig2_seeds.rs`'s whole 23-seed replay went
+  from about twelve seconds to ten milliseconds.
+  `the_pixel_budget_seed_is_refused_at_its_first_symbol` pins that **by its
+  cause and not by a clock**, asserting the symbol count is 1 and naming the
+  refusal, because a budget proved by a clock passes on a fast machine with the
+  budget removed. **No corpus file moved**: `jbig2_attribution.rs` still reports
+  1 of 118, `pdfjs/issue3371.pdf`, for the reason it always did.
+
+  **And the same measurement filled the hole this row was really about.**
+  `MAX_JBIG2_SYMBOL_PIXELS` was the one cap of the four with no corpus figure
+  behind it at all — the other three publish counts, and it is a pixel budget.
+  It has one now: the largest total any one dictionary in five corpora spends is
+  **1 568 118** pixels, in `safedocs/0000337.pdf`, so the cap clears the worst
+  real document by **42.8x** and its own argued yardstick by 16x. That
+  corroborates the arithmetic from below rather than licensing a lower cap: the
+  25 000 000 is a *200-page* scan sharing one dictionary and the corpus's worst
+  is a 46-page one, so lowering the cap to the measurement would be setting it
+  under the estimate on the strength of a smaller document. It stays where it
+  is, and now with a number under it.
+
+  **What this bound does not do, stated rather than implied, with the
+  arithmetic.** It bounds a symbol against its page; it does not bound a
+  dictionary's total work, and it was not allowed to. One symbol is now at most
+  sixteen times the page's *area* — four times each side — so `MAX_JBIG2_SYMBOLS`
+  and `MAX_JBIG2_SYMBOL_PIXELS` between them still permit 67 108 864 decoded
+  pixels, about 560 ms in release, from a page of roughly **42 pixels** upward:
+  100 000 x 16 x 42 crosses the budget. Below that the budget is out of reach,
+  and that is the class this finding was in — a page of one pixel now buys at
+  most 1 600 000 decoded pixels rather than 67 million, a factor of 42. Of the
+  sixteen page shapes this target's first byte can choose, **four are under that
+  threshold** (1x1, 1x8, 8x1, 37x1) and the other twelve can still reach the
+  budget. So what the bound removes from this target is the *shape* the finding
+  had — a page too small to display what was decoded for it — and not the
+  possibility of a slow input in general. The residual is the two existing caps
+  behaving exactly as their own ledgers argue, on a page large enough to make
+  them proportionate; that is what a bound against page geometry buys, and the
+  most one can.
+
+### What a green fuzz run does not mean
+
+**Not one of the thirty-nine targets checks that a decode is right.** They
+divide into two shapes, and both are now written into every target's own
+header under a `# What this target ...` heading — which `xtask fuzz` requires,
+so a new target cannot land without one.
+
+**Fourteen assert nothing beyond "it did not panic, hang, or exhaust
+memory."** They call the decoder and discard the result with `let _ =`:
+`ascii_filters`, `cff`, `cmap`, `content_tokenizer`, `cos_document`,
+`cos_object`, `icc_profile`, `jpeg`, `lzw`, `render_page`, `sfnt`,
+`signatures`, `truetype`, `type1`. A green run over `render_page` is the
+single easiest result in this repository to mistake for more than it is.
+
+**The other twenty-five assert only structural or self-consistent
+properties** — a ceiling held, a geometry agrees with its own sample count, a
+name past a cap was refused, parsing twice gave the same answer, a reordering
+was a permutation. Every one of those is satisfied by a decoder that is
+*consistently wrong*. Three are worth singling out:
+
+- **`shape` and `shape_text`** lean on determinism, and a shaper that is
+  consistently wrong is perfectly deterministic.
+- **`crypt` and `crypt_ciphers`** lean on a round trip, which proves the
+  cipher is an involution and not that it is RC4 or AES. A self-inverse but
+  wrong key schedule passes while producing documents no other reader opens.
+- **`pki_cms`** enforces X.690's clauses about encoding and nothing about what
+  the encoding says — and for a signature reader, a wrong answer reported
+  confidently is worse than a refusal.
+
+`cff_subset` is the strongest of the thirty-nine and still not exempt: it
+fuzzes a *writer*, and its round trip goes through **this repository's own**
+parser, so a misreading of the CFF specification shared by writer and reader
+round-trips perfectly and draws the wrong glyphs everywhere else.
+
+The precedent for all of this is `brotli`, which asserts only
+self-consistency and therefore could not have found the ring-buffer defect
+that a decoded-bytes comparison found on the first try. `brotli` is also the
+one case where the missing check **cannot** be supplied from anywhere in the
+tree: `CONTRIBUTING.md` rule 1 leaves no encoder to round-trip against and
+ruling 13 bars asking another decoder. Everywhere else the check exists and
+is somewhere else, and each header now names where.
+
+Short runs on
+every commit over committed seed corpora; a bounded nightly job runs
+longer. **Eighteen** of the corpora are written by an `#[ignore]`d test in
+the crate that owns the fixtures, so the seeds and the fixtures cannot drift:
+`brotli`, `cff`, `crypt`, `crypt_ciphers`, `icc_profile`, `jxr`, `pki_cms`,
+`pki_der`, `png`, `rar`, `render_page`, `sevenz`, `shape`, `signatures`,
+`tar`, `tiff`, `truetype` and `zip_archive`.
+
+That count read *twelve* until tier 4's archive lane counted it, and it was
+wrong in both directions — which is the failure this section's own
+`icc_profile` story is about, arriving again. It was short by `brotli`, `jxr`
+and `tiff`, whose writers had landed without the sentence being updated, and by
+the three the archive lane added. And it listed **`jbig2`, which has no writer
+at all**: that corpus is twenty-two inputs a fuzzer found or a person wrote,
+replayed by `jbig2_seeds.rs` and never regenerated, which is a different
+guarantee and is the one thing on the old list that could not have been true.
+The number is measured now rather than remembered — every `fuzz/corpus/<name>`
+a crate test calls `fs::write` on. It went to eighteen when `truetype` got a
+writer, and re-measuring rather than incrementing is the discipline: the
+seventeen above were counted the same way on the same day.
+
+`icc_profile` joined that list late, and how it was found is the point:
+`fuzz/Cargo.toml`'s targets listed against `fuzz/corpus`'s directories, not
+read off either. It was the **one target with no seeds at all**, so its
+twenty seconds in `fuzz-seeds` went on random bytes — and for a format
+whose first gate is the `acsp` signature at byte 36, random bytes reach the
+parser essentially never. Half its seeds are profiles this build *refuses*,
+deliberately: `NeedsLut` and `MissingTags` are reached after the header
+check, the tag count and the whole `132 + i * 12` table walk, which is
+where that format's arithmetic lives. Each seed states which it is and the
+test asserts it, so a seed that quietly stopped parsing cannot sit in the
+corpus looking like the coverage it no longer is.
+
+This sentence read 24 and omitted `icc_profile` until the signature work
+counted them, so the number was wrong in the direction that flatters — which
+is the direction worth checking. The fuzz job reads its matrix off the
+directory precisely so that a target nobody runs cannot exist; nothing was
+checking this paragraph against that directory.
+
+Every target has had a real session: **251 676 242 recorded executions**,
+three crashes and one timeout, **all four closed**. Two of the crashes are old
+— one a real lexer defect (fixed, both inputs committed as seeds), one the
+crate being right and the harness's assertion wrong. The third crash and the
+timeout are from September 2026, were open for one day, and are described
+below with the sessions that closed them. The per-target numbers are recorded
+beside the results because coverage is uneven by design: a hardened password
+hash runs at 8 executions a second where an ASCII filter runs at 61 795, and a
+clean result at 8/s is not filed as the same evidence as a clean result at
+61 795/s.
+
+Four of those figures are new. `pki_der`, `pki_cms`, `shape` and `signatures`
+were the four targets with no session at all — they counted toward the target
+list and not toward the executions — and each got one on **4-5 September 2026**,
+600 seconds asked for apiece, one core, `rustlang/rust:nightly` with rustc
+1.100.0-nightly (a69a63265 2026-09-03) and cargo-fuzz 0.13.2, run in Docker on
+`x86_64-unknown-linux-gnu` because libFuzzer does not build for
+`x86_64-pc-windows-msvc`. Two of them ended on a finding rather than on the
+clock; the rows below are the sessions **after** those two were fixed, run the
+same day on the same image and toolchain:
+
+| Target | Seconds | Executions | Exec/s | Corpus | Result |
+| --- | ---: | ---: | ---: | --- | --- |
+| `pki_der` | 601 | 5 113 813 | 8 508 | 13 → 1 975 | clean |
+| `pki_cms` | 601 | 58 453 573 | 97 260 | 10 → 1 476 | clean |
+| `shape` | 601 | 24 586 | 40 | 9 → 1 017 | clean |
+| `signatures` | 601 | 1 924 289 | 3 201 | 5 → 3 572 | clean |
+
+The seconds are libFuzzer's own fuzzing clock, which starts after the seed
+corpus is loaded and has one-second granularity. The two sessions that found
+something are **not** in that table and their executions are **not** in the
+total above, so nothing is counted twice: `pki_der` crashed after 33 072
+executions in its first second, and `shape` stopped after 24 115 in 78
+seconds. Each target's own header carries both runs.
+
+**What the two findings were, and what closed them.** They are named here
+rather than in a footnote because ruling 1 makes each a release blocker:
+
+- **`pki_der` crashed inside its first second**, on the assertion that a
+  subtree `require_definite_lengths` calls definite holds no indefinite node.
+  The crate was wrong and the harness right, which is the opposite of the
+  earlier case on this page. The sweep descended into a constructed node
+  without re-bounding itself by that node's declared end, so an inner node
+  over-claiming its length stepped straight over an indefinite-length sibling
+  and the subtree was reported definite. That method is the whole of what
+  keeps a BER `signedAttrs` out of a digest. Minimised to 42 bytes, written
+  out verbatim in `fuzz/fuzz_targets/pki_der.rs`, committed as
+  `fuzz/corpus/pki_der/sweep-over-an-indefinite-sibling`, and closed by
+  checking at every constructed node that its immediate children fill it
+  exactly before the sweep descends into it.
+- **`shape` timed out** — ruling 1's middle clause, not its first — with one
+  input taking over 28 seconds against a limit of 25. Minimised to 1 158
+  bytes, committed as `fuzz/corpus/shape/lookup-list-subtable-storm`. The
+  face path costs microseconds because the parsed face has no `GSUB` or
+  `GPOS` at all; every second of it was the second pass, which reads the same
+  bytes *as* a lookup list, finds 174 lookups, and shapes three glyphs
+  through them twice. `Limits::max_operations` was charged once per lookup
+  application and then looped over every subtable, so it bounded *attempts*
+  while `subTableCount` — the input's to choose — bounded the cost of each.
+  Closed by charging per subtable searched.
+
+**The four clean results are not the same evidence as each other**, which is
+this page's standing point about rates. `pki_cms` at 97 260 a second is the
+fastest target in the tree and 58 million executions is real coverage;
+`shape` at **40** is the slowest anything here has run, and that is the fix
+showing up in the number rather than a second defect — a corpus of a thousand
+mutated lookup lists now runs each of them *to* its ceiling instead of running
+until somebody gives up, and half a million subtable searches is real work.
+`slowest_unit_time_sec` was 0 on both re-runs, so no single input came within
+a second of the 25-second limit. Whether half a million is the right ceiling
+for a shaping run is a separate question these sessions do not answer; ruling
+3 says it moves on evidence.
+
+Each of the four also has a committed seed corpus replayed on stable by an
+ordinary test. That is weaker than a session, was never counted as one, and
+the `pki_der` crash is the demonstration: the replay had been green on every
+commit for as long as the corpus existed, and one second of mutation found a
+defect in the method the CMS digest path depends on. Both minimised inputs are
+now in those corpora, and both are asserted for their *verdict* rather than
+for not panicking — which is what the `pki_der` case turned out to need.
 
 Fuzzers need nightly, so a **hostile-input sweep runs on stable on every
 commit**: seeded xorshift mutation of the real fixtures, driven as an
@@ -41,32 +617,111 @@ ordinary test (`crates/tinker-pdf/tests/hostile_input.rs`).
 ## Determinism, fingerprinted
 
 Ruling 4's contract — same bytes, same options, bit-identical output on
-every target — is proven by **15 committed render fingerprints and 3
+every target — is proven by **19 committed render fingerprints and 3
 document byte-hashes** in `crates/tinker-pdf/tests/determinism.rs`. Each
 fixture carries an ink floor and an `UnreadableFont` guard, so a fixture
-that draws nothing fails rather than becoming a baseline. Details, and
+that draws nothing fails rather than becoming a baseline. Four of the
+nineteen are the analytic tier's own pages, hashed through the same builders
+`render_analytic.rs` evaluates them with, so the page a formula adjudicates
+and the page a hash covers are one document. Details, and
 which targets are measured versus claimed, are in
 [features/determinism.md](features/determinism.md).
 
 ## Corpora: fetched, pinned, never committed
 
-`corpus/` holds fetch scripts and a lockfile of upstream commits and
-sha256 per corpus. Nothing from any corpus enters git — redistribution
+`corpus/` holds fetch scripts and a lockfile pinning every corpus by sha256,
+and the four fetched from a forge by upstream commit as well; the fifth is a
+published archive with no repository behind it, so its checksum is the whole
+pin and the lockfile refuses a `commit` on such an entry rather than letting
+one pin nothing. Nothing from any corpus enters git — redistribution
 rights are per-file murky in every real-world PDF collection, and a pin
 plus checksum reproduces the set without this repository becoming a
 distributor. Licences per corpus are generated by
 `cargo xtask corpus-licences` into [corpus/README.md](../corpus/README.md).
 
-The measured state (`corpus/ratchet.json`, 72 dpi, no font provider, 20 s
-timeout):
+The measured state (`corpus/ratchet.json`, 72 dpi, no font provider, 180 s
+timeout, 6 September 2026):
 
 | Corpus | Files | Rendered every page | Failed | Timed out | Rewrites that validate |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| pdf.js | 974 | 963 | 11 | 0 | 842 of 842 |
-| veraPDF | 2 907 | 2 906 | 0 | 1 | 2 890 of 2 890 |
-| qpdf | 637 | 608 | 29 | 0 | 487 of 487 |
+| pdf.js | 974 | 974 | 0 | 0 | 841 of 841 |
+| veraPDF | 2 907 | 2 907 | 0 | 0 | 2 891 of 2 891 |
+| qpdf | 637 | 631 | 6 | 0 | 487 of 487 |
 | PDF Association | 7 | 7 | 0 | 0 | 6 of 6 |
-| **Total** | **4 525** | **4 484 (99.1 %)** | 40 | 1 | **4 225 of 4 225** |
+| SafeDocs | 1 000 | 997 | 3 | 0 | 899 of 899 |
+| **Total** | **5 525** | **5 516 (99.8 %)** | 9 | 0 | **5 124 of 5 124** |
+
+**The nine that do not render every page, attributed.** All nine are files that
+would not open at all, and not one is a page this engine drew wrongly:
+
+| Class | Files | What it is |
+| --- | ---: | --- |
+| No PDF header at all | 4 | qpdf `bad1.pdf`, `issue-141b.pdf`, `issue-263.pdf`, `issue-335b.pdf` |
+| Not a PDF at all | 2 | SafeDocs `0000819.pdf` and `0000920.pdf` are HTML pages the crawler saved under a `.pdf` name — 58 KB and 1.3 KB of `<!doctype html>` |
+| A key length the file misspells | 1 | qpdf `bad-encryption-length.pdf` writes `/Wength 128`, so 7.6.3.2's default of 40 bits applies and this engine uses it. Algorithm 5 over the empty password reproduces the file's own `/U` at sixteen key bytes and not at five, so the file was built at 128 and following the default is the specification's answer |
+| A fuzzer's output | 1 | qpdf `issue-147.pdf`: 91 bytes from its own `fuzz/` corpus, no header, `/O` and `/U` both empty strings. There is no password, because an empty `/U` has nothing for one to authenticate against |
+| A password nobody stated | 1 | SafeDocs `0000300.pdf`, a real encrypted document off the open web |
+
+**Thirty-six of these were password refusals until 5 September 2026, and they
+were the runner's limitation rather than the engine's.** `tpdf` tries the empty
+password and nothing else, which is right for a tool and wrong for a census:
+the fixtures are encryption tests, and their passwords are stated upstream.
+Eight of the qpdf files carry theirs *in their own names* —
+`enc-R2,V1,U=view,O=master.pdf` has the user password `view`,
+`enc-XI-R6,V5,U=wwwww,O=wwwww.pdf` has `wwwww` — and qpdf's own
+`qtest/*.test` scripts name the rest, `c-r2.pdf` with `user1`,
+`nontrivial-crypt-filter.pdf` with `asdfqwer`, `short-O-U.pdf` with
+`19723102477`. `check-encryption.test` settles `20-pages.pdf` outright: with no
+password `--requires-password` exits 0, meaning a password other than the one
+supplied is required, and with `user` it exits 3, meaning that one works. So
+the engine is refusing exactly what it should refuse.
+
+**The decision was taken on 5 September 2026 and the cost was paid.**
+[corpus/passwords.tsv](../corpus/passwords.tsv) carries 34 rows, every one
+quoted to the upstream line that states it, and the runner passes each to the
+child. `passed` moved from 4 484 to 4 519 over the four fixture corpora, and
+every ratchet baseline, `degraded`, `strict_eligible` and every metamorphic
+denominator was re-recorded with it.
+
+Two rows are marked `derived` rather than quoted, because no upstream file
+names them: `c-r4.pdf` and `job-json-encrypt-40.pdf` were opened by trying what
+their siblings use, and the word is there so nobody later reads a derivation as
+a quotation. One row names a gap rather than closing it: `saslprep-r6.pdf` is
+pdf.js's test that a revision 6 password is SASLprep-normalised before it is
+hashed (ISO 32000-2 7.6.4.3.3), and this engine does not do that — upstream
+states the password as `S<U+00AA>SL<U+00AD>prep` and the file authenticates the
+normalised `SaSLprep`, so the sidecar carries the normalised form and says why.
+What that buys is the rest of the file measured; what it must not buy is a
+missing feature looking like a present one.
+
+Reading an upstream test script for a password is an *input*, which ruling 13
+admits. Re-recording six committed bars was the judgement, and it was taken.
+
+**The four have no header.** `bad1.pdf` begins `oops`, `issue-263.pdf` begins
+`%PDFn`, `issue-141b.pdf` runs the version into the first object, and
+`issue-335b.pdf` starts with a byte above 127 followed by `startxref`. Each is
+a deliberately damaged fixture in qpdf's own suite — `bad1.pdf` is driven by
+`qpdf-ctest` as a bad file by name — and `NotAPdf` is the answer.
+
+**There is no timeout left, and getting there took two goes.** The
+ten-thousand-page implementation-limit fixture used to be stopped at page 4 153
+against a twenty-second budget; at sixty it finishes, in 48 seconds measured
+alone, which is *inside a factor of 1.25 of the limit* — so a run competing for
+the machine killed it and an idle one did not. That is the same hazard as the
+two pdf.js files below, arriving on a different file.
+
+The limit is **180 seconds** since 6 September 2026, and this time it is sited
+on the whole distribution rather than on whichever file was flipping. Measured
+per corpus on an idle machine, after the rasteriser fix below: pdf.js 54 s
+(`issue16263.pdf`), veraPDF 48 s (the implementation-limit fixture), qpdf 21 s,
+the PDF Association's examples 0.2 s, SafeDocs 80 s (`0000231.pdf`, 4.5 MB off
+the open web). Three minutes is between three and nine times each of those, and
+the stall detector still fires on a child silent for half its budget — no file
+measured here is silent for ninety seconds.
+
+SafeDocs carries its own, `timeout = 240` in the lock, because a timeout is a
+property of the documents rather than of the run: its median file is 288 KB
+where a fixture's is a few kilobytes.
 
 **Not one crash.** Ruling 1 held against thousands of files nobody here
 authored, which is worth more than the fuzzers, because these are documents
@@ -81,20 +736,62 @@ file that rendered in under two seconds did not finish a rewrite in three
 minutes, and "timed out" is also what a 900-page scan says. The limit of the
 signal is worth stating — one unit of work longer than the stall window is
 silent for the same reason a hang is, so what the runner claims honestly is
-*made no observable progress for half its budget*. The second axis — 1 045 files
-(23.1 %) rendering *with something reported* — is measured without font faces,
-and there are now two more bars that say what that costs.
-`corpus/ratchet-fonts.json` is the same 4 525 files with a synthesised face
-supplied and reports **506 (11.2 %)**; `corpus/ratchet-bundled.json` is the
-same files with the twelve Liberation faces the `bundled-fonts` feature ships
-and reports **533 (11.8 %)**. So roughly **half of all reported degradation was
-the absence of a face** rather than a defect in the engine.
+*made no observable progress for half its budget*.
+
+**The pdf.js pass bar was load-sensitive, and here is which files and why it
+is not any more.** Measuring the corpus per file: `freeculture.pdf` takes
+20 122 ms and `tiling-pattern-box.pdf` 20 010 ms against what was a 20-second
+limit, and the next slowest file in that corpus is 13 138 ms. Two files sat
+within a factor of two of the limit and nothing else was close, so a run
+competing with a build for the machine flipped one or both, `passed` fell from
+963, and the strict and metamorphic rows fell with it because those two files
+dropped out of every denominator. It arrived three times looking like an engine
+that had stopped rendering.
+
+The limit went to **sixty seconds** on 4-5 September 2026, taken together with
+deleting the metamorphic budget gate below, and to **180** on 6 September when
+the same hazard turned up on two more files; the siting of that number is above.
+
+**And the last of the load-sensitivity was not the limit at all.** Two files
+that had to be timed out at sixty seconds now finish in 41 and 80 seconds, and
+one page of a real Word document at 144 dpi went from 11 380 ms to 1 245 ms —
+because the rasteriser's row loop indexed with a bounds check per pixel where a
+slice would do. That is recorded under **the rasteriser's row loop** below. A
+timeout is a limit on how slow the engine is allowed to be; it is not a fix for
+being slow.
+
+The second axis — **1 412 files (25.6 %) rendering *with something reported***
+— is measured without font faces, and there are two more bars that say what
+that costs. `corpus/ratchet-fonts.json` is the same 5 525 files with a
+synthesised face supplied and reports **459 (8.3 %)**;
+`corpus/ratchet-bundled.json` is the same files with the twelve Liberation
+faces the `bundled-fonts` feature ships and reports **495 (9.0 %)**. So
+roughly **two thirds of all reported degradation was the absence of a face**
+rather than a defect in the engine.
+
+Those figures rose in absolute terms on 6 September and the reason is the
+corpus rather than the engine: a thousand real-world documents were added, and
+483 of them report something without a face where 184 do with one. A document
+off the open web names fonts it does not embed far more often than a fixture
+written to test a reader does, which is the kind of thing the fifth corpus is
+there to say.
+
+The no-faces figure was 1 045 until August 2026. Seventy-two files left it
+when a form XObject's own `/Resources` was consulted at last
+([features/rendering.md](features/rendering.md)) and stopped drawing a
+placeholder where a form named an image, a colour space or a font the page had
+never heard of; the rest of the way to 929 was ICC profiles being read and
+image edges being drawn soft, each re-recorded in `corpus/ratchet.json` by the
+commit that earned it. Over the four fixture corpora it is 959 now, the 30
+being files that stopped being password refusals and started being
+measurements.
 
 The synthetic face is one this repository writes for itself (`cargo xtask
 synth-face`) — every glyph from 32 up a filled box — so it answers *was a face
 available* and nothing more, needs no licence and no download, and is the same
-bytes on every machine. That it scores 27 files *better* than the real faces is
-the interesting part: every one of the 27 is a symbolic font that the bundled
+bytes on every machine. That it scores *better* than the real faces — 27 files
+when it was measured, 31 on the recorded bars — is the interesting part: every
+one of the 27 was a symbolic font that the bundled
 set declines and one all-purpose face answered with squares, so the synthetic
 bar flatters itself by exactly that much
 ([features/fonts.md](features/fonts.md)).
@@ -108,19 +805,26 @@ and the runner fails the run when that and the `--fonts` setting disagree, in
 either direction.
 
 The fourth axis is the metamorphic one, and its denominator is worth being
-honest about. A relation is not asked of a file that has already spent much of
-the runner's budget opening and rendering, because the relations cost roughly
-that again twice over and a timeout would move the *pass* rate — a different
-measurement that was here first. That gate is a **clock**, and a clock deciding
-a ratcheted number means a file near the line can be asked on one run and
-declined on the next: one run recorded `dpi` at 572 of 579 and the next at 572
-of 580. Nothing deterministic replaces it — `qpdf/numeric-and-string-2.pdf` is
-16 KB with 22 objects and takes 4.9 seconds, while files a hundred times its
-size take a tenth of that — so the line is **sited** instead: every corpus file
-between one and six seconds was timed, and 3 100 ms is the middle of the widest
-gap in that distribution, 2 885 ms below and 3 385 ms above. The per-file
-report carries each document's `cost` — bytes, objects and first-page pixels —
-which is the measurement that settled it.
+honest about. **A relation used to be declined for a file that had already
+spent much of the runner's budget opening and rendering**, because the relations
+cost roughly that again twice over and a timeout would move the *pass* rate — a
+different measurement that was here first. That gate was a **clock**, and a
+clock deciding a ratcheted number meant a file near the line could be asked on
+one run and declined on the next: one run recorded `dpi` at 572 of 579 and the
+next at 572 of 580. The nightly failed on exactly that for a week.
+
+Nothing deterministic could replace it, which was measured rather than assumed —
+`qpdf/numeric-and-string-2.pdf` is 16 KB with 22 objects and was declined at
+6.3 s, while its sibling `numeric-and-string-1.pdf`, 18 KB and 15 objects, was
+admitted at 8.9 s. So on **4-5 September 2026 the gate was deleted and the
+per-file timeout raised to sixty seconds**, which the deleted comment had
+considered and rejected because a longer timeout changes what the pass rate
+means. It does, and the change was measured first: the whole corpus in 95
+seconds, nothing timing out anywhere, and every one of the twelve
+corpus-and-relation counts up or equal. What declines a relation now is a
+property of the document, so `compared` is a function of the corpus rather than
+of the machine. The per-file report still carries each document's `cost` —
+bytes, objects and first-page pixels — because it is what ruled a cost gate out.
 
 The third axis is ruling 13's, and it is about the **writer** rather than the
 reader: every file this engine read cleanly is rewritten in memory and the
@@ -129,8 +833,8 @@ the header, the cross-reference sections, the offsets, the stream extents, the
 trailer — because a rewrite copies the page tree, the annotations and the
 resource dictionaries from its source, and a backwards `/Rect` in somebody's
 2003 invoice belongs to the invoice. A file this engine could not read cleanly
-is not eligible and is counted as neither: 4 225 of the 4 525 were rewritten
-and every one of those 4 225 validates. What the semantic tier found in the
+is not eligible and is counted as neither: 5 124 of the 5 525 were rewritten
+and every one of those 5 124 validates. What the semantic tier found in the
 same rewrites — outline counts that disagree with their own trees, backwards
 annotation rectangles, malformed `/W` arrays — is listed per file and per rule
 in `corpus/report.json`, and belongs to the documents.
@@ -155,26 +859,147 @@ The ratchet: recorded rates may not decrease; improving one updates the
 recorded floor in the same PR. The floor and the budgets live in-repo,
 diffable, so lowering one is a reviewed decision rather than a drift.
 
+### The rasteriser's row loop, and what the fifth corpus was for
+
+*6 September 2026.*
+
+The production corpus's first run said fourteen of its thousand documents could
+not be rendered inside a minute and two could not be rendered inside seven. The
+timeout was not the problem, and neither was the corpus: **two loops in
+`crates/tinker-pdf-raster/src/fill.rs` indexed with a bounds check per pixel
+where a slice would do.** Coverage normalisation walked a row through
+`mask.data.get_mut(base + col)`; a span's fully covered interior walked column
+by column the same way. Rewriting both to take a slice and iterate it — no
+`unsafe`, no architecture-specific code, no change to the arithmetic — lets the
+compiler see a trip count it can vectorise.
+
+Measured with `tpdf render --dpi 144 --page 1`, minimum of five runs on an idle
+machine:
+
+| Document | Before | After |
+| --- | ---: | ---: |
+| `0000783.pdf`, Microsoft Word 2016 | 11 380 ms | **1 245 ms** |
+| `0000174.pdf`, Word for Office 365 | 509 ms | **161 ms** |
+| `0000390.pdf`, PowerPoint 365 | 613 ms | **330 ms** |
+
+And on the whole probe, which renders, validates and asks three relations:
+
+| Document | Before | After |
+| --- | ---: | ---: |
+| `0000816.pdf` | never finished in 7 min | **41 s** |
+| `0000039.pdf` | never finished in 7 min | **80 s** |
+| `0000390.pdf` | 308 s | **34 s** |
+| `0000783.pdf` | 164 s | **13 s** |
+
+**Every fingerprint is unchanged**, which is the half that makes the speedup
+admissible: the nine byte-exact goldens, the four differential pairs, the
+committed render fingerprints on `x86_64-pc-windows-msvc` and the same
+fingerprints under wasmtime on `wasm32-wasip1`. A rasteriser change that moved
+a single pixel would have failed a golden before it failed anything else.
+
+**A hypothesis that the measurement killed, kept because the negative result is
+the useful part.** The obvious explanation was that both loops walk the *canvas
+width* per row while a glyph is ten pixels across, so a page of three thousand
+glyphs pays three thousand page-wide passes. That predicts a large further
+speedup from bounding the loops to the columns a row actually touched. It was
+implemented and measured: 1 076 ms against 1 038 ms, 339 against 330, 162
+against 161 — nothing, three times over. So the change was reverted rather than
+kept for its story, and the 9× is the bounds check and the codegen it prevented.
+
+**What the four fixture corpora had said about this: nothing.** They contain no
+page like `0000783.pdf`, and six of the seven benchmarks do not enter the
+scanline rasteriser at all — which is why the roadmap's vectorisation row had
+nothing to measure a speedup on until a seventh was written for it.
+
 ### The fourth axis: relations between two renders
 
 Roadmap step 7. The corpus has no ground truth — nobody here knows what those
-4 525 pages should look like — but a *relation between two renders of one file*
+5 525 pages should look like — but a *relation between two renders of one file*
 needs none, and it can be asked of every file at once. `tpdf probe` checks three
-in-process, on the first page, and `corpus/ratchet.json` records how many files
-each was asked of beside how many it held on:
+in-process, on the first page, and reports **four** judgements — `rotate` is
+judged twice, against the budget that decides pass or fail and again against a
+tighter line that decides nothing — and `corpus/ratchet.json` records how many
+files each was asked of beside how many it held on.
+
+Every hold now carries its own measurement, `held 12 of 501832`, where it used
+to say only `held`. That is not decoration: the budgets below are sited from a
+population, and a record that keeps only the failures throws away the ninety-
+eight per cent a budget would have to be re-sited against. It cost one line in
+the probe and it is what made the raise below possible.
 
 | Relation | Asked of | Held |
 | --- | ---: | ---: |
-| `rotate` | 4209 | 3930 |
-| `crop` | 4189 | 4140 |
-| `dpi` | 4436 | 4362 |
+| `rotate` | 5 114 | 4 998 |
+| `rotate-tight` | 5 114 | 4 583 |
+| `crop` | 5 075 | 4 929 |
+| `dpi` | 5 457 | 5 342 |
+
+All three moved up in August 2026 when image edges stopped being quantised to
+whole device pixels and a run of abutting images stopped conflating
+([design/image-edges.md](design/image-edges.md)). `crop` and `dpi` gained on the
+arithmetic alone; part of `rotate`'s hundred is the budget below going from one
+percent to two, which that entry states and justifies.
 
 - **`rotate`** turns the page a quarter and requires the transposition. Not
   exact and measured rather than assumed: turning the page puts every glyph on
   a different sampling grid, so over 119 pdf.js files it was exact on 83 and at
-  0.29 % of pixels by the ninetieth percentile. The budget is 1 %, which is far
-  above that noise and far below anything structural — a rotation applied to
-  the geometry and not to the clip moves whole regions.
+  0.29 % of pixels by the ninetieth percentile. The budget is **10 %** since
+  6 September 2026, and the history of that number is three reviews rather
+  than one.
+
+  It was 1 % until August 2026, and what raised it then was a change in what
+  the noise *is*. Every figure above was measured when an image edge was
+  quantised to whole device pixels: images alone did not anti-alias, so images
+  alone transposed exactly. Image edges are soft now
+  ([design/image-edges.md](design/image-edges.md)), and a soft edge does not
+  transpose to the byte any more than a glyph's does — there is just more of it
+  on a long straight edge. Two qpdf files of quarter-turned scans measure
+  exactly 1.0 % with hard edges and 1.7 % with soft ones, which is what took it
+  to 2 %.
+
+  **Two percent was then out by a factor of four, and the ablation is what said
+  so.** `crates/tinker-pdf/tests/metamorphic_classes.rs` puts seven constructs
+  through this relation and two move anything: a tiling pattern at 22 %, which
+  is a lattice rounded wrongly and a defect this relation must go on catching,
+  and anti-aliased edges that are not axis-aligned, which is arithmetic. Its
+  first figures for the second class — 2.81 % for diagonals, 2.64 % for text —
+  were properties of the *fixtures*, which are 64 points square with the
+  construct in a corner. A budget is a share of a page, so the construct has to
+  cover one:
+
+  | Page | `rotate` |
+  | --- | ---: |
+  | two triangles in a corner of 64 pt | 2.81 % |
+  | the same two triangles on 595 pt | 0.03 % |
+  | 11-point text filling 200 pt | 7.74 % |
+  | 11-point text filling 595 pt | **8.77 %** |
+  | 11-point text filling 842 pt | **8.74 %** |
+  | diagonal edges covering 595 pt | 23.52 % |
+
+  A page of text costs 8.8 % and stays there as the page grows, so every
+  text-heavy document in the corpus was failing this relation for arithmetic —
+  the one thing a budget exists to prevent. Ten per cent is above the widest
+  legitimate construct measured and below the defects the relation is for.
+
+  **This raise has no gap to sit in, and the last one did.** One per cent was
+  sited where nothing sat. A whole-corpus run on 5 September, with every hold
+  carrying its own measurement, says that region is gone: of 4 032 files that
+  held, 109 held above 1 % and 47 above 1.5 %, and of the 181 that broke at two
+  per cent the smallest was 2.027 % with no gap up to 4 %. What is left is the
+  other half of the argument — above every construct ablated and shown to be
+  arithmetic, below the defects — and that is where 10 % is.
+
+  **And the cost is paid rather than waved away.** A relation that breaks on 15
+  files where it broke on 181 sees less. So the same `moved of total` is judged
+  a second time at 3 % and recorded as its own relation, **`rotate-tight`**,
+  which the ratchet holds like any other and which no run fails on. A change
+  that makes glyph edges noisier moves it long before it moves `rotate`; a
+  rotation applied to the geometry and not the clip moves both.
+
+  One limitation no budget removes, asserted in that file rather than left to
+  be rediscovered: a page saturated with diagonal edge costs 23.5 % at 595
+  points, which is the tiling class's own range. At no budget does this
+  relation separate a saturated vector page from a lattice rounded wrongly.
 - **`crop`** moves the page box and requires the sub-rectangle of the full
   render, **exactly**. It needs no budget because it changes no sampling grid,
   and that is a measurement too: it was exact on all 119.
@@ -188,6 +1013,18 @@ rate by shrinking what it is a rate of. `rotate` and `crop` are asked only of
 files this engine read cleanly, because a rewrite of a document the reader had
 to repair compares two repairs rather than two renders.
 
+**What a placeholder does to them, because it looks like a pass.** A capability
+the engine declines draws a neutral rectangle, and a neutral rectangle
+transposes exactly, crops exactly and resamples exactly — it holds every
+relation on this page perfectly. So a file whose missing capability is *built*
+can lose a relation it used to hold, and that is content appearing rather than
+a defect arriving. When forms began resolving their own resources, five pdf.js
+files did exactly that and one gained all three; every one of the five lost a
+`UnsupportedImage` or `UnreadableFont` warning in the same run, which is how
+the two were told apart rather than assumed. The relations are a check on the
+engine's arithmetic, not on how much of a document it can draw, and the
+degraded count above is the measure that moves the right way.
+
 **What they cannot catch, stated because it is why they are an axis and not a
 verdict:** any defect that commutes with the transformation. A colour converted
 wrongly is converted equally wrongly at both resolutions and at both rotations,
@@ -198,9 +1035,12 @@ files that had always passed into timeouts — and `--record` wrote that
 regression in as the new bar, which is exactly what a ratchet exists to prevent;
 the relations are now bounded so the pass rate they must not disturb is
 undisturbed. And `pdfjs/test/pdfs/bug1980958.pdf`, 219 bytes and a 10 × 10 page,
-has a **rewrite that does not come back**: three minutes in, the rotation
-relation had not returned, where the same file renders in under two seconds. It
-is a roadmap item now.
+had a **rewrite that did not come back**: three minutes in, the rotation
+relation had not returned, where the same file renders in under two seconds.
+Its last object is numbered 2 147 483 647, and a rewrite that walked the
+numbering range rather than the objects made two thousand million lookups; the
+writer now enumerates the cross-reference table's own entries
+([features/writing.md](features/writing.md)).
 
 **The honest limit of the corpus run**: it measures whether a bitmap came
 back, not whether it is the right bitmap. Nothing here compares a page this
@@ -214,7 +1054,7 @@ Ruling 13. Nothing outside this repository renders, parses, validates or
 measures a document as evidence. A third-party program may host this code,
 execute it, fetch bytes for it or generate inputs for it; it may never be
 the thing that says whether the output is right. Third-party **bytes** stay
-admissible with provenance recorded — the four fetched corpora, fixtures
+admissible with provenance recorded — the five fetched corpora, fixtures
 real producers emitted, published normative data (Adobe's CMap resources,
 the Unicode character database), and the committed output of a tool that was
 run once, which is a dated measurement rather than a check.
@@ -242,6 +1082,57 @@ which is the argument for running them rather than reasoning about them.
 | CSS layout against the reference implementation of CSS | `epub_browser.rs` | `epub_analytic.rs`, whose every expected number is computed in the test, and `epub_reftest.rs`, which lays out pairs the specification says are one document | **done** |
 | Whose fault an engine-versus-book EPUB disagreement is | epubcheck 5.3.0 (`tests/epub/EPUBCHECK.tsv`) | Nothing. The verdicts stand as a dated record, never re-run | **done** |
 | JPEG 2000 decode against a decoder sharing no code | *(none — see below)* | Committed reference decodes, already offline | **done** |
+
+### PngSuite, which was never an oracle and now adjudicates both directions
+
+Ruling 13 removes *programs* from the verification surface and keeps *inputs*,
+and PngSuite is squarely the second: Willem van Schaik's 176 files say what a
+PNG implementation should do by being deliberately correct in 162 documented
+ways and deliberately broken in fourteen. Nothing of it is committed. It is
+fetched — `http://www.schaik.com/pngsuite/PngSuite-2017jul19.zip`, with
+`TINKER_PNGSUITE` pointing at the extracted directory — and
+`crates/tinker-pdf-filters/tests/png_suite.rs` prints `pngsuite-oracle: RAN` or
+`pngsuite-oracle: SKIPPED` per test, because gap 20's finding was that a
+skipped oracle exits 0 and reads exactly like a pass.
+
+**It adjudicates the decoder**: the filename convention is an independent
+statement of every IHDR, the fifteen `bas*` pairs are Table 11.1's fifteen
+legal pairings, `basn`/`basi` twins are fifteen independent confirmations of
+Adam7, the `oi*` group is one zlib stream cut into 1, 2, 4 and n IDAT chunks,
+and each of the fourteen broken files must be refused *by a name matching the
+published reason*.
+
+**Since the `Bitmap::to_png` row it adjudicates the encoder too**, and that
+needed two legs rather than one. Leg one decodes each of the 162 readable
+files, encodes the raster, decodes that and requires the same pixels — so the
+raster the encoder is handed came from an encoder nobody here wrote, at every
+legal colour-type/depth pairing, interlaced and not. Leg one alone would not be
+worth much: `png/encode.rs` filters with the same `predictors.rs` Paeth
+predictor `png.rs` unfilters with, so a defect in the shared predictor moves
+both directions together and the comparison stays green. **Leg two transcribes
+ISO/IEC 15948 9.2's five reconstruction formulas into the test** and rebuilds
+the raster from the encoder's own IDAT without calling `png_decode` at all —
+first-party, which ruling 13 requires, and a second *implementation* rather
+than a second *program*, which is the line that ruling draws.
+
+The injection matrix is the measurement rather than the claim, and it corrected
+this section's own first draft. A filter emitted under the wrong type byte is
+caught by both legs. A **reversed Paeth tie-break is invisible to leg one** —
+all 162 round trips pass, because both directions go through the same reversed
+function — and is caught by leg two and by two of the decoder tests that were
+already there: the Adam7 twins and the published equivalence classes. Those two
+catch it for a reason worth naming, because it generalises: they compare two
+*third-party* files against each other rather than against anything this
+repository wrote, so a shared defect has nothing to cancel against. Three of
+2 014 in all, and not one of them a round trip. The container is
+held to clause 5 on the way past — signature, IHDR first, IEND last and empty,
+every CRC recomputed over its chunk's type and data, and the IDAT payload equal
+to `zlib_compress` of the filtered stream.
+
+What PngSuite cannot see is the `Bitmap` side of it — it has no `PixelFormat`
+and no notion of ink or `L*a*b*` — so the format mapping is
+`crates/tinker-pdf/tests/png_output.rs`'s, and the two converted formats are
+asserted there by colour rather than by comparison.
 
 ### The strict validator
 
@@ -283,9 +1174,14 @@ ECMA-388 18.1 puts it?** Both sides state the same census — page sizes, painte
 elements with their colours, gradient geometry and stops, image pixel counts and
 rectangles, tiling copies, glyph runs with their origins, sizes, text and the
 advances `Indices` overrides — and the comparator reports a typed divergence for
-each thing that differs. All eight packages conserve every fact, and the counts
-are recorded in `tests/xps/CONSERVATION.tsv`, which a change that moves them has
-to re-measure.
+each thing that differs. Twelve of the thirteen committed packages conserve
+every fact, and the counts are recorded in `tests/xps/CONSERVATION.tsv`, which a
+change that moves them has to re-measure. The thirteenth is `gs-images.xps`,
+whose two pictures this build refuses at the element by name: the markup states
+them and the document carries ruling 2's placeholder instead, both sides are
+right, and no census can make them equal — so the exclusion is a test of its own
+that pins the divergence and fails the day a TIFF decoder arrives, rather than a
+package quietly missing from a list.
 
 What makes it worth anything is the same thing the strict validator's value
 rests on: **what the markup side is not allowed to use.** It reaches for
@@ -405,6 +1301,89 @@ files committed once, with the commands, the tool version and the date in
 its header. It was described here and in its own name as an oracle, and it
 was not one.
 
+**What has since replaced part of it is first-party in the strongest sense
+available: the standard's own published numbers.** T.800 Annex J.10 states a
+100-byte codestream, its intermediate coefficients (J.10.4) and its nine
+decoded samples (J.10.5), and `jpx_annex_j.rs` asserts them.
+`jpx_annex_h.rs` extends the same numbers to Annex H's region of interest,
+which T.800 publishes no test data for at all: H.1 rewrites exactly the
+coefficients J.10.4 prints, so the clause can be run over the standard's own
+values and held to the standard's own samples.
+
+`jpx_poc.rs` extends them a second way, and it is a different lever worth
+naming. A.6.6's progression order change acts on packet *order* rather than
+on coefficients, and T.800 publishes no codestream carrying one — `0xFF5F`
+occurs exactly twice in the 231 pages, in Table A.2 and Table A.32. What
+J.10 publishes instead is **where each of its two packets begins and ends**
+(J.10.3's Table J.20 and J.10.4's octal 0125; Table J.21 and octal 0137), and
+a published packet boundary is what a reordering needs: the file swaps
+J.10's own nine and seven bytes, describes the swap in a two-volume POC, and
+demands J.10.5's nine samples back. It also measures what the refusal that
+stood there for a year was protecting against — the identical swapped bytes
+with the POC removed decode **cleanly and silently** to nine different
+samples.
+
+`code_block_styles.rs` extends them a third way, and this lever is Annex B's
+rather than Annex J's. Table A.19's last two code-block styles — D.6's
+selective arithmetic coding bypass and D.4's termination on each coding pass —
+act *inside* a packet, which no rearrangement of J.10 can reach. But
+**B.10.7.2's own NOTE publishes a worked example**: a code-block's five
+included passes, the set `T` of terminated ones D.6 produces, the four lengths
+that are then signalled, their pass counts, and a valid 39-bit sequence coding
+all of it. That is the standard's bits in and the standard's numbers out, fed
+to the shipped packet-header reader, with `T` derived from this build's Table
+D.9 transcription rather than written into the test — so the four lengths only
+come back in order if the transcription puts terminations where Table D.9
+does. B.10.7.1's NOTE 1 does the same for the single-segment case, four layers
+deep, including two `Lblock` increments.
+
+J.10 then brackets D.6's boundary without moving a byte, because `K` — how
+many lengths a packet header signals — is a function of the pass count. J.10's
+second code-block has seven coding passes, all before the boundary, so its
+published header must read identically with the style bit set and its three
+published bytes must still give J.10.4's "1, 5, 1, 0"; its first has sixteen,
+which straddle it, so B.10.7.2 wants five lengths where Table J.20 prints one
+and the published header stops parsing. Together those put the boundary in
+7..=15, and ten is transcribed from D.6 and Table D.9.
+
+**What this does not cover is `TERMALL`, and the file says so in its header.**
+T.800 publishes no codestream with a raw or per-pass-terminated coding pass in
+it, and J.10's two code-blocks carry sixteen and seven passes against headers
+printing one length each, so `TERMALL` cannot be flipped onto them: sixteen
+and seven lengths would have to be re-encoded, and an encoder this repository
+wrote agreeing with a decoder this repository wrote is a statement about this
+repository. `TERMALL` is held up by Table D.8 transcribed and asserted as data,
+by B.10.7.2's rule turning that table into `K`, and by sharing that one
+function with the half B.10.7.2's NOTE does adjudicate. That is weaker, and
+naming the weaker half is the point of this section.
+
+None of the four files invokes anything and none is a round trip through an
+encoder written here. One test in the fourth is nonetheless a comparison of
+two inputs this repository authored — `a_contribution_split_across_two_layers`
+builds the same twelve code-block bytes as a one-layer and a two-layer
+codestream and requires the same picture — and it says so in its own doc
+comment. It is there because B.10.7.2's multi-layer merge is stated in prose
+with no bytes published for it, and because the injection campaign fired
+nothing against that path until it existed. A statement about bookkeeping,
+checked against itself, is worth having and is not worth calling evidence.
+
+**Whether a picture may be compared against an outside viewer, decided.**
+*5 September 2026, ruling 13's amendment.* The first of the four properties
+below is the one a person keeps reaching for: nobody here knows what those
+5 525 pages should look like, and a screenshot from a viewer somebody else
+wrote would say. The decision is that such a comparison is **admissible as an
+input and never as a check** — the standing `jpx_reference.rs`'s committed
+decodes and `tests/epub/EPUBCHECK.tsv`'s verdicts already have. It may be
+recorded with the tool, its version, the command and the date; it may be read
+by a person and cited in a document; it may not be re-run, may not gate a
+build, and may not be called a test.
+
+What that buys is small and real: a dated measurement is evidence about one
+day, it decays visibly, and nobody has to trust it tomorrow. What it does not
+buy is the property below, which stays gone. Tier 1's reviewed goldens remain
+the only first-party answer to "is this the picture the clause describes", and
+they are worth exactly what the review that produced them was worth.
+
 **What does not come back.** Four properties leave this suite with the
 oracles, and no first-party mechanism returns them:
 
@@ -477,10 +1456,19 @@ been.**
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in
-`crates/tinker-pdf/tests/bounds_ledger.rs` — 34 rows, each measured against
-a real book, comic or document rather than guessed. The ledger also asserts
-that no bound is proved by a clock (`Instant::now` is banned from the
-file), so the caps are properties of inputs, not of machines.
+`crates/tinker-pdf/tests/bounds_ledger.rs` — **44 rows**, each carrying a
+figure for a real book, comic and document rather than a guess. Forty-one of
+those figures are measurements or arithmetic about a plausible file; the
+three JBIG2 count-and-total rows publish the word **estimate** in the number
+itself, because their caps were derived as arithmetic about a plausible scan
+rather than read off a file, and a row that reads like a measurement when it is
+not is the failure this file exists to prevent. The fourth JBIG2 row,
+`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`, does not carry the word, because its yardstick
+*is* a measurement: 88 736 corpus symbols, none of them larger than the page it
+is drawn onto (the `jbig2` fuzz row above).
+The ledger also asserts that no bound is proved by a clock — `Instant::now` is
+banned from every source a row names as firing it — so the caps are properties
+of inputs, not of machines.
 
 ## Injection: assertions are counted, not assumed
 
@@ -492,18 +1480,57 @@ a guard. The same both-directions discipline applies to documentation:
 claims are audited against code and code against claims, because a known
 gap is manageable and a false claim is not — nobody goes looking.
 
+### T.81 Annex D, 20 September 2026: twelve injections against the arithmetic JPEG decoder
+
+Counted with `cargo test --no-fail-fast -p tinker-pdf-filters --lib`, the flag
+before `-p` for the reason [CONTRIBUTING](../CONTRIBUTING.md) gives. Each row
+names one plausible misreading of T.81 and how many distinct tests failed.
+
+| Injection | Fired |
+| --- | ---: |
+| Table D.3 row 1: `Next_Index_LPS` and `Next_Index_MPS` swapped | 4 |
+| `Initdec` starts `A` at T.88's `X'8000'` rather than T.81's `X'10000'` | 16 |
+| `Cond_LPS_exchange` does not subtract `A` from `Cx` | 15 |
+| `Renorm_d` shifts before pulling a byte, the way `Renorm_e` does | 6 |
+| At a marker, feed T.88's 1-bits instead of T.81's 0-bits | 3 |
+| `Discard_final_zeros` left out of `Flush`, which D.1.8 says it may be | 1 |
+| `AC_Context` splits at `K < Kx` rather than `K <= Kx` | 2 |
+| Table F.4's `X1` is 21 rather than 20 | 4 |
+| A refinement scan reads an end-of-band decision below `EOBx` | 1 |
+| `Da` is the DC prediction rather than the difference | 1 |
+| DAC (`X'FFCC'`) skipped, as it was until this work | 1 |
+| The statistics are not reset at a restart interval | 1 |
+
+**One injection fired zero and is recorded because it did**, which is the whole
+reason the count is taken rather than assumed. Feeding 1-bits from the *second*
+`Byte_in` after a marker rather than the first left all 558 tests in the crate
+passing, and the reason is specific:
+`Clear_final_bits` has already made those bits irrelevant to the decisions, and
+the fixture stops 29 bytes into 32. The defect that matters is the one on the
+line above — the marker rule applied from the moment the marker is seen — and
+that one fires three. A zero is a result about where a fixture reaches, and the
+fix was to sharpen the injection rather than to shrug at the number.
+
 ## Tools
 
 - **`tpdf`** (`tools/tpdf`): debug CLI over the facade — `info`, `text`,
   `render`, `fields`, `outline`, `objects`, `check`, `probe`. `check --strict`
   runs the validator and exits by its verdict; `probe` is what the corpus
-  runner spawns, and its record carries the strict pass.
+  runner spawns, and its record carries the strict pass. `render` writes
+  `<stem>-NNNN.png` through `Bitmap::to_png` — PNG always, with no flag for
+  anything else: it wrote binary PNM until the encoder existed, and a debug
+  tool with two output paths has one that is rarely taken and eventually
+  wrong.
 - **`pdfcmp`** (`tools/pdfcmp`): the canonical perceptual comparator. Gates
   on the fraction of pixels where any channel moves more than a threshold —
   a glyph moving one pixel barely moves a mean, so the metric is changed
   pixels, not mean difference. `--diff` writes a per-pixel heat map beside
   the verdict, because a number that fails without a picture wastes a
-  human's morning.
+  human's morning. It reads a `.pnm` or a `.pdf` and **not** a `.png`, so
+  `tpdf render`'s output no longer feeds it directly; reading one would need a
+  PNG decoder, and `xtask`'s `TOOLS` table keeps a tool to the facade, which
+  publishes an encoder and no decoder. The seam is a [ROADMAP](ROADMAP.md) row
+  rather than a silent gap.
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary:
   no test may spawn a program the workspace did not build), `vendor`
@@ -516,27 +1543,170 @@ Clocks stay banned from **tests**. `bounds_ledger.rs` bans `Instant::now` from
 itself so that every hardening bound is a property of an input rather than of a
 machine, and that does not change.
 
-They live in `crates/tinker-pdf/benches/engine.rs` instead — six operations
+They live in `crates/tinker-pdf/benches/engine.rs` instead — seven operations
 under criterion, which is exempt tooling by name and whose plotting stack is
 switched off so the dependency tree stays four crates deep. `cargo bench` runs
 weekly in `bench.yml` and keeps its numbers as artefacts; it is scheduled rather
-than gating, because a hosted runner swings 20 % between two runs of identical
-code and a benchmark that fails a pull request on that teaches people to ignore
-it. The useful mode is criterion's own comparison, which needs two revisions on
-one machine:
+than gating, because a hosted runner swings widely between two runs of
+identical code and a benchmark that fails a pull request on that teaches people
+to ignore it. This page said "20 %" there, unsourced, from the day the job was
+written until 19 September 2026, when fifteen runs of one revision put the
+figure at **88.36 %** for the worst of the seven operations and 22.61 % for the
+best. The guess was low, and low by enough that a band built on it would have
+failed on the machine rather than on the code — which is what
+`bench-check` refuses an entry for. The useful mode is criterion's own
+comparison, which needs two revisions on one machine:
 
 ```sh
 cargo bench -p tinker-pdf -- --save-baseline before
 cargo bench -p tinker-pdf -- --baseline before
 ```
 
-## Six examples, run rather than compiled
+**The comparison is `cargo xtask bench-check --machine NAME`, and it exists
+because criterion's own cannot fail.** `cargo bench -- --baseline` compares
+perfectly well and **never exits non-zero when it loses**: the only failure path
+in 0.5.1 is a *missing* baseline directory, and a regression prints
+"Performance has regressed" and exits 0. So the weekly job was reporting rather
+than gating, which is what the roadmap's speed row said. `bench-check` reads
+criterion's own `estimates.json` — its numbers, not a second timing — and holds
+each operation to a committed figure and a band.
+
+**And the weekly job had never passed at all, for two faults and not one.**
+Its guard read `time:+\[`, which is `time` followed by one-or-more colons and a
+bracket; criterion prints `time:` and then three spaces. It counts **seven**
+matches now: `engine.rs` gained a seventh operation on 5 September 2026,
+because six of the seven never enter the scanline rasteriser and the roadmap's
+vectorisation row had nothing to measure a speedup on.
+
+That fix landed on `develop` and the job went on failing weekly anyway. **A
+scheduled workflow runs the default branch**, whatever ref it was written on,
+and the default branch is `main` — hundreds of commits behind, still carrying
+the pattern that cannot match. So all three cron runs, 31 August and 7 and 14
+September 2026, benchmarked a months-old tree: six operations rather than
+seven, all six printing their figures, and then exit 1 on a guard that had
+been corrected on `develop` on 5 September, somewhere no cron could reach.
+Reading all three failures as the one fault was the mistake: the guard was
+corrected and the job kept failing, because the correction and the schedule
+were on different branches. Whether `main` should be moved to `develop` is a
+release decision and is not taken in this document.
+
+**The desktop this repository is written on cannot be the named machine, and
+that is a measurement rather than an excuse.** A band has to be above the
+machine's own swing or it fails on the machine rather than on the code, so
+`bench-check` refuses an entry that carries no measured swing. This desktop
+was measured twice, five runs each, with nothing else compiling:
+
+| Operation | Widest spread over five runs |
+| --- | ---: |
+| rewrite a document | 32 % |
+| open a 3-page document | 46 % |
+| paginate a book | 57 % |
+| extract a page of text | 93 % |
+| render text at 150 dpi | 105 % |
+| a full-page axial shading | **259 %** |
+
+A band above 259 % would admit any regression anybody could write.
+
+### The named machine is `ubuntu-latest`, measured 19 September 2026
+
+The roadmap called this row *"blocked on runs of a machine nobody owns"*.
+`bench.yml` has a `workflow_dispatch` and `runs-on: ubuntu-latest`, so the
+machine was one command away: `gh workflow run bench.yml --ref develop`, on
+`develop` rather than on the default branch, fifteen times against one
+unchanged revision (`4aff8cc`). Every one of the fifteen reported all seven
+operations. The figures below are criterion's own `mean.point_estimate`, read
+out of the `estimates.json` each run uploaded as an artefact — nothing
+re-timed anything, and the runner hosted this code rather than judging it
+(ruling 13).
+
+| Operation | Fastest | Slowest | Spread | Band |
+| --- | ---: | ---: | ---: | ---: |
+| extract a page of text | 0.728 ms | 0.893 ms | 22.61 % | 35 % |
+| rewrite a document | 0.052 ms | 0.066 ms | 27.89 % | 45 % |
+| paginate a book at 432x648 pt | 12.365 ms | 16.102 ms | 30.22 % | 50 % |
+| open a 3-page document | 0.0145 ms | 0.0194 ms | 33.67 % | 55 % |
+| a full-page axial shading at 150 dpi | 123.662 ms | 171.645 ms | 38.80 % | 60 % |
+| fill 300 anti-aliased paths at 150 dpi | 31.739 ms | 45.193 ms | 42.39 % | 65 % |
+| render text at 150 dpi | 5.341 ms | 10.061 ms | **88.36 %** | 135 % |
+
+The runs are `workflow_dispatch` ids 35462488069, 35462702958, 35462705081,
+35462706950, 35462708751, 35462921377, 35462922858, 35462924746, 35462926404,
+35463256473, 35463258487, 35463260359, 35463262176, 35463264168 and
+35463266192, all on 19 September 2026, and `baseline.json` lists them.
+
+**Three choices in that table, and the reason for each.**
+
+*The recorded figure is the fastest of the fifteen, not their average.* The
+comparison is one-sided — faster is never a failure — so the bar worth
+recording is the best the machine has ever done, and a verdict then reads as
+*how much slower than that*. A middle figure would raise the bar by whatever
+the slow half of the fleet contributed and slacken the gate by the same
+amount, for nothing.
+
+*The band is per operation.* One band has to clear the worst spread in the
+table, and the worst is 3.9 times the best; a single machine-wide band would
+have held the text extractor, which swings 22.61 %, to the text renderer's
+88.36 % of slack — a doubling of the extractor would have passed without a
+word. `ratchet.json` already bands each corpus's peak separately rather than
+banding five on the worst, and this is the same argument. `baseline.json`
+still carries a machine-level pair: the widest swing any of its operations
+showed, and a ceiling no operation's band may exceed.
+
+*Each band is its operation's spread, half again as wide, rounded up to the
+next 5 %.* Half again because that is what the measurement itself did when the
+sample grew: the worst operation read 57.59 % over the first five runs,
+72.71 % over nine and **88.36 % over fifteen**, a factor of 1.53 for tripling
+the sample. The measured swing is a lower bound that has not converged, so a
+band set just above the observation would fail on the machine rather than on
+the code — which is the thing `bench-check` refuses an entry for. These bands
+are a floor, and a later measurement may have to raise them.
+
+**`ubuntu-latest` is a fleet and not a machine, and most of the table is that
+and not noise.** Score each run by the geometric mean of its seven operations
+against the fastest figure for each, and the fifteen fall into two groups with
+nothing between them: four at 1.00, 1.06, 1.14 and 1.16, and eleven at 1.30 to
+1.36. The runner image was the same on all fifteen — `ubuntu24/20260907.300`,
+checked on each — so the difference is hardware the log does not name. Within
+either group the operation that swings 88.36 % across the fifteen swings 20 %
+(the eleven) and 16 % (the four); the rest of it is the split. `bench.yml`
+writes `/proc/cpuinfo`'s model name into `bench.log` now, so the next
+measurement can attribute the split rather than band it.
+
+**What this does not catch.** The text renderer's band is 135 %: a change that
+makes it half again slower passes in silence. The 9× rasteriser regression of
+5 September 2026 would not have. This is a ratchet against the catastrophic
+and not against the incremental, and the finer instrument is still criterion's
+own `--baseline` between two revisions on one machine, which needs no band
+because it changes nothing but the code.
+
+**The entry is checked, not just written.** `cargo xtask baseline` — part of
+`cargo run -p xtask -- check`, so it fails a build — holds three files that
+carry the same list of operations to each other: `benches/engine.rs` defines
+them, `bench.yml`'s guard counts them, and `baseline.json` records a figure
+for each. Both ways they have already drifted apart are covered: a guard
+counting six when the file defines seven, and a baseline the path names that
+is not there at all. That second one was live until this measurement — there
+was no `baseline.json` — so the step that promises to "report and not fail for
+a machine with no entry" was exiting 1 on every dispatch, whatever the
+benchmarks had done. Every band in the committed file is pushed against from
+both sides by a unit test, because a band nobody has ever crossed is a number
+nobody has checked.
+
+All fifteen runs pass the entry they set, and so do three more — dispatches
+35463898109, 35463900276 and 35463902573, run after the figures were fixed and
+used for nothing else. Their widest verdict is "render text at 150 dpi" at
++68.88 % of its 135 % band; every other operation in the three sits between
++12 % and +35 % of a band between 35 % and 65 %. A baseline that only its own
+runs can satisfy is a baseline fitted to them, so it is worth having three
+that were not consulted.
+
+## Seven examples, run rather than compiled
 
 `crates/tinker-pdf/examples/` is the documented end-to-end usage: open, render,
-extract, edit, create, convert. Each runs with no arguments against a committed
-fixture, so trying one needs no corpus and no download.
+extract, edit, create, convert, parallel. Each runs with no arguments against a
+committed fixture, so trying one needs no corpus and no download.
 
-CI **runs all six and greps each one's output**, which is the same rule as
+CI **runs all seven and greps each one's output**, which is the same rule as
 everywhere else on this page: `cargo clippy --all-targets` already compiles
 them, and a program that compiles and prints nothing is indistinguishable from
 one that works. The greps assert content — `the original, untouched` from the

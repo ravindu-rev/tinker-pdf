@@ -10,12 +10,19 @@
 //! once the appearances are right, asking viewers to rebuild them can only
 //! make things worse.
 
+use tinker_pdf_font::Sfnt;
+use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
+use tinker_pdf_shape::shape::{itemize, Shaper};
+use tinker_pdf_shape::ShapedGlyph;
+
+use crate::build::{close_array, number};
 use crate::doc::CosDocument;
-use crate::font::{self, Font};
+use crate::font::{self, Font, FontKind};
 use crate::form::{self, FieldKind};
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::pages::Rect;
+use crate::warn::{WarningKind, WarningSink};
 use crate::write::StreamData;
 
 /// Splits a `/DA` string into its font name, size, and everything else.
@@ -84,23 +91,324 @@ fn width_of(font: Option<&Font>, text: &str) -> f64 {
         .sum()
 }
 
-/// Escapes a string for a literal in a content stream (7.3.4.2).
-fn escape(out: &mut Vec<u8>, text: &str) {
-    for byte in text.chars().map(|c| {
-        // Field text is written single-byte; anything above that is not
-        // representable in the standard encodings and becomes a question mark
-        // rather than a truncated multi-byte sequence.
+/// Escapes a string for a literal in a content stream (7.3.4.2), naming every
+/// character it could not write.
+///
+/// A simple font addresses a *byte*, so a character above the single-byte
+/// range has no code here at all. It is still drawn — ruling 2 degrades rather
+/// than failing, and a field that vanished would be worse than one that shows
+/// a mark — but the mark is now accompanied by a
+/// [`WarningKind::FieldCharacterUnrepresentable`] naming the character, which
+/// is the half ruling 10 adds. Before milestone 8 this function wrote `b'?'`
+/// and said nothing, so a form whose Arabic value had become a row of question
+/// marks was indistinguishable from one that had been filled correctly.
+///
+/// The shaped path is the *other* half of the answer, and where a composite
+/// `/DA` font makes it available nothing reaches here; see [`Composite`].
+fn escape(out: &mut Vec<u8>, text: &str, unwritable: &mut Vec<char>) {
+    for c in text.chars() {
         let code = u32::from(c);
-        if code < 256 {
+        let byte = if code < 256 {
             code as u8
         } else {
+            if !unwritable.contains(&c) {
+                unwritable.push(c);
+            }
             b'?'
-        }
-    }) {
+        };
         if matches!(byte, b'(' | b')' | b'\\') {
             out.push(b'\\');
         }
         out.push(byte);
+    }
+}
+
+/// A `/DA` font this build can shape a field's value against.
+///
+/// Milestone 8 of `docs/design/shaping.md`, and the reason the milestone was
+/// blocked until now: `text_appearance` reaches its font through the AcroForm
+/// `/DR`, and a [`Font`] that knew every width and no outline had nothing for
+/// a shaper to work on. [`Font::program`] is the entry that changed.
+///
+/// # The conditions, each checked rather than assumed
+///
+/// 1. **The font is composite** (9.7). A simple font addresses a byte, so it
+///    cannot name a glyph beyond 255 whatever is embedded in it.
+/// 2. **The writing mode is horizontal.** 9.7.4.3's vertical CMaps advance
+///    the pen downward and this module places every glyph along a baseline.
+///    Selecting the right glyphs and drawing them in a row a viewer will
+///    stack is a worse answer than a question mark, so a `-V` encoding keeps
+///    the single-byte path.
+/// 3. **Its `/Encoding` can be read backwards to a code.** This is the
+///    condition that used to say `/Identity-H` and no longer does. A writer
+///    needs to go from a glyph to a *code*, and 9.7.5's CMaps are written to
+///    be read the other way — but "written to be read forwards" is not "not
+///    invertible". `tinker_pdf_font::CMap::code_for_cid` gathers every code
+///    the CMap's own tables could have meant by a CID and returns the first that maps
+///    **back**, so the round trip is checked rather than assumed and a
+///    `cidchar` override cannot be inverted into a code that now means
+///    something else. That covers `/Identity-H` (where the code is the CID
+///    outright), every embedded CMap stream, and — where this build compiled
+///    the tables in — every horizontal registry CMap of 9.7.5.2.
+///    [`Font::cid_for_gid`] inverts the remaining step, `/CIDToGIDMap`.
+///    Inversion is what condition 2 leaves on the table: `/Identity-V` is
+///    just as invertible and is still refused, because the refusal there is
+///    about where the glyph is *drawn* rather than about which one it is.
+/// 4. **The descriptor embeds a program `tinker_pdf_font::Sfnt` reads.** A
+///    bare CFF (`/FontFile3 /Subtype /Type1C` or `/CIDFontType0C`) is not an
+///    sfnt and carries no `GSUB`/`GPOS` for this crate to execute, so a
+///    CIDFontType0 face is still outside what this claims.
+struct Composite {
+    /// The embedded program, decoded once per appearance rather than once per
+    /// line: a multiline field would otherwise inflate a megabyte per row.
+    program: Vec<u8>,
+}
+
+/// Whether a field's value can be shaped against its `/DA` font, and where it
+/// cannot, whether that is worth saying out loud.
+enum Shaping {
+    /// It can, against this program.
+    Yes(Composite),
+    /// It cannot, and the single-byte path is the right answer for this font
+    /// — a simple font, a vertical one, one that embeds no sfnt. Every
+    /// character that path cannot write is still named (ruling 10); there is
+    /// just nothing to say about the *font* beyond what the file already
+    /// says.
+    No,
+    /// It cannot, and the reason is this **build** rather than this document.
+    ///
+    /// The registry's code-to-CID tables are a megabyte and live behind the
+    /// `cmap-predefined` cargo feature, so a `--no-default-features` build
+    /// can read a `UniJIS-UCS2-H` field's widths and codespaces and still
+    /// have nothing to invert. That refusal is typed and named against the
+    /// field, because a capability that quietly depends on a feature is the
+    /// failure this repository already named once in PDF/A: a verdict that
+    /// depends on a feature is not a verdict, and neither is a fill.
+    Refused(WarningKind),
+}
+
+/// One glyph of a shaped line, in the thousandths of an em [`width_of`]
+/// answers in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Placed {
+    /// The character code to write. Under `/Identity-H` this is the CID;
+    /// under any other CMap it is whatever code maps to it (9.7.5.2).
+    code: u32,
+    /// How many bytes the code occupies, from the CMap's codespace ranges
+    /// (9.7.6.2).
+    ///
+    /// Carried per glyph rather than per font because one CMap may have both
+    /// widths: `90ms-RKSJ-H` takes one byte for ASCII and two for kanji, and
+    /// writing `<0041>` where `<41>` was meant mis-splits every code after
+    /// it.
+    bytes: u8,
+    /// Where the glyph's origin sits along the baseline, from the line's
+    /// start.
+    x: f64,
+    /// Its origin off the baseline — 9.4.3's `Ts`.
+    rise: f64,
+}
+
+/// What one line of a field's value shapes to.
+struct ShapedLine {
+    /// The glyphs, in the order they are **drawn** — left to right, whichever
+    /// way the text reads.
+    glyphs: Vec<Placed>,
+    /// The line's whole advance, in thousandths of an em, which is what
+    /// quadding and auto-sizing measure with.
+    advance: f64,
+    /// Characters the face has no glyph for, or that the font's own
+    /// `/CIDToGIDMap` cannot address. Each becomes a warning naming the field
+    /// (ruling 10).
+    unwritable: Vec<char>,
+}
+
+impl Composite {
+    /// The font behind a `/DA`, if the conditions above hold, and the typed
+    /// reason where one of them fails for a reason this build owns.
+    fn of(doc: &CosDocument, dict: &Dict, font: &Font) -> Shaping {
+        if font.kind() != FontKind::Type0 {
+            return Shaping::No;
+        }
+        if font.is_vertical() {
+            return Shaping::No;
+        }
+        // A composite font whose `/Encoding` names nothing 9.7.5.2 defines
+        // has no codes to write at all. `font::read` has already said which
+        // name it was (`PredefinedCMapUnknown`); repeating it here would only
+        // double it, and the single-byte path still names every character.
+        if !font.has_encoding_cmap() {
+            return Shaping::No;
+        }
+        // 9.7.5.2: the registry defines this CMap and this build left its
+        // code-to-CID table out, so there is nothing to invert. Declared
+        // before the program is decoded, because the answer does not depend
+        // on the program and a megabyte should not be inflated to reach it.
+        if font.encoding_is_approximate() {
+            // The name is what makes the warning actionable, and the
+            // dictionary is where a name lives — `Font` models the CMap's
+            // forward direction and has no name to give.
+            return match doc.resolve_key(dict, doc.intern(b"Encoding")).as_name() {
+                Some(name) => Shaping::Refused(WarningKind::PredefinedCMapApproximate(name)),
+                // An embedded CMap stream that inherited approximateness up a
+                // `usecmap` chain: real, and with no name of its own to
+                // report.
+                None => Shaping::No,
+            };
+        }
+        let Some(program) = font
+            .program()
+            .and_then(|p| doc.stream_decoded(p.stream).ok())
+        else {
+            return Shaping::No;
+        };
+        // Parsed here and thrown away, so that a program which is not an sfnt
+        // — a bare CFF, or bytes that are not a font at all — declines now
+        // rather than per line.
+        if Sfnt::parse(&program).is_none() {
+            return Shaping::No;
+        }
+        Shaping::Yes(Composite { program })
+    }
+
+    /// Shapes one line and places every glyph, in visual order.
+    ///
+    /// # Two steps, and they are the consumer's two steps
+    ///
+    /// `docs/design/shaping.md`'s pipeline ends with the caller reordering:
+    /// the shaper returns **logical** order, UAX #9's rule L2 orders the runs,
+    /// and a right-to-left run's glyphs are then walked backwards. Both happen
+    /// here, which is what puts an Arabic value's last letter at the left of
+    /// the box where a reader of the script expects it.
+    ///
+    /// A line with no glyphs at all comes back empty rather than as `None`:
+    /// an empty field value is not a failure.
+    fn line(&self, font: &Font, text: &str) -> ShapedLine {
+        let mut out = ShapedLine {
+            glyphs: Vec::new(),
+            advance: 0.0,
+            unwritable: Vec::new(),
+        };
+        let Some(face) = Sfnt::parse(&self.program) else {
+            return out;
+        };
+        let upem = f64::from(face.units_per_em.max(1));
+        let scale = |units: i32| f64::from(units) * 1000.0 / upem;
+        let shaper = Shaper::new(&face);
+        let paragraph = Paragraph::new(text, BaseDirection::Auto);
+        let runs = itemize(text, &paragraph);
+        let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(text, run)).collect();
+        let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
+
+        let mut pen = 0.0f64;
+        for index in reorder(&levels) {
+            let Some(run) = shaped.get(index) else {
+                continue;
+            };
+            let glyphs: Vec<ShapedGlyph> = if run.direction().is_forward() {
+                run.glyphs().to_vec()
+            } else {
+                run.glyphs().iter().rev().copied().collect()
+            };
+            for glyph in glyphs {
+                match self.code_for(font, glyph.glyph) {
+                    Some((code, bytes)) => out.glyphs.push(Placed {
+                        code,
+                        bytes,
+                        x: pen + scale(glyph.x_offset),
+                        rise: scale(glyph.y_offset),
+                    }),
+                    None => {
+                        // The cluster is a byte offset into the text this run
+                        // was shaped from, which is the line, so the character
+                        // the reader typed is recoverable and is what the
+                        // warning names.
+                        let at = usize::try_from(glyph.cluster).unwrap_or(0);
+                        if let Some(c) = text.get(at..).and_then(|rest| rest.chars().next()) {
+                            if !out.unwritable.contains(&c) {
+                                out.unwritable.push(c);
+                            }
+                        }
+                    }
+                }
+                pen += scale(glyph.x_advance);
+            }
+        }
+        out.advance = pen;
+        out
+    }
+
+    /// The code that draws `glyph` and its byte width, or `None` where the
+    /// font cannot name it.
+    ///
+    /// Two inversions, in the order 9.7.4 composes them forwards: the glyph
+    /// back through `/CIDToGIDMap` to a CID, the CID back through the
+    /// encoding CMap to a code. Either may refuse, and a refusal at either
+    /// step is a character this appearance will not draw.
+    ///
+    /// Glyph 0 is `.notdef` and is refused rather than written: it is the
+    /// face saying it has nothing for that character, and drawing the empty
+    /// box while reporting success is the invisible failure ruling 10 exists
+    /// to prevent.
+    fn code_for(&self, font: &Font, glyph: u16) -> Option<(u32, u8)> {
+        if glyph == 0 {
+            return None;
+        }
+        font.code_for_cid(font.cid_for_gid(glyph)?)
+    }
+}
+
+/// Writes one shaped line as a composite text run at `(x, y)`.
+///
+/// The `TJ` numbers are the difference between where the *reader's* pen will
+/// be — which advances by `/W`, not by the shaper's own `hmtx` figure — and
+/// where this crate put each glyph. Absorbing the difference glyph by glyph
+/// rather than letting it accumulate is what `DocumentBuilder::glyph_run`
+/// does for the same reason, and it is `docs/design/shaping.md`'s answer to
+/// its own third risk: what was measured is what is drawn.
+fn write_shaped(out: &mut Vec<u8>, font: &Font, line: &ShapedLine, x: f64, y: f64) {
+    out.extend_from_slice(format!("1 0 0 1 {x:.2} {y:.2} Tm\n").as_bytes());
+    let mut pen = 0.0f64;
+    let mut rise = 0.0f64;
+    let mut open = false;
+    for placed in &line.glyphs {
+        if placed.rise != rise {
+            close_array(out, &mut open);
+            rise = placed.rise;
+            out.extend_from_slice(format!("{} Ts\n", number(rise / 1000.0)).as_bytes());
+        }
+        if !open {
+            out.push(b'[');
+            open = true;
+        }
+        // 9.4.3: a `TJ` number moves the pen **backwards** by that many
+        // thousandths of a text space unit. Both sides here are already in
+        // thousandths of an em, so the number is the gap outright.
+        let adjust = pen - placed.x;
+        if number(adjust) != "0" {
+            if out.last() == Some(&b'>') {
+                out.push(b' ');
+            }
+            out.extend_from_slice(number(adjust).as_bytes());
+            out.push(b' ');
+        }
+        // 9.7.6.2: a code is as many bytes as its codespace range says, and
+        // the string carries no separators — so the width is what tells a
+        // reader where this code ends. Two hex digits per byte, zero-padded,
+        // whatever the code's magnitude; `/Identity-H`'s two bytes are the
+        // common case rather than the only one.
+        let digits = usize::from(placed.bytes).clamp(1, 4) * 2;
+        let mask = u32::MAX >> (32 - digits * 4);
+        out.extend_from_slice(
+            format!("<{:0digits$X}>", placed.code & mask, digits = digits).as_bytes(),
+        );
+        pen = placed.x + font.width_of(placed.code).0;
+    }
+    close_array(out, &mut open);
+    if rise != 0.0 {
+        // `Ts` is graphics state and outlives the text object, so a run that
+        // left one set would tilt whatever a viewer drew next.
+        out.extend_from_slice(b"0 Ts\n");
     }
 }
 
@@ -120,6 +428,13 @@ pub struct TextLayout<'a> {
     pub comb: Option<i64>,
     /// The form's `/DR`, where the `/DA` finds its font.
     pub resources: Option<&'a Dict>,
+    /// The field object this appearance is for, so that a character the font
+    /// cannot draw is reported against something (ruling 10).
+    ///
+    /// `None` is a caller building an appearance outside a document's field
+    /// tree — the tests below do it — and costs only the address on the
+    /// warning, never the warning itself.
+    pub field: Option<ObjRef>,
 }
 
 /// Builds the appearance stream for a text field's widget.
@@ -140,14 +455,34 @@ pub fn text_appearance(
         multiline,
         comb,
         resources,
+        field,
     } = *layout;
     let (font_name, mut size, colour) = operators(da);
     let (w, h) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
 
-    let font = resources
+    let font_dict = resources
         .and_then(|dr| doc.resolve_key(dr, doc.intern(b"Font")).as_dict().cloned())
         .and_then(|fonts| fonts.get_ref(doc.intern(&font_name)))
-        .and_then(|r| font::at(doc, r));
+        .and_then(|r| doc.get(r).ok())
+        .and_then(|object| object.as_dict().cloned());
+    let font = font_dict.as_ref().map(|dict| font::read(doc, dict));
+    // Milestone 8: whether this field's value can be shaped and written as
+    // glyphs rather than as bytes. `None` keeps every line on the single-byte
+    // path this module has always had, which is still right for the `/Helv`
+    // most forms name.
+    let mut refusals: Vec<WarningKind> = Vec::new();
+    let composite = match font_dict
+        .as_ref()
+        .zip(font.as_ref())
+        .map_or(Shaping::No, |(dict, font)| Composite::of(doc, dict, font))
+    {
+        Shaping::Yes(composite) => Some(composite),
+        Shaping::No => None,
+        Shaping::Refused(kind) => {
+            refusals.push(kind);
+            None
+        }
+    };
 
     // 12.7.3.3: two units of padding on each side is the convention, and
     // matching it is what keeps a regenerated appearance from jumping.
@@ -162,14 +497,36 @@ pub fn text_appearance(
         vec![value.lines().next().unwrap_or(value)]
     };
 
+    // Shaped **once**, before auto-sizing, because auto-sizing measures the
+    // same runs that are about to be drawn. Measuring one way and drawing
+    // another is the two-paths-disagree failure `metrics.rs` warns about, and
+    // a joined Arabic word is narrower than its letters by enough to see.
+    let shaped: Option<Vec<ShapedLine>> = composite
+        .as_ref()
+        .zip(font.as_ref())
+        .map(|(composite, font)| lines.iter().map(|l| composite.line(font, l)).collect());
+    let widths: Vec<f64> = match &shaped {
+        Some(shaped) => shaped.iter().map(|line| line.advance).collect(),
+        None => lines
+            .iter()
+            .map(|line| width_of(font.as_ref(), line))
+            .collect(),
+    };
+    let mut unwritable: Vec<char> = Vec::new();
+    if let Some(shaped) = &shaped {
+        for line in shaped {
+            for c in &line.unwritable {
+                if !unwritable.contains(c) {
+                    unwritable.push(*c);
+                }
+            }
+        }
+    }
+
     if size <= 0.0 {
         // Auto-size. The height budget is what makes it legible; the width
         // budget is what keeps it inside the box.
-        let widest = lines
-            .iter()
-            .map(|line| width_of(font.as_ref(), line))
-            .fold(0.0f64, f64::max)
-            / 1000.0;
+        let widest = widths.iter().copied().fold(0.0f64, f64::max) / 1000.0;
         let by_height = if multiline {
             inner_h / (lines.len() as f64).max(1.0) / 1.15
         } else {
@@ -208,24 +565,49 @@ pub fn text_appearance(
         for (index, ch) in line.chars().take(cells as usize).enumerate() {
             let mut text = String::new();
             text.push(ch);
-            let width = width_of(font.as_ref(), &text) / 1000.0 * size;
+            // Each cell is shaped on its own, and that is the right answer
+            // rather than a shortcut: a comb field draws one character per
+            // printed box, so a joining script's letters are in the isolated
+            // form in one whatever their neighbours are.
+            let cell_shaped = composite
+                .as_ref()
+                .zip(font.as_ref())
+                .map(|(composite, font)| composite.line(font, &text));
+            let width = cell_shaped
+                .as_ref()
+                .map_or_else(|| width_of(font.as_ref(), &text), |line| line.advance)
+                / 1000.0
+                * size;
             // Centred in its cell, which is what makes the column line up
             // whatever the character is.
             let x = PAD + cell * index as f64 + (cell - width) / 2.0;
             let y = (h - size * 0.72) / 2.0;
 
-            content.extend_from_slice(format!("1 0 0 1 {x:.2} {y:.2} Tm\n").as_bytes());
-            content.push(b'(');
-            escape(&mut content, &text);
-            content.extend_from_slice(b") Tj\n");
+            match (&cell_shaped, font.as_ref()) {
+                (Some(cell_shaped), Some(font)) => {
+                    for c in &cell_shaped.unwritable {
+                        if !unwritable.contains(c) {
+                            unwritable.push(*c);
+                        }
+                    }
+                    write_shaped(&mut content, font, cell_shaped, x, y);
+                }
+                _ => {
+                    content.extend_from_slice(format!("1 0 0 1 {x:.2} {y:.2} Tm\n").as_bytes());
+                    content.push(b'(');
+                    escape(&mut content, &text, &mut unwritable);
+                    content.extend_from_slice(b") Tj\n");
+                }
+            }
         }
 
         content.extend_from_slice(b"ET\nQ\nEMC\n");
+        report(doc, field, &refusals, &unwritable);
         return finish_appearance(doc, content, w, h, resources);
     }
 
     for (index, line) in lines.iter().enumerate() {
-        let line_width = width_of(font.as_ref(), line) / 1000.0 * size;
+        let line_width = widths.get(index).copied().unwrap_or(0.0) / 1000.0 * size;
         // 12.7.4.3: /Q is 0 left, 1 centred, 2 right.
         let x = match quadding {
             1 => PAD + (inner_w - line_width) / 2.0,
@@ -243,14 +625,57 @@ pub fn text_appearance(
             (h - size * 0.72) / 2.0
         };
 
-        content.extend_from_slice(format!("1 0 0 1 {x:.2} {y:.2} Tm\n").as_bytes());
-        content.push(b'(');
-        escape(&mut content, line);
-        content.extend_from_slice(b") Tj\n");
+        match shaped
+            .as_ref()
+            .and_then(|s| s.get(index))
+            .zip(font.as_ref())
+        {
+            Some((shaped, font)) => write_shaped(&mut content, font, shaped, x, y),
+            None => {
+                content.extend_from_slice(format!("1 0 0 1 {x:.2} {y:.2} Tm\n").as_bytes());
+                content.push(b'(');
+                escape(&mut content, line, &mut unwritable);
+                content.extend_from_slice(b") Tj\n");
+            }
+        }
     }
 
     content.extend_from_slice(b"ET\nQ\nEMC\n");
+    report(doc, field, &refusals, &unwritable);
     finish_appearance(doc, content, w, h, resources)
+}
+
+/// What this appearance could not do, against the field it could not do it to
+/// (ruling 10).
+///
+/// Two kinds, and the order is the order a reader wants them in: the
+/// **refusal** first, because it is the cause and it names the font or the
+/// build, then one warning per character the appearance could not draw.
+///
+/// Distinct characters and not occurrences: a value of two hundred Devanagari
+/// letters in a Latin face is one problem with one fix, and two hundred
+/// warnings would spend the sink's whole budget saying so.
+///
+/// Both carry the field as their object, which is what makes a
+/// `cmap-predefined`-off build's `predefined-cmap-approximate` here
+/// distinguishable from the one `font::read` emits when the same font is
+/// merely *read*: this one names a field, and it means a fill was refused.
+fn report(doc: &CosDocument, field: Option<ObjRef>, refusals: &[WarningKind], unwritable: &[char]) {
+    if refusals.is_empty() && unwritable.is_empty() {
+        return;
+    }
+    let mut sink = WarningSink::new();
+    sink.set_context(field);
+    for kind in refusals {
+        sink.warn(0, *kind);
+    }
+    for c in unwritable {
+        sink.warn(
+            0,
+            WarningKind::FieldCharacterUnrepresentable { character: *c },
+        );
+    }
+    doc.absorb(sink);
 }
 
 /// Wraps a field's operators in the form XObject that carries them.
@@ -463,6 +888,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         );
         let content = text_of(&stream);
@@ -492,6 +918,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         );
         let bbox: Vec<f64> = stream
@@ -517,6 +944,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         assert!(content.contains(" re W n"), "a clip is set: {content}");
@@ -535,6 +963,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         let centre = text_of(&text_appearance(
@@ -547,6 +976,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         let right = text_of(&text_appearance(
@@ -559,6 +989,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
 
@@ -593,6 +1024,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: true,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         assert_eq!(content.matches(" Tj").count(), 3);
@@ -612,6 +1044,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         assert_eq!(content.matches(" Tj").count(), 1);
@@ -633,6 +1066,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         let size: f64 = content
@@ -658,6 +1092,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         let long = text_of(&text_appearance(
@@ -670,6 +1105,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         let size = |content: &str| -> f64 {
@@ -696,6 +1132,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         assert!(content.contains("(a \\(b\\) \\\\ c) Tj"), "got: {content}");
@@ -723,6 +1160,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: Some(4),
                 resources: None,
+                field: None,
             },
         ));
 
@@ -757,6 +1195,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: Some(3),
                 resources: None,
+                field: None,
             },
         ));
         assert_eq!(content.matches(" Tj").count(), 3);
@@ -777,6 +1216,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
                 multiline: false,
                 comb: None,
                 resources: None,
+                field: None,
             },
         ));
         assert_eq!(content.matches(" Tj").count(), 1, "one run, not four");

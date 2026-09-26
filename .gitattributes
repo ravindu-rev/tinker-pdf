@@ -14,12 +14,25 @@
 *.jp2 binary
 *.pgm binary
 
-# The XPS corpus (gap 30 milestone 1). These are OPC packages -- ZIPs -- so
-# `text=auto` would leave them alone anyway; they are named because the reason
-# not to touch them is stronger than "it found a NUL". Every one was written by
-# a Microsoft serialiser and none of it is regenerable byte for byte, since both
-# serialisers mint a fresh GUID per resource part. A normalised line ending
+# The reviewed goldens (design/render-verification.md milestone 6). Binary PPMs
+# whose `#` comment header carries the review — family, clause, reviewer, date —
+# so a normalised line ending inside one is both a different picture and a
+# damaged record of who read it.
+*.ppm binary
+
+# The XPS corpus (gap 30 milestone 1, and Tier 4's second producer). These are
+# OPC packages -- ZIPs -- so `text=auto` would leave them alone anyway; they are
+# named because the reason not to touch them is stronger than "it found a NUL".
+#
+# The eight Microsoft packages are not regenerable byte for byte, since both
+# serialisers mint a fresh GUID per resource part, so a normalised line ending
 # inside a stored part would break its CRC-32 and there would be no way back.
+# The five Ghostscript packages *are* regenerable -- and they need this more,
+# not less. Every one of their thirty entries is **stored**, where WPF deflates
+# all but one, so a normalised byte anywhere in any of them breaks a CRC-32;
+# what regenerability buys is that the damage would be repairable, not that it
+# would be absent, and a corpus that has to be rebuilt to be trusted is not one
+# git is holding correctly.
 *.xps binary
 *.oxps binary
 
@@ -31,6 +44,19 @@
 # reproducible byte for byte -- pandoc and calibre each mint a fresh UUID for
 # the package document's `dc:identifier` on every run.
 *.epub binary
+
+# The comic corpus (tier 4). Four container formats holding one set of pages,
+# named for the ZIP reason above and one that is sharper for two of them: a
+# `.cbz` written by 7-Zip or WinRAR **stores** most of its entries, so there is
+# more raw picture sitting outside a compressed stream here than anywhere else
+# in the tree, and a normalised line ending in any of it breaks a CRC-32 with
+# no way back. The RAR, 7z and tar are refused by this build today and are
+# committed so that the decoders which read them have something to be held to;
+# a fixture nobody can read yet is exactly the one nothing else would protect.
+*.cbz binary
+*.cbr binary
+*.cb7 binary
+*.cbt binary
 
 # Fuzz seeds are bytes chosen for what they make a parser do; a normalized
 # line ending is a different input, and several of them have no extension.
@@ -49,3 +75,53 @@ crates/tinker-pdf-font/data/** -text linguist-vendored
 # still a modification. `linguist-vendored` keeps four megabytes of Unicode
 # out of the diff a reviewer reads and out of the language statistics.
 crates/tinker-pdf-layout/data/** -text linguist-vendored
+
+# Adobe's aots conformance corpus (design/shaping.md milestone 1,
+# THIRDPARTY.md). `-text` for the two reasons above and one that is sharper
+# here: a `.otf` is a table directory whose entries carry byte offsets and
+# lengths, so a single rewritten line ending moves every table after it and
+# the face stops parsing. Nothing in this tree names `*.otf` binary, and
+# `text=auto` decides by looking for a NUL in the first 8 KB — which these
+# happen to have and which is not a property worth relying on.
+# `linguist-vendored` keeps a megabyte of test faces out of the diff a
+# reviewer reads and out of the language statistics.
+crates/tinker-pdf-shape/data/** -text linguist-vendored
+# RFC 7932's static dictionary (THIRDPARTY.md). `-text` because it is binary --
+# the RFC publishes it as hexadecimal and this is that dump decoded, so it is
+# 122 784 bytes of arbitrary values with no line structure to normalise, and
+# the CRC-32 the RFC publishes is what a test checks it against.
+# `linguist-vendored` keeps it out of the diff a reviewer reads and out of the
+# repository's language statistics.
+crates/tinker-pdf-filters/data/** -text linguist-vendored
+
+# The committed Brotli reference streams (`tests/brotli_vectors.rs`). Bytes an
+# encoder emitted once, on a named day; a normalised line ending inside one is
+# a different stream, and several have no structure that would survive it.
+crates/tinker-pdf-filters/tests/brotli/** binary
+
+# The WOFF corpus (tier 4, `crates/tinker-pdf-font/tests/woff/`). Two faces and
+# five packings of them, named binary for a reason that is sharper here than
+# for any other fixture in this tree.
+#
+# A WOFF 1.0 is a table directory of byte offsets over per-table zlib streams,
+# and a WOFF 2.0 is a table directory of byte offsets over one Brotli stream:
+# a rewritten line ending anywhere in either moves every offset after it, and
+# the file stops being a font rather than becoming a slightly different one.
+# The `.ttf` pair beside them is the same argument -- an sfnt directory carries
+# offsets and lengths, which is already why `crates/tinker-pdf-shape/data/**`
+# is spelled out.
+#
+# What is different here is that these *are* regenerable, byte for byte, by
+# `tests/woff/make-fixtures.py` -- and that argues for this line rather than
+# against it, exactly as it does for the five Ghostscript packages above. What
+# regenerability buys is that damage would be repairable, not that it would be
+# absent; and repairing it needs fontTools, Node and two npm packages that no
+# CI job here installs, so in practice a normalised byte would be found by a
+# test failure and fixed by nobody.
+#
+# `*.woff` and `*.woff2` are named rather than left to `text=auto`, which
+# decides by looking for a NUL in the first 8 KB. A Brotli stream of a small
+# font is a few hundred bytes of entropy that may well have none.
+*.woff binary
+*.woff2 binary
+crates/tinker-pdf-font/tests/woff/*.ttf binary

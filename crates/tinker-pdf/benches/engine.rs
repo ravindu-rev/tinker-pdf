@@ -21,10 +21,15 @@
 //! cargo bench -p tinker-pdf -- --baseline before
 //! ```
 //!
-//! Six operations, chosen because they are the ones the docs quote numbers
+//! Seven operations, chosen because they are the ones the docs quote numbers
 //! for: opening, rendering text, rendering a shading, extracting text,
-//! rewriting a document, and paginating a book. Each is built or read from a
-//! committed fixture, so a run needs no corpus.
+//! filling anti-aliased paths, rewriting a document, and paginating a book.
+//! Each is built or read from a committed fixture, so a run needs no corpus.
+//!
+//! The seventh is newer than the rest and was added for a reason worth keeping:
+//! **six of these do not enter the scanline rasteriser**, so the roadmap's
+//! vectorisation row -- whose exit criterion named "the six benchmarks" -- was
+//! unmeasurable as written. See `paths_document` below.
 
 use std::hint::black_box;
 use std::time::Duration;
@@ -75,6 +80,45 @@ fn shading_document() -> Vec<u8> {
     builder.finish()
 }
 
+/// Three hundred filled paths with edges on no axis, over a whole page.
+///
+/// **This is the only benchmark that spends its time in the scanline
+/// rasteriser, and it was added because the roadmap's vectorisation row could
+/// not be measured without one.** That row's exit criterion said "a measured
+/// speedup on the six benchmarks", and of the six: four never enter
+/// `tinker-pdf-raster` at all, the shading is its own sampler, and *"render
+/// text at 150 dpi" draws no glyphs* — its fixture names base-14 Helvetica,
+/// embeds no program, `bundled-fonts` is off by default, so the renderer
+/// pushes `UnreadableFont` and paints nothing. A speedup in the span filler
+/// would have moved none of them.
+///
+/// Triangles rather than rectangles, and at fractional coordinates, because
+/// the loops in question are the ones that accumulate *partial* coverage: an
+/// axis-aligned rectangle on integers is the one shape that costs a span
+/// filler nothing to anti-alias.
+fn paths_document() -> Vec<u8> {
+    let mut content = String::with_capacity(24 * 1024);
+    for index in 0..300 {
+        let step = f64::from(index);
+        let x = 20.0 + (step * 37.0) % 520.0;
+        let y = 20.0 + (step * 61.0) % 760.0;
+        let size = 18.0 + (step * 7.0) % 44.0;
+        let shade = 0.15 + (step % 17.0) / 20.0;
+        content.push_str(&format!(
+            "{shade:.3} {:.3} {:.3} rg {x:.2} {y:.2} m {:.2} {:.2} l {:.2} {:.2} l h f\n",
+            1.0 - shade,
+            (step % 11.0) / 11.0,
+            x + size * 0.93,
+            y + size * 0.37,
+            x + size * 0.41,
+            y + size,
+        ));
+    }
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(595.0, 842.0, |page| page.raw(content.as_bytes()));
+    builder.finish()
+}
+
 fn book() -> Vec<u8> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -114,6 +158,12 @@ fn benchmarks(c: &mut Criterion) {
         b.iter(|| black_box(shaded_page.render(&RenderOptions::at_dpi(150.0))));
     });
     drop(slow);
+
+    let paths = Document::open(paths_document()).expect("it opens");
+    let paths_page = paths.page(0).expect("a page");
+    c.bench_function("fill 300 anti-aliased paths at 150 dpi", |b| {
+        b.iter(|| black_box(paths_page.render(&RenderOptions::at_dpi(150.0))));
+    });
 
     c.bench_function("rewrite a document", |b| {
         b.iter(|| {

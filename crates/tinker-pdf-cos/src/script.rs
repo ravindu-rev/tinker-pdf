@@ -45,6 +45,17 @@
 //!   cheap steps into gigabytes: repeated concatenation doubles, and twenty
 //!   thousand doublings is not a length anything can hold.
 //!
+//! # Which scripts run at all
+//!
+//! Whether a script runs is a separate question from whether it terminates,
+//! and it is answered by [`ScriptPolicy`] rather than by the interpreter:
+//! a [`Trigger`] says which of the six classes a source arrived under, and
+//! the policy says which classes this host allows. Deny by default, except
+//! the two — [`Trigger::Calculate`] and [`Trigger::Format`] — that were
+//! already running before the type existed. A denied trigger is always a
+//! named refusal and never a silent skip, because a pass that quietly ran
+//! nothing reads exactly like a form with no scripts in it.
+//!
 //! # PDF-free on purpose
 //!
 //! Nothing in this module knows what a PDF is. Values reach it through
@@ -100,6 +111,26 @@ pub enum ScriptError {
     ArrayTooLong,
     /// More variables than [`limits::MAX_SCRIPT_VARS`].
     TooManyVars,
+    /// Something at document scope that is not a function definition
+    /// (7.7.4).
+    ///
+    /// `/Names /JavaScript` is read for the helpers a form's field scripts
+    /// call, and nothing else in it is taken. A `var`, an assignment or a
+    /// bare call there is program text that would run at open time against a
+    /// document this engine is reading rather than displaying, so it is
+    /// named and refused rather than skipped — skipping it would build a
+    /// name table that is silently missing whatever the statement would have
+    /// defined.
+    NotADefinition,
+    /// A function that calls itself, directly or through another.
+    ///
+    /// Refused by name rather than bounded by a depth cap. A cap makes the
+    /// answer depend on a number nobody can predict from the file, which is
+    /// the same argument that made the cascade rule one pass rather than
+    /// bounded re-entry.
+    Recursion,
+    /// More document-level functions than [`limits::MAX_SCRIPT_FUNCTIONS`].
+    TooManyFunctions,
 }
 
 impl core::fmt::Display for ScriptError {
@@ -122,6 +153,9 @@ impl core::fmt::Display for ScriptError {
             ScriptError::StringTooLong => "the string is too long",
             ScriptError::ArrayTooLong => "the array is too long",
             ScriptError::TooManyVars => "too many variables",
+            ScriptError::NotADefinition => "not a function definition",
+            ScriptError::Recursion => "a function that calls itself",
+            ScriptError::TooManyFunctions => "too many functions",
         })
     }
 }
@@ -202,6 +236,169 @@ pub trait Host {
     /// Records a value for a field. `false` when the field will not take it,
     /// which stops the script with [`ScriptError::FieldRefused`].
     fn set_field(&mut self, name: &str, value: &str) -> bool;
+}
+
+// ---------------------------------------------------------------------------
+// Policy
+// ---------------------------------------------------------------------------
+
+/// Where a script came from, which is the only thing that distinguishes one
+/// run of this interpreter from another.
+///
+/// The five field triggers are 12.6.3 table 198's `/AA` entries and the
+/// document ones are 7.7.4's `/Names /JavaScript` and 12.6.3 table 200's
+/// catalog `/AA`. They are a *class* rather than a script, because a policy
+/// that had to name individual scripts would be a policy nobody could write
+/// before opening the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Trigger {
+    /// `/AA /C` — recalculate a field when another changes.
+    Calculate,
+    /// `/AA /F` — produce the text a viewer displays, without touching `/V`.
+    Format,
+    /// `/AA /K` — a keystroke, a paste, or the commit at the end of one.
+    Keystroke,
+    /// `/AA /V` — validate a value the user committed.
+    Validate,
+    /// `/Names /JavaScript` (7.7.4) — the document's own script, which is
+    /// where a form keeps the helpers its field scripts call.
+    Document,
+    /// The catalog's `/AA` (12.6.3 table 200) — `WC`, `WS`, `DS`, `WP`, `DP`.
+    Catalog,
+}
+
+impl Trigger {
+    /// The trigger's name, as this project writes it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Trigger::Calculate => "calculate",
+            Trigger::Format => "format",
+            Trigger::Keystroke => "keystroke",
+            Trigger::Validate => "validate",
+            Trigger::Document => "document-level",
+            Trigger::Catalog => "catalog",
+        }
+    }
+}
+
+impl core::fmt::Display for Trigger {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Which trigger classes a host allows to run.
+///
+/// **Deny by default, with two exceptions that are the shipped behaviour
+/// rather than a judgement about safety.** [`Trigger::Calculate`] and
+/// [`Trigger::Format`] are allowed because `recalculate()` and
+/// `formatted_value()` have run them since gap 27 and a policy type that
+/// silently turned an existing capability off would be a breaking change
+/// wearing a safety argument. The other four are denied because nothing ran
+/// them before this type existed, and a default that starts running document
+/// program text on the strength of a new struct is exactly the change nobody
+/// reviews.
+///
+/// A denied trigger is a **refusal that names itself**, never a silent skip
+/// (ruling 10): a pass that quietly ran nothing is indistinguishable from a
+/// form that carries no scripts, and those are different documents. It is
+/// also only ever raised against a script that is *there* — a form with no
+/// calculate action computes the same empty answer under every policy,
+/// because a policy refuses what there is to run rather than what is absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScriptPolicy {
+    calculate: bool,
+    format: bool,
+    keystroke: bool,
+    validate: bool,
+    document: bool,
+    catalog: bool,
+}
+
+impl Default for ScriptPolicy {
+    fn default() -> ScriptPolicy {
+        ScriptPolicy {
+            calculate: true,
+            format: true,
+            keystroke: false,
+            validate: false,
+            document: false,
+            catalog: false,
+        }
+    }
+}
+
+impl ScriptPolicy {
+    /// A policy that allows nothing at all.
+    ///
+    /// For a host that reads a form's scripts as data and runs none of them,
+    /// which is what the surfacing API was built for.
+    #[must_use]
+    pub fn nothing() -> ScriptPolicy {
+        ScriptPolicy {
+            calculate: false,
+            format: false,
+            keystroke: false,
+            validate: false,
+            document: false,
+            catalog: false,
+        }
+    }
+
+    /// A policy that allows every trigger class.
+    ///
+    /// Named rather than assembled from six `allow` calls, because a host
+    /// that means "run this document's scripts" should say so in one place
+    /// that a reader can grep for.
+    #[must_use]
+    pub fn everything() -> ScriptPolicy {
+        ScriptPolicy {
+            calculate: true,
+            format: true,
+            keystroke: true,
+            validate: true,
+            document: true,
+            catalog: true,
+        }
+    }
+
+    /// The same policy with `trigger` allowed.
+    #[must_use]
+    pub fn allow(self, trigger: Trigger) -> ScriptPolicy {
+        self.set(trigger, true)
+    }
+
+    /// The same policy with `trigger` denied.
+    #[must_use]
+    pub fn deny(self, trigger: Trigger) -> ScriptPolicy {
+        self.set(trigger, false)
+    }
+
+    /// Whether a script arriving under `trigger` may run.
+    #[must_use]
+    pub fn allows(self, trigger: Trigger) -> bool {
+        match trigger {
+            Trigger::Calculate => self.calculate,
+            Trigger::Format => self.format,
+            Trigger::Keystroke => self.keystroke,
+            Trigger::Validate => self.validate,
+            Trigger::Document => self.document,
+            Trigger::Catalog => self.catalog,
+        }
+    }
+
+    fn set(mut self, trigger: Trigger, to: bool) -> ScriptPolicy {
+        match trigger {
+            Trigger::Calculate => self.calculate = to,
+            Trigger::Format => self.format = to,
+            Trigger::Keystroke => self.keystroke = to,
+            Trigger::Validate => self.validate = to,
+            Trigger::Document => self.document = to,
+            Trigger::Catalog => self.catalog = to,
+        }
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +644,19 @@ enum Expr {
     Assign(Box<Expr>, Option<BinOp>, Box<Expr>),
 }
 
+/// One document-level function definition (7.7.4).
+///
+/// Its body is ordinary [`Stmt`], parsed by the same productions a field
+/// script is, so every construct the subset refuses inside a calculate action
+/// is refused inside a helper as well — including `function`, which is why a
+/// definition cannot nest.
+#[derive(Clone, Debug)]
+struct FnDef {
+    name: String,
+    params: Vec<String>,
+    body: Vec<Stmt>,
+}
+
 #[derive(Clone, Debug)]
 enum Stmt {
     Empty,
@@ -524,6 +734,74 @@ impl<'a> Parser<'a> {
             out.push(self.statement()?);
         }
         Ok(out)
+    }
+
+    /// Document scope: function definitions, and nothing else.
+    ///
+    /// A separate production from [`Parser::program`] on purpose. `function`
+    /// stays a reserved word everywhere a *field* script is parsed, so the
+    /// only thing this gained a calculate action is the ability to **call** a
+    /// helper — never to declare one. One place declares, and it is the one
+    /// the policy gates.
+    fn definitions(&mut self) -> Result<Vec<FnDef>, ScriptError> {
+        let mut out = Vec::new();
+        while self.pos < self.toks.len() {
+            // A semicolon between declarations is punctuation rather than a
+            // statement, and generators write them.
+            if self.eat_punct(";") {
+                continue;
+            }
+            if !self.eat_word("function") {
+                return Err(ScriptError::NotADefinition);
+            }
+            let Some(Tok::Word(name)) = self.peek().cloned() else {
+                return Err(ScriptError::Syntax);
+            };
+            if is_reserved(&name) {
+                return Err(ScriptError::Syntax);
+            }
+            self.pos += 1;
+            self.expect("(")?;
+            let params = self.parameters()?;
+            // The body is a block, read by the ordinary statement production.
+            if !self.at_punct("{") {
+                return Err(ScriptError::Syntax);
+            }
+            let Stmt::Block(body) = self.statement()? else {
+                return Err(ScriptError::Syntax);
+            };
+            out.push(FnDef { name, params, body });
+            if out.len() > limits::MAX_SCRIPT_FUNCTIONS {
+                return Err(ScriptError::TooManyFunctions);
+            }
+        }
+        Ok(out)
+    }
+
+    fn parameters(&mut self) -> Result<Vec<String>, ScriptError> {
+        let mut params: Vec<String> = Vec::new();
+        if self.eat_punct(")") {
+            return Ok(params);
+        }
+        loop {
+            let Some(Tok::Word(name)) = self.peek().cloned() else {
+                return Err(ScriptError::Syntax);
+            };
+            if is_reserved(&name) {
+                return Err(ScriptError::Syntax);
+            }
+            self.pos += 1;
+            params.push(name);
+            if params.len() > limits::MAX_SCRIPT_VARS {
+                return Err(ScriptError::TooManyVars);
+            }
+            if self.eat_punct(",") {
+                continue;
+            }
+            self.expect(")")?;
+            break;
+        }
+        Ok(params)
     }
 
     fn statement(&mut self) -> Result<Stmt, ScriptError> {
@@ -934,6 +1212,100 @@ fn is_reserved(word: &str) -> bool {
 // Values
 // ---------------------------------------------------------------------------
 
+/// The document-level helpers a run may call (7.7.4).
+///
+/// **This is why real calculating forms failed.** `/Names /JavaScript` is
+/// where a form keeps the functions its `/AA /C` scripts call, and until this
+/// table existed the interpreter met the first call to one, raised
+/// [`ScriptError::UnknownName`], and refused the whole pass — so a form doing
+/// the most ordinary thing a form does could not be computed at all.
+///
+/// Only **function definitions** are taken from a document-level source.
+/// Anything else there is [`ScriptError::NotADefinition`], named rather than
+/// skipped: skipping it would build a table silently missing whatever the
+/// statement would have defined, and a calculation running against a
+/// half-built name table is the "form that lies" this whole subset is
+/// written against.
+///
+/// A later definition of a name replaces an earlier one, which is what a
+/// reader does with two `function f` declarations in one scope. The order is
+/// the order the caller adds sources in, which for a document is the name
+/// tree's own ordering — fixed, so the table is the same on every run
+/// (ruling 4).
+#[derive(Clone, Debug, Default)]
+pub struct ScriptScope {
+    functions: Vec<FnDef>,
+}
+
+impl ScriptScope {
+    /// No helpers at all, which is what a run gets when the policy denies
+    /// [`Trigger::Document`] — and is exactly the behaviour that existed
+    /// before this type did.
+    #[must_use]
+    pub fn empty() -> ScriptScope {
+        ScriptScope::default()
+    }
+
+    /// Reads one document-level source and adds the functions it defines.
+    ///
+    /// Returns how many definitions that source carried.
+    ///
+    /// # Errors
+    ///
+    /// [`ScriptError::NotADefinition`] for anything at document scope that is
+    /// not a `function` declaration, [`ScriptError::TooManyFunctions`] past
+    /// [`limits::MAX_SCRIPT_FUNCTIONS`], and every lexing and parsing refusal
+    /// a field script would get — the body is parsed by the same productions,
+    /// so a helper cannot smuggle in a construct a calculate action could not.
+    pub fn define(&mut self, source: &str) -> Result<usize, ScriptError> {
+        let toks = lex(source)?;
+        let mut parser = Parser {
+            toks: &toks,
+            pos: 0,
+            depth: 0,
+        };
+        let defs = parser.definitions()?;
+        let count = defs.len();
+        for def in defs {
+            match self.functions.iter_mut().find(|f| f.name == def.name) {
+                Some(slot) => *slot = def,
+                None => {
+                    if self.functions.len() >= limits::MAX_SCRIPT_FUNCTIONS {
+                        return Err(ScriptError::TooManyFunctions);
+                    }
+                    self.functions.push(def);
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// How many distinct helpers the table holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.functions.len()
+    }
+
+    /// Whether the table holds none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.functions.is_empty()
+    }
+
+    /// Whether a name is one of them, for a caller reporting what a document
+    /// defined without running any of it.
+    #[must_use]
+    pub fn defines(&self, name: &str) -> bool {
+        self.functions.iter().any(|f| f.name == name)
+    }
+
+    /// Every helper's name, in the order the table holds them.
+    #[must_use]
+    pub fn names(&self) -> Vec<&str> {
+        self.functions.iter().map(|f| f.name.as_str()).collect()
+    }
+}
+
 /// The builtins the subset offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Builtin {
@@ -963,6 +1335,9 @@ enum Value {
     /// so that calling one does nothing.
     Inert,
     Builtin(Builtin),
+    /// A document-level helper, by its index in the [`ScriptScope`] the run
+    /// was given.
+    Function(usize),
 }
 
 /// JavaScript's number-to-string, near enough for a field value.
@@ -1044,7 +1419,7 @@ fn to_text(value: &Value) -> String {
         Value::Field(name) => name.clone(),
         Value::Event => "[event]".to_string(),
         Value::Doc => "[doc]".to_string(),
-        Value::Inert | Value::Builtin(_) => "undefined".to_string(),
+        Value::Inert | Value::Builtin(_) | Value::Function(_) => "undefined".to_string(),
     }
 }
 
@@ -1079,25 +1454,74 @@ fn loose_eq(a: &Value, b: &Value) -> bool {
 // Interpreter
 // ---------------------------------------------------------------------------
 
+/// How a statement left its block.
+///
+/// `Return` carries the value now, because a document-level helper's whole
+/// purpose is the value it hands back — a `Flow` that only said *that* a
+/// return happened was enough while every script wrote through `event.value`
+/// and nothing could be called.
 enum Flow {
     Normal,
-    Return,
+    Return(Value),
 }
 
 /// Where a value can be put.
 enum Place {
     Var(String),
     EventValue,
+    /// `event.change` — a keystroke action rewriting what is being typed.
+    EventChange,
+    /// `event.rc` — the verdict a keystroke or validate action delivers.
+    EventReturn,
     Field(String),
+}
+
+/// What the `event` object holds when a run starts (12.6.4.16 table 196).
+///
+/// A calculate or format action only ever needs `value`, which is why [`run`]
+/// takes one string. A keystroke or validate action needs the rest, and needs
+/// them from the host: this engine has no caret and no typing, so a selection
+/// and a commit flag are facts the caller states rather than facts the
+/// interpreter could invent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Event {
+    /// `event.value` — the field's value the event runs against.
+    pub value: String,
+    /// `event.change` — the text being inserted. Empty for a deletion.
+    pub change: String,
+    /// `event.selStart` and `event.selEnd`, in that order. JavaScript's own
+    /// convention of `-1` for "no selection" is the caller's to use.
+    pub selection: (i64, i64),
+    /// `event.willCommit` — whether this is the commit at the end of typing
+    /// rather than one keystroke inside it.
+    pub will_commit: bool,
 }
 
 struct Interp<'h, H: Host> {
     host: &'h mut H,
     budget: &'h mut Budget,
+    /// The current frame's variables. A call swaps in a fresh one holding
+    /// its parameters and swaps the caller's back afterwards, so a helper
+    /// cannot see or overwrite the locals of whatever called it.
     vars: Vec<(String, Value)>,
+    scope: &'h ScriptScope,
+    /// The helpers currently on the stack, by index. A name already here is
+    /// [`ScriptError::Recursion`].
+    calling: Vec<usize>,
     target: String,
     event_value: Value,
     event_assigned: bool,
+    /// `event.change`, and whether the script rewrote it. A keystroke action
+    /// that changes what is being typed is the one legitimate way a script
+    /// alters an event, and the difference between "left alone" and "set to
+    /// the same thing" is one a caller can act on.
+    event_change: Value,
+    event_change_assigned: bool,
+    /// `event.rc` — true until a script says otherwise, which is the whole
+    /// verdict a keystroke or validate action delivers.
+    event_rc: bool,
+    selection: (i64, i64),
+    will_commit: bool,
     wrote: Vec<String>,
 }
 
@@ -1111,6 +1535,13 @@ pub struct Outcome {
     /// The fields the script wrote directly, through
     /// `getField("x").value = ...`, in the order it wrote them.
     pub wrote: Vec<String>,
+    /// The text `event.change` was left holding, when the script assigned it.
+    /// `None` means the keystroke stands as the host offered it.
+    pub change: Option<String>,
+    /// `event.rc`. False means the script refused the keystroke or the value
+    /// (12.6.4.16 table 196), which is the verdict and not an error: a
+    /// validate action saying no is the action working.
+    pub accepted: bool,
 }
 
 /// Runs one script against a host.
@@ -1137,6 +1568,62 @@ pub fn run(
     host: &mut impl Host,
     budget: &mut Budget,
 ) -> Result<Outcome, ScriptError> {
+    run_in(source, target, current, host, budget, &ScriptScope::empty())
+}
+
+/// The same run, with the document's helpers in scope (7.7.4).
+///
+/// `scope` is what `/Names /JavaScript` defined, and consulting it is what
+/// turns a call to a form's own helper from [`ScriptError::UnknownName`] into
+/// the value it computes. An empty scope is exactly [`run`], which is what a
+/// host that has not allowed [`Trigger::Document`] gets.
+///
+/// The table is consulted **after** every builtin, so a document cannot
+/// redefine `getField` or an `AF` helper by declaring a function of that
+/// name — a form whose `getField` is the document's own is a form nothing
+/// downstream could reason about.
+///
+/// # Errors
+///
+/// Everything [`run`] can return, plus [`ScriptError::Recursion`] for a
+/// helper that calls itself directly or through another.
+pub fn run_in(
+    source: &str,
+    target: &str,
+    current: &str,
+    host: &mut impl Host,
+    budget: &mut Budget,
+    scope: &ScriptScope,
+) -> Result<Outcome, ScriptError> {
+    let event = Event {
+        value: current.to_string(),
+        ..Event::default()
+    };
+    run_event(source, target, &event, host, budget, scope)
+}
+
+/// The same run, against a whole [`Event`].
+///
+/// A calculate or format action only ever reads `event.value`, which is why
+/// [`run`] and [`run_in`] take one string. A keystroke or validate action
+/// (12.6.4.16 table 196) reads `event.change`, the selection and
+/// `event.willCommit`, and answers through `event.rc` — so those need an
+/// event a host built, because this engine has no caret and no typing and
+/// could not invent one.
+///
+/// # Errors
+///
+/// Everything [`run_in`] can return. A script setting `event.rc = false` is
+/// **not** an error: a validate action saying no is the action working, and
+/// it comes back as [`Outcome::accepted`].
+pub fn run_event(
+    source: &str,
+    target: &str,
+    event: &Event,
+    host: &mut impl Host,
+    budget: &mut Budget,
+    scope: &ScriptScope,
+) -> Result<Outcome, ScriptError> {
     let toks = lex(source)?;
     let mut parser = Parser {
         toks: &toks,
@@ -1149,13 +1636,22 @@ pub fn run(
         host,
         budget,
         vars: Vec::new(),
+        scope,
+        calling: Vec::new(),
         target: target.to_string(),
-        event_value: Value::Str(current.to_string()),
+        event_value: Value::Str(event.value.clone()),
         event_assigned: false,
+        event_change: Value::Str(event.change.clone()),
+        event_change_assigned: false,
+        // 12.6.4.16 table 196: `rc` starts true, and a script that never
+        // touches it has accepted.
+        event_rc: true,
+        selection: event.selection,
+        will_commit: event.will_commit,
         wrote: Vec::new(),
     };
     for stmt in &program {
-        if matches!(interp.exec(stmt)?, Flow::Return) {
+        if matches!(interp.exec(stmt)?, Flow::Return(_)) {
             break;
         }
     }
@@ -1165,9 +1661,16 @@ pub fn run(
     } else {
         None
     };
+    let change = if interp.event_change_assigned {
+        Some(to_storable(&interp.event_change)?)
+    } else {
+        None
+    };
     Ok(Outcome {
         value,
         wrote: interp.wrote,
+        change,
+        accepted: interp.event_rc,
     })
 }
 
@@ -1196,8 +1699,8 @@ impl<H: Host> Interp<'_, H> {
             }
             Stmt::Block(body) => {
                 for stmt in body {
-                    if matches!(self.exec(stmt)?, Flow::Return) {
-                        return Ok(Flow::Return);
+                    if let Flow::Return(value) = self.exec(stmt)? {
+                        return Ok(Flow::Return(value));
                     }
                 }
                 Ok(Flow::Normal)
@@ -1219,8 +1722,8 @@ impl<H: Host> Interp<'_, H> {
                 // them apart.
                 while truthy(&self.eval(cond)?) {
                     self.step()?;
-                    if matches!(self.exec(body)?, Flow::Return) {
-                        return Ok(Flow::Return);
+                    if let Flow::Return(value) = self.exec(body)? {
+                        return Ok(Flow::Return(value));
                     }
                 }
                 Ok(Flow::Normal)
@@ -1236,8 +1739,8 @@ impl<H: Host> Interp<'_, H> {
                         }
                     }
                     self.step()?;
-                    if matches!(self.exec(body)?, Flow::Return) {
-                        return Ok(Flow::Return);
+                    if let Flow::Return(value) = self.exec(body)? {
+                        return Ok(Flow::Return(value));
                     }
                     if let Some(step) = step {
                         self.eval(step)?;
@@ -1246,10 +1749,11 @@ impl<H: Host> Interp<'_, H> {
                 Ok(Flow::Normal)
             }
             Stmt::Return(value) => {
-                if let Some(value) = value {
-                    self.eval(value)?;
-                }
-                Ok(Flow::Return)
+                let value = match value {
+                    Some(expr) => self.eval(expr)?,
+                    None => Value::Undefined,
+                };
+                Ok(Flow::Return(value))
             }
         }
     }
@@ -1382,7 +1886,14 @@ impl<H: Host> Interp<'_, H> {
             "AFPercent_Format" => Value::Builtin(Builtin::PercentFormat),
             "AFDate_Format" => Value::Builtin(Builtin::DateFormat),
             "AFSpecial_Format" => Value::Builtin(Builtin::SpecialFormat),
-            _ => return Err(ScriptError::UnknownName),
+            // The document's own helpers are consulted last, so a form
+            // cannot redefine `getField` or an `AF` helper by declaring a
+            // function of that name (7.7.4). An empty scope makes this arm
+            // exactly the `UnknownName` it was before the table existed.
+            _ => match self.scope.functions.iter().position(|f| f.name == name) {
+                Some(at) => Value::Function(at),
+                None => return Err(ScriptError::UnknownName),
+            },
         })
     }
 
@@ -1393,6 +1904,18 @@ impl<H: Host> Interp<'_, H> {
                 "value" => Ok(self.event_value.clone()),
                 "target" => Ok(Value::Field(self.target.clone())),
                 "targetName" => Ok(Value::Str(self.target.clone())),
+                // 12.6.4.16 table 196. Everything else on the event needs a
+                // viewer to mean anything — `event.source`, `event.modifier`,
+                // `event.shift` — and an unknown member is refused rather
+                // than answered `undefined`, which is what stops a keystroke
+                // script quietly taking the wrong branch.
+                "change" => Ok(self.event_change.clone()),
+                "rc" => Ok(Value::Bool(self.event_rc)),
+                #[allow(clippy::cast_precision_loss)]
+                "selStart" => Ok(Value::Num(self.selection.0 as f64)),
+                #[allow(clippy::cast_precision_loss)]
+                "selEnd" => Ok(Value::Num(self.selection.1 as f64)),
+                "willCommit" => Ok(Value::Bool(self.will_commit)),
                 _ => Err(ScriptError::UnknownMember),
             },
             Value::Field(field) => match name {
@@ -1448,6 +1971,12 @@ impl<H: Host> Interp<'_, H> {
                 let base = self.eval(base)?;
                 match (&base, name.as_str()) {
                     (Value::Event, "value") => Ok(Place::EventValue),
+                    (Value::Event, "change") => Ok(Place::EventChange),
+                    (Value::Event, "rc") => Ok(Place::EventReturn),
+                    // `selStart`, `selEnd` and `willCommit` are readable and
+                    // not writable: a host with no caret has nowhere to put a
+                    // selection a script moved, and accepting the write would
+                    // be the silent approximation this subset refuses.
                     (Value::Field(field), "value") => Ok(Place::Field(field.clone())),
                     (Value::Null, _) => Err(ScriptError::NoSuchField),
                     _ => Err(ScriptError::NotAssignable),
@@ -1461,6 +1990,8 @@ impl<H: Host> Interp<'_, H> {
         match place {
             Place::Var(name) => self.name(name),
             Place::EventValue => Ok(self.event_value.clone()),
+            Place::EventChange => Ok(self.event_change.clone()),
+            Place::EventReturn => Ok(Value::Bool(self.event_rc)),
             Place::Field(field) => {
                 let handle = Value::Field(field.clone());
                 self.member(&handle, "value")
@@ -1481,6 +2012,15 @@ impl<H: Host> Interp<'_, H> {
                 self.event_assigned = true;
                 Ok(())
             }
+            Place::EventChange => {
+                self.event_change = value;
+                self.event_change_assigned = true;
+                Ok(())
+            }
+            Place::EventReturn => {
+                self.event_rc = truthy(&value);
+                Ok(())
+            }
             Place::Field(field) => {
                 let text = to_storable(&value)?;
                 if !self.host.set_field(field, &text) {
@@ -1498,6 +2038,7 @@ impl<H: Host> Interp<'_, H> {
         self.step()?;
         let builtin = match callee {
             Value::Builtin(builtin) => *builtin,
+            Value::Function(at) => return self.call_helper(*at, args),
             // An inert namespace's members are inert, and calling one is the
             // no-op the boundary promises.
             Value::Inert => return Ok(Value::Undefined),
@@ -1520,6 +2061,75 @@ impl<H: Host> Interp<'_, H> {
             Builtin::DateFormat => self.date_format(args),
             Builtin::SpecialFormat => self.special_format(args),
         }
+    }
+
+    /// Calls one of the document's own helpers (7.7.4).
+    ///
+    /// Three things bound it, and the first is the one that matters:
+    ///
+    /// - **Recursion is refused by name**, not bounded by a counter. A helper
+    ///   already on the stack is [`ScriptError::Recursion`], so a chain is at
+    ///   most as long as the table has distinct functions, which
+    ///   [`limits::MAX_SCRIPT_FUNCTIONS`] caps. A depth cap was the
+    ///   alternative and was rejected for the reason the cascade rule
+    ///   rejected bounded re-entry: it makes the answer depend on a number
+    ///   nobody can predict from the file.
+    /// - **The native stack** is bounded by the same
+    ///   [`limits::MAX_SCRIPT_DEPTH`] the parser counts with, because this
+    ///   recursion is the evaluator's own and the parser cannot see it.
+    /// - **Work** is the shared [`Budget`]: every statement and expression in
+    ///   a helper's body charges against the pass, so a helper that does not
+    ///   terminate cheaply stops the pass rather than the helper.
+    ///
+    /// A frame is a fresh variable list holding the parameters. Missing
+    /// arguments are `undefined` and extra ones are dropped, which is what a
+    /// reader does; the caller's own locals are swapped out and back, so a
+    /// helper can neither read nor overwrite them.
+    fn call_helper(&mut self, at: usize, args: &[Value]) -> Result<Value, ScriptError> {
+        // Copied out first: `scope` is a shared reference the struct holds,
+        // and the body below needs `&mut self` for every step it charges.
+        let scope = self.scope;
+        let Some(def) = scope.functions.get(at) else {
+            return Err(ScriptError::UnknownName);
+        };
+        if self.calling.contains(&at) {
+            return Err(ScriptError::Recursion);
+        }
+        if u32::try_from(self.calling.len()).unwrap_or(u32::MAX) >= limits::MAX_SCRIPT_DEPTH {
+            return Err(ScriptError::TooDeep);
+        }
+
+        let mut frame: Vec<(String, Value)> = Vec::with_capacity(def.params.len());
+        for (index, param) in def.params.iter().enumerate() {
+            frame.push((
+                param.clone(),
+                args.get(index).cloned().unwrap_or(Value::Undefined),
+            ));
+        }
+        let caller = core::mem::replace(&mut self.vars, frame);
+        self.calling.push(at);
+
+        let mut result = Ok(Value::Undefined);
+        for stmt in &def.body {
+            match self.exec(stmt) {
+                Ok(Flow::Normal) => {}
+                Ok(Flow::Return(value)) => {
+                    result = Ok(value);
+                    break;
+                }
+                Err(reason) => {
+                    result = Err(reason);
+                    break;
+                }
+            }
+        }
+
+        // Restored on the failing path as well: a refusal stops the pass, and
+        // leaving the interpreter holding a callee's frame would make any
+        // later inspection of it a lie.
+        self.calling.pop();
+        self.vars = caller;
+        result
     }
 
     /// `AFSimple_Calculate(cFunction, aFields)` — by a wide margin the most
@@ -1664,6 +2274,29 @@ fn binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, ScriptError> 
                 return Err(ScriptError::StringTooLong);
             }
             return Ok(Value::Str(text));
+        }
+    }
+    // 11.8.5: when **both** operands are strings the relational operators
+    // compare code unit by code unit, and only otherwise by number.
+    //
+    // This engine compared by number in every case until keystroke actions
+    // arrived, and the idiom that found it is the commonest keystroke script
+    // there is: `event.change >= '0' && event.change <= '9'`. Under numeric
+    // comparison `'!'` is `NaN`, every comparison against it is false, and a
+    // digits-only field silently accepts or silently refuses everything
+    // depending on which way its author wrote the test — a construct
+    // approximated rather than refused, which is what this subset is written
+    // against. The ordering here is by code point rather than by UTF-16 code
+    // unit, and the two differ only between an astral character and
+    // U+E000..U+FFFF — said rather than left to be discovered.
+    if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+        if let (Value::Str(x), Value::Str(y)) = (left, right) {
+            return Ok(Value::Bool(match op {
+                BinOp::Lt => x < y,
+                BinOp::Le => x <= y,
+                BinOp::Gt => x > y,
+                _ => x >= y,
+            }));
         }
     }
     let (a, b) = (to_number(left), to_number(right));
@@ -2579,5 +3212,380 @@ mod tests {
             Err(ScriptError::OutOfSteps)
         );
         assert!(budget.is_spent());
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy
+    // -----------------------------------------------------------------------
+
+    /// The default is the shipped behaviour written down, and this is what
+    /// says so. If it ever changes, this fails before anything downstream
+    /// silently starts or stops running a document's program text.
+    #[test]
+    fn the_default_policy_allows_calculate_and_format_and_nothing_else() {
+        let policy = ScriptPolicy::default();
+        assert!(policy.allows(Trigger::Calculate));
+        assert!(policy.allows(Trigger::Format));
+        assert!(!policy.allows(Trigger::Keystroke));
+        assert!(!policy.allows(Trigger::Validate));
+        assert!(!policy.allows(Trigger::Document));
+        assert!(!policy.allows(Trigger::Catalog));
+    }
+
+    #[test]
+    fn allowing_and_denying_a_trigger_touches_only_that_trigger() {
+        let every = [
+            Trigger::Calculate,
+            Trigger::Format,
+            Trigger::Keystroke,
+            Trigger::Validate,
+            Trigger::Document,
+            Trigger::Catalog,
+        ];
+        for trigger in every {
+            let allowed = ScriptPolicy::nothing().allow(trigger);
+            let denied = ScriptPolicy::everything().deny(trigger);
+            for other in every {
+                assert_eq!(
+                    allowed.allows(other),
+                    other == trigger,
+                    "{other} after allow"
+                );
+                assert_eq!(denied.allows(other), other != trigger, "{other} after deny");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Events
+    // -----------------------------------------------------------------------
+
+    /// 11.8.5: two strings compare code unit by code unit, and only otherwise
+    /// by number.
+    ///
+    /// This engine compared by number in every case until keystroke actions
+    /// arrived. What found it is the commonest keystroke script there is —
+    /// `event.change >= '0' && event.change <= '9'` — under which `'!'` is
+    /// `NaN`, every comparison against it is false, and a digits-only field
+    /// silently accepts everything.
+    #[test]
+    fn two_strings_compare_as_strings_and_a_mixed_pair_as_numbers() {
+        assert_eq!(
+            value_of("event.value = 'a' < 'b';"),
+            Ok(Some("true".into()))
+        );
+        assert_eq!(
+            value_of("event.value = '!' < '0';"),
+            Ok(Some("true".into()))
+        );
+        assert_eq!(
+            value_of("event.value = 'z' > '9';"),
+            Ok(Some("true".into()))
+        );
+        assert_eq!(
+            value_of("event.value = '10' < '9';"),
+            Ok(Some("true".into())),
+            "string order, not numeric: '1' precedes '9'"
+        );
+        // One number on either side and it is arithmetic again, which is what
+        // keeps `getField('a').value > 500` meaning what it says.
+        assert_eq!(
+            value_of("event.value = '10' < 9;"),
+            Ok(Some("false".into()))
+        );
+        assert_eq!(value_of("event.value = 10 > '9';"), Ok(Some("true".into())));
+    }
+
+    /// The event object a keystroke action reads, and the verdict it leaves.
+    #[test]
+    fn an_event_carries_the_change_the_selection_and_the_verdict() {
+        let mut host = Fields::with(&[("total", "abc")]);
+        let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+        let event = Event {
+            value: "abc".to_string(),
+            change: "d".to_string(),
+            selection: (1, 2),
+            will_commit: true,
+        };
+        let outcome = run_event(
+            "event.change = event.change + event.selStart + event.selEnd + event.willCommit;",
+            "total",
+            &event,
+            &mut host,
+            &mut budget,
+            &ScriptScope::empty(),
+        )
+        .expect("it runs");
+        assert_eq!(outcome.change, Some("d12true".to_string()));
+        assert!(outcome.accepted, "rc is true until a script says otherwise");
+        assert_eq!(outcome.value, None, "event.value was never touched");
+    }
+
+    #[test]
+    fn a_script_that_clears_rc_has_refused() {
+        let mut host = Fields::default();
+        let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+        let outcome = run_event(
+            "if (event.rc) { event.rc = false; }",
+            "total",
+            &Event::default(),
+            &mut host,
+            &mut budget,
+            &ScriptScope::empty(),
+        )
+        .expect("it runs");
+        assert!(!outcome.accepted);
+    }
+
+    /// The three event members a host states and a script may not move: a
+    /// reader has no caret to put a selection back into.
+    #[test]
+    fn the_selection_and_the_commit_flag_are_read_only() {
+        for source in [
+            "event.selStart = 0;",
+            "event.selEnd = 0;",
+            "event.willCommit = true;",
+        ] {
+            let mut host = Fields::default();
+            let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+            assert_eq!(
+                run_event(
+                    source,
+                    "total",
+                    &Event::default(),
+                    &mut host,
+                    &mut budget,
+                    &ScriptScope::empty(),
+                ),
+                Err(ScriptError::NotAssignable),
+                "{source}"
+            );
+        }
+    }
+
+    /// An event member outside the subset is refused rather than answered
+    /// `undefined`, which is what stops a keystroke script quietly taking the
+    /// wrong branch.
+    #[test]
+    fn an_event_member_outside_the_subset_is_refused() {
+        for source in [
+            "event.value = event.modifier;",
+            "event.value = event.shift;",
+            "event.value = event.source;",
+            "event.value = event.commitKey;",
+        ] {
+            assert_eq!(
+                value_of(source),
+                Err(ScriptError::UnknownMember),
+                "{source}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Document-level helpers
+    // -----------------------------------------------------------------------
+
+    /// Runs against a field set with a name table in scope.
+    fn run_with(source: &str, definitions: &str, current: &str) -> Result<Outcome, ScriptError> {
+        let mut scope = ScriptScope::empty();
+        scope.define(definitions)?;
+        let mut host = Fields::with(&[("a", "10"), ("b", "20"), ("total", "0")]);
+        let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+        run_in(source, "total", current, &mut host, &mut budget, &scope)
+    }
+
+    #[test]
+    fn a_helper_computes_and_returns() {
+        assert_eq!(
+            run_with(
+                "event.value = add(getField('a').value, getField('b').value);",
+                "function add(x, y) { return x + y; }",
+                "0",
+            )
+            .map(|outcome| outcome.value),
+            Ok(Some("30".to_string()))
+        );
+    }
+
+    /// Missing arguments are `undefined` and extra ones are dropped, which is
+    /// what a reader does; refusing would make a generated form that passes
+    /// four arguments to a three-parameter helper uncomputable.
+    #[test]
+    fn arity_is_not_checked() {
+        assert_eq!(
+            run_with(
+                "event.value = one(1, 2, 3);",
+                "function one(x) { return x; }",
+                "0",
+            )
+            .map(|outcome| outcome.value),
+            Ok(Some("1".to_string()))
+        );
+        assert_eq!(
+            run_with(
+                "event.value = two(1);",
+                "function two(x, y) { return y; }",
+                "0"
+            ),
+            Err(ScriptError::NotStorable),
+            "an undefined result is refused rather than stored as the word"
+        );
+    }
+
+    /// A helper with no `return` answers `undefined`, and storing that is
+    /// refused for the same reason an inert `app.*` result is.
+    #[test]
+    fn a_helper_with_no_return_produces_nothing_storable() {
+        assert_eq!(
+            run_with(
+                "event.value = quiet();",
+                "function quiet() { var x = 1; }",
+                "0"
+            ),
+            Err(ScriptError::NotStorable)
+        );
+    }
+
+    #[test]
+    fn a_helper_that_calls_itself_is_refused_by_name() {
+        assert_eq!(
+            run_with("event.value = f(1);", "function f(n) { return f(n); }", "0"),
+            Err(ScriptError::Recursion)
+        );
+    }
+
+    #[test]
+    fn a_helper_reached_only_through_another_still_runs() {
+        assert_eq!(
+            run_with(
+                "event.value = outer(4);",
+                "function inner(n) { return n * 2; } function outer(n) { return inner(n) + 1; }",
+                "0",
+            )
+            .map(|outcome| outcome.value),
+            Ok(Some("9".to_string()))
+        );
+    }
+
+    /// A helper writes fields through the same host door a field script does,
+    /// so a refusal there is the same refusal.
+    #[test]
+    fn a_helper_writes_through_the_same_door() {
+        let mut scope = ScriptScope::empty();
+        scope
+            .define("function put(v) { getField('total').value = v; return v; }")
+            .expect("it defines");
+        let mut host = Fields::with(&[("total", "0")]);
+        host.refuse.push("total".to_string());
+        let mut budget = Budget::new(limits::MAX_SCRIPT_STEPS);
+        assert_eq!(
+            run_in(
+                "event.value = put(5);",
+                "total",
+                "0",
+                &mut host,
+                &mut budget,
+                &scope,
+            ),
+            Err(ScriptError::FieldRefused)
+        );
+    }
+
+    #[test]
+    fn document_scope_takes_definitions_and_nothing_else() {
+        let mut scope = ScriptScope::empty();
+        for source in [
+            "var x = 1;",
+            "getField('a').value = 1;",
+            "1 + 1;",
+            "if (1) { }",
+            "return 1;",
+        ] {
+            assert_eq!(
+                scope.define(source),
+                Err(ScriptError::NotADefinition),
+                "{source} was taken"
+            );
+        }
+    }
+
+    /// A definition cannot nest, because `function` is still reserved
+    /// everywhere the ordinary statement production reads.
+    #[test]
+    fn a_definition_cannot_nest() {
+        let mut scope = ScriptScope::empty();
+        assert_eq!(
+            scope.define("function a() { function b() { return 1; } return b(); }"),
+            Err(ScriptError::Syntax)
+        );
+    }
+
+    #[test]
+    fn a_table_past_the_function_cap_is_refused() {
+        let mut scope = ScriptScope::empty();
+        let mut source = String::new();
+        for i in 0..=limits::MAX_SCRIPT_FUNCTIONS {
+            source.push_str(&format!("function f{i}() {{ return {i}; }} "));
+        }
+        assert_eq!(scope.define(&source), Err(ScriptError::TooManyFunctions));
+
+        // And across two sources, so the cap is the table's rather than one
+        // source's.
+        let mut scope = ScriptScope::empty();
+        for i in 0..limits::MAX_SCRIPT_FUNCTIONS {
+            assert_eq!(
+                scope.define(&format!("function g{i}() {{ return 1; }}")),
+                Ok(1)
+            );
+        }
+        assert_eq!(
+            scope.define("function last() { return 1; }"),
+            Err(ScriptError::TooManyFunctions)
+        );
+        // Redefining one already there is not a new entry, so it still fits.
+        assert_eq!(scope.define("function g0() { return 2; }"), Ok(1));
+    }
+
+    /// Every one of these is a document-scope source the fuzzer could hand
+    /// `define`, and none of them may panic (ruling 1).
+    #[test]
+    fn hostile_document_scope_never_panics() {
+        let sources = [
+            "function",
+            "function (",
+            "function f",
+            "function f(",
+            "function f()",
+            "function f() {",
+            "function f(,) {}",
+            "function f(a,) {}",
+            "function eval() {}",
+            "function f(eval) {}",
+            ";;;;",
+            "",
+            "\u{1f600}",
+            "function f() { return; } function f() { return; }",
+        ];
+        for source in sources {
+            let mut scope = ScriptScope::empty();
+            let _ = scope.define(source);
+        }
+    }
+
+    #[test]
+    fn the_two_named_policies_are_the_two_extremes() {
+        let every = [
+            Trigger::Calculate,
+            Trigger::Format,
+            Trigger::Keystroke,
+            Trigger::Validate,
+            Trigger::Document,
+            Trigger::Catalog,
+        ];
+        for trigger in every {
+            assert!(!ScriptPolicy::nothing().allows(trigger));
+            assert!(ScriptPolicy::everything().allows(trigger));
+        }
     }
 }

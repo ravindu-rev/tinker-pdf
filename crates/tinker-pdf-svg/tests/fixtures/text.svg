@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- §10's text, in the shapes a real file writes it.
+
+     Every run below is checked for what this crate can answer without a font:
+     the characters, the anchor, the matrix and the resolved font properties.
+     Where a run *begins* when it states no position of its own is a font
+     metric, and this crate has no font — so that run carries `anchor: None`
+     and the caller advances the pen. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"
+     font-family="Georgia, Times New Roman, 'Zapf Chancery', serif" font-size="12">
+  <!-- A chunk, opened by an absolute position. -->
+  <text x="10" y="20">Hello</text>
+
+  <!-- A `<tspan>` that states nothing continues the run before it; one that
+       states an `x` opens a new chunk. §10.4: the `<tspan>` with only a `y`
+       keeps the `x` the chunk before it had. -->
+  <text x="10" y="40">One<tspan>two</tspan><tspan x="80">three</tspan><tspan y="60">four</tspan></text>
+
+  <!-- Properties inherit into a `<tspan>` and are overridden on it. `2em` is
+       relative to the parent's computed size, which is the root's twelve. -->
+  <text x="10" y="80" font-weight="bold"><tspan>heavy</tspan><tspan font-style="italic" font-size="2em" fill="#ff0000">slanted</tspan></text>
+
+  <!-- §10.9's `text-anchor`, which the caller applies once it knows a chunk's
+       width. -->
+  <text x="100" y="100" text-anchor="middle">centred</text>
+
+  <!-- §10.4's per-glyph positioning: the first number is used and the rest
+       are named. -->
+  <text x="10 20 30" y="140">abc</text>
+
+  <!-- A `<tspan>` with a transform of its own, composed onto the `<text>`'s. -->
+  <text x="0" y="0" transform="translate(3,4)"><tspan transform="scale(2)">moved</tspan></text>
+
+  <!-- §10.13, refused by name. -->
+  <text x="10" y="160"><textPath href="#curve">along</textPath></text>
+</svg>

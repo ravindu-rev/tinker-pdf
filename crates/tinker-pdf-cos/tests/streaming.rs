@@ -1,0 +1,475 @@
+//! Opening a document over a [`ByteSource`] (`docs/design/streaming-open.md`).
+//!
+//! The property under test is the one ruling 4 makes non-negotiable: **arrival
+//! is not an input.** The same bytes produce the same objects, the same
+//! warnings and the same ladder level whether they arrived as one buffer, as
+//! aligned chunks, or one byte at a time from the most hostile conforming
+//! source that can be written.
+
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
+
+use tinker_pdf_cos::{
+    ByteSource, CosDocument, CountingSource, DocumentBuilder, LadderLevel, Name, ObjRef, Object,
+    ShreddedSource, SliceSource, SourceMiss, WarningKind, XrefEntry, CHUNK_SIZE,
+};
+
+/// A minimal, honest document: a catalog, an empty page tree, a classic table.
+fn a_document() -> Vec<u8> {
+    let body = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+xref\n0 3\n\
+0000000000 65535 f \n\
+0000000009 00000 n \n\
+0000000058 00000 n \n\
+trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n";
+    body.to_vec()
+}
+
+/// A source that answers only the ranges a host has fed it.
+///
+/// The wasm host loop in miniature: a read outside what has been fed is a miss
+/// naming what it wanted, the test feeds that, and asks again.
+struct Fed {
+    bytes: Vec<u8>,
+    available: Mutex<Vec<Range<u64>>>,
+    /// What it had to refuse. A real host records the same thing for the same
+    /// reason: it is the list it has to go and fetch.
+    missed: Mutex<Vec<Range<u64>>>,
+}
+
+impl Fed {
+    fn new(bytes: Vec<u8>) -> Fed {
+        Fed {
+            bytes,
+            available: Mutex::new(Vec::new()),
+            missed: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The ranges refused since this was last asked, and forgets them.
+    fn take_missed(&self) -> Vec<Range<u64>> {
+        std::mem::take(&mut self.missed.lock().expect("no panic here"))
+    }
+
+    fn feed(&self, range: Range<u64>) {
+        self.available.lock().expect("no panic here").push(range);
+    }
+
+    fn has(&self, at: u64) -> bool {
+        self.available
+            .lock()
+            .expect("no panic here")
+            .iter()
+            .any(|r| r.contains(&at))
+    }
+}
+
+impl ByteSource for Fed {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
+        let end = range.end.min(self.len());
+        if range.start >= end {
+            return Ok(Arc::from(&[][..]));
+        }
+        if !self.has(range.start) {
+            self.missed
+                .lock()
+                .expect("no panic here")
+                .push(range.clone());
+            return Err(SourceMiss::at(range));
+        }
+        let mut at = range.start;
+        while at < end && self.has(at) {
+            at += 1;
+        }
+        let from = range.start as usize;
+        let to = at as usize;
+        Ok(Arc::from(&self.bytes[from..to]))
+    }
+}
+
+/// What a document says about itself, as plain values two opens can be
+/// compared on.
+///
+/// `WholeFileFetched` is left out of the warning count on purpose, and it is
+/// the only thing left out. It is the one warning a streamed document has that
+/// a buffered one cannot: it is about transport rather than about the
+/// document, and counting it would make every whole-file operation look like a
+/// difference in what the two paths *read*.
+fn observed(doc: &CosDocument) -> (LadderLevel, usize, Vec<u8>, Option<i64>, usize) {
+    let root = doc.resolve_key(doc.trailer(), Name::ROOT);
+    let pages = root
+        .as_dict()
+        .map(|d| doc.resolve_key(d, Name::PAGES))
+        .unwrap_or_else(|| Arc::new(tinker_pdf_cos::Object::Null));
+    let count = pages.as_dict().and_then(|d| d.get_int(Name::COUNT));
+    let warnings = doc
+        .warnings()
+        .iter()
+        .filter(|w| w.kind != WarningKind::WholeFileFetched)
+        .count();
+    (
+        doc.ladder_level(),
+        warnings,
+        doc.bytes().to_vec(),
+        count,
+        doc.xref().len(),
+    )
+}
+
+#[test]
+fn a_buffer_a_slice_source_and_a_shredded_source_open_the_same_document() {
+    let bytes = a_document();
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    let sliced = CosDocument::open_source(Arc::new(SliceSource::new(bytes.clone())))
+        .expect("it opens over a slice source");
+    let shredded = CosDocument::open_source(Arc::new(ShreddedSource::new(SliceSource::new(
+        bytes.clone(),
+    ))))
+    .expect("it opens one byte at a time");
+
+    assert_eq!(observed(&buffered), observed(&sliced));
+    assert_eq!(
+        observed(&buffered),
+        observed(&shredded),
+        "a source that answers one byte at a time is the same document"
+    );
+    assert_eq!(buffered.ladder_level(), LadderLevel::Trust);
+    assert!(buffered.warnings().is_empty(), "the fixture is honest");
+}
+
+#[test]
+fn a_document_from_a_buffer_is_never_streamed_and_always_whole() {
+    let doc = CosDocument::open(a_document()).expect("it opens");
+    assert!(!doc.is_streamed());
+    assert!(doc.whole_file_fetched());
+
+    let streamed =
+        CosDocument::open_source(Arc::new(SliceSource::new(a_document()))).expect("it opens");
+    assert!(streamed.is_streamed());
+}
+
+/// The instruments do not change what is read, only what is counted.
+#[test]
+fn counting_a_source_changes_no_value_it_passes_through() {
+    let bytes = a_document();
+    let counter = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
+    let counted = CosDocument::open_source(counter.clone()).expect("it opens");
+    let plain = CosDocument::open(bytes).expect("it opens");
+    assert_eq!(observed(&counted), observed(&plain));
+    assert!(counter.bytes_read() > 0, "something was read");
+}
+
+/// A source that has nothing yet is a document that does not open, rather
+/// than one that opens empty.
+#[test]
+fn a_source_that_answers_nothing_refuses_rather_than_opening_empty() {
+    let source = Arc::new(Fed::new(a_document()));
+    assert!(CosDocument::open_source(source).is_err());
+}
+
+/// The retry converges: a host that feeds what a miss asked for and opens
+/// again gets the answer a buffer would have given.
+#[test]
+fn feeding_what_a_miss_named_converges_on_the_buffer_answer() {
+    let bytes = a_document();
+    let source = Arc::new(Fed::new(bytes.clone()));
+    assert!(
+        CosDocument::open_source(source.clone()).is_err(),
+        "nothing has been fed yet"
+    );
+    source.feed(0..bytes.len() as u64);
+    let fed = CosDocument::open_source(source).expect("it opens once the bytes are there");
+    let plain = CosDocument::open(bytes).expect("it opens");
+    assert_eq!(observed(&fed), observed(&plain));
+}
+
+/// The same document with object 2's cross-reference entry pointing at
+/// nothing, which is ladder level 2: a lying offset, repaired from the scan.
+fn a_damaged_document() -> Vec<u8> {
+    let mut bytes = a_document();
+    let table = bytes
+        .windows(9)
+        .position(|w| w == b"xref\n0 3\n")
+        .expect("the fixture carries a classic table");
+    // The third line of the table, whose first ten bytes are the offset.
+    let entry = table + 9 + 2 * 20;
+    bytes
+        .get_mut(entry..entry + 10)
+        .expect("an entry")
+        .copy_from_slice(b"0000000004");
+    bytes
+}
+
+/// A damaged document reads the same values whichever way it arrived.
+///
+/// This is the half of "arrival is not an input" that the eager offset probe
+/// used to carry: a buffered open decides at open that it needs the repair
+/// scanner, and a streamed open defers that decision to the first read that
+/// finds an entry lying. Both must reach the same object.
+#[test]
+fn a_lying_offset_is_repaired_on_both_paths() {
+    let bytes = a_damaged_document();
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    let streamed = CosDocument::open_source(Arc::new(ShreddedSource::new(SliceSource::new(
+        bytes.clone(),
+    ))))
+    .expect("it opens");
+
+    assert_eq!(buffered.ladder_level(), LadderLevel::Patch);
+    assert_eq!(
+        streamed.ladder_level(),
+        LadderLevel::Trust,
+        "provisional: the probe that would have said Patch is the one deferred"
+    );
+
+    let from_buffer = buffered.get(ObjRef::new(2, 0)).expect("a page tree");
+    let from_source = streamed.get(ObjRef::new(2, 0)).expect("a page tree");
+    assert_eq!(from_buffer, from_source, "the same object, both ways");
+    assert!(
+        from_buffer.as_dict().is_some(),
+        "and it is the real object rather than a null"
+    );
+
+    // The repair cost the whole source, and said so before it spent it.
+    assert!(streamed.whole_file_fetched());
+    let kinds: Vec<WarningKind> = streamed.warnings().iter().map(|w| w.kind).collect();
+    assert!(
+        kinds.contains(&WarningKind::WholeFileFetched),
+        "a streamed repair declares its whole-file fetch: {kinds:?}"
+    );
+    assert!(!buffered
+        .warnings()
+        .iter()
+        .any(|w| w.kind == WarningKind::WholeFileFetched));
+}
+
+/// The completion call gives back the eager answer.
+#[test]
+fn completing_validation_restores_the_verdict_a_buffer_would_have_given() {
+    for bytes in [a_document(), a_damaged_document()] {
+        let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+        let streamed =
+            CosDocument::open_source(Arc::new(SliceSource::new(bytes.clone()))).expect("it opens");
+        assert_eq!(
+            streamed.complete_validation(),
+            buffered.ladder_level(),
+            "provisional then completed equals a whole-buffer open"
+        );
+        assert_eq!(
+            buffered.complete_validation(),
+            buffered.ladder_level(),
+            "and it reads nothing for a document that was never streamed"
+        );
+    }
+}
+
+/// A document whose `startxref` keyword is gone, which is ladder level 3:
+/// the tables cannot be found at all and the scanner becomes truth.
+fn a_rescanned_document() -> Vec<u8> {
+    let mut bytes = a_document();
+    let at = bytes
+        .windows(9)
+        .position(|w| w == b"startxref")
+        .expect("the fixture carries one");
+    bytes[at..at + 9].copy_from_slice(b"startxrEf");
+    bytes
+}
+
+/// A rescan is one forward pass over everything, so a streamed document says
+/// so before it spends the file.
+#[test]
+fn a_rescan_on_a_streamed_source_declares_its_whole_file_fetch() {
+    let bytes = a_rescanned_document();
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    let streamed =
+        CosDocument::open_source(Arc::new(SliceSource::new(bytes.clone()))).expect("it opens");
+
+    assert_eq!(buffered.ladder_level(), LadderLevel::Rescan);
+    assert_eq!(
+        streamed.ladder_level(),
+        LadderLevel::Rescan,
+        "the rescan decision needs no eager probe, so it is not deferred"
+    );
+    assert_eq!(observed(&buffered), observed(&streamed));
+
+    let kinds: Vec<WarningKind> = streamed.warnings().iter().map(|w| w.kind).collect();
+    assert!(
+        kinds.contains(&WarningKind::WholeFileFetched),
+        "a streamed rescan declares its fetch: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&WarningKind::DocumentRescanned),
+        "and still says why: {kinds:?}"
+    );
+    assert!(streamed.whole_file_fetched());
+    assert!(!buffered
+        .warnings()
+        .iter()
+        .any(|w| w.kind == WarningKind::WholeFileFetched));
+}
+
+/// The wasm host loop, in miniature and bounded.
+///
+/// A host that cannot answer a range knows which range it was: its own `read`
+/// saw it. So the loop needs nothing from the engine but a refusal -- feed
+/// what was asked for, call again, and because parsing is pure and the store
+/// and chunk cache keep what they built, the retry repeats no completed work.
+/// The bound is what makes it a test rather than a hope: a loop that could not
+/// finish would spin here instead of converging.
+#[test]
+fn a_host_that_feeds_what_it_was_asked_for_converges_in_bounded_rounds() {
+    let bytes = a_document();
+    let source = Arc::new(Fed::new(bytes.clone()));
+    let mut rounds = 0usize;
+    let streamed = loop {
+        rounds += 1;
+        assert!(rounds <= 16, "the host loop has not converged in {rounds}");
+        let handle: Arc<dyn ByteSource> = Arc::clone(&source) as Arc<dyn ByteSource>;
+        match CosDocument::open_source(handle) {
+            Ok(doc) => break doc,
+            Err(_) => {
+                let wanted = source.take_missed();
+                assert!(
+                    !wanted.is_empty(),
+                    "a refusal that named no range is a loop that cannot end"
+                );
+                for range in wanted {
+                    source.feed(range);
+                }
+            }
+        }
+    };
+    assert!(rounds > 1, "the first call really did miss");
+
+    let buffered = CosDocument::open(bytes).expect("it opens");
+    assert_eq!(
+        observed(&streamed),
+        observed(&buffered),
+        "the loop converged on the answer a buffer would have given"
+    );
+}
+
+/// A feed that stops **inside** a chunk refuses, and the retry converges.
+///
+/// The interruption lands where a whole-chunk feed could never put it, which
+/// is what makes this different from the test above. It is deliberately *not*
+/// the guard for "a half-filled chunk is never published": opening again
+/// builds a new chunk cache, so a poisoned chunk cannot survive between two
+/// opens. `a_miss_never_publishes_a_null_the_host_could_still_fix` is that
+/// guard, and it holds one document across the miss.
+#[test]
+fn a_feed_that_stops_inside_a_chunk_refuses_and_then_converges() {
+    let bytes = a_document();
+    assert!(
+        bytes.len() > 200,
+        "the fixture must be longer than the prefix fed below"
+    );
+    let source = Arc::new(Fed::new(bytes.clone()));
+
+    // A prefix that ends inside the first chunk and inside the document.
+    source.feed(0..120);
+    let handle: Arc<dyn ByteSource> = Arc::clone(&source) as Arc<dyn ByteSource>;
+    assert!(
+        CosDocument::open_source(handle).is_err(),
+        "the first chunk cannot be completed from a 120-byte prefix"
+    );
+
+    source.feed(120..bytes.len() as u64);
+    let handle: Arc<dyn ByteSource> = Arc::clone(&source) as Arc<dyn ByteSource>;
+    let after = CosDocument::open_source(handle).expect("it opens once the rest arrives");
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    assert_eq!(
+        observed(&after),
+        observed(&buffered),
+        "the retry read a chunk that had been cached half-full"
+    );
+    assert_eq!(
+        after.bytes().len(),
+        bytes.len(),
+        "and the document is all of its bytes, not the prefix that arrived first"
+    );
+}
+
+/// A document of several chunks, so a range can be withheld from the middle
+/// of it without withholding the head or the tail.
+fn a_multi_chunk_document() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    for index in 0..12 {
+        builder.add_page(200.0, 100.0, |page| {
+            let shade = (index % 5) as f64 / 5.0;
+            let mut ops = Vec::new();
+            for step in 0..80 {
+                let x = (step % 20) as f64 * 8.0;
+                let y = (step / 20) as f64 * 20.0;
+                ops.extend_from_slice(
+                    format!("{shade:.3} 0.4 0.6 rg {x:.2} {y:.2} 6.00 9.00 re f ").as_bytes(),
+                );
+            }
+            page.raw(&ops);
+        });
+    }
+    builder.finish()
+}
+
+/// A slot that could not be read must not become a published null.
+///
+/// This is the risk table's first row, and the one an ordinary retry test
+/// cannot reach: opening again builds a new chunk cache, so a poisoned slot
+/// only shows when **one** document reads, misses, and reads again after the
+/// host has supplied the range. The null is correct as an answer -- 7.3.10
+/// says a missing object is null and ruling 2 says degrade -- and wrong as a
+/// memory, because the object is not missing, its bytes had not arrived.
+#[test]
+fn a_miss_never_publishes_a_null_the_host_could_still_fix() {
+    let bytes = a_multi_chunk_document();
+    let len = bytes.len() as u64;
+    assert!(len > 6 * CHUNK_SIZE, "the fixture spans several chunks");
+
+    // An object in the middle of the file, found through the buffered open so
+    // that the choice does not depend on the path under test.
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    let middle = len / 2;
+    let (target, at) = buffered
+        .xref()
+        .iter()
+        .filter_map(|(num, entry)| match entry {
+            XrefEntry::Offset { offset, .. } => Some((num, offset)),
+            _ => None,
+        })
+        .min_by_key(|(_, offset)| offset.abs_diff(middle))
+        .expect("the fixture has objects in the middle");
+    let expected = buffered.get(ObjRef::new(target, 0)).expect("it reads");
+    assert!(
+        !matches!(*expected, Object::Null),
+        "the object chosen is a real one"
+    );
+
+    // Everything except the one chunk that object lives in.
+    let hole = (at / CHUNK_SIZE) * CHUNK_SIZE..((at / CHUNK_SIZE) + 1) * CHUNK_SIZE;
+    let source = Arc::new(Fed::new(bytes.clone()));
+    source.feed(0..hole.start);
+    source.feed(hole.end.min(len)..len);
+
+    let handle: Arc<dyn ByteSource> = Arc::clone(&source) as Arc<dyn ByteSource>;
+    let doc = CosDocument::open_source(handle).expect("the head and tail are enough to open");
+    let absent = doc.get(ObjRef::new(target, 0)).expect("it reads");
+    assert!(
+        matches!(*absent, Object::Null),
+        "an object whose bytes are absent reads as null"
+    );
+
+    // The host goes and fetches what it refused, and the same document reads
+    // the object it could not read before.
+    source.feed(hole);
+    let arrived = doc.get(ObjRef::new(target, 0)).expect("it reads");
+    assert_eq!(
+        *arrived, *expected,
+        "the null was remembered, so the retry read the miss's answer"
+    );
+}

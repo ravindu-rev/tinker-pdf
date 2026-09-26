@@ -263,6 +263,68 @@ pub enum WarningKind {
     /// Ladder level 3: the cross-reference tables were discarded and the whole
     /// buffer was scanned for objects.
     DocumentRescanned,
+    /// Annex F: a file declares itself linearized and its `/L` is not the
+    /// length of the file, so it was updated after it was linearized and must
+    /// be read as an ordinary one. The head-only fast path stands down.
+    LinearizedLengthMismatch,
+    /// Annex F: the linearization parameter dictionary is there and does not
+    /// describe a file this reader can open from its head alone. The generic
+    /// path reads it instead, which is what every other reader would have
+    /// done anyway.
+    LinearizedParametersUnusable,
+    /// Annex F: the primary hint stream `/H` names could not be read, so a
+    /// page other than the first is reached through the main cross-reference
+    /// table instead.
+    ///
+    /// Not a defect in the file by itself — `/H` may name a stream this
+    /// reader will not decode, or the tables may run out mid-field, and both
+    /// are cases [`crate::validate`] already reports on their own terms. What
+    /// this records is the *consequence*: the accelerator stood down and the
+    /// generic path paid for the tail (ruling 10).
+    LinearizedHintsUnusable,
+    /// Annex F: the page offset hint table pointed at bytes that are not the
+    /// page it claimed, so the page tree was walked instead.
+    ///
+    /// The [`Warning`]'s `object` names what was found there, when anything
+    /// was. Hints accelerate and never decide: a table naming a byte range
+    /// whose leading object is not a page leaf with its own `/MediaBox` and
+    /// `/Resources` buys nothing, and a page built from it would be the wrong
+    /// page rather than a cheaper one.
+    LinearizedPageHintRejected,
+    /// A streamed document needed every byte and fetched them.
+    ///
+    /// The repair rescan is one forward pass over everything, a container is
+    /// synthesised whole, and an incremental save must reproduce the original
+    /// bytes exactly as its prefix. Each of those is whole-file by contract
+    /// rather than by accident, and this is how it says so before it happens
+    /// (ruling 10): "it opened by streaming" and "it opened by streaming and
+    /// then pulled the file anyway" are different facts, and a byte budget
+    /// that could not tell them apart would measure nothing.
+    ///
+    /// Never emitted for a document opened from a buffer, which had them all
+    /// from the start.
+    WholeFileFetched,
+
+    // ---- variable text (12.7.4.3) ----------------------------------------
+    /// A character of a field's value did not reach a glyph in the `/DA`
+    /// font, and the appearance was written with a substitute in its place.
+    ///
+    /// The character is carried because it is the whole of what is
+    /// actionable: "this form will not display Arabic" is a guess, and "the
+    /// font Helv has no glyph for U+0645" is a fix. The [`Warning`]'s
+    /// `object` names the field it happened to, which is the other half
+    /// ruling 10 asks for.
+    ///
+    /// This exists because the alternative was a silent `?`. Until milestone
+    /// 8 of `docs/design/shaping.md`, `crate::fill::text_appearance` mapped
+    /// every character above the single-byte range onto `b'?'` and said
+    /// nothing, so a document whose Arabic field had been replaced by
+    /// question marks was indistinguishable, to every caller, from one that
+    /// had been filled correctly.
+    FieldCharacterUnrepresentable {
+        /// The character the font could not draw.
+        character: char,
+    },
 }
 
 impl WarningKind {
@@ -347,6 +409,12 @@ impl WarningKind {
             WarningKind::RootSynthesized => "root-synthesized",
             WarningKind::RootMissing => "root-missing",
             WarningKind::DocumentRescanned => "document-rescanned",
+            WarningKind::LinearizedLengthMismatch => "linearized-length-mismatch",
+            WarningKind::LinearizedParametersUnusable => "linearized-parameters-unusable",
+            WarningKind::LinearizedHintsUnusable => "linearized-hints-unusable",
+            WarningKind::LinearizedPageHintRejected => "linearized-page-hint-rejected",
+            WarningKind::WholeFileFetched => "whole-file-fetched",
+            WarningKind::FieldCharacterUnrepresentable { .. } => "field-character-unrepresentable",
         }
     }
 }
@@ -378,6 +446,11 @@ impl fmt::Display for WarningKind {
                 write!(f, "predefined-cmap-approximate (name #{})", n.id())
             }
             WarningKind::SecurityHandler(n) => write!(f, "security-handler: {n:?}"),
+            WarningKind::FieldCharacterUnrepresentable { character } => write!(
+                f,
+                "field-character-unrepresentable (U+{:04X})",
+                u32::from(*character)
+            ),
             other => f.write_str(other.as_str()),
         }
     }

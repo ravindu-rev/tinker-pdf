@@ -2,12 +2,15 @@
 //! 5's three-way split.
 
 use super::sheet;
+use crate::longhand::Longhand;
 use crate::media::{MediaContext, MediaType};
-use crate::parser::{parse, Declared};
+use crate::parser::{parse, Declared, LayerName, LayerPart};
 use crate::property::{
-    AlignContent, AlignItems, AlignSelf, BorderStyle, Color, Declaration, Display, FlexDirection,
-    FlexWrap, Float, JustifyContent, Len, LengthPercentage, MarginValue, Property, Side, Size,
-    SpecifiedMargin, SpecifiedSize, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
+    AlignContent, AlignItems, AlignSelf, BorderStyle, Color, ColumnCount, ColumnFill, ColumnSpan,
+    Declaration, Defaulting, Display, FlexDirection, FlexWrap, Float, JustifyContent, Len,
+    LengthPercentage, MarginValue, Position, Property, Side, Size, SpecifiedColumnWidth,
+    SpecifiedGap, SpecifiedInset, SpecifiedMargin, SpecifiedMaxSize, SpecifiedMinSize,
+    SpecifiedSize, SpecifiedVerticalAlign, ZIndex, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
 };
 use crate::{Budget, ImportResolver, Limits, NoImports, Warning};
 
@@ -207,20 +210,219 @@ fn an_unreadable_media_query_is_false_and_does_not_spread() {
     );
 }
 
-/// `@layer` is refused **by name** rather than ignored.
+/// A layer name, spelled out, for the fixtures below.
+fn named(parts: &[&str]) -> LayerName {
+    parts
+        .iter()
+        .map(|part| LayerPart::Named((*part).to_string()))
+        .collect()
+}
+
+/// `@layer name { … }`: the rules inside are **kept**, and each carries the
+/// layer it was written in.
 ///
-/// `css-cascade-5` §6.1 sorts layers above specificity, so reading the block as
-/// ordinary rules would invert the cascade for a book that uses one — and
-/// dropping it silently would lose the rules with no number saying how many.
+/// This is the whole of what the parser owes the cascade. `css-cascade-5` §6.1
+/// sorts on a position and the position is computed from the layer *tree* of a
+/// whole origin, which one sheet cannot see — so what a sheet records is which
+/// layer, and `cascade.rs` decides what that is worth.
 #[test]
-fn layer_is_refused_by_name() {
+fn a_layer_block_keeps_its_rules_and_names_their_layer() {
     let parsed = sheet("@layer base { p { float: left } } p { float: right }");
-    assert_eq!(parsed.report.warnings, vec![(Warning::LayerRefused, 1)]);
-    assert_eq!(parsed.rules.len(), 1);
+    assert!(parsed.report.warnings.is_empty(), "{:?}", parsed.report);
+    assert_eq!(parsed.layers, vec![named(&["base"])]);
+    assert_eq!(parsed.rules.len(), 2);
+    assert_eq!(parsed.rules[0].layer, Some(0));
     assert_eq!(
         parsed.rules[0].declarations[0].declaration,
-        Declaration::Known(Property::Float(Float::Right))
+        Declaration::Known(Property::Float(Float::Left))
     );
+    // And the rule after the block is unlayered, which is a different fact
+    // from "in the last layer": §6.4.2 puts it in the implicit final layer,
+    // and `None` is how that is spelled here.
+    assert_eq!(parsed.rules[1].layer, None);
+}
+
+/// `@layer a, b, c;` declares the order and produces no rules at all.
+///
+/// The statement form exists so a sheet can fix its layer order at the top and
+/// then write the blocks in whatever order suits it, which is exactly the case
+/// a build that ordered layers by their *blocks* gets backwards.
+#[test]
+fn a_layer_statement_declares_order_and_no_rules() {
+    let parsed = sheet("@layer a, b, c;");
+    assert!(parsed.report.warnings.is_empty(), "{:?}", parsed.report);
+    assert!(parsed.rules.is_empty());
+    assert_eq!(
+        parsed.layers,
+        vec![named(&["a"]), named(&["b"]), named(&["c"])]
+    );
+
+    // And a block that follows it re-opens the layer that is already there
+    // rather than declaring a second one — **first mention wins**, so the list
+    // does not grow and `b` does not move.
+    let reopened =
+        sheet("@layer a, b; @layer b { p { float: left } } @layer a { p { float: right } }");
+    assert_eq!(reopened.layers, vec![named(&["a"]), named(&["b"])]);
+    assert_eq!(reopened.rules[0].layer, Some(1), "the `b` block is layer b");
+    assert_eq!(reopened.rules[1].layer, Some(0), "the `a` block is layer a");
+}
+
+/// `@layer { … }` is a fresh layer every time, and **two of them are two
+/// layers**.
+///
+/// A build that gave every anonymous layer the same identity would merge the
+/// two blocks below into one, which is not a subtle wrong answer: it makes the
+/// second block's rules lose to the first's on order alone.
+#[test]
+fn an_anonymous_layer_is_a_fresh_one_every_time() {
+    let parsed = sheet("@layer { p { float: left } } @layer { p { float: right } }");
+    assert_eq!(
+        parsed.layers,
+        vec![vec![LayerPart::Anonymous(0)], vec![LayerPart::Anonymous(1)]]
+    );
+    assert_eq!(parsed.rules[0].layer, Some(0));
+    assert_eq!(parsed.rules[1].layer, Some(1));
+}
+
+/// A nested block and the dotted spelling are **the same layer**.
+///
+/// `@layer a { @layer b { … } }` is `a.b`, so a sheet that opens `a.b` later by
+/// its dotted name adds to the layer the nesting already made rather than
+/// making a second one beside it.
+#[test]
+fn a_nested_layer_resolves_to_its_dotted_name() {
+    let parsed = sheet(
+        "@layer a { @layer b { p { float: left } } }
+         @layer a.b { p { float: right } }",
+    );
+    assert!(parsed.report.warnings.is_empty(), "{:?}", parsed.report);
+    assert_eq!(parsed.layers, vec![named(&["a"]), named(&["a", "b"])]);
+    assert_eq!(parsed.rules[0].layer, Some(1));
+    assert_eq!(
+        parsed.rules[1].layer,
+        Some(1),
+        "the same layer, not a second"
+    );
+}
+
+/// `@media` and `@layer` nest **both ways round**, because both are books
+/// somebody writes.
+///
+/// The at-rules inside a block used to be a second, shorter list than the one
+/// at the top level, and a second list is how the two come to disagree: this
+/// fixture is one construct from each direction, and the `@font-face` is there
+/// because it is the at-rule that was already special-cased inside `@media`.
+#[test]
+fn media_and_layer_nest_in_either_order() {
+    let parsed = sheet(
+        "@layer a { @media screen { p { float: left } } }
+         @media screen { @layer b { p { float: right } } }
+         @layer c { @media print { p { float: left } } }
+         @media screen { @font-face { font-family: X; src: url(x.ttf) } }",
+    );
+    assert!(parsed.report.warnings.is_empty(), "{:?}", parsed.report);
+    assert_eq!(
+        parsed.layers,
+        vec![named(&["a"]), named(&["b"]), named(&["c"])]
+    );
+    assert_eq!(parsed.rules.len(), 2, "the print block does not match");
+    assert_eq!(parsed.rules[0].layer, Some(0));
+    assert_eq!(parsed.rules[1].layer, Some(1));
+    assert_eq!(parsed.font_faces.len(), 1, "and @font-face still survives");
+}
+
+/// An `@layer` prelude the grammar does not admit discards the rule, and
+/// **§6.4.1's no-whitespace clause is why one of these is not two layers**.
+///
+/// `@layer a b` is two names with no comma: invalid. A reader that skipped
+/// whitespace would take it for `a.b` — a layer the author never wrote, holding
+/// the rules that were meant for two.
+#[test]
+fn an_invalid_layer_prelude_discards_the_rule() {
+    for source in [
+        "@layer a b { p { float: left } }",
+        "@layer a . b { p { float: left } }",
+        "@layer a, b { p { float: left } }",
+        "@layer 3 { p { float: left } }",
+        "@layer a. { p { float: left } }",
+        "@layer;",
+    ] {
+        let parsed = sheet(source);
+        assert!(parsed.layers.is_empty(), "{source}");
+        assert!(parsed.rules.is_empty(), "{source}");
+        assert_eq!(parsed.report.discarded_rules, 1, "{source}");
+    }
+}
+
+/// §6.4.1: an `@import` may name the layer its sheet lands in, and the clause
+/// is taken off **before** the media query list is read.
+///
+/// A build that left it in hands `layer(a)` to the media evaluator, which
+/// cannot read it, calls that query false and drops the whole sheet — a book
+/// that layers its imports arriving unstyled with nothing anywhere saying why.
+#[test]
+fn an_import_may_name_the_layer_it_lands_in() {
+    let table = Table(&[("one.css", "p { float: left }")]);
+
+    let into_named = parse_with("@import url(one.css) layer(a);", &table);
+    assert!(
+        into_named.report.warnings.is_empty(),
+        "{:?}",
+        into_named.report
+    );
+    assert_eq!(into_named.layers, vec![named(&["a"])]);
+    assert_eq!(into_named.rules.len(), 1);
+    assert_eq!(into_named.rules[0].layer, Some(0));
+
+    // Bare `layer` is the anonymous form, exactly as `@layer { … }` is.
+    let anonymous = parse_with("@import url(one.css) layer;", &table);
+    assert_eq!(anonymous.layers, vec![vec![LayerPart::Anonymous(0)]]);
+    assert_eq!(anonymous.rules[0].layer, Some(0));
+
+    // The media query list after the clause is still read — this is the pair
+    // that says the clause was removed rather than the query skipped.
+    let unmatched = parse_with("@import url(one.css) layer(a) print;", &table);
+    assert!(unmatched.rules.is_empty(), "print does not match");
+    let matched = parse_with("@import url(one.css) layer(a) screen;", &table);
+    assert_eq!(matched.rules.len(), 1);
+    assert_eq!(matched.rules[0].layer, Some(0));
+
+    // And an unlayered `@import` is unchanged.
+    let plain = parse_with("@import url(one.css);", &table);
+    assert!(plain.layers.is_empty());
+    assert_eq!(plain.rules[0].layer, None);
+}
+
+/// §3.3: a `@layer` **statement** does not close the `@import` window and a
+/// `@layer` **block** does.
+///
+/// The clause names `@charset` and `@layer` as the two an `@import` may follow,
+/// and it means the statement form — a block holds rules, and a rule is what
+/// the window closes on. A build that closed the window on both would refuse
+/// the `@import` in exactly the sheet that ordered its layers first, which is
+/// the sheet most likely to have been written by somebody who read the spec.
+#[test]
+fn a_layer_statement_leaves_the_import_window_open() {
+    let after_statement = parse_with(
+        "@layer a, b; @import url(one.css);",
+        &Table(&[("one.css", "p { float: left }")]),
+    );
+    assert!(
+        after_statement.report.warnings.is_empty(),
+        "{:?}",
+        after_statement.report
+    );
+    assert_eq!(after_statement.rules.len(), 1);
+
+    let after_block = parse_with(
+        "@layer a { } @import url(one.css);",
+        &Table(&[("one.css", "p { float: left }")]),
+    );
+    assert_eq!(
+        after_block.report.warnings,
+        vec![(Warning::ImportOutOfOrder, 1)]
+    );
+    assert!(after_block.rules.is_empty());
 }
 
 /// Every other at-rule is dropped **with its name**, which is decision 5's
@@ -478,8 +680,6 @@ fn a_value_outside_a_supported_property_is_unsupported_and_not_its_neighbour() {
         ),
         ("p { color: rebeccapurple }", "color", "rebeccapurple"),
         ("p { width: 50vw }", "width", "50vw"),
-        ("p { color: inherit }", "color", "inherit"),
-        ("p { display: initial }", "display", "initial"),
     ] {
         let declared = declarations(source);
         assert_eq!(
@@ -508,8 +708,8 @@ fn a_value_outside_a_supported_property_is_unsupported_and_not_its_neighbour() {
 fn unsupported_is_this_builds_gap_and_unknown_is_somebody_elses() {
     let parsed = sheet(
         "p {
-            column-count: 2;
-            -webkit-column-count: 2;
+            box-shadow: 0 0 2px #000;
+            -webkit-box-shadow: 0 0 2px #000;
             -epub-text-emphasis-style: dot;
             -ah-margin-start: 1em;
             --brand: #333;
@@ -519,7 +719,7 @@ fn unsupported_is_this_builds_gap_and_unknown_is_somebody_elses() {
     );
     assert_eq!(
         parsed.report.unsupported,
-        vec![("column-count", 1), ("hyphens", 1)]
+        vec![("box-shadow", 1), ("hyphens", 1)]
     );
     let unknown: Vec<&str> = parsed
         .report
@@ -530,7 +730,7 @@ fn unsupported_is_this_builds_gap_and_unknown_is_somebody_elses() {
     assert_eq!(
         unknown,
         vec![
-            "-webkit-column-count",
+            "-webkit-box-shadow",
             "-epub-text-emphasis-style",
             "-ah-margin-start",
             "--brand",
@@ -563,54 +763,96 @@ fn a_declaration_that_does_not_start_with_an_identifier_is_counted() {
         assert_eq!(known(source).len(), 1, "{source}");
     }
 }
-
-/// `css-cascade-5` §7.1's explicit defaulting keywords are **this build's gap**
-/// on every property, including the ones whose values are lengths.
+/// **§7.1's five keywords are values, on a length-valued property too.**
 ///
-/// The other survivor, and it is milestone 3's shape exactly: the rule was
-/// enforced twice and only one half was reachable. Disabling the CSS-wide
-/// keyword branch entirely changed no answer for `color: inherit` or
-/// `display: initial`, because a colour that is not a colour and a keyword that
-/// is not one of a property's own keywords are **already** `Unsupported` by the
-/// (property, value) rule. The half nobody reached is a *length*-valued
-/// property, where an identifier that is not one of its keywords is `Invalid` —
-/// so `margin-top: inherit` would have been filed as the author's typo rather
-/// than as a gap in this engine, and the one number the milestone is judged on
-/// would have been short by every `inherit` in every real book.
+/// This test was `a_css_wide_keyword_is_a_gap_on_a_length_valued_property_too`
+/// and asserted the opposite, for a reason worth keeping: the keywords used to
+/// be a gap, and the branch that filed them as one was reachable only here. A
+/// colour that is not a colour is already `Unsupported` by the (property,
+/// value) rule, so `color: inherit` reached the right answer either way; but an
+/// identifier that is not one of a *length's* keywords is `Invalid`, so
+/// `margin-top: inherit` would have been filed as the author's typo. The same
+/// asymmetry is why this is still the test that matters now the keywords are
+/// implemented -- if the defaulting branch were removed, `color: inherit` would
+/// quietly become `Unsupported` and `margin-top: inherit` would quietly become
+/// a discarded typo, and only the second of those loses the declaration
+/// entirely.
+///
+/// All five keywords, on both shapes of property, and on a shorthand.
 #[test]
-fn a_css_wide_keyword_is_a_gap_on_a_length_valued_property_too() {
-    for (source, property, value) in [
-        ("p { margin-top: inherit }", "margin-top", "inherit"),
-        ("p { width: initial }", "width", "initial"),
-        ("p { padding: unset }", "padding", "unset"),
-        ("p { text-indent: revert }", "text-indent", "revert"),
+fn a_css_wide_keyword_is_a_value_on_a_length_valued_property_too() {
+    for (source, longhand, keyword) in [
+        (
+            "p { margin-top: inherit }",
+            Longhand::MarginTop,
+            Defaulting::Inherit,
+        ),
+        ("p { width: initial }", Longhand::Width, Defaulting::Initial),
+        (
+            "p { text-indent: revert }",
+            Longhand::TextIndent,
+            Defaulting::Revert,
+        ),
         (
             "p { border-top-width: inherit }",
-            "border-top-width",
-            "inherit",
+            Longhand::BorderWidthTop,
+            Defaulting::Inherit,
         ),
         (
             "p { line-height: revert-layer }",
-            "line-height",
-            "revert-layer",
+            Longhand::LineHeight,
+            Defaulting::RevertLayer,
         ),
-        ("p { letter-spacing: inherit }", "letter-spacing", "inherit"),
+        (
+            "p { letter-spacing: inherit }",
+            Longhand::LetterSpacing,
+            Defaulting::Inherit,
+        ),
+        ("p { color: inherit }", Longhand::Color, Defaulting::Inherit),
+        (
+            "p { display: initial }",
+            Longhand::Display,
+            Defaulting::Initial,
+        ),
     ] {
         assert_eq!(
             declarations(source)[0].declaration,
-            Declaration::Unsupported {
-                property,
-                value: value.to_string()
-            },
+            Declaration::Defaulted { longhand, keyword },
             "{source}"
         );
     }
+
+    // A shorthand expands, exactly as it does for a value: four declarations
+    // and not one, so a `padding-top` written after it beats one of them.
+    let padding = declarations("p { padding: unset }");
+    assert_eq!(padding.len(), 4, "padding expands to four longhands");
+    assert!(padding.iter().all(|d| matches!(
+        d.declaration,
+        Declaration::Defaulted {
+            keyword: Defaulting::Unset,
+            ..
+        }
+    )));
+
     // And the direction that says this is about the five keywords and not about
     // identifiers in general: an identifier that is not one of them is not CSS
     // for a length at all, and is the author's error rather than this build's.
     let typo = sheet("p { margin-top: red }");
     assert_eq!(typo.report.discarded_declarations, 1);
     assert!(typo.report.unsupported.is_empty());
+
+    // Nor is a keyword a keyword when it is only part of the value: §7.1 makes
+    // the five valid *instead of* a property's own syntax, never inside it.
+    // `margin: 0 inherit` reaches the `margin` grammar, which does not have
+    // `inherit` in it, and comes out as this build's gap in `margin` rather
+    // than as four defaulted longhands.
+    let partial = declarations("p { margin: 0 inherit }");
+    assert!(
+        !partial
+            .iter()
+            .any(|d| matches!(d.declaration, Declaration::Defaulted { .. })),
+        "a keyword inside a value is not §7.1 defaulting: {partial:?}"
+    );
 }
 
 /// A property this build implements, at a value that is not CSS at all, is a
@@ -636,10 +878,10 @@ fn a_value_that_is_not_css_is_discarded_rather_than_counted_as_a_gap() {
 fn the_report_deduplicates_with_counts() {
     let mut source = String::new();
     for index in 0..400 {
-        source.push_str(&format!(".c{index} {{ column-count: 2 }}\n"));
+        source.push_str(&format!(".c{index} {{ box-shadow: 0 0 2px #000 }}\n"));
     }
     let parsed = sheet(&source);
-    assert_eq!(parsed.report.unsupported, vec![("column-count", 400)]);
+    assert_eq!(parsed.report.unsupported, vec![("box-shadow", 400)]);
 }
 
 /// The two name tables are disjoint.
@@ -1060,4 +1302,212 @@ fn flex_basis_computes_to_a_size_and_auto_stays_auto() {
         super::cascade::styles("p { color: red }", &tree)[0].flex_basis,
         Size::Auto
     );
+}
+
+/// CSS 2.2 §10.4 and §10.7's four, and the three answers a length can get.
+///
+/// A **negative** minimum or maximum is `Malformed` and the author's, because
+/// both grammars are `<length-percentage [0,inf]>` and a negative number is not
+/// a value of the property at all. `min-content` is `BadValue` and this
+/// build's, because `css-sizing-3` §5.1 defines it and this build has not
+/// implemented it. Putting the second in the author's column is the mistake
+/// this split exists to prevent: it is the one figure the census is judged on,
+/// and it would move in the flattering direction.
+#[test]
+fn min_and_max_sizing_tell_the_authors_mistake_from_this_builds_gap() {
+    assert_eq!(
+        known("p { min-width: 0 }"),
+        vec![Property::MinWidth(SpecifiedMinSize::Length(Len::Px(0.0)))]
+    );
+    assert_eq!(
+        known("p { min-width: auto }"),
+        vec![Property::MinWidth(SpecifiedMinSize::Auto)]
+    );
+    assert_eq!(
+        known("img { max-width: 100% }"),
+        vec![Property::MaxWidth(SpecifiedMaxSize::Length(Len::Percent(
+            100.0
+        )))]
+    );
+    assert_eq!(
+        known("p { max-height: none }"),
+        vec![Property::MaxHeight(SpecifiedMaxSize::None)]
+    );
+    assert_eq!(
+        known("p { min-height: 2em }"),
+        vec![Property::MinHeight(SpecifiedMinSize::Length(Len::Em(2.0)))]
+    );
+    // The author's: discarded by §5.4.4, counted nowhere as a gap.
+    for source in ["p { min-width: -1px }", "p { max-width: -3em }"] {
+        let parsed = sheet(source);
+        assert!(parsed.report.unsupported.is_empty(), "{source}");
+        assert_eq!(parsed.report.discarded_declarations, 1, "{source}");
+    }
+    // This build's: named, with the value beside it.
+    let parsed = sheet("p { min-width: min-content }");
+    assert_eq!(parsed.report.unsupported, vec![("min-width", 1)]);
+}
+
+/// §10.8.1's ten values, and the two things a first implementation folds.
+///
+/// `sub` and `super` are keywords rather than lengths, `text-top` is not `top`,
+/// and a **negative** length is valid where a negative `min-width` is not --
+/// `vertical-align: -0.4em` is how a book sets a chemical subscript, so the
+/// absence of a non-negative check here is the grammar rather than an omission.
+#[test]
+fn vertical_align_takes_ten_values_and_a_negative_length_is_one_of_them() {
+    for (source, expected) in [
+        ("baseline", SpecifiedVerticalAlign::Baseline),
+        ("sub", SpecifiedVerticalAlign::Sub),
+        ("super", SpecifiedVerticalAlign::Super),
+        ("top", SpecifiedVerticalAlign::Top),
+        ("middle", SpecifiedVerticalAlign::Middle),
+        ("bottom", SpecifiedVerticalAlign::Bottom),
+        ("text-top", SpecifiedVerticalAlign::TextTop),
+        ("text-bottom", SpecifiedVerticalAlign::TextBottom),
+    ] {
+        assert_eq!(
+            known(&format!("sup {{ vertical-align: {source} }}")),
+            vec![Property::VerticalAlign(expected)],
+            "{source}"
+        );
+    }
+    assert_eq!(
+        known("sub { vertical-align: -0.4em }"),
+        vec![Property::VerticalAlign(SpecifiedVerticalAlign::Length(
+            Len::Em(-0.4)
+        ))]
+    );
+    assert_eq!(
+        known("sup { vertical-align: 30% }"),
+        vec![Property::VerticalAlign(SpecifiedVerticalAlign::Length(
+            Len::Percent(30.0)
+        ))]
+    );
+    // `css-inline-3`'s keyword, which this build does not have.
+    let parsed = sheet("sup { vertical-align: first }");
+    assert_eq!(parsed.report.unsupported, vec![("vertical-align", 1)]);
+}
+
+/// §9.3.1's five, §9.3.2's four insets and §9.9.1's `z-index`.
+///
+/// **All five `position` values are `Known`**, including the three no box in
+/// this build is placed by. The alternative -- reporting `absolute` as a value
+/// gap -- would have had to refuse the five longhands with it, and then the
+/// report could say nothing about the box at all; cascading it lets
+/// `tinker_pdf_layout` count it per **box** instead of per declaration.
+#[test]
+fn position_its_insets_and_z_index() {
+    for (source, expected) in [
+        ("static", Position::Static),
+        ("relative", Position::Relative),
+        ("absolute", Position::Absolute),
+        ("fixed", Position::Fixed),
+        ("sticky", Position::Sticky),
+    ] {
+        assert_eq!(
+            known(&format!("figure {{ position: {source} }}")),
+            vec![Property::Position(expected)],
+            "{source}"
+        );
+    }
+    assert_eq!(
+        known("figure { top: 0; right: auto; bottom: -2px; left: 50% }"),
+        vec![
+            Property::Inset(Side::Top, SpecifiedInset::Length(Len::Px(0.0))),
+            Property::Inset(Side::Right, SpecifiedInset::Auto),
+            Property::Inset(Side::Bottom, SpecifiedInset::Length(Len::Px(-2.0))),
+            Property::Inset(Side::Left, SpecifiedInset::Length(Len::Percent(50.0))),
+        ]
+    );
+    assert_eq!(
+        known("figure { z-index: auto }"),
+        vec![Property::ZIndex(ZIndex::Auto)]
+    );
+    assert_eq!(
+        known("figure { z-index: -1 }"),
+        vec![Property::ZIndex(ZIndex::Layer(-1))]
+    );
+    // §9.9.1's grammar is `<integer>`; `2.5` is not one.
+    assert!(known("figure { z-index: 2.5 }").is_empty());
+}
+
+/// `css-multicol-1`'s longhands and its two shorthands, and `css-align-3`'s
+/// `gap`.
+///
+/// Three separate claims, and the third is the one to get wrong. §3.3's
+/// `columns` **resets the omitted longhand**, so both come out of it whatever
+/// the author wrote; §5.4's `column-rule` is `border`'s three-in-any-order; and
+/// §8.2's `gap` is **row first**, which is the opposite of every
+/// `<length> <length>?` in CSS 2.2 and would look entirely reasonable read the
+/// other way round.
+#[test]
+fn the_multi_column_longhands_and_the_three_shorthands() {
+    assert_eq!(
+        known("div { column-count: 3 }"),
+        vec![Property::ColumnCount(ColumnCount::Count(3))]
+    );
+    assert_eq!(
+        known("div { column-width: 20em }"),
+        vec![Property::ColumnWidth(SpecifiedColumnWidth::Length(
+            Len::Em(20.0)
+        ))]
+    );
+    // §3.1's grammar has no percentage in it: the author's, not this build's.
+    assert!(known("div { column-width: 40% }").is_empty());
+    assert_eq!(
+        known("div { columns: 20em 3 }"),
+        vec![
+            Property::ColumnWidth(SpecifiedColumnWidth::Length(Len::Em(20.0))),
+            Property::ColumnCount(ColumnCount::Count(3)),
+        ]
+    );
+    // §3.3 resets the omitted one, so a bare count still says `auto` out loud.
+    assert_eq!(
+        known("div { columns: 2 }"),
+        vec![
+            Property::ColumnWidth(SpecifiedColumnWidth::Auto),
+            Property::ColumnCount(ColumnCount::Count(2)),
+        ]
+    );
+    assert_eq!(
+        known("div { column-rule: 2px solid red }"),
+        vec![
+            Property::ColumnRuleWidth(Len::Px(2.0)),
+            Property::ColumnRuleStyle(BorderStyle::Solid),
+            Property::ColumnRuleColor(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }),
+        ]
+    );
+    assert_eq!(
+        known("div { column-span: all; column-fill: auto }"),
+        vec![
+            Property::ColumnSpan(ColumnSpan::All),
+            Property::ColumnFill(ColumnFill::Auto),
+        ]
+    );
+    // §8.2: `<'row-gap'> <'column-gap'>?`, and the order is the assertion.
+    assert_eq!(
+        known("div { gap: 1em 2em }"),
+        vec![
+            Property::RowGap(SpecifiedGap::Length(Len::Em(1.0))),
+            Property::ColumnGap(SpecifiedGap::Length(Len::Em(2.0))),
+        ]
+    );
+    assert_eq!(
+        known("div { gap: 4px }"),
+        vec![
+            Property::RowGap(SpecifiedGap::Length(Len::Px(4.0))),
+            Property::ColumnGap(SpecifiedGap::Length(Len::Px(4.0))),
+        ]
+    );
+    assert_eq!(
+        known("div { column-gap: normal }"),
+        vec![Property::ColumnGap(SpecifiedGap::Normal)]
+    );
+    assert!(known("div { gap: -1px }").is_empty());
 }

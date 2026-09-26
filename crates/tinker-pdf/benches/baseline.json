@@ -1,0 +1,76 @@
+{
+  "note": [
+    "The speed ratchet's committed figures, read by `cargo xtask bench-check",
+    "--machine NAME` and held to `benches/engine.rs` by `cargo xtask baseline`.",
+    "Every number here is one criterion computed and wrote into its own",
+    "estimates.json on the runner; nothing re-times anything. See",
+    "docs/verification.md, 'Clocks: outside the suite, and not nowhere'.",
+    "",
+    "`nanos` is the FASTEST mean of the stated runs, not their average: the",
+    "comparison is one-sided, faster is never a failure, so the bar worth",
+    "recording is the best the machine has ever done.",
+    "",
+    "`swing_percent` is measured, never assumed, and every band is above its",
+    "own operation's swing. Key order is load-bearing -- the reader cuts the",
+    "file into entries at `machine`, so that key comes first in each one."
+  ],
+  "machines": [
+    {
+      "machine": "ubuntu-latest",
+      "runs": 15,
+      "swing_percent": 88.36,
+      "band_percent": 135.0,
+      "recorded": "19 September 2026, fifteen workflow_dispatch runs of bench.yml on develop at 4aff8cc",
+      "dispatches": [
+        "35462488069", "35462702958", "35462705081", "35462706950",
+        "35462708751", "35462921377", "35462922858", "35462924746",
+        "35462926404", "35463256473", "35463258487", "35463260359",
+        "35463262176", "35463264168", "35463266192"
+      ],
+      "operations": [
+        {
+          "id": "extract a page of text",
+          "nanos": 728484.6,
+          "swing_percent": 22.61,
+          "band_percent": 35.0
+        },
+        {
+          "id": "fill 300 anti-aliased paths at 150 dpi",
+          "nanos": 31738504.1,
+          "swing_percent": 42.39,
+          "band_percent": 65.0
+        },
+        {
+          "id": "open a 3-page document",
+          "nanos": 14527.1,
+          "swing_percent": 33.67,
+          "band_percent": 55.0
+        },
+        {
+          "id": "paginate a book at 432x648 pt",
+          "nanos": 12365318.6,
+          "swing_percent": 30.22,
+          "band_percent": 50.0
+        },
+        {
+          "id": "render text at 150 dpi",
+          "nanos": 5341153.3,
+          "swing_percent": 88.36,
+          "band_percent": 135.0
+        },
+        {
+          "id": "rewrite a document",
+          "nanos": 51980.8,
+          "swing_percent": 27.89,
+          "band_percent": 45.0
+        },
+        {
+          "id": "shading/render a full-page axial shading at 150 dpi",
+          "nanos": 123662267.4,
+          "swing_percent": 38.80,
+          "band_percent": 60.0
+        }
+      ]
+    }
+  ]
+}

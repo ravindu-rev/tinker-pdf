@@ -31,7 +31,7 @@
 mod epub_support;
 
 use tinker_pdf::epub::paint::BookMetrics;
-use tinker_pdf::epub::read::{box_tree, PX_TO_PT, UA_STYLESHEET};
+use tinker_pdf::epub::read::{box_tree, Pictures, PX_TO_PT, UA_STYLESHEET};
 use tinker_pdf::epub::{xhtml, DEFAULT_FONT_SIZE};
 use tinker_pdf::{Document, OpenOptions};
 use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, StyleTree};
@@ -124,7 +124,7 @@ fn engine(body: &str, width_px: f64, height_px: f64) -> (xhtml::Dom, StyleTree, 
     )
     .expect("a cascade");
     let laid = layout(
-        &box_tree(&dom, &styles),
+        &box_tree(&dom, &styles, &Pictures::default()),
         &BookMetrics::STANDARD,
         &Options::new(width_px, height_px),
         &LayoutLimits::DEFAULT,
@@ -780,7 +780,7 @@ fn layout_document(document: &str, width_px: f64, height_px: f64) -> Layout {
     )
     .expect("a cascade");
     layout(
-        &box_tree(&dom, &styles),
+        &box_tree(&dom, &styles, &Pictures::default()),
         &BookMetrics::STANDARD,
         &Options::new(width_px, height_px),
         &LayoutLimits::DEFAULT,

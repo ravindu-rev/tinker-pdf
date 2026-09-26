@@ -30,6 +30,7 @@
     reason = "shared by several test binaries; each uses a different subset"
 )]
 
+pub mod book;
 pub mod conservation;
 pub mod layout;
 pub mod typeface;

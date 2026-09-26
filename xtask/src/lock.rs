@@ -15,6 +15,16 @@
 //! change it was. Re-recording a `sha256` is then a deliberate act with its own
 //! commit, which is what plan 23's risk table asks for.
 //!
+//! **One pin, when there is only one thing to pin.** A corpus that is not a
+//! git repository has no commit, and `archive = zip` says so. The temptation
+//! is to require the field anyway and let somebody write a zero — a pin that
+//! pins nothing, in a file whose whole purpose is that a pin means something.
+//! So `commit` is required for a forge archive and *refused* for a published
+//! object, and that object's `sha256` carries the entire guarantee: if the
+//! bytes ever change, every fetch fails loudly and a person decides what
+//! happened. That is a weaker position than two pins and it is stated rather
+//! than glossed — a `zip` entry's corpus is only as reproducible as its host.
+//!
 //! The format is `key = value` under `[name]` headers, read line by line for
 //! the same reason `xtask` reads manifests that way: no dependency may be
 //! added to check the rules about dependencies.
@@ -29,8 +39,12 @@ pub struct Corpus {
     pub name: String,
     /// Where the archive is fetched from.
     pub url: String,
-    /// The upstream commit the archive is of: the content pin.
+    /// The upstream commit the archive is of: the content pin. Empty for an
+    /// entry whose upstream is not a git repository — see [`Archive`].
     pub commit: String,
+    /// What kind of archive the URL names, which decides how it is unpacked
+    /// and whether a `commit` is required.
+    pub archive: Archive,
     /// The archive's SHA-256, lowercase hex: the byte pin.
     pub sha256: String,
     /// The path *inside* the extracted archive holding the PDFs. Empty means
@@ -46,16 +60,57 @@ pub struct Corpus {
     pub redistribute: bool,
     /// One sentence on what the corpus exercises, for the licence table.
     pub exercises: String,
+    /// A per-file timeout for *this* corpus, in seconds, where the run's
+    /// default is wrong for it.
+    ///
+    /// **A timeout is a property of the documents, not of the run.** The four
+    /// fixture corpora are files somebody wrote to exercise a reader: small,
+    /// fast, and a minute is three times the slowest of them. The production
+    /// corpus is a thousand documents off the open web, whose median is 288 KB
+    /// and whose slowest *passing* file takes 55 seconds on the machine that
+    /// recorded the bar -- so at one minute, twenty-eight of them sit within a
+    /// factor of three of the limit and a slower runner turns rendering into a
+    /// coin toss. That is the failure this repository spent a week on already,
+    /// arriving by a different door.
+    ///
+    /// `None` means the run's own `--timeout`.
+    pub timeout_seconds: Option<u64>,
 }
 
-const REQUIRED: &[&str] = &[
-    "url",
-    "commit",
-    "sha256",
-    "licence",
-    "redistribute",
-    "exercises",
-];
+/// How a corpus's archive is packed, and therefore how it is pinned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Archive {
+    /// A forge's `tar.gz` of one commit — every entry before September 2026.
+    /// Carries a `commit`, and extraction strips the single leading directory
+    /// codeload wraps everything in.
+    CodeloadTarGz,
+    /// A `.zip` published as an object at a stable URL, with no repository
+    /// behind it and so no commit to name. Extracted whole.
+    Zip,
+}
+
+impl Archive {
+    /// The word the lock file spells.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Archive::CodeloadTarGz => "tar.gz",
+            Archive::Zip => "zip",
+        }
+    }
+
+    /// The extension the cached archive is given.
+    #[must_use]
+    pub fn extension(self) -> &'static str {
+        self.word()
+    }
+}
+
+/// Fields every entry must carry, whatever its archive.
+const REQUIRED: &[&str] = &["url", "sha256", "licence", "redistribute", "exercises"];
+
+/// Fields an entry may carry; which of them are legal depends on the archive.
+const OPTIONAL: &[&str] = &["commit", "subdir", "archive", "timeout"];
 
 /// Parses a lock file, refusing anything it cannot fully account for.
 ///
@@ -151,14 +206,27 @@ fn build((name, fields): (String, Vec<(String, String)>)) -> Result<Corpus, Stri
         }
     }
     for (key, _) in &fields {
-        if !REQUIRED.contains(&key.as_str()) && key != "subdir" {
+        if !REQUIRED.contains(&key.as_str()) && !OPTIONAL.contains(&key.as_str()) {
             return Err(format!(
                 "[{name}]: `{key}` is not a lock field — the known ones are {}, \
-                 and `subdir`",
-                REQUIRED.join(", ")
+                 and optionally {}",
+                REQUIRED.join(", "),
+                OPTIONAL.join(", ")
             ));
         }
     }
+
+    let archive = match find("archive").as_deref() {
+        None | Some("tar.gz") => Archive::CodeloadTarGz,
+        Some("zip") => Archive::Zip,
+        Some(other) => {
+            return Err(format!(
+                "[{name}]: `archive = {other}` is not a kind this fetches; it is \
+                 `tar.gz` (the default, a forge archive of a commit) or `zip` (a \
+                 published object)"
+            ))
+        }
+    };
 
     let sha256 = find("sha256").unwrap_or_default();
     if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -175,11 +243,29 @@ fn build((name, fields): (String, Vec<(String, String)>)) -> Result<Corpus, Stri
     }
 
     let commit = find("commit").unwrap_or_default();
-    if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(format!(
-            "[{name}]: `commit = {commit}` is not a 40-character git object id; \
-             a branch or a tag is not a pin, because upstream can move it"
-        ));
+    match archive {
+        Archive::CodeloadTarGz => {
+            if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "[{name}]: `commit = {commit}` is not a 40-character git \
+                     object id; a branch or a tag is not a pin, because upstream \
+                     can move it"
+                ));
+            }
+        }
+        // Refused rather than ignored. An entry carrying a commit that nothing
+        // verifies reads as two pins and is one, which is the exact confusion
+        // this file exists to prevent.
+        Archive::Zip => {
+            if !commit.is_empty() {
+                return Err(format!(
+                    "[{name}]: `archive = zip` names a published object rather \
+                     than a repository, so there is nothing for `commit = \
+                     {commit}` to pin; the `sha256` carries the whole guarantee \
+                     here and a second pin would overstate it"
+                ));
+            }
+        }
     }
 
     let url = find("url").unwrap_or_default();
@@ -201,6 +287,19 @@ fn build((name, fields): (String, Vec<(String, String)>)) -> Result<Corpus, Stri
         }
     };
 
+    let timeout_seconds = match find("timeout") {
+        None => None,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(0) | Err(_) => {
+                return Err(format!(
+                    "[{name}]: `timeout = {raw}` must be a whole number of \
+                     seconds above zero"
+                ))
+            }
+            Ok(seconds) => Some(seconds),
+        },
+    };
+
     let licence = find("licence").unwrap_or_default();
     if licence.is_empty() {
         return Err(format!(
@@ -214,6 +313,8 @@ fn build((name, fields): (String, Vec<(String, String)>)) -> Result<Corpus, Stri
         url,
         commit,
         sha256,
+        archive,
+        timeout_seconds,
         subdir: find("subdir").unwrap_or_default(),
         licence,
         redistribute,
@@ -227,7 +328,7 @@ pub const LOCK_PATH: &str = "corpus/corpora.lock";
 /// Where a corpus's archive is cached. Ignored by git, per plan 14.
 pub fn archive_path(root: &Path, corpus: &Corpus) -> PathBuf {
     root.join("corpus/cache")
-        .join(format!("{}.tar.gz", corpus.name))
+        .join(format!("{}.{}", corpus.name, corpus.archive.extension()))
 }
 
 /// Where a corpus's files begin once extracted, including its `subdir`.
@@ -250,15 +351,22 @@ pub fn read(root: &Path) -> Result<Vec<Corpus>, String> {
 /// drift away from what is actually fetched.
 pub fn licence_table(corpora: &[Corpus]) -> String {
     let mut out = String::from(
-        "| Corpus | What it exercises | Upstream licence | Redistributed here? |\n\
-         | --- | --- | --- | --- |\n",
+        "| Corpus | What it exercises | Upstream licence | Pinned by | Redistributed here? |\n\
+         | --- | --- | --- | --- | --- |\n",
     );
     for corpus in corpora {
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} |\n",
             corpus.name,
             corpus.exercises,
             corpus.licence,
+            // How an entry is pinned belongs in the table a person reads:
+            // one of these has a single pin, and this is the only place
+            // that difference would otherwise not appear.
+            match corpus.archive {
+                Archive::CodeloadTarGz => "commit and sha256",
+                Archive::Zip => "sha256 alone (no repository)",
+            },
             if corpus.redistribute {
                 "yes"
             } else {
@@ -333,7 +441,22 @@ exercises = decades of real-world breakage
             (&GOOD.replace("licence = Mixed", "licence ="), "is empty"),
             (
                 &GOOD.replace("commit = ", "commitish = "),
-                "`commit` is missing",
+                "is not a lock field",
+            ),
+            (
+                // A forge archive with no commit is the pin that is not there.
+                &GOOD.replace("commit = b96d745c277a5666013359a7272d74d1896fbb9f\n", ""),
+                "not a 40-character git object id",
+            ),
+            (
+                &GOOD.replace("licence = Mixed", "archive = tarball\nlicence = Mixed"),
+                "is not a kind this fetches",
+            ),
+            (
+                // A published object carrying a commit: two pins claimed, one
+                // verified.
+                &GOOD.replace("licence = Mixed", "archive = zip\nlicence = Mixed"),
+                "there is nothing for",
             ),
             (
                 &GOOD.replace("subdir = ", "sudbir = "),
@@ -353,6 +476,52 @@ exercises = decades of real-world breakage
                 error.contains(expected),
                 "the message for `{text}` should mention `{expected}`, and says: {error}"
             );
+        }
+    }
+
+    /// A published object pins by its bytes and nothing else, and that is a
+    /// whole entry rather than a degraded one.
+    ///
+    /// The pair of assertions is the point: it parses *and* the archive kind
+    /// survives into the `Corpus`, because the kind is what decides which
+    /// program unpacks it. A parse that quietly produced `CodeloadTarGz` would
+    /// send `tar -xzf` at a zip and fail with a message about gzip headers.
+    #[test]
+    fn a_published_object_pins_by_its_bytes_alone() {
+        let text = GOOD
+            .replace("commit = b96d745c277a5666013359a7272d74d1896fbb9f\n", "")
+            .replace("licence = Mixed", "archive = zip\nlicence = Mixed");
+        let corpora = parse(&text).expect("a zip entry needs no commit");
+        assert_eq!(corpora[0].archive, Archive::Zip);
+        assert_eq!(corpora[0].commit, "");
+        let table = licence_table(&corpora);
+        assert!(
+            table.contains("sha256 alone"),
+            "the table has to say which entries have one pin: {table}"
+        );
+    }
+
+    /// A corpus may state the timeout its own documents need.
+    ///
+    /// The zero case is the one worth a test rather than a glance: `timeout =
+    /// 0` would kill every child the instant it started and report a thousand
+    /// stalls, which reads exactly like an engine that stopped working.
+    #[test]
+    fn a_corpus_may_state_its_own_timeout_and_nonsense_is_refused() {
+        let stated = GOOD.replace("licence = Mixed", "timeout = 300\nlicence = Mixed");
+        let corpora = parse(&stated).expect("a stated timeout parses");
+        assert_eq!(corpora[0].timeout_seconds, Some(300));
+
+        let unstated = parse(GOOD).expect("it parses");
+        assert_eq!(
+            unstated[0].timeout_seconds, None,
+            "no field means the run's own default, not a zero"
+        );
+
+        for bad in ["timeout = 0", "timeout = soon", "timeout = -5"] {
+            let text = GOOD.replace("licence = Mixed", &format!("{bad}\nlicence = Mixed"));
+            let error = parse(&text).expect_err("nonsense is refused");
+            assert!(error.contains("whole number of seconds"), "{error}");
         }
     }
 

@@ -10,3 +10,8 @@ description = "Pure 2D rasterizer: Bezier flattening, analytic-coverage AA fill,
 
 [dependencies]
 tinker-pdf-math = { workspace = true }
+# A `/Lab` transparency group composites in Lab (11.4.7), so `canvas.rs` needs
+# `srgb_to_lab` and `lab_to_srgb`. A leaf-to-leaf edge, which ruling 8 admits;
+# the alternative was a second copy of the two XYZ matrices, which that crate's
+# own comment records as having drifted once already.
+tinker-pdf-color = { workspace = true }

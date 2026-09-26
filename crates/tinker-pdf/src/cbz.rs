@@ -31,7 +31,12 @@
 //! Synthesis happens whole at open, so whatever a page holds is held for the
 //! document's life. A JPEG is placed verbatim ([`ImageData::Jpeg`]) and a PNG
 //! goes through [`png_image`], whose default route copies the IDAT into a
-//! `/FlateDecode` stream with `/Predictor 15` and never builds a raster.
+//! `/FlateDecode` stream with `/Predictor 15` and never builds a raster. A
+//! TIFF goes through [`tiff_image`], which does the same thing for four more
+//! codings: a G3 or G4 strip is a `/CCITTFaxDecode` stream, an LZW strip is a
+//! `/LZWDecode` one, a DEFLATE strip is `/FlateDecode`, and a JPEG strip is
+//! `/DCTDecode` — so a scanned comic costs its own bytes rather than its own
+//! pixels, the same as every other entry here.
 //! Decoding every page instead would cost *w x h x 3* each — about 3.6 GB for
 //! a 200-page archive at 2000 x 3000 — and the failure would arrive only at
 //! the size that matters.
@@ -52,22 +57,51 @@
 //! holds 100, every page correct, and the story jumping in the middle with
 //! nothing anywhere saying so.
 //!
-//! Entries that are not images at all — `ComicInfo.xml`, `Thumbs.db`,
-//! `__MACOSX/`, directory records — are neither pages nor warnings. Skipping
-//! them is correct rather than lenient, and warning about them would bury the
-//! warnings that matter.
+//! Entries that are not images at all — `Thumbs.db`, `__MACOSX/`, directory
+//! records — are neither pages nor warnings. Skipping them is correct rather
+//! than lenient, and warning about them would bury the warnings that matter.
+//!
+//! **`ComicInfo.xml` is the one exception, and it is a third thing rather than
+//! a page.** Tier 4 gave it a reader ([`comic_info`]): it produces no page, no
+//! [`PageOrigin`] and no page number, and it writes the archive's title,
+//! series, credits and summary into the synthesised document's `/Info`. The
+//! distinction the change must not blur is that *not a page* and *not read* are
+//! different sentences — `extension_claims_image("ComicInfo.xml")` is still
+//! false and is still asserted to be.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use tinker_pdf_cos::{png_image, DocumentBuilder, ImageData, PngImageData};
+use tinker_pdf_archive::{rar, sevenz, tar};
+use tinker_pdf_cos::{
+    png_image, tiff_image, DocumentBuilder, ImageData, PngImageData, TiffImageData,
+};
 use tinker_pdf_filters::Limits as FilterLimits;
-use tinker_pdf_zip::{Archive, ArchiveError, Entry};
+use tinker_pdf_zip::{Archive, ArchiveError};
+
+pub use tinker_pdf_archive::tar::{
+    limits as tar_limits, EntryError as TarEntryError, Error as TarError, Limits as TarLimits,
+    Warning as TarWarning,
+};
+
+pub use tinker_pdf_archive::sevenz::{
+    limits as sevenz_limits, EntryError as SevenZipEntryError, Error as SevenZipError,
+    Limits as SevenZipLimits, Warning as SevenZipWarning,
+};
+
+pub use tinker_pdf_archive::rar::{
+    limits as rar_limits, EntryError as RarEntryError, Error as RarError, Limits as RarLimits,
+    Warning as RarWarning,
+};
 
 pub use tinker_pdf_zip::{
     limits as zip_limits, EntryError as ZipEntryError, InflateWarning, Limits as ZipLimits,
     Warning as ZipWarning,
 };
+
+pub mod comic_info;
+
+pub use comic_info::{ComicInfo, ComicInfoDefect, MAX_COMIC_INFO_BYTES};
 
 // ---- Bounds -----------------------------------------------------------------
 
@@ -169,6 +203,40 @@ pub struct Limits {
     pub max_synthesised: usize,
     /// What the archive reader is allowed to spend.
     pub zip: ZipLimits,
+    /// What the RAR reader is allowed to spend (tier 4, W-ARCHIVE milestone
+    /// 4).
+    ///
+    /// Three numbers. Like a tar and unlike a 7z, a **stored** RAR entry is a
+    /// byte range of the input; what RAR has that tar does not is a header
+    /// whose length the file chooses.
+    pub rar: RarLimits,
+    /// What the 7z reader is allowed to spend (tier 4, W-ARCHIVE milestone
+    /// 3).
+    ///
+    /// Five numbers, where the tar reader needs two, and the difference is
+    /// compression: nothing in a tar expands, so the input's own length bounds
+    /// it, and a `.7z` declares its unpacked sizes in a field a file chooses.
+    /// `tinker_pdf_archive::sevenz::limits` argues each one.
+    pub sevenz: SevenZipLimits,
+    /// What the tar reader is allowed to spend (tier 4, W-ARCHIVE milestone
+    /// 2).
+    ///
+    /// Two numbers rather than the ZIP reader's four, and the difference is a
+    /// fact about the format rather than an oversight: nothing in a tar
+    /// decompresses, so the input's own length already bounds every entry and
+    /// all of them together. `tinker_pdf_archive::tar::limits` argues it.
+    pub tar: TarLimits,
+    /// What reading one `ComicInfo.xml` is allowed to spend (tier 4,
+    /// W-ARCHIVE milestone 1).
+    ///
+    /// The comic path's only markup, and it carries the *same* four caps the
+    /// XPS and EPUB paths pass rather than a fifth set of numbers: a metadata
+    /// file two orders of magnitude smaller than either does not need its own
+    /// ceilings, and a second copy of four constants is how two readers of one
+    /// format start disagreeing. What is comic-specific is
+    /// [`MAX_COMIC_INFO_BYTES`], which is a cap on the entry rather than on
+    /// the parse.
+    pub xml: tinker_pdf_xml::Limits,
 }
 
 impl Limits {
@@ -177,6 +245,10 @@ impl Limits {
         max_pages: MAX_CBZ_PAGES,
         max_synthesised: MAX_SYNTHESISED_PDF,
         zip: ZipLimits::DEFAULT,
+        tar: TarLimits::DEFAULT,
+        sevenz: SevenZipLimits::DEFAULT,
+        rar: RarLimits::DEFAULT,
+        xml: tinker_pdf_xml::Limits::DEFAULT,
     };
 }
 
@@ -190,9 +262,11 @@ impl Default for Limits {
 
 /// A container format recognised at the head of a file.
 ///
-/// Recognising the three this build does not read is the point rather than an
-/// afterthought: "this is a CBR and I do not read CBR" is a different sentence
-/// from "this is not a PDF", and a host shows different things for them.
+/// Recognising a container rather than falling through to "not a PDF" is the
+/// point rather than an afterthought: "this is a CBR and I do not read CBR" is
+/// a different sentence from "this is not a PDF", and a host shows different
+/// things for them. Since tier 4 most of these are read, and the distinction
+/// still earns its keep: what is left is refused by name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Container {
@@ -200,9 +274,11 @@ pub enum Container {
     Zip,
     /// `Rar!\x1A\x07` — RAR, which a CBR is. Not read here.
     Rar,
-    /// `7z\xBC\xAF\x27\x1C` — 7z, which a CB7 is. Not read here.
+    /// `7z\xBC\xAF\x27\x1C` — 7z, which a CB7 is. Read since tier 4,
+    /// through `tinker_pdf_archive::sevenz`.
     SevenZip,
-    /// POSIX `ustar` — tar, which a CBT is. Not read here.
+    /// POSIX `ustar` — tar, which a CBT is. Read since tier 4,
+    /// through `tinker_pdf_archive::tar`.
     Tar,
 }
 
@@ -449,7 +525,9 @@ pub enum ImageFormat {
     WebP,
     /// Windows bitmap. Not read here.
     Bmp,
-    /// TIFF, either byte order. Not read here.
+    /// TIFF, either byte order. Read — see [`tiff_image`], which places a
+    /// single-strip G3, G4, LZW, DEFLATE or JPEG file's own bytes and decodes
+    /// the rest.
     Tiff,
     /// AVIF. Not read here.
     Avif,
@@ -457,6 +535,42 @@ pub enum ImageFormat {
     /// this engine has a JPX decoder for PDF streams and no route from a
     /// container entry to it.
     Jpeg2000,
+}
+
+/// Why an XHTML `<img>` did not become a replaced box on the page.
+///
+/// **Four arms and not a string**, because each of them is a different party's
+/// fault and a host acts on them differently: the book is wrong in the first,
+/// the book is beyond this build in the second and third, and this build is
+/// wrong -- or the bytes are -- in the fourth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ImageDefect {
+    /// `src` is absent or empty, or it resolves to a path the container holds
+    /// no entry for, or the entry would not inflate.
+    Unresolved,
+    /// A format recognised by its magic bytes and not placed here, named rather
+    /// than collapsed.
+    ///
+    /// An EPUB `<img>` reaches the page through **JPEG and PNG**, which are the
+    /// two of EPUB 3.3 §3.2's core image media types this build has a
+    /// container-to-page route for. GIF and WebP are core media types with no
+    /// decoder here; the rest are foreign resources a §3.2-conforming book may
+    /// only use behind a manifest fallback this build does not follow.
+    UnsupportedFormat(ImageFormat),
+    /// Bytes whose leading magic matches no format [`image_format`] knows.
+    ///
+    /// **This is where an SVG lands**, and it is where it belongs: an SVG is
+    /// XML and has no magic number, so the classifier that refuses to read an
+    /// extension as a fact cannot recognise one. `<img src="cover.svg">` is a
+    /// core media type this build places only as a **spine item** -- see
+    /// [`ArchiveWarning::Svg`] -- and never as a replaced box.
+    Unknown,
+    /// A JPEG or a PNG whose bytes would not make an image: an unreadable
+    /// header, a colour type outside Table 11.1, a zero dimension, a raster
+    /// past the ceiling. [`PageDefect::Undecodable`]'s sentence, one container
+    /// along.
+    Undecodable,
 }
 
 /// Why a page is a placeholder rather than the picture the archive holds.
@@ -468,6 +582,41 @@ pub enum PageDefect {
     /// The archive would not hand the entry's bytes over: encrypted, a
     /// checksum failure, a truncation, a compression method not read here.
     EntryRefused(ZipEntryError),
+    /// The **tar** would not hand the entry's bytes over: a sparse file, a
+    /// multi-volume continuation, an entry that holds no file data, or an
+    /// archive that ends before the entry does (tier 4, W-ARCHIVE milestone
+    /// 2).
+    ///
+    /// A second variant rather than a widened first one, and the shape is
+    /// [`ArchiveWarning::Zip`]'s: each container's own reader keeps its own
+    /// vocabulary and the facade carries it verbatim. Flattening four
+    /// containers' answers into one namespace is what made
+    /// [`ArchiveRefusal`] a twenty-variant union of which only seven are
+    /// comic-reachable, and this is that not repeated one level down.
+    TarEntryRefused(TarEntryError),
+    /// The **7z** would not hand the entry's bytes over: a block that would
+    /// not decompress, a coder this build does not read, an entry whose
+    /// recorded CRC-32 does not match (tier 4, W-ARCHIVE milestone 3).
+    ///
+    /// The CRC arm is the one worth naming. Every other container here refuses
+    /// an entry because it could not *find* the bytes; 7z refuses one because
+    /// it found them and the archive's own checksum says they are wrong —
+    /// which is the format adjudicating this engine's LZMA decoder, and the
+    /// whole reason a hand-rolled decompressor could be written without an
+    /// oracle to check it against.
+    SevenZipEntryRefused(SevenZipEntryError),
+    /// The **RAR** would not hand the entry's bytes over (tier 4, W-ARCHIVE
+    /// milestone 4).
+    ///
+    /// [`RarEntryError::Compressed`] is the variant that matters and it is the
+    /// reason this is a page defect rather than an archive refusal: this build
+    /// reads RAR 5's method 0 and not its methods 1 to 5, so an archive that
+    /// mixes them pages the stored entries and puts a placeholder where the
+    /// others are (ruling 2). `docs/design/comic-archives.md` argues why the
+    /// algorithm is not written: the fixture this repository can produce
+    /// stores every entry, so a decoder for it would have nothing first-party
+    /// to be held to.
+    RarEntryRefused(RarEntryError),
     /// The bytes are a JPEG or a PNG and could not be made into an image —
     /// an unreadable header, a colour type outside Table 11.1, a raster past
     /// the ceiling.
@@ -483,6 +632,18 @@ pub enum PageDefect {
 pub enum ArchiveWarning {
     /// What the archive reader tolerated, carried verbatim.
     Zip(ZipWarning),
+    /// What the **tar** reader tolerated, carried verbatim (tier 4, W-ARCHIVE
+    /// milestone 2): a header that did not checksum and ended the walk, a name
+    /// that is not UTF-8, an archive with no end-of-archive blocks.
+    Tar(TarWarning),
+    /// What the **7z** reader tolerated, carried verbatim (tier 4, W-ARCHIVE
+    /// milestone 3): a name that is not valid UTF-16, a header property this
+    /// build does not act on, an entry the archive recorded no CRC-32 for.
+    SevenZip(SevenZipWarning),
+    /// What the **RAR** reader tolerated, carried verbatim (tier 4, W-ARCHIVE
+    /// milestone 4): a header that did not checksum and ended the walk, a name
+    /// that is not UTF-8, an entry with no recorded CRC-32.
+    Rar(RarWarning),
     /// An entry that is an image became a placeholder page. **The page count
     /// and every page number after it are unchanged**, which is the whole
     /// reason the entry was not dropped.
@@ -499,6 +660,16 @@ pub enum ArchiveWarning {
         /// Zero-based page index.
         page: u32,
     },
+    /// A `ComicInfo.xml` is present and did not become the document's `/Info`
+    /// (tier 4, W-ARCHIVE milestone 1).
+    ///
+    /// **No page is affected**, which is what separates this from every other
+    /// variant here: the document is every page the archive holds either way,
+    /// and this says only that it opened without the title it was carrying.
+    /// Warned rather than silent for ruling 10's reason — an archive with no
+    /// `ComicInfo.xml` at all produces no warning, so "no title" and "a title
+    /// this build could not read" stay distinguishable.
+    ComicInfo(ComicInfoDefect),
     /// A synthesised **fixed page** is a placeholder rather than the picture
     /// the package holds (gap 30, milestone 3).
     ///
@@ -542,6 +713,25 @@ pub enum ArchiveWarning {
     /// What EPUB 3.3 §5.5.3.1 and §5.6.1 tolerated about a book's package
     /// document (gap 31, milestone 4).
     Package(crate::epub::package::PackageDefect),
+    /// A shaped text run could not be written into a page's content stream,
+    /// so the words it carried are on no page (milestone 6 of
+    /// `docs/design/shaping.md`).
+    ///
+    /// `DocumentBuilder::glyph_run` refuses a run whose font is not a
+    /// registered composite one, whose size is not a number a content stream
+    /// can carry, or whose placements are not finite — and a writer that
+    /// refused in silence would leave a page short of a word with nothing
+    /// anywhere saying so, which is ruling 10's whole subject. Counted rather
+    /// than reported once per run, for
+    /// [`ArchiveWarning::UnimplementedFeature`]'s reason.
+    ///
+    /// **Distinct from [`ArchiveWarning::UnrepresentedCharacters`]**: that one
+    /// says a character had no code in any font, and this one says the code
+    /// existed and the operators did not reach the page.
+    UnwritableTextRun {
+        /// How many shaped runs were refused.
+        runs: usize,
+    },
     /// A synthesised **spine page** is a placeholder rather than the chapter it
     /// stands for (gap 31, milestone 4).
     ///
@@ -606,6 +796,59 @@ pub enum ArchiveWarning {
         item: String,
         /// Which failure.
         defect: crate::epub::xhtml::MarkupDefect,
+    },
+    /// What an SVG content document asked for that this build did not draw
+    /// (Tier 4's SVG lane, milestone 7).
+    ///
+    /// Carried verbatim from `tinker_pdf_svg::Warning`, deduplicated **per
+    /// document** by the crate that produced it — so a cover with four hundred
+    /// `<animate>` elements is one sentence and not four hundred. The item is
+    /// named because a book has many of them and *"a filter was not drawn"* is
+    /// not something a host can act on.
+    Svg {
+        /// The container path of the SVG content document.
+        item: String,
+        /// What it asked for.
+        warning: tinker_pdf_svg::Warning,
+    },
+    /// An `<image>` inside an SVG content document whose reference this build
+    /// did not resolve into a picture, with the number of them on that page.
+    ///
+    /// Distinct from [`ArchiveWarning::Svg`] because the two blame different
+    /// halves: that one is a capability this build does not have, and this one
+    /// is a reference that named nothing the container holds, or bytes in a
+    /// format this build does not decode. A page short of a photograph is a
+    /// page a host should be told about either way.
+    SvgImageUnresolved {
+        /// The container path of the SVG content document.
+        item: String,
+        /// How many references on that page did not resolve.
+        images: usize,
+    },
+    /// An `<img>` in an XHTML content document that **did not become a box on
+    /// the page**, with the number of them in that document that failed the
+    /// same way.
+    ///
+    /// The ruling 10 companion to [`ArchiveWarning::SvgImageUnresolved`], which
+    /// is an SVG `<image>` and only that. The two are separate variants because
+    /// the two elements are read by different halves of this reader — one is a
+    /// display list drawn onto a page and the other is a replaced box in a flow
+    /// — and a host told only that *"an image did not resolve"* could not say
+    /// which of the two to look at.
+    ///
+    /// **A refusal here is a page with nothing where a picture was**, and the
+    /// hole is invisible: HTML §4.8.4.4 makes an `<img>` a replaced element
+    /// *"only when the image is available"*, so an unavailable one generates no
+    /// box at all and the text around it closes over the gap. Nothing about the
+    /// page says a picture was meant to be there, which is precisely why this
+    /// says it.
+    ImageNotDrawn {
+        /// The container path of the content document the `<img>` is in.
+        item: String,
+        /// Why it did not reach the page.
+        defect: ImageDefect,
+        /// How many `<img>` elements in that document failed that way.
+        images: usize,
     },
     /// A CSS property this build does not implement, and **how many elements
     /// it reached** (gap 31, milestone 8).
@@ -751,6 +994,13 @@ pub struct ArchiveReport {
     parsed_parts: usize,
     layout: Option<crate::epub::BookLayout>,
     cost: Option<crate::epub::BookCost>,
+    /// Boxed, and the reason is measured rather than stylistic: six
+    /// `Option<String>`s inline push this struct past the point where
+    /// `clippy::large_enum_variant` fires on `xps::Routing` and
+    /// `epub::Routing`, which carry it by value and are returned from every
+    /// route decision. One allocation on the rare path is the cheaper half of
+    /// that trade — an XPS package and a book never build one at all.
+    info: Option<Box<ComicInfo>>,
 }
 
 impl ArchiveReport {
@@ -771,7 +1021,21 @@ impl ArchiveReport {
             parsed_parts,
             layout: None,
             cost: None,
+            info: None,
         }
+    }
+
+    /// Records what a comic archive's `ComicInfo.xml` said (tier 4, W-ARCHIVE
+    /// milestone 1).
+    ///
+    /// A setter rather than a sixth parameter on [`ArchiveReport::synthesised`],
+    /// because that constructor is the *fixed document* path's too and an XPS
+    /// package holds no such file: a parameter every XPS call site had to pass
+    /// `None` for would be a field pretending to be a question both formats
+    /// answer.
+    pub(crate) fn with_comic_info(mut self, info: Option<ComicInfo>) -> ArchiveReport {
+        self.info = info.map(Box::new);
+        self
     }
 
     /// Builds a report for a **reflowable book** (gap 31, milestone 4).
@@ -800,6 +1064,7 @@ impl ArchiveReport {
             // acquiring a second meaning.
             parsed_parts: 0,
             layout: Some(layout),
+            info: None,
         }
     }
 
@@ -850,8 +1115,13 @@ impl ArchiveReport {
     /// (gap 30, milestone 4).
     ///
     /// **Zero for a comic archive**, and that is a real answer rather than a
-    /// placeholder: the comic path reads magic bytes and image headers and
-    /// parses no markup at all — `ComicInfo.xml` is deliberately nobody's scope.
+    /// placeholder: this counts the parts a *fixed document*'s payload cache
+    /// was asked for, and the comic path has no such cache. A comic archive
+    /// does now parse markup — one entry of it, through
+    /// [`comic_info::parse`] — and it is deliberately not counted here, because
+    /// a second meaning on a counter is how a number stops answering the
+    /// question it was published for. [`ArchiveReport::comic_info`] is where
+    /// that read comes out.
     ///
     /// For an XPS this is the count of **distinct parts**, not of references to
     /// them, and it is published for the same reason
@@ -864,6 +1134,21 @@ impl ArchiveReport {
     #[must_use]
     pub fn parsed_parts(&self) -> usize {
         self.parsed_parts
+    }
+
+    /// What a comic archive's `ComicInfo.xml` said, or `None` when it held
+    /// none, held one this build could not read, or is not a comic archive
+    /// (tier 4, W-ARCHIVE milestone 1).
+    ///
+    /// Published for [`ArchiveReport::synthesised_bytes`]'s reason: the fields
+    /// reach the document's `/Info` and a caller that wanted to know *which*
+    /// of them did would otherwise have to re-derive the mapping from the
+    /// dictionary it produced. The three ways to get `None` are told apart by
+    /// [`ArchiveWarning::ComicInfo`], which names the last two and is absent
+    /// for the first.
+    #[must_use]
+    pub fn comic_info(&self) -> Option<&ComicInfo> {
+        self.info.as_deref()
     }
 
     /// The page box and base font size a **reflowable** book was laid out at,
@@ -995,11 +1280,32 @@ fn text_cmp(a: &[u8], b: &[u8]) -> Ordering {
         .then_with(|| a.cmp(b))
 }
 
+/// One entry, reduced to the three things paging a comic needs to know about
+/// it (tier 4, W-ARCHIVE milestone 2).
+///
+/// The container-independent half of `tinker_pdf_zip::Entry` and
+/// `tinker_pdf_archive::tar::Entry`, and it is a struct in the *facade* rather
+/// than a trait in either leaf. That is the crate rule read from this side:
+/// the two readers hand back different things and cannot usefully share a
+/// signature, so the conversion happens once, here, where the formats already
+/// converge — a `Vec` of these per archive, which is the same cost the sort
+/// below already pays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Listing {
+    /// The stored path.
+    pub(crate) name: String,
+    /// Position in the container's own entry list, which is the tie-break.
+    pub(crate) index: usize,
+    /// Whether the entry holds no file data at all.
+    pub(crate) directory: bool,
+}
+
 /// The archive's entries in reading order.
 ///
-/// Ties break on the entry's position in the central directory, which makes the
-/// order total: two entries in a ZIP may legally have the same name.
-fn reading_order(entries: &[Entry]) -> Vec<usize> {
+/// Ties break on the entry's position in the container's own list, which makes
+/// the order total: two entries in a ZIP may legally have the same name, and
+/// so may two headers in a tar.
+fn reading_order(entries: &[Listing]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..entries.len()).collect();
     order.sort_by(|&x, &y| {
         // Both indices come from the range above, so neither `get` can miss;
@@ -1013,14 +1319,147 @@ fn reading_order(entries: &[Entry]) -> Vec<usize> {
     order
 }
 
+/// The container an archive turned out to be, held open (tier 4, W-ARCHIVE
+/// milestone 2).
+///
+/// **An enum and not a trait**, which is `tinker-pdf-archive`'s own rule
+/// arriving where it has to be honoured: `tinker_pdf_zip::Archive::read`
+/// returns a `Cow` and hands a stored entry back **borrowed**, and
+/// `tar::Archive::read` returns a plain borrow. A trait over them would have
+/// to return the weakest signature either could satisfy, and the borrow is the
+/// property `tinker-pdf-zip`'s own test suite exists to hold — *the moment
+/// this copies, a 3.6 GB peak comes back*. So they are matched on, and the
+/// `Cow` here is the ZIP reader's own rather than a widening of tar's.
+///
+/// **`sevenz` is what makes the argument concrete rather than theoretical.** A
+/// 7z solid block decodes many files from one LZMA stream, so there is no
+/// range of the input that is any one file and its `read` returns owned bytes
+/// and takes `&mut self`. A trait over all three would have to be that
+/// signature — which would delete the borrow in the two that have it, in order
+/// to give three unrelated readers one name.
+enum Reader<'a> {
+    Zip(Archive<'a>),
+    Tar(tar::Archive<'a>),
+    SevenZip(sevenz::Archive<'a>),
+    Rar(rar::Archive<'a>),
+}
+
+impl<'a> Reader<'a> {
+    /// Every entry, as the three things paging needs.
+    fn listing(&self) -> Vec<Listing> {
+        match self {
+            Reader::Zip(archive) => archive
+                .entries()
+                .iter()
+                .map(|entry| Listing {
+                    name: entry.name.clone(),
+                    index: entry.index,
+                    // 4.4.17.1: a stored path ending in `/` is a directory
+                    // record, which holds no bytes and is not a page.
+                    directory: entry.is_directory(),
+                })
+                .collect(),
+            Reader::Tar(archive) => archive
+                .entries()
+                .iter()
+                .map(|entry| Listing {
+                    name: entry.name.clone(),
+                    index: entry.index,
+                    directory: entry.is_directory(),
+                })
+                .collect(),
+            Reader::SevenZip(archive) => archive
+                .entries()
+                .iter()
+                .map(|entry| Listing {
+                    name: entry.name.clone(),
+                    index: entry.index,
+                    directory: entry.is_directory(),
+                })
+                .collect(),
+            Reader::Rar(archive) => archive
+                .entries()
+                .iter()
+                .map(|entry| Listing {
+                    name: entry.name.clone(),
+                    index: entry.index,
+                    directory: entry.is_directory(),
+                })
+                .collect(),
+        }
+    }
+
+    /// One entry's bytes, or the page-level defect that says why there are
+    /// none.
+    ///
+    /// The mapping into [`PageDefect`] is here rather than at the call site so
+    /// that adding a container is one arm rather than a second `match` a
+    /// hundred lines away.
+    fn read(&mut self, index: usize) -> Result<Cow<'a, [u8]>, PageDefect> {
+        match self {
+            Reader::Zip(archive) => archive.read(index).map_err(PageDefect::EntryRefused),
+            Reader::Tar(archive) => archive
+                .read(index)
+                .map(Cow::Borrowed)
+                .map_err(PageDefect::TarEntryRefused),
+            // `Cow::Owned`, and it is the only arm that is: a solid block is
+            // many files in one stream. The reader caches the block it last
+            // decompressed, so a whole comic out of one block decompresses
+            // once rather than once per page.
+            Reader::SevenZip(archive) => archive
+                .read(index)
+                .map(Cow::Owned)
+                .map_err(PageDefect::SevenZipEntryRefused),
+            // The RAR reader's own `Cow`, carried rather than widened: a
+            // stored entry comes back borrowed, which is every entry this
+            // build reads.
+            Reader::Rar(archive) => archive.read(index).map_err(PageDefect::RarEntryRefused),
+        }
+    }
+
+    /// What the container's own reader tolerated, carried verbatim (ruling
+    /// 10).
+    fn warnings(&self) -> Vec<ArchiveWarning> {
+        match self {
+            Reader::Zip(archive) => archive
+                .warnings()
+                .iter()
+                .map(|w| ArchiveWarning::Zip(*w))
+                .collect(),
+            Reader::Tar(archive) => archive
+                .warnings()
+                .iter()
+                .map(|w| ArchiveWarning::Tar(*w))
+                .collect(),
+            Reader::SevenZip(archive) => archive
+                .warnings()
+                .iter()
+                .map(|w| ArchiveWarning::SevenZip(*w))
+                .collect(),
+            Reader::Rar(archive) => archive
+                .warnings()
+                .iter()
+                .map(|w| ArchiveWarning::Rar(*w))
+                .collect(),
+        }
+    }
+}
+
 // ---- Classification ---------------------------------------------------------
 
 /// What the first bytes of an entry say it is.
 ///
 /// Magic bytes and nothing else. An entry matching none of these is not an
-/// image, is not a page and is not a warning — `ComicInfo.xml`, `Thumbs.db`,
-/// `.DS_Store` and the `__MACOSX/` AppleDouble files all land here, and warning
-/// about each of them would bury the warnings that matter.
+/// image and is not a page — `Thumbs.db`, `.DS_Store` and the `__MACOSX/`
+/// AppleDouble files all land here, and warning about each of them would bury
+/// the warnings that matter.
+///
+/// `ComicInfo.xml` lands here too and is **not** decided by this function: the
+/// synthesiser takes it by name before classification is reached
+/// ([`comic_info::is_comic_info`]), because it is the one entry whose meaning
+/// is its stored path rather than its first bytes. That is the narrow exception
+/// [`extension_claims_image`] already argues for, read the other way round —
+/// and it is still not a page.
 #[must_use]
 pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -1110,6 +1549,8 @@ enum Content<'a> {
     Jpeg(Cow<'a, [u8]>),
     /// A PNG, through gap 29 milestone 4's chooser.
     Png(Box<PngImageData>),
+    /// A TIFF, through the chooser that is that one's sibling.
+    Tiff(Box<TiffImageData>),
     /// Nothing usable; the page is the neutral placeholder.
     Placeholder,
 }
@@ -1152,13 +1593,143 @@ pub fn synthesise(
     bytes: &[u8],
     limits: &Limits,
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
-    if what != Container::Zip {
-        // Recognised and refused. RAR, 7z and tar are three more
-        // decompressors, two of them encumbered, and none of them a page.
-        return Err(ArchiveRefusal::NotAZip);
+    match what {
+        Container::Zip => {
+            let archive = open_archive(bytes, &limits.zip)?;
+            pages_from_archive(archive, limits)
+        }
+        Container::Tar => {
+            let archive = open_tar(bytes, &limits.tar)?;
+            pages_from_tar(archive, limits)
+        }
+        Container::SevenZip => {
+            let archive = open_sevenz(bytes, &limits.sevenz)?;
+            pages_from_sevenz(archive, limits)
+        }
+        Container::Rar => {
+            let archive = open_rar(bytes, &limits.rar)?;
+            pages_from_rar(archive, limits)
+        } // **No `_` arm, and its absence is load-bearing.** `Container` is
+          // `#[non_exhaustive]` for callers and exhaustive here, so every
+          // signature the sniff can return now has a reader behind it and a
+          // fifth one added later fails *this* build rather than silently
+          // falling through to a refusal nobody meant.
     }
-    let archive = open_archive(bytes, &limits.zip)?;
-    pages_from_archive(archive, limits)
+}
+
+/// Opens a RAR, mapping the reader's refusals onto this one's (tier 4,
+/// W-ARCHIVE milestone 4).
+///
+/// # Errors
+/// [`ArchiveRefusal::NotAZip`] for a file with no RAR signature **and for a
+/// RAR 4**, [`ArchiveRefusal::Encrypted`], [`ArchiveRefusal::MultiDisk`] for a
+/// volume of a set, [`ArchiveRefusal::TooLarge`] past a bound, and
+/// [`ArchiveRefusal::Damaged`] for a first header that does not checksum.
+///
+/// **RAR 4 lands on `NotAZip` rather than `Damaged`**, and the leaf keeps the
+/// distinction the facade cannot: `rar::Error::Rar4` is its own variant with
+/// its own sentence, because "this is a RAR of a version I do not read" is not
+/// "this file is broken". `docs/design/comic-archives.md` argues why there is
+/// no RAR 4 decoder — WinRAR 7.20 on this machine cannot produce a RAR 4, so
+/// one would have no first-party fixture to be held to (ruling 13).
+pub fn open_rar<'a>(
+    bytes: &'a [u8],
+    limits: &RarLimits,
+) -> Result<rar::Archive<'a>, ArchiveRefusal> {
+    rar::Archive::open(bytes, limits).map_err(|e| match e {
+        RarError::NotARar | RarError::Rar4 => ArchiveRefusal::NotAZip,
+        RarError::Encrypted => ArchiveRefusal::Encrypted,
+        RarError::MultiVolume => ArchiveRefusal::MultiDisk,
+        RarError::TooManyEntries => ArchiveRefusal::TooLarge,
+        _ => ArchiveRefusal::Damaged,
+    })
+}
+
+/// Pages an already-open RAR as a comic (tier 4, W-ARCHIVE milestone 4).
+///
+/// # Errors
+/// [`ArchiveRefusal`], one variant per refusal, each of them by name.
+pub fn pages_from_rar(
+    archive: rar::Archive<'_>,
+    limits: &Limits,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    pages_from_reader(Reader::Rar(archive), limits)
+}
+
+/// Opens a 7z, mapping the reader's refusals onto this one's (tier 4,
+/// W-ARCHIVE milestone 3).
+///
+/// # Errors
+/// [`ArchiveRefusal::NotAZip`] for a file with no 7z signature,
+/// [`ArchiveRefusal::Encrypted`] for AES-256, [`ArchiveRefusal::TooLarge`]
+/// past a bound, and [`ArchiveRefusal::Damaged`] for a header that does not
+/// checksum or does not parse.
+///
+/// **`UnsupportedCoder` lands on `NotAZip` and that is deliberate.** It is the
+/// refusal whose sentence is *"this build does not read that"*, which is what
+/// a `.cb7` compressed with PPMd is; calling it `Damaged` would tell a host
+/// the file is broken when it is fine and only this engine is short.
+pub fn open_sevenz<'a>(
+    bytes: &'a [u8],
+    limits: &SevenZipLimits,
+) -> Result<sevenz::Archive<'a>, ArchiveRefusal> {
+    sevenz::Archive::open(bytes, limits).map_err(|e| match e {
+        SevenZipError::NotA7z => ArchiveRefusal::NotAZip,
+        SevenZipError::Encrypted => ArchiveRefusal::Encrypted,
+        SevenZipError::TooManyEntries => ArchiveRefusal::TooLarge,
+        SevenZipError::UnsupportedCoder { .. } | SevenZipError::NotAChain => {
+            ArchiveRefusal::NotAZip
+        }
+        // `sevenz::Error` is `#[non_exhaustive]`, so a variant added later
+        // compiles here rather than failing the build — and lands on the
+        // refusal that means "structure present, nothing recoverable".
+        _ => ArchiveRefusal::Damaged,
+    })
+}
+
+/// Pages an already-open 7z as a comic (tier 4, W-ARCHIVE milestone 3).
+///
+/// # Errors
+/// [`ArchiveRefusal`], one variant per refusal, each of them by name.
+pub fn pages_from_sevenz(
+    archive: sevenz::Archive<'_>,
+    limits: &Limits,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    pages_from_reader(Reader::SevenZip(archive), limits)
+}
+
+/// Opens a tar, mapping the reader's two refusals onto this one's (tier 4,
+/// W-ARCHIVE milestone 2).
+///
+/// # Errors
+/// [`ArchiveRefusal::NotAZip`] for a file with no `ustar` magic -- the name is
+/// the one it has always had and is a sentence about *this build's* container
+/// support rather than about ZIP -- and [`ArchiveRefusal::TooLarge`] past
+/// [`TarLimits::max_entries`].
+pub fn open_tar<'a>(
+    bytes: &'a [u8],
+    limits: &TarLimits,
+) -> Result<tar::Archive<'a>, ArchiveRefusal> {
+    tar::Archive::open(bytes, limits).map_err(|e| match e {
+        TarError::NotATar => ArchiveRefusal::NotAZip,
+        TarError::TooManyEntries => ArchiveRefusal::TooLarge,
+        // `tar::Error` is `#[non_exhaustive]`, so a variant added later
+        // compiles here rather than failing the build — and lands on the
+        // refusal that means "structure present, nothing recoverable" rather
+        // than on one that would claim something specific about it.
+        _ => ArchiveRefusal::Damaged,
+    })
+}
+
+/// Pages an already-open tar as a comic (tier 4, W-ARCHIVE milestone 2).
+///
+/// # Errors
+/// [`ArchiveRefusal`], one variant per refusal, each of them by name.
+pub fn pages_from_tar(
+    archive: tar::Archive<'_>,
+    limits: &Limits,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    pages_from_reader(Reader::Tar(archive), limits)
 }
 
 /// Opens the archive, once, mapping the reader's refusals onto this one's.
@@ -1188,23 +1759,50 @@ pub fn open_archive<'a>(
 /// # Errors
 /// [`ArchiveRefusal`], one variant per refusal, each of them by name.
 pub fn pages_from_archive(
-    mut archive: Archive<'_>,
+    archive: Archive<'_>,
     limits: &Limits,
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
-    let order = reading_order(archive.entries());
+    pages_from_reader(Reader::Zip(archive), limits)
+}
+
+/// Pages whichever container was opened.
+///
+/// One body for every container rather than one per format, which is the half
+/// of the crate rule that *is* shared: what a page is, what order the pages
+/// come in, which entries are metadata and what a page that cannot be built
+/// looks like are decisions about a comic and not about a container. Only
+/// [`Reader`] knows which format it is holding, and only for two questions --
+/// how to list an entry and how to read one.
+fn pages_from_reader(
+    mut archive: Reader<'_>,
+    limits: &Limits,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    let listing = archive.listing();
+    let order = reading_order(&listing);
     let mut plans: Vec<Plan<'_>> = Vec::new();
     let mut spent = DOCUMENT_OVERHEAD;
+    // Read before the pages, and its outcome kept until after them, because a
+    // refusal below (`NoImages`, a bound) means there is no document for a
+    // title to be on. Nothing here can refuse the archive.
+    let (info, info_defect) = read_comic_info(&mut archive, &listing, limits);
 
-    for index in order {
-        let Some(entry) = archive.entries().get(index).cloned() else {
+    for position in order {
+        let Some(entry) = listing.get(position).cloned() else {
             continue;
         };
-        // 4.4.17.1: a stored path ending in `/` is a directory record, which
-        // holds no bytes and is not a page.
-        if entry.is_directory() {
+        // A record that holds no file data is not a page: APPNOTE 4.4.17.1's
+        // trailing slash in a ZIP, and a type flag that is not a file in a tar.
+        if entry.directory {
             continue;
         }
-        let Some(plan) = plan_entry(&mut archive, index, &entry, limits) else {
+        // Not a page, and — since tier 4 — not ignored either. It was read
+        // above; `plan_entry` would classify it by magic bytes, find no image
+        // and skip it anyway, and this makes that an intention rather than a
+        // coincidence two readers of the same entry happen to share.
+        if comic_info::is_comic_info(&entry.name) {
+            continue;
+        }
+        let Some(plan) = plan_entry(&mut archive, position, &entry.name, limits) else {
             continue;
         };
 
@@ -1240,6 +1838,20 @@ pub fn pages_from_archive(
     let mut warnings: Vec<ArchiveWarning> = Vec::new();
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(plans.len());
 
+    // §14.3.3's document information dictionary, filled from the archive's own
+    // `ComicInfo.xml`. The mapping lives in `comic_info::ComicInfo::info_entries`
+    // and not here, so a test reading the finished `/Info` and a caller reading
+    // the report are looking at one decision. `set_info` answers false only
+    // under an archival profile, which a synthesised comic never has.
+    if let Some(info) = &info {
+        for (key, value) in info.info_entries() {
+            builder.set_info(key, &value);
+        }
+    }
+    if let Some(defect) = info_defect {
+        warnings.push(ArchiveWarning::ComicInfo(defect));
+    }
+
     for (number, plan) in plans.iter().enumerate() {
         // Each page names its own image and no other. Without this every page
         // would inherit every image registered before it, and a 200-page
@@ -1249,6 +1861,7 @@ pub fn pages_from_archive(
         let drawn = match &plan.content {
             Content::Jpeg(data) => builder.add_image(IMAGE_RESOURCE, &ImageData::Jpeg(data)),
             Content::Png(png) => builder.add_image(IMAGE_RESOURCE, &png.image()),
+            Content::Tiff(tiff) => builder.add_image(IMAGE_RESOURCE, &tiff.image()),
             Content::Placeholder => false,
         };
 
@@ -1285,18 +1898,52 @@ pub fn pages_from_archive(
     }
 
     // Taken after every read, because reading is what most of them come from.
-    for w in archive.warnings() {
-        warnings.push(ArchiveWarning::Zip(*w));
-    }
+    warnings.extend(archive.warnings());
 
     let pdf = builder.finish();
     let synthesised_bytes = pdf.len();
-    // No markup: the comic path reads magic bytes and image headers, and
-    // `ComicInfo.xml` is gap 29's named non-goal rather than an omission.
+    // `parsed_parts` stays zero: it counts a *fixed document*'s payload cache,
+    // which the comic path does not have. The one entry of markup this path
+    // does read comes out through `ArchiveReport::comic_info`.
     Ok((
         pdf,
-        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, None, 0),
+        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, None, 0)
+            .with_comic_info(info),
     ))
+}
+
+/// Reads the archive's `ComicInfo.xml`, if it holds one.
+///
+/// Returns what it said and what went wrong, and **never both**: a defect means
+/// there is nothing to write, and a value means there was nothing to warn
+/// about. An archive with no such entry returns neither, which is what makes
+/// "no metadata" and "metadata this build could not read" different states a
+/// host can show differently (ruling 10).
+///
+/// The entry is charged against the archive reader's own inflation budget like
+/// any other, so a `ComicInfo.xml` that inflates to gigabytes is refused by
+/// `tinker-pdf-zip` before this sees a byte — and by
+/// [`MAX_COMIC_INFO_BYTES`] if it fits inside that and is still not a
+/// plausible metadata file.
+fn read_comic_info(
+    archive: &mut Reader<'_>,
+    listing: &[Listing],
+    limits: &Limits,
+) -> (Option<ComicInfo>, Option<ComicInfoDefect>) {
+    let Some(index) = listing
+        .iter()
+        .position(|entry| comic_info::is_comic_info(&entry.name))
+    else {
+        return (None, None);
+    };
+    let data = match archive.read(index) {
+        Ok(data) => data,
+        Err(_) => return (None, Some(ComicInfoDefect::EntryRefused)),
+    };
+    match comic_info::parse(&data, &limits.xml) {
+        Ok(info) => (Some(info), None),
+        Err(defect) => (None, Some(defect)),
+    }
 }
 
 /// The resource name every synthesised page gives its own image.
@@ -1307,13 +1954,13 @@ const IMAGE_RESOURCE: &[u8] = b"Im";
 
 /// Decides what one entry becomes, or `None` when it is not a page at all.
 fn plan_entry<'a>(
-    archive: &mut Archive<'a>,
+    archive: &mut Reader<'a>,
     index: usize,
-    entry: &Entry,
+    name: &str,
     limits: &Limits,
 ) -> Option<Plan<'a>> {
     let placeholder = |defect: PageDefect| Plan {
-        name: entry.name.clone(),
+        name: name.to_owned(),
         size: None,
         content: Content::Placeholder,
         defect: Some(defect),
@@ -1323,11 +1970,10 @@ fn plan_entry<'a>(
 
     let data = match archive.read(index) {
         Ok(data) => data,
-        Err(e) => {
+        Err(defect) => {
             // No bytes, so no magic. See `extension_claims_image` for why the
             // name is allowed to decide this one case and nothing else.
-            return extension_claims_image(&entry.name)
-                .then(|| placeholder(PageDefect::EntryRefused(e)));
+            return extension_claims_image(name).then(|| placeholder(defect));
         }
     };
 
@@ -1342,7 +1988,7 @@ fn plan_entry<'a>(
                 return Some(placeholder(PageDefect::Undecodable));
             }
             Some(Plan {
-                name: entry.name.clone(),
+                name: name.to_owned(),
                 size: Some((f64::from(width), f64::from(height))),
                 charge: PAGE_OVERHEAD.saturating_add(data.len()),
                 content: Content::Jpeg(data),
@@ -1365,11 +2011,38 @@ fn plan_entry<'a>(
             }
             let size = (f64::from(png.width()), f64::from(png.height()));
             let degraded = !png.complete();
-            let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&png));
+            let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&png.image()));
             Some(Plan {
-                name: entry.name.clone(),
+                name: name.to_owned(),
                 size: Some(size),
                 content: Content::Png(Box::new(png)),
+                defect: None,
+                degraded,
+                charge,
+            })
+        }
+        ImageFormat::Tiff => {
+            // The same ceiling the PNG route takes, for the same reason: the
+            // largest entry this build will read out of an archive is the most
+            // a page's raster may be, and it is the *caller's* number, which is
+            // what `ExceedsOutputLimit` carries back.
+            //
+            // It binds only the decoded route. A single-strip G4 page — the
+            // shape a scanned comic actually has — builds no raster at all, so
+            // a page far past this ceiling still opens.
+            let Ok(tiff) = tiff_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)) else {
+                return Some(placeholder(PageDefect::Undecodable));
+            };
+            if tiff.width() == 0 || tiff.height() == 0 {
+                return Some(placeholder(PageDefect::Undecodable));
+            }
+            let size = (f64::from(tiff.width()), f64::from(tiff.height()));
+            let degraded = !tiff.complete();
+            let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&tiff.image()));
+            Some(Plan {
+                name: name.to_owned(),
+                size: Some(size),
+                content: Content::Tiff(Box::new(tiff)),
                 defect: None,
                 degraded,
                 charge,
@@ -1382,15 +2055,18 @@ fn plan_entry<'a>(
     }
 }
 
-/// How many bytes a prepared PNG will put in the file.
-fn embedded_len(png: &PngImageData) -> usize {
-    match png.image() {
+/// How many bytes a prepared image will put in the file.
+///
+/// Takes the [`ImageData`] rather than the preparer's own type, because both
+/// preparers produce the same shape and the charge is a fact about the bytes.
+fn embedded_len(image: &ImageData<'_>) -> usize {
+    match image {
         ImageData::Compressed(image) => image
             .data
             .len()
-            .saturating_add(image.soft_mask.map_or(0, |m| m.data.len())),
-        // `png_image` builds nothing else, and a shape that costs nothing to
-        // charge for is one that has not been written yet.
+            .saturating_add(image.soft_mask.as_ref().map_or(0, |m| m.data.len())),
+        // Neither preparer builds anything else, and a shape that costs nothing
+        // to charge for is one that has not been written yet.
         _ => 0,
     }
 }

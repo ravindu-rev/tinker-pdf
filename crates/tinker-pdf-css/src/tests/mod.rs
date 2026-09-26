@@ -2,8 +2,10 @@
 
 mod bounds;
 mod cascade;
+mod defaulting;
 mod font_face;
 mod parser;
+mod pseudo;
 mod selector;
 mod tokenizer;
 

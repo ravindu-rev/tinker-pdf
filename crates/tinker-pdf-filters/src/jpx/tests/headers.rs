@@ -1,6 +1,7 @@
 //! Milestone 1: the container (Annex I) and the codestream headers (Annex A).
 
 use super::writer::{boxed, segment, tile_part, Spec, SIGNATURE};
+use crate::jpx::codestream::cb_style;
 use crate::jpx::codestream::{marker, refuse_marker, Progression, QuantStyle};
 use crate::jpx::{boxes, codestream, jpx_decode, JpxColour, Refusal};
 use crate::Limits;
@@ -251,16 +252,31 @@ fn bpcc_is_read_when_ihdr_says_the_components_differ() {
 
 /// **Every marker in Table A.2 is either parsed or named in a refusal.**
 ///
-/// Not "most", and not "the ones a file is likely to hold". A skipped RGN
-/// draws a bright rectangle where the region of interest was; a skipped POC
-/// changes the packet order mid-stream and mis-parses every packet after it.
-/// Both produce a picture. This test walks the whole table and demands that
-/// each marker lands in exactly one of the two buckets — which is checkable
-/// only because [`Refusal`] carries the name rather than collapsing to a
-/// warning.
+/// Not "most", and not "the ones a file is likely to hold". A skipped POC
+/// changes the packet order mid-stream and mis-parses every packet after it;
+/// a skipped RGN leaves every background coefficient `2^s` too small. Both
+/// produce a picture. This test walks the whole table and demands that each
+/// marker lands in exactly one of the two buckets — which is checkable only
+/// because [`Refusal`] carries the name rather than collapsing to a warning.
 #[test]
 fn every_table_a2_marker_is_parsed_or_named() {
-    /// T.800 Table A.2, transcribed. Twenty markers.
+    /// T.800 Table A.2, transcribed. Twenty markers, and the flag says
+    /// whether this build **acts on** the marker or refuses it by name.
+    ///
+    /// **The flag used to be documentation** — every loop below took it as
+    /// `_` — so it could have said anything, and a row could have gone stale
+    /// in either direction without a test moving. It is asserted now, in both
+    /// directions: a marker flagged acted-on may not come back as
+    /// `Refusal::Marker`, and a marker flagged refused must. RGN, PPM and PPT
+    /// all moved from `false` to `true` on 20 September 2026 and POC on the
+    /// 21st, and a flag nothing reads would have recorded those moves without
+    /// checking them.
+    ///
+    /// **Every row is `true` now**, which is a statement about the decoder
+    /// rather than about this table: no Table A.2 marker is refused as a
+    /// capability. SOP and EPH are `true` and still refuse where this test
+    /// puts them, because A.8 puts both inside the bit stream, tier-2 reads
+    /// them there, and a header is the one place they have no meaning.
     const TABLE_A2: [(u16, &str, bool); 20] = [
         (marker::SOC, "SOC", true),
         (marker::SOT, "SOT", true),
@@ -269,18 +285,18 @@ fn every_table_a2_marker_is_parsed_or_named() {
         (marker::SIZ, "SIZ", true),
         (marker::COD, "COD", true),
         (marker::COC, "COC", true),
-        (marker::RGN, "RGN", false),
+        (marker::RGN, "RGN", true),
         (marker::QCD, "QCD", true),
         (marker::QCC, "QCC", true),
-        (marker::POC, "POC", false),
+        (marker::POC, "POC", true),
         (marker::TLM, "TLM", true),
         (marker::PLM, "PLM", true),
         (marker::PLT, "PLT", true),
-        (marker::PPM, "PPM", false),
-        (marker::PPT, "PPT", false),
+        (marker::PPM, "PPM", true),
+        (marker::PPT, "PPT", true),
         (marker::SOP, "SOP", true),
         (marker::EPH, "EPH", true),
-        (marker::CRG, "CRG", false),
+        (marker::CRG, "CRG", true),
         (marker::COM, "COM", true),
     ];
 
@@ -308,7 +324,7 @@ fn every_table_a2_marker_is_parsed_or_named() {
     }
 
     let spec = Spec::default();
-    for (code, name, _) in TABLE_A2 {
+    for (code, name, acted_on) in TABLE_A2 {
         // Every marker that may appear in a main header, put in one. The four
         // delimiters and the two in-packet markers are covered by their own
         // tests; what this asks of them is that reaching one here is still a
@@ -318,21 +334,50 @@ fn every_table_a2_marker_is_parsed_or_named() {
         bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &[]));
         bytes.extend_from_slice(&marker::EOC.to_be_bytes());
         let got = parse(&bytes);
+        // **The third column is a demand, not a note.** It used to be read
+        // as `_` in both loops of this test, so it recorded the decoder's
+        // refusal list without checking a word of it — and a row could have
+        // gone stale in either direction without a test moving. A marker
+        // flagged as one this build does not act on must be refused *by
+        // name*, here, in a main header, which is the property the whole
+        // refusal list exists to make checkable.
+        if !acted_on {
+            assert!(
+                matches!(got, Err(Refusal::Marker(_))),
+                "{name} is flagged as a marker this build does not act on,                  so it must be refused by name; it produced {got:?}"
+            );
+        }
         match got {
             // Parsed: TLM, PLM, PLT and COM carry no coding information, so a
             // main header holding one still parses.
             Ok(_) => assert!(
                 matches!(code, marker::TLM | marker::PLM | marker::PLT | marker::COM),
-                "{name} parsed and should not have"
+                "{name} was acted on and should not have been"
             ),
-            Err(Refusal::Marker(text)) => assert!(
-                text.starts_with(name),
-                "{name} was refused as {text:?}, which does not name it"
-            ),
+            Err(Refusal::Marker(text)) => {
+                assert!(
+                    text.starts_with(name),
+                    "{name} was refused as {text:?}, which does not name it"
+                );
+                // SOP and EPH are the two flagged acted-on that still refuse
+                // *here*: they belong to tier-2's packet data, and a header
+                // is the one place they have no meaning. Every other marker
+                // refusing by name is one the flag says is refused.
+                assert!(
+                    !acted_on || matches!(code, marker::SOP | marker::EPH),
+                    "{name} is flagged acted-on in TABLE_A2 and came back as a \
+                     marker refusal"
+                );
+            }
             // The delimiters are structural where this test puts them: a
             // second SIZ, an SOD with no SOT, an SOC in the middle. Refused,
             // and never *skipped*.
-            Err(Refusal::Structure(_) | Refusal::Truncated(_) | Refusal::Feature(_)) => {}
+            Err(Refusal::Structure(_) | Refusal::Truncated(_) | Refusal::Feature(_)) => assert!(
+                acted_on,
+                "{name} is flagged refused in TABLE_A2 and did not name \
+                 itself — a refusal that does not carry the marker's name is \
+                 what this whole test exists to forbid"
+            ),
             // The one outcome this whole test exists to forbid: a marker the
             // standard defines being reported as one nothing defines, which
             // is what a decoder that had never transcribed the table would do.
@@ -363,33 +408,554 @@ fn a_marker_outside_table_a2_is_refused_by_code() {
     assert_eq!(parse(&bytes), Err(Refusal::UnknownMarker(0xFF74)));
 }
 
-/// The five Table A.2 markers this build refuses, each in a main header or a
-/// tile-part header, each naming itself.
+/// **No Table A.2 marker is refused as a capability, and the two that name
+/// themselves name a *place* instead.**
+///
+/// This test was `the_one_refused_marker_names_itself` and before that a loop
+/// over four, and what it asserts has changed shape rather than shrunk again.
+/// The list is empty of capabilities now:
+///
+/// - CRG went first: A.9.1 says it "has no effect on decoding the
+///   codestream", so it is parsed, carried and never applied.
+/// - RGN went when T.800 Annex H was implemented, and what took its place is
+///   narrower and lives inside the segment rather than at it — Table A.25
+///   defines one `Srgn` style and reserves the rest, so a reserved style is
+///   refused as a reserved style ([`a_reserved_srgn_style_is_refused_by_name`])
+///   and style 0 is decoded.
+/// - PPM and PPT went when packed packet headers were implemented; they are
+///   parsed here and read by tier-2
+///   ([`ppm_relocates_every_tile_part_s_headers`] and its neighbours below).
+/// - POC went last, on 21 September 2026: A.6.6's progressions are B.12.2's
+///   progression order volumes and tier-2 sequences the packets from them.
+///   `crates/tinker-pdf-filters/tests/jpx_poc.rs` holds it to T.800's own
+///   bytes, and what is left of it here is a *value* — a `Ppoc` Table A.16
+///   does not define, a bound outside Table A.32, a length that is not
+///   equation (A-6)'s.
+///
+/// What still refuses **by name** is SOP and EPH, and for a reason that is
+/// about placement rather than capability: A.8 puts both inside the bit
+/// stream, tier-2 reads them there, and a header is the one place in a
+/// codestream where neither has a meaning.
 #[test]
-fn the_five_refused_markers_name_themselves() {
+fn the_markers_that_name_themselves_are_the_two_out_of_place_ones() {
     let spec = Spec::default();
-    for (code, name) in [
-        (marker::RGN, "RGN"),
-        (marker::POC, "POC"),
-        (marker::PPM, "PPM"),
-        (marker::CRG, "CRG"),
-    ] {
+    for (code, name) in [(marker::SOP, "SOP"), (marker::EPH, "EPH")] {
         let mut bytes = spec.main_header();
-        bytes.extend_from_slice(&segment(code, &[0, 0, 0]));
+        bytes.extend_from_slice(&segment(code, &[0, 0]));
         bytes.extend_from_slice(&marker::EOC.to_be_bytes());
         match parse(&bytes) {
-            Err(Refusal::Marker(text)) => assert!(text.starts_with(name), "{text:?}"),
+            Err(Refusal::Marker(text)) => {
+                assert!(text.starts_with(name), "{text:?}");
+                assert!(
+                    text.contains("outside tile data"),
+                    "{name} should be refused for where it is, not for what it \
+                     is: {text:?}"
+                );
+            }
             other => panic!("{name} produced {other:?}"),
         }
     }
-    // PPT lives in a tile-part header rather than the main one.
+
+    // And the marker that used to stand here: a POC whose body is the seven
+    // bytes (A-6) requires now parses, so the refusal it leaves behind is a
+    // value inside the segment rather than the segment.
     let mut bytes = spec.main_header();
-    bytes.extend_from_slice(&tile_part(0, 0, 1, &segment(marker::PPT, &[0]), &[]));
+    bytes.extend_from_slice(&segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, 0)])));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
     bytes.extend_from_slice(&marker::EOC.to_be_bytes());
-    match parse(&bytes) {
-        Err(Refusal::Marker(text)) => assert!(text.starts_with("PPT"), "{text:?}"),
-        other => panic!("PPT produced {other:?}"),
+    let stream = parse(&bytes).expect("a POC at Table A.32's widths parses");
+    assert_eq!(stream.poc.as_ref().map(Vec::len), Some(1));
+}
+
+// --- A.6.6's progression order change ------------------------------------
+
+/// One POC progression, in Figure A.15's field order — `RSpoc`, `CSpoc`,
+/// `LYEpoc`, `REpoc`, `CEpoc`, `Ppoc`.
+///
+/// The narrow `CSpoc` and `CEpoc`, because every fixture here has far fewer
+/// than 257 components (Table A.32), which is also why one progression is
+/// seven bytes rather than nine.
+type PocFields = (u8, u8, u16, u8, u8, u8);
+
+/// A POC body: one seven-byte progression per [`PocFields`].
+fn poc_body(progressions: &[PocFields]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &(rs, cs, lye, re, ce, ppoc) in progressions {
+        out.extend_from_slice(&[rs, cs]);
+        out.extend_from_slice(&lye.to_be_bytes());
+        out.extend_from_slice(&[re, ce, ppoc]);
     }
+    out
+}
+
+/// A codestream with `main` in its main header and `tile` in its only
+/// tile-part header.
+fn with_headers(main: &[u8], tile: &[u8]) -> Vec<u8> {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(main);
+    bytes.extend_from_slice(&tile_part(0, 0, 1, tile, &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    bytes
+}
+
+/// **Equation (A-6) leaves exactly one legal `Lpoc` for a progression
+/// count**, so the length is checked for equality rather than sufficiency.
+///
+/// ```text
+/// Lpoc = 2 + 7 * number_progression_order_change   Csiz <  257
+/// Lpoc = 2 + 9 * number_progression_order_change   Csiz >= 257
+/// ```
+///
+/// Table A.32 gives `Lpoc` as "9 to 65 535", whose lower bound is the
+/// one-progression case — so a zero-progression POC is a segment describing
+/// nothing while A.6.6 requires "the progression of every packet in the
+/// codestream ... shall be defined in one or more POC marker segments".
+#[test]
+fn a_poc_length_equation_a6_does_not_allow_is_refused() {
+    for body in [Vec::new(), vec![0; 6], vec![0; 8], vec![0; 13], vec![0; 15]] {
+        let len = body.len();
+        assert_eq!(
+            parse(&with_headers(&segment(marker::POC, &body), &[])),
+            Err(Refusal::Structure(
+                "a POC marker segment whose length is not equation A-6's"
+            )),
+            "a {len}-byte POC body",
+        );
+    }
+    // Seven and fourteen are one and two progressions.
+    for n in [1usize, 2] {
+        let body = poc_body(&vec![(0, 0, 1, 2, 1, 0); n]);
+        assert_eq!(body.len(), 7 * n);
+        let bytes = with_headers(&segment(marker::POC, &body), &[]);
+        let stream = parse(&bytes).expect("(A-6)'s own length parses");
+        assert_eq!(stream.poc.as_ref().map(Vec::len), Some(n));
+    }
+}
+
+/// **Every one of Table A.32's ranges, checked rather than assumed.**
+///
+/// | Parameter | Values |
+/// | --- | --- |
+/// | `RSpoc` | 0 to 32 |
+/// | `LYEpoc` | 1 to 65 535 |
+/// | `REpoc` | (`RSpoc` + 1) to 33 |
+/// | `CEpoc` | (`CSpoc` + 1) to 255, 0; if Csiz < 257 |
+///
+/// A volume whose bounds run backwards is not a volume, and clamping one into
+/// shape would decode a packet sequence the codestream never described —
+/// which is the same failure as skipping the marker, reached from the other
+/// side.
+#[test]
+fn a_poc_outside_table_a32s_ranges_is_refused() {
+    let cases: &[(PocFields, &str)] = &[
+        (
+            (33, 0, 1, 34, 1, 0),
+            "a POC RSpoc above Table A.32's thirty-two",
+        ),
+        (
+            (1, 0, 1, 1, 1, 0),
+            "a POC REpoc outside Table A.32's (RSpoc + 1) to 33",
+        ),
+        (
+            (0, 0, 1, 0, 1, 0),
+            "a POC REpoc outside Table A.32's (RSpoc + 1) to 33",
+        ),
+        (
+            (0, 0, 1, 34, 1, 0),
+            "a POC REpoc outside Table A.32's (RSpoc + 1) to 33",
+        ),
+        ((0, 0, 0, 2, 1, 0), "a POC LYEpoc of zero"),
+        // The default spec has one component, so `CSpoc` = 1 names one SIZ
+        // never declared. `CEpoc` = 2 keeps Table A.32's (CSpoc + 1) rule
+        // satisfied, so this reaches the check it is about.
+        (
+            (0, 1, 1, 2, 2, 0),
+            "a POC CSpoc naming a component SIZ did not",
+        ),
+    ];
+    for &(fields, why) in cases {
+        assert_eq!(
+            parse(&with_headers(
+                &segment(marker::POC, &poc_body(&[fields])),
+                &[]
+            )),
+            Err(Refusal::Structure(why)),
+            "{fields:?}",
+        );
+    }
+    // `CEpoc` <= `CSpoc` needs a component to start from, so it gets its own
+    // fixture with two of them.
+    let spec = Spec {
+        components: vec![(8, false, 1, 1), (8, false, 1, 1)],
+        ..Spec::default()
+    };
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&segment(marker::POC, &poc_body(&[(0, 1, 1, 2, 1, 0)])));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&bytes),
+        Err(Refusal::Structure(
+            "a POC CEpoc outside Table A.32's (CSpoc + 1) to its ceiling"
+        ))
+    );
+}
+
+/// Table A.32's `CEpoc` footnote: "(0 is interpreted as 256)".
+///
+/// Zero is the *largest* legal `CEpoc` and not the smallest, so it is read
+/// before the range check rather than after — a decoder that ordered the two
+/// the other way would refuse the one value the table adds a note for.
+#[test]
+fn a_cepoc_of_zero_is_table_a32s_two_hundred_and_fifty_six() {
+    let bytes = with_headers(&segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 0, 0)])), &[]);
+    let stream = parse(&bytes).expect("CEpoc = 0 is Table A.32's 256");
+    let volumes = stream.poc.expect("a main-header POC");
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].component_end, 256);
+}
+
+/// `Ppoc` is Table A.16's eight bits, which is the same table `SGcod` uses —
+/// so a sixth progression order is refused here exactly as it is in a COD.
+#[test]
+fn a_ppoc_table_a16_does_not_define_is_refused() {
+    for ppoc in [5u8, 6, 255] {
+        assert_eq!(
+            parse(&with_headers(
+                &segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, ppoc)])),
+                &[]
+            )),
+            Err(Refusal::Feature(
+                "a progression order Table A.16 does not define"
+            )),
+            "Ppoc = {ppoc}",
+        );
+    }
+    for ppoc in 0..=4u8 {
+        assert!(
+            parse(&with_headers(
+                &segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, ppoc)])),
+                &[]
+            ))
+            .is_ok(),
+            "Ppoc = {ppoc} is one of Table A.16's five",
+        );
+    }
+}
+
+/// A.6.6: "At most one POC marker segment may appear in any header."
+///
+/// B.12.3 says it again with the scope spelled out — "There can only be one
+/// POC marker segment in a given header (main or tile-part) but that marker
+/// segment can describe many progression order changes" — so both headers are
+/// checked, and a segment with two progressions in it is the legal way to say
+/// what two segments cannot.
+#[test]
+fn two_poc_segments_in_one_header_are_refused() {
+    let one = segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, 0)]));
+    let mut two = one.clone();
+    two.extend_from_slice(&one);
+    assert_eq!(
+        parse(&with_headers(&two, &[])),
+        Err(Refusal::Structure(
+            "a second POC marker segment in one header"
+        ))
+    );
+    assert_eq!(
+        parse(&with_headers(&[], &two)),
+        Err(Refusal::Structure(
+            "a second POC marker segment in one header"
+        ))
+    );
+    // One segment describing two progressions is what A.6.6 offers instead.
+    let both = segment(
+        marker::POC,
+        &poc_body(&[(0, 0, 1, 1, 1, 0), (1, 0, 1, 2, 1, 0)]),
+    );
+    assert_eq!(
+        parse(&with_headers(&both, &[]))
+            .expect("two progressions in one segment")
+            .poc
+            .map(|v| v.len()),
+        Some(2)
+    );
+}
+
+/// **A.6.6's precedence, at the parser rather than through a decode.**
+///
+/// > Tile-part POC > Main POC > Tile-part COD > Main COD
+///
+/// B.12.3 states the override from the other end: with a tile-part POC, "The
+/// COD progression order and the main header POC marker segment (if there is
+/// one) are overridden" — so a tile's own volumes *replace* the main
+/// header's rather than extending them.
+#[test]
+fn a_tile_part_poc_replaces_the_main_headers_rather_than_extending_it() {
+    let main = segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, 0)]));
+    let tile = segment(
+        marker::POC,
+        &poc_body(&[(1, 0, 1, 2, 1, 1), (0, 0, 1, 1, 1, 1)]),
+    );
+
+    let main_only_bytes = with_headers(&main, &[]);
+    let only_main = parse(&main_only_bytes).expect("a main-header POC");
+    let volumes = only_main
+        .progression_volumes(0)
+        .expect("the main header's reach every tile");
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].resolution_start, 0);
+    assert_eq!(volumes[0].order, Progression::Lrcp);
+
+    let both_bytes = with_headers(&main, &tile);
+    let both = parse(&both_bytes).expect("both headers may carry one");
+    let volumes = both.progression_volumes(0).expect("the tile-part's win");
+    assert_eq!(
+        volumes.len(),
+        2,
+        "two, not three: this replaces, not appends"
+    );
+    assert_eq!(volumes[0].resolution_start, 1);
+    assert_eq!(volumes[0].order, Progression::Rlcp);
+    // The main header's is still parsed and still there for any other tile.
+    assert_eq!(both.poc.as_ref().map(Vec::len), Some(1));
+}
+
+/// B.12.3: "If a POC marker segment is used for an individual tile, **there
+/// shall be a POC marker in the first tile-part header of that tile**."
+///
+/// A.6.6 requires the same thing in its own words. A later part carrying the
+/// first of a tile's volumes is a codestream whose packets began before
+/// anything said in what order, so it is refused rather than read as though
+/// the volumes had started at the top.
+///
+/// **The other placement B.12.3 allows is not refused**, and the difference
+/// is the whole reason this is checked after every part has arrived rather
+/// than inside the tile-part parser: Figure B.15b draws volumes 1 and 2 in
+/// the first tile-part header with volume 3 in the third, and that is a
+/// conforming arrangement.
+#[test]
+fn a_tile_part_poc_needs_one_in_the_tiles_first_tile_part_header() {
+    let poc = segment(marker::POC, &poc_body(&[(0, 0, 1, 2, 1, 0)]));
+    let spec = Spec::default();
+
+    let mut late_only = spec.main_header();
+    late_only.extend_from_slice(&tile_part(0, 0, 2, &[], &EMPTY_PACKETS));
+    late_only.extend_from_slice(&tile_part(0, 1, 2, &poc, &[]));
+    late_only.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&late_only),
+        Err(Refusal::Structure(
+            "a tile-part POC with none in the tile's first tile-part header"
+        ))
+    );
+
+    // Figure B.15b's arrangement: the first part opens the series and a later
+    // part continues it. The volumes join in TPsot order.
+    let mut both = spec.main_header();
+    both.extend_from_slice(&tile_part(
+        0,
+        0,
+        2,
+        &segment(marker::POC, &poc_body(&[(0, 0, 1, 1, 1, 0)])),
+        &EMPTY_PACKETS,
+    ));
+    both.extend_from_slice(&tile_part(
+        0,
+        1,
+        2,
+        &segment(marker::POC, &poc_body(&[(1, 0, 1, 2, 1, 0)])),
+        &[],
+    ));
+    both.extend_from_slice(&marker::EOC.to_be_bytes());
+    let stream = parse(&both).expect("Figure B.15b's placement is conforming");
+    let volumes = stream.progression_volumes(0).expect("the tile's own");
+    assert_eq!(volumes.len(), 2, "joined across the tile's parts");
+    assert_eq!(
+        (volumes[0].resolution_start, volumes[1].resolution_start),
+        (0, 1),
+        "B.12.3: the volumes are described in order"
+    );
+}
+
+// --- A.6.3's region of interest -----------------------------------------
+
+/// An RGN marker segment's body, Figure A.12's fields in order: `Crgn`,
+/// `Srgn`, `SPrgn`, with `Crgn` one byte because every fixture here has far
+/// fewer than 257 components (Table A.24).
+fn rgn(component: u8, srgn: u8, sprgn: u8) -> Vec<u8> {
+    segment(marker::RGN, &[component, srgn, sprgn])
+}
+
+/// **Table A.24's field widths, read as the table writes them.**
+///
+/// The order is Figure A.12's — `RGN`, `Lrgn`, `Crgn`, `Srgn`, `SPrgn` — and
+/// getting `Srgn` and `SPrgn` the wrong way round is the transcription slip
+/// this guards: both are one byte, so a swap parses cleanly and gives a
+/// shift of 0 with a style of 21, or a style of 0 with a shift of nothing.
+/// The fixture below uses a style of 0 and a shift of 21 precisely because
+/// they are distinguishable.
+#[test]
+fn an_rgn_segment_is_read_at_table_a24s_field_widths() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&rgn(0, 0, 21));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    let stream = parse(&bytes).expect("an RGN with Table A.25's one style parses");
+    assert_eq!(
+        stream.roi_for(0, 0).map(|r| r.shift),
+        Some(21),
+        "SPrgn is Table A.26's implicit ROI shift"
+    );
+}
+
+/// **A component with no RGN has no region of interest**, so H.1 applies to
+/// nothing — which is every component of almost every file.
+#[test]
+fn a_component_with_no_rgn_has_no_roi() {
+    let bytes = minimal();
+    let stream = parse(&bytes).expect("the minimal fixture parses");
+    assert_eq!(stream.roi_for(0, 0), None);
+}
+
+/// **A reserved `Srgn` is refused by name, not stepped over.**
+///
+/// Table A.25 gives value 0, "Implicit ROI (maximum shift)", and says "All
+/// other values reserved". A style this build has never seen describes some
+/// other realignment of the coefficients, and running H.1's Maxshift
+/// arithmetic over it would put the background at the wrong magnitude and
+/// draw a plausible picture. That is the SOF3/SOF5/SOF6/SOF7 failure in this
+/// tree's JPEG decoder, where a frame type was skipped rather than refused
+/// and a lossless file surfaced as a damaged one.
+#[test]
+fn a_reserved_srgn_style_is_refused_by_name() {
+    let spec = Spec::default();
+    for srgn in [1u8, 2, 127, 255] {
+        let mut bytes = spec.main_header();
+        bytes.extend_from_slice(&rgn(0, srgn, 4));
+        bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+        bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+        assert_eq!(
+            parse(&bytes),
+            Err(Refusal::Feature("an Srgn ROI style Table A.25 reserves")),
+            "Srgn = {srgn}"
+        );
+    }
+}
+
+/// **`Lrgn` is checked for equality, not sufficiency.**
+///
+/// Table A.24 gives "5 to 6", which is two for the length, one or two for
+/// `Crgn` by `Csiz`, one for `Srgn` and one for `SPrgn`. For a one-component
+/// image that is exactly one legal body length, and a decoder that read the
+/// first three bytes out of a longer segment would be inventing a tolerance
+/// the table does not give — the mistake `parse_crg` records for CRG.
+#[test]
+fn an_rgn_length_table_a24_does_not_allow_is_refused() {
+    let spec = Spec::default();
+    for body in [vec![0u8], vec![0, 0], vec![0, 0, 0, 0], vec![0, 0, 0, 0, 0]] {
+        let mut bytes = spec.main_header();
+        bytes.extend_from_slice(&segment(marker::RGN, &body));
+        bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+        bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+        assert_eq!(
+            parse(&bytes),
+            Err(Refusal::Structure(
+                "an RGN marker segment whose length is not Table A.24's"
+            )),
+            "a {}-byte RGN body",
+            body.len()
+        );
+    }
+}
+
+/// A.6.3: "There may be at most one RGN marker segment for each component in
+/// either the main or tile-part headers." Two is a codestream saying two
+/// things about one component's ROI, and last-one-wins is a guess that
+/// decodes.
+#[test]
+fn two_rgn_markers_for_one_component_are_refused() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&rgn(0, 0, 3));
+    bytes.extend_from_slice(&rgn(0, 0, 4));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&bytes),
+        Err(Refusal::Structure("two RGN markers for one component"))
+    );
+
+    // And the same inside one tile-part header.
+    let mut header = rgn(0, 0, 3);
+    header.extend_from_slice(&rgn(0, 0, 4));
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &header, &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&bytes),
+        Err(Refusal::Structure("two RGN markers for one component"))
+    );
+}
+
+/// An RGN naming a component SIZ did not declare is refused rather than
+/// widening any array (ruling 1).
+#[test]
+fn an_rgn_naming_a_component_siz_did_not_is_refused() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&rgn(3, 0, 3));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&bytes),
+        Err(Refusal::Structure("RGN names a component SIZ did not"))
+    );
+}
+
+/// **A.6.3's precedence, which is two deep rather than four.**
+///
+/// "The RGN marker segment for a particular component which appears in a
+/// tile-part header overrides any marker for that component in the main
+/// header, for the tile in which it appears." Two tiles, an RGN in the main
+/// header and another in tile 1's first tile-part: tile 0 keeps the main
+/// header's shift and tile 1 takes its own. A decoder that took the larger,
+/// or added them, would be inventing an arithmetic the clause does not have.
+#[test]
+fn a_tile_part_rgn_overrides_the_main_header_for_that_tile() {
+    let spec = Spec {
+        xsiz: 8,
+        ysiz: 4,
+        xtsiz: 4,
+        ytsiz: 4,
+        ..Spec::default()
+    };
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&rgn(0, 0, 3));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&tile_part(1, 0, 1, &rgn(0, 0, 9), &EMPTY_PACKETS));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    let stream = parse(&bytes).expect("two tiles, one with its own RGN");
+    assert_eq!(stream.roi_for(0, 0).map(|r| r.shift), Some(3), "tile 0");
+    assert_eq!(stream.roi_for(1, 0).map(|r| r.shift), Some(9), "tile 1");
+}
+
+/// A.6.3: "If there are multiple tile-parts in a tile, then this marker
+/// segment shall be found only in the first tile-part header."
+#[test]
+fn an_rgn_after_the_first_tile_part_is_refused() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(0, 0, 2, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&tile_part(0, 1, 2, &rgn(0, 0, 3), &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&bytes),
+        Err(Refusal::Structure(
+            "a coding style marker in a tile-part after the first"
+        ))
+    );
 }
 
 // --- A.5.1's tile grid --------------------------------------------------
@@ -581,30 +1147,65 @@ fn cod_reads_the_five_progression_orders_and_refuses_a_sixth() {
     ));
 }
 
-/// The five Table A.19 code-block style bits this build does not implement,
-/// each refused. Segmentation symbols are the sixth and are implemented, so
-/// they are not here.
+/// Every Table A.19 code-block style is accepted, and only a bit the table
+/// does not define is refused.
+///
+/// **This test used to assert the opposite for two of the six**, and the
+/// inversion is the point rather than an edit: it looped over `BYPASS` and
+/// `TERMALL` demanding a refusal, and then — the half that kept it honest —
+/// over the other three demanding acceptance, so that a build which refused
+/// an implemented style again could not pass by only checking refusals. Both
+/// halves are still here; the membership moved.
+///
+/// A style bit accepted in the header is not a style bit decoded, so this
+/// test claims only what it checks. What decodes them is
+/// [`super::tier1`]'s and [`super::tier2`]'s, and what adjudicates that is
+/// `tests/jpx_code_block_styles.rs` against T.800's own published lengths and
+/// coefficients.
 #[test]
-fn the_unsupported_code_block_styles_are_refused_one_by_one() {
-    for bit in [0x01u8, 0x02, 0x04, 0x08, 0x10] {
+fn every_table_a19_code_block_style_is_accepted() {
+    for bit in [
+        cb_style::BYPASS,
+        cb_style::RESET,
+        cb_style::TERMALL,
+        cb_style::VERTICALLY_CAUSAL,
+        cb_style::PREDICTABLE,
+        cb_style::SEGMENTATION_SYMBOLS,
+    ] {
+        let spec = Spec {
+            cb_style: bit,
+            ..Spec::default()
+        };
+        assert!(
+            parse(&spec.codestream(&[])).is_ok(),
+            "code-block style bit {bit:#04X} is implemented and must be accepted"
+        );
+    }
+
+    // And all six at once, which is a legal `Scod` byte and not merely six
+    // legal ones: A.19's bits are independent and a parser that accepted each
+    // alone could still reject the combination.
+    let spec = Spec {
+        cb_style: cb_style::DEFINED,
+        ..Spec::default()
+    };
+    assert!(
+        parse(&spec.codestream(&[])).is_ok(),
+        "Table A.19's six bits together"
+    );
+
+    // The two bits the table leaves as "All other values reserved", each
+    // alone and together. These are what the refusal means now.
+    for bit in [0x40, 0x80, 0xC0] {
         let spec = Spec {
             cb_style: bit,
             ..Spec::default()
         };
         assert!(
             matches!(parse(&spec.codestream(&[])), Err(Refusal::Feature(_))),
-            "code-block style bit {bit:#04X} was not refused"
+            "code-block style bit {bit:#04X} is outside Table A.19"
         );
     }
-    // And a bit the table does not define at all.
-    let spec = Spec {
-        cb_style: 0x40,
-        ..Spec::default()
-    };
-    assert!(matches!(
-        parse(&spec.codestream(&[])),
-        Err(Refusal::Feature(_))
-    ));
 }
 
 /// Table A.18's code-block bounds: exponents 2 to 10 with a sum at most 12.
@@ -836,10 +1437,22 @@ fn an_rsiz_beyond_part_1_is_refused() {
     }
 }
 
-/// A.4.2's rules about tile-parts, each of which is on the refusal list
-/// because reassembling them in stream order regardless produces a picture.
+/// A.4.2's rules about tile-parts, and **the line between the two failures
+/// that live here**.
+///
+/// A codestream contradicting itself is refused: parts out of order, or an SOT
+/// naming a tile outside the grid, would both produce a picture if
+/// reassembled in stream order, and the picture would be wrong in a way that
+/// looks like compression.
+///
+/// A codestream that *stops early* is not the same thing. A tile short of its
+/// declared parts is a file that ended, which costs pixels rather than
+/// meaning — the same bargain `JxrWarning::TileDroppedAsZero` strikes and the
+/// one a fax row strikes. It is marked rather than refused, and only a
+/// codestream with no whole tile at all is a refusal, because a page of
+/// rectangles reported as a successful decode is worse than the placeholder.
 #[test]
-fn tile_parts_out_of_order_or_short_of_their_count_are_refused() {
+fn tile_parts_out_of_order_are_refused_and_short_ones_are_marked() {
     let spec = Spec::default();
 
     let mut bytes = spec.main_header();
@@ -851,20 +1464,40 @@ fn tile_parts_out_of_order_or_short_of_their_count_are_refused() {
     );
 
     let mut bytes = spec.main_header();
-    bytes.extend_from_slice(&tile_part(0, 0, 3, &[], &[]));
-    bytes.extend_from_slice(&tile_part(0, 1, 3, &[], &[]));
-    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
-    assert_eq!(
-        parse(&bytes),
-        Err(Refusal::Structure("a tile whose parts do not cover it"))
-    );
-
-    let mut bytes = spec.main_header();
     bytes.extend_from_slice(&tile_part(1, 0, 1, &[], &[]));
     bytes.extend_from_slice(&marker::EOC.to_be_bytes());
     assert_eq!(
         parse(&bytes),
         Err(Refusal::Structure("an SOT naming a tile outside the grid"))
+    );
+
+    // One tile short of its three declared parts, and it is the only tile:
+    // nothing arrived whole, so there is no picture to degrade to.
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(0, 0, 3, &[], &[]));
+    bytes.extend_from_slice(&tile_part(0, 1, 3, &[], &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(
+        parse(&bytes),
+        Err(Refusal::Structure("a codestream with no complete tile"))
+    );
+
+    // Two tiles, one whole and one short. The codestream parses, and the short
+    // one is marked for the caller to leave blank.
+    // A four-by-four image in two two-by-four tiles.
+    let spec = Spec {
+        xtsiz: 2,
+        ..Spec::default()
+    };
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    bytes.extend_from_slice(&tile_part(1, 0, 3, &[], &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    let stream = parse(&bytes).expect("one whole tile is a picture");
+    assert_eq!(
+        stream.short_tiles,
+        vec![false, true],
+        "the second tile declared three parts and one arrived"
     );
 }
 
@@ -966,3 +1599,125 @@ fn no_prefix_or_corruption_panics() {
 // rather than over the five cases that lived here while the list was still
 // being built. Two tests moved there with milestone 8, and this note is where
 // a reader looking for them lands.
+
+/// T.800 A.9.1: a CRG marker segment is parsed, carried and never applied.
+///
+/// The clause is unusually explicit — "This marker segment has no effect on
+/// decoding the codestream" — so honouring it means reading it and leaving
+/// every sample alone. Refusing a file for carrying it, which this build did
+/// until A.9.1 was read, refused a conforming file for saying something true
+/// about itself.
+///
+/// The pairs are **interleaved** per component, `Xcrg_0, Ycrg_0, Xcrg_1,
+/// Ycrg_1`. Figure A.23 is what settles that: the prose says "This value is
+/// repeated for every component" separately of `Xcrg_i` and of `Ycrg_i`,
+/// which on its own is ambiguous between interleaved and grouped. This test
+/// uses two components with four distinct values, so a build that read them
+/// grouped would produce `(0x0102, 0x0304)` for the first component instead
+/// of `(0x0102, 0x8000)` and fail here rather than silently.
+#[test]
+fn a_crg_marker_is_parsed_and_carried() {
+    let spec = Spec {
+        components: vec![(7, false, 1, 1), (7, false, 1, 1)],
+        ..Default::default()
+    };
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&segment(
+        marker::CRG,
+        &[
+            0x01, 0x02, // Xcrg_0
+            0x80, 0x00, // Ycrg_0: half of YRsiz_0
+            0x03, 0x04, // Xcrg_1
+            0xFF, 0xFF, // Ycrg_1: just before the next sample's grid point
+        ],
+    ));
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+
+    let parsed = parse(&bytes).expect("a CRG marker segment is not a refusal");
+    let registration = parsed.registration.expect("the CRG was carried");
+    assert_eq!(
+        registration,
+        vec![
+            codestream::Registration {
+                x: 0x0102,
+                y: 0x8000
+            },
+            codestream::Registration {
+                x: 0x0304,
+                y: 0xFFFF
+            },
+        ]
+    );
+}
+
+/// A codestream with no CRG carries no registration, which is what says the
+/// field above means "the file said so" rather than "the parser defaulted".
+#[test]
+fn a_codestream_without_crg_carries_no_registration() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(0, 0, 1, &[], &[]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert_eq!(parse(&bytes).expect("parses").registration, None);
+}
+
+/// Table A.42 fixes `Lcrg` at `2 + 4 × Csiz`, so a segment of any other length
+/// is malformed rather than merely long.
+///
+/// Both directions, because the tolerant reading is the dangerous one: a
+/// decoder that took the first `Csiz` pairs out of a longer segment would be
+/// inventing a latitude the table does not give, and one that accepted a short
+/// segment would read a registration for a component the file never described.
+#[test]
+fn a_crg_whose_length_is_not_four_bytes_per_component_is_refused() {
+    let spec = Spec {
+        components: vec![(7, false, 1, 1), (7, false, 1, 1)],
+        ..Default::default()
+    };
+    for body in [
+        &[0x01, 0x02, 0x03, 0x04][..], // one pair short
+        &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A][..], // two bytes long
+    ] {
+        let mut bytes = spec.main_header();
+        bytes.extend_from_slice(&segment(marker::CRG, body));
+        bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+        assert!(
+            matches!(parse(&bytes), Err(Refusal::Structure(_))),
+            "a CRG of {} bytes against 2 components",
+            body.len()
+        );
+    }
+}
+
+/// A.9.1: "Only one CRG may be used in the main header."
+#[test]
+fn a_second_crg_marker_is_refused() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&segment(marker::CRG, &[0x00, 0x00, 0x00, 0x00]));
+    bytes.extend_from_slice(&segment(marker::CRG, &[0x00, 0x00, 0x00, 0x00]));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert!(matches!(parse(&bytes), Err(Refusal::Structure(_))));
+}
+
+/// A.9.1: "Usage: Main header only." Table A.2 says the same, so a CRG in a
+/// tile-part header is a marker out of place rather than one this build
+/// refuses by name — a distinction a reader of the warning depends on.
+#[test]
+fn a_crg_in_a_tile_part_header_is_out_of_place() {
+    let spec = Spec::default();
+    let mut bytes = spec.main_header();
+    bytes.extend_from_slice(&tile_part(
+        0,
+        0,
+        1,
+        &segment(marker::CRG, &[0x00, 0x00, 0x00, 0x00]),
+        &[],
+    ));
+    bytes.extend_from_slice(&marker::EOC.to_be_bytes());
+    assert!(
+        matches!(parse(&bytes), Err(Refusal::Structure(_))),
+        "a CRG in a tile-part header"
+    );
+}

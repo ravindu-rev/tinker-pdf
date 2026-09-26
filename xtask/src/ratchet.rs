@@ -72,6 +72,109 @@ pub struct Bar {
     /// a bar recorded before a relation existed simply has no entry for it,
     /// and a run that adds one is an improvement rather than a refusal.
     pub metamorphic: BTreeMap<String, (u64, u64)>,
+    /// What the structure tree walk reached (ISO 32000-1 14.7), or `None` in a
+    /// bar recorded before the walk existed.
+    ///
+    /// `None` is an improvement rather than a refusal, for the reason an
+    /// absent metamorphic relation is: a bar that predates a measurement
+    /// cannot be regressed against.
+    pub tagged: Option<TaggedBar>,
+    /// The most memory any one child needed, or `None` in a bar recorded
+    /// before the measurement existed — which is the three bars committed
+    /// today.
+    ///
+    /// `None` for [`Bar::tagged`]'s reason, and it is what keeps `SCHEMA` at 2:
+    /// a bar that predates a measurement cannot be regressed against, so an
+    /// absent key is an improvement rather than a refusal and no committed
+    /// file has to be rewritten to stay readable.
+    pub peak: Option<PeakBar>,
+    /// How many files carried each capability the child's scanner names, or an
+    /// empty map in a bar recorded before this axis existed.
+    ///
+    /// **This one guards the measurement rather than the engine.** A
+    /// capability count is a property of the *corpus* — how many files name an
+    /// `ICCBased` space, carry a JBIG2 stream, hold a signature — so a run that
+    /// finds fewer of them than the bar did has not got worse at rendering,
+    /// it has stopped *seeing* them. That is the drift nine of this
+    /// repository's thirteen censuses were found in when the nightly first ran
+    /// them, and it is invisible to every other axis here: a scanner that
+    /// quietly stops recognising a filter name makes the pass rate go up.
+    ///
+    /// Empty is an improvement rather than a refusal, for [`Bar::tagged`]'s
+    /// reason.
+    pub capabilities: BTreeMap<String, u64>,
+}
+
+/// The peak-memory bar for one corpus.
+///
+/// **The only absolute band in this file, and the only `<=`.** Every other
+/// axis here is a rate compared by cross-multiplication, because a count
+/// compared against a count changes meaning when the corpus grows.
+///
+/// A maximum does not. Adding a file can only raise it if that file genuinely
+/// costs more than anything already in the corpus, and *that is the thing
+/// being ratcheted* — "no file in this corpus ever needs more than N bytes" is
+/// a statement about the engine that a larger corpus can only make harder to
+/// satisfy, never easier. It is precisely the opposite of the orphan ceiling
+/// [`compare`] argues against three comparisons up: a ceiling on orphans is
+/// regressed by reading *more* text, so it punishes the run for doing more
+/// work, whereas nothing about reading more files raises the memory one file
+/// needs.
+///
+/// So there is no cross-multiplication: this is a maximum against a maximum,
+/// in exact integer arithmetic.
+///
+/// **There is an epsilon, and it is two percent, because the measurement's own
+/// swing is not zero.** This comment used to say there was none, and told
+/// whoever recorded a band to "expect the next one to sit within a megabyte
+/// either side" — which is a swing described and then not allowed for. It cost
+/// exactly what that costs: on 6 September 2026 a `--check` run of the same
+/// release binary over the same files reported `verapdf` at 55 902 208 bytes
+/// against a band of 55 480 320, a regression of **421 888 bytes, 0.76 %**,
+/// with nothing changed between the two runs.
+///
+/// The two measurements this repository has of that swing are 0.06 % (two runs
+/// over 974 `pdfjs` files, 924 033 024 and 923 512 832 bytes) and 0.76 %. A
+/// high-water mark is not a clock and does not depend on how busy the machine
+/// was, but it does depend on what the allocator asked the kernel for, and
+/// where it asked. [`PEAK_TOLERANCE_PERCENT`] is set above both, and a band
+/// that admits two percent of a memory ceiling still refuses every regression
+/// anybody is going to write: the caps this ratchet is a backstop for are
+/// counted in megabytes, not in kilobytes.
+/// How far above a recorded peak a run may sit before it is a regression.
+///
+/// Measured rather than chosen: see [`PeakBar`]. Two percent is above both
+/// swings this repository has measured — 0.06 % and 0.76 % — and far below any
+/// regression worth reporting, since the allocations this backstops are
+/// bounded in megabytes.
+pub const PEAK_TOLERANCE_PERCENT: u64 = 2;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeakBar {
+    /// The largest peak resident set any child reached, in bytes.
+    pub bytes: u64,
+    /// How many children reported one, which is the maximum's denominator: a
+    /// maximum taken over fewer children is a different measurement.
+    pub files: u64,
+}
+
+/// The structure-tree bar for one corpus.
+///
+/// Four counts, compared three ways, and none of them a stored rate — see
+/// [`compare`] for which comparison each takes and why. The counts are over
+/// the corpus, not averaged over its files: a per-file rate averaged is not
+/// the rate over the corpus, and a corpus of mostly-untagged files would
+/// otherwise let one enormous tree carry the figure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TaggedBar {
+    /// Files carrying a `/StructTreeRoot` this engine could read.
+    pub files: u64,
+    /// Structure elements reached by the `/K` walk, summed.
+    pub elements: u64,
+    /// Characters a structure element claimed.
+    pub matched: u64,
+    /// Characters carrying an `/MCID` no element on their page claimed.
+    pub orphans: u64,
 }
 
 /// A committed ratchet.
@@ -197,6 +300,21 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                 u128::from(bar.passed) * u128::from(total),
                 bar.passed,
             ));
+            // Still a regression — the shortfall is real and this does not
+            // forgive it. But a shortfall made entirely of timeouts is a
+            // different fact from one made of files that stopped rendering,
+            // and the message is the only place a reader learns which. Two
+            // pdf.js files sit within a factor of two of the 20-second limit,
+            // so a run competing with other work on the machine flips them,
+            // and twice that arrived looking like an engine that had broken.
+            let timed_out = corpus.outcomes().get("timed_out").copied().unwrap_or(0);
+            let short = bar.passed.saturating_sub(passed);
+            if timed_out > 0 && short <= timed_out {
+                out.regressions.push(format!(
+                    "{}: and {timed_out} of those timed out, which accounts for the whole shortfall of {short}. A file near the limit flips when the machine is busy; re-run before believing this is the engine",
+                    bar.name
+                ));
+            }
         }
 
         // The second axis. Lower is better, so the inequality is the mirror
@@ -239,7 +357,7 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
             ));
         } else if !holds(bar.strict_clean, bar.strict_eligible, clean, eligible) {
             out.regressions.push(format!(
-                "{}: {clean}/{eligible} rewrites validate, which is worse than                  the recorded {}/{}",
+                "{}: {clean}/{eligible} rewrites validate, which is worse than the recorded {}/{}",
                 bar.name, bar.strict_clean, bar.strict_eligible
             ));
         } else if u128::from(clean) * u128::from(bar.strict_eligible)
@@ -252,7 +370,7 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
         }
         if !holds(bar.strict_eligible, bar.total, eligible, total) {
             out.regressions.push(format!(
-                "{}: the strict pass ran on {eligible}/{total} files, down from {}/{};                  a smaller denominator is not a better rate",
+                "{}: the strict pass ran on {eligible}/{total} files, down from {}/{}; a smaller denominator is not a better rate",
                 bar.name, bar.strict_eligible, bar.total
             ));
         }
@@ -305,6 +423,157 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                     held_now.get(relation).copied().unwrap_or(0),
                     compared_now.get(relation).copied().unwrap_or(0),
                 ));
+            }
+        }
+
+        // Capabilities: a floor per name, and a floor for the reason above —
+        // this is the only axis that fails when the *scanner* regresses rather
+        // than the engine. Compared as absolute counts and not as rates,
+        // because a capability is carried by a file or it is not and the
+        // denominator is the same corpus on both sides; `total` is checked
+        // separately above.
+        let now_capabilities = corpus.capabilities();
+        for (capability, before_count) in &bar.capabilities {
+            let now_count = now_capabilities.get(capability).copied().unwrap_or(0);
+            if now_count < *before_count {
+                out.regressions.push(format!(
+                    "{}: {now_count} files carry `{capability}` and the bar is \
+                     {before_count} — the corpus did not change, so something \
+                     stopped recognising it",
+                    bar.name
+                ));
+            } else if now_count > *before_count {
+                out.improvements.push(format!(
+                    "{}: `{capability}` {before_count} to {now_count}",
+                    bar.name,
+                ));
+            }
+        }
+        for (capability, count) in &now_capabilities {
+            if !bar.capabilities.contains_key(capability) {
+                out.improvements.push(format!(
+                    "{}: `{capability}` is newly counted at {count}",
+                    bar.name
+                ));
+            }
+        }
+
+        // The fifth axis (tagged PDF milestone 4): what the structure tree
+        // walk reached. Three comparisons, because the three counts fail in
+        // three different directions and one of them is not a floor.
+        let now_tagged = corpus.tagged();
+        match bar.tagged {
+            // A first measurement of zero is not an improvement. It is a
+            // corpus with no tagged files in it, or a walk that found none,
+            // and the two are told apart by looking rather than by a word
+            // that says the number went the right way.
+            None if now_tagged.files == 0 => out.notes.push(format!(
+                "{}: no file yielded a structure tree, and there is no recorded bar",
+                bar.name
+            )),
+            None => out.improvements.push(format!(
+                "{}: {} files yield a structure tree with {} elements — new, with no recorded bar",
+                bar.name, now_tagged.files, now_tagged.elements
+            )),
+            Some(before) => {
+                // (1) Files with a tree, as a share of the corpus. This is the
+                // one the seeded regression trips: a walk that stops resolving
+                // `/StructTreeRoot` finds no trees anywhere.
+                if now_tagged.files == 0 && before.files > 0 {
+                    out.regressions.push(format!(
+                        "{}: no file yielded a structure tree at all, against a bar of {}",
+                        bar.name, before.files
+                    ));
+                } else if !holds(before.files, bar.total, now_tagged.files, total) {
+                    out.regressions.push(format!(
+                        "{}: {}/{total} files yield a structure tree, down from {}/{}",
+                        bar.name, now_tagged.files, before.files, bar.total
+                    ));
+                } else if u128::from(now_tagged.files) * u128::from(bar.total)
+                    > u128::from(before.files) * u128::from(total)
+                {
+                    out.improvements.push(format!(
+                        "{}: {}/{total} files yield a structure tree, up from {}/{}",
+                        bar.name, now_tagged.files, before.files, bar.total
+                    ));
+                }
+
+                // (2) Elements per file in the corpus, not per tagged file.
+                // Per tagged file would let a walk that lost the large trees
+                // hold its rate by also losing the small ones.
+                if !holds(before.elements, bar.total, now_tagged.elements, total) {
+                    out.regressions.push(format!(
+                        "{}: the walk reached {} structure elements over {total} files, down from {} over {}",
+                        bar.name, now_tagged.elements, before.elements, bar.total
+                    ));
+                }
+
+                // (3) Orphans are the count that is better small, so the
+                // comparison is on the share of marked characters the tree
+                // *claimed* — matched against matched-plus-orphaned. An
+                // absolute ceiling on orphans would be regressed by reading
+                // more files, which is the opposite of what it is for.
+                let (m, o) = (now_tagged.matched, now_tagged.orphans);
+                if !holds(before.matched, before.matched + before.orphans, m, m + o) {
+                    out.regressions.push(format!(
+                        "{}: the tree claimed {m} of {} marked characters, a smaller share than the recorded {} of {}",
+                        bar.name,
+                        m + o,
+                        before.matched,
+                        before.matched + before.orphans
+                    ));
+                }
+            }
+        }
+
+        // The sixth axis (tier 0's memory row): the most memory any one child
+        // needed. See [`PeakBar`] for why this one is an absolute `<=` where
+        // every other axis in this file is a ratio.
+        let now_peak = corpus.peak();
+        match bar.peak {
+            // No bar, and nothing measured either. Said rather than passed
+            // over, because a corpus whose children report no peak is a run
+            // that is already incomplete — `corpus::run` puts that in
+            // `limits`, and the refusal at the top of this function is what
+            // actually stops it. This note is how a reader learns which of the
+            // two silences they are looking at.
+            None if now_peak.files == 0 => out.notes.push(format!(
+                "{}: no child reported a peak resident set, and there is no recorded bar",
+                bar.name
+            )),
+            None => out.improvements.push(format!(
+                "{}: the largest peak resident set is {} bytes over {} children — new, with no recorded bar",
+                bar.name, now_peak.bytes, now_peak.files
+            )),
+            Some(before) => {
+                if now_peak.files == 0 {
+                    out.regressions.push(format!(
+                        "{}: no child reported a peak resident set at all, against a bar of {} bytes over {} children",
+                        bar.name, before.bytes, before.files
+                    ));
+                } else if u128::from(now_peak.bytes) * 100
+                    > u128::from(before.bytes) * u128::from(100 + PEAK_TOLERANCE_PERCENT)
+                {
+                    out.regressions.push(format!(
+                        "{}: the largest peak resident set is {} bytes, above the recorded band of {} bytes and its {PEAK_TOLERANCE_PERCENT} % tolerance",
+                        bar.name, now_peak.bytes, before.bytes
+                    ));
+                } else if now_peak.bytes < before.bytes {
+                    out.improvements.push(format!(
+                        "{}: the largest peak resident set is {} bytes, down from {}",
+                        bar.name, now_peak.bytes, before.bytes
+                    ));
+                }
+                // And the denominator, for the strict pass's reason: a
+                // maximum over half as many children is a smaller maximum
+                // without the engine having improved. A ratio, because this
+                // one *is* a share of the corpus.
+                if !holds(before.files, bar.total, now_peak.files, total) {
+                    out.regressions.push(format!(
+                        "{}: {}/{total} children reported a peak resident set, down from {}/{}; a maximum over fewer children is not a smaller maximum",
+                        bar.name, now_peak.files, before.files, bar.total
+                    ));
+                }
             }
         }
     }
@@ -400,6 +669,107 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
                  {strict_eligible} eligible of {total}, which cannot be"
             ));
         }
+        // Absent in a bar recorded before this axis: an empty map compares
+        // against nothing and refuses nothing.
+        let mut capabilities: BTreeMap<String, u64> = BTreeMap::new();
+        if let Some(object) = entry.get("capabilities") {
+            let Json::Object(members) = object else {
+                return Err(format!("`{name}`'s `capabilities` is not an object"));
+            };
+            for (capability, value) in members {
+                let count = value.as_u64().ok_or_else(|| {
+                    format!("`{name}`'s `capabilities.{capability}` is not a whole number")
+                })?;
+                if count > total {
+                    return Err(format!(
+                        "`{name}` says {count} files carry `{capability}` and the \
+                         corpus is {total} files"
+                    ));
+                }
+                capabilities.insert(capability.clone(), count);
+            }
+        }
+
+        let tagged = match entry.get("tagged") {
+            None => None,
+            Some(object) => {
+                let read = |key: &str| -> Result<u64, String> {
+                    object
+                        .get(key)
+                        .and_then(Json::as_u64)
+                        .ok_or_else(|| format!("`{name}`'s `tagged` has no whole-number `{key}`"))
+                };
+                let tagged = TaggedBar {
+                    files: read("files")?,
+                    elements: read("elements")?,
+                    matched: read("matched")?,
+                    orphans: read("orphans")?,
+                };
+                if tagged.files > total {
+                    return Err(format!(
+                        "`{name}` records {} files with a structure tree out of {total}, which cannot be",
+                        tagged.files
+                    ));
+                }
+                // A bar with trees but no elements is what the seeded
+                // regression writes, and it must be refused at the *bar*
+                // rather than only compared against: a committed floor of
+                // zero elements is a floor nothing can fall below.
+                if tagged.files > 0 && tagged.elements == 0 {
+                    return Err(format!(
+                        "`{name}` records {} files with a structure tree and no structure elements at all, which is a floor nothing can fall below",
+                        tagged.files
+                    ));
+                }
+                Some(tagged)
+            }
+        };
+        let peak = match entry.get("peak") {
+            // Absent is a bar recorded before the measurement existed, which
+            // is every bar committed today. `SCHEMA` stays 2 for exactly this:
+            // no committed file has to be rewritten to stay readable, and none
+            // of them can be regressed against on an axis they never measured.
+            None => None,
+            Some(object) => {
+                let read = |key: &str| -> Result<u64, String> {
+                    object
+                        .get(key)
+                        .and_then(Json::as_u64)
+                        .ok_or_else(|| format!("`{name}`'s `peak` has no whole-number `{key}`"))
+                };
+                let peak = PeakBar {
+                    bytes: read("bytes")?,
+                    files: read("files")?,
+                };
+                if peak.files > total {
+                    return Err(format!(
+                        "`{name}` records a peak resident set over {} children out of {total}, which cannot be",
+                        peak.files
+                    ));
+                }
+                // Refused at the *bar* rather than only compared against, for
+                // the reason a tagged bar of zero elements is: a band of zero
+                // bytes over children that reported something is a ceiling
+                // nothing can sit under, so every future run would regress
+                // against it and the message would name memory rather than
+                // the ratchet that was written wrong.
+                if peak.files > 0 && peak.bytes == 0 {
+                    return Err(format!(
+                        "`{name}` records {} children reporting a peak resident set of zero bytes, which is a band nothing can sit under",
+                        peak.files
+                    ));
+                }
+                // And the mirror: a band with no children behind it is not a
+                // measurement, so it must not be read as one.
+                if peak.files == 0 {
+                    return Err(format!(
+                        "`{name}` records a peak resident set of {} bytes over no children at all",
+                        peak.bytes
+                    ));
+                }
+                Some(peak)
+            }
+        };
         if bars.iter().any(|b: &Bar| b.name == name) {
             return Err(format!("`{name}` appears twice in the ratchet"));
         }
@@ -411,6 +781,9 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             strict_eligible,
             strict_clean,
             metamorphic,
+            tagged,
+            capabilities,
+            peak,
         });
     }
     if bars.is_empty() {
@@ -427,7 +800,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
 mod tests {
     use super::*;
     use crate::report::{CorpusReport, Settings};
-    use crate::runner::{FileResult, Outcome};
+    use crate::runner::{FileResult, Outcome, Tagged};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn files(passed: u64, failed: u64, degraded: u64) -> Vec<FileResult> {
@@ -459,9 +832,75 @@ mod tests {
                     kinds: BTreeMap::new(),
                 },
                 metamorphic: BTreeMap::new(),
+                tagged: None,
+                producer: None,
+                peak: None,
             });
         }
         out
+    }
+
+    /// A run where `timed_out` of the non-passing files ran out of time
+    /// rather than failing.
+    fn run_with_timeouts(name: &str, passed: u64, timed_out: u64) -> Run {
+        let mut run = run(name, passed, timed_out, 0);
+        for file in run.corpora[0].files.iter_mut().skip(passed as usize) {
+            file.outcome = Outcome::TimedOut {
+                at: "page 1".to_string(),
+            };
+        }
+        run
+    }
+
+    /// A shortfall made entirely of timeouts is still a regression, and it
+    /// says so — but it also says *why*, because the two causes want
+    /// different responses.
+    ///
+    /// This is not hypothetical. Two pdf.js files render within a factor of
+    /// two of the 20-second limit, so a run competing with a build for the
+    /// machine flips them, and the result arrived twice looking like an
+    /// engine that had stopped rendering.
+    ///
+    /// Counted injection: removing the explanation leaves 1 assertion
+    /// failing here and 0 anywhere else — which is the point of writing it
+    /// down, since nothing else in the suite looks at the cause of a
+    /// shortfall.
+    #[test]
+    fn a_shortfall_made_of_timeouts_is_still_a_regression_and_says_which() {
+        let committed = bar("pdfjs", 963, 974, 0);
+        let out = compare(&committed, &run_with_timeouts("pdfjs", 962, 12), true);
+        assert!(out.failed(), "a timeout is not forgiven: {out:?}");
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("timed out") && r.contains("accounts for the whole shortfall")),
+            "{:?}",
+            out.regressions
+        );
+    }
+
+    /// A shortfall bigger than the timeout count is not explained by them,
+    /// and the message must not say it is.
+    ///
+    /// The dangerous direction: a run with one flaky timeout *and* ten real
+    /// failures would otherwise be read as "just the machine being busy".
+    #[test]
+    fn a_shortfall_larger_than_the_timeouts_is_not_explained_away() {
+        let committed = bar("pdfjs", 963, 974, 0);
+        // 950 passed against a bar of 963 is 13 short, and only one timed out.
+        let mut now = run_with_timeouts("pdfjs", 950, 24);
+        for file in now.corpora[0].files.iter_mut().skip(951) {
+            file.outcome = Outcome::Failed("no".to_string());
+        }
+        let out = compare(&committed, &now, true);
+        assert!(out.failed());
+        assert!(
+            !out.regressions
+                .iter()
+                .any(|r| r.contains("accounts for the whole shortfall")),
+            "{:?}",
+            out.regressions
+        );
     }
 
     /// A run whose strict pass ran on every file and found nothing.
@@ -490,10 +929,334 @@ mod tests {
                 strict_eligible: total,
                 strict_clean: total,
                 metamorphic: BTreeMap::new(),
+                tagged: None,
+                capabilities: BTreeMap::new(),
+                peak: None,
             }],
             complete: true,
             fonts: "none".to_string(),
         }
+    }
+
+    /// A run whose files carry the given structure counts, spread evenly.
+    ///
+    /// Evenly because the comparison is over corpus totals: how the elements
+    /// are distributed across files cannot change any of the three answers,
+    /// and a helper that pretended otherwise would be testing itself.
+    fn tagged_run(name: &str, files_with_tree: u64, per_file: Tagged) -> Run {
+        let mut run = run(name, 10, 0, 0);
+        for (index, file) in run.corpora[0].files.iter_mut().enumerate() {
+            if (index as u64) < files_with_tree {
+                file.tagged = Some(per_file);
+            }
+        }
+        run
+    }
+
+    fn tagged_bar(name: &str, tagged: TaggedBar) -> Ratchet {
+        let mut committed = bar(name, 10, 10, 0);
+        committed.bars[0].tagged = Some(tagged);
+        committed
+    }
+
+    /// The seeded regression tagged PDF milestone 4 names: cap the walk's
+    /// elements at zero and the check must fail. It fails twice over — the
+    /// files-with-a-tree share collapses and the element floor is breached —
+    /// and both messages are asserted, because a single message could be
+    /// produced by a comparison that happened to be looking elsewhere.
+    #[test]
+    fn a_structure_walk_that_finds_nothing_is_a_regression() {
+        let committed = tagged_bar(
+            "verapdf",
+            TaggedBar {
+                files: 6,
+                elements: 600,
+                matched: 900,
+                orphans: 100,
+            },
+        );
+        let now = tagged_run("verapdf", 0, Tagged::default());
+        let out = compare(&committed, &now, true);
+        assert!(out.failed(), "{out:?}");
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("no file yielded a structure tree at all")),
+            "{:?}",
+            out.regressions
+        );
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("structure elements")),
+            "{:?}",
+            out.regressions
+        );
+    }
+
+    /// The subtler shape: every tree is still found and every element is still
+    /// reached, but the join stopped claiming characters — a `/ParentTree` or
+    /// `/MCID` regression that the element floor cannot see. The share of
+    /// marked characters the tree claimed is what catches it.
+    #[test]
+    fn a_join_that_orphans_what_it_used_to_claim_is_a_regression() {
+        let committed = tagged_bar(
+            "verapdf",
+            TaggedBar {
+                files: 6,
+                elements: 600,
+                matched: 900,
+                orphans: 100,
+            },
+        );
+        let now = tagged_run(
+            "verapdf",
+            6,
+            Tagged {
+                elements: 100,
+                matched: 50,
+                orphans: 116,
+                ..Tagged::default()
+            },
+        );
+        let out = compare(&committed, &now, true);
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("a smaller share")),
+            "{:?}",
+            out.regressions
+        );
+    }
+
+    /// A run that reaches more of everything is not a regression, and the two
+    /// improvements are printed rather than passed over in silence.
+    #[test]
+    fn reaching_more_structure_is_an_improvement() {
+        let committed = tagged_bar(
+            "verapdf",
+            TaggedBar {
+                files: 5,
+                elements: 500,
+                matched: 900,
+                orphans: 100,
+            },
+        );
+        let now = tagged_run(
+            "verapdf",
+            6,
+            Tagged {
+                elements: 100,
+                matched: 190,
+                orphans: 10,
+                ..Tagged::default()
+            },
+        );
+        let out = compare(&committed, &now, true);
+        assert!(!out.failed(), "{out:?}");
+        assert!(
+            out.improvements
+                .iter()
+                .any(|i| i.contains("yield a structure tree, up from")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    /// A bar recorded before the walk existed cannot be regressed against, so
+    /// the first run that measures one is an improvement and never a refusal.
+    #[test]
+    fn a_bar_with_no_structure_row_is_new_rather_than_broken() {
+        let committed = bar("verapdf", 10, 10, 0);
+        let now = tagged_run(
+            "verapdf",
+            6,
+            Tagged {
+                elements: 100,
+                matched: 190,
+                orphans: 10,
+                ..Tagged::default()
+            },
+        );
+        let out = compare(&committed, &now, true);
+        assert!(!out.failed(), "{out:?}");
+        assert!(
+            out.improvements
+                .iter()
+                .any(|i| i.contains("new, with no recorded bar")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    /// The floor a seeded regression would otherwise be recorded *as*. A
+    /// committed bar of zero elements over files that have trees is a floor
+    /// nothing can fall below, so it is refused when the ratchet is read
+    /// rather than compared against and passed.
+    #[test]
+    fn a_committed_bar_of_zero_elements_is_refused_at_the_ratchet() {
+        let text = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"verapdf","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10,
+            "tagged":{"files":6,"elements":0,"matched":0,"orphans":0}}]}"#;
+        let error = parse(text).expect_err("a floor of zero is not a floor");
+        assert!(error.contains("no structure elements at all"), "{error}");
+    }
+
+    /// A run where the given files each reached the given peak.
+    fn peak_run(name: &str, children: u64, bytes: u64) -> Run {
+        let mut run = run(name, 10, 0, 0);
+        for (index, file) in run.corpora[0].files.iter_mut().enumerate() {
+            if (index as u64) < children {
+                // Descending, so the maximum is the first file's rather than
+                // whichever one the helper happened to write last: a test that
+                // could pass by reading a sum or a mean is not testing a
+                // maximum.
+                file.peak = Some(bytes - index as u64);
+            }
+        }
+        run
+    }
+
+    fn peak_bar(name: &str, peak: PeakBar) -> Ratchet {
+        let mut committed = bar(name, 10, 10, 0);
+        committed.bars[0].peak = Some(peak);
+        committed
+    }
+
+    /// **The band, its tolerance, and the direction it is a band in.** A run
+    /// whose largest child needs more than the recorded maximum *plus its
+    /// measured tolerance* has regressed; one inside the tolerance has not,
+    /// which is what stops a high-water mark's own swing failing a build; and
+    /// one that needs less is an improvement.
+    #[test]
+    fn a_child_that_needs_more_memory_than_the_band_is_a_regression() {
+        let committed = peak_bar(
+            "verapdf",
+            PeakBar {
+                bytes: 200_000_000,
+                files: 10,
+            },
+        );
+
+        // Two percent of 200 MB is 4 MB, so this is a byte past the tolerance.
+        let worse = compare(&committed, &peak_run("verapdf", 10, 204_000_001), false);
+        assert!(worse.failed(), "{worse:#?}");
+        assert!(
+            worse.regressions[0].contains("above the recorded band"),
+            "{:?}",
+            worse.regressions
+        );
+
+        // Exactly the band is not a regression. An absolute maximum compared
+        // with `<` would fail a run that changed nothing.
+        let level = compare(&committed, &peak_run("verapdf", 10, 200_000_000), true);
+        assert!(!level.failed(), "{level:#?}");
+
+        // And neither is the swing this tolerance was measured for: 0.76 % of
+        // the band, which is what a `--check` run of an unchanged binary
+        // actually produced on 6 September 2026.
+        let swung = compare(&committed, &peak_run("verapdf", 10, 201_520_000), true);
+        assert!(
+            !swung.failed(),
+            "a high-water mark's own swing must not fail a build: {swung:#?}"
+        );
+
+        let better = compare(&committed, &peak_run("verapdf", 10, 100_000_000), false);
+        assert!(!better.failed(), "{better:#?}");
+        assert!(
+            better
+                .improvements
+                .iter()
+                .any(|i| i.contains("down from 200000000")),
+            "{:?}",
+            better.improvements
+        );
+    }
+
+    /// And the denominator, which is the trick the maximum would otherwise be
+    /// open to: a run where the measurement stopped happening on most children
+    /// reports a smaller maximum without the engine having improved at all.
+    #[test]
+    fn a_maximum_over_fewer_children_is_not_a_smaller_maximum() {
+        let committed = peak_bar(
+            "verapdf",
+            PeakBar {
+                bytes: 200_000_000,
+                files: 10,
+            },
+        );
+
+        let thinned = compare(&committed, &peak_run("verapdf", 2, 100_000_000), false);
+        assert!(thinned.failed(), "{thinned:#?}");
+        assert!(
+            thinned
+                .regressions
+                .iter()
+                .any(|r| r.contains("2/10 children reported a peak resident set")),
+            "{:?}",
+            thinned.regressions
+        );
+
+        // And none at all is its own message, for the reason the tagged axis
+        // separates "no tree anywhere" from "fewer trees": a build that stopped
+        // measuring is a different fix from one that measures less.
+        let silent = compare(&committed, &peak_run("verapdf", 0, 0), false);
+        assert!(silent.failed(), "{silent:#?}");
+        assert!(
+            silent
+                .regressions
+                .iter()
+                .any(|r| r.contains("no child reported a peak resident set at all")),
+            "{:?}",
+            silent.regressions
+        );
+    }
+
+    /// The three bars committed today have no `peak` key, and they must go on
+    /// parsing and go on being compared against. A bar that predates a
+    /// measurement cannot be regressed against, which is the same rule the
+    /// structure walk arrived under and the reason `SCHEMA` stays 2.
+    #[test]
+    fn a_bar_recorded_before_the_measurement_still_parses_and_still_holds() {
+        let text = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"verapdf","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10}]}"#;
+        let committed = parse(text).expect("a bar with no peak key is still a bar");
+        assert_eq!(committed.bars[0].peak, None);
+
+        let out = compare(&committed, &peak_run("verapdf", 10, 200_000_000), true);
+        assert!(!out.failed(), "{out:#?}");
+        assert!(
+            out.improvements
+                .iter()
+                .any(|i| i.contains("new, with no recorded bar")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    /// A band of zero bytes over children that reported something is the
+    /// mirror of a structure floor of zero elements: nothing can sit under it,
+    /// so every run afterwards would regress and the message would blame the
+    /// engine for a ratchet written wrong. Refused when the file is read.
+    #[test]
+    fn a_committed_band_of_zero_bytes_is_refused_at_the_ratchet() {
+        let text = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"verapdf","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10,
+            "peak":{"bytes":0,"files":6}}]}"#;
+        let error = parse(text).expect_err("a band of zero is not a band");
+        assert!(error.contains("a band nothing can sit under"), "{error}");
+
+        // And the mirror: a figure with no children behind it was measured by
+        // nobody, so it is not a measurement.
+        let empty = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"verapdf","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10,
+            "peak":{"bytes":200000000,"files":0}}]}"#;
+        let error = parse(empty).expect_err("no children is no measurement");
+        assert!(error.contains("over no children at all"), "{error}");
     }
 
     /// Ruling 13's axis: a rewrite that stops validating is a regression, and
@@ -750,5 +1513,68 @@ mod tests {
         let read = parse(&text).expect("it still parses");
         assert!(!read.complete);
         assert!(compare(&read, &run("pdfjs", 970, 6, 0), false).failed());
+    }
+
+    /// **A capability the scanner stops seeing is a regression**, even though
+    /// every other number improves when it happens.
+    ///
+    /// This is the axis's whole reason. A capability count is a property of the
+    /// corpus rather than of the engine: the same thousand files carry the same
+    /// thousand `ICCBased` spaces whatever this build does with them. So a run
+    /// that finds fewer has not got worse at rendering — it has stopped looking
+    /// — and the pass rate goes *up*, because a file whose capability is not
+    /// recognised is a file whose capability cannot be reported as degraded.
+    #[test]
+    fn a_capability_the_scanner_stops_finding_is_a_regression() {
+        let mut committed = bar("pdfjs", 10, 10, 0);
+        committed.bars[0]
+            .capabilities
+            .insert("iccbased".to_string(), 4);
+
+        // The same ten files, all passing, with the capability seen twice.
+        let mut now = run("pdfjs", 10, 0, 0);
+        for file in now.corpora[0].files.iter_mut().take(2) {
+            file.capabilities.insert("iccbased".to_string());
+        }
+        let out = compare(&committed, &now, false);
+        assert!(out.failed(), "a scanner that lost two files did not fail");
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("stopped recognising it")),
+            "{:?}",
+            out.regressions
+        );
+
+        // And finding more of them is an improvement, not a refusal: the
+        // corpus grew, or the scanner learned a name.
+        let mut now = run("pdfjs", 10, 0, 0);
+        for file in now.corpora[0].files.iter_mut().take(6) {
+            file.capabilities.insert("iccbased".to_string());
+        }
+        let out = compare(&committed, &now, false);
+        assert!(!out.failed(), "{:?}", out.regressions);
+        assert!(
+            out.improvements.iter().any(|i| i.contains("iccbased")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    /// A bar recorded before this axis existed compares against nothing.
+    #[test]
+    fn a_bar_with_no_capabilities_refuses_nothing() {
+        let committed = bar("pdfjs", 10, 10, 0);
+        let mut now = run("pdfjs", 10, 0, 0);
+        now.corpora[0].files[0]
+            .capabilities
+            .insert("jbig2".to_string());
+        let out = compare(&committed, &now, false);
+        assert!(!out.failed(), "{:?}", out.regressions);
+        assert!(
+            out.improvements.iter().any(|i| i.contains("newly counted")),
+            "{:?}",
+            out.improvements
+        );
     }
 }

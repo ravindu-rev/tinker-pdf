@@ -113,6 +113,7 @@ pub mod flow;
 pub mod fragment;
 pub mod limits;
 pub mod metrics;
+mod position;
 pub mod style;
 pub mod table;
 pub mod text;
@@ -214,6 +215,73 @@ pub enum Content {
     /// preserved newline and a collapsible one before `white-space` was
     /// consulted.
     Text(String),
+    /// A **replaced** element, CSS 2.2 §3.1: *"an element whose content is
+    /// outside the scope of the CSS formatting model"* — a picture, and nothing
+    /// else in this build.
+    ///
+    /// The payload is everything the formatting model is allowed to know about
+    /// that content: the size the source itself has. What the picture *is*
+    /// stays with the caller, reached through [`BoxNode::anchor`], and that is
+    /// ruling 8 rather than a convenience — this crate holds no decoder, no
+    /// container and no idea what a JPEG is, and a variant carrying bytes would
+    /// have put all three here.
+    Replaced(Intrinsic),
+}
+
+/// What a replaced element's own source says about its size, `css-images-3` §4.
+///
+/// Three fields and not two, because the specification's sizing cascade
+/// distinguishes all three and the distinctions are load-bearing: CSS 2.2
+/// §10.3.2 has a case for *"no intrinsic width, but ... an intrinsic height and
+/// intrinsic ratio"* that a build deriving the ratio from the dimensions could
+/// never reach, and `css-images-3` §4.1 makes an SVG with a `viewBox` and
+/// percentage dimensions exactly that shape. This build's only producer is a
+/// raster, where [`Intrinsic::raster`] fills all three from one pair of numbers
+/// — but the cascade is written against the general case, so the general case
+/// is what the type can express.
+///
+/// Every length is in CSS pixels, which is the unit the whole crate measures in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Intrinsic {
+    /// The intrinsic width, where the source has one.
+    pub width: Option<f64>,
+    /// The intrinsic height, where the source has one.
+    pub height: Option<f64>,
+    /// The intrinsic aspect ratio, as width divided by height.
+    pub ratio: Option<f64>,
+}
+
+impl Intrinsic {
+    /// A source that states nothing about its own size.
+    ///
+    /// CSS 2.2 §10.3.2's and §10.6.2's last cases are written for exactly this
+    /// and give it 300 by 150 pixels. **No EPUB `<img>` reaches it**: the
+    /// facade makes an element replaced only once it has the picture's
+    /// dimensions, because HTML §4.8.4.4 makes an `<img>` a replaced element
+    /// *"only when the image is available"*. It is reachable from this crate's
+    /// own API, which is what its fixtures use.
+    pub const NONE: Self = Self {
+        width: None,
+        height: None,
+        ratio: None,
+    };
+
+    /// A raster's dimensions: a width, a height and the ratio between them.
+    ///
+    /// A degenerate side — zero or not finite — yields [`Intrinsic::NONE`]
+    /// rather than a ratio of zero or of infinity, because every one of
+    /// §10.3.2's ratio cases multiplies by it.
+    #[must_use]
+    pub fn raster(width: f64, height: f64) -> Self {
+        if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+            return Self::NONE;
+        }
+        Self {
+            width: Some(width),
+            height: Some(height),
+            ratio: Some(width / height),
+        }
+    }
 }
 
 impl BoxNode {
@@ -234,6 +302,22 @@ impl BoxNode {
         Self {
             style,
             content: Content::Children(children),
+            anchor: None,
+            span: CellSpan::ONE,
+        }
+    }
+
+    /// A replaced element — a picture — with whatever its source says about its
+    /// own size.
+    ///
+    /// Tag it with [`BoxNode::with_anchor`]: every [`ReplacedFragment`] this
+    /// node produces carries that tag and **nothing else**, so a caller with no
+    /// anchor on it gets a box on the page it cannot put a picture in.
+    #[must_use]
+    pub fn replaced(style: ComputedStyle, intrinsic: Intrinsic) -> Self {
+        Self {
+            style,
+            content: Content::Replaced(intrinsic),
             anchor: None,
             span: CellSpan::ONE,
         }
@@ -273,6 +357,12 @@ impl BoxNode {
                     child.collect_text(out);
                 }
             }
+            // A picture contributes no characters to either side of the
+            // conservation comparison, which is the whole reason `<img alt>` is
+            // not laid out: `alt` is an attribute, the spine's text does not
+            // contain it, and setting it would be one page character per image
+            // that no source text answers.
+            Content::Replaced(_) => {}
         }
     }
 }
@@ -288,13 +378,48 @@ pub struct Options {
     pub width: f64,
     /// The height available to the flow.
     pub height: f64,
+    /// Whether the flow is **cut** at [`Options::height`] at all.
+    ///
+    /// `true` for a book that is paginated, which is the ordinary case and what
+    /// [`Options::new`] gives.
+    ///
+    /// `false` for a flow that is one page however tall its content comes to,
+    /// which is not a convenience: EPUB RS 3.3 §8.1 makes a pre-paginated
+    /// content document *"exactly one page per spine itemref"* and §8.1.2 makes
+    /// the viewport the initial containing block, **clipping** what falls
+    /// outside it. Those are two different sentences about the same box, and a
+    /// caller that expressed the second by paginating at the viewport and
+    /// dropping the pages after the first gets a third thing: content that
+    /// overflows by a hair is not clipped, it is moved to a page that then does
+    /// not exist. An inline picture in a viewport sized to the picture
+    /// overflows by exactly the strut's descender, CSS 2.2 §10.8.1, which is
+    /// how this was found.
+    ///
+    /// [`Options::height`] still means what it means — §10.1's initial
+    /// containing block, which a `position: absolute; bottom: 0` box is placed
+    /// against — so the two questions stay separate.
+    pub paginate: bool,
 }
 
 impl Options {
-    /// A page of the given content size.
+    /// A page of the given content size, cut into pages at its height.
     #[must_use]
     pub fn new(width: f64, height: f64) -> Self {
-        Self { width, height }
+        Self {
+            width,
+            height,
+            paginate: true,
+        }
+    }
+
+    /// The same box, as **one** page however tall the content is. See
+    /// [`Options::paginate`].
+    #[must_use]
+    pub fn unpaginated(self) -> Self {
+        Self {
+            paginate: false,
+            ..self
+        }
     }
 }
 
@@ -308,6 +433,15 @@ pub struct Page {
     /// Backgrounds and borders, in paint order: an ancestor before its
     /// descendants, so a child's background covers its parent's.
     pub boxes: Vec<BoxFragment>,
+    /// Replaced elements' **content boxes**, in the same paint order as
+    /// [`Page::boxes`] and produced by the same walk.
+    ///
+    /// A third list rather than a field on [`BoxFragment`], because the two
+    /// answer different questions about the same box: a fragment is a border
+    /// box that exists for every page a box crosses, and a picture is drawn
+    /// once, whole, from the page its box began on. See
+    /// [`ReplacedFragment::height`].
+    pub replaced: Vec<ReplacedFragment>,
     /// Text, in **reading order**, which is what makes text conservation a
     /// comparison rather than a search.
     pub runs: Vec<TextRun>,
@@ -333,6 +467,35 @@ pub struct BoxFragment {
     pub border_style: Sides<BorderStyle>,
     /// `border-*-color`.
     pub border_color: Sides<Color>,
+}
+
+/// A replaced element's content box on one page.
+///
+/// **The content box and not the border box**, CSS 2.2 §8.1: a picture is drawn
+/// inside its padding and border, and a consumer handed the border box would
+/// draw over both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplacedFragment {
+    /// Content-box left edge.
+    pub x: f64,
+    /// Content-box top edge.
+    pub y: f64,
+    /// The used `width`, CSS 2.2 §10.3.2.
+    pub width: f64,
+    /// The used `height`, §10.6.2.
+    ///
+    /// **Not clipped to the page.** A replaced box taller than the page it
+    /// begins on is drawn whole, overflowing the bottom — CSS 2.2 §13.3.3
+    /// offers no break position inside a box with no line boxes in it, and this
+    /// crate's answer to an atomic box taller than a page is everywhere else to
+    /// draw it where it starts. One fragment per picture for that reason: a
+    /// second one on the next page would draw the picture twice.
+    pub height: f64,
+    /// The [`BoxNode::anchor`] of the node this box came from, unchanged.
+    ///
+    /// The only thing that says **which** picture this is. This crate never
+    /// reads it; see [`BoxNode::anchor`].
+    pub anchor: Option<u32>,
 }
 
 /// One run of text, positioned.
@@ -662,18 +825,6 @@ pub enum Warning {
     /// so is the difference between a known gap and a figure that quietly
     /// straddles a page.
     FloatBrokenAcrossPages,
-    /// `display: inline-block`, laid out as ordinary inline text: its `width`,
-    /// its `height` and its vertical margins do not apply to it.
-    ///
-    /// **It used to say the opposite, and it used to be unreachable.** The
-    /// variant was `InlineBlockAsBlock` and it was raised where a block-level
-    /// box is built — which an `inline-block` never reaches, because
-    /// `Consumed::is_block_level` sends it down the inline path. Milestone 10
-    /// found it by needing a warning it could count, and the two halves of the
-    /// fix are one change: it is raised where inline content is gathered, and
-    /// it now names what is actually done. See the refusal table in
-    /// `docs/features/epub.md`.
-    InlineBlockAsInline,
     /// An inline box with a block-level child, laid out as a block container.
     /// CSS 2.2 §9.2.1.1 splits the inline instead.
     BlockInInline,
@@ -713,7 +864,7 @@ pub enum Warning {
     /// it out as a block-level flex container, which gets the box's *outside*
     /// wrong and everything inside it right. It takes the second.
     ///
-    /// **Distinct from [`Warning::InlineBlockAsInline`], which took the other
+    /// **Distinct from an approximation, which takes the other
     /// answer**, and the two disagree for a reason rather than by accident: an
     /// `inline-block` holding a sentence set as inline text is very nearly
     /// right, and a flex container set as inline text is a column of words with
@@ -729,6 +880,38 @@ pub enum Warning {
     /// is one line whatever its length, so this is the warning a long
     /// `flex-direction: column` raises.
     FlexLineTallerThanPage,
+    /// A `max-height` shorter than the content, which did **not** shorten the
+    /// box. CSS 2.2 §10.7.
+    ///
+    /// §10.7's clamp is one sentence and its two halves land differently here.
+    /// `min-height` is padding, which [`flow`] already does for `height`.
+    /// `max-height` makes a box shorter, and by the time it is known this
+    /// module has emitted the items the content came to -- the flow is one
+    /// column whose `y` never goes backwards, and there is no negative edge.
+    /// So the clamp is applied to the padding, which is its whole effect on a
+    /// box whose content fits, and this is raised on the box whose content does
+    /// not. **The box is its content's height and the declaration did nothing**,
+    /// which is this crate's shape for a half-honoured value: what was done,
+    /// named, rather
+    /// than a property quietly half-honoured.
+    MaxHeightAsAuto,
+    /// A column of a multi-column container that is taller than a page.
+    ///
+    /// The third of `Abreast`'s three shapes and the same sentence the other
+    /// two carry: the container is cut across pages like any band, and this is
+    /// raised only when one **atomic** box inside a column -- a line box, or a
+    /// band inside it -- is itself taller than a whole page, which no cut can
+    /// halve.
+    ColumnTallerThanPage,
+    /// `column-span: all`, laid out in its column.
+    ///
+    /// `css-multicol-1` §6: a spanning box interrupts the columns, is laid out
+    /// across the full width of the container, and the columns resume beneath
+    /// it. That is three column sets where this build has one, so the box is
+    /// laid out in the column it fell in and the fact is named. Counted per
+    /// box, for `UnimplementedProperty`'s reason: the same declaration on four
+    /// hundred figures is four hundred.
+    ColumnSpanAsNone,
     /// `display: table-column` or `table-column-group` carrying a `width`,
     /// which this build reads, beside anything else on it, which it does not:
     /// a column box's background and borders are §17.5.1's two rendering
@@ -741,9 +924,6 @@ impl fmt::Display for Warning {
         match self {
             Warning::FloatBrokenAcrossPages => {
                 f.write_str("a float did not fit its page and was broken across the boundary")
-            }
-            Warning::InlineBlockAsInline => {
-                f.write_str("display: inline-block is laid out as inline text")
             }
             Warning::BlockInInline => {
                 f.write_str("an inline box holds a block, and is laid out as one")
@@ -759,8 +939,17 @@ impl fmt::Display for Warning {
             Warning::RowspanPastTheRowGroup => {
                 f.write_str("a rowspan reaches past its row group and was clamped")
             }
+            Warning::ColumnTallerThanPage => {
+                f.write_str("a multi-column container holds a box taller than a page")
+            }
+            Warning::ColumnSpanAsNone => {
+                f.write_str("column-span: all is laid out in its own column")
+            }
             Warning::ColumnBoxNotPainted => {
                 f.write_str("a table column box's background and borders are not painted")
+            }
+            Warning::MaxHeightAsAuto => {
+                f.write_str("a max-height shorter than the content did not shorten the box")
             }
             Warning::InlineFlexAsBlock => {
                 f.write_str("display: inline-flex is laid out as a block-level flex container")

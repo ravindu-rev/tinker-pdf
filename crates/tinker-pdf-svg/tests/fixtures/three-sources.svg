@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- §6.4's three sources, on one element each and then all at once.
+
+     `#attribute` has only a presentation attribute. `#ruled` has one and a
+     class the sheet also names, so the rule must win. `#inline` has all three,
+     so `style=""` must win. `#shouted` has an important *rule* against a
+     normal `style=""`, which is `css-cascade-5` §6.1's reversal and the half a
+     three-pass build gets wrong. `#specific` has two rules whose only
+     difference is specificity. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <style type="text/css">
+    .a       { fill: #00ff00 }
+    .a.b     { fill: #0000ff }
+    #shouted { fill: #00ff00 !important }
+    @media print { .a { fill: #ff00ff } }
+  </style>
+  <rect id="attribute" fill="#ff0000" width="1" height="1"/>
+  <rect id="ruled"  class="a" fill="#ff0000" width="1" height="1"/>
+  <rect id="inline" class="a" fill="#ff0000" style="fill: #00ffff" width="1" height="1"/>
+  <rect id="shouted" class="a" style="fill: #ff0000" width="1" height="1"/>
+  <rect id="specific" class="a b" width="1" height="1"/>
+</svg>

@@ -22,6 +22,23 @@
 //! error rather than any other — the refusal is the whole degradation contract
 //! for this codec, and a decoder that started returning something else would
 //! change what the caller draws.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: the ceiling held, the refusal was
+//! the named one, and no warning was recorded twice. None of them asks
+//! whether the numbers are the ones the input actually describes, so a decode
+//! that is well-formed and *wrong* passes this target exactly as a correct
+//! one does.
+//!
+//! Correctness lives in `crates/tinker-pdf/tests/jbig2.rs`, `jbig2_census.rs`
+//! and `jbig2_refinement.rs`, which decode real corpus files and compare the
+//! page they produce.
+//!
+//! This is the shape `brotli` records at length, and the difference is worth
+//! keeping in view: there, nothing in the tree can supply the missing check
+//! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
+//! a second decoder. Here the check exists, and it is somewhere else.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
@@ -36,6 +53,14 @@ fuzz_target!(|data: &[u8]| {
     // other half of that: a region is bounded before it allocates, and a
     // generous ceiling here would let one input spend seconds inside
     // `decode_arithmetic` and time the run out instead of exploring it.
+    //
+    // **These four are load-bearing since 26 September 2026 and were not
+    // before.** `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` bounds one symbol against the
+    // page the same call was given, so a small page here is a small symbol
+    // budget rather than only a small output — which is what stopped the seed
+    // `symbol-dictionary-spends-the-pixel-budget` spending 67 million decoded
+    // pixels on a page of one (`docs/verification.md`, the `jbig2` fuzz row).
+    // A knob that grew the page would relax that bound as well as the buffer.
     let width = match knobs & 3 {
         0 => 1,
         1 => 8,

@@ -28,14 +28,13 @@ mod epub_support;
 
 use std::path::PathBuf;
 
-use epub_support::conservation::{conservation, spine_text};
+use epub_support::conservation::{conservation, conservation_in_logical_order, spine_text};
 use epub_support::{
     classify_doctype, css_properties, doctype_shape, entries, is_content_document, is_stylesheet,
     mimetype_verdict, named_references, numeric_references, read_at, todays_answer, Doctype,
     TodaysAnswer, RESERVED_META_INF,
 };
-use tinker_pdf::epub::SpineDefect;
-use tinker_pdf::{ArchiveWarning, Document};
+use tinker_pdf::{ArchiveWarning, Document, RenderOptions};
 use tinker_pdf_xml::{
     Doctype as XmlDoctype, Error as XmlError, Limits as XmlLimits, Reader as XmlReader,
     Source as XmlSource, Warning as XmlWarning,
@@ -47,13 +46,50 @@ const RAN: &str = "epub-corpus: RAN";
 /// Printed once per test that could not. CI greps for it too, and fails.
 const SKIPPED: &str = "epub-corpus: SKIPPED";
 
+/// Turns a skip into a failure, for a caller that means to have run this.
+///
+/// **The banner was the only signal, and a banner is not a gate.** A skipped
+/// sweep prints one line, passes, and exits zero; twelve of them in a wall of
+/// build output read exactly like twelve tests that ran. That is not a
+/// hypothetical — this suite skipped for most of a session, in every lane, and
+/// a stale pin and two unrecorded re-baselines accumulated behind it before
+/// anybody noticed.
+///
+/// So `TINKER_EPUB_CORPUS_REQUIRED=1` makes the absence of a corpus a
+/// **failure** rather than a skip. It is opt-in because a contributor with no
+/// network still has to be able to run `cargo test`, and it is what CI sets:
+/// a job that means to measure twenty books cannot then go green over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_EPUB_CORPUS_REQUIRED").is_some_and(|value| value != "0")
+}
+
 /// The fetched corpus, or `None`.
 ///
 /// A directory that exists **and holds at least one `.epub`**, rather than a
 /// directory that exists: an interrupted fetch leaves an empty directory, and a
 /// sweep over nothing passes.
+///
+/// # The relative-path trap
+///
+/// **`TINKER_EPUB_CORPUS` must be absolute.** A test binary's working directory
+/// is its *crate* root, not the workspace root, so the
+/// `TINKER_EPUB_CORPUS=target/epub-corpus` that this repository's own
+/// documentation and fetch script both printed resolves to
+/// `crates/tinker-pdf/target/epub-corpus`, which does not exist. Every sweep
+/// then skipped and every one of them passed. The script now prints the
+/// absolute path it wrote to, and this is the second place that says so.
 fn corpus() -> Option<Vec<(String, Vec<u8>)>> {
-    let dir = PathBuf::from(std::env::var_os("TINKER_EPUB_CORPUS")?);
+    let set = std::env::var_os("TINKER_EPUB_CORPUS");
+    if let Some(dir) = &set {
+        let path = PathBuf::from(dir);
+        assert!(
+            path.is_absolute() || !required(),
+            "TINKER_EPUB_CORPUS is {path:?}, which is relative: a test binary's \
+             working directory is its crate root, so a relative path resolves \
+             under crates/tinker-pdf/ and finds nothing. Pass an absolute path."
+        );
+    }
+    let dir = PathBuf::from(set?);
     let mut books: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
         .ok()?
         .filter_map(Result::ok)
@@ -88,9 +124,15 @@ macro_rules! fetched {
             }
             None => {
                 println!(
-                    "{} {} -- TINKER_EPUB_CORPUS is unset or holds no .epub; run \
-                     crates/tinker-pdf/tests/epub/fetch-corpus.sh",
+                    "{} {} -- TINKER_EPUB_CORPUS is unset, relative, or holds no \
+                     .epub; run crates/tinker-pdf/tests/epub/fetch-corpus.sh and \
+                     pass the **absolute** path it prints",
                     SKIPPED, $what
+                );
+                assert!(
+                    !required(),
+                    "TINKER_EPUB_CORPUS_REQUIRED is set and there is no corpus to \
+                     read: this sweep would have skipped and passed"
                 );
                 return;
             }
@@ -251,10 +293,17 @@ const FETCHED_SPINES: &[(&str, u32)] = &[
 /// **every page nothing named carries text**. A build that quietly stopped
 /// laying out would fail the second half rather than passing a test about the
 /// first.
+///
+/// **Amended by Tier 4's SVG lane, and the six are gone from this side of it.**
+/// They are pages that draw now, so no `SpinePage` warning names them and
+/// `spine_defects` is empty across the whole corpus — which makes the `panic!`
+/// arm below a total assertion rather than a list with one exception in it.
+/// The six moved to `the_six_svg_spine_items_draw_rather_than_placehold`, which
+/// checks ink rather than absence: a page with no warning and no drawing would
+/// pass here and fail there, which is why both exist.
 #[test]
 fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
     let books = fetched!("the placeholder sweep");
-    let mut svg = 0usize;
     let mut read = 0usize;
     let mut blank = Vec::new();
     for (name, bytes) in &books {
@@ -266,10 +315,10 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
                 continue;
             };
             named[*page as usize] = true;
-            match defect {
-                SpineDefect::SvgContentDocument => svg += 1,
-                other => panic!("{name} page {page}: {other:?}"),
-            }
+            // **No exceptions left.** Every spine item in the fetched corpus
+            // either lays out or draws; a defect here is a book this build has
+            // stopped reading.
+            panic!("{name} page {page}: {defect:?}");
         }
         for (page, said) in named.iter().enumerate() {
             if *said {
@@ -289,15 +338,14 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
             }
         }
     }
-    println!("  {read} pages of text and {svg} SVG spine items");
-    assert_eq!(svg, 6, "the six SVG spine items are one book's");
+    println!("  {read} pages of text, {} with none", blank.len());
     // A page with no text and no defect is the shape this test exists to find.
-    // Some are real — a cover whose only content is an `<img>`, which this
-    // build does not draw until milestone 9 — so the number is bounded rather
-    // than zero, and it is bounded tightly enough that a build which stopped
-    // laying out could not hide inside it.
+    // Some are real — a cover whose only content is an `<img>`, and since the
+    // SVG lane the six drawn SVG pages, which carry no characters at all — so
+    // the number is bounded rather than zero, and it is bounded tightly enough
+    // that a build which stopped laying out could not hide inside it.
     assert!(
-        blank.len() <= 40,
+        blank.len() <= 46,
         "{} pages have neither text nor a reason: {blank:?}",
         blank.len()
     );
@@ -357,7 +405,9 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
 /// to**, which is what keeps this exception from covering a book that lost text
 /// for some other reason. Once the aligner loses synchronisation on the first
 /// dropped run it counts the remainder wholesale, which is why 3 474 missing
-/// glyphs are reported as 4 464 missing and 3 872 extra.
+/// glyphs are reported as 4 464 missing and 3 883 extra — 3 872 of them the
+/// lost synchronisation, and eleven the `::before` and `::after` boxes this
+/// book's stylesheet generates, which are on the page and not in the markup.
 #[test]
 fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     let books = fetched!("text conservation");
@@ -429,6 +479,57 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     );
 }
 
+/// **Every book conserves exactly in logical order, including the pinned one.**
+///
+/// `NOT_CONSERVED` above is a statement about **content-stream** order, which
+/// is what an untagged extractor sees and what §14.8 calls the fallback when
+/// there is no structure tree. This is the same twenty books read the way the
+/// specification says reading order is defined — the `/StructTreeRoot` these
+/// documents now carry — and there is nothing pinned about it: every character
+/// of every book, in source order, exactly once.
+///
+/// The two together are the whole claim, and neither is redundant. Beowulf's
+/// 2 182 stays pinned above because it is true of a reader that ignores the
+/// tree, and it is *more* interesting now that a reader which uses the tree
+/// sees a perfect book, not less.
+///
+/// **Beowulf is the load-bearing one** and the reason is worth stating: its
+/// marginal glosses are floats that `clear` pushes a page past the text they
+/// were written among, so its content order and its logical order genuinely
+/// differ. A build that emitted a tree per page — which is what this engine
+/// did first — reproduces page order and measures 2 182 here too.
+#[test]
+fn every_fetched_book_conserves_exactly_in_logical_order() {
+    let books = fetched!("logical-order conservation");
+    let mut checked = 0usize;
+    for (name, bytes) in &books {
+        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        // The book with no glyphs cannot conserve in any order: its characters
+        // were never set, which the row above says by name. Reading order is
+        // not what it is missing.
+        if NOT_CONSERVED
+            .iter()
+            .any(|book| book.name == *name && book.because == Why::NoGlyphs)
+        {
+            continue;
+        }
+        let verdict = conservation_in_logical_order(bytes, &doc);
+        assert!(
+            verdict.holds(),
+            "{name} does not conserve in logical order: {} extra, {} missing, {:?}",
+            verdict.extra,
+            verdict.missing,
+            verdict.divergences
+        );
+        checked += 1;
+    }
+    println!("  {checked} books conserve exactly in logical order");
+    assert!(
+        checked > 15,
+        "only {checked} books were read, which is not the corpus"
+    );
+}
+
 /// Why a pinned book does not conserve.
 ///
 /// Two names rather than one flag, because the two need **different**
@@ -463,15 +564,41 @@ struct NotConserved {
 /// the reader does. **Both numbers**, so a build that fixed one direction and
 /// broke the other fails here.
 const NOT_CONSERVED: &[NotConserved] = &[
+    // **Halved, and the half that went has a name.** `fragment::beside` decided
+    // which floats a page draws by asking whether the float's static position
+    // was within `top + page height` of that page's top. That is the right
+    // question only when a page is as tall as the page box, and a page ended by
+    // a *forced break* is not: `page-break-before: always` on a chapter heading
+    // ends a page anywhere, and the reach ran past the break into the next
+    // page's column. The gloss was drawn on the page before its own and read
+    // before the heading it was written after. `epub_float_order.rs` holds that
+    // shape as a book this repository builds, so the fix does not depend on a
+    // corpus anyone has to fetch.
+    //
+    // What is left is 2 182 characters of a defect no ordering of one page's
+    // runs can repair. §9.5.1 places a float **below** text that follows it in
+    // the source whenever `clear` pushes it under the float before it, and this
+    // book's glosses clear each other all the way down a chapter. Inside one
+    // page that costs nothing -- the runs are sorted by their reading-order
+    // stamp, so a gloss reads where it was written whatever its `y`. Across a
+    // page boundary it cannot be paid: the gloss's box is on the next page, its
+    // text is its box's, and there is no third place to put it.
     NotConserved {
         name: "pg16328-beowulf.epub",
-        extra: 4_560,
-        missing: 4_560,
+        extra: 2_182,
+        missing: 2_182,
         because: Why::Reordered,
     },
     NotConserved {
         name: "sample-internallinks.epub",
-        extra: 3_872,
+        // 3 872 until `::before` and `::after` began generating boxes; the
+        // extra eleven are generated content, which is *by definition* on the
+        // page and not in the source markup. Five declarations produce them
+        // here: four `#` before an internal link, and a left quote.
+        // The missing figure does not move, and that is what says this is
+        // generated content rather than lost text - a defect in the glyph
+        // path would move both.
+        extra: 3_883,
         missing: 4_464,
         because: Why::NoGlyphs,
     },
@@ -481,12 +608,12 @@ const NOT_CONSERVED: &[NotConserved] = &[
     // spellings of that book carry it; only the OTF one reaches this, because
     // the WOFF one's face does not de-obfuscate to a readable table and its
     // text takes the `NoGlyphs` route instead.
-    NotConserved {
-        name: "sample-wasteland-otf-obf.epub",
-        extra: 3,
-        missing: 3,
-        because: Why::Reordered,
-    },
+    // **Both Waste Land spellings were here and both conserve exactly now.**
+    // Three characters each, the marginal line number `170` coming out before
+    // the line it numbers -- and it was the same forced-break reach every time:
+    // that book sets its line numbers as right floats and its section headings
+    // force a page. Their rows are deleted rather than zeroed, because a pinned
+    // book with nothing pinned about it is a row that outlives its reason.
 ];
 
 // ---- the route --------------------------------------------------------------
@@ -859,4 +986,65 @@ fn bump(counts: &mut Vec<(&'static str, usize)>, key: &'static str) {
         Some((_, n)) => *n += 1,
         None => counts.push((key, 1)),
     }
+}
+
+/// **The six SVG spine items draw.**
+///
+/// This is the SVG lane's exit criterion, and it is deliberately a claim about
+/// *ink* rather than about the absence of a warning. The test above can only
+/// say that nothing named these pages as placeholders; a build that read every
+/// SVG, produced an empty scene and wrote a blank page would satisfy it
+/// completely. So this one renders each of the six and counts distinct greys:
+/// a page that drew nothing is one colour, and a page that drew is not.
+///
+/// The book is `sample-svg-in-spine.epub`, whose six items are exactly the
+/// spread of what an SVG spine item is in the wild: a cover of three hundred
+/// and thirty-nine gradient-filled paths from Illustrator, two Inkscape
+/// drawings, and three pages that are one `<image>` and nothing else. The last
+/// three are the reason `<image>` is resolved against the container at all —
+/// without it, half this book would be blank and the row in
+/// `docs/features/epub.md` would still be true.
+#[test]
+fn the_six_svg_spine_items_draw_rather_than_placehold() {
+    let books = fetched!("the SVG spine sweep");
+    let Some((_, bytes)) = books
+        .iter()
+        .find(|(name, _)| name == "sample-svg-in-spine.epub")
+    else {
+        panic!("the corpus manifest lists sample-svg-in-spine.epub");
+    };
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    assert_eq!(doc.page_count(), 6, "one page per spine itemref");
+
+    let mut drawn = 0usize;
+    for page in 0..doc.page_count() {
+        // A twelfth of an inch to the point: enough that a hairline still
+        // lands on a pixel, small enough that six pages of a hundred and forty
+        // kilobytes of path data is a test rather than a wait.
+        let bitmap = doc.page(page).expect("a page").render(&RenderOptions {
+            scale: 0.25,
+            ..RenderOptions::default()
+        });
+        let components = bitmap.components();
+        let mut greys: Vec<u8> = bitmap
+            .data
+            .chunks_exact(components)
+            .map(|pixel| pixel[0])
+            .collect();
+        greys.sort_unstable();
+        greys.dedup();
+        assert!(
+            greys.len() > 1,
+            "page {page} is one flat colour ({greys:?}), which is a page that \
+             drew nothing reported as a page that drew"
+        );
+        assert_ne!(
+            greys,
+            [0xBF],
+            "page {page} is the placeholder grey, which this lane exists to remove"
+        );
+        drawn += 1;
+    }
+    println!("  {drawn} SVG spine items drew");
+    assert_eq!(drawn, 6);
 }

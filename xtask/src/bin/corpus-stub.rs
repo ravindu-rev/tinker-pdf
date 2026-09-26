@@ -58,7 +58,7 @@ fn main() {
         // `hang`: a hang is a bound to find and a slow file is a machine to
         // buy, and they are never the same afternoon's work.
         "crawl" => {
-            println!("probe 3");
+            println!("probe {}", xtask::runner::PROBE_VERSION);
             println!("file {file}");
             println!("opened yes");
             println!("pages 9000");
@@ -72,20 +72,20 @@ fn main() {
         // Dies mid-record: everything up to `rendered` and then nothing. This
         // is the one an exit code cannot catch, because the process exits 0.
         "truncate" => {
-            println!("probe 3");
+            println!("probe {}", xtask::runner::PROBE_VERSION);
             println!("file {file}");
             println!("opened yes");
             println!("pages 9");
         }
         "unopenable" => {
-            println!("probe 3");
+            println!("probe {}", xtask::runner::PROBE_VERSION);
             println!("file {file}");
             println!("opened no not a PDF: no indirect objects found");
             println!("ms 1");
             println!("done");
         }
         other => {
-            println!("probe 3");
+            println!("probe {}", xtask::runner::PROBE_VERSION);
             println!("file {file}");
             println!("opened yes");
             println!("ladder Trust");

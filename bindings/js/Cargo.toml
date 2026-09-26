@@ -1,3 +1,7 @@
+# Its own workspace root; see the same table in `bindings/python/Cargo.toml`
+# for why `exclude` in the root manifest is not enough on its own.
+[workspace]
+
 [package]
 name = "tinker-pdf-js"
 version = "0.0.1"

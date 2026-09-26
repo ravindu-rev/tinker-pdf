@@ -1,6 +1,6 @@
 //! The corpus sub-commands' command lines.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -116,7 +116,47 @@ pub struct RunArgs {
     /// Only these corpora, by lock name. Empty means all of them.
     pub only: Vec<String>,
     /// The per-file timeout.
+    ///
+    /// Sixty seconds from 4-5 September 2026, up from twenty. The metamorphic
+    /// relations used to be declined for any file that had already spent
+    /// 3 100 ms, precisely so that the extra work could not run twenty seconds
+    /// out — and that clock decided a ratcheted denominator, so the nightly
+    /// failed for a week on counts that moved with the runner's load. Deleting
+    /// the gate means the relations are always asked, which needs the room.
+    ///
+    /// **Three minutes from 6 September 2026, and this time the number is
+    /// sited on the whole distribution rather than on the two files that were
+    /// flipping.** Sixty was set against a corpus whose slowest file took
+    /// 20 s. It is now measured per corpus, on an idle machine, after the
+    /// rasteriser's row loop was fixed:
+    ///
+    /// | Corpus | Slowest file | What it is |
+    /// | --- | ---: | --- |
+    /// | `pdfjs` | 54 s | `issue16263.pdf` |
+    /// | `verapdf` | 48 s | the 10 000-page implementation-limit fixture |
+    /// | `qpdf` | 21 s | `numeric-and-string-2.pdf` |
+    /// | `pdfa-examples` | 0.2 s | |
+    /// | `safedocs` | 80 s | `0000231.pdf`, 4.5 MB off the open web |
+    ///
+    /// Two of those sat inside a factor of 1.25 of sixty seconds, which is
+    /// the hazard this repository has already been bitten by twice: a file
+    /// near the limit is passed on an idle run and killed on a busy one, the
+    /// pass rate moves, and every ratcheted count that file contributed to
+    /// moves with it. A limit has to clear the slowest *legitimate* file by
+    /// enough to survive a shared runner, and three minutes is between three
+    /// and nine times each of these.
+    ///
+    /// It is still a limit and still catches a hang: the stall detector fires
+    /// on a child that has written nothing for half its budget, and no file
+    /// measured here is silent for ninety seconds.
     pub timeout: Duration,
+    /// Whether the caller named `--timeout` on the command line.
+    ///
+    /// The distinction matters because a corpus may state its own in
+    /// `corpora.lock`, and the two have to be ordered. An explicit flag is an
+    /// *override* of the whole run and wins; the default is only a default,
+    /// and a corpus that states a timeout of its own beats it.
+    pub timeout_explicit: bool,
     /// Render resolution.
     pub dpi: f64,
     /// A face or directory of faces for documents that embed none.
@@ -141,7 +181,8 @@ impl Default for RunArgs {
     fn default() -> RunArgs {
         RunArgs {
             only: Vec::new(),
-            timeout: Duration::from_secs(20),
+            timeout: Duration::from_secs(180),
+            timeout_explicit: false,
             // 72 dpi: one device pixel per point. The question this run asks
             // is whether a bitmap comes back at all, and asking it four times
             // over at 150 costs hours across four thousand files without
@@ -182,6 +223,7 @@ impl RunArgs {
                         return Err("`--timeout 0` would kill every child instantly".to_string());
                     }
                     out.timeout = Duration::from_secs(seconds);
+                    out.timeout_explicit = true;
                 }
                 "--dpi" => {
                     let raw = value()?;
@@ -238,7 +280,44 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let (fonts, fonts_path) = resolve_fonts(root, &args)?;
     let child = resolve_child(&args, fonts_path.as_deref())?;
 
+    // **The sidecar is read before the run, and a defect in it stops the
+    // run.** Thirty-four files open only because of it, so a sidecar that
+    // will not parse is thirty-four failures the pass rate would carry
+    // without saying why — the same shape as the stale-binary check above.
+    let passwords_path = root.join(crate::passwords::PASSWORDS_PATH);
+    let passwords = match std::fs::read_to_string(&passwords_path) {
+        Ok(text) => crate::passwords::parse(&text)
+            .map_err(|e| format!("{}: {e}", crate::passwords::PASSWORDS_PATH))?,
+        // Absent is allowed: `--child` may name someone else's program and a
+        // checkout may be partial. It is recorded as a limit rather than
+        // passed over, because a run without it measures thirty-four files
+        // differently and a bar is a comparison between runs.
+        Err(_) => crate::passwords::Passwords::default(),
+    };
+    let known: Vec<String> = corpora.iter().map(|c| c.name.clone()).collect();
+    let stale = passwords.corpora_not_in(&known);
+    if !stale.is_empty() {
+        return Err(format!(
+            "{} names {} corpus this lockfile does not have ({}); a row that \
+             matches no corpus is silent, which is why it is refused here",
+            crate::passwords::PASSWORDS_PATH,
+            stale.len(),
+            stale
+                .iter()
+                .map(|row| format!("{}/{}", row.corpus, row.path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
     let mut limits: Vec<String> = Vec::new();
+    if passwords.rows().is_empty() {
+        limits.push(format!(
+            "no passwords were supplied: {} was not read, so every \
+             password-protected file is a failure rather than a measurement",
+            crate::passwords::PASSWORDS_PATH
+        ));
+    }
     if let Some(sample) = args.sample {
         limits.push(format!(
             "sampled: at most {sample} files per corpus were run, in path order"
@@ -295,12 +374,76 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             }
         }
 
-        eprintln!("corpus-run: {} — {} files", corpus.name, files.len());
-        let results = run_files(&child, &dir, &files, args.timeout, args.jobs);
-        reports.push(CorpusReport {
+        // **The timeout this corpus is measured with.** A per-corpus value in
+        // the lock is a statement about the documents; `--timeout` on the
+        // command line is a statement about the run, so it wins.
+        let timeout = match (args.timeout_explicit, corpus.timeout_seconds) {
+            (false, Some(seconds)) => Duration::from_secs(seconds),
+            _ => args.timeout,
+        };
+        if timeout != args.timeout {
+            // Said out loud, because a pass rate measured at a different
+            // timeout is a different measurement and the log is where anybody
+            // reading a moved bar starts.
+            eprintln!(
+                "corpus-run: {} — {} files, {} s per file (its own, from the lock)",
+                corpus.name,
+                files.len(),
+                timeout.as_secs()
+            );
+        } else {
+            eprintln!("corpus-run: {} — {} files", corpus.name, files.len());
+        }
+        let for_corpus = passwords.for_corpus(&corpus.name);
+        let results = run_files(&child, &dir, &files, timeout, args.jobs, &for_corpus);
+
+        // **A sidecar row that matched no file is a stale row**, and a stale
+        // row is silent: the file it names was renamed or removed upstream,
+        // nothing is passed to any child, and the report shows only that some
+        // file failed for a password. On a sampled run it means nothing —
+        // most files were not run — so it is only looked for on a whole one.
+        if args.sample.is_none() {
+            let seen: BTreeSet<&str> = results.iter().map(|r| r.path.as_str()).collect();
+            let unmatched: Vec<&str> = for_corpus
+                .keys()
+                .copied()
+                .filter(|path| !seen.contains(path))
+                .collect();
+            if !unmatched.is_empty() {
+                limits.push(format!(
+                    "`{}` has {} password row(s) matching no file: {} — {} is \
+                     stale against this pin",
+                    corpus.name,
+                    unmatched.len(),
+                    unmatched.join(", "),
+                    crate::passwords::PASSWORDS_PATH
+                ));
+            }
+        }
+
+        let report = CorpusReport {
             name: corpus.name.clone(),
             files: results,
-        });
+        };
+        // **A corpus nobody could measure the memory of is an incomplete run.**
+        // The child reads its own high-water mark on Linux and Windows and
+        // omits the line everywhere else, so a corpus where not one child
+        // reported a peak is a platform that cannot answer rather than a
+        // corpus that costs nothing. Saying so in `limits` is what makes
+        // `ratchet::compare` refuse: without it the maximum would be a silent
+        // zero, and a band of zero bytes is one nothing can sit under.
+        //
+        // Not one child rather than every child, because a file that crashed
+        // wrote no record at all and would otherwise make every real run
+        // incomplete over a failure the pass rate already counts.
+        if report.total() > 0 && report.peak().files == 0 {
+            limits.push(format!(
+                "`{}` has no memory measurement: not one child reported a peak \
+                 resident set, which is a platform `tpdf` cannot read one on",
+                corpus.name
+            ));
+        }
+        reports.push(report);
     }
 
     let run = Run {
@@ -329,11 +472,11 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if carried != asked {
         return Err(if carried {
             format!(
-                "the child was built with `bundled-fonts`, so every file was                  measured with twelve faces, and this run is recorded as                  `{}`. Rebuild `tpdf` without the feature, or run with                  `--fonts bundled`.",
+                "the child was built with `bundled-fonts`, so every file was measured with twelve faces, and this run is recorded as `{}`. Rebuild `tpdf` without the feature, or run with `--fonts bundled`.",
                 run.settings.fonts
             )
         } else {
-            "`--fonts bundled` was asked for and the child carries no faces;              rebuild `tpdf` with `--features bundled-fonts`"
+            "`--fonts bundled` was asked for and the child carries no faces; rebuild `tpdf` with `--features bundled-fonts`"
                 .to_string()
         });
     }
@@ -343,6 +486,13 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
     println!();
     print!("{}", run.capability_table());
+    // Only when there is something to attribute: `producer_table` returns an
+    // empty string for a run where everything passed.
+    let attribution = run.producer_table();
+    if !attribution.is_empty() {
+        println!();
+        print!("{attribution}");
+    }
 
     if let Some(path) = &args.report {
         if let Some(parent) = path.parent() {
@@ -460,12 +610,16 @@ fn ratchet_note(run: &Run) -> String {
 /// job count far above the core count can time a slow file out that a serial
 /// run would not — which is why the default is the core count rather than
 /// something greedier.
+/// `passwords` maps a file's report path to the password to open it with, and
+/// is the corpus's own slice of `corpus/passwords.tsv`. A file with no row is
+/// run exactly as before.
 pub fn run_files(
     child: &Child,
     dir: &Path,
     files: &[PathBuf],
     timeout: Duration,
     jobs: usize,
+    passwords: &BTreeMap<&str, &str>,
 ) -> Vec<runner::FileResult> {
     let next = Arc::new(AtomicUsize::new(0));
     let results = Arc::new(Mutex::new(Vec::with_capacity(files.len())));
@@ -486,7 +640,13 @@ pub fn run_files(
                     .unwrap_or(file)
                     .to_string_lossy()
                     .replace('\\', "/");
-                let result = runner::run_one(child, file, &relative, timeout);
+                let extra = match passwords.get(relative.as_str()) {
+                    Some(password) => {
+                        vec!["--password".to_string(), (*password).to_string()]
+                    }
+                    None => Vec::new(),
+                };
+                let result = runner::run_one(child, file, &relative, timeout, &extra);
                 let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if finished % 250 == 0 {
                     eprintln!("corpus-run:   {finished}/{}", files.len());
@@ -578,15 +738,108 @@ fn resolve_child(args: &RunArgs, fonts: Option<&str>) -> Result<Child, String> {
         child_args.push("--fonts".to_string());
         child_args.push(fonts.to_string());
     }
-    Ok(Child {
+    let child = Child {
         program: sibling,
         args: child_args,
-    })
+    };
+    agrees_on_the_record_format(&child)?;
+    Ok(child)
+}
+
+/// Refuses a child whose record format this runner does not read.
+///
+/// Asked once, before the run, because the alternative is what it replaced: a
+/// child one version behind writes a complete record per file, the runner
+/// refuses each one as unreadable, and four thousand refusals arrive as
+/// `0/4525 passed` — which is indistinguishable from an engine that stopped
+/// rendering, and sends whoever reads it looking for a rendering bug that is
+/// not there. A stale binary is a different fact and now says so.
+///
+/// A child that does not understand the question at all is let through rather
+/// than refused: `--child` may name someone else's program, and this runner
+/// has no standing to require a flag of it. The per-file version check still
+/// catches a mismatch; this only makes the common case legible.
+fn agrees_on_the_record_format(child: &Child) -> Result<(), String> {
+    let asked = std::process::Command::new(&child.program)
+        .arg("probe")
+        .arg("--record-version")
+        .output();
+    let Ok(output) = asked else {
+        return Ok(());
+    };
+    if !output.status.success() {
+        return Ok(());
+    }
+    match record_version_disagreement(&child.program, &String::from_utf8_lossy(&output.stdout)) {
+        Some(message) => Err(message),
+        None => Ok(()),
+    }
+}
+
+/// The decision [`agrees_on_the_record_format`] makes, separated from the
+/// spawn so it can be tested without a binary to spawn.
+fn record_version_disagreement(program: &Path, said: &str) -> Option<String> {
+    let version = said
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("probe "))
+        .and_then(|rest| rest.trim().parse::<u32>().ok())?;
+    if version == runner::PROBE_VERSION {
+        return None;
+    }
+    Some(format!(
+        "{} writes probe records at version {version} and this runner reads version {}. Rebuild it: `cargo build -p tpdf` (add --release if this xtask is a release build).",
+        program.display(),
+        runner::PROBE_VERSION
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure this exists to replace: a child one version behind used to
+    /// produce four thousand unreadable records, which arrived as `0/4525
+    /// passed` — a message about rendering, for a problem about a binary.
+    #[test]
+    fn a_child_a_version_behind_is_named_rather_than_counted_as_a_regression() {
+        let stale = record_version_disagreement(
+            Path::new("target/release/tpdf"),
+            &format!(
+                "probe {}
+",
+                runner::PROBE_VERSION - 1
+            ),
+        )
+        .expect("a version behind is a refusal");
+        assert!(stale.contains("writes probe records at version"), "{stale}");
+        assert!(stale.contains("cargo build -p tpdf"), "{stale}");
+        assert!(
+            record_version_disagreement(
+                Path::new("tpdf"),
+                &format!(
+                    "probe {}
+",
+                    runner::PROBE_VERSION
+                ),
+            )
+            .is_none(),
+            "the version this runner reads is not a disagreement"
+        );
+    }
+
+    /// A `--child` naming somebody else's program owes this runner no flag,
+    /// so an answer it cannot read is let through. The per-file version check
+    /// still catches a real mismatch; the preflight only makes the common
+    /// case legible, and refusing on silence would make it a requirement.
+    #[test]
+    fn a_child_that_does_not_answer_is_let_through() {
+        for said in ["", "usage: someprog [options]", "probe", "probe next"] {
+            assert!(
+                record_version_disagreement(Path::new("other"), said).is_none(),
+                "{said:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_command_line_reads() {
@@ -601,6 +854,10 @@ mod tests {
         ])
         .expect("it parses");
         assert_eq!(args.timeout, Duration::from_secs(5));
+        assert!(
+            args.timeout_explicit,
+            "a `--timeout` on the command line overrides a corpus's own"
+        );
         assert_eq!(args.jobs, 2);
         assert_eq!(args.only, vec!["qpdf".to_string()]);
         assert!(args.strict);

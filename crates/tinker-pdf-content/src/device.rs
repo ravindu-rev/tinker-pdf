@@ -8,6 +8,71 @@
 use crate::interpret::{Group, MaskGroup};
 use crate::state::{GraphicsState, Matrix};
 
+/// The plain values a `BDC`'s property list carries (14.6.2, 14.9).
+///
+/// **No COS types, and no bytes that still need a document to read them.**
+/// The two forms a property list takes — an inline `<< … >>` the tokenizer
+/// flattened, and a name into the page's `/Properties` — are resolved on
+/// opposite sides of this crate's boundary, and a struct of plain values is
+/// what lets them arrive indistinguishable. A device cannot tell which form
+/// wrote the `/MCID` it is handed, and 14.6.2 gives it no reason to.
+///
+/// Every field is `Option` because every field is optional: 14.7.4.2 makes
+/// `/MCID` the only entry that associates content with structure, and 14.9's
+/// four are alternate descriptions a producer supplies or does not.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MarkedProps {
+    /// `/MCID`, the marked-content identifier (14.7.4.2).
+    ///
+    /// Non-negative and integral, because that is what 14.7.4.2 says it is;
+    /// anything else in the slot is read as absent rather than rounded, since
+    /// an invented identifier joins content to the wrong structure element
+    /// and reads as a reordering rather than as damage.
+    pub mcid: Option<u32>,
+    /// `/ActualText`: what this content *is*, replacing what it draws
+    /// (14.9.4). Two glyphs of a ligature spelled out, a soft hyphen removed.
+    pub actual_text: Option<String>,
+    /// `/Alt`: a description of content that is not text (14.9.3).
+    pub alt: Option<String>,
+    /// `/Lang`: the natural language of the content (14.9.2).
+    pub lang: Option<String>,
+    /// `/E`: what an abbreviation stands for (14.9.5).
+    pub expansion: Option<String>,
+    /// Which content stream the `BDC` that opened this sequence was written
+    /// in: a form XObject's packed indirect reference, or `0` for the page's
+    /// own stream.
+    ///
+    /// **Not read from the property list.** 14.7.4.2 numbers marked-content
+    /// sequences within a content stream, so `/MCID 0` in one form and
+    /// `/MCID 0` in another are two sequences and not one; the identifier
+    /// alone cannot say which. Only the interpreter knows which stream it is
+    /// running, so it stamps this on the way past — which is why it is the
+    /// one field here a producer did not write.
+    pub stream: u64,
+}
+
+impl MarkedProps {
+    /// Whether the property list said nothing this engine reads.
+    ///
+    /// A `BDC` whose list is a `/Type` and a `/BBox` and nothing else is not
+    /// the same as a `BDC` with no list at all to a producer, but it is to
+    /// every consumer here — so the two are collapsed at the seam rather
+    /// than at each device.
+    ///
+    /// [`MarkedProps::stream`] is deliberately not one of the fields checked:
+    /// it is stamped by the interpreter *after* this decides whether the list
+    /// was worth keeping, and counting it would make every `BDC` in a form
+    /// non-empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.mcid.is_none()
+            && self.actual_text.is_none()
+            && self.alt.is_none()
+            && self.lang.is_none()
+            && self.expansion.is_none()
+    }
+}
+
 /// One glyph, as the interpreter resolved it.
 #[derive(Clone, Debug)]
 pub struct Glyph {
@@ -18,6 +83,29 @@ pub struct Glyph {
     /// The transform from glyph space to device space, including the font
     /// size, horizontal scaling and rise.
     pub transform: Matrix,
+    /// Where the glyph would sit with 9.4.3's `Ts` taken out — the same
+    /// transform's translation with its rise set to zero — and `None`
+    /// whenever the rise is zero, which is every glyph on the hot path.
+    ///
+    /// # Why a rise is not a new line
+    ///
+    /// `Ts` displaces a glyph and **leaves the pen where it was**: a
+    /// superscript footnote marker, a chemical subscript and a `GPOS` mark
+    /// raised onto its base are all on the line they interrupt, not on one of
+    /// their own. A consumer that decided line membership from
+    /// [`Glyph::transform`]'s own origin would split such a line in two — and
+    /// then again where the rise returns to zero, so one raised glyph between
+    /// two ordinary ones makes three lines.
+    ///
+    /// The rule this enables is **monotone**: it can only join lines a `Ts`
+    /// currently splits, and can never split a line that is joined today,
+    /// because it changes nothing at all when the rise is zero.
+    ///
+    /// It is the *origin* rather than a whole matrix because that is what the
+    /// question needs, and reported geometry does not move: a consumer's quads
+    /// and per-character origins keep [`Glyph::transform`]'s risen position,
+    /// which is where the ink is.
+    pub baseline: Option<(f64, f64)>,
     /// The displacement to the next glyph, in text space, before the
     /// transform.
     ///
@@ -119,8 +207,22 @@ pub trait Device {
     /// A `BMC` has a tag and no property list, so it is here too; a `BDC`
     /// whose operand stack is damaged reports an empty tag rather than
     /// guessing at one.
-    fn begin_marked_content(&mut self, tag: &[u8], visible: bool, hidden_layer: Option<&str>) {
-        let _ = (tag, visible, hidden_layer);
+    ///
+    /// `props` is the `BDC`'s property list reduced to the plain values 14.6.2
+    /// and 14.9 define, or `None` for a `BMC`, for a `BDC` whose list this
+    /// build could not read, and for a list that said nothing either clause
+    /// covers. It is what carries `/MCID` — the only thing that ties drawn
+    /// content to the structure tree (14.7.4.2) — so a device that wants a
+    /// structured view keeps it, and every other device ignores it exactly as
+    /// this default does.
+    fn begin_marked_content(
+        &mut self,
+        tag: &[u8],
+        visible: bool,
+        hidden_layer: Option<&str>,
+        props: Option<&MarkedProps>,
+    ) {
+        let _ = (tag, visible, hidden_layer, props);
     }
 
     /// `EMC`: the innermost marked-content scope ended.
@@ -132,7 +234,8 @@ pub trait Device {
     fn end_marked_content(&mut self) {}
 
     /// A form XObject is about to be interpreted; returning false skips it.
-    fn begin_form(&mut self, id: u64) -> bool {
+    fn begin_form(&mut self, id: u64, name: &[u8]) -> bool {
+        let _ = name;
         let _ = id;
         true
     }

@@ -40,9 +40,12 @@ use tinker_pdf::{ArchiveWarning, Document, OpenOptions};
 const COMMITTED: &[&str] = &[
     "calibre-book-cover.epub",
     "calibre-book-nocover.epub",
+    "calibre-embedded-font.epub",
+    "kcc-fixed-layout.epub",
     "pandoc-book-cover.epub",
     "pandoc-book-epub2.epub",
     "pandoc-book-nocover.epub",
+    "pandoc-embedded-font.epub",
     "pandoc-plates.epub",
 ];
 
@@ -129,7 +132,7 @@ fn the_committed_sheet_is_what_a_book_is_set_with() {
 #[test]
 fn without_the_ua_stylesheet_a_book_has_no_block_structure_at_all() {
     use tinker_pdf::epub::paint::BookMetrics;
-    use tinker_pdf::epub::read::{box_tree, PX_TO_PT};
+    use tinker_pdf::epub::read::{box_tree, Pictures, PX_TO_PT};
     use tinker_pdf::epub::xhtml;
     use tinker_pdf_css::cascade::{cascade, Origin};
     use tinker_pdf_css::media::MediaContext;
@@ -211,14 +214,14 @@ fn without_the_ua_stylesheet_a_book_has_no_block_structure_at_all() {
     // stylesheet's own source set as text.
     let options = Options::new(400.0 / PX_TO_PT, 100_000.0);
     let laid_with = layout(
-        &box_tree(&dom, &with),
+        &box_tree(&dom, &with, &Pictures::default()),
         &BookMetrics::STANDARD,
         &options,
         &LayoutLimits::DEFAULT,
     )
     .expect("a layout with the sheet");
     let laid_without = layout(
-        &box_tree(&dom, &without),
+        &box_tree(&dom, &without, &Pictures::default()),
         &BookMetrics::STANDARD,
         &options,
         &LayoutLimits::DEFAULT,
@@ -795,7 +798,19 @@ fn a_same_document_reference_reaches_the_page_it_points_at() {
 /// for that this build does not implement, counted by the elements it reached.
 /// It is written down in `tests/epub/CENSUS.tsv` rather than listed here, so a
 /// milestone that implements `float` or `vertical-align` has to re-measure
-/// rather than argue — the same ratchet `CONSERVATION.tsv` is.
+/// rather than argue — the same ratchet `CONSERVATION.tsv` is. Tier 4 did
+/// exactly that: `vertical-align` was 101, 96, 92, 49, 18 and 18 across the six
+/// books and is 0, 0, 0, 0, 16 and 16, and `max-width` was 3 on
+/// `pandoc-plates.epub` and is gone.
+///
+/// **The two sixteens are not `vertical-align` and no milestone that
+/// implements it will move them.** They are `vertical-align: inherit`, on
+/// calibre's table rows and cells: `css-cascade-5` §7.1's explicit defaulting
+/// keywords are unimplemented for every property, and decision 5 counts them
+/// against the property the keyword was written on. The milestone that built
+/// §10.8.1 and §17.5.3 left this file byte for byte unchanged, which is the
+/// census working rather than the census failing — a property gap and a value
+/// gap are two things, and this file has never distinguished them by name.
 #[test]
 fn the_unsupported_census_is_the_one_the_record_states() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -819,40 +834,96 @@ fn the_unsupported_census_is_the_one_the_record_states() {
             println!("      {property:20} {elements:5} elements");
             measured.push(format!("{name}\t{property}\t{elements}"));
         }
-        assert!(
-            !entries.is_empty(),
-            "{name} reports no unimplemented property at all, which no book in \
-             this corpus can honestly say"
-        );
+        if entries.is_empty() {
+            println!("      (nothing unimplemented)");
+        }
     }
     assert_eq!(measured, recorded, "tests/epub/CENSUS.tsv is out of date");
+
+    // **The guard this replaced said every book reports something, and tier 4
+    // proved that wrong rather than the build.** It held for six books because
+    // every one of them carries a table, a picture or pandoc's own default
+    // stylesheet, and each of those brings a property this build does not
+    // implement — `vertical-align` on eighteen table cells, `max-width` on a
+    // figure, `color-scheme` in pandoc's boilerplate.
+    //
+    // All three tier-4 books report **nothing**, for three different reasons
+    // worth keeping apart. `calibre-embedded-font.epub` is calibre over prose
+    // with no table and no picture. `pandoc-embedded-font.epub` passes `--css`,
+    // which *replaces* pandoc's default sheet rather than adding to it, so the
+    // boilerplate that supplied `hyphens` and `color-scheme` is simply not
+    // there. `kcc-fixed-layout.epub` has a seven-line stylesheet and six
+    // one-character documents.
+    //
+    // So "no real book is fully implemented" was a claim about six books that
+    // happened to share a shape. What the guard was for survives as a total: a
+    // build that measured nothing could still not pass by committing an empty
+    // file.
+    assert!(
+        measured.len() > 20,
+        "the census collapsed to {} rows, which is a build that stopped \
+         counting rather than a corpus that stopped asking",
+        measured.len()
+    );
+    let silent: Vec<&str> = COMMITTED
+        .iter()
+        .copied()
+        .filter(|name| !measured.iter().any(|row| row.starts_with(name)))
+        .collect();
+    // **Two books joined this list in tier 4 and neither was touched.** Both
+    // calibre books' whole remaining census was `vertical-align: inherit` and
+    // `text-align: inherit`, and `css-cascade-5` §7.1's defaulting keywords
+    // being implemented emptied them. A calibre book now has nothing in it this
+    // build does not read.
+    assert_eq!(
+        silent,
+        [
+            "calibre-book-cover.epub",
+            "calibre-book-nocover.epub",
+            "calibre-embedded-font.epub",
+            "kcc-fixed-layout.epub",
+            "pandoc-embedded-font.epub"
+        ],
+        "the set of books with nothing unimplemented in them changed"
+    );
 }
 
 /// The census counts **elements reached** and not declarations written.
 ///
 /// The two differ by a factor of a hundred on a real book and only one of them
 /// is a fact about the book: a `float: left` in a rule that matches nothing is
-/// not a gap the book noticed, and `.calibre13 { vertical-align: top }`
-/// matching eighteen cells is eighteen and not one. A build that counted at
-/// parse time would report 1 for each.
+/// not a gap the book noticed, and `.calibre15 { vertical-align: inherit }`
+/// matching nine cells is nine and not one. A build that counted at parse time
+/// would report 1 for each.
 ///
-/// **The property this asserts on used to be `display`**, and milestone 11 took
-/// it away by implementing every `display: table*` value calibre writes. The
-/// same eighteen cells still carry a `vertical-align`, which is §17.5.4's and
-/// is not in this build, so the fixture is the same eighteen elements under a
-/// different name — and the fact that it had to move is the census reporting a
-/// gap that closed.
+/// **The book and the property this asserts on have both moved three times**,
+/// and each move was a milestone taking the gap away rather than a test being
+/// rewritten. It was `display` on a calibre book until milestone 11 implemented
+/// every `display: table*` value calibre writes. It became `vertical-align` at
+/// eighteen elements; tier 4's §17.5.4 alignment took two of those, leaving
+/// sixteen that were all one value — `vertical-align: inherit`. Then §7.1's
+/// defaulting keywords landed and took the remaining sixteen **and** the nine
+/// `text-align: inherit` beside them, which left both calibre books with
+/// nothing unimplemented in them at all and this fixture with no book.
+///
+/// It is now pandoc's `hyphens`, and it is a **better** fixture than either of
+/// its predecessors for the claim being made: pandoc writes `hyphens: manual`
+/// exactly **once**, in `code { … }`, and it reaches **six** elements. One
+/// declaration, six elements, and a build that counted at parse time would say
+/// one — where `vertical-align` was sixteen elements from three declarations
+/// and `display` was six from six, so neither could ever have shown a factor
+/// this cleanly.
 #[test]
 fn the_census_counts_elements_and_not_declarations() {
-    let doc = Document::open(corpus_book("calibre-book-cover.epub")).expect("a book");
+    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
     let entries = census(&doc);
     let aligned = entries
         .iter()
-        .find(|(property, _)| property == "vertical-align")
-        .expect("this book sets vertical-align on its cells");
-    assert!(
-        aligned.1 > 10,
-        "vertical-align was counted per declaration rather than per element: {aligned:?}"
+        .find(|(property, _)| property == "hyphens")
+        .expect("this book sets hyphens: manual on its code spans");
+    assert_eq!(
+        aligned.1, 6,
+        "hyphens was counted per declaration rather than per element: {aligned:?}"
     );
     // And the ranking is by count, which is what makes the first line of a
     // report the thing worth reading.

@@ -14,6 +14,22 @@
 //! ways in rather than two decoders: `decode` owns `/K`, `/Rows`, EOL and
 //! EOFB and starts at bit zero, and `T6Rows` is the T.6 rows alone from
 //! wherever a caller says.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: the result is a whole number of
+//! rows, and no row was written past its own width. None of them asks whether
+//! the numbers are the ones the input actually describes, so a decode that is
+//! well-formed and *wrong* passes this target exactly as a correct one does.
+//!
+//! Correctness lives in `crates/tinker-pdf/tests/ccitt.rs` and in
+//! `crates/tinker-pdf-filters/tests/vectors.rs`, which hold coded streams
+//! with recorded provenance and compare the bits that come back out.
+//!
+//! This is the shape `brotli` records at length, and the difference is worth
+//! keeping in view: there, nothing in the tree can supply the missing check
+//! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
+//! a second decoder. Here the check exists, and it is somewhere else.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

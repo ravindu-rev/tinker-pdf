@@ -50,13 +50,24 @@ and the writer never re-encodes a stream that already declares a `/Filter`.
 `tinker_pdf_cos::build::jpeg_shape(bytes)` reads a JPEG's dimensions and
 component count from its SOF marker so the caller need not. Indexed images take a `DeviceSpace` base
 only — 8.6.6.3 forbids an `/Indexed` over `/Indexed`, and this writer emits
-no CIE, `/Separation` or `/DeviceN` space.
+no CIE, `/Separation` or `/DeviceN` space. It **does** write an `/ICCBased`
+space: `add_icc_color_space` registers one as an indirect object with `/N`
+checked against Table 66, `set_fill_icc` and `set_stroke_icc` name it on the
+page, and `ImageColorSpace::Icc` names it on an image (8.9.5.4) — so one
+embedded profile serves a page's operators and its pictures alike.
+
+**The operand count comes from the space rather than from the caller.** 8.6.5.5's
+`/N` says how many operands `scn` takes, so four values against a three-channel
+profile lose the fourth and one value gains two zeros. A content stream whose
+arity disagrees with its own space is one every reader has to guess about, and
+the guesses differ.
 
 **Graphics.** `add_ext_gstate` (`ExtGState`: blend mode, alphas, soft mask
 with `MaskKind` and `StateMask`), `add_form` (`FormXObject`, optionally a
 `TransparencyGroup`), `add_shading` (`Shading`: axial and radial with a
 `Function`), `add_tiling_pattern` (`TilingPattern`, all three `TilingType`
-values of Table 75); the page side applies them with `set_ext_gstate`, `form`,
+values of Table 75), `add_shading_pattern` (`ShadingPattern`, `/PatternType 2`);
+the page side applies them with `set_ext_gstate`, `form`,
 `shading`, `set_fill_pattern` / `set_stroke_pattern`, plus `fill_rect`,
 `set_fill_rgb` / `set_stroke_rgb`, `image`, and `raw(operators)` for
 anything else. Each page-side call returns `false` when the named resource
@@ -101,23 +112,43 @@ let pdf: Vec<u8> = b.finish();
 ```
 
 `DocumentBuilder`, `PageBuilder`, `ImageData`, `DeviceSpace`, `ExtGState`,
-`TransparencyGroup`, `FormXObject`, `Function`, `Shading`, `TilingPattern`,
-`TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`, `StateMask`,
+`TransparencyGroup`, `FormXObject`, `Function`, `Shading`, `ShadingPattern`,
+`TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`,
+`StateMask`,
 `Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade.
 `ImageData` and `Target` are `#[non_exhaustive]`: the next shape is an
 addition, not a break.
+
+**`ImageData::Compressed` is constructible from outside the workspace**, which
+it was not: the enum crossed the facade and its payload did not, so the variant
+was documented and unreachable — a shape worse than an absent one, because it
+reads as a capability. `CompressedImage`, `ImageColorSpace`, `ImageFilter`,
+`SoftMask` and `CcittParams` are re-exported now. The fifth is the one a grep
+over the writer's own names does not find: `ImageFilter::CcittFax` carries
+7.4.6's parameters as the *filters* crate's struct rather than a second
+spelling of `/K`, so without it that variant could be neither built nor matched
+on. The doctest on the re-export names all five through the facade and nothing
+else, so deleting any one of them fails `cargo test --doc` rather than quietly
+reopening the gap.
+
+**The archival profile.** `DocumentBuilder::archival` takes an ISO 19005
+profile and turns this whole surface into one that says no: the standard 14,
+transparency under part 1, a device colour the output intent cannot reproduce
+and an `/Info` entry part 4 has no room for are all refused where the caller
+asks for them, and the finished document carries an output intent, a
+byte-deterministic XMP packet and the header version its part requires.
+[features/pdfa.md](pdfa.md) is the whole of it.
 
 ## Refused by name
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| CFF / OpenType-CFF subsetting | a CFF face embeds whole | charstring subsetting with subroutine renumbering is not written | [ROADMAP.md](../ROADMAP.md) |
-| Any image encoder but deflate | `Rgb8`/`Gray8` are deflated; JPEG and PNG-IDAT pass through; nothing is encoded to JPEG, CCITT, JBIG2 or JPX | the engine decodes those codecs; it does not write them | [filters](filters.md) |
-| Text shaping | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | no GSUB/GPOS; a stated non-goal now reopened | [ROADMAP.md](../ROADMAP.md), [fonts](fonts.md) |
-| Non-device colour spaces on write | `DeviceSpace` only (`/DeviceGray`, `/DeviceRGB`, `/DeviceCMYK`) | no CIE, ICC, `/Separation` or `/DeviceN` writer | — |
+| Any image encoder but deflate | `Rgb8`/`Gray8` are deflated; JPEG and PNG-IDAT pass through; nothing is encoded to JPEG, CCITT, JBIG2 or JPX | **The reason has now changed twice and the refusal has not.** It used to be "the engine decodes those codecs; it does not write them"; on 15 September 2026 `tinker-pdf-filters` gained CCITT G4 and JBIG2 generic regions, and on 16 September a baseline JPEG encoder, so three of the four codecs named here have a writer in the leaf crate and this builder calls none of them. What is missing is not a coder. It is the decision of *when* a raster is better off lossy, or as a fax coding, than as deflate — and, per codec, the framing: for JBIG2 D.3's embedded-stream assembly, which the filter crate deliberately does not write, and for JPEG the `/DCTDecode` XObject's own colour and `/Decode` agreement. JPX has no encoder at all | [filters](filters.md), [ROADMAP](../ROADMAP.md) |
+| Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS and neither will: `glyph_run` is the shaped entry point, through `tinker-pdf-shape` | [fonts](fonts.md), [design/shaping.md](../design/shaping.md) |
+| CIE, `/Separation` and `/DeviceN` on write | `DeviceSpace` and `/ICCBased` on the fill, stroke and image setters | a `/Separation` or `/DeviceN` space is a tint transform into an alternate space, and this writer emits no function for one. **ICC is not in this row**: `add_icc_color_space` registers a space, `set_fill_icc` and `set_stroke_icc` name it, and `ImageColorSpace::Icc` puts it on an image | [ROADMAP](../ROADMAP.md) |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
-| `ImageData::Compressed` from outside the workspace | `CompressedImage`, `ImageColorSpace`, `ImageFilter` and `SoftMask` are not re-exported by the facade, so the variant cannot be constructed by an external caller | the container formats use it internally; the facade re-export is owed and not yet on the roadmap | — |
 | Layout | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API | — |
+| Everything an `ArchivalProfile` forbids | the call returns `false` and pushes a typed `ArchivalRefusal` naming its clause; `finish_archival` returns `Err` for what only a finished document can be judged on | a builder that emitted what the validator rejects would make the validator the last line of defence rather than the second | [pdfa](pdfa.md) |
 
 ## Verified
 

@@ -19,10 +19,15 @@ tinker-pdf-filters = { path = "../crates/tinker-pdf-filters" }
 tinker-pdf-font = { path = "../crates/tinker-pdf-font" }
 tinker-pdf-content = { path = "../crates/tinker-pdf-content" }
 tinker-pdf-crypto = { path = "../crates/tinker-pdf-crypto" }
+tinker-pdf-pki = { path = "../crates/tinker-pdf-pki" }
 tinker-pdf-zip = { path = "../crates/tinker-pdf-zip" }
+tinker-pdf-archive = { path = "../crates/tinker-pdf-archive" }
 tinker-pdf-xml = { path = "../crates/tinker-pdf-xml" }
+tinker-pdf-color = { path = "../crates/tinker-pdf-color" }
 tinker-pdf-css = { path = "../crates/tinker-pdf-css" }
+tinker-pdf-svg = { path = "../crates/tinker-pdf-svg" }
 tinker-pdf-layout = { path = "../crates/tinker-pdf-layout" }
+tinker-pdf-shape = { path = "../crates/tinker-pdf-shape" }
 
 # Detaches from the parent workspace so `cargo build` at the root never tries
 # to build a libFuzzer target on a stable toolchain.
@@ -53,6 +58,12 @@ doc = false
 [[bin]]
 name = "lzw"
 path = "fuzz_targets/lzw.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "icc_profile"
+path = "fuzz_targets/icc_profile.rs"
 test = false
 doc = false
 
@@ -99,6 +110,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "cff_subset"
+path = "fuzz_targets/cff_subset.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "content_tokenizer"
 path = "fuzz_targets/content_tokenizer.rs"
 test = false
@@ -107,6 +124,12 @@ doc = false
 [[bin]]
 name = "render_page"
 path = "fuzz_targets/render_page.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "signatures"
+path = "fuzz_targets/signatures.rs"
 test = false
 doc = false
 
@@ -135,6 +158,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "pki_der"
+path = "fuzz_targets/pki_der.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pki_cms"
+path = "fuzz_targets/pki_cms.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "crypt_ciphers"
 path = "fuzz_targets/crypt_ciphers.rs"
 test = false
@@ -149,6 +184,24 @@ doc = false
 [[bin]]
 name = "zip_archive"
 path = "fuzz_targets/zip_archive.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tar"
+path = "fuzz_targets/tar.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sevenz"
+path = "fuzz_targets/sevenz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rar"
+path = "fuzz_targets/rar.rs"
 test = false
 doc = false
 
@@ -173,5 +226,47 @@ doc = false
 [[bin]]
 name = "layout"
 path = "fuzz_targets/layout.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shape"
+path = "fuzz_targets/shape.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "shape_text"
+path = "fuzz_targets/shape_text.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tiff"
+path = "fuzz_targets/tiff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "brotli"
+path = "fuzz_targets/brotli.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "jxr"
+path = "fuzz_targets/jxr.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "svg"
+path = "fuzz_targets/svg.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "woff"
+path = "fuzz_targets/woff.rs"
 test = false
 doc = false

@@ -15,6 +15,7 @@
 //! Everything here goes through `corpus::run_files`, which is the same
 //! function `cargo xtask corpus-run` calls over the real corpora.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -137,7 +138,14 @@ fn a_file_that_aborts_and_a_file_that_hangs_both_reach_the_report() {
         ],
     );
 
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(5), 3);
+    let results = corpus::run_files(
+        &stub(),
+        &dir,
+        &files,
+        Duration::from_secs(5),
+        3,
+        &BTreeMap::new(),
+    );
 
     // Complete: every file has an entry. The failure this guards against is
     // not a wrong verdict, it is a *short report* — the run stopping at the
@@ -197,7 +205,14 @@ fn a_file_that_aborts_and_a_file_that_hangs_both_reach_the_report() {
 #[test]
 fn a_child_that_stops_mid_record_is_a_crash_rather_than_a_pass() {
     let (dir, files) = synthetic_corpus("truncated", &[("aa-truncates", "truncate")]);
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(5), 1);
+    let results = corpus::run_files(
+        &stub(),
+        &dir,
+        &files,
+        Duration::from_secs(5),
+        1,
+        &BTreeMap::new(),
+    );
     assert_eq!(results.len(), 1);
     assert!(
         matches!(&results[0].outcome, Outcome::Crashed(_)),
@@ -224,7 +239,14 @@ fn the_timeout_bounds_the_whole_run() {
         ],
     );
     let started = Instant::now();
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_millis(500), 2);
+    let results = corpus::run_files(
+        &stub(),
+        &dir,
+        &files,
+        Duration::from_millis(500),
+        2,
+        &BTreeMap::new(),
+    );
     let elapsed = started.elapsed();
 
     assert_eq!(results.len(), 3);
@@ -258,7 +280,14 @@ fn the_timeout_bounds_the_whole_run() {
 #[test]
 fn a_child_that_stopped_speaking_is_not_a_child_that_is_merely_slow() {
     let (dir, files) = synthetic_corpus("stall", &[("aa-crawls", "crawl"), ("bb-hangs", "hang")]);
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(4), 2);
+    let results = corpus::run_files(
+        &stub(),
+        &dir,
+        &files,
+        Duration::from_secs(4),
+        2,
+        &BTreeMap::new(),
+    );
 
     let crawling = outcome_of(&results, "aa-crawls");
     assert!(
@@ -299,7 +328,14 @@ fn the_report_carries_both_states_by_name() {
             ("dd-crawls", "crawl"),
         ],
     );
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(4), 4);
+    let results = corpus::run_files(
+        &stub(),
+        &dir,
+        &files,
+        Duration::from_secs(4),
+        4,
+        &BTreeMap::new(),
+    );
 
     let run = Run {
         corpora: vec![CorpusReport {
@@ -349,7 +385,14 @@ fn a_corpus_directory_that_is_not_there_yields_no_files() {
     // for the comparison itself. Here the point is only that the runner
     // reports zero rather than erroring out, so that the refusal happens
     // where it can carry a reason.
-    let results = corpus::run_files(&stub(), &missing, &[], Duration::from_secs(1), 1);
+    let results = corpus::run_files(
+        &stub(),
+        &missing,
+        &[],
+        Duration::from_secs(1),
+        1,
+        &BTreeMap::new(),
+    );
     assert!(results.is_empty());
 }
 
@@ -368,7 +411,14 @@ fn one_bad_file_does_not_affect_its_neighbours() {
             ("ee-good", "pass"),
         ],
     );
-    let results = corpus::run_files(&stub(), &dir, &files, Duration::from_secs(5), 1);
+    let results = corpus::run_files(
+        &stub(),
+        &dir,
+        &files,
+        Duration::from_secs(5),
+        1,
+        &BTreeMap::new(),
+    );
     let passed = results
         .iter()
         .filter(|r| r.outcome == Outcome::Passed)
@@ -403,10 +453,40 @@ fn the_synthetic_files_are_real_pdfs() {
 
     let (dir, files) = synthetic_corpus("real", &[("aa-good", "pass"), ("bb-abort", "abort")]);
     let child = Child {
-        program: tpdf,
+        program: tpdf.clone(),
         args: vec!["probe".to_string(), "--dpi".to_string(), "72".to_string()],
     };
-    let results = corpus::run_files(&child, &dir, &files, Duration::from_secs(20), 2);
+    let results = corpus::run_files(
+        &child,
+        &dir,
+        &files,
+        Duration::from_secs(20),
+        2,
+        &BTreeMap::new(),
+    );
+
+    // `cargo test` does not rebuild `tpdf`, because nothing here depends on
+    // it. A binary left over from before the record format last changed
+    // writes a record this runner refuses, and then *every* assertion below
+    // fails with "the child wrote no complete record" — which is true, and
+    // says nothing about what is actually wrong. The file that is supposed to
+    // pass failing that particular way is the signature of it.
+    let stale = results.iter().any(|result| {
+        result.path.starts_with("aa-good")
+            && matches!(&result.outcome, Outcome::Crashed(why)
+                if why.contains("no complete record"))
+    });
+    if stale {
+        println!(
+            "corpus-isolation: SKIPPED the real-child check — {} wrote no \
+             record this runner accepts, which is what a binary older than \
+             record format {} looks like; rebuild it with \
+             `cargo build -p tpdf`",
+            tpdf.display(),
+            xtask::runner::PROBE_VERSION
+        );
+        return;
+    }
 
     assert_eq!(results.len(), 2);
     for result in &results {

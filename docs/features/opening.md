@@ -17,7 +17,10 @@ formats, so it is opened once and asked what it is: an XPS package is
 recognised by ECMA-388 E.3's three steps, an EPUB by OCF's
 `META-INF/container.xml`, and anything else falls through to the comic-archive
 path — each synthesised into a real document with a real catalog and page
-tree. RAR, 7z and tar are refused by name. The signatures are tested at a
+tree. **A tar, a 7z and a RAR 5 open too** (tier 4), through
+`tinker-pdf-archive`; a RAR 4 is refused by its own signature, and a RAR 5
+entry this build cannot decompress is a placeholder page rather than a refused
+archive. The signatures are tested at a
 fixed position only, so a PDF carrying `PK\x03\x04` inside a stream is
 unaffected. See [cbz](cbz.md), [xps](xps.md) and [epub](epub.md); a
 reflowable book additionally takes `OpenOptions`, because its page count is a
@@ -76,6 +79,38 @@ null with a warning rather than hanging. The same code runs single-threaded
 on `wasm32-unknown-unknown`, which is why the input is bytes rather than a
 path: that target has no filesystem ([architecture](../architecture.md)).
 
+**Opening from a source rather than a buffer.** `Document::open_streaming`
+takes a `ByteSource` — length plus ranged reads, synchronous, with a typed
+miss — and reads what it needs. The engine performs no transport: `SliceSource`
+wraps bytes already in hand, and a host that fetches over HTTP range requests
+or a memory map implements the trait itself, exactly as it supplies fonts.
+Discovery is windowed: a head window for 7.5.2's header scan, the two
+`startxref` probes, then each cross-reference section as its own window. The
+same engine and the same answers — `streaming_determinism.rs` renders every
+fixture from a buffer, from a slice source and from one that answers a single
+byte at a time, and compares the pixels and the warnings.
+
+**Annex F, from the head.** A linearized file whose `/L` is the length of the
+file opens from its head alone: the first-page cross-reference section is
+parsed where it sits, `/O` names page one's page object so the page tree — whose
+root a linearized file may leave in the tail, and qpdf's linearizer does — is
+not walked, and **the page offset hint table places every page after it**.
+Table F.4 item 2 locates a page by accumulating the lengths of the pages before
+it; what the tables supply is that byte range and nothing else, because the
+objects inside it are read from the file's own `N G obj` headers and each one
+still passes `parse_at`'s header check. Hints accelerate, they never decide: a
+table that disagrees with the first-page section, or names a range whose
+leading object is not a page leaf carrying its own `/MediaBox` and
+`/Resources`, or whose runs do not begin one after another, gets
+`WarningKind::LinearizedHintsUnusable` or `LinearizedPageHintRejected` and the
+page tree walk instead. Page one of the
+60-page fixture costs **29,696 bytes of 1,631,075**, page 31 costs **37,888**,
+and neither reads the main cross-reference table at `/T`; `main_table_fetched`
+and `whole_file_fetched` are the observables that say so. What still costs the
+tail is declared: the page *count*, `xref()`, a repair rescan, a save, and a
+signature's byte range each fetch and warn first. See
+[design/streaming-open.md](../design/streaming-open.md).
+
 **Encryption at open.** An encrypted document opens perfectly well; the
 `/Encrypt` scalars are extracted and everything else waits. `readable()` is
 what separates "not a PDF" from "wants a password", and
@@ -98,6 +133,15 @@ second dependency. On `CosDocument`: `get`, `resolve`, `trailer`,
 `revisions`, `xref`, and the tiers `stream_raw_encrypted` / `stream_raw` /
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an
 image codec).
+
+The streaming seam adds `open_streaming(source)` and
+`open_streaming_with(source, &OpenOptions)`, the `ByteSource` trait with
+`SliceSource`, `CountingSource` and `ShreddedSource`, the `CHUNK_SIZE` the
+chunk cache reads in, and four observables a caller measures a streamed open
+by: `is_streamed()`, `first_page_end()` (Annex F's `/E`, `None` unless the
+head-only path engaged), `main_table_fetched()` and `whole_file_fetched()`.
+`complete_validation()` runs the eager offset probe a streamed open defers and
+returns the ladder level a buffered open would have reported.
 
 ```rust
 let bytes = std::fs::read("report.pdf")?;
@@ -122,7 +166,7 @@ exceed it routinely — declared in one place,
 | --- | --- | --- | --- |
 | Zero bytes | `OpenError::Empty` | Almost always a caller's bug — a path that did not exist — and telling that apart from a bad file matters | `crates/tinker-pdf/src/lib.rs` |
 | Nothing PDF-shaped | `OpenError::NotAPdf` | Not one indirect object found, even after a full rescan | `CosDocument::open` → `OpenError::NoObjects` |
-| RAR, 7z, tar | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | Recognised containers, refused by name: more decompressors, two of them encumbered, none of them a page | [cbz](cbz.md), [ROADMAP](../ROADMAP.md) |
+| A RAR 4 | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | Recognised by its own signature and refused as *that version*; no producer here can write one to hold a decoder to | [cbz](cbz.md), [design/comic-archives.md](../design/comic-archives.md) |
 | Encrypted, nothing authenticated | `DocumentError::PasswordRequired` | The document opened; reading it is the thing that waits | [encryption](encryption.md) |
 | Encryption handler not implemented | `DocumentError::UnsupportedEncryption` | A handler outside R2–R6 cannot be pretended at | [encryption](encryption.md) |
 | Decompression bomb | `WarningKind::Filter(Warning::OutputCapHit)` | `stream_decoded` output capped at `MAX_DECODED_STREAM` (128 MiB), so a 1 KB stream cannot buy unbounded memory | `limits.rs` |
@@ -135,8 +179,8 @@ exceed it routinely — declared in one place,
 
 ## Verified
 
-As of August 2026, `cargo test --workspace` runs 2 952 tests (0 failed,
-8 ignored, Windows x86_64), and the parts that cover opening are named
+As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
+58 ignored, Windows x86_64), and the parts that cover opening are named
 ([verification](../verification.md)):
 
 - **`crates/tinker-pdf-cos/tests/corrupt.rs`** — the ladder on damage built
@@ -160,13 +204,29 @@ As of August 2026, `cargo test --workspace` runs 2 952 tests (0 failed,
   values by ruling 12, which is why the enum stays `Copy + PartialEq + Eq`.
 - **Fuzzing** — `cos_document` (the whole file parser, every ladder rung
   reachable from arbitrary bytes, plus a bounded page-tree walk) and
-  `cos_object` are two of the 24 fuzz targets, run briefly in CI on every
+  `cos_object` are two of the 39 fuzz targets, run briefly in CI on every
   commit over committed seed corpora.
-- **Corpus** — 4 525 files, 4 484 of them rendered every page, 0 crashes
+- **Corpus** — 5 525 files, 5 516 of them rendered every page, 0 crashes
   (August 2026), in the ratcheted corpus run
   ([verification](../verification.md)); the canonical fixtures in
   `crates/tinker-pdf-cos/tests/document.rs` are mutool-written and must open
   at `Trust` with an empty warning list.
+- **`crates/tinker-pdf/tests/streaming_open.rs`** — what a streamed open
+  costs, in bytes, against committed budgets: the generic path, page one of a
+  linearized file, and page 31 of it. Annex F's hint tables are put to three
+  lies made one byte at a time out of a file that was correct before — a table
+  disagreeing with the first-page section, a page run whose leading object is
+  not a page, a hint stream the section places elsewhere — and each asserts the
+  same page comes out, off the page tree, with the leniency named — and a
+  fourth, a page length of zero, which is the one hint that could hand back the
+  page before it. Over the fetched qpdf corpus: 43 files open from their heads
+  and 41 draw the page one the page tree draws (the two exceptions are named,
+  and are files the walk cannot answer for at all); 29 of the 43 have a page
+  two, **every one of the 29 draws the page the main table draws**, and 20
+  reach it without that table.
+- **`crates/tinker-pdf/tests/streaming_determinism.rs`** — ruling 4 over a byte
+  source. Every fixture, linearized ones included, renders identically from a
+  buffer, from a slice source and from one answering a byte at a time.
 - **Determinism** — the 15 render fingerprints and 3 document byte-hashes all
   pass through `Document::open` first, so a change to opening moves them
   ([determinism](determinism.md)).

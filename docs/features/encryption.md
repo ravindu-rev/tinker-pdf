@@ -2,7 +2,10 @@
 
 The standard security handler, both directions: documents encrypted at any
 revision from R2 to R6 open, authenticate and decrypt, and documents are
-encrypted on save at R6 (AES-256). Every primitive — MD5, SHA-1, SHA-2,
+encrypted on save at R6 (AES-256). An *incremental* save is the one place the
+writer does not choose: it appends into a file whose `/Encrypt` still stands,
+so it re-encrypts with that file's own key and methods, whichever of the four
+they are ([writing](writing.md)). Every primitive — MD5, SHA-1, SHA-2,
 RC4, AES-CBC — is the project's own, living in the `tinker-pdf-crypto` leaf
 crate (bytes and plain scalars in, bytes and values out, no PDF types on
 its surface — ruling 8, [rulings](../rulings.md)), which is what lets it be
@@ -119,10 +122,40 @@ let bytes = doc.editor().save(&WriteOptions {
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| Public-key and vendor handlers (`Adobe.PubSec` and kin) | `AuthError::UnsupportedHandler` | only the `Standard` handler is implemented; a foreign `/Filter` is refused rather than guessed | [ROADMAP](../ROADMAP.md) Tier 3 |
+| A vendor's own `/Filter` | `AuthError::UnsupportedHandler` | only `Standard` and `Adobe.PubSec` are implemented; a foreign handler is refused rather than guessed | this page |
+| A password offered to a public-key document | `AuthError::UnsupportedHandler`, not `WrongPassword` | no password was ever going to work, and saying "wrong password" sends a caller looking for a better one | 7.6.5 |
+| Writing a public-key-encrypted document | none offered — reading only | sealing a key needs a certificate the engine has no business choosing | [design/pubsec.md](../design/pubsec.md) |
+| An envelope's content cipher this build does not implement — AES-192-CBC and RC2 are the reachable ones | `PubSecError::UnsupportedContentCipher` | AES-128/256-CBC, RC4 and `des-ede3-cbc` are implemented, the last being what OpenSSL still picks by default for older recipients; anything else is named rather than silently unopenable | [design/pubsec.md](../design/pubsec.md) |
+| Recipient shapes other than key transport | `EnvelopedError::UnsupportedRecipientKind` | key agreement, KEK and password recipients are recognised by tag and refused; every PDF public-key handler in the wild uses key transport | RFC 5652 §6.2 |
 | Writing R5 | none offered — the writer emits R6 and nothing else | R5 is the withdrawn draft; reading it works and carries `HandlerNote::DeprecatedRevision5` | [pdf20-deltas](../pdf20-deltas.md) |
-| Encrypting an incremental update | no typed variant: the incremental writer takes no cipher, so the combination cannot be requested | an update inherits the original file's encryption, which needs the original file key plumbed through | [ROADMAP](../ROADMAP.md) Tier 2 |
 | Wrong password / unencrypted document | `AuthError::WrongPassword`, `AuthError::NotEncrypted` | the ordinary API errors, typed so a prompt loop can tell them apart | — |
+
+## The public-key handler, and what it is not verified against
+
+`/Adobe.PubSec` (7.6.5) reads: `Document::authenticate_with_recipient` takes a
+[`Recipient`] the caller implements, hands it the sealed key and the identifier
+saying whose it is, and the caller does the one private-key operation this
+engine holds no key material to do. The envelope is CMS `EnvelopedData` and is
+parsed by `tinker-pdf-pki`; the file key is the digest 7.6.5 describes over the
+unsealed seed and every `/Recipients` string in file order.
+
+**It has no corpus behind it at all — zero of 5 605 files use this handler**
+(re-measured 15 September 2026; `/Adobe.PubSec` and `/Recipients` are each
+zero), and no tool available here produces one, qpdf included. So the evidence
+splits three ways, and only the middle layer is weak:
+
+- the envelope parsing is checked against structures **OpenSSL produced**,
+  which is real interop;
+- the **content ciphers are each held to published vectors** — FIPS 197 and
+  RFC 6229 as before, and since Triple DES landed, 500 NIST CAVP known answers
+  for `des-ede3-cbc`. That layer owes the corpus nothing;
+- the key derivation between them is checked against a second implementation
+  written from the same clause by the same author, which catches a
+  transcription slip and **cannot catch a misreading**.
+
+So a document this code opens is, at the derivation step, a document this code
+agrees with itself about. [design/pubsec.md](../design/pubsec.md) records that
+as an open risk rather than a footnote.
 
 ## Verified
 
@@ -131,7 +164,16 @@ FIPS 197 appendix C known-answer blocks and NIST SP 800-38A F.2 CBC
 vectors (`aes.rs`), FIPS 180-4 examples for SHA-256/384/512 (`sha2.rs`)
 and for SHA-1 including the million-`a` vector (`sha1.rs`), RFC 6229
 keystream vectors (`rc4.rs`), the complete RFC 1321 appendix A.5 suite
-(`md5.rs`). `handler.rs` pins constant-time comparison, Algorithm 2.B
+(`md5.rs`), and for Triple DES **500 NIST CAVP known answers** across seven
+committed files (`des.rs`) — the variable-plaintext and variable-key KATs,
+which between them walk every plaintext and every key bit position, the
+substitution-table, permutation-operation and inverse-permutation KATs, and
+the two multi-block message tests. The five KATs are all keyed
+`K1 = K2 = K3` and all single-block, so between them they cannot see EDE3's
+*order*, the CBC chain, or the 16-byte key bundle at all; the three-key file
+sees the first two and the two-key file the third, and a counted-injection
+campaign is how that was established rather than assumed. `handler.rs` pins
+constant-time comparison, Algorithm 2.B
 termination and the `/P -2056` fixture that reads "printing denied,
 copying permitted" correctly.
 
@@ -163,5 +205,5 @@ a handler the crate built itself, and `crypt_ciphers` drives the raw
 primitives; their committed seeds are written by a test inside
 `handler.rs` so seeds and carve order cannot drift, including the one
 pre-R6 seed that genuinely authenticates. All of it rides in the
-workspace suite: 2 952 passed, 0 failed, 8 ignored (Windows x86_64,
-August 2026) — [verification](../verification.md).
+workspace suite: 4 879 passed, 0 failed, 58 ignored (Windows x86_64,
+14 September 2026) — [verification](../verification.md).

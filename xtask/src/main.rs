@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
-use xtask::{corpus, fetch, release, repo_root, version};
+use xtask::{bench, corpus, fetch, fuzzaudit, parity, release, repo_root, version};
 
 const USAGE: &str = "\
 xtask — repository chores
@@ -19,9 +19,15 @@ usage:
   cargo xtask oracles   check that every program this repository spawns is
                         written down with a reason (ruling 13)
   cargo xtask vendor    check vendored data against THIRDPARTY.md and deny.toml
+  cargo xtask conflicts check that no unresolved merge marker is committed
   cargo xtask versions  check every manifest against the workspace version, and
                         `publish = false` where publishing would be wrong
-  cargo xtask check     all five of the above
+  cargo xtask fuzz      check the fuzz roster against `fuzz_targets`, the seed
+                        corpora and `fuzz/Cargo.toml`, which must agree
+  cargo xtask baseline  check the committed speed baseline against the
+                        operations `benches/engine.rs` defines and the count
+                        `bench.yml` guards — three files carrying one list
+  cargo xtask check     all eight of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -43,6 +49,21 @@ release options:
   cargo xtask nuget-stage        copy this machine's tinker-pdf-ffi cdylib into
                                  bindings/dotnet/runtimes/<rid>/native/
 
+  cargo xtask bindings-parity [options]
+                  run both write-parity scripts on all four surfaces and
+                  require byte-identical output. Non-zero on a mismatch OR on
+                  a surface that ran and printed no `WROTE sha256=` line at
+                  all, which is the failure that gets shipped. A surface whose
+                  artefact is not installed here is SKIPPED, by name and with
+                  the reason -- never silently
+
+bindings-parity options:
+  --require-all   a skipped surface is a failure. What CI passes
+  --python P      the interpreter that has the wheel installed (default:
+                  python; skipped when `import tinker_pdf` fails in it)
+  --node-dir D    a directory where the npm tarball has been installed
+                  (default: target/js-parity)
+
   cargo xtask synth-face [--out PATH]    write the synthetic face `--fonts
                                  synthetic` measures with, so it can be looked at
 
@@ -50,10 +71,11 @@ release options:
                                          fetch and verify the pinned corpora
   cargo xtask corpus-licences [--check]  the corpus lock's licence table
   cargo xtask corpus-run [options]       open and render every corpus file
+  cargo xtask bench-check --machine NAME  hold `cargo bench` to the committed baseline
 
 corpus-run options:
   --corpus NAME   only this one; repeatable
-  --timeout N     seconds per file before the child is killed (default 20)
+  --timeout N     seconds per file before the child is killed (default 60)
   --dpi D         render resolution (default 72)
   --fonts PATH    a face, or directory of faces, for documents embedding none
   --fonts synthetic
@@ -83,18 +105,27 @@ fn main() -> ExitCode {
         "libm" => report("libm", check_libm()),
         "oracles" => report("oracles", check_oracles()),
         "vendor" => report("vendor", check_vendor()),
+        "conflicts" => report("conflicts", check_conflicts()),
+        "fuzz" => report("fuzz", fuzzaudit::run(&repo_root(), rest).map(|_| ())),
         "versions" => report("versions", version::check(&repo_root())),
+        "baseline" => report("baseline", bench::check(&repo_root())),
         "check" => {
             let dag = check_dag();
             let libm = check_libm();
             let oracles = check_oracles();
             let vendor = check_vendor();
             let versions = version::check(&repo_root());
+            let conflicts = check_conflicts();
+            let fuzz = fuzzaudit::check(&repo_root());
+            let baseline = bench::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
             problems.extend(vendor.err().unwrap_or_default());
             problems.extend(versions.err().unwrap_or_default());
+            problems.extend(conflicts.err().unwrap_or_default());
+            problems.extend(fuzz.err().unwrap_or_default());
+            problems.extend(baseline.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {
@@ -115,9 +146,11 @@ fn main() -> ExitCode {
                 );
             }),
         ),
+        "bindings-parity" => one("bindings-parity", parity::run(&repo_root(), rest)),
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
         "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
+        "bench-check" => one("bench-check", bench::run(&repo_root(), rest)),
         "synth-face" => one("synth-face", synth_face(rest)),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
@@ -360,6 +393,204 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// types, independently fuzzable. A tree of plain structs is plain parameters,
 /// and `layout` is the twenty-fourth fuzz target precisely because it can be
 /// driven with no file of any kind in front of it.
+///
+/// **`pki` is the seventh amendment, and it is the fourth leaf-to-leaf edge.**
+/// `tinker-pdf-pki` holds ASN.1 DER, X.509 and — from milestone 3 —
+/// CMS, and it takes `tinker-pdf-crypto`. Two questions have to be answered
+/// separately: why the crate exists at all rather than being part of `crypto`,
+/// and why the edge between them is safe.
+///
+/// **Why it is not inside `tinker-pdf-crypto`, which is where a signature
+/// feature would obviously put it.** The two fail differently, and the way a
+/// thing fails is what decides how it has to be reviewed. `crypto` is
+/// *arithmetic*: its failure mode is a wrong number, and a wrong number is
+/// caught completely by published vectors — FIPS 197, RFC 6229, FIPS 180-4 are
+/// already merge gates there. ASN.1 is *untrusted-input structure walking*:
+/// its failure mode is a panic or a read past the end of a buffer on bytes an
+/// attacker chose, which no known-answer vector detects and which ruling 1's
+/// per-format fuzzers exist for. Merging them would put the largest new attack
+/// surface in the tree inside the one crate whose review story is "small,
+/// vector-gated arithmetic", and — the concrete cost — would leave DER
+/// reachable by a fuzzer only through `crypto`'s API, so a malformed
+/// certificate could be fuzzed only by first constructing a plausible
+/// `HandlerParams` around it. Apart, it is the twenty-fifth fuzz target and
+/// `fuzz/fuzz_targets/pki_der.rs` points straight at raw DER, which
+/// `docs/design/signatures.md:75-92` argues for and its risk table names as the
+/// mitigation for the largest risk it records.
+///
+/// **It is a leaf on ruling 8's definition, which is about public APIs.** X.509
+/// and CMS are not PDF concepts: bytes and plain parameters in, values out, no
+/// COS types, no `/ByteRange`, no signature dictionary. Everything PDF about a
+/// signature — which bytes a `/ByteRange` covers, what `/DocMDP` permits, what
+/// a verdict says — lives in the facade, the same split that keeps `zip`
+/// ignorant of what an archive entry is *for*.
+///
+/// **The edge itself.** The three properties that made `font -> filters`,
+/// `zip -> filters` and `layout -> css` acceptable hold unchanged. It points
+/// sideways from one leaf to another rather than upward, so the layering is not
+/// inverted. It cannot cycle, because `tinker-pdf-crypto` depends on nothing at
+/// all — the same sentence that carried the first two amendments, and it is
+/// still the whole of the cycle argument. And a sibling workspace crate is not
+/// a third-party dependency, so ruling 3 and CONTRIBUTING rule 1 are untouched.
+///
+/// What is taken across it *today* is one function: SHA-1, for RFC 5280
+/// §4.2.1.2's method (1) key identifier, which is the SHA-1 of a certificate's
+/// `subjectPublicKey` bits and which chain building needs when a certificate
+/// carries no `subjectKeyIdentifier` of its own. That is deliberately a real
+/// use rather than a placeholder, because this file's own history records the
+/// failure in the other direction — an edge in a manifest that nothing needs —
+/// and because RFC 5280's Appendix C.1 certificate states the identifier its
+/// own key produces, so the edge arrives with a published vector behind it.
+/// Milestones 4 and 5 of the design widen what crosses to RSA and ECDSA
+/// verification; the edge is declared once, here, and does not move when they
+/// land.
+///
+/// **`shape -> font` is the eighth amendment, and the fifth leaf-to-leaf
+/// edge.** `docs/design/shaping.md` makes the argument in two halves, and the
+/// interesting half is the one about a table that is *not* taken.
+///
+/// The edge itself is small and obvious. `tinker_pdf_font::Sfnt` already
+/// parses the table directory, and `tinker-pdf-shape` needs exactly that —
+/// the twelve-byte header and `table(tag)` — to find `GDEF`, `GSUB` and
+/// `GPOS`. A second reader of those twelve bytes in this workspace would be a
+/// second place for the same bug to live, and the design says so: *"one sfnt
+/// parser in the tree rather than two"*.
+///
+/// **What is not taken is the parsing of the layout tables themselves**, and
+/// that is the decision worth recording. The obvious move was to add `GSUB`
+/// and `GPOS` to `tinker-pdf-font` beside `cmap` and `hmtx`, and it was
+/// refused on the font crate's charter: that crate holds *the tables metrics
+/// need*, and a lookup is not a metric. Nothing in `tinker-pdf-content`,
+/// `tinker-pdf-render` or the facade asks a font what its ligatures are —
+/// they ask how wide a glyph is and what its outline looks like — so putting
+/// substitution rules there would widen a crate every layer above depends on,
+/// for one caller. It would also put the lookup fuzz target in the wrong
+/// crate: `fuzz_targets/shape.rs` drives the code it exercises directly,
+/// which it could not if that code lived behind `tinker-pdf-font`'s API.
+///
+/// The three properties that made the earlier leaf-to-leaf edges acceptable
+/// hold here, and the third of them is what makes the direction safe. It
+/// points **sideways to a leaf** rather than upward, so the layering is not
+/// inverted. It **cannot cycle**: `tinker-pdf-font` depends on
+/// `tinker-pdf-filters`, `tinker-pdf-filters` on nothing, and neither has any
+/// reason to know that shaping exists — an edge into a subtree with no path
+/// back is a tree, whatever else it is. And a sibling workspace crate is not a
+/// third-party dependency, so ruling 3 and CONTRIBUTING rule 1 are untouched:
+/// setting Arabic adds no crate from outside this repository.
+///
+/// It is a leaf on ruling 8's definition rather than on any list: face table
+/// bytes and glyph indices in, glyph indices and six integers out. There is no
+/// PDF vocabulary in its API and no CSS vocabulary either — the consumers in
+/// milestones 6 to 8 convert at their own boundaries.
+/// **`cos -> pki` is the ninth amendment, and it is not a leaf-to-leaf edge
+/// at all** — it is the same shape as `cos -> font`, which this file already
+/// argues for, applied to a second leaf.
+///
+/// ISO 32000-1 7.6.5's public-key security handler derives its file key from a
+/// seed sealed inside a CMS `EnvelopedData` in `/Recipients`. Two facts decide
+/// where that lives. A security handler is `tinker-pdf-cos`'s charter: it owns
+/// `/Encrypt`, `security.rs`, and the decryptor a document installs. And an
+/// `EnvelopedData` is DER, which is `tinker-pdf-pki`'s, for the reasons the
+/// seventh amendment gives about how structure-walking and arithmetic fail
+/// differently.
+///
+/// The alternative was putting the handler in the facade, which already
+/// depends on both. It was rejected on what it would have cost: installing a
+/// decryptor is `CosDocument`'s own operation, so a facade-level handler needs
+/// `set_decryptor_with_key` to become public — and a public "install this
+/// decryptor" on an opened document is a hole with no floor under it, offered
+/// so that a dependency edge could be avoided. An edge is cheaper than a
+/// footgun.
+///
+/// It points downward from a non-leaf to a leaf and cannot cycle, because
+/// `pki` depends only on `crypto` and `crypto` on nothing.
+/// **`svg -> xml`, `svg -> css` and `svg -> math` are the tenth amendment**,
+/// and it is the first entry here with three edges. Each one answers a
+/// question the others do not, which is why none of them collapses into
+/// another.
+///
+/// `xml`, because an SVG *is* XML and there is one XML parser in this tree.
+/// Taking it also inherits what that parser refuses by name — `<!DOCTYPE` with
+/// an internal subset, before one byte past it is read — and an SVG is the
+/// document type in this repository a caller is most likely to be handed by a
+/// stranger, since a book's cover page is somebody else's file. A second
+/// parser here would be a second answer to the entity-expansion question, and
+/// `deny.toml` already records that reasoning against `html5ever`.
+///
+/// `css`, for the tokenizer and the colour grammar. An SVG carries
+/// presentation attributes, `style=""` and `<style>` elements, and all three
+/// are CSS values. What is deliberately **not** taken is `ComputedStyle`: its
+/// forty-seven fields are HTML's property set and an SVG wants a different
+/// dozen, so this crate resolves its own. The edge buys the parsing and not
+/// the model, which is the distinction the sixth amendment drew when
+/// `tinker-pdf-layout` took the same edge for the opposite half.
+///
+/// `math`, and this one is ruling 4 rather than convenience. SVG 1.1 F.6.5's
+/// endpoint-to-centre conversion for the elliptical-arc command needs `cos`,
+/// `sin` and an `atan2`, and a platform transcendental on a path that decides
+/// where ink lands is exactly what `cargo xtask libm` fails a build over. The
+/// alternative considered and rejected was refusing `A` with a non-zero
+/// x-axis-rotation, which avoids the edge at the price of being unable to read
+/// a rotated ellipse that every drawing program emits. **The sixth amendment
+/// predicted this edge for `tinker-pdf-layout` and was wrong there** — nothing
+/// in a box model is transcendental — so it is worth saying why it is right
+/// here: a box has axes and an arc has an angle.
+///
+/// It is a leaf on ruling 8's definition rather than on its shape: bytes and a
+/// plain limits struct in, a display list of plain structs out. Markup in,
+/// geometry out, with no PDF vocabulary anywhere — the caller that turns a
+/// `Scene` into content-stream operators is the facade.
+///
+/// The direction is safe for the third amendment's reasons. All three edges
+/// point **down to leaves**, and none of `xml`, `css` or `math` has any reason
+/// to know that SVG exists, so there is no path back.
+///
+/// **`archive -> filters` is the eleventh amendment, and it is the eighth
+/// leaf-to-leaf edge.** The edge itself is the third copy of an argument this
+/// file has already made twice — `font -> filters` and `zip -> filters` — so
+/// what needs writing down is not the edge. It is the crate: **why
+/// `tinker-pdf-archive` exists at all instead of three modules inside
+/// `tinker-pdf-zip`.**
+///
+/// The answer is a measurement rather than a preference.
+/// `tinker_pdf_zip::Archive::read` returns a `Cow` and hands a **stored entry
+/// back borrowed**, copied nowhere, and that crate's own test suite pins it
+/// with the reason attached: *the moment this copies, a 3.6 GB peak comes
+/// back.* The comic path places image bytes into a PDF stream verbatim, so a
+/// copy per entry is a copy of the whole archive, and a 200-page scan is the
+/// size at which that stops being a detail.
+///
+/// tar keeps the property and strengthens it — every entry is a contiguous
+/// byte range of the input, so `tar::Archive::read` returns a plain `&[u8]`
+/// with no `Cow` at all. **7z cannot have it.** A solid block decodes many
+/// files from one LZMA stream, so there is no range in the input that is any
+/// one file and the read must return owned bytes in the general case. A trait
+/// unifying all four containers would therefore have to return the weakest
+/// signature of the four, which deletes the exact property that ZIP test
+/// exists to hold — in the crate that has it, to give four unrelated readers
+/// one name.
+///
+/// So there is no trait, and the two crates stay two. `tinker-pdf-zip`'s
+/// charter is recorded twice as APPNOTE 6.3.10 and nothing else
+/// (`docs/architecture.md`, and ruling 8's own example), and a crate whose
+/// charter names one specification is not the place to put three more.
+///
+/// What the new crate is instead: **one crate, three modules, three error
+/// enums, three entry types, and no trait over them.** What tar, 7z and RAR
+/// share is a negative — the archive containers that are not ZIP — which is
+/// weaker than `filters`' "decoders" and is honestly weaker. It is still real,
+/// and it buys one node and one edge here instead of three of each. The
+/// failure it avoids is visible one layer up and is why the rule is written
+/// into the crate's own header: `tinker_pdf::ArchiveRefusal` is a
+/// twenty-variant union of three formats' vocabularies of which only seven are
+/// reachable from a comic archive, because three formats were once given one
+/// enum to fail through.
+///
+/// The edge points down into `filters` for two things and no third: CRC-32,
+/// which 7z and RAR both record per file and which is the whole of this
+/// crate's verification argument, and `inflate_raw`, because 7z method 040108
+/// is RFC 1951 with no wrapper exactly as ZIP method 8 is. It cannot cycle,
+/// because `filters` depends on nothing.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -367,7 +598,21 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-filters", &[]),
     ("tinker-pdf-crypto", &[]),
     ("tinker-pdf-font", &["tinker-pdf-filters"]),
+    // The fourth leaf-to-leaf edge: ASN.1 is structure walking on hostile
+    // bytes, `crypto` is vector-gated arithmetic, and they are reviewed and
+    // fuzzed differently. See the seventh amendment above.
+    ("tinker-pdf-pki", &["tinker-pdf-crypto"]),
     ("tinker-pdf-zip", &["tinker-pdf-filters"]),
+    // The fourteenth leaf, and the eighth leaf-to-leaf edge. A second
+    // archive crate rather than three more modules in `tinker-pdf-zip`,
+    // because that crate hands a stored entry back **borrowed** and a 7z solid
+    // block cannot. See the eleventh amendment above.
+    //
+    // Filed here next to `zip` because that is where it is read from, but
+    // numbered last: the ordinals in this table are positions in
+    // `docs/architecture.md`'s leaf list, and inserting into the middle of
+    // that list renumbers every comment below.
+    ("tinker-pdf-archive", &["tinker-pdf-filters"]),
     // The eighth leaf, and the first with nothing under it since `crypto`.
     ("tinker-pdf-xml", &[]),
     // The ninth, and the fourth crate here with no internal dependency at all.
@@ -378,12 +623,75 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // which gap 31's plan predicted and milestone 7 answered: nothing here is
     // transcendental. See the sixth amendment above.
     ("tinker-pdf-layout", &["tinker-pdf-css"]),
+    // The eleventh, and the fourth leaf-to-leaf edge. It takes the sfnt table
+    // directory and nothing else; the OpenType Layout tables are parsed here
+    // rather than in `font` because that crate's charter is the tables
+    // metrics need. See the eighth amendment above.
+    ("tinker-pdf-shape", &["tinker-pdf-font"]),
+    // The thirteenth leaf, and the only one here with three edges. See the
+    // tenth amendment above.
+    (
+        "tinker-pdf-svg",
+        &["tinker-pdf-xml", "tinker-pdf-css", "tinker-pdf-math"],
+    ),
     ("tinker-pdf-color", &["tinker-pdf-math"]),
-    ("tinker-pdf-raster", &["tinker-pdf-math"]),
+    // The sixth leaf-to-leaf edge, and the fourteenth amendment. A `/Lab`
+    // transparency group composites in Lab (11.4.7), so `Canvas` needs a
+    // buffer whose components are `L*a*b*` and therefore needs to put an sRGB
+    // colour *into* that space and read one back out.
+    //
+    // The alternative was to copy the two XYZ matrices into this crate, and
+    // this repository has already watched that pair drift apart once when it
+    // existed in two places -- `tinker-pdf-color`'s own comment records it.
+    // Ruling 8 admits a leaf-to-leaf edge; a duplicated constant is what it
+    // does not admit.
+    (
+        "tinker-pdf-raster",
+        &["tinker-pdf-math", "tinker-pdf-color"],
+    ),
     // File syntax and the object model.
     (
         "tinker-pdf-cos",
-        &["tinker-pdf-filters", "tinker-pdf-crypto", "tinker-pdf-font"],
+        &[
+            "tinker-pdf-filters",
+            "tinker-pdf-crypto",
+            "tinker-pdf-font",
+            // The public-key security handler's envelope is DER. See the
+            // ninth amendment above.
+            "tinker-pdf-pki",
+            // Shaping milestone 8, and the argument is worth writing out
+            // because the obvious alternative was tried on paper first.
+            //
+            // `src/fill.rs` builds a text field's appearance stream (12.7.4.3)
+            // from the field's own `/V`. It is the **only** producing path in
+            // this tree whose entry point takes a string and no glyphs:
+            // `build.rs`'s `glyph_run` takes glyphs a caller positioned, which
+            // is exactly why milestone 7 wired shaping in above this crate and
+            // added no edge at all. `DocumentEditor::set_field_value(name,
+            // value)` has nowhere to put such a seam.
+            //
+            // The alternative considered and rejected: a `dyn Shaper` on
+            // `DocumentEditor`, supplied from the facade. It fails on its own
+            // terms twice. The facade **re-exports** `DocumentEditor`
+            // verbatim rather than wrapping it, so a seam only the facade
+            // filled would leave `tinker_pdf_cos::DocumentEditor` — a
+            // published crate's public API — still writing `?` for Arabic
+            // while the identical re-export did not: two answers to one
+            // question, which is the failure `metrics.rs` argues against by
+            // name. And a seam the *caller* fills leaves the default broken,
+            // which is the whole defect milestone 8 exists to close.
+            //
+            // What the edge does not cost: it points down into a leaf, the
+            // direction ruling 8 allows without argument, and this crate hands
+            // it face bytes and a `&str`, so `tinker-pdf-shape` learns no PDF
+            // vocabulary. The reading half of the non-goal stays structural
+            // rather than merely stated: `tinker-pdf-content` and
+            // `tinker-pdf-render` have no edge to it, and this crate does not
+            // interpret content streams at all — the only text it *writes* is
+            // an appearance it built itself, and the only text it reads is a
+            // string in an object.
+            "tinker-pdf-shape",
+        ],
     ),
     // Content interpretation emits to a `Device`; it never rasterizes.
     (
@@ -412,9 +720,45 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "tinker-pdf-filters",
             "tinker-pdf-color",
             "tinker-pdf-zip",
+            // Tier 4's W-ARCHIVE lane. `src/cbz.rs` reads a `.cbt`, a `.cb7`
+            // and a `.cbr` through it, and the facade is where the four
+            // containers converge because deciding what a page *is* needs
+            // document types and a leaf may not have them (ruling 8). The edge
+            // goes down into a leaf, which ruling 8 allows without argument.
+            "tinker-pdf-archive",
             "tinker-pdf-xml",
             "tinker-pdf-css",
             "tinker-pdf-layout",
+            // Tier 4's SVG lane, milestone 7. `src/epub/svg.rs` turns a
+            // `Scene` into content-stream operators, which is what makes an
+            // SVG spine item a page that draws. The edge goes down into a
+            // leaf, which ruling 8 allows without argument — and it is the
+            // facade rather than the leaf that knows what a PDF operator is,
+            // which is the whole reason the seam is here.
+            "tinker-pdf-svg",
+            // Signatures milestone 3. The facade is where a signature verdict
+            // is assembled (milestone 6), so it is the one crate that must be
+            // able to turn a `/Contents` blob into a `SignedData` — and the
+            // edge goes *down* into a leaf, which is the direction ruling 8
+            // allows without argument. What needed the argument was the other
+            // half: `tinker-pdf-pki` still has no PDF vocabulary and still
+            // does not know what a document is, so adding this edge did not
+            // buy the leaf a reason to acquire one.
+            "tinker-pdf-pki",
+            // Shaping milestone 6. The facade is where a *producing* path
+            // meets a face: `BookMetrics` implements the layout crate's
+            // `Shaper` seam over a book's own `@font-face` faces, and
+            // `DocumentBuilder::glyph_run` writes what comes back. The edge
+            // goes down into a leaf, which ruling 8 allows without argument,
+            // and the direction matters: `tinker-pdf-layout` gains **no** edge
+            // for this, because the trait is plain structs and `f64` and a
+            // leaf that had acquired a shaper would have stopped being one.
+            //
+            // Nothing in `tinker-pdf-render` reaches it. Shaping while
+            // *reading* a PDF stays the permanent non-goal it was — the
+            // producer positioned every glyph and re-shaping them would be
+            // wrong — and `docs/features/fonts.md` keeps that row.
+            "tinker-pdf-shape",
         ],
     ),
     // Ruling 11: bindings sit on the facade only.
@@ -479,11 +823,21 @@ fn report(task: &str, outcome: Result<(), Vec<String>>) -> ExitCode {
 /// the MSVC runtime, Apple's libm and the wasm shim each round them their own
 /// way. `tinker-pdf-math` exists to replace them; this makes sure nobody
 /// quietly goes back.
+/// **`tinker-pdf-svg` is the fifth, added when it stopped being geometry alone.**
+/// Its `Cargo.toml` already argues the `tinker-pdf-math` edge on ruling 4 —
+/// F.6.5's endpoint-to-centre conversion needs `cos`, `sin` and an `atan2` and
+/// *"a platform transcendental on a path that decides where ink lands is
+/// exactly what `cargo xtask libm` fails the build over"*. That sentence was
+/// true and this check was not looking, so the rule was a comment rather than a
+/// check for as long as the crate had one file in it. It passes on the day it
+/// is added, which is the point: a list a crate joins only once it has already
+/// broken the rule is a list that ratifies the breakage.
 const PIXEL_PATHS: &[&str] = &[
     "tinker-pdf-raster",
     "tinker-pdf-color",
     "tinker-pdf-render",
     "tinker-pdf-content",
+    "tinker-pdf-svg",
 ];
 
 /// Method calls that are not correctly rounded, and so differ between
@@ -575,15 +929,16 @@ fn check_libm() -> Result<(), Vec<String>> {
 ///   bytes this repository then verifies against its own SHA-256; `cargo`
 ///   builds and publishes; the child the corpus runner spawns is a workspace
 ///   binary built from the same revision.
-/// - **A debt, with a milestone against it.** The XPS render comparison, the
-///   browser and epubcheck. Each is an oracle of retired ruling 9, still
-///   running because ruling 13's order is fixed: nothing is deleted before the
-///   first-party check replacing it exists and has been injection-counted.
-///   Each row names the step of the roadmap's first-party-verification item
-///   that removes it. The four qpdf tests left in step 3 with the strict
-///   validator, and `xps_mutool.rs` left in step 4 with the conservation
-///   suite — every one of their rows leaving in the same commit as the test it
-///   allowed, which is the half of this check that catches a stale allowance.
+/// - **A debt, with a milestone against it.** None remain. The XPS render
+///   comparison, the browser and epubcheck were oracles of retired ruling 9,
+///   kept until ruling 13's order was met: nothing deleted before the
+///   first-party check replacing it existed and had been injection-counted.
+///   Each row named the roadmap step that removed it. The four qpdf tests left
+///   in step 3 with the strict validator, `xps_mutool.rs` in step 4 with the
+///   conservation suite, the browser and epubcheck in step 5 — every row
+///   leaving in the same commit as the test it allowed, which is the half of
+///   this check that catches a stale allowance. The `DEBT (step N)` spelling
+///   stays legal so that a future oracle cannot be filed as a fact of life.
 ///
 /// The check runs both ways. A file that spawns something and is not here is
 /// a build failure — that is the boundary. And a row here whose file no
@@ -602,11 +957,27 @@ const SPAWNERS: &[(&str, &str)] = &[
         "PERMANENT: the same compile-refusal proof for a layout field",
     ),
     (
+        "crates/tinker-pdf-cos/tests/display_string_does_not_reach_v.rs",
+        "PERMANENT: spawns `rustc` to ask this repository's own compiler \
+         whether this repository's own type refuses a state; it adjudicates \
+         nothing about a document. The state is a format action's display \
+         string reaching `/V` (12.7.3.3), and the four write doors are \
+         injected one at a time against the real rlib rather than a copy of \
+         the type",
+    ),
+    (
         "xtask/src/fetch.rs",
-        "PERMANENT: `curl` and `tar` fetch and unpack the pinned corpora. \
+        "PERMANENT: `curl`, `tar` and `unzip` fetch and unpack the pinned \
+         corpora -- `unzip` since 6 September 2026, because the \
+         production corpus is published as a `.zip` and GNU tar does \
+         not read one. \
          Supplying, not adjudicating — and nothing fetched is trusted: the \
          archive is verified against this project's own SHA-256 before it is \
          unpacked",
+    ),
+    (
+        "xtask/src/fuzzaudit.rs",
+        "PERMANENT: `cargo check` over `fuzz/`, which is its own workspace and          so is stepped past by every `--workspace` command. Build machinery,          which reads no document and adjudicates none",
     ),
     (
         "xtask/src/release.rs",
@@ -618,6 +989,25 @@ const SPAWNERS: &[(&str, &str)] = &[
         "PERMANENT: spawns the corpus child, which is `tpdf` built from this \
          revision into the same directory as the runner. A workspace binary, \
          resolved as a sibling rather than from PATH for exactly that reason",
+    ),
+    (
+        "xtask/src/corpus.rs",
+        "PERMANENT: asks that same sibling `tpdf` what record format it writes, \
+         once, before a run spawns it per file. It adjudicates nothing about a \
+         document — the question is what this repository's own binary is, and \
+         the answer only decides whether to refuse the run",
+    ),
+    (
+        "xtask/src/parity.rs",
+        "PERMANENT: spawns `cargo`, `python`, `node` and `dotnet` as *hosts* \
+         for this repository's own code. Each loads this engine — as a cargo \
+         example, an installed wheel, an installed npm package, an installed \
+         NuGet package — and runs a script this repository wrote. Ruling 13's \
+         line is between hosting and adjudicating, and every judgement here is \
+         first-party: the bytes are hashed against a number recorded in \
+         parity.rs, and each surface re-opens its own artefact through this \
+         engine's strict structural validator before reporting one. No \
+         third-party program reads, writes or judges a document",
     ),
 ];
 
@@ -916,6 +1306,107 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Every directory a conflict marker could hide in.
+///
+/// The tree rather than a crate list, because the file that got through was a
+/// feature doc: a marker in prose compiles perfectly and reads as a paragraph
+/// somebody meant to write.
+const CONFLICT_ROOTS: [&str; 7] = [
+    "crates", "docs", "fuzz", "xtask", "tools", "bindings", "corpus",
+];
+
+/// `cargo xtask conflicts` — no unresolved merge marker is committed.
+///
+/// This exists because one was. A merge printed four conflicts, the command
+/// that ran it truncated the output, two were resolved and two were not, and
+/// `git add -A` staged the rest; `crates/tinker-pdf-filters/src/lib.rs` stopped
+/// compiling and `docs/features/cbz.md` grew a marker in the middle of a
+/// sentence. The compiler caught the first within the minute. **Nothing at all
+/// would have caught the second** — `check` does not read prose, and a marker
+/// in a paragraph is a paragraph.
+///
+/// Only `<<<<<<<` and `>>>>>>>` are looked for, each with the space git writes
+/// after it. A bare `=======` is deliberately not a marker here: seven equals
+/// signs under a line is Markdown's setext H1, and this file's own docs use it.
+fn check_conflicts() -> Result<(), Vec<String>> {
+    let root = repo_root();
+    let mut problems = Vec::new();
+
+    for dir in CONFLICT_ROOTS {
+        let mut files = Vec::new();
+        collect_text_files(&root.join(dir), &mut files);
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            for (number, line) in text.lines().enumerate() {
+                if is_conflict_marker(line) {
+                    let shown = file
+                        .strip_prefix(&root)
+                        .unwrap_or(&file)
+                        .display()
+                        .to_string();
+                    problems.push(format!(
+                        "{shown}:{}: an unresolved merge marker",
+                        number + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// Whether a line is one of git's conflict markers.
+///
+/// The space is load-bearing on both. Git writes `<<<<<<< ` and `>>>>>>> `
+/// with a label after them, so the space is always there — and requiring it is
+/// what keeps a row of seven angle brackets in an ASCII diagram from being a
+/// merge conflict. A bare `=======` is deliberately not a marker: seven equals
+/// signs under a line is Markdown's setext H1 and this repository's docs use
+/// it, so flagging it would fail on prose that is exactly right.
+fn is_conflict_marker(line: &str) -> bool {
+    line.starts_with("<<<<<<< ") || line.starts_with(">>>>>>> ")
+}
+
+/// Every file worth reading as text, for [`check_conflicts`].
+///
+/// Extension-led rather than exhaustive: a marker inside a `.png` is not a
+/// marker, and reading every byte of the vendored trees to find out would cost
+/// more than the check is worth.
+fn collect_text_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    const TEXT: [&str; 9] = [
+        "rs", "toml", "md", "yml", "yaml", "json", "css", "sh", "ps1",
+    ];
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // `target` is build output and `corpus/cache` is fetched bytes;
+            // neither is committed and both are enormous.
+            let skip = path
+                .file_name()
+                .is_some_and(|n| n == "target" || n == "cache" || n == ".git");
+            if !skip {
+                collect_text_files(&path, out);
+            }
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| TEXT.contains(&e))
+        {
+            out.push(path);
+        }
+    }
+}
+
 fn check_dag() -> Result<(), Vec<String>> {
     let root = repo_root();
     let crates_dir = root.join("crates");
@@ -1030,7 +1521,7 @@ mod tests {
         for (file, reason) in SPAWNERS {
             assert!(
                 reason.starts_with("PERMANENT: ") || reason.starts_with("DEBT ("),
-                "{file}: a reason must begin `PERMANENT: ` or `DEBT (step N): `,                  so that a debt cannot be filed as a fact of life: {reason}"
+                "{file}: a reason must begin `PERMANENT: ` or `DEBT (step N): `, so that a debt cannot be filed as a fact of life: {reason}"
             );
             assert!(
                 reason.len() > 40,
@@ -1126,5 +1617,26 @@ allow = [
         if let Err(problems) = check_vendor() {
             panic!("vendored data and THIRDPARTY.md disagree:\n{problems:#?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::is_conflict_marker;
+
+    /// The two shapes git writes, and the four that are prose.
+    #[test]
+    fn a_marker_is_a_marker_and_a_setext_heading_is_not() {
+        assert!(is_conflict_marker("<<<<<<< HEAD"));
+        assert!(is_conflict_marker(">>>>>>> worktree-agent-abc123"));
+
+        // Markdown's setext H1, which `docs/` uses and which shares the middle
+        // marker's bytes exactly. Flagging it would fail on correct prose.
+        assert!(!is_conflict_marker("======="));
+        assert!(!is_conflict_marker("======================"));
+        // No label, so not something git wrote.
+        assert!(!is_conflict_marker("<<<<<<<"));
+        // Not at the start of the line.
+        assert!(!is_conflict_marker("    <<<<<<< HEAD"));
     }
 }

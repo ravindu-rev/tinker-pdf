@@ -5,7 +5,9 @@ When this is done, a caller holding a byte *source* rather than a byte
 requests (RFC 9110) — will open a document and render page one before most
 of the file has been read, with a byte counter proving it: for a linearized
 file (ISO 32000-1 Annex F) not one read touches the tail. The
-[roadmap](../ROADMAP.md) names this gap and its unusual advantage: the
+roadmap named this gap and its unusual advantage (the item has since closed,
+and the hint-table gap below is what the [roadmap](../ROADMAP.md) still
+carries): the
 reader's spec-complete counterpart is already in-tree, because the writer
 produces Annex F output whose hint tables are read back bit-for-bit by this
 repository's own tests. The reader is also what closes an old gap in that
@@ -29,10 +31,9 @@ operations that still need every byte.
   (`tinker_parity.rs` compares it, ruling 12).
 - Incremental discovery: header window, `startxref` tail window, xref chain
   walked section-by-section — never the whole file for an undamaged one.
-- The linearized fast path: promote the hint-table reader living in
-  `linearize.rs`'s test module (`BitReader`, `read_page_offsets`,
-  `read_shared_objects`) into a production `linearize::hints` module, and
-  use it so page one costs only head-of-file reads.
+- The linearized fast path: read the hint tables with
+  `validate::hints`, the production decoder that already exists, so page one
+  costs only head-of-file reads. **Amended August 2026** — see milestone 3.
 - The lazy store re-keyed on ranges: `CosDocument`'s loads fetch bounded
   windows instead of indexing one whole buffer.
 - Honest degradation: every whole-file dependency (repair rescan, container
@@ -112,8 +113,9 @@ fetch the hint stream at `/H` (offset, length), and hand it to
 the page-offset table (F.4.1) yields each page's object run and byte span,
 the shared-object table the groups pages share. Page one's objects all lie
 below `/E`, so rendering it is head reads only; `/Encrypt`, when present,
-is object 3 in the head by this writer's own layout, so authentication
-needs no tail either. The main table at `/T` is fetched only when a read
+is numbered inside the head group by this writer's own layout — directly
+after the parameter dictionary — so the front section places it and
+authentication needs no tail either. The main table at `/T` is fetched only when a read
 leaves page one. Hints are attacker-controlled bytes: they are an
 accelerator, never an authority — every object still passes `parse_at`'s
 header check, and a hint that lies falls back to the generic path with a
@@ -180,15 +182,230 @@ against `SliceSource`.
 |---|---|---|---|
 | 1 | `ByteSource`, `SliceSource`, `CountingSource`, `ShreddedSource`; `Backing` behind `CosDocument` | Full workspace suite green with `SliceSource`; `determinism.rs` fingerprints byte-identical over `ShreddedSource`; no public-signature change flagged by `tinker_parity.rs` | M |
 | 2 | Incremental tail-first discovery (generic path) | New `streaming_open.rs` test: a multi-megabyte committed fixture opens and reads one mid-file object with `CountingSource` total under a committed byte budget (ratchet-style number, `--check`ed like `corpus/ratchet.json`) | M |
-| 3 | `linearize::hints` promoted from `linearize.rs` tests to production | Existing round-trip tests re-pointed at the production module; the reader parses the hint tables of every already-linearized file in the fetched qpdf corpus — files this project did not write — and the count parsed is asserted so a shrinking set cannot read as a passing one | S |
+| 3 | One hint-table reader: `validate::hints`, re-pointed and widened | Existing round-trip tests re-pointed at the production module and the test-only reader in `linearize.rs` deleted; the reader parses the hint tables of every already-linearized file in the fetched qpdf corpus — files this project did not write — and the count parsed is asserted so a shrinking set cannot read as a passing one | S |
 | 4 | Linearized fast path + `Document::open_streaming` + page-one render | Test renders page one of (a) a writer-linearized fixture and (b) a linearized file from the fetched qpdf corpus, asserting via `CountingSource` that **zero read ranges intersect the tail** past `/E` and total bytes stay under budget; `/L` mismatch provably falls back to the generic path | L |
 | 5 | Honest degradation + wasm host loop | Damaged fixture on a streamed source reaches `LadderLevel::Rescan` with `WholeFileFetched` warned; `hostile_input.rs` sweep runs over `ShreddedSource` with zero panics; `bindings/js` demo feeds ranges and draws page one, checked in the existing wasm CI job shape | M |
+
+## Amendment, August 2026: milestone 3 is one reader, not a promotion
+
+The row above said the hint-table reader was test-only, living in
+`linearize.rs`'s test module, and had to be promoted into a production
+`linearize::hints`. That was stale when it was written. A production decoder
+already existed at `crates/tinker-pdf-cos/src/validate/hints.rs` — bounds
+checked before each field is consumed, `width > 32` refused, entry counts
+guarded — already consumed from `validate.rs` and already run against
+qpdf-corpus files this project did not write. Promoting a third reader into
+existence would have left the tree with three readers for one format.
+
+So milestone 3 is reuse and re-point. `validate::hints` becomes crate-visible,
+the test-only reader in `linearize.rs` is deleted, and the round-trip tests
+that drove it drive the production decoder instead. Making one reader carry
+both jobs is what surfaced the disagreement between them: Table F.4 item 5,
+the fractional-position numerator, is written once per shared object
+*reference* and the production decoder read one per *page*. Both readings
+agree on every linearized file in the qpdf corpus, because all of them state
+item 12 as zero bits — which is exactly why a second reader could disagree
+for as long as it existed without a file noticing, and why the discriminating
+case is now a hand-packed table in the decoder's own tests.
+
+## As built, August 2026
+
+All five milestones landed. What differs from the design above is written here
+rather than quietly, because a design doc that describes a plan the code did
+not follow is worse than no design doc.
+
+### The fast path reads `/O` and the first-page section, not the hint tables
+
+The design said page one would be found through the page-offset hint table.
+It is found through Annex F part 3 -- the first-page cross-reference section,
+which sits in the head and is parsed by the same walker every other section
+goes through -- and through `/O`, which names the first page's object number
+outright (F.3.3, Table F.1).
+
+`/O` turned out not to be an optimisation but a requirement, and the corpus is
+what said so. **A linearized file is free to leave the page tree root in the
+tail, and qpdf's linearizer does**: `lin1.pdf`'s first-page section covers
+objects 60 to 78, its catalogue is 61, and its page tree root is not in the
+head at all. A page-one render that insisted on walking the tree fetched the
+end of every such file to draw the front of it. So `pages::at(doc, 0)` builds
+the page from `/O` with nothing inherited -- by the same function the tree walk
+uses -- and declines, letting the walk run, when the page does not carry its
+own `/MediaBox` and `/Resources`. A page laid out at US Letter because its
+ancestor was not fetched is the wrong page, not a cheaper one.
+
+### Page *N* is found through the hint tables, and only their ranges are believed
+
+*September 2026.* The paragraph that stood here said the hint tables were read
+by `validate::hints` and its corpus sweep and were **not** on the open path,
+which made every page but the first cost the main cross-reference table. They
+are on it now.
+
+What the tables supply is a **byte range per page** and nothing else. Table F.4
+item 2 places a page by accumulating the lengths of the pages before it and
+says a reader "shall skip over the primary hint stream, wherever it is
+located"; F.4's own rule is that every position a hint table states is written
+as though that stream were not in the file, so one at or past its offset gets
+its length added back. Table F.4 item 1 makes the page's own page object the
+first object of its run. So `CosDocument::hinted_page_object` computes the
+range, fetches it, and reads the `N G obj` headers *inside* it — the same
+statement the repair scanner believes over a whole document at ladder level 3
+— and records where each object was found. Every one of those offsets is
+checked again by `parse_at` when the object loads.
+
+That is what "hints accelerate, never decide" comes to in code, and it is
+stronger than a check after the fact: **almost no value comes from a hint at
+all.** A table that names the wrong bytes costs a window nobody uses. Three
+things are checked anyway, and the third is the one that matters —
+
+- Table F.3 item 2, the first page's location, must be the offset the
+  first-page section gives for the object `/O` names, which is the other route
+  Table F.4 item 2 offers. Compared through `xref::offset_candidates` rather
+  than by equality, because both numbers are offsets *the file* stated and
+  7.5.2 measures those from `%PDF-`;
+- the leading object of a page's run must be a page leaf carrying its own
+  `/MediaBox` and `/Resources`, by the same rule `/O` is held to;
+- **each run must begin strictly after the one before it.** This is the only
+  hint here that can change an *answer* rather than a cost, and a zero in the
+  counted injection campaign is what found it — the question "what would make
+  the leaf test catch something" had an answer nobody wanted: a table stating
+  page one's length as
+  zero puts page two's run at page one's page object — a page leaf with its
+  own `/MediaBox` and `/Resources`, so every other check passes it — and
+  `page(1)` comes back holding page one's content under index 1. Silently,
+  cheaply, and wrong.
+
+A file that fails any of them gets `WarningKind::LinearizedHintsUnusable` or
+`LinearizedPageHintRejected` and the page tree walk, which fetches the main
+table and is never wrong, only slower.
+
+The first form of that third check also asked for a page after the first to
+begin at or past `/E`, and it **refused eight corpus files that are perfectly
+well linearized.** Table F.3 item 4 measures a page's length from its page
+object to the last byte of the last object it *uses*, while `/E` ends part 6,
+and F.3.5 puts things in part 6 the first page does not use — an outline
+hierarchy, when the catalogue asks for one. The two are not the same number,
+and a check built on their being equal measured this reader's assumption
+rather than the file.
+
+Object *numbers* are deliberately not derived. F.3.1 numbers the remaining
+pages' objects from 1 and the first page's after them, and Table F.4 item 1
+repeats the rule — but a reader that derived numbers would be believing a hint,
+and this one reads them off the file's own headers instead. That was not a
+theoretical preference while this project's own linearizer numbered the two
+groups the other way round; it numbers them F.3.1's way as of 20 September
+2026, and the reader is unchanged, because it never asked. What does derive
+the numbers, and says so, is
+`crates/tinker-pdf-cos/tests/linearized_numbering.rs` and
+`validate/hints.rs`'s `annex_f_numbering` — a test rather than a read path,
+which is the whole distinction.
+
+The shared object hint table comes along for the same ride. Table F.6 item 1
+places part 8's groups by accumulating from Table F.5 item 2, and Table F.4
+item 4 says which of them a page names, so a font or a colour space several
+pages share is fetched with the page that needs it rather than through the
+table at `/T`.
+
+### Measured
+
+| What | Fixture | Bytes |
+|---|---|---|
+| Open, generic path | generated, 120 pages, 4,891,065 bytes | 13,753 |
+| Open plus one mid-file object | the same | 67,001 |
+| Page-one render, linearized | generated, 60 pages, 1,631,075 bytes, `/E` 28,222 | 29,696 |
+| Page-31 render, same document untouched | the same | 37,888 |
+| Page 31 after page one, marginal | the same | 32,768 |
+
+43 of the qpdf corpus's 45 already-linearized files open from their heads and
+render page one; `badlin1.pdf` is the only one whose render reaches past `/E`,
+and it is qpdf's deliberately damaged linearization fixture, whose declared
+`/E` is not where its first page ends.
+
+**Page one is compared now rather than counted**, which `/O` had never been
+held to: 41 of the 43 draw the page the page tree walk draws, and the two that
+do not are two the walk cannot answer for at all. Both are sealed under a
+password the sweep does not have, and the difference is which route survives
+that — `/O` names the object outright and a page dictionary is structure rather
+than content, so the head path builds a page and draws whatever its content
+stream decrypts to, which is nothing; the walk cannot start, because the
+catalogue is inside an object stream and an object stream is a stream. Named in
+`PAGE_ONE_ONLY_FROM_THE_HEAD` rather than excluded, because it is a real
+difference between two routes to the same page.
+
+**29 of those 43 have a second page to ask for, and every one of them draws the
+page the main table draws** — compared bitmap against bitmap, because a cheap
+render of the wrong page passes every byte budget there is. **20 of the 29
+reach it without the main table at all.** The nine that do not are two families
+and no others, named in `streaming_open.rs`: five are encrypted under a
+password the sweep does not have, so their hint stream is ciphertext and
+refusing to read it is the right answer, and four are qpdf's damaged
+linearization fixtures, three of which `validate::hints` already refuses by
+name. A sealed document that is then given its password reads its tables at
+once — `install_security` drops the refusal with everything else that was read
+as plaintext out of ciphertext.
+
+### Three things that had to shrink
+
+Every one of them was a window bigger than the head of a small file, and none
+of them showed on a fixture this repository wrote.
+
+- The `%%EOF` search that ends a revision. A linearized file's only `%%EOF` is
+  at the very back, so scanning forward from a first-page section at the front
+  read everything. The head path is told its revision is the document.
+- The first-page section window, from 8 KiB to 1 KiB, and the object window,
+  from 4 KiB to 1 KiB. On a 13 KB file whose `/E` is 1,827 both pulled chunks
+  of the tail to parse the front.
+- A read that begins inside the first page is clamped to `/E`. An object that
+  ends there needs no byte past it, but a window sized by a guess asks for
+  more, and on a fixed granularity that guess costs a whole chunk of tail. Only
+  a parse that comes up short is allowed through, so the ceiling changes which
+  bytes are fetched first and never which are readable.
+
+### What a streamed document does differently, and says so
+
+- `ladder_level()` is **provisional** until `complete_validation()`, which
+  fetches the source and runs the eager offset probe the open deferred.
+- The repair index is built at the first read that finds an entry lying, rather
+  than at open. The *values* are the same on both paths -- that is asserted --
+  and the fetch is declared with `WarningKind::WholeFileFetched`.
+- `Revision::byte_range.end` is the document's end rather than the byte past
+  `%%EOF` when the marker is more than 8 KiB past the section, which on the
+  head path it always is.
+- `xref()` fetches the main table, because asking for the table is asking about
+  every object. So does `page_count()`, for the same reason: 7.7.3.2's `/Count`
+  is a claim like any other and the walk that checks it is a walk over every
+  page. `/N` in the parameter dictionary would answer it from the head, and is
+  not used for it — a page count taken from a hint would be a number this
+  reader had checked nothing about.
+- `main_table_fetched()` reports whether that has happened, which is the
+  observable the byte budgets for page *N* are written against.
+
+### Bytes before `%PDF-`, and what is still owed
+
+7.5.2 lets a file begin with something else, and then every offset it states is
+measured from the header rather than from byte zero. Table F.1 says `/L` is
+"the length of the entire file", so such a file states a length that *includes*
+the prefix while `/H`, `/O`, `/E`, `/T` and every position in the hint tables do
+not. The hint path holds both readings: positions it derives are shifted, and
+the two cross-checks above compare through `xref::offset_candidates` rather than
+by equality, so a file that agrees with itself is not called a file that does
+not.
+
+What is **not** fixed is underneath it. The first-page cross-reference section
+states its entries from the header too, and the pass that reconciles those with
+the file's own `N G obj` headers is the eager `validate()` a streamed open
+defers — so on such a file the objects that section places are found by the
+repair scanner instead, which fetches everything and warns `WholeFileFetched`.
+Page *N* is drawn from its head regardless, because its objects come from the
+hint tables. `a_linearized_file_behind_leading_junk_still_opens_from_its_head`
+pins both halves, and the fetched corpus says nothing either way: its one file
+with leading junk states `/L` *without* the junk, which Table F.1 makes a
+mismatch and therefore an ordinary PDF.
 
 ## Dependencies
 
 - The Annex F writer and its tests — `linearize.rs`,
-  `tests/linearized.rs` — all landed; milestone 3 is a move, not an
-  implementation.
+  `tests/linearized.rs` — all landed; milestone 3 is a deletion and a
+  re-point, not an implementation.
 - The determinism suite and its fingerprints
   ([verification.md](../verification.md)) as the arrival-independence bar.
 - The qpdf corpus (637 files, fetched via `xtask corpus-fetch`) as the

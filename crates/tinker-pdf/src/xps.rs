@@ -130,6 +130,8 @@ mod image;
 pub mod markup;
 pub mod opc;
 pub mod paint;
+pub mod profiles;
+pub mod resources;
 
 use std::collections::HashMap;
 
@@ -304,6 +306,54 @@ pub const MAX_XPS_GLYPHS: usize = 1 << 21;
 /// Reachable: `a_static_resource_chain_past_the_depth_cap_is_named`, against
 /// `tinker_pdf_xml::limits::MAX_XML_TOKENS` entries one dictionary could hold.
 pub const MAX_XPS_RESOURCE_DEPTH: usize = 16;
+
+/// The most colour components a `ContextColor` may state.
+///
+/// **Fifteen**, which is ICC.1's own ceiling: the `nCLR` colour space
+/// signatures run `2CLR` through `FCLR`, and `F` is fifteen. A `ContextColor`
+/// naming more components than any profile can have is not a colour whose
+/// profile this build happens not to hold — it is markup that cannot be true,
+/// so it is [`brush::BrushError::Syntax`] and not a narrowing.
+///
+/// The cap is here rather than left to the XML reader's own bounds because the
+/// component list is one attribute value: `tinker_pdf_xml` bounds how long an
+/// attribute may be, and that bound is tens of thousands of characters — long
+/// enough to ask for a great many `f64`s out of one small element.
+///
+/// Reachable: `a_context_color_with_more_channels_than_icc_allows_is_syntax`.
+pub const MAX_XPS_COLOUR_CHANNELS: usize = 15;
+
+/// How deep a `VisualBrush` may nest inside another one.
+///
+/// 15.4's `VisualBrush` paints a **subtree of markup** as its tile, and that
+/// subtree may state a `VisualBrush` of its own — legally, and to any depth the
+/// file chooses. So this is not the resource chain's problem wearing a
+/// different hat: a nest four deep holds no repeated key, resolves nothing
+/// twice and is still an exponential amount of drawing.
+///
+/// | | Brushes deep |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 2 |
+/// | Anything in the thirteen committed packages | 0 |
+/// | **This cap** | **8** |
+///
+/// Eight rather than sixteen because the work is not linear in the depth the
+/// way an alias chain's is: each level paints the whole of the level below it
+/// into a pattern cell, so what the depth bounds is a product. The element,
+/// segment and glyph totals in [`MAX_XPS_ELEMENTS`], [`MAX_XPS_SEGMENTS`] and
+/// [`MAX_XPS_GLYPHS`] are spent by every level and never refunded, which is
+/// what actually stops a hostile file; this cap stops the *stack*.
+///
+/// **The depth cap and the cycle guard are two rules**, for
+/// [`MAX_XPS_RESOURCE_DEPTH`]'s reason and answering under its two names: a
+/// `VisualBrush` reached through a `{StaticResource}` its own subtree names
+/// again is [`XpsElementDefect::BrushCyclic`], and a nest past this cap is
+/// [`XpsElementDefect::BrushTooDeep`]. Neither is the other, and a build with
+/// only one of them passes every test written for the one it has.
+///
+/// Reachable: `a_visual_brush_nested_past_the_depth_cap_is_named` and
+/// `a_visual_brush_that_reaches_itself_is_a_cycle_and_not_a_depth`.
+pub const MAX_XPS_VISUAL_DEPTH: usize = 8;
 
 /// The two relations, in `const` blocks so a build that broke either **does not
 /// compile**.
@@ -624,33 +674,68 @@ pub enum XpsElementDefect {
     ClipUnreadable,
     /// An `Opacity` that is not a number in `[0, 1]`. **Refused.**
     OpacityUnreadable,
-    /// An `OpacityMask`, which this build does not apply (14.3). **Refused**,
-    /// for `OpacityUnreadable`'s reason: a mask ignored draws a whole shape
-    /// where a sliver was meant.
-    OpacityMaskUnsupported,
     /// A `{StaticResource}` naming a key no dictionary in scope holds.
     /// **Painted grey.**
     BrushUnresolved,
-    /// A `{StaticResource}` chain that returns to a key it already passed
-    /// through. **Painted grey**, and refused rather than recursed.
+    /// A brush that reaches itself. **Painted grey**, and refused rather than
+    /// recursed.
+    ///
+    /// Two constructions, one name, because a reader cannot tell them apart
+    /// and would not act differently if it could: a `{StaticResource}` chain
+    /// that returns to a key it already passed through, and a `VisualBrush`
+    /// whose own subtree names through a `{StaticResource}` the key that
+    /// brush was reached by. The second is invisible to the first's guard —
+    /// each lookup starts afresh, so no single chain ever repeats a key.
     BrushCyclic,
-    /// A `{StaticResource}` chain longer than [`MAX_XPS_RESOURCE_DEPTH`].
-    /// **Painted grey.** Not the same as a cycle and never reported as one.
+    /// A brush nested past its depth cap. **Painted grey.** Not the same as a
+    /// cycle and never reported as one.
+    ///
+    /// Two caps under one name, for [`XpsElementDefect::BrushCyclic`]'s
+    /// reason: a `{StaticResource}` chain longer than
+    /// [`MAX_XPS_RESOURCE_DEPTH`], and a `VisualBrush` nest deeper than
+    /// [`MAX_XPS_VISUAL_DEPTH`].
     BrushTooDeep,
-    /// A brush this milestone does not paint: an `ImageBrush` or a
-    /// `VisualBrush` (gap 30, milestone 8), a `ContextColor` naming an ICC
-    /// profile, or a gradient asked to stroke. **Painted grey.**
-    BrushUnsupported,
+    /// A `ContextColor` (15.2.5) whose ICC profile part is missing, is not a
+    /// profile, or names a data colour space ICC.1 does not.
+    ///
+    /// **Painted**, in 8.6.5.5's default-`/Alternate` reading of the
+    /// components — one channel is grey, three are RGB, four are CMYK. That
+    /// fallback is not this build's invention: it is what a PDF reader does
+    /// with an `/ICCBased` stream it cannot use, and 15.2.5's syntax carries
+    /// no sRGB fallback of its own to prefer over it.
+    ColourProfileUnresolved,
+    /// A `ContextColor` whose profile takes a number of components PDF's
+    /// `/ICCBased` cannot state.
+    ///
+    /// Table 66 permits **1, 3 or 4** and no others, and ICC.1's `nCLR` family
+    /// runs to fifteen. PDF's other n-channel space, `/DeviceN`, needs a tint
+    /// transform into an alternate space that only *evaluating* the profile
+    /// could supply — so this is a **narrowing** and is named as one, and the
+    /// element takes the placeholder grey rather than a colour picked by
+    /// dropping components.
+    ColourProfileChannels,
     /// A colour or a gradient that is not 15's syntax. **Painted grey.**
     BrushUnreadable,
     /// The brush reached the page and not exactly: gradient stops whose alphas
     /// differ from each other, which one constant alpha cannot express, or a
     /// `ColorInterpolationMode` this build does not interpolate in.
     BrushApproximated,
-    /// A `ResourceDictionary` with a `Source`, naming another part (14.2.4).
-    /// Gap 30's milestone 8; every key in it is unresolvable until then, and
-    /// saying so once beats one `BrushUnresolved` per use.
-    ResourceDictionaryRemote,
+    /// A `ResourceDictionary` whose `Source` names no part this package holds,
+    /// or names one that cannot be read (14.2.4).
+    ///
+    /// Said **once**, on the element that named the dictionary, rather than
+    /// once per key that then fails to resolve: a dictionary that is not there
+    /// is one fact about the file, and one `BrushUnresolved` per use would
+    /// report the same fact as many times as the page happened to use it.
+    ResourceDictionaryUnresolved,
+    /// A `ResourceDictionary` part that is there and whose root is not 14.2.4's
+    /// `ResourceDictionary` in either dialect.
+    ///
+    /// Not the same as [`XpsElementDefect::ResourceDictionaryUnresolved`] and
+    /// never reported as one: "no such part" and "that part is not a
+    /// dictionary" are different facts, and only the second says the package is
+    /// internally inconsistent.
+    ResourceDictionaryUnreadable,
     /// A `Glyphs` whose `FontUri` names no part of this package, or a part
     /// that will not read. **Not painted** — a run whose font is unknown has
     /// no glyph indices to draw and no widths to place them at.
@@ -677,15 +762,6 @@ pub enum XpsElementDefect {
     /// which is the geometry rule: a run at an origin this reader invented is
     /// text in the wrong place.
     GlyphsUnreadable,
-    /// `IsSideways="true"` (12.1). **Not painted**, and refused by name rather
-    /// than drawn upright: rotated glyphs drawn the other way round are a
-    /// different picture at the same place.
-    GlyphsSidewaysUnsupported,
-    /// A `BidiLevel` that is odd, which is 12.1's right-to-left run.
-    /// **Not painted**, because the origin of a right-to-left run is the
-    /// *right* edge of it and drawing it left to right puts the text
-    /// somewhere it is not.
-    GlyphsBidiUnsupported,
     /// A `StyleSimulations` other than `None` (12.1). The run **is painted**,
     /// at exactly the glyphs, widths and positions the file states, without
     /// the synthetic slant or weight — which is the paint-unreadable side of
@@ -695,13 +771,13 @@ pub enum XpsElementDefect {
     /// An `ImageSource` that resolves to no part in the package, or to one the
     /// package does not hold.
     ImageUnresolved,
-    /// 9.1.5's TIFF or 9.1.5.1's JPEG XR. This engine has neither decoder, and
-    /// the refusal is at the **element** so the rest of the page still draws --
-    /// a report whose every page failed because one picture did would be worse
-    /// than the missing picture.
-    ///
-    /// Also the answer when neither the content type nor the magic bytes name a
-    /// format at all: a part nobody has identified is not one to guess at.
+    /// A part neither the content type nor the magic bytes identify as one of
+    /// 9.1.5's four formats -- PNG, JPEG, TIFF and 9.1.5.1's JPEG XR all decode
+    /// and draw now, so this is the answer only for a part nobody has
+    /// identified, which is not one to guess at. The refusal is at the
+    /// **element** so the rest of the page still draws -- a report whose every
+    /// page failed because one picture did would be worse than the missing
+    /// picture.
     ImageFormatUnsupported,
     /// The part is a format this build draws and its bytes will not decode.
     ImageUnreadable,
@@ -710,6 +786,24 @@ pub enum XpsElementDefect {
     /// sRGB fallback -- so the picture is refused rather than drawn in colours
     /// the file did not ask for.
     ImageProfileUnsupported,
+    /// 7.2.3.5's content type and the part's magic bytes name **two different**
+    /// formats of 9.1.5's four, and the bytes decided.
+    ///
+    /// The picture **is drawn**, which is what makes this the image side of
+    /// [`XpsElementDefect::BrushApproximated`] rather than a refusal: a decoder
+    /// reads bytes, so a `.tiff` re-declared `image/png` is still a TIFF and
+    /// refusing it would lose a picture the package plainly holds. What is lost
+    /// is the producer's statement about the part, and that is the leniency —
+    /// so it is named, and a reader repairing the package is told which of the
+    /// two rules was ignored. Like every other variant here it is deduplicated
+    /// per page, so a page that mis-declares two parts reports it once.
+    ///
+    /// Not reported where only one rule spoke: a part with no content type, or
+    /// one whose bytes match no signature, is *silence* from that rule and not
+    /// disagreement with it. Not reported either where the bytes then failed to
+    /// decode — that is [`XpsElementDefect::ImageUnreadable`], and a leniency
+    /// about a picture nobody drew would be a fact about nothing.
+    ImageMediaTypeMismatch,
     /// Markup this build does not draw: an element from another vocabulary, a
     /// property element nothing here reads, a dictionary entry with no
     /// `x:Key`.
@@ -723,14 +817,23 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::TransformUnreadable => "a transform that is not six numbers",
             XpsElementDefect::ClipUnreadable => "a `Clip` that is not 11.2's geometry",
             XpsElementDefect::OpacityUnreadable => "an `Opacity` that is not a number in [0, 1]",
-            XpsElementDefect::OpacityMaskUnsupported => "an `OpacityMask` this build cannot apply",
             XpsElementDefect::BrushUnresolved => "a `{StaticResource}` naming no resource",
-            XpsElementDefect::BrushCyclic => "a `{StaticResource}` chain that returns to itself",
-            XpsElementDefect::BrushTooDeep => "a `{StaticResource}` chain past the depth cap",
-            XpsElementDefect::BrushUnsupported => "a brush this build does not paint",
+            XpsElementDefect::BrushCyclic => "a brush that reaches itself",
+            XpsElementDefect::BrushTooDeep => "a brush nested past the depth cap",
+            XpsElementDefect::ColourProfileUnresolved => {
+                "a `ContextColor` whose profile part is not a profile"
+            }
+            XpsElementDefect::ColourProfileChannels => {
+                "a colour profile with a channel count `/ICCBased` cannot state"
+            }
             XpsElementDefect::BrushUnreadable => "a colour or gradient that is not 15's syntax",
             XpsElementDefect::BrushApproximated => "a brush that reached the page approximately",
-            XpsElementDefect::ResourceDictionaryRemote => "a `ResourceDictionary` in another part",
+            XpsElementDefect::ResourceDictionaryUnresolved => {
+                "a `ResourceDictionary` naming no readable part"
+            }
+            XpsElementDefect::ResourceDictionaryUnreadable => {
+                "a `ResourceDictionary` part that is not one"
+            }
             XpsElementDefect::GlyphsFontUnresolved => "a `FontUri` naming no readable font part",
             XpsElementDefect::GlyphsFontFace => "a `FontUri` naming a face other than the first",
             XpsElementDefect::GlyphsFontObfuscation => {
@@ -739,12 +842,6 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::GlyphsFontUnreadable => "a font part this engine cannot read",
             XpsElementDefect::GlyphsIndicesUnreadable => "`Indices` that is not 12.1.3's grammar",
             XpsElementDefect::GlyphsUnreadable => "a `Glyphs` stating no usable origin or em size",
-            XpsElementDefect::GlyphsSidewaysUnsupported => {
-                "an `IsSideways` run, which is not drawn"
-            }
-            XpsElementDefect::GlyphsBidiUnsupported => {
-                "a right-to-left `BidiLevel`, which is not drawn"
-            }
             XpsElementDefect::GlyphsStyleSimulated => {
                 "a `StyleSimulations` this build does not simulate"
             }
@@ -754,6 +851,9 @@ impl core::fmt::Display for XpsElementDefect {
             }
             XpsElementDefect::ImageUnreadable => "an image whose bytes will not decode",
             XpsElementDefect::ImageProfileUnsupported => "an image behind a colour profile",
+            XpsElementDefect::ImageMediaTypeMismatch => {
+                "an image drawn from its bytes, against its content type"
+            }
             XpsElementDefect::ElementUnknown => "markup this build does not draw",
         })
     }
@@ -1162,6 +1262,15 @@ fn synthesise(
     // And one image table, for the same reason and with the same lifetime: two
     // pages naming one `/XI0` for two different pictures would be one picture.
     let mut images = image::Images::default();
+    // And one dictionary table, for the reason the fonts and the images have
+    // one: 14.2.4's `Source` is resolved against the *part* it is written on,
+    // so two pages may spell one dictionary two ways and it is still one
+    // dictionary — read once and answered from a table.
+    let mut remotes = resources::Remotes::default();
+    // And one profile table, for the reason the images have one: a PDF
+    // resource name has to be unique across a document, and two pages naming
+    // one `/CS0` for two different profiles would be one profile.
+    let mut profiles = profiles::Profiles::default();
     // Painted **once per part**, for the reason milestone 4 built its own
     // caches: a `FixedDocument` may show one page part four thousand times,
     // and `Source::new` walks every character of a part before it yields an
@@ -1193,6 +1302,19 @@ fn synthesise(
                 if let Err(Trouble::Exhausted) = images.load(package, part, &mut builder, limits) {
                     return Err(ArchiveRefusal::TooLarge);
                 }
+                // 14.2.4's remote dictionaries, in a third pass and before the
+                // walk for the same reason: a dictionary part read mid-walk
+                // would need the page's own bytes copied out. See
+                // `resources::Remotes::load`.
+                if let Err(Trouble::Exhausted) = remotes.load(package, part, limits, &mut budget) {
+                    return Err(ArchiveRefusal::TooLarge);
+                }
+                // 15.2.5's ICC profiles, in a fourth pass and before the walk
+                // for the same reason. See `profiles::Profiles::load`.
+                if let Err(Trouble::Exhausted) = profiles.load(package, part, &mut builder, limits)
+                {
+                    return Err(ArchiveRefusal::TooLarge);
+                }
                 let drawn = match package.read_part(part) {
                     Ok(bytes) => painter.page(
                         &mut builder,
@@ -1201,6 +1323,8 @@ fn synthesise(
                             part,
                             fonts: &fonts,
                             images: &images,
+                            remotes: &remotes,
+                            profiles: &profiles,
                             page: (width, height),
                             xml: &limits.xml,
                         },

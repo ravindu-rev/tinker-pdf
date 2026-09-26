@@ -9,6 +9,25 @@
 //! charstrings underneath are subroutine recursion, `seac`, `flex`, and the
 //! hintmask whose length depends on how many stems were declared before it:
 //! the operator most often counted wrongly.
+//!
+//! # What this target checks, and what it does not
+//!
+//! **Only that the code did not panic, hang, or exhaust memory.** Every table
+//! walk and every charstring run below is discarded with `let _ =`, so an
+//! outline built from the wrong offsets, a charset read one glyph out, or an
+//! FDSelect that picks the wrong private dictionary all pass. So a run that
+//! returned the *wrong* answer passes this target exactly as a correct one
+//! does, and a green `cargo fuzz` here is evidence about ruling 1 and about
+//! nothing else.
+//!
+//! That is worth writing down rather than leaving implied. Correctness lives
+//! in `crates/tinker-pdf-font`'s own tests and in the `cff_fonts.rs` suite
+//! under `crates/tinker-pdf/tests/`, which compare rendered glyphs rather
+//! than merely running the interpreter.
+//!
+//! Recorded because the same shape has already cost this repository once: the
+//! `brotli` target asserts only self-consistency and could not have found the
+//! ring-buffer defect that a decoded-bytes comparison found immediately.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

@@ -21,8 +21,10 @@
 //! d. Gap 23's nineteen real files, as milestone 8's acceptance number.
 
 mod bounds;
+mod code_block_styles;
 mod colour;
 mod headers;
+mod packed;
 mod refusals;
 mod tier1;
 mod tier2;

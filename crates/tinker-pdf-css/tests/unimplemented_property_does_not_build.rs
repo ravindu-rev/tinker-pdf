@@ -29,10 +29,10 @@
 //! `--crate-type lib` build and not a `--test` one. The proof is about the
 //! library.
 //!
-//! # The three consumers, injected separately
+//! # The four consumers of a property, injected separately
 //!
 //! One `match` is one consequence, and gap 31's own rule is that a test for one
-//! of two independent consequences is not a test. [`Property`] has three
+//! of two independent consequences is not a test. [`Property`] has four
 //! exhaustive consumers and each is withheld on its own:
 //!
 //! - `cascade::apply`, which is the one the plan names — a property that is
@@ -40,7 +40,32 @@
 //! - `Property::name`, without which a property would be applied and then
 //!   anonymous in every warning and every census;
 //! - `Property::inherited`, without which it would be applied, named, and
-//!   inherit or not by accident.
+//!   inherit or not by accident;
+//! - `Property::longhand`, without which no `css-cascade-5` §7.1 defaulting
+//!   keyword could name it — `color: inherit` would work and the new
+//!   property's `inherit` would silently do nothing.
+//!
+//! # What this file did **not** cover until §7.1 landed, and now does
+//!
+//! Everything above is about a **property**. For most of this file's life it
+//! said nothing whatever about a **value** that no consumer reads, and the
+//! distinction is not academic: the five defaulting keywords are values, valid
+//! on every property, and a build could have grown one of them with nothing to
+//! write it down and no `match` anywhere to notice.
+//!
+//! That is what [`Longhand`] and its three exhaustive consumers are for, and
+//! why they are injected here too:
+//!
+//! - `Longhand::name`, `Longhand::inherited` — a property name a keyword can
+//!   be written on and whose inheritance `unset` cannot ask about;
+//! - `cascade::copy_computed`, the one that actually moves a value. A longhand
+//!   missing that arm is `inherit` parsing, cascading, winning, and writing
+//!   nothing.
+//!
+//! `Longhand::ALL` is the one thing here `rustc` cannot check, because it is a
+//! list and not a `match`. `crates/tinker-pdf-css/src/tests/defaulting.rs`
+//! checks it against `IMPLEMENTED_NAMES` instead, and this file does not
+//! pretend otherwise.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,6 +76,19 @@ const NAME_ANCHOR: &str = "// <<< the compile-time proof's second arm goes here 
 const INHERITED_ANCHOR: &str = "// <<< the compile-time proof's third arm goes here >>>";
 const VARIANT_ANCHOR: &str =
     "// <<< the compile-time proof injects a variant directly above this line >>>";
+const LONGHAND_ANCHOR: &str = "// <<< the compile-time proof's fifth arm goes here >>>";
+const LONGHAND_NAME_ANCHOR: &str = "// <<< the compile-time proof's sixth arm goes here >>>";
+const LONGHAND_INHERITED_ANCHOR: &str = "// <<< the compile-time proof's seventh arm goes here >>>";
+const COPY_ANCHOR: &str = "// <<< the compile-time proof's eighth arm goes here >>>";
+const LONGHAND_VARIANT_ANCHOR: &str =
+    "// <<< the compile-time proof injects a longhand directly above this line >>>";
+
+/// The `Longhand` the injected property sets, and its own three arms.
+const LONGHAND_VARIANT: &str = "    TextTransform,";
+const LONGHAND_ARM: &str = "            Property::TextTransform(_) => Longhand::TextTransform,";
+const LONGHAND_NAME_ARM: &str = "            Longhand::TextTransform => \"text-transform\",";
+const LONGHAND_INHERITED_ARM: &str = "            Longhand::TextTransform => true,";
+const COPY_ARM: &str = "        Longhand::TextTransform => into.color = from.color.clone(),";
 
 /// The property injected, and it is not an arbitrary one.
 ///
@@ -65,25 +103,49 @@ const VARIANT_ANCHOR: &str =
 ///
 /// `border-collapse` was the successor and milestone 11 implemented it, on
 /// exactly the schedule the paragraph above predicted — *"when that milestone
-/// lands this constant moves again"*. It has now moved twice, which is the
-/// second piece of evidence that the choice is the right kind: a name that
-/// never had to move would be a name nobody was ever going to implement.
+/// lands this constant moves again"*. `vertical-align` was the third and tier
+/// 4 implemented it, in the same commit as this line. It has now moved three
+/// times, which is the standing evidence that the choice is the right kind: a
+/// name that never had to move would be a name nobody was ever going to
+/// implement, and a proof injecting one would be asserting something about a
+/// property this build had decided never to have.
 ///
-/// `vertical-align` is the successor and it is chosen the same way: CSS 2.2
-/// §10.8 and §17.5.4, in `UNSUPPORTED_PROPERTIES` today, and **the largest
-/// single gap the committed corpus measures** at thirty-four elements — larger
-/// now than `display`'s was before milestone 11 emptied it. It is genuinely not
-/// implemented: nothing here aligns a cell's content within its row, and every
-/// cell in this build is set from its top.
-const VARIANT: &str = "    VerticalAlign(bool),";
-const APPLY_ARM: &str = "        Property::VerticalAlign(_) => {}";
-const NAME_ARM: &str = "            Property::VerticalAlign(_) => \"vertical-align\",";
-const INHERITED_ARM: &str = "            Property::VerticalAlign(_) => true,";
+/// `text-transform` is the successor and it is chosen the same way, on the
+/// three tests the moves above have settled between them.
+///
+/// **It is in `UNSUPPORTED_PROPERTIES` and stays there.** Tier 4 consumes
+/// `content` and `gap`, so neither could have been picked without this constant
+/// moving again inside the same tier.
+///
+/// **It is genuinely unimplemented, for a reason that can be stated.**
+/// `css-text-4` §2.1's `uppercase` and `lowercase` are not a `char::to_uppercase`
+/// away: the mapping is locale-dependent (Turkish `i` uppercases to `İ` and
+/// dotless `ı` lowercases from `I`), context-dependent (a Greek final sigma is
+/// `ς` at the end of a word and `σ` inside it), and not length-preserving (`ß`
+/// uppercases to `SS`, so a transformed run measures differently from the one
+/// the source wrote). All three need Unicode's `SpecialCasing.txt`, which is
+/// **not** among the files vendored at `crates/tinker-pdf-layout/data/ucd` —
+/// that directory holds `DerivedGeneralCategory.txt`, `EastAsianWidth.txt`,
+/// `LineBreak.txt`, `LineBreakTest.txt` and `emoji-data.txt`, all of them
+/// UAX #14's. A build that reached for the ASCII answer would set a Turkish
+/// book's headings wrong and nothing would look broken.
+///
+/// **And it is a name somebody will implement one day**, which is the test the
+/// three moves above have made the important one. `writing-mode` would have
+/// been the easy wrong answer here: it is unimplemented, it is in the same
+/// list, and it is refused *permanently* by the vertical-text non-goal in
+/// `docs/design/shaping.md` — so it would never move, and a constant that never
+/// moves is one nobody ever re-reads.
+const VARIANT: &str = "    TextTransform(bool),";
+const APPLY_ARM: &str = "        Property::TextTransform(_) => {}";
+const NAME_ARM: &str = "            Property::TextTransform(_) => \"text-transform\",";
+const INHERITED_ARM: &str = "            Property::TextTransform(_) => true,";
 
 struct Source {
     lib: String,
     property: String,
     cascade: String,
+    longhand: String,
 }
 
 impl Source {
@@ -94,6 +156,7 @@ impl Source {
             lib: read(&root.join("src/lib.rs")),
             property: read(&root.join("src/property.rs")),
             cascade: read(&root.join("src/cascade.rs")),
+            longhand: read(&root.join("src/longhand.rs")),
         }
     }
 
@@ -121,6 +184,7 @@ impl Source {
         std::fs::write(src.join("lib.rs"), &self.lib).expect("write");
         std::fs::write(src.join("property.rs"), &self.property).expect("write");
         std::fs::write(src.join("cascade.rs"), &self.cascade).expect("write");
+        std::fs::write(src.join("longhand.rs"), &self.longhand).expect("write");
 
         let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
         let output = Command::new(rustc)
@@ -170,8 +234,17 @@ fn inject(source: &str, anchor: &str, replacement: &str) -> String {
     source.replace(anchor, replacement)
 }
 
-/// A variant added, with the arms named in `arms` supplied and the rest not.
-fn with_variant(supply_apply: bool, supply_name: bool, supply_inherited: bool) -> Source {
+/// A variant added, with the arms named supplied and the rest not.
+///
+/// The `Longhand` side is always supplied here: a `Property` variant needs a
+/// `Longhand` to map onto, so withholding both at once would fail for two
+/// reasons and prove neither. [`with_longhand`] withholds that side on its own.
+fn with_variant(
+    supply_apply: bool,
+    supply_name: bool,
+    supply_inherited: bool,
+    supply_longhand: bool,
+) -> Source {
     let pristine = Source::pristine();
     let mut property = inject(
         &pristine.property,
@@ -196,7 +269,7 @@ fn with_variant(supply_apply: bool, supply_name: bool, supply_inherited: bool) -
             INHERITED_ANCHOR.to_string()
         },
     );
-    let cascade = inject(
+    let mut cascade = inject(
         &pristine.cascade,
         APPLY_ANCHOR,
         &if supply_apply {
@@ -205,10 +278,89 @@ fn with_variant(supply_apply: bool, supply_name: bool, supply_inherited: bool) -
             APPLY_ANCHOR.to_string()
         },
     );
+    cascade = inject(
+        &cascade,
+        COPY_ANCHOR,
+        &format!("{COPY_ARM}\n        {COPY_ANCHOR}"),
+    );
+    let longhand = with_longhand_arms(&pristine.longhand, supply_longhand, true, true);
     Source {
         lib: pristine.lib,
         property,
         cascade,
+        longhand,
+    }
+}
+
+/// The `Longhand` variant added, with each of its own arms supplied or not.
+fn with_longhand_arms(
+    source: &str,
+    supply_longhand: bool,
+    supply_name: bool,
+    supply_inherited: bool,
+) -> String {
+    let mut longhand = inject(
+        source,
+        LONGHAND_VARIANT_ANCHOR,
+        &format!("{LONGHAND_VARIANT}\n    {LONGHAND_VARIANT_ANCHOR}"),
+    );
+    longhand = inject(
+        &longhand,
+        LONGHAND_ANCHOR,
+        &if supply_longhand {
+            format!("{LONGHAND_ARM}\n            {LONGHAND_ANCHOR}")
+        } else {
+            LONGHAND_ANCHOR.to_string()
+        },
+    );
+    longhand = inject(
+        &longhand,
+        LONGHAND_NAME_ANCHOR,
+        &if supply_name {
+            format!("{LONGHAND_NAME_ARM}\n            {LONGHAND_NAME_ANCHOR}")
+        } else {
+            LONGHAND_NAME_ANCHOR.to_string()
+        },
+    );
+    inject(
+        &longhand,
+        LONGHAND_INHERITED_ANCHOR,
+        &if supply_inherited {
+            format!("{LONGHAND_INHERITED_ARM}\n            {LONGHAND_INHERITED_ANCHOR}")
+        } else {
+            LONGHAND_INHERITED_ANCHOR.to_string()
+        },
+    )
+}
+
+/// A **longhand** added with no `Property` behind it, and one of its consumers
+/// withheld.
+///
+/// The value-side proof. Nothing about `Property` changes, so a failure here is
+/// about a property *name* that §7.1's keywords can be written on and that the
+/// cascade cannot write down.
+fn with_longhand(supply_copy: bool, supply_name: bool, supply_inherited: bool) -> Source {
+    let pristine = Source::pristine();
+    let cascade = inject(
+        &pristine.cascade,
+        COPY_ANCHOR,
+        &if supply_copy {
+            format!("{COPY_ARM}\n        {COPY_ANCHOR}")
+        } else {
+            COPY_ANCHOR.to_string()
+        },
+    );
+    // No `Property::longhand` arm, because no `Property` variant was added.
+    let longhand = with_longhand_arms(&pristine.longhand, true, supply_name, supply_inherited);
+    let longhand = longhand.replace(
+        &format!("{LONGHAND_ARM}\n            {LONGHAND_ANCHOR}"),
+        LONGHAND_ANCHOR,
+    );
+    Source {
+        lib: pristine.lib,
+        property: pristine.property,
+        cascade,
+        longhand,
     }
 }
 
@@ -228,7 +380,7 @@ fn the_pristine_crate_builds_and_a_property_with_no_consumer_does_not() {
         "the unmodified crate did not compile, so nothing below proves anything:\n{stderr}"
     );
 
-    let (ok, stderr) = with_variant(false, false, false).compile("no-consumer");
+    let (ok, stderr) = with_variant(false, false, false, false).compile("no-consumer");
     assert!(
         !ok,
         "a property with no consumer at all compiled, which is decision 5 not holding"
@@ -238,7 +390,7 @@ fn the_pristine_crate_builds_and_a_property_with_no_consumer_does_not() {
         "the build failed for some other reason than a non-exhaustive match:\n{stderr}"
     );
     assert!(
-        stderr.contains("VerticalAlign"),
+        stderr.contains("TextTransform"),
         "the error does not name the variant that was added:\n{stderr}"
     );
 }
@@ -252,7 +404,7 @@ fn the_pristine_crate_builds_and_a_property_with_no_consumer_does_not() {
 /// laid out slightly differently with nothing anywhere saying so.
 #[test]
 fn a_property_that_no_computed_style_consumes_does_not_build() {
-    let (ok, stderr) = with_variant(false, true, true).compile("no-apply");
+    let (ok, stderr) = with_variant(false, true, true, true).compile("no-apply");
     assert!(
         !ok,
         "a property with a name and an inheritance rule and no consumer compiled"
@@ -272,7 +424,7 @@ fn a_property_that_no_computed_style_consumes_does_not_build() {
 /// gap is judged on, would be silently short by one property.
 #[test]
 fn a_property_with_no_name_does_not_build() {
-    let (ok, stderr) = with_variant(true, false, true).compile("no-name");
+    let (ok, stderr) = with_variant(true, false, true, true).compile("no-name");
     assert!(!ok, "a property with no name compiled");
     assert!(stderr.contains("E0004"), "{stderr}");
     assert!(
@@ -288,7 +440,7 @@ fn a_property_with_no_name_does_not_build() {
 /// it is right on the element that sets it and wrong on every descendant.
 #[test]
 fn a_property_with_no_inheritance_rule_does_not_build() {
-    let (ok, stderr) = with_variant(true, true, false).compile("no-inherited");
+    let (ok, stderr) = with_variant(true, true, false, true).compile("no-inherited");
     assert!(!ok, "a property with no inheritance rule compiled");
     assert!(stderr.contains("E0004"), "{stderr}");
     assert!(
@@ -306,10 +458,85 @@ fn a_property_with_no_inheritance_rule_does_not_build() {
 /// a harness that simply never compiles anything.
 #[test]
 fn the_same_variant_with_every_arm_supplied_builds() {
-    let (ok, stderr) = with_variant(true, true, true).compile("all-arms");
+    let (ok, stderr) = with_variant(true, true, true, true).compile("all-arms");
     assert!(
         ok,
         "a fully consumed property did not build, so the proofs above prove only that the \
          injection breaks something:\n{stderr}"
+    );
+}
+
+/// The fourth consumer of a property: one that no defaulting keyword can name.
+///
+/// `Property::longhand` is what turns a property into something §7.1 can be
+/// written on. Withhold it and the property parses, cascades and lays out —
+/// and `inherit` on it is a declaration the cascade cannot even address.
+#[test]
+fn a_property_no_defaulting_keyword_can_name_does_not_build() {
+    let (ok, stderr) = with_variant(true, true, true, false).compile("no-longhand");
+    assert!(
+        !ok,
+        "a property that no defaulting keyword can name compiled"
+    );
+    assert!(stderr.contains("E0004"), "{stderr}");
+    assert!(
+        stderr.contains("longhand.rs"),
+        "the error should point at `Property::longhand`:\n{stderr}"
+    );
+}
+
+/// **The value-side proof**, and the one this file could not make until §7.1
+/// landed: a property *name* the cascade cannot write a defaulted value into.
+///
+/// Nothing about `Property` changes here. A `Longhand` is added — which is what
+/// a new property name is — and `cascade::copy_computed` is withheld. The
+/// result is `inherit` on that name parsing, cascading, winning, and writing
+/// nothing at all: the quietest of the failures this file exists to prevent,
+/// because the page renders and the property simply keeps whatever it had.
+#[test]
+fn a_longhand_the_cascade_cannot_write_does_not_build() {
+    let (ok, stderr) = with_longhand(false, true, true).compile("no-copy");
+    assert!(
+        !ok,
+        "a longhand that no defaulting keyword can write compiled"
+    );
+    assert!(stderr.contains("E0004"), "{stderr}");
+    assert!(
+        stderr.contains("cascade.rs"),
+        "the error should point at `copy_computed`:\n{stderr}"
+    );
+}
+
+/// A longhand with no name, which is the census failure one level down: a
+/// property name that cannot be printed cannot be matched by `from_name`
+/// either, so no stylesheet could ever address it.
+#[test]
+fn a_longhand_with_no_name_does_not_build() {
+    let (ok, stderr) = with_longhand(true, false, true).compile("no-longhand-name");
+    assert!(!ok, "a longhand with no name compiled");
+    assert!(stderr.contains("E0004"), "{stderr}");
+    assert!(stderr.contains("longhand.rs"), "{stderr}");
+}
+
+/// A longhand whose inheritance nobody decided, which is exactly the value
+/// `unset` asks for: §7.1 defines it as `inherit` or `initial` *according to
+/// this answer*, so a missing one is `unset` doing something arbitrary.
+#[test]
+fn a_longhand_with_no_inheritance_rule_does_not_build() {
+    let (ok, stderr) = with_longhand(true, true, false).compile("no-longhand-inherited");
+    assert!(!ok, "a longhand with no inheritance rule compiled");
+    assert!(stderr.contains("E0004"), "{stderr}");
+    assert!(stderr.contains("longhand.rs"), "{stderr}");
+}
+
+/// And the other direction for the value side: a fully consumed longhand
+/// builds, so the three above fail for the arm and not for the variant.
+#[test]
+fn the_same_longhand_with_every_arm_supplied_builds() {
+    let (ok, stderr) = with_longhand(true, true, true).compile("longhand-all-arms");
+    assert!(
+        ok,
+        "a fully consumed longhand did not build, so the proofs above prove only that adding \
+         one breaks something:\n{stderr}"
     );
 }

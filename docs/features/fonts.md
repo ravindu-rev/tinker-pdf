@@ -108,14 +108,115 @@ symbolic fonts unless `substituting_symbolic()` was called, because a text
 face standing in for a symbol font draws confidently wrong glyphs.
 
 **Writing** (9.9). `DocumentBuilder::add_embedded_font` and `add_cid_font`
-embed TrueType programs with widths taken from the program's own `hmtx`, and
+embed a TrueType, an `OpenType/CFF` face or a bare CFF program, with widths
+taken from the program's own `hmtx` — or, for a bare CFF, from its charstrings
+through its `FontMatrix`, which need not be the usual 1/1000. Each gets the
+descriptor entry 9.9 Table 126 gives it: `/FontFile2`, `/FontFile3
+/Subtype /OpenType`, or `/FontFile3 /Subtype /Type1C` (`/CIDFontType0C` under a
+composite font).
+
 `set_subset_fonts` (on by default) cuts each program down to the glyphs the
-pages drew: `glyf`/`loca` rebuilt, composite closures followed, glyph
-identifiers never renumbered (a dropped glyph becomes a zero-length `loca`
-entry, so `/Widths`, `/W`, `cmap` and `/CIDToGIDMap` all stay right), hinting
-tables kept for readers that interpret them, and the 9.6.4 six-letter tag
-prefixed to `/BaseFont`. A subset that cannot be built embeds the whole face
-instead — larger and correct (ruling 2).
+pages drew, and **glyph identifiers are never renumbered** — which is what
+lets `/Widths`, `/W`, `cmap`, `/CIDToGIDMap` and `/ToUnicode` stay as written.
+For TrueType that means `glyf`/`loca` rebuilt with composite closures followed
+and a dropped glyph left as a zero-length `loca` entry. For CFF it means the
+CharStrings INDEX, both subroutine INDEXes, the Private DICTs and the Top DICT
+rebuilt together, with a dropped glyph left as a single `endchar`; the charset,
+the encoding, the String INDEX and `FDSelect` are copied through byte for byte,
+because nothing moved and re-encoding them would only be a chance to map a
+glyph to the wrong name. A `callsubr` operand is recomputed from the new index
+and the **new bias** rather than adjusted, since subsetting can move an INDEX
+across the 1 240 and 33 900 thresholds. A global subroutine reached from two
+Font DICTs is written twice, because the local subroutines it calls are the
+caller's.
+
+The 9.6.4 six-letter tag is prefixed to `/BaseFont`. A face that is not cut
+down is embedded whole — larger and correct (ruling 2) — and
+`DocumentBuilder::finish_reporting` returns an `EmbeddedWhole` naming the
+resource and one of three `SubsetRefusal` reasons: the font claimed none of the
+text drawn with it, the program could not be rebuilt, or the rebuild came out
+no smaller than the face. That last one is common, and the production corpus
+made it commoner: **1 936 of the fetched corpora's 3 313 CFF faces** are
+already producer-made subsets with nothing left to remove, against 212 of 441
+before a thousand real-world documents were pinned.
+
+**Rewriting** (9.6.4, 9.9). The paragraph above is the *builder*, which knows
+every glyph it placed because it placed them. A rewrite of somebody else's
+document knows nothing of the kind, and until `tinker_pdf::subset::apply`
+existed it copied every embedded program through untouched however little of it
+the pages used. It now runs the same `tinker_pdf_font::subset` over a glyph set
+the interpreter collects — pages, form XObjects at any depth, Type 3 glyph
+procedures and every state of every annotation `/AP` — and leaves whole,
+by name, any program it cannot bound. The encoding needs no repair because
+glyph identifiers are never renumbered; only `/BaseFont`, the descendant's
+`/BaseFont` and the descriptor's `/FontName` move, all three to the same
+9.6.4 name, from the same `subset_tag` this page's builder uses. It is an
+editing operation and lives with the rest of them: see
+[editing](editing.md).
+
+**And it is now arranged rather than asked for.** `tinker_pdf::write::save`,
+the facade's save door, runs the pass by default — `SaveOptions::fonts` is a
+`FontPolicy` whose default is `Subset` — so the common case no longer depends
+on a caller remembering, which is what it depended on while the only door was
+`DocumentEditor::save`. That door is `tinker-pdf-cos`'s, it writes every
+program through as it arrived, and it carries no font switch **and must not**:
+the pass is driven by the interpreter, which sits above that crate, so a flag
+there would be one the crate carrying it cannot act on. [writing](writing.md)
+argues the boundary; the part that belongs on this page is what it buys — a
+redacted document's embedded face no longer keeps the removed letters' outlines
+unless somebody asked it to.
+
+**A collection is rebuilt as the face it was read as.** `Sfnt::parse` takes a
+`ttcf` by its first member, since a PDF embedding a collection has no way to
+say which member it means, and `subset` used to copy the *file's* leading tag
+into the subset it assembled — so a `/FontFile2` carrying a collection came out
+as a single flat table directory still declaring `ttcf`, which this crate and
+every other then refused to read. It now declares `Sfnt::version`, the
+directory the tables actually came from. Two of the 5 605 fetched documents
+embed one, and the corpus census
+(`crates/tinker-pdf/tests/cff_subset_census.rs`) is what found it: nothing in
+this repository writes a collection, so no fixture here could have.
+
+**WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2018]). `woff.rs` unpacks
+both to the sfnt inside them; nothing else in the crate knows they exist, and
+`Sfnt::parse` is what reads what comes out. The two are not variations on each
+other and the code does not pretend they are.
+
+WOFF 1.0 is a **repackaging**: each table zlib-compressed on its own, the
+directory recording the original length and the original checksum. Undoing it
+is inflate — `tinker-pdf-filters`' own, not a second one — plus a directory
+rebuilt in ascending tag order, which §5 requires in as many words. The tables
+themselves go back in the **physical order the container recorded**, which is
+the only surviving record of the order the original font had them in, and is
+the difference between reproducing the producer's file and producing an
+equivalent one. `origChecksum` is verified for every table even though §5 puts
+that on the producer: it is the one end-to-end integrity check either container
+carries, it costs one pass over bytes already in cache, and a face that fails
+it is one this engine would rather decline by name. `head` is checksummed with
+`checkSumAdjustment` taken as zero, which is the sfnt rule neither WOFF
+restates and which every producer follows because it copies the value out of a
+real directory.
+
+WOFF 2.0 is a **re-encoding**. One Brotli stream carries every table
+concatenated; `glyf` is taken apart into seven substreams and its contours
+re-encoded as triplets; `loca` is not stored at all and falls out of the `glyf`
+reconstruction; `hmtx` may have had its left side bearings deleted on the
+grounds that they equal the glyph bounding boxes. All of that is reversed here,
+along with §3.1's two variable-width integer codings — `255UInt16`, whose
+encoding is deliberately not unique, and `UIntBase128`, whose two forbidden
+spellings are both refused — §4.1's table of 63 known tags, and §4.2's font
+collections. §5 says the result "may produce binary results that are different
+from the original data", so byte identity is not the property claimed for it.
+
+Both are bounded by a caller-supplied ceiling that is **not advisory**: a WOFF2
+directory states its lengths in `UIntBase128`, which reaches 2^32 − 1 in five
+bytes, so a forty-byte file can ask for four gigabytes. Metadata and private
+data blocks are located and skipped, never parsed — the metadata block is XML,
+and reading it would give this crate an opinion about markup that ruling 8 says
+it may not have.
+
+[W3C REC 2012]: https://www.w3.org/TR/WOFF/
+[W3C REC 2018]: https://www.w3.org/TR/WOFF2/
 
 ## API
 
@@ -143,6 +244,78 @@ let doc = Document::open(bytes)?
 // would extract perfectly and render none of it, reporting UnreadableFont.
 ```
 
+## Listing what a document carries
+
+`Document::fonts()` answers "which faces is this file made of" without
+rendering anything. Each `DocumentFont` carries the `/Subtype` family
+(`FontKind`), `/BaseFont` exactly as the file spelled it, that name with
+9.6.4's subset tag stripped, the tag itself, whether a program is embedded and
+under which `/FontFile*` key (`ProgramKey`), and the resource names the font
+answered to. `tpdf fonts <file>` prints that list; `tpdf fonts <file> --out
+DIR` additionally writes each embedded program out, naming each file from the
+program's own first bytes rather than from the descriptor key, since
+`/FontFile3` holds a bare CFF or an OpenType wrapper and the listing does not
+read the stream's `/Subtype` to tell them apart.
+
+**The bytes are lazy and the listing is not a parse.** `DocumentFont` holds
+the *address* of the program; `program_bytes()` decodes the stream, and
+nothing else does. The listing reads `/Subtype`, `/BaseFont` and the
+descriptor and never a CMap — which is what keeps it cheap, and also what
+keeps it a *read*: `cos::font::read` absorbs its leniencies into the
+document's warnings, so a listing built on it would make `warnings()` depend
+on whether anyone had asked for the fonts first. A test asserts the warning
+count is unchanged across a call.
+
+Each face appears once however many pages and resource names reach it, and a
+composite font is one entry rather than two: 9.7.4 makes the descendant
+CIDFont part of the Type 0 font, so listing both would report every CJK face
+twice. Reachability is the pages' `/Resources` plus every scope their content
+can enter — form XObjects (8.10.1), tiling patterns (8.7.3), Type 3 glyph
+procedures (9.6.5), every state of every annotation appearance (12.5.5) — and
+the form's `/DR` (12.7.3.3).
+
+**`/DR` is there because the corpus census put it there.** A variable-text
+field's `/DA` names its font in `/DR`, which no page has to mention: in
+`verapdf/Isartor test files/PDFA-1b/6.9 Interactive Forms/isartor-6-9-t01-fail-a.pdf`
+the page's whole `/Resources` is a `/ProcSet`, and the one embedded face in
+the file is reachable only that way. Walking pages alone called that document
+fontless. Adding `/DR` moved the corpus from 22 168 fonts across 3 151 files
+to **22 769 across 3 242**.
+
+### Measured over the corpus
+
+`crates/tinker-pdf/tests/annotation_census.rs`'s font half, `#[ignore]`d and
+run with `-- --ignored --nocapture`, over the 5 605 fetched files
+(15 September 2026; 5 597 opened, 8 did not):
+
+| | |
+| --- | --- |
+| distinct fonts listed | 22 769 across 3 242 files |
+| by family | TrueType 7 813, Type1 8 056, Type0 6 737, Type3 163 |
+| embedded | 17 794 (78.2%) |
+| by key (9.9 Table 126) | `/FontFile2` 12 285, `/FontFile3` 4 949, `/FontFile` 560 |
+| subset-tagged | 15 899, every tag six upper-case ASCII letters |
+| program bytes decoded | 909 758 651, with **no** embedded program failing to decode |
+| reached under more than one resource name | 1 863 |
+| written as a direct dictionary | 23 |
+
+Fourteen files name `/FontFile` somewhere in their raw bytes and yield no
+embedded program. The census prints them by name rather than asserting about
+them, because the bytes can be in an unreferenced object, on a page outside
+the tree, or in a descriptor key whose value is not a stream — the byte scan
+is a hint, not a claim. They are: two fuzzed pdfjs inputs, three other pdfjs
+issue files and one SafeDocs file, five veraPDF 6.1.12 implementation-limit
+fixtures, and three veraPDF font-embedding fixtures.
+
+The last three are the ones that were read, and all three carry a
+`/FontFile3` that resolves to nothing: two write `null` as the descriptor's
+value outright, the third names an object that is itself `null`. Each states
+its own expectation in its outline, and the expectation is ours —
+`6-2-11-4-1-t01-fail-a.pdf` says *"Type1 font that is used for rendering is
+not embedded"*, `6-2-10-4-1-t01-pass-a.pdf` says the same with *"the text
+rendering mode is 3"* after it, and `is_embedded()` answers `false` for the
+face in both. The other eleven are counted, not diagnosed.
+
 ## What the missing faces cost, measured
 
 This engine bundles no font programs, so a document that names Helvetica and
@@ -152,33 +325,34 @@ own defects: every such file counts as *rendered with something reported*, and
 `corpus/ratchet.json` said so in its own note without being able to say how
 much.
 
-Both numbers now exist. `corpus/ratchet-fonts.json` is the same 4 525 files
+Both numbers now exist. `corpus/ratchet-fonts.json` is the same 5 525 files
 measured with a face supplied — the one `cargo xtask synth-face` writes, whose
 every glyph from 32 up is a filled box, so it answers *was a face available*
 and nothing else:
 
 | Corpus | Files | No faces | Synthetic face | Bundled faces |
 | --- | ---: | ---: | ---: | ---: |
-| pdf.js | 974 | 422 | 300 | 305 |
-| veraPDF | 2 907 | 87 | 72 | 72 |
-| qpdf | 637 | 530 | 130 | 152 |
+| pdf.js | 974 | 345 | 149 | 158 |
+| veraPDF | 2 907 | 55 | 39 | 39 |
+| qpdf | 637 | 553 | 113 | 135 |
 | PDF Association | 7 | 6 | 4 | 4 |
-| **Total** | **4 525** | **1 045 (23.1 %)** | **506 (11.2 %)** | **533 (11.8 %)** |
+| SafeDocs | 1 000 | 483 | 184 | 189 |
+| **Total** | **5 525** | **1442 (26.1 %)** | **489 (8.9 %)** | **525 (9.5 %)** |
 
 Three bars, in three files, and `corpus-run` refuses to compare any of them
 against another. The last column is the faces this project now ships
 (`corpus/ratchet-bundled.json`); the middle one is a face it synthesises for
 the measurement (`corpus/ratchet-fonts.json`), every glyph a filled box.
 
-**The bundled column is 27 files worse, and that is the bundled set being
-right.** Every one of the 27 is a symbolic font — an embedded face the engine
+**The bundled column is 31 files worse, and that is the bundled set being
+right.** Every one of them is a symbolic font — an embedded face the engine
 could not read, with `/Flags` bit 3 set — which the bundled faces decline and
 one all-purpose face silently answered with squares. The synthetic bar was
 flattering itself on those files, and the difference between the two columns is
 exactly the size of that flattery.
 
-**512 of the 1 045 — 49 % — were the absence of a face**, and in qpdf's corpus
-it is three quarters of them. The synthetic face exists so the measurement can
+**953 of the 1442 — 66 % — were the absence of a face**, and in qpdf's corpus it
+is four fifths of them. The synthetic face exists so the measurement can
 be reproduced anywhere: no licence, no download, the same bytes on every
 machine forever, and no dependence on what a runner image happens to ship.
 
@@ -237,12 +411,309 @@ to hand them over, and none of them should carry 4.2 MB of ours. `FontProvider`
 remains the seam either way. Provenance and the OFL text are in
 [THIRDPARTY.md](../../THIRDPARTY.md).
 
+## Shaping, and what it is allowed to claim
+
+`crates/tinker-pdf-shape` is the eleventh leaf: face bytes and text in,
+positioned glyph runs out, in integer font design units, with no PDF or CSS
+vocabulary on its API. Nothing in `tinker-pdf-render` calls it and nothing ever
+will — see the row above. Its design and its eight milestones are
+[design/shaping.md](../design/shaping.md).
+
+Landed so far:
+
+- **OpenType Layout.** `GDEF`, `GSUB` types 1–8 and `GPOS` types 1–9,
+  coverage and class definitions, extension and chaining-context lookups.
+- **The default shaper.** `cmap` through `tinker_pdf_font::Sfnt`, plus `cmap`
+  format 14 read here because a variation selector is consumed by a shaper and
+  never reaches a renderer; script itemization; `locl`/`ccmp`/`rlig`/`liga`/
+  `clig`/`calt`, then `kern`/`dist`/`curs`/`mark`/`mkmk`; a cluster on every
+  glyph that is a byte offset into the caller's own text.
+- **UAX #9.** Level resolution per paragraph, bracket pairs, mirroring, and
+  L1/L2 per *line*, as a function the caller applies after breaking — because
+  only the caller knows where a line ends.
+- **Cursive joining.** `Joining_Type` from the UCD, the four forms from the
+  Unicode Standard's own rule, and a feature mask per glyph so `init` reaches
+  the first letter of a word and no other. Seven `GSUB` stages instead of one,
+  because a face's `medi` lookup is written expecting `init` not to have run.
+- **The Universal Shaping Engine, in part.** `Indic_Syllabic_Category` and
+  `Indic_Positional_Category`, a syllable per Brahmic cluster, every `GSUB`
+  feature applied inside one syllable and never across two, USE's feature
+  stages, the canonical decomposition of a Brahmic character that has one, and
+  one reordering pause that moves a pre-base glyph to the front of its
+  syllable — over the glyphs, through a category each one carries from the
+  character it came from, so a conjunct formed before the pause is still
+  reordered. A `ZWJ` or `ZWNJ` survives the whole of `GSUB` — blocking a
+  ligature is the whole of what one is for — and is deleted at the end of it,
+  before any advance is filled, because a face may give one an outline and a
+  width. `rphf` is offered only where the syllable has a base for the repha to
+  sit on, so a word-final `RA` and halant is a dead consonant and not a reph.
+  **Milestone 5's exit criterion is not met**; the table below says by how
+  much.
+
+- **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
+  in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so
+  the layout crate gains no dependency; `Metrics::shaper()` is asked once per
+  provider, in one place in `flow.rs`, and a run measured through the shaper is
+  never also measured through `Metrics::measure`.
+  `crates/tinker-pdf-layout/tests/shaper.rs` drives a provider whose `advance`
+  **panics**, so a second measurement path is a failure and not a discrepancy.
+  `BookMetrics` implements it over a book's own `@font-face` faces.
+- **Shaped runs into a document.** `tinker_pdf::shaping` turns a run's clusters
+  back into the text each glyph stands for and writes it through
+  `DocumentBuilder::glyph_run`. An Arabic string built that way extracts back
+  to itself through the `/ToUnicode` the writer wrote, across a ligature, and
+  the document is clean under the strict structural validator.
+
+- **Shaped values into a form field.** `tinker_pdf_cos::Font::program` walks
+  `/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`, or
+  `/FontFile`) and returns the stream's *address*, which is what unblocked
+  milestone 8: `fill.rs` reaches its font through the AcroForm `/DR`, and a
+  `Font` that knew every width and no outline had nothing to shape against.
+  Where the `/DA` font is composite, horizontal, and embeds an sfnt, a
+  field's value is shaped and written as a `TJ` run in visual order — under
+  `/Identity-H`, under an embedded CMap stream, and under a predefined
+  registry CMap where this build compiled its table in, because
+  `CMap::code_for_cid` inverts the encoding and verifies each candidate
+  forwards before answering. Everywhere else the single-byte path stands and
+  every character it could not write is named by
+  `WarningKind::FieldCharacterUnrepresentable`, against the field's own
+  object; a registry CMap in a `cmap-predefined`-off build is refused with
+  `WarningKind::PredefinedCMapApproximate` against the field first, so the
+  missing table is not mistaken for a missing glyph — see
+  [forms.md](forms.md).
+
+- **A paginated Arabic book.** `epub/paint.rs` resolved fallback per character
+  and then asked that character's face for a glyph, so an Arabic paragraph was
+  *measured* through the shaper and *drawn* as isolated letters in the order
+  they were typed — two measurement paths disagreeing, which is what
+  `metrics.rs` warns about. Drawing now walks the same segments measurement
+  does (`paint::face_runs`, `css-fonts-4` §5.3 resolved **before** shaping,
+  because a glyph index means nothing outside its own face), and an embedded
+  face's segment is shaped whole. `crates/tinker-pdf/tests/epub_shaped.rs`
+  pins it: joined forms, the line drawn from its last letter, a render
+  fingerprint, and a page-level assertion that the line was measured the way
+  it is drawn. `epub_reftest.rs` gains the EPUB tier's right-to-left pair.
+
+- **Rule L2 is applied at two levels, not one.** It was applied only inside a
+  face segment, so a right-to-left line whose characters need two faces was
+  drawn as two left-to-right pieces — every glyph the right glyph, and the
+  line read backwards. The segments of a right-to-left run are now drawn in
+  reverse and each keeps the glyph order its own shaping gave it.
+  `epub_shaped.rs` carries a two-face fixture for it and a left-to-right
+  control beside it, because a build that reversed every multi-face run would
+  pass the first and set every English sentence with a fallback character in
+  it backwards.
+
+  One limit remains, named rather than implied: **the unit is the `TextRun`
+  and not the visual line.** `flow.rs` breaks lines over logical text and
+  resolves no levels, so a right-to-left line made of two styled spans is two
+  runs at two `x`s the painter did not choose. Closing that means resolving
+  levels above the line breaker, which is a change to the layout crate.
+
+- **`GPOS` offsets reach the page.** They did not, and it was a **silent**
+  defect: `PageBuilder::glyphs` writes one hex string at one origin, so a mark
+  sat where its advance put it rather than where its anchor did, and a
+  vowelled Arabic or Devanagari book rendered wrong while every test passed.
+  The EPUB painter draws through `DocumentBuilder::glyph_run` now — 9.4.3's
+  `TJ` adjustment per glyph and `Ts` for a vertical offset, against the same
+  `/W`-rounded advances the reader will use — and `letter-spacing` is folded
+  into those positions rather than left to `Tc`, which also fixes a
+  measurement disagreement: `Tc` is applied per glyph and `flow.rs` measures
+  per character, so a ligature or a joined word was drawn narrower than it was
+  measured.
+
+  The fingerprint could not see any of it. **No fixture in this repository had
+  a mark**, so the page a build that dropped every offset drew was byte for
+  byte the page a build that carried them drew, and
+  `epub_shaped.rs`'s `SHAPED_PAGE` did not move when the defect was fixed.
+  That file now carries a `GPOS` `SinglePos` face whose one displaced glyph
+  makes the transport visible; the anchor arithmetic itself stays adjudicated
+  by aots and by the `GPOS-3` and `GPOS-4` sections.
+
+  Extraction had the same defect from the other end and it had to be fixed
+  first: `TextDevice` decided which line a glyph was on from where its ink
+  was, so a rise started a new line and a base–mark–base sequence split into
+  three. A glyph now carries its **baseline** origin — the same transform with
+  9.4.3's rise taken out, computed only when there is a rise — and the line
+  tests ask that. The reported quads and origins are unchanged.
+
+**What no shaping engine here adjudicates.** Ruling 13 rules out running
+another shaper and diffing, so the claim for a script is exactly as strong as
+the fixture behind it, and the scripts divide in five:
+
+| Script | What is behind it |
+|---|---|
+| Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
+| Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
+| Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, all six reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
+| Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **301 are reproduced and 32 are not**. Seven of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall, and its `TRIAGE` says of each remaining failure whether the glyph *set*, their *order* or only a *position* is wrong |
+| Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them. What that produces is deterministic and plausible; nothing in this repository says it is right |
+
+Three things milestone 5 **closed**, and the largest of them was not on the
+list of what was wrong:
+
+- **The halant no longer moves the reordering insertion point.** A pre-base
+  vowel goes in front of the whole conjunct, not in front of the consonant it
+  attaches to. `SHBALI-2/1` — `KA ADEG-ADEG PA TALING` — expects the taling
+  first, and the opposite rule stood here on a plausible sentence until the
+  fixtures were run against it. Thirty cases across six sections.
+- **The reordering permutation is computed over the glyphs**, through a USE
+  category carried on each one from the character it came from. It was
+  computed over the characters and skipped whenever a substitution had changed
+  their number, which is exactly the clusters where reordering matters.
+- **Canonical decomposition**, of Brahmic characters that have one, from
+  `UnicodeData.txt` field 5 fully expanded at build time. Five cases — worth
+  recording, because it was named as the single largest cause and it was the
+  smallest of the three.
+
+A fourth thing was recorded as an open guess and the corpus turned out to
+settle it. Two pre-base characters in one syllable come out in the **reverse**
+of the order they were typed; the note here said no fixture had two, and Tai
+Tham `SHLANA-6/2` and `SHLANA-6/4` each have `U+1A55 CONSONANT SIGN MEDIAL RA`
+beside a pre-base vowel. Keeping their order was tried and costs three cases
+across two sections, so the reversal stands on evidence rather than on a
+default.
+
+Four things it does **not** do, each named so they are a backlog and not a
+mystery:
+
+- **The Indic shaper's base-finding.** Kannada, Devanagari and their seven
+  relatives form conjuncts by a different model from USE's, in which `rphf`,
+  `half` and `blwf` apply at *one position* of a syllable rather than to the
+  whole of it. This crate applies them to the syllable.
+
+  **This entry used to say that was why `SHKNDA-3` reproduced none of its 31
+  cases and `SHKNDA-2` four of its 16, and it was wrong.** `SHKNDA-3` was a
+  mark advance — a Brahmic run zeroed the advance a face gave a spacing matra,
+  so every glyph of a syllable stacked at one x — and it is now whole. What
+  the `TRIAGE` table measures instead is that twenty-five of the thirty-two
+  remaining failures are the wrong glyph *set*, two are the wrong *order* and
+  five are a *position*.
+
+  What is left of it in `SHKNDA-2` is **six cases, one cause, and a price**. A
+  Kannada matra has to be next to its base before the presentation features
+  run: `NA` + `AA` rewrites the base and `NA` + `E` ligates, and neither
+  matches with a subjoined consonant in between. Moving every dependent mark
+  back onto its base was implemented and measured — it gains those six and
+  costs **sixty-nine** across `SHBALI` and `SHLANA`, because Tai Tham's
+  `SHLANA-2/6` expects base, subjoined consonant, mark and Kannada's
+  `SHKNDA-2/1` expects base, mark, subjoined consonant for the same shape.
+  **No property this crate reads separates them**: both matras are
+  `Vowel_Dependent` and `Right`. What separates them is which shaping engine
+  the script belongs to, and choosing one per script is a second cluster
+  model. `crates/tinker-pdf-shape/src/universal.rs` holds the per-section
+  numbers.
+- **`rphf` now asks whether the syllable has a base for the repha**, which is
+  the one piece of that model this crate does implement. A word-final `RA` +
+  halant is a dead consonant and not a reph, and offering the lookup at both
+  cost `SHKNDA-2/7`.
+- **A reph is moved to the end of its syllable.** `SHKNDA-2/12` is the one
+  case in either corpus with a reph in it, and what it says is that the reph
+  goes last, so that `haln` can reach the consonant and virama it left behind.
+  The Indic model gives a face several positions to choose between and reads
+  which from the face's own tables; this implements one of them and reads
+  nothing.
+- **Canonical ordering.** What is done above is decomposition and not NFD: the
+  `Canonical_Combining_Class` sort that would follow it is not applied. No
+  case in the corpus is known to need it, so it is a gap rather than a cause.
+- **Hangul.** Its decomposition is arithmetic rather than tabulated (UAX #15
+  §3.12) and `UnicodeData.txt` lists none, so a Hangul syllable is not
+  decomposed. Hangul does not reach the Brahmic plan anyway; the row is here
+  so the absence is a decision.
+- **Tai Tham's residue is one glyph.** Fifteen of the thirty-two remaining
+  failures are the same substitution not happening — `TestShapeLana`'s gid311
+  (`uni1A78`) expected where this crate produces gid314, the glyph `cmap`
+  gives U+1A7B — and ten of those differ in nothing else at all. It is **not**
+  a feature this crate fails to ask for: requesting all twenty-four the face
+  declares still produces gid314. It is not a `cmap` difference either; the
+  face has one subtable and it reads monotonically across the block. What is
+  left is a lookup that does not match the glyph sequence this crate hands it,
+  which is inside USE's cluster grammar. `TRIAGE` in
+  `crates/tinker-pdf-shape/tests/text_rendering.rs` holds the case list and
+  both refutations.
+- **The per-syllable `GSUB` confinement costs three cases and gains none** in
+  this corpus, and it stays. What those three say is that this crate's
+  syllable *boundaries* are in the wrong place, not that confining a lookup to
+  a cluster is wrong; `Buffer::set_syllable` has the measurement.
+- **Dotted circles.** USE inserts one into a cluster that its grammar calls
+  broken. This crate never inserts a glyph the text did not ask for, so a
+  malformed cluster renders as its parts.
+- **`Default_Ignorable_Code_Point`.** Only `ZWJ` and `ZWNJ` are deleted, by
+  `Indic_Syllabic_Category`, which this crate already parses. The wider
+  property — soft hyphen, word joiner, the Mongolian free variation selectors
+  and some seventy more — is not vendored, because no case in either corpus
+  reaches a default-ignorable character that is not one of those two, and a
+  table nothing here could adjudicate is worth less than a predicate named as
+  narrow. The variation selectors are the exception and are already handled:
+  `Shaper::map` *consumes* one, because a selector chooses a glyph.
+
+**A `cmap` of format 13 is read**, the many-to-one range format: the same
+groups as format 12 and the same glyph for every code in the range rather than
+an offset into a run. `CMAP-4` is what adjudicates it, and it is worth saying
+that no corpus document does — `crates/tinker-pdf/tests/cmap_census.rs` finds
+**zero** format 13 subtables across 7 905 distinct embedded faces, so this is a
+capability built against a published conformance fixture rather than against
+measured demand, on a decision the [roadmap](../ROADMAP.md) records.
+
+**A Macintosh subtable is not indexed by Unicode, and is no longer read as
+though it were.** Platform 1 is the classic Mac OS and its subtables are byte
+maps in a legacy encoding named by the subtable's `language` field. Below
+U+0080 every one of those encodings agrees with ASCII; above it they do not, so
+`glyph_for_char` returns `None` there rather than the wrong glyph. That is a
+refusal a caller can fall back from, where the previous silent mis-mapping was
+not. The census counts **28** faces carrying such a subtable and **none** that
+lacks a Unicode subtable beside it, so no corpus document loses a glyph to it.
+
+What would lift the refusal is the conversion table for the encoding the
+language field names, and this repository does not carry one: Apple's published
+mapping files disclaim warranty and grant no redistribution rights, so they
+have no SPDX identifier `deny.toml` allows and `cargo xtask vendor` would
+refuse them. That is the same limit as the bundled sRGB profile, and it is
+recorded in the [roadmap](../ROADMAP.md)'s named non-goals rather than left as
+owed work.
+
+**A `cmap` of format 2 is read**, the high-byte mapping the legacy CJK
+encodings use: a 256-entry key array says, for each first byte, which subheader
+reads the byte after it, with key 0 meaning the byte stands alone. That is how
+a mixed one- and two-byte encoding is written as one table.
+
+The census found it, and then found something the roadmap row had not asked
+about. It asked how many of the **25** subtables are a face's only one — the
+answer is none, on 13 faces — but the number that matters is the platform:
+
+| subtables | platform, encoding |
+| ---: | --- |
+| 10 | (3, 3), Windows PRC — GBK byte pairs |
+| 10 | (1, 25), Macintosh, Chinese simplified |
+| 1 | (1, 0), Macintosh Roman |
+| **2** | **(3, 1), Windows Unicode BMP** |
+| **2** | **(0, 3), Unicode BMP** |
+
+The first three are legacy byte maps, and reaching them from a `char` needs the
+same conversion table the Macintosh row above does not have. **The last four
+are not.** A format 2 subtable on a Unicode platform is indexed by the scalar
+value directly — the high byte selects the subheader and the low byte indexes
+within it, which works for the BMP as well as for GBK — and `glyph_for_char`
+scores (3, 1) and (0, 3) above everything but (3, 10). So it selected those
+four and then got nothing back, because `lookup_cmap` had no arm for the
+format. Those were lost glyphs on four subtables nobody had counted.
+
+Two more are refused inside `tinker-pdf-shape`, for ruling 13's reason rather
+than for want of code: **Syriac's Alaph**, which selects `fin2`, `fin3` and
+`med2` in place of `fina` by its `Joining_Group`, and the **topographical
+features of a joining Brahmic script**, which would need the four joining masks
+on a run that computes syllables instead. Neither has a fixture in either
+vendored corpus, so implementing either would be adding behavior nothing here
+could show was right.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 |---|---|---|---|
-| Shaping: GSUB/GPOS, kerning, bidi — advances are per-character from `/Widths`/`/W` | none — layout uses the file's own advances; nothing is dropped, so nothing warns | Long a stated non-goal, since overturned: the roadmap stages a shaping leaf crate | [ROADMAP](../ROADMAP.md) |
-| CFF subsetting on write | `tinker_pdf_font::subset` answers `None`; the whole face is embedded | A CFF subset needs its charstring INDEX rebuilt, and a broken subset renders *almost* right | [ROADMAP](../ROADMAP.md) |
+| Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
+| A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
+| A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
+| A **CID-keyed** CFF under `add_cid_font` | `add_cid_font` returns false | Its charset maps a CID onto a glyph and the two are different numbers; `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make every one of them a CID (9.7.4.2) | this page |
 | Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | Liberation has no equivalent, and a text face drawn for a symbolic font puts letters where the document meant arrows | this page |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
 | A predefined CMap name outside Adobe's registry | `WarningKind::PredefinedCMapUnknown` | A guessed codespace mis-splits the string, so glyphs *and* advances go wrong silently | [rulings](../rulings.md) ruling 10 |
@@ -254,8 +725,101 @@ remains the seam either way. Provenance and the OFL text are in
 
 ## Verified
 
+- `crates/tinker-pdf/src/fontlist.rs` — 12 unit tests beside the listing:
+  9.6.4's subset-tag shape in both directions (seven strings that are not a
+  tag, each for its own reason), a descriptor deciding embedding, a
+  `/FontFile2` naming no stream reported **not** embedded, a composite font
+  as one entry carrying its descendant's program, one face reached three ways
+  listed once with both its resource names, a form XObject's and an
+  annotation appearance's fonts reached, a resource cycle that terminates,
+  the form's `/DR` reached, the listing agreeing with `cos::font::read` about
+  family and embedding (self-consistency, named as such), and listing adding
+  no warnings.
+- `crates/tinker-pdf/tests/annotation_census.rs`'s font half — the corpus
+  numbers above, `#[ignore]`d, printing `RAN`/`SKIPPED`. It asserts every
+  subset tag it meets against 9.6.4's shape, that a font with a program is
+  `is_embedded()` and one without is not, and floors at 22 769 fonts over
+  5 605 files with all four families present.
+- `crates/tinker-pdf-font/tests/woff_fixtures.rs` — 12 tests, **the WOFF
+  decoders against seven committed files**, in `crates/tinker-pdf-font/tests/woff/`,
+  written on 2026-08-31 by `make-fixtures.py` from `cargo xtask synth-face` —
+  a face this project owns, which is why they can exist at all: OFL-1.1
+  reserves the name of every face the corpus vendors, and no producer in the
+  corpus tooling emits a web font. Five packings by **three encoders with
+  no code in common** — fontTools 4.63.0, `ttf2woff` 3.0.0, and
+  `wawoff2` 2.0.1,
+  which is Google's reference C++ encoder built to WebAssembly. fontTools
+  **generated** these files and adjudicates nothing (ruling 13): no program
+  runs at test time, and every assertion compares this build against the
+  source face committed beside the containers. `tests/woff/PROVENANCE.tsv`
+  records all of that per file — producer, version, the face it was made
+  from, the day, and ruling 13's two halves — and a test holds it to the
+  directory in both directions, because a record nothing checks stops being
+  true the first time a fixture is regenerated.
+  The claim is **identical glyph outlines through `Sfnt`** over all 263
+  glyphs — 230 that draw and 33 that do not, asserted by number — plus
+  identical `cmap` answers, identical advances, and a `head` whose
+  `checkSumAdjustment` this build recomputed correctly. For WOFF 1.0 from the
+  producer that preserved the table order it is **byte identity** with the
+  source face. Nine counted injections.
+- `crates/tinker-pdf-font/src/woff/tests.rs` — 18 tests over the parts no
+  committed file reaches: §3.1's three legal spellings of 506, `UIntBase128`'s
+  two forbidden ones, the known-tag table, an unknown tag carried through, the
+  three tables whose legal transform versions differ, and the ceiling refused
+  before a byte is decompressed. 22 counted injections, and one deliberate
+  **non**-refusal — WOFF 2.0 §3.2 says a decoder "MUST NOT reject" a file for
+  a non-zero reserved field or a `totalSfntSize` that disagrees, where WOFF 1.0
+  §3 and §4 say it MUST reject both.
+- `crates/tinker-pdf-font/tests/woff_seeds.rs` and
+  `fuzz/fuzz_targets/woff.rs` — thirteen seeds, replayed on stable because a
+  seed corpus nothing reads stops describing the parser. Five must decode and
+  eight must be refused, both asserted by number; 8 509 prefixes and 11 988
+  single-byte flips reach an answer rather than a panic (ruling 1).
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect.
+- `crates/tinker-pdf-font/src/cff_subset/tests.rs` — 21 tests over fonts built
+  byte by byte: local and global subroutine renumbering, a global subroutine
+  reached from two Font DICTs, `hintmask` counting stems a subroutine declared,
+  `seac` components kept, and the four refusals. Two of them cross a **bias
+  threshold**: 1 300 local subroutines cut to one (1 131 → 107), and 34 000 cut
+  to 1 300 (32 768 → 1 131), the second keeping a non-prefix, non-contiguous
+  range so the renumbering is the identity nowhere and every operand form
+  appears on the new side and none on the old. That test pins the whole
+  rewritten charstring against a byte string derived from the renumbering rule
+  rather than read back from the subsetter.
+- `crates/tinker-pdf-cos/tests/cff_subsetting.rs` — the writer end: the 9.6.4
+  tag, the Table 126 descriptor entry for each of the three shapes, `/W` from
+  the original program, and each `SubsetRefusal` reported by name.
+- `crates/tinker-pdf/tests/cff_subset_census.rs` — every CFF face in the
+  fetched corpora cut to nine glyphs: 480 files, 3 313 faces (551 CID-keyed,
+  2 735 bare simple, 27 `OpenType/CFF`), 3 311 rebuilt and 2 refused, 25.3 MB
+  of font program down to 5.05 MB, and **zero divergences** — every retained glyph's
+  outline, advance and font matrix, every glyph's name, every CID's glyph and
+  every one of the 256 codes identical to the original's.
+- **Counted injection over the CFF subsetter** (`docs/verification.md`'s house
+  practice). Each defect put back, and the assertions that fire. The writer
+  also verifies its own output by outlining every retained glyph, so each row
+  was run twice — with that self-check on and off — to separate what the tests
+  catch from what the writer catches. The counts were the same both ways, so
+  nothing here depends on the self-check:
+
+  | defect reintroduced | unit (21) | writer (9) | census (1) |
+  |---|---|---|---|
+  | none | 0 | 0 | 0 |
+  | the operand is recomputed with the **old** bias | 2 | **0** | 1 |
+  | one global subroutine left out of the rebuilt INDEX | 2 | **0** | 1 |
+  | the operand names the subroutine's **old** index | 7 | 3 | 1 |
+
+  The two zeroes are the finding. The writer's fixtures carry 26 local
+  subroutines and no global ones, so their bias never changes and there is no
+  global INDEX to damage — exactly the "a test that only uses small fonts never
+  crosses a threshold" hole. The two bias-threshold fixtures are the only
+  things in the suite that close it, and the corpus census is the only thing
+  that closes it over fonts nobody here wrote. A third finding came out of the
+  same run: the 33 900 fixture originally kept subroutines 0..1299, a *prefix*
+  of the original numbering that renumbers onto itself, and reintroducing "use
+  the old index" changed nothing there — it now keeps every third subroutine
+  from 20 000 up, and catches that defect too.
 - `crates/tinker-pdf/tests/composite_fonts.rs` — the CID selects glyph and
   advance together; `/CIDToGIDMap` in both forms; `.notdef` plus report for a
   CID the font does not carry.
@@ -281,7 +845,9 @@ remains the seam either way. Provenance and the OFL text are in
   targets, asserting a least-ink floor so a face that stops drawing cannot
   read as a pass ([determinism](determinism.md)); the `epub` fixture renders
   through `SimpleFontProvider`, covering the provider path.
-- The whole workspace stands at 2 952 passed / 0 failed / 8 ignored
-  (Windows x86_64, August 2026), and the corpus run — 4 525 files, 4 484
-  rendered every page, 0 crashes — exercises real embedded fonts of every
+- The whole workspace stands at 4 779 passed / 0 failed / 58 ignored across
+  218 suites (Windows x86_64, 15 September 2026, measured on this branch;
+  other lanes are moving the total in parallel), and the corpus run of 13 September 2026
+  — 5 525 files, 5 516 rendered every page, 0 crashes — exercises real
+  embedded fonts of every
   kind here. See [verification](../verification.md).

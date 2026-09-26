@@ -66,11 +66,19 @@ use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PageBuilder, Target};
 use tinker_pdf_css::property::{BorderStyle, Color, FontFamily, FontStyle, Side, TextDecoration};
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
-use tinker_pdf_layout::metrics::{FontRequest, Metrics, Vertical};
-use tinker_pdf_layout::{BoxFragment, Page as LayoutPage, TextRun};
+use tinker_pdf_font::Sfnt;
+use tinker_pdf_layout::metrics::{FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, Vertical};
+use tinker_pdf_layout::{BoxFragment, Page as LayoutPage, ReplacedFragment, TextRun};
+use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
+use tinker_pdf_shape::shape::itemize;
 
 use super::read::PX_TO_PT;
 use super::typeface::FaceSet;
+use super::xhtml::Dom;
+// `Placed` and not `tinker_pdf_layout::metrics::PlacedGlyph`, which is
+// imported above under that name and is a different thing: layout's is a
+// measurement and this one is a position on a page.
+use crate::shaping::Placed;
 
 /// How many codes one overflow font holds: 32 through 255.
 ///
@@ -207,6 +215,41 @@ pub fn choose(faces: &FaceSet, font: &FontRequest<'_>, ch: Option<char>) -> Chos
         bold,
         italic,
     })
+}
+
+/// The maximal stretches of `text` that [`choose`] answers the same for, as
+/// byte ranges.
+///
+/// # Why fallback is resolved before shaping and not after
+///
+/// Font fallback is per **character** (`css-fonts-4` §5.3) and shaping is per
+/// **run of one face** (ISO/IEC 14496-22): a `GSUB` rule names glyph indices,
+/// and a glyph index means nothing outside the face it came from. So a
+/// paragraph whose characters need three faces is three shaped runs, and a
+/// build that shaped it as one — through whichever face its first character
+/// happened to resolve to — would ask two faces' worth of characters of a face
+/// that has neither and get `.notdef` for both.
+///
+/// It is also what keeps the measured advance and the drawn advance the same
+/// number: [`BookMetrics::shape`] and [`draw_run`] walk **these** segments, so
+/// the one-path-owns-a-run rule `tinker-pdf-layout`'s `metrics.rs` states holds
+/// across the seam rather than only inside it.
+#[must_use]
+pub fn face_runs(
+    faces: &FaceSet,
+    font: &FontRequest<'_>,
+    text: &str,
+) -> Vec<(core::ops::Range<usize>, Chosen)> {
+    let mut out: Vec<(core::ops::Range<usize>, Chosen)> = Vec::new();
+    for (at, ch) in text.char_indices() {
+        let chosen = choose(faces, font, Some(ch));
+        let end = at + ch.len_utf8();
+        match out.last_mut() {
+            Some((range, last)) if *last == chosen => range.end = end,
+            _ => out.push((at..end, chosen)),
+        }
+    }
+    out
 }
 
 impl Face {
@@ -419,6 +462,140 @@ impl Metrics for BookMetrics<'_> {
             descent: descent * font.size,
         }
     }
+
+    fn shaper(&self) -> Option<&dyn Shaper> {
+        Some(self)
+    }
+}
+
+/// Milestone 6 of `docs/design/shaping.md`: the book's own faces, shaped.
+///
+/// # Why this answers for every run and not only for the ones it can shape
+///
+/// [`tinker_pdf_layout::metrics::Metrics::shaper`] is asked once per provider
+/// and not once per run, so a provider that is a shaper owns **all** of its
+/// runs. That is not a limitation to work around; it is the rule. A run
+/// measured by the shaper and drawn from `Metrics::advance` — or the other way
+/// round — is the two-paths-disagree failure `metrics.rs` warns about, and the
+/// only way to make it unreachable is for one of the two to own everything.
+///
+/// So a run set in one of the standard 14, which has no sfnt in this process
+/// to shape against, is measured here by summing [`BookMetrics::advance`] —
+/// the same number, produced by the same provider, **once**. What changes is
+/// not the arithmetic but who did it.
+///
+/// # The clusters are the run's own
+///
+/// `tinker_pdf_shape` numbers a cluster by byte offset into the paragraph it
+/// was given, and the paragraph here *is* the run, so the offsets come back
+/// indexed from the start of `text` and need no adjustment. Milestone 7 turns
+/// them into `/ToUnicode`.
+impl Shaper for BookMetrics<'_> {
+    fn shape(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText {
+        let mut glyphs = Vec::new();
+        let mut advance = 0.0;
+        for (range, chosen) in face_runs(self.faces(), font, text) {
+            let slice = text.get(range.clone()).unwrap_or("");
+            let shaped = match chosen {
+                Chosen::Embedded(index) => self
+                    .faces()
+                    .faces()
+                    .get(index)
+                    .and_then(|face| shape_with(&face.program, slice, font, rtl)),
+                Chosen::Standard(_) => None,
+            };
+            let mut shaped = shaped.unwrap_or_else(|| self.unshaped(slice, font, rtl));
+            // A cluster is a byte offset into the text the run was shaped
+            // from, and that was the *segment*. Adding the segment's own start
+            // is what makes the offsets index the caller's string, which is
+            // what milestone 7 rebuilds `/ToUnicode` from.
+            let base = u32::try_from(range.start).unwrap_or(u32::MAX);
+            for glyph in &mut shaped.glyphs {
+                glyph.cluster = glyph.cluster.saturating_add(base);
+            }
+            advance += shaped.advance;
+            glyphs.extend(shaped.glyphs);
+        }
+        ShapedText {
+            glyphs,
+            advance,
+            rtl,
+        }
+    }
+}
+
+impl BookMetrics<'_> {
+    /// One glyph per character, at this provider's own advances.
+    ///
+    /// The answer for a standard-14 run, and for an embedded face whose sfnt
+    /// this build could not read. The glyph index is zero throughout because
+    /// there is none to give: a simple font addresses a *code* and the
+    /// consumer that draws this run resolves that itself, through
+    /// [`Coded`]. What layout needs from this is the advance, and that is the
+    /// provider's own.
+    fn unshaped(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText {
+        let mut glyphs = Vec::new();
+        let mut advance = 0.0;
+        for (at, ch) in text.char_indices() {
+            let width = self.advance(ch, font);
+            glyphs.push(PlacedGlyph {
+                glyph: 0,
+                cluster: u32::try_from(at).unwrap_or(u32::MAX),
+                x_advance: width,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            });
+            advance += width;
+        }
+        ShapedText {
+            glyphs,
+            advance,
+            rtl,
+        }
+    }
+}
+
+/// Shapes one run against one embedded face, scaling design units to points.
+///
+/// `None` where the bytes are not an sfnt this build reads, which is the same
+/// answer [`EmbeddedFace::advance_em`] gives for the same face and leaves the
+/// caller to fall back.
+///
+/// The scale is `units * size / units_per_em`: one multiply and one divide,
+/// both correctly rounded by IEEE 754, which is where ruling 4's integer
+/// pipeline is allowed to end. Every number is an integer until this line.
+fn shape_with(bytes: &[u8], text: &str, font: &FontRequest<'_>, rtl: bool) -> Option<ShapedText> {
+    let sfnt = Sfnt::parse(bytes)?;
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
+    let direction = if rtl {
+        BaseDirection::RightToLeft
+    } else {
+        BaseDirection::Auto
+    };
+    let (_, runs) = shaper.shape_text(text, direction);
+    let mut glyphs = Vec::new();
+    let mut advance = 0.0;
+    for run in &runs {
+        let units = f64::from(run.units_per_em().max(1));
+        let scale = |value: i32| f64::from(value) * font.size / units;
+        for glyph in run.glyphs() {
+            glyphs.push(PlacedGlyph {
+                glyph: glyph.glyph,
+                cluster: glyph.cluster,
+                x_advance: scale(glyph.x_advance),
+                y_advance: scale(glyph.y_advance),
+                x_offset: scale(glyph.x_offset),
+                y_offset: scale(glyph.y_offset),
+            });
+            advance += scale(glyph.x_advance);
+        }
+    }
+    Some(ShapedText {
+        glyphs,
+        advance,
+        rtl,
+    })
 }
 
 /// How one character reaches the page: a code in a simple font, or a glyph
@@ -739,28 +916,249 @@ impl Frame {
 /// parent's — and then the text, in **reading order**, which is what makes
 /// `Page::text()` return the words in the order the book wrote them rather
 /// than in the order a painter found convenient.
-pub fn draw_page(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, fonts: &Fonts<'_>) {
+///
+/// Returns how many shaped pieces the writer refused, which the caller turns
+/// into [`crate::ArchiveWarning::UnwritableTextRun`] (ruling 10).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_page(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    laid: &LayoutPage,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+    pictures: &[(u32, Vec<u8>)],
+    dom: Option<&Dom>,
+    chapter: u64,
+) -> usize {
+    let mut refused = 0usize;
     for fragment in &laid.boxes {
         draw_box(page, fragment, frame);
     }
-    for run in &laid.runs {
-        if !run.painted {
+    // After the backgrounds and before the text, which is CSS 2.2 §E.2's
+    // painting order for a replaced element's content: it goes in the same
+    // layer as in-flow inline content, above its own background and below
+    // nothing the flow put on top of it. A picture registered nowhere — the
+    // writer refused the bytes after the box was already laid out — leaves its
+    // box empty and is named by `ArchiveWarning::ImageNotDrawn`.
+    for fragment in &laid.replaced {
+        let Some(anchor) = fragment.anchor else {
+            continue;
+        };
+        let Some((_, name)) = pictures.iter().find(|(at, _)| *at == anchor) else {
+            continue;
+        };
+        draw_replaced(page, fragment, frame, name);
+    }
+    // 14.7's structure tree, when the caller has the element tree the runs
+    // came from. Every run carries the index of the element that wrote it, so
+    // the tree this builds is the **document's** tree and not a description of
+    // the page: the order is source order, which is what `TextRun::order`
+    // already sorted these runs into.
+    let Some(dom) = dom else {
+        for run in &laid.runs {
+            if !run.painted {
+                continue;
+            }
+            refused += artifact_or_run(builder, page, run, frame, fonts);
+        }
+        return refused;
+    };
+
+    let drawn: Vec<&TextRun> = laid.runs.iter().filter(|run| run.painted).collect();
+    let chains: Vec<Vec<usize>> = drawn
+        .iter()
+        .map(|run| match run.generated {
+            // An artifact belongs to no element: 14.8.2.2 puts it outside the
+            // structure entirely, which is `/Artifact` and not a tag.
+            true => Vec::new(),
+            false => ancestry(dom, run.anchor),
+        })
+        .collect();
+    tag_runs(
+        builder,
+        page,
+        frame,
+        fonts,
+        dom,
+        chapter,
+        &drawn,
+        &chains,
+        0,
+        &mut refused,
+    );
+    refused
+}
+
+/// One run, marked as an artifact where it is one.
+fn artifact_or_run(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    run: &TextRun,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+) -> usize {
+    // 14.8.2.2: a list marker is *"a graphics object that is not part of
+    // the author's original content"*, which is what 14.8.2 calls an
+    // artifact and what `TextRun::generated` already says one crate down.
+    // Marking it is what lets a bullet be **drawn and not extracted**, and
+    // it is the only reason text conservation can stay an equality: a
+    // marker on the page and not in the spine would be one extra character
+    // per list item, on every book with a list in it.
+    if run.generated {
+        page.raw(b"/Artifact BMC");
+    }
+    let refused = draw_run(builder, page, run, frame, fonts);
+    if run.generated {
+        page.raw(b"EMC");
+    }
+    refused
+}
+
+/// The element chain a run sits under, outermost first.
+///
+/// From the run's own element up to — but not including — `<body>`, then
+/// reversed. `<body>` is left out because [`DocumentBuilder`] already wraps
+/// every page's roots in a `/Document`, and a `/Sect` per page under it that
+/// meant "this chapter's body" would be a level that says nothing.
+///
+/// An element with no anchor gets an empty chain and is drawn untagged rather
+/// than guessed at, which is the same refusal the reader makes: this build
+/// does not invent structure (`docs/design/tagged-pdf.md`).
+fn ancestry(dom: &Dom, anchor: Option<u32>) -> Vec<usize> {
+    let Some(anchor) = anchor else {
+        return Vec::new();
+    };
+    let mut at = anchor as usize;
+    if at >= dom.nodes.len() {
+        return Vec::new();
+    }
+    let body = dom.body();
+    let mut chain = Vec::new();
+    loop {
+        if Some(at) == body {
+            break;
+        }
+        chain.push(at);
+        match dom.nodes[at].parent {
+            // `parent` is always less than the node's own index, so this
+            // terminates without a visited set.
+            Some(parent) => at = parent,
+            None => break,
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+/// Draws a run of runs, opening one structure element per level they share.
+///
+/// **Grouped rather than one element per run.** Consecutive runs of one
+/// paragraph share its whole chain, and opening a `/P` for each of them would
+/// make a paragraph of three runs three paragraphs. The runs arrive in reading
+/// order — `fragment::order` sorted them — so equal chains are adjacent and a
+/// partition by the level's element is all the grouping there is to do.
+#[allow(clippy::too_many_arguments)]
+fn tag_runs(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+    dom: &Dom,
+    chapter: u64,
+    runs: &[&TextRun],
+    chains: &[Vec<usize>],
+    level: usize,
+    refused: &mut usize,
+) {
+    let mut at = 0usize;
+    while at < runs.len() {
+        // A run whose chain has run out belongs to the element opened around
+        // it, so it is drawn here rather than descended into.
+        if chains[at].len() <= level {
+            *refused += artifact_or_run(builder, page, runs[at], frame, fonts);
+            at += 1;
             continue;
         }
-        // 14.8.2.2: a list marker is *"a graphics object that is not part of
-        // the author's original content"*, which is what 14.8.2 calls an
-        // artifact and what `TextRun::generated` already says one crate down.
-        // Marking it is what lets a bullet be **drawn and not extracted**, and
-        // it is the only reason text conservation can stay an equality: a
-        // marker on the page and not in the spine would be one extra character
-        // per list item, on every book with a list in it.
-        if run.generated {
-            page.raw(b"/Artifact BMC");
+        let element = chains[at][level];
+        let mut end = at + 1;
+        while end < runs.len() && chains[end].get(level) == Some(&element) {
+            end += 1;
         }
-        draw_run(page, run, frame, fonts);
-        if run.generated {
-            page.raw(b"EMC");
-        }
+        let tag = structure_type(&dom.nodes[element].name);
+        let (slice, tails) = (&runs[at..end], &chains[at..end]);
+        // **The key is the element and the order is the reading position**,
+        // and they are two numbers because they answer two questions. The key
+        // has to be the same on every page this element appears on or its
+        // halves never merge, so it is the element's own index. The order has
+        // to ascend with the document or the halves merge into the wrong
+        // place, so it is the reading-order stamp of the first run under it —
+        // which for a float is where it was *met*, not where its box landed.
+        let key = chapter + element as u64;
+        let order = chapter + runs[at].order as u64;
+        page.tagged_keyed(tag.as_bytes(), key, order, |page| {
+            tag_runs(
+                builder,
+                page,
+                frame,
+                fonts,
+                dom,
+                chapter,
+                slice,
+                tails,
+                level + 1,
+                refused,
+            );
+        });
+        at = end;
+    }
+}
+
+/// ISO 32000 Table 333's standard structure type for an XHTML element.
+///
+/// **Every arm returns a standard type, which is why no `/RoleMap` is
+/// written.** 14.7.3's role map exists to say what a non-standard tag means;
+/// a producer that only ever emits standard tags has nothing to declare, and
+/// a role map mapping `/P` to `/P` is the loop the reader counts as a warning.
+/// The cost is that the XHTML element name is not recoverable from the PDF —
+/// `<em>` and `<strong>` are both `/Span` — which is named in the refusal
+/// table rather than hidden.
+fn structure_type(name: &str) -> &'static str {
+    match name {
+        "p" => "P",
+        "h1" => "H1",
+        "h2" => "H2",
+        "h3" => "H3",
+        "h4" => "H4",
+        "h5" => "H5",
+        "h6" => "H6",
+        "ul" | "ol" | "dl" => "L",
+        "li" | "dt" | "dd" => "LI",
+        "table" => "Table",
+        "thead" => "THead",
+        "tbody" => "TBody",
+        "tfoot" => "TFoot",
+        "tr" => "TR",
+        "td" => "TD",
+        "th" => "TH",
+        "caption" | "figcaption" => "Caption",
+        "blockquote" => "BlockQuote",
+        "code" | "kbd" | "samp" | "var" | "pre" => "Code",
+        "sub" => "Sub",
+        "figure" => "Figure",
+        "section" | "article" | "nav" | "aside" | "header" | "footer" | "main" => "Sect",
+        // **`<a>` is a `/Span` and not a `/Link`**, which is a refusal rather
+        // than an oversight. 14.8.4.4.2 requires a `/Link` element to contain
+        // an `/OBJR` referencing the link annotation it stands for, and this
+        // writer cannot emit one; a bare `/Link` would claim an association to
+        // assistive technology that is not in the file. The annotation itself
+        // is still written and still works.
+        //
+        // §14.8.4.2's two inline defaults. Anything block-level this build
+        // does not name is a `/Div` and anything else is a `/Span`, which is
+        // what a reader does with an unknown tag anyway — and is honest,
+        // because the alternative is inventing a type from a class attribute.
+        "div" | "body" | "html" | "form" | "fieldset" => "Div",
+        _ => "Span",
     }
 }
 
@@ -816,6 +1214,44 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
     }
 }
 
+/// Draws one replaced element's picture into its content box.
+///
+/// # What it does not do
+///
+/// **It does not scale to fit and it does not letterbox.** A raster's intrinsic
+/// aspect ratio is already in the box `tinker-pdf-layout` gave it — CSS 2.2
+/// §10.3.2 and §10.6.2 put it there — so the picture fills the content box
+/// exactly, and where an author stated a `width` and a `height` that disagree
+/// with the picture's proportions, it is stretched. That is what CSS says
+/// happens: `object-fit` is the property that would say otherwise and it is not
+/// implemented here. The SVG path's `preserveAspectRatio` is a different
+/// question about a different element and `epub::svg::place_image` answers it
+/// there.
+///
+/// **It draws untagged.** 14.8.4.4 would put a picture in a `/Figure` with an
+/// `/Alt`, and the structure this file builds is built out of *text runs* —
+/// every element of it is opened around a run's ancestry. See the refusal table
+/// in `docs/features/epub.md`.
+fn draw_replaced(page: &mut PageBuilder, fragment: &ReplacedFragment, frame: &Frame, name: &[u8]) {
+    let width = fragment.width * PX_TO_PT;
+    let height = fragment.height * PX_TO_PT;
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    // 8.9.5.2 puts an image in the unit square with its first row at the top,
+    // and `PageBuilder::image` writes the `cm` that maps the square onto a
+    // rectangle given by its **bottom** left corner — which is `frame.y` of the
+    // content box's bottom edge, the one place the downward `y` of a flow and
+    // the upward `y` of a page have to meet.
+    page.image(
+        name,
+        frame.x(fragment.x),
+        frame.y(fragment.y + fragment.height),
+        width,
+        height,
+    );
+}
+
 /// Whether a border style puts ink on the page at all.
 ///
 /// `dashed`, `dotted` and `double` are drawn **solid**, and that is a
@@ -839,23 +1275,341 @@ struct Segment {
     x: f64,
 }
 
-fn draw_run(page: &mut PageBuilder, run: &TextRun, frame: &Frame, fonts: &Fonts<'_>) {
+/// One embedded face's shaped slice: where every glyph goes, and how wide the
+/// whole of it is.
+struct Shaped {
+    /// The glyphs **in the order they are drawn**, positioned in text space
+    /// from the run's own origin — which is what
+    /// [`tinker_pdf_cos::build::DocumentBuilder::glyph_run`] takes.
+    glyphs: Vec<Placed>,
+    /// The slice's whole advance, in **points**, `letter-spacing` included.
+    ///
+    /// Not `glyphs.last()`'s position: the last glyph may be a mark with no
+    /// advance sitting behind its base, and the pen is not where the ink
+    /// stopped.
+    advance: f64,
+}
+
+/// One embedded face's glyphs for a slice, **in the order they are drawn**.
+///
+/// Milestone 6 of `docs/design/shaping.md`. Four things happen here that the
+/// per-character path this replaced could not do:
+///
+/// - `GSUB` runs, so a joining script's letters take their initial, medial and
+///   final forms instead of the isolated glyph a `cmap` lookup returns;
+/// - UAX #9's rule L2 orders the runs and a right-to-left run's glyphs are
+///   walked backwards, so an Arabic line is drawn from its last letter;
+/// - each glyph carries the text of its own cluster, so a ligature extracts as
+///   the characters it replaced rather than as one of them;
+/// - **`GPOS`'s per-glyph offsets are carried**, so a mark sits where its
+///   anchor puts it rather than where its advance does.
+///
+/// The direction is `Auto` rather than the caller's flag, matching
+/// [`shape_with`]: `flow.rs` resolves no levels and passes `false` for every
+/// run, so P2/P3 over the run's own text is the only answer either side has.
+///
+/// # The pen model, and why it is the shaper's own
+///
+/// `x = pen + x_offset` and `rise = y_offset`, with `pen` accumulating the
+/// advances **in draw order** — the model
+/// `crates/tinker-pdf-shape/tests/text_rendering.rs` measures the vendored
+/// corpus with, so the positions this writes are the positions that suite
+/// adjudicates. `glyph_run` then works out each `TJ` adjustment against its
+/// own `/W`-rounded pen, so the difference between the shaper's advance and
+/// the one a reader will use is absorbed glyph by glyph rather than
+/// accumulating.
+///
+/// # `letter-spacing` is folded in here rather than left to `Tc`
+///
+/// Not a preference. `glyph_run`'s pen model does not know about `Tc`, so a
+/// non-zero one would push glyph *k* by *k* × `Tc` past where this put it. And
+/// `Tc` is applied by a reader per **glyph** while `tinker-pdf-layout`
+/// measures `letter_spacing × chars().count()` per **character**
+/// (`flow.rs`'s `measure`), so a ligature or a joined Arabic word was drawn
+/// *narrower* than the line box it was measured into. Folding the spacing in
+/// at cluster boundaries — one character's worth per character, none between a
+/// mark and its base — makes the drawn width the measured width by
+/// construction.
+fn shaped_glyphs(program: &[u8], text: &str, size: f64, letter_spacing: f64) -> Option<Shaped> {
+    let sfnt = Sfnt::parse(program)?;
+    let upem = f64::from(sfnt.units_per_em.max(1));
+    let scale = |units: i32| f64::from(units) * size / upem;
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
+    let paragraph = Paragraph::new(text, BaseDirection::Auto);
+    let runs = itemize(text, &paragraph);
+    let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(text, run)).collect();
+    let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
+
+    let mut out: Vec<Placed> = Vec::new();
+    let mut pen = 0.0f64;
+    // Characters whose clusters are already behind the pen, and the characters
+    // of the cluster it is inside. `letter-spacing` is charged once per
+    // character and paid at the cluster boundary, so a mark keeps the position
+    // its anchor gave it.
+    let mut spaced = 0usize;
+    let mut pending = 0usize;
+    let mut cluster: Option<u32> = None;
+    for index in reorder(&levels) {
+        let Some(run) = shaped.get(index) else {
+            continue;
+        };
+        let glyphs = run.glyphs();
+        // The text each glyph stands for is worked out in **logical** order,
+        // because that is the order clusters are monotonic in; the reversal
+        // for drawing happens after.
+        let texts = crate::shaping::cluster_texts(text, run);
+        let order: Vec<usize> = if run.direction().is_forward() {
+            (0..glyphs.len()).collect()
+        } else {
+            (0..glyphs.len()).rev().collect()
+        };
+        for at in order {
+            let Some(glyph) = glyphs.get(at) else {
+                continue;
+            };
+            if cluster.is_some_and(|last| last != glyph.cluster) {
+                spaced = spaced.saturating_add(pending);
+                pending = 0;
+            }
+            let stands_for = texts.get(at).copied().unwrap_or("");
+            if !stands_for.is_empty() {
+                pending = stands_for.chars().count();
+            }
+            cluster = Some(glyph.cluster);
+            out.push(Placed {
+                id: glyph.glyph,
+                text: stands_for.to_string(),
+                x: pen + letter_spacing * spaced as f64 + scale(glyph.x_offset),
+                rise: scale(glyph.y_offset),
+            });
+            pen += scale(glyph.x_advance);
+        }
+    }
+    Some(Shaped {
+        // The whole slice's `letter-spacing` rather than the sum of the
+        // clusters', so the pen agrees with `flow.rs`'s `measure` exactly even
+        // where a shaper dropped a character that started no cluster of its
+        // own.
+        advance: pen + letter_spacing * text.chars().count() as f64,
+        glyphs: out,
+    })
+}
+
+fn draw_run(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    run: &TextRun,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+) -> usize {
     let font = request(run);
-    let metrics = BookMetrics::with(fonts.faces());
     let size = run.font_size * PX_TO_PT;
     let baseline = frame.y(run.y);
     let mut x = run.x;
+    let mut refused = 0usize;
 
     set_fill(page, run.color);
+    // `css-fonts-4` §5.3 first, then shaping: see [`face_runs`]. An embedded
+    // face's stretch is shaped whole; a standard-14 one keeps the
+    // character-at-a-time path, because a simple font addresses a code and
+    // there is no sfnt in this process to shape against.
+    let mut segments = face_runs(fonts.faces(), &font, &run.text);
+    if right_to_left(&run.text) {
+        segments.reverse();
+    }
+    for (range, chosen) in segments {
+        let slice = run.text.get(range).unwrap_or("");
+        match chosen {
+            Chosen::Embedded(index) => {
+                let drawn = draw_shaped(
+                    builder, page, run, frame, fonts, index, slice, size, baseline, x,
+                );
+                x = drawn.0;
+                refused += drawn.1;
+            }
+            Chosen::Standard(_) => {
+                x = draw_coded(page, run, frame, fonts, slice, size, baseline, x);
+            }
+        }
+    }
+
+    decorate(page, run, frame, x);
+    refused
+}
+
+/// Whether a run reads right to left, by UAX #9's own P2 and P3 over its text.
+///
+/// # Why the question is asked here at all
+///
+/// [`face_runs`] resolves fallback **before** shaping, because a glyph index
+/// means nothing outside the face it came from — so a right-to-left line whose
+/// characters need two faces is two segments, and rule L2 has already been
+/// applied *inside* each of them by the time either is drawn. Reversing the
+/// glyphs of a segment orders the segment; it does not order the segments, and
+/// a build that stopped there drew a two-face Arabic line as two left-to-right
+/// pieces, each internally correct.
+///
+/// So L2 is applied at two levels: the segments of a right-to-left run are
+/// drawn in reverse, and each keeps the glyph order its own shaping gave it.
+/// That is the same two-step [`shaped_glyphs`] performs over one segment's
+/// bidi runs, one level out.
+///
+/// **The unit is the `TextRun` and not the visual line**, and that is a real
+/// limit rather than a simplification. `flow.rs` breaks lines over logical
+/// text and resolves no levels, so a line made of two styled spans is two
+/// `TextRun`s at two `x`s this file did not choose; reordering across them
+/// would mean moving boxes layout placed. What this closes is the case
+/// fallback creates — one run, one style, several faces — which is the case
+/// `docs/features/fonts.md` named.
+///
+/// **And a standard-14 segment is still drawn a character at a time in
+/// logical order**, because [`draw_coded`] addresses codes rather than glyphs
+/// and there is no sfnt in this process to shape or reorder against. A
+/// right-to-left run that falls partly to the standard 14 therefore has its
+/// segments in visual order and that segment's letters in logical order.
+/// It was that way before this: the segments were in logical order too, so
+/// what changes is that half of the answer is now right rather than none of
+/// it. Named rather than implied.
+fn right_to_left(text: &str) -> bool {
+    Paragraph::new(text, BaseDirection::Auto)
+        .base_level()
+        .is_rtl()
+}
+
+/// One embedded face's stretch: shaped, ordered, positioned, and drawn as text
+/// objects.
+///
+/// Returns where the pen ended, in layout pixels, and how many pieces the
+/// writer refused.
+///
+/// A word boundary starts a new text object whenever `word-spacing` is in
+/// force, for the reason the character path gives in as many words: 9.3.3
+/// applies `Tw` to **byte code 32 in a single-byte encoding**, and a composite
+/// font under `/Identity-H` has none, so the space has to be paid by moving
+/// the origin. Splitting there costs nothing a joining script would notice —
+/// a space is `Joining_Type` `U` and breaks a cursive connection anyway.
+///
+/// # Why `DocumentBuilder::glyph_run` and not `PageBuilder::glyphs`
+///
+/// `glyphs` shows one hex string at one origin and lets the font's advances
+/// place everything after the first glyph, so a `GPOS` offset is
+/// **inexpressible** through it: a mark is drawn where its advance puts it and
+/// not where its anchor does. `glyph_run` takes the position of every glyph
+/// and writes 9.4.3's `TJ` adjustments and `Ts` for them, which is the shape
+/// this needs and the shape XPS has been writing since gap 30.
+///
+/// The borrow that used to make this impossible is gone: `begin_page` takes
+/// `&self` and hands back an owned page, so the document and the page it is
+/// drawing are two independent borrows.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pen state a segment needs; a struct here would be eight \
+              fields written once and read once"
+)]
+fn draw_shaped(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    run: &TextRun,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+    index: usize,
+    slice: &str,
+    size: f64,
+    baseline: f64,
+    mut x: f64,
+) -> (f64, usize) {
+    let Some(face) = fonts.faces().faces().get(index) else {
+        return (x, 0);
+    };
+    let pieces: Vec<&str> = if run.word_spacing == 0.0 {
+        vec![slice]
+    } else {
+        split_after_spaces(slice)
+    };
+    let mut refused = 0usize;
+    for piece in pieces {
+        let Some(shaped) = shaped_glyphs(&face.program, piece, size, run.letter_spacing * PX_TO_PT)
+        else {
+            return (x, refused);
+        };
+        if !shaped.glyphs.is_empty() {
+            // Neither writer sets `Tc` or `Tw`, and both are **text state**
+            // that survives a `BT`/`ET` pair — so a composite draw after a
+            // simple one would inherit the simple one's spacing. Zero for both
+            // here: `letter-spacing` is already in the glyph positions, and a
+            // `Tc` on top of them would be charged twice.
+            page.raw(b"0 Tc 0 Tw");
+            let placed: Vec<tinker_pdf_cos::build::PlacedGlyph<'_>> =
+                shaped.glyphs.iter().map(Placed::as_glyph).collect();
+            let mut bytes = Vec::new();
+            if builder.glyph_run(
+                &mut bytes,
+                &face.resource,
+                size,
+                [1.0, 0.0, 0.0, 1.0, frame.x(x), baseline],
+                &placed,
+            ) {
+                page.raw(&bytes);
+            } else {
+                // Ruling 10: the writer refusing a run is a fact about the
+                // page, and a page short of a word that says nothing is the
+                // failure this whole file is organised against. Counted here
+                // and named by the caller.
+                refused += 1;
+            }
+        }
+        x += shaped.advance / PX_TO_PT
+            + if piece.ends_with(' ') {
+                run.word_spacing
+            } else {
+                0.0
+            };
+    }
+    (x, refused)
+}
+
+/// `slice`, cut after every space, with the space kept on the piece it ends.
+fn split_after_spaces(slice: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (at, ch) in slice.char_indices() {
+        if ch == ' ' {
+            out.push(&slice[start..at + 1]);
+            start = at + 1;
+        }
+    }
+    if start < slice.len() {
+        out.push(&slice[start..]);
+    }
+    out
+}
+
+/// One standard-14 stretch, a character at a time.
+///
+/// Returns where the pen ended, in layout pixels.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same pen state [`draw_shaped`] takes, for the same reason"
+)]
+fn draw_coded(
+    page: &mut PageBuilder,
+    run: &TextRun,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+    slice: &str,
+    size: f64,
+    baseline: f64,
+    mut x: f64,
+) -> f64 {
+    let font = request(run);
+    let metrics = BookMetrics::with(fonts.faces());
     // One text object per contiguous stretch of characters sharing a font
-    // resource, because a PDF string is bytes in **one** font: a run that mixes
-    // two faces is two show operations and not one, and the second's origin is
-    // wherever the first's advance left it. This is where `css-fonts-4` §5.3's
-    // per-character matching becomes something a content stream can be asked
-    // about.
+    // resource, because a PDF string is bytes in **one** font: a stretch that
+    // spills into the overflow font is two show operations and not one, and
+    // the second's origin is wherever the first's advance left it.
     let mut segment: Option<Segment> = None;
 
-    for ch in run.text.chars() {
+    for ch in slice.chars() {
         let chosen = choose(fonts.faces(), &font, Some(ch));
         let Some(coded) = fonts.encode(chosen, ch) else {
             // No code at all: the character is not drawn. Counted by
@@ -887,23 +1641,28 @@ fn draw_run(page: &mut PageBuilder, run: &TextRun, frame: &Frame, fonts: &Fonts<
         x += metrics.advance(ch, &font) + run.letter_spacing;
         if ch == ' ' {
             x += run.word_spacing;
-            // 9.3.3: word spacing applies to **byte code 32 in a single-byte
-            // encoding**, and a composite font under `/Identity-H` has none —
-            // so `Tw` is inert there and the space has to be paid by starting a
-            // new text object at the position this build already computed. A
-            // build that set `Tw` on a composite font and moved on would put
-            // every word after the first space in the wrong place.
-            if run.word_spacing != 0.0 && segment.as_ref().is_some_and(|open| open.composite) {
-                flush(page, segment.take(), size, baseline, run, frame);
-            }
         }
     }
     flush(page, segment.take(), size, baseline, run, frame);
-
-    decorate(page, run, frame, x);
+    x
 }
 
 /// Writes one segment as one text object.
+///
+/// # This is the caller of [`PageBuilder::glyphs`] that survived, and it is
+/// the right one
+///
+/// [`draw_shaped`] went to `DocumentBuilder::glyph_run` because a shaped run
+/// has per-glyph `GPOS` offsets and `glyphs` cannot spell one. **This segment
+/// has none and never will**: it is the standard-14 overflow composite, whose
+/// run is unshaped and one glyph per character at the face's own advances, so
+/// letting the font's advances place it is not a limitation here but the whole
+/// of what it needs. Writing it through `glyph_run` would state a position for
+/// every glyph that the advances already give, and would buy nothing.
+///
+/// Recorded rather than left to be found, because "one path was migrated and
+/// one was not" reads as an unfinished migration until someone works out that
+/// the two paths are not the same path.
 fn flush(
     page: &mut PageBuilder,
     segment: Option<Segment>,

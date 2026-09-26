@@ -46,7 +46,9 @@
 //! stream that can survive a layout engine at all. Every other character is
 //! compared exactly, in order, and duplication is an error.
 
-use tinker_pdf::Document;
+use std::collections::BTreeMap;
+
+use tinker_pdf::{Document, StructKid};
 use tinker_pdf_zip::{Archive, Limits};
 
 // ---- the source side --------------------------------------------------------
@@ -757,4 +759,91 @@ fn run_matches(s: &[char], i: usize, p: &[char], j: usize) -> bool {
 #[must_use]
 pub fn conservation(book: &[u8], doc: &Document) -> Verdict {
     compare(&spine_text(book), &paginated_text(doc))
+}
+
+/// Every character of the document in **logical** order: ISO 32000 §14.8's
+/// structure tree, walked once for the whole book.
+///
+/// **Once for the book and not once per page**, which is the whole point. A
+/// per-page walk concatenated in page order can only ever reproduce page
+/// order, so it would measure the content stream's answer however good the
+/// tree was — the mistake that made the first measurement of this look like a
+/// negative result.
+///
+/// Each marked-content id is resolved to the text drawn under it on the page
+/// that owns it, and the tree is walked in `/K` order, so what comes out is
+/// the order the *document* states rather than the order the glyphs were laid
+/// down in.
+#[must_use]
+pub fn logical_text(doc: &Document) -> Vec<String> {
+    let Some(tree) = doc.structure() else {
+        return paginated_text(doc);
+    };
+    // One map per page, from marked-content id to the characters shown inside
+    // it. Built once: a book of eight hundred pages is eight hundred content
+    // streams and re-interpreting one per structure kid is quadratic.
+    //
+    // Keyed on 14.7.4.2's whole identifier — the stream the `BDC` was written
+    // in and the number within it — because that is what a `/K` content kid
+    // names. This writer puts everything in the page's own stream, so every
+    // key here has a stream of 0; keying on the number alone would still work
+    // for that and would stop working the moment it did not.
+    let mut per_page: Vec<BTreeMap<(u64, u32), String>> =
+        Vec::with_capacity(doc.page_count() as usize);
+    for at in 0..doc.page_count() {
+        let mut by_id: BTreeMap<(u64, u32), String> = BTreeMap::new();
+        let page = doc.page(at).expect("a page in range");
+        for block in &page.text().blocks {
+            for line in &block.lines {
+                for character in &line.chars {
+                    if let Some(mcid) = character.mcid {
+                        by_id
+                            .entry((character.stream, mcid))
+                            .or_default()
+                            .push_str(&character.text);
+                    }
+                }
+            }
+        }
+        per_page.push(by_id);
+    }
+
+    let mut out = String::new();
+    let mut stack: Vec<&StructKid> = tree.kids.iter().rev().collect();
+    while let Some(kid) = stack.pop() {
+        match kid {
+            StructKid::Content {
+                page,
+                mcid,
+                stream,
+                stream_owner: _,
+            } => {
+                // 14.7.4.2: no `/Stm` is the page's own content stream, which
+                // is where this writer puts every sequence it numbers.
+                let key = (
+                    stream.map_or(0, |r| (u64::from(r.num) << 16) | u64::from(r.gen)),
+                    *mcid,
+                );
+                if let Some(text) = page
+                    .and_then(|page| per_page.get(page as usize))
+                    .and_then(|by_id| by_id.get(&key))
+                {
+                    out.push_str(text);
+                }
+            }
+            StructKid::Element(element) => {
+                for inner in element.kids.iter().rev() {
+                    stack.push(inner);
+                }
+            }
+            StructKid::Object(_) => {}
+        }
+    }
+    vec![out]
+}
+
+/// The same verdict, against logical order.
+#[must_use]
+pub fn conservation_in_logical_order(book: &[u8], doc: &Document) -> Verdict {
+    compare(&spine_text(book), &logical_text(doc))
 }

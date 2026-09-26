@@ -117,6 +117,41 @@ pub struct FileKey {
 }
 
 impl FileKey {
+    /// A key some *other* handler derived, with the ciphers to use it under.
+    ///
+    /// The standard handler derives its key from a password and is the only
+    /// thing in this crate that does. ISO 32000-1's public-key handler (7.6.5)
+    /// derives one from a seed a recipient unsealed, by an algorithm that is
+    /// document structure rather than arithmetic — so it lives in the crate
+    /// that owns document structure, and hands the result here.
+    ///
+    /// Everything after the key is identical between the two handlers:
+    /// Algorithm 1's per-object salting, the four crypt methods, and the
+    /// encrypt side an incremental save needs. Duplicating that for the second
+    /// handler would be two implementations of the part where a mistake is
+    /// invisible, so there is one and this is its other door.
+    ///
+    /// `outcome` is the caller's, because only the caller knows what its
+    /// authentication meant. The public-key handler has no notion of an owner
+    /// password, so it says [`AuthOutcome::User`].
+    #[must_use]
+    pub fn from_derived(
+        key: Vec<u8>,
+        revision: i64,
+        stream_method: CryptMethod,
+        string_method: CryptMethod,
+        outcome: AuthOutcome,
+    ) -> FileKey {
+        FileKey {
+            key,
+            outcome,
+            revision,
+            stream_method,
+            string_method,
+            notes: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn outcome(&self) -> AuthOutcome {
         self.outcome
@@ -158,6 +193,68 @@ impl FileKey {
             // per-object salting.
             CryptMethod::AesV3 => aes::cbc_decrypt_with_iv_prefix(&self.key, data).0,
         }
+    }
+
+    /// Encrypts one string belonging to the given indirect object.
+    ///
+    /// `nonce` distinguishes several strings inside one object, which would
+    /// otherwise share an initialisation vector.
+    #[must_use]
+    pub fn encrypt_string(&self, num: u32, gen: u16, nonce: u32, data: &[u8]) -> Vec<u8> {
+        self.encrypt(self.string_method, num, gen, nonce, data)
+    }
+
+    /// Encrypts one stream belonging to the given indirect object.
+    #[must_use]
+    pub fn encrypt_stream(&self, num: u32, gen: u16, data: &[u8]) -> Vec<u8> {
+        self.encrypt(self.stream_method, num, gen, 0, data)
+    }
+
+    /// The inverse of [`FileKey::decrypt`], method for method.
+    ///
+    /// Written beside it deliberately: an incremental update has to reproduce
+    /// the encryption of the file it appends to, whatever revision that file
+    /// used, and a second implementation of the same four cases is how the two
+    /// come to disagree about one of them.
+    fn encrypt(&self, method: CryptMethod, num: u32, gen: u16, nonce: u32, data: &[u8]) -> Vec<u8> {
+        match method {
+            CryptMethod::Identity => data.to_vec(),
+            // RC4 is its own inverse, so this is `decrypt` unchanged.
+            CryptMethod::Rc4 => rc4(&self.object_key(num, gen, false), data),
+            CryptMethod::AesV2 => {
+                let key = self.object_key(num, gen, true);
+                aes::cbc_encrypt_with_iv_prefix(&key, &self.iv(num, gen, nonce), data)
+                    .unwrap_or_else(|| data.to_vec())
+            }
+            // 7.6.4.3.3: revision 6 uses the file key directly; there is no
+            // per-object salting.
+            CryptMethod::AesV3 => {
+                aes::cbc_encrypt_with_iv_prefix(&self.key, &self.iv(num, gen, nonce), data)
+                    .unwrap_or_else(|| data.to_vec())
+            }
+        }
+    }
+
+    /// A per-object initialisation vector, derived rather than drawn.
+    ///
+    /// `wasm32-unknown-unknown` has no random source and ruling 4 wants the
+    /// same document to write the same bytes everywhere, so the IV comes out of
+    /// a hash of the **file key** and the object's identity instead of an RNG.
+    /// That keeps it unpredictable to anyone who does not already hold the key
+    /// — which is the property CBC needs — while making it reproducible for
+    /// anyone who does. It is the same construction `write.rs`'s R6 cipher
+    /// already uses for a full save.
+    fn iv(&self, num: u32, gen: u16, nonce: u32) -> [u8; 16] {
+        let mut input = Vec::with_capacity(self.key.len() + 14);
+        input.extend_from_slice(&self.key);
+        input.extend_from_slice(b"tpdf-iv");
+        input.extend_from_slice(&num.to_be_bytes());
+        input.extend_from_slice(&gen.to_be_bytes());
+        input.extend_from_slice(&nonce.to_be_bytes());
+        let digest = sha256(&input);
+        let mut iv = [0u8; 16];
+        iv.copy_from_slice(&digest[..16]);
+        iv
     }
 
     /// 7.6.2 Algorithm 1: the file key salted with the object's identity.
@@ -636,6 +733,76 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Encrypting is decrypting run backwards**, for every method a real
+    /// file uses.
+    ///
+    /// The reason this is a round trip and not a known-answer table: the
+    /// answer that matters is not any particular ciphertext but that the
+    /// engine's own reader gets the plaintext back, because an incremental
+    /// update has to append bytes the *original* file's encryption describes.
+    /// The per-object key derivation of 7.6.2 Algorithm 1 is exercised on both
+    /// sides, including the `sAlT` branch AES-128 takes and the revision-6
+    /// branch that skips salting entirely.
+    #[test]
+    fn every_method_encrypts_back_to_what_it_decrypts() {
+        let cases = [
+            (CryptMethod::Rc4, 4, 16usize),
+            (CryptMethod::AesV2, 4, 16),
+            (CryptMethod::AesV3, 6, 32),
+            (CryptMethod::Identity, 4, 16),
+        ];
+        // Lengths either side of a block boundary, plus empty: CBC pads, and a
+        // payload that is already a whole number of blocks gains a whole block
+        // of padding rather than none.
+        let payloads: [&[u8]; 5] = [
+            b"",
+            b"a",
+            b"sixteen bytes!!!",
+            b"seventeen bytes!!",
+            b"the quick brown fox jumps over the lazy dog",
+        ];
+
+        for (method, revision, key_len) in cases {
+            let key = FileKey {
+                key: (0..key_len)
+                    .map(|i| (i as u8).wrapping_mul(37).wrapping_add(0x5A))
+                    .collect(),
+                outcome: AuthOutcome::User,
+                revision,
+                stream_method: method,
+                string_method: method,
+                notes: Vec::new(),
+            };
+            for (nonce, plain) in payloads.iter().enumerate() {
+                let sealed = key.encrypt_stream(7, 0, plain);
+                assert_eq!(
+                    key.decrypt_stream(7, 0, &sealed),
+                    *plain,
+                    "{method:?} stream of {} bytes",
+                    plain.len()
+                );
+
+                let sealed = key.encrypt_string(7, 0, nonce as u32, plain);
+                assert_eq!(
+                    key.decrypt_string(7, 0, &sealed),
+                    *plain,
+                    "{method:?} string of {} bytes",
+                    plain.len()
+                );
+
+                // A different object must not produce the same bytes, or the
+                // per-object derivation is not happening at all.
+                if method != CryptMethod::Identity && !plain.is_empty() {
+                    assert_ne!(
+                        key.encrypt_stream(8, 0, plain),
+                        key.encrypt_stream(7, 0, plain),
+                        "{method:?} encrypts two objects identically"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn padding_a_password_fills_from_the_pad_string() {

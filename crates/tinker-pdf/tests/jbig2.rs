@@ -355,9 +355,10 @@ fn a_globals_only_symbol_dictionary_is_refused_and_named() {
 /// The region draws — refusing it would throw away a picture that decoded
 /// perfectly — and the missing lineage is still named, so "the scan decoded"
 /// and "the scan decoded whole" stay apart (ruling 10). This is Annex H.1's
-/// second page exactly: one generic region, plus a symbol dictionary, a text
-/// region, a pattern dictionary and a halftone region that are all absent
-/// from the result.
+/// second page exactly: a generic region and a halftone region that both draw,
+/// plus a symbol dictionary and a text region that do not -- the region refers
+/// to a dictionary belonging to page 1, so 7.4.3's shared numbering makes it a
+/// refusal rather than a partial draw.
 #[test]
 fn a_generic_region_beside_an_undecodable_symbol_dictionary_draws_and_reports() {
     let bitmap = render(jbig2_page(&ANNEX_H_PAGE_2, 64, 56, "", &[]));
@@ -375,9 +376,10 @@ fn a_generic_region_beside_an_undecodable_symbol_dictionary_draws_and_reports() 
     );
 
     assert!(
-        reasons(&bitmap).contains(&"jbig2-segment-skipped".to_string()),
-        "the text and halftone regions are missing from this page and \
-         ruling 10 wants that said: {:?}",
+        reasons(&bitmap).contains(&"jbig2-variant-skipped".to_string()),
+        "the text region on this page refers to a dictionary that belongs to \
+         page 1, so it is missing from the result and ruling 10 wants that \
+         said: {:?}",
         reasons(&bitmap)
     );
 }

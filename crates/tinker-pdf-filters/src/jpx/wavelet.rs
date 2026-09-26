@@ -10,9 +10,18 @@
 //! That gate does more work than it looks like. Byte-identity here pins the
 //! container, tier-2's packet arithmetic, tier-1's context *numbering*,
 //! dequantisation, and the DC level shift, all at once, against a decoder
-//! sharing no code with this one. T.800 publishes no datastream annex — there
-//! is no equivalent of T.88's Annex H.1, which is what gap 17 leaned on — so
-//! this comparison carries that weight instead.
+//! sharing no code with this one.
+//!
+//! *Corrected 14 September 2026.* This paragraph used to continue: "T.800
+//! publishes no datastream annex — there is no equivalent of T.88's Annex
+//! H.1, which is what gap 17 leaned on — so this comparison carries that
+//! weight instead." **T.800 does publish one.** Annex J.10, "An example of
+//! decoding showing intermediate steps", gives a complete 100-byte codestream
+//! in hex, walks its headers field by field, and states the nine decoded
+//! samples in J.10.5. It is decoded and asserted in
+//! `tests/jpx_annex_j.rs`, and it exercises this file's inverse 5/3 and level
+//! shift among everything else. The comparison below no longer carries that
+//! weight alone.
 //!
 //! # Two arithmetics, deliberately not mixed
 //!
@@ -70,7 +79,7 @@
 //! single step can form is 2^58.90, at the alpha step — and [`MAX_PRODUCT`]
 //! pins the plan's own conservative 2^59.96 in a `debug_assert`.
 
-use super::codestream::{Codestream, Quant, QuantStyle};
+use super::codestream::{Codestream, Quant, QuantStyle, Roi};
 use super::colour;
 use super::tier2::{CodeBlock, Orientation, Subband, Tile};
 use super::Refusal;
@@ -488,6 +497,11 @@ struct BandContext<'a, 'b> {
     /// The component's bit depth, which is `R_b` for the irreversible
     /// transform.
     precision: u8,
+    /// The region of interest in force for this tile-component (A.6.3), or
+    /// `None` for the overwhelming majority of files, which have no RGN at
+    /// all. Resolved once per band rather than per coefficient because
+    /// A.6.3's precedence is a per-tile-component question.
+    roi: Option<Roi>,
 }
 
 /// E.1's step size for one subband, resolving A.6.4's two spellings.
@@ -545,6 +559,128 @@ fn clamp_dyadic(m: i64, e: i32, bound: i32, clamped: &mut bool) -> (i64, i32) {
         (-limit, e)
     } else {
         (m, e)
+    }
+}
+
+// --- the region of interest (H.1) -----------------------------------------
+
+/// One coefficient's decoded bits after T.800 H.1 has realigned them.
+///
+/// The value is `magnitude * 2^exponent`, and `half` is the bit of
+/// `magnitude` that the lowest *decoded* bit sits in — which is what
+/// E.1.1.2's reconstruction offset is half of. H.1 moves all three, and
+/// moving the value without moving `half` is the defect
+/// [`dequantise`] already records for truncated streams: it puts a
+/// coefficient a quarter of its own magnitude low.
+///
+/// `pub(crate)` for the same reason [`ladder`] is: the test module works
+/// H.1's three branches by hand and compares the triple, which is the only
+/// place the `s > Mb` mask of (H-1) can be reached — no fixture in this
+/// repository carries a codestream that asks for one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Realigned {
+    pub(crate) magnitude: i64,
+    pub(crate) half: u8,
+    pub(crate) exponent: i32,
+}
+
+/// **T.800 H.1, "Decoding of ROI", applied to one coefficient.**
+///
+/// This is the whole of the Maxshift decoder, and it is four lines of
+/// arithmetic because Maxshift's entire point is that **the decoder never
+/// sees the region**. H.3: "The ROI functionality described in H.2 depends
+/// only on the scaling value chosen on the encoder side and hence only on the
+/// amplitude of the coefficients on the decoder side." There is no mask in
+/// the codestream, no rectangle, and nothing to intersect with a tile — only
+/// a per-component shift `s` and a magnitude test.
+///
+/// # Which stage owns the shift
+///
+/// D.2.2 settles it: "In the case of the presence of the RGN marker segment
+/// (indicating the presence of an ROI), modifications need to be made to the
+/// decoded bits, as well as the number of decoded bits `Nb(u, v)`. These
+/// modifications are specified in H.1." So H.1 rewrites what tier-1 produced,
+/// **before** E-1 sums it and before E.1.1.2's reconstruction offset — it is
+/// the head of the dequantiser, not a stage of its own and not a tier-1 one.
+///
+/// # The three branches, and the coordinate they are written in
+///
+/// E-1 fixes the alignment and is the only reason any of this is
+/// unambiguous: `q̄b(u, v) = (1 - 2 sb(u, v)) · Σ MSBi(b, u, v) · 2^(Mb - i)`
+/// for `i = 1 … Nb(u, v)`. So `MSB₁` has weight `2^(Mb - 1)`, the first `Mb`
+/// MSBs are exactly the bits of weight `2^0` and above, and a coefficient
+/// with `Nb(u, v) > Mb` has bits of **fractional** weight. That is how the
+/// Maxshift budget fits: the ROI's coefficients sit in the top `Mb` planes
+/// and the background's in the `s` below the point.
+///
+/// `align` is `Mb - zero_planes - planes`, the exponent tier-1's lowest coded
+/// plane carries, so `Nb(u, v) = Mb - align - half` and the whole of H.1's
+/// case analysis is about `align + half` and `magnitude * 2^align`:
+///
+/// - **Step 2**, `Nb(u, v) < Mb`: no modification. That is `align + half > 0`
+///   — every decoded bit has weight above `2^0`, so there is no Maxshift
+///   headroom under this coefficient at all.
+/// - **Step 3**, `Nb(u, v) >= Mb` and at least one of the first `Mb` MSBs is
+///   non-zero: `Nb(u, v)` becomes `Mb`. The first `Mb` MSBs are the integer
+///   bits, so the test is `floor(|q̄|) != 0` and the action is that floor —
+///   the fractional bits are dropped and the lowest bit lands on `2^0`. This
+///   is the **ROI** branch, and it is a truncation rather than a shift.
+/// - **Step 4**, `Nb(u, v) >= Mb` and all first `Mb` MSBs are zero: H-1
+///   shifts every remaining MSB `s` places and H-2 sets
+///   `Nb(u, v) = max(0, Nb(u, v) - s)`, which is a multiplication by `2^s`.
+///   This is the **background** branch.
+///
+/// # H-1 discards bits, and only a malformed `s` makes it bite
+///
+/// H-1 is `MSBi ← MSB(i+s)` for `i + s <= Nb(u, v)` and `0` above, so the
+/// `s` most significant positions leave the coefficient. In step 4's branch
+/// the first `Mb` of them are known to be zero, so while `s <= Mb` nothing is
+/// lost and the step is exactly `× 2^s`. When `s > Mb` — which H.2.2's own
+/// `s >= max(Mb)` cannot produce against a budget that holds both halves —
+/// positions `Mb + 1 … s` are discarded although they may be set. `keep`
+/// below is that mask, written out rather than assumed away, because "the
+/// encoder would not do that" is not a property of an attacker's bytes
+/// (ruling 1).
+pub(crate) fn maxshift(magnitude: u32, half: u8, align: i32, roi: Roi, mb: i32) -> Realigned {
+    let magnitude = i64::from(magnitude);
+    if align + i32::from(half) > 0 {
+        // H.1 step 2.
+        return Realigned {
+            magnitude,
+            half,
+            exponent: align,
+        };
+    }
+    let s = i32::from(roi.shift);
+    // `floor(|q̄|)`: the first Mb MSBs read as an integer. `align` is at most
+    // `-half <= 0` on this path, so this is a right shift, and a shift of 63
+    // or more is every bit gone rather than a panic.
+    let integer = if align <= -64 { 0 } else { magnitude >> -align };
+    if integer != 0 {
+        // H.1 step 3: an ROI coefficient. Nb(u, v) = Mb puts the lowest bit
+        // on 2^0, so the reconstruction offset is half of one — which is
+        // `half = 0` against an exponent of zero.
+        return Realigned {
+            magnitude: integer,
+            half: 0,
+            exponent: 0,
+        };
+    }
+    // H.1 step 4: a background coefficient. Bit `b` of `magnitude` carries
+    // E-1 index `Mb - align - b`, and H-1 keeps the indices above `s`, so
+    // the surviving bits are `b < Mb - align - s`.
+    let keep = mb - align - s;
+    let kept = if keep <= 0 {
+        0
+    } else if keep >= 63 {
+        magnitude
+    } else {
+        magnitude & ((1i64 << keep) - 1)
+    };
+    Realigned {
+        magnitude: kept,
+        half,
+        exponent: align.saturating_add(s),
     }
 }
 
@@ -608,12 +744,52 @@ fn dequantise<A: Arith>(
     clamped: &mut bool,
 ) -> Result<Vec<A>, Refusal> {
     let quant = ctx.stream.quant_for(ctx.tile, ctx.component);
+    let bound = i32::from(ctx.precision) + 2;
     match quant.style {
-        QuantStyle::None => Ok(block
-            .coefficients
-            .iter()
-            .map(|&v| A::dyadic(i64::from(v), 0))
-            .collect()),
+        QuantStyle::None => {
+            let Some(roi) = ctx.roi else {
+                return Ok(block
+                    .coefficients
+                    .iter()
+                    .map(|&v| A::dyadic(i64::from(v), 0))
+                    .collect());
+            };
+            // **The reversible path needs E-1's alignment only when an RGN
+            // is present**, and that is why it is computed here rather than
+            // above. Without one, a conformant stream codes at most `Mb`
+            // planes, so the lowest coded plane is `2^0` and the paragraph
+            // above holds: the magnitude *is* the coefficient. Maxshift codes
+            // `Mb + s` of them (H-3), so the lowest plane is `2^-s` and a
+            // decoder that kept assuming `2^0` would read every background
+            // coefficient `2^s` too large.
+            let (exponent, _) = step_for(quant, ctx.band)?;
+            let mb = i32::from(quant.guard_bits) + i32::from(exponent) - 1;
+            let align = mb - i32::from(block.zero_planes) - i32::from(block.planes);
+            Ok(block
+                .coefficients
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    if v == 0 {
+                        return A::default();
+                    }
+                    let half = block.half_planes.get(i).copied().unwrap_or(0);
+                    let r = maxshift(v.unsigned_abs(), half, align, roi, mb);
+                    if r.magnitude == 0 {
+                        // H-1 shifted every bit this coefficient had past
+                        // MSB₁. Zero, and no reconstruction offset under it.
+                        return A::default();
+                    }
+                    let (m, e) = clamp_dyadic(
+                        r.magnitude * i64::from(v.signum()),
+                        r.exponent,
+                        bound,
+                        clamped,
+                    );
+                    A::dyadic(m, e)
+                })
+                .collect())
+        }
         QuantStyle::Derived | QuantStyle::Expounded => {
             let (exponent, mantissa) = step_for(quant, ctx.band)?;
             // E-2's Mb, and the bit-planes a truncated stream never sent.
@@ -622,9 +798,15 @@ fn dequantise<A: Arith>(
                 (mb - i32::from(block.zero_planes) - i32::from(block.planes)).clamp(0, 64);
             // `(2q + 2^h)` carries a factor of two and `(2048 + mu)` carries
             // 2^11, so the twelve below is the two of them together.
-            let e = truncated - 12 + i32::from(ctx.precision) - i32::from(exponent);
+            let step = -12 + i32::from(ctx.precision) - i32::from(exponent);
+            let e = truncated + step;
             let scale = 2048 + i64::from(mantissa);
-            let bound = i32::from(ctx.precision) + 2;
+            // H.1 needs the unclamped alignment: Maxshift puts `s` planes
+            // *below* E-1's radix point, which is exactly the negative
+            // `truncated` the clamp above exists to refuse. The clamp stays
+            // on the path with no RGN, so nothing about a file without one
+            // moves.
+            let align = mb - i32::from(block.zero_planes) - i32::from(block.planes);
             Ok(block
                 .coefficients
                 .iter()
@@ -638,7 +820,16 @@ fn dequantise<A: Arith>(
                     // at, which is the block's lowest only when the passes
                     // ran all the way down for it.
                     let half = block.half_planes.get(i).copied().unwrap_or(0);
-                    let magnitude = i64::from(v.unsigned_abs());
+                    let (magnitude, half, e) = match ctx.roi {
+                        None => (i64::from(v.unsigned_abs()), half, e),
+                        Some(roi) => {
+                            let r = maxshift(v.unsigned_abs(), half, align, roi, mb);
+                            (r.magnitude, r.half, r.exponent + step)
+                        }
+                    };
+                    if magnitude == 0 {
+                        return A::default();
+                    }
                     let m =
                         (2 * magnitude + (1i64 << half.min(62))) * scale * i64::from(v.signum());
                     let (m, e) = clamp_dyadic(m, e, bound, clamped);
@@ -702,6 +893,9 @@ pub(crate) fn ladder<A: Arith>(
             "a component the SIZ marker does not declare",
         ))?
         .precision;
+    // A.6.3's precedence is per tile-component, so it is resolved once here
+    // rather than per subband or per coefficient.
+    let roi = stream.roi_for(tile.index, component);
 
     // Start from the coarsest LL, which is resolution 0's only subband.
     let mut plane = Plane {
@@ -732,6 +926,7 @@ pub(crate) fn ladder<A: Arith>(
                     component,
                     band: 0,
                     precision,
+                    roi,
                 };
                 write_band(&ctx, band, &mut next, (0, 0), false, clamped)?;
             }
@@ -757,6 +952,7 @@ pub(crate) fn ladder<A: Arith>(
                     component,
                     band: 3 * (r - 1) + 1 + k,
                     precision,
+                    roi,
                 };
                 write_band(&ctx, band, &mut next, offsets, true, clamped)?;
             }

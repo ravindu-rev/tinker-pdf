@@ -8,10 +8,22 @@
 //! bit-identical output across linux, windows, macOS and wasm a contract, and
 //! this is what pays for it.
 //!
-//! The cost is that a nearly-horizontal edge quantizes to sixteen levels
-//! vertically. At the sample count used the difference from exact-area
-//! coverage is below one 8-bit level for every angle, so it is invisible and
-//! reproducible, which is the trade worth making.
+//! The cost is that an edge's *vertical* position quantizes to a sixteenth of
+//! a pixel, and that is not invisible. Measured 15 September 2026 against the
+//! true area of a half-plane, over a sweep of angles and sub-pixel offsets:
+//! the worst pixel is **14.7 levels of 255**, at one degree off horizontal,
+//! and the error stays between 8 and 10 levels from two degrees all the way to
+//! forty-five, falling to 1.1 at eighty-nine. A sixteenth of a pixel of
+//! position is about an eighth of that in coverage either side, which is where
+//! those numbers come from.
+//!
+//! **This file used to say that difference was "below one 8-bit level for
+//! every angle".** It never was, and the sentence made the trade look free
+//! when the trade is real: a fixed grid buys ruling 4's bit-identical output on
+//! every target, which a floating-point area integrator cannot, and it is paid
+//! for in anti-aliasing quality at shallow angles. Raising `SAMPLES` is the
+//! knob; it costs time linearly and would move every fingerprint in the tree,
+//! so it is a decision and not a tweak.
 
 use core::ops::Range;
 
@@ -212,15 +224,52 @@ fn common_rect(a: &Mask, b: &Mask) -> (i32, i32, u32, u32) {
     (x0 as i32, y0 as i32, width as u32, height as u32)
 }
 
+/// Sub-steps an edge's x carries below the 1/256 the spans are measured in,
+/// as a bit count.
+///
+/// **An edge's slope needs far more precision than its position does**, because
+/// the slope is multiplied by the height of the edge and the position is not.
+/// Held at 1/256 per sub-scanline — which is what this file did until ruling
+/// 5's tile guard went in — a slope is stored as `trunc(slope × 16)`, so:
+///
+/// - every slope shallower than **one pixel of x per sixteen of y** truncated
+///   to zero and the edge came out vertical, and
+/// - every steeper edge kept a slope error of up to a whole 1/256 unit per
+///   sub-scanline, which over an edge `h` pixels tall walks its lower end
+///   **`h/16` pixels** off the line the path states.
+///
+/// Neither is small. `analytic_coverage.rs`'s shallow parallelogram is two
+/// pixels wide, 256 tall and drifts fourteen across — 0.875 of a unit per
+/// sub-scanline, truncated to nothing — so it rasterised as a straight
+/// vertical bar whose lower end was the whole fourteen pixels wrong.
+///
+/// Sixteen extra bits leave a slope error under `2^-16` of a 1/256 unit per
+/// sub-scanline; over the 12 672 sub-scanlines of a page-tall edge that
+/// accumulates to a fifth of one 1/256 unit, which is under a thousandth of a
+/// byte level.
+const SUBSTEP_BITS: u32 = 16;
+
+/// [`SUBSTEP_BITS`] as a multiplier.
+///
+/// The reduction back to 1/256 is what makes a tile equal the page under it:
+/// **add half a step, then shift right**, which is `floor` of a value moved by
+/// a multiple of the step and therefore commutes with translating the whole
+/// shape by a whole number of pixels — a tile's frame and the page's quantise
+/// a crossing to the same unit. It is also the *nearest* unit rather than the
+/// one below, which is the unbiased choice: [`add_span`] is linear in the
+/// crossing, so the nearest unit is the one whose span is nearest the span the
+/// geometry states.
+const SUBSTEP: i64 = 1 << SUBSTEP_BITS;
+
 /// One edge, in sub-scanline space.
 struct Edge {
     /// Sub-scanline of the upper end, inclusive.
     top: i32,
     /// Sub-scanline of the lower end, exclusive.
     bottom: i32,
-    /// x at `top`, in 1/256 pixel.
+    /// x at `top`, in 1/256 pixel scaled by [`SUBSTEP`].
     x: i64,
-    /// Change in x per sub-scanline, in 1/256 pixel.
+    /// Change in x per sub-scanline, in the same units as [`Edge::x`].
     dxdy: i64,
     /// +1 or -1, for the non-zero winding rule.
     winding: i32,
@@ -315,7 +364,20 @@ pub fn fill(
                 // the height then exceeds i64. Clamping puts the crossing far
                 // outside the region, which is where it belongs.
                 let steps = i64::from(sub).saturating_sub(i64::from(edge.top));
-                let x = edge.dxdy.saturating_mul(steps).saturating_add(edge.x);
+                // Down to the 1/256 the spans are measured in, **rounded**
+                // rather than floored. The rounding is `+ half, >> bits`,
+                // which is a `floor` of a
+                // shifted value and therefore commutes with moving the whole
+                // shape by a whole pixel -- the property a tile rests on, and
+                // the reason the shift is spelled from [`SUBSTEP_BITS`] rather
+                // than written out beside a constant that could move without
+                // it.
+                let x = edge
+                    .dxdy
+                    .saturating_mul(steps)
+                    .saturating_add(edge.x)
+                    .saturating_add(SUBSTEP / 2)
+                    >> SUBSTEP_BITS;
                 crossings.push((x, edge.winding));
             }
             if crossings.len() < 2 {
@@ -340,11 +402,20 @@ pub fn fill(
 
         // Each sub-scanline contributes at most 256 units of a pixel's width,
         // over SAMPLES rows: scale to 0..=255.
+        //
+        // **One bounds check for the row rather than one per pixel.** The
+        // arithmetic is unchanged -- `SAMPLES` is 16, so this is a shift, and
+        // the accumulator is `u16` whose largest value is 256 * 16 = 4 096,
+        // which divides and clamps identically in `u16` and in the `u32` this
+        // used to widen to. What changes is that the compiler can see a slice
+        // as long as the accumulator instead of an indexed `get_mut`, and a
+        // shift-and-saturate over a known trip count is a loop it will
+        // vectorise. Measured on a real document rather than assumed: see
+        // `docs/verification.md`.
         let base = (row as usize) * (width as usize);
-        for (col, total) in accumulator.iter().enumerate() {
-            let coverage = (u32::from(*total) / SAMPLES as u32).min(255) as u8;
-            if let Some(slot) = mask.data.get_mut(base + col) {
-                *slot = coverage;
+        if let Some(out) = mask.data.get_mut(base..base + accumulator.len()) {
+            for (slot, total) in out.iter_mut().zip(accumulator.iter()) {
+                *slot = (*total / SAMPLES as u16).min(255) as u8;
             }
         }
     }
@@ -419,8 +490,14 @@ fn add_span(accumulator: &mut [u16], x0: i32, width: u32, from: i64, to: i64) {
         let covered = 256 - (left % 256);
         *slot = slot.saturating_add(covered as u16);
     }
-    for col in (first + 1)..last {
-        if let Some(slot) = accumulator.get_mut(col) {
+    // The fully covered interior, as one slice rather than one bounds-checked
+    // index per pixel. `last` is clamped rather than trusted, because the
+    // indexed form silently skipped a column past the end and a slice range
+    // past the end would skip the whole run instead -- the same arithmetic,
+    // and a different answer on the one case that matters.
+    let to = last.min(accumulator.len());
+    if let Some(run) = accumulator.get_mut((first + 1).min(to)..to) {
+        for slot in run {
             *slot = slot.saturating_add(256);
         }
     }
@@ -468,11 +545,61 @@ fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
             continue;
         }
 
+        // Into 1/256 of a pixel with [`SUBSTEP`]'s extra bits under it, which
+        // is what the sweep accumulates in.
+        //
+        // **No clamp to the segment's own ends here, and none on the crossings
+        // either.** One stood in both places while ruling 5's guard was being
+        // written, on the theory that a nearly horizontal edge -- `dx / dy`
+        // with an ulp or two of `dy` -- could land `x_first` outside the two
+        // points that produced it. It cannot: `y_first` is `ceil(y x 16) / 16`
+        // and every operation reaching it is exact, `y_first - top.y` and
+        // `bottom.y - top.y` are both exact by Sterbenz, so the only error in
+        // `x_first` is the one rounding of the division, and the reduction
+        // below is monotone -- a crossing inside `[min x, max x]` reduces to a
+        // unit inside their two rounded units. Instrumented over the whole
+        // workspace suite, a clamp on the crossings fired **zero** times.
+        //
+        // Clamping the *start* did fire, on ordinary edges, and was a defect
+        // rather than a guard: `x_lo` is `round(min x)`, which sits up to half
+        // a unit above the real minimum, so an edge starting below it was
+        // pushed up and its whole length went with it. That is 79 pixels of
+        // the fingerprint pages moving a level for no reason a geometry can
+        // name.
+        let sub = |v: f64| (v * 256.0 * SUBSTEP as f64).round() as i64;
+
         edges.push(Edge {
             top: y_top,
             bottom: y_bottom,
-            x: (x_first * 256.0) as i64,
-            dxdy: (dxdy * 256.0) as i64,
+            // `round`, not `as`, because it is closer and free -- **and it
+            // is not what makes a tile equal the page**, which is worth
+            // stating here because an earlier draft of this comment claimed it
+            // was and the claim is measurably wrong.
+            //
+            // The load-bearing rounding is the *reduction* in the sweep above:
+            // that one takes a crossing to the nearest 1/256 unit, which is
+            // the unit the spans are measured in and the unit a translation
+            // has to commute with. Injecting a truncation there fails seven
+            // tests, `tiles_at_other_scales_are_byte_equal_too` among them.
+            // This conversion is two-to-the-sixteen finer than that: truncating
+            // here moves `x` by less than `2^-16` of a 1/256 unit, which
+            // reaches a byte only if the exact value sits inside that of a
+            // half-step. Injected on 15 September 2026 it failed **nothing**
+            // in a 4 653-test workspace.
+            //
+            // So it stays on its own merits and no others: `add_span` is
+            // linear in the crossing, the nearest representable value is the
+            // one whose span is nearest the geometry's, and `round` is
+            // correctly rounded by IEEE 754 and named in ruling 4 as safe on a
+            // pixel path, so it costs no target stability.
+            //
+            // What no rounding in this file can fix is named where it shows: a
+            // whole-pixel shift is exact as arithmetic, but `fl(u + e)` and
+            // `fl(u + e - tx)` are two roundings at two magnitudes, and
+            // `crates/tinker-pdf/tests/render_regions.rs` bounds that residual
+            // by measurement rather than claiming it away.
+            x: sub(x_first),
+            dxdy: sub(dxdy),
             winding,
         });
     }

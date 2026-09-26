@@ -13,8 +13,9 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_content::{interpret, Device, Matrix};
+use tinker_pdf_content::{interpret, Matrix};
 use tinker_pdf_cos::{pages as cos_pages, CosDocument, Dict, Object, Rect};
+use tinker_pdf_render::Renderer;
 
 use crate::fonts::FontProvider;
 use crate::resources::PageResources;
@@ -24,11 +25,11 @@ const HIDDEN: i64 = 1 << 1;
 const NO_VIEW: i64 = 1 << 5;
 
 /// Draws every visible annotation of a page.
-pub fn draw<D: Device>(
+pub fn draw(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     provider: Option<&Arc<dyn FontProvider>>,
-    device: &mut D,
+    device: &mut Renderer<'_, PageResources>,
 ) {
     let Ok(object) = doc.get(page.reference) else {
         return;
@@ -56,11 +57,11 @@ pub fn draw<D: Device>(
     }
 }
 
-fn draw_one<D: Device>(
+fn draw_one(
     doc: &Arc<CosDocument>,
     annotation: &Dict,
     provider: Option<&Arc<dyn FontProvider>>,
-    device: &mut D,
+    device: &mut Renderer<'_, PageResources>,
 ) {
     let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);
     if flags & HIDDEN != 0 || flags & NO_VIEW != 0 {
@@ -134,14 +135,26 @@ fn draw_one<D: Device>(
         _ => content,
     };
 
-    let resources = doc
+    let resources_dict = doc
         .resolve_key(form_dict, tinker_pdf_cos::Name::RESOURCES)
         .as_dict()
         .cloned()
         .unwrap_or_default();
+    let resources = resources_dict.clone();
     let resources = PageResources::from_dict(doc, resources, provider);
 
+    // 12.5.5: the appearance is a form XObject reached by reference, so there
+    // is no name for the interpreter to announce and the caller announces it
+    // instead. Both seams have to change: the device resolves images,
+    // shadings and patterns, and an appearance that names one the page does
+    // not define is the ordinary case, not the odd one.
+    device.push_resources(Arc::new(PageResources::from_dict(
+        doc,
+        resources_dict,
+        provider,
+    )));
     interpret(&content, transform, device, &resources);
+    device.pop_resources();
 }
 
 /// The `/AP` `/N` stream, following `/AS` when the appearance has states.

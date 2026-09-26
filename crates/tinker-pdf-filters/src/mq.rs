@@ -111,6 +111,17 @@ const QE: [QeRow; 47] = [
     row(0x5601, 46, 46, false),
 ];
 
+/// Table E.1's `Qe` column, for `qm.rs`'s assertion that T.81 Table D.3 shares
+/// no value with it.
+///
+/// That claim is the reason the two coders are two modules, and a claim of
+/// that weight is worth being a test rather than a sentence in a header — so
+/// the table is readable from inside the crate at test time and nowhere else.
+#[cfg(test)]
+pub(crate) fn table_e_1_qe_values() -> Vec<u16> {
+    QE.iter().map(|r| r.qe).collect()
+}
+
 /// One adaptive probability state: a row of [`QE`] and the current sense of
 /// the more probable symbol.
 ///
@@ -410,22 +421,30 @@ impl<'a> MqDecoder<'a> {
     }
 }
 
-/// The MQ *encoder* (T.88 E.3.7 and E.3.8), for tests only.
+/// The MQ *encoder* (T.88 E.3.7 and E.3.8).
 ///
-/// Nothing ships this: the engine reads PDFs, it does not write JBIG2. It
-/// exists so a generic-region test can put a picture in and demand the same
-/// picture back, which is the only way to exercise a template against a
-/// bitmap the standard does not happen to publish.
+/// **It was `#[cfg(test)]` until September 2026** and its old header said so:
+/// "nothing ships this: the engine reads PDFs, it does not write JBIG2". It
+/// existed so a generic-region test could put a picture in and demand the same
+/// picture back, which is the only way to exercise a template against a bitmap
+/// the standard does not happen to publish.
+///
+/// What changed is that [`crate::jbig2_generic_encode`] is built on it, so the
+/// roadmap's image-encoder row could name something that exists rather than
+/// something a test could reach. Nothing about the coder itself moved: the
+/// three procedures below are the same bytes they were, and the test that
+/// pinned them is still the test that pins them.
 ///
 /// **It is pinned against published data itself**, in
 /// [`tests::annex_h2_re_encodes_to_the_published_bytes`]: Annex H.2's 256
 /// decisions encode to Annex H.2's thirty bytes. Without that, a round-trip
 /// would only prove the two halves of one misunderstanding agree.
-#[cfg(test)]
-pub(crate) mod encoder {
+pub mod encoder {
     use super::QE;
 
-    pub(crate) struct MqEncoder {
+    /// The encoder state of T.88 E.3.7: the A and C registers, the bit
+    /// counter, the bytes written so far, and one adaptive state per context.
+    pub struct MqEncoder {
         /// The output, with one scratch byte in front. E.3.8's `INITENC`
         /// leaves `BP` pointing one byte *before* the first it will write,
         /// and `BYTEOUT` reads that byte to decide whether to stuff — so the
@@ -441,7 +460,8 @@ pub(crate) mod encoder {
 
     impl MqEncoder {
         /// `INITENC` (T.88 E.3.8).
-        pub(crate) fn new(contexts: usize) -> MqEncoder {
+        #[must_use]
+        pub fn new(contexts: usize) -> MqEncoder {
             MqEncoder {
                 out: vec![0],
                 bp: 0,
@@ -460,7 +480,7 @@ pub(crate) mod encoder {
         /// this crate's decoder cannot read — so a tier-1 round trip needs
         /// this to mean anything. Refused above Table E.1's last row, and
         /// inert past the end of the array, exactly as the decoder's is.
-        pub(crate) fn set_state(&mut self, index: usize, state: u8, mps: u8) {
+        pub fn set_state(&mut self, index: usize, state: u8, mps: u8) {
             if state as usize >= QE.len() || mps > 1 {
                 return;
             }
@@ -517,7 +537,7 @@ pub(crate) mod encoder {
         }
 
         /// `ENCODE` (T.88 E.3.7): one decision against one context.
-        pub(crate) fn encode_at(&mut self, index: usize, decision: u8) {
+        pub fn encode_at(&mut self, index: usize, decision: u8) {
             let Some(&(state, mps)) = self.states.get(index) else {
                 return;
             };
@@ -554,7 +574,8 @@ pub(crate) mod encoder {
 
         /// `FLUSH` (T.88 E.3.8), which ends every arithmetically coded
         /// segment in Annex H.1 with the same `FF AC` this produces.
-        pub(crate) fn flush(mut self) -> Vec<u8> {
+        #[must_use]
+        pub fn flush(mut self) -> Vec<u8> {
             // SETBITS.
             let temp = self.c.wrapping_add(self.a);
             self.c |= 0xFFFF;

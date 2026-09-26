@@ -24,9 +24,11 @@
 //! `std` linked, `x.sin()` does not compile inside these walls, so the rule
 //! is enforced by the compiler instead of by remembering it.
 //!
-//! One habit still has to be kept by hand: **no `mul_add`**. It may compile to
-//! a fused multiply-add on one target and a multiply-then-add on another, and
-//! those differ. The extra precision would be welcome; the divergence is not.
+//! One rule the compiler cannot enforce inside these walls is **no
+//! `mul_add`**: it may compile to a fused multiply-add on one target and a
+//! multiply-then-add on another, and those differ. The extra precision would
+//! be welcome; the divergence is not. `cargo xtask libm` bans the call across
+//! every pixel-path crate, so the rule is checked rather than remembered.
 //!
 //! Accuracy, measured against the platform across the ranges the tests
 //! sweep: two units in the last place for `sin`, `cos`, `ln`, `atan` and

@@ -1,7 +1,8 @@
 # The corpus lock (plan 14, gap 23).
 #
-# Corpora are FETCHED, never committed. Each entry pins two things, because
-# they answer different questions:
+# Corpora are FETCHED, never committed. A forge entry pins two things, because
+# they answer different questions -- and the one entry that is not a forge
+# archive pins one, which its own comment argues where it sits:
 #
 #   commit  the upstream git object id the archive is of. An upstream that
 #           rewrites history or moves a branch cannot change what this names.
@@ -57,3 +58,43 @@ sha256 = 2a9228f621f59422e70a4ca241093fd37b2ab9c1ea96f8c6eba2663c818573a5
 licence = CC-BY-SA-4.0
 redistribute = no
 exercises = PDF 2.0 features shown deliberately: UTF-8 strings, page-level output intents, incremental saves
+
+# The fifth entry, and the first that is not a test suite.
+#
+# The other four were written to exercise a reader: pdf.js's fixtures are bugs
+# somebody reported, veraPDF's are one clause each, qpdf's are torture. A
+# reader that passes its own kind's tests has not met the world, and that gap
+# is what this corpus closes -- 1 000 PDFs a crawler found on the open web in
+# July 2021, refetched untruncated by the DARPA SafeDocs programme, emitted by
+# whoever emitted them for whoever was going to read them.
+#
+# ONE PIN, NOT TWO, and `archive = zip` is what says so. There is no
+# repository behind a published object, so there is no commit; the `sha256` is
+# the whole guarantee, and if these bytes ever change every fetch fails loudly.
+# That is weaker than the two pins the forge entries carry and it is written
+# down rather than glossed over.
+#
+# WHY THIS SHARD. The corpus is 7 933 shards of 1 000 files and its metadata
+# tables give a `/Producer` per file. Shard 0000 carries **462 distinct
+# producer strings across its 1 000 files** -- the largest single group,
+# Adobe PDF Library 15.0, is 68 files, and 58 state no producer at all. A
+# selection of 300 "by producer diversity" would have reached exactly 300
+# distinct producers and thrown away 700 real documents to do it, so the shard
+# is taken whole. It is 1.27 GB fetched and nothing of it enters git.
+
+[safedocs]
+url = https://digitalcorpora.s3.amazonaws.com/corpora/files/CC-MAIN-2021-31-PDF-UNTRUNCATED/zipfiles/0000-0999/0000.zip
+archive = zip
+# Four minutes, not the run's minute, and sited on a measurement.
+# With the rasteriser's row loop fixed (5 September 2026) the slowest
+# file in this shard is `0000039.pdf` at 80 s and the next at 65 s, on
+# an otherwise idle desktop; before that fix the same two took over
+# seven minutes and did not finish. 240 s is three times the slowest,
+# which is the room a shared runner needs -- and it is a per-corpus
+# number because the four fixture corpora are nothing like this: their
+# slowest file is a tenth of it.
+timeout = 240
+sha256 = a6b28286550f6dcfdebec0454d57cb9797ca4c5792c85a09cb89b207f3f407fb
+licence = per-file and unstated: these are documents found on the open web, each under whatever terms its own publisher set. The collection is distributed by digitalcorpora.org under the DARPA SafeDocs programme and Common Crawl's terms of use (commoncrawl.org/terms-of-use) cover the crawl it came from
+redistribute = no
+exercises = real-world documents nobody wrote to test a reader: 1 000 files from a 2021 web crawl, spanning 462 distinct /Producer strings

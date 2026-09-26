@@ -64,9 +64,42 @@ pub const MAX_RESOLVE_DEPTH: u32 = 32;
 /// `/Encrypt` dictionary; nothing legitimate stacks deeper than a handful.
 pub const MAX_LOAD_DEPTH: usize = 64;
 
-/// Ceiling on the bytes one `stream_decoded` call produces. A 1 KB flate
-/// stream can legally expand without bound, so the cap is what keeps a
-/// decompression bomb costing bounded memory.
+/// Ceiling on the bytes one `stream_decoded` call produces. A flate stream
+/// expands by as much as 1 032 to 1, so what a decode costs is a property of
+/// the file's arithmetic rather than of its length, and this cap is what keeps
+/// a decompression bomb costing bounded memory.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 134 217 728 |
+/// | A 200-page comic, whose largest page is a 2000 x 3000 16-bit RGBA scan | 48 000 000 |
+/// | A dense 200-page fixed document, whose largest stream is a full-page 300 dpi RGBA image | 33 660 000 |
+/// | A 300-page reflowable book, whose largest stream is the same plate | 33 660 000 |
+/// | **This cap** | **128 MiB** |
+///
+/// The fixture figure is the cap itself and is allowed:
+/// `an_inline_image_decodes_under_the_shared_ceiling` builds a zlib bomb of
+/// `cap + 1024` and the decode stops at `cap` with
+/// `filters::Warning::OutputCapHit`, so the most any fixture *produces* is
+/// this number. The three yardsticks are one stream each rather than a
+/// document's worth, because that is what this cap bounds — every one of the
+/// three formats is synthesised into a PDF and read back through this crate,
+/// and the largest single stream each of them holds is an image.
+///
+/// Reachable, and this is the row that needed the number written down. The
+/// sentence above used to read *"a 1 KB flate stream can legally expand
+/// without bound"*, which is a cap with no ceiling in front of it to be
+/// compared against — gap 18a milestone 8's failure, and the thing
+/// `bounds_ledger.rs`'s `every_bound_can_fire` exists to catch. DEFLATE's
+/// expansion **is** bounded, at **1 032:1**: RFC 1951's longest match is 258
+/// bytes, and under a degenerate dynamic Huffman tree — one literal/length
+/// code and one distance code, one bit each — that match costs two bits, so
+/// `258 * 8 / 2` is 1 032 bytes out per byte in. The input is a subslice of
+/// the document buffer, which on the 32-bit targets this engine builds for
+/// (`wasm32-unknown-unknown` and `wasm32-wasip1`) is at most `u32::MAX` bytes.
+/// The narrowest target is taken deliberately: a cap that fires under the
+/// tightest ceiling fires under every looser one. `4 294 967 295 * 1 032` is
+/// 4 432 406 248 440 bytes, thirty-three thousand times this cap.
 pub const MAX_DECODED_STREAM: usize = 128 << 20;
 
 /// Bytes at the end of the buffer searched for `startxref` first (7.5.5).
@@ -75,6 +108,51 @@ pub const STARTXREF_SCAN: usize = 1024;
 /// Bytes at the end of the buffer searched for `startxref` before giving up
 /// and dropping to a full rescan. Trailing junk after `%%EOF` is routine.
 pub const STARTXREF_SCAN_MAX: usize = 64 * 1024;
+
+/// Bytes fetched for one indirect object before the window doubles.
+///
+/// Only a streamed document pays this. The window grows until the object
+/// demonstrably ends inside it, because a window that cut an object short
+/// would parse to a different value than the same bytes in one buffer, and
+/// ruling 4 does not allow the two to differ.
+///
+/// A quarter of a chunk rather than a whole one, so that reading an object
+/// near the end of the head of a small linearized file does not pull the
+/// chunk after it. Doubling costs no transport -- the chunk cache holds what
+/// the shorter attempt read -- so the small first window is close to free,
+/// and a stream's data is fetched by its declared length rather than by
+/// doubling anyway.
+pub const OBJECT_WINDOW: u64 = 1024;
+
+/// How far past a cross-reference section a streamed reader looks for the
+/// `%%EOF` that ends its revision (7.5.5).
+///
+/// A generic file puts them within a few hundred bytes of each other. A
+/// linearized one does not: its first-page section is at the front and the
+/// only `%%EOF` is at the very end (Annex F part 11), so an unbounded forward
+/// search would read the whole document to answer a question the head-only
+/// open exists to avoid asking. Past this the revision is taken to end at the
+/// document, which is where it ends -- give or take the bytes after the
+/// marker, and `Revision::byte_range` on a streamed document says so.
+pub const REVISION_END_SCAN: u64 = 8192;
+
+/// Bytes fetched for the first-page cross-reference section of a linearized
+/// file before the window doubles (Annex F part 3).
+///
+/// Smaller than a generic section's window on purpose. That table describes
+/// one page, so it is short; and a linearized file can be small enough that
+/// `/E` is under a single chunk, where an over-eager first window would read
+/// the tail of the file to parse the front of it.
+pub const HEAD_SECTION_WINDOW: u64 = 1024;
+
+/// Bytes fetched for one cross-reference section before the window doubles.
+///
+/// Only a streamed document pays this: a document opened from a buffer hands
+/// the walker the whole buffer for every window, so the constant is what a
+/// *fetch* costs rather than what a section may be. It doubles until the
+/// section parses, and doubling is free in fetched bytes because the chunk
+/// cache already holds what the shorter attempt read.
+pub const XREF_SECTION_WINDOW: u64 = 8192;
 
 /// Bytes at the start of the buffer searched for the `%PDF-` header (7.5.2).
 /// A header found past byte 0 means every stored offset is short by exactly
@@ -96,6 +174,18 @@ pub const LADDER_RESCAN_MIN_FAILURES: usize = 4;
 /// this bounds the walk without bounding any real document, the largest of
 /// which run to a few hundred thousand pages.
 pub const MAX_PAGES: usize = 1 << 21;
+
+/// The most objects one hint-named page run may contribute (Annex F).
+///
+/// A page's byte run is a range the file's own hint table chose, so the
+/// `N G obj` headers inside it are a count an attacker picks. Every one of
+/// them is a map entry, so the walk that finds them is bounded here rather
+/// than by the range's length: a megabyte of `1 0 obj` would otherwise buy a
+/// map of a hundred thousand entries for nothing. A run this long is not a
+/// page — the largest in the fetched corpora is sixteen objects — so a range
+/// that reaches the cap is refused whole and the page falls back to the main
+/// cross-reference table.
+pub const MAX_HINTED_PAGE_OBJECTS: usize = 4096;
 
 /// The most entries one name or number tree may yield.
 ///
@@ -159,3 +249,12 @@ pub const MAX_SCRIPT_VARS: usize = 256;
 
 /// Fields whose calculation action one recalculation pass will run.
 pub const MAX_CALC_FIELDS: usize = 4096;
+
+/// Distinct functions one document's `/Names /JavaScript` scripts may define
+/// for its field scripts to call (7.7.4).
+///
+/// The same number as [`MAX_SCRIPT_VARS`] and for the same reason: a name
+/// table is a lookup the interpreter scans per unknown name, so a
+/// document-controlled count of them is document-controlled work. Real forms
+/// define a handful; the largest generated ones a corpus shows define tens.
+pub const MAX_SCRIPT_FUNCTIONS: usize = 256;

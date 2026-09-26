@@ -682,19 +682,52 @@ fn an_opacity_that_is_not_a_number_refuses_its_element() {
     assert!(content.contains(" gs\n"), "{content}");
 }
 
-/// An `OpacityMask` is refused rather than ignored (gap 30 milestone 8 owns
-/// the brush that would apply it).
+/// **An `OpacityMask` is applied, and the three brushes it can be are three
+/// constructions.**
 ///
-/// Ignoring a mask draws a whole shape where a sliver was meant, which is the
-/// opacity case exactly.
+/// 14.3 makes the mask a brush used as an *alpha channel*, and where a brush
+/// keeps its alpha is different in each of them — so one construction would be
+/// right about one and wrong about the other two:
+///
+/// - a `SolidColorBrush` is one alpha over the whole element, which 11.6.4.4's
+///   `/ca` already says, so no form XObject is built at all;
+/// - a gradient whose stops' alphas differ varies across the element and
+///   8.7.4.5's shading carries no alpha, so the alphas are painted as a grey
+///   and read back by a `/Luminosity` soft mask;
+/// - an `ImageBrush`'s alpha is the picture's own, so the brush is painted as
+///   it stands and an `/Alpha` soft mask reads what the painting produced.
+///
+/// The dictionaries the last two produce are read back in `xps_validated.rs`;
+/// what is asserted here is the half this test had before and lost — the shape
+/// is on the page. A refused mask took the whole element with it.
 #[test]
-fn an_opacity_mask_refuses_its_element_rather_than_being_ignored() {
-    let body = r##"<Path Fill="#000000" Data="M0,0L10,0Z"><Path.OpacityMask><SolidColorBrush Color="#80000000" /></Path.OpacityMask></Path>"##;
-    assert_eq!(
-        body_defects(body),
-        [XpsElementDefect::OpacityMaskUnsupported]
+fn an_opacity_mask_is_applied_rather_than_taking_its_element_with_it() {
+    // A solid mask is a constant alpha rather than a soft mask, and 0.5 is the
+    // `#80` the mask states: a form XObject holding a flat grey would say the
+    // same thing at the cost of an object.
+    let solid = r##"<Path Fill="#000000" Data="M0,0L10,0 10,10Z"><Path.OpacityMask><SolidColorBrush Color="#80000000" /></Path.OpacityMask></Path>"##;
+    assert_eq!(body_defects(solid), []);
+    let content = drawn(solid);
+    assert!(content.contains("0 0 m"), "the shape draws: {content}");
+    assert!(
+        content.contains(" gs"),
+        "and its alpha is a graphics state: {content}"
     );
-    assert!(!drawn(body).contains("0 0 m"), "{}", drawn(body));
+
+    // A gradient whose stops differ in alpha is not one number, so it becomes a
+    // soft mask — a second `gs` beside whatever alpha was already in force.
+    let gradient = r##"<Path Fill="#000000" Data="M0,0L100,0 100,100 0,100Z"><Path.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="100,0" MappingMode="Absolute"><LinearGradientBrush.GradientStops><GradientStop Color="#FFFFFFFF" Offset="0" /><GradientStop Color="#00FFFFFF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.OpacityMask></Path>"##;
+    assert_eq!(body_defects(gradient), []);
+    let content = drawn(gradient);
+    assert!(content.contains("0 0 m"), "the shape draws: {content}");
+    assert!(content.contains(" gs"), "a state is set: {content}");
+
+    // A mask brush that is not 15's syntax still refuses the element, which is
+    // the rule that did not change: a mask ignored draws a whole shape where a
+    // sliver was meant.
+    let broken = r##"<Path Fill="#000000" Data="M0,0L10,0 10,10Z"><Path.OpacityMask><SolidColorBrush Color="#ZZZ" /></Path.OpacityMask></Path>"##;
+    assert_eq!(body_defects(broken), [XpsElementDefect::BrushUnreadable]);
+    assert!(!drawn(broken).contains("0 0 m"), "{}", drawn(broken));
 }
 
 // ---- 15, brushes --------------------------------------------------------
@@ -941,20 +974,38 @@ fn a_relative_gradient_is_stated_in_fractions_of_the_shape_it_fills() {
     );
 }
 
-/// **A `ContextColor` is not painted black.**
+/// **A `ContextColor` whose profile part is missing still paints**, and says
+/// which thing was missing.
 ///
-/// 15.2.5 carries a profile part URI and channel floats and **no sRGB
-/// fallback**, so there is no cheap approximation available. Gap 07's headline
-/// defect was a gradient-stroked rule painting solid black silently, and black
-/// is a plausible colour where the placeholder grey is not.
+/// *Amended.* This used to assert `BrushUnsupported` — "a brush this build
+/// does not paint" — and that was the truth for several milestones. The brush
+/// is painted now, so what is left in this fixture is a `ContextColor` whose
+/// `/Resources/p.icc` names no part of this package, and the answer is
+/// `ColourProfileUnresolved`: a different sentence about a different fault.
+///
+/// The colour is **not** the placeholder grey, and that is the point. 15.2.5
+/// carries no sRGB fallback, but the four components are in the markup and PDF
+/// already says what to do with an `/ICCBased` space whose profile a reader
+/// cannot use — 8.6.5.5 falls back to `/Alternate`, which defaults by count to
+/// `DeviceCMYK` here. So the fallback is not invented: the *rule* is PDF's and
+/// the numbers are the file's. Painting grey would throw away four numbers the
+/// file supplied.
 #[test]
-fn a_context_colour_is_the_placeholder_grey_and_not_black() {
+fn a_context_colour_with_no_profile_part_paints_its_alternate_reading() {
     let body =
         r##"<Path Fill="ContextColor /Resources/p.icc 1.0,0.1,0.2,0.3,0.4" Data="M0,0L10,0Z" />"##;
-    assert_eq!(body_defects(body), [XpsElementDefect::BrushUnsupported]);
+    assert_eq!(
+        body_defects(body),
+        [XpsElementDefect::ColourProfileUnresolved]
+    );
     let content = drawn(body);
-    assert!(content.contains("0.749 0.749 0.749 rg"), "{content}");
+    assert!(
+        !content.contains("0.749 0.749 0.749 rg"),
+        "four components are not nothing: {content}"
+    );
     assert!(!content.contains("0 0 0 rg"), "{content}");
+    // 8.6.4.4's subtractive reading of `0.1,0.2,0.3` under a `K` of `0.4`.
+    assert!(content.contains("0.5 0.4 0.3 rg"), "{content}");
 }
 
 /// A colour that is not 15.2.4's syntax is grey and named, and the shape is
@@ -990,18 +1041,24 @@ fn an_image_brush_whose_picture_is_missing_is_grey_and_named() {
     assert!(drawn(body).contains("0.749 0.749 0.749 rg"));
 }
 
-/// A gradient asked to **stroke** is grey, not the gradient's first colour.
+/// A gradient asked to **stroke** is a shading pattern, set as the stroking
+/// colour.
 ///
-/// Gap 07's defect said the other way round: a shading pattern is what a
-/// gradient stroke needs, milestone 5 deliberately writes none, and taking the
-/// first stop would produce a plausible solid rule where a gradient was asked
-/// for.
+/// Gap 07's headline defect was a gradient-stroked rule painting solid black
+/// silently, and the two answers this test has had are the two halves of
+/// getting it right: the placeholder grey while the writer had no
+/// `/PatternType 2` to offer, and the gradient itself now that it has. What is
+/// still asserted is the half that was never about the milestone — the width is
+/// the file's, and nothing paints the first stop as though it were the whole
+/// brush.
 #[test]
-fn a_gradient_stroke_is_grey_rather_than_its_first_colour() {
+fn a_gradient_stroke_is_a_shading_pattern_rather_than_its_first_colour() {
     let body = r##"<Path Data="M0,0L10,0" StrokeThickness="4"><Path.Stroke><LinearGradientBrush StartPoint="0,0" EndPoint="10,0"><LinearGradientBrush.GradientStops><GradientStop Color="#FF0000" Offset="0" /><GradientStop Color="#0000FF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Stroke></Path>"##;
-    assert_eq!(body_defects(body), [XpsElementDefect::BrushUnsupported]);
+    assert_eq!(body_defects(body), []);
     let content = drawn(body);
-    assert!(content.contains("0.749 G"), "{content}");
+    assert!(content.contains("/Pattern CS /"), "{content}");
+    assert!(content.contains(" SCN"), "{content}");
+    assert!(!content.contains("0.749 G"), "{content}");
     assert!(!content.contains("1 0 0 RG"), "{content}");
     assert!(content.contains("4 w"), "the width is still the file's");
 }
@@ -1198,15 +1255,21 @@ fn a_static_resource_chain_past_the_depth_cap_is_named() {
     assert!(drawn(&long).contains("0.749 0.749 0.749 rg"));
 }
 
-/// A `ResourceDictionary` naming another part is milestone 8's, and says so
+/// A `ResourceDictionary` naming a part **this package does not hold** says so
 /// once rather than once per key.
+///
+/// Remote dictionaries are read now, so this fixture no longer says "not
+/// supported" — it says "no such part", which is a fact about the file rather
+/// than about this build. The one-warning-per-dictionary property is the half
+/// that survived the change and is what this test is still for; the half that
+/// resolves lives in `xps_resources.rs`.
 #[test]
-fn a_resource_dictionary_in_another_part_is_named() {
+fn a_resource_dictionary_naming_no_part_is_named_once() {
     let body = r##"<FixedPage.Resources><ResourceDictionary Source="/Resources/d.xml" /></FixedPage.Resources><Path Fill="{StaticResource b0}" Data="M0,0L10,0Z" />"##;
     assert_eq!(
         body_defects(body),
         [
-            XpsElementDefect::ResourceDictionaryRemote,
+            XpsElementDefect::ResourceDictionaryUnresolved,
             XpsElementDefect::BrushUnresolved
         ]
     );

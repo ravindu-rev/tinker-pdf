@@ -25,9 +25,18 @@
 //! stuffing rule: after a `0xFF` byte the next byte carries seven bits, so a
 //! header can never accidentally contain a marker.
 //!
-//! **The progression orders** (B.12), all five. A decoder that implements one
-//! and defaults the rest reads every packet of an RPCL stream in LRCP order —
-//! all the packets are there, none is missing, and the picture is wrong.
+//! **The progression orders** (B.12), all five, over B.12.2's progression
+//! order volumes. A decoder that implements one and defaults the rest reads
+//! every packet of an RPCL stream in LRCP order — all the packets are there,
+//! none is missing, and the picture is wrong.
+//!
+//! A POC marker segment (A.6.6) is what makes a *volume* out of each of
+//! B.12.1's loop nests: (B-21) bounds the component, resolution and layer
+//! loops, and the packets of one volume all appear before the next volume's.
+//! The default is not a second code path — B.12.2's opening sentence, "The
+//! progression loops of B.12.1 all go from zero to the maximum value", is one
+//! volume covering everything, and that is literally how a codestream with no
+//! POC is sequenced here.
 //!
 //! # The integrity check
 //!
@@ -39,7 +48,10 @@
 //! one; with EPH signalled every header must end with one; and in all cases
 //! the packets of a tile must consume its data exactly.
 
-use super::codestream::{Codestream, CodingStyle, Progression};
+use std::collections::BTreeSet;
+
+use super::codestream::{Codestream, CodingStyle, Packed, Poc, Progression};
+use super::passes::Schedule;
 use super::{Refusal, MAX_JPX_CODE_BLOCKS};
 
 /// Subband orientation (T.800 Table E.1's `b`), which decides both the
@@ -66,6 +78,48 @@ impl Orientation {
     }
 }
 
+/// One of B.10.7's codeword segments: a span of bytes and the coding passes
+/// coded into it.
+///
+/// T.800 calls it "the number of bytes contributed to a packet by a
+/// code-block" in B.10.7.1, which is the single-segment case; B.10.7.2
+/// generalises it to the span between two terminations. The passes matter as
+/// well as the bytes, because (B-19) widens the length field by
+/// `floor(log2(coding passes added))` and because tier-1 has to know how many
+/// passes to run out of this reader before opening the next.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Segment {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) passes: u32,
+    /// Whether a coding pass in Tables D.8 or D.9's terminated set closed
+    /// this, as opposed to the packet simply ending.
+    ///
+    /// False means the next packet's contribution continues the same segment
+    /// and the same reader. Treating B.10.7.2's "final coding pass included
+    /// in the packet is ... added to T" as a real termination would restart
+    /// the MQ decoder part way through a segment, which decodes every layer
+    /// after the first as noise.
+    pub(crate) terminated: bool,
+}
+
+impl Segment {
+    /// B.10.7.1's case as a one-element list: one segment holding every byte
+    /// and every pass.
+    ///
+    /// What a code-block with neither Table A.19 bit set always ends up with,
+    /// and the shape every caller that has bytes rather than a packet wants —
+    /// which in the shipped decoder is none of them, because there the shape
+    /// comes out of the packet header. Tests only.
+    #[cfg(test)]
+    pub(crate) fn single(bytes: &[u8], passes: u32) -> [Segment; 1] {
+        [Segment {
+            bytes: bytes.to_vec(),
+            passes,
+            terminated: true,
+        }]
+    }
+}
+
 /// One code-block, and everything tier-2 learned about it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CodeBlock {
@@ -79,10 +133,24 @@ pub(crate) struct CodeBlock {
     pub(crate) zero_planes: u8,
     /// Coding passes accumulated over every layer that included this block.
     pub(crate) passes: u32,
-    /// The MQ codeword segment, concatenated across layers. One segment,
-    /// because the code-block styles that split it — TERMALL and BYPASS —
-    /// are refused in the header parser.
-    pub(crate) data: Vec<u8>,
+    /// B.10.7's codeword segments, in order, each with the coding passes it
+    /// carries.
+    ///
+    /// Usually one, holding every byte the code-block contributed across
+    /// every layer — that is B.10.7.1's case and it is what a codestream with
+    /// neither Table A.19 bit 0 nor bit 2 always produces. With either set,
+    /// B.10.7.2 splits the contribution at the passes Tables D.8 and D.9
+    /// terminate, and tier-1 opens a fresh reader on each one.
+    ///
+    /// **A segment is not the same thing as a signalled length**, and keeping
+    /// them apart is the whole reason this is a list of segments rather than
+    /// a list of lengths. B.10.7.2 signals a length for the final pass
+    /// included in a packet whether or not that pass terminated, so a
+    /// code-block whose passes span two layers gets two lengths for one
+    /// segment. [`Segment::terminated`] records which of the two closed it,
+    /// and a contribution that arrives against an unterminated segment is
+    /// appended to it rather than starting a new one.
+    pub(crate) segments: Vec<Segment>,
     /// Tier-1's output: signed coefficients in scan order, whose magnitudes
     /// occupy [`CodeBlock::planes`] bits. Empty until tier-1 has run.
     pub(crate) coefficients: Vec<i32>,
@@ -114,6 +182,35 @@ impl CodeBlock {
 
     pub(crate) const fn height(&self) -> u32 {
         self.y1 - self.y0
+    }
+
+    /// Adds one packet's contribution to this code-block.
+    ///
+    /// The merge is the whole of B.10.7.2's multi-layer case. A segment the
+    /// previous packet left open — closed because the packet ended rather
+    /// than because Tables D.8 or D.9 terminate that pass — is *continued*
+    /// here: same segment, same bytes, same reader. Only a contribution
+    /// arriving against a terminated segment, or against none, starts a new
+    /// one.
+    ///
+    /// Getting this wrong is invisible without a multi-layer codestream and
+    /// silent when it happens: a fresh MQ decoder mid-segment produces
+    /// coefficients rather than an error, and the inverse wavelet turns those
+    /// into a photograph.
+    fn append(&mut self, bytes: &[u8], passes: u32, terminated: bool) {
+        match self.segments.last_mut() {
+            Some(open) if !open.terminated => {
+                open.bytes.extend_from_slice(bytes);
+                open.passes += passes;
+                open.terminated = terminated;
+            }
+            _ => self.segments.push(Segment {
+                bytes: bytes.to_vec(),
+                passes,
+                terminated,
+            }),
+        }
+        self.passes += passes;
     }
 }
 
@@ -457,7 +554,7 @@ impl<'a> PacketBits<'a> {
         Ok((self.buf >> self.ct) & 1)
     }
 
-    fn bits(&mut self, n: u32) -> Result<u32, Refusal> {
+    pub(crate) fn bits(&mut self, n: u32) -> Result<u32, Refusal> {
         if n > 32 {
             return Err(Refusal::Structure(
                 "a packet header field wider than 32 bits",
@@ -485,7 +582,7 @@ impl<'a> PacketBits<'a> {
         Ok(())
     }
 
-    fn consumed(&self) -> usize {
+    pub(crate) fn consumed(&self) -> usize {
         self.at
     }
 }
@@ -515,7 +612,13 @@ pub(crate) fn decode_tiles(stream: &Codestream<'_>) -> Result<Vec<Tile>, Refusal
         let t = u32::try_from(t).map_err(|_| Refusal::Budget("tiles"))?;
         let index = u16::try_from(t).map_err(|_| Refusal::Budget("tiles"))?;
         let mut tile = build_tile(stream, t, index, &mut budget)?;
-        read_tile_packets(stream, &mut tile, &mut budget)?;
+        // A tile whose declared parts did not all arrive has no complete set
+        // of coefficients. Its geometry is still built, so the picture keeps
+        // its shape and the tile stays at the value the plane was initialised
+        // to; only the packet read is skipped. See `check_tile_parts`.
+        if !stream.short_tiles.get(t as usize).copied().unwrap_or(false) {
+            read_tile_packets(stream, &mut tile, &mut budget)?;
+        }
         tiles.push(tile);
     }
     Ok(tiles)
@@ -748,12 +851,74 @@ fn charge(budget: &mut u64, n: u64) -> Result<(), Refusal> {
 // --- the packet sequence (B.12) -----------------------------------------
 
 /// One packet's address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Packet {
     layer: u16,
     resolution: u8,
     component: u16,
     precinct: u32,
+}
+
+/// One progression order volume (B.12.2), resolved against this tile.
+///
+/// A volume is [`Progression`] plus (B-21)'s three bounds, already clamped to
+/// what the tile actually has — so the loops below are the ones B.12.1
+/// writes, with `0` and the maximum replaced by the volume's own ends.
+///
+/// **The default is a volume, not a special case.** B.12.2 opens with "The
+/// progression order default is signalled in the COD marker segment ... The
+/// progression loops of B.12.1 all go from zero to the maximum value", which
+/// is exactly [`Volume::whole`]. A codestream with no POC therefore runs the
+/// same code as one with a single-progression POC covering everything, and
+/// there is no second sequencer to drift from the first.
+#[derive(Clone, Copy, Debug)]
+struct Volume {
+    /// `CSpod <= i < CEpod`.
+    components: (usize, usize),
+    /// `RSpod <= r < REpod`.
+    resolutions: (usize, usize),
+    /// `0 <= l < LEpod`.
+    layers: u16,
+    order: Progression,
+}
+
+impl Volume {
+    /// B.12.2's default: every loop from zero to the maximum value.
+    fn whole(cod: &super::codestream::Cod, tile: &Tile, max_res: usize) -> Volume {
+        Volume {
+            components: (0, tile.components.len()),
+            resolutions: (0, max_res),
+            layers: cod.layers,
+            order: cod.progression,
+        }
+    }
+
+    /// One POC progression, with (B-21)'s bounds clamped to the tile.
+    ///
+    /// **Clamping is the whole of what B.12.3 licenses here**, and it is
+    /// worth being exact about which sentence: "the POC marker segments may
+    /// describe more progression order volumes than exist in the codestream".
+    /// A volume naming resolution levels or components the tile does not have
+    /// describes no packets, so its surplus is dropped rather than refused —
+    /// Table A.32's ceilings are constants (33, 256, 16 384) rather than this
+    /// tile's geometry, so an encoder asking for "everything" writes the
+    /// constant.
+    ///
+    /// The layer end is clamped the same way and for the same reason: COD's
+    /// `SGcod` fixes the layer count, and Table A.32 lets `LYEpoc` run to
+    /// 65 535 regardless.
+    fn of(poc: &Poc, cod: &super::codestream::Cod, tile: &Tile, max_res: usize) -> Volume {
+        let cs = usize::from(poc.component_start).min(tile.components.len());
+        let ce = usize::from(poc.component_end).min(tile.components.len());
+        let rs = usize::from(poc.resolution_start).min(max_res);
+        let re = usize::from(poc.resolution_end).min(max_res);
+        Volume {
+            components: (cs, ce),
+            resolutions: (rs, re),
+            layers: poc.layer_end.min(cod.layers),
+            order: poc.order,
+        }
+    }
 }
 
 /// Reads every packet of one tile, over the concatenation of its tile-parts.
@@ -770,10 +935,38 @@ fn read_tile_packets(
         data.extend_from_slice(part.data);
     }
 
-    let order = packet_order(stream, tile, &cod, budget)?;
+    // A.7.4 and A.7.5: the headers may have been moved out of the bit
+    // stream. `packed_headers` answers which of B.10's three places this
+    // tile's headers are in; everything below is the same reader either way.
+    let packed = stream.packed_headers(tile.index)?;
+    let mut headers = match &packed {
+        Some(p) => HeaderSource::Packed {
+            bytes: &p.bytes,
+            at: 0,
+        },
+        None => HeaderSource::InStream,
+    };
+    let empty = Packed::default();
+    let seams = packed.as_ref().unwrap_or(&empty);
+
+    // A.6.6 and B.12.3's precedence, resolved once for the whole tile: a
+    // tile-part POC, else the main header's, else nothing and B.12.1's
+    // unbounded loops stand.
+    let poc = stream.progression_volumes(tile.index);
+    let order = packet_order(stream, tile, &cod, poc.as_deref(), budget)?;
+    // Table A.19's bits 0 and 2 per component, with A.6.2's four-deep
+    // precedence applied once rather than per packet.
+    let schedules: Vec<Schedule> = (0..tile.components.len())
+        .map(|c| stream.style_for(tile.index, c).schedule())
+        .collect();
     let mut at = 0usize;
+    let mut seam = 0usize;
+    // A run of zero bytes is a tile-part that carried no packets, and its
+    // seam falls before the first header rather than after one.
+    check_seams(&headers, seams, &mut seam)?;
     for packet in order {
-        at = read_packet(tile, &cod, &packet, &data, at)?;
+        at = read_packet(tile, &cod, &schedules, &packet, &data, at, &mut headers)?;
+        check_seams(&headers, seams, &mut seam)?;
     }
     // The integrity check, in its plainest form: the packets of a tile
     // consume the tile's data exactly. A tier-2 parse that has gone wrong
@@ -781,75 +974,184 @@ fn read_tile_packets(
     if at != data.len() {
         return Err(Refusal::PacketLength);
     }
+    // And its packed half. With the headers moved out, the bit-stream check
+    // above only covers the bodies, so on its own it would let a header read
+    // that stopped short of the packed stream through — which is exactly
+    // the mis-parse this decoder refuses everywhere else.
+    if let HeaderSource::Packed { bytes, at } = headers {
+        if at != bytes.len() || seam != seams.boundaries.len() {
+            return Err(Refusal::PacketLength);
+        }
+    }
     Ok(())
 }
 
-/// B.12's five progression orders.
+/// Where a packet's header bits come from.
+///
+/// B.10 gives three places and this is the fork between them: the header
+/// immediately before its own body in the bit stream, or a packed stream
+/// filled from PPM or from PPT. **The fork is the byte source and nothing
+/// else** — [`read_packet`] below is one reader, and the packed case does
+/// not get a second copy of B.10's header syntax to drift away from the
+/// first.
+enum HeaderSource<'a> {
+    InStream,
+    Packed { bytes: &'a [u8], at: usize },
+}
+
+impl HeaderSource<'_> {
+    /// How far into the packed stream the headers have been read, or `None`
+    /// when they are in the bit stream and the bit stream's own cursor is
+    /// the answer.
+    const fn packed_at(&self) -> Option<usize> {
+        match self {
+            HeaderSource::InStream => None,
+            HeaderSource::Packed { at, .. } => Some(*at),
+        }
+    }
+}
+
+/// Checks the packed stream's seams as they are passed (A.7.4, A.7.5).
+///
+/// Each of [`Packed::boundaries`] is an offset the standard requires to fall
+/// between two packet headers. Landing on one advances past it; passing one
+/// without landing on it means the header read straddled a seam the
+/// standard says it cannot, which is a mis-parse and refused as one.
+fn check_seams(
+    headers: &HeaderSource<'_>,
+    seams: &Packed,
+    next: &mut usize,
+) -> Result<(), Refusal> {
+    let Some(at) = headers.packed_at() else {
+        return Ok(());
+    };
+    while let Some(&seam) = seams.boundaries.get(*next) {
+        if seam > at {
+            break;
+        }
+        if seam < at {
+            return Err(Refusal::PacketLength);
+        }
+        *next += 1;
+    }
+    Ok(())
+}
+
+/// The packet sequence of one tile: B.12's five progression orders, over
+/// B.12.2's progression order volumes.
+///
+/// One volume when no POC reaches this tile, and one per progression of the
+/// POC that does. **The volumes run in the order the segment lists them**
+/// (B.12.2: "All the packets included in the entire progression order volume
+/// are found in order in the codestream before the next progression order
+/// change takes effect"), and a packet emitted by an earlier volume is not
+/// emitted again (A.6.6's `LYEpoc`: "Packets that have already been included
+/// in the codestream are not included again").
+///
+/// That last rule is why [`Emitter`] carries a set. Every volume's layer loop
+/// starts at zero — A.6.6 says so in as many words — so two volumes over the
+/// same `(component, resolution, precinct)` with different `LYEpoc` both walk
+/// the low layers, and only the set makes the second one pick up where the
+/// first stopped. B.12.2 states the consequence rather than the mechanism:
+/// "Therefore, the layer always starts with the next one for a given
+/// tile-component, resolution level and precinct. The decoder is required to
+/// determine the next layer."
 fn packet_order(
     stream: &Codestream<'_>,
     tile: &Tile,
     cod: &super::codestream::Cod,
+    poc: Option<&[Poc]>,
     budget: &mut u64,
 ) -> Result<Vec<Packet>, Refusal> {
-    let layers = cod.layers;
-    let components = tile.components.len();
     let max_res = tile
         .components
         .iter()
         .map(|c| c.resolutions.len())
         .max()
         .unwrap_or(0);
-    let mut out = Vec::new();
+    let volumes: Vec<Volume> = match poc {
+        Some(progressions) => progressions
+            .iter()
+            .map(|p| Volume::of(p, cod, tile, max_res))
+            .collect(),
+        None => vec![Volume::whole(cod, tile, max_res)],
+    };
 
-    match cod.progression {
-        Progression::Lrcp => {
-            for l in 0..layers {
-                for r in 0..max_res {
-                    for c in 0..components {
-                        for p in 0..precinct_count(tile, c, r) {
-                            emit(&mut out, l, r, c, p, budget)?;
+    let mut out = Emitter::default();
+    for volume in volumes {
+        let (c0, c1) = volume.components;
+        let (r0, r1) = volume.resolutions;
+        match volume.order {
+            Progression::Lrcp => {
+                for l in 0..volume.layers {
+                    for r in r0..r1 {
+                        for c in c0..c1 {
+                            for p in 0..precinct_count(tile, c, r) {
+                                out.emit(l, r, c, p, budget)?;
+                            }
                         }
                     }
                 }
             }
-        }
-        Progression::Rlcp => {
-            for r in 0..max_res {
-                for l in 0..layers {
-                    for c in 0..components {
-                        for p in 0..precinct_count(tile, c, r) {
-                            emit(&mut out, l, r, c, p, budget)?;
+            Progression::Rlcp => {
+                for r in r0..r1 {
+                    for l in 0..volume.layers {
+                        for c in c0..c1 {
+                            for p in 0..precinct_count(tile, c, r) {
+                                out.emit(l, r, c, p, budget)?;
+                            }
                         }
                     }
                 }
             }
-        }
-        // The three positional orders walk the reference grid rather than a
-        // precinct index, so a packet's address has to be recovered from a
-        // coordinate. B.12.1.3 to B.12.1.5.
-        Progression::Rpcl | Progression::Pcrl | Progression::Cprl => {
-            positional_order(stream, tile, cod, &mut out, budget)?;
+            // The three positional orders walk the reference grid rather than
+            // a precinct index, so a packet's address has to be recovered
+            // from a coordinate. B.12.1.3 to B.12.1.5.
+            Progression::Rpcl | Progression::Pcrl | Progression::Cprl => {
+                positional_order(stream, tile, &volume, &mut out, budget)?;
+            }
         }
     }
-    Ok(out)
+    Ok(out.packets)
 }
 
-fn emit(
-    out: &mut Vec<Packet>,
-    l: u16,
-    r: usize,
-    c: usize,
-    p: u32,
-    budget: &mut u64,
-) -> Result<(), Refusal> {
-    charge(budget, 1)?;
-    out.push(Packet {
-        layer: l,
-        resolution: u8::try_from(r).map_err(|_| Refusal::Budget("resolutions"))?,
-        component: u16::try_from(c).map_err(|_| Refusal::Budget("components"))?,
-        precinct: p,
-    });
-    Ok(())
+/// The packet sequence as it is built, with A.6.6's "not included again"
+/// rule.
+///
+/// The set is a `BTreeSet` rather than a hash set for the reason every
+/// ordered container in this tree is one: nothing here depends on its
+/// iteration order, but a container whose behaviour is a hash seed is a
+/// container ruling 4 has to argue about, and this one never has to.
+#[derive(Default)]
+struct Emitter {
+    packets: Vec<Packet>,
+    seen: BTreeSet<Packet>,
+}
+
+impl Emitter {
+    fn emit(
+        &mut self,
+        l: u16,
+        r: usize,
+        c: usize,
+        p: u32,
+        budget: &mut u64,
+    ) -> Result<(), Refusal> {
+        // Charged before the duplicate is dropped, because the budget is a
+        // work budget: a POC describing a thousand overlapping volumes costs
+        // the walk whether or not the packets are new.
+        charge(budget, 1)?;
+        let packet = Packet {
+            layer: l,
+            resolution: u8::try_from(r).map_err(|_| Refusal::Budget("resolutions"))?,
+            component: u16::try_from(c).map_err(|_| Refusal::Budget("components"))?,
+            precinct: p,
+        };
+        if self.seen.insert(packet) {
+            self.packets.push(packet);
+        }
+        Ok(())
+    }
 }
 
 fn precinct_count(tile: &Tile, c: usize, r: usize) -> u32 {
@@ -870,15 +1172,16 @@ fn precinct_count(tile: &Tile, c: usize, r: usize) -> u32 {
 fn positional_order(
     stream: &Codestream<'_>,
     tile: &Tile,
-    cod: &super::codestream::Cod,
-    out: &mut Vec<Packet>,
+    volume: &Volume,
+    out: &mut Emitter,
     budget: &mut u64,
 ) -> Result<(), Refusal> {
     let (tx0, ty0, tx1, ty1) = stream.siz.tile_bounds(u32::from(tile.index));
     if tx0 >= tx1 || ty0 >= ty1 {
         return Ok(());
     }
-    let components = tile.components.len();
+    let (vc0, vc1) = volume.components;
+    let (vr0, vr1) = volume.resolutions;
 
     // The projection of one precinct onto the reference grid, per
     // (component, resolution).
@@ -898,23 +1201,26 @@ fn positional_order(
 
     // CPRL walks each component's own positions; RPCL and PCRL share one
     // walk across all of them, which is why the step is a minimum over
-    // whichever components the order is about.
-    let ranges: Vec<(usize, usize)> = match cod.progression {
-        Progression::Cprl => (0..components).map(|c| (c, c + 1)).collect(),
-        _ => vec![(0, components)],
+    // whichever components the order is about. With a POC in force the
+    // component axis is (B-21)'s `CSpod <= i < CEpod` rather than every
+    // component of the tile, so the split is over the volume.
+    let ranges: Vec<(usize, usize)> = match volume.order {
+        Progression::Cprl => (vc0..vc1).map(|c| (c, c + 1)).collect(),
+        _ => vec![(vc0, vc1)],
     };
-    let max_res = tile
-        .components
-        .iter()
-        .map(|c| c.resolutions.len())
-        .max()
-        .unwrap_or(0);
 
     for (c0, c1) in ranges {
         let mut dx = u64::MAX;
         let mut dy = u64::MAX;
         for c in c0..c1 {
-            for r in 0..tile.components[c].resolutions.len() {
+            // The step is the finest precinct the volume will actually visit.
+            // Taking it over resolutions outside `RSpod..REpod` would step
+            // the walk in units no packet of this volume is anchored to, and
+            // the surplus positions would be dropped by `precinct_at`
+            // anyway — but a *coarser* step than the volume needs would skip
+            // precinct origins, so the minimum is over the volume's own
+            // resolutions and not over the tile's.
+            for r in vr0..vr1.min(tile.components[c].resolutions.len()) {
                 if let Some((sx, sy)) = step(c, r) {
                     dx = dx.min(sx.max(1));
                     dy = dy.min(sy.max(1));
@@ -937,15 +1243,15 @@ fn positional_order(
             y += dy - (y % dy);
         }
 
-        match cod.progression {
+        match volume.order {
             // B.12.1.3: resolution, then position, then component, then
             // layer.
             Progression::Rpcl => {
-                for r in 0..max_res {
+                for r in vr0..vr1 {
                     for &(x, y) in &positions {
                         for c in c0..c1 {
-                            for l in layers_of(cod, tile, c, r, x, y, stream, tx0, ty0) {
-                                emit(out, l.0, r, c, l.1, budget)?;
+                            for l in layers_of(volume, tile, c, r, x, y, stream, tx0, ty0) {
+                                out.emit(l.0, r, c, l.1, budget)?;
                             }
                         }
                     }
@@ -956,9 +1262,9 @@ fn positional_order(
             Progression::Pcrl => {
                 for &(x, y) in &positions {
                     for c in c0..c1 {
-                        for r in 0..tile.components[c].resolutions.len() {
-                            for l in layers_of(cod, tile, c, r, x, y, stream, tx0, ty0) {
-                                emit(out, l.0, r, c, l.1, budget)?;
+                        for r in vr0..vr1.min(tile.components[c].resolutions.len()) {
+                            for l in layers_of(volume, tile, c, r, x, y, stream, tx0, ty0) {
+                                out.emit(l.0, r, c, l.1, budget)?;
                             }
                         }
                     }
@@ -969,9 +1275,9 @@ fn positional_order(
             _ => {
                 for &(x, y) in &positions {
                     for c in c0..c1 {
-                        for r in 0..tile.components[c].resolutions.len() {
-                            for l in layers_of(cod, tile, c, r, x, y, stream, tx0, ty0) {
-                                emit(out, l.0, r, c, l.1, budget)?;
+                        for r in vr0..vr1.min(tile.components[c].resolutions.len()) {
+                            for l in layers_of(volume, tile, c, r, x, y, stream, tx0, ty0) {
+                                out.emit(l.0, r, c, l.1, budget)?;
                             }
                         }
                     }
@@ -987,7 +1293,7 @@ fn positional_order(
 /// loop, so it is written once.
 #[allow(clippy::too_many_arguments)]
 fn layers_of(
-    cod: &super::codestream::Cod,
+    volume: &Volume,
     tile: &Tile,
     c: usize,
     r: usize,
@@ -998,7 +1304,10 @@ fn layers_of(
     ty0: u32,
 ) -> Vec<(u16, u32)> {
     match precinct_at(stream, tile, c, r, x, y, tx0, ty0) {
-        Some(p) => (0..cod.layers).map(|l| (l, p)).collect(),
+        // (B-21)'s `0 <= l < LEpod`, which for a tile with no POC is
+        // `0 <= l < L` — B.12.1's own bound, since `Volume::whole` puts the
+        // COD's layer count here.
+        Some(p) => (0..volume.layers).map(|l| (l, p)).collect(),
         None => Vec::new(),
     }
 }
@@ -1058,12 +1367,18 @@ const SOP: [u8; 2] = [0xFF, 0x91];
 const EPH: [u8; 2] = [0xFF, 0x92];
 
 /// Reads one packet's header and body, returning where the next one starts.
+///
+/// `at` and the returned offset are always in the **bit stream**, because
+/// that is where a packet's body is in all three of B.10's arrangements.
+/// Only the header bits move, and `headers` says where they moved to.
 fn read_packet(
     tile: &mut Tile,
     cod: &super::codestream::Cod,
+    schedules: &[Schedule],
     packet: &Packet,
     data: &[u8],
     mut at: usize,
+    headers: &mut HeaderSource<'_>,
 ) -> Result<usize, Refusal> {
     if cod.sop {
         // Signalled and absent is a refusal, not a shrug: SOP is the one
@@ -1078,14 +1393,29 @@ fn read_packet(
         }
     }
 
-    let body = data.get(at..).ok_or(Refusal::Truncated("a packet"))?;
-    let mut bits = PacketBits::new(body);
-    let mut contributions: Vec<(usize, usize, usize, usize, u32)> = Vec::new();
+    // A.8.1 leaves SOP where it was: "If PPM or PPT marker segments are
+    // used, then the SOP marker segment may appear immediately before the
+    // packet data in the bit stream" — so the check above reads the bit
+    // stream in every case, and only the header bits below move.
+    let header_bytes = match &*headers {
+        HeaderSource::InStream => data.get(at..).ok_or(Refusal::Truncated("a packet"))?,
+        HeaderSource::Packed { bytes, at } => bytes
+            .get(*at..)
+            .ok_or(Refusal::Truncated("a packed packet header"))?,
+    };
+    let mut bits = PacketBits::new(header_bytes);
+    let mut contributions: Vec<Contribution> = Vec::new();
 
     // B.10.3: the first bit says whether the packet carries anything at all.
     if bits.bit()? == 1 {
         let component = usize::from(packet.component);
         let resolution = usize::from(packet.resolution);
+        // A.6.2's precedence is already resolved in `schedules`, one entry
+        // per component: a COC may set Table A.19's bits for one component
+        // and not for another, and reading the main COD's byte for every
+        // component would split a chroma plane's packets at a luma plane's
+        // terminations.
+        let schedule = schedules.get(component).copied().unwrap_or_default();
         let bands = tile
             .components
             .get(component)
@@ -1145,68 +1475,206 @@ fn read_packet(
                     pb.blocks[i].included = true;
                 }
                 let passes = read_pass_count(&mut bits)?;
-                // B.10.7: `Lblock` grows by one per signalled 1-bit and never
-                // shrinks, across every layer of this code-block.
-                while bits.bit()? == 1 {
-                    pb.blocks[i].lblock += 1;
-                    if pb.blocks[i].lblock > 32 {
-                        return Err(Refusal::Structure(
-                            "an Lblock past any legal segment length",
-                        ));
-                    }
+                // `first` is where this packet's passes start in the
+                // code-block's own numbering, which is every pass an earlier
+                // layer already contributed. Without it the schedule would be
+                // read at packet-local indices and a second layer would split
+                // in the wrong places.
+                let first = pb.blocks[i].passes;
+                // The cap on what *earlier layers* already contributed, and it
+                // is deliberately on `first` rather than on `first + passes`.
+                //
+                // Tier-1 refuses a code-block carrying more than
+                // [`tier1::MAX_PASSES`] coding passes, and that refusal is
+                // unchanged and still the one a single over-long packet gets.
+                // What this stops is the accumulation *reaching* it: a
+                // code-block's contribution is now a list of [`Segment`]s
+                // rather than one byte vector, and B.10.7.2 gives `TERMALL`
+                // one segment per pass, so with `Acod`'s `u16` layer count
+                // 65 535 packets each declaring B.10.6's largest pass count
+                // would build ten million segments out of about a megabyte of
+                // header bits before tier-1 was reached to say no. The bytes
+                // were always bounded by the codestream; the segment *count*
+                // was not.
+                //
+                // `first > MAX_PASSES` cannot fire for a code-block tier-1
+                // would have accepted, because the total is at least `first`.
+                // So this narrows nothing and pre-empts no other refusal —
+                // which a looser bound did, taking a hand-built tile away
+                // from the packet-length check that is meant to catch it.
+                if first > super::tier1::MAX_PASSES {
+                    return Err(Refusal::Structure(
+                        "more coding passes than any legal bit-plane count allows",
+                    ));
                 }
-                let width = pb.blocks[i].lblock + floor_log2(passes);
-                let length = bits.bits(width)? as usize;
-                contributions.push((component, resolution, b, i, passes));
-                // Reuse the tuple's last slot for the length by pushing it
-                // separately would cost a second vector; the length rides in
-                // the block's own accumulator instead.
-                pb.blocks[i].data.reserve(length);
-                lengths_push(&mut contributions, length);
+                let block = &mut pb.blocks[i];
+                for segment in read_lengths(&mut bits, &mut block.lblock, schedule, first, passes)?
+                {
+                    contributions.push(Contribution {
+                        component,
+                        resolution,
+                        band: b,
+                        block: i,
+                        passes: segment.passes,
+                        length: segment.length,
+                        terminated: segment.terminated,
+                    });
+                }
             }
         }
     }
     bits.align()?;
     let header_len = bits.consumed();
-    at += header_len;
 
-    if cod.eph {
-        if data.get(at..at + 2) != Some(&EPH[..]) {
-            return Err(Refusal::PacketLength);
+    // A.8.2 moves EPH with the header it delimits: "If the packet headers
+    // are moved to a PPM or PPT marker segments (see A.7.4 and A.7.5), then
+    // the EPH markers shall appear after the packet headers in the PPM or
+    // PPT marker segments", and, in the same clause, "If packet headers are
+    // not in-bit stream (i.e., PPM or PPT marker segments are used), this
+    // marker shall not be used in the bit stream." B.10 says it once more:
+    // "In the event that the packet header appears in a PPM or PPT marker
+    // segment, the EPH marker (if used) must appear together with the packet
+    // header."
+    match headers {
+        HeaderSource::InStream => {
+            at += header_len;
+            if cod.eph {
+                if data.get(at..at + 2) != Some(&EPH[..]) {
+                    return Err(Refusal::PacketLength);
+                }
+                at += 2;
+            }
         }
-        at += 2;
+        HeaderSource::Packed { bytes, at: hat } => {
+            *hat += header_len;
+            if cod.eph {
+                if bytes.get(*hat..*hat + 2) != Some(&EPH[..]) {
+                    return Err(Refusal::PacketLength);
+                }
+                *hat += 2;
+            }
+        }
     }
 
     // The bodies follow the header in the same order the header listed them.
-    let mut i = 0;
-    while i < contributions.len() {
-        let (component, resolution, b, blk, passes) = contributions[i];
-        let length = contributions[i + 1].0;
-        i += 2;
+    for c in contributions {
         let end = at
-            .checked_add(length)
+            .checked_add(c.length)
             .ok_or(Refusal::Structure("a code-block length past addressable"))?;
         let bytes = data
             .get(at..end)
             .ok_or(Refusal::Truncated("a code-block segment"))?;
-        let block = &mut tile.components[component].resolutions[resolution].bands[b].precincts
-            [usize::try_from(packet.precinct).unwrap_or(0)]
-        .blocks[blk];
-        block.data.extend_from_slice(bytes);
-        block.passes += passes;
+        let block = &mut tile.components[c.component].resolutions[c.resolution].bands[c.band]
+            .precincts[usize::try_from(packet.precinct).unwrap_or(0)]
+        .blocks[c.block];
+        block.append(bytes, c.passes, c.terminated);
         at = end;
     }
     Ok(at)
 }
 
-/// A length pushed as a second tuple, so the contribution list stays one
-/// vector. See [`read_packet`].
-fn lengths_push(list: &mut Vec<(usize, usize, usize, usize, u32)>, length: usize) {
-    list.push((length, 0, 0, 0, 0));
+/// One codeword segment's worth of a code-block's contribution to a packet.
+///
+/// A struct rather than the pair of tuples this used to be. The header names
+/// a code-block and then B.10.7.2's K lengths, and the bodies follow in the
+/// same order — but "same order" is only checkable if a contribution carries
+/// everything about itself, and the previous shape carried a length in a
+/// second tuple whose other four slots were zero.
+struct Contribution {
+    component: usize,
+    resolution: usize,
+    band: usize,
+    block: usize,
+    /// (B-19)'s "coding passes added" for this segment.
+    passes: u32,
+    length: usize,
+    /// Whether Tables D.8 or D.9 terminate the pass this segment ends on.
+    terminated: bool,
+}
+
+/// One signalled length out of a packet header: B.10.7's `(bytes, passes)`
+/// for one codeword segment, and which rule closed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SignalledLength {
+    pub(crate) length: usize,
+    pub(crate) passes: u32,
+    pub(crate) terminated: bool,
+}
+
+/// B.10.7: the `Lblock` signalling bits and then B.10.7.2's K lengths.
+///
+/// Split out of [`read_packet`] so that T.800's own worked examples can be
+/// fed to it. B.10.7.1's NOTE 1 and B.10.7.2's NOTE each print a complete
+/// valid bit sequence with the lengths it codes, which makes this one of the
+/// few things in the decoder the standard adjudicates directly rather than
+/// describes — see `tests::code_block_styles`.
+///
+/// `first` is the index, in the code-block's own pass numbering, of the first
+/// pass this packet contributes; `passes` how many it contributes. `lblock`
+/// is the code-block's running state variable and is updated in place.
+pub(crate) fn read_lengths(
+    bits: &mut PacketBits<'_>,
+    lblock: &mut u32,
+    schedule: Schedule,
+    first: u32,
+    passes: u32,
+) -> Result<Vec<SignalledLength>, Refusal> {
+    // B.10.7.1: "The value of Lblock is initially set to three. The number of
+    // bytes contributed by each code-block is preceded by signalling bits
+    // that increase the value of Lblock, as needed. A signalling bit of zero
+    // indicates the current value of Lblock is sufficient. If there are k
+    // ones followed by a zero, the value of Lblock is incremented by k."
+    //
+    // Once per code-block contribution and **not** once per codeword segment,
+    // which is the half of B.10.7.2 easiest to get wrong: its own worked
+    // example ends "Notice that the value of Lblock is incremented only at
+    // the start of the sequence".
+    while bits.bit()? == 1 {
+        *lblock += 1;
+        if *lblock > 32 {
+            return Err(Refusal::Structure(
+                "an Lblock past any legal segment length",
+            ));
+        }
+    }
+
+    // B.10.7.2: "Let T be the set of indices of terminated coding passes
+    // included for the code-block in the packet as indicated in Tables D.8
+    // and D.9. If the index final coding pass included in the packet is not a
+    // member of T, then it is added to T. Let n1 < ... < nK be the indices in
+    // T. K lengths are signalled consecutively with each length using the
+    // mechanism described in B.10.7.1."
+    let last = first.checked_add(passes).ok_or(Refusal::Structure(
+        "more coding passes than a code-block has",
+    ))?;
+    let mut out = Vec::new();
+    let mut start = first;
+    for p in first..last {
+        let terminated = schedule.terminates(p);
+        // The two ways a segment closes, and they are kept apart: `p + 1 ==
+        // last` is the "final coding pass included in the packet" rule, which
+        // closes a *signalled length* without the coder having terminated.
+        if !terminated && p + 1 != last {
+            continue;
+        }
+        // (B-19): the width is `Lblock` plus the floor of the base-2 log of
+        // the passes *in this segment*, which B.10.7.2 gives as "the number
+        // of passes in the packet up through n1" for the first and "n2 - n1"
+        // after it — the same quantity both times.
+        let in_segment = p - start + 1;
+        let width = *lblock + floor_log2(in_segment);
+        out.push(SignalledLength {
+            length: bits.bits(width)? as usize,
+            passes: in_segment,
+            terminated,
+        });
+        start = p + 1;
+    }
+    Ok(out)
 }
 
 /// B.10.6's variable-length code for the number of coding passes.
-fn read_pass_count(bits: &mut PacketBits<'_>) -> Result<u32, Refusal> {
+pub(crate) fn read_pass_count(bits: &mut PacketBits<'_>) -> Result<u32, Refusal> {
     if bits.bit()? == 0 {
         return Ok(1);
     }

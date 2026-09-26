@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- §7.10's absolute units, at the resolution §7.10 fixes rather than CSS's:
+     one inch is ninety user units here, not ninety-six. Two inches wide and
+     one inch tall, spelled two different ways, so a build that used the wrong
+     table would produce a document that is not square where this one is. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="2in" height="72pt"/>

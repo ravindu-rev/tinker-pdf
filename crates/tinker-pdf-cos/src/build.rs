@@ -6,6 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use tinker_pdf_filters::CcittParams;
+
 use crate::dest::DestKind;
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
@@ -114,6 +116,22 @@ pub enum ImageColorSpace<'a> {
     DeviceRgb,
     /// `/DeviceCMYK`.
     DeviceCmyk,
+    /// A registered `/ICCBased` space, by the resource name
+    /// [`DocumentBuilder::add_icc_color_space`] gave it (8.6.5.5).
+    ///
+    /// An image's `/ColorSpace` may name a resource rather than state a space
+    /// inline (8.9.5.4), which is what lets one embedded profile serve a page's
+    /// operators and its images alike instead of being copied into each. The
+    /// channel count comes from the registered space's `/N`, so this variant
+    /// carries no count of its own — and an image whose samples disagree with
+    /// that count is a defect this writer cannot see, exactly as it cannot see
+    /// inside the profile.
+    Icc {
+        /// The resource name the space was registered under.
+        resource: &'a [u8],
+        /// How many channels a sample has, which must be the space's `/N`.
+        components: u8,
+    },
     /// `[/Indexed base hival lookup]` (8.6.6.3).
     Indexed {
         /// The space each table entry is expressed in.
@@ -139,6 +157,7 @@ impl ImageColorSpace<'_> {
             ImageColorSpace::DeviceGray | ImageColorSpace::Indexed { .. } => 1,
             ImageColorSpace::DeviceRgb => 3,
             ImageColorSpace::DeviceCmyk => 4,
+            ImageColorSpace::Icc { components, .. } => *components as u32,
         }
     }
 }
@@ -172,6 +191,46 @@ pub enum ImageFilter {
         /// `/Columns`: samples per row.
         columns: u32,
     },
+    /// `/FlateDecode` with
+    /// `/DecodeParms << /Predictor 2 /Colors c /BitsPerComponent b /Columns w >>`.
+    ///
+    /// 7.4.4.4's predictor 2 is TIFF horizontal differencing, and Table 10
+    /// says so in those words - PDF took it from TIFF 6.0 p.64 whole, which is
+    /// why a `Compression` 8 strip with `Predictor` 2 is already a legal
+    /// `/FlateDecode` stream and needs no pixel work to become one.
+    FlateTiffPredictor {
+        /// `/Colors`: components per sample in the *encoded* data.
+        colors: u32,
+        /// `/BitsPerComponent`, as the predictor saw them.
+        bits_per_component: u32,
+        /// `/Columns`: samples per row.
+        columns: u32,
+    },
+    /// `/LZWDecode` over the samples directly, with no `/DecodeParms`.
+    ///
+    /// TIFF 6.0 section 13's LZW is 7.4.4's: nine to twelve bit codes, most
+    /// significant bit first, and the width switched one code early - which is
+    /// `/EarlyChange 1`, PDF's own default, so the parameter is not written.
+    /// The **other** LZW, the pre-1993 bit order, is not this and never
+    /// reaches here.
+    Lzw,
+    /// `/LZWDecode` with `/DecodeParms << /Predictor 2 ... >>`.
+    LzwTiffPredictor {
+        /// `/Colors`: components per sample in the *encoded* data.
+        colors: u32,
+        /// `/BitsPerComponent`, as the predictor saw them.
+        bits_per_component: u32,
+        /// `/Columns`: samples per row.
+        columns: u32,
+    },
+    /// `/CCITTFaxDecode` with Table 11's parameters, which are carried as the
+    /// filters crate's own struct rather than re-spelled here.
+    ///
+    /// Re-spelling them would mean two definitions of `/K`, and the one place
+    /// they could disagree - a `/Rows` that is the strip's rather than the
+    /// image's - is exactly the disagreement that produces a page with the
+    /// right dictionary and the wrong picture.
+    CcittFax(CcittParams),
 }
 
 /// Per-sample opacity, as the `/DeviceGray` sub-image 11.6.5.3 asks for.
@@ -239,11 +298,31 @@ const fn max_sample(bits: u8) -> u32 {
 /// geometry, so a disagreement is refused rather than written out.
 fn filter_describes(filter: Option<ImageFilter>, components: u32, bits: u8, width: u32) -> bool {
     match filter {
-        Some(ImageFilter::FlatePngPredictor {
-            colors,
-            bits_per_component,
-            columns,
-        }) => colors == components && bits_per_component == u32::from(bits) && columns == width,
+        Some(
+            ImageFilter::FlatePngPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            }
+            | ImageFilter::FlateTiffPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            }
+            | ImageFilter::LzwTiffPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            },
+        ) => colors == components && bits_per_component == u32::from(bits) && columns == width,
+        // 7.4.6: a fax is one bit per pixel and `/Columns` is the row length,
+        // so a `/CCITTFaxDecode` whose parameters disagree with the image
+        // dictionary describes a different raster from the one declared -
+        // which is the same failure `/Predictor`'s columns produce, one filter
+        // over.
+        Some(ImageFilter::CcittFax(p)) => {
+            components == 1 && bits == 1 && p.columns == width && p.rows > 0
+        }
         _ => true,
     }
 }
@@ -524,6 +603,25 @@ pub enum TilingType {
     FasterTiling,
 }
 
+/// A shading pattern, `/PatternType 2` (8.7.4.5.5).
+///
+/// The other half of [`Shading`], and it is a **different capability** rather
+/// than a spelling of the same one. `PageBuilder::shading` writes 8.7.4.1's
+/// `sh`, which floods the current clip: a caller filling a *shape* has to make
+/// that shape the clip first, and a caller **stroking** one, or setting text in
+/// one, has no such move at all — a stroke is not a region and a glyph outline
+/// is not a clip a content stream can state. A shading pattern is a colour, so
+/// it reaches `scn`, `SCN` and every operator that takes one.
+pub struct ShadingPattern {
+    /// `/Shading`, written as its own indirect object.
+    pub shading: Shading,
+    /// `/Matrix`, mapping pattern space into the **default** coordinate system
+    /// of the page the pattern is used on — 8.7.3.1's rule, which 8.7.4.5.5
+    /// inherits whole, so this ignores whatever transform is in force when the
+    /// pattern is set. `None` for the identity.
+    pub matrix: Option<[f64; 6]>,
+}
+
 /// A tiling pattern, `/PatternType 1` (8.7.3).
 ///
 /// `/PaintType` is always 1, a **coloured** pattern, and the reason is written
@@ -615,6 +713,15 @@ struct ResourceSet {
     ext_gstates: Vec<(Vec<u8>, ObjRef)>,
     shadings: Vec<(Vec<u8>, ObjRef)>,
     patterns: Vec<(Vec<u8>, ObjRef)>,
+    color_spaces: Vec<(Vec<u8>, ObjRef)>,
+    /// `/N` for each registered `/ICCBased` space, by resource name.
+    ///
+    /// Carried beside `color_spaces` rather than inside it because the
+    /// `/Resources` assembly above is one loop over six identically shaped
+    /// lists, and widening the tuple would widen all six. What it buys is that
+    /// [`PageBuilder::set_fill_icc`] can write **exactly** the operand count
+    /// 8.6.5.5 declares, instead of trusting a caller to count to `/N`.
+    icc_channels: BTreeMap<Vec<u8>, u8>,
 }
 
 impl ResourceSet {
@@ -638,6 +745,7 @@ impl ResourceSet {
             (b"ExtGState", &self.ext_gstates),
             (b"Shading", &self.shadings),
             (b"Pattern", &self.patterns),
+            (b"ColorSpace", &self.color_spaces),
         ] {
             if entries.is_empty() {
                 continue;
@@ -838,7 +946,14 @@ struct CidFont {
 /// different subsets of the same face collide only if their bytes hash the
 /// same, and a collision would merely give two fonts the same name, which is
 /// legal.
-fn subset_tag(program: &[u8]) -> Vec<u8> {
+///
+/// Public because the *rewrite* side subsets fonts too, and a second
+/// implementation of this would be two ways of naming the same bytes: a
+/// document built here and the same document rewritten here would disagree
+/// about what a subset of one face is called, for no reason a reader of either
+/// file could see. One door, as with [`tinker_pdf_font::subset`] itself.
+#[must_use]
+pub fn subset_tag(program: &[u8]) -> Vec<u8> {
     // FNV-1a, for no reason beyond being short and well spread.
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for &byte in program {
@@ -867,15 +982,10 @@ fn subset_tag(program: &[u8]) -> Vec<u8> {
 /// with no entry. Writing 500 for every glyph, which the simple-font path does
 /// because 9.6.6.4 leaves it no choice, would be a number this document made
 /// up presented as the font's.
-fn width_array(
-    sfnt: &tinker_pdf_font::Sfnt<'_>,
-    units: f64,
-    ids: impl Iterator<Item = u16>,
-) -> Option<Vec<Object>> {
+fn width_array(program: &FontProgram<'_>, ids: impl Iterator<Item = u16>) -> Option<Vec<Object>> {
     let mut runs: Vec<(u16, Vec<Object>)> = Vec::new();
     for id in ids {
-        let advance = sfnt.advance(id)?;
-        let width = (f64::from(advance) * 1000.0 / units).round();
+        let width = program.width(id)?.round();
         match runs.last_mut() {
             // `ids` arrives from a `BTreeMap`'s keys, so it is sorted and
             // duplicate-free; a run therefore continues exactly when the next
@@ -896,6 +1006,207 @@ fn width_array(
         out.push(Object::Array(widths));
     }
     Some(out)
+}
+
+/// A font program, and the metrics and dictionary entries it decides.
+///
+/// Three shapes reach an embedding call and they are not interchangeable:
+/// 9.9 Table 126 gives each one a different descriptor entry, and a
+/// `/FontFile2` holding CFF outlines is a stream a conforming reader looks
+/// for `glyf` in and does not find. The metrics differ too — a TrueType
+/// measures in `unitsPerEm`, a CFF in whatever its `FontMatrix` says, and the
+/// two are only the same number when that matrix is the usual 1/1000.
+enum FontProgram<'a> {
+    /// An sfnt carrying `glyf`: `/FontFile2`.
+    TrueType(tinker_pdf_font::Sfnt<'a>),
+    /// An sfnt whose outlines are in `CFF `: `/FontFile3`, `/Subtype
+    /// /OpenType`. Widths still come from `hmtx`, which such a face carries.
+    OpenType(tinker_pdf_font::Sfnt<'a>, tinker_pdf_font::Cff<'a>),
+    /// A bare CFF program, which is what `/FontFile3` carries on its own.
+    Bare(tinker_pdf_font::Cff<'a>),
+}
+
+impl<'a> FontProgram<'a> {
+    /// Reads whichever of the three it is, or `None` for bytes that are none.
+    fn parse(program: &'a [u8]) -> Option<FontProgram<'a>> {
+        if let Some(sfnt) = tinker_pdf_font::Sfnt::parse(program) {
+            // 0x676C7966 `glyf`, 0x43464620 `CFF `.
+            if sfnt.table(0x676C_7966).is_some() {
+                return Some(FontProgram::TrueType(sfnt));
+            }
+            let cff = sfnt
+                .table(0x4346_4620)
+                .and_then(tinker_pdf_font::Cff::parse)?;
+            return Some(FontProgram::OpenType(sfnt, cff));
+        }
+        tinker_pdf_font::Cff::parse(program).map(FontProgram::Bare)
+    }
+
+    /// Whether the program is a CID-keyed CFF, whose charset maps a CID onto a
+    /// glyph rather than the two being the same number.
+    fn is_cid_keyed(&self) -> bool {
+        match self {
+            FontProgram::TrueType(_) => false,
+            FontProgram::OpenType(_, cff) | FontProgram::Bare(cff) => cff.is_cid(),
+        }
+    }
+
+    /// One glyph's advance, in the thousandths of a text space unit `/Widths`
+    /// and `/W` are stated in.
+    fn width(&self, glyph: u16) -> Option<f64> {
+        match self {
+            FontProgram::TrueType(sfnt) | FontProgram::OpenType(sfnt, _) => {
+                let units = f64::from(sfnt.units_per_em.max(1));
+                sfnt.advance(glyph)
+                    .map(|advance| f64::from(advance) * 1000.0 / units)
+            }
+            FontProgram::Bare(cff) => {
+                // A CFF states its own scale, and it need not be 1/1000: a
+                // face drawn at 2048 units to the em carries a matrix that
+                // says so, and reading the advance without it makes every
+                // width twice what it should be.
+                let scale = cff.font_matrix_for(glyph)[0];
+                cff.advance(glyph)
+                    .map(|advance| advance * scale * 1000.0)
+                    .filter(|width| width.is_finite())
+            }
+        }
+    }
+
+    /// The glyph a character selects, through whatever the program offers.
+    fn glyph_for_char(&self, c: char) -> Option<u16> {
+        match self {
+            FontProgram::TrueType(sfnt) | FontProgram::OpenType(sfnt, _) => sfnt.glyph_for_char(c),
+            // A bare CFF has no `cmap`; the charset names its glyphs, and its
+            // own encoding is the fallback (9.6.6).
+            FontProgram::Bare(cff) => tinker_pdf_font::glyph_name_for_char(c)
+                .and_then(|name| cff.gid_for_name(&name))
+                .or_else(|| {
+                    u8::try_from(u32::from(c))
+                        .ok()
+                        .and_then(|code| cff.gid_for_code(code))
+                }),
+        }
+    }
+
+    /// The descriptor key that carries the program, and the `/Subtype` its
+    /// stream needs (9.9 Table 126). `/FontFile2` takes `/Length1` instead.
+    fn file_entry(&self, cid: bool) -> (&'static [u8], Option<&'static [u8]>) {
+        match self {
+            FontProgram::TrueType(_) => (b"FontFile2", None),
+            FontProgram::OpenType(_, _) => (b"FontFile3", Some(b"OpenType")),
+            FontProgram::Bare(_) if cid => (b"FontFile3", Some(b"CIDFontType0C")),
+            FontProgram::Bare(_) => (b"FontFile3", Some(b"Type1C")),
+        }
+    }
+
+    /// The `/Subtype` of a **simple** font dictionary built on this program
+    /// (9.6.2.1): an sfnt is a TrueType font whichever table its outlines are
+    /// in, and a bare CFF is a Type 1 one.
+    fn simple_subtype(&self) -> &'static [u8] {
+        match self {
+            FontProgram::TrueType(_) | FontProgram::OpenType(_, _) => b"TrueType",
+            FontProgram::Bare(_) => b"Type1",
+        }
+    }
+
+    /// The `/Subtype` of a **descendant** CIDFont built on this program
+    /// (9.7.4.1). `/CIDToGIDMap` belongs only to the first of the two.
+    fn descendant_subtype(&self) -> &'static [u8] {
+        match self {
+            FontProgram::TrueType(_) | FontProgram::OpenType(_, _) => b"CIDFontType2",
+            FontProgram::Bare(_) => b"CIDFontType0",
+        }
+    }
+}
+
+/// Why a font program was embedded whole rather than cut down.
+///
+/// Not an error: the whole face is larger and correct, which is the right way
+/// round (ruling 2). It is a *leniency*, and ruling 10 says a leniency names
+/// what it touched — without this the only trace of it is the missing
+/// `ABCDEF+` tag on `/BaseFont`, which nothing checks and nobody notices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SubsetRefusal {
+    /// The pages drew text with this font and the program claims none of the
+    /// characters: a missing or unreadable `cmap`, most likely, or a symbolic
+    /// font addressed some other way. Subsetting on that evidence would keep
+    /// `.notdef` alone and every letter would come out blank.
+    NoGlyphResolved,
+    /// The program is not one this engine can rebuild. A TrueType missing
+    /// `glyf` or `loca`; a CFF whose charstrings this cannot renumber without
+    /// guessing (see `tinker_pdf_font::cff_subset` for that list); or bytes
+    /// that are neither.
+    ProgramNotRebuildable,
+    /// The subset came out no smaller than the face. A program a producer had
+    /// already cut down to thirty glyphs has almost nothing left to remove,
+    /// and what a rebuild costs — a `.notdef`-shaped charstring in every
+    /// dropped slot, an offset for it, and DICT operands written at a fixed
+    /// width so the offsets in them cannot move — can exceed what it saves.
+    /// The whole face is then both smaller *and* the one the producer tested,
+    /// so it is the one that goes in.
+    SubsetNotSmaller,
+}
+
+impl core::fmt::Display for SubsetRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            SubsetRefusal::NoGlyphResolved => "the font claims none of the text drawn with it",
+            SubsetRefusal::ProgramNotRebuildable => "the font program cannot be rebuilt",
+            SubsetRefusal::SubsetNotSmaller => "the subset is no smaller than the face",
+        })
+    }
+}
+
+/// A font whose whole program was embedded, and which resource it is
+/// (ruling 10).
+///
+/// Reported by [`DocumentBuilder::finish_reporting`]. Nothing is reported when
+/// [`DocumentBuilder::set_subset_fonts`] turned subsetting off: that is the
+/// caller's stated intent rather than a capability this engine lacked.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EmbeddedWhole {
+    /// The resource name the font was registered under.
+    pub resource: Vec<u8>,
+    /// The `/BaseFont` name it was written with — without the 9.6.4 subset
+    /// tag, because there is no subset.
+    pub base_font: Vec<u8>,
+    /// How many bytes the stream carries, which is the size the subset would
+    /// have been measured against.
+    pub bytes: usize,
+    /// Why.
+    pub reason: SubsetRefusal,
+}
+
+impl core::fmt::Display for EmbeddedWhole {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "/{} embedded whole ({} bytes): {}",
+            String::from_utf8_lossy(&self.resource),
+            self.bytes,
+            self.reason
+        )
+    }
+}
+
+/// Cuts a program down to `glyphs`, and keeps the result only if it is
+/// smaller than the face it came from.
+///
+/// The size comparison is the writer's decision and not the subsetter's:
+/// `tinker_pdf_font::subset` answers "what does this face look like with those
+/// glyphs kept", which is a question about fonts, and whether the answer is
+/// worth writing into a file is a question about documents. Two hundred and
+/// twelve of the fetched corpora's four hundred and forty-one CFF faces are
+/// already subsets a producer cut, and rebuilding one of those costs more
+/// bytes than it saves.
+fn subset_smaller_than(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Vec<u8>, SubsetRefusal> {
+    let reduced =
+        tinker_pdf_font::subset(program, glyphs).ok_or(SubsetRefusal::ProgramNotRebuildable)?;
+    if reduced.len() >= program.len() {
+        return Err(SubsetRefusal::SubsetNotSmaller);
+    }
+    Ok(reduced)
 }
 
 /// A `/ToUnicode` CMap for the glyphs a document drew (9.10.3).
@@ -957,7 +1268,7 @@ fn to_unicode_cmap(mapping: &BTreeMap<u16, String>) -> Option<Vec<u8>> {
 /// `0.30000000000000004` and the length of a content stream comes to depend on
 /// a floating-point accident. One ten-thousandth of a text space unit is two
 /// orders below what any rasteriser resolves.
-fn number(value: f64) -> String {
+pub(crate) fn number(value: f64) -> String {
     let rounded = (value * 1.0e4).round() / 1.0e4;
     // `-0` is a PDF number and a pointless one, and it is a second spelling of
     // a stream that is otherwise the same bytes.
@@ -966,7 +1277,7 @@ fn number(value: f64) -> String {
 }
 
 /// Closes an open `TJ` array, if one is open.
-fn close_array(out: &mut Vec<u8>, open: &mut bool) {
+pub(crate) fn close_array(out: &mut Vec<u8>, open: &mut bool) {
     if *open {
         out.extend_from_slice(b"] TJ\n");
         *open = false;
@@ -999,7 +1310,95 @@ pub struct PageBuilder {
     /// in. Written at `finish`, because a destination naming a page index
     /// cannot be resolved until every page exists.
     links: Vec<LinkAnnotation>,
+    /// The next marked-content id this page will hand out (14.7.4.2).
+    ///
+    /// Per page, because that is the scope the specification gives them: an
+    /// `/MCID` identifies a sequence *within one content stream*, and a
+    /// document-wide counter would make `/ParentTree` lookups depend on how
+    /// many pages came before.
+    next_mcid: u32,
+    /// Structure elements closed on this page, in the order they closed.
+    tag_roots: Vec<TaggedNode>,
+    /// Structure elements still open, outermost first.
+    tag_stack: Vec<TaggedNode>,
+    /// Where the most recent `BDC` starts in [`Self::content`], and the
+    /// length immediately after it. Together they say whether the open
+    /// sequence has had anything drawn into it. See [`Self::close_marked`].
+    opened: Option<usize>,
+    opened_end: usize,
+    /// The device colour space an [`ArchivalProfile`]'s destination profile
+    /// admits, when the document is being written under one.
+    ///
+    /// Copied from the builder at [`DocumentBuilder::begin_page`] rather than
+    /// looked up, because a page is drawn without a handle on the document it
+    /// will join — which is also why the refusals it makes are merged back at
+    /// [`DocumentBuilder::push_page`] rather than pushed straight onto the
+    /// builder's list.
+    archival_space: Option<DeviceSpace>,
+    /// Refusals made while drawing, merged into the document's at push.
+    refusals: Vec<ArchivalRefusal>,
 }
+
+/// One structure element under construction, and what it claims.
+///
+/// Built by [`PageBuilder::tagged`] rather than described by the caller, which
+/// is what makes the tree correct by construction: there is no way to name a
+/// marked-content id that was never written, and no way to write one no
+/// element claims.
+struct TaggedNode {
+    /// The structure type, which is also the content stream's tag.
+    tag: Vec<u8>,
+    /// What the caller calls this element, if it named it.
+    ///
+    /// **The whole of what makes an element able to cross a page.** Two
+    /// `tagged_keyed` calls on two pages with the same key are two halves of
+    /// **one** element -- a paragraph broken across a page break, or a float
+    /// whose box was drawn a page away from where it reads -- and are merged
+    /// at `finish`. `None` is an anonymous element, which never merges with
+    /// anything and is what [`PageBuilder::tagged`] produces.
+    key: Option<u64>,
+    /// Where this element reads, which is **not** its key.
+    ///
+    /// The two are separate because they answer different questions and cannot
+    /// be the same number: the key has to be equal on every page the element
+    /// appears on, or its halves do not merge, and the position has to ascend
+    /// with the document, or the halves merge into the wrong place. An element
+    /// met again on a later page keeps the **earliest** position it was given,
+    /// because that is where it reads.
+    order: u64,
+    kids: Vec<TaggedKid>,
+}
+
+/// What a structure element holds: marked content on its own page, or a
+/// nested element.
+///
+/// Two variants and never one, for the reason the reader's `StructKid` keeps
+/// them apart: a marked-content id is a span of this page's content stream and
+/// a child element is a subtree, and a writer that flattened them would have
+/// to guess which it meant on the way back.
+enum TaggedKid {
+    /// A marked-content sequence on the page that opened it, and where it
+    /// sits in the **document's** order.
+    ///
+    /// The order is the caller's, not the page's: once elements can merge
+    /// across pages their kids arrive in page order, and page order is not
+    /// reading order for the one case this exists to fix. A stable sort by it
+    /// leaves everything the caller did not distinguish in the order it was
+    /// drawn.
+    Content {
+        mcid: u32,
+        order: u64,
+    },
+    Element(TaggedNode),
+}
+
+/// How deep [`PageBuilder::tagged`] will nest before it stops opening
+/// elements and simply draws.
+///
+/// The reader caps its own walk at [`crate::limits::MAX_NEST_DEPTH`], so a
+/// writer that nested past it would produce a file this engine could not read
+/// back — which is the one thing a writer must not do.
+const MAX_TAG_DEPTH: usize = crate::limits::MAX_NEST_DEPTH as usize;
 
 impl PageBuilder {
     /// Sets `/CropBox`, as `[x0 y0 x1 y1]` in points from the bottom-left.
@@ -1018,6 +1417,179 @@ impl PageBuilder {
     /// diff against the source document readable.
     pub fn set_crop_box(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         self.crop_box = Some([x0, y0, x1, y1]);
+    }
+
+    /// Draws inside a tagged marked-content sequence (14.7.4), recording a
+    /// structure element that claims exactly what was drawn.
+    ///
+    /// `tag` is the structure type and the content stream's tag at once —
+    /// `P`, `H1`, `Figure`, `Span`. It is written as a name, so anything
+    /// 7.3.5 requires escaping is escaped rather than refused.
+    ///
+    /// # Why a closure, and why the tree is not described
+    ///
+    /// The alternative was a pair of `begin`/`end` calls and a separate tree
+    /// the caller hands over, naming marked-content ids. That shape lets a
+    /// caller name an id that was never written, and lets an id be written
+    /// that no element claims — the two defects `Document::structure()`
+    /// reports as orphans and unreadable kids. Here neither is expressible:
+    /// the element and the sequence are opened by the same call, so the tree
+    /// is correct by construction and `finish` has nothing to validate.
+    ///
+    /// Nesting works, and reading order survives it. A sequence that resumes
+    /// after a nested one closes gets a **fresh** id, so an element whose text
+    /// continues after its child reads before *and* after the child rather
+    /// than all of it afterwards. An empty resumption is dropped rather than
+    /// written: a marked sequence with nothing in it is a node the reader
+    /// would report and nobody asked for.
+    ///
+    /// Past [`MAX_TAG_DEPTH`] the content is drawn untagged rather than
+    /// refused (ruling 2). The reader caps its own walk at the same depth, so
+    /// an element written below it is one this engine could not read back.
+    pub fn tagged(&mut self, tag: &[u8], draw: impl FnOnce(&mut PageBuilder)) {
+        // An anonymous element has no position of its own; a stable sort
+        // then leaves every one of them exactly where it was drawn, which
+        // is what a caller that names nothing had before any of this.
+        self.tag_with(tag, None, 0, draw);
+    }
+
+    /// The same, for an element the caller can **name**.
+    ///
+    /// Two calls with one key, on any two pages, are two halves of one
+    /// structure element: 14.7.2 Table 323 lets an element's kids name
+    /// different pages, which is what a paragraph broken across a page break
+    /// is and what a float whose box landed a page from where it reads needs.
+    /// `finish` merges them and writes the kids on other pages as `/MCR`
+    /// dictionaries carrying their own `/Pg`.
+    ///
+    /// The key is also the **order** the element takes among its siblings, so
+    /// a caller whose keys ascend in document order gets a tree in document
+    /// order however the pages fell. Nothing here checks that they ascend: a
+    /// key is the caller's statement about its own document, the way
+    /// [`crate::PageBuilder::tagged`]'s nesting already is.
+    pub fn tagged_keyed(
+        &mut self,
+        tag: &[u8],
+        key: u64,
+        order: u64,
+        draw: impl FnOnce(&mut PageBuilder),
+    ) {
+        self.tag_with(tag, Some(key), order, draw);
+    }
+
+    /// Where the two forms meet.
+    fn tag_with(
+        &mut self,
+        tag: &[u8],
+        key: Option<u64>,
+        order: u64,
+        draw: impl FnOnce(&mut PageBuilder),
+    ) {
+        if self.tag_stack.len() >= MAX_TAG_DEPTH {
+            draw(self);
+            return;
+        }
+
+        // The parent's sequence closes before the child's opens: 14.7.4.2
+        // scopes content to the innermost sequence, and leaving the parent's
+        // open would make the child's content belong to both.
+        let resume = self.tag_stack.last().map(|parent| parent.tag.clone());
+        if resume.is_some() {
+            self.close_marked();
+        }
+
+        let mcid = self.open_marked(tag);
+        self.tag_stack.push(TaggedNode {
+            tag: tag.to_vec(),
+            key,
+            order,
+            // **The element's own first sequence is seeded from `order`**, and
+            // that is why no separate "say where this content sits" call is
+            // needed: `tagged_keyed` is called once per page, with the position
+            // of the first run drawn on *that* page, so a merged element's text
+            // already carries where it was written rather than which page it
+            // landed on. A `mark_order` method existed here and was deleted
+            // when its counted injection fired zero twice, against a fixture
+            // written specifically to catch it.
+            kids: vec![TaggedKid::Content { mcid, order }],
+        });
+        draw(self);
+        self.close_marked();
+
+        let node = self.tag_stack.pop().expect("pushed immediately above");
+        // An element that claims nothing at all is dropped. It can only arise
+        // from a `tagged` whose closure drew nothing, and a structure element
+        // with no content and no children is a node the reader would report
+        // and nobody asked for. `/Alt` on an empty `Figure` is the case that
+        // would want one, and this builder cannot write `/Alt` yet.
+        if !node.kids.is_empty() {
+            match self.tag_stack.last_mut() {
+                Some(parent) => parent.kids.push(TaggedKid::Element(node)),
+                None => self.tag_roots.push(node),
+            }
+        }
+
+        // Reopen the parent so anything drawn after this child still belongs
+        // to it. If nothing is, `close_marked` takes the reopening back.
+        if let Some(tag) = resume {
+            let mcid = self.open_marked(&tag);
+            let parent = self.tag_stack.last_mut().expect("resume implies a parent");
+            // The resumption reads **after** the child that interrupted it, so
+            // it takes an order past the child's rather than the parent's own.
+            // Without this a paragraph's second half sorts back in front of the
+            // span that split it.
+            let order = parent
+                .kids
+                .iter()
+                .map(|kid| match kid {
+                    TaggedKid::Content { order, .. } => *order,
+                    TaggedKid::Element(child) => child.order,
+                })
+                .max()
+                .unwrap_or(0);
+            parent.kids.push(TaggedKid::Content { mcid, order });
+        }
+    }
+
+    /// Writes `/Tag <</MCID n>> BDC` and returns the id it handed out.
+    fn open_marked(&mut self, tag: &[u8]) -> u32 {
+        let mcid = self.next_mcid;
+        self.next_mcid += 1;
+        self.opened = Some(self.content.len());
+        crate::write::write_name(&mut self.content, tag);
+        self.content
+            .extend_from_slice(format!(" <</MCID {mcid}>> BDC\n").as_bytes());
+        self.opened_end = self.content.len();
+        mcid
+    }
+
+    /// Writes `EMC`, or unwrites the `BDC` when nothing was drawn since it.
+    ///
+    /// The empty case is not hypothetical: it is what a resumption after the
+    /// last nested child always is. Writing it would leave a marked sequence
+    /// with no content, which `Document::structure` reports as a node, so the
+    /// bytes are taken back and the id handed back with them.
+    ///
+    /// Taking bytes back is safe because [`Self::open_marked`] only appends
+    /// and `opened_end` is the length immediately after it: a content length
+    /// still equal to it means nothing has been written since, and the bytes
+    /// from `opened` onwards are exactly the ones it wrote. Handing the id
+    /// back is safe for the same reason — a nested `tagged` would have moved
+    /// the length, so the id being dropped is always the last one issued.
+    fn close_marked(&mut self) {
+        let Some(at) = self.opened.take() else {
+            self.content.extend_from_slice(b"EMC\n");
+            return;
+        };
+        if self.content.len() != self.opened_end {
+            self.content.extend_from_slice(b"EMC\n");
+            return;
+        }
+        self.content.truncate(at);
+        self.next_mcid -= 1;
+        if let Some(node) = self.tag_stack.last_mut() {
+            node.kids.pop();
+        }
     }
 
     /// Sets `/BleedBox` (14.11.2), in the same coordinates as
@@ -1125,20 +1697,98 @@ impl PageBuilder {
     }
 
     /// Sets the non-stroking colour, as red, green and blue from zero to one.
-    pub fn set_fill_rgb(&mut self, r: f64, g: f64, b: f64) {
+    ///
+    /// **Refused** when the document is written under an [`ArchivalProfile`]
+    /// whose destination profile is not an RGB one: ISO 19005-1 6.2.3.3 admits
+    /// `DeviceRGB` only where the output intent says what an RGB triple means,
+    /// and painting one under a CMYK intent is a colour nobody can reproduce.
+    /// Returns whether the operator was written.
+    pub fn set_fill_rgb(&mut self, r: f64, g: f64, b: f64) -> bool {
+        if self.refuses_device_space(DeviceSpace::Rgb) {
+            return false;
+        }
         let c = |v: f64| v.clamp(0.0, 1.0);
         self.content
             .extend_from_slice(format!("{} {} {} rg\n", c(r), c(g), c(b)).as_bytes());
+        true
+    }
+
+    /// Sets the non-stroking colour in a registered `/ICCBased` space:
+    /// `/Name cs c1 … cn scn` (8.6.5.5, Table 74).
+    ///
+    /// The space must already have been registered with
+    /// [`DocumentBuilder::add_icc_color_space`] under this page's document, and
+    /// `components` are the channel values in that profile's own space, each
+    /// clamped to `[0, 1]`.
+    ///
+    /// **The operand count comes from the space, not from the caller.**
+    /// 8.6.5.5's `/N` says how many operands `scn` takes, so a caller handing
+    /// over four values for a three-channel profile has them truncated here,
+    /// and one handing over two has them padded with zero — rather than a
+    /// reader being left to guess at a content stream whose arity disagrees
+    /// with its space. This is the guarantee the XPS painter has been making
+    /// privately since `ContextColor` landed; it belongs to every caller.
+    ///
+    /// Returns false for a name no `/ICCBased` space was registered under,
+    /// which is the one case where writing anything at all would name a
+    /// resource the page does not carry.
+    pub fn set_fill_icc(&mut self, resource: &[u8], components: &[f64]) -> bool {
+        self.set_icc(resource, components, false)
+    }
+
+    /// The same for the **stroking** colour, which Table 74 spells in capitals.
+    pub fn set_stroke_icc(&mut self, resource: &[u8], components: &[f64]) -> bool {
+        self.set_icc(resource, components, true)
+    }
+
+    /// Both of the above. `stroking` picks Table 74's case.
+    fn set_icc(&mut self, resource: &[u8], components: &[f64], stroking: bool) -> bool {
+        let Some(channels) = self.resources.icc_channels.get(resource).copied() else {
+            return false;
+        };
+        self.content.push(b'/');
+        self.content.extend_from_slice(resource);
+        self.content
+            .extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
+        for at in 0..usize::from(channels) {
+            let value = components.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            self.content
+                .extend_from_slice(format!("{value} ").as_bytes());
+        }
+        self.content
+            .extend_from_slice(if stroking { b"SCN\n" } else { b"scn\n" });
+        true
+    }
+
+    /// Whether the profile in force refuses this device space, recording the
+    /// refusal if it does.
+    fn refuses_device_space(&mut self, space: DeviceSpace) -> bool {
+        let Some(destination) = self.archival_space else {
+            return false;
+        };
+        // The same reading the validator's 6.2.3.3 rule makes: grey is a value
+        // on the neutral axis of whatever device the intent names.
+        if space == DeviceSpace::Gray || space == destination {
+            return false;
+        }
+        self.refusals.push(ArchivalRefusal::DeviceColour { space });
+        true
     }
 
     /// Sets the **stroking** colour, as red, green and blue from zero to one.
     ///
     /// `RG`, not `rg`. The two are different parameters of the graphics state
     /// and always have been; only this writer conflated them, by having one.
-    pub fn set_stroke_rgb(&mut self, r: f64, g: f64, b: f64) {
+    /// Refused under a profile on the same terms as
+    /// [`PageBuilder::set_fill_rgb`], and for the same clause.
+    pub fn set_stroke_rgb(&mut self, r: f64, g: f64, b: f64) -> bool {
+        if self.refuses_device_space(DeviceSpace::Rgb) {
+            return false;
+        }
         let c = |v: f64| v.clamp(0.0, 1.0);
         self.content
             .extend_from_slice(format!("{} {} {} RG\n", c(r), c(g), c(b)).as_bytes());
+        true
     }
 
     /// Applies a graphics state registered with
@@ -1514,6 +2164,260 @@ fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
     true
 }
 
+// ---- the archival profile (ISO 19005) -------------------------------------
+
+/// Which part of ISO 19005 a document is written under.
+///
+/// The vocabulary is deliberately this crate's own and not the facade's
+/// [`tinker_pdf::Part`]. `tinker-pdf-cos` is a leaf and the validator lives in
+/// the facade, so the two cannot share a type without an edge that ruling 8
+/// refuses. They are checked against each other in
+/// `crates/tinker-pdf/tests/pdfa_writer.rs`, which builds under this profile
+/// and validates against that one — which is the only place the agreement
+/// matters and the only place a divergence would show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ArchivalPart {
+    /// ISO 19005-1, on PDF 1.4.
+    One,
+    /// ISO 19005-2, on PDF 1.7.
+    Two,
+    /// ISO 19005-3: part 2 plus arbitrary embedded files.
+    Three,
+    /// ISO 19005-4, on PDF 2.0.
+    Four,
+}
+
+impl ArchivalPart {
+    /// The `pdfaid:part` value.
+    #[must_use]
+    pub const fn number(self) -> u8 {
+        match self {
+            ArchivalPart::One => 1,
+            ArchivalPart::Two => 2,
+            ArchivalPart::Three => 3,
+            ArchivalPart::Four => 4,
+        }
+    }
+
+    /// The PDF version the part is defined on, which is what 6.1.2 requires
+    /// the header to declare.
+    const fn version(self) -> (u8, u8) {
+        match self {
+            ArchivalPart::One => (1, 4),
+            ArchivalPart::Two | ArchivalPart::Three => (1, 7),
+            ArchivalPart::Four => (2, 0),
+        }
+    }
+
+    /// Whether this part defines `level`.
+    #[must_use]
+    pub const fn allows(self, level: ArchivalLevel) -> bool {
+        matches!(
+            (self, level),
+            (ArchivalPart::One, ArchivalLevel::A | ArchivalLevel::B)
+                | (
+                    ArchivalPart::Two | ArchivalPart::Three,
+                    ArchivalLevel::A | ArchivalLevel::B | ArchivalLevel::U
+                )
+                | (ArchivalPart::Four, ArchivalLevel::E | ArchivalLevel::F)
+        )
+    }
+}
+
+/// The conformance level, for the parts that have one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ArchivalLevel {
+    /// Accessible: level B plus a tagged structure tree.
+    A,
+    /// Basic.
+    B,
+    /// Unicode. Parts 2 and 3.
+    U,
+    /// Engineering. Part 4.
+    E,
+    /// Embedded files. Part 4.
+    F,
+}
+
+impl ArchivalLevel {
+    /// The `pdfaid:conformance` letter.
+    #[must_use]
+    pub const fn letter(self) -> &'static str {
+        match self {
+            ArchivalLevel::A => "A",
+            ArchivalLevel::B => "B",
+            ArchivalLevel::U => "U",
+            ArchivalLevel::E => "E",
+            ArchivalLevel::F => "F",
+        }
+    }
+}
+
+/// The `pdfaid:rev` a part 4 document declares.
+///
+/// ISO 19005-4:2020 is the only published amendment, so this is a constant
+/// rather than a parameter. A knob for a revision that does not exist would be
+/// a way for a caller to write a claim no standard backs.
+const ARCHIVAL_REVISION: u16 = 2020;
+
+/// What a document built under an ISO 19005 profile promises.
+///
+/// # The destination profile is mandatory, and that is a licence decision
+///
+/// There is no `Option` here and no default. The obvious default would be a
+/// vendored sRGB profile, and the gate in [THIRDPARTY.md] decides that before
+/// the API does: a vendored tree must declare an SPDX identifier `deny.toml`
+/// already allows, and the ICC's own sRGB profiles carry the ICC's bespoke
+/// permission notice, which has no SPDX identifier at all. It cannot declare
+/// one, so it cannot clear `cargo xtask vendor`.
+///
+/// The design doc named this outcome in advance — *"if no profile clears
+/// `cargo xtask vendor`, the parameter is mandatory and documented"* — and it
+/// is the same answer the no-bundled-faces policy gives for the same reason.
+/// It is also the better API on the merits: an output intent is a statement
+/// about the device a document's colours are *for*, which is the caller's to
+/// make and not this crate's to assume.
+///
+/// [THIRDPARTY.md]: https://github.com/tinker-pdf/tinker-pdf/blob/main/THIRDPARTY.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchivalProfile {
+    /// Which part.
+    pub part: ArchivalPart,
+    /// The level, which parts 1 to 3 require and part 4 leaves optional.
+    pub level: Option<ArchivalLevel>,
+    /// The ICC destination profile, embedded as the output intent's
+    /// `/DestOutputProfile` (14.11.5). **Mandatory** — see the type note.
+    pub destination_profile: Vec<u8>,
+    /// Which kind of device the profile characterises.
+    ///
+    /// Declared rather than read out of the bytes, and deliberately: reading
+    /// it would put an ICC parser in this crate, and `tinker-pdf-cos` has no
+    /// edge to `tinker-pdf-color` and should not grow one to answer a question
+    /// the caller already knows the answer to. It is what the writer refuses
+    /// device colours against.
+    pub destination_space: DeviceSpace,
+    /// `/OutputConditionIdentifier` (14.11.5 Table 365), which every output
+    /// intent is required to carry.
+    pub output_condition: String,
+    /// The document's natural language, written as the catalog's `/Lang`.
+    ///
+    /// Required at level A (ISO 19005-1 6.8.4) and refused-on at
+    /// [`DocumentBuilder::finish_archival`] when it is absent there.
+    pub language: Option<String>,
+}
+
+/// What the writer refused, and the clause it refused under.
+///
+/// Every variant is a **refusal**: the call that would have written the
+/// forbidden thing wrote nothing and said so. Nothing here is discovered at
+/// validation time — which is the whole point of the profile, since a builder
+/// that emitted what the validator rejects would make the validator the last
+/// line of defence rather than the second.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArchivalRefusal {
+    /// A font with no embedded program: the standard 14, or a named-encoding
+    /// font over one.
+    UnembeddedFont {
+        /// The resource name the caller asked for.
+        resource: Vec<u8>,
+    },
+    /// Transparency in a part 1 document, which forbids it outright.
+    Transparency {
+        /// Which construct: `Group`, `SMask`, `BM`, `CA` or `ca`.
+        feature: &'static str,
+    },
+    /// A device colour space the destination profile does not admit.
+    DeviceColour {
+        /// The space the caller asked to paint in.
+        space: DeviceSpace,
+    },
+    /// An `/Info` entry part 4 does not admit.
+    InfoEntry {
+        /// The key.
+        key: Vec<u8>,
+    },
+    /// A conformance level the part does not define.
+    LevelNotInPart,
+    /// A part 1-to-3 profile with no conformance level.
+    LevelMissing,
+    /// Level A with a page that tagged nothing.
+    UntaggedPage {
+        /// Which page, counting from zero.
+        page: usize,
+    },
+    /// Level A with no natural language.
+    LanguageMissing,
+    /// A profile with no destination profile bytes.
+    DestinationProfileMissing,
+}
+
+impl ArchivalRefusal {
+    /// The clause the refusal cites, as ISO 19005-1 numbers it.
+    ///
+    /// Part 1's numbering, once, for every part — the same choice
+    /// `tinker_pdf::StagedRule` makes and for the same reason: a refusal is
+    /// about a rule, and the rule is one thing however many numbers the parts
+    /// give it.
+    #[must_use]
+    pub const fn clause(&self) -> &'static str {
+        match self {
+            ArchivalRefusal::UnembeddedFont { .. } => "6.3.4",
+            ArchivalRefusal::Transparency { .. } => "6.4",
+            ArchivalRefusal::DeviceColour { .. } => "6.2.3.3",
+            ArchivalRefusal::InfoEntry { .. } => "6.1.3",
+            ArchivalRefusal::LevelNotInPart
+            | ArchivalRefusal::LevelMissing
+            | ArchivalRefusal::LanguageMissing => "6.7.11",
+            ArchivalRefusal::UntaggedPage { .. } => "6.8.2",
+            ArchivalRefusal::DestinationProfileMissing => "6.2.2",
+        }
+    }
+}
+
+impl core::fmt::Display for ArchivalRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: ", self.clause())?;
+        match self {
+            ArchivalRefusal::UnembeddedFont { resource } => write!(
+                f,
+                "the font resource {} has no embedded program, and ISO 19005 \
+                 has no standard-14 exception",
+                String::from_utf8_lossy(resource)
+            ),
+            ArchivalRefusal::Transparency { feature } => {
+                write!(f, "part 1 admits no transparency, and this sets /{feature}")
+            }
+            ArchivalRefusal::DeviceColour { space } => write!(
+                f,
+                "the output intent's destination profile does not admit /{}",
+                String::from_utf8_lossy(space.pdf_name())
+            ),
+            ArchivalRefusal::InfoEntry { key } => write!(
+                f,
+                "part 4 admits no /Info entry but /ModDate, and this is /{}",
+                String::from_utf8_lossy(key)
+            ),
+            ArchivalRefusal::LevelNotInPart => {
+                f.write_str("the part does not define that conformance level")
+            }
+            ArchivalRefusal::LevelMissing => {
+                f.write_str("parts 1 to 3 require a conformance level")
+            }
+            ArchivalRefusal::UntaggedPage { page } => write!(
+                f,
+                "level A requires a tagged structure tree, and page {page} \
+                 tagged nothing"
+            ),
+            ArchivalRefusal::LanguageMissing => {
+                f.write_str("level A requires the document's natural language")
+            }
+            ArchivalRefusal::DestinationProfileMissing => {
+                f.write_str("an output intent needs an ICC destination profile")
+            }
+        }
+    }
+}
+
 /// Assembles a document.
 pub struct DocumentBuilder {
     names: NameTable,
@@ -1538,8 +2442,15 @@ pub struct DocumentBuilder {
     /// `finish`; see that method for why the record is the document's.
     drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>>,
     subset_fonts: bool,
+    /// Fonts written whole because a subset could not be built, gathered at
+    /// `finish` and handed back by `finish_reporting`.
+    embedded_whole: Vec<EmbeddedWhole>,
     info: Dict,
     outline: Vec<OutlineEntry>,
+    /// The ISO 19005 profile this document is written under, if any.
+    profile: Option<ArchivalProfile>,
+    /// Every call that profile refused, in the order they were made.
+    refusals: Vec<ArchivalRefusal>,
 }
 
 impl Default for DocumentBuilder {
@@ -1565,8 +2476,11 @@ impl DocumentBuilder {
             cid_fonts: Vec::new(),
             drawn: BTreeMap::new(),
             subset_fonts: true,
+            embedded_whole: Vec::new(),
             info: Dict::new(),
             outline: Vec::new(),
+            profile: None,
+            refusals: Vec::new(),
         }
     }
 
@@ -1581,7 +2495,15 @@ impl DocumentBuilder {
     /// A standard font needs no `/Widths` and no embedded program, which is
     /// what makes it the right choice for a fixture: the reader supplies the
     /// metrics.
-    pub fn add_base_font(&mut self, resource: &[u8], base_font: &[u8]) {
+    ///
+    /// **Refused under an [`ArchivalProfile`]**, which is the whole of what
+    /// ISO 19005 6.3.4 says about the standard 14: it has no list of them.
+    /// Returns whether the font was registered, so a profiled caller finds out
+    /// at this call rather than at validation; [`Self::refusals`] says why.
+    pub fn add_base_font(&mut self, resource: &[u8], base_font: &[u8]) -> bool {
+        if self.refuses_unembedded_font(resource) {
+            return false;
+        }
         let r = self.allocate();
         let mut dict = Dict::new();
         dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
@@ -1599,6 +2521,7 @@ impl DocumentBuilder {
         );
         self.objects.insert(r.num, Object::Dict(dict));
         self.resources.fonts.push((resource.to_vec(), r));
+        true
     }
 
     /// Registers one of the standard 14 under an `/Encoding` the caller wrote
@@ -1634,6 +2557,11 @@ impl DocumentBuilder {
         names: &[&str],
         widths: &[u16],
     ) -> bool {
+        // A named encoding over one of the standard 14 is still one of the
+        // standard 14, and still has no embedded program.
+        if self.refuses_unembedded_font(resource) {
+            return false;
+        }
         if names.is_empty() || names.len() != widths.len() {
             return false;
         }
@@ -1706,7 +2634,7 @@ impl DocumentBuilder {
     /// and a table rewriter, and shipping the entire face is correct — merely
     /// larger — where a broken subset is neither.
     pub fn add_embedded_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        if tinker_pdf_font::Sfnt::parse(program).is_none() {
+        if FontProgram::parse(program).is_none() {
             return false;
         }
 
@@ -1748,8 +2676,18 @@ impl DocumentBuilder {
     /// Returns false when the bytes are not a font this can read, for
     /// [`DocumentBuilder::add_embedded_font`]'s reason.
     pub fn add_cid_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        if tinker_pdf_font::Sfnt::parse(program).is_none() {
-            return false;
+        // A **CID-keyed** bare CFF is refused rather than embedded. Its
+        // charset maps a CID onto a glyph, and the two are different numbers;
+        // `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make
+        // every one of those numbers a CID. Accepting it would silently draw
+        // whichever glyph the charset happened to put at that CID — the
+        // failure this whole path exists to prevent (9.7.4.2).
+        match FontProgram::parse(program) {
+            None => return false,
+            Some(kind) if kind.is_cid_keyed() && !matches!(kind, FontProgram::OpenType(_, _)) => {
+                return false
+            }
+            Some(_) => {}
         }
 
         let file_ref = self.allocate();
@@ -1834,16 +2772,13 @@ impl DocumentBuilder {
             .iter()
             .find(|f| f.resource == font)
             .map(|f| f.program.clone());
-        let sfnt = program.as_deref().and_then(tinker_pdf_font::Sfnt::parse);
-        let units = sfnt
-            .as_ref()
-            .map_or(1000.0, |s| f64::from(s.units_per_em.max(1)));
+        let kind = program.as_deref().and_then(FontProgram::parse);
         let advance = |id: u16| -> f64 {
             // 9.7.4.3: a CID with no `/W` entry takes `/DW`, which this writer
             // states as 1000 — one em.
-            sfnt.as_ref()
-                .and_then(|s| s.advance(id))
-                .map_or(1.0, |a| (f64::from(a) * 1000.0 / units).round() / 1000.0)
+            kind.as_ref()
+                .and_then(|kind| kind.width(id))
+                .map_or(1.0, |width| width.round() / 1000.0)
         };
 
         let mapping = self.drawn.entry(font.to_vec()).or_default();
@@ -1927,6 +2862,29 @@ impl DocumentBuilder {
             || state.stroke_alpha.is_some_and(|v| !is_alpha(v))
         {
             return false;
+        }
+        // ISO 19005-1 6.4: a part 1 document has no transparency, so every
+        // parameter that introduces some is refused here rather than found by
+        // the validator afterwards.
+        if self.forbids_transparency() {
+            let forbidden = if state.fill_alpha.is_some_and(|v| v < 1.0) {
+                Some("ca")
+            } else if state.stroke_alpha.is_some_and(|v| v < 1.0) {
+                Some("CA")
+            } else if state
+                .blend_mode
+                .is_some_and(|mode| mode != BlendMode::Normal)
+            {
+                Some("BM")
+            } else if matches!(state.soft_mask, Some(StateMask::Group { .. })) {
+                Some("SMask")
+            } else {
+                None
+            };
+            if let Some(feature) = forbidden {
+                self.refuse(ArchivalRefusal::Transparency { feature });
+                return false;
+            }
         }
 
         let mut mask_ref = None;
@@ -2013,6 +2971,15 @@ impl DocumentBuilder {
         if !is_box(&form.bbox) {
             return false;
         }
+        // ISO 19005-1 6.4: a transparency group is transparency, and part 1
+        // has none. The form itself is unobjectionable, so only the `/Group`
+        // is refused — and the whole call with it, because a form registered
+        // without the group the caller asked for is not the form they asked
+        // for.
+        if form.group.is_some() && self.forbids_transparency() {
+            self.refuse(ArchivalRefusal::Transparency { feature: "Group" });
+            return false;
+        }
         if let Some(matrix) = form.matrix {
             if !all_finite(&matrix) {
                 return false;
@@ -2079,6 +3046,61 @@ impl DocumentBuilder {
     /// Returns false for a degenerate geometry, a negative radius, or a
     /// `/Function` that does not produce one number per colour component.
     pub fn add_shading(&mut self, resource: &[u8], shading: &Shading) -> bool {
+        let Some(reference) = self.write_shading(shading) else {
+            return false;
+        };
+        self.resources.shadings.push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Registers a **shading pattern** under a resource name (8.7.4.5.5).
+    ///
+    /// The pattern goes into `/Pattern`, not `/Shading`: 8.7.3.2 makes it a
+    /// colour, reached through `set_fill_pattern` / `set_stroke_pattern`, where
+    /// [`DocumentBuilder::add_shading`]'s resource is reached through
+    /// `PageBuilder::shading`'s `sh`. The two are not interchangeable and a
+    /// caller naming one where the other belongs gets a `false` rather than a
+    /// dangling name.
+    ///
+    /// Returns false for the geometries [`DocumentBuilder::add_shading`]
+    /// refuses, or a non-finite `/Matrix`.
+    pub fn add_shading_pattern(&mut self, resource: &[u8], pattern: &ShadingPattern) -> bool {
+        if let Some(matrix) = pattern.matrix {
+            if !all_finite(&matrix) {
+                return false;
+            }
+        }
+        // The shading is validated and written first, so a refused geometry
+        // leaves no pattern dictionary pointing at nothing — `add_image`'s
+        // posture, for `add_ext_gstate`'s reason.
+        let Some(shading_ref) = self.write_shading(&pattern.shading) else {
+            return false;
+        };
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Pattern")));
+        dict.insert(self.names.intern(b"PatternType"), Object::Int(2));
+        dict.insert(self.names.intern(b"Shading"), Object::Ref(shading_ref));
+        if let Some(matrix) = pattern.matrix {
+            dict.insert(
+                self.names.intern(b"Matrix"),
+                Object::Array(matrix.iter().map(|v| Object::Real(*v)).collect()),
+            );
+        }
+
+        let reference = self.allocate();
+        self.objects.insert(reference.num, Object::Dict(dict));
+        self.resources.patterns.push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Validates a shading and writes it as an indirect object.
+    ///
+    /// One body for the two doors — `/Shading` resource and `/PatternType 2`
+    /// — because 8.7.4.5's dictionary is the same dictionary either way, and
+    /// two copies of the geometry checks would be two places for a degenerate
+    /// axis to stop being refused.
+    fn write_shading(&mut self, shading: &Shading) -> Option<ObjRef> {
         let (kind, space, coords, function, extend) = match shading {
             Shading::Axial {
                 color_space,
@@ -2090,7 +3112,7 @@ impl DocumentBuilder {
                 // 8.7.4.5.3's parameter is undefined everywhere and the area
                 // paints in whatever the reader falls back to.
                 if !all_finite(coords) || (coords[0] == coords[2] && coords[1] == coords[3]) {
-                    return false;
+                    return None;
                 }
                 (2i64, *color_space, coords.to_vec(), function, *extend)
             }
@@ -2101,19 +3123,19 @@ impl DocumentBuilder {
                 extend,
             } => {
                 if !all_finite(coords) || coords[2] < 0.0 || coords[5] < 0.0 {
-                    return false;
+                    return None;
                 }
                 // Two circles of zero radius in the same place are a point,
                 // and 8.7.4.5.4 has nothing to blend between.
                 if coords[2] == 0.0 && coords[5] == 0.0 {
-                    return false;
+                    return None;
                 }
                 (3i64, *color_space, coords.to_vec(), function, *extend)
             }
         };
 
         if !function.is_valid(space.components() as usize) {
-            return false;
+            return None;
         }
 
         let function_ref = self.write_function(function);
@@ -2135,8 +3157,7 @@ impl DocumentBuilder {
 
         let reference = self.allocate();
         self.objects.insert(reference.num, Object::Dict(dict));
-        self.resources.shadings.push((resource.to_vec(), reference));
-        true
+        Some(reference)
     }
 
     /// Registers a tiling pattern under a resource name (8.7.3).
@@ -2202,6 +3223,60 @@ impl DocumentBuilder {
             },
         );
         self.resources.patterns.push((resource.to_vec(), reference));
+        true
+    }
+
+    /// Registers an `/ICCBased` colour space under a resource name (8.6.5.5).
+    ///
+    /// The profile goes into the file **verbatim**, as the stream the space
+    /// points at, and the reader does the colour management. That is what
+    /// makes an ICC-tagged colour a translation rather than a conversion:
+    /// nothing here evaluates a profile, so nothing here can be wrong about
+    /// one.
+    ///
+    /// `components` is 8.6.5.5's `/N`, and Table 66 permits **only 1, 3 or 4**
+    /// — a profile with any other channel count has no `/ICCBased` spelling at
+    /// all, and this returns `false` rather than writing a space no reader may
+    /// accept. It is the caller's job to name that narrowing; a silent
+    /// substitution here would be a colour the file did not ask for.
+    ///
+    /// `/Alternate` is deliberately absent. 8.6.5.5 defaults it by `/N` to
+    /// `DeviceGray`, `DeviceRGB` or `DeviceCMYK`, which is exactly what a
+    /// caller with no better information would have written — and writing the
+    /// default out would say it twice and invite the two to disagree.
+    ///
+    /// Returns false for an empty profile, which is not a profile, and for a
+    /// component count Table 66 does not allow.
+    pub fn add_icc_color_space(&mut self, resource: &[u8], profile: &[u8], components: u8) -> bool {
+        if profile.is_empty() || !matches!(components, 1 | 3 | 4) {
+            return false;
+        }
+        let mut dict = Dict::new();
+        dict.insert(self.names.intern(b"N"), Object::Int(i64::from(components)));
+        let stream = self.allocate();
+        self.objects.insert_stream(
+            stream.num,
+            StreamData {
+                dict,
+                data: profile.to_vec(),
+            },
+        );
+
+        // 8.6.5.5's space is the two-element array `[/ICCBased stream]`, and it
+        // is written as an indirect object so one profile serves every page
+        // that names it rather than being copied into each `/Resources`.
+        let space = self.allocate();
+        self.objects.insert(
+            space.num,
+            Object::Array(vec![
+                Object::Name(self.names.intern(b"ICCBased")),
+                Object::Ref(stream),
+            ]),
+        );
+        self.resources.color_spaces.push((resource.to_vec(), space));
+        self.resources
+            .icc_channels
+            .insert(resource.to_vec(), components);
         true
     }
 
@@ -2291,7 +3366,10 @@ impl DocumentBuilder {
 
             // A subset that cannot be built is not a reason to fail the
             // document: the whole face is larger and correct, which is the
-            // right way round (ruling 2).
+            // right way round (ruling 2). What ruling 10 does not licence is
+            // silence, so the refusal is recorded with the resource it is
+            // about — until August 2026 the only observable difference was the
+            // missing `ABCDEF+` tag.
             let (program, subsetted) = if self.subset_fonts {
                 let glyphs = tinker_pdf_font::glyphs_for(&font.program, &text);
                 if !text.is_empty() && glyphs.is_empty() {
@@ -2302,11 +3380,25 @@ impl DocumentBuilder {
                     // and every letter would come out blank — which reads as
                     // a rendering bug rather than a subsetting one, and so
                     // gets found far too late.
+                    self.embedded_whole.push(EmbeddedWhole {
+                        resource: font.resource.clone(),
+                        base_font: font.base_font.clone(),
+                        bytes: font.program.len(),
+                        reason: SubsetRefusal::NoGlyphResolved,
+                    });
                     (font.program.clone(), false)
                 } else {
-                    match tinker_pdf_font::subset(&font.program, &glyphs) {
-                        Some(reduced) => (reduced, true),
-                        None => (font.program.clone(), false),
+                    match subset_smaller_than(&font.program, &glyphs) {
+                        Ok(reduced) => (reduced, true),
+                        Err(reason) => {
+                            self.embedded_whole.push(EmbeddedWhole {
+                                resource: font.resource.clone(),
+                                base_font: font.base_font.clone(),
+                                bytes: font.program.len(),
+                                reason,
+                            });
+                            (font.program.clone(), false)
+                        }
                     }
                 }
             } else {
@@ -2334,10 +3426,9 @@ impl DocumentBuilder {
         // reading them from the subset would be no different — but reading
         // them from the original says plainly that it does not depend on
         // which glyphs survived.
-        let Some(sfnt) = tinker_pdf_font::Sfnt::parse(&font.program) else {
+        let Some(kind) = FontProgram::parse(&font.program) else {
             return;
         };
-        let units = f64::from(sfnt.units_per_em.max(1));
 
         // 9.6.6.4: /FirstChar../LastChar with one width each, in glyph space
         // thousandths. WinAnsi is assumed because that is what the encoding
@@ -2347,20 +3438,33 @@ impl DocumentBuilder {
         const LAST: u8 = 255;
         let mut widths = Vec::with_capacity(usize::from(LAST - FIRST) + 1);
         for code in FIRST..=LAST {
-            let width = sfnt
+            let width = kind
                 .glyph_for_char(char::from(code))
-                .and_then(|glyph| sfnt.advance(glyph))
-                .map_or(500.0, |advance| f64::from(advance) * 1000.0 / units);
+                .and_then(|glyph| kind.width(glyph))
+                .unwrap_or(500.0);
             widths.push(Object::Real(width.round()));
         }
 
+        let (file_key, file_subtype) = kind.file_entry(false);
         let mut file_dict = Dict::new();
-        // 9.9: /Length1 is the embedded program's length — the subset's, not
-        // the original's, since the subset is what the stream contains.
-        file_dict.insert(
-            self.names.intern(b"Length1"),
-            Object::Int(program.len() as i64),
-        );
+        match file_subtype {
+            // 9.9 Table 126: a `/FontFile3` stream states what kind of program
+            // it carries, and it is the only thing in the file that does.
+            Some(subtype) => {
+                file_dict.insert(
+                    self.names.intern(b"Subtype"),
+                    Object::Name(self.names.intern(subtype)),
+                );
+            }
+            // /Length1 is the embedded program's length — the subset's, not
+            // the original's, since the subset is what the stream contains.
+            None => {
+                file_dict.insert(
+                    self.names.intern(b"Length1"),
+                    Object::Int(program.len() as i64),
+                );
+            }
+        }
         self.objects.insert_stream(
             font.file_ref.num,
             StreamData {
@@ -2396,7 +3500,7 @@ impl DocumentBuilder {
         descriptor.insert(self.names.intern(b"Descent"), Object::Int(-250));
         descriptor.insert(self.names.intern(b"CapHeight"), Object::Int(700));
         descriptor.insert(self.names.intern(b"StemV"), Object::Int(80));
-        descriptor.insert(self.names.intern(b"FontFile2"), Object::Ref(font.file_ref));
+        descriptor.insert(self.names.intern(file_key), Object::Ref(font.file_ref));
         self.objects
             .insert(font.descriptor_ref.num, Object::Dict(descriptor));
 
@@ -2404,7 +3508,7 @@ impl DocumentBuilder {
         dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
         dict.insert(
             self.names.intern(b"Subtype"),
-            Object::Name(self.names.intern(b"TrueType")),
+            Object::Name(self.names.intern(kind.simple_subtype())),
         );
         dict.insert(
             self.names.intern(b"BaseFont"),
@@ -2448,9 +3552,18 @@ impl DocumentBuilder {
             ids.insert(0);
 
             let (program, subsetted) = if self.subset_fonts {
-                match tinker_pdf_font::subset(&font.program, &ids) {
-                    Some(reduced) => (reduced, true),
-                    None => (font.program.clone(), false),
+                match subset_smaller_than(&font.program, &ids) {
+                    Ok(reduced) => (reduced, true),
+                    Err(reason) => {
+                        // Ruling 10, for `write_embedded_fonts`'s reason.
+                        self.embedded_whole.push(EmbeddedWhole {
+                            resource: font.resource.clone(),
+                            base_font: font.base_font.clone(),
+                            bytes: font.program.len(),
+                            reason,
+                        });
+                        (font.program.clone(), false)
+                    }
                 }
             } else {
                 (font.program.clone(), false)
@@ -2479,16 +3592,26 @@ impl DocumentBuilder {
         // subsetting never moves a glyph identifier, and reading the metrics
         // from the face rather than from the cut-down copy says plainly that
         // the widths do not depend on which glyphs survived.
-        let Some(sfnt) = tinker_pdf_font::Sfnt::parse(&font.program) else {
+        let Some(kind) = FontProgram::parse(&font.program) else {
             return;
         };
-        let units = f64::from(sfnt.units_per_em.max(1));
 
+        let (file_key, file_subtype) = kind.file_entry(true);
         let mut file_dict = Dict::new();
-        file_dict.insert(
-            self.names.intern(b"Length1"),
-            Object::Int(program.len() as i64),
-        );
+        match file_subtype {
+            Some(subtype) => {
+                file_dict.insert(
+                    self.names.intern(b"Subtype"),
+                    Object::Name(self.names.intern(subtype)),
+                );
+            }
+            None => {
+                file_dict.insert(
+                    self.names.intern(b"Length1"),
+                    Object::Int(program.len() as i64),
+                );
+            }
+        }
         self.objects.insert_stream(
             font.file_ref.num,
             StreamData {
@@ -2525,7 +3648,7 @@ impl DocumentBuilder {
         descriptor.insert(self.names.intern(b"Descent"), Object::Int(-250));
         descriptor.insert(self.names.intern(b"CapHeight"), Object::Int(700));
         descriptor.insert(self.names.intern(b"StemV"), Object::Int(80));
-        descriptor.insert(self.names.intern(b"FontFile2"), Object::Ref(font.file_ref));
+        descriptor.insert(self.names.intern(file_key), Object::Ref(font.file_ref));
         self.objects
             .insert(font.descriptor_ref.num, Object::Dict(descriptor));
 
@@ -2548,7 +3671,7 @@ impl DocumentBuilder {
         descendant.insert(Name::TYPE, Object::Name(self.names.intern(b"Font")));
         descendant.insert(
             self.names.intern(b"Subtype"),
-            Object::Name(self.names.intern(b"CIDFontType2")),
+            Object::Name(self.names.intern(kind.descendant_subtype())),
         );
         descendant.insert(
             self.names.intern(b"BaseFont"),
@@ -2563,16 +3686,22 @@ impl DocumentBuilder {
         // so the absence of a `/W` entry has a stated answer rather than one a
         // reader has to know the default of.
         descendant.insert(self.names.intern(b"DW"), Object::Int(1000));
-        if let Some(widths) = width_array(&sfnt, units, mapping.keys().copied()) {
+        if let Some(widths) = width_array(&kind, mapping.keys().copied()) {
             descendant.insert(self.names.intern(b"W"), Object::Array(widths));
         }
         // 9.7.4.2: `/Identity` makes the CID the glyph index. This is the
         // entry that makes an index addressable, and the reason `subset` may
         // be applied at all — it preserves glyph ids, so the map stays true.
-        descendant.insert(
-            self.names.intern(b"CIDToGIDMap"),
-            Object::Name(self.names.intern(b"Identity")),
-        );
+        // Table 117 puts it on a CIDFontType2 and nowhere else; a
+        // CIDFontType0 over a CFF that is not CID-keyed already uses the CID
+        // as the glyph index, and writing the entry there would be an entry a
+        // reader is entitled to ignore or to object to.
+        if kind.descendant_subtype() == b"CIDFontType2" {
+            descendant.insert(
+                self.names.intern(b"CIDToGIDMap"),
+                Object::Name(self.names.intern(b"Identity")),
+            );
+        }
         self.objects
             .insert(font.descendant_ref.num, Object::Dict(descendant));
 
@@ -2618,6 +3747,15 @@ impl DocumentBuilder {
     /// Returns false when the data does not describe an image of the size it
     /// claims, rather than writing a stream a reader would choke on.
     pub fn add_image(&mut self, resource: &[u8], image: &ImageData<'_>) -> bool {
+        // 6.2.3.3 again, on the other surface a device colour reaches a page
+        // through: an image's samples are values in a colour space just as an
+        // `rg` operator's operands are.
+        if let Some(space) = image_device_space(image) {
+            if !DocumentBuilder::admits_device_space(self.profile.as_ref(), space) {
+                self.refuse(ArchivalRefusal::DeviceColour { space });
+                return false;
+            }
+        }
         let r = self.allocate();
         let mut dict = Dict::new();
         dict.insert(Name::TYPE, Object::Name(self.names.intern(b"XObject")));
@@ -2801,6 +3939,10 @@ impl DocumentBuilder {
             ImageColorSpace::DeviceGray => Object::Name(self.names.intern(b"DeviceGray")),
             ImageColorSpace::DeviceRgb => Object::Name(self.names.intern(b"DeviceRGB")),
             ImageColorSpace::DeviceCmyk => Object::Name(self.names.intern(b"DeviceCMYK")),
+            // 8.9.5.4: a name, resolved through the page's `/Resources
+            // /ColorSpace`. Written as a bare name rather than as the array
+            // itself so one profile stream serves every image that names it.
+            ImageColorSpace::Icc { resource, .. } => Object::Name(self.names.intern(resource)),
             ImageColorSpace::Indexed { base, lookup } => Object::Array(vec![
                 Object::Name(self.names.intern(b"Indexed")),
                 Object::Name(self.names.intern(base.pdf_name())),
@@ -2870,21 +4012,42 @@ impl DocumentBuilder {
 
     /// Writes `/Filter` and, where the filter has any, `/DecodeParms`.
     fn insert_filter(&mut self, dict: &mut Dict, filter: ImageFilter) {
+        // Written as a match with no wildcard on purpose: a `_ =>` arm here
+        // would silently name the wrong filter for every variant added after
+        // it, and "the bytes are right and the `/Filter` is wrong" is a page
+        // that renders as noise rather than as an error.
         let name = match filter {
             ImageFilter::Dct => b"DCTDecode".as_slice(),
-            _ => b"FlateDecode",
+            ImageFilter::Flate
+            | ImageFilter::FlatePngPredictor { .. }
+            | ImageFilter::FlateTiffPredictor { .. } => b"FlateDecode",
+            ImageFilter::Lzw | ImageFilter::LzwTiffPredictor { .. } => b"LZWDecode",
+            ImageFilter::CcittFax(_) => b"CCITTFaxDecode",
         };
         dict.insert(Name::FILTER, Object::Name(self.names.intern(name)));
 
-        if let ImageFilter::FlatePngPredictor {
-            colors,
-            bits_per_component,
-            columns,
-        } = filter
-        {
+        let predictor = match filter {
+            ImageFilter::FlatePngPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            } => Some((15i64, colors, bits_per_component, columns)),
+            ImageFilter::FlateTiffPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            }
+            | ImageFilter::LzwTiffPredictor {
+                colors,
+                bits_per_component,
+                columns,
+            } => Some((2, colors, bits_per_component, columns)),
+            _ => None,
+        };
+        if let Some((which, colors, bits_per_component, columns)) = predictor {
             let mut parms = Dict::new();
             // 7.4.4.4 Table 10, in the table's own order.
-            parms.insert(self.names.intern(b"Predictor"), Object::Int(15));
+            parms.insert(self.names.intern(b"Predictor"), Object::Int(which));
             parms.insert(self.names.intern(b"Colors"), Object::Int(i64::from(colors)));
             parms.insert(
                 self.names.intern(b"BitsPerComponent"),
@@ -2896,6 +4059,31 @@ impl DocumentBuilder {
             );
             dict.insert(Name::DECODE_PARMS, Object::Dict(parms));
         }
+
+        if let ImageFilter::CcittFax(p) = filter {
+            // 7.4.6 Table 11, in the table's own order. Every entry is written
+            // rather than left to its default, because three of the defaults
+            // are wrong for a TIFF strip: `/Columns` is 1728, `/Rows` is 0 and
+            // `/EndOfBlock` is true where a strip carries no EOFB at all.
+            let mut parms = Dict::new();
+            parms.insert(self.names.intern(b"K"), Object::Int(i64::from(p.k)));
+            parms.insert(self.names.intern(b"EndOfLine"), Object::Bool(p.end_of_line));
+            parms.insert(
+                self.names.intern(b"EncodedByteAlign"),
+                Object::Bool(p.byte_align),
+            );
+            parms.insert(
+                self.names.intern(b"Columns"),
+                Object::Int(i64::from(p.columns)),
+            );
+            parms.insert(self.names.intern(b"Rows"), Object::Int(i64::from(p.rows)));
+            parms.insert(
+                self.names.intern(b"EndOfBlock"),
+                Object::Bool(p.end_of_block),
+            );
+            parms.insert(self.names.intern(b"BlackIs1"), Object::Bool(p.black_is_1));
+            dict.insert(Name::DECODE_PARMS, Object::Dict(parms));
+        }
     }
 
     /// Adds a page, drawing it with the given closure.
@@ -2903,8 +4091,44 @@ impl DocumentBuilder {
     /// A closure rather than a returned reference so the API stays infallible:
     /// there is no borrow to fumble and no case where "the page just pushed"
     /// has to be recovered from an `Option`.
+    ///
+    /// Exactly [`DocumentBuilder::begin_page`] -> draw ->
+    /// [`DocumentBuilder::push_page`], which is what makes the two forms
+    /// interchangeable rather than merely similar: there is one page
+    /// constructor and one push, and this is a caller of both. The pair exists
+    /// because a closure does not cross a foreign-function boundary (ruling
+    /// 11, `docs/design/bindings-write.md`); this stays the Rust API because
+    /// it is the one that cannot be misordered.
     pub fn add_page(&mut self, width: f64, height: f64, draw: impl FnOnce(&mut PageBuilder)) {
-        let mut page = PageBuilder {
+        let mut page = self.begin_page(width, height);
+        draw(&mut page);
+        self.push_page(page);
+    }
+
+    /// Starts a page, owned by the caller until [`DocumentBuilder::push_page`]
+    /// takes it.
+    ///
+    /// **The resource snapshot happens here**, at the same instant
+    /// [`DocumentBuilder::add_page`] takes it -- because that method is a
+    /// caller of this one. So a font, image, pattern or form registered on the
+    /// builder *after* this call is invisible to this page, exactly as it is
+    /// invisible to a closure form's page. That is timing inherited rather
+    /// than reimplemented, and
+    /// `beginning_a_page_snapshots_resources_when_add_page_does` in this
+    /// module's tests is what holds the two together if either moves.
+    ///
+    /// A page is born from a builder or not at all: [`PageBuilder`] has no
+    /// public constructor, so there is no way to draw on a page whose
+    /// resource names mean nothing.
+    ///
+    /// Nothing about the builder changes here. A page begun and never pushed
+    /// is simply dropped, and the document is what it would have been --
+    /// there is no half-added page and no counter to unwind, which is the
+    /// property that lets this cross an ABI where the caller may abandon a
+    /// handle.
+    #[must_use]
+    pub fn begin_page(&self, width: f64, height: f64) -> PageBuilder {
+        PageBuilder {
             width,
             height,
             content: Vec::new(),
@@ -2915,18 +4139,71 @@ impl DocumentBuilder {
             crop_box: None,
             bleed_box: None,
             links: Vec::new(),
-        };
-        draw(&mut page);
+            next_mcid: 0,
+            tag_roots: Vec::new(),
+            tag_stack: Vec::new(),
+            opened: None,
+            opened_end: 0,
+            archival_space: self.profile.as_ref().map(|p| p.destination_space),
+            refusals: Vec::new(),
+        }
+    }
+
+    /// Adds a page the caller has finished drawing.
+    ///
+    /// Consumes it, so a page reaches a document once. Pages arrive in the
+    /// order they are pushed, which is the order they are numbered -- the
+    /// same order [`DocumentBuilder::add_page`] gives them, because that
+    /// method pushes here.
+    ///
+    /// A page begun against one builder and pushed to another is not checked
+    /// and is a caller error: its resource names were resolved against the
+    /// builder it came from, so names the receiving builder does not have will
+    /// reach the file unresolved. Nothing panics (ruling 1); the page is
+    /// written with the names it was drawn with.
+    pub fn push_page(&mut self, mut page: PageBuilder) {
+        self.refusals.append(&mut page.refusals);
         self.pages.push(page);
     }
 
     /// Sets an `/Info` field.
-    pub fn set_info(&mut self, key: &[u8], value: &str) {
+    ///
+    /// **Under a part 4 [`ArchivalProfile`]** ISO 19005-4 6.1.3 admits a
+    /// document information dictionary only where a `/PieceInfo` justifies it,
+    /// and admits no entry in it but `/ModDate`; anything else is refused
+    /// here. Parts 1 to 3 keep the dictionary and get the matching XMP
+    /// properties written for them at `finish`, from the same table, so the
+    /// two cannot disagree.
+    ///
+    /// Returns whether the entry was set.
+    pub fn set_info(&mut self, key: &[u8], value: &str) -> bool {
+        if self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.part == ArchivalPart::Four)
+            && key != b"ModDate"
+        {
+            self.refuse(ArchivalRefusal::InfoEntry { key: key.to_vec() });
+            return false;
+        }
+        // A date entry the packet could not restate is refused rather than
+        // written: 6.7.3 requires the two to agree, and an `/Info` date this
+        // crate's own parser cannot read would be an entry with no property
+        // to agree with. Refusing it here is the difference between the
+        // builder saying no and the validator saying no later.
+        if self.profile.is_some()
+            && matches!(key, b"CreationDate" | b"ModDate")
+            && iso8601(value).is_none()
+        {
+            self.refuse(ArchivalRefusal::InfoEntry { key: key.to_vec() });
+            return false;
+        }
         let name = self.names.intern(key);
         self.info.insert(
             name,
             Object::String(PdfString::literal(value.as_bytes().to_vec())),
         );
+        true
     }
 
     /// Sets the document outline (12.3.3).
@@ -2949,9 +4226,103 @@ impl DocumentBuilder {
         true
     }
 
+    /// Writes the merged structure elements and returns the refs a parent
+    /// should list as its kids.
+    ///
+    /// `claims` is indexed by page and then by marked-content id, and filled
+    /// with the element that opened each one — the `/ParentTree` entry 14.7.4.4
+    /// asks for: the same relation as `/K`, stored the other way round, so a
+    /// consumer holding an id can find its element without walking the tree.
+    /// Both directions are written from the same walk so they cannot disagree.
+    ///
+    /// **An element's kids may name different pages**, which is 14.7.2 Table
+    /// 323's own model and what this builder used to be unable to express. So
+    /// `/Pg` is the element's **default** page — the page of its first content
+    /// kid — and a kid on any other page is written as an `/MCR` dictionary
+    /// carrying its own `/Pg`. An element with no content of its own inherits
+    /// nothing and states no `/Pg`, because it has no default to give.
+    fn write_struct_elements(
+        &mut self,
+        arena: &[Merged],
+        kids_of: &[MergedKid],
+        parent: ObjRef,
+        pages: &[ObjRef],
+        claims: &mut [Vec<Option<ObjRef>>],
+    ) -> Vec<Object> {
+        let mut out = Vec::new();
+        for kid in kids_of {
+            let MergedKid::Element(at) = kid else {
+                continue;
+            };
+            let node = &arena[*at];
+            let reference = self.allocate();
+            // The default page: the first content this element holds anywhere
+            // under it, in the order the sort left them.
+            let default = default_page(arena, *at);
+            let mut written = Vec::with_capacity(node.kids.len());
+            for kid in &node.kids {
+                match kid {
+                    MergedKid::Content { page, mcid, .. } => {
+                        if let Some(slots) = claims.get_mut(*page) {
+                            if let Some(slot) = slots.get_mut(*mcid as usize) {
+                                *slot = Some(reference);
+                            }
+                        }
+                        if Some(*page) == default {
+                            written.push(Object::Int(i64::from(*mcid)));
+                        } else {
+                            let mut mcr = Dict::new();
+                            mcr.insert(Name::TYPE, Object::Name(self.names.intern(b"MCR")));
+                            mcr.insert(self.names.intern(b"Pg"), Object::Ref(pages[*page]));
+                            mcr.insert(self.names.intern(b"MCID"), Object::Int(i64::from(*mcid)));
+                            written.push(Object::Dict(mcr));
+                        }
+                    }
+                    MergedKid::Element(_) => {
+                        written.extend(self.write_struct_elements(
+                            arena,
+                            std::slice::from_ref(kid),
+                            reference,
+                            pages,
+                            claims,
+                        ));
+                    }
+                }
+            }
+
+            let mut element = Dict::new();
+            element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
+            element.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(&node.tag)),
+            );
+            element.insert(self.names.intern(b"P"), Object::Ref(parent));
+            if let Some(page) = default {
+                element.insert(self.names.intern(b"Pg"), Object::Ref(pages[page]));
+            }
+            element.insert(self.names.intern(b"K"), Object::Array(written));
+            self.objects.insert(reference.num, Object::Dict(element));
+            out.push(Object::Ref(reference));
+        }
+        out
+    }
+
     /// Serializes the document.
     #[must_use]
-    pub fn finish(mut self) -> Vec<u8> {
+    pub fn finish(self) -> Vec<u8> {
+        self.finish_reporting().0
+    }
+
+    /// The same document, and every font whose whole program was embedded
+    /// because a subset could not be built (ruling 10).
+    ///
+    /// The list is the writer's leniency ledger. An empty one says every
+    /// embedded face was cut down to what the pages drew; an entry says which
+    /// resource was not, how big it is, and why — which is what makes
+    /// "it wrote" and "it wrote a small file" distinguishable without
+    /// measuring the output and guessing.
+    #[must_use]
+    pub fn finish_reporting(mut self) -> (Vec<u8>, Vec<EmbeddedWhole>) {
         let page_refs: Vec<ObjRef> = (0..self.pages.len()).map(|_| self.allocate()).collect();
         let pages_ref = ObjRef::new(2, 0);
 
@@ -2987,7 +4358,20 @@ impl DocumentBuilder {
         self.write_embedded_fonts(&used);
         self.write_cid_fonts(&drawn);
 
-        for (page, reference) in pages.iter().zip(page_refs.iter()) {
+        // 14.7.4.4: the `/ParentTree` entry for each page, and the elements
+        // that claim each of its marked-content ids. Filled as the pages are
+        // written and turned into a number tree afterwards, because an
+        // element names its page and its page names its key.
+        let struct_root = if pages.iter().any(|page| !page.tag_roots.is_empty()) {
+            Some(self.allocate())
+        } else {
+            None
+        };
+        // Which pages carry tagged content, in page order; their position
+        // here is their `/StructParents` key.
+        let mut tagged_pages: Vec<usize> = Vec::new();
+
+        for (at, (page, reference)) in pages.iter().zip(page_refs.iter()).enumerate() {
             let content_ref = self.allocate();
             self.objects.insert_stream(
                 content_ref.num,
@@ -3061,6 +4445,19 @@ impl DocumentBuilder {
                 dict.insert(self.names.intern(b"Annots"), Object::Array(annots));
             }
 
+            // 14.7.4.4. Written only on a page that has marked content, for
+            // the reason `/CropBox` is written only when there is one: a
+            // `/StructParents` naming an empty `/Nums` entry is a statement
+            // where its absence is not.
+            // **The key only.** The elements themselves are written after
+            // every page has one, because an element may now hold content from
+            // more than one page and cannot be written until they all exist.
+            if struct_root.is_some() && !page.tag_roots.is_empty() {
+                let key = tagged_pages.len() as i64;
+                tagged_pages.push(at);
+                dict.insert(self.names.intern(b"StructParents"), Object::Int(key));
+            }
+
             self.objects.insert(reference.num, Object::Dict(dict));
         }
 
@@ -3078,6 +4475,188 @@ impl DocumentBuilder {
         let mut catalog = Dict::new();
         catalog.insert(Name::TYPE, Object::Name(self.names.intern(b"Catalog")));
         catalog.insert(Name::PAGES, Object::Ref(pages_ref));
+
+        // ---- the archival profile's own three objects ---------------------
+        //
+        // Written here and nowhere else, so a profiled document differs from
+        // an unprofiled one by exactly these: an output intent naming an
+        // embedded ICC profile (14.11.5), an XMP packet declaring the claim
+        // (ISO 19005-1 6.7.11), and the natural language level A asks for
+        // (6.8.4). Allocated in a fixed order, because two runs of the same
+        // program have to produce the same object numbers.
+        if let Some(profile) = self.profile.clone() {
+            let profile_ref = self.allocate();
+            let intent_ref = self.allocate();
+            let metadata_ref = self.allocate();
+
+            let mut profile_dict = Dict::new();
+            // 14.11.5 Table 366: the destination profile stream says how many
+            // components its colour space has, the same way an `ICCBased`
+            // stream does.
+            profile_dict.insert(
+                self.names.intern(b"N"),
+                Object::Int(i64::from(profile.destination_space.components())),
+            );
+            self.objects.insert_stream(
+                profile_ref.num,
+                StreamData {
+                    dict: profile_dict,
+                    data: profile.destination_profile.clone(),
+                },
+            );
+
+            let mut intent = Dict::new();
+            intent.insert(Name::TYPE, Object::Name(self.names.intern(b"OutputIntent")));
+            intent.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(b"GTS_PDFA1")),
+            );
+            intent.insert(
+                self.names.intern(b"OutputConditionIdentifier"),
+                Object::String(PdfString::literal(
+                    profile.output_condition.as_bytes().to_vec(),
+                )),
+            );
+            intent.insert(
+                self.names.intern(b"DestOutputProfile"),
+                Object::Ref(profile_ref),
+            );
+            self.objects.insert(intent_ref.num, Object::Dict(intent));
+            catalog.insert(
+                self.names.intern(b"OutputIntents"),
+                Object::Array(vec![Object::Ref(intent_ref)]),
+            );
+
+            let packet = archival_packet(&profile, &self.info, &self.names);
+            let mut metadata = Dict::new();
+            metadata.insert(Name::TYPE, Object::Name(self.names.intern(b"Metadata")));
+            metadata.insert(
+                self.names.intern(b"Subtype"),
+                Object::Name(self.names.intern(b"XML")),
+            );
+            self.objects.insert_stream(
+                metadata_ref.num,
+                StreamData {
+                    dict: metadata,
+                    data: packet,
+                },
+            );
+            catalog.insert(self.names.intern(b"Metadata"), Object::Ref(metadata_ref));
+
+            if let Some(language) = &profile.language {
+                catalog.insert(
+                    self.names.intern(b"Lang"),
+                    Object::String(PdfString::literal(language.as_bytes().to_vec())),
+                );
+            }
+        }
+
+        // 14.7.2: the structure tree, when any page tagged anything. One
+        // `/Document` element holds every page's roots, which is the shape
+        // ISO 19005 Level A asks for and costs a document with one page
+        // nothing it would not otherwise have.
+        if let Some(root) = struct_root {
+            let document = self.allocate();
+
+            // **One tree for the document, folded out of the pages' nodes.**
+            // Elements the caller named are merged across every page they were
+            // opened on, then every kid list is put into the caller's order —
+            // which is the source document's, and is not page order the moment
+            // anything was drawn on a page other than the one it reads on.
+            let mut arena: Vec<Merged> = Vec::new();
+            let mut roots: Vec<MergedKid> = Vec::new();
+            for (at, page) in pages.iter().enumerate() {
+                for node in &page.tag_roots {
+                    absorb(&mut arena, &mut roots, node, at);
+                }
+            }
+            order_kids(&mut arena);
+            roots.sort_by_key(|kid| kid.order(&arena));
+
+            // One claims array per **page**, not per element: `/ParentTree` is
+            // indexed by the page's `/StructParents` key and then by the id,
+            // and an id now belongs to an element that may be owned anywhere.
+            let mut claims: Vec<Vec<Option<ObjRef>>> = pages
+                .iter()
+                .map(|page| vec![None; page.next_mcid as usize])
+                .collect();
+            let struct_kids =
+                self.write_struct_elements(&arena, &roots, document, &page_refs, &mut claims);
+            let parent_tree: Vec<Vec<Object>> = tagged_pages
+                .iter()
+                .map(|at| {
+                    claims[*at]
+                        .iter()
+                        .map(|claim| match claim {
+                            Some(reference) => Object::Ref(*reference),
+                            // An id no element claims cannot happen from this
+                            // builder — `tagged` opens both together — so a
+                            // null here is a defect in this writer rather than
+                            // in the caller's document. It is written rather
+                            // than skipped so the array stays indexed by id.
+                            None => Object::Null,
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let mut element = Dict::new();
+            element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
+            element.insert(
+                self.names.intern(b"S"),
+                Object::Name(self.names.intern(b"Document")),
+            );
+            // 14.7.2 Table 323: a structure element's parent is `/P` and its
+            // children are `/K`. They are not `/Parent` and `/Kids` — those
+            // are the page tree's — and using the page tree's constants here
+            // produced a file every reader accepted and none could use, with
+            // every marked-content id orphaned and no error anywhere.
+            element.insert(self.names.intern(b"P"), Object::Ref(root));
+            element.insert(self.names.intern(b"K"), Object::Array(struct_kids));
+            self.objects.insert(document.num, Object::Dict(element));
+
+            // 7.9.7: a number tree whose root is also its only leaf, which is
+            // what `/Nums` on the root node means. Legal at any size, and a
+            // document this builder produced has one entry per tagged page —
+            // splitting into `/Kids` would buy a lookup nothing here performs.
+            let mut nums = Vec::with_capacity(parent_tree.len() * 2);
+            for (key, claims) in parent_tree.iter().enumerate() {
+                nums.push(Object::Int(key as i64));
+                nums.push(Object::Array(claims.clone()));
+            }
+            let tree_ref = self.allocate();
+            let mut tree = Dict::new();
+            tree.insert(self.names.intern(b"Nums"), Object::Array(nums));
+            self.objects.insert(tree_ref.num, Object::Dict(tree));
+
+            let mut dict = Dict::new();
+            dict.insert(
+                Name::TYPE,
+                Object::Name(self.names.intern(b"StructTreeRoot")),
+            );
+            dict.insert(
+                self.names.intern(b"K"),
+                Object::Array(vec![Object::Ref(document)]),
+            );
+            dict.insert(self.names.intern(b"ParentTree"), Object::Ref(tree_ref));
+            // The key a future incremental update would take next, which is
+            // one past the last used and not the count of pages: an untagged
+            // page takes no key.
+            dict.insert(
+                self.names.intern(b"ParentTreeNextKey"),
+                Object::Int(parent_tree.len() as i64),
+            );
+            self.objects.insert(root.num, Object::Dict(dict));
+            catalog.insert(self.names.intern(b"StructTreeRoot"), Object::Ref(root));
+
+            // 14.7.1: `/Marked true` is the claim that the tagging is
+            // complete enough to be used, which is what this builder's
+            // construction guarantees — every marked sequence is claimed by
+            // the element that opened it.
+            let mut mark_info = Dict::new();
+            mark_info.insert(self.names.intern(b"Marked"), Object::Bool(true));
+            catalog.insert(self.names.intern(b"MarkInfo"), Object::Dict(mark_info));
+        }
 
         let outline = std::mem::take(&mut self.outline);
         if !outline.is_empty() {
@@ -3108,12 +4687,15 @@ impl DocumentBuilder {
             trailer.insert(Name::INFO, Object::Ref(info_ref));
         }
 
-        rewrite(
-            &self.objects,
-            &trailer,
-            &WriteOptions::default(),
-            &self.names,
-        )
+        // 6.1.2: each part is defined on a version of PDF and requires the
+        // header to say which. An unprofiled document keeps the writer's
+        // default, so nothing that was byte-stable before this moved.
+        let mut options = WriteOptions::default();
+        if let Some(profile) = &self.profile {
+            options.version = profile.part.version();
+        }
+        let bytes = rewrite(&self.objects, &trailer, &options, &self.names);
+        (bytes, std::mem::take(&mut self.embedded_whole))
     }
 
     /// Writes one level of outline entries, returning `(first, last, visible)`.
@@ -3195,6 +4777,442 @@ impl DocumentBuilder {
             (Some(&first), Some(&last)) => Some((first, last, visible)),
             _ => None,
         }
+    }
+}
+
+// ---- the archival profile, on the builder ---------------------------------
+
+impl DocumentBuilder {
+    /// An empty document written under an ISO 19005 profile.
+    ///
+    /// From here on the builder **refuses** what the profile forbids, at the
+    /// call that would have written it: an unembedded font, transparency in a
+    /// part 1 document, a device colour the destination profile does not
+    /// admit, an `/Info` entry part 4 has no room for. Each of those calls
+    /// returns `false` and registers nothing, and [`Self::refusals`] says why
+    /// with the clause.
+    ///
+    /// What cannot be judged until the document is finished — level A with a
+    /// page that tagged nothing, a level the part does not define — is judged
+    /// by [`Self::finish_archival`], which is the only way to serialize a
+    /// profiled document and be told about it.
+    #[must_use]
+    pub fn archival(profile: ArchivalProfile) -> DocumentBuilder {
+        DocumentBuilder {
+            profile: Some(profile),
+            ..DocumentBuilder::new()
+        }
+    }
+
+    /// The profile this document is being written under, if any.
+    #[must_use]
+    pub fn profile(&self) -> Option<&ArchivalProfile> {
+        self.profile.as_ref()
+    }
+
+    /// Every call the profile refused, in the order they were made.
+    ///
+    /// The typed half of a refusal. The call itself answers `false` so a
+    /// caller who checks it knows immediately; this is what they read to find
+    /// out *which clause* said no, and it is what a test asserts on.
+    #[must_use]
+    pub fn refusals(&self) -> &[ArchivalRefusal] {
+        &self.refusals
+    }
+
+    /// Serializes a profiled document, or refuses it.
+    ///
+    /// # Errors
+    ///
+    /// The conditions only a finished document has: a level the part does not
+    /// define, a part 1-to-3 profile with no level, level A with no natural
+    /// language or with a page that tagged nothing, and a profile carrying no
+    /// destination profile bytes. Each is an [`ArchivalRefusal`] naming its
+    /// clause.
+    ///
+    /// A document with **no** profile is serialized unchanged rather than
+    /// refused: `finish_archival` on an ordinary builder is a caller asking
+    /// for bytes, and there is no standard for it to fail.
+    pub fn finish_archival(self) -> Result<Vec<u8>, ArchivalRefusal> {
+        if let Some(profile) = &self.profile {
+            match profile.level {
+                Some(level) if !profile.part.allows(level) => {
+                    return Err(ArchivalRefusal::LevelNotInPart);
+                }
+                None if profile.part != ArchivalPart::Four => {
+                    return Err(ArchivalRefusal::LevelMissing);
+                }
+                _ => {}
+            }
+            if profile.destination_profile.is_empty() {
+                return Err(ArchivalRefusal::DestinationProfileMissing);
+            }
+            if profile.level == Some(ArchivalLevel::A) {
+                if profile.language.is_none() {
+                    return Err(ArchivalRefusal::LanguageMissing);
+                }
+                // 6.8.2: level A is a tagged structure tree, and a page with
+                // no marked content contributes nothing to one. Caught here
+                // rather than at `push_page` because a caller may legitimately
+                // draw into a page after pushing nothing, and because the page
+                // that matters is the one that reached the document.
+                if let Some(page) = self.pages.iter().position(|p| p.tag_roots.is_empty()) {
+                    return Err(ArchivalRefusal::UntaggedPage { page });
+                }
+            }
+        }
+        Ok(self.finish())
+    }
+
+    /// Records a refusal and answers `true`, so a call site reads
+    /// `if self.refuse(...) { return false; }`.
+    fn refuse(&mut self, refusal: ArchivalRefusal) -> bool {
+        self.refusals.push(refusal);
+        true
+    }
+
+    /// Whether the profile forbids a font with no embedded program.
+    fn refuses_unembedded_font(&mut self, resource: &[u8]) -> bool {
+        if self.profile.is_none() {
+            return false;
+        }
+        self.refuse(ArchivalRefusal::UnembeddedFont {
+            resource: resource.to_vec(),
+        })
+    }
+
+    /// Whether the profile is part 1's, which admits no transparency.
+    fn forbids_transparency(&self) -> bool {
+        self.profile
+            .as_ref()
+            .is_some_and(|profile| profile.part == ArchivalPart::One)
+    }
+
+    /// Whether the destination profile admits `space`.
+    ///
+    /// The same reading the validator's 6.2.3.3 rule makes, and it has to be:
+    /// `DeviceGray` is admitted under any destination — a grey value is a
+    /// value on the neutral axis of whatever device the intent names — and
+    /// `DeviceRGB` and `DeviceCMYK` need their own kind.
+    fn admits_device_space(profile: Option<&ArchivalProfile>, space: DeviceSpace) -> bool {
+        let Some(profile) = profile else {
+            return true;
+        };
+        match space {
+            DeviceSpace::Gray => true,
+            other => other == profile.destination_space,
+        }
+    }
+}
+
+/// The device colour space an image's samples are in, where it has one.
+///
+/// An `/Indexed` image's samples are indices and its *table* is in the base
+/// space, which is the space the page ends up painting in — so the base is
+/// what the archival rule is about, and 8.6.6.3 is why.
+fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
+    match image {
+        ImageData::Gray8 { .. } => Some(DeviceSpace::Gray),
+        ImageData::Rgb8 { .. } => Some(DeviceSpace::Rgb),
+        // A JPEG's colour space follows from its own component count, which
+        // `add_image` reads out of the SOF marker further down. Judged there
+        // would mean reading the marker twice; judged here would mean reading
+        // it before the call that owns it. It is left to the validator, and
+        // `super::STAGED`'s neighbour in the writer is this comment.
+        ImageData::Jpeg(_) => None,
+        ImageData::Compressed(image) => match image.color_space {
+            ImageColorSpace::DeviceGray => Some(DeviceSpace::Gray),
+            ImageColorSpace::DeviceRgb => Some(DeviceSpace::Rgb),
+            ImageColorSpace::DeviceCmyk => Some(DeviceSpace::Cmyk),
+            ImageColorSpace::Indexed { base, .. } => Some(base),
+            // Not a device colour at all: an `/ICCBased` space says which
+            // device its values are for, which is exactly what 6.2.3.3 asks a
+            // device space to have an output intent for. Nothing to refuse.
+            ImageColorSpace::Icc { .. } => None,
+        },
+    }
+}
+
+/// Escapes the five characters XML gives meaning to.
+///
+/// Written here rather than borrowed from `tinker-pdf-xml`: that crate reads
+/// XML and this writes it, and a reader's unescaper is not a writer's escaper
+/// however symmetric they look.
+fn xml_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// A PDF date string as XMP writes it: ISO 8601.
+///
+/// `D:20240102030405+01'00'` and `2024-01-02T03:04:05+01:00` are the same
+/// instant spelled twice, and ISO 19005-1 6.7.3 requires the `/Info` entry and
+/// the XMP property to agree. Returns `None` for a string this crate's own
+/// date parser cannot read, in which case the property is not written — a
+/// property carrying a date nobody could parse would be a second wrong answer
+/// rather than a first right one.
+fn iso8601(pdf_date: &str) -> Option<String> {
+    let date = crate::text_string::parse_date(pdf_date)?;
+    let zone = match date.utc_offset_minutes {
+        None => String::new(),
+        Some(0) => "Z".to_string(),
+        Some(minutes) => {
+            let sign = if minutes < 0 { '-' } else { '+' };
+            let magnitude = minutes.abs();
+            format!("{sign}{:02}:{:02}", magnitude / 60, magnitude % 60)
+        }
+    };
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{zone}",
+        date.year, date.month, date.day, date.hour, date.minute, date.second
+    ))
+}
+
+/// How an `/Info` entry is written into the packet.
+enum XmpShape {
+    /// A simple property: the text is the element's content.
+    Text,
+    /// An `rdf:Alt` with one language-tagged member.
+    Alt,
+    /// An `rdf:Seq` with one member.
+    Seq,
+    /// An ISO 8601 instant.
+    Instant,
+}
+
+/// The eight `/Info` entries ISO 19005-1 6.7.3 pairs with an XMP property, in
+/// the order they are written.
+///
+/// The order is fixed and the table is a constant, which is what makes the
+/// packet byte-deterministic: the same `/Info` dictionary produces the same
+/// bytes on every run and every target, with nothing read from a clock.
+const XMP_PAIRINGS: &[(&[u8], &str, XmpShape)] = &[
+    (b"Title", "dc:title", XmpShape::Alt),
+    (b"Author", "dc:creator", XmpShape::Seq),
+    (b"Subject", "dc:description", XmpShape::Alt),
+    (b"Keywords", "pdf:Keywords", XmpShape::Text),
+    (b"Creator", "xmp:CreatorTool", XmpShape::Text),
+    (b"Producer", "pdf:Producer", XmpShape::Text),
+    (b"CreationDate", "xmp:CreateDate", XmpShape::Instant),
+    (b"ModDate", "xmp:ModifyDate", XmpShape::Instant),
+];
+
+/// The XMP packet a profiled document carries, byte for byte.
+///
+/// # Why it is generated rather than accepted from the caller
+///
+/// ISO 19005-1 6.7.3 requires every `/Info` entry to have an equivalent XMP
+/// property, and the validator in this repository checks it. A caller handing
+/// over a packet would have to satisfy that by hand, against a `/Info`
+/// dictionary the builder owns — so the builder writes both, from one table,
+/// and they cannot disagree.
+///
+/// # Determinism
+///
+/// Nothing here reads a clock, a locale, a hash seed or a pointer. The packet
+/// is a pure function of the profile and the `/Info` dictionary, iterated in
+/// [`XMP_PAIRINGS`]' fixed order, which is what ruling 4 asks of every byte
+/// this writer emits.
+fn archival_packet(profile: &ArchivalProfile, info: &Dict, names: &NameTable) -> Vec<u8> {
+    let mut out = String::with_capacity(1024);
+    out.push_str("<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n");
+    out.push_str("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n");
+    out.push_str("<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n");
+
+    out.push_str(
+        "<rdf:Description rdf:about=\"\" \
+         xmlns:pdfaid=\"http://www.aiim.org/pdfa/ns/id/\">\n",
+    );
+    out.push_str(&format!(
+        "<pdfaid:part>{}</pdfaid:part>\n",
+        profile.part.number()
+    ));
+    if let Some(level) = profile.level {
+        out.push_str(&format!(
+            "<pdfaid:conformance>{}</pdfaid:conformance>\n",
+            level.letter()
+        ));
+    }
+    // ISO 19005-4 6.7.3 identifies the amendment as well as the part, and
+    // parts 1 to 3 have no equivalent of it.
+    if profile.part == ArchivalPart::Four {
+        out.push_str(&format!("<pdfaid:rev>{ARCHIVAL_REVISION}</pdfaid:rev>\n"));
+    }
+    out.push_str("</rdf:Description>\n");
+
+    out.push_str(
+        "<rdf:Description rdf:about=\"\" \
+         xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+         xmlns:pdf=\"http://ns.adobe.com/pdf/1.3/\" \
+         xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\">\n",
+    );
+    for (key, property, shape) in XMP_PAIRINGS {
+        let Some(value) = info
+            .get(names.intern(key))
+            .and_then(Object::as_string)
+            .map(|string| crate::text_string::decode_text_string(&string.bytes))
+        else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        // Written on one line so the value carries no layout whitespace. A
+        // reader cannot tell a pretty-printer's indentation from a value that
+        // really begins with spaces, and this writer does not make it guess.
+        match shape {
+            XmpShape::Text => out.push_str(&format!(
+                "<{property}>{}</{property}>\n",
+                xml_escaped(&value)
+            )),
+            XmpShape::Alt => out.push_str(&format!(
+                "<{property}><rdf:Alt><rdf:li xml:lang=\"x-default\">{}\
+                 </rdf:li></rdf:Alt></{property}>\n",
+                xml_escaped(&value)
+            )),
+            XmpShape::Seq => out.push_str(&format!(
+                "<{property}><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></{property}>\n",
+                xml_escaped(&value)
+            )),
+            XmpShape::Instant => {
+                if let Some(instant) = iso8601(&value) {
+                    out.push_str(&format!("<{property}>{instant}</{property}>\n"));
+                }
+            }
+        }
+    }
+    out.push_str("</rdf:Description>\n");
+
+    out.push_str("</rdf:RDF>\n</x:xmpmeta>\n<?xpacket end=\"w\"?>");
+    out.into_bytes()
+}
+
+/// One element of the merged, **document-level** tree.
+///
+/// The per-page [`TaggedNode`]s are folded into these at `finish`: nodes that
+/// share a key and a parent are one element, however many pages they were
+/// opened on. Kids are held as indices into one arena rather than by value,
+/// because merging appends to a node already in the tree.
+struct Merged {
+    tag: Vec<u8>,
+    key: Option<u64>,
+    /// The **earliest** position any of its halves was given.
+    order: u64,
+    kids: Vec<MergedKid>,
+}
+
+/// A merged element's kid: a sequence on a **named** page, or a child.
+enum MergedKid {
+    Content { page: usize, mcid: u32, order: u64 },
+    Element(usize),
+}
+
+impl MergedKid {
+    /// Where this kid reads, which is what the sort below orders by.
+    fn order(&self, arena: &[Merged]) -> u64 {
+        match self {
+            MergedKid::Content { order, .. } => *order,
+            MergedKid::Element(at) => arena[*at].order,
+        }
+    }
+}
+
+/// Folds one page's nodes into the document tree.
+///
+/// `siblings` is the kid list the nodes join — the root list, or a merged
+/// element's own kids. A node with a key finds the sibling that shares it and
+/// appends to it; a node without one is always new, which is what keeps
+/// [`PageBuilder::tagged`]'s anonymous elements per page.
+fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedNode, page: usize) {
+    let existing = node.key.and_then(|key| {
+        siblings.iter().find_map(|kid| match kid {
+            MergedKid::Element(at) if arena[*at].key == Some(key) => Some(*at),
+            _ => None,
+        })
+    });
+    let at = match existing {
+        Some(at) => {
+            // The element reads where its **first** half did: a paragraph
+            // continued onto a later page did not move, and a float met early
+            // and drawn late did not either.
+            arena[at].order = arena[at].order.min(node.order);
+            at
+        }
+        None => {
+            arena.push(Merged {
+                tag: node.tag.clone(),
+                key: node.key,
+                order: node.order,
+                kids: Vec::new(),
+            });
+            let at = arena.len() - 1;
+            siblings.push(MergedKid::Element(at));
+            at
+        }
+    };
+    for kid in &node.kids {
+        match kid {
+            TaggedKid::Content { mcid, order } => {
+                arena[at].kids.push(MergedKid::Content {
+                    page,
+                    mcid: *mcid,
+                    order: *order,
+                });
+            }
+            TaggedKid::Element(child) => {
+                // Taken out and put back so the arena and the kid list can be
+                // borrowed at once. Nothing else can reach this node in
+                // between: `absorb` is the only walker.
+                let mut kids = std::mem::take(&mut arena[at].kids);
+                absorb(arena, &mut kids, child, page);
+                arena[at].kids = kids;
+            }
+        }
+    }
+}
+
+/// The page an element states as its `/Pg`: where its first content sits.
+///
+/// 14.7.2 Table 323 makes `/Pg` a **default** for kids that do not name a page
+/// of their own, so the one that costs fewest `/MCR` dictionaries is the one
+/// most of its content is on — and the first is a good enough proxy for that
+/// while being stable, which matters more. An element with no content anywhere
+/// beneath it has no default to give and states none.
+fn default_page(arena: &[Merged], at: usize) -> Option<usize> {
+    for kid in &arena[at].kids {
+        match kid {
+            MergedKid::Content { page, .. } => return Some(*page),
+            MergedKid::Element(child) => {
+                if let Some(page) = default_page(arena, *child) {
+                    return Some(page);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Sorts every element's kids into the document's order.
+///
+/// **Stable**, and that is the whole contract with the caller: kids it gave
+/// the same order keep the order they were drawn in, and only the ones it
+/// distinguished move. A caller that names nothing gets exactly what the
+/// per-page builder gave it.
+fn order_kids(arena: &mut [Merged]) {
+    for at in 0..arena.len() {
+        let mut kids = std::mem::take(&mut arena[at].kids);
+        kids.sort_by_key(|kid| kid.order(arena));
+        arena[at].kids = kids;
     }
 }
 
@@ -5247,6 +7265,166 @@ mod graphics_tests {
             bytes.windows(8).filter(|w| *w == b"the cell").count(),
             1,
             "exactly the accepted pattern's cell is in the file"
+        );
+    }
+
+    // ---- shading patterns ------------------------------------------------
+
+    /// A gradient reached as a **colour**: `/PatternType 2` in `/Pattern`, its
+    /// shading its own object, and a page naming it through `scn` and `SCN`.
+    ///
+    /// The two doors are asserted apart on purpose. A shading registered with
+    /// `add_shading` lands in `/Shading` and is reachable only from `sh`, which
+    /// floods the clip; a shading *pattern* lands in `/Pattern` and is a colour
+    /// operand. A writer that put one in both tables would let a caller stroke
+    /// with `sh`, which no reader can do.
+    #[test]
+    fn a_shading_pattern_is_a_colour_where_a_shading_resource_is_a_flood() {
+        let ramp = Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 0.0, 0.0],
+            c1: vec![0.0, 0.0, 1.0],
+            n: 1.0,
+        };
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_shading_pattern(
+            b"P0",
+            &ShadingPattern {
+                shading: Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, 20.0, 0.0],
+                    function: ramp,
+                    extend: (true, true),
+                },
+                matrix: Some([1.0, 0.0, 0.0, 1.0, 3.0, 7.0]),
+            }
+        ));
+        builder.add_page(40.0, 40.0, |page| {
+            assert!(page.set_fill_pattern(b"P0"));
+            assert!(page.set_stroke_pattern(b"P0"));
+            assert!(
+                !page.shading(b"P0"),
+                "a pattern is not a /Shading resource and `sh` cannot name one"
+            );
+        });
+        let doc = opened(builder);
+
+        let pattern = resource(&doc, b"Pattern", b"P0");
+        assert_eq!(
+            name_of(&doc, &pattern, b"Type").as_deref(),
+            Some(&b"Pattern"[..])
+        );
+        assert_eq!(
+            doc.resolve_key(&pattern, doc.intern(b"PatternType"))
+                .as_int(),
+            Some(2)
+        );
+        assert_eq!(
+            numbers(&doc, &pattern, b"Matrix"),
+            vec![1.0, 0.0, 0.0, 1.0, 3.0, 7.0]
+        );
+        // 8.7.3.3 does not give a shading pattern a `/PaintType`; that entry
+        // is `/PatternType 1`'s, and writing it here would describe a tiling
+        // pattern with no cell.
+        assert!(
+            doc.resolve_key(&pattern, doc.intern(b"PaintType"))
+                .is_null(),
+            "a shading pattern has no /PaintType"
+        );
+
+        let shading = doc.resolve_key(&pattern, doc.intern(b"Shading"));
+        let shading = shading.as_dict().expect("the shading is a dictionary");
+        assert_eq!(
+            doc.resolve_key(shading, doc.intern(b"ShadingType"))
+                .as_int(),
+            Some(2)
+        );
+        assert_eq!(numbers(&doc, shading, b"Coords"), vec![0.0, 0.0, 20.0, 0.0]);
+
+        let text = content(&doc);
+        assert!(text.contains("/Pattern cs /P0 scn"), "{text}");
+        assert!(text.contains("/Pattern CS /P0 SCN"), "{text}");
+        assert!(!text.contains(" sh"), "{text}");
+    }
+
+    /// A shading pattern refuses what a shading refuses, and a refused one
+    /// leaves **nothing** behind.
+    ///
+    /// The second half is the one worth writing down: the pattern dictionary
+    /// and the shading are two objects, so a writer that allocated the pattern
+    /// first would leave a `/Pattern` entry pointing at a shading it then
+    /// declined to write — a resource that exists and cannot be drawn, which is
+    /// worse than the refusal it was meant to be.
+    #[test]
+    fn a_shading_pattern_that_describes_no_gradient_is_refused_and_writes_nothing() {
+        let ramp = || Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 0.0, 0.0],
+            c1: vec![0.0, 0.0, 1.0],
+            n: 1.0,
+        };
+        let mut builder = DocumentBuilder::new();
+        for (what, pattern) in [
+            (
+                "an axis of no length",
+                ShadingPattern {
+                    shading: Shading::Axial {
+                        color_space: DeviceSpace::Rgb,
+                        coords: [5.0, 5.0, 5.0, 5.0],
+                        function: ramp(),
+                        extend: (false, false),
+                    },
+                    matrix: None,
+                },
+            ),
+            (
+                "a function of the wrong arity",
+                ShadingPattern {
+                    shading: Shading::Axial {
+                        color_space: DeviceSpace::Rgb,
+                        coords: [0.0, 0.0, 1.0, 0.0],
+                        function: Function::Exponential {
+                            domain: [0.0, 1.0],
+                            c0: vec![0.0, 0.0],
+                            c1: vec![1.0, 1.0],
+                            n: 1.0,
+                        },
+                        extend: (false, false),
+                    },
+                    matrix: None,
+                },
+            ),
+            (
+                "a matrix that is not numbers",
+                ShadingPattern {
+                    shading: Shading::Axial {
+                        color_space: DeviceSpace::Rgb,
+                        coords: [0.0, 0.0, 1.0, 0.0],
+                        function: ramp(),
+                        extend: (false, false),
+                    },
+                    matrix: Some([1.0, 0.0, 0.0, 1.0, f64::NAN, 0.0]),
+                },
+            ),
+        ] {
+            assert!(
+                !builder.add_shading_pattern(b"P", &pattern),
+                "{what} was accepted"
+            );
+        }
+        builder.add_page(10.0, 10.0, |page| {
+            assert!(!page.set_fill_pattern(b"P"));
+        });
+        let bytes = builder.finish();
+        assert_eq!(
+            bytes.windows(13).filter(|w| *w == b"/PatternType ").count(),
+            0,
+            "no pattern dictionary reached the file"
+        );
+        assert_eq!(
+            bytes.windows(12).filter(|w| *w == b"/ShadingType").count(),
+            0,
+            "and neither did the shading a refused pattern would have carried"
         );
     }
 

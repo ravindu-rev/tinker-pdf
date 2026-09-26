@@ -1,8 +1,51 @@
 //! JPEG decoding (DCTDecode, 7.4.8; ITU-T T.81).
 //!
-//! Huffman-coded baseline, extended sequential and **progressive** at 8 bits,
-//! which between them is what essentially every PDF carries. Arithmetic coding
-//! and 12-bit precision are reported rather than half-decoded.
+//! Baseline, extended sequential and **progressive**, each with either entropy
+//! coder — Annex C's Huffman codes or Annex D's arithmetic ones — at 8 or 12
+//! bits. That is SOF0, SOF1, SOF2, SOF9 and SOF10. The lossless frames of
+//! Annex H and the differential frames of Annex J are reported rather than
+//! half-decoded, each by the annex it needs.
+//!
+//! # The arithmetic frames, and what stands behind them
+//!
+//! SOF9 and SOF10 landed in September 2026. The coder is `crate::qm`, which
+//! T.81 K.4.1's published test sequence adjudicates outright. The statistical
+//! models that pick its contexts are in [`arith`], and **nothing published
+//! adjudicates those** — the search that establishes it is below, because a
+//! failed fixture hunt that is not written down gets repeated.
+//!
+//! **What was searched, on 20 September 2026.** *T.81 itself* —
+//! <https://www.w3.org/Graphics/JPEG/itu-t81.pdf>, the W3C's copy of CCITT
+//! Rec. T.81 (1992) | ISO/IEC 10918-1 : 1993, **HTTP 200** to `curl` that day,
+//! 1 058 883 bytes, SHA-256
+//! `631031d4ba56b06abee3e312a0f235b9422da9c7267d1c8f7604418795768bf0`, byte for
+//! byte the file `encode.rs`'s header names from 15 September. (That header
+//! records a 403 from `curl`; it answers 200 now, which is what bot protection
+//! does and is the fifth time a "not obtainable" here has needed retesting.)
+//! Searched: the contents list, then Annex K section by section. K.1 and K.2 are quantisation
+//! tables; K.3 is Huffman tables and K.3.3 their byte lists; **K.4.1 is the
+//! arithmetic coder test sequence — 256 decisions, the 32 bytes they encode
+//! to, and Tables K.7 and K.8's symbol-by-symbol encoder and decoder traces**;
+//! K.4 has no other subsection; K.5 to K.10 are downsampling filters,
+//! applicability guidance, AC prediction and a point-transform example, with
+//! no data. A sweep of the whole document for hexadecimal runs finds three
+//! places only: K.3.3's Huffman byte lists, K.4.1's two sequences, and
+//! `X'FFFF0000'` inside D.1. **So T.81 publishes an arithmetic *coder* vector
+//! and no arithmetic-coded *image*.**
+//!
+//! *The other two parts*: T.83 | ISO/IEC 10918-2 is the compliance-testing
+//! document and its clause 4.4 says its test data "are available on 3
+//! diskettes and are included with the copy of this ITU-T Recommendation"
+//! rather than inside it; T.84 | ISO/IEC 10918-3, fetched whole on 20
+//! September 2026, says in clause 4.2.1 that compliance test data is
+//! "available from ISO and ITU to parties who wish to determine compliance"
+//! and its Annex G specifies the *structure* of those streams without
+//! printing one. URLs and what each returned are in `encode.rs`'s header for
+//! T.83 and in [`arith`]'s for the rest.
+//!
+//! So the models are transcribed from F.1.4.4, Tables F.4 and F.5, and Table
+//! G.2, checked against the document a second time, and pinned against
+//! hand-derived decision sequences. [`arith`] says what that is worth.
 //!
 //! Every mode decodes into the same per-component coefficient buffer and is
 //! then rendered once, at the end, by a single dequantise-and-transform pass.
@@ -14,7 +57,19 @@
 //! from libjpeg's by a least-significant bit on some coefficients — there is no
 //! single correct IDCT, only conforming ones — so comparison against a
 //! reference is perceptual, never exact.
+//!
+//! The encoder is `encode`, which writes baseline and only baseline; what it
+//! excludes, what adjudicates it, and what does not, are that module's header.
 
+mod arith;
+mod encode;
+
+pub use encode::{
+    jpeg_encode, JpegEncodeError, JpegOptions, JpegQuantisation, JpegSampling, JpegSource,
+    JpegSourceColour,
+};
+
+use crate::qm::QmDecoder;
 use crate::Warning;
 
 /// What colour the decoded components represent.
@@ -41,7 +96,17 @@ pub struct JpegImage {
     /// What the components mean.
     pub color: JpegColor,
     /// Interleaved samples, one byte each.
+    ///
+    /// **Eight bits whatever the frame's precision was.** A 12-bit frame is
+    /// decoded at twelve and narrowed here, because every `PixelFormat` this
+    /// engine rasters into is eight bits deep and a 16-bit sample path would
+    /// be a change to the raster rather than to this decoder. The narrowing is
+    /// reported as [`Warning::JpegPrecisionNarrowed`] and [`JpegImage::precision`]
+    /// says what it came from, so a later caller that grows a wider path knows
+    /// where to look.
     pub data: Vec<u8>,
+    /// T.81 B.2.2's `P`: the frame's sample precision, 8 or 12.
+    pub precision: u8,
     /// What the decoder tolerated.
     pub warnings: Vec<Warning>,
 }
@@ -51,9 +116,35 @@ pub struct JpegImage {
 pub enum JpegError {
     /// The bytes do not begin like a JPEG.
     NotJpeg,
-    /// Arithmetic coding, which is deferred behind a capability.
-    Arithmetic,
-    /// A sample precision other than 8 bits.
+    /// A lossless frame: SOF3, SOF7, SOF11 or SOF15.
+    ///
+    /// Annex H's predictive coder, which shares nothing with the DCT path
+    /// below -- no quantisation tables, no blocks, no transform. Both entropy
+    /// coders are here because the predictor is what is missing either way:
+    /// SOF3 and SOF7 are Huffman-coded and SOF11 and SOF15 arithmetic, and
+    /// `crate::qm` decodes the latter's decisions perfectly well with nothing
+    /// to hand them to.
+    ///
+    /// SOF3 and SOF7 were once **skipped rather than refused** -- the marker
+    /// fell through to the unknown-segment arm, no frame was ever found, and
+    /// the failure surfaced as `Truncated`, so a lossless JPEG looked like a
+    /// damaged file.
+    Lossless,
+    /// A differential frame: SOF5, SOF6, SOF13 or SOF14.
+    ///
+    /// The hierarchical progression of Annex J, where a frame codes the
+    /// difference from an upsampled earlier one. Same shape as
+    /// [`JpegError::Lossless`]: the entropy coder is not the gap, so the
+    /// Huffman pair and the arithmetic pair report together.
+    ///
+    /// **There was a third variant here, `Arithmetic`, and it is gone.** It
+    /// refused SOF9, SOF10, SOF11, SOF13, SOF14 and SOF15 together on the
+    /// grounds that Annex D's coder was not built. It is built (`crate::qm`),
+    /// SOF9 and SOF10 decode, and the remaining four are refused by the annex
+    /// they actually need rather than by the coder they happen to use -- which
+    /// is what this enum was always for.
+    Differential,
+    /// A sample precision T.81 B.2.2 does not allow: anything but 8 or 12.
     UnsupportedPrecision,
     /// The file ended before the image did, past any hope of recovery.
     Truncated,
@@ -70,6 +161,11 @@ struct Component {
     dc_table: usize,
     ac_table: usize,
     dc_prediction: i32,
+    /// T.81 F.1.4.4.1.2's `Da`: the difference coded for the previous block of
+    /// this component, which conditions the next block's first three
+    /// arithmetic decisions. Zero at a scan and at every restart
+    /// (F.1.4.4.1.5), and untouched by the Huffman path.
+    da: i32,
     /// Blocks per line in the coefficient buffer, padded out to whole MCUs so
     /// an interleaved scan can address every block it codes.
     blocks_x: usize,
@@ -368,6 +464,10 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     let mut adobe_transform: Option<u8> = None;
     let mut adobe_seen = false;
     let mut progressive = false;
+    let mut arithmetic = false;
+    let mut conditioning = arith::Conditioning::default();
+    let mut arith_stats = arith::Stats::new();
+    let mut sample_precision = 8u8;
     let mut mcus = (0usize, 0usize);
     let mut allocated = false;
     let mut truncated = false;
@@ -402,18 +502,25 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
         };
 
         match marker {
-            // SOF0 baseline, SOF1 extended sequential, SOF2 progressive.
-            0xC0..=0xC2 => {
-                progressive = marker == 0xC2;
+            // SOF0 baseline, SOF1 extended sequential, SOF2 progressive, and
+            // SOF9 and SOF10, which are the same two DCT processes with
+            // Annex D's entropy coder in place of Annex C's.
+            0xC0..=0xC2 | 0xC9 | 0xCA => {
+                progressive = matches!(marker, 0xC2 | 0xCA);
+                arithmetic = matches!(marker, 0xC9 | 0xCA);
 
                 let (Some(&precision), Some(h), Some(w)) =
                     (segment.first(), segment.get(1..3), segment.get(3..5))
                 else {
                     return Err(JpegError::Truncated);
                 };
-                if precision != 8 {
+                // B.2.2: `P` is 8 for a baseline frame and 8 or 12 for an
+                // extended sequential or progressive one. Anything else is a
+                // header this build will not guess at.
+                if precision != 8 && !(precision == 12 && marker != 0xC0) {
                     return Err(JpegError::UnsupportedPrecision);
                 }
+                sample_precision = precision;
                 height = usize::from(u16::from_be_bytes([h[0], h[1]]));
                 width = usize::from(u16::from_be_bytes([w[0], w[1]]));
 
@@ -437,7 +544,14 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                     });
                 }
             }
-            0xC9..=0xCB => return Err(JpegError::Arithmetic),
+            // Every other SOF marker, refused by the annex it needs rather
+            // than by the entropy coder it uses: SOF3 and SOF11 are Annex H
+            // lossless, SOF7 and SOF15 differential lossless, SOF5, SOF6,
+            // SOF13 and SOF14 Annex J's hierarchical progression. 0xC4 is DHT
+            // and 0xCC is DAC, which are tables rather than frames and have
+            // their own arms below.
+            0xC3 | 0xC7 | 0xCB | 0xCF => return Err(JpegError::Lossless),
+            0xC5 | 0xC6 | 0xCD | 0xCE => return Err(JpegError::Differential),
 
             // DQT
             0xDB => {
@@ -502,6 +616,20 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                 }
             }
 
+            // DAC: the arithmetic conditioning tables (B.2.4.3).
+            //
+            // **This arm did not exist until September 2026**, and the comment
+            // beside the SOF refusals above said it did -- "0xCC is DAC, which
+            // [is a table] rather than [a frame] and [is] handled below". It
+            // was not: 0xCC fell through to the wildcard and was stepped over
+            // as though it were a comment. It did not matter while every
+            // arithmetic frame was refused before a DAC could be reached, but
+            // it is exactly the shape of the defect this decoder has already
+            // been caught by once, when SOF3, SOF5, SOF6 and SOF7 were skipped
+            // rather than refused and a lossless JPEG surfaced as a damaged
+            // file.
+            0xCC => conditioning.define(segment),
+
             // DRI
             0xDD => {
                 if let Some(pair) = segment.get(..2) {
@@ -559,8 +687,13 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
                     scan,
                     &mut components,
                     &parts,
-                    &dc_tables,
-                    &ac_tables,
+                    Entropy {
+                        arithmetic,
+                        dc_tables: &dc_tables,
+                        ac_tables: &ac_tables,
+                        conditioning: &conditioning,
+                        stats: &mut arith_stats,
+                    },
                     restart_interval,
                     progressive,
                     (ss, se.max(ss)),
@@ -596,14 +729,40 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
         height,
         adobe_seen,
         adobe_transform,
+        sample_precision,
         max_output,
         warnings,
     )
 }
 
+/// Everything a scan's entropy decoding needs that is not the scan's bytes.
+///
+/// It is one struct rather than five parameters because the frame picks one
+/// half of it and never both: a Huffman frame reads `dc_tables` and
+/// `ac_tables` and leaves the conditioning alone, and an arithmetic frame does
+/// the reverse.
+struct Entropy<'a> {
+    /// The frame was SOF9 or SOF10, so the scan is coded by Annex D rather
+    /// than Annex C.
+    arithmetic: bool,
+    dc_tables: &'a [HuffmanTable],
+    ac_tables: &'a [HuffmanTable],
+    conditioning: &'a arith::Conditioning,
+    stats: &'a mut arith::Stats,
+}
+
+/// The live entropy decoder for one scan: one or the other, never both.
+enum Coder<'a> {
+    /// Annex C, through [`BitReader`].
+    Huffman(BitReader<'a>),
+    /// Annex D, through [`crate::qm::QmDecoder`].
+    Arithmetic(QmDecoder<'a>),
+}
+
 /// Decodes one scan into the components' coefficient buffers.
 ///
-/// Returns false when the entropy data ran out or a table was missing. What
+/// Returns false when the entropy data ran out, a table was missing, or the
+/// arithmetic decoder met T.81 F.2.4.4 b)'s "physically impossible data". What
 /// was decoded stays in place either way: a progressive file that loses its
 /// last refinement still shows an image, just a coarser one, which is exactly
 /// the degradation the format was designed around (ruling 2).
@@ -612,8 +771,7 @@ fn decode_scan(
     data: &[u8],
     components: &mut [Component],
     parts: &[usize],
-    dc_tables: &[HuffmanTable],
-    ac_tables: &[HuffmanTable],
+    entropy: Entropy<'_>,
     restart_interval: usize,
     progressive: bool,
     band: (usize, usize),
@@ -624,11 +782,28 @@ fn decode_scan(
         return false;
     }
 
-    let mut reader = BitReader::new(data);
+    let Entropy {
+        arithmetic,
+        dc_tables,
+        ac_tables,
+        conditioning,
+        stats,
+    } = entropy;
+
+    // E.2.3 and F.2.4: the entropy coder is initialised at the start of every
+    // scan, and for the arithmetic coder F.1.4.4.1.5 and F.1.4.4.2.2 return
+    // every statistics bin to Annex D's initial state at the same moment.
+    let mut coder = if arithmetic {
+        stats.reset();
+        Coder::Arithmetic(QmDecoder::new(data))
+    } else {
+        Coder::Huffman(BitReader::new(data))
+    };
     let mut eobrun = 0u32;
     for &index in parts {
         if let Some(component) = components.get_mut(index) {
             component.dc_prediction = 0;
+            component.da = 0;
         }
     }
 
@@ -651,11 +826,24 @@ fn decode_scan(
     'outer: for uy in 0..units_y {
         for ux in 0..units_x {
             if restart_interval > 0 && unit > 0 && unit % restart_interval == 0 {
-                reader.restart();
+                match &mut coder {
+                    Coder::Huffman(reader) => reader.restart(),
+                    Coder::Arithmetic(qm) => {
+                        // F.2.4.4: the RSTm markers "can be located without
+                        // decoding", and E.2.4 restarts the coder after each.
+                        // F.1.4.4.1.5 and F.1.4.4.2.2 reset the statistics at
+                        // "the beginning of each restart interval" too, which
+                        // is the difference from the Huffman path -- there is
+                        // no Huffman table to reset.
+                        qm.restart();
+                        stats.reset();
+                    }
+                }
                 eobrun = 0;
                 for &index in parts {
                     if let Some(component) = components.get_mut(index) {
                         component.dc_prediction = 0;
+                        component.da = 0;
                     }
                 }
             }
@@ -669,7 +857,9 @@ fn decode_scan(
                     break 'outer;
                 };
                 if !decode_block(
-                    &mut reader,
+                    &mut coder,
+                    conditioning,
+                    stats,
                     component,
                     ux,
                     uy,
@@ -695,7 +885,9 @@ fn decode_scan(
                             break 'outer;
                         };
                         if !decode_block(
-                            &mut reader,
+                            &mut coder,
+                            conditioning,
+                            stats,
                             component,
                             ux * h + bx,
                             uy * v + by,
@@ -715,13 +907,29 @@ fn decode_scan(
         }
     }
 
-    complete && !reader.exhausted
+    complete
+        && match &coder {
+            Coder::Huffman(reader) => !reader.exhausted,
+            // The scan's slice runs to the end of the file, so a healthy
+            // arithmetic scan stops at the marker that follows its
+            // entropy-coded segment (D.21) with bytes to spare. Running off
+            // the end instead means no marker was ever found, which is the
+            // same truncation `exhausted` reports on the other side.
+            Coder::Arithmetic(qm) => !qm.overran(),
+        }
 }
 
-/// Decodes one block, in whichever of the four codings this scan is using.
+/// Decodes one block, in whichever of the codings this scan is using.
+///
+/// The coding model -- sequential, progressive DC first or refined,
+/// progressive AC first or refined -- is chosen by the scan header and is the
+/// same on both sides of `coder`. Only the entropy coding differs, which is
+/// why the split is here and not higher up.
 #[allow(clippy::too_many_arguments)]
 fn decode_block(
-    reader: &mut BitReader,
+    coder: &mut Coder,
+    conditioning: &arith::Conditioning,
+    stats: &mut arith::Stats,
     component: &mut Component,
     bx: usize,
     by: usize,
@@ -745,14 +953,30 @@ fn decode_block(
     let (ss, se) = band;
     let (ah, al) = approximation;
 
-    let ok = if !progressive {
-        decode_sequential(reader, component, &mut block, dc_tables, ac_tables)
-    } else if ss == 0 {
-        decode_dc_progressive(reader, component, &mut block, dc_tables, ah, al)
-    } else {
-        decode_ac_progressive(
-            reader, component, &mut block, ac_tables, ss, se, ah, al, eobrun,
-        )
+    let ok = match coder {
+        Coder::Arithmetic(qm) => arith::decode_block(
+            qm,
+            stats,
+            conditioning,
+            (component.dc_table, component.ac_table),
+            &mut component.dc_prediction,
+            &mut component.da,
+            &mut block,
+            progressive,
+            (ss, se),
+            (ah, al),
+        ),
+        Coder::Huffman(reader) => {
+            if !progressive {
+                decode_sequential(reader, component, &mut block, dc_tables, ac_tables)
+            } else if ss == 0 {
+                decode_dc_progressive(reader, component, &mut block, dc_tables, ah, al)
+            } else {
+                decode_ac_progressive(
+                    reader, component, &mut block, ac_tables, ss, se, ah, al, eobrun,
+                )
+            }
+        }
     };
 
     if let Some(target) = component.block_mut(bx, by) {
@@ -1032,6 +1256,7 @@ fn finish(
     height: usize,
     adobe_seen: bool,
     adobe_transform: Option<u8>,
+    precision: u8,
     max_output: usize,
     mut warnings: Vec<Warning>,
 ) -> Result<JpegImage, JpegError> {
@@ -1060,6 +1285,12 @@ fn finish(
     if needed > max_output {
         warnings.push(Warning::OutputCapHit);
         return Err(JpegError::Truncated);
+    }
+
+    if precision > 8 {
+        // Ruling 10: the samples handed out are narrower than the frame's, and
+        // that is a leniency rather than a decode. Recorded once.
+        warnings.push(Warning::JpegPrecisionNarrowed);
     }
 
     let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
@@ -1101,7 +1332,7 @@ fn finish(
                         *slot = i32::from(coefficient).saturating_mul(q);
                     }
                 }
-                idct_block(&block, &mut pixels);
+                idct_block(&block, precision, &mut pixels);
 
                 let origin_x = bx * 8 * scale_x;
                 let origin_y = by * 8 * scale_y;
@@ -1210,12 +1441,13 @@ fn finish(
         height: height as u32,
         color,
         data: out,
+        precision,
         warnings,
     })
 }
 
 /// The inverse DCT of one block, separable and in integers.
-fn idct_block(input: &[i32; 64], out: &mut [u8; 64]) {
+fn idct_block(input: &[i32; 64], precision: u8, out: &mut [u8; 64]) {
     // A straightforward separable implementation: rows then columns, with
     // fixed-point cosines. Determinism matters more here than the last unit
     // of precision (ruling 4).
@@ -1250,7 +1482,13 @@ fn idct_block(input: &[i32; 64], out: &mut [u8; 64]) {
                 let cos = COS_TABLE.get(y * 8 + v).copied().unwrap_or(0);
                 sum += i64::from(coefficient) * i64::from(cos);
             }
-            let value = ((sum >> 14) + 128).clamp(0, 255) as u8;
+            // A.3.1's level shift is `2^(P-1)`, and the clamp is to the
+            // frame's own range. A 12-bit sample is then narrowed to the
+            // eight this crate hands out -- see [`JpegImage::data`] -- which
+            // for `P = 8` is a shift of zero and leaves the byte untouched.
+            let half = 1i64 << (precision - 1);
+            let ceiling = (1i64 << precision) - 1;
+            let value = (((sum >> 14) + half).clamp(0, ceiling) >> (precision - 8)) as u8;
             if let Some(slot) = out.get_mut(y * 8 + col) {
                 *slot = value;
             }
@@ -1346,24 +1584,102 @@ mod tests {
         );
     }
 
-    #[test]
-    fn arithmetic_coding_is_reported_rather_than_half_decoded() {
-        let mut arithmetic = vec![0xFF, 0xD8, 0xFF, 0xC9, 0x00, 0x0B, 0x08];
-        arithmetic.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x01, 0x11, 0x00]);
-        assert_eq!(
-            decode(&arithmetic, 1 << 20).err(),
-            Some(JpegError::Arithmetic)
-        );
+    /// [`tiny_gray`] with the frame marker and the sample precision chosen.
+    ///
+    /// The SOF sits after SOI and a 69-byte DQT, and is found rather than
+    /// counted so that a change to the fixture above cannot silently move it.
+    fn tiny_gray_at(marker: u8, precision: u8) -> Vec<u8> {
+        let mut out = tiny_gray();
+        let at = out
+            .windows(2)
+            .position(|w| w == [0xFF, 0xC0])
+            .expect("the fixture has an SOF0");
+        out[at + 1] = marker;
+        out[at + 4] = precision;
+        out
     }
 
+    /// **B.2.2 allows twelve bits, and only outside the baseline frame.**
+    ///
+    /// `P` is 8 for SOF0 and 8 or 12 for SOF1 and SOF2, so the same header at
+    /// twelve bits is a legal extended-sequential frame and an illegal
+    /// baseline one. Both are asserted, because accepting 12 everywhere would
+    /// read a corrupt baseline header as a valid frame.
     #[test]
-    fn a_twelve_bit_image_is_refused_rather_than_misread() {
-        let mut twelve = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x0C];
-        twelve.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x01, 0x11, 0x00]);
+    fn twelve_bits_are_read_outside_the_baseline_frame_and_refused_inside_it() {
         assert_eq!(
-            decode(&twelve, 1 << 20).err(),
-            Some(JpegError::UnsupportedPrecision)
+            decode(&tiny_gray_at(0xC0, 12), 1 << 20).err(),
+            Some(JpegError::UnsupportedPrecision),
+            "SOF0 at twelve bits is not a baseline frame"
         );
+        let image = decode(&tiny_gray_at(0xC1, 12), 1 << 20).expect("SOF1 at twelve bits decodes");
+        assert_eq!(image.precision, 12);
+        assert_eq!(
+            image.warnings,
+            vec![Warning::JpegPrecisionNarrowed],
+            "the narrowing to eight bits is recorded"
+        );
+        // A DC of zero is mid-grey after A.3.1's level shift, which at twelve
+        // bits is 2048 of 4095 -- and 2048 >> 4 is 128, the same byte the
+        // eight-bit path gives. That is the point: the narrowing is a shift,
+        // not a rescale, so mid-grey stays mid-grey.
+        assert_eq!(image.data.first().copied(), Some(128));
+
+        for bits in [1u8, 4, 9, 16] {
+            assert_eq!(
+                decode(&tiny_gray_at(0xC1, bits), 1 << 20).err(),
+                Some(JpegError::UnsupportedPrecision),
+                "{bits} bits"
+            );
+        }
+    }
+
+    /// **Every frame type this build does not decode refuses by its own
+    /// name**, rather than being skipped.
+    ///
+    /// Once only SOF9, SOF10 and SOF11 were named. SOF3, SOF5, SOF6, SOF7,
+    /// SOF13, SOF14 and SOF15 fell through to the unknown-segment arm, were
+    /// stepped over as though they were a comment, and the decode then failed
+    /// as `Truncated` -- a lossless JPEG reported as a damaged file.
+    ///
+    /// **The four arithmetic refusals moved in September 2026**, when SOF9 and
+    /// SOF10 started decoding. They are refused by the annex they need rather
+    /// than by the entropy coder they use: SOF11 and SOF15 need Annex H's
+    /// predictor and SOF13 and SOF14 Annex J's hierarchical progression, and
+    /// `crate::qm` decodes all four of their decision streams perfectly well
+    /// with nothing to hand them to. The two that decode are listed here too,
+    /// so the boundary is one table rather than two.
+    #[test]
+    fn every_frame_type_this_build_declines_refuses_by_its_own_name() {
+        for (marker, expected) in [
+            (0xC3u8, JpegError::Lossless),
+            (0xC5, JpegError::Differential),
+            (0xC6, JpegError::Differential),
+            (0xC7, JpegError::Lossless),
+            (0xCB, JpegError::Lossless),
+            (0xCD, JpegError::Differential),
+            (0xCE, JpegError::Differential),
+            (0xCF, JpegError::Lossless),
+        ] {
+            assert_eq!(
+                decode(&tiny_gray_at(marker, 8), 1 << 20).err(),
+                Some(expected),
+                "SOF marker {marker:#04x}"
+            );
+        }
+
+        // SOF9 and SOF10 are frames now. `tiny_gray` carries a Huffman-coded
+        // scan, so relabelling its SOF does not make a decodable file -- what
+        // is asserted is only that neither marker is refused for its coder.
+        for marker in [0xC9u8, 0xCA] {
+            assert!(
+                !matches!(
+                    decode(&tiny_gray_at(marker, 8), 1 << 20).err(),
+                    Some(JpegError::Lossless) | Some(JpegError::Differential)
+                ),
+                "SOF marker {marker:#04x} is a frame this build decodes"
+            );
+        }
     }
 
     #[test]
@@ -1387,7 +1703,7 @@ mod tests {
         let mut block = [0i32; 64];
         block[0] = 8 * 16; // an arbitrary DC level
         let mut pixels = [0u8; 64];
-        idct_block(&block, &mut pixels);
+        idct_block(&block, 8, &mut pixels);
 
         let first = pixels.first().copied().unwrap_or(0);
         assert!(
@@ -1655,5 +1971,1445 @@ mod tests {
             }
             let _ = decode(&damaged, 1 << 20);
         }
+    }
+
+    // ---------------------------------------------------------------- encoder
+    //
+    // Everything below is the baseline encoder in `jpeg/encode.rs`. Each test's
+    // own doc comment says which link it adjudicates with third-party data and
+    // which it only holds to itself; there is no test here that presents an
+    // encode-then-decode round trip as adjudication.
+
+    use super::encode::{
+        canonical_codes, category, forward_dct_quantise, pad_plane, rgb_to_ycbcr, HuffSpec,
+        ANNEX_K1_LUMINANCE, ANNEX_K2_CHROMINANCE, ANNEX_K3_DC_LUMA, ANNEX_K4_DC_CHROMA,
+        ANNEX_K5_AC_LUMA, ANNEX_K6_AC_CHROMA,
+    };
+
+    /// Hex, one byte per two characters, spaces ignored.
+    fn hex(text: &str) -> Vec<u8> {
+        let digits: Vec<u8> = text
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .map(|b| match b {
+                b'0'..=b'9' => b - b'0',
+                b'A'..=b'F' => b - b'A' + 10,
+                b'a'..=b'f' => b - b'a' + 10,
+                other => panic!("not hex: {other}"),
+            })
+            .collect();
+        digits
+            .chunks(2)
+            .map(|pair| (pair[0] << 4) | pair[1])
+            .collect()
+    }
+
+    /// The entropy-coded segment: everything between the SOS segment and EOI.
+    fn entropy_segment(bytes: &[u8]) -> Vec<u8> {
+        let mut at = 2; // past SOI
+        while at + 3 < bytes.len() {
+            assert_eq!(bytes[at], 0xFF, "expected a marker at {at}");
+            let code = bytes[at + 1];
+            let length = usize::from(bytes[at + 2]) << 8 | usize::from(bytes[at + 3]);
+            if code == 0xDA {
+                let start = at + 2 + length;
+                let end = bytes.len() - 2;
+                assert_eq!(&bytes[end..], &[0xFF, 0xD9], "EOI");
+                return bytes[start..end].to_vec();
+            }
+            at += 2 + length;
+        }
+        panic!("no SOS");
+    }
+
+    /// Every marker segment's payload, keyed by marker code, in order.
+    fn segments(bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut at = 2;
+        while at + 3 < bytes.len() {
+            let code = bytes[at + 1];
+            let length = usize::from(bytes[at + 2]) << 8 | usize::from(bytes[at + 3]);
+            out.push((code, bytes[at + 4..at + 2 + length].to_vec()));
+            if code == 0xDA {
+                break;
+            }
+            at += 2 + length;
+        }
+        out
+    }
+
+    fn gray(width: u32, height: u32, value: u8) -> Vec<u8> {
+        vec![value; (width * height) as usize]
+    }
+
+    fn gray_source(data: &[u8], width: u32, height: u32) -> JpegSource<'_> {
+        JpegSource {
+            width,
+            height,
+            colour: JpegSourceColour::Gray,
+            stride: width as usize,
+            data,
+        }
+    }
+
+    /// T.81 Figure A.6 as printed: for each natural (row-major) coefficient
+    /// position, the index at which the zig-zag sequence visits it. That is the
+    /// **inverse** of [`ZIGZAG`], which is what makes the test below a check on
+    /// the shipped table rather than a copy of it.
+    const FIGURE_A_6: [usize; 64] = [
+        0, 1, 5, 6, 14, 15, 27, 28, //
+        2, 4, 7, 13, 16, 26, 29, 42, //
+        3, 8, 12, 17, 25, 30, 41, 43, //
+        9, 11, 18, 24, 31, 40, 44, 53, //
+        10, 19, 23, 32, 39, 45, 52, 54, //
+        20, 22, 33, 38, 46, 51, 55, 60, //
+        21, 34, 37, 47, 50, 56, 59, 61, //
+        35, 36, 48, 49, 57, 58, 62, 63,
+    ];
+
+    /// **Adjudicated by third-party data.** T.81 Figure A.6, read twice — text
+    /// layer and `tpdf render --dpi 200`'s page 30 — from the same
+    /// `T-REC-T.81` the tables below come from. Both readings agree on all 64
+    /// cells.
+    ///
+    /// This test exists because a counted injection found it missing. Swapping
+    /// two entries of [`ZIGZAG`] fired **nothing**: the decoder scatters with
+    /// the same table the encoder gathers with, so a round trip is blind to any
+    /// permutation of it, and every other test here had been written in terms of
+    /// [`ZIGZAG`] rather than in terms of the figure. Holding the shipped table
+    /// to its own inverse, transcribed independently, is what closes that — and
+    /// `a_grayscale_datastream_carries_annex_k_s_published_table_bytes` and
+    /// `the_forward_dct_matches_a_3_3_s_equation` were rewritten to build their
+    /// expectations from `FIGURE_A_6` for the same reason.
+    #[test]
+    fn the_zig_zag_order_is_figure_a_6_s() {
+        for (natural, &k) in FIGURE_A_6.iter().enumerate() {
+            assert_eq!(
+                ZIGZAG[k], natural,
+                "the zig-zag sequence's step {k} is not Figure A.6's cell {natural}"
+            );
+        }
+        // A.6 is a permutation of the 64 positions, which is the property a
+        // transposition preserves and a duplicated entry does not.
+        let mut seen = [false; 64];
+        for &k in FIGURE_A_6.iter() {
+            assert!(!seen[k], "step {k} appears twice");
+            seen[k] = true;
+        }
+    }
+
+    /// **Adjudicated by third-party data.** T.81 Tables K.1 and K.2, from
+    /// `T-REC-T.81` (<https://www.w3.org/Graphics/JPEG/itu-t81.pdf>, W3C's copy
+    /// of CCITT Rec. T.81 (1992) | ISO/IEC 10918-1 : 1993), fetched 15 September
+    /// 2026 and read twice: once from the text layer `tpdf text` extracts, once
+    /// off `tpdf render --dpi 200`'s page 143. The two readings agree on all 128
+    /// entries, and the transcription below is the rendered one.
+    ///
+    /// The second reading was not a formality. T.81's tables are typeset with
+    /// column rules that the text layer emits as a literal `1`, so K.1's first
+    /// row arrives as `16111016124140151161` and resolves into
+    /// `16 11 10 16 24 40 51 61` only against the picture.
+    #[test]
+    fn the_quantisation_tables_are_itu_t_t_81_annex_k_s() {
+        let k1: [u8; 64] = [
+            16, 11, 10, 16, 24, 40, 51, 61, //
+            12, 12, 14, 19, 26, 58, 60, 55, //
+            14, 13, 16, 24, 40, 57, 69, 56, //
+            14, 17, 22, 29, 51, 87, 80, 62, //
+            18, 22, 37, 56, 68, 109, 103, 77, //
+            24, 35, 55, 64, 81, 104, 113, 92, //
+            49, 64, 78, 87, 103, 121, 120, 101, //
+            72, 92, 95, 98, 112, 100, 103, 99,
+        ];
+        let k2: [u8; 64] = [
+            17, 18, 24, 47, 99, 99, 99, 99, //
+            18, 21, 26, 66, 99, 99, 99, 99, //
+            24, 26, 56, 99, 99, 99, 99, 99, //
+            47, 66, 99, 99, 99, 99, 99, 99, //
+            99, 99, 99, 99, 99, 99, 99, 99, //
+            99, 99, 99, 99, 99, 99, 99, 99, //
+            99, 99, 99, 99, 99, 99, 99, 99, //
+            99, 99, 99, 99, 99, 99, 99, 99,
+        ];
+        assert_eq!(ANNEX_K1_LUMINANCE, k1, "Table K.1");
+        assert_eq!(ANNEX_K2_CHROMINANCE, k2, "Table K.2");
+        // B.2.4.1 gives Qk the range 1 to 255 at Pq = 0.
+        assert!(k1.iter().chain(k2.iter()).all(|&q| q >= 1));
+    }
+
+    /// **Adjudicated by third-party data.** T.81 K.3.3.1 and K.3.3.2 print the
+    /// BITS and HUFFVAL lists of Tables K.3 to K.6 as hexadecimal byte strings,
+    /// and B.2.4.2 makes those strings the DHT payload. Read twice from the same
+    /// document as the test above: text layer, and `tpdf render`'s pages 158 and
+    /// 159. Both readings agree on all 396 bytes.
+    ///
+    /// These strings, and not Tables K.3 to K.6's typeset grids, are what the
+    /// shipped tables are held to, because running text extracts unambiguously
+    /// where a ruled grid does not.
+    #[test]
+    fn the_huffman_tables_are_itu_t_t_81_annex_k_s() {
+        let cases: [(&HuffSpec, &str, &str, &str); 4] = [
+            (
+                &ANNEX_K3_DC_LUMA,
+                "K.3 luminance DC",
+                "00010501010101010100000000000000",
+                "000102030405060708090A0B",
+            ),
+            (
+                &ANNEX_K4_DC_CHROMA,
+                "K.4 chrominance DC",
+                "00030101010101010101010000000000",
+                "000102030405060708090A0B",
+            ),
+            (
+                &ANNEX_K5_AC_LUMA,
+                "K.5 luminance AC",
+                "0002010303020403050504040000017D",
+                "01020300041105122131410613516107\
+                 227114328191A1082342B1C11552D1F0\
+                 2433627282090A161718191A25262728\
+                 292A3435363738393A43444546474849\
+                 4A535455565758595A63646566676869\
+                 6A737475767778797A83848586878889\
+                 8A92939495969798999AA2A3A4A5A6A7\
+                 A8A9AAB2B3B4B5B6B7B8B9BAC2C3C4C5\
+                 C6C7C8C9CAD2D3D4D5D6D7D8D9DAE1E2\
+                 E3E4E5E6E7E8E9EAF1F2F3F4F5F6F7F8\
+                 F9FA",
+            ),
+            (
+                &ANNEX_K6_AC_CHROMA,
+                "K.6 chrominance AC",
+                "00020102040403040705040400010277",
+                "000102031104 05213106124151076171\
+                 1322328108144291A1B1C109233352F0\
+                 156272D10A162434E125F11718191A26\
+                 2728292A35363738393A434445464748\
+                 494A535455565758595A6364 65666768\
+                 696A737475767778797A828384858687\
+                 88898A92939495969798999AA2A3A4A5\
+                 A6A7A8A9AAB2B3B4B5 B6B7B8B9BAC2C3\
+                 C4C5C6C7C8C9CAD2D3D4D5D6D7D8D9DA\
+                 E2E3E4E5E6E7E8E9EAF2F3F4F5F6F7F8\
+                 F9FA",
+            ),
+        ];
+
+        for (spec, name, bits, values) in cases {
+            assert_eq!(spec.bits.as_slice(), hex(bits).as_slice(), "{name} BITS");
+            assert_eq!(spec.values, hex(values).as_slice(), "{name} HUFFVAL");
+            // C.2: the counts and the value list have to describe the same
+            // table, which is also the check that catches a dropped byte.
+            let total: usize = spec.bits.iter().map(|&n| usize::from(n)).sum();
+            assert_eq!(total, spec.values.len(), "{name} BITS sum");
+        }
+        assert_eq!(ANNEX_K5_AC_LUMA.values.len(), 162);
+        assert_eq!(ANNEX_K6_AC_CHROMA.values.len(), 162);
+    }
+
+    /// **Adjudicated by third-party data.** T.81 Tables K.3 and K.4 print, for
+    /// every one of their 24 symbols, a code length *and* a binary code word.
+    /// Those 24 code words are transcribed here and required to be what Annex
+    /// C's canonical assignment produces from the BITS and HUFFVAL of the test
+    /// above — two independent presentations of the same table in the same
+    /// Recommendation, which is why this is a check and not a restatement.
+    ///
+    /// Read twice, text layer and `tpdf render`'s page 149. The text layer
+    /// carries the same column-rule `1` that Table K.1 does, so
+    /// `1641110` is category 6, length 4, code word `1110`.
+    ///
+    /// Tables K.5 and K.6 print 324 more code words the same way. **Sheet 1 of
+    /// 4 of Table K.5 — 40 of them — is transcribed here too**, read twice from
+    /// the text layer and from `tpdf render`'s page 150; that sample reaches
+    /// nine of the sixteen code lengths, including the 16-bit group whose codes
+    /// are the last ones the canonical assignment produces and therefore the
+    /// ones a mis-stepped `code <<= 1` would land wrongest. The remaining three
+    /// sheets and all of K.6 are left to the BITS and HUFFVAL above, which
+    /// determine them.
+    #[test]
+    fn the_canonical_codes_are_tables_k_3_and_k_4_s_printed_code_words() {
+        // (category, code length, code word) exactly as Table K.3 prints them.
+        let k3: [(u8, u8, &str); 12] = [
+            (0, 2, "00"),
+            (1, 3, "010"),
+            (2, 3, "011"),
+            (3, 3, "100"),
+            (4, 3, "101"),
+            (5, 3, "110"),
+            (6, 4, "1110"),
+            (7, 5, "11110"),
+            (8, 6, "111110"),
+            (9, 7, "1111110"),
+            (10, 8, "11111110"),
+            (11, 9, "111111110"),
+        ];
+        // Table K.4.
+        let k4: [(u8, u8, &str); 12] = [
+            (0, 2, "00"),
+            (1, 2, "01"),
+            (2, 2, "10"),
+            (3, 3, "110"),
+            (4, 4, "1110"),
+            (5, 5, "11110"),
+            (6, 6, "111110"),
+            (7, 7, "1111110"),
+            (8, 8, "11111110"),
+            (9, 9, "111111110"),
+            (10, 10, "1111111110"),
+            (11, 11, "11111111110"),
+        ];
+        // Table K.5, the whole of sheet 1 of 4: run/size, length, code word.
+        let k5: [(u8, u8, &str); 40] = [
+            (0x00, 4, "1010"), // EOB
+            (0x01, 2, "00"),
+            (0x02, 2, "01"),
+            (0x03, 3, "100"),
+            (0x04, 4, "1011"),
+            (0x05, 5, "11010"),
+            (0x06, 7, "1111000"),
+            (0x07, 8, "11111000"),
+            (0x08, 10, "1111110110"),
+            (0x09, 16, "1111111110000010"),
+            (0x0A, 16, "1111111110000011"),
+            (0x11, 4, "1100"),
+            (0x12, 5, "11011"),
+            (0x13, 7, "1111001"),
+            (0x14, 9, "111110110"),
+            (0x15, 11, "11111110110"),
+            (0x16, 16, "1111111110000100"),
+            (0x17, 16, "1111111110000101"),
+            (0x18, 16, "1111111110000110"),
+            (0x19, 16, "1111111110000111"),
+            (0x1A, 16, "1111111110001000"),
+            (0x21, 5, "11100"),
+            (0x22, 8, "11111001"),
+            (0x23, 10, "1111110111"),
+            (0x24, 12, "111111110100"),
+            (0x25, 16, "1111111110001001"),
+            (0x26, 16, "1111111110001010"),
+            (0x27, 16, "1111111110001011"),
+            (0x28, 16, "1111111110001100"),
+            (0x29, 16, "1111111110001101"),
+            (0x2A, 16, "1111111110001110"),
+            (0x31, 6, "111010"),
+            (0x32, 9, "111110111"),
+            (0x33, 12, "111111110101"),
+            (0x34, 16, "1111111110001111"),
+            (0x35, 16, "1111111110010000"),
+            (0x36, 16, "1111111110010001"),
+            (0x37, 16, "1111111110010010"),
+            (0x38, 16, "1111111110010011"),
+            (0x39, 16, "1111111110010100"),
+        ];
+
+        for (spec, printed, name) in [
+            (&ANNEX_K3_DC_LUMA, k3.as_slice(), "K.3"),
+            (&ANNEX_K4_DC_CHROMA, k4.as_slice(), "K.4"),
+        ] {
+            let codes = canonical_codes(spec);
+            for &(value, length, word) in printed {
+                let code = codes[usize::from(value)];
+                assert_eq!(code.length, length, "{name} value {value} length");
+                assert_eq!(
+                    format!("{:0width$b}", code.bits, width = usize::from(length)),
+                    word,
+                    "{name} value {value} code word"
+                );
+            }
+        }
+
+        let codes = canonical_codes(&ANNEX_K5_AC_LUMA);
+        for &(value, length, word) in k5.iter() {
+            let code = codes[usize::from(value)];
+            assert_eq!(code.length, length, "K.5 run/size {value:02X} length");
+            assert_eq!(
+                format!("{:0width$b}", code.bits, width = usize::from(length)),
+                word,
+                "K.5 run/size {value:02X} code word"
+            );
+        }
+    }
+
+    /// **Adjudicated by third-party data.** B.2.4.1 makes a DQT payload
+    /// `Pq`/`Tq` then the table in zig-zag order, and B.2.4.2 makes a DHT
+    /// payload `Tc`/`Th` then BITS then HUFFVAL. So the bytes T.81 K.1 and
+    /// K.3.3 print appear in this encoder's output verbatim, and this test finds
+    /// them there — encoder output against published bytes, with no decoder on
+    /// either side.
+    #[test]
+    fn a_grayscale_datastream_carries_annex_k_s_published_table_bytes() {
+        let pixels = gray(8, 8, 128);
+        let bytes = jpeg_encode(&gray_source(&pixels, 8, 8), &JpegOptions::default()).unwrap();
+        let found = segments(&bytes);
+
+        let dqt = &found.iter().find(|(code, _)| *code == 0xDB).unwrap().1;
+        assert_eq!(dqt[0], 0x00, "Pq = 0, Tq = 0");
+        let mut zigzagged = [0u8; 64];
+        for (natural, &k) in FIGURE_A_6.iter().enumerate() {
+            zigzagged[k] = ANNEX_K1_LUMINANCE[natural];
+        }
+        assert_eq!(
+            &dqt[1..],
+            zigzagged.as_slice(),
+            "Table K.1 in Figure A.6's order"
+        );
+
+        let dhts: Vec<&(u8, Vec<u8>)> = found.iter().filter(|(code, _)| *code == 0xC4).collect();
+        assert_eq!(dhts.len(), 2, "a grayscale frame needs one DC and one AC");
+
+        let mut dc = vec![0x00u8];
+        dc.extend_from_slice(&hex("00010501010101010100000000000000"));
+        dc.extend_from_slice(&hex("000102030405060708090A0B"));
+        assert_eq!(dhts[0].1, dc, "K.3.3.1's published bytes");
+
+        let mut ac = vec![0x10u8];
+        ac.extend_from_slice(&hex("0002010303020403050504040000017D"));
+        ac.extend_from_slice(ANNEX_K5_AC_LUMA.values);
+        assert_eq!(dhts[1].1, ac, "K.3.3.2's published bytes");
+
+        // B.2.2's SOF0: P, Y, X, Nf, then one component.
+        let sof = &found.iter().find(|(code, _)| *code == 0xC0).unwrap().1;
+        assert_eq!(sof.as_slice(), &[8, 0, 8, 0, 8, 1, 1, 0x11, 0]);
+    }
+
+    /// **Adjudicated by third-party data.** Two complete entropy-coded segments
+    /// whose every bit follows from the standard alone: A.3.3's equation, K.1's
+    /// quantiser, the code words Tables K.3 and K.5 print, and B.1.1.5 NOTE 1's
+    /// 1-bit padding. Nothing in this repository is consulted to produce the
+    /// expected bytes, and no decoder runs.
+    ///
+    /// A flat 8x8 block of 128 level-shifts to zero, so every coefficient is
+    /// zero: `DIFF = 0` is K.3 category 0, code word `00`; the rest of the block
+    /// is K.5's 0/0 EOB, code word `1010`. Six bits, padded to `00101011`.
+    ///
+    /// A flat block of 144 has `s = 16` everywhere, so A.3.3 gives
+    /// `S00 = (1/4)(1/sqrt 2)(1/sqrt 2) x 64 x 16 = 128` and every other
+    /// coefficient zero; K.1's `Q00 = 16` makes `Sq00 = 8`. Category 4 is K.3's
+    /// `101`, the four additional bits of F.1.2.1.1 are `1000`, then EOB
+    /// `1010` — eleven bits, padded to `10110001 01011111`.
+    #[test]
+    fn the_flat_block_datastreams_are_annex_k_s_own_code_words() {
+        for (value, expected) in [(128u8, vec![0x2Bu8]), (144, vec![0xB1, 0x5F])] {
+            let pixels = gray(8, 8, value);
+            let bytes = jpeg_encode(&gray_source(&pixels, 8, 8), &JpegOptions::default()).unwrap();
+            assert_eq!(entropy_segment(&bytes), expected, "a flat block of {value}");
+        }
+    }
+
+    /// A.3.3's FDCT, transcribed here in `f64` from the equation on the
+    /// rendered page 27, against the fixed-point transform the encoder runs.
+    ///
+    /// **This is the standard's formula, not the standard's numbers.** ITU-T
+    /// T.83's compliance data — the published vector set that would adjudicate
+    /// these coefficients — is on three MS-DOS diskettes bundled with the paid
+    /// Recommendation (T.83 clause 4.4) and could not be obtained; the module
+    /// header lists the URLs tried and what each returned. What this test can
+    /// and does say is that the integer path rounds the ideal transform
+    /// **correctly to within 0.012 of a quantiser step** on every coefficient of
+    /// every block below — 0.5117 measured, where 0.5 is a correct rounding —
+    /// which is enough to catch a transposed basis function, a quantiser
+    /// applied on the wrong side of the transform, or a zig-zag that scans the
+    /// wrong cell.
+    #[test]
+    fn the_forward_dct_matches_a_3_3_s_equation() {
+        fn reference(samples: &[i32; 64], u: usize, v: usize) -> f64 {
+            let c = |k: usize| {
+                if k == 0 {
+                    1.0 / std::f64::consts::SQRT_2
+                } else {
+                    1.0
+                }
+            };
+            let mut sum = 0.0;
+            for x in 0..8usize {
+                for y in 0..8usize {
+                    sum += f64::from(samples[y * 8 + x])
+                        * ((2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI / 16.0).cos()
+                        * ((2.0 * y as f64 + 1.0) * v as f64 * std::f64::consts::PI / 16.0).cos();
+                }
+            }
+            0.25 * c(u) * c(v) * sum
+        }
+
+        let mut worst = 0.0f64;
+        let mut state = 0x1234_5678u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as i32 - 128
+        };
+
+        for case in 0..24usize {
+            let mut samples = [0i32; 64];
+            for (i, slot) in samples.iter_mut().enumerate() {
+                *slot = match case {
+                    0 => 0,
+                    1 => 127,
+                    2 => -128,
+                    3 => {
+                        if (i / 8 + i % 8) % 2 == 0 {
+                            127
+                        } else {
+                            -128
+                        }
+                    }
+                    4 => (i as i32) - 32,
+                    _ => next(),
+                };
+            }
+            for table in [&ANNEX_K1_LUMINANCE, &ANNEX_K2_CHROMINANCE, &[1u8; 64]] {
+                let mut coefficients = [0i32; 64];
+                forward_dct_quantise(&samples, table, &mut coefficients);
+                for (natural, &k) in FIGURE_A_6.iter().enumerate() {
+                    let (v, u) = (natural / 8, natural % 8);
+                    let exact = reference(&samples, u, v) / f64::from(table[natural]);
+                    let error = (f64::from(coefficients[k]) - exact).abs();
+                    worst = worst.max(error);
+                }
+            }
+        }
+        assert!(
+            worst <= 0.55,
+            "the fixed-point transform strayed {worst} from A.3.3's equation"
+        );
+    }
+
+    /// Why the encoder needs no "coefficient too large" refusal, measured
+    /// rather than argued.
+    ///
+    /// Annex K's tables code AC magnitudes up to size 10 (`|Sq| <= 1023`) and DC
+    /// differences up to category 11 (`|DIFF| <= 2047`). A.3.3's transform is
+    /// linear in the samples, so its extreme over the box `s in [-128, 127]` is
+    /// attained at a vertex, and the vertex is known: take `127` where the basis
+    /// product is positive and `-128` where it is negative. That is computed
+    /// here for all 64 coefficients at the finest quantiser B.2.4.1 allows, a
+    /// table of ones, which is the worst case over every legal table.
+    ///
+    /// The clamp in `forward_dct_quantise` is unreachable because of this, and
+    /// this test is what keeps that true.
+    #[test]
+    fn no_quantiser_can_push_a_coefficient_past_annex_k() {
+        let basis = |x: usize, u: usize| {
+            let c = if u == 0 {
+                1.0 / std::f64::consts::SQRT_2
+            } else {
+                1.0
+            };
+            c / 2.0 * ((2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI / 16.0).cos()
+        };
+
+        let mut worst_ac = 0.0f64;
+        let (mut dc_high, mut dc_low) = (0.0f64, 0.0f64);
+        for v in 0..8usize {
+            for u in 0..8usize {
+                let mut high = 0.0f64;
+                let mut low = 0.0f64;
+                for x in 0..8usize {
+                    for y in 0..8usize {
+                        let weight = basis(x, u) * basis(y, v);
+                        // The vertex that maximises, and the one that minimises.
+                        high += weight * if weight > 0.0 { 127.0 } else { -128.0 };
+                        low += weight * if weight > 0.0 { -128.0 } else { 127.0 };
+                    }
+                }
+                if u == 0 && v == 0 {
+                    dc_high = high;
+                    dc_low = low;
+                } else {
+                    worst_ac = worst_ac.max(high.abs()).max(low.abs());
+                }
+            }
+        }
+
+        assert!(
+            worst_ac <= 1023.0,
+            "an AC coefficient can reach {worst_ac}, past K.5's size 10"
+        );
+        let spread = dc_high - dc_low;
+        assert!(
+            spread <= 2047.0,
+            "a DC difference can reach {spread}, past K.3's category 11"
+        );
+        // The categories those magnitudes fall in, so a changed bound is loud.
+        assert_eq!(category(worst_ac.round() as i32), 10);
+        assert_eq!(category(spread.round() as i32), 11);
+    }
+
+    /// **Adjudicated by third-party data.** ITU-T T.871 | ISO/IEC 10918-5
+    /// clause 7's exact forward equations, read off `tpdf render`'s page 4 of
+    /// `T-REC-T.871-201105-I` — fetched from the ITU 15 September 2026, by
+    /// `WebFetch` where `curl` got an HTTP 500 — and written out here literally.
+    ///
+    /// The encoder computes the algebraically equivalent identity
+    /// `Cb = (B - Y)/1.772 + 128` in fixed point, so agreement is a check on
+    /// both the identity and the fixed-point precision rather than a
+    /// restatement of one expression as itself. The tolerance is one level,
+    /// which is what a 1/65536 fixed point buys.
+    #[test]
+    fn the_colour_transform_is_t_871_clause_7_s() {
+        let published = |r: u8, g: u8, b: u8| {
+            let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
+            let clamp = |v: f64| v.round().clamp(0.0, 255.0) as i32;
+            (
+                clamp(0.299 * r + 0.587 * g + 0.114 * b),
+                clamp((-0.299 * r - 0.587 * g + 0.886 * b) / 1.772 + 128.0),
+                clamp((0.701 * r - 0.587 * g - 0.114 * b) / 1.402 + 128.0),
+            )
+        };
+
+        let mut worst = 0i32;
+        for r in (0..=255u32).step_by(15) {
+            for g in (0..=255u32).step_by(15) {
+                for b in (0..=255u32).step_by(15) {
+                    let (r, g, b) = (r as u8, g as u8, b as u8);
+                    let (y, cb, cr) = rgb_to_ycbcr(r, g, b);
+                    let want = published(r, g, b);
+                    worst = worst
+                        .max((i32::from(y) - want.0).abs())
+                        .max((i32::from(cb) - want.1).abs())
+                        .max((i32::from(cr) - want.2).abs());
+                }
+            }
+        }
+        assert!(
+            worst <= 1,
+            "the transform strayed {worst} levels from T.871"
+        );
+
+        // The three points clause 7 pins exactly, in both directions.
+        assert_eq!(rgb_to_ycbcr(0, 0, 0), (0, 128, 128));
+        assert_eq!(rgb_to_ycbcr(255, 255, 255), (255, 128, 128));
+    }
+
+    /// A.2.4's NOTE: "any incomplete MCUs be completed by replication of the
+    /// right-most column and the bottom line of each component". Held to the
+    /// clause, not to a round trip — a padding rule is only visible in the bits
+    /// it costs, and a decoder discards it by A.2.4's last sentence.
+    #[test]
+    fn a_partial_mcu_is_completed_by_replicating_the_edge() {
+        // A 3 x 2 picture in an 8 x 8 plane, with a distinct value per pixel.
+        let mut plane = vec![0u8; 64];
+        for y in 0..2usize {
+            for x in 0..3usize {
+                plane[y * 8 + x] = (y * 3 + x + 1) as u8;
+            }
+        }
+        pad_plane(&mut plane, 8, 8, 3, 2);
+
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let sy = y.min(1);
+                let sx = x.min(2);
+                assert_eq!(
+                    plane[y * 8 + x],
+                    (sy * 3 + sx + 1) as u8,
+                    "the sample at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    /// F.1.2.3's byte stuffing, checked over an image noisy enough to produce
+    /// X'FF' bytes in the coded data. Held to the clause: inside the entropy-
+    /// coded segment of a scan with no restart interval, an X'FF' may be
+    /// followed only by X'00'.
+    #[test]
+    fn every_ff_in_the_coded_data_is_followed_by_a_stuffed_zero() {
+        let mut pixels = vec![0u8; 64 * 64];
+        let mut state = 0x9E37_79B9u32;
+        for slot in pixels.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *slot = (state >> 24) as u8;
+        }
+        let options = JpegOptions {
+            quantisation: JpegQuantisation::Tables {
+                luminance: [1; 64],
+                chrominance: [1; 64],
+            },
+            ..JpegOptions::default()
+        };
+        let bytes = jpeg_encode(&gray_source(&pixels, 64, 64), &options).unwrap();
+        let coded = entropy_segment(&bytes);
+        let mut stuffed = 0;
+        let mut at = 0;
+        while at < coded.len() {
+            if coded[at] == 0xFF {
+                assert_eq!(
+                    coded.get(at + 1).copied(),
+                    Some(0x00),
+                    "an unstuffed X'FF' at {at}"
+                );
+                stuffed += 1;
+                at += 2;
+            } else {
+                at += 1;
+            }
+        }
+        assert!(
+            stuffed > 0,
+            "this fixture is supposed to produce X'FF' bytes"
+        );
+    }
+
+    /// 4.10 and F.1.2.3's restart interval: the markers are RST0 through RST7 in
+    /// order, there is one every `Ri` MCUs, and — the half that a decoder can
+    /// hide — the DC predictor goes back to zero at each one.
+    ///
+    /// The predictor reset is what the second half of this test is for. It is
+    /// invisible to any check that only counts markers, and it is invisible to a
+    /// round trip through a decoder that also forgets to reset, so the bits are
+    /// read here instead: the first block after a restart must code its DC as a
+    /// difference from zero, which for this flat image is the same code word the
+    /// very first block emitted.
+    #[test]
+    fn the_restart_interval_is_emitted_and_the_predictors_reset() {
+        // 32 x 16 of one value: eight MCUs of 8 x 8, all with the same DC.
+        let pixels = gray(32, 16, 144);
+        let options = JpegOptions {
+            restart_interval: 2,
+            ..JpegOptions::default()
+        };
+        let bytes = jpeg_encode(&gray_source(&pixels, 32, 16), &options).unwrap();
+
+        let dri = segments(&bytes)
+            .into_iter()
+            .find(|(code, _)| *code == 0xDD)
+            .expect("a DRI segment");
+        assert_eq!(dri.1, vec![0x00, 0x02]);
+
+        let coded = entropy_segment(&bytes);
+        // Eight MCUs, a restart before MCUs 2, 4 and 6: three markers.
+        let mut markers = Vec::new();
+        let mut runs: Vec<Vec<u8>> = vec![Vec::new()];
+        let mut at = 0;
+        while at < coded.len() {
+            if coded[at] == 0xFF {
+                match coded.get(at + 1).copied() {
+                    Some(0x00) => {
+                        runs.last_mut().unwrap().push(0xFF);
+                        at += 2;
+                        continue;
+                    }
+                    Some(m) if (0xD0..=0xD7).contains(&m) => {
+                        markers.push(m);
+                        runs.push(Vec::new());
+                        at += 2;
+                        continue;
+                    }
+                    other => panic!("a marker {other:?} inside the coded data"),
+                }
+            }
+            runs.last_mut().unwrap().push(coded[at]);
+            at += 1;
+        }
+        assert_eq!(markers, vec![0xD0, 0xD1, 0xD2], "RSTn in order from RST0");
+
+        // Each run codes two identical MCUs, and each starts from a zeroed
+        // predictor, so every run is byte-identical to the first.
+        assert_eq!(runs.len(), 4);
+        for (i, run) in runs.iter().enumerate() {
+            assert_eq!(run, &runs[0], "run {i} after a restart");
+        }
+        // And it is the flat-block code word of the published test above, twice
+        // over: 101 1000 1010 then 000 1010 (DIFF = 0 for the second MCU).
+        assert_eq!(runs[0], vec![0xB1, 0x45, 0x7F]);
+    }
+
+    /// Self-consistency only: this encoder against this crate's decoder, which
+    /// `jpeg/encode.rs`'s header says is itself adjudicated by nothing
+    /// third-party. It says that a datastream is well-formed enough to be read
+    /// back and that the picture survives; it says nothing about T.81.
+    #[test]
+    fn a_round_trip_keeps_the_picture_in_every_colour_and_sampling() {
+        let cases: [(u32, u32, JpegSourceColour, JpegSampling); 5] = [
+            (16, 16, JpegSourceColour::Gray, JpegSampling::FourFourFour),
+            (16, 16, JpegSourceColour::Rgb, JpegSampling::FourFourFour),
+            (32, 32, JpegSourceColour::Rgb, JpegSampling::FourTwoZero),
+            (13, 7, JpegSourceColour::Gray, JpegSampling::FourFourFour),
+            (13, 7, JpegSourceColour::Rgb, JpegSampling::FourTwoZero),
+        ];
+
+        for (width, height, colour, sampling) in cases {
+            let components = usize::from(colour.components());
+            let mut pixels = vec![0u8; width as usize * height as usize * components];
+            for (i, slot) in pixels.iter_mut().enumerate() {
+                let pixel = i / components;
+                // A smooth luma ramp: coarse quantisers keep it, so the
+                // comparison can be tight without asserting anything about the
+                // IDCT.
+                let base = (pixel % 8 * 16 + 64) as i32;
+                // And a colour that is genuinely off neutral, because a grey
+                // ramp leaves both chrominance planes at 128 and makes every
+                // colour case a luminance case wearing three components. The
+                // offset flips every sixteenth row, which is one 4:2:0 MCU, so
+                // each chrominance block is still *flat*: the box filter and
+                // the block transform are exact on it and the tolerance below
+                // stays the luma ramp's. Transposing Cb and Cr fires this test
+                // only because of these three lines.
+                let offset = if components == 3 {
+                    let band = if (pixel / width as usize / 16) % 2 == 0 {
+                        1i32
+                    } else {
+                        -1
+                    };
+                    band * match i % 3 {
+                        0 => 40i32,
+                        1 => 0,
+                        _ => -40,
+                    }
+                } else {
+                    0
+                };
+                *slot = (base + offset) as u8;
+            }
+            let source = JpegSource {
+                width,
+                height,
+                colour,
+                stride: width as usize * components,
+                data: &pixels,
+            };
+            let options = JpegOptions {
+                quantisation: JpegQuantisation::AnnexKHalved,
+                sampling,
+                restart_interval: 0,
+            };
+            let bytes = jpeg_encode(&source, &options).unwrap();
+            let image = decode(&bytes, 1 << 24).expect("the encoder's own output decodes");
+            assert_eq!((image.width, image.height), (width, height));
+            assert_eq!(image.data.len(), pixels.len());
+
+            let worst = image
+                .data
+                .iter()
+                .zip(pixels.iter())
+                .map(|(&got, &want)| (i32::from(got) - i32::from(want)).abs())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                worst <= 24,
+                "{width}x{height} {colour:?} {sampling:?} strayed {worst} levels"
+            );
+        }
+    }
+
+    /// Self-consistency only, and the reason it is here rather than folded into
+    /// the round trip above: a restart interval must change the bytes and not
+    /// the picture. A decoder that mishandles RSTn desynchronises, so this is
+    /// the cheapest total check that the markers are where the decoder expects.
+    #[test]
+    fn restarts_change_the_bytes_and_not_the_picture() {
+        let pixels: Vec<u8> = (0..64u32 * 64).map(|i| (i % 251) as u8).collect();
+        let plain = jpeg_encode(&gray_source(&pixels, 64, 64), &JpegOptions::default()).unwrap();
+        let restarted = jpeg_encode(
+            &gray_source(&pixels, 64, 64),
+            &JpegOptions {
+                restart_interval: 3,
+                ..JpegOptions::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(plain, restarted);
+        assert_eq!(
+            decode(&plain, 1 << 24).unwrap().data,
+            decode(&restarted, 1 << 24).unwrap().data
+        );
+    }
+
+    /// The stride is the field an encoder is most likely to ignore, because for
+    /// every unpadded buffer it equals the row length. `PngSource`'s test says
+    /// the same thing about the same mistake.
+    #[test]
+    fn a_padded_stride_is_not_read_as_pixels() {
+        let mut padded = vec![0u8; 12 * 4];
+        for y in 0..4usize {
+            for x in 0..4usize {
+                padded[y * 12 + x] = (x * 16 + y * 4) as u8;
+            }
+        }
+        let tight: Vec<u8> = (0..4usize)
+            .flat_map(|y| (0..4usize).map(move |x| (x * 16 + y * 4) as u8))
+            .collect();
+
+        let from_padded = jpeg_encode(
+            &JpegSource {
+                width: 4,
+                height: 4,
+                colour: JpegSourceColour::Gray,
+                stride: 12,
+                data: &padded,
+            },
+            &JpegOptions::default(),
+        )
+        .unwrap();
+        let from_tight = jpeg_encode(&gray_source(&tight, 4, 4), &JpegOptions::default()).unwrap();
+        assert_eq!(from_padded, from_tight);
+    }
+
+    /// Every refusal, by its own name. All five are a caller describing its own
+    /// buffer or its own intent wrongly; none can be reached from the pixels.
+    #[test]
+    fn every_refusal_fires_by_its_own_name() {
+        let pixels = gray(8, 8, 128);
+        let default = JpegOptions::default();
+
+        assert_eq!(
+            jpeg_encode(&gray_source(&pixels, 0, 8), &default),
+            Err(JpegEncodeError::BadDimensions {
+                width: 0,
+                height: 8
+            })
+        );
+        assert_eq!(
+            jpeg_encode(&gray_source(&pixels, 65_536, 8), &default),
+            Err(JpegEncodeError::BadDimensions {
+                width: 65_536,
+                height: 8
+            })
+        );
+        assert_eq!(
+            jpeg_encode(
+                &JpegSource {
+                    width: 8,
+                    height: 8,
+                    colour: JpegSourceColour::Gray,
+                    stride: 4,
+                    data: &pixels,
+                },
+                &default
+            ),
+            Err(JpegEncodeError::ShortStride {
+                stride: 4,
+                row_bytes: 8
+            })
+        );
+        assert_eq!(
+            jpeg_encode(&gray_source(&pixels[..40], 8, 8), &default),
+            Err(JpegEncodeError::ShortData { have: 40, need: 64 })
+        );
+        assert_eq!(
+            jpeg_encode(
+                &gray_source(&pixels, 8, 8),
+                &JpegOptions {
+                    quantisation: JpegQuantisation::Tables {
+                        luminance: {
+                            let mut table = [1u8; 64];
+                            table[7] = 0;
+                            table
+                        },
+                        chrominance: [1; 64],
+                    },
+                    ..default
+                }
+            ),
+            Err(JpegEncodeError::ZeroQuantiser {
+                chrominance: false,
+                index: 7
+            })
+        );
+        assert_eq!(
+            jpeg_encode(
+                &gray_source(&pixels, 8, 8),
+                &JpegOptions {
+                    sampling: JpegSampling::FourTwoZero,
+                    ..default
+                }
+            ),
+            Err(JpegEncodeError::SubsampledGrayscale)
+        );
+    }
+
+    /// The two rungs T.81 names are different quantisers and therefore different
+    /// bytes, and the halved one is finer — which is the whole content of K.1's
+    /// second paragraph.
+    #[test]
+    fn annex_k_halved_is_finer_than_annex_k() {
+        let pixels: Vec<u8> = (0..32u32 * 32).map(|i| (i % 97 * 2) as u8).collect();
+        let coarse = jpeg_encode(&gray_source(&pixels, 32, 32), &JpegOptions::default()).unwrap();
+        let fine = jpeg_encode(
+            &gray_source(&pixels, 32, 32),
+            &JpegOptions {
+                quantisation: JpegQuantisation::AnnexKHalved,
+                ..JpegOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(fine.len() > coarse.len(), "a finer quantiser costs bits");
+
+        let error = |bytes: &[u8]| {
+            decode(bytes, 1 << 24)
+                .unwrap()
+                .data
+                .iter()
+                .zip(pixels.iter())
+                .map(|(&got, &want)| u32::from(got.abs_diff(want)))
+                .sum::<u32>()
+        };
+        assert!(error(&fine) < error(&coarse), "and buys accuracy");
+
+        // Rounding up, so halving can never produce the zero B.2.4.1 forbids.
+        let dqt = segments(&fine)
+            .into_iter()
+            .find(|(code, _)| *code == 0xDB)
+            .unwrap()
+            .1;
+        assert!(dqt[1..].iter().all(|&q| q >= 1));
+        assert_eq!(dqt[1], ANNEX_K1_LUMINANCE[0].div_ceil(2));
+    }
+    // ---- SOF9 and SOF10: the arithmetic frames ------------------------------
+
+    /// Encodes a hand-derived decision list into an entropy-coded segment.
+    ///
+    /// The same shape as `arith`'s own test helper and for the same reason:
+    /// what goes in is the test's reading of T.81's figures, and the coder it
+    /// goes through is pinned at both ends by K.4.1's published data.
+    fn arith_segment(decisions: &[(arith::Bin, u8)]) -> Vec<u8> {
+        let mut encoder = crate::qm::encoder::QmEncoder::new();
+        let mut dc = [crate::qm::QmContext::default(); 49];
+        let mut ac = [crate::qm::QmContext::default(); 245];
+        for &(bin, d) in decisions {
+            match bin {
+                arith::Bin::Dc(at) => encoder.encode(&mut dc[at], d),
+                arith::Bin::Ac(at) => encoder.encode(&mut ac[at], d),
+                arith::Bin::Fixed => encoder.encode_fixed(d),
+            }
+        }
+        encoder.finish()
+    }
+
+    /// A one-component arithmetic JPEG of `width` by `height` around already
+    /// entropy-coded scans.
+    ///
+    /// The quantisation table is all ones so a coefficient reaches the
+    /// transform unchanged and the expected pixels can be worked out from
+    /// A.3.3 alone. Each scan is `(Ss, Se, Ah/Al, bytes)`.
+    fn arithmetic_gray(
+        marker: u8,
+        width: u16,
+        height: u16,
+        restart: Option<u16>,
+        dac: Option<&[u8]>,
+        scans: &[(u8, u8, u8, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xD8];
+
+        out.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x43, 0x00]);
+        out.extend_from_slice(&[1u8; 64]);
+
+        if let Some(segment) = dac {
+            let length = u16::try_from(segment.len() + 2).expect("a short DAC segment");
+            out.extend_from_slice(&[0xFF, 0xCC]);
+            out.extend_from_slice(&length.to_be_bytes());
+            out.extend_from_slice(segment);
+        }
+        if let Some(interval) = restart {
+            out.extend_from_slice(&[0xFF, 0xDD, 0x00, 0x04]);
+            out.extend_from_slice(&interval.to_be_bytes());
+        }
+
+        // B.2.2: Lf = 8 + 3 * Nf.
+        out.extend_from_slice(&[0xFF, marker, 0x00, 0x0B, 0x08]);
+        out.extend_from_slice(&height.to_be_bytes());
+        out.extend_from_slice(&width.to_be_bytes());
+        out.extend_from_slice(&[0x01, 0x01, 0x11, 0x00]);
+
+        for (ss, se, a, data) in scans {
+            // B.2.3: Ls = 6 + 2 * Ns.
+            out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, *ss, *se, *a]);
+            out.extend_from_slice(data);
+        }
+
+        out.extend_from_slice(&[0xFF, 0xD9]);
+        out
+    }
+
+    /// The decisions for `DIFF = 8`, derived from Figures F.19 to F.24 with
+    /// `Da = 0`.
+    ///
+    /// `V = 8` means `Sz = 7`, so the category runs `X1`, `X2`, `X3` and stops
+    /// at "Sz < 8", and the two magnitude bits at `M3 = X3 + 14 = 36` are both
+    /// 1, making `Sz = 4 | 2 | 1`.
+    fn diff_of_eight() -> Vec<(arith::Bin, u8)> {
+        vec![
+            (arith::Bin::Dc(0), 1),
+            (arith::Bin::Dc(1), 0),
+            (arith::Bin::Dc(2), 1),
+            (arith::Bin::Dc(20), 1),
+            (arith::Bin::Dc(21), 1),
+            (arith::Bin::Dc(22), 0),
+            (arith::Bin::Dc(36), 1),
+            (arith::Bin::Dc(36), 1),
+        ]
+    }
+
+    /// The decisions for `DIFF = 128`.
+    ///
+    /// `V = 128` means `Sz = 127`, so the category climbs `X1` to `X7` — bins
+    /// 20 to 26 — before "Sz < 128" stops it, and the six magnitude bits at
+    /// `M7 = X7 + 14 = 40` are all 1.
+    ///
+    /// 128 rather than 8 because this engine's integer IDCT reaches a byte
+    /// through two truncating shifts and a DC of 8 does not survive them: the
+    /// exact sample is `8 / 8 = 1` and the transform yields 0, so mid-grey
+    /// would be the answer whether or not this decoded at all. 128 is sixteen
+    /// levels, which it cannot swallow.
+    fn diff_of_128() -> Vec<(arith::Bin, u8)> {
+        let mut decisions = vec![
+            (arith::Bin::Dc(0), 1),
+            (arith::Bin::Dc(1), 0),
+            (arith::Bin::Dc(2), 1),
+        ];
+        for bin in 20..=25usize {
+            decisions.push((arith::Bin::Dc(bin), 1));
+        }
+        decisions.push((arith::Bin::Dc(26), 0));
+        for _ in 0..6 {
+            decisions.push((arith::Bin::Dc(40), 1));
+        }
+        decisions
+    }
+
+    /// A flat grayscale JPEG of `value`, Huffman-coded by this crate's own
+    /// encoder against a quantisation table of ones.
+    ///
+    /// A.3.3's FDCT of a flat block leaves `S00 = 8 x (value - 128)` and every
+    /// other coefficient zero, and a quantiser of one passes that through — so
+    /// the caller knows which coefficient the file carries without decoding
+    /// it.
+    fn huffman_flat_gray(width: u32, height: u32, value: u8, restart_interval: u16) -> Vec<u8> {
+        let raster = vec![value; (width * height) as usize];
+        jpeg_encode(
+            &JpegSource {
+                width,
+                height,
+                colour: JpegSourceColour::Gray,
+                stride: width as usize,
+                data: &raster,
+            },
+            &JpegOptions {
+                quantisation: JpegQuantisation::Tables {
+                    luminance: [1; 64],
+                    chrominance: [1; 64],
+                },
+                sampling: JpegSampling::FourFourFour,
+                restart_interval,
+            },
+        )
+        .expect("a flat grayscale raster encodes")
+    }
+
+    /// **A SOF9 frame and a Huffman frame carrying the same coefficients
+    /// decode to the same image** — which is T.81 F.1.4's own claim about the
+    /// two entropy coders, tested rather than assumed:
+    ///
+    /// > As with the Huffman coding technique, the binary arithmetic coding
+    /// > technique is lossless. It is possible to transcode between the two
+    /// > systems without either FDCT or IDCT computations, and without
+    /// > modification of the reconstructed image.
+    ///
+    /// The Huffman side is this crate's baseline encoder over a flat raster of
+    /// 144, which A.3.3 puts at `S00 = 8 x 16 = 128` with every other
+    /// coefficient zero; the arithmetic side is [`diff_of_128`], hand-derived
+    /// from Figures F.19 to F.24. Nothing is shared between the two paths
+    /// below the coefficient buffer, so agreement is a statement about the
+    /// entropy decoding rather than about the transform.
+    #[test]
+    fn a_sof9_frame_and_a_huffman_frame_carry_the_same_block_t_81_f_1_4() {
+        let mut decisions = diff_of_128();
+        decisions.push((arith::Bin::Ac(0), 1));
+        let arithmetic = arithmetic_gray(
+            0xC9,
+            8,
+            8,
+            None,
+            None,
+            &[(0x00, 0x3F, 0x00, arith_segment(&decisions))],
+        );
+
+        let image = decode(&arithmetic, 1 << 20).expect("a SOF9 frame decodes");
+        assert_eq!((image.width, image.height), (8, 8));
+        assert_eq!(image.color, JpegColor::Gray);
+        assert_eq!(
+            image.warnings,
+            Vec::new(),
+            "a clean frame warns about nothing"
+        );
+
+        let huffman =
+            decode(&huffman_flat_gray(8, 8, 144, 0), 1 << 20).expect("the Huffman frame decodes");
+        assert_eq!(image.data, huffman.data);
+
+        // And it is not vacuously equal: both are the flat block the
+        // coefficient describes, well away from the mid-grey an undecoded
+        // frame would give.
+        assert!(image.data.iter().all(|&s| s == image.data[0]));
+        assert_ne!(image.data[0], 128);
+    }
+
+    /// **The DC predictor runs across blocks and `Da` conditions the next
+    /// one** (F.2.1.3.1 and F.1.4.4.1.2), over a two-MCU frame.
+    ///
+    /// The second block's difference is zero, so its DC coefficient is the
+    /// first block's 128 carried forward and both blocks come out at the same
+    /// grey. Its `Da` is 128, "large positive" under the default `L = 0`,
+    /// `U = 1`, so its one decision is at bin 12 — a bin nothing has touched —
+    /// and not at bin 0, which the first block left adapted.
+    #[test]
+    fn the_dc_predictor_and_da_carry_across_blocks_in_a_sof9_frame() {
+        let mut decisions = diff_of_128();
+        decisions.push((arith::Bin::Ac(0), 1));
+        decisions.push((arith::Bin::Dc(12), 0));
+        decisions.push((arith::Bin::Ac(0), 1));
+
+        let data = arithmetic_gray(
+            0xC9,
+            16,
+            8,
+            None,
+            None,
+            &[(0x00, 0x3F, 0x00, arith_segment(&decisions))],
+        );
+
+        let image = decode(&data, 1 << 20).expect("a two-block SOF9 frame decodes");
+        assert_eq!((image.width, image.height), (16, 8));
+        let huffman =
+            decode(&huffman_flat_gray(16, 8, 144, 0), 1 << 20).expect("the Huffman frame decodes");
+        assert_eq!(image.data, huffman.data);
+    }
+
+    /// **A restart interval re-runs `Initdec` and resets the statistics**
+    /// (E.2.4, F.1.4.4.1.5, F.1.4.4.2.2).
+    ///
+    /// Two blocks with `Ri = 1`, so an `RSTn` sits between them and the second
+    /// starts from scratch: its DC predictor is zero again, its `Da` is zero
+    /// again, and every statistics bin is back at Table D.3's index 0. So the
+    /// second interval's bytes are byte for byte the first's, which is what
+    /// lets this tell a reset from a missing one — a decoder that carried
+    /// either the predictor or the statistics across would decode the second
+    /// block to something else.
+    #[test]
+    fn a_restart_interval_resets_the_coder_and_the_statistics() {
+        let mut decisions = diff_of_128();
+        decisions.push((arith::Bin::Ac(0), 1));
+        let interval = arith_segment(&decisions);
+
+        let mut scan = interval.clone();
+        scan.extend_from_slice(&[0xFF, 0xD0]);
+        scan.extend_from_slice(&interval);
+
+        let data = arithmetic_gray(0xC9, 16, 8, Some(1), None, &[(0x00, 0x3F, 0x00, scan)]);
+
+        let image = decode(&data, 1 << 20).expect("a restarting SOF9 frame decodes");
+        let huffman =
+            decode(&huffman_flat_gray(16, 8, 144, 1), 1 << 20).expect("the Huffman frame decodes");
+        assert_eq!(image.data, huffman.data);
+    }
+
+    /// **The DAC marker is read, not stepped over.**
+    ///
+    /// Until September 2026 `X'FFCC'` fell through to the unknown-segment arm
+    /// while a comment beside the SOF refusals claimed it was "handled below".
+    /// It was invisible because every arithmetic frame was refused before a
+    /// DAC could matter.
+    ///
+    /// The block below has coefficients at `K = 3` and `K = 6`, and its
+    /// decisions were derived with `Kx = 6` — so both use the `X2` bin at 189
+    /// and the second inherits the adaptation the first left there. Under the
+    /// default `Kx = 5` the second would use 217 instead, which no decision
+    /// has touched, and the stream decodes to something else. So the two
+    /// decodes differing is the marker being parsed; what the conditioning
+    /// then *means* is `arith`'s own tests, which assert the bins directly.
+    #[test]
+    fn the_dac_marker_changes_what_a_sof9_frame_decodes_to() {
+        let decisions = vec![
+            (arith::Bin::Dc(0), 0),
+            (arith::Bin::Ac(0), 0),
+            (arith::Bin::Ac(1), 0),
+            (arith::Bin::Ac(4), 0),
+            (arith::Bin::Ac(7), 1),
+            (arith::Bin::Fixed, 0),
+            (arith::Bin::Ac(8), 1),
+            (arith::Bin::Ac(8), 1),
+            (arith::Bin::Ac(189), 0),
+            (arith::Bin::Ac(203), 0),
+            (arith::Bin::Ac(9), 0),
+            (arith::Bin::Ac(10), 0),
+            (arith::Bin::Ac(13), 0),
+            (arith::Bin::Ac(16), 1),
+            (arith::Bin::Fixed, 0),
+            (arith::Bin::Ac(17), 1),
+            (arith::Bin::Ac(17), 1),
+            (arith::Bin::Ac(189), 0),
+            (arith::Bin::Ac(203), 1),
+            (arith::Bin::Ac(18), 1),
+        ];
+        let scans = [(0x00u8, 0x3Fu8, 0x00u8, arith_segment(&decisions))];
+
+        // B.2.4.3: Tc = 1 selects an AC conditioning table, Tb = 0 the
+        // destination, and Cs is Kx.
+        let with_dac = arithmetic_gray(0xC9, 8, 8, None, Some(&[0x10, 0x06]), &scans);
+        let without = arithmetic_gray(0xC9, 8, 8, None, None, &scans);
+
+        let read = decode(&with_dac, 1 << 20).expect("with DAC");
+        let ignored = decode(&without, 1 << 20).expect("without DAC");
+        assert_ne!(
+            read.data, ignored.data,
+            "the DAC segment made no difference, so it was skipped"
+        );
+    }
+
+    /// **A SOF10 frame decodes across three scans** — a DC first scan, a DC
+    /// refinement and an AC band — which is the shape G.1.3 describes.
+    ///
+    /// The DC coefficient arrives in two pieces: the first scan sends 8 at
+    /// `Al = 4`, giving 128, and the refinement adds the bit below it at
+    /// `Al = 3`, giving 136. The AC band places nothing. A Huffman frame over
+    /// a flat raster of 145 carries that same `S00 = 8 x 17 = 136`, so
+    /// F.1.4's transcoding claim applies to it as much as to the sequential
+    /// frame above — and it is the refinement that makes the two match, since
+    /// the first scan alone would leave 128 and a visibly different grey.
+    #[test]
+    fn a_sof10_frame_decodes_across_three_scans() {
+        let first = arith_segment(&diff_of_eight());
+        // G.1.3.1: one decision at the fixed estimate, per block, per scan.
+        let refine = arith_segment(&[(arith::Bin::Fixed, 1)]);
+        // An AC band that is immediately at its end of band.
+        let band = arith_segment(&[(arith::Bin::Ac(0), 1)]);
+
+        let data = arithmetic_gray(
+            0xCA,
+            8,
+            8,
+            None,
+            None,
+            &[
+                (0x00, 0x00, 0x04, first),
+                (0x00, 0x00, 0x43, refine),
+                (0x01, 0x3F, 0x03, band),
+            ],
+        );
+
+        let image = decode(&data, 1 << 20).expect("a SOF10 frame decodes");
+        assert_eq!((image.width, image.height), (8, 8));
+        let huffman =
+            decode(&huffman_flat_gray(8, 8, 145, 0), 1 << 20).expect("the Huffman frame decodes");
+        assert_eq!(image.data, huffman.data);
+        assert_ne!(
+            image.data,
+            decode(&huffman_flat_gray(8, 8, 144, 0), 1 << 20)
+                .expect("the Huffman frame decodes")
+                .data,
+            "without the refinement scan the DC would still be 128"
+        );
+    }
+
+    /// The two seeds `fuzz/corpus/jpeg/` carries for the arithmetic frames,
+    /// written from the same helpers as the tests above so the two cannot
+    /// drift apart.
+    ///
+    /// Worth having because the corpus held four seeds before this and every
+    /// one of them was Huffman-coded: `qm.rs` and `jpeg/arith.rs` together are
+    /// roughly a thousand lines that **no fuzz target could reach**, and a
+    /// mutator starting from a SOF0 file does not stumble into a SOF9 one —
+    /// it would have to invent a valid arithmetic segment from nothing. This
+    /// is ruling 1's enforcement arm being given a door.
+    ///
+    /// The seeds are **reachable by construction rather than measured**: the
+    /// assertions below prove each one decodes, and to the block it was built
+    /// from, before a single byte is mutated.
+    ///
+    /// Run with `--ignored` when the fixtures change; the corpus is committed,
+    /// and a run that rewrites it is a diff to look at rather than apply
+    /// blindly.
+    #[test]
+    #[ignore = "writes into fuzz/corpus/jpeg, which is committed"]
+    fn write_the_arithmetic_fuzz_seeds() {
+        let mut sequential = diff_of_128();
+        sequential.push((arith::Bin::Ac(0), 0));
+        sequential.push((arith::Bin::Ac(1), 1));
+        sequential.push((arith::Bin::Fixed, 1));
+        sequential.push((arith::Bin::Ac(2), 1));
+        sequential.push((arith::Bin::Ac(2), 1));
+        sequential.push((arith::Bin::Ac(189), 0));
+        sequential.push((arith::Bin::Ac(203), 0));
+        sequential.push((arith::Bin::Ac(3), 1));
+        let sequential = arithmetic_gray(
+            0xC9,
+            16,
+            8,
+            None,
+            Some(&[0x10, 0x06, 0x00, 0x31]),
+            &[(0x00, 0x3F, 0x00, arith_segment(&sequential))],
+        );
+
+        let progressive = arithmetic_gray(
+            0xCA,
+            8,
+            8,
+            None,
+            None,
+            &[
+                (0x00, 0x00, 0x04, arith_segment(&diff_of_eight())),
+                (0x00, 0x00, 0x43, arith_segment(&[(arith::Bin::Fixed, 1)])),
+                (
+                    0x01,
+                    0x3F,
+                    0x03,
+                    arith_segment(&[
+                        (arith::Bin::Ac(0), 0),
+                        (arith::Bin::Ac(1), 1),
+                        (arith::Bin::Fixed, 0),
+                        (arith::Bin::Ac(2), 1),
+                        (arith::Bin::Ac(2), 0),
+                        (arith::Bin::Ac(3), 1),
+                    ]),
+                ),
+                (0x01, 0x3F, 0x30, arith_segment(&[(arith::Bin::Ac(2), 1)])),
+            ],
+        );
+
+        // A seed that no longer reaches what it was chosen for is worse than
+        // no seed, because it looks like coverage.
+        for (label, bytes) in [
+            ("arithmetic-sequential", &sequential),
+            ("arithmetic-progressive", &progressive),
+        ] {
+            let image = decode(bytes, 1 << 20).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            assert_eq!(image.warnings, Vec::new(), "{label}");
+            assert!(
+                image.data.iter().any(|&s| s != 128),
+                "{label}: nothing decoded"
+            );
+        }
+
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/jpeg");
+        std::fs::write(base.join("arithmetic-sequential.jpg"), &sequential)
+            .expect("the corpus directory is there");
+        std::fs::write(base.join("arithmetic-progressive.jpg"), &progressive)
+            .expect("the corpus directory is there");
+    }
+
+    /// An arithmetic scan that stops in the middle is reported as truncated
+    /// rather than silently completed (ruling 10), and what decoded stays
+    /// (ruling 2).
+    #[test]
+    fn a_truncated_arithmetic_scan_warns_rather_than_failing() {
+        let mut data = arithmetic_gray(
+            0xC9,
+            16,
+            8,
+            None,
+            None,
+            &[(0x00, 0x3F, 0x00, arith_segment(&diff_of_eight()))],
+        );
+        // Drop the EOI, so the coder runs off the end of the segment instead
+        // of stopping at a marker.
+        data.truncate(data.len() - 2);
+
+        let image = decode(&data, 1 << 20).expect("what decoded is kept");
+        assert!(image.warnings.contains(&Warning::TruncatedInput));
     }
 }

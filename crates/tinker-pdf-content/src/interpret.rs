@@ -5,9 +5,12 @@
 //! which is what keeps one malformed instruction from desynchronizing the rest
 //! of the page.
 
-use crate::device::{Device, Glyph, ImageRef, PathSegment};
+use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::state::{GraphicsState, LineCap, LineJoin, Matrix, Rgb, TextRenderMode};
 use crate::tokenizer::{Token, Tokenizer};
+use core::mem;
+use std::sync::Arc;
+use tinker_pdf_cos::decode_text_string;
 
 /// Everything the interpreter needs from a page's resources.
 ///
@@ -37,15 +40,40 @@ pub struct Form {
     pub bbox: Option<[f64; 4]>,
     /// `/Group` with `/S /Transparency` (11.6.6), when the form is one.
     pub group: Option<Group>,
+    /// The form's own indirect reference, packed as `num << 16 | gen`, and
+    /// `0` when the caller reached the stream without one.
+    ///
+    /// 14.7.4.2 numbers marked-content sequences **within a content stream**,
+    /// so an `/MCID` only identifies a sequence beside the stream it was
+    /// written in: two forms on one page may each write `/MCID 0`, and a
+    /// structure join keyed on the identifier alone hands both sequences to
+    /// both elements. This is the other half of that key, and it travels with
+    /// the content for the same reason [`Form::bbox`] does — adding it as a
+    /// field forced every implementor to supply it rather than inherit a
+    /// defaulted accessor that would have compiled everywhere and silently
+    /// gone on collapsing the pair.
+    ///
+    /// A plain integer, not a COS reference: ruling 8 keeps object types out
+    /// of this crate, and an identity is all a device needs. Packing rather
+    /// than the object number alone because 7.3.10 makes `num gen` the
+    /// reference, and a regenerated object reuses the number.
+    pub stream: u64,
 }
 
 /// A transparency group XObject's attributes (11.6.6).
 ///
-/// The group's colour space is deliberately absent. 11.6.6 lets `/CS` name
-/// the space the group's contents are composited in; this engine composites
-/// in RGB throughout, and changing that is a separate decision from making
-/// groups exist at all — recorded as a non-goal in the gap plan rather than
-/// half-answered here.
+/// 11.6.6 lets `/CS` name the space the group's contents are composited in,
+/// and [`Group::space`] below carries it: grey, RGB and CMYK groups each
+/// composite in their own, which is what `CmykA8` exists for. `/Lab` is the
+/// one that does not, and it is reported by name rather than silently
+/// composited in RGB.
+///
+/// This comment used to say the colour space was *deliberately absent* and
+/// that the engine composited in RGB throughout. That stopped being true when
+/// the field three lines below was added, and it stayed here — which is the
+/// direction of documentation drift that is hardest to catch, because a reader
+/// checking the claim against the struct sees the contradiction and a reader
+/// checking the struct against the claim does not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Group {
     /// `/I`: the group composites against a transparent backdrop rather than
@@ -54,6 +82,63 @@ pub struct Group {
     /// `/K`: each element composites against the group's *initial* backdrop
     /// rather than against the elements before it (11.4.5).
     pub knockout: bool,
+    /// `/CS`: the space the group's contents are composited in (11.6.6).
+    ///
+    /// `None` where the group declares no space, which 11.6.6 permits — the
+    /// group then inherits the space it is composited into.
+    pub space: Option<GroupSpace>,
+}
+
+/// Which of 11.6.6's blending spaces a group's `/CS` names.
+///
+/// The *shape* of the space rather than the space itself, and deliberately so.
+/// A blend formula in 11.3.5 acts on component values, so what a compositor
+/// needs from `/CS` is how many components there are and whether they are
+/// subtractive — not the palette, the tint transform or the profile that
+/// decides what those components *mean*. Keeping it to that also keeps
+/// [`Group`] `Copy`, which every save and restore of the graphics state relies
+/// on.
+///
+/// Exact conversion between these — which is what makes a CMYK group blend
+/// like one rather than merely be named as one — is `docs/design/icc.md`'s
+/// stage 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupSpace {
+    /// One component, additive.
+    Gray,
+    /// Three components, additive.
+    Rgb,
+    /// Four components, subtractive.
+    Cmyk,
+    /// CIE L*a*b*, whose components are not in `0..1` at all.
+    Lab,
+}
+
+impl GroupSpace {
+    /// Whether compositing this group in RGB is the same arithmetic as
+    /// compositing it in its own space.
+    ///
+    /// True for grey and RGB, and the grey case is worth stating rather than
+    /// assuming: a separable blend applied per channel to `R = G = B` produces
+    /// `R' = G' = B'` equal to the same blend applied to the single grey
+    /// channel, because each channel's formula is the same function of the
+    /// same two numbers. Subtractive components are a different formula, and
+    /// `/Lab`'s are not even in the unit interval.
+    #[must_use]
+    pub fn blends_as_rgb(self) -> bool {
+        matches!(self, GroupSpace::Gray | GroupSpace::Rgb)
+    }
+
+    /// What to call it in a warning.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            GroupSpace::Gray => "DeviceGray",
+            GroupSpace::Rgb => "DeviceRGB",
+            GroupSpace::Cmyk => "DeviceCMYK",
+            GroupSpace::Lab => "Lab",
+        }
+    }
 }
 
 /// An ExtGState `/SMask` (11.6.5.1).
@@ -63,6 +148,29 @@ pub enum SoftMask {
     None,
     /// A group to render and read back as a mask.
     Group(Box<MaskGroup>),
+}
+
+/// Whichever resource dictionary is in force: the caller's, or a form's own.
+///
+/// A borrow while the page's own resources are in force, which is every
+/// content stream and most of every other one; owned only while a form that
+/// brought its own is running.
+enum Scope<'d, F> {
+    /// The caller's, borrowed for the whole run.
+    Borrowed(&'d F),
+    /// A form's own, shared with whatever cached it.
+    Owned(Arc<F>),
+}
+
+impl<F> core::ops::Deref for Scope<'_, F> {
+    type Target = F;
+
+    fn deref(&self) -> &F {
+        match self {
+            Scope::Borrowed(fonts) => fonts,
+            Scope::Owned(fonts) => fonts,
+        }
+    }
 }
 
 /// The `/SMask` dictionary's group, resolved (11.6.5.2).
@@ -144,6 +252,30 @@ pub trait FontSource {
     /// A form XObject, when the interpreter should recurse into one.
     /// Returning `None` skips it.
     fn form(&self, name: &[u8]) -> Option<Form> {
+        let _ = name;
+        None
+    }
+
+    /// The resources a form XObject brings with it, if it has its own.
+    ///
+    /// 8.10.1: a form's `/Resources` names what its content stream may refer
+    /// to, and a form written beside one document and pasted into another
+    /// brings the only dictionary its names resolve in. Returning `None` keeps
+    /// the invoking scope, which is what a form that omits the key relies on
+    /// and what every reader does.
+    ///
+    /// The device is asked the same question at the same moment, by name,
+    /// through [`Device::begin_form`] — the two seams resolve the same form
+    /// independently rather than passing a resource object between them, which
+    /// is what keeps a crate that must not know what a resource dictionary is
+    /// from having to hold one.
+    /// Shared rather than owned, and cached by the implementor: a page that
+    /// invokes one form a thousand times must not build its resources a
+    /// thousand times. Two corpus files stalled outright when it did.
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
         let _ = name;
         None
     }
@@ -233,10 +365,151 @@ pub trait FontSource {
         let _ = name;
         None
     }
+
+    /// The 14.6.2 and 14.9 values a *named* property list holds
+    /// (`/P /MC0 BDC`).
+    ///
+    /// The same `/Properties` sub-dictionary [`FontSource::optional_content`]
+    /// reads, asked a different question: that one wants a layer, this one
+    /// wants `/MCID` and the alternate descriptions 14.9 allows beside it. A
+    /// name may legitimately answer both, neither, or one — an `/OC` list is
+    /// an optional-content group with no `/MCID`, and a `/Span` list is a
+    /// property list with no layer — so they are two methods rather than one
+    /// returning a pair, and a build that supplies only one is not broken.
+    ///
+    /// `None` means the name reached no property list this build could read.
+    /// It never means "hidden": nothing in this method's answer can suppress
+    /// content.
+    fn marked_content_properties(&self, name: &[u8]) -> Option<MarkedProps> {
+        let _ = name;
+        None
+    }
 }
 
 /// How deep form XObjects may nest before recursion is refused (8.10).
 const MAX_FORM_DEPTH: u32 = 16;
+
+/// A `BDC`'s property list, in the two forms 14.6.2 gives it.
+///
+/// Three variants and not two: "the file wrote no readable list" is a
+/// different fact from "the file wrote an empty one", and only the first may
+/// ever be inferred from damage. Collapsing them would make a truncated
+/// stream indistinguishable from a producer that meant `<< >>`.
+enum Properties {
+    /// `/Tag /MC0 BDC` — a name into the page's `/Properties`.
+    Named(Vec<u8>),
+    /// `/Tag << … >> BDC` — an inline dictionary, already reassembled.
+    Inline(MarkedProps),
+    /// Neither: a `BDC` whose operands this build could not read.
+    None,
+}
+
+/// Reads the plain values out of a flattened inline property list.
+///
+/// `body` is every token strictly between the `<<` and its `>>`, in stream
+/// order. 7.8.2's tokenizer does not build dictionaries, so this walks the
+/// flat run: a name is a key, the token after it is its value, and a value
+/// that opens a container is skipped whole. Only 14.7.4.2's `/MCID` and
+/// 14.9's four text strings are kept — everything else a property list may
+/// carry (`/Type`, `/BBox`, `/Placement`, a producer's private entries) is
+/// read past rather than stored, because storing it would put a COS-shaped
+/// object in a crate that has no object model.
+///
+/// **Nothing here can fail.** A key with no value, a value of the wrong
+/// type, an unbalanced container, a run of bare values with no key at all:
+/// each is skipped and the walk continues. What comes back is what was
+/// legible, which for a damaged list is nothing — and nothing is a visible
+/// scope with no `/MCID`, which is the direction 14.6.2's failures are ruled
+/// to fall in.
+fn read_inline_properties(body: &[Token]) -> MarkedProps {
+    let mut props = MarkedProps::default();
+    let mut at = 0usize;
+
+    while at < body.len() && at < MAX_INLINE_PROPERTY_TOKENS {
+        let Some(Token::Name(key)) = body.get(at) else {
+            // A value where a key belongs. Step over exactly one token so a
+            // run of them costs one step each rather than stalling.
+            at += 1;
+            continue;
+        };
+        at += 1;
+        let Some(value) = body.get(at) else {
+            // 7.3.7's "a key with no value"; there is nothing after it.
+            break;
+        };
+        // A container-valued entry is skipped whole: none of the five keys
+        // read here is ever an array or a dictionary, and stepping into one
+        // would read its members as top-level keys.
+        if matches!(value, Token::ArrayOpen | Token::DictOpen) {
+            at = skip_container(body, at);
+            continue;
+        }
+        at += 1;
+
+        match (key.as_slice(), value) {
+            // 14.7.4.2: a non-negative integer. `f64` is what the tokenizer
+            // produces for every number, so integrality is checked rather
+            // than assumed — an `/MCID 3.5` names no marked sequence, and
+            // rounding it would join content to the wrong element.
+            (b"MCID", Token::Number(n)) => {
+                let integral = n.is_finite() && n.fract() == 0.0;
+                if integral && *n >= 0.0 && *n <= f64::from(u32::MAX) {
+                    props.mcid = Some(*n as u32);
+                }
+            }
+            // 14.9.2 to 14.9.5. All four are *text strings* (7.9.2.2), so
+            // they are decoded by the document's own rules rather than read
+            // as UTF-8: a `/Alt` written UTF-16BE is the common case, and
+            // taking its bytes literally yields interleaved NULs.
+            (b"ActualText", Token::String(bytes)) => {
+                props.actual_text = Some(decode_text_string(bytes));
+            }
+            (b"Alt", Token::String(bytes)) => props.alt = Some(decode_text_string(bytes)),
+            (b"Lang", Token::String(bytes)) => props.lang = Some(decode_text_string(bytes)),
+            (b"E", Token::String(bytes)) => props.expansion = Some(decode_text_string(bytes)),
+            _ => {}
+        }
+    }
+
+    props
+}
+
+/// The index just past the container opening at `at`.
+///
+/// Arrays and dictionaries are counted together, because 7.8.2 flattens both
+/// and a stream may close one with the other's delimiter. Treating them as
+/// one nesting level means a mismatched close ends the container instead of
+/// leaving the scan inside it forever, which is the failure that matters:
+/// this walk must terminate on every input, and it is not the place where a
+/// malformed inline dictionary gets diagnosed.
+fn skip_container(body: &[Token], at: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = at;
+    while index < body.len() && index < MAX_INLINE_PROPERTY_TOKENS {
+        match body[index] {
+            Token::ArrayOpen | Token::DictOpen => depth += 1,
+            Token::ArrayClose | Token::DictClose => {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    index
+}
+
+/// How many tokens of one flattened inline property list are examined
+/// (14.6.2, 7.8.2).
+///
+/// The operand stack is already bounded to 512 by [`Interpreter::run`], so
+/// this can never be the binding limit today. It is named anyway because the
+/// scan below is the only place in the interpreter that walks the stack
+/// *forwards* over an unbounded number of key/value pairs, and a later
+/// change to the stack bound must not silently make that walk unbounded.
+const MAX_INLINE_PROPERTY_TOKENS: usize = 512;
 
 /// How many marked-content scopes may be open at once (14.6.2).
 ///
@@ -256,7 +529,7 @@ pub fn interpret<D: Device, F: FontSource>(
 ) {
     let mut interp = Interpreter {
         device,
-        fonts,
+        fonts: Scope::Borrowed(fonts),
         stack: Vec::new(),
         gs: GraphicsState::new(initial),
         saved: Vec::new(),
@@ -269,6 +542,7 @@ pub fn interpret<D: Device, F: FontSource>(
         pending_clip: None,
         marked: 0,
         marked_over_cap: 0,
+        streams: Vec::new(),
     };
     interp.run(content);
     // 14.6.2: a stream may end with scopes still open, and a device left
@@ -278,7 +552,7 @@ pub fn interpret<D: Device, F: FontSource>(
 
 struct Interpreter<'d, D: Device, F: FontSource> {
     device: &'d mut D,
-    fonts: &'d F,
+    fonts: Scope<'d, F>,
     stack: Vec<Token>,
     gs: GraphicsState,
     saved: Vec<GraphicsState>,
@@ -295,6 +569,15 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     /// Scopes refused by [`MAX_MARKED_CONTENT_DEPTH`], so that an `EMC`
     /// closes the one it belongs to rather than an outer one.
     marked_over_cap: u32,
+    /// The form XObject streams being run, innermost last (14.7.4.2).
+    ///
+    /// Empty while the page's own content stream is running, which is why
+    /// [`Interpreter::stream`] reads an empty stack as `0`. A form whose
+    /// [`Form::stream`] is `0` — one the resource layer reached without a
+    /// reference — pushes nothing, so its content keeps the identity of the
+    /// stream that invoked it: that is the old behaviour, kept for the case
+    /// where there is no better answer rather than asserted as one.
+    streams: Vec<u64>,
 }
 
 impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
@@ -829,27 +1112,37 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             // stop a page drawing, so it is the only one that looks at its
             // property list here.
             b"BDC" => {
-                let layer = self
-                    .optional_content_name()
-                    .and_then(|name| self.fonts.optional_content(&name));
-                // `BDC` is `tag properties`, so the tag is the operand
-                // **below** the property list — the same position
-                // `optional_content_name` looks in, asked for its own sake
-                // rather than only when the tag happens to be `/OC`.
-                let tag = match self.stack.iter().rev().nth(1) {
-                    Some(Token::Name(tag)) => tag.clone(),
-                    _ => Vec::new(),
+                let (tag, properties) = self.bdc_operands();
+                let (layer, props) = match &properties {
+                    // 8.11.3.2: only the `/OC` tag selects optional content,
+                    // and only the name form of the list can reach a group.
+                    Properties::Named(name) => {
+                        let layer = (tag.as_slice() == b"OC")
+                            .then(|| self.fonts.optional_content(name))
+                            .flatten();
+                        (layer, self.fonts.marked_content_properties(name))
+                    }
+                    Properties::Inline(props) => (None, Some(props.clone())),
+                    Properties::None => (None, None),
                 };
-                self.open_marked_content(&tag, layer);
+                // 14.7.4.2: the sequence resides in the stream its `BDC` was
+                // written in, and only the interpreter knows which that is.
+                // Stamped after `is_empty`, so a list holding nothing but the
+                // stream identity is still no list at all.
+                let props = props.filter(|p| !p.is_empty()).map(|mut props| {
+                    props.stream = self.stream();
+                    props
+                });
+                self.open_marked_content(&tag, layer, props.as_ref());
             }
             // 14.6.1: `BMC` has a tag and no property list, so it can name
-            // no layer and always paints.
+            // no layer, carries no `/MCID`, and always paints.
             b"BMC" => {
                 let tag = match self.stack.last() {
                     Some(Token::Name(tag)) => tag.clone(),
                     _ => Vec::new(),
                 };
-                self.open_marked_content(&tag, None);
+                self.open_marked_content(&tag, None, None);
             }
             b"EMC" => self.close_marked_content(),
             // 14.6.1's marked-content *points*, which mark a position rather
@@ -864,40 +1157,129 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         }
     }
 
-    /// The name a `BDC`'s `/OC` property list gave, if it gave one (14.6.2).
+    /// A `BDC`'s two operands: its tag, and its property list (14.6.2).
     ///
-    /// `BDC` takes `tag properties`. Only the `/OC` tag selects optional
-    /// content — every other tag, `/Span` and `/Artifact` and the structure
-    /// element names, opens a scope that is structure and nothing else — and
-    /// only the name form of the property list can reach a layer.
+    /// `BDC` takes `tag properties`, and the property list is either a name
+    /// into the page's `/Properties` sub-dictionary or an inline dictionary
+    /// written out in the stream.
     ///
-    /// **The inline form cannot, and there is nothing to reassemble.**
-    /// 8.11.3.2 makes an `/OC` entry a reference to an optional content
-    /// group or a membership dictionary; 7.3.10 puts indirect references in
-    /// the file structure, where a content stream cannot write one. So an
-    /// inline `<< … >>` property list names no group in any document, and
-    /// this returns `None` for it — which means visible, the direction a
-    /// parse failure must fail in.
+    /// # The inline scan is back, and now it changes answers
     ///
-    /// The scan that reassembled 7.8.2's flattened `DictOpen`/`DictClose`
-    /// tokens to find the tag before the `<<` was written and then deleted:
-    /// a deliberate defect injection could not make it change a single
-    /// answer, because both it and this produce a visible scope for every
-    /// inline list, well formed or not. Gap 06 asks for the reassembly; the
-    /// plan is amended there instead.
-    fn optional_content_name(&self) -> Option<Vec<u8>> {
-        let Some(Token::Name(property)) = self.stack.last() else {
-            return None;
-        };
-        match self.stack.iter().rev().nth(1) {
-            Some(Token::Name(tag)) if tag.as_slice() == b"OC" => Some(property.clone()),
-            _ => None,
+    /// This reassembles 7.8.2's flattened `DictOpen`/`DictClose` tokens. An
+    /// earlier build wrote that scan, deleted it, and recorded the deletion
+    /// here: a deliberate defect injection could not make it change a single
+    /// answer, because the only thing then read from a property list was
+    /// `/OC`, and an inline list can never name a layer — 8.11.3.2 makes an
+    /// `/OC` entry a reference to a group or a membership dictionary, and
+    /// 7.3.10 puts indirect references in the file structure, where a content
+    /// stream cannot write one. Both the scan and the two-token peek that
+    /// replaced it produced a visible scope for every inline list, well
+    /// formed or not, so the scan was dead weight and the note said so.
+    ///
+    /// **That argument stopped holding the moment `/MCID` was read from the
+    /// same list.** 14.7.4.2 puts `/MCID` in the property list itself, not
+    /// behind a reference, and `/P << /MCID 3 >> BDC` is the form nearly
+    /// every tagging producer emits — so without the reassembly a tagged page
+    /// has no marked content this engine can see at all. The 14.9 values
+    /// beside it (`/ActualText`, `/Alt`, `/Lang`, `/E`) are text strings,
+    /// which a content stream can also write inline, and they are read here
+    /// for the same reason.
+    ///
+    /// The old note was right about a second thing, and the scan inherits it:
+    /// a list this cannot read yields **no** properties and a **visible**
+    /// scope. Nothing here can hide content.
+    ///
+    /// It also closes a defect the two-token peek carried. The tag sits
+    /// before the `<<`, and peeking one token below the top of the stack
+    /// finds whatever the dictionary's *last value* happened to be — so
+    /// `/OC << /Type /OCMD >> BDC` reported its tag as `OCMD`, and
+    /// `/Artifact << /Type /Pagination >> BDC` reported `Pagination` rather
+    /// than `Artifact`. The text device excludes artifacts by that tag
+    /// (14.8.2.2), so an artifact written with an inline property list was
+    /// extracted as though it were the author's content. Finding the `<<` is
+    /// what fixes it, and only the reassembly can find the `<<`.
+    fn bdc_operands(&self) -> (Vec<u8>, Properties) {
+        match self.stack.last() {
+            // `/Tag /MC0 BDC`: the list is a name, and the tag is below it.
+            Some(Token::Name(property)) => {
+                let tag = match self.stack.iter().rev().nth(1) {
+                    Some(Token::Name(tag)) => tag.clone(),
+                    _ => Vec::new(),
+                };
+                (tag, Properties::Named(property.clone()))
+            }
+            // `/Tag << … >> BDC`: the tokenizer left the dictionary flat.
+            Some(Token::DictClose) => {
+                let Some(open) = self.inline_dict_start() else {
+                    // A `>>` with no `<<` before it is damage, not a list.
+                    return (Vec::new(), Properties::None);
+                };
+                let tag = match open.checked_sub(1).and_then(|at| self.stack.get(at)) {
+                    Some(Token::Name(tag)) => tag.clone(),
+                    _ => Vec::new(),
+                };
+                let body = self
+                    .stack
+                    .get(open + 1..self.stack.len() - 1)
+                    .unwrap_or_default();
+                (tag, Properties::Inline(read_inline_properties(body)))
+            }
+            // No property list at all, which `BDC` requires. The scope still
+            // opens — 14.6.2's `EMC` will arrive for it either way — and it
+            // is nameless rather than guessed at.
+            _ => (Vec::new(), Properties::None),
         }
+    }
+
+    /// The index of the `<<` matching the `>>` on top of the stack.
+    ///
+    /// Scanned backwards with a depth counter, so a dictionary nested inside
+    /// the list does not end the search early. `None` when the stack holds no
+    /// matching `<<` — which happens both for genuine damage and for a list
+    /// so long that [`Interpreter::run`]'s operand bound dropped its opening
+    /// brace, and both mean "no properties, visible scope".
+    fn inline_dict_start(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        for (at, token) in self
+            .stack
+            .iter()
+            .enumerate()
+            .rev()
+            .take(MAX_INLINE_PROPERTY_TOKENS)
+        {
+            match token {
+                Token::DictClose => depth += 1,
+                Token::DictOpen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Which content stream is being run (14.7.4.2).
+    ///
+    /// The **innermost** form, not the outermost: 14.7.4.2 puts a sequence in
+    /// the stream its `BDC` was written in, and a form invoked from inside
+    /// another form writes its own. Reporting the outer one would give two
+    /// nested forms one identity and put the collision this key exists to
+    /// break back exactly where it was.
+    fn stream(&self) -> u64 {
+        self.streams.last().copied().unwrap_or(0)
     }
 
     /// Opens a marked-content scope and tells the device whether to paint
     /// what follows.
-    fn open_marked_content(&mut self, tag: &[u8], layer: Option<Layer>) {
+    fn open_marked_content(
+        &mut self,
+        tag: &[u8],
+        layer: Option<Layer>,
+        props: Option<&MarkedProps>,
+    ) {
         if self.marked >= MAX_MARKED_CONTENT_DEPTH {
             self.marked_over_cap = self.marked_over_cap.saturating_add(1);
             return;
@@ -906,9 +1288,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         match layer {
             Some(layer) if !layer.visible => {
                 self.device
-                    .begin_marked_content(tag, false, Some(&layer.label));
+                    .begin_marked_content(tag, false, Some(&layer.label), props);
             }
-            _ => self.device.begin_marked_content(tag, true, None),
+            _ => self.device.begin_marked_content(tag, true, None, props),
         }
     }
 
@@ -995,7 +1377,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         // text still extracts and its state changes still happen.
         let hidden = match self.fonts.xobject_optional_content(name) {
             Some(layer) if !layer.visible => {
-                self.open_marked_content(b"OC", Some(layer));
+                self.open_marked_content(b"OC", Some(layer), None);
                 true
             }
             _ => false,
@@ -1024,9 +1406,14 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             return;
         }
         let id = self.fonts.font_id(name);
-        if !self.device.begin_form(id) {
+        // 8.10.1: a form may bring its own resources, and the device is asked
+        // for the same form by the same name so that both seams change scope
+        // together.
+        let nested = self.fonts.form_scope(name);
+        if !self.device.begin_form(id, name) {
             return;
         }
+        let outer = nested.map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
 
         // 8.10.2: a form's /Matrix maps its space into the current one, and
         // its content runs with the surrounding state saved.
@@ -1041,6 +1428,15 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         // starts at zero here and is emptied below.
         let saved_marked = std::mem::replace(&mut self.marked, 0);
         let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
+        // 14.7.4.2: an `/MCID` numbers a sequence within *this* stream, so
+        // the form's own identity is what the sequences it opens are keyed
+        // on. A form the resource layer reached without a reference pushes
+        // nothing and keeps the caller's identity, which is the answer this
+        // engine gave before there was a stack at all.
+        let pushed_stream = form.stream != 0;
+        if pushed_stream {
+            self.streams.push(form.stream);
+        }
 
         let combined = form.matrix.then(&self.gs.ctm);
         if combined.is_finite() {
@@ -1085,6 +1481,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         if grouped {
             self.device.end_group();
         }
+        if pushed_stream {
+            self.streams.pop();
+        }
         self.marked = saved_marked;
         self.marked_over_cap = saved_over_cap;
         self.gs = saved_gs;
@@ -1092,6 +1491,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.path = saved_path;
         self.text_matrix = saved_text;
         self.line_matrix = saved_line;
+        if let Some(outer) = outer {
+            self.fonts = outer;
+        }
         self.device.end_form(id);
     }
 
@@ -1148,6 +1550,12 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         let saved_line = self.line_matrix;
         let saved_marked = std::mem::replace(&mut self.marked, 0);
         let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
+        // 11.6.5.2's `/G` is a form XObject like any other, so 14.7.4.2's
+        // per-stream numbering applies to it the same way.
+        let pushed_stream = mask.form.stream != 0;
+        if pushed_stream {
+            self.streams.push(mask.form.stream);
+        }
 
         // 8.10.2's `/Matrix`, composed onto the CTM at the `gs`.
         let combined = mask.form.matrix.then(&self.gs.ctm);
@@ -1179,6 +1587,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             self.device.end_soft_mask();
         }
 
+        if pushed_stream {
+            self.streams.pop();
+        }
         self.marked = saved_marked;
         self.marked_over_cap = saved_over_cap;
         self.gs = saved_gs;
@@ -1282,6 +1693,24 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             };
             let transform = placed.then(&self.text_matrix).then(&self.gs.ctm);
 
+            // The same point with 9.4.3's rise taken out, for a consumer that
+            // has to decide which line this glyph belongs to. Computed only
+            // when there is a rise, so the ordinary glyph pays one comparison
+            // and no matrix multiplication: `Ts` is rare and a page is
+            // millions of glyphs. See [`Glyph::baseline`].
+            let baseline = if ts.rise == 0.0 {
+                None
+            } else {
+                let flat = Matrix { f: 0.0, ..scale };
+                let flat = if vertical {
+                    Matrix::translate(-v_x / 1000.0, -v_y / 1000.0).then(&flat)
+                } else {
+                    flat
+                };
+                let at = flat.then(&self.text_matrix).then(&self.gs.ctm);
+                Some((at.e, at.f))
+            };
+
             // 9.6.5: a Type 3 glyph is a content stream. Its procedure runs in
             // glyph space, which the font matrix maps into text space — so the
             // matrix goes *inside* the transform that places the glyph, not
@@ -1325,6 +1754,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 code,
                 text: text.clone(),
                 transform,
+                baseline,
                 advance: if vertical { w1_y } else { width } / 1000.0 * ts.size,
                 size: ts.size,
                 vertical,
@@ -1480,29 +1910,21 @@ fn is_delimiter(c: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! These tests used to carry **five** devices of their own — `Recorder`,
+    //! `GroupEvents`, `Painted`, `Scopes` and `Images` — each recording the
+    //! subset one test needed, with heavy overlap and no two agreeing on what
+    //! an event was. All five are gone; every test below drives
+    //! [`crate::record::RecordingDevice`], which keeps every call in order.
+    //!
+    //! What each of them asserted is unchanged. What moved is where the
+    //! *derived* answers are computed: the enclosing visibility of a scope was
+    //! a field `Scopes` maintained, and is now
+    //! [`RecordingDevice::hidden_at`](crate::record::RecordingDevice::hidden_at)
+    //! over the scopes the recorder kept — so a test here still fails for the
+    //! same reason a real drawing device would.
+
     use super::*;
-
-    #[derive(Default)]
-    struct Recorder {
-        glyphs: Vec<(String, f64, f64)>,
-        advances: Vec<f64>,
-        fills: usize,
-        strokes: usize,
-    }
-
-    impl Device for Recorder {
-        fn show_glyph(&mut self, glyph: &Glyph, _state: &GraphicsState) {
-            self.glyphs
-                .push((glyph.text.clone(), glyph.transform.e, glyph.transform.f));
-            self.advances.push(glyph.advance);
-        }
-        fn fill_path(&mut self, _path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
-            self.fills += 1;
-        }
-        fn stroke_path(&mut self, _path: &[PathSegment], _state: &GraphicsState) {
-            self.strokes += 1;
-        }
-    }
+    use crate::record::{Answers, Event, EventKind, RecordingDevice};
 
     /// Every byte is one code, 500/1000 em wide, mapping to itself.
     struct Simple;
@@ -1545,6 +1967,7 @@ mod tests {
                 matrix: Matrix::IDENTITY,
                 bbox: None,
                 group: self.group,
+                stream: 0,
             })
         }
         fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
@@ -1555,33 +1978,29 @@ mod tests {
         }
     }
 
-    /// Records the group events and the state each paint saw.
-    #[derive(Default)]
-    struct GroupEvents {
-        begins: Vec<Group>,
-        /// The `ca`, `CA` and blend mode in force at `begin_group`.
-        outer: Vec<(f64, f64, crate::state::BlendMode)>,
-        ends: usize,
-        /// The same three, at each fill.
-        fills: Vec<(f64, f64, crate::state::BlendMode)>,
-        /// What `begin_group` answers.
-        accept: bool,
+    /// The attributes of every transparency group the stream offered, in
+    /// order.
+    fn groups_offered(d: &RecordingDevice) -> Vec<Group> {
+        d.of_kind(EventKind::BeginGroup)
+            .filter_map(|event| match event {
+                Event::BeginGroup { group, .. } => Some(*group),
+                _ => None,
+            })
+            .collect()
     }
 
-    impl Device for GroupEvents {
-        fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
-            self.begins.push(group);
-            self.outer
-                .push((state.fill_alpha, state.stroke_alpha, state.blend));
-            self.accept
-        }
-        fn end_group(&mut self) {
-            self.ends += 1;
-        }
-        fn fill_path(&mut self, _path: &[PathSegment], state: &GraphicsState, _even_odd: bool) {
-            self.fills
-                .push((state.fill_alpha, state.stroke_alpha, state.blend));
-        }
+    /// The `ca`, `CA` and blend mode every event of `kind` saw.
+    ///
+    /// The three that 11.6.6 resets inside an accepted group, read back off
+    /// the state the recorder copied **at each call** — which is what makes
+    /// the group's own state and its contents' distinguishable at all.
+    fn alphas(d: &RecordingDevice, kind: EventKind) -> Vec<(f64, f64, crate::state::BlendMode)> {
+        d.of_kind(kind)
+            .map(|event| {
+                let state = event.state().expect("the state was captured");
+                (state.fill_alpha, state.stroke_alpha, state.blend)
+            })
+            .collect()
     }
 
     /// 11.6.6: the alphas and the blend mode at the `Do` belong to the group's
@@ -1589,37 +2008,43 @@ mod tests {
     /// `ca 0.5` fades every element separately *and* the result again.
     #[test]
     fn a_transparency_group_resets_the_alphas_and_the_blend_mode_inside_it() {
-        let mut device = GroupEvents {
-            accept: true,
-            ..GroupEvents::default()
-        };
+        let mut device = RecordingDevice::new().answering(Answers {
+            groups: true,
+            ..Answers::default()
+        });
         let fonts = Groups {
             group: Some(Group {
                 isolated: true,
                 knockout: false,
+                space: None,
             }),
         };
         interpret(b"/Half gs /Fm Do", Matrix::IDENTITY, &mut device, &fonts);
 
         assert_eq!(
-            device.begins,
+            groups_offered(&device),
             vec![Group {
                 isolated: true,
-                knockout: false
+                knockout: false,
+                space: None,
             }],
             "the group's own attributes reach the device"
         );
         assert_eq!(
-            device.outer,
+            alphas(&device, EventKind::BeginGroup),
             vec![(0.5, 0.25, crate::state::BlendMode::Multiply)],
             "and it is handed the state at the `Do`, which is the group's own"
         );
         assert_eq!(
-            device.fills,
+            alphas(&device, EventKind::FillPath),
             vec![(1.0, 1.0, crate::state::BlendMode::Normal)],
             "while the content inside runs at full strength under Normal"
         );
-        assert_eq!(device.ends, 1, "and the group is closed exactly once");
+        assert_eq!(
+            device.count(EventKind::EndGroup),
+            1,
+            "and the group is closed exactly once"
+        );
     }
 
     /// A device that declines the group must not have the state reset
@@ -1628,16 +2053,24 @@ mod tests {
     /// strength with nothing left to fade it.
     #[test]
     fn declining_a_group_leaves_the_state_alone() {
-        let mut device = GroupEvents::default();
+        let mut device = RecordingDevice::new();
         let fonts = Groups {
             group: Some(Group::default()),
         };
         interpret(b"/Half gs /Fm Do", Matrix::IDENTITY, &mut device, &fonts);
 
-        assert_eq!(device.begins.len(), 1, "it was still offered");
-        assert_eq!(device.ends, 0, "and not closed, having never opened");
         assert_eq!(
-            device.fills,
+            device.count(EventKind::BeginGroup),
+            1,
+            "it was still offered"
+        );
+        assert_eq!(
+            device.count(EventKind::EndGroup),
+            0,
+            "and not closed, having never opened"
+        );
+        assert_eq!(
+            alphas(&device, EventKind::FillPath),
             vec![(0.5, 0.25, crate::state::BlendMode::Multiply)],
             "the content keeps the alphas the page set"
         );
@@ -1646,20 +2079,20 @@ mod tests {
     /// A form that is not a transparency group is not offered at all.
     #[test]
     fn a_plain_form_raises_no_group_event() {
-        let mut device = GroupEvents {
-            accept: true,
-            ..GroupEvents::default()
-        };
+        let mut device = RecordingDevice::new().answering(Answers {
+            groups: true,
+            ..Answers::default()
+        });
         interpret(
             b"/Half gs /Fm Do",
             Matrix::IDENTITY,
             &mut device,
             &Groups { group: None },
         );
-        assert!(device.begins.is_empty());
-        assert_eq!(device.ends, 0);
+        assert_eq!(device.count(EventKind::BeginGroup), 0);
+        assert_eq!(device.count(EventKind::EndGroup), 0);
         assert_eq!(
-            device.fills,
+            alphas(&device, EventKind::FillPath),
             vec![(0.5, 0.25, crate::state::BlendMode::Multiply)]
         );
     }
@@ -1703,14 +2136,14 @@ mod tests {
         }
     }
 
-    fn run(src: &[u8]) -> Recorder {
-        let mut d = Recorder::default();
+    fn run(src: &[u8]) -> RecordingDevice {
+        let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, &Simple);
         d
     }
 
-    fn run_vertical(src: &[u8]) -> Recorder {
-        let mut d = Recorder::default();
+    fn run_vertical(src: &[u8]) -> RecordingDevice {
+        let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, &Vertical);
         d
     }
@@ -1718,28 +2151,28 @@ mod tests {
     #[test]
     fn glyphs_advance_by_their_width() {
         let d = run(b"BT /F0 10 Tf 0 0 Td (AB) Tj ET");
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(text, "AB");
         // 500/1000 em at 10pt is 5 points per glyph.
-        assert_eq!(d.glyphs.first().map(|g| g.1), Some(0.0));
-        assert_eq!(d.glyphs.get(1).map(|g| g.1), Some(5.0));
+        assert_eq!(d.glyphs().next().map(|g| g.transform.e), Some(0.0));
+        assert_eq!(d.glyphs().nth(1).map(|g| g.transform.e), Some(5.0));
     }
 
     #[test]
     fn tj_adjustments_move_the_pen_backwards() {
         let d = run(b"BT /F0 10 Tf [(A) -1000 (B)] TJ ET");
         // -1000 thousandths at 10pt closes 10 points, so B lands at 5 + 10.
-        assert_eq!(d.glyphs.get(1).map(|g| g.1), Some(15.0));
+        assert_eq!(d.glyphs().nth(1).map(|g| g.transform.e), Some(15.0));
     }
 
     #[test]
     fn character_and_word_spacing_apply_where_the_spec_says() {
         let spaced = run(b"BT /F0 10 Tf 2 Tc (AB) Tj ET");
-        assert_eq!(spaced.glyphs.get(1).map(|g| g.1), Some(7.0));
+        assert_eq!(spaced.glyphs().nth(1).map(|g| g.transform.e), Some(7.0));
 
         // Word spacing applies to code 32 only.
         let worded = run(b"BT /F0 10 Tf 100 Tw (A B) Tj ET");
-        let xs: Vec<f64> = worded.glyphs.iter().map(|g| g.1).collect();
+        let xs: Vec<f64> = worded.glyphs().map(|g| g.transform.e).collect();
         assert_eq!(xs.first(), Some(&0.0), "A");
         assert_eq!(xs.get(1), Some(&5.0), "the space itself is not shifted");
         assert_eq!(xs.get(2), Some(&110.0), "B follows the word space");
@@ -1771,19 +2204,22 @@ mod tests {
         let d = run_vertical(b"BT /F0 10 Tf 100 700 Td (AB) Tj ET");
 
         assert_eq!(
-            d.glyphs.first().map(|g| (g.1, g.2)),
+            d.glyphs().next().map(|g| (g.transform.e, g.transform.f)),
             Some((97.5, 693.0)),
             "A, at the pen minus its position vector"
         );
         assert_eq!(
-            d.glyphs.get(1).map(|g| (g.1, g.2)),
+            d.glyphs().nth(1).map(|g| (g.transform.e, g.transform.f)),
             Some((97.0, 685.5)),
             "B, one w1 further down and offset by its own v"
         );
 
         // The glyph event carries the same displacement, signed: a consumer
         // measuring a column reads it rather than recomputing it.
-        assert_eq!(d.advances, vec![-8.0, -9.0]);
+        assert_eq!(
+            d.glyphs().map(|g| g.advance).collect::<Vec<_>>(),
+            vec![-8.0, -9.0]
+        );
     }
 
     /// The position vector is the half of 9.7.4.3 that has nothing to do with
@@ -1796,7 +2232,7 @@ mod tests {
     #[test]
     fn the_position_vector_shifts_the_glyph_within_its_em_box() {
         let d = run_vertical(b"BT /F0 10 Tf 100 700 Td (AB) Tj ET");
-        let xs: Vec<f64> = d.glyphs.iter().map(|g| g.1).collect();
+        let xs: Vec<f64> = d.glyphs().map(|g| g.transform.e).collect();
         assert_eq!(xs, vec![97.5, 97.0]);
         assert!(
             xs.iter().all(|x| *x != 100.0),
@@ -1814,7 +2250,7 @@ mod tests {
         let d = run_vertical(b"BT /F0 10 Tf 2 Tc 200 Tz 100 700 Td (AB) Tj ET");
 
         assert_eq!(
-            d.glyphs.first().map(|g| (g.1, g.2)),
+            d.glyphs().next().map(|g| (g.transform.e, g.transform.f)),
             Some((95.0, 693.0)),
             "A: v_x doubled by Tz, v_y untouched by it"
         );
@@ -1822,7 +2258,7 @@ mod tests {
         // Character spacing shortens a downward step because the spec adds it
         // to a negative number; scaling it by 2 would put B at y = 682.
         assert_eq!(
-            d.glyphs.get(1).map(|g| (g.1, g.2)),
+            d.glyphs().nth(1).map(|g| (g.transform.e, g.transform.f)),
             Some((94.0, 687.5)),
             "B: one step of -6 down, not -12"
         );
@@ -1838,9 +2274,12 @@ mod tests {
 
         // A is where it always was; the pen is then at (100, 692), and -1000
         // thousandths at 10pt subtracts -10 from y, taking it to 702.
-        assert_eq!(d.glyphs.get(1).map(|g| (g.1, g.2)), Some((97.0, 695.5)));
         assert_eq!(
-            d.glyphs.get(1).map(|g| g.1),
+            d.glyphs().nth(1).map(|g| (g.transform.e, g.transform.f)),
+            Some((97.0, 695.5))
+        );
+        assert_eq!(
+            d.glyphs().nth(1).map(|g| g.transform.e),
             Some(97.0),
             "and the column has not moved sideways, which is what the \
              adjustment used to do"
@@ -1850,14 +2289,20 @@ mod tests {
     #[test]
     fn horizontal_scaling_multiplies_the_advance() {
         let d = run(b"BT /F0 10 Tf 50 Tz (AB) Tj ET");
-        assert_eq!(d.glyphs.get(1).map(|g| g.1), Some(2.5));
+        assert_eq!(d.glyphs().nth(1).map(|g| g.transform.e), Some(2.5));
     }
 
     #[test]
     fn td_and_t_star_move_by_the_leading() {
         let d = run(b"BT /F0 10 Tf 12 TL 5 700 Td (A) Tj T* (B) Tj ET");
-        assert_eq!(d.glyphs.first().map(|g| (g.1, g.2)), Some((5.0, 700.0)));
-        assert_eq!(d.glyphs.get(1).map(|g| (g.1, g.2)), Some((5.0, 688.0)));
+        assert_eq!(
+            d.glyphs().next().map(|g| (g.transform.e, g.transform.f)),
+            Some((5.0, 700.0))
+        );
+        assert_eq!(
+            d.glyphs().nth(1).map(|g| (g.transform.e, g.transform.f)),
+            Some((5.0, 688.0))
+        );
     }
 
     #[test]
@@ -1865,7 +2310,7 @@ mod tests {
         // Mode 3 is what a scanned page's OCR layer uses; extraction must see
         // it even though a renderer paints nothing.
         let d = run(b"BT /F0 10 Tf 3 Tr (hidden) Tj ET");
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(text, "hidden");
     }
 
@@ -1874,22 +2319,22 @@ mod tests {
         let d = run(b"q 2 0 0 2 0 0 cm BT /F0 10 Tf (A) Tj ET Q BT /F0 10 Tf (B) Tj ET");
         // Inside the q/Q the CTM doubles the font size's effect on advance,
         // but both glyphs start at the origin.
-        assert_eq!(d.glyphs.len(), 2);
-        assert_eq!(d.glyphs.first().map(|g| g.1), Some(0.0));
-        assert_eq!(d.glyphs.get(1).map(|g| g.1), Some(0.0));
+        assert_eq!(d.count(EventKind::ShowGlyph), 2);
+        assert_eq!(d.glyphs().next().map(|g| g.transform.e), Some(0.0));
+        assert_eq!(d.glyphs().nth(1).map(|g| g.transform.e), Some(0.0));
     }
 
     #[test]
     fn paths_reach_the_device() {
         let d = run(b"0 0 m 10 10 l S 0 0 100 100 re f");
-        assert_eq!(d.strokes, 1);
-        assert_eq!(d.fills, 1);
+        assert_eq!(d.count(EventKind::StrokePath), 1);
+        assert_eq!(d.count(EventKind::FillPath), 1);
     }
 
     #[test]
     fn an_inline_image_does_not_derail_the_stream() {
         let d = run(b"BI /W 2 /H 2 ID \x00\x01\x02\x03 EI BT /F0 10 Tf (A) Tj ET");
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(text, "A", "text after an inline image still runs");
     }
 
@@ -1913,27 +2358,14 @@ mod tests {
     fn a_non_finite_matrix_is_refused() {
         // Without the guard everything after this would be at NaN.
         let d = run(b"BT /F0 10 Tf 0 0 Td (A) Tj 1 0 0 0 0 0 Tm (B) Tj ET");
-        assert!(d.glyphs.iter().all(|g| g.1.is_finite() && g.2.is_finite()));
+        assert!(d
+            .glyphs()
+            .all(|g| g.transform.e.is_finite() && g.transform.f.is_finite()));
     }
 
     // -----------------------------------------------------------------------
     // Patterns (gap 07, 8.7.3).
     // -----------------------------------------------------------------------
-
-    /// The state as the device saw it when the path was painted.
-    #[derive(Default)]
-    struct Painted {
-        states: Vec<GraphicsState>,
-    }
-
-    impl Device for Painted {
-        fn fill_path(&mut self, _path: &[PathSegment], state: &GraphicsState, _even_odd: bool) {
-            self.states.push(state.clone());
-        }
-        fn stroke_path(&mut self, _path: &[PathSegment], state: &GraphicsState) {
-            self.states.push(state.clone());
-        }
-    }
 
     /// Two uncoloured pattern spaces (8.7.3.2), over different underlying
     /// spaces so a test cannot pass by resolving against the wrong one:
@@ -1972,10 +2404,20 @@ mod tests {
         }
     }
 
-    fn run_patterned(src: &[u8]) -> Painted {
-        let mut d = Painted::default();
+    fn run_patterned(src: &[u8]) -> RecordingDevice {
+        let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, &PatternSpaces);
         d
+    }
+
+    /// The state the stroke saw, copied at the call.
+    ///
+    /// `Painted` kept one `Vec<GraphicsState>` for fills and strokes alike;
+    /// every assertion it fed was about a stroke, and this says so.
+    fn stroke_state(d: &RecordingDevice) -> Option<&GraphicsState> {
+        d.of_kind(EventKind::StrokePath)
+            .next()
+            .and_then(Event::state)
     }
 
     /// 8.7.3.2: a `PaintType 2` pattern paints with the colour the operands
@@ -1994,7 +2436,7 @@ mod tests {
               0 0 m 10 10 l S",
         );
 
-        let state = d.states.first().expect("the stroke reached the device");
+        let state = stroke_state(&d).expect("the stroke reached the device");
         assert_eq!(
             state.fill_color,
             Rgb { r: 255, g: 0, b: 0 },
@@ -2024,7 +2466,7 @@ mod tests {
     fn a_pattern_named_alone_leaves_the_colour_where_it_was() {
         let d = run_patterned(b"0 1 0 RG /P1 SCN 0 0 m 10 10 l S");
 
-        let state = d.states.first().expect("the stroke reached the device");
+        let state = stroke_state(&d).expect("the stroke reached the device");
         assert_eq!(
             state.stroke_color,
             Rgb { r: 0, g: 255, b: 0 },
@@ -2039,7 +2481,7 @@ mod tests {
     fn an_ordinary_stroking_colour_clears_the_stroke_pattern() {
         let d = run_patterned(b"/P1 SCN 0 0 1 RG 0 0 m 10 10 l S");
 
-        let state = d.states.first().expect("the stroke reached the device");
+        let state = stroke_state(&d).expect("the stroke reached the device");
         assert_eq!(state.stroke_pattern, None);
         assert_eq!(state.stroke_color, Rgb { r: 0, g: 0, b: 255 });
     }
@@ -2048,57 +2490,267 @@ mod tests {
     // Marked content and optional content (gap 06, 14.6.2 and 8.11.3.2).
     // -----------------------------------------------------------------------
 
-    /// A device that keeps the nesting the interpreter reports, so a test can
-    /// ask what was in force when something was painted.
+    /// Every scope's own `(visible, layer)`, in order.
     ///
-    /// The counter is exactly what a drawing device has to keep — each scope's
-    /// *own* visibility arrives, so the enclosing answer is this stack — which
-    /// is the point: a test here fails for the same reason the renderer would.
-    #[derive(Default)]
-    struct Scopes {
-        /// Whether each open scope hid its contents, innermost last.
-        open: Vec<bool>,
-        /// Every `begin`, in order: `(visible, layer)`.
-        begins: Vec<(bool, Option<String>)>,
-        /// How many `end`s arrived.
-        ends: usize,
-        /// One entry per fill: whether any scope was hiding it.
-        fills: Vec<bool>,
-        /// One entry per glyph: its text, and whether any scope was hiding it.
-        glyphs: Vec<(String, bool)>,
+    /// Each scope's **own** answer, which is what the device is handed; the
+    /// enclosing answer is [`hidden_fills`] and `hidden_at` below.
+    fn begins(d: &RecordingDevice) -> Vec<(bool, Option<String>)> {
+        d.scopes()
+            .map(|scope| (scope.visible, scope.hidden_layer.clone()))
+            .collect()
     }
 
-    impl Scopes {
-        fn hidden(&self) -> bool {
-            self.open.iter().any(|h| *h)
-        }
-        /// The fills that were painted with nothing hiding them.
-        fn painted(&self) -> usize {
-            self.fills.iter().filter(|hidden| !**hidden).count()
+    /// Every scope's tag, in order.
+    fn scope_tags(d: &RecordingDevice) -> Vec<Vec<u8>> {
+        d.scopes().map(|scope| scope.tag.clone()).collect()
+    }
+
+    /// Every scope's property list, in order.
+    fn scope_props(d: &RecordingDevice) -> Vec<Option<MarkedProps>> {
+        d.scopes().map(|scope| scope.props.clone()).collect()
+    }
+
+    /// One entry per fill: whether **any** scope open at that fill was hiding
+    /// it.
+    ///
+    /// Derived rather than stored, which is the whole nesting argument: the
+    /// device keeps each scope's own answer and this walks the stack, exactly
+    /// as a drawing device must — so a test here fails for the same reason
+    /// the renderer would.
+    fn hidden_fills(d: &RecordingDevice) -> Vec<bool> {
+        d.indices(EventKind::FillPath)
+            .map(|index| d.hidden_at(index))
+            .collect()
+    }
+
+    /// The fills that were painted with nothing hiding them.
+    fn painted(d: &RecordingDevice) -> usize {
+        hidden_fills(d).iter().filter(|hidden| !**hidden).count()
+    }
+
+    /// The property lists the interpreter reported, in order.
+    fn props_of(source: &[u8]) -> Vec<Option<MarkedProps>> {
+        scope_props(&run_layers(source))
+    }
+
+    /// The tags it reported, as strings.
+    fn tags_of(source: &[u8]) -> Vec<String> {
+        scope_tags(&run_layers(source))
+            .iter()
+            .map(|tag| String::from_utf8_lossy(tag).into_owned())
+            .collect()
+    }
+
+    /// 14.7.4.2: a marked sequence carries the stream its `BDC` was written
+    /// in, and a nested form's is its own rather than its caller's.
+    ///
+    /// Three sequences all numbered 0 — the page's, a form's, and a form that
+    /// form invokes — which without the stream identity are one sequence
+    /// numbered three times. The stack has to unwind too: the identity is a
+    /// property of where the `BDC` is, so a form that has returned must not
+    /// leave its own on the next sequence its caller opens.
+    #[test]
+    fn a_marked_sequence_carries_the_stream_its_bdc_was_written_in() {
+        let props = props_of(b"/P << /MCID 0 >> BDC 0 0 2 2 re f EMC /OuterFrm Do");
+
+        let sequences: Vec<(u64, Option<u32>)> = props
+            .iter()
+            .map(|p| p.as_ref().map_or((0, None), |p| (p.stream, p.mcid)))
+            .collect();
+        assert_eq!(
+            sequences,
+            vec![(0, Some(0)), (0x3_0000, Some(0)), (0x4_0000, Some(0))],
+            "the page's own stream is 0, and the innermost form is the one \
+             that wrote the sequence"
+        );
+    }
+
+    /// The common form: `/P << /MCID 3 >> BDC`.
+    ///
+    /// 14.7.4.2 puts `/MCID` in the property list, and 7.8.2 flattens that
+    /// list to tokens — so this is the reassembly working, and without it a
+    /// tagged page has no marked content this engine can see at all.
+    #[test]
+    fn an_inline_property_list_yields_its_mcid() {
+        let props = props_of(b"/P << /MCID 3 >> BDC 0 0 2 2 re f EMC");
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].as_ref().and_then(|p| p.mcid), Some(3));
+        assert_eq!(
+            tags_of(b"/P << /MCID 3 >> BDC EMC"),
+            vec!["P"],
+            "the tag is the name before the `<<`, not the last value inside it"
+        );
+    }
+
+    /// 14.9's four values, inline, beside the `/MCID` and around entries this
+    /// build reads past.
+    ///
+    /// `/BBox` is an array and `/A` a nested dictionary: both are values a
+    /// property list legitimately carries, and a scan that stepped *into*
+    /// either would read their members as top-level keys and find an `/E`
+    /// that is not the abbreviation expansion.
+    #[test]
+    fn an_inline_property_list_yields_the_accessibility_values() {
+        let props = props_of(
+            b"/Span << /Type /Pagination /BBox [0 0 9 9] /MCID 12 \
+                /ActualText (fi) /Alt (a ligature) /Lang (en-GB) /E (etc.) \
+                /A << /E (not this one) >> >> BDC 0 0 2 2 re f EMC",
+        );
+        let props = props[0].clone().expect("a property list");
+        assert_eq!(props.mcid, Some(12));
+        assert_eq!(props.actual_text.as_deref(), Some("fi"));
+        assert_eq!(props.alt.as_deref(), Some("a ligature"));
+        assert_eq!(props.lang.as_deref(), Some("en-GB"));
+        assert_eq!(
+            props.expansion.as_deref(),
+            Some("etc."),
+            "the /E read is the one at the top level, not the one inside /A"
+        );
+    }
+
+    /// 7.9.2.2: the four are *text strings*, so a UTF-16BE one decodes rather
+    /// than arriving as interleaved NULs.
+    #[test]
+    fn an_inline_text_string_is_decoded_by_the_documents_rules() {
+        let props = props_of(b"/Span << /MCID 0 /Alt <FEFF00660069> >> BDC EMC");
+        assert_eq!(
+            props[0].as_ref().and_then(|p| p.alt.clone()).as_deref(),
+            Some("fi")
+        );
+    }
+
+    /// `/P /MC0 BDC`: the same values through the `/Properties` seam.
+    ///
+    /// The two forms must be indistinguishable at the device, because 14.6.2
+    /// gives a consumer no reason to care which one a producer chose.
+    #[test]
+    fn a_named_property_list_yields_the_same_values() {
+        let props = props_of(b"/P /MC0 BDC 0 0 2 2 re f EMC");
+        let props = props[0].clone().expect("a property list");
+        assert_eq!(props.mcid, Some(7));
+        assert_eq!(props.alt.as_deref(), Some("a named list"));
+    }
+
+    /// A name the resources define as *optional content* and not as a
+    /// property list answers the layer question and not this one, and the
+    /// other way round. Neither lookup may stand in for the other.
+    #[test]
+    fn the_two_property_lookups_are_independent() {
+        let d = &run_layers(b"/OC /Off BDC EMC /P /Plain BDC EMC");
+        assert_eq!(
+            begins(d)[0],
+            (false, Some("Construction lines".to_string())),
+            "/Off is a layer"
+        );
+        assert!(scope_props(d)[0].is_none(), "and carries no /MCID");
+        assert_eq!(begins(d)[1], (true, None), "/Plain is not a layer");
+        assert!(
+            scope_props(d)[1].is_none(),
+            "and is not a property list either"
+        );
+    }
+
+    /// Every shape of malformed list: **no `/MCID`, and a visible scope.**
+    ///
+    /// The direction is the one already ruled for `/OC` — a list this build
+    /// cannot read must not be able to hide content, and must not invent an
+    /// identifier either, because an invented one joins content to the wrong
+    /// structure element and reads as a reordering rather than as damage.
+    #[test]
+    fn a_malformed_property_list_yields_no_mcid_and_a_visible_scope() {
+        let cases: &[&[u8]] = &[
+            b"/P << >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID (three) >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID -1 >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID 2.5 >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID [1] >> BDC 0 0 2 2 re f EMC",
+            // Unbalanced: no `<<` for the `>>` to match.
+            b"/P /MCID 3 >> BDC 0 0 2 2 re f EMC",
+            // A bare value run with no key at all.
+            b"/P << 1 2 3 >> BDC 0 0 2 2 re f EMC",
+            b"/P << /MCID /Three >> BDC 0 0 2 2 re f EMC",
+            b"BDC 0 0 2 2 re f EMC",
+        ];
+        for source in cases {
+            let d = run_layers(source);
+            let what = String::from_utf8_lossy(source);
+            assert_eq!(hidden_fills(&d), vec![false], "{what} should paint");
+            assert_eq!(
+                d.count(EventKind::BeginMarkedContent),
+                1,
+                "{what} should open one scope"
+            );
+            assert_eq!(
+                scope_props(&d)[0].as_ref().and_then(|p| p.mcid),
+                None,
+                "{what} should name no marked sequence"
+            );
         }
     }
 
-    impl Device for Scopes {
-        fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, hidden_layer: Option<&str>) {
-            self.open.push(!visible);
-            self.begins
-                .push((visible, hidden_layer.map(str::to_string)));
-        }
-        fn end_marked_content(&mut self) {
-            self.ends += 1;
-            // Counted separately from the stack, so a pop with nothing open
-            // is visible as `ends > begins` rather than silently absorbed —
-            // which is what a real device's `saturating_sub` would do.
-            self.open.pop();
-        }
-        fn fill_path(&mut self, _path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
-            let hidden = self.hidden();
-            self.fills.push(hidden);
-        }
-        fn show_glyph(&mut self, glyph: &Glyph, _state: &GraphicsState) {
-            let hidden = self.hidden();
-            self.glyphs.push((glyph.text.clone(), hidden));
-        }
+    /// An `/MCID` nested inside a hidden `/OC` scope.
+    ///
+    /// The two are orthogonal: 8.11.3.2 decides whether the *renderer* paints
+    /// and 14.7.4.2 decides what the *structure tree* claims, so a paragraph
+    /// inside a layer that is switched off is still that paragraph. A build
+    /// that let visibility gate the property list would drop a tagged
+    /// document's alternate-language content out of its own reading order.
+    #[test]
+    fn a_property_list_survives_nesting_inside_a_hidden_layer() {
+        let d = run_layers(
+            b"/OC /Off BDC \
+                /P << /MCID 4 >> BDC 0 0 2 2 re f EMC \
+              EMC \
+              /P << /MCID 5 >> BDC 0 0 3 3 re f EMC",
+        );
+
+        assert_eq!(
+            begins(&d),
+            vec![
+                (false, Some("Construction lines".to_string())),
+                (true, None),
+                (true, None)
+            ],
+            "the layer hides, the two paragraphs do not"
+        );
+        assert_eq!(
+            scope_props(&d)
+                .iter()
+                .map(|p| p.as_ref().and_then(|p| p.mcid))
+                .collect::<Vec<_>>(),
+            vec![None, Some(4), Some(5)],
+            "the hidden scope carries no identifier and the nested one does"
+        );
+        assert_eq!(
+            hidden_fills(&d),
+            vec![true, false],
+            "and only the painting was suppressed"
+        );
+        assert_eq!(d.count(EventKind::EndMarkedContent), 3);
+    }
+
+    /// 14.6.1: `BMC` has no property list at all, so it can carry no `/MCID`.
+    #[test]
+    fn a_bmc_carries_no_properties() {
+        let d = run_layers(b"/Span BMC 0 0 2 2 re f EMC");
+        assert_eq!(scope_tags(&d), vec![b"Span".to_vec()]);
+        assert_eq!(scope_props(&d), vec![None]);
+    }
+
+    /// An `/Artifact` with an inline property list is an artifact.
+    ///
+    /// The tag lives before the `<<`, and the peek this replaced read the
+    /// dictionary's last *value* instead — so an artifact written this way
+    /// reported its tag as `Pagination`, and the text device, which excludes
+    /// artifacts by tag (14.8.2.2), extracted a running head as though it were
+    /// the author's own content.
+    #[test]
+    fn an_artifact_with_an_inline_list_is_still_tagged_artifact() {
+        assert_eq!(
+            tags_of(b"/Artifact << /Type /Pagination /BBox [0 0 9 9] >> BDC EMC"),
+            vec!["Artifact"]
+        );
     }
 
     /// `/Off` names a layer the configuration hides, `/On` one it shows, and
@@ -2107,6 +2759,12 @@ mod tests {
     /// Three answers rather than two, because "hidden" and "not a layer" are
     /// different `None`s and a seam that collapsed them would hide every
     /// `/Span`.
+    ///
+    /// It also answers the *second* question the same `/Properties`
+    /// sub-dictionary is asked (14.6.2): `/MC0` is a named property list
+    /// carrying an `/MCID` and an `/Alt`, and `/Plain` deliberately answers
+    /// neither question — which is what says the two lookups are independent
+    /// rather than one lookup asked twice.
     struct Layers;
 
     impl FontSource for Layers {
@@ -2141,6 +2799,7 @@ mod tests {
                     matrix: Matrix::IDENTITY,
                     bbox: None,
                     group: None,
+                    stream: 0x1_0000,
                 }),
                 // A well-behaved form, used to test the `/OC` on the XObject
                 // itself rather than anything in its content.
@@ -2149,6 +2808,24 @@ mod tests {
                     matrix: Matrix::IDENTITY,
                     bbox: None,
                     group: None,
+                    stream: 0x2_0000,
+                }),
+                // One form invoking another, each numbering a sequence 0.
+                // 14.7.4.2 numbers within a stream, so the two are different
+                // sequences and only the stream identity says so.
+                b"OuterFrm" => Some(Form {
+                    content: b"/P << /MCID 0 >> BDC 0 0 5 5 re f EMC /InnerFrm Do".to_vec(),
+                    matrix: Matrix::IDENTITY,
+                    bbox: None,
+                    group: None,
+                    stream: 0x3_0000,
+                }),
+                b"InnerFrm" => Some(Form {
+                    content: b"/P << /MCID 0 >> BDC 0 0 5 5 re f EMC".to_vec(),
+                    matrix: Matrix::IDENTITY,
+                    bbox: None,
+                    group: None,
+                    stream: 0x4_0000,
                 }),
                 _ => None,
             }
@@ -2159,10 +2836,21 @@ mod tests {
                 label: "Construction lines".to_string(),
             })
         }
+        fn marked_content_properties(&self, name: &[u8]) -> Option<MarkedProps> {
+            // Only `/MC0` is a property list. `/Off`, `/On` and `/Plain` reach
+            // here too and answer nothing, which is what makes the two
+            // `/Properties` questions independent rather than one question
+            // asked twice.
+            (name == b"MC0").then(|| MarkedProps {
+                mcid: Some(7),
+                alt: Some("a named list".to_string()),
+                ..MarkedProps::default()
+            })
+        }
     }
 
-    fn run_layers(src: &[u8]) -> Scopes {
-        let mut d = Scopes::default();
+    fn run_layers(src: &[u8]) -> RecordingDevice {
+        let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, &Layers);
         d
     }
@@ -2186,15 +2874,15 @@ mod tests {
               0 0 5 5 re f",
         );
 
-        assert_eq!(d.fills.len(), 5, "every fill reached the device");
+        assert_eq!(hidden_fills(&d).len(), 5, "every fill reached the device");
         assert_eq!(
-            d.fills,
+            hidden_fills(&d),
             vec![false, true, true, true, false],
             "the three inside the /Off scope are hidden, including the two \
              nested ones"
         );
-        assert_eq!(d.painted(), 2);
-        assert_eq!(d.ends, 3, "one EMC per BDC");
+        assert_eq!(painted(&d), 2);
+        assert_eq!(d.count(EventKind::EndMarkedContent), 3, "one EMC per BDC");
     }
 
     /// M2's second exit criterion: an unbalanced `EMC` does not underflow.
@@ -2207,9 +2895,13 @@ mod tests {
     fn a_stray_emc_is_dropped_rather_than_underflowing() {
         let d = run_layers(b"EMC EMC EMC EMC /OC /Off BDC 0 0 2 2 re f EMC EMC EMC 0 0 3 3 re f");
 
-        assert_eq!(d.begins.len(), 1);
-        assert_eq!(d.ends, 1, "six of the seven EMCs had nothing to close");
-        assert_eq!(d.fills, vec![true, false]);
+        assert_eq!(d.count(EventKind::BeginMarkedContent), 1);
+        assert_eq!(
+            d.count(EventKind::EndMarkedContent),
+            1,
+            "six of the seven EMCs had nothing to close"
+        );
+        assert_eq!(hidden_fills(&d), vec![true, false]);
     }
 
     /// 14.6.2: a stream may end inside a scope, and the device must not be
@@ -2218,21 +2910,25 @@ mod tests {
     #[test]
     fn an_unclosed_scope_is_closed_at_the_end_of_its_stream() {
         let d = run_layers(b"/OC /Off BDC 0 0 2 2 re f");
-        assert_eq!(d.begins.len(), 1);
-        assert_eq!(d.ends, 1, "the page's own trailing scope was closed");
-        assert!(d.open.is_empty());
+        assert_eq!(d.count(EventKind::BeginMarkedContent), 1);
+        assert_eq!(
+            d.count(EventKind::EndMarkedContent),
+            1,
+            "the page's own trailing scope was closed"
+        );
+        assert!(d.open_scopes().is_empty());
 
         // `Frm` opens one scope it never closes and closes one it never
         // opened. Neither may reach the page: the fill after the form is
         // outside every layer.
         let d = run_layers(b"/Frm Do 0 0 9 9 re f");
         assert_eq!(
-            d.fills,
+            hidden_fills(&d),
             vec![true, false],
             "the form's own fill is hidden and the page's is not"
         );
-        assert_eq!(d.begins.len(), 1);
-        assert_eq!(d.ends, 1);
+        assert_eq!(d.count(EventKind::BeginMarkedContent), 1);
+        assert_eq!(d.count(EventKind::EndMarkedContent), 1);
     }
 
     /// 8.11.3.2: only an `/OC` tag selects optional content.
@@ -2241,8 +2937,8 @@ mod tests {
         // `/Off` is a hidden layer, but the tag here is `/Span`, so the name
         // is an ordinary property list and the fill paints.
         let d = run_layers(b"/Span /Off BDC 0 0 2 2 re f EMC");
-        assert_eq!(d.fills, vec![false]);
-        assert_eq!(d.begins, vec![(true, None)]);
+        assert_eq!(hidden_fills(&d), vec![false]);
+        assert_eq!(begins(&d), vec![(true, None)]);
     }
 
     /// Ruling 10: the scope that hides carries the layer's name, so a device
@@ -2251,7 +2947,7 @@ mod tests {
     fn a_hidden_scope_names_its_layer() {
         let d = run_layers(b"/OC /Off BDC 0 0 2 2 re f EMC");
         assert_eq!(
-            d.begins,
+            begins(&d),
             vec![(false, Some("Construction lines".to_string()))]
         );
     }
@@ -2277,7 +2973,7 @@ mod tests {
         ] {
             let d = run_layers(src);
             assert_eq!(
-                d.fills,
+                hidden_fills(&d),
                 vec![false],
                 "{} should paint",
                 String::from_utf8_lossy(src)
@@ -2298,10 +2994,14 @@ mod tests {
               0 0 3 3 re f",
         );
 
-        assert_eq!(d.begins.len(), 1, "only the BMC opened a scope");
-        assert_eq!(d.begins, vec![(true, None)]);
-        assert_eq!(d.ends, 1);
-        assert_eq!(d.fills, vec![false, false], "both fills painted");
+        assert_eq!(
+            d.count(EventKind::BeginMarkedContent),
+            1,
+            "only the BMC opened a scope"
+        );
+        assert_eq!(begins(&d), vec![(true, None)]);
+        assert_eq!(d.count(EventKind::EndMarkedContent), 1);
+        assert_eq!(hidden_fills(&d), vec![false, false], "both fills painted");
     }
 
     /// Hidden content still runs. The pen advances, `q`/`Q` balance, and the
@@ -2314,10 +3014,12 @@ mod tests {
               BT /F0 10 Tf (C) Tj ET",
         );
 
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(text, "ABC", "the hidden glyphs were still shown");
         assert_eq!(
-            d.glyphs.iter().map(|g| g.1).collect::<Vec<_>>(),
+            d.indices(EventKind::ShowGlyph)
+                .map(|index| d.hidden_at(index))
+                .collect::<Vec<_>>(),
             vec![true, true, false],
             "and only their painting was marked hidden"
         );
@@ -2333,62 +3035,74 @@ mod tests {
         let d = run_layers(b"/PlainFrm Do /HiddenFrm Do 0 0 9 9 re f");
 
         assert_eq!(
-            d.fills,
+            hidden_fills(&d),
             vec![false, true, false],
             "the plain form paints, the hidden one does not, and the page \
              after both does"
         );
-        let text: String = d.glyphs.iter().map(|g| g.0.as_str()).collect();
+        let text: String = d.glyphs().map(|g| g.text.as_str()).collect();
         assert_eq!(
             text, "form textform text",
             "the hidden form was still interpreted"
         );
         assert_eq!(
-            d.begins,
+            begins(&d),
             vec![(false, Some("Construction lines".to_string()))],
             "one scope, opened around the `Do` rather than inside the form"
         );
-        assert_eq!(d.ends, 1);
-        assert!(d.open.is_empty());
+        assert_eq!(d.count(EventKind::EndMarkedContent), 1);
+        assert!(d.open_scopes().is_empty());
     }
 
     /// An image XObject is the branch where `form` returns `None`, so it is
-    /// asserted separately: a hidden one must not even be handed to the
-    /// device, or the device decodes it to find out it cannot.
+    /// asserted separately: a hidden one is wrapped in a hidden scope, and a
+    /// device that honours the scope never decodes it to find out it cannot.
+    ///
+    /// **This test used to be named `…_is_not_handed_to_the_device`, and the
+    /// device it drove claimed in a comment to record "whether it was asked at
+    /// all, which is the stronger property".** It did not: its `draw_image`
+    /// returned early while a scope was hiding, so it recorded what it *drew*.
+    /// `run_xobject` calls `draw_image` unconditionally — the `/OC` on the
+    /// XObject opens a scope around the `Do` and nothing else — so the hidden
+    /// image *is* handed over, and the claim was false about the code beside
+    /// it. The promoted recorder makes the difference visible rather than
+    /// absorbing it, because it keeps the call and derives the suppression;
+    /// the last assertion is the property the comment was reaching for, now
+    /// stated in the direction that is true.
     #[test]
-    fn a_hidden_image_xobject_is_not_handed_to_the_device() {
-        #[derive(Default)]
-        struct Images {
-            drawn: Vec<Vec<u8>>,
-            open: Vec<bool>,
-        }
-        impl Device for Images {
-            fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, _layer: Option<&str>) {
-                self.open.push(!visible);
-            }
-            fn end_marked_content(&mut self) {
-                self.open.pop();
-            }
-            fn draw_image(&mut self, image: &ImageRef, _state: &GraphicsState) {
-                // A drawing device suppresses here; this one records whether
-                // it was asked at all, which is the stronger property for a
-                // codec that would otherwise be reported as unsupported.
-                if self.open.iter().any(|hidden| *hidden) {
-                    return;
-                }
-                self.drawn.push(image.name.clone());
-            }
-        }
-
-        let mut d = Images::default();
+    fn a_hidden_image_xobject_arrives_inside_a_hidden_scope() {
+        let mut d = RecordingDevice::new();
         interpret(
             b"/PlainImg Do /HiddenImg Do",
             Matrix::IDENTITY,
             &mut d,
             &Layers,
         );
-        assert_eq!(d.drawn, vec![b"PlainImg".to_vec()]);
-        assert!(d.open.is_empty());
+
+        let drawn: Vec<Vec<u8>> = d
+            .indices(EventKind::DrawImage)
+            .filter(|index| !d.hidden_at(*index))
+            .filter_map(|index| match &d.events()[index] {
+                Event::DrawImage { image, .. } => Some(image.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn, vec![b"PlainImg".to_vec()]);
+        assert!(d.open_scopes().is_empty());
+
+        let offered: Vec<Vec<u8>> = d
+            .of_kind(EventKind::DrawImage)
+            .filter_map(|event| match event {
+                Event::DrawImage { image, .. } => Some(image.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offered,
+            vec![b"PlainImg".to_vec(), b"HiddenImg".to_vec()],
+            "both were handed over; only the scope around the second one \
+             tells a device not to decode it"
+        );
     }
 
     /// Depth is bounded, and running out of it shows content rather than
@@ -2423,18 +3137,22 @@ mod tests {
         src.extend_from_slice(b"0 0 3 3 re f EMC 0 0 4 4 re f");
 
         let d = run_layers(&src);
-        assert_eq!(d.begins.len(), cap, "the cap held");
-        assert_eq!(d.begins.len(), d.ends, "and every one was closed");
-        assert!(d.open.is_empty());
+        assert_eq!(d.count(EventKind::BeginMarkedContent), cap, "the cap held");
         assert_eq!(
-            d.fills,
+            d.count(EventKind::BeginMarkedContent),
+            d.count(EventKind::EndMarkedContent),
+            "and every one was closed"
+        );
+        assert!(d.open_scopes().is_empty());
+        assert_eq!(
+            hidden_fills(&d),
             vec![true, true, false],
             "the fill inside is hidden; so is the one after the unwinding, \
              because the outermost scope is still open; only the fill after \
              its own EMC paints"
         );
         assert!(
-            d.begins.iter().filter(|(visible, _)| !*visible).count() == 1,
+            begins(&d).iter().filter(|(visible, _)| !*visible).count() == 1,
             "the three scopes past the cap were refused, and a refused scope \
              is a visible one"
         );

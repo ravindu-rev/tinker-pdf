@@ -88,14 +88,17 @@ now, and reviews enforce all four.
    engine crates. This is ruling 1 in [docs/rulings.md](docs/rulings.md) and
    the fuzzers enforce it — a fuzz crash blocks a release.
 
-3. **Leaf crates stay PDF-free.** `filters`, `crypto`, `font`, `color`,
-   `raster`, `math`, `zip`, `xml`, `css` and `layout` — **ten** — take bytes
-   and plain parameter structs, return bytes and values. No COS types, no PDF
-   vocabulary in their public APIs. That is what keeps them independently
-   fuzzable, testable and publishable. This is ruling 8 in
-   [docs/rulings.md](docs/rulings.md), and the test of it is the definition
-   rather than the list: if a crate takes bytes and returns values, it is a
-   leaf and this rule binds it.
+3. **Leaf crates stay PDF-free.** A leaf takes bytes and plain parameter
+   structs and returns bytes and values. No COS types, no PDF vocabulary in
+   their public APIs. That is what keeps them independently fuzzable, testable
+   and publishable. This is ruling 8 in [docs/rulings.md](docs/rulings.md),
+   and the test of it is the definition rather than the list: if a crate takes
+   bytes and returns values, it is a leaf and this rule binds it. The current
+   membership is counted in [docs/architecture.md](docs/architecture.md), in
+   one place, deliberately — this paragraph used to carry its own copy and had
+   drifted to ten names against that file's twelve, which is the third time
+   ruling 8's list has drifted and the reason the ruling made the definition
+   binding rather than the enumeration.
 
 4. **The docs are the record.** Every crate's doc comment names the feature
    doc that describes it ([docs/README.md](docs/README.md) indexes them). A
@@ -112,6 +115,46 @@ Roadmap items carry **exit criteria** that are deliberately concrete — a
 test that runs, a corpus number, a counted injection — and a design doc when
 the item is large. Build to the exit criteria and treat a design doc's milestone
 table as the commit boundary set.
+
+**Two ways a counted injection lies, and both have happened here.**
+
+A campaign reports how many assertions fire when a defect is put back, *including
+when the answer is zero*, because a plausible break that fires nothing means the
+suite does not test what it claims. That only works if the harness is measuring
+what it thinks it is:
+
+- **`--no-fail-fast` belongs before `-p`, not after `--`.** Everything after
+  `--` goes to the *test binary*, which does not know the flag and rejects it —
+  so the run produces no `failures:` block, a harness that scrapes for one finds
+  nothing, and every injection reports zero. A whole six-defect campaign read as
+  six zeros for this reason before anybody noticed the shape of the answer.
+  Write `cargo test --no-fail-fast -p <crate>`.
+- **A campaign whose subject can skip must force it to run.** An oracle that
+  needs a fetched corpus or an external file exits 0 when it is absent, so an
+  injection against it fires nothing and reads as a suite that does not care.
+  Set whatever the suite's own "required" switch is — for the EPUB corpus that
+  is `TINKER_EPUB_CORPUS_REQUIRED=1`, and the path it is given must be
+  absolute, because a test binary's working directory is its crate root.
+- **Setting the "required" switch does not make an `#[ignore]`d test run.**
+  Most corpus suites here are `#[ignore]`d so that `cargo test` stays
+  independent of fetched data, and `TINKER_CORPUS_REQUIRED` is read *inside the
+  test body*. Without `-- --ignored` the body never executes: the run exits 0,
+  prints no banner, and reads exactly like a pass. Write
+  `cargo test -p tinker-pdf --test jpx_attribution -- --ignored --nocapture`
+  and then grep your own output for the `RAN` line. The two switches answer
+  different questions — `--ignored` decides whether the test runs at all, and
+  `TINKER_CORPUS_REQUIRED` decides whether a missing corpus is a failure once
+  it has.
+- **A campaign that dies mid-run leaves the source injected.** The harness
+  mutates a file in place and restores it, so an interruption between those
+  two steps leaves a deliberate defect in the tree looking like ordinary
+  work. One campaign here crashed on a Windows codepage decode after four
+  injections and lost two counts. Check `git status` and re-run the suite
+  before trusting anything a partial campaign reported, and treat a count
+  from a run that did not finish as absent rather than as zero.
+
+A row of zeros is a result about the harness at least as often as about the
+suite. Check the instrument before believing it.
 
 Warnings are data, not log lines: every leniency the engine performs emits a
 typed, object-addressed warning (ruling 10), so "it opened" and "it opened
@@ -146,7 +189,7 @@ whose file has stopped spawning fails too, so an allowance cannot outlive
 the thing it allowed.
 
 **Every row is `PERMANENT`, and none of them adjudicates a document.** What is
-left spawns `rustc` to prove a type refuses a state, `curl` and `tar` to fetch
+left spawns `rustc` to prove a type refuses a state, `curl`, `tar` and `unzip` to fetch
 corpora this repository then verifies against its own SHA-256, `cargo` to build
 and publish, and the corpus child, which is a workspace binary built from the
 same revision. The four qpdf rows left with the strict validator, the mutool row

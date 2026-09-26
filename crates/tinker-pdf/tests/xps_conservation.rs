@@ -34,6 +34,29 @@
 //! with the figure written down in `tests/xps/CONSERVATION.tsv` so a change
 //! that moves it has to say so in the same commit.
 //!
+//! # What the third producer did to all of that
+//!
+//! Tier 4 added five Ghostscript packages, and they moved the sweep in three
+//! ways worth naming here rather than leaving in a diff.
+//!
+//! **The scale.** The eight Microsoft packages state at most six facts each.
+//! `gs-gradients.xps` states 1 115, `gs-rasterised-text.xps` 715 and
+//! `gs-embedded-font.xps` 590, because `xpswrite` decomposes gradients and text
+//! into one filled path per device unit. The comparator had never been run over
+//! a page with more than three marks on it.
+//!
+//! **The defect it found, in this file's own scanner.** 11.2.3's fill-rule
+//! prefix is `"F" wsp* ("0"|"1")`, and `data_bounds` stripped `F0` and `F1`
+//! only — which is the whole of what WPF and the object model write, because
+//! neither writes an `F` at all. Ghostscript writes `F 1`, the scanner met an
+//! unknown command, and two of `gs-paths.xps`'s six marks censused as having no
+//! bounds. The engine had it right; the independent walk did not. Corrected
+//! against the clause, and it is exactly the class of hole a second producer
+//! exists to find.
+//!
+//! **The one package the sweep cannot cover**, which is named below in a test
+//! of its own rather than dropped from a list.
+//!
 //! # The injections that were counted before the oracle left
 //!
 //! Ruling 13's order is that nothing is deleted before the check replacing it
@@ -1131,12 +1154,22 @@ fn every_committed_package_conserves_the_figure_the_record_states() {
         measured, recorded,
         "tests/xps/CONSERVATION.tsv is out of date"
     );
-    assert_eq!(recorded.len(), 8, "the committed corpus is eight packages");
+    assert_eq!(recorded.len(), 13, "the sweep covers thirteen packages");
 }
 
-/// The committed corpus, which is the list of packages rather than the record
-/// of what they measured.
+/// The packages the sweep covers, which is the list rather than the record of
+/// what they measured.
+///
+/// **Twelve of the thirteen committed packages**, and the thirteenth is named
+/// below rather than left out quietly.
 const COMMITTED: &[&str] = &[
+    "gs-embedded-font.xps",
+    "gs-gradients.xps",
+    // Joined the sweep on 14 September 2026, which is what the test below now
+    // records: its two pictures were the only thing keeping it out.
+    "gs-images.xps",
+    "gs-paths.xps",
+    "gs-rasterised-text.xps",
     "wpf-gradients.xps",
     "wpf-image-and-text.xps",
     "wpf-jpeg-image.xps",
@@ -1146,6 +1179,66 @@ const COMMITTED: &[&str] = &[
     "xpsom-gradients.oxps",
     "xpsom-image-and-text.oxps",
 ];
+
+/// **The package the sweep used to exclude, and what let it in.**
+///
+/// This test used to assert a divergence. Its own words were that "the day
+/// this build learns to read a TIFF, **this test fails** and the package joins
+/// the sweep in the same commit" — and that day was 14 September 2026, though
+/// TIFF was not what was missing in the end.
+///
+/// Ghostscript writes every picture as a TIFF part named through a
+/// `{ColorConvertedBitmap picture profile}` wrapper. The wrapper was refused by
+/// name, so ruling 2's grey placeholder reached the page and a census of what
+/// the markup *states* could never equal a census of what a refusal *drew*.
+/// Reading the wrapper — the picture drawn, the profile embedded as the
+/// `/ICCBased` space its samples are values in — closed the divergence, and
+/// `gs-images.xps` is in `COMMITTED` above.
+///
+/// **Two gaps in this harness had to close with it, and neither was the
+/// engine's.** The census could not measure a TIFF's dimensions, so it counted
+/// zero pictures on a page that states two; and it read a transform only in
+/// its attribute spelling, so the pictures it did count landed in the wrong
+/// place. Both are fixed in `xps_support/conservation.rs`, and both were
+/// invisible until a package needed them.
+///
+/// What is left here is the assertion that the pictures are drawn **and that
+/// the profile went with them**: two `/ICCBased` spaces in the document, one
+/// per picture, because Ghostscript writes a profile part per image.
+#[test]
+fn the_package_that_used_to_be_excluded_now_conserves_with_its_profiles() {
+    let bytes = corpus("gs-images.xps");
+    let markup = markup_census(&bytes);
+    let verdict = conservation(&bytes);
+
+    assert_eq!(markup.pages.len(), 1);
+    assert_eq!(markup.solids(), 1, "the page's white background");
+    assert_eq!(markup.images(), 2, "both pictures are addressable now");
+    assert!(verdict.holds(), "{:?}", verdict.divergences);
+
+    // No refusal is left on the element, which is what the old assertion was
+    // counting.
+    let document = Document::open(bytes).expect("gs-images.xps opens");
+    let report = document.archive().expect("a report");
+    let refusals: Vec<&tinker_pdf::ArchiveWarning> = report
+        .warnings()
+        .iter()
+        .filter(|w| {
+            matches!(
+                w,
+                tinker_pdf::ArchiveWarning::XpsElement {
+                    defect: tinker_pdf::XpsElementDefect::ImageProfileUnsupported,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        refusals.is_empty(),
+        "the wrapper is read, not refused: {:?}",
+        report.warnings()
+    );
+}
 
 /// **The two dialects of one document conserve the same census.**
 ///

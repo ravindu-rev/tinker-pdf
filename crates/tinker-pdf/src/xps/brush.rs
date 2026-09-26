@@ -47,10 +47,45 @@ const SPREAD_COPIES: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Colour {
     /// Red, green and blue, each from zero to one.
+    ///
+    /// For a `ContextColor` this is 8.6.5.5's default-`/Alternate` reading of
+    /// the components — see [`ContextColour`]. Every other form states it
+    /// directly.
     pub rgb: [f64; 3],
     /// Alpha, from zero to one. 15.2.4's `#RRGGBB` form has none and means
     /// one.
     pub alpha: f64,
+}
+
+/// 15.2.5's `ContextColor <uri> a,c1,…,cn`, parsed and not resolved.
+///
+/// # Why this is a [`Paint`] and not a field on [`Colour`]
+///
+/// A `ContextColor` becomes a PDF `/ICCBased` colour space, and a colour space
+/// is a property of the **operator that sets a colour**, not of a number. A
+/// gradient *stop* cannot have one at all: 8.7.4.5's shading states one space
+/// for the whole function and a stop is not free to pick its own. So a stop
+/// reads [`Colour::rgb`] — the default-`/Alternate` reading — and the gradient
+/// says it approximated, while a `SolidColorBrush` carries the components
+/// verbatim through here and loses nothing.
+///
+/// The part is carried unresolved for [`Paint::Image`]'s reason: reading it
+/// needs the package, and this module is pure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextColour {
+    /// The profile part, verbatim. Resolved against the fixed page's own name.
+    pub profile: String,
+    /// The components, in the profile's own space, in the order stated.
+    ///
+    /// One to [`super::MAX_XPS_COLOUR_CHANNELS`] of them. The alpha is **not**
+    /// among them: 15.2.5 puts it first in the list and it is a coverage, not
+    /// a colour component, so it is lifted into [`Colour::alpha`] where every
+    /// other form keeps it.
+    pub components: Vec<f64>,
+    /// 8.6.5.5's default-`/Alternate` reading of those components, for the
+    /// callers that cannot name a colour space and for a profile part that is
+    /// not there.
+    pub fallback: [f64; 3],
 }
 
 /// Why a brush did not become paint.
@@ -59,15 +94,20 @@ pub struct Colour {
 /// names and a reader of the report has to be able to tell "this file says
 /// something I cannot read" from "this file says something this build does not
 /// draw yet".
+/// One variant, and it used to be two.
+///
+/// The second was `Unsupported` — "it is a brush and this build does not paint
+/// it" — and nothing produces it any more. An `ImageBrush` became a tiling
+/// pattern, a gradient learned to stroke and to set text through a shading
+/// pattern, a `VisualBrush` became a pattern whose cell is a drawing, and a
+/// `ContextColor` became an `/ICCBased` colour space. What is left is the
+/// file being wrong rather than this build being short, so the distinction
+/// the two names carried no longer exists and keeping it would be a refusal
+/// with nothing behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrushError {
     /// The markup is not 15's brush syntax.
     Syntax,
-    /// It is a brush and this milestone does not paint it: an `ImageBrush` or
-    /// a `VisualBrush` (both gap 30 milestone 8), or a `ContextColor` naming
-    /// an ICC profile (a non-goal of the whole plan, because 15.2.5's syntax
-    /// has nowhere to put an sRGB fallback).
-    Unsupported,
 }
 
 /// What an element paints with.
@@ -75,6 +115,11 @@ pub enum BrushError {
 pub enum Paint {
     /// A colour, as `r g b`.
     Solid([f64; 3]),
+    /// 15.2.5's `ContextColor`: components in a profile's own space, which
+    /// becomes a PDF `/ICCBased` colour space carrying that same profile.
+    ///
+    /// A translation and not a conversion — see [`ContextColour`].
+    Context(Box<ContextColour>),
     /// A gradient, and the matrix mapping its own space into the element's.
     Gradient {
         /// The shading, ready for [`tinker_pdf_cos::DocumentBuilder::add_shading`].
@@ -90,6 +135,55 @@ pub enum Paint {
     /// `Package::read_part` hands back a borrow the painter is already holding,
     /// which is why images are resolved in a pass before the drawing walk.
     Image(Box<ImageTile>),
+    /// A `VisualBrush` (15.4), which becomes a PDF tiling pattern whose cell is
+    /// a **drawing** rather than a picture.
+    ///
+    /// The subtree is carried unresolved for [`Paint::Image`]'s reason, one step
+    /// further along: a picture needs the package looked up once, and a visual
+    /// needs the *drawing walk* re-entered from inside a brush -- with the
+    /// fonts, the pictures, the resource dictionaries in scope and the element
+    /// budget all of which live in [`super::paint`]. Answering with the subtree
+    /// unresolved is what keeps this module pure, and it is the shape
+    /// [`Paint::Image`] already set.
+    Visual(Box<VisualTile>),
+}
+
+/// Where a tile goes, which 15.3 states in six values.
+///
+/// One value rather than six fields on each of the two brushes that state
+/// them: an `ImageBrush` and a `VisualBrush` differ in **what** they tile and
+/// in nothing about where, and two copies would be two places for the relative
+/// units to stop being read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    /// `Viewbox`, as `x y width height` in the source's own units.
+    pub viewbox: [f64; 4],
+    /// `Viewport`, as `x y width height` in the element's units.
+    pub viewport: [f64; 4],
+    /// Whether `Viewbox` is absolute or a fraction of the source.
+    pub viewbox_units: Units,
+    /// Whether `Viewport` is absolute or a fraction of the filled box.
+    pub viewport_units: Units,
+    /// `TileMode` (15.3.1).
+    pub tile: TileMode,
+    /// `Transform`, which maps the brush's space into the element's.
+    pub transform: [f64; 6],
+}
+
+/// A `VisualBrush`, parsed but not painted (15.4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisualTile {
+    /// The one drawable under `VisualBrush.Visual`.
+    pub visual: Node,
+    /// The `x:Key` this brush was reached through, when it was reached through
+    /// one at all.
+    ///
+    /// Carried for the cycle guard and for nothing else: a `VisualBrush` whose
+    /// own subtree names it again through a `{StaticResource}` is a cycle that
+    /// no single lookup chain can see, because each lookup starts afresh.
+    pub key: Option<String>,
+    /// Where the tile goes.
+    pub placement: Placement,
 }
 
 /// An `ImageBrush`, parsed but not resolved (15.3).
@@ -104,18 +198,8 @@ pub enum Paint {
 pub struct ImageTile {
     /// `ImageSource`, verbatim. Resolved against the fixed page part's own name.
     pub source: String,
-    /// `Viewbox`, as `x y width height` in the image's own units.
-    pub viewbox: [f64; 4],
-    /// `Viewport`, as `x y width height` in the element's units.
-    pub viewport: [f64; 4],
-    /// Whether `Viewbox` is absolute or a fraction of the image.
-    pub viewbox_units: Units,
-    /// Whether `Viewport` is absolute or a fraction of the filled box.
-    pub viewport_units: Units,
-    /// `TileMode` (15.3.1).
-    pub tile: TileMode,
-    /// `Transform`, which maps the brush's space into the element's.
-    pub transform: [f64; 6],
+    /// Where the tile goes.
+    pub placement: Placement,
 }
 
 /// 15.3's `ViewboxUnits` and `ViewportUnits`.
@@ -186,14 +270,18 @@ impl Brush {
 ///
 /// # Errors
 /// [`BrushError::Syntax`] for anything that is not 15.2.4's grammar,
-/// [`BrushError::Unsupported`] for `ContextColor`.
+/// A `ContextColor` answers 8.6.5.5's default-`/Alternate` reading of its
+/// components; the colour space it also names is [`from_attribute`]'s to
+/// carry, because a number cannot hold one.
 pub fn colour(text: &str) -> Result<Colour, BrushError> {
     let text = text.trim();
-    // 15.2.5's `ContextColor <uri> a,c1,…` carries a profile part and channel
-    // values and **no sRGB fallback**, so there is no cheap approximation to
-    // take: the shape degrades under ruling 2 rather than being guessed at.
-    if text.starts_with("ContextColor") {
-        return Err(BrushError::Unsupported);
+    // 15.2.5's `ContextColor` is a colour like any other **here**: what it
+    // adds is a colour space, and a colour space belongs to the operator that
+    // sets a colour rather than to the number. `colour` answers the number —
+    // 8.6.5.5's default-`/Alternate` reading of it — and the callers that can
+    // name a space call `context_colour` for the rest.
+    if let Some(rest) = text.strip_prefix("ContextColor") {
+        return context_colour(rest).map(|(colour, _)| colour);
     }
     if let Some(values) = text.strip_prefix("sc#") {
         return sc_rgb(values);
@@ -236,6 +324,100 @@ pub fn colour(text: &str) -> Result<Colour, BrushError> {
     }
 }
 
+/// 15.2.5's `ContextColor <uri> a,c1,…,cn`.
+///
+/// # There is no sRGB fallback in the syntax, and one is not invented
+///
+/// 15.2.5 states a profile part, an alpha and the components — and **nothing
+/// else**. A consumer without the profile has the numbers and no statement
+/// about what they mean, so this build does not guess at a colour: it hands
+/// the components to the PDF unchanged inside an `/ICCBased` space carrying
+/// the same profile, and the reader does the colour management. That is a
+/// translation rather than a conversion, and it is exact.
+///
+/// The `rgb` filled in here is **not** that answer. It is the reading PDF
+/// itself gives an `/ICCBased` space whose stream a reader cannot use: 8.6.5.5
+/// says such a space falls back to `/Alternate`, and that `/Alternate`
+/// defaults by component count to `DeviceGray`, `DeviceRGB` or `DeviceCMYK`.
+/// So the fallback is not invented here either — it is the one PDF already
+/// specifies for exactly this situation, and it is only ever reached where a
+/// colour space cannot be named at all (a gradient stop) or where the part is
+/// missing.
+pub fn context_colour(rest: &str) -> Result<(Colour, ContextColour), BrushError> {
+    // A profile URI has to be separated from the keyword by whitespace;
+    // `ContextColorx` is not a `ContextColor` and `#ContextColor` is not a
+    // colour at all.
+    if !rest.starts_with([' ', '\t', '\r', '\n']) {
+        return Err(BrushError::Syntax);
+    }
+    let rest = rest.trim_start();
+    let (profile, values) = rest
+        .split_once(char::is_whitespace)
+        .ok_or(BrushError::Syntax)?;
+    if profile.is_empty() {
+        return Err(BrushError::Syntax);
+    }
+    let numbers = markup::numbers(values).ok_or(BrushError::Syntax)?;
+    // 15.2.5 puts the alpha first and always states it, so a list of one is an
+    // alpha and no colour.
+    let (alpha, components) = numbers.split_first().ok_or(BrushError::Syntax)?;
+    if components.is_empty() || components.len() > super::MAX_XPS_COLOUR_CHANNELS {
+        return Err(BrushError::Syntax);
+    }
+    if !components.iter().all(|value| value.is_finite()) {
+        return Err(BrushError::Syntax);
+    }
+    let fallback = device_reading(components);
+    Ok((
+        Colour {
+            rgb: fallback,
+            alpha: alpha.clamp(0.0, 1.0),
+        },
+        ContextColour {
+            profile: profile.to_string(),
+            components: components.to_vec(),
+            fallback,
+        },
+    ))
+}
+
+/// 8.6.5.5's default `/Alternate` for an `/ICCBased` space of `n` components,
+/// evaluated.
+///
+/// This is what a PDF reader does with a profile it cannot use, and it is
+/// reached here for the two cases where an `/ICCBased` space cannot be named:
+/// a gradient stop, and a profile part that is not in the package. Nothing
+/// about it is this build's invention — the *rule* is PDF's and the numbers
+/// are the file's.
+///
+/// A component count that is none of one, three or four has no default
+/// alternate at all, and PDF has no colour space for it that does not need a
+/// tint transform this build would have to invent. It answers mid-grey and the
+/// caller names the narrowing.
+fn device_reading(components: &[f64]) -> [f64; 3] {
+    let at = |index: usize| {
+        components
+            .get(index)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    };
+    match components.len() {
+        1 => [at(0); 3],
+        3 => [at(0), at(1), at(2)],
+        // 8.6.4.4's subtractive reading, which is the one `DeviceCMYK` states.
+        4 => {
+            let k = at(3);
+            [
+                1.0 - (at(0) + k).min(1.0),
+                1.0 - (at(1) + k).min(1.0),
+                1.0 - (at(2) + k).min(1.0),
+            ]
+        }
+        _ => [crate::cbz::PLACEHOLDER_GREY; 3],
+    }
+}
+
 /// 15.2.4's `sc#` form: three or four **scRGB** components as reals.
 ///
 /// scRGB is linear-light and its components legitimately run outside `[0, 1]`,
@@ -275,6 +457,25 @@ fn srgb_transfer(linear: f64) -> f64 {
 /// # Errors
 /// As [`colour`].
 pub fn from_attribute(text: &str) -> Result<Brush, BrushError> {
+    tinted(text)
+}
+
+/// A colour as a brush, carrying its colour space where it has one.
+///
+/// The one place `ContextColor` differs from every other 15.2.4 colour, and it
+/// is deliberately not inside [`colour`]: `colour` answers a *number*, which is
+/// what a gradient stop and a mask need, and this answers a **paint**, which is
+/// what an element that can name a colour space needs.
+fn tinted(text: &str) -> Result<Brush, BrushError> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("ContextColor") {
+        let (colour, context) = context_colour(rest)?;
+        return Ok(Brush {
+            paint: Paint::Context(Box::new(context)),
+            alpha: colour.alpha,
+            approximated: false,
+        });
+    }
     colour(text).map(Brush::solid)
 }
 
@@ -288,26 +489,146 @@ pub fn from_attribute(text: &str) -> Result<Brush, BrushError> {
 ///
 /// # Errors
 /// [`BrushError::Syntax`] for markup that is not 15's, and
-/// [`BrushError::Unsupported`] for a brush kind this milestone does not paint.
+/// Every failure is [`BrushError::Syntax`]: there is no brush in section 15
+/// this build declines to paint.
 pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
     if !node.xps {
         return Err(BrushError::Syntax);
     }
     match node.local.as_str() {
         "SolidColorBrush" => {
-            let mut brush = Brush::solid(colour(node.attr("Color").ok_or(BrushError::Syntax)?)?);
+            let mut brush = tinted(node.attr("Color").ok_or(BrushError::Syntax)?)?;
             brush.alpha *= opacity_of(node)?;
             Ok(brush)
         }
-        "LinearGradientBrush" | "RadialGradientBrush" => gradient(node, bbox),
+        "LinearGradientBrush" | "RadialGradientBrush" => gradient(node, bbox, Channel::Colour),
         "ImageBrush" => image_brush(node, bbox),
-        // `VisualBrush` is row 8's and is not built. Its cell is a *subtree* of
-        // markup rather than a part, so painting one means re-entering the
-        // drawing walk from inside a brush -- with 18.2's cross-part depth to
-        // carry -- and this module is deliberately pure. Refused by name rather
-        // than drawn as its first child, which would be a picture the file
-        // never described. See the plan's amended row 8.
-        "VisualBrush" => Err(BrushError::Unsupported),
+        "VisualBrush" => visual_brush(node, bbox),
+        _ => Err(BrushError::Syntax),
+    }
+}
+
+// ---- 14.3, a brush used as an alpha channel ---------------------------------
+
+/// Which of a gradient's two channels a shading is built from.
+///
+/// 15.4's `GradientStop` states a colour *and* an alpha, and PDF's 8.7.4.5
+/// shading states colour only — there is no alpha shading. So the two channels
+/// of one gradient become two shadings, and which one is wanted is the
+/// caller's question rather than the gradient's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Channel {
+    /// The stops' colours, in `/DeviceRGB`.
+    Colour,
+    /// The stops' **alphas**, as a grey in `/DeviceGray`. 14.3's opacity mask
+    /// is a brush used as an alpha channel, and a `/Luminosity` soft mask
+    /// (11.6.5.2) is where PDF keeps one — so an alpha of 0.4 is painted as
+    /// the grey 0.4 and read back as its own luminosity.
+    Alpha,
+}
+
+impl Channel {
+    fn space(self) -> DeviceSpace {
+        match self {
+            Channel::Colour => DeviceSpace::Rgb,
+            Channel::Alpha => DeviceSpace::Gray,
+        }
+    }
+
+    fn components(self, colour: Colour) -> Vec<f64> {
+        match self {
+            Channel::Colour => colour.rgb.to_vec(),
+            Channel::Alpha => vec![colour.alpha],
+        }
+    }
+}
+
+/// 14.3's `OpacityMask`, read as the alpha it states.
+///
+/// **Three shapes and not one**, because the alpha a brush carries lives
+/// somewhere different in each of them and PDF has a different construction for
+/// each place. Collapsing them would mean picking one and being wrong about the
+/// other two: a luminosity mask over a picture reads its *colours*, and an
+/// alpha mask over a gradient reads the one constant alpha a shading can carry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mask {
+    /// The alpha is one number over the whole element: a `SolidColorBrush`, or
+    /// a gradient every one of whose stops carries the same alpha.
+    ///
+    /// No soft mask at all. 11.6.4.4's `/ca` and `/CA` say exactly this, and a
+    /// form XObject carrying a flat grey would say it again at the cost of an
+    /// object — which is the same argument [`super::paint`] makes about a
+    /// `Canvas` opacity over children that do not overlap.
+    Uniform(f64),
+    /// The alpha varies across the element, and is painted as a grey for
+    /// 11.6.5.2's `/Luminosity` to read back.
+    Luminosity {
+        /// The shading, over `/DeviceGray`, whose one output is the alpha.
+        shading: Shading,
+        /// Shading space into the space the element draws in.
+        matrix: [f64; 6],
+        /// The brush's own `Opacity`, which multiplies every stop's alpha.
+        opacity: f64,
+    },
+    /// The alpha is what painting the brush produces — a picture's own alpha,
+    /// or a drawing's coverage — which nothing but the painting can supply.
+    /// So the brush is painted as it stands and 11.6.5.2's `/Alpha` reads the
+    /// result.
+    Alpha {
+        /// The brush, as the paint it would be anywhere else. Only
+        /// [`Paint::Image`] and [`Paint::Visual`] reach here; the other two
+        /// carry their alpha somewhere a shading or a constant can hold it.
+        paint: Paint,
+        /// The brush's own `Opacity`.
+        opacity: f64,
+    },
+}
+
+/// Reads a brush as 14.3's opacity mask.
+///
+/// # Errors
+/// As [`from_node`].
+pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, BrushError> {
+    if !node.xps {
+        return Err(BrushError::Syntax);
+    }
+    match node.local.as_str() {
+        "SolidColorBrush" => {
+            let colour = colour(node.attr("Color").ok_or(BrushError::Syntax)?)?;
+            Ok(Mask::Uniform(colour.alpha * opacity_of(node)?))
+        }
+        "LinearGradientBrush" | "RadialGradientBrush" => {
+            let stops = stops_of(node)?;
+            let opacity = opacity_of(node)?;
+            // Every stop carrying one alpha is a gradient that does not vary
+            // where a mask reads it, whatever it does with colour — so it is
+            // the uniform case, and building a shading for it would be a form
+            // XObject holding a flat grey.
+            if stops
+                .iter()
+                .all(|stop| stop.colour.alpha == stops[0].colour.alpha)
+            {
+                return Ok(Mask::Uniform(stops[0].colour.alpha * opacity));
+            }
+            let brush = gradient(node, bbox, Channel::Alpha)?;
+            match brush.paint {
+                Paint::Gradient { shading, matrix } => Ok(Mask::Luminosity {
+                    shading,
+                    matrix,
+                    opacity,
+                }),
+                // `gradient` answers a gradient element with a gradient.
+                _ => Err(BrushError::Syntax),
+            }
+        }
+        "ImageBrush" => Ok(Mask::Alpha {
+            paint: image_brush(node, bbox)?.paint,
+            opacity: opacity_of(node)?,
+        }),
+        "VisualBrush" => Ok(Mask::Alpha {
+            paint: visual_brush(node, bbox)?.paint,
+            opacity: opacity_of(node)?,
+        }),
         _ => Err(BrushError::Syntax),
     }
 }
@@ -320,8 +641,59 @@ pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushErro
 /// which is `gradient`'s rule and for the same reason.
 fn image_brush(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
     let source = node.attr("ImageSource").ok_or(BrushError::Syntax)?;
-    // 15.3 makes both rectangles required on an `ImageBrush`; there is no
-    // sensible default for "which part of the image" or "where it goes".
+    let placement = placement_of(node, bbox)?;
+    Ok(Brush {
+        paint: Paint::Image(Box::new(ImageTile {
+            source: source.to_string(),
+            placement,
+        })),
+        alpha: opacity_of(node)?,
+        approximated: false,
+    })
+}
+
+/// Reads a `VisualBrush` (15.4).
+///
+/// The `Visual` is carried as **markup**, for [`Paint::Image`]'s reason one
+/// step further along: painting it means re-entering the drawing walk, which
+/// needs the package for the fonts and pictures the subtree may name, and this
+/// module is pure. What is read here is everything a tile needs *around* the
+/// subtree, which is 15.3's own vocabulary and the same six values an
+/// `ImageBrush` states.
+fn visual_brush(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
+    // 15.4's `Visual` is a property element holding exactly one drawable. A
+    // brush stating none paints nothing, which is not the same as a brush this
+    // build cannot paint -- so it is `Syntax` and takes the placeholder grey by
+    // name rather than being drawn as an empty cell nobody asked for.
+    let visual = node
+        .children
+        .iter()
+        .find(|child| child.xps && child.local == "VisualBrush.Visual")
+        .and_then(|property| property.children.iter().find(|child| child.xps))
+        .ok_or(BrushError::Syntax)?;
+    // The box a `RelativeToBoundingBox` viewport is a fraction of is the box
+    // being *filled* — the element's, exactly as for an `ImageBrush` — and not
+    // the visual's own. It has to be threaded, because 15.3 makes
+    // `RelativeToBoundingBox` the **default** for both unit attributes: a
+    // build that passed `None` here would refuse every `VisualBrush` that did
+    // not spell `ViewportUnits="Absolute"` out, which is nearly all of them.
+    let placement = placement_of(node, bbox)?;
+    Ok(Brush {
+        paint: Paint::Visual(Box::new(VisualTile {
+            visual: visual.clone(),
+            key: node.key.clone(),
+            placement,
+        })),
+        alpha: opacity_of(node)?,
+        approximated: false,
+    })
+}
+
+/// The six values 15.3 states about where a tile goes, shared by both brushes
+/// that state them.
+fn placement_of(node: &Node, bbox: Option<[f64; 4]>) -> Result<Placement, BrushError> {
+    // 15.3 makes both rectangles required; there is no sensible default for
+    // "which part of the source" or "where it goes".
     let viewbox = rect(node.attr("Viewbox").ok_or(BrushError::Syntax)?)?;
     let viewport = rect(node.attr("Viewport").ok_or(BrushError::Syntax)?)?;
     let viewbox_units = units_of(node, "ViewboxUnits")?;
@@ -345,19 +717,13 @@ fn image_brush(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError>
     if viewbox[2] <= 0.0 || viewbox[3] <= 0.0 || viewport[2] <= 0.0 || viewport[3] <= 0.0 {
         return Err(BrushError::Syntax);
     }
-
-    Ok(Brush {
-        paint: Paint::Image(Box::new(ImageTile {
-            source: source.to_string(),
-            viewbox,
-            viewport,
-            viewbox_units,
-            viewport_units,
-            tile,
-            transform,
-        })),
-        alpha: opacity_of(node)?,
-        approximated: false,
+    Ok(Placement {
+        viewbox,
+        viewport,
+        viewbox_units,
+        viewport_units,
+        tile,
+        transform,
     })
 }
 
@@ -442,6 +808,15 @@ fn spread_of(node: &Node) -> Result<Spread, BrushError> {
 struct Stop {
     offset: f64,
     colour: Colour,
+    /// Whether the stop stated a `ContextColor`.
+    ///
+    /// 8.7.4.5's shading names **one** colour space for the whole function, so
+    /// a stop cannot carry a space of its own the way a solid fill can: it
+    /// takes 8.6.5.5's default-`/Alternate` reading and the gradient says it
+    /// approximated. Recorded here rather than inferred from the colour,
+    /// because the reading is a perfectly ordinary RGB triple once it is made
+    /// and nothing about the number remembers where it came from.
+    contextual: bool,
 }
 
 /// 15.4.2's stop list, from either spelling of the property element.
@@ -452,12 +827,14 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
         if !stop.xps || stop.local != "GradientStop" {
             return Ok(());
         }
-        let colour = colour(stop.attr("Color").ok_or(BrushError::Syntax)?)?;
+        let text = stop.attr("Color").ok_or(BrushError::Syntax)?;
+        let colour = colour(text)?;
         let offset = markup::number(stop.attr("Offset").ok_or(BrushError::Syntax)?)
             .ok_or(BrushError::Syntax)?;
         out.push(Stop {
             offset: offset.clamp(0.0, 1.0),
             colour,
+            contextual: text.trim_start().starts_with("ContextColor"),
         });
         Ok(())
     };
@@ -480,12 +857,17 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
     Ok(out)
 }
 
-fn gradient(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
+fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Brush, BrushError> {
     let stops = stops_of(node)?;
     let spread = spread_of(node)?;
     let approximated = stops
         .iter()
         .any(|stop| stop.colour.alpha != stops[0].colour.alpha)
+        // A `ContextColor` stop, which cannot carry its own colour space into
+        // a shading — see `Stop::contextual`. Named rather than left silent,
+        // because the same colour on a solid fill *is* exact and a reader
+        // comparing the two is entitled to know which one lost something.
+        || stops.iter().any(|stop| stop.contextual)
         // 15.4's `ScRgbLinearInterpolation` interpolates in linear light and
         // this writer interpolates in the shading's own `/DeviceRGB`, which is
         // sRGB. The endpoints are right and the middle is not, so it is
@@ -517,8 +899,8 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
         .unwrap_or(markup::IDENTITY);
 
     let (shading, inner) = match node.local.as_str() {
-        "LinearGradientBrush" => linear(node, &stops, spread)?,
-        _ => radial(node, &stops, spread)?,
+        "LinearGradientBrush" => linear(node, &stops, spread, channel)?,
+        _ => radial(node, &stops, spread, channel)?,
     };
     let matrix = markup::concat(inner, markup::concat(unit, brush_transform));
     if !matrix.iter().all(|v| markup::usable(*v)) {
@@ -533,7 +915,12 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
 }
 
 /// 15.4.3's `LinearGradientBrush`, as a type 2 shading.
-fn linear(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64; 6]), BrushError> {
+fn linear(
+    node: &Node,
+    stops: &[Stop],
+    spread: Spread,
+    channel: Channel,
+) -> Result<(Shading, [f64; 6]), BrushError> {
     let start = node
         .attr("StartPoint")
         .and_then(markup::pair)
@@ -546,7 +933,7 @@ fn linear(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
         return Err(BrushError::Syntax);
     }
 
-    let base = ramp(stops);
+    let base = ramp(stops, channel);
     let (function, coords) = match spread {
         Spread::Pad => (base, [start.0, start.1, end.0, end.1]),
         _ => {
@@ -577,7 +964,7 @@ fn linear(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
     }
     Ok((
         Shading::Axial {
-            color_space: DeviceSpace::Rgb,
+            color_space: channel.space(),
             coords,
             function,
             extend: (true, true),
@@ -595,7 +982,12 @@ fn linear(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
 /// and the space it lives in is scaled about the centre so that circle becomes
 /// the ellipse the file stated. The focal point is un-scaled on the way in for
 /// the same reason.
-fn radial(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64; 6]), BrushError> {
+fn radial(
+    node: &Node,
+    stops: &[Stop],
+    spread: Spread,
+    channel: Channel,
+) -> Result<(Shading, [f64; 6]), BrushError> {
     let centre = node
         .attr("Center")
         .and_then(markup::pair)
@@ -631,7 +1023,7 @@ fn radial(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
         ),
     );
 
-    let base = ramp(stops);
+    let base = ramp(stops, channel);
     let (function, coords) = match spread {
         Spread::Pad => (base, [focal.0, focal.1, 0.0, centre.0, centre.1, rx]),
         _ => {
@@ -655,7 +1047,7 @@ fn radial(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
     }
     Ok((
         Shading::Radial {
-            color_space: DeviceSpace::Rgb,
+            color_space: channel.space(),
             coords,
             function,
             extend: (true, true),
@@ -669,21 +1061,21 @@ fn radial(node: &Node, stops: &[Stop], spread: Spread) -> Result<(Shading, [f64;
 /// Stops that do not reach the ends are extended flat, because 15.4.2 makes
 /// the colour before the first stop and after the last one that stop's own —
 /// which is a statement about the gradient and not about `/Extend`.
-fn ramp(stops: &[Stop]) -> Function {
+fn ramp(stops: &[Stop], channel: Channel) -> Function {
     let mut offsets: Vec<f64> = Vec::with_capacity(stops.len() + 2);
-    let mut colours: Vec<[f64; 3]> = Vec::with_capacity(stops.len() + 2);
+    let mut colours: Vec<Vec<f64>> = Vec::with_capacity(stops.len() + 2);
     if stops[0].offset > 0.0 {
         offsets.push(0.0);
-        colours.push(stops[0].colour.rgb);
+        colours.push(channel.components(stops[0].colour));
     }
     for stop in stops {
         offsets.push(stop.offset);
-        colours.push(stop.colour.rgb);
+        colours.push(channel.components(stop.colour));
     }
     let last = stops[stops.len() - 1];
     if last.offset < 1.0 {
         offsets.push(1.0);
-        colours.push(last.colour.rgb);
+        colours.push(channel.components(last.colour));
     }
 
     // 7.10.4 wants `/Bounds` strictly increasing and strictly inside the
@@ -704,8 +1096,8 @@ fn ramp(stops: &[Stop]) -> Function {
     for at in 1..offsets.len() {
         pieces.push(Function::Exponential {
             domain: [0.0, 1.0],
-            c0: colours[at - 1].to_vec(),
-            c1: colours[at].to_vec(),
+            c0: colours[at - 1].clone(),
+            c1: colours[at].clone(),
             n: 1.0,
         });
         if at + 1 < offsets.len() {
@@ -720,8 +1112,8 @@ fn ramp(stops: &[Stop]) -> Function {
         // flat colour, which is what 15.4.2 makes it.
         return Function::Exponential {
             domain: [0.0, 1.0],
-            c0: colours[0].to_vec(),
-            c1: colours[0].to_vec(),
+            c0: colours[0].clone(),
+            c1: colours[0].clone(),
             n: 1.0,
         };
     }

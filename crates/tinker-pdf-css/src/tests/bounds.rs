@@ -13,7 +13,7 @@ use crate::limits::{
     MAX_CSS_SELECTOR_PARTS, MAX_CSS_TOKENS, MAX_DOM_NODES, MAX_SELECTOR_MATCHES,
 };
 use crate::media::MediaContext;
-use crate::parser::parse;
+use crate::parser::{parse, MAX_AT_RULE_DEPTH};
 use crate::{Budget, ImportResolver, Limits, NoImports, Refusal, Warning};
 
 fn parse_at_defaults(source: &[u8]) -> Result<crate::Stylesheet, Refusal> {
@@ -137,6 +137,107 @@ fn a_selector_past_the_compound_cap_is_dropped_with_its_own_warning() {
     let ok = parse_at_defaults(format!("{at_cap} {{ float: left }}").as_bytes()).expect("read");
     assert!(ok.report.warnings.is_empty());
     assert_eq!(ok.rules.len(), 1);
+}
+
+/// `MAX_AT_RULE_DEPTH`, reached three ways, because the layer tree's depth has
+/// three spellings and a cap that only fired on one of them would not be one.
+///
+/// **Dropped, not flattened.** A layer silently merged into the block around it
+/// inverts `css-cascade-5` §6.1's fourth criterion exactly as reading its block
+/// as ordinary rules would — which is the whole reason `@layer` was refused by
+/// name before it was read — so the construct past the cap loses its rules and
+/// says so.
+#[test]
+fn a_layer_past_the_depth_cap_is_dropped_with_its_own_warning() {
+    let nested = |depth: usize| {
+        let mut source = String::new();
+        for level in 0..depth {
+            source.push_str(&format!("@layer l{level} {{"));
+        }
+        source.push_str("p { float: left }");
+        source.push_str(&"}".repeat(depth));
+        source
+    };
+
+    // Exactly at the cap it is read, which is what puts the boundary where the
+    // constant says it is and not near it.
+    let at_cap = parse_at_defaults(nested(MAX_AT_RULE_DEPTH).as_bytes()).expect("read");
+    assert!(at_cap.report.warnings.is_empty(), "{:?}", at_cap.report);
+    assert_eq!(at_cap.rules.len(), 1);
+    assert_eq!(at_cap.layers.len(), MAX_AT_RULE_DEPTH);
+
+    let past = parse_at_defaults(nested(MAX_AT_RULE_DEPTH + 1).as_bytes())
+        .expect("a depth cap warns rather than refusing the sheet");
+    assert_eq!(past.report.warnings, vec![(Warning::AtRuleTooDeep, 1)]);
+    assert!(
+        past.rules.is_empty(),
+        "the rule past the cap is dropped rather than landing in the layer above it"
+    );
+    assert_eq!(past.layers.len(), MAX_AT_RULE_DEPTH);
+
+    // The dotted spelling is the same depth and reaches the same cap:
+    // `@layer a.b` and `@layer a { @layer b { … } }` name one layer.
+    let dotted: Vec<String> = (0..=MAX_AT_RULE_DEPTH)
+        .map(|part| format!("l{part}"))
+        .collect();
+    let deep_name = parse_at_defaults(
+        format!("@layer {} {{ p {{ float: left }} }}", dotted.join(".")).as_bytes(),
+    )
+    .expect("read");
+    assert_eq!(deep_name.report.warnings, vec![(Warning::AtRuleTooDeep, 1)]);
+    assert!(deep_name.rules.is_empty());
+    assert!(deep_name.layers.is_empty());
+
+    // And the recursion itself, through `@media`, which declares no layer and
+    // so is bounded by nothing else at all. This is the half that is a
+    // **stack** rather than a budget, and it is the reason the cap exists.
+    let mut media = String::new();
+    for _ in 0..=MAX_AT_RULE_DEPTH {
+        media.push_str("@media screen {");
+    }
+    media.push_str("p { float: left }");
+    media.push_str(&"}".repeat(MAX_AT_RULE_DEPTH + 1));
+    let deep_media = parse_at_defaults(media.as_bytes()).expect("warns rather than refusing");
+    assert_eq!(
+        deep_media.report.warnings,
+        vec![(Warning::AtRuleTooDeep, 1)]
+    );
+    assert!(deep_media.rules.is_empty());
+}
+
+/// A layer is charged against the **rule** budget, which is what bounds how
+/// many of them a book may declare without a second constant to justify.
+///
+/// `@font-face`'s argument one milestone earlier, unchanged: a layer costs a
+/// parse and a `Vec` the way a style rule does, and a book that declared a
+/// hundred thousand of them would otherwise be refused for neither.
+#[test]
+fn the_rule_total_bounds_how_many_layers_a_book_declares() {
+    let names: Vec<String> = (0..=MAX_CSS_RULES).map(|at| format!("l{at}")).collect();
+    match parse_at_defaults(format!("@layer {};", names.join(",")).as_bytes()) {
+        Err(Refusal::TooManyRules { rules }) => assert_eq!(rules, MAX_CSS_RULES + 1),
+        other => panic!("expected the rule total to fire, got {other:?}"),
+    }
+    let under =
+        parse_at_defaults(format!("@layer {};", names[..MAX_CSS_RULES].join(",")).as_bytes())
+            .expect("exactly at the cap it is read");
+    assert_eq!(under.layers.len(), MAX_CSS_RULES);
+
+    // **First mention is what is charged**, not every mention: a book that
+    // re-opens its layers is declaring the same ones again, and charging each
+    // time would refuse a sheet for writing `@layer a { … }` in two places.
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    parse(
+        b"@layer a; @layer a; @layer a { }",
+        None,
+        &NoImports,
+        &MediaContext::screen(432.0, 648.0),
+        &limits,
+        &mut budget,
+    )
+    .expect("read");
+    assert_eq!(budget.rules(), 1, "one layer, charged once");
 }
 
 /// A chain of sheets, each importing the next, for the depth cap.

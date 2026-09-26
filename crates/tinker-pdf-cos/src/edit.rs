@@ -16,6 +16,7 @@ use crate::doc::CosDocument;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::pages::{self, Rect};
+use crate::sign::{SignError, SigningRequest, SigningTarget};
 use crate::write::{self, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 use crate::{fill, form};
 
@@ -138,18 +139,52 @@ pub struct DocumentEditor {
     page_order: Option<Vec<ObjRef>>,
 }
 
-/// Everything a rollback restores.
+/// Everything a rollback restores: an editor's state, taken as a value.
 ///
 /// Exhaustive by construction: [`DocumentEditor`] holds these four fields and
 /// one more -- the `Arc<CosDocument>` it overlays, which is immutable and
 /// therefore has nothing to restore. A field added to the editor without being
 /// added here is a silent hole in every transaction, which is why the two
 /// declarations sit next to each other.
-struct Snapshot {
+///
+/// **A value, not an open transaction.** This is what
+/// [`DocumentEditor::transaction`] uses internally, made public so the same
+/// semantics can be had without a closure -- which is what a foreign-function
+/// boundary needs, because closures do not cross one (ruling 11:
+/// `docs/design/bindings-write.md`). The distinction that keeps that safe is
+/// that there is no *state* here to misuse. Taking one changes nothing;
+/// dropping one commits nothing, because nothing was pending;
+/// [`DocumentEditor::restore`] is idempotent, so restoring twice is restoring
+/// once. The failure a `begin`/`commit`/`rollback` triple has -- an editor
+/// left in a condition a later reader cannot classify -- has no spelling here.
+///
+/// The fields stay private. A checkpoint is meaningful only to the editor it
+/// came from, and this crate does not promise which four things an editor
+/// keeps.
+///
+/// Restoring a checkpoint into a *different* editor is not checked and not
+/// meaningful: object numbers are relative to the document, so the result is
+/// an overlay addressing objects of another file. Nothing panics -- ruling 1
+/// binds this crate -- and nothing else is promised.
+#[derive(Clone)]
+pub struct EditCheckpoint {
     overlay: HashMap<u32, Written>,
     deleted: HashSet<u32>,
     next: u32,
     page_order: Option<Vec<ObjRef>>,
+}
+
+impl core::fmt::Debug for EditCheckpoint {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The overlay's contents are a document's objects, which is not what
+        // a caller printing a checkpoint wants to see; the sizes are.
+        f.debug_struct("EditCheckpoint")
+            .field("written", &self.overlay.len())
+            .field("deleted", &self.deleted.len())
+            .field("next", &self.next)
+            .field("page_order_disturbed", &self.page_order.is_some())
+            .finish()
+    }
 }
 
 /// Why a field could not be filled at all (12.7.4.3).
@@ -272,6 +307,45 @@ impl DocumentEditor {
         &self.doc
     }
 
+    /// The document being edited, as the shared handle it was opened with.
+    ///
+    /// For a caller that must build something *over* the document while
+    /// holding the editor — a page's resources, an interpretation of a content
+    /// stream — where a borrow of [`DocumentEditor::document`] would pin the
+    /// editor for as long as that thing lived.
+    #[must_use]
+    pub fn shared_document(&self) -> Arc<CosDocument> {
+        Arc::clone(&self.doc)
+    }
+
+    /// The decoded bytes of a stream **as this editor now has it**.
+    ///
+    /// The editor's own overlay first, the document underneath. That order is
+    /// the whole point: a caller reading a content stream it has already
+    /// rewritten must see the rewrite, and [`CosDocument::stream_decoded`]
+    /// cannot show it one — it reads the file, which still says what it said
+    /// before the edit. A pass that rewrites content and then walks it (the
+    /// glyph-usage walk font subsetting does after a redaction) reads the
+    /// *original* text through the document and would put back exactly what
+    /// the redaction removed.
+    ///
+    /// `None` when the object is neither an overlay stream nor a decodable
+    /// stream in the file — including one this editor has deleted.
+    #[must_use]
+    pub fn stream_bytes(&self, r: ObjRef) -> Option<Vec<u8>> {
+        if self.deleted.contains(&r.num) {
+            return None;
+        }
+        match self.overlay.get(&r.num) {
+            Some(Written::Stream(stream)) => Some(stream.data.clone()),
+            // An overlay entry that is not a stream replaced the stream with
+            // something else, and the file's bytes are no longer what this
+            // object is.
+            Some(Written::Object(_)) => None,
+            None => self.doc.stream_decoded(r).ok(),
+        }
+    }
+
     /// Whether anything has been changed.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
@@ -304,6 +378,18 @@ impl DocumentEditor {
     /// crosses a function boundary -- is not something a document edit needs,
     /// and is exactly the shape that leaves an edit half applied.
     ///
+    /// **This is sugar over [`DocumentEditor::checkpoint`] and
+    /// [`DocumentEditor::restore`]**, and the two forms run the same two
+    /// functions -- so the contract in the paragraph above is inherited by
+    /// the pair rather than re-proven for it. The pair exists because a
+    /// closure does not cross a foreign-function boundary and this is the API
+    /// every binding must project (ruling 11). It is *not* the triple this
+    /// paragraph rejects: a checkpoint is a value, so there is no open state
+    /// to forget to close. What a caller of the pair gives up is the
+    /// guarantee that it is called at all, which is why the managed bindings
+    /// ship the closure sugar in their own languages and this stays the Rust
+    /// one.
+    ///
     /// Nesting works and means what it says: an inner rollback restores the
     /// inner start, an outer one restores the outer start.
     ///
@@ -319,18 +405,35 @@ impl DocumentEditor {
         &mut self,
         body: impl FnOnce(&mut DocumentEditor) -> Result<T, E>,
     ) -> Result<T, E> {
-        let saved = self.snapshot();
+        let saved = self.checkpoint();
         match body(self) {
             Ok(value) => Ok(value),
             Err(error) => {
-                self.restore(saved);
+                self.restore(&saved);
                 Err(error)
             }
         }
     }
 
-    fn snapshot(&self) -> Snapshot {
-        Snapshot {
+    /// Takes this editor's state as a value, for
+    /// [`DocumentEditor::restore`] to put back.
+    ///
+    /// The closure-free half of [`DocumentEditor::transaction`], which is
+    /// nothing but `checkpoint` -> body -> `restore` on `Err`. Taking one
+    /// changes nothing about the editor, and holding one across any number of
+    /// further edits is fine -- it is a copy, not a borrow.
+    ///
+    /// The copy is of *this editor's changes*, never of the document: the
+    /// document is immutable and shared behind an `Arc`. So a checkpoint
+    /// costs what has been edited so far, not what is being edited -- which
+    /// is why taking one per keystroke in a form is affordable and taking one
+    /// per page of a hundred-megabyte file is too.
+    ///
+    /// See [`EditCheckpoint`] for why this is a value rather than an open
+    /// transaction.
+    #[must_use]
+    pub fn checkpoint(&self) -> EditCheckpoint {
+        EditCheckpoint {
             overlay: self.overlay.clone(),
             deleted: self.deleted.clone(),
             next: self.next,
@@ -338,11 +441,26 @@ impl DocumentEditor {
         }
     }
 
-    fn restore(&mut self, saved: Snapshot) {
-        self.overlay = saved.overlay;
-        self.deleted = saved.deleted;
+    /// Puts this editor back to what a checkpoint recorded.
+    ///
+    /// Restores exactly what a rolled-back [`DocumentEditor::transaction`]
+    /// restores, because it is the same function: objects written, objects
+    /// deleted, the page order, and the object-number counter (see
+    /// [`DocumentEditor`]'s `next` for why that last one, and what it costs).
+    ///
+    /// **Idempotent.** Restoring the same checkpoint twice leaves the editor
+    /// where restoring it once did, so a caller that cannot tell whether it
+    /// already restored may simply restore. That is what makes this safe to
+    /// project across a foreign-function boundary where the caller's own
+    /// error handling may run twice.
+    ///
+    /// The checkpoint is borrowed rather than consumed, so one checkpoint can
+    /// undo several attempts -- the retry loop a closure cannot express.
+    pub fn restore(&mut self, saved: &EditCheckpoint) {
+        self.overlay = saved.overlay.clone();
+        self.deleted = saved.deleted.clone();
         self.next = saved.next;
-        self.page_order = saved.page_order;
+        self.page_order = saved.page_order.clone();
     }
 
     /// Reads an object, seeing this editor's changes.
@@ -934,10 +1052,10 @@ impl DocumentEditor {
         let mut out = Vec::new();
         for r in refs {
             // An overlay stream is this editor's own work; otherwise the
-            // document's decoded bytes.
-            if let Some(Written::Stream(stream)) = self.overlay.get(&r.num) {
-                out.extend_from_slice(&stream.data);
-            } else if let Ok(bytes) = self.doc.stream_decoded(r) {
+            // document's decoded bytes. One reader for both, so that a caller
+            // asking the same question through `stream_bytes` cannot get a
+            // different answer from the one this uses.
+            if let Some(bytes) = self.stream_bytes(r) {
                 out.extend_from_slice(&bytes);
             }
             out.push(b'\n');
@@ -966,7 +1084,17 @@ impl DocumentEditor {
     /// rather than blanking it and "absent" is an answer.
     #[must_use]
     pub fn fields(&self) -> Vec<form::Field> {
-        let mut fields = form::fields(&self.doc);
+        self.fields_within(&mut form::ScriptBudget::new())
+    }
+
+    /// The same field list, spending a script budget the caller owns.
+    ///
+    /// The recalculation pass uses this so that the field tree's `/AA` and
+    /// `/Names /JavaScript` share one [`form::ScriptBudget`] rather than
+    /// starting from the total apiece.
+    #[must_use]
+    pub fn fields_within(&self, budget: &mut form::ScriptBudget) -> Vec<form::Field> {
+        let mut fields = form::fields_within(&self.doc, budget);
         if self.overlay.is_empty() && self.deleted.is_empty() {
             return fields;
         }
@@ -1131,6 +1259,82 @@ impl DocumentEditor {
     /// is written.
     pub fn recalculate(&mut self) -> Result<crate::calc::Recalculation, crate::calc::CalcError> {
         crate::calc::recalculate(self)
+    }
+
+    /// The same pass, under a [`crate::script::ScriptPolicy`] the host chose.
+    ///
+    /// # Errors
+    ///
+    /// `CalcError::Refused` when the policy denies a trigger class this form
+    /// carries; otherwise exactly what [`DocumentEditor::recalculate`]
+    /// returns. Nothing is written in either case.
+    pub fn recalculate_under(
+        &mut self,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::Recalculation, crate::calc::CalcError> {
+        crate::calc::recalculate_under(self, policy)
+    }
+
+    /// The text a field's format action would display (12.7.3.3).
+    ///
+    /// `Ok(None)` for a field with no format action, which is most fields.
+    /// The answer is a [`crate::calc::DisplayString`] and not a `String`,
+    /// because a display string that reached `/V` would give a form whose
+    /// export reads "GBP 1,234.00" where a consumer expects 1234 — see the
+    /// type, and the compile-refusal proof beside it.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::formatted_value_under`].
+    pub fn formatted_value(
+        &self,
+        name: &str,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<Option<crate::calc::DisplayString>, crate::calc::CalcError> {
+        crate::calc::formatted_value_under(self, name, policy)
+    }
+
+    /// Offers a keystroke to a field's `/AA /K` action (12.6.4.16 table 196).
+    ///
+    /// It takes an event because it has to: what is being typed, where, and
+    /// whether this is the commit are facts a host has and a reader does not,
+    /// which is exactly why keystroke actions could never run implicitly.
+    /// Nothing in a recalculation reaches this.
+    ///
+    /// Under the default [`crate::script::ScriptPolicy`] a field that carries
+    /// a keystroke action answers `CalcError::Refused`; one that carries none
+    /// accepts the keystroke as offered.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::keystroke`]. A script that refuses the keystroke is
+    /// not an error — that is `EventVerdict::Refused`.
+    pub fn keystroke(
+        &self,
+        name: &str,
+        event: &crate::calc::Keystroke,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::EventVerdict, crate::calc::CalcError> {
+        crate::calc::keystroke(self, name, event, policy)
+    }
+
+    /// Offers a committed value to a field's `/AA /V` action (12.6.4.16
+    /// table 196).
+    ///
+    /// Nothing is written either way: this answers whether the form would
+    /// take the value, and applying it is still
+    /// [`DocumentEditor::fill_field`]'s job.
+    ///
+    /// # Errors
+    ///
+    /// See [`crate::calc::validate`].
+    pub fn validate(
+        &self,
+        name: &str,
+        value: &str,
+        policy: crate::script::ScriptPolicy,
+    ) -> Result<crate::calc::EventVerdict, crate::calc::CalcError> {
+        crate::calc::validate(self, name, value, policy)
     }
 
     /// Turns a checkbox on or off.
@@ -1337,6 +1541,9 @@ impl DocumentEditor {
                     multiline,
                     comb,
                     resources: resources.as_ref(),
+                    // Ruling 10: a character the `/DA` font cannot draw is
+                    // reported against the field it was written into.
+                    field: Some(field.reference),
                 },
             );
             let form_ref = self.allocate();
@@ -1505,17 +1712,7 @@ impl DocumentEditor {
     /// breaking the signature over it.
     #[must_use]
     pub fn save(&self, options: &WriteOptions) -> Vec<u8> {
-        let mut set = ObjectSet::new();
-
-        for (num, entry) in &self.overlay {
-            match entry {
-                Written::Object(object) => set.insert(*num, object.clone()),
-                Written::Stream(stream) => set.insert_stream(*num, stream.clone()),
-            }
-        }
-        for num in &self.deleted {
-            set.insert(*num, Object::Null);
-        }
+        let set = self.changed_set();
 
         // A reordered page tree needs its /Kids and /Count rewritten.
         //
@@ -1526,21 +1723,30 @@ impl DocumentEditor {
         // into the file and never referenced, and a reordering did nothing at
         // all. Nothing caught it because the page-operation tests all saved
         // incrementally.
+        //
+        // `changed_set` has already folded these into the incremental set;
+        // the binding stays because the rewrite arm below needs them too.
         let tree_updates = self.page_tree_updates();
-        for (num, object) in &tree_updates {
-            set.insert(*num, object.clone());
-        }
 
         let trailer = self.doc.trailer().clone();
         match options.mode {
-            WriteMode::Incremental => write::incremental_update(
-                self.doc.bytes(),
-                &set,
-                &trailer,
-                self.doc.last_startxref(),
-                self.doc.names_table(),
-                options.compress,
-            ),
+            WriteMode::Incremental => {
+                // 7.6.2: the update is sealed with the key the document was
+                // opened with, because it appends into a file whose /Encrypt
+                // still stands. An unencrypted document, or one never
+                // authenticated, has no key and writes in the clear as before.
+                let key = self.doc.file_key();
+                let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
+                write::incremental_update(
+                    self.doc.bytes(),
+                    &set,
+                    &trailer,
+                    self.doc.last_startxref(),
+                    self.doc.names_table(),
+                    options.compress,
+                    cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
+                )
+            }
             WriteMode::Rewrite => {
                 // 7.6.1: a rewrite decrypts on the way through — `stream_raw`
                 // hands back plaintext once a decryptor is installed, and the
@@ -1634,6 +1840,292 @@ impl DocumentEditor {
             }
         }
     }
+
+    /// Saves the edits and signs the result (12.8.1).
+    ///
+    /// The signature covers every byte of the output except the `/Contents`
+    /// string holding it, which is the only coverage that means "this document,
+    /// as you have it". Everything the original file already contained is
+    /// inside it, because an incremental save leaves the original bytes alone.
+    ///
+    /// # How the circle is broken
+    ///
+    /// `/Contents` signs bytes that surround it, so the space is reserved,
+    /// the file is finished, `/ByteRange` is patched to describe the finished
+    /// file, and only then is the digest taken and the blob written into the
+    /// reservation. Patching order is load-bearing: `/ByteRange` is *inside*
+    /// the range it describes, so digesting before it was patched would sign
+    /// a placeholder.
+    ///
+    /// # Errors
+    /// [`SignError`], including the host's own refusal carried verbatim. A CMS
+    /// blob larger than [`SigningRequest::reserve`] is refused rather than
+    /// truncated: the reservation cannot grow once the cross-reference table
+    /// has recorded every offset around it, and a truncated signature is a
+    /// file that looks signed and is not.
+    pub fn save_signed(
+        &mut self,
+        options: &WriteOptions,
+        request: &SigningRequest<'_>,
+    ) -> Result<Vec<u8>, SignError> {
+        if options.mode != WriteMode::Incremental {
+            return Err(SignError::NotIncremental);
+        }
+
+        let signature_ref = self.allocate();
+        match &request.target {
+            SigningTarget::Field(name) => self.attach_to_field(name, signature_ref)?,
+            SigningTarget::NewInvisibleField { name } => {
+                self.attach_to_new_field(name, signature_ref)?;
+            }
+        }
+
+        let set = self.changed_set();
+        let trailer = self.doc.trailer().clone();
+        let key = self.doc.file_key();
+        let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
+        let catalog = self.doc.trailer().get_ref(Name::ROOT);
+        if request.certification.is_some() {
+            self.certify(signature_ref);
+        }
+        let reserved = crate::sign::Reserved::build(request, catalog);
+        let (mut out, placeholder) = write::incremental_update_reserving(
+            self.doc.bytes(),
+            &set,
+            &trailer,
+            self.doc.last_startxref(),
+            &write::UpdatePlan {
+                names: self.doc.names_table(),
+                compress: options.compress,
+                crypt: cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
+                reserved: Some((signature_ref.num, &reserved)),
+            },
+        );
+        let placeholder = placeholder.ok_or(SignError::RangeDoesNotFit)?;
+        crate::sign::seal(&mut out, &placeholder, request.signer)?;
+        Ok(out)
+    }
+
+    /// 12.8.4: the catalog's `/Perms /DocMDP` names the certifying signature,
+    /// which is what lets a reader find the document's certification without
+    /// walking every field looking for a `/Reference`.
+    fn certify(&mut self, signature: ObjRef) {
+        let Some(root) = self.doc.trailer().get_ref(Name::ROOT) else {
+            return;
+        };
+        let Some(Object::Dict(mut catalog)) = self.get(root) else {
+            return;
+        };
+        let perms_key = self.intern(b"Perms");
+        let docmdp = self.intern(b"DocMDP");
+        let mut perms = match catalog.get(perms_key).cloned() {
+            Some(Object::Dict(dict)) => dict,
+            Some(Object::Ref(perms_ref)) => match self.get(perms_ref) {
+                Some(Object::Dict(dict)) => {
+                    let mut dict = dict;
+                    dict.insert(docmdp, Object::Ref(signature));
+                    self.put(perms_ref, Object::Dict(dict));
+                    return;
+                }
+                _ => Dict::new(),
+            },
+            _ => Dict::new(),
+        };
+        perms.insert(docmdp, Object::Ref(signature));
+        catalog.insert(perms_key, Object::Dict(perms));
+        self.put(root, Object::Dict(catalog));
+    }
+
+    /// Points an existing empty signature field at `signature`.
+    fn attach_to_field(&mut self, name: &str, signature: ObjRef) -> Result<(), SignError> {
+        let field = self
+            .fields()
+            .into_iter()
+            .find(|field| field.name == name)
+            .ok_or_else(|| SignError::NoSuchField(name.to_string()))?;
+        if field.kind != crate::form::FieldKind::Signature {
+            return Err(SignError::NotASignatureField(name.to_string()));
+        }
+        let value = self.intern(b"V");
+        let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
+            return Err(SignError::NoSuchField(name.to_string()));
+        };
+        // Overwriting a signature destroys the evidence it was, and a caller
+        // who wanted a second one meant a second field.
+        if dict.get(value).is_some() {
+            return Err(SignError::FieldAlreadySigned(name.to_string()));
+        }
+        dict.insert(value, Object::Ref(signature));
+        self.put(field.reference, Object::Dict(dict));
+        self.register_signature_field(None);
+        Ok(())
+    }
+
+    /// Adds an invisible signature field on the first page, pointing at
+    /// `signature`.
+    ///
+    /// Invisible — a zero `/Rect` with 12.5.3's NoView bit — because drawing a
+    /// signature appearance is a separate capability this build does not have,
+    /// and an empty rectangle where a seal should be is worse than nothing
+    /// visible at all. `Print` is set with it so the field's absence is
+    /// consistent on paper and on screen.
+    fn attach_to_new_field(&mut self, name: &str, signature: ObjRef) -> Result<(), SignError> {
+        let page = *self.page_refs().first().ok_or(SignError::NoPages)?;
+        let widget = self.allocate();
+
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.intern(b"Annot")));
+        dict.insert(
+            self.intern(b"Subtype"),
+            Object::Name(self.intern(b"Widget")),
+        );
+        dict.insert(self.intern(b"FT"), Object::Name(self.intern(b"Sig")));
+        dict.insert(
+            self.intern(b"T"),
+            Object::String(PdfString::literal(name.as_bytes().to_vec())),
+        );
+        dict.insert(self.intern(b"Rect"), Object::Array(vec![Object::Int(0); 4]));
+        dict.insert(self.intern(b"F"), Object::Int(132));
+        dict.insert(self.intern(b"P"), Object::Ref(page));
+        dict.insert(self.intern(b"V"), Object::Ref(signature));
+        self.put(widget, Object::Dict(dict));
+
+        self.append_to_page_annots(page, widget);
+        self.register_signature_field(Some(widget));
+        Ok(())
+    }
+
+    fn append_to_page_annots(&mut self, page: ObjRef, widget: ObjRef) {
+        let annots = self.intern(b"Annots");
+        let Some(Object::Dict(mut dict)) = self.get(page) else {
+            return;
+        };
+        // `/Annots` may be the array itself or a reference to one, and the two
+        // are written back to different objects.
+        match dict.get(annots).cloned() {
+            Some(Object::Ref(array_ref)) => {
+                let mut existing = match self.get(array_ref) {
+                    Some(Object::Array(items)) => items,
+                    _ => Vec::new(),
+                };
+                existing.push(Object::Ref(widget));
+                self.put(array_ref, Object::Array(existing));
+            }
+            Some(Object::Array(mut existing)) => {
+                existing.push(Object::Ref(widget));
+                dict.insert(annots, Object::Array(existing));
+                self.put(page, Object::Dict(dict));
+            }
+            _ => {
+                dict.insert(annots, Object::Array(vec![Object::Ref(widget)]));
+                self.put(page, Object::Dict(dict));
+            }
+        }
+    }
+
+    /// The interactive form, read **through this editor's own changes**, and
+    /// where writing it back has to go.
+    ///
+    /// Reading it from `self.doc` instead is a trap worth naming: two edits to
+    /// the form in one save then each start from the file's original catalog,
+    /// so the second silently discards the first. That is exactly what
+    /// happened when adding a field and setting `/SigFlags` were two passes —
+    /// the file came out structurally valid, strict-clean, and carrying a
+    /// signature dictionary no field pointed at.
+    fn acroform(&mut self) -> Option<(FormHome, Dict)> {
+        let root = self.doc.trailer().get_ref(Name::ROOT)?;
+        let Some(Object::Dict(catalog)) = self.get(root) else {
+            return None;
+        };
+        let key = self.intern(b"AcroForm");
+        match catalog.get(key) {
+            Some(Object::Ref(form_ref)) => {
+                let form = match self.get(*form_ref) {
+                    Some(Object::Dict(dict)) => dict,
+                    _ => Dict::new(),
+                };
+                Some((FormHome::Indirect(*form_ref), form))
+            }
+            Some(Object::Dict(form)) => Some((FormHome::InCatalog(root), form.clone())),
+            // A document with no `/AcroForm` gets one, written into the
+            // catalog: an indirect form would need an object number for a
+            // dictionary with two entries in it.
+            _ => Some((FormHome::InCatalog(root), Dict::new())),
+        }
+    }
+
+    fn put_acroform(&mut self, home: FormHome, form: Dict) {
+        match home {
+            FormHome::Indirect(form_ref) => self.put(form_ref, Object::Dict(form)),
+            FormHome::InCatalog(root) => {
+                let Some(Object::Dict(mut catalog)) = self.get(root) else {
+                    return;
+                };
+                let key = self.intern(b"AcroForm");
+                catalog.insert(key, Object::Dict(form));
+                self.put(root, Object::Dict(catalog));
+            }
+        }
+    }
+
+    /// Adds `widget` to `/Fields` and sets `/SigFlags`, in one update.
+    ///
+    /// 12.7.2 Table 218: `/SigFlags` bit 1 says the document has a signature
+    /// and bit 2 says it must only ever be saved incrementally. Both, because
+    /// both are true of a file this method produced.
+    fn register_signature_field(&mut self, widget: Option<ObjRef>) {
+        let Some((home, mut form)) = self.acroform() else {
+            return;
+        };
+        if let Some(widget) = widget {
+            let fields = self.intern(b"Fields");
+            let mut list = match form.get(fields).cloned() {
+                Some(Object::Array(items)) => items,
+                Some(Object::Ref(array_ref)) => match self.get(array_ref) {
+                    Some(Object::Array(items)) => items,
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            list.push(Object::Ref(widget));
+            form.insert(fields, Object::Array(list));
+        }
+        let flags = self.intern(b"SigFlags");
+        form.insert(flags, Object::Int(3));
+        self.put_acroform(home, form);
+    }
+
+    /// The overlay, deletions and page-tree rewrites as one object set.
+    ///
+    /// Factored out of [`DocumentEditor::save`] so that signing writes exactly
+    /// the same objects an ordinary incremental save would, rather than a
+    /// second assembly of them that could drift.
+    fn changed_set(&self) -> ObjectSet {
+        let mut set = ObjectSet::new();
+        for (num, entry) in &self.overlay {
+            match entry {
+                Written::Object(object) => set.insert(*num, object.clone()),
+                Written::Stream(stream) => set.insert_stream(*num, stream.clone()),
+            }
+        }
+        for num in &self.deleted {
+            set.insert(*num, Object::Null);
+        }
+        for (num, object) in &self.page_tree_updates() {
+            set.insert(*num, object.clone());
+        }
+        set
+    }
+}
+
+/// Where a document's `/AcroForm` lives, and therefore where an edit to it
+/// has to be written.
+#[derive(Clone, Copy)]
+enum FormHome {
+    /// Its own object.
+    Indirect(ObjRef),
+    /// Directly inside the catalog, whose reference this is.
+    InCatalog(ObjRef),
 }
 
 /// Building the common annotation types (12.5.6).

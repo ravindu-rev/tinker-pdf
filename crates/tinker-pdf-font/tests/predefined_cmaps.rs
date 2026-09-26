@@ -566,3 +566,80 @@ fn the_names_the_prefix_list_missed_now_resolve() {
         );
     }
 }
+
+/// The registry read **backwards**: every CID a CMap's own text declares
+/// inverts to a code that reads back as that CID, at a width the CMap's own
+/// codespaces split correctly.
+///
+/// A producer needs the direction nothing here tested before. The property
+/// asserted is the one that matters to a form fill: what a writer would emit
+/// for a CID is a byte string this same CMap reads as exactly one code, and
+/// that code means the CID again. A guessed width fails the middle assertion
+/// rather than the last, which is the point — `<0041>` where `<41>` was meant
+/// still names the right CID as a *number* and reads as a different code.
+///
+/// `90ms-RKSJ-H` because Shift-JIS is the mixed case: one-byte codes for
+/// ASCII and half-width katakana, two-byte for everything else, in one CMap.
+/// A `UniJIS` name would pass with the width hard-coded at two.
+#[test]
+fn the_registrys_own_text_inverts_to_codes_that_read_back() {
+    let source = registry()
+        .into_iter()
+        .find(|(name, _)| name == "90ms-RKSJ-H")
+        .map(|(_, source)| source)
+        .expect("the vendored set has 90ms-RKSJ-H");
+    let cmap = CMap::predefined(b"90ms-RKSJ-H").expect("the registry defines it");
+
+    let entries = declared(&source);
+    // 90ms-RKSJ-H is differential: it states its own ranges and inherits the
+    // rest through `usecmap`, so this is a hundred-odd entries rather than
+    // thousands. The inherited ranges are still inverted — they are in the
+    // same compiled blocks — but only what this file's own text declares can
+    // be checked *against the registry's text*, which is the point.
+    assert!(
+        entries.len() > 100,
+        "the vendored source read as nothing much"
+    );
+
+    let mut widths: Vec<u8> = Vec::new();
+    let mut checked = 0usize;
+    for (low, high, cid) in entries.iter().copied() {
+        // Both ends of every range and one inside it: an off-by-one in the
+        // inverse shows at an end, and a range walked from the wrong base
+        // shows in the middle.
+        for step in [0, (high - low) / 2, high - low] {
+            let want = cid + step;
+            let (code, bytes) = cmap
+                .code_for_cid(want)
+                .unwrap_or_else(|| panic!("CID {want} inverts to nothing"));
+            assert_eq!(
+                cmap.cid(code),
+                Some(want),
+                "CID {want} inverted to {code:#X}, which means something else"
+            );
+            let encoded = &code.to_be_bytes()[4 - usize::from(bytes)..];
+            assert_eq!(
+                cmap.decode_codes(encoded),
+                vec![(code, bytes)],
+                "the bytes a writer would emit for CID {want} do not read \
+                 back as one code"
+            );
+            if !widths.contains(&bytes) {
+                widths.push(bytes);
+            }
+            checked += 1;
+        }
+    }
+
+    assert_eq!(
+        checked,
+        entries.len() * 3,
+        "the loop skipped entries it should have checked"
+    );
+    widths.sort_unstable();
+    assert_eq!(
+        widths,
+        vec![1, 2],
+        "Shift-JIS has both widths and the inverse produced only these"
+    );
+}

@@ -1,7 +1,7 @@
 # Architecture
 
 tinker-pdf is a from-scratch, pure-Rust document engine: a workspace of
-fifteen crates in which every byte of logic is this repository's own — the
+eighteen crates in which every byte of logic is this repository's own — the
 inflate, the image codecs, the crypto, the font parsers, the rasterizer, the
 XML parser, the CSS engine, the layout engine, and the transcendental math
 they all share. `#![forbid(unsafe_code)]` holds in every engine crate, and
@@ -40,37 +40,110 @@ tinker-pdf-math ────→ tinker-pdf-color ──┐
               └─────→ tinker-pdf-raster ─┼───────────────────────────────┐
 tinker-pdf-filters ─┬─→ tinker-pdf-font ─┤                               ↓
                     ├─→ tinker-pdf-zip ──┼───────────────────────────────┤
+                    ├─→ tinker-pdf-archive ─────────────────────────────────┤
 tinker-pdf-crypto ──┴─→ tinker-pdf-cos ──┴─→ tinker-pdf-content ─→ tinker-pdf-render ─→ tinker-pdf ─→ tinker-pdf-ffi
+              └─────→ tinker-pdf-pki ──────────────────────────────────────────────────→ tinker-pdf
+tinker-pdf-font ────→ tinker-pdf-shape    (no consumer yet: milestone 6 of design/shaping.md)
 tinker-pdf-xml ───────────────────────────────────────────────────────────────────────→ tinker-pdf
 tinker-pdf-css ─────→ tinker-pdf-layout ──────────────────────────────────────────────→ tinker-pdf
+tinker-pdf-svg ─────→ tinker-pdf-xml, tinker-pdf-css, tinker-pdf-math ─────────────────→ tinker-pdf
 
-tools: pdfcmp (no engine deps) · tpdf (depends on facade)
+tools: pdfcmp, tpdf (both on the facade and nothing below it)
 ```
 
-**Ten leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
-`math`, `zip`, `xml`, `css`, `layout` — are bytes-in/values-out with zero
-PDF types (ruling 8 defines a leaf; the definition binds, not the list).
+**Fourteen leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
+`math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape`, `svg`, `archive` — are
+bytes-in/values-out with zero PDF types (ruling 8 defines a leaf; the
+definition binds, not the list). `archive` is **appended** rather than filed
+next to `zip`: the ordinals in `xtask`'s `ALLOWED` table are positions in this
+list, so inserting into the middle of it silently renumbers eight comments.
 This is the property that makes each one independently fuzzable: a fuzz
 target hands `tinker-pdf-font` a byte slice and expects a value or a
 structured error, with no COS machinery in the corpus or the crash triage.
 It also means a leaf is tested against its own spec (DEFLATE against
 RFC 1951, CFF against Adobe TN 5176) without a PDF in sight.
 
-Four leaf-to-leaf edges exist, each pointing from a higher layer down:
+Eight leaf-to-leaf edges exist, each pointing from a higher layer down:
 `font → filters` (the CMap asset pipeline), `zip → filters` (raw DEFLATE
-and CRC-32), `layout → css` (computed styles in, boxes out), and
-`cos → font` (reading a font *dictionary* — `/Encoding`, `/ToUnicode`,
-standard-14 metrics — is object-model work that needs the leaf's CMap
-parser and encoding tables; a fourth crate whose only job is to hold two
-tables would be worse). The graph cannot cycle, because `filters` depends
-on nothing.
+and CRC-32), `archive → filters` (the same two, for the same two reasons —
+7z method 040108 *is* RFC 1951, and 7z and RAR both record a per-file
+CRC-32), `layout → css` (computed styles in, boxes out),
+`pki → crypto` (RFC 5280's key identifier is a SHA-1, and DER stays out of
+the cipher crate because the two fail differently — a wrong number caught by
+published vectors, against a panic or an overread on untrusted structure),
+`shape → font` (`Sfnt` parses the table directory, and the OpenType Layout
+tables are read in `shape` because `font`'s charter is the tables *metrics*
+need — a lookup is not a metric), and `svg → xml` and `svg → css` (an SVG
+*is* XML, and its presentation attributes, `style=""` and `<style>` are all
+CSS values).
+
+**An edge into `math` is not counted here**, which is why that list is eight
+and not eleven: `color → math`, `raster → math` and `svg → math` exist and
+always have. `tinker-pdf-math` is the bottom of the graph rather than a peer —
+`xtask`'s `ALLOWED` table calls the row above it *“nothing internal beyond the
+maths”* — so depending on it is the baseline every leaf starts from and not a
+coupling anyone has to argue for. This paragraph read *five* until tier 4 and
+had not been recounted when `tinker-pdf-svg` landed with two of them.
+
+**Three** more edges point down *out* of a non-leaf, and they are listed
+here because the first of them used to be counted among the leaf-to-leaf
+edges, which it never was. All three come from `cos` — its full set is
+`filters`, `crypto`, `font`, `shape`, `pki`, checked against its manifest
+rather than remembered — and the first two make the same argument:
+
+- `cos → font` — reading a font *dictionary* (`/Encoding`, `/ToUnicode`,
+  standard-14 metrics) is object-model work that needs the leaf's CMap parser
+  and encoding tables, and a crate whose only job is to hold two tables would
+  be worse.
+- `cos → pki` — reading a `/Recipients` envelope (7.6.5) is object-model work
+  that needs a DER parser. The alternative was putting the public-key handler
+  in the facade, which already depends on both crates, and it was rejected on
+  what it would cost: installing a decryptor is `CosDocument`'s own operation,
+  so a facade-level handler needs `set_decryptor_with_key` to become public —
+  and a public "install this decryptor on an opened document" is a hole with
+  no floor under it, offered so that a dependency edge could be avoided.
+
+The third is a different argument and the only one of the three that a
+reader might expect *not* to be here:
+
+- `cos → shape` — filling a form field. `fill.rs` is the one producing path
+  in the tree whose entry point takes a string and no glyphs:
+  `DocumentBuilder::glyph_run` takes glyphs the caller positioned, so the
+  seam is already in its signature and shaping sits *above* cos for it,
+  but `DocumentEditor::set_field_value(name, value)` has nowhere to put
+  one. Without the edge, `fill.rs` writes `?` for every character above the
+  single-byte range.
+
+  The alternative considered was a `dyn Shaper` on `DocumentEditor` filled
+  from the facade. It fails twice on its own terms. The facade
+  **re-exports `DocumentEditor` verbatim** rather than wrapping it, so a
+  seam only the facade filled would leave `tinker_pdf_cos::DocumentEditor`
+  — a published crate's public API — still writing `?` for Arabic while the
+  identical re-export did not: two answers to one question. And a seam the
+  *caller* fills leaves the default broken, which is the defect it was
+  meant to close.
+
+  What it does not cost: it points down into a leaf, the direction ruling 8
+  allows without argument, and cos hands it face bytes and a `&str`, so
+  `tinker-pdf-shape` learns no PDF vocabulary. The reading half of the
+  shaping non-goal stays structural — `tinker-pdf-content` and
+  `tinker-pdf-render` have no edge to it, and cos interprets no content
+  streams at all. The only text it shapes is an appearance it built itself.
+
+`cos` is not a leaf, so none of the three is leaf-to-leaf however useful
+it is.
+
+The graph cannot cycle, because `filters` depends on nothing.
 
 `tinker-pdf-cos` owns file syntax, xref, repair, the writer, and the strict
 validator that reads a file back with the repairs turned off (ruling 13,
 [verification](verification.md)).
 `tinker-pdf-content` is the content-stream interpreter plus `trait Device`,
-and ships the text device; the rasterizing device lives in
-`tinker-pdf-render`. Because the two devices are in different crates, the
+and ships two devices: the text device, and the recording device that keeps
+every call in order for the consumers a display list, an SVG writer, a
+structured-text serialiser, a table reconstructor, a reading-order inference
+and a glyph-usage walk each need. The rasterizing device lives in
+`tinker-pdf-render`. Because the drawing device is in a different crate, the
 text-extraction path never links a rasterizer — the seam is load-bearing,
 not decorative (ruling 7). `tinker-pdf` is the facade and the only
 user-facing crate (ruling 11).
@@ -82,32 +155,83 @@ Convenient shortcuts between crates are how seams die.
 
 ## Per-crate map
 
-Source lines are `src/` including inline test modules, as of August 2026.
+Source lines are `src/` including inline test modules, as of August 2026 —
+except `tinker-pdf-content`, re-measured 14 September 2026 when the recording
+device landed. The August figure for it was 4 500 and the file was already
+5 531 lines before that change, so the rest of this column is a dated
+measurement rather than a number kept in step.
 
 | Crate | Role | ~LOC | Feature doc | Fuzz targets |
 | --- | --- | ---: | --- | --- |
 | `tinker-pdf` | facade; the only public surface | 24 300 | all of [features/](README.md) | `render_page` |
 | `tinker-pdf-cos` | file syntax, object store, writer, strict validator | 32 900 | [opening](features/opening.md), [document-model](features/document-model.md), [writing](features/writing.md), [forms](features/forms.md), [creation](features/creation.md) | `cos_document`, `cos_object`, `form_script` |
 | `tinker-pdf-filters` | stream filters + image codecs | 21 800 | [filters](features/filters.md) | `ascii_filters`, `ccitt`, `inflate`, `jbig2`, `jpeg`, `jpx`, `lzw`, `png` |
-| `tinker-pdf-crypto` | ciphers, hashes, security handlers | 3 000 | [encryption](features/encryption.md) | `crypt`, `crypt_ciphers` |
+| `tinker-pdf-crypto` | ciphers, hashes, security handlers, RSA/ECDSA verify | 6 000 | [encryption](features/encryption.md) | `crypt`, `crypt_ciphers` |
+| `tinker-pdf-pki` | DER (X.690), X.509 (RFC 5280), CMS (RFC 5652) | 6 000 | [signatures](features/signatures.md) | `pki_der`, `pki_cms` |
+| `tinker-pdf-shape` | OpenType Layout: GDEF, GSUB, GPOS | 4 950 | [design/shaping.md](design/shaping.md) | `shape` |
 | `tinker-pdf-font` | font and CMap parsing, subsetting | 8 400 | [fonts](features/fonts.md) | `cff`, `cmap`, `sfnt`, `truetype`, `type1` |
-| `tinker-pdf-content` | interpreter + `Device` seam, text device | 4 500 | [content-and-text](features/content-and-text.md) | `content_tokenizer` |
+| `tinker-pdf-content` | interpreter + `Device` seam, text device, recording device | 6 700 | [content-and-text](features/content-and-text.md) | `content_tokenizer` |
 | `tinker-pdf-raster` | deterministic AA rasterizer | 5 900 | [rasterizer](features/rasterizer.md) | — (driven via `render_page`) |
 | `tinker-pdf-render` | the rasterizing `Device` | 6 000 | [rendering](features/rendering.md) | — (driven via `render_page`) |
 | `tinker-pdf-color` | colour spaces and functions | 1 100 | [rendering](features/rendering.md) | — |
 | `tinker-pdf-math` | pinned transcendentals, `no_std` | 900 | [determinism](features/determinism.md) | — |
 | `tinker-pdf-zip` | ZIP reader | 3 000 | [cbz](features/cbz.md) | `zip_archive` |
+| `tinker-pdf-archive` | the containers that are not ZIP: tar, 7z, RAR | 4 500 | [cbz](features/cbz.md), [design/comic-archives.md](design/comic-archives.md) | `tar`, `sevenz`, `rar` |
 | `tinker-pdf-xml` | XML pull parser | 4 100 | [xps](features/xps.md) | `xml` |
 | `tinker-pdf-css` | CSS engine | 10 800 | [epub](features/epub.md) | `css` |
+| `tinker-pdf-svg` | SVG 1.1: markup in, a display list out | 4 900 | [epub](features/epub.md) | `svg` |
 | `tinker-pdf-layout` | box model, fragmentation, line breaking | 13 700 | [epub](features/epub.md) | `layout` |
 | `tinker-pdf-ffi` | C ABI | 900 | [bindings](features/bindings.md) | — |
 
-Tools: `tpdf` (debug CLI over the facade) and `pdfcmp` (perceptual
-comparator), both described in [verification.md](verification.md). There is no
+Tools: `tpdf` (debug CLI over the facade, whose `render` writes a `.png` a
+page through `Bitmap::to_png`) and `pdfcmp` (perceptual comparator), both
+described in [verification.md](verification.md) and both on the facade and
+nothing below it — `xtask`'s `TOOLS` table enforces that, so a tool exercises
+what a user gets rather than reaching past the API into a leaf. There is no
 third: `oracle-diff`, the external-renderer harness of retired ruling 9, was
 deleted with the last oracle it could have driven. `xtask` holds the workspace police
 (`dag`, `libm`, `oracles`, `vendor`, `versions`, `check`) and the release,
 corpus and packaging machinery.
+
+### `tinker-pdf-archive`: why a second archive crate, and why no trait
+
+The comic path reads four containers now, and the three that are not ZIP live
+in their own leaf rather than in `tinker-pdf-zip`. The argument is a
+measurement, not a taste, and it is worth stating here because the obvious
+shape — one archive crate with a `trait Container` over all four — is the one
+this rejects.
+
+`tinker_pdf_zip::Archive::read` returns a `Cow` and hands a **stored entry back
+borrowed**, copied nowhere. That crate's own suite pins it with the reason
+attached: *the moment this copies, a 3.6 GB peak comes back* — the comic path
+places image bytes into a PDF stream verbatim, so a copy per entry is a copy of
+the whole archive, and a 200-page scan is the size at which that stops being a
+detail. tar keeps the property and strengthens it: every entry is a contiguous
+range of the input, so its `read` returns a plain `&[u8]`.
+
+**7z cannot have it.** A solid block decodes many files from one LZMA stream,
+so no range of the input is any one file and the read must return owned bytes.
+A trait over all four would have to return the weakest of the four signatures,
+which deletes the exact property that ZIP test exists to hold — in the crate
+that has it, to give four unrelated readers one name. `tinker-pdf-zip`'s
+charter is also recorded twice as APPNOTE 6.3.10 and nothing else (below, and
+ruling 8's own example), and a crate whose charter names one specification is
+not where three more go.
+
+So: **one crate, three modules, three error enums, three entry types, and no
+trait over them.** What tar, 7z and RAR share is a negative — the archive
+containers that are not ZIP — which is weaker than `filters`' "decoders" and is
+honestly weaker. It is still real, and it buys one node and one edge instead of
+three of each. Where the four converge is the facade, which is where they have
+to: deciding what a *page* is needs document types, and a leaf may not have
+them.
+
+What the new crate wanted and did not take: `tinker-pdf-crypto`, for the
+AES-256 that 7z and RAR 5 both offer. Encrypted archives are refused by name in
+both, so the edge would have bought a refusal a comparison of two bytes already
+gives. And `tinker-pdf-math`, which nothing here needs — an LZMA range decoder
+and a Huffman table are integer arithmetic end to end, which is also what makes
+ruling 4 free in this crate rather than something it has to be careful about.
 
 ## Error model
 
@@ -168,6 +292,36 @@ snapshot alive. Readers never observe a half-applied edit and never dangle.
 On wasm32 the same types compile single-threaded; the library spawns no
 threads and owns no global mutable state beyond once-cells, so threading is
 entirely the embedder's business on every target.
+
+**The decision that follows from that: the pools live outside the facade,
+and there is no threading API on `tinker-pdf`.** No `render_all`, no job
+count, no feature flag, no runtime — the library's whole contribution to
+concurrency is that `Document` is `Send + Sync`, that `Document::page`
+returns an *owned* `Page` (it clones an `Arc` rather than borrowing, so a
+worker holding a page borrows nothing and a pool over page indices needs no
+lifetime work), and that `FontProvider` is `Send + Sync` too. Given those
+three, a pool is a dozen lines of `std::thread::scope` in the caller — and
+the same dozen lines in here would be code that cannot exist on wasm32 and
+that every embedder with an executor of its own would have to be talked out
+of. Ruling 11 says the facade is the only public surface; this is that
+surface staying small where the alternative is a second scheduler.
+
+Which leaves the claim above needing something to exercise it, since a
+guarantee nothing tests is the kind this repository has caught itself
+making. Three things do:
+
+- `crates/tinker-pdf/tests/tinker_parity.rs`'s
+  `one_document_is_read_and_rendered_by_several_threads_at_once` shares
+  **one** `&Document` across four scoped threads — `Sync`, not the `Send`
+  that a clone per thread would have shown — and each walks every page,
+  reading its text and rendering it, against the serial answer page by page.
+- `crates/tinker-pdf/examples/parallel.rs` is those dozen lines, as an
+  embedder would write them, checking every page from the pool byte for byte
+  against the same page drawn serially. CI runs it.
+- `tpdf render --jobs N` is the same pool in the command-line tool, with the
+  property that makes it usable: results are buffered per page and printed
+  in page order after the join, so `--jobs 8` and `--jobs 1` write the same
+  bytes. The flag changes the clock and nothing else, and defaults to 1.
 
 ## Outward rounding
 

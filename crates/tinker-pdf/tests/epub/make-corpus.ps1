@@ -1,11 +1,15 @@
 # Produces the committed EPUB corpus in this directory. Nothing in this
 # repository writes a byte of any `.epub` here: every book comes out of one of
-# two real producers, run over text authored in `source/`.
+# three real producers, run over text authored in `source/`.
 #
 #   pandoc         jgm/pandoc, GPL-2.0-or-later, the portable Windows zip.
 #                  Writes EPUB 3 by default and EPUB 2 under `-t epub2`.
 #   ebook-convert  calibre's converter, kovidgoyal/calibre, GPL-3.0-only.
 #                  Writes EPUB 2 or 3 under `--epub-version`.
+#   kcc-c2e        Kindle Comic Converter's comic-to-ebook converter,
+#                  ciromattia/kcc, ISC. The only producer here that writes a
+#                  fixed-layout book, and see README.md for the three that
+#                  cannot.
 #
 # The text, the tables, the code block, the Japanese line and the four PNGs are
 # all authored here, so each book is *our input through their tool* -- the
@@ -15,22 +19,32 @@
 # the alternative sources -- Project Gutenberg and `epub3-samples` -- cannot be
 # committed at all.
 #
+# The one thing here that is not ours is the **face** the two font books
+# embed, and it is deliberately the one already in this tree:
+# `crates/tinker-pdf-font/data/liberation`, OFL-1.1, already on `deny.toml`'s
+# allowlist and already in `THIRDPARTY.md`. Both producers embed it
+# **unmodified**, which README.md explains is a licence constraint rather than
+# a preference.
+#
 # Run it as:
 #
 #   pwsh -NoProfile -File crates\tinker-pdf\tests\epub\make-corpus.ps1 `
 #       -Pandoc C:\tools\pandoc\pandoc.exe `
-#       -EbookConvert 'C:\Program Files\Calibre2\ebook-convert.exe'
+#       -EbookConvert 'C:\Program Files\Calibre2\ebook-convert.exe' `
+#       -KccC2e C:\Users\you\AppData\Local\kcc_c2e.exe
 #
-# It is NOT reproducible byte for byte. Both producers mint a fresh UUID for
-# the package document's `dc:identifier` on every run, and calibre stamps a
-# `dcterms:modified` timestamp. A second run is a different file. The committed
-# books are the record; this script is how they were obtained, and README.md
-# records which version of which producer wrote which file, with a hash.
+# It is NOT reproducible byte for byte. All three producers mint a fresh UUID
+# for the package document's `dc:identifier` on every run, and calibre and KCC
+# stamp a `dcterms:modified` timestamp. A second run is a different file. The
+# committed books are the record; this script is how they were obtained, and
+# README.md records which version of which producer wrote which file, with a
+# hash.
 
 param(
     [string]$OutDir = $PSScriptRoot,
     [string]$Pandoc = $(if ($env:TINKER_PANDOC) { $env:TINKER_PANDOC } else { 'pandoc' }),
-    [string]$EbookConvert = $(if ($env:TINKER_EBOOK_CONVERT) { $env:TINKER_EBOOK_CONVERT } else { 'ebook-convert' })
+    [string]$EbookConvert = $(if ($env:TINKER_EBOOK_CONVERT) { $env:TINKER_EBOOK_CONVERT } else { 'ebook-convert' }),
+    [string]$KccC2e = $(if ($env:TINKER_KCC_C2E) { $env:TINKER_KCC_C2E } else { 'kcc-c2e' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -166,6 +180,91 @@ $meta = @(
     '--epub-version' '2' '--no-default-epub-cover'
 
 Remove-Item $stripped -ErrorAction SilentlyContinue
+
+# ---- the two books that carry a face -----------------------------------------
+#
+# `source/typeface.md` is short and has no code block and no table on purpose:
+# a monospace run or a table caption would pull a second family in, and every
+# family a producer embeds is another third of a megabyte in a corpus that was
+# fifty kilobytes.
+#
+# The face is `LiberationSerif-Regular.ttf` and its bold, out of
+# `crates/tinker-pdf-font/data/liberation` -- OFL-1.1, release 2.1.5, already
+# vendored, already on `deny.toml`'s allowlist. calibre ships **the same
+# release**, byte for byte, in `app/resources/fonts/liberation`, which is where
+# it finds the family: this machine has no Liberation in `C:\Windows\Fonts`.
+#
+# `--embed-all-fonts` rather than `--embed-font-family`, and the difference is
+# measured rather than assumed. `--embed-font-family "Liberation Serif"`
+# embeds all four faces of the family whether or not the book uses them --
+# 863 KB -- and writes a `@font-face` rule per face carrying only the
+# descriptors that differ. `--embed-all-fonts` embeds the two faces the
+# document actually reaches, 423 KB, and writes `font-weight`, `font-style`
+# **and** `font-stretch` on every rule. Half the bytes and more descriptors, so
+# it is the one committed; the other is recorded here because a reader of this
+# script should not have to rediscover what it costs.
+#
+# **Neither is subsetted, and that is a licence constraint.**
+# `--subset-embedded-fonts` takes the book to 11 KB and produces a file this
+# repository may not redistribute: OFL-1.1 clause 3 forbids a Modified Version
+# from using a Reserved Font Name, `AUTHORS` beside the vendored faces reads
+# "with Reserved Font Name Liberation", and calibre's subsetter keeps
+# `name` ID 1 as "Liberation Serif" while dropping IDs 7 to 14 -- including
+# ID 13, the OFL grant clause 2 requires every redistributed copy to carry.
+# Two independent breaches in one 14 KB file. README.md records it.
+
+$typefaceStripped = Join-Path ([System.IO.Path]::GetTempPath()) 'tinker-epub-typeface.md'
+$typeface = Join-Path $src 'typeface.md'
+$text = [System.IO.File]::ReadAllText($typeface)
+$text = [System.Text.RegularExpressions.Regex]::Replace($text, '(?s)\A---\r?\n.*?\r?\n---\r?\n', '')
+[System.IO.File]::WriteAllText($typefaceStripped, $text, (New-Object System.Text.UTF8Encoding($false)))
+
+& $EbookConvert $typefaceStripped (Join-Path $OutDir 'calibre-embedded-font.epub') `
+    '--title' 'A Book That Brought Its Own Face' `
+    '--authors' 'The tinker-pdf authors' `
+    '--language' 'en' '--txt-in-remove-indents' `
+    '--epub-version' '3' '--no-default-epub-cover' `
+    '--embed-all-fonts' `
+    '--extra-css' 'body { font-family: "Liberation Serif", serif; }'
+
+Remove-Item $typefaceStripped -ErrorAction SilentlyContinue
+
+# pandoc embeds the file named and writes its manifest entry; its own
+# documentation makes the `@font-face` rule the author's, so `source/embedded.css`
+# is ours and everything around it is pandoc's. Two producers rather than one,
+# for the reason README.md gives about producer counts -- and here the second
+# producer earns its place twice over, because pandoc does **not** rewrite the
+# author's `url()` and puts the stylesheet and the face in two different
+# directories, so the reference resolves against the sheet that holds it.
+
+$face = Join-Path $PSScriptRoot '..\..\..\tinker-pdf-font\data\liberation\LiberationSerif-Regular.ttf'
+$face = [System.IO.Path]::GetFullPath($face)
+& $Pandoc $typeface @common `
+    "--css=$(Join-Path $src 'embedded.css')" `
+    "--epub-embed-font=$face" `
+    -o (Join-Path $OutDir 'pandoc-embedded-font.epub')
+
+# ---- the fixed-layout book ---------------------------------------------------
+#
+# KCC is a comic converter and takes a directory of pictures, so it is fed the
+# same four PNGs written above rather than anything new: four pages at four
+# different pixel sizes, which is what makes a per-item viewport visible.
+#
+# `--nokepub` because the default extension is `.kepub.epub`, which is Kobo's
+# and not a name this corpus should carry. `-p KV` is KCC's default device
+# profile; every picture here is smaller than its 1072 x 1448 screen and KCC
+# does not upscale unless asked, so each page keeps its own dimensions.
+#
+# calibre cannot do this and it was tried: `ebook-convert` writes no
+# `rendition:` metadata at all, in either EPUB version, and its help lists no
+# fixed-layout, viewport or pre-paginated option. README.md records the route.
+
+& $KccC2e -p KV -f EPUB --nokepub `
+    -t 'Four Plates, Pre-Paginated' `
+    -a 'The tinker-pdf authors' `
+    --language en `
+    -o (Join-Path $OutDir 'kcc-fixed-layout.epub') `
+    $figures
 
 'books:'
 Get-ChildItem $OutDir -Filter '*.epub' | Sort-Object Name | ForEach-Object {

@@ -34,6 +34,22 @@
 //! - **A lower ceiling never turns a refusal into a panic, and never turns a
 //!   refusal into a different picture.** Decoding the same bytes twice under
 //!   two ceilings must give the same image or a named refusal.
+//! # What this target cannot find, and what covers it instead
+//!
+//! Every assertion above is **structural**: a successful scan promised an
+//! IDAT and a usable palette, the two entry points agree about whether a file
+//! decodes, and the ceiling held. None of them asks whether the numbers are
+//! the ones the input actually describes, so a decode that is well-formed and
+//! *wrong* passes this target exactly as a correct one does.
+//!
+//! Correctness lives in `crates/tinker-pdf-filters/tests/png_suite.rs`, which
+//! decodes PngSuite and compares the samples.
+//!
+//! This is the shape `brotli` records at length, and the difference is worth
+//! keeping in view: there, nothing in the tree can supply the missing check
+//! at all — rule 1 leaves no encoder to round-trip against and ruling 13 bars
+//! a second decoder. Here the check exists, and it is somewhere else.
+//!
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

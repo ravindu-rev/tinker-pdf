@@ -77,6 +77,45 @@ So: **draw from the view immediately and drop it.** If the pixels must outlive
 the next engine call, use `data()`. The safe call has the short name; the
 dangerous one has the warning in its name, its doc comment and here.
 
+## Opening by ranges
+
+A host that has the whole file hands it over. A host that has to fetch it —
+over HTTP range requests, out of a `File` it does not want to read whole —
+opens the document by feeding the ranges the engine asks for:
+
+```js
+const source = new PdfSource(file.size);
+let doc = null;
+while (doc === null) {
+  try {
+    doc = PdfDocument.openStreaming(source);
+  } catch (e) {
+    const needed = source.takeNeeded();      // [start, end, start, end, ...]
+    for (let i = 0; i < needed.length; i += 2) {
+      source.feed(needed[i], await fetchRange(needed[i], needed[i + 1]));
+    }
+  }
+}
+```
+
+**The engine performs no transport.** It never fetches, never blocks and has
+no runtime; it asks for a range and, if the host has not fed it, refuses with
+that range named. The loop terminates because every refusal names a range, the
+host feeds exactly that, and the engine's caches keep what they have already
+parsed — so each turn strictly increases what is readable and no work is
+repeated. There is no async here and there will not be: it would need a
+runtime this workspace does not have, would colour every function down to the
+device, and would make output depend on when bytes arrived
+(`docs/rulings.md`, ruling 4).
+
+The document that comes out is the document the whole-buffer open would have
+produced. `node_smoke.mjs` drives the loop, caps the turns so a loop that could
+not finish fails rather than hangs, and asserts the streamed render is
+**byte-identical** to the buffered one.
+
+A linearized file (ISO 32000-1 Annex F) pays for this the least: its first page
+is at the front, and page one renders without a byte of the tail being fetched.
+
 ## The browser demo
 
 Plan 13's exit criterion for this binding: a page that renders an uploaded PDF.
@@ -119,6 +158,43 @@ is the default, and it carries all 202 of Adobe's predefined CMaps. Plan 13's
 budget is 2.5 MB gzipped. Turning the feature off is
 `--no-default-features`, and it is the switch a host that renders no CJK
 reaches for.
+
+## Writing, and proving it is the same engine
+
+```bash
+cd <a directory where the tarball has been npm install'ed>
+node <repo>/bindings/js/tests/write_parity.mjs <repo>/testdata/form-fields.pdf
+```
+
+Two scripts with every input pinned — fill a form and save incrementally, and
+build a document from pages, a font and an image — printing one
+`WROTE sha256=<hex>` line each. The same two run against the facade in Rust,
+through the wheel and through the NuGet package, and
+`cargo xtask bindings-parity` requires all four to be byte-identical.
+
+**There is no `editor.transaction(callback)`**, and the reason is mechanical
+rather than a matter of taste. An exported wasm-bindgen method borrows its
+`this` for the whole call, so JavaScript running inside one that touched the
+same editor would hit *"recursive use of an object detected which would lead to
+unsafe aliasing in Rust"* — a panic, from the one shape a caller would most
+want. What the engine's design asks for is checkpoint, host-language control
+flow, restore, and in JavaScript that is three lines you write:
+
+```js
+const mark = editor.checkpoint();
+try { editor.fillField('name', 'Ada Lovelace'); }
+catch (e) { editor.restore(mark); throw e; }
+finally { mark.free(); }
+```
+
+Wrapping those three lines in a shipped helper was the alternative and was
+rejected: it would be the first logic this binding carries, and ruling 11's
+whole point is that there is none to diverge with. `restore` is idempotent, so
+a `finally` that runs after its own `catch` is safe.
+
+`save` returns a **copy**. `viewUnsafeUntilNextAllocation` is the only aliasing
+view on this surface, and a write API that handed one back would hand it back
+at exactly the moment the caller is about to allocate again.
 
 ## Nothing has been published
 

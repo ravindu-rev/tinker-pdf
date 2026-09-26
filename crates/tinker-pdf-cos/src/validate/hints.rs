@@ -21,8 +21,21 @@
 //! and each run is padded to a byte boundary — which is what accounts for the
 //! sixteen bytes between a thirty-six byte header and a `/S` of 52 in a
 //! six-page file, and row packing cannot.
+//!
+//! # One reader, not two
+//!
+//! *August 2026.* `linearize.rs`'s test module carried a second reader for the
+//! same two tables, written against the same Annex F clauses, and the two
+//! disagreed about Table F.4 item 5 — see [`decode`]. A format with two
+//! readers has no reader: whichever is wrong is wrong in private. The tests
+//! that drove the second one now drive this one, which is why this module
+//! reports every header item and both end positions rather than only the
+//! fields [`super`] happens to compare. A field nothing reads is a field
+//! nothing checks, and that is the defect this module was created for.
 
-/// One page's row of the page offset hint table (F.3, Table F.4).
+use crate::limits;
+
+/// One page's row of the page offset hint table (F.4.1, Table F.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PageHint {
     /// How many objects the page claims, item 1 plus the header's least.
@@ -33,66 +46,148 @@ pub(crate) struct PageHint {
     pub shared: Vec<u32>,
 }
 
-/// What the primary hint stream declares (F.3 and F.4).
+/// What the primary hint stream declares (F.4.1 and F.4.2).
+///
+/// Every header item of Tables F.3 and F.5 is reported, in their order and
+/// under their numbers, rather than only the ones a caller happens to compare
+/// today: an item this struct dropped would be an item that could be written
+/// at the wrong width forever, which is exactly how the tables came to be
+/// wrong in five ways at once.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Hints {
+    /// Table F.3 item 1: the least objects any page has.
+    pub least_objects: u32,
     /// Table F.3 item 2: where the first page's page object begins.
     pub first_page_offset: u32,
+    /// Item 3: the width of Table F.4 item 1.
+    pub object_bits: u16,
+    /// Item 4: the least bytes any page occupies.
+    pub least_length: u32,
+    /// Item 5: the width of Table F.4 item 2.
+    pub length_bits: u16,
+    /// Item 6: the least content-stream offset.
+    pub least_content_offset: u32,
+    /// Item 7: the width of Table F.4 item 6.
+    pub content_offset_bits: u16,
+    /// Item 8: the least content-stream length.
+    pub least_content_length: u32,
+    /// Item 9: the width of Table F.4 item 7.
+    pub content_length_bits: u16,
+    /// Item 10: the width of Table F.4 item 3.
+    pub count_bits: u16,
+    /// Item 11: the width of Table F.4 item 4.
+    pub identifier_bits: u16,
+    /// Item 12: the width of Table F.4 item 5.
+    pub position_bits: u16,
+    /// Item 13: what item 5's numerators are over.
+    pub position_denominator: u32,
     /// One row per page, in page order.
     pub pages: Vec<PageHint>,
+    /// How many bytes the page offset hint table occupies.
+    ///
+    /// The stream's `/S` names the same number from the other side, so the
+    /// two disagreeing is a file that packs one table and addresses another.
+    pub page_table_end: usize,
     /// Table F.5 item 1: part 8's first object number, or zero.
     pub first_shared_object: u32,
     /// Table F.5 item 2: where that object begins, or zero.
     pub first_shared_offset: u32,
     /// Table F.5 item 3: how many entries describe the first page's objects.
     pub shared_first_page: u32,
+    /// Table F.5 item 5: the width of Table F.6 item 4.
+    pub group_count_bits: u16,
+    /// Table F.5 item 6: the least group length.
+    pub least_group: u32,
+    /// Table F.5 item 7: the width of Table F.6 item 1.
+    pub group_bits: u16,
     /// Each entry's group length (Table F.6 item 1 plus the header's least).
+    ///
+    /// Its length is Table F.5 item 4, the entry count.
     pub shared_lengths: Vec<u32>,
+    /// Table F.6 item 2, one flag per entry: whether a 128-bit signature
+    /// follows it.
+    pub signature_flags: Vec<u32>,
+    /// How many bytes of the stream both tables together occupy, measured
+    /// from byte zero.
+    pub end: usize,
 }
 
 /// Unpacks both tables, or nothing when the stream runs out mid-field.
 ///
 /// `shared_at` is the hint stream's own `/S`: the byte offset, inside the
 /// decoded stream, where the shared object hint table begins.
+///
+/// # Table F.4 item 5 is per *reference*, not per page
+///
+/// The fractional-position numerator follows item 4, the shared object
+/// identifiers, and Table F.4 repeats both of them for each shared object a
+/// page references — so a page naming three shared objects contributes three
+/// numerators and a page naming none contributes nothing. Reading one per page
+/// instead, which this module did until August 2026, puts every later run of
+/// the table out of step by the difference between the reference count and the
+/// page count. It never showed, because this writer states item 12 as zero
+/// bits and a zero-width run consumes nothing either way; a producer that
+/// states a width would have been misread in silence.
 pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option<Hints> {
+    // `page_count` reaches here from a file's own `/N` on the streaming path,
+    // so it is attacker-chosen. Capped before anything is sized by it.
+    if page_count > limits::MAX_PAGES {
+        return None;
+    }
     let mut bits = BitReader::new(data);
 
-    // ---- Page offset hint table (F.3, Table F.3) ----
+    // ---- Page offset hint table (F.4.1, Table F.3) ----
     let least_objects = bits.read(32)?;
     let first_page_offset = bits.read(32)?;
     let object_bits = bits.read(16)? as u16;
     let least_length = bits.read(32)?;
     let length_bits = bits.read(16)? as u16;
-    let _least_content_offset = bits.read(32)?;
+    let least_content_offset = bits.read(32)?;
     let content_offset_bits = bits.read(16)? as u16;
-    let _least_content_length = bits.read(32)?;
+    let least_content_length = bits.read(32)?;
     let content_length_bits = bits.read(16)? as u16;
     let count_bits = bits.read(16)? as u16;
     let identifier_bits = bits.read(16)? as u16;
     let position_bits = bits.read(16)? as u16;
-    let _position_denominator = bits.read(16)?;
+    let position_denominator = bits.read(16)?;
 
-    let mut objects = Vec::with_capacity(page_count);
+    let mut objects = Vec::new();
     for _ in 0..page_count {
         objects.push(least_objects.saturating_add(bits.read(object_bits)?));
     }
     bits.align();
 
-    let mut lengths = Vec::with_capacity(page_count);
+    let mut lengths = Vec::new();
     for _ in 0..page_count {
         lengths.push(least_length.saturating_add(bits.read(length_bits)?));
     }
     bits.align();
 
-    let mut counts = Vec::with_capacity(page_count);
+    let mut counts = Vec::new();
     for _ in 0..page_count {
         counts.push(bits.read(count_bits)?);
     }
     bits.align();
 
-    let mut shared = Vec::with_capacity(page_count);
+    // Item 4, one identifier per reference. The count is the file's own, so
+    // it is bounded before any vector is grown by it: a zero-width identifier
+    // consumes nothing, so the reads below would never fail however large the
+    // claim. Two bounds, because one of them is not enough. The bits that
+    // could hold the identifiers rule out a claim of four billion in a
+    // forty-byte stream -- but a stream may be [`limits::MAX_DECODED_STREAM`]
+    // long, and eight times that is a billion identifiers and four gigabytes
+    // of vector for a file that never had to hold one. So the table's own
+    // capacity is the first bound and what a document could reference is the
+    // second.
+    let references: u64 = counts.iter().map(|c| u64::from(*c)).sum();
+    if references > data.len().saturating_mul(8) as u64
+        || references > limits::MAX_XREF_SLOTS as u64
+    {
+        return None;
+    }
+    let mut shared = Vec::new();
     for count in &counts {
-        let mut ids = Vec::with_capacity(*count as usize);
+        let mut ids = Vec::new();
         for _ in 0..*count {
             ids.push(bits.read(identifier_bits)?);
         }
@@ -100,19 +195,25 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
     }
     bits.align();
 
-    // Items 5, 6 and 7: the fractional position, and the content stream's
-    // offset and length. Each is a run at a width the header states, and this
-    // writer states zero for all three — but a file from anywhere else may
-    // not, and reading past a run that is really there would put every later
-    // field one column out.
-    for width in [position_bits, content_offset_bits, content_length_bits] {
+    // Item 5: one fractional-position numerator per shared object reference —
+    // see the note above, which is what this module got wrong.
+    for count in &counts {
+        for _ in 0..*count {
+            bits.read(position_bits)?;
+        }
+    }
+    bits.align();
+
+    // Items 6 and 7: the content stream's offset and length, one per page.
+    for width in [content_offset_bits, content_length_bits] {
         for _ in 0..page_count {
             bits.read(width)?;
         }
         bits.align();
     }
+    let page_table_end = bits.byte();
 
-    // ---- Shared object hint table (F.4, Table F.5) ----
+    // ---- Shared object hint table (F.4.2, Table F.5) ----
     //
     // Addressed by `/S` rather than by where the page table happened to end:
     // the stream's own dictionary says where this begins, and a reader that
@@ -130,10 +231,13 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
     let total = usize::try_from(total).ok()?;
     // A hostile file can claim four billion entries in a stream of forty
     // bytes; the reads below would fail anyway, but not before the allocation.
-    if total > data.len().saturating_mul(8) {
+    // And it can claim a billion of them in a stream large enough to hold
+    // that many bits, which the first bound alone lets through -- see the
+    // identifier count above, which is the same shape of claim.
+    if total > data.len().saturating_mul(8) || total > limits::MAX_XREF_SLOTS {
         return None;
     }
-    let mut shared_lengths = Vec::with_capacity(total);
+    let mut shared_lengths = Vec::new();
     for _ in 0..total {
         shared_lengths.push(least_group.saturating_add(bits.read(group_bits)?));
     }
@@ -142,13 +246,12 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
     // Item 2: a one-bit flag per entry saying whether a 128-bit signature
     // follows. Never optional, and writing it at zero width is what once made
     // a reader run off the end of the stream before it had read one entry.
-    let mut signed = 0usize;
+    let mut signature_flags = Vec::new();
     for _ in 0..total {
-        if bits.read(1)? == 1 {
-            signed += 1;
-        }
+        signature_flags.push(bits.read(1)?);
     }
     bits.align();
+    let signed = signature_flags.iter().filter(|flag| **flag == 1).count();
     for _ in 0..signed {
         for _ in 0..4 {
             bits.read(32)?;
@@ -160,9 +263,23 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
     for _ in 0..total {
         bits.read(group_count_bits)?;
     }
+    bits.align();
+    let end = shared_at.checked_add(bits.byte())?;
 
     Some(Hints {
+        least_objects,
         first_page_offset,
+        object_bits,
+        least_length,
+        length_bits,
+        least_content_offset,
+        content_offset_bits,
+        least_content_length,
+        content_length_bits,
+        count_bits,
+        identifier_bits,
+        position_bits,
+        position_denominator,
         pages: (0..page_count)
             .map(|index| PageHint {
                 objects: objects.get(index).copied().unwrap_or(0),
@@ -170,10 +287,16 @@ pub(crate) fn decode(data: &[u8], shared_at: usize, page_count: usize) -> Option
                 shared: shared.get(index).cloned().unwrap_or_default(),
             })
             .collect(),
+        page_table_end,
         first_shared_object,
         first_shared_offset,
         shared_first_page,
+        group_count_bits,
+        least_group,
+        group_bits,
         shared_lengths,
+        signature_flags,
+        end,
     })
 }
 
@@ -236,6 +359,11 @@ impl<'a> BitReader<'a> {
             self.at += 1;
         }
     }
+
+    /// How many whole bytes have been consumed. Only meaningful when aligned.
+    fn byte(&self) -> usize {
+        self.at
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +395,680 @@ mod tests {
     #[test]
     fn a_truncated_table_decodes_to_nothing_rather_than_to_zeroes() {
         assert_eq!(decode(&[0u8; 8], 0, 1), None);
+    }
+
+    /// The two headers are the sizes Annex F states, measured rather than
+    /// assumed.
+    ///
+    /// Table F.3 is thirteen items and Table F.5 is seven, and every field of
+    /// both is fixed-width, so their sizes are arithmetic a reader can be held
+    /// to: 36 bytes and 24. An item dropped or added shifts every run below it
+    /// and this is the assertion that says so, in the decoder's own file,
+    /// without a document in front of it.
+    #[test]
+    fn the_two_table_headers_are_thirty_six_and_twenty_four_bytes() {
+        let data = [0u8; 60];
+        let read = decode(&data, 36, 0).expect("an empty pair of tables decodes");
+        assert_eq!(read.page_table_end, 36, "Table F.3 is thirteen items");
+        assert_eq!(read.end, 60, "Table F.5 is seven more");
+        assert!(read.pages.is_empty());
+        assert!(read.shared_lengths.is_empty());
+    }
+
+    /// One byte short of either header is nothing, not a header of zeroes.
+    #[test]
+    fn a_header_one_byte_short_decodes_to_nothing() {
+        assert_eq!(decode(&[0u8; 35], 0, 0), None, "the page offset header");
+        assert_eq!(decode(&[0u8; 59], 36, 0), None, "the shared object header");
+    }
+
+    /// Table F.4 item 5 is one numerator per shared object *reference*.
+    ///
+    /// Nothing in the fetched qpdf corpus discriminates this: every linearized
+    /// file in it states item 12 as zero bits, so a zero-width run consumes
+    /// nothing whichever way it is counted, and this decoder read one per page
+    /// for as long as it existed without a single file noticing. The table is
+    /// therefore packed here by hand, with a width and two pages whose
+    /// reference counts differ from the page count, so the two readings land
+    /// on different bytes: per reference the page table is 44 bytes, per page
+    /// it is 43, and `/S` names the first.
+    #[test]
+    fn one_fractional_position_is_read_for_each_shared_reference() {
+        let mut data = vec![0u8; 36];
+        // Item 10, the width of a page's reference count.
+        data[29] = 8;
+        // Item 11, the width of one identifier.
+        data[31] = 8;
+        // Item 12, the width of one fractional-position numerator.
+        data[33] = 8;
+        // Item 13, what those numerators are over.
+        data[35] = 1;
+        // Two pages: the first names three shared objects, the second none.
+        data.extend_from_slice(&[3, 0]);
+        // Item 4, three identifiers.
+        data.extend_from_slice(&[10, 11, 12]);
+        // Item 5, three numerators -- one for each reference, not one for
+        // each page. A reader that takes two here ends a byte short.
+        data.extend_from_slice(&[1, 2, 3]);
+        let shared_at = data.len();
+        assert_eq!(shared_at, 44, "the hand-packed page table is 44 bytes");
+        // An empty shared object hint table: seven header items, no entries.
+        data.extend_from_slice(&[0u8; 24]);
+
+        let read = decode(&data, shared_at, 2).expect("the tables decode");
+        assert_eq!(read.count_bits, 8, "item 10");
+        assert_eq!(read.identifier_bits, 8, "item 11");
+        assert_eq!(read.position_bits, 8, "item 12");
+        assert_eq!(read.position_denominator, 1, "item 13");
+        assert_eq!(read.pages[0].shared, vec![10, 11, 12], "item 4, page one");
+        assert_eq!(read.pages[1].shared, Vec::<u32>::new(), "item 4, page two");
+        assert_eq!(
+            read.page_table_end, shared_at,
+            "item 5 is per reference: one numerator per page ends at 43"
+        );
+        assert_eq!(read.end, 68, "and the shared header is the last 24 bytes");
+    }
+
+    /// A page count no file could have is refused before it is allocated for.
+    #[test]
+    fn an_absurd_page_count_is_refused_rather_than_sized_for() {
+        assert_eq!(decode(&[0u8; 64], 0, limits::MAX_PAGES + 1), None);
+    }
+
+    /// A shared-entry count the stream is large enough to state is still a
+    /// count no document could have.
+    ///
+    /// The bits-that-could-hold-them bound alone lets a 128 KiB hint stream
+    /// claim a million entries and a 16 MiB one claim a hundred million, which
+    /// is a four-hundred-megabyte vector grown from a field nobody checked.
+    /// Zero-width group lengths mean the reads that follow consume nothing, so
+    /// nothing downstream would have refused it either.
+    #[test]
+    fn a_shared_entry_count_no_document_could_have_is_refused() {
+        // Big enough that `total` passes the bits bound, so this measures the
+        // second one and not the first.
+        let mut data = vec![0u8; 36 + 24 + (limits::MAX_XREF_SLOTS + 8) / 8];
+        let shared_at = 36;
+        // Table F.5 item 4, the entry count, is the fourth 32-bit field of the
+        // shared object header: bytes 12 to 16 of it.
+        let total = (limits::MAX_XREF_SLOTS as u32) + 1;
+        data[shared_at + 12..shared_at + 16].copy_from_slice(&total.to_be_bytes());
+        assert_eq!(decode(&data, shared_at, 0), None);
+
+        // And the cap itself decodes, so what refused the above is the count
+        // being over it rather than anything else about these bytes.
+        data[shared_at + 12..shared_at + 16]
+            .copy_from_slice(&(limits::MAX_XREF_SLOTS as u32).to_be_bytes());
+        let read = decode(&data, shared_at, 0).expect("the cap itself is readable");
+        assert_eq!(read.shared_lengths.len(), limits::MAX_XREF_SLOTS);
+    }
+
+    /// The same claim in the other table: shared object *references*.
+    ///
+    /// Table F.4 item 3 is one count per page and item 4 is one identifier per
+    /// reference, so a single page can claim four billion of them. At item
+    /// 11's zero width they consume no bits, which is what makes the count
+    /// rather than the stream the thing that has to be bounded.
+    #[test]
+    fn a_shared_reference_count_no_document_could_have_is_refused() {
+        let mut data = vec![0u8; 36 + 24 + (limits::MAX_XREF_SLOTS + 8) / 8];
+        // Item 10, the width of a page's reference count, at bytes 28 and 29;
+        // item 11, the identifier width, left at zero.
+        data[29] = 32;
+        let references = (limits::MAX_XREF_SLOTS as u32) + 1;
+        data[36..40].copy_from_slice(&references.to_be_bytes());
+        let shared_at = data.len() - 24;
+        assert_eq!(decode(&data, shared_at, 1), None);
+
+        data[36..40].copy_from_slice(&(limits::MAX_XREF_SLOTS as u32).to_be_bytes());
+        let read = decode(&data, shared_at, 1).expect("the cap itself is readable");
+        assert_eq!(read.pages[0].shared.len(), limits::MAX_XREF_SLOTS);
+    }
+
+    /// A hostile shared-reference count over a zero-width identifier column
+    /// would otherwise grow a vector without consuming a bit.
+    #[test]
+    fn shared_references_are_bounded_by_the_bits_that_could_hold_them() {
+        // Thirteen header items in thirty-six bytes. Item 10 -- the width of
+        // a page's reference count -- is the fifth 16-bit field, so it lands
+        // at bytes 28 and 29; item 11, the identifier width, is left at zero
+        // so that the references themselves consume nothing however many are
+        // claimed. Then one page whose count field is four bytes of ones.
+        let mut data = vec![0u8; 36];
+        data[29] = 32;
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        data.extend_from_slice(&[0u8; 64]);
+        assert_eq!(decode(&data, 0, 1), None);
+    }
+}
+
+/// The reader against linearized files this project did not write.
+///
+/// The round-trip tests above prove the decoder is the writer's inverse. That
+/// is the agreement that proves the least: a reader misunderstanding Annex F
+/// exactly as the writer does agrees with it perfectly, which is how the
+/// tables came to be wrong in five ways with every test green. These files
+/// were linearized by somebody else, so the two understandings are
+/// independent — and the count is asserted, because a sweep reporting whatever
+/// it happens to find reads as a pass when the set shrinks to nothing.
+#[cfg(test)]
+mod corpus {
+    use std::path::PathBuf;
+
+    use super::decode;
+    use crate::doc::CosDocument;
+    use crate::object::Object;
+    use crate::parse::parse_indirect_at;
+    use crate::repair::next_object_header;
+    use crate::warn::WarningSink;
+    use crate::xref;
+
+    /// How many files in the pinned qpdf corpus are already linearized.
+    ///
+    /// Committed numbers rather than "however many were found", so a corpus
+    /// that half-extracted, a filter that stopped matching, or a decoder that
+    /// started calling linearized files ordinary all fail here instead of
+    /// passing quietly with a smaller set. Measured against the `qpdf` entry
+    /// of `corpus/corpora.lock`, commit e8adee32, whose pinned subdirectory
+    /// holds 626 PDFs.
+    const LINEARIZED_FILES: usize = 45;
+
+    /// How many of those unpack both hint tables.
+    const DECODED_FILES: usize = 32;
+
+    /// How many are encrypted under a password this test does not have.
+    ///
+    /// Their hint streams are ciphertext, so refusing to read them is the
+    /// right answer rather than a defect: counted as linearized, excluded from
+    /// what must decode, and pinned so that a decoder which started returning
+    /// numbers for ciphertext would fail here.
+    const SEALED_FILES: usize = 10;
+
+    /// The linearized files whose hint tables this reader refuses, by name and
+    /// with the reason it refuses them.
+    ///
+    /// Named rather than counted, and asserted as a set: qpdf carries these
+    /// three as deliberately malformed linearization fixtures — two bounds
+    /// cases and one allocation regression — so a refusal is the answer
+    /// rulings 1 and 2 ask for. A file that stopped being refused, or a
+    /// fourth that started, both fail here.
+    const REFUSED_FILES: &[&str] = &[
+        "linearization-bounds-1.pdf: the tables ran out mid-field",
+        "linearization-bounds-2.pdf: the tables ran out mid-field",
+        "linearization-large-vector-alloc.pdf: the tables ran out mid-field",
+    ];
+
+    /// Where `cargo xtask corpus-fetch` puts the qpdf corpus, and the override
+    /// for a checkout that shares one fetch between worktrees.
+    pub(super) fn corpus_dir() -> Option<PathBuf> {
+        // An override that names nothing is a typo, and falling back to the
+        // default would answer a question nobody asked: the run would measure
+        // the corpus it happened to find and report `RAN`, which is the shape
+        // of failure the `RAN`/`SKIPPED` discipline exists to stop. So a named
+        // directory that is not one fails here rather than later.
+        if let Some(named) = std::env::var_os("TINKER_QPDF_CORPUS").map(PathBuf::from) {
+            assert!(
+                named.is_dir(),
+                "TINKER_QPDF_CORPUS is set to {} and that is not a directory",
+                named.display()
+            );
+            return Some(named);
+        }
+        let default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/files/qpdf/qpdf/qtest/qpdf");
+        default.is_dir().then_some(default)
+    }
+
+    /// Every `.pdf` in the corpus, by name, so the order is the same on every
+    /// machine and a failure names the same file twice running.
+    pub(super) fn pdfs(dir: &PathBuf) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|e| e == "pdf"))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// What one file turned out to be.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        /// Its first object is not a linearization parameter dictionary.
+        NotLinearized,
+        /// It is linearized and both hint tables unpacked.
+        Decoded,
+        /// It is linearized and something stopped the tables being read.
+        Refused(&'static str),
+        /// It is linearized and encrypted under a password this test does not
+        /// have, so its hint stream is ciphertext. Counted as linearized and
+        /// excluded from what must decode, because refusing to read bytes
+        /// nobody supplied the key for is the correct answer rather than a
+        /// defect in the decoder.
+        NeedsPassword,
+    }
+
+    /// F.3.3: the parameter dictionary is the first object in the body of the
+    /// file, so a file whose first object is anything else is not linearized. That is the
+    /// same test [`crate::validate`] applies, deliberately: two different
+    /// answers to "is this file linearized" would make the count meaningless.
+    fn read_hints(bytes: Vec<u8>) -> Outcome {
+        let Ok(doc) = CosDocument::open(bytes) else {
+            return Outcome::NotLinearized;
+        };
+        let mut sink = WarningSink::new();
+        // 7.5.2: bytes before `%PDF-` shift every offset the file stores, and
+        // Annex F's `/H` is one of them. A reader that forgets the shift finds
+        // no hint stream in a file that has a perfectly good one.
+        let shift = xref::header_shift(doc.bytes(), &mut sink);
+        let Some(at) = next_object_header(doc.bytes(), 0) else {
+            return Outcome::NotLinearized;
+        };
+        let Some(first) = parse_indirect_at(doc.bytes(), at, doc.names_table(), &mut sink) else {
+            return Outcome::NotLinearized;
+        };
+        let linearized = doc.intern(b"Linearized");
+        let Some(dict) = first
+            .object
+            .as_dict()
+            .filter(|d| d.contains_key(linearized))
+        else {
+            return Outcome::NotLinearized;
+        };
+
+        let Some(page_count) = dict
+            .get_int(doc.intern(b"N"))
+            .and_then(|v| usize::try_from(v).ok())
+        else {
+            return Outcome::Refused("/N is not a page count");
+        };
+        let hint_offset = dict
+            .get_array(doc.intern(b"H"))
+            .and_then(|a| a.first().cloned())
+            .and_then(|o| o.as_int())
+            .and_then(|v| u64::try_from(v).ok());
+        let Some(hint_offset) = hint_offset else {
+            return Outcome::Refused("/H does not name an offset");
+        };
+
+        if doc.is_encrypted() && doc.authenticate("").is_err() {
+            return Outcome::NeedsPassword;
+        }
+
+        let mut sink = WarningSink::new();
+        let len = doc.bytes().len() as u64;
+        let stream = xref::offset_candidates(len, hint_offset, shift)
+            .into_iter()
+            .find_map(|at| parse_indirect_at(doc.bytes(), at, doc.names_table(), &mut sink));
+        let Some(stream) = stream else {
+            return Outcome::Refused("/H names no object");
+        };
+        let Object::Stream(hint) = &stream.object else {
+            return Outcome::Refused("/H names something that is not a stream");
+        };
+        let shared_at = hint
+            .dict
+            .get_int(doc.intern(b"S"))
+            .and_then(|v| usize::try_from(v).ok());
+        let Some(shared_at) = shared_at else {
+            return Outcome::Refused("the hint stream states no /S");
+        };
+        let Ok(data) = doc.stream_decoded(stream.reference) else {
+            return Outcome::Refused("the hint stream does not decode");
+        };
+        match decode(&data, shared_at, page_count) {
+            Some(_) => Outcome::Decoded,
+            None => Outcome::Refused("the tables ran out mid-field"),
+        }
+    }
+
+    /// Ruling 13's `RAN`/`SKIPPED` discipline: a check that can be absent says
+    /// which it was, so a corpus nobody fetched cannot read as a corpus that
+    /// passed.
+    #[test]
+    fn every_linearized_file_in_the_qpdf_corpus_decodes_its_hint_tables() {
+        let Some(dir) = corpus_dir() else {
+            println!("SKIPPED hint tables over the qpdf corpus: it is not fetched");
+            return;
+        };
+
+        let files = pdfs(&dir);
+        assert!(
+            files.len() > 500,
+            "{} holds {} PDFs, which is not the qpdf corpus",
+            dir.display(),
+            files.len()
+        );
+
+        let mut linearized = 0usize;
+        let mut decoded = 0usize;
+        let mut sealed = 0usize;
+        let mut refused: Vec<String> = Vec::new();
+        for path in &files {
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match read_hints(bytes) {
+                Outcome::NotLinearized => {}
+                Outcome::NeedsPassword => {
+                    linearized += 1;
+                    sealed += 1;
+                }
+                Outcome::Decoded => {
+                    linearized += 1;
+                    decoded += 1;
+                }
+                Outcome::Refused(why) => {
+                    linearized += 1;
+                    refused.push(format!("{name}: {why}"));
+                }
+            }
+        }
+
+        println!(
+            "RAN hint tables over qpdf: {decoded} decoded, {sealed} sealed, {linearized} linearized, {} PDFs",
+            files.len()
+        );
+        assert_eq!(
+            refused, REFUSED_FILES,
+            "these are the linearized files this reader refuses, and no others"
+        );
+        assert_eq!(
+            linearized, LINEARIZED_FILES,
+            "the corpus holds this many already-linearized files"
+        );
+        assert_eq!(
+            decoded, DECODED_FILES,
+            "this many of them unpack both hint tables, and a set that shrank would
+             otherwise read as a pass"
+        );
+        assert_eq!(
+            sealed, SEALED_FILES,
+            "this many are sealed under a password"
+        );
+    }
+}
+
+/// Annex F's own numbering rule, applied to files this project did not write.
+///
+/// F.3.1 divides every indirect object into two groups: the remaining pages,
+/// the shared objects and everything else, *numbered sequentially starting at
+/// 1*, and the catalogue, the document-level objects and the first page's
+/// after them. Table F.4 item 1 states what that buys a reader — *the first
+/// object of the second page shall have an object number of 1* — and F.4.1's
+/// per-page entry gives a count and nothing else, so a reader derives every
+/// page's first object number by accumulating counts from `/O`.
+///
+/// This is that derivation, run against the page objects the document walk
+/// finds. It lives here rather than in `tests/` because the counts come from
+/// [`decode`], which is `pub(crate)`: this module's own header says why there
+/// is one reader for these tables and not two, and widening it so an
+/// integration test could reach it would put Annex F's bit layout on the
+/// public surface of a crate that routes through the facade (ruling 11). The
+/// halves the public API can answer are in
+/// `crates/tinker-pdf-cos/tests/linearized_numbering.rs`.
+#[cfg(test)]
+mod annex_f_numbering {
+    use std::path::PathBuf;
+
+    use super::corpus::{corpus_dir, pdfs};
+    use super::decode;
+    use crate::doc::CosDocument;
+    use crate::name::Name;
+    use crate::object::{ObjRef, Object};
+    use crate::pages;
+    use crate::parse::parse_indirect_at;
+    use crate::repair::next_object_header;
+    use crate::warn::WarningSink;
+    use crate::xref;
+
+    /// How many linearized files in the pinned qpdf corpus this rule can be
+    /// applied to end to end — opened, hint tables decoded, and every page
+    /// found by Annex F's arithmetic.
+    ///
+    /// Measured against the `qpdf` entry of `corpus/corpora.lock`, commit
+    /// e8adee32, whose pinned subdirectory holds 626 PDFs, 45 of them already
+    /// linearized. Committed rather than counted at run time, because a sweep
+    /// that reports whatever it found reads as a pass when the set shrinks to
+    /// nothing.
+    const ANNEX_F_NUMBERED_CORPUS_FILES: usize = 31;
+
+    /// The linearized corpus files Annex F's arithmetic does not find every
+    /// page of, by name and with the reason.
+    ///
+    /// Named rather than counted, in the style of this module's
+    /// `REFUSED_FILES`: a file that stopped failing, or one that started, both
+    /// fail here.
+    const NOT_NUMBERED_BY_ANNEX_F: &[&str] = &[
+        "badlin1.pdf: qpdf's deliberately damaged linearization — its /O names object 63, \n         which is page one's content stream rather than its page object, so the chain \n         starts one object late and every page after it is out by one",
+    ];
+
+    /// What applying the rule to one file came to.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        /// Not a linearized file, or one whose tables this reader will not
+        /// read — both already counted by `corpus` above, and neither this
+        /// rule's business.
+        NotChecked,
+        /// Every page was found by the arithmetic.
+        Numbered,
+        /// It was not.
+        Wrong(String),
+    }
+
+    /// `first[0]` is `/O`; `first[1]` is 1; `first[k]` is `first[k - 1]` plus
+    /// how many objects page `k - 1` owns. Nothing else.
+    fn annex_f_first_objects(first_page_object: u32, counts: &[u32]) -> Vec<u32> {
+        let mut out: Vec<u32> = Vec::with_capacity(counts.len());
+        for index in 0..counts.len() {
+            let number = match index {
+                0 => first_page_object,
+                1 => 1,
+                _ => out[index - 1].saturating_add(counts[index - 1]),
+            };
+            out.push(number);
+        }
+        out
+    }
+
+    /// Opens one file, decodes its tables, and asks whether the numbers the
+    /// rule produces are the pages the document walk finds.
+    fn check(bytes: Vec<u8>) -> Outcome {
+        let Ok(doc) = CosDocument::open(bytes) else {
+            return Outcome::NotChecked;
+        };
+        let mut sink = WarningSink::new();
+        let shift = xref::header_shift(doc.bytes(), &mut sink);
+        let Some(at) = next_object_header(doc.bytes(), 0) else {
+            return Outcome::NotChecked;
+        };
+        let Some(first) = parse_indirect_at(doc.bytes(), at, doc.names_table(), &mut sink) else {
+            return Outcome::NotChecked;
+        };
+        let linearized = doc.intern(b"Linearized");
+        let Some(dict) = first
+            .object
+            .as_dict()
+            .filter(|d| d.contains_key(linearized))
+        else {
+            return Outcome::NotChecked;
+        };
+
+        let page_count = dict
+            .get_int(doc.intern(b"N"))
+            .and_then(|v| usize::try_from(v).ok());
+        let first_page_object = dict
+            .get_int(doc.intern(b"O"))
+            .and_then(|v| u32::try_from(v).ok());
+        let hint_offset = dict
+            .get_array(doc.intern(b"H"))
+            .and_then(|a| a.first().cloned())
+            .and_then(|o| o.as_int())
+            .and_then(|v| u64::try_from(v).ok());
+        let (Some(page_count), Some(first_page_object), Some(hint_offset)) =
+            (page_count, first_page_object, hint_offset)
+        else {
+            return Outcome::NotChecked;
+        };
+
+        if doc.is_encrypted() && doc.authenticate("").is_err() {
+            return Outcome::NotChecked;
+        }
+
+        let len = doc.bytes().len() as u64;
+        let stream = xref::offset_candidates(len, hint_offset, shift)
+            .into_iter()
+            .find_map(|at| parse_indirect_at(doc.bytes(), at, doc.names_table(), &mut sink));
+        let Some(stream) = stream else {
+            return Outcome::NotChecked;
+        };
+        let Object::Stream(hint) = &stream.object else {
+            return Outcome::NotChecked;
+        };
+        let shared_at = hint
+            .dict
+            .get_int(doc.intern(b"S"))
+            .and_then(|v| usize::try_from(v).ok());
+        let (Some(shared_at), Ok(data)) = (shared_at, doc.stream_decoded(stream.reference)) else {
+            return Outcome::NotChecked;
+        };
+        let Some(tables) = decode(&data, shared_at, page_count) else {
+            return Outcome::NotChecked;
+        };
+
+        let walked = pages::collect(&doc);
+        if walked.len() != page_count {
+            return Outcome::NotChecked;
+        }
+        let counts: Vec<u32> = tables.pages.iter().map(|page| page.objects).collect();
+        let page = doc.intern(b"Page");
+        for (index, number) in annex_f_first_objects(first_page_object, &counts)
+            .into_iter()
+            .enumerate()
+        {
+            let Ok(object) = doc.get(ObjRef::new(number, 0)) else {
+                return Outcome::Wrong(format!("page {index} lands on object {number}, absent"));
+            };
+            if object.as_dict().and_then(|d| d.get_name(Name::TYPE)) != Some(page) {
+                return Outcome::Wrong(format!(
+                    "page {index} lands on object {number}, which is not a page"
+                ));
+            }
+            if walked.get(index).map(|p| p.reference.num) != Some(number) {
+                return Outcome::Wrong(format!(
+                    "page {index} lands on object {number}, which is some other page"
+                ));
+            }
+        }
+        Outcome::Numbered
+    }
+
+    /// The writer's own output, held to the same rule.
+    ///
+    /// Always runs. The helper above would be worth nothing if it had only
+    /// ever met files somebody else laid out, and a corpus that is not fetched
+    /// would leave it never executed at all.
+    #[test]
+    fn this_writers_pages_are_found_by_annex_fs_own_arithmetic() {
+        for pages in [2usize, 3, 6] {
+            let mut builder = crate::DocumentBuilder::new();
+            builder.add_base_font(b"F0", b"Helvetica");
+            for index in 0..pages {
+                builder.add_page(200.0, 100.0, |page| {
+                    page.text(b"F0", 12.0, 10.0, 50.0, &format!("page {index}"));
+                });
+            }
+            let doc = std::sync::Arc::new(
+                CosDocument::open(builder.finish()).expect("the fixture opens"),
+            );
+            let bytes = crate::edit::DocumentEditor::new(doc).save(&crate::write::WriteOptions {
+                mode: crate::write::WriteMode::Rewrite,
+                linearize: true,
+                object_streams: false,
+                ..crate::write::WriteOptions::default()
+            });
+            assert_eq!(
+                check(bytes),
+                Outcome::Numbered,
+                "{pages} pages of this writer's own output"
+            );
+        }
+    }
+
+    /// And over files this project did not write.
+    ///
+    /// Ruling 13's `RAN`/`SKIPPED` discipline: a check that can be absent says
+    /// which it was, and `TINKER_CORPUS_REQUIRED` turns the absence into a
+    /// failure for a run that is meant to include it.
+    #[test]
+    fn qpdf_linearized_files_are_found_by_annex_fs_own_arithmetic() {
+        let Some(dir) = corpus_dir() else {
+            assert!(
+                std::env::var_os("TINKER_CORPUS_REQUIRED").is_none(),
+                "TINKER_CORPUS_REQUIRED is set and the qpdf corpus is not there"
+            );
+            println!(
+                "SKIPPED linearized numbering over the qpdf corpus: it is not fetched \
+                 (set TINKER_QPDF_CORPUS)"
+            );
+            return;
+        };
+
+        let files: Vec<PathBuf> = pdfs(&dir);
+        assert!(
+            files.len() > 500,
+            "{} holds {} PDFs, which is not the qpdf corpus",
+            dir.display(),
+            files.len()
+        );
+
+        let mut checked = 0usize;
+        let mut wrong: Vec<String> = Vec::new();
+        for path in &files {
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match check(bytes) {
+                Outcome::NotChecked => {}
+                Outcome::Numbered => checked += 1,
+                Outcome::Wrong(why) => wrong.push(format!("{name}: {why}")),
+            }
+        }
+
+        println!(
+            "RAN linearized numbering over qpdf: {checked} files found every page by Annex F's \
+             arithmetic, {} did not, over {} PDFs",
+            wrong.len(),
+            files.len()
+        );
+        let named: Vec<String> = wrong
+            .iter()
+            .map(|line| line.split(':').next().unwrap_or(line).to_string())
+            .collect();
+        let expected: Vec<String> = NOT_NUMBERED_BY_ANNEX_F
+            .iter()
+            .map(|line| line.split(':').next().unwrap_or(line).to_string())
+            .collect();
+        assert_eq!(
+            named, expected,
+            "these are the linearized corpus files Annex F's arithmetic does not find every page \
+             of, and no others: {wrong:?}"
+        );
+        assert!(
+            checked >= ANNEX_F_NUMBERED_CORPUS_FILES,
+            "only {checked} corpus files were checked end to end, and \
+             {ANNEX_F_NUMBERED_CORPUS_FILES} were when this was measured: a shrinking set reads \
+             as a pass"
+        );
     }
 }

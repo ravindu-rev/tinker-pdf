@@ -24,10 +24,19 @@
 //! the images its pass-through cannot carry. All three live here because this
 //! is where inflate, the PNG row filters and the checksum already are, and none
 //! of them changes anything a `/Filter` name reaches.
+//!
+//! [`png_encode`] is the fourth and the only one that *writes*. It is here for
+//! the same reason and more sharply: a PNG file is a zlib stream inside chunks
+//! carrying a CRC-32, with 9.2's row filters in front of it, and all three of
+//! those already live in this crate and in no other. `tinker_pdf::Bitmap::to_png`
+//! is a projection over it — it maps a `PixelFormat` onto one of PNG's colour
+//! types and calls this — because ruling 11 makes the facade the public surface
+//! for a *document* and a rendered page is what a caller has.
 
 #![forbid(unsafe_code)]
 
 mod ascii;
+mod brotli;
 mod ccitt;
 mod crc32;
 pub mod deflate;
@@ -35,27 +44,53 @@ mod inflate;
 mod jbig2;
 mod jpeg;
 mod jpx;
+mod jxr;
 mod lzw;
 pub mod mq;
+mod packbits;
 mod png;
 mod predictors;
+mod qm;
 mod runlength;
+mod tiff;
 
 use core::fmt;
 
-pub use ccitt::{decode as ccitt_decode, CcittParams, T6Rows};
+pub use brotli::{brotli_decode, BrotliError};
+pub use ccitt::{
+    decode as ccitt_decode, g4_encode as ccitt_g4_encode, CcittEncodeError, CcittParams,
+    CcittSource, T6Rows,
+};
 pub use crc32::{crc32, Crc32};
 pub use deflate::{deflate, zlib_compress};
 pub use inflate::{inflate_raw, RawInflated};
-pub use jbig2::{decode as jbig2_decode, Jbig2Params};
-pub use jpeg::{decode as jpeg_decode, JpegColor, JpegError, JpegImage};
-pub use jpx::{jpx_decode, JpxColour, JpxImage};
-pub use mq::{MqContext, MqContexts, MqDecoder};
+pub use jbig2::{
+    decode as jbig2_decode, decode_attributed as jbig2_decode_attributed,
+    decode_measured as jbig2_decode_measured, generic_encode as jbig2_generic_encode,
+    generic_region_segment as jbig2_generic_region_segment, Jbig2EncodeError, Jbig2GenericSource,
+    Jbig2Params, Jbig2Refusal, Jbig2SymbolExtent, MAX_JBIG2_SYMBOLS,
+    MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TABLE_LINES,
+    MAX_JBIG2_TEXT_INSTANCES,
+};
+pub use jpeg::{
+    decode as jpeg_decode, jpeg_encode, JpegColor, JpegEncodeError, JpegError, JpegImage,
+    JpegOptions, JpegQuantisation, JpegSampling, JpegSource, JpegSourceColour,
+};
+pub use jpx::{jpx_decode, jpx_decode_attributed, JpxColour, JpxImage, Refusal as JpxRefusal};
+pub use jxr::{
+    jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,
+};
+pub use mq::{encoder::MqEncoder, MqContext, MqContexts, MqDecoder};
 pub use png::{
-    colour_type_depth_is_legal, png_decode, png_scan, ChunkType, PngColour, PngError, PngHeader,
-    PngImage, PngScan, PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
+    colour_type_depth_is_legal, png_decode, png_encode, png_scan, ChunkType, PngColour,
+    PngEncodeError, PngError, PngHeader, PngImage, PngScan, PngSource, PngTransparency,
+    MAX_PNG_SAMPLES, PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
+pub use tiff::{
+    tiff_decode, tiff_scan, TiffCcitt, TiffColour, TiffCompression, TiffError, TiffImage,
+    TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffScan, MAX_TIFF_SAMPLES,
+};
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
 /// gigabytes, and a lenient decoder without a ceiling is a denial-of-service
@@ -111,8 +146,6 @@ impl std::error::Error for FilterError {}
 pub enum Capability {
     Jbig2,
     Jpx,
-    JpegArithmetic,
-    Jpeg12Bit,
 }
 
 /// Every leniency this crate performs, as data rather than a log line.
@@ -180,6 +213,28 @@ pub enum Warning {
     /// JBIG2: a region or page declared more pixels than the output ceiling
     /// allows, so it was refused rather than allocated.
     Jbig2RegionTooLarge,
+    /// JBIG2: a *variant* of a segment this build decodes — the Huffman or the
+    /// refinement coding of a symbol dictionary or text region, or a retained
+    /// context from another segment.
+    ///
+    /// Distinct from [`Warning::Jbig2SegmentSkipped`] on purpose. That one
+    /// means a lineage nobody has started; this one means a file that is one
+    /// scheduled milestone away, and the corpus census in
+    /// `docs/design/jbig2-symbol-text.md` counted how many files each is.
+    /// Folding the two together is how the residual after a capability lands
+    /// comes to look like the refusal it replaced.
+    Jbig2VariantSkipped,
+    /// JBIG2: a symbol dictionary asked for more symbols, or more pixels of
+    /// them, than the bounds allow — or promised a count its own data did not
+    /// keep to.
+    Jbig2SymbolLimitHit,
+
+    /// PackBits (TIFF 6.0 §9): the -128 tag, which §9 calls a no-op and 7.4.5
+    /// calls an end marker. It was skipped, not obeyed.
+    PackBitsNoOp,
+    /// PackBits: a literal or replicate run reached past the byte count the
+    /// caller expected; the excess was dropped.
+    PackBitsRunOverruns,
 
     // ---- JPEG 2000 (T.800) -----------------------------------------------
     //
@@ -202,9 +257,15 @@ pub enum Warning {
     // being reported as `JpxStructureInvalid`, so the two integrity checks
     // the plan calls the cheapest real defence in the decoder were invisible
     // from outside the crate.
-    /// JPX: a marker T.800 Table A.2 defines and this build does not decode —
-    /// RGN, POC, PPM, PPT or CRG. Never skipped, because a skipped RGN draws
-    /// a bright rectangle and a skipped POC mis-parses every packet after it.
+    /// JPX: a marker T.800 Table A.2 defines, in a place the clause that
+    /// defines it does not put — SOP or EPH in a header rather than in the
+    /// bit stream (A.8).
+    ///
+    /// **No Table A.2 marker is refused as a capability.** RGN, PPM, PPT and
+    /// POC were all here and all left, the last on 21 September 2026, once
+    /// each was implemented where its clause puts it: a skipped RGN draws a
+    /// bright rectangle and a skipped POC mis-parses every packet after it,
+    /// which is why none of them was ever stepped over instead.
     JpxMarkerUnsupported,
     /// JPX: a marker code Table A.2 does not define at all, which is where
     /// every ISO/IEC 15444-2 marker lands.
@@ -245,6 +306,46 @@ pub enum Warning {
     /// image's coefficients live three bits below — so this says the file
     /// declared a step size its own samples cannot justify.
     JpxCoefficientClamped,
+
+    // ---- JPEG ------------------------------------------------------------
+    /// JPEG: the frame's sample precision was twelve bits (T.81 B.2.2) and the
+    /// samples handed out are eight.
+    ///
+    /// The decode itself is at twelve; the narrowing is A.3.1's level shift
+    /// followed by a four-bit shift right, which is where the information
+    /// goes. Every `PixelFormat` this engine rasters into is eight bits deep,
+    /// so a wider `JpegImage` would be a change to the raster rather than to
+    /// the codec — `JpegImage::precision` records what it came from.
+    JpegPrecisionNarrowed,
+
+    // ---- TIFF 6.0 --------------------------------------------------------
+    //
+    // Seven, and every one of them is a *leniency* rather than a refusal:
+    // anything a TIFF can get wrong that costs meaning rather than pixels is a
+    // [`tiff::TiffError`], for the reason `png.rs` gives one line below.
+    /// TIFF: the LZW strip was packed least significant bit first and widened
+    /// its codes one code late — the pre-1993 encoders' form, which §13 does
+    /// not describe. It was repacked and decoded.
+    TiffOldStyleLzw,
+    /// TIFF: a strip or tile would not decode at all, so the rows it covers
+    /// are missing from the raster.
+    TiffSegmentUndecodable,
+    /// TIFF: the `NextIFD` chain pointed back at a directory already read, or
+    /// ran past the depth bound. The chain was cut there.
+    TiffDirectoryCycle,
+    /// TIFF: `SamplesPerPixel` was smaller than the
+    /// `PhotometricInterpretation` needs. The photometric won.
+    TiffSamplesPerPixelWrong,
+    /// TIFF: `FillOrder` 2 on a coding whose strips are a byte stream rather
+    /// than a bit stream. Reversing them would destroy the strip, so the tag
+    /// was ignored.
+    TiffFillOrderIgnored,
+    /// TIFF: every `ColorMap` value was at or below 255, so the map was read
+    /// as an 8-bit one rather than as the 16-bit one p.23 describes.
+    TiffColorMapIsEightBit,
+    /// TIFF: the file holds more than one image file directory. The first is
+    /// the image; the rest are not read.
+    TiffExtraPagesIgnored,
 
     // ---- PNG (ISO/IEC 15948) ---------------------------------------------
     //
@@ -299,6 +400,17 @@ impl Warning {
             Self::MissingEndOfLine => "missing-end-of-line",
             Self::Jbig2SegmentSkipped => "jbig2-segment-skipped",
             Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
+            Self::Jbig2VariantSkipped => "jbig2-variant-skipped",
+            Self::Jbig2SymbolLimitHit => "jbig2-symbol-limit-hit",
+            Self::PackBitsNoOp => "packbits-no-op",
+            Self::PackBitsRunOverruns => "packbits-run-overruns",
+            Self::TiffOldStyleLzw => "tiff-old-style-lzw",
+            Self::TiffSegmentUndecodable => "tiff-segment-undecodable",
+            Self::TiffDirectoryCycle => "tiff-directory-cycle",
+            Self::TiffSamplesPerPixelWrong => "tiff-samples-per-pixel-wrong",
+            Self::TiffFillOrderIgnored => "tiff-fill-order-ignored",
+            Self::TiffColorMapIsEightBit => "tiff-color-map-is-eight-bit",
+            Self::TiffExtraPagesIgnored => "tiff-extra-pages-ignored",
             Self::JpxMarkerUnsupported => "jpx-marker-unsupported",
             Self::JpxMarkerUnknown => "jpx-marker-unknown",
             Self::JpxStructureInvalid => "jpx-structure-invalid",
@@ -309,6 +421,7 @@ impl Warning {
             Self::JpxSegmentationSymbol => "jpx-segmentation-symbol",
             Self::JpxBudgetSpent => "jpx-budget-spent",
             Self::JpxCoefficientClamped => "jpx-coefficient-clamped",
+            Self::JpegPrecisionNarrowed => "jpeg-precision-narrowed",
             Self::PngChunkCrcMismatch => "png-chunk-crc-mismatch",
             Self::PngChunkDropped => "png-chunk-dropped",
             Self::PngPaletteIndexOutOfRange => "png-palette-index-out-of-range",
@@ -340,6 +453,17 @@ impl fmt::Display for Warning {
             Self::MissingEndOfLine => "expected end-of-line code absent",
             Self::Jbig2SegmentSkipped => "JBIG2 segment type not decoded",
             Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
+            Self::Jbig2VariantSkipped => "JBIG2 coding variant not decoded here",
+            Self::Jbig2SymbolLimitHit => "JBIG2 symbol dictionary past its bounds",
+            Self::PackBitsNoOp => "PackBits no-op tag skipped",
+            Self::PackBitsRunOverruns => "PackBits run past the expected byte count",
+            Self::TiffOldStyleLzw => "TIFF LZW strip in the pre-1993 bit order, repacked",
+            Self::TiffSegmentUndecodable => "TIFF strip or tile could not be decoded",
+            Self::TiffDirectoryCycle => "TIFF directory chain cycled or ran past its bound",
+            Self::TiffSamplesPerPixelWrong => "TIFF SamplesPerPixel below the photometric's need",
+            Self::TiffFillOrderIgnored => "TIFF FillOrder 2 on a byte-oriented coding, ignored",
+            Self::TiffColorMapIsEightBit => "TIFF ColorMap written at 8 bits rather than 16",
+            Self::TiffExtraPagesIgnored => "TIFF directories after the first are not read",
             Self::JpxMarkerUnsupported => "JPX marker defined by T.800 but not decoded here",
             Self::JpxMarkerUnknown => "JPX marker not defined by T.800 Table A.2",
             Self::JpxStructureInvalid => "JPX codestream or box structure invalid",
@@ -350,6 +474,7 @@ impl fmt::Display for Warning {
             Self::JpxSegmentationSymbol => "JPX segmentation symbol was not 1010",
             Self::JpxBudgetSpent => "JPX decode budget spent",
             Self::JpxCoefficientClamped => "JPX coefficient clamped to E.1's dynamic range",
+            Self::JpegPrecisionNarrowed => "JPEG twelve-bit samples narrowed to eight",
             Self::PngChunkCrcMismatch => "PNG ancillary chunk CRC-32 mismatch, chunk dropped",
             Self::PngChunkDropped => "PNG chunk dropped as misplaced or malformed",
             Self::PngPaletteIndexOutOfRange => "PNG sample indexed past the end of PLTE",
@@ -560,6 +685,24 @@ pub fn ascii85_decode(input: &[u8], limits: &Limits) -> Decoded {
 pub fn run_length_decode(input: &[u8], limits: &Limits) -> Decoded {
     let mut w = Warnings::default();
     let (data, complete) = runlength::rle_bytes(input, limits, &mut w);
+    Decoded {
+        data,
+        complete,
+        warnings: w.into_vec(),
+    }
+}
+
+/// PackBits (TIFF 6.0 §9), the run-length scheme TIFF compression 32773 names.
+///
+/// **Not `/Filter` RunLengthDecode**, though the two are the same Macintosh
+/// scheme: 7.4.5 makes the byte 128 an end-of-data marker and §9 makes it a
+/// no-op, and §9 stops on a byte count where 7.4.5 stops on the marker. So
+/// `expected` — the bytes one strip is declared to hold — is a parameter here
+/// and does not exist there. See [`run_length_decode`] for the other one.
+#[must_use]
+pub fn packbits_decode(input: &[u8], expected: usize, limits: &Limits) -> Decoded {
+    let mut w = Warnings::default();
+    let (data, complete) = packbits::packbits_bytes(input, expected, limits, &mut w);
     Decoded {
         data,
         complete,
@@ -807,8 +950,8 @@ mod tests {
             "bad filter parameters: bad"
         );
         assert_eq!(
-            FilterError::Unsupported(Capability::Jpeg12Bit).to_string(),
-            "unsupported codec: Jpeg12Bit"
+            FilterError::Unsupported(Capability::Jpx).to_string(),
+            "unsupported codec: Jpx"
         );
         assert_eq!(
             Warning::EarlyEod.to_string(),

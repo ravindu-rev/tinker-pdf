@@ -48,12 +48,34 @@
 //! type crosses into here (ruling 8).
 //!
 //! **What is refused is enumerated rather than defaulted**, and the list is
-//! the plan's: a progression order or code-block style this build does not
-//! implement, POC, RGN, any Part 2 marker, tile-parts out of order, a
-//! `colr` this build cannot map, precision above 16 bits, channels of
-//! differing bit depth, and any of the three budgets above. Every entry is
-//! reached by a test in `tests::refusals`, because "the refusals are the
-//! feature" is only a claim if something checks that they fire.
+//! the plan's with three of its entries narrowed from *a capability this
+//! build lacks* to *a value the standard reserves* — POC, RGN and, on
+//! 23 September 2026, Table A.19's code-block styles. Each narrowing is
+//! visible in the refusal string itself and in `tests::refusals`, which is
+//! why they are named here rather than counted against a plan no longer in
+//! the tree. What is refused: a progression order
+//! Table A.16 does not define or a code-block style bit Table A.19 does not
+//! define, an `Srgn` Table A.25 reserves, any Part 2 marker, SOP or EPH
+//! outside the bit stream, tile-parts out of order, a `colr` this build
+//! cannot map, precision above 16 bits, channels of differing bit depth, and
+//! any of the three budgets above. Every entry is reached by a test in
+//! `tests::refusals`, because "the refusals are the feature" is only a claim
+//! if something checks that they fire.
+//!
+//! POC and RGN stood on that list as whole markers and no longer do — A.6.6's
+//! progressions are B.12.2's progression order volumes in tier-2, and A.6.3's
+//! shift is H.1's Maxshift in the dequantiser — so what is left of each is a
+//! *value inside* a segment rather than the segment.
+//!
+//! **Table A.19 has left it entirely**, and it is the one entry that went to
+//! zero rather than narrowing. All six code-block styles are decoded: the
+//! three that are decisions about context state, the segmentation symbol that
+//! is an integrity check, and — last, on 23 September 2026 — the selective
+//! arithmetic coding bypass of D.6 and the termination on each coding pass of
+//! D.4, which together are B.10.7.2's multiple codeword segments plus a raw
+//! bit reader. What is left of the entry is a style **bit** Table A.19 does
+//! not define, which is bits 6 and 7 and a value rather than a capability.
+//! [`passes`] holds the split and says which half belonged to which bit.
 //!
 //! Measured against gap 23's nineteen real JPX files: fourteen decode, four
 //! refuse by name, and one is never asked for — its image sits two form
@@ -64,6 +86,7 @@
 pub(crate) mod boxes;
 pub(crate) mod codestream;
 pub(crate) mod colour;
+pub(crate) mod passes;
 pub(crate) mod tier1;
 pub(crate) mod tier2;
 pub(crate) mod wavelet;
@@ -110,6 +133,35 @@ pub(crate) const MAX_JPX_TILES: u64 = 65_535;
 
 /// Decomposition levels, T.800 A.6.1's own bound. Resolutions are one more.
 pub(crate) const MAX_JPX_LEVELS: u8 = 32;
+
+/// Component sample precision, in bits.
+///
+/// **T.800 Table A.11 allows 1 to 38** — `Ssiz` is `x000 0000` to
+/// `x010 0101`, "component sample bit depth = value + 1", with the table's
+/// own footnote a) adding that "not all combinations of coding styles will
+/// allow the coding of 38-bit samples". This build stops at 16, and the
+/// reason is arithmetic rather than taste, which is why the figure has a
+/// name here instead of being a literal at each of the three places that
+/// reads a depth.
+///
+/// **The coefficient plane is what caps it, not the output.** E.1's
+/// dequantisation clamps a coefficient to `2^(R_b + 2)` sample units, where
+/// `R_b` is the component precision; [`wavelet::Fixed`] stores a plane entry
+/// at Q12 in an `i32`. So a clamped coefficient occupies `2^(R + 2 + 12)` of
+/// the plane's own format, which is `2^30` at 16 bits — exactly
+/// [`wavelet::PLANE_BOUND`] — and `2^31` at 17, which an `i32` does not
+/// hold. Seventeen bits is where the plane format runs out, not where a
+/// policy begins, and `the_coefficient_plane_is_what_caps_precision` in
+/// `tests::bounds` asserts that relation rather than restating the 16.
+///
+/// The output cannot carry it either: [`JpxImage::precision`] is 8 or 16 and
+/// ISO 32000-1 Table 89 gives `/BitsPerComponent` as 1, 2, 4, 8 or 16, so
+/// there is no member of the PDF image model above this to widen into. That
+/// is why this is a **limit** in ROADMAP's Named non-goals rather than a row
+/// — unlike JPEG's twelve-bit frames, which decode and are narrowed to eight
+/// on the way out, because there the coefficient path is fixed at the
+/// frame's own precision and only the *sample* needed narrowing.
+pub(crate) const MAX_JPX_PRECISION: u8 = 16;
 
 /// Code-blocks in one tile-component, across every resolution and precinct.
 ///
@@ -197,9 +249,25 @@ pub(crate) const MAX_JPX_WORK: u64 = 3 << 30;
 /// either parsed or named in a refusal" is only checkable if the refusal
 /// carries the name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
-    /// A marker T.800 Table A.2 defines and this build does not decode:
-    /// RGN, POC, PPM, PPT, CRG. Carries the marker's name.
+pub enum Refusal {
+    /// A marker T.800 Table A.2 defines, refused **where it stands**: SOP or
+    /// EPH in a header. Carries the marker's name.
+    ///
+    /// **No Table A.2 marker is refused as a capability any more**, and the
+    /// last one left on 21 September 2026. It was five, and they went one at
+    /// a time, each for its own reason. CRG went when A.9.1 was read: the
+    /// clause says it "has no effect on decoding the codestream", so it is
+    /// parsed and carried. RGN went when Annex H was implemented; what is
+    /// left of it is a [`Refusal::Feature`] naming the one `Srgn` style Table
+    /// A.25 reserves, which is a value inside the segment rather than the
+    /// segment. PPM and PPT went when packed packet headers were implemented
+    /// (A.7.4, A.7.5); they are parsed, and tier-2 reads a packet's header
+    /// bits from the packed stream. POC went last, when A.6.6's progressions
+    /// became B.12.2's progression order volumes in tier-2's packet sequence.
+    ///
+    /// What is left is the two markers A.8 puts inside the bit stream. Both
+    /// are implemented there; a header is the one place they have no meaning,
+    /// and that is what this variant now names.
     Marker(&'static str),
     /// A marker code Table A.2 does not define — which includes every marker
     /// ISO/IEC 15444-2 adds, since Part 2 is a non-goal.
@@ -209,12 +277,20 @@ pub(crate) enum Refusal {
     /// runs past its parent.
     Structure(&'static str),
     /// A coding feature this build does not implement: a progression order,
-    /// a Table A.19 code-block style bit, a quantisation style, an `Rsiz`
-    /// capability.
+    /// a quantisation style, an `Rsiz` capability — or a **value** a table
+    /// reserves, which is what most of this variant now carries. Table A.19's
+    /// code-block styles were the last capability here and all six are
+    /// decoded; what fires for A.19 now is a bit the table does not define.
     Feature(&'static str),
-    /// Component precision above 16 bits. T.800 allows 38; PDF's sample path
-    /// reads at most 16 and the fixed-point format is proved for 16, so this
-    /// is refused rather than truncated.
+    /// Component precision above [`MAX_JPX_PRECISION`]. T.800 Table A.11
+    /// allows 38.
+    ///
+    /// **A limit rather than a gap**, and ROADMAP's Named non-goals is where
+    /// it is argued. The short form: E.1 clamps a coefficient to
+    /// `2^(R_b + 2)` sample units and the plane holds a Q12 `i32`, so 17 bits
+    /// is where the plane format runs out; and there is nowhere to hand the
+    /// result even if it were widened, because ISO 32000-1 Table 89 gives
+    /// `/BitsPerComponent` as 1, 2, 4, 8 or 16.
     Precision(u8),
     /// The data ended inside something that was still being read.
     Truncated(&'static str),
@@ -257,7 +333,8 @@ impl Refusal {
     /// Coarser than the refusal itself on purpose: [`Warning`] is a closed
     /// set recorded at most once per decode, and a variant per marker would
     /// make it neither.
-    pub(crate) const fn warning(self) -> Warning {
+    #[must_use]
+    pub const fn warning(self) -> Warning {
         match self {
             Self::Marker(_) => Warning::JpxMarkerUnsupported,
             Self::UnknownMarker(_) => Warning::JpxMarkerUnknown,
@@ -363,6 +440,14 @@ pub struct JpxImage {
     /// Interleaved samples, `components` per pixel, row-major, big-endian
     /// when `precision` is 16.
     pub samples: Vec<u8>,
+    /// Whether some tile declared more parts than the file carried, so its
+    /// samples are whatever the plane was initialised to rather than a decode.
+    ///
+    /// The picture keeps its shape and loses a rectangle of it — damage that
+    /// costs pixels, which this crate draws around and reports rather than
+    /// refusing (ruling 2). `check_tile_parts` is where the two are told
+    /// apart, and a codestream with *no* whole tile is still a refusal.
+    pub truncated: bool,
     /// What the codestream says its colour space is. `/ColorSpace` on the
     /// image dictionary overrides this when it is present.
     pub colour: JpxColour,
@@ -428,6 +513,7 @@ pub fn jpx_decode(
 ) -> Result<JpxImage, FilterError> {
     let mut clamped = false;
     let decoded = decode_inner(input, limits, &mut clamped);
+    let truncated = matches!(&decoded, Ok(image) if image.truncated);
     // Recorded whether the decode went on to succeed or not: E.1's clamp is a
     // leniency, and ruling 10 wants a leniency to survive the result it led
     // to rather than only the ones that failed.
@@ -435,7 +521,16 @@ pub fn jpx_decode(
         warnings.push(Warning::JpxCoefficientClamped);
     }
     match decoded {
-        Ok(image) => Ok(image),
+        Ok(image) => {
+            // A tile that stopped early is damage this decode drew around
+            // rather than refused, and ruling 10 wants it named on the way
+            // out — `Decoded::complete` is not reachable from here, so the
+            // warning is the whole record.
+            if truncated && !warnings.contains(&Warning::JpxTruncated) {
+                warnings.push(Warning::JpxTruncated);
+            }
+            Ok(image)
+        }
         Err(refusal) => {
             let w = refusal.warning();
             if !warnings.contains(&w) {
@@ -444,6 +539,24 @@ pub fn jpx_decode(
             Err(FilterError::Unsupported(Capability::Jpx))
         }
     }
+}
+
+/// [`jpx_decode`], with the precise reason for a refusal rather than the one
+/// [`Warning`] its class reports.
+///
+/// The same decode; the difference is what comes back. `Warning` is a closed
+/// set of seven, and `JpxStructureInvalid` alone covers every one of
+/// [`Refusal::Structure`]'s conditions — a tile-part naming a tile outside the
+/// grid, tile-parts out of order, two parts disagreeing about `TNsot`, a box
+/// shorter than its header, a marker in the wrong place. Those are different
+/// sentences to show a human and different answers to whether a file is worth
+/// a roadmap row, and a corpus census cannot tell them apart from the warning.
+///
+/// # Errors
+/// The [`Refusal`] the decode stopped on.
+pub fn jpx_decode_attributed(input: &[u8], limits: &Limits) -> Result<JpxImage, Refusal> {
+    let mut clamped = false;
+    decode_inner(input, limits, &mut clamped)
 }
 
 fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<JpxImage, Refusal> {
@@ -474,7 +587,7 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
     let header = container.header.as_ref();
     let plan = colour::plan(header, &stream.siz.components)?;
     let palette = header.and_then(|h| h.palette.as_ref());
-    if plan.precision > 16 {
+    if plan.precision > MAX_JPX_PRECISION {
         return Err(Refusal::Precision(plan.precision));
     }
     // **The output is 8 or 16 bits and nothing else**, which is what
@@ -570,6 +683,7 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
         components: u8::try_from(stride).map_err(|_| Refusal::Budget("output colour channels"))?,
         precision,
         samples,
+        truncated: stream.short_tiles.iter().any(|short| *short),
         colour: header.map_or(JpxColour::Unstated, |h| h.colour),
         opacity: opacity.map(|samples| JpxOpacity {
             premultiplied: plan.premultiplied,

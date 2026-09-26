@@ -18,6 +18,7 @@
 use tinker_pdf_math as math;
 
 pub mod function;
+pub mod icc;
 
 pub use function::Function;
 
@@ -49,13 +50,56 @@ pub enum ColorSpace {
         /// The tint transform.
         tint: Box<Function>,
     },
+    /// An ICC space whose profile was read, with the transform it compiled to.
+    ///
+    /// The profile's own rendering rather than 8.6.5.5's alternate-space
+    /// approximation. `Arc` because a transform carries three 4 096-entry
+    /// tables and a page may name the same space at every one of a thousand
+    /// `cs` operators; compiling it once per resource dictionary and sharing it
+    /// is the difference between reading a profile and reading it repeatedly.
+    Icc {
+        /// The compiled transform.
+        transform: std::sync::Arc<icc::Transform>,
+        /// How many components the space takes, which is `/N` and is what
+        /// every caller that sizes a buffer asks for.
+        components: usize,
+    },
     /// A CIE-based or ICC space, approximated by its component count.
     ///
     /// 8.6.5.5 lets a reader use the alternate space, and that is what this
-    /// is: the shape of the data without the profile's exact rendering.
+    /// is: the shape of the data without the profile's exact rendering. Still
+    /// the answer for a CIE space, and for a profile [`icc::Profile::parse`]
+    /// refused — a profile that cannot be read leaves the page exactly as it
+    /// was before profiles were read at all.
     Approximated {
         /// How many components.
         components: usize,
+    },
+    /// **CIE-based grey (8.6.5.1).**
+    ///
+    /// One component through a gamma, scaled by a white point. Aliased to
+    /// [`ColorSpace::DeviceGray`] until now, which meant `/WhitePoint` and
+    /// `/Gamma` were never read and *nothing said so* — unlike an ICC profile
+    /// this build refuses, where [`ColorSpace::Approximated`] records the
+    /// approximation on the type.
+    CalGray {
+        /// `/WhitePoint`, the diffuse white the components are relative to.
+        white: [f64; 3],
+        /// `/Gamma`, defaulting to 1.
+        gamma: f64,
+    },
+    /// **CIE-based RGB (8.6.5.2).**
+    ///
+    /// Three components, each through its own gamma, then a 3×3 matrix into
+    /// XYZ relative to `/WhitePoint`.
+    CalRgb {
+        /// `/WhitePoint`.
+        white: [f64; 3],
+        /// `/Gamma`, defaulting to `[1, 1, 1]`.
+        gamma: [f64; 3],
+        /// `/Matrix`, column-major as Table 65 writes it —
+        /// `[XA YA ZA XB YB ZB XC YC ZC]` — defaulting to the identity.
+        matrix: [f64; 9],
     },
     /// `/Lab`: CIE 1976 L*a*b* (8.6.5.4).
     ///
@@ -90,8 +134,11 @@ impl ColorSpace {
             ColorSpace::DeviceCmyk => 4,
             ColorSpace::Indexed { .. } => 1,
             ColorSpace::Separation { components, .. } => *components,
+            ColorSpace::Icc { components, .. } => *components,
             ColorSpace::Approximated { components } => *components,
             ColorSpace::Lab { .. } => 3,
+            ColorSpace::CalGray { .. } => 1,
+            ColorSpace::CalRgb { .. } => 3,
             // 8.7.3.2: an uncoloured pattern's operands are counted in the
             // underlying space. A plain `/Pattern` takes none at all, and 1 is
             // the answer that keeps callers which size a buffer from this from
@@ -107,6 +154,10 @@ impl ColorSpace {
             // Black in every device space, which for CMYK means all zeros
             // except the black ink.
             ColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+            // 8.6.8: an ICCBased space's initial colour is all zeros, whatever
+            // the profile makes of them — which for a subtractive profile is
+            // white rather than black, and is what the clause says.
+            ColorSpace::Icc { components, .. } => vec![0.0; *components],
             // 8.6.5.4: black is L=0 with no chroma, and zero is inside every
             // legal /Range, so the generic all-zeros answer is right here for
             // a different reason than it is elsewhere.
@@ -158,6 +209,30 @@ impl ColorSpace {
                 let converted = tint.eval(components);
                 alternate.to_rgb(&converted)
             }
+            ColorSpace::CalGray { white, gamma } => {
+                // 8.6.5.1: A^G scales the white point. `at` clamps to 0..1,
+                // which is this space's own range.
+                let a = math::pow(at(0), *gamma);
+                xyz_to_rgb([white[0] * a, white[1] * a, white[2] * a], *white)
+            }
+            ColorSpace::CalRgb {
+                white,
+                gamma,
+                matrix,
+            } => {
+                // 8.6.5.2: each component through its own gamma, then Table
+                // 65's matrix — which is written column by column, so the
+                // first three numbers are the *A* column and not the X row.
+                let a = math::pow(at(0), gamma[0]);
+                let b = math::pow(at(1), gamma[1]);
+                let c = math::pow(at(2), gamma[2]);
+                let xyz = [
+                    matrix[0] * a + matrix[3] * b + matrix[6] * c,
+                    matrix[1] * a + matrix[4] * b + matrix[7] * c,
+                    matrix[2] * a + matrix[5] * b + matrix[8] * c,
+                ];
+                xyz_to_rgb(xyz, *white)
+            }
             ColorSpace::Lab { range } => {
                 // Raw, not `at`: these components are not in 0..1, and
                 // clamping them there is precisely the bug this variant fixes.
@@ -167,6 +242,9 @@ impl ColorSpace {
                 let b = raw(2).clamp(range[2], range[3]);
                 lab_to_rgb(l, a, b)
             }
+            // The profile's own transform, which is what this whole module
+            // exists to make possible.
+            ColorSpace::Icc { transform, .. } => transform.apply(components),
             ColorSpace::Approximated { components: n } => match n {
                 1 => ColorSpace::DeviceGray.to_rgb(components),
                 4 => ColorSpace::DeviceCmyk.to_rgb(components),
@@ -192,13 +270,135 @@ fn byte(value: f64) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-/// CIE L*a*b* to sRGB, through XYZ (8.6.5.4).
+/// XYZ at D50 to linear sRGB, Bradford-adapted.
 ///
-/// The white point is D50, which is what PDF's `/WhitePoint` defaults to and
-/// what almost every file that uses Lab declares. A document with a different
-/// one is converted slightly wrongly rather than not at all — visibly closer
+/// ICC.1 puts the profile connection space at D50 and sRGB is defined at D65,
+/// so the chromatic adaptation is part of this relation rather than a step
+/// beside it.
+///
+/// One constant with two callers: `/Lab` conversion (8.6.5.4) reaches the
+/// connection space through its own arithmetic and an ICC transform reaches it
+/// through a profile's columns, but from there both are doing the same thing.
+/// It was written out twice before an ICC transform existed to want it, and the
+/// two copies had already drifted in the fourth decimal.
+pub(crate) const XYZ_D50_TO_SRGB: [[f64; 3]; 3] = [
+    [3.134_136, -1.617_036, -0.490_662],
+    [-0.978_755, 1.916_143, 0.033_454],
+    [0.071_95, -0.228_988, 1.405_386],
+];
+
+/// The inverse of [`XYZ_D50_TO_SRGB`], for the one direction that needs it.
+///
+/// **Computed from the matrix above rather than quoted beside it.** The values
+/// here were produced by inverting those, and the round trip is asserted in
+/// this module's tests — because two matrices that are meant to be inverses
+/// and are typed out independently are exactly the pair this file has already
+/// watched drift once.
+pub(crate) const SRGB_TO_XYZ_D50: [[f64; 3]; 3] = [
+    [0.436_035_143, 0.385_067_848, 0.143_066_613],
+    [0.222_481_132, 0.716_877_077, 0.060_610_132],
+    [0.013_926_979, 0.097_091_202, 0.714_099_436],
+];
+
+/// [`XYZ_D50_TO_SRGB`], applied.
+pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
+    let row = |r: usize| {
+        XYZ_D50_TO_SRGB[r][0] * x + XYZ_D50_TO_SRGB[r][1] * y + XYZ_D50_TO_SRGB[r][2] * z
+    };
+    [row(0), row(1), row(2)]
+}
+
+/// XYZ relative to `white`, as sRGB.
+///
+/// **The adaptation is von Kries in XYZ, and saying which one it is matters.**
+/// The matrix below takes XYZ relative to *D50*; a CIE-based space names its
+/// own white point and D65 is as common as D50 in the wild, so the two have to
+/// be reconciled. Scaling each axis by the ratio of the two whites is the
+/// simplest transform that maps one white exactly onto the other, and it is
+/// what 8.6.5.2's own note describes when it says the components are relative
+/// to the diffuse white.
+///
+/// It is not Bradford, which is what [`XYZ_D50_TO_SRGB`] already has baked in
+/// for the *profile* path, and the difference shows on saturated colours far
+/// from the neutral axis. Stated rather than hidden: a CIE-based space is a
+/// space a producer chose over an ICC profile, and this is the accuracy that
+/// choice buys.
+fn xyz_to_rgb(xyz: [f64; 3], white: [f64; 3]) -> (u8, u8, u8) {
+    const D50: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+    let scale = |v: f64, from: f64, to: f64| if from > 0.0 { v * to / from } else { v };
+    let adapted = [
+        scale(xyz[0], white[0], D50[0]),
+        scale(xyz[1], white[1], D50[1]),
+        scale(xyz[2], white[2], D50[2]),
+    ];
+    let [r, g, b] = xyz_d50_to_linear_srgb(adapted[0], adapted[1], adapted[2]);
+    (srgb_encode(r), srgb_encode(g), srgb_encode(b))
+}
+
+/// One linear-light channel as an sRGB byte (IEC 61966-2-1).
+fn srgb_encode(v: f64) -> u8 {
+    let v = v.clamp(0.0, 1.0);
+    // Linear near zero, so the gradient stays finite where a plain power
+    // would flatten.
+    let s = if v <= 0.003_130_8 {
+        12.92 * v
+    } else {
+        1.055 * math::pow(v, 1.0 / 2.4) - 0.055
+    };
+    byte(s)
+}
+
+/// **An sRGB triple as CIE L*a*b*** (8.6.5.4), relative to D50.
+///
+/// The inverse of [`lab_to_srgb`], and the direction nothing in this engine
+/// needed until a transparency group asked to composite in `/Lab`: a group
+/// buffer holds the space the group declared, so something has to put a colour
+/// *into* Lab as well as read one out.
+///
+/// `L` runs 0..100 and `a`/`b` roughly -128..127, which is why a Lab group
+/// cannot use the 0..1 buffers every other space does.
+#[must_use]
+pub fn srgb_to_lab(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+    let linear = |v: u8| -> f64 {
+        let v = f64::from(v) / 255.0;
+        // The inverse of the sRGB transfer function, linear near zero.
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            math::pow((v + 0.055) / 1.055, 2.4)
+        }
+    };
+    let (lr, lg, lb) = (linear(r), linear(g), linear(b));
+    let row = |i: usize| {
+        SRGB_TO_XYZ_D50[i][0] * lr + SRGB_TO_XYZ_D50[i][1] * lg + SRGB_TO_XYZ_D50[i][2] * lb
+    };
+    let (x, y, z) = (row(0), row(1), row(2));
+
+    // The forward piecewise cube root, linear near zero for the reason its
+    // inverse is: a plain cube root has an infinite gradient at the origin.
+    let f = |t: f64| -> f64 {
+        const DELTA: f64 = 6.0 / 29.0;
+        if t > DELTA * DELTA * DELTA {
+            math::cbrt(t)
+        } else {
+            t / (3.0 * DELTA * DELTA) + 4.0 / 29.0
+        }
+    };
+    let fx = f(x / WHITE[0]);
+    let fy = f(y / WHITE[1]);
+    let fz = f(z / WHITE[2]);
+    (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+}
+
+/// **A CIE L*a*b* triple as sRGB**, relative to D50.
+#[must_use]
+pub fn lab_to_srgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
+    lab_to_rgb(l, a, b)
+}
+
 /// than the alternative, which was rendering the whole space black.
-fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
+pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     // D50, normalized so Y is 1.
     const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
 
@@ -221,23 +421,9 @@ fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     let y = WHITE[1] * finv(fy);
     let z = WHITE[2] * finv(fz);
 
-    // XYZ (D50) to linear sRGB, Bradford-adapted.
-    let r = 3.134_136 * x - 1.617_036 * y - 0.490_662 * z;
-    let g = -0.978_755 * x + 1.916_143 * y + 0.033_454 * z;
-    let bl = 0.071_95 * x - 0.228_988 * y + 1.405_386 * z;
+    let [r, g, bl] = xyz_d50_to_linear_srgb(x, y, z);
 
-    let encode = |v: f64| -> u8 {
-        let v = v.clamp(0.0, 1.0);
-        // The sRGB transfer function, linear near zero for the same reason.
-        let s = if v <= 0.003_130_8 {
-            12.92 * v
-        } else {
-            1.055 * math::pow(v, 1.0 / 2.4) - 0.055
-        };
-        byte(s)
-    };
-
-    (encode(r), encode(g), encode(bl))
+    (srgb_encode(r), srgb_encode(g), srgb_encode(bl))
 }
 
 #[cfg(test)]
@@ -359,5 +545,57 @@ mod tests {
         // Too few components read as zero rather than panicking.
         assert_eq!(ColorSpace::DeviceRgb.to_rgb(&[]), (0, 0, 0));
         assert_eq!(ColorSpace::DeviceCmyk.to_rgb(&[0.5]), (128, 255, 255));
+    }
+
+    /// **The two XYZ matrices are inverses**, which is the only thing standing
+    /// between them and the drift this file has already had once.
+    ///
+    /// They are typed out separately because a matrix inverted at runtime would
+    /// put a division on a path ruling 4 wants exact; the assertion is what
+    /// makes that safe. A tolerance of 1e-6 is two orders below the precision
+    /// either matrix is written to.
+    #[test]
+    fn the_two_xyz_matrices_are_inverses() {
+        for (i, row) in XYZ_D50_TO_SRGB.iter().enumerate() {
+            for j in 0..3 {
+                let product: f64 = row
+                    .iter()
+                    .zip(SRGB_TO_XYZ_D50.iter())
+                    .map(|(a, b)| a * b[j])
+                    .sum();
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (product - expected).abs() < 1e-6,
+                    "row {i} column {j} is {product} and should be {expected}"
+                );
+            }
+        }
+    }
+
+    /// **Lab round-trips through sRGB**, which is what a group buffer needs:
+    /// a colour goes in, is blended, and comes back out.
+    #[test]
+    fn srgb_survives_a_trip_through_lab() {
+        for (r, g, b) in [
+            (0, 0, 0),
+            (255, 255, 255),
+            (128, 128, 128),
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (12, 200, 71),
+            (200, 40, 130),
+        ] {
+            let (l, a, bb) = srgb_to_lab(r, g, b);
+            let back = lab_to_srgb(l, a, bb);
+            for (before, after) in [(r, back.0), (g, back.1), (b, back.2)] {
+                assert!(
+                    before.abs_diff(after) <= 1,
+                    "{:?} came back as {back:?} through Lab {:?}",
+                    (r, g, b),
+                    (l, a, bb)
+                );
+            }
+        }
     }
 }

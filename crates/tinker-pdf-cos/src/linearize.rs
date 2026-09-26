@@ -44,6 +44,36 @@
 //! the first-page section, and the hint stream is the one thing a reader
 //! needs before it can use any of it.
 //!
+//! # Which group is numbered first, and why it is not a preference
+//!
+//! F.3.1 numbers parts 7, 8 and 9 — the remaining pages, the shared objects
+//! and everything no page reaches — "sequentially starting at 1", and the
+//! head of the file after them. Table F.4 item 1 states the visible
+//! consequence from the reader's side: *the first object of the second page
+//! shall have an object number of 1*.
+//!
+//! The reason is structural rather than stylistic. The first-page
+//! cross-reference section is one classic subsection, and 7.5.4 makes a
+//! subsection a contiguous range of object numbers. So everything the head
+//! must resolve without the tail — part 2, the `/Encrypt` dictionary, part 4,
+//! part 5 and part 6 — has to sit in one unbroken block, and the only place a
+//! block can sit without freeing anything below it is *above* the objects the
+//! main table carries. Numbering the head first instead forces the front
+//! section to start at zero and mark every number it does not carry as free,
+//! and a free entry in the newer section overrides the main table reached
+//! through `/Prev`.
+//!
+//! This is why there are no reserved object numbers here. Annex F reserves
+//! none; the head group is dense by construction and its subsection header is
+//! its own first number.
+//!
+//! The hint stream is the one object Annex F places by number rather than by
+//! part. F.3.1 lets it be "numbered out of sequence" and F.3.6 says where:
+//! *the last object numbers in the file — that is, after the object number
+//! for the last object in the first page*, with its cross-reference entry at
+//! the end of the first-page section. So it is numbered last and written
+//! fifth, and F.3.6 says in as many words that the two are independent.
+//!
 //! # Encryption: encrypt first, then measure
 //!
 //! Encryption looks like it breaks that premise. AES-256-CBC prefixes a
@@ -65,8 +95,12 @@
 //! Three things stay in the clear, because a reader reaches them before it can
 //! decrypt anything:
 //!
-//! - The `/Encrypt` dictionary (7.6.1), which is object 3 here and the first
-//!   object in part 4.
+//! - The `/Encrypt` dictionary (7.6.1), which is the first object in part 4
+//!   and takes the number immediately after the parameter dictionary's, so it
+//!   stays inside the head group's range. Numbering it anywhere else would
+//!   leave the front trailer's `/Encrypt N 0 R` resolvable only through
+//!   `/Prev`, which is a tail read on every streaming open of an encrypted
+//!   file.
 //! - Both cross-reference tables and their trailers (7.6.1): a reader finds
 //!   them before it knows there is an `/Encrypt` dictionary to look for.
 //! - The linearization parameter dictionary. 7.6.1 does not exempt it, but a
@@ -89,7 +123,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object};
-use crate::write::{write_object, ObjectSet, StreamCipher, StreamData, WriteOptions, Written};
+use crate::write::{
+    write_object, ObjectCipher, ObjectSet, StreamCipher, StreamData, WriteOptions, Written,
+};
 
 /// How many digits every patchable integer in the parameter dictionary gets.
 ///
@@ -97,19 +133,6 @@ use crate::write::{write_object, ObjectSet, StreamCipher, StreamData, WriteOptio
 /// fixed width is what removes the need for a patching pass. Leading zeros in
 /// an integer are legal (7.3.3).
 const FIELD_WIDTH: usize = 10;
-
-/// The object number the `/Encrypt` dictionary takes, when there is one.
-///
-/// Objects 1 and 2 are the parameter dictionary and the hint stream. The
-/// third reserved number matters more than it looks: the first-page
-/// cross-reference table declares a single subsection running from zero to
-/// its highest entry, and marks every number in that range it does not carry
-/// as *free*. A free entry in the newer table overrides the main table
-/// reached through `/Prev`, so numbering `/Encrypt` above the ordinary
-/// objects — which is what the unlinearized writer does — would put it in the
-/// front table's range and free everything between. Reserving a low number
-/// keeps the front table's range exactly the front of the file.
-const ENCRYPT_OBJECT: u32 = 3;
 
 /// Writes a linearized file, or returns `None` when the document has no shape
 /// to linearize around.
@@ -141,7 +164,7 @@ enum Section {
     /// objects a reader needs before it can do anything at all.
     Document,
     /// Part 6: the first page's section — its page object, everything only it
-    /// uses, and everything it shares with a later page. F.3.8 keeps a shared
+    /// uses, and everything it shares with a later page. F.4.2 keeps a shared
     /// object here when the first page needs it, because a reader holding the
     /// front of the file must not have to reach past `/E` to draw page one.
     FirstPage,
@@ -178,7 +201,18 @@ struct Plan {
     /// Part 8's first object number, or zero when part 8 is empty.
     first_shared_object: u32,
     trailer: Dict,
-    /// The highest new object number, plus the two reserved ones.
+    /// Part 2's own object number, which is also the head group's first — the
+    /// number the front cross-reference subsection's header line carries.
+    parameters_object: u32,
+    /// The primary hint stream's object number, which F.3.6 makes the last in
+    /// the file whatever its physical position — part 5 is written before
+    /// part 6 and numbered after it.
+    hint_object: u32,
+    /// The `/Encrypt` dictionary's, when there is one. It sits immediately
+    /// after part 2 so that it is inside the head group and a reader holding
+    /// the front of the file resolves it from the front section alone.
+    encrypt_object: Option<u32>,
+    /// One past the highest new object number, which is `/Size`.
     size: u32,
     /// The cipher, when the file is encrypted. Held so the hint stream — an
     /// ordinary stream object, and encrypted like one — can be built in
@@ -250,7 +284,7 @@ impl Plan {
             if document.contains(num) {
                 continue;
             }
-            // F.3.8: part 8 is for objects *several* pages need and the first
+            // F.3.9: part 8 is for objects *several* pages need and the first
             // page does not. An object the first page needs travels with it
             // whether or not later pages need it too, because a reader that
             // has only the front of the file has to be able to draw page one.
@@ -265,9 +299,9 @@ impl Plan {
             );
         }
 
-        // Output order, and with it the new numbering. Object 1 is the
-        // parameter dictionary and object 2 the hint stream; both are
-        // reserved here and written by `emit`.
+        // Output order. The numbering is derived from it below, in two
+        // passes rather than one, because F.3.1 numbers the *tail* group
+        // first.
         //
         // The order is not a preference. F.4.1's per-page entry gives a
         // reader a count and nothing else, and the reader takes that many
@@ -284,7 +318,7 @@ impl Plan {
             false
         };
 
-        // Part 4. F.3.4 puts the catalog first; a reader that has the front of
+        // Part 4. F.3.5 puts the catalog first; a reader that has the front of
         // the file reaches it without a search.
         push(root.num, Section::Document, &mut order);
         for num in objects.numbers() {
@@ -341,18 +375,57 @@ impl Plan {
             push(num, Section::Other, &mut order);
         }
 
+        // Group 1 (F.3.1): parts 7, 8 and 9, numbered sequentially starting at
+        // 1. Page two leads part 7, so this is what makes Table F.4 item 1 —
+        // "the first object of the second page shall have an object number of
+        // 1" — true by construction rather than by a separate rule.
         let mut mapping: BTreeMap<u32, u32> = BTreeMap::new();
-        let mut next = if encryption.is_some() {
-            ENCRYPT_OBJECT.saturating_add(1)
-        } else {
-            ENCRYPT_OBJECT
-        };
-        for (old, _) in &order {
-            mapping.insert(*old, next);
-            next = next.saturating_add(1);
+        let mut next = 1u32;
+        for (old, section) in &order {
+            if matches!(section, Section::Rest | Section::Shared | Section::Other) {
+                mapping.insert(*old, next);
+                next = next.saturating_add(1);
+            }
         }
 
-        // F.3.1: `/O` names the first page's page object.
+        // Group 2: part 2, the `/Encrypt` dictionary, part 4, part 6 and last
+        // of all the hint stream, as one contiguous range. Contiguous because
+        // the first-page cross-reference section covers all of it with a
+        // single subsection (7.5.4), and a gap in that subsection would be an
+        // entry marked free in the newer section for an object the main table
+        // carries.
+        let parameters_object = next;
+        next = next.saturating_add(1);
+        let encrypt_object = if encryption.is_some() {
+            let num = next;
+            next = next.saturating_add(1);
+            Some(num)
+        } else {
+            None
+        };
+        // `order`'s `Document` entries are exactly part 4: the `/Encrypt`
+        // dictionary is not among them, because it is not an object of the
+        // input document and is synthesised below.
+        for (old, section) in &order {
+            if *section == Section::Document {
+                mapping.insert(*old, next);
+                next = next.saturating_add(1);
+            }
+        }
+        for (old, section) in &order {
+            if *section == Section::FirstPage {
+                mapping.insert(*old, next);
+                next = next.saturating_add(1);
+            }
+        }
+        // F.3.6: the hint stream takes the last object number in the file,
+        // after the last object of the first page, and its entry is the last
+        // of the first-page section — whatever its physical position, which
+        // F.3.6 states is independent of this.
+        let hint_object = next;
+        next = next.saturating_add(1);
+
+        // Table F.1: `/O` names the first page's page object.
         let first_page_object = *mapping.get(pages.first()?)?;
 
         let crypt = encryption.as_ref().map(|(_, cipher)| cipher);
@@ -361,18 +434,18 @@ impl Plan {
         // 7.6.1: the `/Encrypt` dictionary is the one object never encrypted,
         // and it leads part 4 so a reader that has the front of the file can
         // authenticate before it needs anything else.
-        if let Some((dict, _)) = &encryption {
+        if let (Some((dict, _)), Some(number)) = (&encryption, encrypt_object) {
             let mut bytes = Vec::new();
             write_indirect(
                 &mut bytes,
-                ENCRYPT_OBJECT,
+                number,
                 &Written::Object(Object::Dict(dict.clone())),
                 names,
                 false,
                 None,
             );
             ordered.push(Placed {
-                number: ENCRYPT_OBJECT,
+                number,
                 section: Section::Document,
                 bytes,
             });
@@ -449,8 +522,8 @@ impl Plan {
 
         let mut trailer = renumber_dict(trailer, &mapping);
         trailer.insert(Name::SIZE, Object::Int(i64::from(next)));
-        if encryption.is_some() {
-            trailer.insert(Name::ENCRYPT, Object::Ref(ObjRef::new(ENCRYPT_OBJECT, 0)));
+        if let Some(number) = encrypt_object {
+            trailer.insert(Name::ENCRYPT, Object::Ref(ObjRef::new(number, 0)));
         }
 
         Some(Plan {
@@ -465,6 +538,9 @@ impl Plan {
             shared_first_page,
             first_shared_object,
             trailer,
+            parameters_object,
+            hint_object,
+            encrypt_object,
             size: next,
             crypt: encryption.map(|(_, cipher)| cipher),
         })
@@ -489,7 +565,7 @@ impl Plan {
             let mut bytes = Vec::new();
             write_indirect(
                 &mut bytes,
-                2,
+                self.hint_object,
                 &Written::Stream(StreamData { dict, data }),
                 names,
                 // Never compressed: `/H` measures this object's length, and
@@ -532,9 +608,32 @@ impl Plan {
 
         // Every entry is twenty bytes, so the table's size follows from the
         // count alone (7.5.4).
-        let front_count = document.len() + first_page.len();
-        let first_xref_len =
-            subsection_len(front_count + 2) + self.trailer_bytes(Some(0), names).len();
+        // The head group is part 2, the `/Encrypt` dictionary if there is one,
+        // part 4, part 6 and the hint stream — and `document` already carries
+        // the `/Encrypt` dictionary, so the two extra entries are part 2 and
+        // the hint stream.
+        let front_count = document.len() + first_page.len() + 2;
+        let first_xref_len = subsection_len(self.parameters_object, front_count)
+            + self.trailer_bytes(Some(0), names).len();
+
+        // The head group is exactly `parameters_object..size`. One subsection
+        // covers it only while that holds, and a gap in it would free an
+        // object the main table carries.
+        debug_assert_eq!(
+            self.parameters_object as usize + front_count,
+            self.size as usize,
+            "the head group is one contiguous range"
+        );
+        // R10 in the roadmap's terms: the `/Encrypt` dictionary has to be
+        // inside that range, or the front trailer's `/Encrypt N 0 R` resolves
+        // only through `/Prev` — a tail read on every encrypted streaming open.
+        debug_assert!(
+            match self.encrypt_object {
+                Some(num) => num >= self.parameters_object && num < self.size,
+                None => true,
+            },
+            "the /Encrypt dictionary is inside the head group"
+        );
 
         let part1 = header.len();
         let part2_at = part1;
@@ -552,7 +651,7 @@ impl Plan {
         // that a reader receiving the file in order has the tables that say
         // what to ask for next before it has the thing they describe.
         let hint_at = at;
-        offsets.insert(2, hint_at as u64);
+        offsets.insert(self.hint_object, hint_at as u64);
         at += hint_len;
 
         let first_page_at = at;
@@ -620,8 +719,8 @@ impl Plan {
             .chain(first_page.iter())
             .filter_map(|p| offsets.get(&p.number).map(|at| (p.number, *at)))
             .collect();
-        front_offsets.push((1, part1 as u64));
-        front_offsets.push((2, hint_at as u64));
+        front_offsets.push((self.parameters_object, part1 as u64));
+        front_offsets.push((self.hint_object, hint_at as u64));
         front_offsets.sort_unstable();
         self.write_first_xref(&mut out, &front_offsets, main_xref_at as u64, names);
         debug_assert_eq!(out.len(), part4_at, "part 4 begins where it was placed");
@@ -641,7 +740,7 @@ impl Plan {
         out
     }
 
-    /// Part 2: the linearization parameter dictionary (F.2.2).
+    /// Part 2: the linearization parameter dictionary (F.3.3).
     fn parameter_dictionary(
         &self,
         length: u64,
@@ -653,7 +752,11 @@ impl Plan {
     ) -> Vec<u8> {
         let _ = names;
         let mut out = Vec::new();
-        out.extend_from_slice(b"1 0 obj\n<< /Linearized 1 /L ");
+        // The number is the head group's first, not a reserved one. It is a
+        // `Plan` field, so both builds of this dictionary produce the same
+        // length and `emit`'s assertion holds.
+        out.extend_from_slice(format!("{} 0 obj\n", self.parameters_object).as_bytes());
+        out.extend_from_slice(b"<< /Linearized 1 /L ");
         pad(&mut out, length);
         out.extend_from_slice(b" /H [ ");
         pad(&mut out, hint_at);
@@ -681,7 +784,7 @@ impl Plan {
         names: &NameTable,
     ) {
         out.extend_from_slice(b"xref\n");
-        write_subsection(out, entries);
+        write_dense_subsection(out, entries);
 
         out.extend_from_slice(&self.trailer_bytes(Some(main_xref_at), names));
     }
@@ -886,14 +989,43 @@ fn pad(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(text.as_bytes());
 }
 
-/// How many bytes one cross-reference subsection occupies, given its entries.
-fn subsection_len(entries: usize) -> usize {
-    // "xref\n", then "0 N\n", then twenty bytes an entry including the free
-    // head. The header line's width depends on the count's digits.
-    let count = entries + 1;
-    5 + format!("0 {count}\n").len() + count * 20
+/// How many bytes the front cross-reference section occupies, given the head
+/// group's first object number and how many objects are in it.
+///
+/// "xref\n", then the subsection header line, then twenty bytes an entry
+/// (7.5.4). Both numbers on the header line are known before the layout is,
+/// which is what keeps this a prediction rather than a patch.
+fn subsection_len(first: u32, entries: usize) -> usize {
+    5 + format!("{first} {entries}\n").len() + entries * 20
 }
 
+/// The front section's subsection: the head group, which is contiguous.
+///
+/// There is no free head and no filler. 7.5.4's "object 0 shall be free and
+/// the head of the free list" applies to the file's object-0 entry, which
+/// lives in the main table — the section this one chains to through `/Prev`,
+/// and the one Table F.1 item 6's `/T` points into. qpdf's linearized output
+/// carries no object-0 entry in its front section either.
+fn write_dense_subsection(out: &mut Vec<u8>, entries: &[(u32, u64)]) {
+    let first = entries.first().map_or(0, |(num, _)| *num);
+    debug_assert!(
+        entries
+            .iter()
+            .enumerate()
+            .all(|(index, (num, _))| u32::try_from(index)
+                .ok()
+                .and_then(|index| first.checked_add(index))
+                == Some(*num)),
+        "the head group is one contiguous range, so this subsection frees nothing"
+    );
+    out.extend_from_slice(format!("{first} {}\n", entries.len()).as_bytes());
+    for (_, at) in entries {
+        out.extend_from_slice(format!("{at:010} 00000 n \n").as_bytes());
+    }
+}
+
+/// The main section's subsection, which starts at zero and carries the file's
+/// free head.
 fn write_subsection(out: &mut Vec<u8>, entries: &[(u32, u64)]) {
     let highest = entries.last().map_or(0, |(num, _)| *num);
     let count = usize::try_from(highest).unwrap_or(0) + 1;
@@ -1241,6 +1373,7 @@ fn write_indirect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validate::hints;
     use crate::write::Encryption;
 
     fn a_plan(crypt: Option<StreamCipher>) -> Plan {
@@ -1256,6 +1389,12 @@ mod tests {
             shared_first_page: 0,
             first_shared_object: 0,
             trailer: Dict::new(),
+            // Self-consistent with the numbering this writer produces: the
+            // head group is 5..20, part 2 leading it, then part 4, then `/O`
+            // at the head of part 6, and the hint stream last of all (F.3.6).
+            parameters_object: 5,
+            hint_object: 19,
+            encrypt_object: None,
             size: 20,
             crypt,
         }
@@ -1337,186 +1476,19 @@ mod tests {
     // ---- The hint tables, read back -------------------------------------
     //
     // The tables are the one structure here that this repository writes and
-    // nothing reads, which is why they were entirely wrong for as long as they
-    // existed while every test passed. What follows is a reader for them,
-    // built from Tables F.3 to F.6 and checked against the values `Plan::build`
-    // computed, so a field at the wrong width, an item in the wrong order or a
-    // delta against the wrong base fails here without an external tool.
+    // almost nothing reads, which is why they were entirely wrong for as long
+    // as they existed while every test passed. The reader is
+    // `crate::validate::hints`, and these tests drive it against the values
+    // `Plan::build` computed, so a field at the wrong width, an item in the
+    // wrong order or a delta against the wrong base fails here.
     //
-    // Its limit is worth stating, because it is the reason the strict
-    // validator's own decoder is not optional: a reader that misunderstands the
-    // format in the same way the writer does agrees with it perfectly. This
-    // half catches arithmetic against `Plan`'s numbers; the validator's half
-    // catches those numbers against the file's own object extents.
-
-    /// Unpacks fields of arbitrary bit width, most significant bit first —
-    /// [`BitWriter`] backwards.
-    struct BitReader<'a> {
-        bytes: &'a [u8],
-        at: usize,
-    }
-
-    impl BitReader<'_> {
-        fn read(&mut self, width: u16) -> u32 {
-            let mut value = 0u32;
-            for _ in 0..width {
-                let byte = self.bytes.get(self.at / 8).copied().unwrap_or(0);
-                let bit = (byte >> (7 - self.at % 8)) & 1;
-                value = (value << 1) | u32::from(bit);
-                self.at += 1;
-            }
-            value
-        }
-
-        fn align(&mut self) {
-            self.at = self.at.div_ceil(8) * 8;
-        }
-
-        /// How many bytes have been consumed. Only meaningful when aligned.
-        fn byte(&self) -> usize {
-            self.at / 8
-        }
-
-        /// Bits asked for beyond the end of the data, which is what a reader
-        /// reports as an overflow.
-        fn overran(&self) -> bool {
-            self.at > self.bytes.len() * 8
-        }
-    }
-
-    /// The page-offset hint table, as Table F.3's thirteen header items and
-    /// Table F.4's per-page entries.
-    struct PageOffsets {
-        least_objects: u32,
-        first_page_offset: u32,
-        object_bits: u16,
-        least_length: u32,
-        length_bits: u16,
-        least_content_offset: u32,
-        content_offset_bits: u16,
-        least_content_length: u32,
-        content_length_bits: u16,
-        count_bits: u16,
-        identifier_bits: u16,
-        numerator_bits: u16,
-        denominator: u32,
-        objects: Vec<u32>,
-        lengths: Vec<u32>,
-        shared: Vec<Vec<u32>>,
-    }
-
-    /// The shared-object hint table, as Table F.5's seven header items and
-    /// Table F.6's entries.
-    struct SharedObjects {
-        first_object: u32,
-        first_offset: u32,
-        first_page_entries: u32,
-        total_entries: u32,
-        group_object_bits: u16,
-        least_group: u32,
-        group_bits: u16,
-        groups: Vec<u32>,
-        signatures: Vec<u32>,
-    }
-
-    fn read_page_offsets(reader: &mut BitReader, pages: usize) -> PageOffsets {
-        let mut table = PageOffsets {
-            least_objects: reader.read(32),
-            first_page_offset: reader.read(32),
-            object_bits: reader.read(16) as u16,
-            least_length: reader.read(32),
-            length_bits: reader.read(16) as u16,
-            least_content_offset: reader.read(32),
-            content_offset_bits: reader.read(16) as u16,
-            least_content_length: reader.read(32),
-            content_length_bits: reader.read(16) as u16,
-            count_bits: reader.read(16) as u16,
-            identifier_bits: reader.read(16) as u16,
-            numerator_bits: reader.read(16) as u16,
-            denominator: reader.read(16),
-            objects: Vec::new(),
-            lengths: Vec::new(),
-            shared: Vec::new(),
-        };
-        assert_eq!(reader.byte(), 36, "Table F.3 is thirteen items, 36 bytes");
-
-        // Item by item across all the pages, not page by page.
-        table.objects = (0..pages)
-            .map(|_| table.least_objects + reader.read(table.object_bits))
-            .collect();
-        reader.align();
-        table.lengths = (0..pages)
-            .map(|_| table.least_length + reader.read(table.length_bits))
-            .collect();
-        reader.align();
-        let counts: Vec<u32> = (0..pages).map(|_| reader.read(table.count_bits)).collect();
-        reader.align();
-        table.shared = counts
-            .iter()
-            .map(|count| {
-                (0..*count)
-                    .map(|_| reader.read(table.identifier_bits))
-                    .collect()
-            })
-            .collect();
-        reader.align();
-        for count in &counts {
-            for _ in 0..*count {
-                assert_eq!(reader.read(table.numerator_bits), 0, "no numerators");
-            }
-        }
-        reader.align();
-        for _ in 0..pages {
-            assert_eq!(reader.read(table.content_offset_bits), 0);
-        }
-        reader.align();
-        for _ in 0..pages {
-            assert_eq!(reader.read(table.content_length_bits), 0);
-        }
-        reader.align();
-        table
-    }
-
-    fn read_shared_objects(reader: &mut BitReader) -> SharedObjects {
-        let start = reader.byte();
-        let mut table = SharedObjects {
-            first_object: reader.read(32),
-            first_offset: reader.read(32),
-            first_page_entries: reader.read(32),
-            total_entries: reader.read(32),
-            group_object_bits: reader.read(16) as u16,
-            least_group: reader.read(32),
-            group_bits: reader.read(16) as u16,
-            groups: Vec::new(),
-            signatures: Vec::new(),
-        };
-        assert_eq!(
-            reader.byte() - start,
-            24,
-            "Table F.5 is seven items, 24 bytes"
-        );
-
-        let entries = table.total_entries as usize;
-        table.groups = (0..entries)
-            .map(|_| table.least_group + reader.read(table.group_bits))
-            .collect();
-        reader.align();
-        // Table F.6 item 2, one bit an entry and never omitted. Writing it at
-        // zero width is what made a reader overflow before it had read one
-        // entry; reading it here at any other width would put every group
-        // count below out of step.
-        table.signatures = (0..entries).map(|_| reader.read(1)).collect();
-        reader.align();
-        for _ in 0..entries {
-            assert_eq!(
-                reader.read(table.group_object_bits),
-                0,
-                "one object a group"
-            );
-        }
-        reader.align();
-        table
-    }
+    // It is the *same* reader the strict validator uses, deliberately. A
+    // second one written here would be a second understanding of Annex F, and
+    // when the two disagreed — as they did, about Table F.4 item 5 — neither
+    // could say which was wrong, because each only ever met the writer. One
+    // reader has one bug at a time and both halves of the evidence find it:
+    // this half catches its arithmetic against `Plan`'s numbers, the
+    // validator's half catches those numbers against the file's own extents.
 
     /// One fixture: a catalog, a page tree, one or two fonts, and a page with
     /// a content stream each.
@@ -1619,135 +1591,138 @@ mod tests {
     /// Two offsets are passed in rather than derived, because `hint_tables`
     /// takes them from the layout; any two distinct values prove they land in
     /// the fields they are meant to and not in each other's.
+    ///
+    /// Read by `crate::validate::hints`, the one decoder in the tree. It
+    /// reports every header item of Tables F.3 and F.5 precisely so that this
+    /// test can hold the writer to all of them rather than to the handful the
+    /// validator happens to compare.
     #[test]
     fn every_hint_table_field_reads_back_as_the_writer_computed_it() {
         for (pages, second_font) in [(1usize, false), (6, false), (6, true)] {
             let plan = a_built_plan(pages, second_font);
             let (data, shared_at) = plan.hint_tables(0x0BAD_F00D, 0x0DEF_ACED);
-
-            let mut reader = BitReader {
-                bytes: &data,
-                at: 0,
-            };
-            let offsets = read_page_offsets(&mut reader, pages);
             let case = format!("{pages} pages, second font {second_font}");
 
+            // A decode that returns at all is a decode that stayed inside the
+            // data: every field is bounds-checked before it is consumed, so
+            // running off the end is `None` rather than a short value.
+            let read = hints::decode(&data, shared_at, pages)
+                .unwrap_or_else(|| panic!("the tables decode ({case})"));
+
             assert_eq!(
-                reader.byte(),
-                shared_at,
+                read.page_table_end, shared_at,
                 "/S names where the shared table starts ({case})"
             );
 
             // Table F.3, item by item.
             assert_eq!(
-                offsets.least_objects,
+                read.least_objects,
                 plan.page_object_counts.iter().copied().min().unwrap(),
                 "item 1 ({case})"
             );
-            assert_eq!(offsets.first_page_offset, 0x0BAD_F00D, "item 2 ({case})");
+            assert_eq!(read.first_page_offset, 0x0BAD_F00D, "item 2 ({case})");
             assert_eq!(
-                offsets.least_length,
+                read.least_length,
                 plan.page_lengths.iter().copied().min().unwrap(),
                 "item 4 ({case})"
             );
-            assert_eq!(offsets.least_content_offset, 0, "item 6 ({case})");
-            assert_eq!(offsets.content_offset_bits, 0, "item 7 ({case})");
-            assert_eq!(offsets.least_content_length, 0, "item 8 ({case})");
-            assert_eq!(offsets.content_length_bits, 0, "item 9 ({case})");
-            assert_eq!(offsets.numerator_bits, 0, "item 12 ({case})");
-            assert_eq!(offsets.denominator, 1, "item 13 ({case})");
+            assert_eq!(read.least_content_offset, 0, "item 6 ({case})");
+            assert_eq!(read.content_offset_bits, 0, "item 7 ({case})");
+            assert_eq!(read.least_content_length, 0, "item 8 ({case})");
+            assert_eq!(read.content_length_bits, 0, "item 9 ({case})");
+            assert_eq!(read.position_bits, 0, "item 12 ({case})");
+            assert_eq!(read.position_denominator, 1, "item 13 ({case})");
 
             // Table F.4, entry by entry. The deltas are checked by their sum
             // with the header's minimum, which is what a reader does, so a
             // delta against the wrong base cannot survive.
-            assert_eq!(offsets.objects, plan.page_object_counts, "item 1 ({case})");
-            assert_eq!(offsets.lengths, plan.page_lengths, "item 2 ({case})");
-            assert_eq!(offsets.shared, plan.page_shared, "items 3 and 4 ({case})");
+            let objects: Vec<u32> = read.pages.iter().map(|page| page.objects).collect();
+            let lengths: Vec<u32> = read.pages.iter().map(|page| page.length).collect();
+            let shared_ids: Vec<Vec<u32>> =
+                read.pages.iter().map(|page| page.shared.clone()).collect();
+            assert_eq!(objects, plan.page_object_counts, "item 1 ({case})");
+            assert_eq!(lengths, plan.page_lengths, "item 2 ({case})");
+            assert_eq!(shared_ids, plan.page_shared, "items 3 and 4 ({case})");
 
             // And the widths are wide enough for the values they carry, which
             // is the other way a field goes wrong: a width one bit short
             // truncates silently and the sum above would still add up if the
             // truncation happened to land on a zero.
             for (index, count) in plan.page_object_counts.iter().enumerate() {
-                let delta = count - offsets.least_objects;
+                let delta = count - read.least_objects;
                 assert!(
-                    u32::from(offsets.object_bits) >= 32 - delta.leading_zeros(),
+                    u32::from(read.object_bits) >= 32 - delta.leading_zeros(),
                     "item 3 is {} bits for a delta of {delta} on page {index} ({case})",
-                    offsets.object_bits
+                    read.object_bits
                 );
             }
             for (index, length) in plan.page_lengths.iter().enumerate() {
-                let delta = length - offsets.least_length;
+                let delta = length - read.least_length;
                 assert!(
-                    u32::from(offsets.length_bits) >= 32 - delta.leading_zeros(),
+                    u32::from(read.length_bits) >= 32 - delta.leading_zeros(),
                     "item 5 is {} bits for a delta of {delta} on page {index} ({case})",
-                    offsets.length_bits
+                    read.length_bits
                 );
             }
             for ids in &plan.page_shared {
                 assert!(
-                    u32::from(offsets.count_bits) >= 32 - (ids.len() as u32).leading_zeros(),
+                    u32::from(read.count_bits) >= 32 - (ids.len() as u32).leading_zeros(),
                     "item 10 is {} bits for {} references ({case})",
-                    offsets.count_bits,
+                    read.count_bits,
                     ids.len()
                 );
                 for id in ids {
                     assert!(
-                        u32::from(offsets.identifier_bits) >= 32 - id.leading_zeros(),
+                        u32::from(read.identifier_bits) >= 32 - id.leading_zeros(),
                         "item 11 is {} bits for identifier {id} ({case})",
-                        offsets.identifier_bits
+                        read.identifier_bits
                     );
                 }
             }
 
             // Table F.5 and Table F.6.
-            let shared = read_shared_objects(&mut reader);
             assert_eq!(
-                shared.first_object, plan.first_shared_object,
+                read.first_shared_object, plan.first_shared_object,
                 "item 1 ({case})"
             );
-            assert_eq!(shared.first_offset, 0x0DEF_ACED, "item 2 ({case})");
+            assert_eq!(read.first_shared_offset, 0x0DEF_ACED, "item 2 ({case})");
             assert_eq!(
-                shared.first_page_entries, plan.shared_first_page,
+                read.shared_first_page, plan.shared_first_page,
                 "item 3 ({case})"
             );
             assert_eq!(
-                shared.total_entries as usize,
+                read.shared_lengths.len(),
                 plan.shared_entries.len(),
                 "item 4 ({case})"
             );
-            assert_eq!(shared.group_object_bits, 0, "item 5 ({case})");
+            assert_eq!(read.group_count_bits, 0, "item 5 ({case})");
             assert_eq!(
-                shared.least_group,
+                read.least_group,
                 plan.shared_lengths.iter().copied().min().unwrap(),
                 "item 6 ({case})"
             );
             assert_eq!(
-                shared.groups, plan.shared_lengths,
+                read.shared_lengths, plan.shared_lengths,
                 "Table F.6 item 1 ({case})"
             );
             assert!(
-                shared.signatures.iter().all(|flag| *flag == 0),
+                read.signature_flags.iter().all(|flag| *flag == 0),
                 "Table F.6 item 2 is present and clear ({case})"
             );
             for length in &plan.shared_lengths {
-                let delta = length - shared.least_group;
+                let delta = length - read.least_group;
                 assert!(
-                    u32::from(shared.group_bits) >= 32 - delta.leading_zeros(),
+                    u32::from(read.group_bits) >= 32 - delta.leading_zeros(),
                     "item 7 is {} bits for a delta of {delta} ({case})",
-                    shared.group_bits
+                    read.group_bits
                 );
             }
 
-            // Nothing was read past the end, and nothing was left over: the
-            // reader lands on the last byte of the stream. A table whose
-            // entries occupy no bits at all -- which is what the shared table
-            // did -- passes every assertion above and fails this one.
-            assert!(
-                !reader.overran(),
-                "the reader stayed inside the data ({case})"
-            );
-            assert_eq!(reader.byte(), data.len(), "and consumed all of it ({case})");
+            // Nothing was left over: the reader lands on the last byte of the
+            // stream. A table whose entries occupy no bits at all -- which is
+            // what the shared table did -- passes every assertion above and
+            // fails this one.
+            assert_eq!(read.end, data.len(), "and consumed all of it ({case})");
         }
     }
 
@@ -1770,10 +1745,26 @@ mod tests {
                 .collect();
 
             // A page's run is `count` consecutive numbers from its first
-            // object, exactly as F.4.1 has a reader take them. Page one's
-            // starts at `/O`; each later page's starts where the last ended.
-            let mut start = plan.first_page_object;
+            // object, exactly as F.4.1 has a reader take them — and Annex F
+            // says where each run begins, verbatim: page one's at `/O`
+            // (F.3.3), page two's at object 1 (Table F.4 item 1), and every
+            // later page's where the one before it ended.
+            let firsts: Vec<u32> = (0..plan.page_count as usize)
+                .scan(0u32, |carried, index| {
+                    *carried = match index {
+                        0 => plan.first_page_object,
+                        1 => 1,
+                        _ => *carried + plan.page_object_counts[index - 1],
+                    };
+                    Some(*carried)
+                })
+                .collect();
+            if pages > 1 {
+                assert_eq!(firsts[1], 1, "Table F.4 item 1 ({case})");
+            }
+
             for (index, count) in plan.page_object_counts.iter().enumerate() {
+                let start = firsts[index];
                 let run: Vec<u32> = (start..start + count).collect();
                 let measured: u32 = run.iter().filter_map(|num| sizes.get(num)).sum();
                 assert_eq!(
@@ -1785,7 +1776,27 @@ mod tests {
                     plan.page_lengths[index], measured,
                     "page {index}'s declared length is its run's bytes ({case})"
                 );
-                start += count;
+            }
+
+            // Two statements the chain above could not make, and that the old
+            // numbering made false. Page one's run is the *top* of the file's
+            // numbering, because part 6 is the last thing the head group holds
+            // and only the hint stream is numbered above it (F.3.6); and every
+            // number Annex F hands the remaining pages is below `/O`, because
+            // group 1 is numbered from 1 and ends where the head group begins.
+            assert_eq!(
+                plan.first_page_object + plan.page_object_counts[0],
+                plan.hint_object,
+                "page one's run reaches the top of the numbering ({case})"
+            );
+            for (index, first) in firsts.iter().enumerate().skip(1) {
+                let count = plan.page_object_counts[index];
+                assert!(
+                    first + count <= plan.first_page_object,
+                    "page {index}'s run {first}..{} is not below /O {} ({case})",
+                    first + count,
+                    plan.first_page_object
+                );
             }
 
             // The shared table's entries are part 6's objects and then part
@@ -1819,6 +1830,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The head group is one unbroken range, which is what lets the front
+    /// cross-reference section be one subsection that frees nothing.
+    ///
+    /// 7.5.4 makes a subsection a contiguous range of object numbers. The
+    /// front section covers part 2, the `/Encrypt` dictionary, part 4, part 5
+    /// and part 6, and a gap anywhere in it would be an entry marked *free* in
+    /// the newer section for an object the main table carries — which a reader
+    /// merging the two through `/Prev` resolves to nothing. Without this
+    /// assertion a `Section` added to the head later would free objects
+    /// silently.
+    #[test]
+    fn the_head_sections_numbers_are_one_contiguous_range() {
+        for (pages, second_font) in [(1usize, false), (2, false), (6, false), (6, true)] {
+            let plan = a_built_plan(pages, second_font);
+            let case = format!("{pages} pages, second font {second_font}");
+
+            let mut head: Vec<u32> = plan
+                .ordered
+                .iter()
+                .filter(|placed| matches!(placed.section, Section::Document | Section::FirstPage))
+                .map(|placed| placed.number)
+                .collect();
+            head.push(plan.parameters_object);
+            head.push(plan.hint_object);
+            head.sort_unstable();
+
+            let wanted: Vec<u32> = (plan.parameters_object..plan.size).collect();
+            assert_eq!(
+                head, wanted,
+                "the head group is exactly {}..{} ({case})",
+                plan.parameters_object, plan.size
+            );
+            assert!(
+                plan.parameters_object < plan.first_page_object,
+                "part 2 is numbered below part 6: {} {} ({case})",
+                plan.parameters_object,
+                plan.first_page_object
+            );
+            // F.3.6: the hint stream takes the last object number in the file,
+            // after the last object of the first page — which is not where it
+            // is written.
+            assert_eq!(
+                plan.hint_object,
+                plan.size - 1,
+                "the hint stream is numbered last ({case})"
+            );
+        }
+    }
+
+    /// With no part 7, 8 or 9 there is nothing to number first, so the head
+    /// group starts at 1 and the parameter dictionary *is* object 1 —
+    /// legally, and for the opposite reason to the one this writer used to
+    /// have.
+    ///
+    /// Asserted rather than left implicit so that the old defect cannot be
+    /// filed again from the look of a one-page file.
+    #[test]
+    fn a_document_with_nothing_in_the_tail_numbers_part_two_one() {
+        let plan = a_built_plan(1, false);
+        let tail = plan
+            .ordered
+            .iter()
+            .filter(|placed| {
+                matches!(
+                    placed.section,
+                    Section::Rest | Section::Shared | Section::Other
+                )
+            })
+            .count();
+        assert_eq!(tail, 0, "the one-page fixture has no part 7, 8 or 9");
+        assert_eq!(plan.parameters_object, 1, "so the head group starts at 1");
     }
 
     /// The three fixtures are three different shapes, not the same one three

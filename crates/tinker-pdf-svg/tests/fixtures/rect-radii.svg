@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- §9.2's three `rx`/`ry` rules, each as a rectangle of the same size so the
+     outlines can be compared against each other rather than against recorded
+     numbers.
+
+     `#both` is the reference. `#one` gives only `rx`, so `ry` takes its value.
+     `#huge` gives radii past half the side, which clamp to half. `#half` is
+     what `#huge` must equal. `#negative` is §9.2's error, degraded to no
+     radius at all and named. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <rect id="both"     x="0" y="0" width="40" height="20" rx="8" ry="8"/>
+  <rect id="one"      x="0" y="0" width="40" height="20" rx="8"/>
+  <rect id="other"    x="0" y="0" width="40" height="20" ry="8"/>
+  <rect id="huge"     x="0" y="0" width="40" height="20" rx="500" ry="500"/>
+  <rect id="half"     x="0" y="0" width="40" height="20" rx="20" ry="10"/>
+  <rect id="square"   x="0" y="0" width="40" height="20"/>
+  <rect id="negative" x="0" y="0" width="40" height="20" rx="-3"/>
+</svg>

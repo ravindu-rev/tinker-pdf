@@ -90,6 +90,58 @@ same thing. Warnings are deduplicated — a page whose font is unknown says
 so once, not once per glyph — so "this page has no text" and "this page has
 text this build could not decode" stay distinguishable (ruling 2).
 
+**The recording device.** `tinker-pdf-content`'s `record.rs` carries a third
+`Device`, beside the text device here and the rasterising one in
+`tinker-pdf-render`: `RecordingDevice` keeps **every** call, in order, as a
+typed `Event` with a copy of the graphics state that call saw. It observes
+and decides nothing — no accumulated clip, no bounding boxes, no decoded
+image samples, and a `q`/`Q` pair that changed nothing is still two events —
+so two consumers wanting different scenes build them from one transcript
+rather than having to agree first.
+
+Three decisions are recorded in the module itself, because a later reader
+would otherwise have to re-derive them:
+
+- **The list is flat, with explicit begin and end events, rather than a
+  tree.** `q`/`Q` and `BMC`/`EMC` nest independently and may cross, so a tree
+  would have to name one of them the parent and be wrong in whichever
+  direction it chose; and the interpreter's own repairs — a stray `EMC`, a
+  scope refused past the depth cap, a stream that ended inside a scope —
+  have no parent to be given one. The price is that "what was open here" is
+  a prefix walk, paid only by the consumers that ask.
+- **Each scope's own visibility is what is stored**, with the enclosing
+  answer derived on demand, because the reverse cannot be undone: a nested
+  `/OC` naming a layer that is on, inside one that is off, is hidden, and a
+  recorder that stored only "hidden here" could never say which scope hid it.
+- **The state is copied at the call**, which is what the retained-page row's
+  byte-equal replay needs and what a recorder holding one shared handle
+  silently loses. `Capture` turns whole categories — and the state copy —
+  off for the two consumers that want only glyphs.
+
+It exists as a **prerequisite rather than as a capability**, which is why it
+has no [roadmap](../ROADMAP.md) row of its own. Six rows need it and only one
+of them says the words: a retained page (whose exit criterion already read "a
+recording `Device`"), PDF to SVG, structured text serialisation, table
+reconstruction from geometry, inferred reading order for untagged pages, and
+the glyph-usage walk that font subsetting on rewrite drives. Promoting it out
+of the interpreter's test module deleted five ad-hoc recorders that had grown
+there, each keeping what one test needed.
+
+**The first of the six has landed**, and the fit is reported rather than
+assumed. `crates/tinker-pdf/src/subset.rs` is one `interpret` into a
+`RecordingDevice` and one pass over its events — no second interpreter, no
+device of its own. What did *not* fit is `Capture::GLYPHS`, the preset
+introduced for that consumer, which turns the bracketing events off:
+`Glyph::font_id` is the interned **resource name**, and a resource name is
+scope-relative, so without `BeginForm`/`EndForm` there is no way to say which
+`/F1` a glyph meant and one font's glyphs would be credited to another — which
+drops the glyphs the other font needs. The walk runs under `text` **and**
+`structure` instead. The preset is still right for the other glyph-only
+consumer named above, inferred reading order, which wants glyphs in document
+order and never asks which dictionary a font came from; its name is what is
+one preset short, and that is written down in `subset.rs` rather than fixed
+by renaming a public constant from a row that is about fonts.
+
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a
@@ -112,10 +164,64 @@ for warning in &text.warnings {
 }
 ```
 
+### The structured view (14.7, 14.8)
+
+A tagged document says its own reading order, and that order is often not
+the geometric one. `Document::structure()` returns the tree — `None` for
+the majority of documents, which carry none, and **nothing is inferred for
+them**: a tree guessed from geometry would be this engine's opinion about
+reading order presented as the file's own statement of it.
+
+```rust
+let Some(tree) = doc.structure() else { return };      // untagged
+let page = &doc.pages()[0];
+let structured = tree.text_for_page(0, &page.text());  // the SAME TextPage
+println!("{}", structured.plain_text());               // in structure order
+println!("{} claimed, {} orphaned, {} unmarked",
+    structured.matched, structured.orphans, structured.unmarked);
+```
+
+Three properties are worth stating because each was a decision:
+
+- **It is a join, never a second extractor.** `text_for_page` takes the
+  `TextPage` `page.text()` already produced. Two extractors would be two
+  answers about one page, and the first bug would be a caller finding text
+  in one that the other does not have.
+- **Nodes are runs, not elements.** An element's content and its child
+  elements interleave — `/P [ 3 /Span[4] 5 ]` reads 3, then 4, then 5 —
+  so one node per element would have to report 3 and 5 together and put 4
+  after them. That is a reordering in the middle of a sentence, and it
+  reads as a layout opinion rather than as a bug.
+- **Orphans are counted, not appended.** A character carrying an `/MCID`
+  no element claims is reported as a number, not silently added to the end
+  where it would look like reading order.
+- **A content item is identified by its stream and its number, never by
+  the number alone.** 14.7.4.2 numbers marked-content sequences *within a
+  content stream*, so `/MCID 0` in one form XObject and `/MCID 0` in
+  another are two sequences; `/MCR /Stm` says which, `/StmOwn` says which
+  object owns that stream, and both are read. An `/MCR` naming no `/Stm`
+  means the page's own content stream, which is what almost every one of
+  them is. Without the pair, two forms on one page with overlapping ids
+  give every element both sequences — a page that says everything twice
+  while `matched`, `orphans` and `unmarked` all still look right.
+
+Element types are kept **twice** — `raw_type` as the file wrote it and
+`standard_type` after `/RoleMap` — because a consumer that wants to know a
+paragraph is a paragraph and one that wants the file's own vocabulary are
+both real, and keeping one name loses the other. An unmapped custom type
+resolves to itself (ruling 2).
+
+On the write side, `PageBuilder::tagged(tag, |page| …)` draws inside a
+marked-content sequence and records the element that claims it, so the tree
+is correct by construction: there is no way to name a marked-content id
+that was never written, and none to write one no element claims.
+
 Coordinates are PDF user space, y upward — the space the page's own boxes
 are in; a display transform is the caller's. The `Device` trait, the
-interpreter and `TextDevice` live in `tinker-pdf-content` and are
-architecture rather than public API; see [architecture](../architecture.md).
+interpreter, `TextDevice` and `RecordingDevice` live in `tinker-pdf-content`
+and are architecture rather than public API — the facade projects none of
+them, and ruling 11 is about what a *document* exposes, not about whether a
+crate has an API of its own; see [architecture](../architecture.md).
 
 ## Refused by name
 
@@ -126,7 +232,13 @@ architecture rather than public API; see [architecture](../architecture.md).
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
 | Text shaping — Arabic joining, ligature substitution, bidi reordering | — | `TextLine::rtl` reports the dominant direction and reorders nothing; shaping is staged as its own work | [ROADMAP](../ROADMAP.md) |
-| Tagged-PDF structure-based reading order (14.7, 14.8) | — | lines and blocks are ordered geometrically; no structure tree is read anywhere | [ROADMAP](../ROADMAP.md) |
+| Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order and always has — geometry decides only whether two glyphs are one line and two lines one block, and `TextDevice` sorts nothing; a structure tree is read when the document carries one, and never invented when it does not ([design/reading-order.md](../design/reading-order.md) is the opt-in inference, labelled as such) | 14.8 |
+| An `/MCR` whose `/Stm` does not name a content stream | `StructureWarning::ContentStreamNotAStream { element, stream }` | a stream is always indirect (7.3.8), so the value names nothing that could hold a sequence; read as though `/Stm` were absent rather than keyed on an object with no content, which would make the sequence findable nowhere | 14.7.4.2 |
+| An `/MCR` carrying `/StmOwn` without the `/Stm` it qualifies | `StructureWarning::StreamOwnerWithoutStream { element, owner }` | Table 324 permits the owner only beside a stream; an owner alone names the owner of a stream nobody named, so it is dropped | 14.7.4.2 |
+| An `/MCR` with no `/Stm` whose `/MCID` is in no page-stream sequence but in exactly one other stream on the page | `StructureWarning::ContentStreamAssumed { page, mcid }` | a producer that tags content inside a form and omits `/Stm` writes something 14.7.4.2 does not define; where one reading exists it is taken and named, and where two streams share the identifier it is refused, because that is the collision `/Stm` exists to resolve | 14.7.4.2 |
+| A marked-content sequence in a stream `/StmOwn` says another object owns — an annotation's `/AP` | — | page text extraction runs the page's stream and the forms it invokes, never an annotation's appearance, so such a reference matches nothing here rather than taking whatever else shares its number; extracting appearance-stream text is separate work | 14.7.4.2, 12.5.5 |
+| `/ActualText` on a property list carrying no `/MCID` | — | the map is keyed by `(stream, /MCID)`, so a list with no identifier reaches no consumer | 14.9.4 |
+| `/Alt`, `/ActualText`, `/E` and `/Lang` on **written** structure elements | — | `PageBuilder::tagged` writes the type and the content, not the 14.9 properties; an empty element is therefore dropped rather than kept, since an empty `Figure` carrying `/Alt` is the case that would want one | 14.9 |
 
 The rendering side of a hidden layer is reported too —
 `RenderWarning::HiddenOptionalContent { layer }` names which layer was not
@@ -138,8 +250,22 @@ Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),
 `text.rs` (artifact scopes nest, `ET` continuation versus baseline gaps,
 search hit geometry, wmode/rtl separation, non-finite glyphs dropped),
-`interpret.rs` (group offer/decline, state save discipline) and `state.rs`
-(matrix convention, render-mode predicates).
+`interpret.rs` (group offer/decline, state save discipline), `record.rs` (a
+small stream's whole event list asserted in order including the nesting; two
+paints with different states asserted separately, which is what catches a
+recorder that shares one handle and reports every event with the last state;
+`q`/`Q` one for one; a declined form has no end; a glyph-only capture keeps
+glyphs and copies no state; the per-event size pinned) and `state.rs` (matrix
+convention, render-mode predicates).
+
+Every test in `interpret.rs` drives `RecordingDevice`. It used to carry five
+devices of its own — `Recorder`, `GroupEvents`, `Painted`, `Scopes` and
+`Images` — and all five are gone with what they asserted unchanged. One
+assertion grew rather than moved: the hidden-image test's device used to
+suppress a hidden image *itself* while its comment claimed it recorded
+"whether it was asked at all", so it proved the weaker of the two. The
+interpreter hands a hidden image to the device inside a hidden scope, and the
+test now says so.
 
 Facade integration tests: `crates/tinker-pdf/tests/inline_images.rs` (a
 predictor-filtered inline image matches the identical XObject pixel for
@@ -158,7 +284,7 @@ the 3 document byte-hashes. The `content_tokenizer` and `render_page` fuzz
 targets are among the 24 with committed seed corpora; `hostile_input.rs`
 sweeps the same shapes on stable. Nothing compares this extractor against
 another one: ruling 13 ended that, and the harness that could have driven one
-is deleted. Across the corpus, 4 484 of
-4 525 files rendered every page with 0 crashes, and `cargo test
---workspace` stands at 2 952 passed / 0 failed / 8 ignored (Windows x86_64,
-as of August 2026).
+is deleted. Across the corpus, 5 516 of
+5 525 files rendered every page with 0 crashes, and `cargo test
+--workspace` stands at 4 879 passed / 0 failed / 58 ignored across 218 suites
+(Windows x86_64, 14 September 2026).

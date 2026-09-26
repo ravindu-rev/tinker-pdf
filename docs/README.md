@@ -9,7 +9,7 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 
 | Doc | Covers |
 | --- | --- |
-| [features/opening.md](features/opening.md) | bytes → `Document`: sniffing, xref flavours, repair ladder, stream tiers |
+| [features/opening.md](features/opening.md) | bytes → `Document`: sniffing, xref flavours, repair ladder, stream tiers, and opening from a `ByteSource` a range at a time |
 | [features/filters.md](features/filters.md) | every stream filter and image codec |
 | [features/encryption.md](features/encryption.md) | handlers R2–R6, authenticate, permissions, encrypt-on-save |
 | [features/document-model.md](features/document-model.md) | metadata, page tree, outlines, destinations, trees, attachments, XMP |
@@ -21,6 +21,7 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | [features/editing.md](features/editing.md) | page surgery, annotations, flattening, redaction |
 | [features/forms.md](features/forms.md) | field tree, fill, transactions, calculations |
 | [features/creation.md](features/creation.md) | `DocumentBuilder`: pages, text, images, patterns, outlines |
+| [features/pdfa.md](features/pdfa.md) | ISO 19005: the validator, its coverage as a measured number, and the writer's archival profile |
 | [features/cbz.md](features/cbz.md) | comic archives as documents |
 | [features/xps.md](features/xps.md) | XPS/OpenXPS as documents |
 | [features/epub.md](features/epub.md) | books as documents: the CSS and layout engines |

@@ -8,18 +8,46 @@
 //! # Every marker in Table A.2, or a refusal that names it
 //!
 //! There are twenty markers in Table A.2 and this module accounts for all
-//! twenty: fourteen are parsed, five are refused **by name** (RGN, POC, PPM,
-//! PPT, CRG) and one — EPH — belongs to tier-2 and is refused here only when
-//! it appears in a header. Anything else is refused as an unknown marker,
-//! which is where every ISO/IEC 15444-2 marker lands, Part 2 being a
-//! non-goal.
+//! twenty: **all twenty are parsed**, and the only two that ever refuse by
+//! name — SOP and EPH — refuse for being in a header rather than for being
+//! undecodable, since A.8 puts both in the bit stream and tier-2 reads them
+//! there. Anything else is refused as an unknown marker, which is where
+//! every ISO/IEC 15444-2 marker lands, Part 2 being a non-goal.
 //!
 //! Skipping a marker whose length happens to be readable is the failure this
-//! guards against, and it is not hypothetical: RGN scales a region's
-//! coefficients, and a decoder that skips it produces a picture with a bright
-//! rectangle in it rather than an error. POC changes the progression order
-//! *mid-stream*, so a decoder that skips it reads every packet after it in
-//! the wrong order and produces a soft, plausible image.
+//! guards against, and it is not hypothetical. Three markers left the refusal
+//! list because reading the clause was cheaper than the failure it prevents:
+//!
+//! RGN was one, until Annex H was read. It is parsed here and applied in
+//! [`super::wavelet`], because A.6.3 carries nothing but a component index, a
+//! style and a shift, and H.1 says exactly what the shift does to a
+//! coefficient. The refusal it leaves behind is narrower and named: Table
+//! A.25 defines one `Srgn` style and reserves every other value, so a
+//! reserved style is refused as a reserved style rather than stepped over.
+//!
+//! POC was the last, and it is the one that could not be parsed and carried.
+//! A.6.6's segment is a list of *progression order volumes*, and B.12.2 says
+//! what a volume is: B.12.1's "for loops", bounded by (B-21)'s start and end
+//! points, with its own progression order. A decoder that read the segment
+//! and left the packet sequence alone would read every packet after it in the
+//! wrong order and produce a soft, plausible image — so the volumes are
+//! handed to [`super::tier2`], which walks them in place of the single
+//! unbounded loop nest. The default is not a special case there: no POC is
+//! one volume covering everything, which is B.12.2's own first sentence.
+//!
+//! # Packed packet headers (A.7.4, A.7.5)
+//!
+//! PPM and PPT used to be the third and fourth names on that refusal list,
+//! for the same reason: they move every packet header out of the bit stream,
+//! so a decoder that skipped them read packet *bodies* as headers. They are
+//! now parsed here and consumed by tier-2, which reads a packet's header bits
+//! from the packed stream and its body bytes from the bit stream — through
+//! the one packet-header reader, not a second one.
+//!
+//! The mutual exclusion is this module's to enforce, because it is the one
+//! constraint that spans the main header and a tile-part header. T.800
+//! Table A.2's note c: *"If the PPM marker segment is used then PPT marker
+//! segments shall not be used, and vice versa."*
 //!
 //! # Where the arithmetic on attacker numbers is
 //!
@@ -28,7 +56,10 @@
 //! Every one of A.5.1's constraints is checked here rather than assumed, and
 //! each violation refuses the file.
 
-use super::{Cursor, Refusal, MAX_JPX_COMPONENTS, MAX_JPX_LEVELS, MAX_JPX_SAMPLES, MAX_JPX_TILES};
+use super::{
+    passes::Schedule, Cursor, Refusal, MAX_JPX_COMPONENTS, MAX_JPX_LEVELS, MAX_JPX_PRECISION,
+    MAX_JPX_SAMPLES, MAX_JPX_TILES,
+};
 use crate::Limits;
 
 /// ITU-T T.800 Table A.2, in full. Every one of these is parsed below or
@@ -48,15 +79,19 @@ pub(crate) mod marker {
     pub const COD: u16 = 0xFF52;
     /// Coding style component (A.6.2).
     pub const COC: u16 = 0xFF53;
-    /// Region of interest (A.6.3). **Refused**: it scales a rectangle's
-    /// coefficients, and ignoring it draws that rectangle too bright.
+    /// Region of interest (A.6.3). **Parsed and applied**: it carries the
+    /// Maxshift scaling value `s`, and H.1 realigns every coefficient of the
+    /// component against it. Ignoring it leaves the background 2^s too
+    /// small — a picture, not an error.
     pub const RGN: u16 = 0xFF5E;
     /// Quantization default (A.6.4).
     pub const QCD: u16 = 0xFF5C;
     /// Quantization component (A.6.5).
     pub const QCC: u16 = 0xFF5D;
-    /// Progression order change (A.6.6). **Refused**: it changes the packet
-    /// order mid-stream, so ignoring it mis-parses every packet after it.
+    /// Progression order change (A.6.6). **Parsed and applied**: each of its
+    /// progressions is one of B.12.2's progression order volumes, and tier-2
+    /// walks the volumes in place of B.12.1's single unbounded loop nest.
+    /// Ignoring it reads every packet after it in the wrong order.
     pub const POC: u16 = 0xFF5F;
     /// Tile-part lengths (A.7.1). An index; skipping it changes nothing.
     pub const TLM: u16 = 0xFF55;
@@ -64,19 +99,21 @@ pub(crate) mod marker {
     pub const PLM: u16 = 0xFF57;
     /// Packet length, tile-part header (A.7.3). An index.
     pub const PLT: u16 = 0xFF58;
-    /// Packed packet headers, main header (A.7.4). **Refused**: it moves
-    /// every packet header out of the packets, so ignoring it means reading
-    /// packet bodies as headers.
+    /// Packed packet headers, main header (A.7.4). Parsed: every tile's
+    /// packet headers live here, and tier-2 takes its header bits from this
+    /// stream instead of from the bit stream.
     pub const PPM: u16 = 0xFF60;
-    /// Packed packet headers, tile-part header (A.7.5). **Refused**, as PPM.
+    /// Packed packet headers, tile-part header (A.7.5). Parsed, as PPM, but
+    /// per tile rather than for the whole codestream.
     pub const PPT: u16 = 0xFF61;
     /// Start of packet (A.8.1). Inside the tile data, not the header.
     pub const SOP: u16 = 0xFF91;
     /// End of packet header (A.8.2). Inside the tile data. No segment.
     pub const EPH: u16 = 0xFF92;
-    /// Component registration (A.9.1). **Refused**: it is a sub-pixel
-    /// registration offset between components, and this build has nowhere to
-    /// put one.
+    /// Component registration (A.9.1). **Parsed and carried, never applied**:
+    /// A.9.1 says in as many words that it "has no effect on decoding the
+    /// codestream", so honouring it means reading it and leaving the samples
+    /// alone.
     pub const CRG: u16 = 0xFF63;
     /// Comment (A.9.2). Carries no coding information.
     pub const COM: u16 = 0xFF64;
@@ -88,11 +125,17 @@ pub(crate) mod marker {
 /// will not act on, and the name is what makes "refused by name" checkable.
 const fn refused_by_design(code: u16) -> Option<&'static str> {
     Some(match code {
-        marker::RGN => "RGN, region of interest",
-        marker::POC => "POC, progression order change",
-        marker::PPM => "PPM, packed packet headers in the main header",
-        marker::PPT => "PPT, packed packet headers in a tile-part header",
-        marker::CRG => "CRG, component registration",
+        // RGN left this list when Annex H was implemented. What is refused
+        // now is a *value* inside the segment rather than the segment —
+        // `Refusal::Feature("an Srgn ROI style Table A.25 reserves")`, from
+        // `parse_rgn` — because Table A.25 defines only style 0.
+        //
+        // POC left it on 21 September 2026, and with it went the last Table
+        // A.2 marker this build refused *as a capability*. What remains is
+        // two markers refused for being **out of place** rather than for
+        // being undecodable: A.8 puts SOP and EPH in the bit stream, and a
+        // header is the one place they have no meaning. Both are implemented
+        // where the clause puts them.
         marker::SOP => "SOP outside tile data",
         marker::EPH => "EPH outside tile data",
         _ => return None,
@@ -163,14 +206,184 @@ impl Progression {
     }
 }
 
+/// One progression order volume, from one progression of a POC marker
+/// segment (A.6.6, Figure A.15, Table A.32).
+///
+/// B.12.2 is what makes this a *volume* rather than six loose numbers: "the
+/// 'for loops' described in B.12.1 are limited by start points (CSpoc, RSpoc,
+/// Layer = 0, inclusive) and end points (CEpoc, REpoc and LEpoc, exclusive)",
+/// and equation (B-21) writes the three bounds out:
+///
+/// ```text
+/// CSpod <= i <  CEpod
+/// RSpod <= r <  REpod
+///     0 <= l <  LEpod
+/// ```
+///
+/// *(B-21) really does spell them `CSpod`, `CEpod`, `RSpod`, `REpod` and
+/// `LEpod`, with a `d`, where A.6.6, Figure A.15 and Table A.32 spell the
+/// same five fields `CSpoc`, `CEpoc`, `RSpoc`, `REpoc` and `LYEpoc` — and
+/// B.12.2's own prose, one paragraph above the equation, spells the layer
+/// bound `LEpoc`. Three spellings of one field across two clauses; the field
+/// names below follow Table A.32, which is the one the bytes are read from.*
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Poc {
+    /// `RSpoc`: "Resolution level index (inclusive) for the start of a
+    /// progression."
+    pub(crate) resolution_start: u8,
+    /// `CSpoc`: "Component index (inclusive) for the start of a
+    /// progression."
+    pub(crate) component_start: u16,
+    /// `LYEpoc`: "Layer index (exclusive) for the end of a progression. The
+    /// layer index always starts at zero for every progression. Packets that
+    /// have already been included in the codestream are not included again."
+    ///
+    /// That last sentence is the whole reason tier-2 carries a set of the
+    /// packets it has already emitted: every volume's layer loop starts at
+    /// zero, so without it two overlapping volumes would each emit the low
+    /// layers and the sequence would double-read them.
+    pub(crate) layer_end: u16,
+    /// `REpoc`: "Resolution level index (exclusive) for the end of a
+    /// progression."
+    pub(crate) resolution_end: u8,
+    /// `CEpoc`: "Component index (exclusive) for the end of a progression",
+    /// with Table A.32's zero already read as 256 — the table gives the
+    /// range as "(CSpoc + 1) to 255, 0" and then says "(0 is interpreted as
+    /// 256)", so the wrap is the table's and not this decoder's.
+    pub(crate) component_end: u16,
+    /// `Ppoc`, this volume's own progression order (Table A.16, the same
+    /// eight bits `SGcod` carries).
+    pub(crate) order: Progression,
+}
+
+/// T.800 A.6.6 and Table A.32: the POC marker segment.
+///
+/// Figure A.15 gives the field order inside one progression — `RSpoc`,
+/// `CSpoc`, `LYEpoc`, `REpoc`, `CEpoc`, `Ppoc` — which is **not** the order
+/// the parameter list above the figure explains them in for `LYEpoc` and
+/// `REpoc`; the figure and Table A.32's row order agree with each other and
+/// are what the bytes follow.
+///
+/// **The length is checked for equality rather than sufficiency**, because
+/// equation (A-6) leaves exactly one legal length for a given progression
+/// count:
+///
+/// ```text
+/// Lpoc = 2 + 7 * number_progression_order_change   Csiz <  257
+/// Lpoc = 2 + 9 * number_progression_order_change   Csiz >= 257
+/// ```
+///
+/// and Table A.32 gives `Lpoc` as "9 to 65 535", whose lower bound is the
+/// one-progression case. So a body whose length is not a whole number of
+/// progressions is malformed, and a zero-progression POC is a segment
+/// describing nothing while A.6.6 requires that "the progression of every
+/// packet in the codestream ... shall be defined in one or more POC marker
+/// segments".
+///
+/// **Every one of Table A.32's ranges is checked rather than assumed**, and
+/// each violation refuses the file. A volume whose bounds run backwards is
+/// not a volume, and clamping one into shape would silently decode a packet
+/// sequence the codestream never described — which is the same failure as
+/// skipping the marker, arrived at from the other side.
+fn parse_poc(body: &[u8], siz: &Siz) -> Result<Vec<Poc>, Refusal> {
+    // A.6.6's CSpoc and CEpoc are "either 8 or 16 bits depending on Csiz
+    // value", the same rule Crgn, Ccoc and Cqcc carry.
+    let wide = siz.components.len() >= 257;
+    let each = if wide { 9 } else { 7 };
+    if body.is_empty() || body.len() % each != 0 {
+        return Err(Refusal::Structure(
+            "a POC marker segment whose length is not equation A-6's",
+        ));
+    }
+    let components = u16::try_from(siz.components.len()).unwrap_or(u16::MAX);
+    let mut c = Cursor::new(body);
+    let mut out = Vec::with_capacity(body.len() / each);
+    while c.remaining() > 0 {
+        let Some(resolution_start) = c.u8() else {
+            return Err(Refusal::Truncated("a POC progression"));
+        };
+        let component_start = if wide { c.u16() } else { c.u8().map(u16::from) }
+            .ok_or(Refusal::Truncated("a POC progression"))?;
+        let (Some(layer_end), Some(resolution_end)) = (c.u16(), c.u8()) else {
+            return Err(Refusal::Truncated("a POC progression"));
+        };
+        let component_end = if wide { c.u16() } else { c.u8().map(u16::from) }
+            .ok_or(Refusal::Truncated("a POC progression"))?;
+        let order = c.u8().ok_or(Refusal::Truncated("a POC progression"))?;
+        // Table A.32: "(0 is interpreted as 256)". Read before the range
+        // check, because 0 is the *largest* legal CEpoc and not the smallest.
+        let component_end = if component_end == 0 {
+            256
+        } else {
+            component_end
+        };
+        // Table A.32's own ranges, row by row: RSpoc 0 to 32, LYEpoc 1 to
+        // 65 535, REpoc (RSpoc + 1) to 33, CEpoc (CSpoc + 1) to 255 or
+        // 16 384. CSpoc's own range — 0 to 255, or 0 to 16 383 — is the width
+        // it was read at, so the only part of it left to check is that a
+        // component index fits the 16 383 ceiling in the wide case.
+        if resolution_start > 32 {
+            return Err(Refusal::Structure(
+                "a POC RSpoc above Table A.32's thirty-two",
+            ));
+        }
+        if resolution_end <= resolution_start || resolution_end > 33 {
+            return Err(Refusal::Structure(
+                "a POC REpoc outside Table A.32's (RSpoc + 1) to 33",
+            ));
+        }
+        if layer_end == 0 {
+            return Err(Refusal::Structure("a POC LYEpoc of zero"));
+        }
+        if wide && component_start > 16_383 {
+            return Err(Refusal::Structure("a POC CSpoc above Table A.32's 16 383"));
+        }
+        if component_end <= component_start || component_end > if wide { 16_384 } else { 256 } {
+            return Err(Refusal::Structure(
+                "a POC CEpoc outside Table A.32's (CSpoc + 1) to its ceiling",
+            ));
+        }
+        // A volume naming a component SIZ never declared describes packets
+        // that cannot exist. The start is refused — it is the codestream
+        // contradicting its own SIZ — while the *end* is left alone, because
+        // Table A.32's ceiling is a constant 256 or 16 384 rather than
+        // `Csiz`, so an encoder writing "to the last component" writes the
+        // ceiling and B.12.3 expects the surplus to describe no packets.
+        if component_start >= components {
+            return Err(Refusal::Structure(
+                "a POC CSpoc naming a component SIZ did not",
+            ));
+        }
+        out.push(Poc {
+            resolution_start,
+            component_start,
+            layer_end,
+            resolution_end,
+            component_end,
+            order: Progression::from_byte(order)?,
+        });
+    }
+    Ok(out)
+}
+
 /// T.800 Table A.19, the code-block style bits.
 ///
-/// Five of the six change how tier-1 reads a code-block and are refused; the
-/// sixth, `SEGMENTATION_SYMBOLS`, is implemented, because decoding the four
-/// UNIFORM decisions at the end of each cleanup pass and **checking** them is
-/// the one integrity check the format offers for free. A build that decoded
-/// them and discarded them would have thrown away the only thing in JPEG 2000
-/// that says the arithmetic decoder has gone out of step.
+/// **All six are implemented**, and the last two landed together because they
+/// share one mechanism rather than because they are one capability. The note
+/// that used to stand here said `BYPASS` and `TERMALL` both "change where a
+/// coding pass's *bytes* are, not how its decisions are read", and that
+/// half of it was wrong: `TERMALL` really is only about segment boundaries,
+/// but D.6 makes `BYPASS` read some passes as raw bits, which is squarely a
+/// tier-1 change. What they share is B.10.7.2's multiple codeword segments in
+/// the packet header; [`super::passes`] carries the split and says which part
+/// belongs to which bit.
+///
+/// The names are this build's shorthand and not the standard's. T.800 never
+/// writes "BYPASS" or "TERMALL"; Table A.19 spells bit 0 "Selective
+/// arithmetic coding bypass" and bit 2 "Termination on each coding pass", and
+/// D.6 and D.4 are the clauses that say what each one does. Table A.45 spells
+/// the whole byte a second way, as the mnemonic `00sp vtra`, and
+/// `tests::code_block_styles` asserts these six constants against both.
 pub(crate) mod cb_style {
     /// Selective arithmetic coding bypass: raw bits instead of MQ decisions
     /// for some passes.
@@ -186,11 +399,41 @@ pub(crate) mod cb_style {
     pub const PREDICTABLE: u8 = 0x10;
     /// Segmentation symbols at the end of each cleanup pass (D.5).
     pub const SEGMENTATION_SYMBOLS: u8 = 0x20;
-    /// The five this build refuses.
-    pub const UNSUPPORTED: u8 = BYPASS | RESET | TERMALL | VERTICALLY_CAUSAL | PREDICTABLE;
     /// Every bit Table A.19 defines. A `Scod` byte with anything outside
     /// this is a codestream using a table this build has not read.
-    pub const DEFINED: u8 = UNSUPPORTED | SEGMENTATION_SYMBOLS;
+    ///
+    /// Enumerated rather than derived from a set of unsupported bits. It was
+    /// `UNSUPPORTED | SEGMENTATION_SYMBOLS`, which was the same set only while
+    /// this build refused five of the six — so implementing three of them
+    /// dropped them out of *defined* as well, and a codestream setting nothing
+    /// but `RESET` was refused for using a bit the table does not define. That
+    /// is the mistake this constant exists to prevent, and it is worth more
+    /// now than it was then: `UNSUPPORTED` is gone entirely, so a set derived
+    /// from it would have emptied out and refused every style bit at once.
+    pub const DEFINED: u8 =
+        BYPASS | RESET | TERMALL | VERTICALLY_CAUSAL | PREDICTABLE | SEGMENTATION_SYMBOLS;
+}
+
+/// One component's registration offset, from CRG (A.9.1).
+///
+/// `x` is in units of 1/65536 of that component's own horizontal separation
+/// `XRsiz`, so the offset in reference grid points is `dx * x / 65536` — the
+/// units are the component's separation and not a reference grid point, which
+/// is the field in this segment most easily got wrong.
+///
+/// **Carried and never applied.** A.9.1: "This marker segment has no effect on
+/// decoding the codestream." It describes the centre of mass of a component's
+/// samples for a renderer that wants to place them more precisely than the
+/// reference grid does; the samples themselves are unchanged, so a decoder
+/// that reads this and does nothing with it is a conforming one. Parsing it
+/// rather than refusing it is what stops a conforming file being refused for
+/// carrying information.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Registration {
+    /// Horizontal offset, in units of 1/65536 of `XRsiz`.
+    pub(crate) x: u16,
+    /// Vertical offset, in units of 1/65536 of `YRsiz`.
+    pub(crate) y: u16,
 }
 
 /// One component's geometry from SIZ (A.5.1).
@@ -303,6 +546,37 @@ impl CodingStyle {
         self.cb_style & cb_style::SEGMENTATION_SYMBOLS != 0
     }
 
+    /// A.6.1 Table A.19 bit 1: the context states return to Table D.7's at
+    /// every coding pass boundary rather than only at the code-block's start.
+    pub(crate) const fn reset_contexts(&self) -> bool {
+        self.cb_style & cb_style::RESET != 0
+    }
+
+    /// Table A.19 bit 3: context formation treats the stripe below the one
+    /// being coded as insignificant, so a stripe depends on nothing beneath
+    /// it.
+    pub(crate) const fn vertically_causal(&self) -> bool {
+        self.cb_style & cb_style::VERTICALLY_CAUSAL != 0
+    }
+
+    /// Table A.19 bit 0, "Selective arithmetic coding bypass" (D.6): the
+    /// significance propagation and magnitude refinement passes from the
+    /// fifth bit-plane down carry raw bits rather than MQ decisions.
+    pub(crate) const fn bypass(&self) -> bool {
+        self.cb_style & cb_style::BYPASS != 0
+    }
+
+    /// Table A.19 bit 2, "Termination on each coding pass" (D.4, Table D.8):
+    /// every pass is its own codeword segment.
+    pub(crate) const fn terminate_all(&self) -> bool {
+        self.cb_style & cb_style::TERMALL != 0
+    }
+
+    /// The two bits above as one value, which is all tier-1 and tier-2 want.
+    pub(crate) const fn schedule(&self) -> Schedule {
+        Schedule::new(self.bypass(), self.terminate_all())
+    }
+
     /// `(PPx, PPy)` at resolution `r`.
     pub(crate) fn precinct_exponents(&self, r: usize) -> (u8, u8) {
         self.precincts.get(r).copied().unwrap_or((15, 15))
@@ -368,6 +642,22 @@ pub(crate) struct Quant {
     pub(crate) steps: Vec<(u8, u16)>,
 }
 
+/// RGN (A.6.3 and Table A.26): one component's region-of-interest shift.
+///
+/// `Srgn` is not carried, and that is deliberate rather than an omission.
+/// Table A.25 gives exactly one ROI style — 0, "Implicit ROI (maximum
+/// shift)" — and reserves every other value, so [`parse_rgn`] refuses
+/// anything else and what survives is the one style's own parameter. A field
+/// that can only hold one value is a field a reader has to check.
+///
+/// `shift` is Table A.26's "implicit ROI shift", 0 to 255: the number of
+/// binary places the encoder put the ROI's coefficients above the
+/// background's, which H.1 calls `s`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Roi {
+    pub(crate) shift: u8,
+}
+
 /// One tile-part: its SOT fields, whatever its header overrode, and its data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TilePart<'a> {
@@ -384,13 +674,87 @@ pub(crate) struct TilePart<'a> {
     pub(crate) coc: Vec<(u16, CodingStyle)>,
     pub(crate) qcd: Option<Quant>,
     pub(crate) qcc: Vec<(u16, Quant)>,
+    /// The tile-part header's RGN segments, by component. A.6.3 permits one
+    /// per component and only in the first tile-part of a tile.
+    pub(crate) rgn: Vec<(u16, Roi)>,
+    /// A.7.5: this tile-part header's PPT segments as `(Zppt, Ippt)`, in the
+    /// order they appeared. Empty unless the header carried one.
+    ///
+    /// Kept unsorted and unjoined here because the concatenation A.7.5
+    /// describes is per *tile* rather than per tile-part — a tile-part's
+    /// packet headers may sit in the header of a part with a lower `TPsot`
+    /// — so it is [`Codestream::packed_headers`] that joins them.
+    pub(crate) ppt: Vec<(u8, &'a [u8])>,
+    /// A.6.6: this tile-part header's POC segment, as progression order
+    /// volumes. `None` unless the header carried one.
+    ///
+    /// Per tile-part rather than per tile, because B.12.3 puts the volumes in
+    /// more than one of a tile's headers on purpose: "It is possible to
+    /// describe many progression order volumes in a tile-part header even
+    /// though these progression order volumes do not appear until later
+    /// tile-parts", and Figure B.15b draws the other arrangement — volumes 1
+    /// and 2 in the first tile-part header and volume 3 in the third. The
+    /// join is per tile and is [`Codestream::progression_volumes`]'s.
+    pub(crate) poc: Option<Vec<Poc>>,
     /// Everything between SOD and the end of the tile-part: the packets.
     pub(crate) data: &'a [u8],
+}
+
+/// T.800 A.7.4: the main header's packed packet headers, joined.
+///
+/// `bytes` is every PPM segment's `Ippm` run concatenated in order of
+/// increasing `Zppm`, and `counts` is the `Nppm` series read out of it —
+/// *after* the join, because A.7.4 allows a run to straddle a segment
+/// boundary: "the series of Ippm parameters described by the Nppm does not
+/// have to be complete in a given marker segment. Therefore, it is possible
+/// that the next PPM marker segment will not have an Nppm parameter after
+/// Zppm, but the continuation of the Ippm series from the last PPM marker
+/// segment." A parser that read each segment independently would take the
+/// first four bytes of such a continuation for a length.
+///
+/// `counts[k]` is the header byte count of the **kth tile-part in codestream
+/// order**, not of the kth tile: "One value for each tile-part (not tile)."
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ppm {
+    /// `Nppm_i`, one per tile-part, as byte offsets: `runs[k]..runs[k + 1]`
+    /// is tile-part `k`'s slice of `bytes`. One longer than the tile-part
+    /// count, and the last entry is `bytes.len()`.
+    runs: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
+/// One tile's packed packet-header stream, and where its seams are.
+///
+/// `boundaries` is every offset into `bytes` that T.800 requires to fall
+/// *between* two packet headers, so tier-2 can check that its reading of the
+/// headers lands on each one rather than straddling it. They come from two
+/// sentences, one per marker:
+///
+/// - A.7.4, for PPM: "The kth entry in the resulting list contains the number
+///   of bytes and packet headers for the kth tile-part appearing in the
+///   codestream" — so each `Nppm` run ends on a packet-header boundary.
+/// - A.7.5, for PPT, and A.7.4 again for PPM: "Every marker segment in this
+///   series shall end with a completed packet header."
+///
+/// This is the packed half of the integrity check `read_tile_packets`
+/// already makes on the bit stream, and it is worth as much: tier-2 carries
+/// no image data, so a header read that has slipped by a few bytes still
+/// produces coefficients and still produces a photograph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Packed {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) boundaries: Vec<usize>,
 }
 
 /// A parsed codestream: the main header and every tile-part in stream order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Codestream<'a> {
+    /// Which tiles declared more parts than arrived, so are left blank.
+    ///
+    /// Empty in a complete codestream. See [`check_tile_parts`]: a tile that
+    /// stops early costs pixels rather than meaning, and the caller reports it
+    /// as damage rather than refusing the image.
+    pub(crate) short_tiles: Vec<bool>,
     pub(crate) siz: Siz,
     pub(crate) cod: Cod,
     /// Per-component COC overrides from the main header.
@@ -398,7 +762,24 @@ pub(crate) struct Codestream<'a> {
     pub(crate) qcd: Quant,
     /// Per-component QCC overrides from the main header.
     pub(crate) qcc: Vec<Option<Quant>>,
+    /// Per-component RGN from the main header (A.6.3). `None` for a
+    /// component with no region of interest, which is every component of
+    /// almost every file.
+    pub(crate) rgn: Vec<Option<Roi>>,
+    /// A.6.6's main-header POC, as progression order volumes, when the main
+    /// header carried one. B.12.3: "If the POC marker segment is found in the
+    /// main header, it overrides the progression found in the COD for all
+    /// tiles."
+    pub(crate) poc: Option<Vec<Poc>>,
     pub(crate) tile_parts: Vec<TilePart<'a>>,
+    /// A.7.4's packed packet headers, when the main header carried PPM.
+    ///
+    /// `Some` here and a non-empty [`TilePart::ppt`] anywhere cannot both
+    /// happen: Table A.2's note c forbids it and [`parse`] refuses it.
+    pub(crate) ppm: Option<Ppm>,
+    /// Per-component registration offsets from CRG (A.9.1), when the main
+    /// header carried one. Read and never applied — see [`Registration`].
+    pub(crate) registration: Option<Vec<Registration>>,
 }
 
 impl Codestream<'_> {
@@ -453,10 +834,136 @@ impl Codestream<'_> {
         &self.qcd
     }
 
+    /// The region of interest in force for component `c` of tile `t`, by
+    /// A.6.3's precedence.
+    ///
+    /// Two deep rather than [`Self::quant_for`]'s four, and the clause says
+    /// so in as many words: "The RGN marker segment for a particular
+    /// component which appears in a tile-part header overrides any marker for
+    /// that component in the main header, for the tile in which it appears."
+    /// There is no RGN default to fall back to — a component with no RGN
+    /// anywhere has no region of interest, and H.1 then applies to nothing.
+    ///
+    /// **The main header's RGN is not inherited by a tile that has its own.**
+    /// A.6.3's Usage paragraph says a main-header RGN is "valid for all tiles
+    /// except those with an RGN marker segment", which is the override read
+    /// from the other end, and a decoder that took the larger of the two, or
+    /// added them, would be inventing an arithmetic the clause does not have.
+    pub(crate) fn roi_for(&self, tile: u16, c: usize) -> Option<Roi> {
+        if let Some(part) = self.first_part(tile) {
+            if let Some((_, roi)) = part.rgn.iter().find(|(i, _)| usize::from(*i) == c) {
+                return Some(*roi);
+            }
+        }
+        self.rgn.get(c).copied().flatten()
+    }
+
+    /// The progression order volumes in force for tile `t` (A.6.6, B.12.3),
+    /// or `None` when no POC reaches it and B.12.1's unbounded loops stand.
+    ///
+    /// **A.6.6's precedence, written out in the clause as a chain**:
+    ///
+    /// > Tile-part POC > Main POC > Tile-part COD > Main COD
+    /// >
+    /// > where the "greater than" sign > means that the greater overrides the
+    /// > lesser marker segment.
+    ///
+    /// This answers the first two terms; the COD terms are
+    /// [`Codestream::cod_for`]'s, and they are consulted only when this
+    /// returns `None`. B.12.3 says the same thing from the other end — "The
+    /// main header POC marker segment is used for tiles that do not have POC
+    /// marker segments in their tile-part headers" — and adds what happens
+    /// when a tile has its own: "The COD progression order **and the main
+    /// header POC marker segment (if there is one) are overridden**", so a
+    /// tile-part POC replaces the main one rather than extending it.
+    ///
+    /// **A tile's own volumes run across its tile-parts.** B.12.3: "all of
+    /// the progression order changes shall be signalled in the tile-part
+    /// headers of that tile", and Figure B.15b draws volumes 1 and 2 in the
+    /// first tile-part header with volume 3 in the third. The parts are in
+    /// `TPsot` order — `check_tile_parts` refuses any other — so
+    /// concatenating in that order is "in order" as B.12.3 requires.
+    pub(crate) fn progression_volumes(&self, tile: u16) -> Option<Vec<Poc>> {
+        let mut own: Vec<Poc> = Vec::new();
+        for part in self.tile_parts.iter().filter(|p| p.tile == tile) {
+            if let Some(poc) = &part.poc {
+                own.extend_from_slice(poc);
+            }
+        }
+        if !own.is_empty() {
+            return Some(own);
+        }
+        self.poc.clone()
+    }
+
     fn first_part(&self, tile: u16) -> Option<&TilePart<'_>> {
         self.tile_parts
             .iter()
             .find(|p| p.tile == tile && p.index == 0)
+    }
+
+    /// One tile's packed packet headers (A.7.4, A.7.5), or `None` when this
+    /// tile's headers are where B.10 puts them by default.
+    ///
+    /// B.10 states the three-way choice this resolves: "The packet headers
+    /// appear in the codestream immediately preceding the packet data, unless
+    /// one of the PPM or PPT marker segments has been used. If the PPM marker
+    /// segment is used, all of the packet headers are relocated to the main
+    /// header (see A.7.4). If the PPM is not used, then a PPT marker segment
+    /// may be used. In this case, all of the packet headers in that tile are
+    /// relocated to tile-part headers (see A.7.5)."
+    ///
+    /// **The choice is per tile, and only the PPT arm is.** PPM covers every
+    /// tile at once; PPT covers the tile whose parts carry it, and A.7.4
+    /// forbids only mixing *within* one tile — "The packet headers shall not
+    /// be in both a PPT marker segment and the codestream for the same
+    /// tile" — so one tile packed and its neighbour not is a conforming
+    /// codestream and is answered here per tile rather than per file.
+    pub(crate) fn packed_headers(&self, tile: u16) -> Result<Option<Packed>, Refusal> {
+        if let Some(ppm) = &self.ppm {
+            let mut out = Packed::default();
+            for (k, _) in self
+                .tile_parts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.tile == tile)
+            {
+                // `runs` is a prefix sum one longer than the tile-part count,
+                // built in `parse`, so both indices exist for every `k` that
+                // indexes `tile_parts`.
+                let (Some(&from), Some(&to)) = (ppm.runs.get(k), ppm.runs.get(k + 1)) else {
+                    return Err(Refusal::Structure(
+                        "a PPM with fewer Nppm entries than the codestream has tile-parts",
+                    ));
+                };
+                let run = ppm
+                    .bytes
+                    .get(from..to)
+                    .ok_or(Refusal::Structure("an Nppm run past the packed headers"))?;
+                out.bytes.extend_from_slice(run);
+                out.boundaries.push(out.bytes.len());
+            }
+            return Ok(Some(out));
+        }
+
+        // A.7.5 puts PPT in "any tile-part header before the packets whose
+        // headers are described herein", which A.7.4 spells out as "the same
+        // tile-part header or one with a lower TPsot value" — so the tile's
+        // stream runs across its parts in TPsot order, and `check_tile_parts`
+        // has already refused parts that arrive out of that order.
+        let mut out = Packed::default();
+        for part in self.tile_parts.iter().filter(|p| p.tile == tile) {
+            let mut segments: Vec<(u8, &[u8])> = part.ppt.clone();
+            // A.7.5: "concatenated, in the order of increasing Zppt". A
+            // repeated index is refused in `tile_part`, so the order is total
+            // and the stable sort has nothing left to decide.
+            segments.sort_by_key(|(z, _)| *z);
+            for (_, ippt) in segments {
+                out.bytes.extend_from_slice(ippt);
+                out.boundaries.push(out.bytes.len());
+            }
+        }
+        Ok((!out.boundaries.is_empty()).then_some(out))
     }
 
     /// The budget of [`super::MAX_JPX_SAMPLES`], and the caller's own
@@ -521,7 +1028,13 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
     let mut qcd: Option<Quant> = None;
     let mut coc: Vec<Option<CodingStyle>> = Vec::new();
     let mut qcc: Vec<Option<Quant>> = Vec::new();
+    let mut rgn: Vec<Option<Roi>> = Vec::new();
+    let mut poc: Option<Vec<Poc>> = None;
+    let mut registration: Option<Vec<Registration>> = None;
     let mut tile_parts: Vec<TilePart<'_>> = Vec::new();
+    // A.7.4: the PPM segments as `(Zppm, the bytes after Zppm)`, joined
+    // once the main header is finished rather than as they arrive.
+    let mut ppm_segments: Vec<(u8, &[u8])> = Vec::new();
 
     loop {
         let Some(code) = c.u16() else {
@@ -531,7 +1044,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
             break;
         }
         if code == marker::SOT {
-            let part = tile_part(&mut c, siz.as_ref(), cod.as_ref())?;
+            let part = tile_part(&mut c, siz.as_ref(), cod.as_ref(), !ppm_segments.is_empty())?;
             if tile_parts.len() as u64 > MAX_JPX_TILES * 4 {
                 return Err(Refusal::Budget("tile-parts"));
             }
@@ -565,6 +1078,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
                 let parsed = parse_siz(body)?;
                 coc = vec![None; parsed.components.len()];
                 qcc = vec![None; parsed.components.len()];
+                rgn = vec![None; parsed.components.len()];
                 siz = Some(parsed);
             }
             marker::COD => {
@@ -606,12 +1120,83 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
                 }
                 *slot = Some(q);
             }
+            // A.6.3: region of interest. Table A.4 makes it optional in the
+            // main header with "no more than one RGN per component", and
+            // A.6.3 repeats it — "There may be at most one RGN marker segment
+            // for each component in either the main or tile-part headers".
+            marker::RGN => {
+                let s = siz.as_ref().ok_or(Refusal::Structure("RGN before SIZ"))?;
+                let (index, roi) = parse_rgn(body, s)?;
+                let slot = rgn
+                    .get_mut(usize::from(index))
+                    .ok_or(Refusal::Structure("RGN names a component SIZ did not"))?;
+                if slot.is_some() {
+                    return Err(Refusal::Structure("two RGN markers for one component"));
+                }
+                *slot = Some(roi);
+            }
+            // A.6.6: the progression order changes. Parsed here and applied
+            // in tier-2, which walks the volumes in place of B.12.1's single
+            // loop nest.
+            marker::POC => {
+                let s = siz.as_ref().ok_or(Refusal::Structure("POC before SIZ"))?;
+                if poc.is_some() {
+                    // A.6.6: "At most one POC marker segment may appear in
+                    // any header." B.12.3 repeats it — "There can only be one
+                    // POC marker segment in a given header (main or
+                    // tile-part) but that marker segment can describe many
+                    // progression order changes" — so two here is a
+                    // codestream giving two accounts of one packet sequence,
+                    // and either choice reads packets in an order the file
+                    // does not describe.
+                    return Err(Refusal::Structure(
+                        "a second POC marker segment in one header",
+                    ));
+                }
+                poc = Some(parse_poc(body, s)?);
+            }
             // A.7.1 to A.7.3: pure indices into the codestream. A decoder
             // that ignores them decodes the same picture, which is exactly
             // what makes them safe to skip — and their lengths are still
             // checked above, so a lying one is a truncation rather than a
             // read past the end.
             marker::TLM | marker::PLM | marker::PLT => {}
+            // A.7.4: packed packet headers. Table A.38 gives Lppm as 7 to
+            // 65 535, and 7 is the shortest segment that can carry a Zppm
+            // and one 32-bit Nppm, so a shorter one is not a PPM segment.
+            marker::PPM => {
+                let Some((&zppm, ippm)) = body.split_first() else {
+                    return Err(Refusal::Structure("a PPM segment with no Zppm"));
+                };
+                if len < 7 {
+                    return Err(Refusal::Structure(
+                        "a PPM segment shorter than Table A.38's Lppm",
+                    ));
+                }
+                if ppm_segments.iter().any(|(z, _)| *z == zppm) {
+                    // A.7.4 orders the segments by Zppm and nothing else, so
+                    // two segments claiming one index leave the join with no
+                    // answer — and picking either one silently associates
+                    // the wrong headers with every packet after it.
+                    return Err(Refusal::Structure("two PPM segments with one Zppm"));
+                }
+                ppm_segments.push((zppm, ippm));
+            }
+            // A.9.1: component registration. Parsed so that a file carrying
+            // it is not refused for saying something true about itself, and
+            // then not applied, because the clause says it changes nothing.
+            marker::CRG => {
+                if registration.is_some() {
+                    // A.9.1: "Only one CRG may be used in the main header".
+                    return Err(Refusal::Structure("a second CRG marker"));
+                }
+                let Some(siz) = siz.as_ref() else {
+                    // A.6.1's ordering puts SIZ first, and without it there is
+                    // no component count to read this against.
+                    return Err(Refusal::Structure("a CRG marker before SIZ"));
+                };
+                registration = Some(parse_crg(body, siz.components.len())?);
+            }
             // A.9.2: a comment.
             marker::COM => {}
             _ => return Err(refuse_marker(code)),
@@ -627,16 +1212,201 @@ pub(crate) fn parse(data: &[u8]) -> Result<Codestream<'_>, Refusal> {
     let Some(qcd) = qcd else {
         return Err(Refusal::Structure("a codestream with no QCD marker"));
     };
-    check_tile_parts(&siz, &tile_parts)?;
+    let short_tiles = check_tile_parts(&siz, &tile_parts)?;
+    check_tile_pocs(&tile_parts)?;
+    let ppm = join_ppm(ppm_segments, tile_parts.len())?;
 
     Ok(Codestream {
+        short_tiles,
         siz,
         cod,
         coc,
         qcd,
         qcc,
+        rgn,
+        poc,
         tile_parts,
+        ppm,
+        registration,
     })
+}
+
+/// B.12.3's one placement rule for a tile's own progression order changes.
+///
+/// > If a POC marker segment is used for an individual tile, **there shall be
+/// > a POC marker in the first tile-part header of that tile** and all of the
+/// > progression order changes shall be signalled in the tile-part headers of
+/// > that tile.
+///
+/// A.6.6 states the same requirement from its own side: "If a POC is used to
+/// describe the progression of a particular tile, a POC marker segment must
+/// appear in the first tile-part header of that tile."
+///
+/// **What this checks and what it does not.** It checks the sentence above,
+/// which is the part that is decidable from the headers alone. It does not
+/// check B.12.3's other placement sentence — "The POC marker segments shall
+/// describe progression order volumes in order in any tile-part header before
+/// the first included packet appears" — because the packets of a tile are
+/// read as one joined sequence across its parts (B.9), so which part a packet
+/// arrived in is not a thing this decoder has after the join. For a
+/// conforming codestream the two agree; for one that violates only the
+/// unchecked sentence, the volumes are still taken in `TPsot` order and the
+/// exact-consumption check in tier-2 is what catches the disagreement.
+fn check_tile_pocs(parts: &[TilePart<'_>]) -> Result<(), Refusal> {
+    let mut first_had: Vec<(u16, bool)> = Vec::new();
+    for part in parts {
+        if part.index == 0 {
+            first_had.push((part.tile, part.poc.is_some()));
+        }
+    }
+    for part in parts {
+        if part.poc.is_none() {
+            continue;
+        }
+        let opened = first_had
+            .iter()
+            .find(|(t, _)| *t == part.tile)
+            .is_some_and(|(_, had)| *had);
+        if !opened {
+            return Err(Refusal::Structure(
+                "a tile-part POC with none in the tile's first tile-part header",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// T.800 A.6.3 and Table A.24: the RGN marker segment.
+///
+/// Four fields after the length, in Figure A.12's order: `Crgn`, `Srgn`,
+/// `SPrgn`. `Crgn` is one byte when `Csiz < 257` and two above, which is the
+/// rule COC's `Ccoc` and QCC's `Cqcc` carry too, and Table A.24 spells it the
+/// same way in both rows: "0 to 255; if Csiz < 257 / 0 to 16 383;
+/// Csiz >= 257".
+///
+/// **The length is checked for equality rather than sufficiency.** Table A.24
+/// gives `Lrgn` as "5 to 6" — two for itself, one or two for `Crgn`, one for
+/// `Srgn`, one for `SPrgn` — so there is exactly one legal body length for a
+/// given `Csiz` and a segment that disagrees is malformed. A decoder that
+/// read the first fields out of a longer one would be inventing a tolerance
+/// the table does not give, which is the mistake `parse_crg` records for CRG.
+///
+/// **A reserved `Srgn` is refused rather than stepped over**, and that is the
+/// whole scope decision in one line. Table A.25 defines value 0, "Implicit
+/// ROI (maximum shift)", and says "All other values reserved". A style this
+/// build has never seen describes a realignment of the coefficients that
+/// H.1's Maxshift arithmetic is not, so applying H.1 to it would put the
+/// background at the wrong magnitude and draw a plausible picture — the exact
+/// failure the JPEG decoder in this tree had when SOF3, SOF5, SOF6 and SOF7
+/// were skipped rather than refused.
+fn parse_rgn(body: &[u8], siz: &Siz) -> Result<(u16, Roi), Refusal> {
+    let wide = siz.components.len() >= 257;
+    let want = if wide { 4 } else { 3 };
+    if body.len() != want {
+        return Err(Refusal::Structure(
+            "an RGN marker segment whose length is not Table A.24's",
+        ));
+    }
+    let mut c = Cursor::new(body);
+    let index = if wide { c.u16() } else { c.u8().map(u16::from) }
+        .ok_or(Refusal::Truncated("an RGN component index"))?;
+    let (Some(srgn), Some(sprgn)) = (c.u8(), c.u8()) else {
+        return Err(Refusal::Truncated("an RGN marker segment"));
+    };
+    if srgn != 0 {
+        return Err(Refusal::Feature("an Srgn ROI style Table A.25 reserves"));
+    }
+    Ok((index, Roi { shift: sprgn }))
+}
+
+/// A.7.4: joins the main header's PPM segments and reads the `Nppm` series
+/// out of the join.
+///
+/// The order of the two steps is the whole point, and it is the clause's own:
+/// the segments are concatenated by `Zppm` **first**, and only then walked as
+/// alternating `Nppm` lengths and `Ippm` runs, because a run may end in a
+/// later segment than the one its length was written in.
+///
+/// Nothing here allocates on `Nppm`. It is a 32-bit count of bytes that are
+/// already in hand, so a lying one is a run that reaches past the join and is
+/// refused, never a reservation.
+fn join_ppm(mut segments: Vec<(u8, &[u8])>, parts: usize) -> Result<Option<Ppm>, Refusal> {
+    if segments.is_empty() {
+        return Ok(None);
+    }
+    segments.sort_by_key(|(z, _)| *z);
+    let mut joined = Vec::new();
+    for (_, ippm) in &segments {
+        joined.extend_from_slice(ippm);
+    }
+
+    // The lengths are dropped as the runs are copied out, so `bytes` is one
+    // contiguous stream of packet headers with nothing interleaved — which
+    // is what tier-2 reads — and `runs` is where each tile-part's slice of
+    // it starts and ends.
+    let mut bytes = Vec::new();
+    let mut runs = vec![0usize];
+    let mut at = 0usize;
+    while at < joined.len() {
+        let Some(head) = joined.get(at..at + 4) else {
+            return Err(Refusal::Truncated("an Nppm length"));
+        };
+        let nppm = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+        let from = at + 4;
+        let to = usize::try_from(nppm)
+            .ok()
+            .and_then(|n| from.checked_add(n))
+            .filter(|end| *end <= joined.len())
+            .ok_or(Refusal::Truncated("an Nppm run past the packed headers"))?;
+        bytes.extend_from_slice(&joined[from..to]);
+        runs.push(bytes.len());
+        at = to;
+    }
+
+    // A.7.4: "One value for each tile-part (not tile)." A series that is
+    // short of the codestream's tile-parts leaves a tile-part with no
+    // headers at all; one that is long describes tile-parts that never
+    // arrived. Either way the kth entry is no longer the kth tile-part's,
+    // and every packet after the slip reads the wrong header.
+    if runs.len() - 1 != parts {
+        return Err(Refusal::Structure(
+            "a PPM whose Nppm series does not have one entry per tile-part",
+        ));
+    }
+    Ok(Some(Ppm { runs, bytes }))
+}
+
+/// T.800 A.9.1 and Table A.42: the CRG marker segment.
+///
+/// The segment is `Csiz` pairs of 16-bit values, **interleaved** as
+/// `Xcrg_0, Ycrg_0, Xcrg_1, Ycrg_1, …` rather than all the horizontals
+/// followed by all the verticals. Figure A.23 is what settles that: the prose
+/// says "This value is repeated for every component" separately of `Xcrg_i`
+/// and of `Ycrg_i`, which is ambiguous between the two orders on its own. SIZ
+/// itself interleaves the same way.
+///
+/// **The loop is bounded by `Csiz`, never by `Lcrg`.** `parse_siz` has already
+/// refused a component count above `MAX_JPX_COMPONENTS`, so counting pairs off
+/// the component count inherits that bound, while counting them off the
+/// segment length would take the count from the file. The length is then
+/// checked for equality rather than sufficiency, because Table A.42 fixes
+/// `Lcrg` at `2 + 4 × Csiz` — a segment that disagrees is malformed rather
+/// than merely long, and a decoder that read the first `Csiz` pairs out of a
+/// longer one would be inventing a tolerance the table does not give.
+fn parse_crg(body: &[u8], components: usize) -> Result<Vec<Registration>, Refusal> {
+    if body.len() != 4 * components {
+        return Err(Refusal::Structure(
+            "a CRG marker segment whose length is not 4 bytes per component",
+        ));
+    }
+    let mut out = Vec::with_capacity(components);
+    for pair in body.chunks_exact(4) {
+        out.push(Registration {
+            x: u16::from_be_bytes([pair[0], pair[1]]),
+            y: u16::from_be_bytes([pair[2], pair[3]]),
+        });
+    }
+    Ok(out)
 }
 
 /// The refusal a marker this build does not decode produces.
@@ -734,7 +1504,7 @@ fn parse_siz(body: &[u8]) -> Result<Siz, Refusal> {
             return Err(Refusal::Truncated("a SIZ component"));
         };
         let precision = (ssiz & 0x7F) + 1;
-        if precision > 16 {
+        if precision > MAX_JPX_PRECISION {
             return Err(Refusal::Precision(precision));
         }
         if dx == 0 || dy == 0 {
@@ -846,11 +1616,6 @@ fn parse_style(c: &mut Cursor<'_>, precincts: bool, siz: &Siz) -> Result<CodingS
         ));
     }
     let (cb_width, cb_height) = (cb_width as u8, cb_height as u8);
-    if style & cb_style::UNSUPPORTED != 0 {
-        return Err(Refusal::Feature(
-            "a Table A.19 code-block style this build does not implement",
-        ));
-    }
     if style & !cb_style::DEFINED != 0 {
         return Err(Refusal::Feature(
             "a code-block style bit Table A.19 does not define",
@@ -958,6 +1723,7 @@ fn tile_part<'a>(
     c: &mut Cursor<'a>,
     siz: Option<&Siz>,
     cod: Option<&Cod>,
+    main_header_has_ppm: bool,
 ) -> Result<TilePart<'a>, Refusal> {
     let start = c.position() - 2;
     let siz = siz.ok_or(Refusal::Structure("SOT before SIZ"))?;
@@ -982,6 +1748,9 @@ fn tile_part<'a>(
         coc: Vec::new(),
         qcd: None,
         qcc: Vec::new(),
+        rgn: Vec::new(),
+        ppt: Vec::new(),
+        poc: None,
         data: &[],
     };
 
@@ -1008,12 +1777,73 @@ fn tile_part<'a>(
             marker::QCD if tpsot == 0 => part.qcd = Some(parse_quant(body, "QCD")?),
             marker::COC if tpsot == 0 => part.coc.push(parse_coc(body, siz, cod)?),
             marker::QCC if tpsot == 0 => part.qcc.push(parse_qcc(body, siz)?),
-            marker::COD | marker::QCD | marker::COC | marker::QCC => {
+            // A.6.3: "If there are multiple tile-parts in a tile, then this
+            // marker segment shall be found only in the first tile-part
+            // header", and at most one per component in that header.
+            marker::RGN if tpsot == 0 => {
+                let (index, roi) = parse_rgn(body, siz)?;
+                if usize::from(index) >= siz.components.len() {
+                    return Err(Refusal::Structure("RGN names a component SIZ did not"));
+                }
+                if part.rgn.iter().any(|(i, _)| *i == index) {
+                    return Err(Refusal::Structure("two RGN markers for one component"));
+                }
+                part.rgn.push((index, roi));
+            }
+            marker::COD | marker::QCD | marker::COC | marker::QCC | marker::RGN => {
                 return Err(Refusal::Structure(
                     "a coding style marker in a tile-part after the first",
                 ))
             }
+            // A.6.6: a POC in *any* tile-part header of the tile, not only
+            // the first. B.12.3's Figure B.15b is the case: "Progression
+            // order volumes 1 and 2 are described in the POC marker segments
+            // in the first tile-part header, progression order volume 3
+            // described in the third tile-part header". `check_tile_pocs`
+            // holds the rule that does bind — the first tile-part header must
+            // carry one — and it holds it after every part has arrived,
+            // because that is the earliest a tile is whole.
+            marker::POC => {
+                if part.poc.is_some() {
+                    // A.6.6: "At most one POC marker segment may appear in
+                    // any header", and a tile-part header is a header.
+                    return Err(Refusal::Structure(
+                        "a second POC marker segment in one header",
+                    ));
+                }
+                part.poc = Some(parse_poc(body, siz)?);
+            }
             marker::PLT | marker::COM => {}
+            // A.7.5: packed packet headers for this tile. Table A.39 gives
+            // Lppt as 4 to 65 535 — a Zppt and at least one Ippt byte.
+            marker::PPT => {
+                if main_header_has_ppm {
+                    // Table A.2, note c: "If the PPM marker segment is used
+                    // then PPT marker segments shall not be used, and vice
+                    // versa." A.7.4 says the same in prose and adds what is
+                    // at stake: with PPM present "all the packet headers
+                    // shall be found in the main header", so a PPT here is a
+                    // second, contradictory account of where this tile's
+                    // headers are, and honouring either one is a guess.
+                    return Err(Refusal::Structure("a codestream carrying both PPM and PPT"));
+                }
+                let Some((&zppt, ippt)) = body.split_first() else {
+                    return Err(Refusal::Structure("a PPT segment with no Zppt"));
+                };
+                if len < 4 {
+                    return Err(Refusal::Structure(
+                        "a PPT segment shorter than Table A.39's Lppt",
+                    ));
+                }
+                if part.ppt.iter().any(|(z, _)| *z == zppt) {
+                    // As for Zppm: the join is ordered by Zppt and nothing
+                    // else, so a repeat leaves it with no answer.
+                    return Err(Refusal::Structure(
+                        "two PPT segments in one tile-part header with one Zppt",
+                    ));
+                }
+                part.ppt.push((zppt, ippt));
+            }
             _ => return Err(refuse_marker(code)),
         }
     }
@@ -1036,13 +1866,27 @@ fn tile_part<'a>(
     Ok(part)
 }
 
-/// A.4.2's rules about how tile-parts fit together.
+/// A.4.2's rules about how tile-parts fit together, and which tiles arrived
+/// whole.
 ///
-/// Out-of-order parts and a tile whose parts do not cover it are both on the
-/// refusal list, and both for the reason the whole list exists: a decoder
-/// that reassembles them in stream order regardless produces a picture, and
-/// the picture is wrong in a way that looks like compression.
-fn check_tile_parts(siz: &Siz, parts: &[TilePart<'_>]) -> Result<(), Refusal> {
+/// **Two different failures live here and they were treated as one.**
+///
+/// Parts *out of order*, or two of them disagreeing about `TNsot`, or one
+/// naming a tile outside the grid, are all a codestream contradicting itself.
+/// A decoder that reassembles them in stream order regardless produces a
+/// picture, and the picture is wrong in a way that looks like compression —
+/// which is what the whole refusal list exists to prevent.
+///
+/// A tile whose declared parts did not all *arrive* is a different thing: it
+/// is a file that stops early. That costs pixels rather than meaning, and this
+/// crate already draws that line — `JxrWarning::TileDroppedAsZero` is the same
+/// bargain in JPEG XR, and a fax row that will not decode is replicated rather
+/// than refused. Two documents off the open web are the reason it is drawn
+/// here too: both carry tiles that decode and one that stops, and refusing the
+/// image threw away the tiles that were whole.
+///
+/// Returns the tiles that are short, for the caller to leave blank.
+fn check_tile_parts(siz: &Siz, parts: &[TilePart<'_>]) -> Result<Vec<bool>, Refusal> {
     let tiles = usize::try_from(u64::from(siz.tiles_x) * u64::from(siz.tiles_y))
         .map_err(|_| Refusal::Budget("tiles"))?;
     let mut next = vec![0u32; tiles];
@@ -1067,21 +1911,25 @@ fn check_tile_parts(siz: &Siz, parts: &[TilePart<'_>]) -> Result<(), Refusal> {
             *total = Some(part.parts);
         }
     }
+    let mut short = vec![false; tiles];
+    let mut whole = 0usize;
     for (t, total) in declared.iter().enumerate() {
-        if let Some(total) = total {
-            if next[t] != u32::from(*total) {
-                return Err(Refusal::Structure("a tile whose parts do not cover it"));
-            }
-        }
-        // A.4.2: every tile in the grid is coded. A tile no part covers has
-        // no coefficients at all, and a decoder that leaves its samples at
-        // whatever the plane was initialised to draws a grey rectangle inside
-        // the picture and calls the decode a success. It is also what an
-        // early EOC produces, which is how a truncated file would otherwise
-        // arrive here looking complete.
-        if next[t] == 0 {
-            return Err(Refusal::Structure("a tile with no tile-parts"));
+        // A.4.2: every tile in the grid is coded, and a tile that declared `n`
+        // parts and got fewer is a file that stopped. Either way the tile has
+        // no complete set of coefficients, so it is marked rather than decoded
+        // — a decoder that read what arrived would draw a partial tile and
+        // call the decode a success.
+        let missing = next[t] == 0 || total.is_some_and(|n| next[t] != u32::from(n));
+        short[t] = missing;
+        if !missing {
+            whole += 1;
         }
     }
-    Ok(())
+    if whole == 0 {
+        // Nothing arrived whole, so there is no picture to degrade *to*. This
+        // is the refusal the note above is about: a page of grey rectangles
+        // reported as a successful decode is worse than the placeholder.
+        return Err(Refusal::Structure("a codestream with no complete tile"));
+    }
+    Ok(short)
 }

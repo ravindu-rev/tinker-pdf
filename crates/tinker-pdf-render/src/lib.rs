@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use core::mem;
 use tinker_pdf_raster::blend::BlendMode as RasterBlend;
 
 pub mod mesh;
@@ -29,8 +30,12 @@ use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
     canvas::{Canvas, Color, MaskKind, PixelFormat},
     fill::{fill, Mask},
+    fragments::Fragments,
     geom::{FillRule, Path},
-    image::{draw_image, ImageDraw, ImageSource, Pyramid, Transform},
+    image::{
+        accumulate_image, draw_image, image_bounds, image_coverage, ImageDraw, ImageSource,
+        Pyramid, Transform,
+    },
     mesh::{draw_mesh, MeshDraw},
     stroke::{stroke, LineCap, LineJoin, StrokeStyle},
 };
@@ -71,6 +76,28 @@ impl CancelToken {
 // an `f64`. `PartialEq` is what the deduplication in the renderer uses.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderWarning {
+    /// A transparency group declared a blending space this build does not
+    /// composite in, so its contents were blended in RGB instead (11.6.6).
+    ///
+    /// Named rather than silent, which is the whole of ruling 2: a group
+    /// declared in `/DeviceCMYK` has 11.3.5's separable formulas applied to
+    /// subtractive components, and applying them to RGB instead is not a
+    /// near-miss — `Multiply` over ink is `Screen`'s shape over light. The
+    /// page still renders, and it says which group and which space.
+    ///
+    /// One- and three-component spaces are *not* reported, because for those
+    /// One of 11.3.5.3's four non-separable blend modes was applied inside a
+    /// `/DeviceCMYK` transparency group.
+    ///
+    /// Those modes reason about hue, saturation and luminosity, which ink
+    /// quantities do not have, so the operands convert to light, blend there,
+    /// and convert back. The round trip is not free: `rgb_to_cmyk` produces one
+    /// particular ink split, so a rich black arrives back as its pure-K
+    /// equivalent. The colour is the same and the *next* blend over it is not,
+    /// which is why ruling 10 wants it said rather than done quietly.
+    ///
+    /// Reported once per group, not once per pixel.
+    ApproximatedGroupBlend,
     /// An image used a codec that is not built in; a placeholder was drawn.
     UnsupportedImage {
         /// Which codec.
@@ -154,6 +181,21 @@ pub enum RenderWarning {
     },
     /// The render stopped because it was cancelled.
     Cancelled,
+    /// A [`PixelRegion`] reached past the edge of the page, so the part that
+    /// is on the page was rendered and the rest was trimmed away.
+    ///
+    /// Ruling 2 and ruling 10 together: the caller gets the pixels that exist
+    /// rather than an error, and is told the bitmap is not the size they asked
+    /// for — which they would otherwise discover by arithmetic, or not at all.
+    /// `applied` is the intersection of the ask with the page, so an `applied`
+    /// of zero width or height means the region missed the page entirely and
+    /// the bitmap has no pixels.
+    RegionClamped {
+        /// The region the caller asked for.
+        requested: PixelRegion,
+        /// The part of it that is on the page, which is what was rendered.
+        applied: PixelRegion,
+    },
 }
 
 /// What a pattern name paints with (8.7.3).
@@ -330,6 +372,21 @@ pub trait GlyphSource {
         let _ = (name, request);
         None
     }
+    /// The resources a form XObject brings with it, if it has its own
+    /// (8.10.1).
+    ///
+    /// The device's half of `FontSource::form_scope`. Both are asked about the
+    /// same form, by the same name, at the same moment, so the two scopes stay
+    /// in step without either seam handing the other a resource dictionary.
+    /// Shared and cached by the implementor, for `FontSource::form_scope`'s
+    /// reason: a page invoking one form many times must not rebuild it.
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// A `GlyphSource` that has nothing, for callers that only want geometry.
@@ -484,10 +541,96 @@ struct MaskFrame {
     clip_depth: usize,
 }
 
+/// The most pixels a run of images may be held over: a quarter of a page.
+///
+/// A run buffers four bytes a pixel, so this is 64 MB at the bound — against
+/// the 268 MB an `Rgba8` canvas of [`MAX_PAGE_PIXELS`] would need, which is
+/// why the two are related rather than chosen apart. An A4 page at 300 dpi is
+/// 8.7 Mpx and well inside it.
+///
+/// Past the bound, images composite one at a time exactly as they did before
+/// runs existed: abutting ones conflate again. That is a quality loss and not
+/// a correctness one, and it is bounded memory rather than a page that will
+/// not render (ruling 1).
+///
+/// **It is still not a `bounds_ledger.rs` row, and the reason it used to give
+/// is no longer available.** That reason was that this and [`MAX_PAGE_PIXELS`]
+/// are both properties of the scale the caller asked for rather than counts
+/// read out of a document, and that ledger measures documents. Tier 0's memory
+/// row put `MAX_PAGE_PIXELS` in that table and amended its `Bound` contract to
+/// admit a caller-parameterised cap, so the premise is now false and the
+/// conclusion drawn from it proves nothing.
+///
+/// The reason that survives is the one that file's header already makes twice
+/// — for `MAX_EPUB_PAGES` at gap 31's milestone 4, and for `MAX_LAYOUT_WORK`
+/// at its milestone 7: **a cap set under another cap, over a quantity that
+/// other cap has already bounded, is the other cap wearing a second name.** A
+/// run buffers part of one page; a page is already bounded by
+/// [`MAX_PAGE_PIXELS`]; and this number is literally a quarter of it. Nothing
+/// unbounded becomes bounded here, and what changes past the threshold is how
+/// the same bounded memory is spent rather than how much of it there is — so
+/// `every_bound_can_fire`, which asks whether a cap sits under what its own
+/// inputs can allocate, would be asking a question this constant does not
+/// answer.
+const MAX_IMAGE_RUN_PIXELS: u64 = MAX_PAGE_PIXELS / 4;
+
+/// A mask's identity: where it is and whose coverage it holds.
+type MaskId = (i32, i32, u32, u32, usize);
+
+/// A run of consecutive image draws, accumulated before any of it is
+/// composited.
+struct ImageRun {
+    /// Coverage and premultiplied colour so far.
+    fragments: Fragments,
+    /// The constant alpha every draw in the run was made with.
+    alpha: f64,
+    /// The blend mode every draw in the run was made with.
+    blend: RasterBlend,
+    /// The clip and soft mask in force when the run was opened.
+    ///
+    /// A run survives `q`, `Q` and a form boundary, because none of those
+    /// draws anything — but any of them can put a *different* clip in force,
+    /// and a run composited under the wrong one would paint through it. Each
+    /// mask is identified by its rectangle and the address of its coverage,
+    /// which is cheap and cannot collide while the mask is alive.
+    masks: (Option<MaskId>, Option<MaskId>),
+    /// The device rectangle the run has put coverage in, as
+    /// `(x0, y0, x1, y1)` with the far edges exclusive.
+    ///
+    /// Kept so that asking whether a new draw *overlaps* the run costs the
+    /// band where the two meet rather than either of them whole. Abutting
+    /// strips share one row; a picture laid over another shares its area, and
+    /// only the second ends the run.
+    covered: (i32, i32, i32, i32),
+}
+
+/// Whichever resource dictionary is in force: the caller's, or a form's own.
+///
+/// The device's half of `FontSource`'s scope. Both are asked for the same form
+/// by the same name at the same moment, so they change together without either
+/// crate handing the other a resource dictionary it should not know about.
+enum Scope<'g, G> {
+    /// The caller's, borrowed for the whole render.
+    Borrowed(&'g G),
+    /// A form's own, shared with whatever cached it.
+    Owned(Arc<G>),
+}
+
+impl<G> core::ops::Deref for Scope<'_, G> {
+    type Target = G;
+
+    fn deref(&self) -> &G {
+        match self {
+            Scope::Borrowed(glyphs) => glyphs,
+            Scope::Owned(glyphs) => glyphs,
+        }
+    }
+}
+
 /// The rasterizing device.
 pub struct Renderer<'g, G: GlyphSource> {
     canvas: Canvas,
-    glyphs: &'g G,
+    glyphs: Scope<'g, G>,
     /// The transform from PDF user space to device pixels.
     base: Matrix,
     clip: Option<Mask>,
@@ -549,6 +692,30 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// repeatedly, and forty thousand identical warnings is not a report.
     group_budget_spent: bool,
     groups: Vec<GroupFrame>,
+    /// Resource scopes pushed by the caller rather than by a form, innermost
+    /// last.
+    ///
+    /// An annotation's appearance stream carries its own `/Resources` and is
+    /// reached by *reference*, not by a name in anybody's dictionary — so the
+    /// interpreter cannot announce it the way it announces a form, and the
+    /// caller says so instead. Until this existed the appearance's resources
+    /// reached the interpreter and not the device, so a name that resolved for
+    /// text did not resolve for an image.
+    pushed_scopes: Vec<Scope<'g, G>>,
+    /// The resource scope each open form displaced, innermost last.
+    ///
+    /// `None` for a form that brought no `/Resources` of its own, which is the
+    /// common case and costs one `Option` rather than a clone of the page's.
+    form_scopes: Vec<Option<Scope<'g, G>>>,
+    /// Consecutive image draws held back so that abutting ones do not
+    /// conflate (`tinker_pdf_raster::fragments`).
+    ///
+    /// A run of images composited one at a time lets the page through
+    /// wherever two of them share an edge, which is what every scanned
+    /// document assembled from strips is made of. Held here rather than in
+    /// the rasterizer because *when a run ends* is a question about the
+    /// content stream, and only this layer sees that.
+    run: Option<ImageRun>,
     /// The soft mask in force, in the current canvas's coordinates (11.6.5).
     ///
     /// On the device rather than in the graphics state, because it is pixels
@@ -586,7 +753,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     pub fn new(canvas: Canvas, base: Matrix, glyphs: &'g G) -> Renderer<'g, G> {
         Renderer {
             canvas,
-            glyphs,
+            glyphs: Scope::Borrowed(glyphs),
             base,
             clip: None,
             clip_stack: Vec::new(),
@@ -597,6 +764,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             missing_fonts: 0,
             text_clip: None,
             text_clip_requested: false,
+            run: None,
+            pushed_scopes: Vec::new(),
+            form_scopes: Vec::new(),
             marked_content: Vec::new(),
             hidden_depth: 0,
             group_buffers: 0,
@@ -662,6 +832,62 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         false
     }
 
+    /// How the clip and the soft mask in force can be told apart cheaply.
+    fn mask_ids(&self) -> (Option<MaskId>, Option<MaskId>) {
+        let id = |mask: &Mask| {
+            (
+                mask.x0,
+                mask.y0,
+                mask.width,
+                mask.height,
+                mask.data.as_ptr() as usize,
+            )
+        };
+        (self.clip.as_ref().map(id), self.soft.as_ref().map(id))
+    }
+
+    /// Resolves names against `resources` until [`Renderer::pop_resources`].
+    ///
+    /// For a content stream the caller reached by reference — an annotation's
+    /// appearance — where there is no name for the interpreter to announce.
+    pub fn push_resources(&mut self, resources: Arc<G>) {
+        let outer = mem::replace(&mut self.glyphs, Scope::Owned(resources));
+        self.pushed_scopes.push(outer);
+    }
+
+    /// Restores the scope [`Renderer::push_resources`] displaced.
+    pub fn pop_resources(&mut self) {
+        if let Some(outer) = self.pushed_scopes.pop() {
+            self.glyphs = outer;
+        }
+    }
+
+    /// Composites the run of images held back so far, if any.
+    ///
+    /// Called at the top of every device operation that is not an image draw,
+    /// which is what makes the run's graphics state constant: the clip and the
+    /// soft mask can only change through one of those, so the state in force
+    /// now is the state every draw in the run was made with.
+    fn flush_run(&mut self) {
+        let Some(run) = self.run.take() else {
+            return;
+        };
+        let stop = self.stop_predicate();
+        let combined = self.combined_mask();
+        let clip = combined
+            .as_ref()
+            .or(self.clip.as_ref())
+            .or(self.soft.as_ref());
+        run.fragments.composite_region(
+            &mut self.canvas,
+            run.covered,
+            run.alpha,
+            run.blend,
+            clip,
+            Some(&stop),
+        );
+    }
+
     /// Record that the group budget declined one, for a single report at
     /// `finish`.
     fn note_group_budget(&mut self) {
@@ -671,6 +897,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// The canvas and everything the render had to tolerate.
     #[must_use]
     pub fn finish(mut self) -> (Canvas, Vec<RenderWarning>) {
+        // Before anything reads the canvas: a page whose last operation was an
+        // image would otherwise hand back a canvas the run never reached.
+        self.flush_run();
         // A group that was opened and never closed would otherwise hand the
         // caller the *group's* buffer as the page. The interpreter balances
         // its own calls, but `Renderer` is public and this is the one failure
@@ -706,6 +935,36 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// bounding box and never larger. Sizing the buffer to the page instead
     /// is the memory blowup the plan's risk table names, multiplied by the
     /// nesting depth.
+    /// The same colours as `parent`, but carrying alpha.
+    ///
+    /// What a buffer needs whatever it is for: a group, a soft mask and a
+    /// tiling cell are all shapes over nothing, so each must record where it
+    /// painted as well as what it painted.
+    fn alpha_format(parent: PixelFormat) -> PixelFormat {
+        match parent {
+            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
+            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
+            PixelFormat::CmykA8 => PixelFormat::CmykA8,
+            PixelFormat::LabA8 => PixelFormat::LabA8,
+        }
+    }
+
+    /// The buffer a transparency group declaring `space` composites in
+    /// (11.6.6).
+    ///
+    /// Keyed by the shape of the space rather than by its identity, which is
+    /// all a blend formula needs: how many components, whether they are
+    /// subtractive, and — for `/Lab` — whether they need encoding into 0..1
+    /// before 11.3.5's formulas can say anything about them at all.
+    ///
+    /// **Every space `GroupSpace` can name now has a buffer**, which is why
+    /// this returns a format rather than an `Option` and why
+    /// `RenderWarning::UnsupportedGroupSpace` no longer exists: a variant
+    /// nothing can reach is a claim rather than a check.
+    fn group_format_of(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
+        group_format(space)
+    }
+
     fn open_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
         if self.groups.len() >= MAX_GROUP_DEPTH {
             return false;
@@ -731,9 +990,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // A group buffer must carry alpha whatever the page format is: it
         // starts as nothing and accumulates a shape, and a format without an
         // alpha channel has no way to say where the group did not paint.
-        let format = match self.canvas.format {
-            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
-            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
+        // 11.6.6: the group composites in the space it declared, so its buffer
+        // holds that space's components. Where it declared none it inherits the
+        // one it will be composited into, which is what "the group's colour
+        // space is the one it is painted onto" comes to in practice.
+        let format = match group.space {
+            Some(space) => Self::group_format_of(space),
+            None => Self::alpha_format(self.canvas.format),
         };
         let mut buffer = Canvas::new(width, height, format, Color::TRANSPARENT);
         // 11.4.4: an isolated group composites against nothing, so its buffer
@@ -818,6 +1081,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self.clip = frame.clip;
         let soft = frame.soft;
 
+        // 11.3.5.3 over a subtractive buffer: reported once per group rather
+        // than once per pixel, which is what makes it a leniency record and not
+        // a log. The comment beside `blend` in `tinker-pdf-raster` has claimed
+        // since it was written that this was reported; until now it was not.
+        if buffer.approximated_blends() > 0 {
+            let warning = RenderWarning::ApproximatedGroupBlend;
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+
         // 11.4.7.2. A no-op on an isolated group, which kept no backdrop.
         buffer.remove_backdrop();
 
@@ -895,7 +1169,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // which is why the common mask costs its bounding box.
         let outside = {
             let raw = match kind {
-                MaskKind::Luminosity => background.luma(),
+                // The identical function `to_mask` uses inside the box. Two
+                // weightings here would put a step exactly at the mask's
+                // bounding-box edge — a halo on a drop shadow, which reads as
+                // a design choice rather than a defect.
+                MaskKind::Luminosity => background.luminosity(),
                 MaskKind::Alpha => 0,
             };
             mask.transfer
@@ -903,10 +1181,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .map_or(raw, |lut| lut.get(raw as usize).copied().unwrap_or(raw))
         };
 
-        let format = match self.canvas.format {
-            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
-            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
-        };
+        let format = Self::alpha_format(self.canvas.format);
         let buffer = Canvas::new(width, height, format, background);
 
         let frame = MaskFrame {
@@ -1414,10 +1689,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
         // A cell is a shape over nothing, so its buffer must carry alpha
         // whatever the page's format is.
-        let format = match self.canvas.format {
-            PixelFormat::Gray8 | PixelFormat::GrayA8 => PixelFormat::GrayA8,
-            PixelFormat::Rgb8 | PixelFormat::Rgba8 => PixelFormat::Rgba8,
-        };
+        let format = Self::alpha_format(self.canvas.format);
         let request = TileRequest {
             to_pixels: to_device.then(&Matrix::translate(-tx0, -ty0)),
             bbox: tiling.bbox,
@@ -1595,6 +1867,27 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             let area = self.coverage(&quad, FillRule::NonZero, None);
             self.knockout_restore(&area);
         }
+        // Whether this draw joins the run held back so that abutting images do
+        // not conflate, or goes straight to the canvas. Decided here, before
+        // the clip is borrowed, because ending a run needs `&mut self`.
+        let bounds = image_bounds(&unit_to_device, self.canvas.width, self.canvas.height);
+        let pixels = u64::from(self.canvas.width) * u64::from(self.canvas.height);
+        // 11.4.5 gives every element inside a knockout group its own shape, so
+        // a run there would restore the wrong one.
+        let direct = self.in_knockout() || pixels > MAX_IMAGE_RUN_PIXELS;
+        let masks = self.mask_ids();
+        let state_changed = self.run.as_ref().is_some_and(|run| {
+            run.alpha.to_bits() != state.fill_alpha.to_bits()
+                || run.blend != blend_mode(state.blend)
+                || run.masks != masks
+        });
+        // A different graphics state, or a picture laid *over* another rather
+        // than beside it: both end the run. Fragments are added, so an overlap
+        // added rather than composited would show both pictures at once.
+        if direct || state_changed || self.run_would_overlap(&unit_to_device) {
+            self.flush_run();
+        }
+
         // The same predicate the fill and the stroker are given. It was a
         // second hand-rolled closure here until gap 15 gave the other two
         // hooks one, and two spellings of the same question is how one of them
@@ -1631,7 +1924,54 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // function. That identity lives with the resource cache, which is
         // phase 08's, so this deliberately does not invent one.
         let mut pyramid = Pyramid::new();
-        draw_image(&mut self.canvas, &draw, &mut pyramid);
+        if direct {
+            draw_image(&mut self.canvas, &draw, &mut pyramid);
+            return;
+        }
+
+        let extent = (self.canvas.width, self.canvas.height);
+        let run = self.run.get_or_insert_with(|| ImageRun {
+            fragments: Fragments::new(0, 0, extent.0, extent.1),
+            alpha: state.fill_alpha,
+            blend: blend_mode(state.blend),
+            masks,
+            covered: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+        });
+        accumulate_image(&mut run.fragments, &draw, &mut pyramid, extent);
+        if let Some((bx0, by0, bw, bh)) = bounds {
+            run.covered = (
+                run.covered.0.min(bx0),
+                run.covered.1.min(by0),
+                run.covered.2.max(bx0.saturating_add(bw as i32)),
+                run.covered.3.max(by0.saturating_add(bh as i32)),
+            );
+        }
+    }
+
+    /// Whether a draw would land on coverage a run is already holding.
+    ///
+    /// Abutment is not overlap. Two strips share one row of pixels, and the
+    /// question is asked only of that row — the intersection of the draw's own
+    /// rectangle with the rectangle the run has painted — rather than of
+    /// either draw whole, so the common case costs a band and not a page.
+    fn run_would_overlap(&self, t: &Transform) -> bool {
+        let Some(run) = &self.run else {
+            return false;
+        };
+        let Some((bx0, by0, bw, bh)) = image_bounds(t, self.canvas.width, self.canvas.height)
+        else {
+            return false;
+        };
+        let (cx0, cy0, cx1, cy1) = run.covered;
+        let x0 = bx0.max(cx0);
+        let y0 = by0.max(cy0);
+        let x1 = bx0.saturating_add(bw as i32).min(cx1);
+        let y1 = by0.saturating_add(bh as i32).min(cy1);
+        if x1 <= x0 || y1 <= y0 {
+            return false;
+        }
+        let shape = image_coverage(t, x0, y0, (x1 - x0) as u32, (y1 - y0) as u32, None);
+        run.fragments.would_overlap(&shape)
     }
 
     /// Converts interpreter path segments into a rasterizer path.
@@ -1793,6 +2133,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         if self.stopping() || self.hidden() {
             return;
         }
@@ -1832,6 +2175,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn clip_path(&mut self, path: &[PathSegment], _state: &GraphicsState, even_odd: bool) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         // A clip is a full fill of its own path plus an intersect, and it had
         // no check at all — so a render cancelled while a clip operator was
         // pending still paid for both. Skipping it cannot leak ink: every
@@ -1859,6 +2205,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_text(&mut self) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         // Before the accumulated outline is rasterized, for the same reason as
         // `clip_path`: a text clip is a fill over every glyph of the object at
         // once, which is the largest single clip a page can ask for.
@@ -1906,6 +2255,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         if self.stopping() || self.hidden() {
             return;
         }
@@ -1987,6 +2339,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         // Before the clipping mode is recorded, and before the outline is
         // looked for. A glyph in a hidden layer must not add to the text
         // clip -- 9.3.6's modes 4 to 7 would otherwise let an invisible
@@ -2178,6 +2533,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         if self.stopping() || self.hidden() {
             return;
         }
@@ -2263,7 +2621,17 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
     }
 
-    fn begin_marked_content(&mut self, _tag: &[u8], visible: bool, hidden_layer: Option<&str>) {
+    /// The property list is ignored here on purpose. 14.7.4.2's `/MCID` ties
+    /// content to the structure tree, and a rasterizer paints the same pixels
+    /// whether or not a paragraph knows its own number; the text device is
+    /// the one that keeps it.
+    fn begin_marked_content(
+        &mut self,
+        _tag: &[u8],
+        visible: bool,
+        hidden_layer: Option<&str>,
+        _props: Option<&tinker_pdf_content::MarkedProps>,
+    ) {
         self.marked_content.push(!visible);
         if !visible {
             self.hidden_depth = self.hidden_depth.saturating_add(1);
@@ -2287,12 +2655,21 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
     }
 
-    fn begin_form(&mut self, _id: u64) -> bool {
+    fn begin_form(&mut self, _id: u64, name: &[u8]) -> bool {
         self.clip_stack.push((self.clip.clone(), self.soft.clone()));
+        // 8.10.1: a form's own `/Resources`, if it brought any. The
+        // interpreter asks its own seam the same question about the same name,
+        // so the two scopes open and close together.
+        let nested = self.glyphs.form_scope(name);
+        self.form_scopes
+            .push(nested.map(|scope| mem::replace(&mut self.glyphs, Scope::Owned(scope))));
         !self.stopping()
     }
 
     fn end_form(&mut self, _id: u64) {
+        if let Some(Some(outer)) = self.form_scopes.pop() {
+            self.glyphs = outer;
+        }
         if let Some((clip, soft)) = self.clip_stack.pop() {
             self.clip = clip;
             self.soft = soft;
@@ -2300,6 +2677,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn begin_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         // A group inside a layer that is off paints nothing, so there is
         // nothing to buffer. Declining also leaves the interpreter's 11.6.6
         // state reset undone, which is right: nothing is going to paint.
@@ -2310,6 +2690,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_group(&mut self) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         self.close_group();
     }
 
@@ -2319,6 +2702,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         bbox: &[PathSegment],
         _state: &GraphicsState,
     ) -> bool {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         if self.stopping() {
             return false;
         }
@@ -2326,10 +2712,16 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_soft_mask(&mut self) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         self.close_soft_mask();
     }
 
     fn clear_soft_mask(&mut self) {
+        // Ends the image run: a run only holds while nothing else draws,
+        // which is what keeps its clip, soft mask and alpha constant.
+        self.flush_run();
         self.soft = None;
     }
 }
@@ -2478,6 +2870,164 @@ pub fn page_view_transform(crop: (f64, f64, f64, f64), rotation: u16, scale: f64
         .then(&page_transform(rotated_height, scale))
 }
 
+/// A rectangle of a page's **rendered pixels**: the unit the bitmap is in, not
+/// the unit the page is in.
+///
+/// # Why pixels and not points, which is the decision this type exists to state
+///
+/// A region could as defensibly be a rectangle of PDF points, and both answers
+/// are useful: a caller tiling a 4x render thinks in pixels, a caller asking
+/// for "the top-left quarter of this page" thinks in points. The two differ,
+/// and a bare four-number rectangle that could be either is exactly the API
+/// defect this type refuses — the name and the `u32`s say which, at every call
+/// site, without a doc comment having to be read.
+///
+/// Pixels win because of ruling 5. The property the whole feature owes is that
+/// **a tile is byte-equal to the corresponding sub-rectangle of the full-page
+/// render**, and a sub-rectangle of a bitmap is a rectangle of whole pixels. A
+/// region in points has to be multiplied by the scale and rounded before it can
+/// become a canvas, and no rounding rule makes an arbitrary point rectangle land
+/// on pixel boundaries: `page_pixels` already rounds the page itself *outward*,
+/// so a caller who asked for a half-open point range would get a tile that
+/// straddles a source pixel and could not be compared to anything exactly. The
+/// guard would then need a tolerance, and a tolerance is precisely what ruling 5
+/// says this must not have.
+///
+/// A caller who is thinking in points converts once, with the page's own
+/// rounding rule, through `tinker_pdf::Page::pixel_size`. A caller who is
+/// thinking in pixels — which is every caller that tiles, which is the use this
+/// row exists for — writes what they mean.
+///
+/// # Where the origin is
+///
+/// `x` and `y` count from the **top-left of the rendered bitmap, downward**,
+/// like the bitmap's own rows and unlike PDF user space, which counts up from
+/// the bottom-left. Stated because it is the second thing a region API gets
+/// wrong and the picture still looks plausible: a region whose y runs the other
+/// way returns a real part of a real page, mirrored about the middle.
+///
+/// The consequence for the page's own geometry follows from this and is not a
+/// separate decision: the bitmap is already `/Rotate`d and already cropped to
+/// the crop box, so the region indexes the picture *after* both. Asking for
+/// `(0, 0, 32, 32)` of a `/Rotate 90` page gives the top-left 32x32 of the
+/// sideways picture a reader sees, never the corner of the upright sheet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelRegion {
+    /// Distance from the bitmap's left edge, in pixels.
+    pub x: u32,
+    /// Distance from the bitmap's top edge, in pixels, counting downward.
+    pub y: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl PixelRegion {
+    /// A region at `(x, y)` of the given size.
+    #[must_use]
+    pub fn new(x: u32, y: u32, width: u32, height: u32) -> PixelRegion {
+        PixelRegion {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Whether this region asks for no pixels at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    /// This region **intersected** with a bitmap of `width` by `height`.
+    ///
+    /// # Why an intersection, and why nothing more forgiving
+    ///
+    /// Ruling 2 says degrade rather than fail, and a region hanging off the
+    /// edge of the page is a degradation waiting to be chosen: clamp it, refuse
+    /// it, return nothing, or panic. Panicking is out under ruling 1 — the
+    /// region is a caller's number, but a page's pixel size is the *file's*,
+    /// and a tiler that is correct for one document must not abort on another.
+    ///
+    /// Of the three that remain, the intersection is the only one that keeps
+    /// ruling 5's guard true. Any clamp that moves the rectangle rather than
+    /// trimming it — sliding an off-page tile back onto the page, or growing an
+    /// empty one to a single pixel so that the result is always "a picture" —
+    /// returns pixels the caller did not ask for, and those pixels are not the
+    /// sub-rectangle of the full render that the caller's own coordinates name.
+    /// The guard would hold for tiles inside the page and quietly not hold at
+    /// the edge, which is the one place a tiler actually needs it.
+    ///
+    /// So the far edges are trimmed and the near ones are not moved, and a
+    /// region that does not meet the page trims to nothing: width or height
+    /// zero, which is an honest empty answer rather than an invented pixel.
+    /// `tinker_pdf::Page::render` reports the trim as
+    /// [`RenderWarning::RegionClamped`] rather than performing it silently
+    /// (ruling 10), so "I got the tile I asked for" and "I got what was left of
+    /// it" stay distinguishable.
+    #[must_use]
+    pub fn clamped_to(&self, width: u32, height: u32) -> PixelRegion {
+        let x = self.x.min(width);
+        let y = self.y.min(height);
+        PixelRegion {
+            x,
+            y,
+            width: self.width.min(width - x),
+            height: self.height.min(height - y),
+        }
+    }
+}
+
+/// [`page_view_transform`], moved so that `region`'s top-left corner lands on
+/// the canvas origin.
+///
+/// This is ruling 5's mechanism in one line: **a clipped render is the same
+/// pipeline with a translated viewport**, never a second implementation. Every
+/// operator, every glyph, every image and every shading goes through the code
+/// that draws a whole page; the only difference is where the page's pixels are
+/// relative to the buffer, and a smaller buffer.
+///
+/// # The translation is composed *after* the page view, and that is the choice
+///
+/// `page_view_transform(..).then(&translate)` puts the shift in device space,
+/// after the crop-box origin, after `/Rotate` and after the y flip — so it
+/// subtracts bitmap pixels from bitmap coordinates. Composing it the other way
+/// round, `translate.then(&page_view_transform(..))`, shifts the page in *user*
+/// space before it is turned, which is the mistake this comment exists to name:
+/// on an unrotated page the two are indistinguishable up to a sign, and on a
+/// `/Rotate 90` page the wrong one still produces a clean, sensible-looking
+/// picture of the page — just not the part of it the caller asked for. Only a
+/// test that knows which part it asked for can tell the difference, which is
+/// why `render_regions.rs` asserts corners on a rotated page as well as
+/// tile equality.
+///
+/// The translation is exact: `region.x` and `region.y` are integers small
+/// enough to be exactly representable, so this changes `e` and `f` and nothing
+/// else, and the geometry that reaches the rasterizer is the page's own.
+#[must_use]
+pub fn region_view_transform(
+    crop: (f64, f64, f64, f64),
+    rotation: u16,
+    scale: f64,
+    region: PixelRegion,
+) -> Matrix {
+    page_view_transform(crop, rotation, scale).then(&Matrix::translate(
+        -f64::from(region.x),
+        -f64::from(region.y),
+    ))
+}
+
+/// A white canvas the size of `region`, in exactly the format asked for.
+///
+/// The region's position is not this function's business — it is in the
+/// transform, which is the whole of ruling 5 — so only the size is read.
+#[must_use]
+pub fn region_canvas_in(region: PixelRegion, format: PixelFormat) -> Canvas {
+    Canvas::new(region.width, region.height, format, Color::WHITE)
+}
+
 /// The largest canvas this will allocate for one page, in pixels.
 ///
 /// About 67 million, which is 201 MB at three bytes a pixel — larger than any
@@ -2490,6 +3040,52 @@ pub fn page_view_transform(crop: (f64, f64, f64, f64), rotation: u16, scale: f64
 /// allocation no machine can serve. A failed allocation **aborts** the process
 /// rather than unwinding, so it cannot be caught and reported afterwards —
 /// which makes this the one place it has to be prevented rather than handled.
+///
+/// | | Pixels, at 150 dpi |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 67 108 864 |
+/// | A 200-page comic, whose largest page is a 2000 x 3000 scan | 26 043 750 |
+/// | A dense 200-page fixed document, US Letter at 612 x 792 pt | 2 103 750 |
+/// | A 300-page reflowable book, at `epub::DEFAULT_PAGE`'s 432 x 648 pt | 1 215 000 |
+/// | **This cap** | **67 108 864** |
+///
+/// The fixture figure is the cap itself and is allowed, because this bound
+/// **degrades rather than refuses**: `an_absurd_page_box_is_clamped_rather_than_allocated`
+/// asks [`page_pixels`] for `1e9 x 1e9` and gets a canvas under the cap, and
+/// `an_enormous_page_is_scaled_rather_than_cropped` renders a 20 000-point
+/// page at scale 4 and gets [`RenderWarning::PageScaledDown`]. Nothing here
+/// ever allocates more than this number, so the most any fixture *spends* is
+/// this number.
+///
+/// **Those three yardsticks are undefined without a resolution, so one is
+/// fixed: 150 dpi.** A page's pixel count is its box in points times the
+/// square of the caller's scale, which makes this the row in
+/// `bounds_ledger.rs` whose columns are a property of the *ask* as much as of
+/// the file — and a column that did not name the ask would be three numbers
+/// nobody could check.
+///
+/// 150 rather than either neighbour, and both neighbours are wrong for a
+/// stated reason. **72 dpi** is `RenderOptions::default()`, one device pixel
+/// per point, and it is the floor; a yardstick that takes the floor measures
+/// nothing. **300 dpi** is what two rows of that table already use, and it is
+/// right where they use it, because their input is a scan — but
+/// `tinker_pdf::cbz::synthesise` makes one image pixel exactly one PDF point,
+/// so a 2000 x 3000 comic page is a 2000 x 3000 *point* box, 27.8 by 41.7
+/// inches, and asking 300 dpi of it asks to upsample a scan four-fold. That
+/// crosses this cap at **241 dpi**, and the crossing is written down here
+/// rather than left to be rediscovered: past it the page is scaled to fit and
+/// says so, which is a degradation under ruling 2 rather than a refusal, and
+/// makes this the one row in that table whose over-yardstick behaviour is a
+/// warning instead of a `Refused`.
+///
+/// **150 dpi** is `tpdf render`'s own default — the resolution a caller who
+/// does not choose gets from this engine's front end — and twice the library's
+/// floor. All three yardsticks clear the cap at it: by 2.6x, 32x and 55x.
+///
+/// Reachable: [`page_pixels`] rounds each side outward and clamps each at
+/// `u32::MAX`, so four tokens of `/MediaBox` and any finite scale may ask for
+/// `u32::MAX` squared — 18 446 744 065 119 617 025 pixels, 275 billion times
+/// this cap.
 pub const MAX_PAGE_PIXELS: u64 = 1 << 26;
 
 /// The pixel size of a page at a given scale.
@@ -2553,18 +3149,119 @@ pub fn page_pixels(width_pt: f64, height_pt: f64, scale: f64) -> (u32, u32) {
     // and stays recognisable rather than becoming a stripe of itself.
     let shrink = (MAX_PAGE_PIXELS as f64 / area as f64).sqrt();
     let clamp = |v: u32| (f64::from(v) * shrink).floor().max(1.0) as u32;
-    (clamp(w), clamp(h))
+    let (w, h) = (clamp(w), clamp(h));
+
+    // **A side raised back to the one-pixel floor did not shrink by `shrink`,
+    // and the product is over the cap by however much it was raised.**
+    // `w * shrink` and `h * shrink` multiply to exactly the cap only while
+    // both are above 1. A `/MediaBox` of `[0 0 20 9.2e18]` at 12 dpi reaches
+    // the two lines above as 1 x 4 294 967 295 — the height having already
+    // taken the `u32::MAX` clamp — whose `shrink` is 0.125; the width shrinks
+    // to 0.125 and the floor raises it back to 1, a factor of eight the
+    // height never gives back, and the pair comes back at 1 x 536 870 911,
+    // eight times the ceiling. The `render_page` fuzz target found it as a
+    // single 1.6 GB allocation from 755 bytes.
+    //
+    // Spend what is left on the other side rather than leaving it over. The
+    // aspect ratio is already gone at this point — a side is at the floor —
+    // so there is nothing left to keep, and the cap is what must hold.
+    let area = u64::from(w) * u64::from(h);
+    if area <= MAX_PAGE_PIXELS {
+        return (w, h);
+    }
+    let fit =
+        |keep: u32| (MAX_PAGE_PIXELS / u64::from(keep).max(1)).clamp(1, u64::from(u32::MAX)) as u32;
+    if w >= h {
+        (fit(h), h)
+    } else {
+        (w, fit(w))
+    }
 }
 
 /// Convenience: a white canvas of the right size for a page.
 #[must_use]
 pub fn page_canvas(width_pt: f64, height_pt: f64, scale: f64, format: PixelFormat) -> Canvas {
+    page_canvas_in(width_pt, height_pt, scale, page_format(format))
+}
+
+/// [`page_canvas`], in exactly the format asked for.
+///
+/// What a page declaring its own transparency group needs (11.4.7): the page
+/// composites in the group's space and is converted for the caller afterwards,
+/// so this one does *not* coerce.
+#[must_use]
+pub fn page_canvas_in(width_pt: f64, height_pt: f64, scale: f64, format: PixelFormat) -> Canvas {
     let (w, h) = page_pixels(width_pt, height_pt, scale);
     Canvas::new(w, h, format, Color::WHITE)
 }
 
+/// The buffer a transparency group declaring `space` composites in (11.6.6),
+/// or `None` for a space this build does not blend in.
+#[must_use]
+pub fn group_format(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
+    match space {
+        tinker_pdf_content::GroupSpace::Gray => PixelFormat::GrayA8,
+        tinker_pdf_content::GroupSpace::Rgb => PixelFormat::Rgba8,
+        tinker_pdf_content::GroupSpace::Cmyk => PixelFormat::CmykA8,
+        tinker_pdf_content::GroupSpace::Lab => PixelFormat::LabA8,
+    }
+}
+
+/// The format a *page* may be handed back in.
+///
+/// `CmykA8` exists so a transparency group can composite over ink (11.6.6). It
+/// is deliberately not a format a page comes back in, and the reason is that
+/// `Bitmap` says how many components it has and nothing about what they mean:
+/// every consumer that reads three bytes and calls them red, green and blue —
+/// this repository's own `examples/render.rs` writes a PPM that way — would
+/// emit cyan, magenta and yellow under those names and look almost right.
+///
+/// So a caller asking for it gets `Rgba8`, which carries the same alpha and
+/// the colours the name promises. Silently, because there is nothing for the
+/// caller to do about it: the request was for pixels, and pixels are what comes
+/// back.
+#[must_use]
+pub fn page_format(format: PixelFormat) -> PixelFormat {
+    match format {
+        PixelFormat::CmykA8 => PixelFormat::Rgba8,
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// **The two crates agree about ink and light.**
+    ///
+    /// `tinker-pdf-raster` carries its own byte-level copy of 8.6.4.4's device
+    /// relation rather than depending on `tinker-pdf-color` for it — the same
+    /// call the crate graph makes for `Color::luma`'s coefficients, and the
+    /// alternative was a fifth leaf-to-leaf edge for eight lines of
+    /// arithmetic. A duplicate that can drift is worth nothing, so this holds
+    /// the copy to the original over every combination that matters.
+    ///
+    /// This crate is where it lives because this crate already depends on both.
+    #[test]
+    fn the_two_crates_agree_on_the_device_relation() {
+        let space = tinker_pdf_color::ColorSpace::DeviceCmyk;
+        let levels = [0u8, 1, 17, 64, 128, 191, 254, 255];
+        for &c in &levels {
+            for &m in &levels {
+                for &y in &levels {
+                    for &k in &levels {
+                        let ours = tinker_pdf_raster::canvas::cmyk_to_rgb(c, m, y, k);
+                        let unit = |v: u8| f64::from(v) / 255.0;
+                        let theirs = space.to_rgb(&[unit(c), unit(m), unit(y), unit(k)]);
+                        assert_eq!(
+                            ours, theirs,
+                            "({c}, {m}, {y}, {k}): the rasterizer and the colour \
+                             crate disagree about 8.6.4.4"
+                        );
+                    }
+                }
+            }
+        }
+    }
     use super::*;
     use tinker_pdf_content::interpret;
     use tinker_pdf_content::FontSource;
@@ -4354,7 +5051,7 @@ mod tests {
 
 #[cfg(test)]
 mod page_size_tests {
-    use super::{page_pixels, MAX_PAGE_PIXELS};
+    use super::{page_pixels, page_scale, MAX_PAGE_PIXELS};
 
     /// The pinned contract, which callers depend on.
     #[test]
@@ -4391,6 +5088,72 @@ mod page_size_tests {
             (ratio - 2.0).abs() < 0.01,
             "expected a 2:1 page, got {w}x{h}"
         );
+    }
+
+    /// **A page that is nearly all one dimension is clamped too.**
+    ///
+    /// `page_pixels` shrinks both sides by `sqrt(cap / area)`, which lands on
+    /// the cap only while both sides stay above the one-pixel floor. A
+    /// `/MediaBox` twenty points wide and 9.2e18 tall shrinks to a width of
+    /// 0.125; the floor raises it back to 1 — a factor of eight the height
+    /// never gave back — and the canvas came back at **eight times** the
+    /// ceiling, 1 x 536 870 911, which is one 1.6 GB allocation in `Rgb8`.
+    /// The `render_page` fuzz target found it as an OOM on 755 bytes.
+    ///
+    /// Nothing else in this module could see it: every other fixture here is
+    /// square or 2:1, and both sides of those shrink well clear of the floor.
+    #[test]
+    fn a_page_that_is_nearly_all_one_dimension_is_clamped_too() {
+        for (w, h) in [
+            (20.0, 9.223_372_036_854_776e18),
+            (9.223_372_036_854_776e18, 20.0),
+            (1.0, 1e300),
+            (1e300, 1.0),
+            (3.0, 1e12),
+        ] {
+            for scale in [1.0, 12.0 / 72.0, 150.0 / 72.0, 4.0] {
+                let used = page_scale(w, h, scale);
+                let (pw, ph) = page_pixels(w, h, used);
+                let area = u64::from(pw) * u64::from(ph);
+                assert!(
+                    area <= MAX_PAGE_PIXELS,
+                    "{w}x{h} at {scale} gave {pw}x{ph} = {area} pixels,                      {}x the {MAX_PAGE_PIXELS}-pixel ceiling",
+                    area / MAX_PAGE_PIXELS
+                );
+                assert!(pw >= 1 && ph >= 1, "{w}x{h} at {scale} gave {pw}x{ph}");
+            }
+        }
+    }
+
+    /// The ceiling over a lattice of shapes rather than over a handful, so a
+    /// future change to the shrink cannot leave one aspect ratio over it.
+    #[test]
+    fn no_shape_of_page_passes_the_ceiling() {
+        let sides = [
+            1.0,
+            2.0,
+            17.0,
+            595.0,
+            9_000.0,
+            1e6,
+            1e9,
+            1e15,
+            1e18,
+            f64::from(u32::MAX),
+        ];
+        for w in sides {
+            for h in sides {
+                for scale in [1e-6, 12.0 / 72.0, 1.0, 150.0 / 72.0, 1e6] {
+                    let (pw, ph) = page_pixels(w, h, page_scale(w, h, scale));
+                    let area = u64::from(pw) * u64::from(ph);
+                    assert!(
+                        area <= MAX_PAGE_PIXELS,
+                        "{w}x{h} at {scale} gave {pw}x{ph} = {area} pixels"
+                    );
+                    assert!(pw >= 1 && ph >= 1);
+                }
+            }
+        }
     }
 
     #[test]

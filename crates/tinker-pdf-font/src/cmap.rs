@@ -372,6 +372,103 @@ impl CMap {
         None
     }
 
+    /// The code that selects `cid`, and how many bytes it occupies (9.7.5.2,
+    /// read backwards).
+    ///
+    /// A CMap is written to be read forwards — code to CID — and every
+    /// consumer of one until now read it that way. A *producer* needs the
+    /// other direction: a shaper answers in glyphs, `/CIDToGIDMap` turns a
+    /// glyph back into a CID, and the string a content stream carries is
+    /// neither of those. It is a code.
+    ///
+    /// # Verified rather than assumed
+    ///
+    /// The inverse of a CMap is not a function: nothing forbids two codes
+    /// mapping to one CID, and a `cidchar` may override a `cidrange` that
+    /// already covered its code. So this gathers every code the tables could
+    /// have meant, walks them in ascending order, and returns the **first one
+    /// that maps back**. The round trip is the property that matters —
+    /// `cmap.cid(code) == Some(cid)` holds for whatever comes out of here —
+    /// and checking it is what keeps a `cidchar` override from being
+    /// inverted into a code that now means something else. A guess would
+    /// draw a different wrong glyph, which is worse than not drawing.
+    ///
+    /// Ascending order is also what makes the answer deterministic: the
+    /// singles live in a `HashMap` whose iteration order is not stable, and a
+    /// writer that emitted a different code for the same CID between runs
+    /// would break ruling 4 in the one place a form fill can.
+    ///
+    /// The byte width comes with the code because a code without one is
+    /// unwritable: `90ms-RKSJ-H` has one-byte and two-byte codes in the same
+    /// CMap, and writing `<0041>` where `<41>` was meant mis-splits the whole
+    /// string that follows it.
+    ///
+    /// `None` means this CMap cannot express that CID at all — including
+    /// every registry CMap in a build without `cmap-predefined`, where
+    /// [`CMap::is_approximate`] is true and there are no CID tables to
+    /// invert. A caller must treat that as a refusal to write, never as a
+    /// licence to write the CID raw.
+    #[must_use]
+    pub fn code_for_cid(&self, cid: u32) -> Option<(u32, u8)> {
+        let mut candidates: Vec<u32> = Vec::new();
+        for (code, mapped) in &self.cid_single {
+            if *mapped == cid {
+                candidates.push(*code);
+            }
+        }
+        for (low, high, base) in &self.cid_ranges {
+            candidates.extend(code_in(*low, *high, *base, cid));
+        }
+        for block in &self.cid_sorted {
+            // A scan and not a binary search: the blocks are sorted by *code*
+            // and this asks about a CID, so the ordering that makes
+            // `cid_mapped` cheap says nothing here. It runs once per glyph of
+            // a field's value rather than once per glyph of a page.
+            for (low, high, base) in block {
+                candidates.extend(code_in(*low, *high, *base, cid));
+            }
+        }
+        if self.identity {
+            candidates.push(cid);
+        }
+
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+            .into_iter()
+            .filter(|code| self.cid(*code) == Some(cid))
+            .find_map(|code| Some((code, self.code_width(code)?)))
+    }
+
+    /// How many bytes a code occupies under this CMap's codespaces (9.7.6.2).
+    ///
+    /// The shortest declared width that admits the code, byte by byte, which
+    /// is the same test [`CMap::next_code`] applies when reading. A code no
+    /// codespace admits has no encoding here and answers `None` rather than a
+    /// plausible two.
+    ///
+    /// This half is available in **every** build: the codespace tables are
+    /// about ten kilobytes and always compiled in, and it is the code-to-CID
+    /// megabyte that `cmap-predefined` gates.
+    fn code_width(&self, code: u32) -> Option<u8> {
+        if self.codespaces.is_empty() {
+            // The same assumption `next_code` makes with nothing to go on.
+            return Some(if self.identity { 2 } else { 1 });
+        }
+        for len in 1..=4u8 {
+            // A code that does not fit in `len` bytes is not this width's,
+            // whatever its low bytes would match.
+            if len < 4 && code >> (u32::from(len) * 8) != 0 {
+                continue;
+            }
+            let bytes = &code.to_be_bytes()[4 - usize::from(len)..];
+            if self.codespaces.iter().any(|range| range.contains(bytes)) {
+                return Some(len);
+            }
+        }
+        None
+    }
+
     /// Merges `parent` beneath this CMap: 9.7.5.3's `usecmap`.
     ///
     /// A merge, not a replacement. This CMap's mappings override the
@@ -907,6 +1004,18 @@ fn read_cidrange(tokens: &mut Tokenizer, cmap: &mut CMap, warnings: &mut Vec<War
         }
     }
     warnings.push(Warning::SectionUnterminated(SECTION));
+}
+
+/// The code a `cidrange` `low..=high` starting at CID `base` gives `cid`, if
+/// the range reaches it.
+///
+/// Checked arithmetic throughout: `low`, `high` and `base` all come out of a
+/// document's own CMap, and a range that claims to start at CID 0xFFFF_FFFF
+/// is a file this must answer `None` to rather than wrap for (ruling 1).
+fn code_in(low: u32, high: u32, base: u32, cid: u32) -> Option<u32> {
+    let step = cid.checked_sub(base)?;
+    let code = low.checked_add(step)?;
+    (code <= high).then_some(code)
 }
 
 fn be(bytes: &[u8]) -> u32 {
@@ -1551,5 +1660,133 @@ mod tests {
                 ParentRef::Named(name) => Some(ParentSource::Named(name.to_vec())),
             });
         }
+    }
+
+    /// The identity pair inverts to itself, at two bytes, in every build.
+    ///
+    /// `Identity-H` is a rule rather than a table, so this is the one CMap a
+    /// `cmap-predefined`-off build can still write through — and the reason
+    /// the writer's refusal has to be about the *tables* rather than about
+    /// predefined CMaps as a class.
+    #[test]
+    fn the_identity_cmap_inverts_to_itself() {
+        let cmap = CMap::predefined(b"Identity-H").expect("built from a rule");
+        for cid in [0u32, 1, 0x41, 0x1234, 0xFFFF] {
+            assert_eq!(cmap.code_for_cid(cid), Some((cid, 2)));
+        }
+    }
+
+    /// A code's byte width comes from the codespace it falls in, not from a
+    /// guess (9.7.6.2).
+    ///
+    /// A mixed CMap is the case that makes the difference visible: writing
+    /// `<0041>` where `<41>` was meant does not merely draw the wrong glyph,
+    /// it mis-splits every code after it.
+    #[test]
+    fn a_codes_width_is_the_codespace_that_admits_it() {
+        // Shift-JIS shaped: ASCII in one byte, kanji in two, in one CMap.
+        let cmap = parse(
+            b"/CIDInit /ProcSet findresource begin
+            begincmap
+            2 begincodespacerange <00> <80> <8140> <9FFC> endcodespacerange
+            1 begincidrange <41> <5A> 100 endcidrange
+            1 begincidrange <8140> <817E> 200 endcidrange
+            endcmap",
+        );
+        assert_eq!(cmap.code_for_cid(100), Some((0x41, 1)), "one-byte");
+        assert_eq!(cmap.code_for_cid(200), Some((0x8140, 2)), "two-byte");
+
+        // A code no codespace admits has no encoding at all, and answering a
+        // plausible two bytes would put a string on the page that this same
+        // engine reads back as something else.
+        let unreachable = parse(
+            b"/CIDInit /ProcSet findresource begin
+            begincmap
+            1 begincodespacerange <8140> <9FFC> endcodespacerange
+            1 begincidrange <0041> <005A> 100 endcidrange
+            endcmap",
+        );
+        assert_eq!(
+            unreachable.cid(0x41),
+            Some(100),
+            "the mapping is still read"
+        );
+        assert_eq!(
+            unreachable.code_for_cid(100),
+            None,
+            "0x0041 is in no codespace: a Shift-JIS lead byte is never 0x00"
+        );
+    }
+
+    /// The inverse is **verified forwards** before it is answered, so a
+    /// `cidchar` that overrode a range cannot be inverted into a code that
+    /// now means something else.
+    ///
+    /// Here `<0041>` is claimed twice: a range gives it CID 100, and a single
+    /// takes it for CID 900. `cid_mapped` consults singles first, so 0x41 now
+    /// means 900 and nothing means 100 any more. A writer that inverted the
+    /// range and stopped would emit `<0041>` for CID 100 and draw CID 900's
+    /// glyph — a *different* wrong glyph, which is the failure the refusal in
+    /// `fill.rs` exists to avoid.
+    #[test]
+    fn an_overridden_code_is_not_handed_back_as_an_inverse() {
+        let cmap = parse(
+            b"/CIDInit /ProcSet findresource begin
+            begincmap
+            1 begincodespacerange <0000> <FFFF> endcodespacerange
+            1 begincidrange <0041> <005A> 100 endcidrange
+            1 begincidchar <0041> 900 endcidchar
+            endcmap",
+        );
+        assert_eq!(
+            cmap.cid(0x41),
+            Some(900),
+            "the single wins, as 9.7.5.3 says"
+        );
+        assert_eq!(
+            cmap.code_for_cid(100),
+            None,
+            "no code means CID 100 any more, and inventing one draws CID 900"
+        );
+        assert_eq!(cmap.code_for_cid(900), Some((0x41, 2)));
+        // The rest of the range is untouched and still inverts.
+        assert_eq!(cmap.code_for_cid(101), Some((0x42, 2)));
+    }
+
+    /// Every code this inverter hands back maps forwards to the CID it was
+    /// asked about — over a real registry table, which is the only place the
+    /// property is worth much.
+    #[test]
+    #[cfg(feature = "cmap-predefined")]
+    fn a_registry_cmaps_inverse_round_trips() {
+        let cmap = CMap::predefined(b"UniJIS-UCS2-H").expect("the registry defines it");
+        let mut found = 0usize;
+        for cid in 1..2000u32 {
+            if let Some((code, bytes)) = cmap.code_for_cid(cid) {
+                assert_eq!(bytes, 2, "UniJIS-UCS2-H is a two-byte codespace");
+                assert_eq!(cmap.cid(code), Some(cid), "CID {cid} inverted to a lie");
+                found += 1;
+            }
+        }
+        assert!(found > 1000, "only {found} of 1999 CIDs inverted at all");
+    }
+
+    /// Without the tables there is nothing to invert, and the answer is a
+    /// refusal rather than a plausible number.
+    ///
+    /// This is what makes the fill path's feature gate honest: the leaf crate
+    /// says "I cannot", the CMap says [`CMap::is_approximate`], and nothing
+    /// downstream has to infer either from a build flag it cannot see.
+    #[test]
+    #[cfg(not(feature = "cmap-predefined"))]
+    fn a_registry_cmap_with_no_table_refuses_to_invert() {
+        let cmap = CMap::predefined(b"UniJIS-UCS2-H").expect("the registry still names it");
+        assert!(cmap.is_approximate());
+        for cid in [1u32, 100, 1000, 20000] {
+            assert_eq!(cmap.code_for_cid(cid), None);
+        }
+        // The codespaces are still the registry's, which is the half that
+        // always ships: a string read through this still splits correctly.
+        assert_eq!(cmap.decode_codes(&[0x00, 0x41]), vec![(0x41, 2)]);
     }
 }
