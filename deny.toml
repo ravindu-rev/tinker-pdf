@@ -175,6 +175,14 @@ deny = [
   { name = "liblzma" },
   { name = "compress-tools" },
   { name = "libarchive" },
+  # bzip2, denied in the milestone that writes its decoder, for the reason
+  # above. `bzip2` binds libbzip2 and `bzip2-rs` and `libbz2-rs-sys` are pure
+  # Rust ports of it -- the last one is excellent, and would have passed every
+  # other check in this file.
+  { name = "bzip2" },
+  { name = "bzip2-sys" },
+  { name = "bzip2-rs" },
+  { name = "libbz2-rs-sys" },
   { name = "crc32fast" },
   { name = "crc" },
   { name = "crc-any" },

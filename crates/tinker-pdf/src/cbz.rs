@@ -1766,37 +1766,67 @@ pub fn open_archive<'a>(
     })
 }
 
-/// Reads one entry of a comic's ZIP, checked, with ZIP method 14 decoded.
+/// Reads one entry of a comic's ZIP, checked, with ZIP methods 14 and 12
+/// decoded.
 ///
-/// [`Archive::read`] with the one thing `tinker-pdf-zip` cannot carry: an
-/// LZMA decoder. That crate may depend on `tinker-pdf-filters` and nothing
-/// else, and the range decoder is `tinker_pdf_archive::lzma`, written for 7z —
-/// so the facade, which already depends on both, hands it in through
-/// [`Archive::read_with`]. Everything that is ZIP's stays ZIP's: APPNOTE
-/// 5.8.8's header is read and checked there (a damaged one is
-/// [`ZipEntryError::LzmaHeader`]), the declared size is bounded and charged
-/// against the archive's total there, and what comes back is held to the
-/// declared length and the recorded CRC-32 there. So a decoder wrong by one
-/// byte is refused by the archive's own checksum, exactly as a `.cb7`'s is.
+/// [`Archive::read`] with the two things `tinker-pdf-zip` cannot carry: an
+/// LZMA decoder and a bzip2 decoder. That crate may depend on
+/// `tinker-pdf-filters` and nothing else, and both decoders live in
+/// `tinker-pdf-archive` — LZMA's written for 7z, bzip2's for 7z and ZIP alike —
+/// so the facade, which already depends on both, hands them in through
+/// [`Archive::read_coded`]. Everything that is ZIP's stays ZIP's: APPNOTE
+/// 5.8.8's header on a method-14 entry is read and checked there (a damaged
+/// one is [`ZipEntryError::LzmaHeader`]), the declared size is bounded and
+/// charged against the archive's total there, and what comes back is held to
+/// the declared length and the recorded CRC-32 there. So a decoder wrong by
+/// one byte is refused by the archive's own checksum, exactly as a `.cb7`'s
+/// is.
 ///
 /// **Only the comic path takes this door.** OPC forbids every compression
 /// method but DEFLATE and OCF 3.3 §4.3.2 allows Stored and Deflated
 /// (`epub::ocf`'s header records both), so an XPS or an EPUB item compressed
-/// with LZMA is a package outside its own format, and those readers keep
-/// [`Archive::read`]'s refusal by number.
+/// with LZMA or bzip2 is a package outside its own format, and those readers
+/// keep [`Archive::read`]'s refusal by number.
 ///
 /// # Errors
-/// [`ZipEntryError`], one variant per refusal. The decoder's own failures are
-/// mapped onto the reader's vocabulary: a property byte whose `lc + lp` is
-/// past 4 is [`ZipEntryError::LzmaHeader`] — it is one of the five header
+/// [`ZipEntryError`], one variant per refusal. The decoders' own failures are
+/// mapped onto the reader's vocabulary: an LZMA property byte whose `lc + lp`
+/// is past 4 is [`ZipEntryError::LzmaHeader`] — it is one of the five header
 /// bytes — a stream that runs out or ends before its declared length is
-/// [`ZipEntryError::Truncated`], and anything else is
+/// [`ZipEntryError::Truncated`], a bzip2 stream that would decode past it is
+/// [`ZipEntryError::OversizedStream`], and anything else is
 /// [`ZipEntryError::Corrupt`].
 pub fn read_entry<'a>(
     archive: &mut Archive<'a>,
     index: usize,
 ) -> Result<Cow<'a, [u8]>, ZipEntryError> {
-    archive.read_with(index, decode_lzma)
+    archive.read_coded(index, |coded| match coded {
+        tinker_pdf_zip::Coded::Lzma(stream) => decode_lzma(stream),
+        tinker_pdf_zip::Coded::Bzip2 { stream, unpacked } => decode_bzip2(stream, *unpacked),
+        // `Coded` is `#[non_exhaustive]`: a method the zip crate learns the
+        // framing of later is one this facade has not wired a decoder for.
+        other => Err(ZipEntryError::UnsupportedMethod(other.method())),
+    })
+}
+
+/// ZIP method 12's stream through the bzip2 decoder 7z's `040202` uses.
+fn decode_bzip2(stream: &[u8], unpacked: usize) -> Result<Vec<u8>, ZipEntryError> {
+    use tinker_pdf_archive::bzip2;
+    // The ceiling is the declared size, bounded and charged by the zip crate,
+    // exactly as for method 14.
+    let limits = bzip2::Limits {
+        max_unpacked: unpacked,
+    };
+    bzip2::decode(stream, &limits).map_err(|e| match e {
+        bzip2::Error::Truncated => ZipEntryError::Truncated,
+        bzip2::Error::TooLarge => ZipEntryError::OversizedStream {
+            declared: unpacked as u64,
+        },
+        // `bzip2::Error` is `#[non_exhaustive]`: a bad table, a failed block
+        // or stream CRC, a refused randomised block and whatever is added
+        // later are all a stream that is not the one the entry claims.
+        _ => ZipEntryError::Corrupt,
+    })
 }
 
 /// ZIP method 14's stream through the decoder 7z already uses.

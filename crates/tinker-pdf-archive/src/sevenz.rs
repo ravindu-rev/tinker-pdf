@@ -37,9 +37,9 @@
 //!
 //! # Coders read
 //!
-//! Copy (`00`), LZMA (`030101`), LZMA2 (`21`), Deflate (`040108`) and BCJ
-//! (`03030103`, the x86 branch filter `-mf=BCJ` puts in front of LZMA2, in the
-//! crate's private `bcj` module). A folder is walked by its bind pairs and
+//! Copy (`00`), LZMA (`030101`), LZMA2 (`21`), Deflate (`040108`), bzip2
+//! (`040202`, in [`crate::bzip2`]) and BCJ (`03030103`, the x86 branch filter
+//! `-mf=BCJ` puts in front of LZMA2, in the crate's private `bcj` module). A folder is walked by its bind pairs and
 //! never by the order its coders are listed in: 7-Zip lists a filter before
 //! the compressor feeding it and py7zr lists it after, and both are the same
 //! chain.
@@ -55,7 +55,7 @@
 
 use tinker_pdf_filters::{crc32, inflate_raw, Limits as InflateLimits};
 
-use crate::{bcj, lzma};
+use crate::{bcj, bzip2, lzma};
 
 pub mod limits;
 
@@ -93,6 +93,9 @@ const K_DUMMY: u8 = 0x19;
 /// 7z method `03030103`, BCJ: the x86 branch converter (`DOC/Methods.txt`:
 /// `03` branch, `03` x86, `01` version, `03` BCJ).
 const BCJ_X86: &[u8] = &[0x03, 0x03, 0x01, 0x03];
+/// 7z method `040202`, bzip2 (`DOC/Methods.txt`: `04` misc, `02` BZip2,
+/// `02` BZip2).
+const BZIP2: &[u8] = &[0x04, 0x02, 0x02];
 
 /// Why an archive could not be opened at all.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -121,8 +124,8 @@ pub enum Error {
     /// A coder this build does not implement, by its 7z method id.
     ///
     /// Carries the id so the refusal names the method rather than the file:
-    /// `030401` is PPMd and `040202` is BZip2, and a host that says which is a
-    /// host whose user can re-pack.
+    /// `030401` is PPMd and `0303011B` is BCJ2, and a host that says which is
+    /// a host whose user can re-pack.
     UnsupportedCoder { id: Vec<u8> },
     /// AES-256 (`06F10701`). A named non-goal, shared with `tinker-pdf-zip`.
     Encrypted,
@@ -173,6 +176,10 @@ pub enum EntryError {
     /// saying so per entry is what turns it into one placeholder page each
     /// (ruling 2) rather than a refused archive.
     FolderFailed(lzma::Error),
+    /// The folder's bzip2 stream would not decode — the same sentence as
+    /// [`EntryError::FolderFailed`] for coder `040202`, carrying bzip2's own
+    /// reason, which includes its block and stream CRCs failing.
+    Bzip2Failed(bzip2::Error),
     /// The folder decompressed and this entry's CRC-32 does not match what the
     /// archive recorded.
     ///
@@ -196,6 +203,7 @@ impl core::fmt::Display for EntryError {
             EntryError::NoSuchEntry => f.write_str("no entry with that index"),
             EntryError::NotAFile => f.write_str("an entry that holds no file data"),
             EntryError::FolderFailed(e) => write!(f, "a block that would not decompress: {e}"),
+            EntryError::Bzip2Failed(e) => write!(f, "a bzip2 block that would not decompress: {e}"),
             EntryError::CrcMismatch => f.write_str("an entry whose recorded CRC-32 does not match"),
             EntryError::Truncated => f.write_str("a block shorter than its own substream table"),
             EntryError::UnsupportedCoder => f.write_str("a coder this build does not read"),
@@ -496,6 +504,7 @@ impl<'a> Archive<'a> {
                 FolderError::Unsupported => EntryError::UnsupportedCoder,
                 FolderError::TooLarge => EntryError::TooLarge,
                 FolderError::Lzma(e) => EntryError::FolderFailed(e),
+                FolderError::Bzip2(e) => EntryError::Bzip2Failed(e),
                 FolderError::SizeMismatch => EntryError::Truncated,
             })?;
             self.cached = Some((folder_index, bytes));
@@ -517,6 +526,7 @@ enum FolderError {
     Unsupported,
     TooLarge,
     Lzma(lzma::Error),
+    Bzip2(bzip2::Error),
     /// A coder produced a length other than the one the header declared for
     /// its output — for a filter, whose output is its input, the header and
     /// the stream disagreeing about one number.
@@ -588,6 +598,19 @@ fn run_coder(
             }
             let mut data = input.to_vec();
             bcj::x86_decode(&mut data);
+            Ok(data)
+        }
+        // bzip2: a whole stream, `BZh` and all, exactly as ZIP method 12
+        // stores one. Its own block and stream CRCs are checked inside the
+        // decoder, and the folder's CRC-32 one layer up.
+        BZIP2 => {
+            let limits = bzip2::Limits {
+                max_unpacked: out_size,
+            };
+            let data = bzip2::decode(input, &limits).map_err(FolderError::Bzip2)?;
+            if data.len() != out_size {
+                return Err(FolderError::SizeMismatch);
+            }
             Ok(data)
         }
         // Deflate: 7z method `040108` is RFC 1951 with no wrapper, exactly as
@@ -916,7 +939,7 @@ fn folder(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Folder, Error> {
     for coder in &coders {
         let known = matches!(
             coder.id.as_slice(),
-            [0x00] | [0x21] | [0x03, 0x01, 0x01] | [0x04, 0x01, 0x08] | BCJ_X86
+            [0x00] | [0x21] | [0x03, 0x01, 0x01] | [0x04, 0x01, 0x08] | BCJ_X86 | BZIP2
         );
         // BCJ has no properties, and 7-Zip since 23 refuses a coder handed
         // properties it has no use for rather than ignoring them: a header

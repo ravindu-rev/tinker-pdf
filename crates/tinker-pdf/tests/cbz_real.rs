@@ -117,18 +117,22 @@ const ZIPS: &[&str] = &[
 /// `ZIPS` is the list `INVENTORY.tsv` describes and .NET — the second reader
 /// that wrote it — infers a method from two lengths and would call a method-14
 /// entry `deflate`. Its entries are held to the files that went into them in
-/// `a_real_archiver_s_lzma_entries_are_the_files_that_went_in` instead.
+/// `a_real_archiver_s_lzma_entries_are_the_files_that_went_in` instead, and
+/// `python-bzip2.cbz` (method 12) is here for the same reason.
 ///
 /// The `py7zr-*.cb7`s are the second 7z writer (`tests/cbz/make-py7zr.py`),
 /// each asked for a coder 7-Zip's three were not: `py7zr-bcj.cb7` puts BCJ in
-/// front of LZMA2, and lists the two coders in the opposite order from 7-Zip.
+/// front of LZMA2, and lists the two coders in the opposite order from 7-Zip;
+/// `py7zr-bzip2.cb7` is coder `040202`.
 const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-tar.cbt", Container::Tar),
     ("7z-lzma2.cb7", Container::SevenZip),
     ("7z-nonsolid.cb7", Container::SevenZip),
     ("7z-dictreset.cb7", Container::SevenZip),
     ("py7zr-bcj.cb7", Container::SevenZip),
+    ("py7zr-bzip2.cb7", Container::SevenZip),
     ("python-lzma.cbz", Container::Zip),
+    ("python-bzip2.cbz", Container::Zip),
 ];
 
 /// The containers that open but do **not** produce all five pages, and what
@@ -571,6 +575,70 @@ fn a_real_archiver_s_lzma_entries_are_the_files_that_went_in() {
         "every page is its entry's own picture: {:?}",
         report.pages().iter().map(|p| p.defect).collect::<Vec<_>>()
     );
+}
+
+/// **ZIP method 12, from a real writer, decodes to the files that went in** —
+/// through `cbz::read_entry`, the door the comic path reads every ZIP entry
+/// by, and so through `tinker-pdf-zip`'s `read_coded` and the bzip2 decoder
+/// `tinker-pdf-archive` also runs for 7z's `040202`.
+///
+/// Two archives. `python-bzip2.cbz` is CPython's `zipfile` with `ZIP_BZIP2`
+/// over the five pages (`tests/cbz/make-bzip2.py`), which also joins the
+/// cross-producer identity through `READ_CONTAINERS`. The other is
+/// `tinker-pdf-archive/tests/coders/python-bzip2.zip`, the same writer at
+/// `compresslevel=1` over files shaped for the coder: `prose.txt` is two bzip2
+/// blocks and `empty.txt` a stream with none. Each entry is held to the file it
+/// was made from, byte for byte, and `Archive::read` still names the method it
+/// has no decoder for.
+#[test]
+fn a_real_archiver_s_bzip2_entries_are_the_files_that_went_in() {
+    let coders = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tinker-pdf-archive/tests/coders");
+    let pages = source_pages();
+    let archives: [(Vec<u8>, &str); 2] = [
+        (read("python-bzip2.cbz"), "python-bzip2.cbz"),
+        (
+            std::fs::read(coders.join("python-bzip2.zip")).expect("the coder fixture"),
+            "python-bzip2.zip",
+        ),
+    ];
+    let mut read_entries = 0usize;
+    for (bytes, name) in &archives {
+        let mut archive = Archive::open(bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+        for index in 0..archive.entries().len() {
+            let entry = archive.entries()[index].clone();
+            assert_eq!(
+                entry.method,
+                Method::Other(tinker_pdf_zip::BZIP2),
+                "{name}: {}: CPython wrote method 12",
+                entry.name
+            );
+            assert_eq!(
+                archive.read(index),
+                Err(cbz::ZipEntryError::UnsupportedMethod(12)),
+                "{name}: {}: `Archive::read` carries no bzip2 decoder",
+                entry.name
+            );
+            let decoded = cbz::read_entry(&mut archive, index)
+                .unwrap_or_else(|e| panic!("{name}: {}: {e}", entry.name));
+            let want = match pages.iter().find(|(page, _)| *page == entry.name) {
+                Some((_, page)) => page.clone(),
+                None => std::fs::read(coders.join("input").join(&entry.name))
+                    .unwrap_or_else(|e| panic!("{name}: {}: {e}", entry.name)),
+            };
+            assert!(
+                *decoded == want[..],
+                "{name}: {} is the file that went into it",
+                entry.name
+            );
+            read_entries += 1;
+        }
+        assert!(
+            archive.warnings().is_empty(),
+            "{name}: {:?}",
+            archive.warnings()
+        );
+    }
+    assert_eq!(read_entries, 9, "five pages and four coder inputs");
 }
 
 /// **A damaged LZMA header costs its page and names itself.**

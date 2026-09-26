@@ -452,11 +452,21 @@ fn a_coder_this_build_does_not_read_is_refused_by_its_method_id() {
         "AES-256 is refused as encryption, not as an unknown method"
     );
 
-    let bzip2 = archive_with(files, &[0x04, 0x02, 0x02], &[], packed);
+    // bzip2 (`040202`) stood here until it was read; the delta filter is a
+    // coder py7zr and 7-Zip both write that this build still does not.
+    let delta = archive_with(files, &[0x03], &[0x00], packed.clone());
     assert_eq!(
-        Archive::open(&bzip2, &Limits::DEFAULT).err(),
+        Archive::open(&delta, &Limits::DEFAULT).err(),
+        Some(Error::UnsupportedCoder { id: vec![0x03] })
+    );
+
+    // BCJ is read, and has no properties: one handed some is a different
+    // filter, and 7-Zip since 23 refuses it rather than ignoring them.
+    let bcj_with_props = archive_with(files, BCJ_X86, &[0x00, 0x10, 0x00, 0x00], packed);
+    assert_eq!(
+        Archive::open(&bcj_with_props, &Limits::DEFAULT).err(),
         Some(Error::UnsupportedCoder {
-            id: vec![0x04, 0x02, 0x02]
+            id: BCJ_X86.to_vec()
         })
     );
 }

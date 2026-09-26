@@ -1,4 +1,5 @@
-//! The committed `tar`, `sevenz` and `rar` fuzz seeds, replayed on stable.
+//! The committed `tar`, `sevenz`, `bzip2` and `rar` fuzz seeds, replayed on
+//! stable.
 //!
 //! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each written
 //! by this crate's own `write_the_fuzz_seeds` tests — plus, in `sevenz/`, one
@@ -33,7 +34,7 @@
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_archive::tar::{Archive, EntryError, Kind, Limits};
-use tinker_pdf_archive::{rar, sevenz};
+use tinker_pdf_archive::{bzip2, rar, sevenz};
 use tinker_pdf_filters::crc32;
 
 /// Every seed, by name, sorted so a failure names the same file on every
@@ -370,10 +371,10 @@ fn the_committed_sevenz_seeds_replay() {
     }
     println!("RAN: {} sevenz seeds, {read_ok} entries read, {crc_checked} CRC-checked, {refused} refused outright", seeds.len());
     // Seven hand-built by `write_the_fuzz_seeds`, and one per coder a real
-    // writer made, by `tests/coders/make-coders.py`: `bcj-lzma2`.
+    // writer made, by `tests/coders/make-coders.py`: `bcj-lzma2` and `bzip2`.
     assert_eq!(
         seeds.len(),
-        8,
+        9,
         "the seed count changed; `write_the_fuzz_seeds` or `make-coders.py` is \
          what should have changed it, and the new file needs a reason there"
     );
@@ -422,7 +423,7 @@ fn the_coder_seeds_reach_their_coders() {
         println!("SKIPPED: fuzz/corpus/sevenz is not in this tree");
         return;
     };
-    let named = ["bcj-lzma2"];
+    let named = ["bcj-lzma2", "bzip2"];
     for want in named {
         let Some((_, data)) = seeds.iter().find(|(name, _)| name == want) else {
             panic!("the {want} seed is missing");
@@ -443,6 +444,54 @@ fn the_coder_seeds_reach_their_coders() {
         "RAN: {} coder seeds decode to their recorded CRC-32s",
         named.len()
     );
+}
+
+// ---- bzip2 ------------------------------------------------------------------
+
+/// `fuzz_targets/bzip2.rs`'s control-byte table, restated.
+fn bzip2_bounds(knobs: u8) -> bzip2::Limits {
+    bzip2::Limits {
+        max_unpacked: match knobs & 3 {
+            0 => 1,
+            1 => 1 << 10,
+            2 => 1 << 16,
+            _ => 1 << 22,
+        },
+    }
+}
+
+/// Every committed bzip2 seed replays with the target's two invariants — a
+/// decode is within its ceiling, and a roomier ceiling gives the same answer —
+/// and every one of them **decodes**: they are libbzip2's own streams
+/// (`tests/coders/make-coders.py`), so a seed that stopped decoding would be a
+/// corpus quietly reduced to exercising the refusals.
+#[test]
+fn the_committed_bzip2_seeds_replay() {
+    let Some(seeds) = corpus("bzip2") else {
+        println!("SKIPPED: fuzz/corpus/bzip2 is not in this tree");
+        return;
+    };
+    let mut bytes = 0usize;
+    for (name, data) in &seeds {
+        let (control, body) = data.split_at(data.len().min(1));
+        let limits = bzip2_bounds(control.first().copied().unwrap_or(0));
+        let out = bzip2::decode(body, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            out.len() <= limits.max_unpacked,
+            "{name}: within the ceiling"
+        );
+        let roomier = bzip2::Limits {
+            max_unpacked: 1 << 24,
+        };
+        assert_eq!(
+            bzip2::decode(body, &roomier).as_ref(),
+            Ok(&out),
+            "{name}: a roomier ceiling"
+        );
+        bytes += out.len();
+    }
+    println!("RAN: {} bzip2 seeds, {bytes} bytes decoded", seeds.len());
+    assert_eq!(seeds.len(), 5, "`make-coders.py` writes five bzip2 seeds");
 }
 
 // ---- RAR --------------------------------------------------------------------

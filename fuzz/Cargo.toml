@@ -200,6 +200,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "bzip2"
+path = "fuzz_targets/bzip2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "rar"
 path = "fuzz_targets/rar.rs"
 test = false

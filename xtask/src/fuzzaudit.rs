@@ -75,6 +75,8 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
         vec![sig(0, b"PK\x03\x04"), sig(0, b"PK\x05\x06")],
     );
     m.insert("sevenz", vec![sig(0, b"7z\xbc\xaf\x27\x1c")]);
+    // `BZh` and a level digit; `BZh` is the part every level shares.
+    m.insert("bzip2", vec![sig(0, b"BZh")]);
     m.insert(
         "rar",
         vec![sig(0, b"Rar!\x1a\x07\0"), sig(0, b"Rar!\x1a\x07\x01")],

@@ -33,9 +33,12 @@ same bytes on any Python 3.
 | File | Bytes | Writer | Coder | sha256 |
 | --- | ---: | --- | --- | --- |
 | `py7zr-bcj.7z` | 47 656 | py7zr 1.1.3, `[FILTER_X86, FILTER_LZMA2]` | 7z `03030103` (BCJ) fed by `21` (LZMA2) through a bind pair; `x86.bin` and `prose.txt` in one solid folder | `1fdf9888563556d9` |
+| `py7zr-bzip2.7z` | 41 604 | py7zr 1.1.3, `[FILTER_BZIP2]` | 7z `040202`; `prose.txt`, `runs.bin` and `x86.bin` in one solid folder, one level-9 block | `091fb3303fa690e5` |
+| `python-bzip2.zip` | 41 656 | CPython 3.11.15 `zipfile`, `ZIP_BZIP2`, `compresslevel=1` | APPNOTE method 12 on all four inputs: `prose.txt` is **two** blocks at level 1's 100 000-byte limit, and `empty.txt` a stream with **no** block | `8ca8493ac60b6287` |
 
-Obtained on Linux x86_64 with CPython 3.11.15, py7zr 1.1.3 and liblzma 5.4.5
-(Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`), on 26 September 2026:
+Obtained on Linux x86_64 with CPython 3.11.15, py7zr 1.1.3, liblzma 5.4.5
+(Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`) and libbzip2 1.0.8 (Ubuntu
+`1.0.8-5.1build0.1`), on 26 September 2026:
 
 ```
 pip install --user py7zr
@@ -46,8 +49,11 @@ python3 make-coders.py
 
 `make-coders.py` pins py7zr's clock to one instant, so a rerun under the same
 versions writes the same bytes; every hash above was measured twice. It also
-writes the real-writer seeds in `fuzz/corpus/` (`sevenz/bcj-lzma2`: the same
-filters over `x86.bin`'s first 768 bytes).
+writes the real-writer seeds in `fuzz/corpus/`: `sevenz/bcj-lzma2` (the same
+filters over `x86.bin`'s first 768 bytes), `sevenz/bzip2`,
+`zip_archive/bzip2-method-12`, and the five bare streams of `bzip2/` —
+libbzip2 through CPython's `bz2` at three levels, an empty stream, and two
+streams end to end.
 
 ### Which implementation did the coding
 
@@ -57,10 +63,14 @@ one matters, because the coder is what these files adjudicate.
 - **BCJ + LZMA2**: py7zr passes both to liblzma as one raw filter chain, so
   the x86 filter here is **xz's**, not 7-Zip's `Bra86.c` — a second
   implementation of the encoder the decoder must invert.
+- **bzip2**: py7zr and CPython's `zipfile` both call CPython's `bz2`, which is
+  libbzip2 1.0.8 — the reference implementation, so the one whose reading of
+  the format is the format.
 
 ## Whether they may be committed
 
 Yes, for the reason `crates/tinker-pdf/tests/cbz/README.md` gives: a coder's
 licence does not reach the bytes it codes, the inputs are ours, and nothing of
 any writer is vendored, linked or redistributed. py7zr is LGPL-2.1-or-later;
-liblzma is public domain (0BSD from 5.6).
+liblzma is public domain (0BSD from 5.6); libbzip2 is under its own BSD-style
+licence.

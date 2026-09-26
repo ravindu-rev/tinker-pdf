@@ -40,11 +40,15 @@ are read too, on the comic path**: `tinker-pdf-zip` reads APPNOTE 5.8.8's
 nine-byte header — two version bytes, a properties size that must be five, the
 `lc`/`lp`/`pb` byte and the dictionary size — bounds and charges the entry
 exactly as it does a deflated one, and hands the stream to the LZMA decoder
-7z already uses through `Archive::read_with`, so the zip crate gained no
-dependency. What comes back is held to the declared length and the recorded
-CRC-32 inside the zip crate, so the archive's checksum adjudicates the decoder
-here exactly as a `.cb7`'s does. An XPS or an EPUB item is still refused by
-method number: OPC and OCF allow stored and deflated and nothing else. Names decode as UTF-8 under
+7z already uses through `Archive::read_coded`, so the zip crate gained no
+dependency. **bzip2 entries (method 12)** take the same door: APPNOTE puts no
+framing round them, so the entry's data is a whole bzip2 stream, handed to the
+decoder 7z's `040202` also runs. What comes back is held to the declared
+length and the recorded CRC-32 inside the zip crate, so the archive's checksum
+adjudicates the decoder here exactly as a `.cb7`'s does — and bzip2 checks
+itself first, with a CRC per block and one over the stream. An XPS or an EPUB
+item is still refused by method number: OPC and OCF allow stored and deflated
+and nothing else. Names decode as UTF-8 under
 bit 11 and as CP437 otherwise (APPNOTE D.1). **Every entry is CRC-32 checked
 before its bytes are returned, and an entry that cannot be checked is
 refused** — the design copies image bytes into the PDF untouched, so the
@@ -93,7 +97,8 @@ so a wrong window or an ignored LZMA2 dictionary reset fails the *format's*
 check and becomes a placeholder page rather than a picture with the wrong
 pixels in it. That is what let a hand-rolled LZMA decoder be written with no
 oracle to check it against (ruling 13); `docs/design/comic-archives.md` carries
-the argument. Coders read: Copy, LZMA, LZMA2, Deflate and BCJ — 7z method
+the argument. Coders read: Copy, LZMA, LZMA2, Deflate, bzip2 and BCJ — 7z
+method `040202` is a whole bzip2 stream, exactly as ZIP method 12 is,
 `040108` is RFC 1951 with no wrapper, exactly as ZIP method 8 is, and
 `03030103` is the x86 branch filter `-mf=BCJ` puts in front of LZMA2, which
 turns the absolute addresses the encoder wrote back into relative call and jump
@@ -304,12 +309,17 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   halves `Document::open` actually uses, split so the sniff and the read share
   one `Archive`.
 - `tinker_pdf_zip::Archive` — `open`, `entries()`, `read(index)` (checked;
-  stored entries are handed back borrowed, copied nowhere), `read_with(index,
-  decoder)` (the same, with the caller's decoder for method 14, handed an
-  `LzmaStream` with 5.8.8's header already read), `route()`, `warnings()` and
-  `inflated()`.
-- `cbz::read_entry(&mut archive, index)` — `read_with` with this engine's
-  LZMA decoder, which is what the comic path reads every ZIP entry through.
+  stored entries are handed back borrowed, copied nowhere), `read_coded(index,
+  decoder)` (the same, with the caller's decoder for methods 14 and 12, handed
+  a `Coded` — an `LzmaStream` with 5.8.8's header already read, or a bzip2
+  stream), `read_with(index, decoder)` (method 14 alone), `route()`,
+  `warnings()` and `inflated()`.
+- `cbz::read_entry(&mut archive, index)` — `read_coded` with this engine's
+  LZMA and bzip2 decoders, which is what the comic path reads every ZIP entry
+  through.
+- `tinker_pdf_archive::bzip2::decode(bytes, &Limits)` — one or more bzip2
+  streams to bytes, bounded by `Limits::max_unpacked`, every block CRC and the
+  stream CRC checked.
 - `cbz::open_tar` and `cbz::pages_from_tar`, the same two halves for a `.cbt`,
   over `tinker_pdf_archive::tar::Archive` — `open`, `entries()`,
   `read(index)` (a plain borrow), `warnings()`.
@@ -330,7 +340,7 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | A RAR entry compressed with methods 1–5 | `PageDefect::RarEntryRefused` | placeholder page naming the method. A **non-goal, not a debt**: RAR's compression has no published specification and the only implementation's licence bars deriving from it, so there is nothing rule 1 permits writing it from | [design/comic-archives.md](../design/comic-archives.md) |
 | A solid RAR entry | `PageDefect::RarEntryRefused` | its dictionary is the entry before it, and this build decompresses neither | — |
 | An encrypted RAR, or one volume of a set | `ArchiveRefusal::Encrypted` / `MultiDisk` | named non-goals; the fragment that happens to be here is not the archive | — |
-| A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `030401` is PPMd and `040202` is bzip2 — so a host can say what to re-pack without | — |
+| A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `030401` is PPMd and `03` the delta filter — so a host can say what to re-pack without | — |
 | A 7z folder that is not a chain of coders | `ArchiveRefusal::NotAZip` | BCJ2 takes four input streams; a reader that walked it as a chain would hand back a quarter of a file | — |
 | An encrypted 7z | `ArchiveRefusal::Encrypted` | AES-256 is a named non-goal, as it is for ZIP | — |
 | A 7z entry whose recorded CRC-32 does not match | `PageDefect::SevenZipEntryRefused` | placeholder page; **this is the check that adjudicates the LZMA decoder**, so it is never tolerated | — |
@@ -343,7 +353,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | Valid archive, no image entries | `ArchiveRefusal::NoImages` | a zero-page open is a failure dressed as a success | — |
 | Past a bound | `ArchiveRefusal::TooLarge` | `MAX_CBZ_PAGES`, `MAX_SYNTHESISED_PDF`, or one of the archive reader's own | — |
 | One encrypted or checksum-failed entry | `PageDefect::EntryRefused(ZipEntryError)` | placeholder page; the page count and every number after it are unchanged | — |
-| Compression method other than stored, deflated or LZMA | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, bzip2, Zstandard — named by code so a refusal says which | — |
+| Compression method other than stored, deflated, LZMA or bzip2 | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, Zstandard — named by code so a refusal says which | — |
+| A randomised bzip2 block | `ZipEntryError::Corrupt` (leaf: `bzip2::Error::Randomised`); in a 7z, `SevenZipEntryError::Bzip2Failed` | written by bzip2 0.9.0 alone, unwritten since 0.9.5 (1999); decoding one needs a 512-entry table this repository has no first-party source for, and no writer on hand can make a fixture | — |
 | A method-14 entry whose APPNOTE 5.8.8 header is damaged | `ZipEntryError::LzmaHeader` | placeholder page; fewer than nine bytes, a properties size other than five, or a property byte outside what LZMA encodes — a wrong offset or a different coder shows here first | — |
 | GIF, WebP, BMP, AVIF entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
 | A JPEG, PNG, TIFF or JPEG 2000 file that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a `Compression` or `PhotometricInterpretation` refused by name, a JPEG 2000 header the decoder refuses or a channel count other than 1, 3 or 4, a raster past the ceiling | [filters](filters.md) |
@@ -385,9 +396,9 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   what to deflate, must give this reader the same five pictures at the same
   sizes. It is a relation between two reads rather than an oracle — nothing
   outside this repository renders any of it ([verification](../verification.md)).
-  The non-ZIPs beside them hold the *same five pages*: four `.cb7`s and the
-  `.cbt` join that identity with `python-lzma.cbz`, so eleven archives must
-  give the same pictures, and the `.cbr` does not — it is four fifths of a comic and is held to
+  The non-ZIPs beside them hold the *same five pages*: five `.cb7`s and the
+  `.cbt` join that identity with `python-lzma.cbz` and `python-bzip2.cbz`, so
+  thirteen archives must give the same pictures, and the `.cbr` does not — it is four fifths of a comic and is held to
   `PageDefect::RarEntryRefused` naming its method instead. 7-Zip's three
   `.cb7`s are one producer asked for three **shapes** — one solid folder, five folders
   (`-ms=off`), and three LZMA2 chunks with a dictionary reset each
@@ -435,6 +446,9 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   the archive's total, and that every entry is either checksummed or refused;
   `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take,
   and `fuzz_targets/tiff.rs` the one a scanned comic reaches. Three of the 32
-  targets.
+  targets. `fuzz_targets/bzip2.rs` covers the bzip2 decoder ZIP method 12 and
+  7z's `040202` share, holding a decode to its ceiling and to the same answer
+  under a roomier one, and the `zip_archive` and `sevenz` targets reach it
+  through their containers (seeds `bzip2-method-12` and `bzip2`).
 - The whole workspace: `cargo test --workspace` is 4 879 passed, 0 failed,
   58 ignored across 218 suites (Windows x86_64, 14 September 2026).

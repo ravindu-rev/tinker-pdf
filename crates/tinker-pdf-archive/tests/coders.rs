@@ -79,6 +79,108 @@ fn py7zr_s_bcj_entries_are_the_files_that_went_in() {
     assert_eq!(names, ["x86.bin", "prose.txt"]);
 }
 
+/// **bzip2 as 7z coder `040202`, from a real writer.**
+///
+/// py7zr's `FILTER_BZIP2`, which is libbzip2 1.0.8 at level 9 through
+/// CPython's `bz2`: one solid folder of `prose.txt`, `runs.bin` and
+/// `x86.bin`, 148 186 bytes in one bzip2 block of six Huffman groups.
+#[test]
+fn py7zr_s_bzip2_entries_are_the_files_that_went_in() {
+    let names = every_entry_is_its_input("py7zr-bzip2.7z");
+    assert_eq!(names, ["prose.txt", "runs.bin", "x86.bin"]);
+}
+
+/// One local file header of a ZIP, walked by hand: the method, the CRC-32,
+/// the name and the compressed bytes. This crate has no ZIP reader and should
+/// not grow one for a test; APPNOTE 4.3.7's thirty bytes are enough to find a
+/// stream, and `tinker-pdf`'s `cbz_real.rs` reads the same archive through the
+/// real one.
+struct Local<'a> {
+    method: u16,
+    crc: u32,
+    name: String,
+    data: &'a [u8],
+}
+
+fn locals(zip: &[u8]) -> Vec<Local<'_>> {
+    let u16le = |at: usize| u16::from_le_bytes([zip[at], zip[at + 1]]);
+    let u32le = |at: usize| u32::from_le_bytes([zip[at], zip[at + 1], zip[at + 2], zip[at + 3]]);
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while zip.get(at..at + 4) == Some(b"PK\x03\x04") {
+        let method = u16le(at + 8);
+        let crc = u32le(at + 14);
+        let size = u32le(at + 18) as usize;
+        let name_len = u16le(at + 26) as usize;
+        let extra_len = u16le(at + 28) as usize;
+        let name = String::from_utf8_lossy(&zip[at + 30..at + 30 + name_len]).into_owned();
+        let start = at + 30 + name_len + extra_len;
+        out.push(Local {
+            method,
+            crc,
+            name,
+            data: &zip[start..start + size],
+        });
+        at = start + size;
+    }
+    out
+}
+
+/// Where the 48-bit block magic `0x314159265359` sits in a bzip2 stream, by
+/// bit. A census rather than a decode: it shares nothing with the decoder, so
+/// the fixture's claim to hold two blocks rests on the bytes and not on the
+/// code it is testing.
+fn block_magics(stream: &[u8]) -> usize {
+    let bits = stream.len() * 8;
+    let bit = |i: usize| (stream[i / 8] >> (7 - i % 8)) & 1;
+    (0..bits.saturating_sub(47))
+        .filter(|&start| {
+            (0..48).all(|k| {
+                let want = (0x3141_5926_5359u64 >> (47 - k)) & 1;
+                u64::from(bit(start + k)) == want
+            })
+        })
+        .count()
+}
+
+/// **bzip2 as ZIP method 12, from a real writer**, decoded here by the same
+/// decoder the facade hands `tinker-pdf-zip` for it.
+///
+/// CPython's `zipfile` at `compresslevel=1`, whose 100 000-byte blocks cut
+/// `prose.txt` in two — asserted by a census of the block magics, so the
+/// fixture cannot quietly lose its second block — and `empty.txt`, which a
+/// ZIP writer still codes into a stream: `BZh1` and the end-of-stream marker
+/// with nothing between. Each stream is held to the file that went in and to
+/// the CRC-32 the ZIP recorded.
+#[test]
+fn cpython_s_method_12_streams_are_the_files_that_went_in() {
+    use tinker_pdf_archive::bzip2;
+    let zip = fixture("python-bzip2.zip");
+    let entries = locals(&zip);
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["prose.txt", "runs.bin", "x86.bin", "empty.txt"]);
+    for entry in &entries {
+        assert_eq!(entry.method, 12, "{}: APPNOTE method 12", entry.name);
+        assert_eq!(&entry.data[..4], b"BZh1", "{}: level 1", entry.name);
+        let want = input(&entry.name);
+        let got = bzip2::decode(
+            entry.data,
+            &bzip2::Limits {
+                max_unpacked: want.len(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", entry.name));
+        assert!(got == want, "{}: the file that went in", entry.name);
+        assert_eq!(tinker_pdf_filters::crc32(&got), entry.crc, "{}", entry.name);
+    }
+    let blocks: Vec<usize> = entries.iter().map(|e| block_magics(e.data)).collect();
+    assert_eq!(
+        blocks,
+        [2, 1, 1, 0],
+        "prose.txt is two blocks at level 1; empty.txt is none"
+    );
+}
+
 /// Reads every entry of a possibly damaged 7z and asserts only what
 /// `hostile_input.rs` asserts of every parser: nothing panics, and a read that
 /// succeeds is the length it declared with the CRC-32 it recorded.
@@ -114,8 +216,22 @@ fn seed(target: &str, name: &str) -> Option<Vec<u8>> {
 /// coder list and bind pairs.
 #[test]
 fn hostile_bytes_through_a_bcj_folder_never_panic() {
-    let Some(original) = seed("sevenz", "bcj-lzma2") else {
-        println!("SKIPPED: fuzz/corpus/sevenz/bcj-lzma2 is not in this tree");
+    sweep("bcj-lzma2", "BCJ");
+}
+
+/// The same sweep over the `bzip2` seed, py7zr's `040202` over 600 bytes of
+/// `runs.bin`: most flips land in a bzip2 block, and reach its tables, its
+/// selectors and its origin pointer before the block CRC can say no.
+#[test]
+fn hostile_bytes_through_a_bzip2_folder_never_panic() {
+    sweep("bzip2", "bzip2");
+}
+
+/// Flips two bits of every byte of a real-writer 7z seed and cuts it at every
+/// length, asserting only what `exercise` does.
+fn sweep(name: &str, what: &str) {
+    let Some(original) = seed("sevenz", name) else {
+        println!("SKIPPED: fuzz/corpus/sevenz/{name} is not in this tree");
         return;
     };
     exercise(&original);
@@ -132,5 +248,5 @@ fn hostile_bytes_through_a_bcj_folder_never_panic() {
         exercise(&original[..cut]);
         tried += 1;
     }
-    println!("RAN: {tried} damaged BCJ archives, none panicked");
+    println!("RAN: {tried} damaged {what} archives, none panicked");
 }

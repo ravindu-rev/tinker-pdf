@@ -131,15 +131,70 @@ pub enum Method {
     /// Anything else — shrink, implode, bzip2, LZMA, Zstandard. Named rather
     /// than collapsed, so a refusal can say which.
     ///
-    /// `Other(14)` is LZMA, and it is the one of these a caller can have read:
-    /// [`Archive::read_with`] takes the decoder this crate does not carry
-    /// (see [`LZMA`]). [`Archive::read`] still refuses it by number.
+    /// `Other(14)` is LZMA and `Other(12)` is bzip2, and they are the ones of
+    /// these a caller can have read: [`Archive::read_coded`] reads their
+    /// framing and takes the decoder this crate does not carry (see [`LZMA`]
+    /// and [`BZIP2`]), and [`Archive::read_with`] does the same for method 14
+    /// alone. [`Archive::read`] still refuses both by number.
     Other(u16),
 }
 
-/// APPNOTE 4.4.5's code for LZMA, the one [`Method::Other`] a caller can have
-/// read through [`Archive::read_with`].
+/// APPNOTE 4.4.5's code for LZMA, one of the [`Method::Other`]s a caller can
+/// have read through [`Archive::read_coded`] or [`Archive::read_with`].
 pub const LZMA: u16 = 14;
+
+/// APPNOTE 4.4.5's code for bzip2, a [`Method::Other`] a caller can have read
+/// through [`Archive::read_coded`].
+pub const BZIP2: u16 = 12;
+
+/// An entry coded with a method whose framing this crate reads and whose
+/// decoder it does not carry, handed to the decoder [`Archive::read_coded`]
+/// takes.
+///
+/// One variant per method this crate knows the *framing* of, because that is
+/// the part that is ZIP's: APPNOTE 5.8.8's header on an LZMA entry is read
+/// here, and a bzip2 entry has no framing at all — its data is a whole bzip2
+/// stream, `BZh` and all. Everything else ZIP asks of an entry — the ceiling,
+/// the total, the produced length and the CRC-32 — is enforced by
+/// [`Archive::read_coded`] around the decoder, exactly as for method 14.
+/// `#[non_exhaustive]`, so a method added later is not a break.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Coded<'a> {
+    /// Method 14, with APPNOTE 5.8.8's header read and checked.
+    Lzma(LzmaStream<'a>),
+    /// Method 12: a bzip2 stream, exactly the entry's compressed size.
+    Bzip2 {
+        /// The entry's data, from the end of its local header to its
+        /// compressed size.
+        stream: &'a [u8],
+        /// The declared uncompressed size, bounded and charged exactly as
+        /// [`LzmaStream::unpacked`] is.
+        unpacked: usize,
+    },
+}
+
+impl Coded<'_> {
+    /// The APPNOTE 4.4.5 method this entry was coded with.
+    #[must_use]
+    pub fn method(&self) -> u16 {
+        match self {
+            Coded::Lzma(_) => LZMA,
+            Coded::Bzip2 { .. } => BZIP2,
+        }
+    }
+
+    /// The declared uncompressed size, already bounded by
+    /// [`Limits::max_entry_bytes`] and charged against
+    /// [`Limits::max_inflated_total`]: the decoder's ceiling.
+    #[must_use]
+    pub fn unpacked(&self) -> usize {
+        match self {
+            Coded::Lzma(stream) => stream.unpacked,
+            Coded::Bzip2 { unpacked, .. } => *unpacked,
+        }
+    }
+}
 
 /// A method-14 entry with APPNOTE 5.8.8's header read and checked, handed to
 /// the decoder a caller passes [`Archive::read_with`].
@@ -377,7 +432,9 @@ pub enum EntryError {
     /// General-purpose bit 0. ZipCrypto and the AES extensions are non-goals.
     Encrypted,
     /// A compression method other than stored or deflated, named — or method
-    /// 14 through [`Archive::read`], which carries no LZMA decoder.
+    /// 14 or 12 through [`Archive::read`], which carries no decoder for
+    /// either, and method 12 through [`Archive::read_with`], whose decoder is
+    /// LZMA's alone.
     UnsupportedMethod(u16),
     /// A method-14 entry whose APPNOTE 5.8.8 header is not one an LZMA
     /// decoder can start from: shorter than its nine bytes, a properties size
@@ -647,9 +704,9 @@ impl<'a> Archive<'a> {
     /// A stored entry is handed back **borrowed** — it is a subslice of the
     /// archive, copied nowhere, which is what keeps gap 29's pass-through a
     /// pass-through. A deflated entry is inflated once, into an owned buffer.
-    /// An LZMA entry is refused here by its number, 14, because this crate
-    /// carries no LZMA decoder; [`Archive::read_with`] is the door that takes
-    /// one.
+    /// An LZMA or bzip2 entry is refused here by its number, 14 or 12, because
+    /// this crate carries no decoder for either; [`Archive::read_coded`] is
+    /// the door that takes one.
     ///
     /// Both are checked the same way before they are returned: the produced
     /// length must be the declared length, and the CRC-32 must be the one the
@@ -662,7 +719,8 @@ impl<'a> Archive<'a> {
     pub fn read(&mut self, index: usize) -> Result<Cow<'a, [u8]>, EntryError> {
         self.read_checked(
             index,
-            None::<fn(&LzmaStream<'a>) -> Result<Vec<u8>, EntryError>>,
+            &[],
+            None::<fn(&Coded<'a>) -> Result<Vec<u8>, EntryError>>,
         )
     }
 
@@ -687,16 +745,50 @@ impl<'a> Archive<'a> {
     where
         F: FnOnce(&LzmaStream<'a>) -> Result<Vec<u8>, EntryError>,
     {
-        self.read_checked(index, Some(lzma))
+        self.read_checked(
+            index,
+            &[LZMA],
+            Some(move |coded: &Coded<'a>| match coded {
+                Coded::Lzma(stream) => lzma(stream),
+                other => Err(EntryError::UnsupportedMethod(other.method())),
+            }),
+        )
     }
 
+    /// Reads one entry, checked, with `decode` as the decoder for every
+    /// method this crate reads the framing of: LZMA (14) and bzip2 (12).
+    ///
+    /// [`Archive::read_with`] generalised, and everything that method says
+    /// holds for each method here: the entry is refused if encrypted or
+    /// unchecksummed, its declared size is bounded by
+    /// [`Limits::max_entry_bytes`], its framing is read (APPNOTE 5.8.8's
+    /// header for LZMA; a bzip2 entry has none) **before** it is charged
+    /// against [`Limits::max_inflated_total`], and whatever the decoder
+    /// returns is held to the declared length and the recorded CRC-32. The
+    /// decoder sees a [`Coded`] and nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`EntryError`], one variant per refusal, including whatever the
+    /// decoder returned.
+    pub fn read_coded<F>(&mut self, index: usize, decode: F) -> Result<Cow<'a, [u8]>, EntryError>
+    where
+        F: FnOnce(&Coded<'a>) -> Result<Vec<u8>, EntryError>,
+    {
+        self.read_checked(index, &[LZMA, BZIP2], Some(decode))
+    }
+
+    /// The one read path: `accepts` is the methods beyond stored and deflated
+    /// the caller supplied a decoder for, and every other is refused by
+    /// number before anything is charged.
     fn read_checked<F>(
         &mut self,
         index: usize,
-        lzma: Option<F>,
+        accepts: &[u16],
+        decode: Option<F>,
     ) -> Result<Cow<'a, [u8]>, EntryError>
     where
-        F: FnOnce(&LzmaStream<'a>) -> Result<Vec<u8>, EntryError>,
+        F: FnOnce(&Coded<'a>) -> Result<Vec<u8>, EntryError>,
     {
         let bytes = self.bytes;
         let entry = self
@@ -709,8 +801,8 @@ impl<'a> Archive<'a> {
             return Err(EntryError::Encrypted);
         }
         let declared_crc = entry.crc.ok_or(EntryError::NoChecksum)?;
-        let lzma = match (entry.method, lzma) {
-            (Method::Other(LZMA), Some(decode)) => Some(decode),
+        let decode = match (entry.method, decode) {
+            (Method::Other(m), Some(decode)) if accepts.contains(&m) => Some(decode),
             (Method::Other(m), _) => return Err(EntryError::UnsupportedMethod(m)),
             _ => None,
         };
@@ -721,10 +813,10 @@ impl<'a> Archive<'a> {
             self.warnings.push(Warning::LocalHeaderDisagrees);
         }
 
-        let data = match (entry.method, lzma) {
+        let data = match (entry.method, decode) {
             (Method::Stored, _) => self.read_stored(&header, &entry)?,
             (Method::Deflated, _) => self.read_deflated(&header, &entry)?,
-            (Method::Other(_), Some(decode)) => self.read_lzma(&header, &entry, decode)?,
+            (Method::Other(m), Some(decode)) => self.read_decoded(&header, &entry, m, decode)?,
             (Method::Other(m), None) => return Err(EntryError::UnsupportedMethod(m)),
         };
 
@@ -840,27 +932,28 @@ impl<'a> Archive<'a> {
         Ok(Cow::Owned(r.data))
     }
 
-    /// Method 14: APPNOTE 5.8.8's header, then the caller's decoder.
+    /// Methods 14 and 12: the method's framing, then the caller's decoder.
     ///
     /// Budgeted the way [`Archive::read_deflated`] is — bounded before it is
     /// believed, charged on what it is *permitted* to produce — with one
-    /// difference in order: the header is read before the charge, because an
-    /// entry refused for its nine header bytes was never permitted to produce
-    /// anything, and charging it would spend the total on a refusal that did no
-    /// work.
+    /// difference in order: the framing is read before the charge, because an
+    /// entry refused for its nine LZMA header bytes was never permitted to
+    /// produce anything, and charging it would spend the total on a refusal
+    /// that did no work.
     ///
     /// The extent is the directory's compressed size and not the stream's own
     /// end. An LZMA stream may carry an end marker (general-purpose bit 1) and
-    /// need not, and the decoder stops at the declared length either way, so
-    /// the compressed size is the one extent both shapes share.
-    fn read_lzma<F>(
+    /// need not, a bzip2 stream ends at a marker padded to a byte, and the
+    /// compressed size is the one extent every shape shares.
+    fn read_decoded<F>(
         &mut self,
         header: &local::LocalHeader,
         entry: &Entry,
+        method: u16,
         decode: F,
     ) -> Result<Cow<'a, [u8]>, EntryError>
     where
-        F: FnOnce(&LzmaStream<'a>) -> Result<Vec<u8>, EntryError>,
+        F: FnOnce(&Coded<'a>) -> Result<Vec<u8>, EntryError>,
     {
         let declared = usize::try_from(entry.uncompressed_size).unwrap_or(usize::MAX);
         if declared >= self.limits.max_entry_bytes {
@@ -875,10 +968,17 @@ impl<'a> Archive<'a> {
             .bytes
             .get(header.data_offset..end)
             .ok_or(EntryError::Truncated)?;
-        let stream = lzma_header(data, declared)?;
+        let coded = match method {
+            LZMA => Coded::Lzma(lzma_header(data, declared)?),
+            BZIP2 => Coded::Bzip2 {
+                stream: data,
+                unpacked: declared,
+            },
+            other => return Err(EntryError::UnsupportedMethod(other)),
+        };
         self.budget.spend(declared)?;
 
-        let out = decode(&stream)?;
+        let out = decode(&coded)?;
         if entry.streamed {
             self.check_descriptor(header.data_offset, n, entry, header.zip64);
         }
