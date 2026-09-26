@@ -220,6 +220,21 @@ datastreams end to end are not a JPEG. It costs less than it sounds, because
 `RowsPerStrip` defaults to 2^32-1 (TIFF 6.0 p.39) and a writer that does not
 set it has written exactly one strip.
 
+**And now four more shapes of TIFF** (tier 4's TIFF row, 26 September 2026).
+A CMYK file takes the same routes into `/DeviceCMYK` — a deflated or LZW strip
+placed, anything else decoded — since §16's samples are ink amounts and that
+is what a CMYK component is. A single-strip JPEG 2000 file (compression 34712)
+is placed as `/JPXDecode` over the strip's own codestream once its header
+agrees with the directory, and a tiled one is decoded. BigTIFF is recognised
+by its own magic and read. Signed and floating-point samples are decoded
+through `tiff.rs`'s stated mapping. And **a TIFF of several directories is
+several pages**: every directory on the `NextIFD` chain that is a page — not a
+reduced-resolution copy (`NewSubfileType` bit 0), not a transparency mask
+(bit 2, or `PhotometricInterpretation` 4) — becomes a page of its own, in
+chain order, each carrying the entry's own name, and each counted against
+`MAX_CBZ_PAGES` and `MAX_SYNTHESISED_PDF` exactly like an entry of its own.
+`tiff.rs`'s 64-directory bound and cycle guard stand in front of the walk.
+
 One thing the TIFF pass-through gives up is written down rather than absorbed.
 A PNG carries a CRC-32 on every chunk, so the pass-through can check the bytes
 it copies; **a TIFF carries no checksum at all**, so `complete()` on the placed
@@ -430,7 +445,13 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   recipe pixel for pixel; a transparent index arrives as a one-index
   colour-key `/Mask` with no `/SMask`, and the page shows through exactly the
   pixels the recipe marked; a local table on part of the screen arrives as
-  RGB over an `/SMask`.
+  RGB over an `/SMask`. The TIFF pages: a four-directory file is three pages
+  (the thumbnail skipped) that render to the recipe and all carry the entry's
+  name, and under a page cap of two it is the cap's own refusal; CMYK pages
+  are `/DeviceCMYK` holding the recipe's inks whether decoded or placed; a
+  one-strip JPEG 2000 TIFF is `/JPXDecode` and a tiled one `/FlateDecode`,
+  both rendering to the recipe; signed, float and BigTIFF pages are their
+  pictures.
 - `crates/tinker-pdf/tests/cbz_validated.rs` — the synthesised document and
   the same document saved back are both held to the strict validator, and the
   pages are read out of the catalog's own `/Kids` rather than through the

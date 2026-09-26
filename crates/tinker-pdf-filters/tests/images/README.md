@@ -1,6 +1,7 @@
 # Container images somebody else encoded
 
-The decoders the tier-4 archive row added — BMP and GIF — are held here to
+The decoders the tier-4 archive row added — BMP and GIF — and the TIFF
+decoder's additions from its TIFF row are held here to
 pictures this repository **authored** and a **third-party encoder** wrote.
 Ruling 13's rule for a lossless codec is that the expected output is the
 generator's input, never another decoder's output, so the device is the one
@@ -24,6 +25,7 @@ the committed files are the record.
 | `bmpsuite/*.bmp` | **bmpsuite 2.8**, Jason Summers' generator, at [`jsummers/bmpsuite`](https://github.com/jsummers/bmpsuite) `555e43a` (2023-11-28) | `make` with gcc 13.3.0, then `make check`, which verified every generated file against upstream's own `checksums` | 26 September 2026 |
 | `gif/pillow-*.gif` | **Pillow 12.3.0** (`PIL.GifImagePlugin`) | `python3 make-images.py` | 26 September 2026 |
 | `gif/omggif-*.gif` | **omggif 1.0.10** (Dean McNamee, MIT, from npm), Node v22.22.2 | `npm install omggif@1.0.10`, then `node make-gif.js` | 26 September 2026 |
+| `tiff/tifffile-*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib; JPEG 2000 through OpenJPEG 2.5.4, `level=0`, lossless) | `python3 make-images.py` | 26 September 2026 |
 
 Pillow's BMP writer produces `BITMAPINFOHEADER`, `BI_RGB`, bottom-up files at
 1, 8, 24 and 32 bits — and at 32 it puts an RGBA image's alpha into the byte
@@ -47,6 +49,18 @@ screen, over the global table and over a local one with a transparent index.
 It does not interlace, which is why the interlaced file is Pillow's. Every
 test that depends on one of those features reads the descriptor byte that
 says the fixture has it, rather than trusting either encoder's documentation.
+
+tifffile writes each TIFF shape the TIFF row added: CMYK (uncompressed and
+deflated), signed samples at 8, 16 (big-endian) and 32 bits (with
+`Predictor` 2), IEEE floats at 16 (big-endian), 32 (with `Predictor` 3) and
+64 bits, BigTIFF in both byte orders, JPEG 2000 as one strip and as a padded
+16 x 16 tile grid, and four directories with a reduced-resolution copy among
+them. The float recipe is whole 128ths, which every width holds exactly, so
+no encoder's rounding stands between the recipe and the file; a signed or
+float sample's expected intensity is the recipe through the mapping
+`tiff.rs`'s module note states, recomputed in the test. For the lossless JPEG
+2000 files the expected answer is the generator's input, as for every other
+file here.
 
 ## bmpsuite, and what it can prove
 

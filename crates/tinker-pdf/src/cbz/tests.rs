@@ -184,6 +184,9 @@ fn the_first_bytes_decide_and_the_extension_does_not() {
     );
     assert_eq!(image_format(b"II\x2a\x00\x08\x00"), Some(ImageFormat::Tiff));
     assert_eq!(image_format(b"MM\x00\x2a\x00\x00"), Some(ImageFormat::Tiff));
+    // BigTIFF, both orders: magic 43 behind the same two bytes.
+    assert_eq!(image_format(b"II\x2b\x00\x08\x00"), Some(ImageFormat::Tiff));
+    assert_eq!(image_format(b"MM\x00\x2b\x00\x08"), Some(ImageFormat::Tiff));
     assert_eq!(
         image_format(&[0xFF, 0x4F, 0xFF, 0x51]),
         Some(ImageFormat::Jpeg2000)

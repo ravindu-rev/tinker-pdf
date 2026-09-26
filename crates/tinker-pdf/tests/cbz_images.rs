@@ -1,4 +1,6 @@
-//! Comic pages in the formats that have no pass-through route: BMP and GIF.
+//! Comic pages in the formats that have no pass-through route — BMP and GIF —
+//! and the TIFF shapes the archive row added: CMYK, signed and floating-point
+//! samples, JPEG 2000 strips and directories after the first.
 //!
 //! `tinker-pdf-filters/tests/image_fixtures.rs` holds each decoder to the
 //! pixels a third-party encoder was handed. This file holds the **page** to
@@ -14,7 +16,8 @@ mod cbz_support;
 use std::path::Path;
 
 use cbz_support::{zip, Damage, ZipFile};
-use tinker_pdf::{Bitmap, Document, PageDefect, RenderOptions};
+use tinker_pdf::cbz::{self, Limits};
+use tinker_pdf::{ArchiveRefusal, Bitmap, Container, Document, PageDefect, RenderOptions};
 use tinker_pdf_cos::{ObjRef, Object};
 
 /// The pictures `tinker-pdf-filters/tests/images/make-images.py` encodes.
@@ -29,6 +32,10 @@ mod recipe {
 
     pub fn alpha(x: u32, y: u32) -> u8 {
         ((x * 13 + y * 19 + 5) % 256) as u8
+    }
+
+    pub fn grey(x: u32, y: u32) -> u8 {
+        ((x * 5 + y * 9) % 256) as u8
     }
 
     pub fn index(x: u32, y: u32, n: u32) -> u32 {
@@ -265,4 +272,190 @@ fn gif_pages_are_the_pictures_they_were_made_from() {
         })
         .collect();
     assert_eq!(alpha, want);
+}
+
+/// The name a page's image XObject gives its `/Filter`.
+fn filter_of(document: &Document, page: usize) -> Option<String> {
+    let cos = document.cos();
+    let dict = image_dict(document, page);
+    let filter = cos.resolve_key(&dict, cos.intern(b"Filter"));
+    let name = filter.as_name()?;
+    Some(String::from_utf8_lossy(&cos.name_bytes(name)?).into_owned())
+}
+
+/// The name of a page's image `/ColorSpace`, when it is a name.
+fn space_of(document: &Document, page: usize) -> Option<String> {
+    let cos = document.cos();
+    let dict = image_dict(document, page);
+    let space = cos.resolve_key(&dict, cos.intern(b"ColorSpace"));
+    let name = space.as_name()?;
+    Some(String::from_utf8_lossy(&cos.name_bytes(name)?).into_owned())
+}
+
+/// A multi-page TIFF is one page per directory that is a page: grey, RGB and
+/// the grey inverted, with the reduced-resolution copy tifffile was told to
+/// write between them skipped. Every page carries the entry's own name, in
+/// directory order.
+#[test]
+fn a_multipage_tiff_is_a_page_per_directory() {
+    let document = open(&[
+        ("a.tif", fixture("tiff/tifffile-multipage.tif")),
+        // A page after it, which must keep its place after three.
+        ("b.gif", fixture("gif/pillow-palette-13x7.gif")),
+    ]);
+    assert_eq!(
+        document.page_count(),
+        4,
+        "three directories that are pages, then b"
+    );
+    assert_no_placeholders(&document);
+    let names: Vec<String> = document
+        .archive()
+        .expect("a report")
+        .pages()
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(names, ["a.tif", "a.tif", "a.tif", "b.gif"]);
+
+    let grey = |x: u32, y: u32| {
+        let v = recipe::grey(x, y);
+        [v, v, v]
+    };
+    let inverted = |x: u32, y: u32| {
+        let v = 255 - recipe::grey(x, y);
+        [v, v, v]
+    };
+    for (page, expect) in [
+        (0u32, &grey as &dyn Fn(u32, u32) -> [u8; 3]),
+        (1, &recipe::rgb),
+        (2, &inverted),
+    ] {
+        let bitmap = render(&document, page);
+        assert_eq!((bitmap.width, bitmap.height), (13, 7), "page {page}");
+        for y in 0..7 {
+            for x in 0..13 {
+                assert_eq!(
+                    rendered_rgb(&bitmap, x, y),
+                    expect(x, y),
+                    "page {page} ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+/// Every directory is a page the caps count, so one entry cannot page past
+/// `max_pages`: three directories under a cap of two is the cap's own refusal.
+#[test]
+fn a_multipage_tiff_counts_against_the_page_cap_page_by_page() {
+    let archive = zip(
+        &[ZipFile::stored(
+            "a.tif",
+            &fixture("tiff/tifffile-multipage.tif"),
+        )],
+        Damage::None,
+    );
+    let tight = Limits {
+        max_pages: 2,
+        ..Limits::default()
+    };
+    assert!(matches!(
+        cbz::synthesise(Container::Zip, &archive, &tight),
+        Err(ArchiveRefusal::TooLarge)
+    ));
+    let enough = Limits {
+        max_pages: 3,
+        ..Limits::default()
+    };
+    let (_, report) = cbz::synthesise(Container::Zip, &archive, &enough).expect("fits");
+    assert_eq!(report.pages().len(), 3);
+}
+
+/// CMYK, uncompressed (decoded) and deflated (placed as its own bytes): both
+/// are `/DeviceCMYK` images holding exactly the recipe's four inks.
+#[test]
+fn cmyk_tiff_pages_are_device_cmyk_ink_for_ink() {
+    let document = open(&[
+        ("p1.tif", fixture("tiff/tifffile-cmyk-13x7.tif")),
+        ("p2.tif", fixture("tiff/tifffile-cmyk-deflate-13x7.tif")),
+    ]);
+    assert_no_placeholders(&document);
+    let cos = document.cos();
+    let want: Vec<u8> = (0..7)
+        .flat_map(|y| {
+            (0..13).flat_map(move |x| {
+                let [c, m, ye] = recipe::rgb(x, y);
+                [c, m, ye, recipe::alpha(x, y)]
+            })
+        })
+        .collect();
+    for page in 0..2 {
+        assert_eq!(space_of(&document, page).as_deref(), Some("DeviceCMYK"));
+        assert_eq!(filter_of(&document, page).as_deref(), Some("FlateDecode"));
+        let samples = cos
+            .stream_decoded(page_image(&document, page))
+            .expect("decodes");
+        assert_eq!(samples, want, "page {page}");
+    }
+}
+
+/// A one-strip JPEG 2000 TIFF is placed as `/JPXDecode` over the strip's own
+/// codestream and renders to the recipe; a tiled one is decoded and does too.
+#[test]
+fn jpeg_2000_tiff_pages_are_placed_or_decoded_and_are_the_recipe() {
+    let document = open(&[
+        ("p1.tif", fixture("tiff/tifffile-jpeg2000-rgb-13x7.tif")),
+        ("p2.tif", fixture("tiff/tifffile-jpeg2000-tiled-40x24.tif")),
+    ]);
+    assert_no_placeholders(&document);
+    assert_eq!(filter_of(&document, 0).as_deref(), Some("JPXDecode"));
+    assert_eq!(filter_of(&document, 1).as_deref(), Some("FlateDecode"));
+    for (page, (w, h)) in [(0u32, (13, 7)), (1, (40, 24))] {
+        let bitmap = render(&document, page);
+        assert_eq!((bitmap.width, bitmap.height), (w, h));
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(
+                    rendered_rgb(&bitmap, x, y),
+                    recipe::rgb(x, y),
+                    "page {page} ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+/// Signed and floating-point pages arrive as the mapped samples — the signed
+/// eight-bit one exactly the grey recipe, the float one sixteen bits deep —
+/// and a BigTIFF page is the RGB recipe.
+#[test]
+fn signed_float_and_bigtiff_pages_are_their_pictures() {
+    let document = open(&[
+        ("p1.tif", fixture("tiff/tifffile-int8-13x7.tif")),
+        (
+            "p2.tif",
+            fixture("tiff/tifffile-float32-predictor3-13x7.tif"),
+        ),
+        ("p3.tif", fixture("tiff/tifffile-bigtiff-mm-rgb-13x7.tif")),
+    ]);
+    assert_no_placeholders(&document);
+    let cos = document.cos();
+    let grey: Vec<u8> = (0..7)
+        .flat_map(|y| (0..13).map(move |x| recipe::grey(x, y)))
+        .collect();
+    assert_eq!(
+        cos.stream_decoded(page_image(&document, 0))
+            .expect("decodes"),
+        grey
+    );
+    let dict = image_dict(&document, 1);
+    let bits = cos.resolve_key(&dict, cos.intern(b"BitsPerComponent"));
+    assert_eq!(bits.as_int(), Some(16));
+    let bitmap = render(&document, 2);
+    for y in 0..7 {
+        for x in 0..13 {
+            assert_eq!(rendered_rgb(&bitmap, x, y), recipe::rgb(x, y), "({x}, {y})");
+        }
+    }
 }

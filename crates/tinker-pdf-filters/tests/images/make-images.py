@@ -13,6 +13,7 @@
 #   Pillow 12.3.0        pip install --user pillow
 #   imagecodecs 2026.3.6 pip install --user imagecodecs  (its BMP writer)
 #   numpy 2.4.6          what imagecodecs takes its arrays as
+#   tifffile 2026.3.3    pip install --user tifffile
 #
 # `make-gif.js` beside this writes the GIFs Pillow cannot: Pillow's GIF
 # writer always codes with 256 roots, and a GIF's LZW root size is the thing
@@ -113,3 +114,96 @@ second = palette_image(W, H, 256).transpose(Image.Transpose.FLIP_LEFT_RIGHT)
 palette_image(W, H, 256).save(
     "gif/pillow-animated-13x7.gif", save_all=True, append_images=[second], duration=100, loop=0
 )
+
+
+# ---- TIFF --------------------------------------------------------------------
+#
+# tifffile 2026.3.3 over imagecodecs 2026.3.6's codecs (zlib, and JPEG 2000
+# through OpenJPEG 2.5.4). Each file exercises one of the archive row's TIFF
+# additions; `tests/image_fixtures.rs` reads the tag that says so before it
+# reads a pixel.
+
+import tifffile
+
+TW, TH = 13, 7
+
+
+def plane(f, dtype):
+    return np.array([[f(x, y) for x in range(TW)] for y in range(TH)], dtype=dtype)
+
+
+def cmyk_array():
+    a = np.zeros((TH, TW, 4), dtype=np.uint8)
+    for y in range(TH):
+        for x in range(TW):
+            a[y, x] = rgb(x, y) + (alpha(x, y),)
+    return a
+
+
+# PhotometricInterpretation 5, InkSet 1: uncompressed (decoded) and deflated
+# (placed as its own bytes). Cyan, magenta, yellow are the RGB recipe and
+# black is the alpha recipe.
+tifffile.imwrite("tiff/tifffile-cmyk-13x7.tif", cmyk_array(), photometric="separated")
+tifffile.imwrite(
+    "tiff/tifffile-cmyk-deflate-13x7.tif", cmyk_array(), photometric="separated",
+    compression="zlib",
+)
+
+# SampleFormat 2: signed samples, at 8 bits (the grey recipe moved down by
+# 128), 16 bits big-endian, and 32 bits with horizontal differencing.
+tifffile.imwrite("tiff/tifffile-int8-13x7.tif", plane(lambda x, y: grey(x, y) - 128, np.int8))
+tifffile.imwrite(
+    "tiff/tifffile-int16-13x7.tif",
+    plane(lambda x, y: (x * 1000 + y * 7777) % 65536 - 32768, np.int16),
+    byteorder=">",
+)
+tifffile.imwrite(
+    "tiff/tifffile-int32-predictor-13x7.tif",
+    plane(lambda x, y: (x * 123456789 + y * 987654321) % 4294967296 - 2147483648,
+          np.int64).astype(np.int32),
+    predictor=True, compression="zlib",
+)
+
+
+# SampleFormat 3: floats around [0, 1] and past both ends, at 32 bits with
+# Predictor 3, at 16 bits big-endian, and at 64 bits. Every value is a whole
+# number of 128ths below 2, which all three widths hold exactly, so no
+# encoder's rounding stands between the recipe and the file.
+def float_value(x, y):
+    return (3 * grey(x, y) - 64) / 128
+
+
+tifffile.imwrite(
+    "tiff/tifffile-float32-predictor3-13x7.tif", plane(float_value, np.float32),
+    predictor=True, compression="zlib",
+)
+tifffile.imwrite("tiff/tifffile-float16-13x7.tif", plane(float_value, np.float16), byteorder=">")
+tifffile.imwrite("tiff/tifffile-float64-13x7.tif", plane(float_value, np.float64))
+
+# BigTIFF, both byte orders.
+rgb_array = np.array([[rgb(x, y) for x in range(TW)] for y in range(TH)], dtype=np.uint8)
+tifffile.imwrite("tiff/tifffile-bigtiff-rgb-13x7.tif", rgb_array, bigtiff=True, photometric="rgb")
+tifffile.imwrite(
+    "tiff/tifffile-bigtiff-mm-rgb-13x7.tif", rgb_array, bigtiff=True, photometric="rgb",
+    byteorder=">",
+)
+
+# Compression 34712: one strip (placed as /JPXDecode) and tiled (decoded),
+# both lossless, which is what OpenJPEG's `level=0` asks for.
+tifffile.imwrite(
+    "tiff/tifffile-jpeg2000-rgb-13x7.tif", rgb_array, photometric="rgb",
+    compression="jpeg2000", compressionargs={"level": 0},
+)
+big_rgb = np.array([[rgb(x, y) for x in range(40)] for y in range(24)], dtype=np.uint8)
+tifffile.imwrite(
+    "tiff/tifffile-jpeg2000-tiled-40x24.tif", big_rgb, photometric="rgb", tile=(16, 16),
+    compression="jpeg2000", compressionargs={"level": 0},
+)
+
+# Four directories: grey, RGB, a reduced-resolution copy (NewSubfileType 1),
+# and the grey recipe inverted. A comic pages the three that are pages.
+with tifffile.TiffWriter("tiff/tifffile-multipage.tif") as tw:
+    tw.write(plane(grey, np.uint8), photometric="minisblack")
+    tw.write(rgb_array, photometric="rgb")
+    tw.write(plane(grey, np.uint8)[::2, ::2], photometric="minisblack", subfiletype=1)
+    tw.write(plane(lambda x, y: 255 - grey(x, y), np.uint8), photometric="minisblack")

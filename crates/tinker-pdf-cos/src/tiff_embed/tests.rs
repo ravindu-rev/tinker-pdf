@@ -621,12 +621,47 @@ fn a_file_that_is_not_a_tiff_is_refused_rather_than_routed() {
         tiff_image(b"not a tiff", &CAP).err(),
         Some(TiffError::NotTiff)
     ));
-    // A directory that is fine and a photometric that is not.
-    let file = build(base(4, 4, 8, 4, 5, 1), vec![vec![0; 64]]);
+    // A directory that is fine and a photometric that is not: 8, CIELab. This
+    // was 5 until CMYK was read.
+    let file = build(base(4, 4, 8, 3, 8, 1), vec![vec![0; 48]]);
     assert!(matches!(
         tiff_image(&file, &CAP).err(),
-        Some(TiffError::UnsupportedPhotometric(5))
+        Some(TiffError::UnsupportedPhotometric(8))
     ));
+}
+
+/// A CMYK strip under a coding with a `/Filter` name is placed into
+/// `/DeviceCMYK` as its own bytes, and an uncompressed one is decoded into the
+/// same space — ink amounts both ways, nothing converted.
+#[test]
+fn a_cmyk_tiff_is_placed_or_decoded_into_device_cmyk() {
+    let samples: Vec<u8> = (0..4 * 4 * 4).map(|i| (i * 7) as u8).collect();
+    let raw = build(base(4, 4, 8, 4, 5, 1), vec![samples.clone()]);
+    let decoded = tiff_image(&raw, &CAP).expect("decodes");
+    assert_eq!(decoded.route(), TiffRoute::Decoded);
+    let ImageData::Compressed(image) = decoded.image() else {
+        panic!("compressed");
+    };
+    assert_eq!(image.color_space, ImageColorSpace::DeviceCmyk);
+    assert_eq!(
+        tinker_pdf_filters::flate_decode(image.data, &CAP, None)
+            .expect("inflates")
+            .data,
+        samples
+    );
+
+    let deflated = build(
+        base(4, 4, 8, 4, 5, 8),
+        vec![tinker_pdf_filters::zlib_compress(&samples)],
+    );
+    let placed = tiff_image(&deflated, &CAP).expect("placed");
+    assert_eq!(placed.route(), TiffRoute::Placed);
+    let ImageData::Compressed(image) = placed.image() else {
+        panic!("compressed");
+    };
+    assert_eq!(image.color_space, ImageColorSpace::DeviceCmyk);
+    let (dict, _) = image_stream(&write_one(&placed));
+    assert!(dict.contains("/DeviceCMYK"), "{dict}");
 }
 
 /// The pass-through builds no raster, so the caller's ceiling has nothing to

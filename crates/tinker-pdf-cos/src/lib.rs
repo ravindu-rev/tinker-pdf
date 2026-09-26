@@ -153,7 +153,7 @@ pub use sign::{
 };
 pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
 pub use text_string::{decode_text_string, encode_text_string, parse_date, Date};
-pub use tiff_embed::{tiff_image, TiffImageData, TiffRoute};
+pub use tiff_embed::{tiff_image, tiff_image_directory, TiffImageData, TiffRoute};
 pub use trees::{
     name_tree, name_tree_lookup, number_tree, write_name_tree, write_number_tree, TreeWriteError,
 };

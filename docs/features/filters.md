@@ -539,7 +539,30 @@ directory with a cycle guard on the `NextIFD` chain, strips and tiles
 (including edge tiles stored full size and padded), `PlanarConfiguration` 2,
 `PhotometricInterpretation` 0 through 3 with the inversion 0 asks for, and a
 `ColorMap` transposed out of p.23's three consecutive arrays into the RGB
-triples every other palette in this engine is. Output is
+triples every other palette in this engine is.
+
+**The archive row widened it on 26 September 2026**, and each addition is
+its own decision in `tiff.rs`'s module note. `PhotometricInterpretation` 5 with
+`InkSet` 1 is read as `TiffColour::Cmyk` — ink amounts with zero as none, which
+is what `/DeviceCMYK` means by a component, so nothing is converted; an Adobe
+inverted CMYK JPEG strip is un-inverted to match. **BigTIFF** is read by the
+same walk as the classic layout, with eight-byte counts and offsets and
+twenty-byte entries chosen once at the header. **`Compression` 34712** is a JPEG
+2000 codestream per strip or tile, decoded by `jpx` — and placed as
+`/JPXDecode` by `tiff_image` when it is one strip whose header agrees with the
+directory. **`tiff_scan_directory`** scans any directory on the chain and
+carries its `NewSubfileType`, so a caller that pages can tell a page from a
+thumbnail or a mask. **`SampleFormat` 2 and 3 and `Predictor` 3** needed a
+mapping from a number to an intensity, and it is stated rather than inferred:
+§19 (p.80) makes the default `SMinSampleValue`/`SMaxSampleValue` "the full
+range of the data type", so a signed integer is mapped linearly from its type's
+range — an offset by half of it — and a float is read as the intensity itself
+on [0, 1], the range ISO 32000-2 8.6.4 gives a device colour component, and
+clamped; explicit `SMinSampleValue`/`SMaxSampleValue` override either.
+Samples wider than eight bits leave at sixteen, Table 89's widest. `Predictor`
+3 is Photoshop TIFF Technical Note 3's byte-plane predictor and is undone into
+big-endian samples whatever the file's own order; `Predictor` 2 now reaches 32
+bits as well. Output is
 [`PngImage`]'s shape deliberately — grey, grey+alpha, RGB or RGBA at 8 or 16
 bits — so a consumer that splits an alpha channel into an `/SMask` learns one
 layout rather than two. `tiff_scan` is `png_scan`'s counterpart: it walks the
@@ -708,11 +731,14 @@ make both enums wrong.
 | JPEG lossless frames: SOF3, SOF7, SOF11, SOF15 | `JpegError::Lossless` | Annex H's predictive coder shares nothing with the DCT path — no quantisation, no blocks, no transform. Both entropy coders are on this row because the predictor is what is missing either way: `qm.rs` decodes SOF11's and SOF15's decisions perfectly well with nothing to hand them to. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
 | JPEG differential frames: SOF5, SOF6, SOF13, SOF14 | `JpegError::Differential` | Annex J's hierarchical progression, where a frame codes the difference from an upsampled earlier one. Same shape as the row above: the entropy coder is not the gap. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
 | JPEG precision other than 8 or 12 bits | `JpegError::UnsupportedPrecision` | B.2.2 allows 8 in a baseline frame and 8 or 12 elsewhere; anything else is a header this build will not guess at | [ROADMAP](../ROADMAP.md) |
-| TIFF `PhotometricInterpretation` 4, 5, 8, 32803, and 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | A CMYK or CIELab image read as RGB is not a degraded picture, it is a different one; YCbCr is read only where a JPEG has already undone it | — |
-| TIFF `Compression` 6 (old-style JPEG), 34712 (JPEG 2000) and the rest | `TiffError::UnsupportedCompression` | Named by code, so a refusal says which | — |
-| TIFF `SampleFormat` 2 or 3 (signed, IEEE float) | `TiffError::UnsupportedSampleFormat` | A different number line; reading it as unsigned produces a picture rather than a refusal | — |
-| TIFF `Predictor` 3, `PlanarConfiguration` past 2, `BitsPerSample` outside {1,2,4,8,16}, two depths in one image | `TiffError::UnsupportedPredictor`, `UnsupportedPlanarConfiguration`, `UnsupportedBitDepth`, `UnequalBitDepths` | Nothing in the sample path carries two depths at once, and half-expanding one is worse than saying so | — |
-| BigTIFF (magic 43) | `TiffError::BigTiff` | Eight-byte offsets and a different directory layout wearing the same two order bytes | — |
+| TIFF `PhotometricInterpretation` 4 (transparency mask) — **permanent** | `TiffError::UnsupportedPhotometric` | p.37: the image "is used to define an irregularly shaped region of another image in the same TIFF file". It is not a picture; drawn alone it is a black-and-white stencil of one. The comic path skips such a directory rather than paging it | — |
+| TIFF `PhotometricInterpretation` 32803 (colour filter array) — **permanent** | `TiffError::UnsupportedPhotometric` | TIFF/EP's raw sensor mosaic. Turning it into a picture is demosaicing, which is an algorithm chosen, not a format read, and no data adjudicates one choice over another | — |
+| TIFF `PhotometricInterpretation` 8 (CIELab), and 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | A CIELab image read as RGB is a different picture; placing it as PDF's `/Lab` needs a `/Decode` and a `/Range` the embed door does not carry, and converting it is the colour crate's floating-point transform rather than an exact mapping — owed on the ROADMAP. YCbCr is read only where a JPEG has already undone it | [ROADMAP](../ROADMAP.md) |
+| TIFF `PhotometricInterpretation` 5 with `InkSet` other than 1 | `TiffError::UnsupportedInkSet` | §16: separated inks that are not CMYK, which no device space names | — |
+| TIFF `Compression` 6 (old-style JPEG) — **permanent** — and the rest | `TiffError::UnsupportedCompression` | TIFF Technical Note 2 withdrew compression 6 because its own definition cannot be implemented consistently; every reader's handling is a guess at what one writer meant. The rest are named by code, so a refusal says which | — |
+| TIFF `SampleFormat` outside 1–4, two formats in one image, or signed/float on a palette or a JPEG, JPEG 2000 or fax coding | `TiffError::UnsupportedSampleFormat` | Nothing in the sample path carries two number lines at once, and a coder's output is unsigned whatever the tag says | — |
+| TIFF `Predictor` 3 on non-float samples or 2 on float ones, `PlanarConfiguration` past 2, a `BitsPerSample` its `SampleFormat` cannot carry, two depths in one image | `TiffError::UnsupportedPredictor`, `UnsupportedPlanarConfiguration`, `UnsupportedBitDepth`, `UnequalBitDepths` | Technical Note 3's predictor is defined for floating point only; nothing in the sample path carries two depths at once | — |
+| A magic-43 header whose offset size is not 8 | `TiffError::BigTiff` | BigTIFF is read; a header claiming it with any other offset width is not one | — |
 | TIFF past `MAX_TIFF_SAMPLES`, `MAX_TIFF_SEGMENTS` or the caller's ceiling | `TiffError::TooManySamples`, `TooManySegments`, `ExceedsOutputLimit` | Width, height and `StripOffsets`'s count are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 | BMP `BI_JPEG` (4) and `BI_PNG` (5), the `BI_CMYK` family (11 to 13), and OS/2 2.x's Huffman 1D and RLE24 under its own numbers 3 and 4 | `BmpError::UnsupportedCompression` | Named by the number the file used. The first two are a whole JPEG or PNG inside the bitmap, which the documentation restricts to printer device contexts; the CMYK family is a print-spooler format; OS/2's two have no writer on any machine this repository has seen | — |
 | BMP at 64 bits a pixel, or a depth its compression cannot carry | `BmpError::UnsupportedBitDepth` | 64 is scRGB fixed point, a number nothing here maps to a display value; `BI_RLE8` at anything but 8 is not RLE8 | — |
@@ -850,6 +876,15 @@ wants the reason to survive it.
   pure cyan is `(0, 255, 255)` because 8.6.4.4 says so, and sRGB's green
   primary at its published CIELAB coordinates comes back green rather than the
   mauve its encoded bytes are when read as RGB.
+- `tests/image_fixtures.rs` holds the TIFF additions to **tifffile 2026.3.3**'s
+  files from authored pixels: CMYK uncompressed and deflated, signed 8/16/32
+  (the last with 32-bit horizontal differencing), float 16/32/64 (the 32 under
+  `Predictor` 3) over values that are whole 128ths so every width holds them
+  exactly, BigTIFF in both byte orders, JPEG 2000 as one strip and as a
+  padded 16 x 16 tile grid (OpenJPEG 2.5.4, lossless), and a four-directory
+  file with a reduced-resolution copy in it. Each test reads the tag proving
+  its fixture has the feature before it compares a pixel, and every expected
+  number is the recipe through the stated mapping.
 - In-crate: `tiff.rs` is held to files this repository writes byte by byte
   from TIFF 6.0's own field layouts, and to coded strips written from the
   coding specification that owns each — a real T.4/T.6 coder for compressions

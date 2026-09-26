@@ -32,14 +32,16 @@
 //! document's life. A JPEG is placed verbatim ([`ImageData::Jpeg`]) and a PNG
 //! goes through [`png_image`], whose default route copies the IDAT into a
 //! `/FlateDecode` stream with `/Predictor 15` and never builds a raster. A
-//! TIFF goes through [`tiff_image`], which does the same thing for four more
-//! codings: a G3 or G4 strip is a `/CCITTFaxDecode` stream, an LZW strip is a
-//! `/LZWDecode` one, a DEFLATE strip is `/FlateDecode`, and a JPEG strip is
-//! `/DCTDecode` — so a scanned comic costs its own bytes rather than its own
-//! pixels, the same as every other entry here. A JPEG 2000 file, JP2 or bare
-//! codestream, is the simplest of them: it *is* a `/JPXDecode` stream (7.4.9
-//! takes both shapes), so its bytes are placed whole and only its header is
-//! read, for the page's size.
+//! TIFF goes through [`tiff_image_directory`], which does the same thing for
+//! five more codings: a G3 or G4 strip is a `/CCITTFaxDecode` stream, an LZW
+//! strip is a `/LZWDecode` one, a DEFLATE strip is `/FlateDecode`, a JPEG
+//! strip is `/DCTDecode` and a JPEG 2000 strip is `/JPXDecode` — so a scanned
+//! comic costs its own bytes rather than its own pixels, the same as every
+//! other entry here. A TIFF of several directories — a scanned chapter in one
+//! file — is several pages, one per directory that is a page. A JPEG 2000
+//! file, JP2 or bare codestream, is the simplest of them: it *is* a
+//! `/JPXDecode` stream (7.4.9 takes both shapes), so its bytes are placed
+//! whole and only its header is read, for the page's size.
 //! Decoding every page instead would cost *w x h x 3* each — about 3.6 GB for
 //! a 200-page archive at 2000 x 3000 — and the failure would arrive only at
 //! the size that matters.
@@ -85,10 +87,10 @@ use std::cmp::Ordering;
 
 use tinker_pdf_archive::{rar, sevenz, tar};
 use tinker_pdf_cos::{
-    bmp_image, gif_image, png_image, tiff_image, CompressedImage, DocumentBuilder, ImageColorSpace,
-    ImageData, ImageFilter, PngImageData, RasterImageData, TiffImageData,
+    bmp_image, gif_image, png_image, tiff_image_directory, CompressedImage, DocumentBuilder,
+    ImageColorSpace, ImageData, ImageFilter, PngImageData, RasterImageData, TiffImageData,
 };
-use tinker_pdf_filters::{JpxHeader, Limits as FilterLimits};
+use tinker_pdf_filters::{tiff_scan_directory, JpxHeader, Limits as FilterLimits, TiffError};
 use tinker_pdf_zip::{Archive, ArchiveError};
 
 pub use tinker_pdf_archive::tar::{
@@ -543,9 +545,10 @@ pub enum ImageFormat {
     /// `/Filter` reads a bottom-up, four-byte-padded pixel array or either of
     /// its RLE codings, and kept `/Indexed` when the file was.
     Bmp,
-    /// TIFF, either byte order. Read — see [`tiff_image`], which places a
-    /// single-strip G3, G4, LZW, DEFLATE or JPEG file's own bytes and decodes
-    /// the rest.
+    /// TIFF, either byte order, classic or BigTIFF. Read — see
+    /// `tinker_pdf_cos::tiff_image`, which places a single-strip G3, G4, LZW,
+    /// DEFLATE, JPEG or JPEG 2000 file's own bytes and decodes the rest — and
+    /// paged: every directory that is a page is a page of its own.
     Tiff,
     /// AVIF. Not read here.
     Avif,
@@ -1502,7 +1505,13 @@ pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     if matches!(bytes.get(4..12), Some(b"ftypavif" | b"ftypavis")) {
         return Some(ImageFormat::Avif);
     }
-    if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"MM\x00\x2A") {
+    // TIFF 6.0's magic 42, and BigTIFF's 43 in front of the same two order
+    // bytes.
+    if bytes.starts_with(b"II\x2A\x00")
+        || bytes.starts_with(b"MM\x00\x2A")
+        || bytes.starts_with(b"II\x2B\x00")
+        || bytes.starts_with(b"MM\x00\x2B")
+    {
         return Some(ImageFormat::Tiff);
     }
     // 15444-1 I.5.1's twelve-byte JP2 signature box, and the bare SOC/SIZ pair
@@ -1949,18 +1958,19 @@ fn pages_from_reader(
         if comic_info::is_comic_info(&entry.name) {
             continue;
         }
-        let Some(plan) = plan_entry(&mut archive, position, &entry.name, limits) else {
-            continue;
-        };
-
-        if plans.len() >= limits.max_pages {
-            return Err(ArchiveRefusal::TooLarge);
+        // Usually one plan, none for an entry that is not an image, and one
+        // per directory for a multi-page TIFF — each of which is a page, and
+        // each of which the page cap and the byte cap count as one.
+        for plan in plan_entry(&mut archive, position, &entry.name, limits) {
+            if plans.len() >= limits.max_pages {
+                return Err(ArchiveRefusal::TooLarge);
+            }
+            spent = spent
+                .checked_add(plan.charge)
+                .filter(|&total| total <= limits.max_synthesised)
+                .ok_or(ArchiveRefusal::TooLarge)?;
+            plans.push(plan);
         }
-        spent = spent
-            .checked_add(plan.charge)
-            .filter(|&total| total <= limits.max_synthesised)
-            .ok_or(ArchiveRefusal::TooLarge)?;
-        plans.push(plan);
     }
 
     if plans.is_empty() {
@@ -2104,32 +2114,55 @@ fn read_comic_info(
 /// holds exactly one `/XObject`, and they are different objects.
 const IMAGE_RESOURCE: &[u8] = b"Im";
 
-/// Decides what one entry becomes, or `None` when it is not a page at all.
+/// Decides what one entry becomes: no page (it is not an image), one page, or
+/// — for a TIFF of several directories — one page per directory that is one.
 fn plan_entry<'a>(
     archive: &mut Reader<'a>,
     index: usize,
     name: &str,
     limits: &Limits,
-) -> Option<Plan<'a>> {
-    let placeholder = |defect: PageDefect| Plan {
+) -> Vec<Plan<'a>> {
+    let data = match archive.read(index) {
+        Ok(data) => data,
+        Err(defect) => {
+            // No bytes, so no magic. See `extension_claims_image` for why the
+            // name is allowed to decide this one case and nothing else.
+            return if extension_claims_image(name) {
+                vec![placeholder_plan(name, defect)]
+            } else {
+                Vec::new()
+            };
+        }
+    };
+    match image_format(&data) {
+        None => Vec::new(),
+        Some(ImageFormat::Tiff) => tiff_plans(name, &data, limits),
+        Some(format) => plan_image(format, data, name, limits).into_iter().collect(),
+    }
+}
+
+/// A page of the book's size carrying the neutral grey, and why.
+fn placeholder_plan<'a>(name: &str, defect: PageDefect) -> Plan<'a> {
+    Plan {
         name: name.to_owned(),
         size: None,
         content: Content::Placeholder,
         defect: Some(defect),
         degraded: false,
         charge: PAGE_OVERHEAD,
-    };
+    }
+}
 
-    let data = match archive.read(index) {
-        Ok(data) => data,
-        Err(defect) => {
-            // No bytes, so no magic. See `extension_claims_image` for why the
-            // name is allowed to decide this one case and nothing else.
-            return extension_claims_image(name).then(|| placeholder(defect));
-        }
-    };
+/// One entry of a format that is one page, whatever it holds.
+fn plan_image<'a>(
+    format: ImageFormat,
+    data: Cow<'a, [u8]>,
+    name: &str,
+    limits: &Limits,
+) -> Option<Plan<'a>> {
+    let placeholder = |defect: PageDefect| placeholder_plan(name, defect);
 
-    match image_format(&data)? {
+    match format {
         ImageFormat::Jpeg => {
             // The same reader `add_image` uses, so the `/MediaBox` and the
             // `/Width` cannot disagree.
@@ -2173,33 +2206,9 @@ fn plan_entry<'a>(
                 charge,
             })
         }
-        ImageFormat::Tiff => {
-            // The same ceiling the PNG route takes, for the same reason: the
-            // largest entry this build will read out of an archive is the most
-            // a page's raster may be, and it is the *caller's* number, which is
-            // what `ExceedsOutputLimit` carries back.
-            //
-            // It binds only the decoded route. A single-strip G4 page — the
-            // shape a scanned comic actually has — builds no raster at all, so
-            // a page far past this ceiling still opens.
-            let Ok(tiff) = tiff_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)) else {
-                return Some(placeholder(PageDefect::Undecodable));
-            };
-            if tiff.width() == 0 || tiff.height() == 0 {
-                return Some(placeholder(PageDefect::Undecodable));
-            }
-            let size = (f64::from(tiff.width()), f64::from(tiff.height()));
-            let degraded = !tiff.complete();
-            let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&tiff.image()));
-            Some(Plan {
-                name: name.to_owned(),
-                size: Some(size),
-                content: Content::Tiff(Box::new(tiff)),
-                defect: None,
-                degraded,
-                charge,
-            })
-        }
+        // `plan_entry` sends a TIFF to `tiff_plans`, for its directories; this
+        // arm is the first directory alone, for a caller that asked for one.
+        ImageFormat::Tiff => Some(tiff_page(name, &data, 0, limits)),
         ImageFormat::Jpeg2000 => {
             // The header and nothing past it: the box walk, the main and
             // tile-part headers, the budgets and Annex I's channel plan. That
@@ -2252,6 +2261,61 @@ fn plan_entry<'a>(
         // archive's: an archive of a hundred JPEGs and one AVIF keeps its
         // hundred readable pages, and the AVIF keeps its page number.
         other => Some(placeholder(PageDefect::UnsupportedFormat(other))),
+    }
+}
+
+/// Every directory of a TIFF that is a page, in the order the `NextIFD` chain
+/// gives them.
+///
+/// TIFF 6.0's `NewSubfileType` says which directories are not pages: bit 0 is
+/// a reduced-resolution copy of another image — the thumbnail a scanner
+/// writes after the page — and bit 2 a transparency mask for one. Neither is
+/// drawn as a page of its own, and a directory refused as
+/// `PhotometricInterpretation` 4 is a mask whatever its subfile type said. The
+/// first directory is always a page: it is the picture a single-image reader
+/// shows, and an entry that became no page would renumber the book.
+///
+/// The chain is walked under `tiff.rs`'s cycle guard and its 64-directory
+/// bound, and every page it yields is charged against [`MAX_CBZ_PAGES`] and
+/// [`MAX_SYNTHESISED_PDF`] like any other — so one entry cannot page past
+/// either cap.
+fn tiff_plans<'a>(name: &str, data: &[u8], limits: &Limits) -> Vec<Plan<'a>> {
+    let directories = tiff_scan_directory(data, 0).map_or(1, |scan| scan.pages as usize);
+    let mut plans = vec![tiff_page(name, data, 0, limits)];
+    for index in 1..directories {
+        match tiff_scan_directory(data, index) {
+            Ok(scan) if scan.subfile & 0b101 != 0 => continue,
+            Err(TiffError::UnsupportedPhotometric(4)) => continue,
+            _ => plans.push(tiff_page(name, data, index, limits)),
+        }
+    }
+    plans
+}
+
+/// One directory of a TIFF as a page, or its placeholder.
+///
+/// The same ceiling the PNG route takes, for the same reason: the largest
+/// entry this build will read out of an archive is the most a page's raster
+/// may be, and it is the *caller's* number, which is what `ExceedsOutputLimit`
+/// carries back. It binds only the decoded route. A single-strip G4 page — the
+/// shape a scanned comic actually has — builds no raster at all, so a page far
+/// past this ceiling still opens.
+fn tiff_page<'a>(name: &str, data: &[u8], directory: usize, limits: &Limits) -> Plan<'a> {
+    let ceiling = FilterLimits::new(limits.zip.max_entry_bytes);
+    let tiff = match tiff_image_directory(data, directory, &ceiling) {
+        Ok(tiff) if tiff.width() > 0 && tiff.height() > 0 => tiff,
+        _ => return placeholder_plan(name, PageDefect::Undecodable),
+    };
+    let size = (f64::from(tiff.width()), f64::from(tiff.height()));
+    let degraded = !tiff.complete();
+    let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&tiff.image()));
+    Plan {
+        name: name.to_owned(),
+        size: Some(size),
+        content: Content::Tiff(Box::new(tiff)),
+        defect: None,
+        degraded,
+        charge,
     }
 }
 

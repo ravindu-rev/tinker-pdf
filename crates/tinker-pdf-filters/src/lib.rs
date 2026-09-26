@@ -102,8 +102,9 @@ pub use png::{
 pub use predictors::PredictorParams;
 pub use raster::ImagePixels;
 pub use tiff::{
-    tiff_decode, tiff_scan, TiffCcitt, TiffColour, TiffCompression, TiffError, TiffImage,
-    TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffScan, MAX_TIFF_SAMPLES,
+    tiff_decode, tiff_scan, tiff_scan_directory, TiffCcitt, TiffColour, TiffCompression, TiffError,
+    TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffSampleFormat,
+    TiffSampleRange, TiffScan, MAX_TIFF_SAMPLES,
 };
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
@@ -357,8 +358,9 @@ pub enum Warning {
     /// TIFF: every `ColorMap` value was at or below 255, so the map was read
     /// as an 8-bit one rather than as the 16-bit one p.23 describes.
     TiffColorMapIsEightBit,
-    /// TIFF: the file holds more than one image file directory. The first is
-    /// the image; the rest are not read.
+    /// TIFF: the file holds more than one image file directory and was read
+    /// through `tiff_scan`, which takes the first. `tiff_scan_directory` reads
+    /// the others by index, and a caller that pages uses it instead.
     TiffExtraPagesIgnored,
 
     // ---- PNG (ISO/IEC 15948) ---------------------------------------------

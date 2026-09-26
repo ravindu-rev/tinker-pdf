@@ -19,7 +19,9 @@
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
-    bmp_decode, gif_decode, BmpError, BmpImage, GifError, GifImage, ImagePixels, Limits, Warning,
+    bmp_decode, gif_decode, tiff_decode, tiff_scan, tiff_scan_directory, BmpError, BmpImage,
+    GifError, GifImage, ImagePixels, Limits, TiffColour, TiffCompression, TiffImage, TiffLayout,
+    TiffSampleFormat, Warning,
 };
 
 const CAP: Limits = Limits::new(1 << 24);
@@ -508,4 +510,197 @@ fn a_file_that_is_not_a_gif_is_refused_by_name() {
         gif_decode(&read("bmp", "pillow-rgb-13x7.bmp"), &CAP),
         Err(GifError::NotGif)
     );
+}
+
+// ---- TIFF: the archive row's additions, from tifffile ------------------------
+
+fn tiff(name: &str) -> TiffImage {
+    let img = tiff_decode(&read("tiff", name), &CAP).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert!(
+        img.complete,
+        "{name} decoded incomplete: {:?}",
+        img.warnings
+    );
+    img
+}
+
+/// Sixteen-bit samples as numbers.
+fn words(data: &[u8]) -> Vec<u16> {
+    data.chunks_exact(2)
+        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+        .collect()
+}
+
+fn each(width: u32, height: u32, f: impl Fn(u32, u32) -> Vec<u8>) -> Vec<u8> {
+    (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| f(x, y))
+        .collect()
+}
+
+/// `PhotometricInterpretation` 5: four ink amounts, handed back as the file
+/// holds them — cyan, magenta and yellow the RGB recipe, black the alpha one.
+#[test]
+fn a_cmyk_tiff_is_its_ink_amounts() {
+    for name in ["tifffile-cmyk-13x7.tif", "tifffile-cmyk-deflate-13x7.tif"] {
+        let img = tiff(name);
+        assert_eq!(img.colour, TiffColour::Cmyk, "{name}");
+        let want = each(13, 7, |x, y| {
+            let [c, m, ye] = recipe::rgb(x, y);
+            vec![c, m, ye, recipe::alpha(x, y)]
+        });
+        assert_eq!(img.data, want, "{name}");
+    }
+}
+
+/// `SampleFormat` 2 at 8, 16 and 32 bits (the last with `Predictor` 2), each
+/// mapped by §19's default range — the full range of its type — onto the
+/// output: exactly the offset by half the range at 8 and 16, and at 32 the
+/// same line rounded onto sixteen bits.
+#[test]
+fn signed_tiffs_are_offset_by_half_their_range() {
+    let file = read("tiff", "tifffile-int8-13x7.tif");
+    let scan = tiff_scan(&file).expect("scans");
+    assert_eq!(scan.sample_format, TiffSampleFormat::Signed);
+    let img = tiff("tifffile-int8-13x7.tif");
+    assert_eq!(img.bits_per_component, 8);
+    assert_eq!(img.data, each(13, 7, |x, y| vec![recipe::grey(x, y)]));
+
+    let img = tiff("tifffile-int16-13x7.tif");
+    assert_eq!(img.bits_per_component, 16);
+    let want: Vec<u16> = (0..7u32)
+        .flat_map(|y| (0..13u32).map(move |x| ((x * 1000 + y * 7777) % 65536) as u16))
+        .collect();
+    assert_eq!(words(&img.data), want);
+
+    let file = read("tiff", "tifffile-int32-predictor-13x7.tif");
+
+    let scan = tiff_scan(&file).expect("scans");
+    assert_eq!((scan.bits_per_sample, scan.predictor), (32, 2));
+    let img = tiff("tifffile-int32-predictor-13x7.tif");
+    let top = (1u128 << 32) - 1;
+    let want: Vec<u16> = (0..7u64)
+        .flat_map(|y| {
+            (0..13u64).map(move |x| {
+                // The authored value plus 2^31, which is the recipe before
+                // the generator subtracted it.
+                let offset = u128::from((x * 123_456_789 + y * 987_654_321) % (1 << 32));
+                ((offset * 65_535 + top / 2) / top) as u16
+            })
+        })
+        .collect();
+    assert_eq!(words(&img.data), want);
+}
+
+/// `SampleFormat` 3 at 16, 32 and 64 bits — the 32-bit file under Technical
+/// Note 3's `Predictor` 3 — read as the intensity itself on [0, 1], clamped,
+/// at sixteen bits. The recipe is whole 128ths, which every width holds
+/// exactly, so the expected number is the recipe and nothing else.
+#[test]
+fn float_tiffs_are_their_own_intensities_clamped() {
+    let want: Vec<u16> = (0..7u32)
+        .flat_map(|y| {
+            (0..13u32).map(move |x| {
+                let v = (3.0 * f64::from(recipe::grey(x, y)) - 64.0) / 128.0;
+                (v.clamp(0.0, 1.0) * 65_535.0 + 0.5).floor() as u16
+            })
+        })
+        .collect();
+    assert!(
+        want.contains(&0) && want.contains(&65_535),
+        "the recipe reaches both clamps"
+    );
+    let file = read("tiff", "tifffile-float32-predictor3-13x7.tif");
+    let scan = tiff_scan(&file).expect("scans");
+    assert_eq!(
+        (scan.sample_format, scan.predictor),
+        (TiffSampleFormat::Float, 3)
+    );
+    for (name, bits) in [
+        ("tifffile-float16-13x7.tif", 16),
+        ("tifffile-float32-predictor3-13x7.tif", 32),
+        ("tifffile-float64-13x7.tif", 64),
+    ] {
+        let file = read("tiff", name);
+        let scan = tiff_scan(&file).expect("scans");
+        assert_eq!(scan.bits_per_sample, bits, "{name}");
+        let img = tiff(name);
+        assert_eq!(img.bits_per_component, 16, "{name}");
+        assert_eq!(words(&img.data), want, "{name}");
+    }
+}
+
+/// BigTIFF in both byte orders: the header says so, and the picture is the
+/// RGB recipe.
+#[test]
+fn a_bigtiff_is_read_in_both_byte_orders() {
+    for name in [
+        "tifffile-bigtiff-rgb-13x7.tif",
+        "tifffile-bigtiff-mm-rgb-13x7.tif",
+    ] {
+        let bytes = read("tiff", name);
+        assert!(
+            bytes.starts_with(b"II\x2b\x00\x08\x00\x00\x00")
+                || bytes.starts_with(b"MM\x00\x2b\x00\x08\x00\x00"),
+            "{name} is a BigTIFF"
+        );
+        let img = tiff(name);
+        assert_eq!(
+            img.data,
+            each(13, 7, |x, y| recipe::rgb(x, y).to_vec()),
+            "{name}"
+        );
+    }
+}
+
+/// `Compression` 34712, one strip and a 16 x 16 tile grid with padded edges,
+/// both lossless: the RGB recipe exactly.
+#[test]
+fn jpeg_2000_tiffs_decode_to_the_recipe() {
+    let file = read("tiff", "tifffile-jpeg2000-rgb-13x7.tif");
+    let scan = tiff_scan(&file).expect("scans");
+    assert_eq!(scan.compression, TiffCompression::Jpeg2000);
+    let img = tiff("tifffile-jpeg2000-rgb-13x7.tif");
+    assert_eq!(img.data, each(13, 7, |x, y| recipe::rgb(x, y).to_vec()));
+
+    let file = read("tiff", "tifffile-jpeg2000-tiled-40x24.tif");
+
+    let scan = tiff_scan(&file).expect("scans");
+    assert_eq!(
+        scan.layout,
+        TiffLayout::Tiles {
+            width: 16,
+            height: 16
+        }
+    );
+    let img = tiff("tifffile-jpeg2000-tiled-40x24.tif");
+    assert_eq!(img.data, each(40, 24, |x, y| recipe::rgb(x, y).to_vec()));
+}
+
+/// Four directories: every one scans by index, the third says it is a
+/// reduced-resolution copy, and each decodes to what was written into it.
+#[test]
+fn every_directory_of_a_multipage_tiff_is_its_own_picture() {
+    let bytes = read("tiff", "tifffile-multipage.tif");
+    let scans: Vec<_> = (0..4)
+        .map(|i| tiff_scan_directory(&bytes, i).unwrap_or_else(|e| panic!("directory {i}: {e}")))
+        .collect();
+    assert!(tiff_scan_directory(&bytes, 4).is_err());
+    assert!(scans.iter().all(|s| s.pages == 4));
+    assert_eq!(
+        scans.iter().map(|s| s.subfile).collect::<Vec<_>>(),
+        [0, 0, 1, 0]
+    );
+    let grey = each(13, 7, |x, y| vec![recipe::grey(x, y)]);
+    let inverted: Vec<u8> = grey.iter().map(|v| 255 - v).collect();
+    assert_eq!(scans[0].decode(&CAP).expect("decodes").data, grey);
+    assert_eq!(
+        scans[1].decode(&CAP).expect("decodes").data,
+        each(13, 7, |x, y| recipe::rgb(x, y).to_vec())
+    );
+    assert_eq!(
+        scans[2].decode(&CAP).expect("decodes").data,
+        each(7, 4, |x, y| vec![recipe::grey(x * 2, y * 2)])
+    );
+    assert_eq!(scans[3].decode(&CAP).expect("decodes").data, inverted);
 }
