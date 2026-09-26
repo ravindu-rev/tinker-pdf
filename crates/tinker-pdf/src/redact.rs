@@ -168,8 +168,8 @@ use std::sync::Arc;
 
 use tinker_pdf_content::{Token, Tokenizer};
 use tinker_pdf_cos::{
-    font as cos_font, pages as cos_pages, CosDocument, Dict, DocumentEditor, Font, Name, ObjRef,
-    Object, Rect, StreamData,
+    font as cos_font, CosDocument, Dict, DocumentEditor, Font, Name, ObjRef, Object, Rect, Resolve,
+    StreamData,
 };
 
 /// What a redaction covers and how it is marked.
@@ -555,17 +555,17 @@ pub fn apply(
     page: u32,
     areas: &[Redaction],
 ) -> Option<RedactionReport> {
+    // The page **as this editor has it**: its place in the editor's page
+    // order, its content as the editor now holds it, and its resources read
+    // through the editor. See [`EditorPage`] for the three ways reading the
+    // file instead went wrong.
     let reference = editor.page_refs().get(page as usize).copied()?;
-
-    let (content, existing, fonts) = {
-        let doc = editor.document();
-        let collected = cos_pages::collect(doc);
-        let info = collected.get(page as usize)?;
-        let content = cos_pages::content_bytes(doc, info);
-        let existing = cos_pages::contents(doc, info);
-        let resources = page_resources(doc, reference).unwrap_or_default();
-        (content, existing, fonts_in(doc, &resources))
-    };
+    let EditorPage {
+        content,
+        existing,
+        resources,
+    } = EditorPage::read(editor, reference)?;
+    let fonts = fonts_in(editor.document(), &resources);
 
     let (mut data, mut report, uses) = rewrite(&content, areas, &fonts, Matrix::IDENTITY);
 
@@ -574,8 +574,6 @@ pub fn apply(
     // was. Images the redaction covers are scrubbed for the same reason: a
     // black rectangle over a photograph removes nothing.
     let mut placements = Placements::default();
-    // The resources of the page being redacted, not of page zero.
-    let resources = page_resources(editor.document(), reference).unwrap_or_default();
     follow(
         editor,
         &resources,
@@ -651,10 +649,85 @@ pub fn apply(
     Some(report)
 }
 
-fn page_resources(doc: &CosDocument, page: ObjRef) -> Option<Dict> {
-    let object = doc.get(page).ok()?;
-    let dict = object.as_dict()?;
-    doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned()
+/// One page, read through the editor rather than out of the file.
+///
+/// Until September 2026 [`apply`] read the page with `pages::collect` and
+/// `content_bytes` over [`DocumentEditor::document`] — the file as it was
+/// opened — and three things followed, each an under-redaction:
+///
+/// - **A second redaction of the same page undid the first.** It read the
+///   file's content, cut its own rectangles out of that, and overwrote the
+///   stream the first redaction had written: the text the first one removed
+///   was back, and its report still said it was gone.
+/// - **A page the editor had moved was read from the wrong place.** The
+///   file's page *n* is not the editor's page *n* after `move_page`, so the
+///   redaction read one page's content and wrote it over another's stream.
+/// - **Inherited resources were not read.** `/Resources` was taken from the
+///   page dictionary alone, and 7.7.3.4 lets it be inherited from the page
+///   tree: every run on such a page was `UnknownFont`, which at least said
+///   so, and every form and image on it was silently not followed at all.
+struct EditorPage {
+    /// The content streams, decoded and joined as the editor has them.
+    content: Vec<u8>,
+    /// The streams `/Contents` names, in order.
+    existing: Vec<ObjRef>,
+    /// `/Resources`, inherited through `/Parent` when the page has none.
+    resources: Dict,
+}
+
+impl EditorPage {
+    fn read(editor: &DocumentEditor, reference: ObjRef) -> Option<EditorPage> {
+        let Some(Object::Dict(dict)) = editor.get(reference) else {
+            return None;
+        };
+
+        // 7.7.3.3: `/Contents` is one stream or an array of them, and the
+        // array may itself be an indirect object.
+        let existing: Vec<ObjRef> = match dict.get(Name::CONTENTS) {
+            Some(Object::Ref(r)) => match editor.get(*r) {
+                Some(Object::Array(items)) => items.iter().filter_map(Object::as_objref).collect(),
+                _ => vec![*r],
+            },
+            Some(Object::Array(items)) => items.iter().filter_map(Object::as_objref).collect(),
+            _ => Vec::new(),
+        };
+        let mut content = Vec::new();
+        for part in &existing {
+            if let Some(bytes) = editor.stream_bytes(*part) {
+                content.extend_from_slice(&bytes);
+                // 7.7.3.3: the parts divide at lexical boundaries only if
+                // separated, and a producer may end one mid-token.
+                content.push(b'\n');
+            }
+        }
+
+        Some(EditorPage {
+            content,
+            existing,
+            resources: inherited_resources(editor, &dict),
+        })
+    }
+}
+
+/// A page's `/Resources`, or the nearest ancestor's (7.7.3.4), read through
+/// the editor.
+///
+/// The walk up `/Parent` is bounded by the same depth the page-tree walker
+/// uses, so a cycle of parents ends rather than spinning.
+fn inherited_resources(editor: &DocumentEditor, page: &Dict) -> Dict {
+    let mut node = page.clone();
+    for _ in 0..tinker_pdf_cos::limits::MAX_NEST_DEPTH {
+        let resources = Resolve::resolve_key(editor, &node, Name::RESOURCES);
+        if let Some(dict) = resources.as_dict() {
+            return dict.clone();
+        }
+        let parent = Resolve::resolve_key(editor, &node, Name::PARENT);
+        match parent.as_dict() {
+            Some(dict) => node = dict.clone(),
+            None => break,
+        }
+    }
+    Dict::new()
 }
 
 /// A font in scope, and what this module knows about measuring it.
@@ -887,11 +960,9 @@ fn follow(
             continue;
         };
 
-        let doc = editor.document();
-        let subtype = doc
-            .resolve_key(&dict, doc.intern(b"Subtype"))
+        let subtype = Resolve::resolve_key(editor, &dict, editor.intern(b"Subtype"))
             .as_name()
-            .and_then(|n| doc.name_bytes(n))
+            .and_then(|n| editor.document().name_bytes(n))
             .map(|b| b.to_vec());
 
         match subtype.as_deref() {
@@ -911,8 +982,7 @@ fn follow(
                 // 8.10.2: the form's own /Matrix sits between its space and the
                 // one that invoked it, so it composes with the transform the
                 // `Do` was made under.
-                let matrix = doc
-                    .resolve_key(&dict, doc.intern(b"Matrix"))
+                let matrix = Resolve::resolve_key(editor, &dict, editor.intern(b"Matrix"))
                     .as_array()
                     .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
                     .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()))
@@ -939,12 +1009,11 @@ fn follow(
                 // names things in. A form that omits the dictionary inherits
                 // the scope that invoked it, which is why the fallback is the
                 // caller's rather than the page's.
-                let inner_resources = doc
-                    .resolve_key(&dict, Name::RESOURCES)
+                let inner_resources = Resolve::resolve_key(editor, &dict, Name::RESOURCES)
                     .as_dict()
                     .cloned()
                     .unwrap_or_else(|| resources.clone());
-                let fonts = fonts_in(doc, &inner_resources);
+                let fonts = fonts_in(editor.document(), &inner_resources);
 
                 let (data, inner_report, inner_uses) = rewrite(&content, areas, &fonts, inner);
                 report.operations += inner_report.operations;
@@ -1032,10 +1101,11 @@ fn resolve_xobject(
     resources: &Dict,
     name: &[u8],
 ) -> Option<(ObjRef, Dict)> {
-    let doc = editor.document();
-    let table = doc.resolve_key(resources, doc.intern(b"XObject"));
-    let reference = table.as_dict()?.get_ref(doc.intern(name))?;
-    let object = doc.get(reference).ok()?;
+    // Through the editor, like every read here: an XObject a redaction has
+    // already rewritten is the editor's, not the file's.
+    let table = Resolve::resolve_key(editor, resources, editor.intern(b"XObject"));
+    let reference = table.as_dict()?.get_ref(editor.intern(name))?;
+    let object = editor.get(reference)?;
     Some((reference, object.as_dict()?.clone()))
 }
 
@@ -3773,7 +3843,26 @@ mod tests_support {
         )
     }
 
-    fn stream_object(number: u32, body: &str) -> String {
+    /// The boxed Type 3 font as object `number`, drawing every letter with
+    /// the procedure in object 5 (which the caller writes, with
+    /// [`stream_object`] and [`BOX_PROCEDURE`]).
+    pub fn boxed_font(number: u32, font_matrix: &str) -> String {
+        let (differences, widths) = every_letter();
+        format!(
+            "{number} 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]\n\
+             /FontMatrix {font_matrix}\n\
+             /CharProcs << /g 5 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences {differences} >>\n\
+             /FirstChar 65 /LastChar 90 /Widths [{widths}]\n\
+             /Resources << >> >>\nendobj\n"
+        )
+    }
+
+    /// The glyph procedure every letter of [`boxed_font`] draws: its whole em
+    /// square, filled.
+    pub const BOX_PROCEDURE: &str = "1000 0 d0 0 0 1000 1000 re f";
+
+    pub fn stream_object(number: u32, body: &str) -> String {
         format!(
             "{number} 0 obj\n<< /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
             body.len() + 1
@@ -3924,6 +4013,182 @@ mod tests_support {
         out.push_str(&stream_object(7, content));
         out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
         out.into_bytes()
+    }
+}
+
+/// A redaction reads the page the **editor** has, not the page the file had.
+///
+/// Each of these failed before [`EditorPage`], and each failure was an
+/// under-redaction with a report that looked like success.
+#[cfg(test)]
+mod editor_reads {
+    use super::tests_support::*;
+    use super::*;
+
+    fn saved(editor: &DocumentEditor) -> Vec<u8> {
+        editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        })
+    }
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// Two redactions of one page, one after the other, both hold.
+    ///
+    /// The second used to read the file's content, cut its own rectangle out
+    /// of that and overwrite the stream the first had written — so `SECRET`,
+    /// which the first redaction removed and reported removed, was back.
+    #[test]
+    fn a_second_redaction_of_a_page_keeps_the_first() {
+        // `PUBLICSECRET` in ten-point boxes from x 20: `PUB` is x 20..50 and
+        // `SECRET` x 80..140, on y 100..110.
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "BT /F0 10 Tf 20 100 Td (PUBLICSECRET) Tj ET",
+        ));
+        let secret = area(82.0, 95.0, 150.0, 115.0);
+        let pub_ = area(15.0, 95.0, 48.0, 115.0);
+
+        let mut editor = DocumentEditor::new(doc);
+        let first = apply(&mut editor, 0, &[secret]).expect("the page exists");
+        assert_eq!(first.glyphs, 6);
+        let second = apply(&mut editor, 0, &[pub_]).expect("the page exists");
+        assert_eq!(second.glyphs, 3, "P, U and B");
+
+        let bytes = saved(&editor);
+        let streams = all_streams(&CosDocument::open(bytes.clone()).expect("it reopens"));
+        assert!(
+            !streams.contains("SECRET") && !streams.contains("SECR"),
+            "the first redaction survived the second: {streams}"
+        );
+        assert!(
+            !streams.contains("PUB"),
+            "and the second happened: {streams}"
+        );
+        assert!(streams.contains("LIC"), "and the rest is there: {streams}");
+
+        let bitmap = render(bytes);
+        assert_eq!(ink_in(&bitmap, 200.0, secret.area), 0);
+        assert_eq!(ink_in(&bitmap, 200.0, pub_.area), 0);
+    }
+
+    /// Two pages of boxed text, `AAAA` on the first and `BBBB` on the second.
+    fn two_pages() -> Vec<u8> {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 6 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 7 0 R >>\nendobj\n",
+        );
+        out.push_str(&boxed_font(4, DEFAULT_FONT_MATRIX));
+        out.push_str(&stream_object(5, BOX_PROCEDURE));
+        out.push_str(
+            "6 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 8 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream_object(7, "BT /F0 10 Tf 20 100 Td (AAAA) Tj ET"));
+        out.push_str(&stream_object(8, "BT /F0 10 Tf 20 100 Td (BBBB) Tj ET"));
+        out.push_str("trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    /// A page the editor has moved is redacted where the editor has it.
+    ///
+    /// The file's page zero is not the editor's page zero after `move_page`.
+    /// Reading the file, the redaction of the editor's page zero cut the
+    /// *file's* page zero and wrote the result over that page's stream, then
+    /// pointed the page it was asked about at it: `BBBB` stayed in the file,
+    /// unreferenced and readable, and `AAAA` was gone from a page nobody
+    /// redacted.
+    #[test]
+    fn a_moved_page_is_redacted_where_the_editor_has_it() {
+        let mut editor = DocumentEditor::new(open(two_pages()));
+        assert!(editor.move_page(1, 0), "BBBB is now first");
+
+        let report =
+            apply(&mut editor, 0, &[area(0.0, 0.0, 200.0, 200.0)]).expect("the page exists");
+        assert_eq!(report.glyphs, 4, "the four Bs");
+
+        let bytes = saved(&editor);
+        let streams = all_streams(&CosDocument::open(bytes.clone()).expect("it reopens"));
+        assert!(!streams.contains("BBBB"), "got: {streams}");
+        assert!(
+            streams.contains("AAAA"),
+            "the other page is untouched: {streams}"
+        );
+
+        let reopened = crate::Document::open(bytes).expect("it reopens");
+        let second = reopened
+            .page(1)
+            .expect("two pages")
+            .render(&crate::RenderOptions::default());
+        assert!(
+            ink_in(&second, 200.0, area(22.0, 102.0, 58.0, 108.0).area) > 100,
+            "and still draws its text"
+        );
+    }
+
+    /// A page whose `/Resources` live on the page tree node above it
+    /// (7.7.3.4) has its forms and images followed and its fonts measured.
+    ///
+    /// Read from the page dictionary alone, the resources were empty: the run
+    /// was refused as `UnknownFont`, which at least said so, and the image was
+    /// **not followed at all**, which said nothing.
+    #[test]
+    fn inherited_resources_are_read() {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.extend_from_slice(
+            b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R]\n\
+              /Resources << /Font << /F0 4 0 R >> /XObject << /Im0 6 0 R >> >> >>\nendobj\n",
+        );
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+              /Contents 7 0 R >>\nendobj\n",
+        );
+        out.extend_from_slice(boxed_font(4, DEFAULT_FONT_MATRIX).as_bytes());
+        out.extend_from_slice(stream_object(5, BOX_PROCEDURE).as_bytes());
+        let samples = b"SECRETPIXELDATA!";
+        out.extend_from_slice(
+            format!(
+                "6 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 4\n\
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n",
+                samples.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(samples);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(
+            stream_object(
+                7,
+                "q 40 0 0 40 120 20 cm /Im0 Do Q BT /F0 10 Tf 20 100 Td (SECRET) Tj ET",
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(b"trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+
+        let doc = open(out);
+        assert!(all_streams(&doc).contains("SECRETPIXEL"));
+        let mut editor = DocumentEditor::new(doc);
+        let report =
+            apply(&mut editor, 0, &[area(0.0, 0.0, 200.0, 200.0)]).expect("the page exists");
+        assert_eq!(report.images, 1, "the inherited /Im0 was followed");
+        assert_eq!(report.glyphs, 6, "and the inherited /F0 measured");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let streams = all_streams(&CosDocument::open(saved(&editor)).expect("it reopens"));
+        assert!(!streams.contains("SECRET"), "got: {streams}");
     }
 }
 

@@ -310,7 +310,14 @@ surviving sub-runs keep the original text matrix untouched; giving each a
 fresh `Tm` at its own origin is the answer that looks plausible on screen
 and is wrong four ways, which `emit_array`'s doc comment sets out. A glyph
 the rectangle covers only *partly* is removed, because a content stream can
-show a glyph or not show it and only one of those two can leak. What
+show a glyph or not show it and only one of those two can leak. The page is
+read **as the editor has it** — its place in the editor's page order, its
+content as the editor now holds it, and `/Resources` inherited through the
+page tree when the page has none (7.7.3.4). Until September 2026 it was read
+out of the file, which made a second redaction of a page put back what the
+first had removed, redacted the file's page *n* when the editor had moved
+pages, and silently skipped every form and image on a page whose resources
+were inherited (`redact.rs`'s `editor_reads` module, one test each). What
 redaction cannot **measure** it still leaves whole and names in
 `RedactionReport::warnings` — four of that type's five classes, in the
 refusal table below; the fifth is the form placement one further down —
