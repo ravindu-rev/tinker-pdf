@@ -1,5 +1,5 @@
-//! The committed `tar`, `sevenz`, `bzip2` and `rar` fuzz seeds, replayed on
-//! stable.
+//! The committed `tar`, `sevenz`, `bzip2`, `ppmd` and `rar` fuzz seeds,
+//! replayed on stable.
 //!
 //! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each written
 //! by this crate's own `write_the_fuzz_seeds` tests — plus, in `sevenz/`, one
@@ -34,7 +34,7 @@
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_archive::tar::{Archive, EntryError, Kind, Limits};
-use tinker_pdf_archive::{bzip2, rar, sevenz};
+use tinker_pdf_archive::{bzip2, ppmd, rar, sevenz};
 use tinker_pdf_filters::crc32;
 
 /// Every seed, by name, sorted so a failure names the same file on every
@@ -371,10 +371,11 @@ fn the_committed_sevenz_seeds_replay() {
     }
     println!("RAN: {} sevenz seeds, {read_ok} entries read, {crc_checked} CRC-checked, {refused} refused outright", seeds.len());
     // Seven hand-built by `write_the_fuzz_seeds`, and one per coder a real
-    // writer made, by `tests/coders/make-coders.py`: `bcj-lzma2` and `bzip2`.
+    // writer made, by `tests/coders/make-coders.py`: `bcj-lzma2`, `bzip2`
+    // and `ppmd`.
     assert_eq!(
         seeds.len(),
-        9,
+        10,
         "the seed count changed; `write_the_fuzz_seeds` or `make-coders.py` is \
          what should have changed it, and the new file needs a reason there"
     );
@@ -423,7 +424,7 @@ fn the_coder_seeds_reach_their_coders() {
         println!("SKIPPED: fuzz/corpus/sevenz is not in this tree");
         return;
     };
-    let named = ["bcj-lzma2", "bzip2"];
+    let named = ["bcj-lzma2", "bzip2", "ppmd"];
     for want in named {
         let Some((_, data)) = seeds.iter().find(|(name, _)| name == want) else {
             panic!("the {want} seed is missing");
@@ -492,6 +493,42 @@ fn the_committed_bzip2_seeds_replay() {
     }
     println!("RAN: {} bzip2 seeds, {bytes} bytes decoded", seeds.len());
     assert_eq!(seeds.len(), 5, "`make-coders.py` writes five bzip2 seeds");
+}
+
+// ---- PPMd -------------------------------------------------------------------
+
+/// Every committed PPMd seed decodes, under the parameters its first three
+/// bytes pick exactly as `fuzz_targets/ppmd.rs` reads them, to the length it
+/// asks for — they are 7-Zip's encoder's streams (`tests/coders/make-coders.py`),
+/// so a seed that stopped decoding would leave the fuzzer exercising refusals.
+/// `x86-o2-2k` is in the smallest arena 7-Zip accepts, where the model
+/// restarts every few dozen symbols.
+#[test]
+fn the_committed_ppmd_seeds_replay() {
+    let Some(seeds) = corpus("ppmd") else {
+        println!("SKIPPED: fuzz/corpus/ppmd is not in this tree");
+        return;
+    };
+    let mut bytes = 0usize;
+    for (name, data) in &seeds {
+        let (control, body) = data.split_at(data.len().min(3));
+        let byte = |i: usize| control.get(i).copied().unwrap_or(0);
+        let order = 2 + byte(0) % 63;
+        let arena = 2048u32 << (byte(1) % 12);
+        let unpacked = usize::from(byte(2)) * 16;
+        let mut props = vec![order];
+        props.extend_from_slice(&arena.to_le_bytes());
+        let limits = ppmd::Limits {
+            max_unpacked: 4096,
+            max_memory: 1 << 22,
+        };
+        let out =
+            ppmd::decode(body, &props, unpacked, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(out.len(), unpacked, "{name}");
+        bytes += out.len();
+    }
+    println!("RAN: {} ppmd seeds, {bytes} bytes decoded", seeds.len());
+    assert_eq!(seeds.len(), 4, "`make-coders.py` writes four ppmd seeds");
 }
 
 // ---- RAR --------------------------------------------------------------------

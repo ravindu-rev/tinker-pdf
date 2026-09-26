@@ -102,6 +102,17 @@ pub const MAX_7Z_CODERS: usize = 32;
 /// a terabyte — which
 /// `a_folder_declaring_more_than_the_cap_is_refused_before_it_allocates`
 /// builds, and which is refused *before* the `Vec` rather than after.
+///
+/// **It bounds a PPMd folder's model arena too**, and that is one cap on two
+/// allocations by design rather than a second constant: the arena is the only
+/// other allocation a folder's header sizes (four property bytes, up to
+/// `2^32 - 37`), it is a cost of decoding the folder exactly as the output is,
+/// and a separate number would have to be argued against this one anyway. The
+/// most a fixture here asks for is 16 MiB (`py7zr-ppmd.7z`); the most 7-Zip's
+/// own presets ask for is 256 MiB, `1 << (level + 19)` at level 9, and less
+/// for a file small enough that 7-Zip shrinks it to fit. `crate::ppmd`'s
+/// `the_arena_and_the_output_are_bounded_before_anything_is_allocated` is
+/// where the refusal fires, before the arena exists.
 pub const MAX_7Z_UNPACKED: usize = 1 << 30;
 
 /// The most bytes of one stored path.

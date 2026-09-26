@@ -90,6 +90,24 @@ fn py7zr_s_bzip2_entries_are_the_files_that_went_in() {
     assert_eq!(names, ["prose.txt", "runs.bin", "x86.bin"]);
 }
 
+/// **PPMd, 7z coder `030401`, from a real writer — twice.**
+///
+/// py7zr's `FILTER_PPMD`, which is pyppmd 1.3.1: 7-Zip's own `Ppmd7Enc.c`
+/// compiled for CPython. `py7zr-ppmd.7z` is order 6 in a 16 MiB arena, room
+/// the model never runs out of; `py7zr-ppmd-tight.7z` is order 32 in 64 KiB,
+/// which fills and restarts the model again and again across the same
+/// 148 186 bytes (counted in `sevenz/tests.rs`). The second is the one that
+/// holds the allocator: its free-list gluing, its borrowing from the text
+/// area, and the restart itself, each of which a decoder must do at exactly
+/// the byte the encoder did or every byte after it is wrong.
+#[test]
+fn py7zr_s_ppmd_entries_are_the_files_that_went_in() {
+    for name in ["py7zr-ppmd.7z", "py7zr-ppmd-tight.7z"] {
+        let names = every_entry_is_its_input(name);
+        assert_eq!(names, ["prose.txt", "runs.bin", "x86.bin"], "{name}");
+    }
+}
+
 /// One local file header of a ZIP, walked by hand: the method, the CRC-32,
 /// the name and the compressed bytes. This crate has no ZIP reader and should
 /// not grow one for a test; APPNOTE 4.3.7's thirty bytes are enough to find a
@@ -225,6 +243,15 @@ fn hostile_bytes_through_a_bcj_folder_never_panic() {
 #[test]
 fn hostile_bytes_through_a_bzip2_folder_never_panic() {
     sweep("bzip2", "bzip2");
+}
+
+/// And over the `ppmd` seed, py7zr's `030401` over 700 bytes of `prose.txt`:
+/// a flip in the range-coded stream steers the model somewhere its encoder
+/// never went, and one in the header can hand it any order and any arena the
+/// property check allows.
+#[test]
+fn hostile_bytes_through_a_ppmd_folder_never_panic() {
+    sweep("ppmd", "PPMd");
 }
 
 /// Flips two bits of every byte of a real-writer 7z seed and cuts it at every

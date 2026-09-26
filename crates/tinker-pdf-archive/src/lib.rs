@@ -22,7 +22,8 @@
 //! carries. The coders beside it follow the same rule. [`bzip2`] is public
 //! for that reason and one more: it has a second caller, ZIP method 12, which
 //! the facade hands it to through `tinker_pdf_zip::Archive::read_coded`
-//! exactly as it hands [`lzma::decode`] to method 14. `bcj`, the x86 branch
+//! exactly as it hands [`lzma::decode`] to method 14; [`ppmd`] is public for
+//! the first reason alone, since only 7z carries it. `bcj`, the x86 branch
 //! filter, is private, because it cannot fail and has no error for a caller
 //! to reach — `sevenz` is the only door to it.
 //!
@@ -86,6 +87,7 @@
 mod bcj;
 pub mod bzip2;
 pub mod lzma;
+pub mod ppmd;
 pub mod rar;
 pub mod sevenz;
 pub mod tar;

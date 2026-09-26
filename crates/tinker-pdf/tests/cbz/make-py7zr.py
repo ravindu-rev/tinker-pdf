@@ -3,6 +3,8 @@
 #
 #   py7zr-bcj.cb7    filters [BCJ x86, LZMA2]: coder 03030103 in front of 21
 #   py7zr-bzip2.cb7  filter [BZIP2]: coder 040202, through libbzip2
+#   py7zr-ppmd.cb7   filter [PPMD], order 6 in 16 MiB: coder 030401, through
+#                    pyppmd (7-Zip's own Ppmd7Enc.c)
 #
 # py7zr is the second 7z writer this directory never had -- every .cb7 before
 # these was 7-Zip 26.02 -- and it is a separate implementation of the container
@@ -37,3 +39,4 @@ def write(path, filters):
 
 write("py7zr-bcj.cb7", [{"id": py7zr.FILTER_X86}, {"id": py7zr.FILTER_LZMA2}])
 write("py7zr-bzip2.cb7", [{"id": py7zr.FILTER_BZIP2}])
+write("py7zr-ppmd.cb7", [{"id": py7zr.FILTER_PPMD, "order": 6, "mem": 24}])

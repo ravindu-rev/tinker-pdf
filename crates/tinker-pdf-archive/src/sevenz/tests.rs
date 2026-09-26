@@ -419,24 +419,19 @@ fn a_coder_this_build_does_not_read_is_refused_by_its_method_id() {
     let files: &[Line<'_>] = &[("page1.png", b"a page", As::File)];
     let packed = b"a page".to_vec();
 
-    let ppmd = archive_with(
-        files,
-        &[0x03, 0x04, 0x01],
-        &[0x05, 0, 0, 0, 0],
-        packed.clone(),
-    );
+    // PPMd (`030401`) stood here until it was read; ARM64's branch filter
+    // (`0A`) is one 7-Zip writes that this build still does not.
+    let arm64 = archive_with(files, &[0x0A], &[], packed.clone());
     assert_eq!(
-        Archive::open(&ppmd, &Limits::DEFAULT).err(),
-        Some(Error::UnsupportedCoder {
-            id: vec![0x03, 0x04, 0x01]
-        }),
-        "PPMd names itself in the refusal"
+        Archive::open(&arm64, &Limits::DEFAULT).err(),
+        Some(Error::UnsupportedCoder { id: vec![0x0A] }),
+        "ARM64 names itself in the refusal"
     );
     assert!(
-        Archive::open(&ppmd, &Limits::DEFAULT)
+        Archive::open(&arm64, &Limits::DEFAULT)
             .unwrap_err()
             .to_string()
-            .contains("030401"),
+            .contains("0A"),
         "and in the sentence a host would show"
     );
 
@@ -839,10 +834,12 @@ fn write_the_fuzz_seeds() {
         &[],
         deflate,
     );
-    let ppmd = archive_with(
+    // The delta filter: a coder 7-Zip and py7zr both write and this build
+    // does not read. (This seed was PPMd's id until PPMd was read.)
+    let unsupported = archive_with(
         &[("page1.png", b"a page", As::File)],
-        &[0x03, 0x04, 0x01],
-        &[0x05, 0, 0, 0, 0],
+        &[0x03],
+        &[0x00],
         b"a page".to_vec(),
     );
     // One bit inside the data, so the header is perfect and only the entry's
@@ -854,7 +851,7 @@ fn write_the_fuzz_seeds() {
         ("stored", [&[0xFFu8][..], &stored].concat()),
         ("mixed-kinds", [&[0xFF][..], &mixed].concat()),
         ("deflate", [&[0xFF][..], &deflated].concat()),
-        ("unsupported-coder", [&[0xFF][..], &ppmd].concat()),
+        ("unsupported-coder", [&[0xFF][..], &unsupported].concat()),
         ("crc-mismatch", [&[0xFF][..], &bad_crc].concat()),
         ("stored-tight", [&[0x00][..], &stored].concat()),
         ("mixed-tight", [&[0x00][..], &mixed].concat()),
@@ -1113,6 +1110,60 @@ fn the_bcj_fixture_is_a_filter_chain_that_rewrote_operands() {
         assert!(
             (1..=4).any(|back| at >= back && whole[at - back] & 0xFE == 0xE8),
             "byte {at} changed and is not inside a branch operand"
+        );
+    }
+}
+
+/// **The two PPMd fixtures run in the arenas they are named for, and the
+/// tight one really restarts.**
+///
+/// `tests/coders.rs` holds both archives' entries to the files that went in.
+/// What it cannot see is *how* the model got there, and the second archive
+/// exists for one path: an arena small enough to fill, so the allocator glues
+/// its free lists, borrows units from the text area and, when nothing is
+/// left, throws the model away (`RestartModel`). A regeneration that quietly
+/// produced a roomy arena would still decode — and would stop testing the
+/// path it is named for. So the coder's properties are read off the header
+/// and the restarts are counted by the decoder itself.
+#[test]
+fn the_ppmd_fixtures_run_in_the_arenas_they_are_named_for() {
+    for (name, order, arena, restarts) in [
+        ("py7zr-ppmd.7z", 6u8, 1u32 << 24, 0..=0u32),
+        ("py7zr-ppmd-tight.7z", 32, 1 << 16, 10..=u32::MAX),
+    ] {
+        let bytes = coder_fixture(name);
+        let archive = open(&bytes);
+        assert_eq!(archive.folders.len(), 1, "{name}: one solid folder");
+        let folder = &archive.folders[0];
+        assert_eq!(folder.coders.len(), 1, "{name}: PPMd alone");
+        let coder = &folder.coders[0];
+        assert_eq!(coder.id, PPMD, "{name}: coder 030401");
+        assert_eq!(coder.props[0], order, "{name}: model order");
+        assert_eq!(
+            u32::from_le_bytes([
+                coder.props[1],
+                coder.props[2],
+                coder.props[3],
+                coder.props[4]
+            ]),
+            arena,
+            "{name}: arena size"
+        );
+        let size = folder.unpack_sizes[0] as usize;
+        let (out, counted) = crate::ppmd::decode_counting(
+            packed_of(&bytes, folder),
+            &coder.props,
+            size,
+            &crate::ppmd::Limits {
+                max_unpacked: size,
+                max_memory: 1 << 24,
+            },
+        )
+        .expect("the folder decodes");
+        assert_eq!(out.len(), size);
+        assert!(
+            restarts.contains(&counted),
+            "{name}: the model restarted {counted} times"
         );
     }
 }

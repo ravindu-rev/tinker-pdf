@@ -206,6 +206,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "ppmd"
+path = "fuzz_targets/ppmd.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "rar"
 path = "fuzz_targets/rar.rs"
 test = false

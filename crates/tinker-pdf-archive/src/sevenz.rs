@@ -38,8 +38,9 @@
 //! # Coders read
 //!
 //! Copy (`00`), LZMA (`030101`), LZMA2 (`21`), Deflate (`040108`), bzip2
-//! (`040202`, in [`crate::bzip2`]) and BCJ (`03030103`, the x86 branch filter
-//! `-mf=BCJ` puts in front of LZMA2, in the crate's private `bcj` module). A folder is walked by its bind pairs and
+//! (`040202`, in [`crate::bzip2`]), PPMd (`030401`, in [`crate::ppmd`]) and
+//! BCJ (`03030103`, the x86 branch filter `-mf=BCJ` puts in front of LZMA2, in
+//! the crate's private `bcj` module). A folder is walked by its bind pairs and
 //! never by the order its coders are listed in: 7-Zip lists a filter before
 //! the compressor feeding it and py7zr lists it after, and both are the same
 //! chain.
@@ -55,7 +56,7 @@
 
 use tinker_pdf_filters::{crc32, inflate_raw, Limits as InflateLimits};
 
-use crate::{bcj, bzip2, lzma};
+use crate::{bcj, bzip2, lzma, ppmd};
 
 pub mod limits;
 
@@ -96,6 +97,9 @@ const BCJ_X86: &[u8] = &[0x03, 0x03, 0x01, 0x03];
 /// 7z method `040202`, bzip2 (`DOC/Methods.txt`: `04` misc, `02` BZip2,
 /// `02` BZip2).
 const BZIP2: &[u8] = &[0x04, 0x02, 0x02];
+/// 7z method `030401`, PPMd (`DOC/Methods.txt`: `03` 7z, `04` PPMD, `01`
+/// PPMd var.H with 7z's range coder).
+const PPMD: &[u8] = &[0x03, 0x04, 0x01];
 
 /// Why an archive could not be opened at all.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -124,8 +128,8 @@ pub enum Error {
     /// A coder this build does not implement, by its 7z method id.
     ///
     /// Carries the id so the refusal names the method rather than the file:
-    /// `030401` is PPMd and `0303011B` is BCJ2, and a host that says which is
-    /// a host whose user can re-pack.
+    /// `0303011B` is BCJ2 and `03` the delta filter, and a host that says
+    /// which is a host whose user can re-pack.
     UnsupportedCoder { id: Vec<u8> },
     /// AES-256 (`06F10701`). A named non-goal, shared with `tinker-pdf-zip`.
     Encrypted,
@@ -180,6 +184,10 @@ pub enum EntryError {
     /// [`EntryError::FolderFailed`] for coder `040202`, carrying bzip2's own
     /// reason, which includes its block and stream CRCs failing.
     Bzip2Failed(bzip2::Error),
+    /// The folder's PPMd stream would not decode, carrying the model's
+    /// reason — properties outside 7-Zip's ranges, an arena past the cap, or
+    /// a stream the model cannot follow.
+    PpmdFailed(ppmd::Error),
     /// The folder decompressed and this entry's CRC-32 does not match what the
     /// archive recorded.
     ///
@@ -204,6 +212,7 @@ impl core::fmt::Display for EntryError {
             EntryError::NotAFile => f.write_str("an entry that holds no file data"),
             EntryError::FolderFailed(e) => write!(f, "a block that would not decompress: {e}"),
             EntryError::Bzip2Failed(e) => write!(f, "a bzip2 block that would not decompress: {e}"),
+            EntryError::PpmdFailed(e) => write!(f, "a PPMd block that would not decompress: {e}"),
             EntryError::CrcMismatch => f.write_str("an entry whose recorded CRC-32 does not match"),
             EntryError::Truncated => f.write_str("a block shorter than its own substream table"),
             EntryError::UnsupportedCoder => f.write_str("a coder this build does not read"),
@@ -505,6 +514,7 @@ impl<'a> Archive<'a> {
                 FolderError::TooLarge => EntryError::TooLarge,
                 FolderError::Lzma(e) => EntryError::FolderFailed(e),
                 FolderError::Bzip2(e) => EntryError::Bzip2Failed(e),
+                FolderError::Ppmd(e) => EntryError::PpmdFailed(e),
                 FolderError::SizeMismatch => EntryError::Truncated,
             })?;
             self.cached = Some((folder_index, bytes));
@@ -527,6 +537,7 @@ enum FolderError {
     TooLarge,
     Lzma(lzma::Error),
     Bzip2(bzip2::Error),
+    Ppmd(ppmd::Error),
     /// A coder produced a length other than the one the header declared for
     /// its output — for a filter, whose output is its input, the header and
     /// the stream disagreeing about one number.
@@ -612,6 +623,15 @@ fn run_coder(
                 return Err(FolderError::SizeMismatch);
             }
             Ok(data)
+        }
+        // PPMd var.H. The model's arena is the one allocation the properties
+        // size, and the folder cap bounds it as it bounds the output.
+        PPMD => {
+            let limits = ppmd::Limits {
+                max_unpacked: out_size,
+                max_memory: limits.max_unpacked,
+            };
+            ppmd::decode(input, &coder.props, out_size, &limits).map_err(FolderError::Ppmd)
         }
         // Deflate: 7z method `040108` is RFC 1951 with no wrapper, exactly as
         // ZIP method 8 is, which is the second half of this crate's edge into
@@ -939,7 +959,7 @@ fn folder(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Folder, Error> {
     for coder in &coders {
         let known = matches!(
             coder.id.as_slice(),
-            [0x00] | [0x21] | [0x03, 0x01, 0x01] | [0x04, 0x01, 0x08] | BCJ_X86 | BZIP2
+            [0x00] | [0x21] | [0x03, 0x01, 0x01] | [0x04, 0x01, 0x08] | BCJ_X86 | BZIP2 | PPMD
         );
         // BCJ has no properties, and 7-Zip since 23 refuses a coder handed
         // properties it has no use for rather than ignoring them: a header

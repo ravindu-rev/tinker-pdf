@@ -183,6 +183,11 @@ deny = [
   { name = "bzip2-sys" },
   { name = "bzip2-rs" },
   { name = "libbz2-rs-sys" },
+  # PPMd, for the same reason in the milestone that writes its model. The one
+  # pure-Rust port is of the same public-domain 7-Zip code this repository
+  # transcribed, which is exactly why reaching for it would be the temptation.
+  { name = "ppmd-rust" },
+  { name = "ppmd-sys" },
   { name = "crc32fast" },
   { name = "crc" },
   { name = "crc-any" },

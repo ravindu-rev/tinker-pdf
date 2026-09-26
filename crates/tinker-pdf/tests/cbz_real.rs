@@ -123,7 +123,7 @@ const ZIPS: &[&str] = &[
 /// The `py7zr-*.cb7`s are the second 7z writer (`tests/cbz/make-py7zr.py`),
 /// each asked for a coder 7-Zip's three were not: `py7zr-bcj.cb7` puts BCJ in
 /// front of LZMA2, and lists the two coders in the opposite order from 7-Zip;
-/// `py7zr-bzip2.cb7` is coder `040202`.
+/// `py7zr-bzip2.cb7` is coder `040202` and `py7zr-ppmd.cb7` coder `030401`.
 const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-tar.cbt", Container::Tar),
     ("7z-lzma2.cb7", Container::SevenZip),
@@ -131,6 +131,7 @@ const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-dictreset.cb7", Container::SevenZip),
     ("py7zr-bcj.cb7", Container::SevenZip),
     ("py7zr-bzip2.cb7", Container::SevenZip),
+    ("py7zr-ppmd.cb7", Container::SevenZip),
     ("python-lzma.cbz", Container::Zip),
     ("python-bzip2.cbz", Container::Zip),
 ];

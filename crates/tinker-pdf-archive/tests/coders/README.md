@@ -34,11 +34,13 @@ same bytes on any Python 3.
 | --- | ---: | --- | --- | --- |
 | `py7zr-bcj.7z` | 47 656 | py7zr 1.1.3, `[FILTER_X86, FILTER_LZMA2]` | 7z `03030103` (BCJ) fed by `21` (LZMA2) through a bind pair; `x86.bin` and `prose.txt` in one solid folder | `1fdf9888563556d9` |
 | `py7zr-bzip2.7z` | 41 604 | py7zr 1.1.3, `[FILTER_BZIP2]` | 7z `040202`; `prose.txt`, `runs.bin` and `x86.bin` in one solid folder, one level-9 block | `091fb3303fa690e5` |
+| `py7zr-ppmd.7z` | 37 965 | py7zr 1.1.3, `[FILTER_PPMD]` order 6, `mem` 24 | 7z `030401` in a 16 MiB arena the model never fills | `a7b31f4828f5d068` |
+| `py7zr-ppmd-tight.7z` | 56 394 | py7zr 1.1.3, `[FILTER_PPMD]` order 32, `mem` 16 | The same coder in **64 KiB**: the arena fills and the model restarts again and again over 148 KB — counted by `the_ppmd_fixtures_run_in_the_arenas_they_are_named_for` | `31de4d89ffcd0f68` |
 | `python-bzip2.zip` | 41 656 | CPython 3.11.15 `zipfile`, `ZIP_BZIP2`, `compresslevel=1` | APPNOTE method 12 on all four inputs: `prose.txt` is **two** blocks at level 1's 100 000-byte limit, and `empty.txt` a stream with **no** block | `8ca8493ac60b6287` |
 
 Obtained on Linux x86_64 with CPython 3.11.15, py7zr 1.1.3, liblzma 5.4.5
-(Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`) and libbzip2 1.0.8 (Ubuntu
-`1.0.8-5.1build0.1`), on 26 September 2026:
+(Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`), libbzip2 1.0.8 (Ubuntu
+`1.0.8-5.1build0.1`) and pyppmd 1.3.1, on 26 September 2026:
 
 ```
 pip install --user py7zr
@@ -53,7 +55,10 @@ writes the real-writer seeds in `fuzz/corpus/`: `sevenz/bcj-lzma2` (the same
 filters over `x86.bin`'s first 768 bytes), `sevenz/bzip2`,
 `zip_archive/bzip2-method-12`, and the five bare streams of `bzip2/` —
 libbzip2 through CPython's `bz2` at three levels, an empty stream, and two
-streams end to end.
+streams end to end — `sevenz/ppmd` (order 8 in 1 MiB, inside the `sevenz`
+target's roomiest bound), and the four bare streams of `ppmd/`, pyppmd's,
+behind the three parameter bytes that target reads: order 2 in 2 KiB,
+order 6 in 64 KiB, order 16 in 1 MiB and order 64 in 8 KiB.
 
 ### Which implementation did the coding
 
@@ -66,6 +71,13 @@ one matters, because the coder is what these files adjudicate.
 - **bzip2**: py7zr and CPython's `zipfile` both call CPython's `bz2`, which is
   libbzip2 1.0.8 — the reference implementation, so the one whose reading of
   the format is the format.
+- **PPMd**: py7zr calls pyppmd 1.3.1, which is 7-Zip's own `Ppmd7.c` and
+  `Ppmd7Enc.c` compiled for CPython — the same public-domain code this
+  crate's decoder was transcribed from. So these archives are **not** a
+  second implementation of the model: an error shared between 7-Zip's
+  encoder and a faithful reading of 7-Zip's decoder would pass. What they
+  are is the encoder every PPMd 7z in the world was written by, and the
+  CRC-32 over the original bytes is what says this decoder inverts it.
 
 ## Whether they may be committed
 
