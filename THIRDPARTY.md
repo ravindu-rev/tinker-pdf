@@ -31,6 +31,7 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-shape/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-shape/data/text-rendering-tests` | [unicode-org/text-rendering-tests](https://github.com/unicode-org/text-rendering-tests) at `26cfb96` (2026-08-24) | `Unicode-3.0` |
 | `crates/tinker-pdf-xml/data/xhtml-entities` | XHTML 1.0's three entity sets as XHTML Modularization 1.1 (2010-07-29) publishes them, from [w3c/markup-validator](https://github.com/w3c/markup-validator) `htdocs/sgml-lib/REC-xhtml-modularization-20100729/` at `724a15b` (fetched 2026-09-26) | `W3C` |
+| `crates/tinker-pdf-content/data/ucd` | The Unicode Character Database, version 17.0.0, via [unicode-org/unicodetools](https://github.com/unicode-org/unicodetools) `unicodetools/data/ucd/17.0.0` at `0509b4b` (fetched 2026-09-26) | `Unicode-3.0` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -569,6 +570,39 @@ recorded here as the measurement it was rather than run by any test (ruling
 the semicolon-less legacy spellings) include ones that expand to two code points (`&nGt;` is U+226B U+20D2), which would end
 `tinker-pdf-xml`'s invariant that decoded text is never longer than its source,
 and it is not what any XHTML DTD declares.
+
+### `crates/tinker-pdf-content/data/ucd`
+
+The Unicode Character Database a third time, at the files
+[UAX #29](https://www.unicode.org/reports/tr29/)'s word boundaries need, for
+`TextLine::words` and the word boxes it returns. A **third** tree rather than
+a share of either existing one, for the reason the second exists: this crate
+may depend on neither `tinker-pdf-layout` nor `tinker-pdf-shape`
+(`cargo xtask dag`), and a build script cannot read across a crate boundary.
+`crates/tinker-pdf-shape/tests/ucd_version.rs` holds all three trees to one
+Unicode version, one licence text and a fixed list of files each.
+
+unicode.org itself was not reachable from where this was vendored, so the
+files were fetched from the Unicode Consortium's own tools repository, which
+carries the published release under `unicodetools/data/ucd/<version>/`, pinned
+to commit `0509b4b256ff75c65300c8aaecb9e6ec816d9520` so the URL names one set
+of bytes:
+`https://raw.githubusercontent.com/unicode-org/unicodetools/0509b4b256ff75c65300c8aaecb9e6ec816d9520/unicodetools/data/ucd/17.0.0/<path>`.
+Each file's first line states its own version, and `emoji-data.txt` is byte
+for byte the copy `crates/tinker-pdf-layout/data/ucd` already carried.
+
+| File | Upstream path | SHA-256 | What it is |
+| --- | --- | --- | --- |
+| `WordBreakProperty.txt` | `auxiliary/WordBreakProperty.txt` | `72274cac1e6b919507db35655c3e175aa27274668a1ece95c28d2069f2ad9852` | The `Word_Break` property, which **is** UAX #29's word algorithm |
+| `emoji-data.txt` | `emoji/emoji-data.txt` | `2cb2bb9455cda83e8481541ecf5b6dfda66a3bb89efa3fa7c5297eccf607b72b` | `Extended_Pictographic`, which rule WB3c is written in |
+| `WordBreakTest.txt` | `auxiliary/WordBreakTest.txt` | `1de23a75f37904abc7d206239ee8d34f8fdf0fb4ab32a7174dfbabbde25419b2` | **The conformance oracle.** 1 944 cases, every one run by `tests/uax29_conformance.rs` against the function `TextLine::words` calls |
+| `LICENSE.txt` | — | `e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96` | The Unicode License v3, byte for byte the file the other two UCD trees carry |
+
+The first two are compiled into static range tables by `build.rs` and never
+opened at run time; the third is a test input and is not compiled into
+anything. It is here rather than fetched for the reason `LineBreakTest.txt` is:
+a skipped oracle exits 0 and reads exactly like a pass. `Unicode-3.0` is
+already on `deny.toml`'s allowlist, and its text is reproduced above.
 
 ### The predefined XMP schemas' property tables
 

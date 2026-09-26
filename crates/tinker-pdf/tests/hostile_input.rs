@@ -228,6 +228,10 @@ fn exercise(bytes: Vec<u8>) {
         let _ = text.search("e");
         let _ = text.lines();
         let _ = text.blocks.len();
+        // UAX #29 over whatever a mutated font decoded to.
+        for line in text.lines() {
+            let _ = line.words();
+        }
 
         // The join, over the same `TextPage`. Reached through the tree bound
         // above rather than through `Page::structured_text` so the walk is

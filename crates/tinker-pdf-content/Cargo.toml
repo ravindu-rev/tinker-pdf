@@ -8,6 +8,12 @@ repository.workspace = true
 authors.workspace = true
 description = "Content-stream tokenizer and interpreter; the Device trait seam; the text-extraction device"
 
+# The vendored UCD ships, for the reason `tinker-pdf-layout` records: build
+# time is the consumer's build time and `build.rs` panics when `data/` is
+# missing. `target/` would otherwise be swept in on a machine that has built
+# here.
+exclude = ["target/"]
+
 [features]
 # Forwarded; see `tinker-pdf-font`.
 default = ["cmap-predefined"]

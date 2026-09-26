@@ -1,4 +1,4 @@
-//! The two vendored UCD trees are the same Unicode version.
+//! The vendored UCD trees are the same Unicode version.
 //!
 //! `docs/design/shaping.md`'s risk table names the failure this exists to stop:
 //! *"Unicode version skew between the two crates' vendored UCD — one pinned
@@ -18,16 +18,24 @@
 //! The files themselves say which version they are, on their first line, so
 //! this reads the pin out of the data rather than out of a constant somebody
 //! has to remember to bump.
+//!
+//! There are **three** trees now, not two: `tinker-pdf-content` segments words
+//! with UAX #29 for `TextLine::words`, and may depend on neither of the other
+//! two crates. The argument above holds a third time — a word boundary and a
+//! line-break opportunity disagreeing about whether a code point is assigned is
+//! the same failure — so the third tree is held to the same pin here rather than
+//! by a test of its own that could drift from this one.
 
 use std::path::{Path, PathBuf};
 
 /// The vendored trees, and one file from each that carries a version header.
 ///
-/// Every file in both trees is checked, not only these; the list is here to
-/// say where the trees are.
+/// Every file in every tree is checked; the list is here to say where the
+/// trees are.
 const TREES: &[&str] = &[
     "crates/tinker-pdf-shape/data/ucd",
     "crates/tinker-pdf-layout/data/ucd",
+    "crates/tinker-pdf-content/data/ucd",
 ];
 
 fn repo_root() -> PathBuf {
@@ -134,7 +142,7 @@ fn both_crates_vendor_the_same_unicode_version() {
     }
     assert!(
         versions.len() >= 12,
-        "only {} versioned files across both trees",
+        "only {} versioned files across the trees",
         versions.len()
     );
     // The longest stated version is the pin, so the two-component emoji header
@@ -152,7 +160,7 @@ fn both_crates_vendor_the_same_unicode_version() {
         .collect();
     assert!(
         disagree.is_empty(),
-        "the two vendored UCD trees have drifted apart:\n{}",
+        "the vendored UCD trees have drifted apart:\n{}",
         disagree.join("\n")
     );
     // And the pin is the one THIRDPARTY.md declares, so the two statements of
@@ -171,12 +179,16 @@ fn both_crates_carry_the_same_licence_text() {
         std::fs::read_to_string(root.join(path).join("LICENSE.txt"))
             .unwrap_or_else(|error| panic!("{path}/LICENSE.txt could not be read ({error})"))
     };
-    assert_eq!(
-        read(TREES[0]).replace("\r\n", "\n"),
-        read(TREES[1]).replace("\r\n", "\n"),
-        "the two vendored UCD trees carry different licence text, so one of \
-         them is describing terms it was not given under"
-    );
+    let first = read(TREES[0]).replace("\r\n", "\n");
+    for tree in TREES.iter().skip(1) {
+        assert_eq!(
+            first,
+            read(tree).replace("\r\n", "\n"),
+            "{tree} carries different licence text from {}, so one of them is \
+             describing terms it was not given under",
+            TREES[0]
+        );
+    }
 }
 
 /// The files each tree is supposed to hold, so that a re-vendor that dropped
@@ -220,13 +232,23 @@ fn each_tree_holds_the_files_its_algorithms_need() {
         ],
         "the layout crate's vendored UCD changed shape"
     );
+    assert_eq!(
+        names("crates/tinker-pdf-content/data/ucd"),
+        vec![
+            "LICENSE.txt",
+            "WordBreakProperty.txt",
+            "WordBreakTest.txt",
+            "emoji-data.txt",
+        ],
+        "the content crate's vendored UCD changed shape"
+    );
 }
 
 /// The vendored files that state no Unicode version of their own.
 ///
 /// Two, and each is pinned by something other than a header:
 ///
-/// - `LICENSE.txt`, compared byte for byte between the two trees by
+/// - `LICENSE.txt`, compared byte for byte between the trees by
 ///   [`both_crates_carry_the_same_licence_text`];
 /// - `UnicodeData.txt`, whose very first line is data — it is the one UCD data
 ///   file published without a header — pinned by

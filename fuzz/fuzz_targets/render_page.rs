@@ -33,7 +33,13 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let _ = page.text().plain_text();
+    let text = page.text();
+    let _ = text.plain_text();
+    // UAX #29 over whatever the page's fonts decoded to, which a mutated
+    // `/ToUnicode` makes arbitrary.
+    for line in text.lines() {
+        let _ = line.words();
+    }
     let _ = doc.form_fields();
     let _ = doc.outline();
     // 14.7's `/K` graph and `/RoleMap` rewriting system, both attacker-shaped
