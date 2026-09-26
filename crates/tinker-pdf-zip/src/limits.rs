@@ -79,7 +79,9 @@ pub const MAX_ZIP_ENTRY_BYTES: usize = 128 << 20;
 /// A stored entry does not spend it: stored data is a subslice of the input,
 /// it allocates nothing, it cannot expand, and it is already bounded by the
 /// archive's own length. Inflation is the only place bounded input becomes
-/// unbounded output, so inflation is what the total counts.
+/// unbounded output, so inflation is what the total counts — and an LZMA
+/// entry read through `Archive::read_with` is decompression by another name,
+/// so it is charged on the same terms, from the same total.
 ///
 /// | | Bytes |
 /// | --- | --- |

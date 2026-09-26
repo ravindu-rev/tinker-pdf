@@ -23,8 +23,9 @@ implementation's idea of a ZIP over content nobody else owns.
 
 ## What produced them
 
-Ten archives, five of them ZIPs, from four independent implementations on the
-machine described below.
+Eleven archives, six of them ZIPs, from four independent implementations —
+ten on the machine described below, and `python-lzma.cbz` later, on the one its
+own row names.
 
 | Producer | Files | What it is |
 | --- | --- | --- |
@@ -32,6 +33,7 @@ machine described below.
 | **WinRAR 7.20** (x64, trial) | `winrar.cbz`, `winrar-rar5.cbr` | RARLAB, proprietary. `WinRAR.exe a -afzip` writes the ZIP; `Rar.exe` writes the RAR. The trial adds no comment or watermark to an archive — the nag is on the console. |
 | **.NET `System.IO.Compression`** | `pwsh.cbz` | Through PowerShell's `Compress-Archive`. Microsoft's ZIP writer, and the one most Windows software reaches for. |
 | **CPython 3.12 `zipfile`** | `python.cbz` | The standard library's writer, and the one most tooling that touches comics is written against. |
+| **CPython 3.11.15 `zipfile`**, `ZIP_LZMA`, over liblzma 5.4.5 (Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`) | `python-lzma.cbz` | The same writer asked for APPNOTE method 14 — the one writer on hand that emits it — by `make-lzma.py`, on Linux x86_64, 26 September 2026. Added later; see *The LZMA ZIP* below. |
 
 **RAR 4 cannot be produced on this machine, and that is recorded rather than
 worked around.** RAR 7.20's `rar.exe` has no `-ma` switch at all: `-ma4`
@@ -70,11 +72,12 @@ rerunning a producer.
 
 ## What is committed
 
-191 755 bytes, which is the sum of the Bytes column below and nothing else —
+210 694 bytes, which is the sum of the Bytes column below and nothing else —
 the pages in `source/` are another 18 483 and the four text files here are not
 counted at all. (The figure that stood here before the two later `.cb7`s landed
 was 183 776, which was the sum of nothing: the eight archives it described came
-to 155 074. Re-measured rather than carried.) `sha256` is the first sixteen hex
+to 155 074. Re-measured rather than carried, and again when `python-lzma.cbz`
+added 18 939 to 191 755.) `sha256` is the first sixteen hex
 digits, enough to tell a file from a regeneration of it.
 
 | File | Bytes | Producer | What it demonstrates | sha256 |
@@ -84,6 +87,7 @@ digits, enough to tell a file from a regeneration of it.
 | `winrar.cbz` | 19 039 | WinRAR `-afzip` | A second ZIP writer that makes the same per-entry store/deflate choices as 7-Zip and lays its central directory out differently | `1db56f83e8cac68e` |
 | `pwsh.cbz` | 18 879 | .NET `System.IO.Compression` | The second finding: **deflates every entry, including the three it makes larger** | `944a422eb61cd0fa` |
 | `python.cbz` | 18 879 | CPython 3.12 `zipfile` | A fourth implementation doing the same, so the finding is not one library's quirk | `48bd76da17bc6a61` |
+| `python-lzma.cbz` | 18 939 | CPython 3.11 `zipfile`, `ZIP_LZMA` | **Every entry ZIP method 14**, with APPNOTE 5.8.8's header and an end-of-stream marker (general-purpose bit 1). Read since tier 4's archive row wired the LZMA decoder | `22543533a5094f1b` |
 | `7z-lzma2.cb7` | 17 663 | 7-Zip `-t7z -m0=LZMA2` | A CB7 holding the same five pages, in one solid LZMA2 block under an **LZMA-compressed header**. Read since tier 4 | `f211476cb9b199d9` |
 | `7z-nonsolid.cb7` | 18 608 | 7-Zip `-t7z -m0=LZMA2 -ms=off` | The same five pages in **five folders**, one per page: the folder walk runs past folder 0 and sets a coder up five times | `6a10817c1df4905f` |
 | `7z-dictreset.cb7` | 18 073 | 7-Zip `-t7z -m0=LZMA2:d8k:c8k` | The same five pages in one folder of **three LZMA2 chunks**, each opening with a dictionary reset — two of them mid-stream | `7e9caaa4ff5fc706` |
@@ -244,11 +248,44 @@ it, in tier 4's archive row, where the same argument already parks PPMd and
 bzip2. BCJ2 stays refused by `Error::NotAChain` by design: it takes four input
 streams and is not a chain.
 
+## The LZMA ZIP
+
+`python-lzma.cbz` arrived with the decoder, not ahead of it, and for a reason
+the three `.cb7`s did not have: those were committed while 7z was refused so
+that a decoder would find its answer already in the tree, and here the answer
+*is* already in the tree — `source/` holds the five files that went in, and
+LZMA is lossless. So `cbz_real.rs`'s
+`a_real_archiver_s_lzma_entries_are_the_files_that_went_in` holds every decoded
+entry to its source file byte for byte, which is the generator's *input* as the
+expected answer rather than any decoder's output, and the archive's own CRC-32
+stands behind that inside `tinker-pdf-zip`.
+
+Obtained on Linux x86_64 with CPython 3.11.15 over liblzma 5.4.5, on
+26 September 2026:
+
+```
+cd crates/tinker-pdf/tests/cbz && python3 make-lzma.py
+```
+
+`make-lzma.py` gives every entry one fixed timestamp, so unlike the rest of
+this directory a rerun under the same two versions writes the **same bytes** —
+SHA-256 `22543533a5094f1beea83fbfe354ec03783dc08ec3e3d67a6b8854868a8768b5`,
+measured twice. It packs in `make-corpus.ps1`'s order, not reading order.
+
+**It is deliberately not in `INVENTORY.tsv`.** That table is .NET's reading of
+the ZIPs, and .NET exposes no method code: `inventory.ps1` infers `stored` or
+`deflate` from whether two lengths are equal, and would write `deflate` for all
+five method-14 entries — a row this reader would then correctly disagree with,
+for a reason that is .NET's and not the archive's. `inventory.ps1` skips the
+file by name and says why, so a regeneration does not quietly put that claim
+in the table; the entries' CRC-32 is what adjudicates the decoder instead.
+
 ## The scripts
 
 `make-corpus.ps1` writes the ten archives and prints a hash for each;
 `inventory.ps1` regenerates `INVENTORY.tsv` from the five ZIPs through .NET's
-reader. Neither runs in CI — they are how these files were obtained.
+reader; `make-lzma.py` writes the eleventh. None runs in CI — they are how
+these files were obtained.
 
 ```
 cargo test -p tinker-pdf --test cbz_real -- --ignored write_the_source_pages

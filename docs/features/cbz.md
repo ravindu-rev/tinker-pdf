@@ -35,7 +35,16 @@ the posture the COS layer already takes for a damaged cross-reference table.
 directory wins: an entry written with general-purpose bit 3 set has zeros in
 its local header *by design* (APPNOTE 4.3.9), so following the local header
 would refuse every streamed entry in the world. Deflated entries are raw
-DEFLATE by definition (APPNOTE 4.4.5, RFC 1951). Names decode as UTF-8 under
+DEFLATE by definition (APPNOTE 4.4.5, RFC 1951). **LZMA entries (method 14)
+are read too, on the comic path**: `tinker-pdf-zip` reads APPNOTE 5.8.8's
+nine-byte header — two version bytes, a properties size that must be five, the
+`lc`/`lp`/`pb` byte and the dictionary size — bounds and charges the entry
+exactly as it does a deflated one, and hands the stream to the LZMA decoder
+7z already uses through `Archive::read_with`, so the zip crate gained no
+dependency. What comes back is held to the declared length and the recorded
+CRC-32 inside the zip crate, so the archive's checksum adjudicates the decoder
+here exactly as a `.cb7`'s does. An XPS or an EPUB item is still refused by
+method number: OPC and OCF allow stored and deflated and nothing else. Names decode as UTF-8 under
 bit 11 and as CP437 otherwise (APPNOTE D.1). **Every entry is CRC-32 checked
 before its bytes are returned, and an entry that cannot be checked is
 refused** — the design copies image bytes into the PDF untouched, so the
@@ -277,8 +286,12 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   halves `Document::open` actually uses, split so the sniff and the read share
   one `Archive`.
 - `tinker_pdf_zip::Archive` — `open`, `entries()`, `read(index)` (checked;
-  stored entries are handed back borrowed, copied nowhere), `route()`,
-  `warnings()` and `inflated()`.
+  stored entries are handed back borrowed, copied nowhere), `read_with(index,
+  decoder)` (the same, with the caller's decoder for method 14, handed an
+  `LzmaStream` with 5.8.8's header already read), `route()`, `warnings()` and
+  `inflated()`.
+- `cbz::read_entry(&mut archive, index)` — `read_with` with this engine's
+  LZMA decoder, which is what the comic path reads every ZIP entry through.
 - `cbz::open_tar` and `cbz::pages_from_tar`, the same two halves for a `.cbt`,
   over `tinker_pdf_archive::tar::Archive` — `open`, `entries()`,
   `read(index)` (a plain borrow), `warnings()`.
@@ -312,7 +325,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | Valid archive, no image entries | `ArchiveRefusal::NoImages` | a zero-page open is a failure dressed as a success | — |
 | Past a bound | `ArchiveRefusal::TooLarge` | `MAX_CBZ_PAGES`, `MAX_SYNTHESISED_PDF`, or one of the archive reader's own | — |
 | One encrypted or checksum-failed entry | `PageDefect::EntryRefused(ZipEntryError)` | placeholder page; the page count and every number after it are unchanged | — |
-| Compression method other than stored/deflated | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, bzip2, LZMA, Zstandard — named by code so a refusal says which | — |
+| Compression method other than stored, deflated or LZMA | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, bzip2, Zstandard — named by code so a refusal says which | — |
+| A method-14 entry whose APPNOTE 5.8.8 header is damaged | `ZipEntryError::LzmaHeader` | placeholder page; fewer than nine bytes, a properties size other than five, or a property byte outside what LZMA encodes — a wrong offset or a different coder shows here first | — |
 | GIF, WebP, BMP, AVIF, JPEG 2000 entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
 | A JPEG, PNG or TIFF that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a `Compression` or `PhotometricInterpretation` refused by name, a raster past the ceiling | [filters](filters.md) |
 | A `ComicInfo.xml` that will not read | `ArchiveWarning::ComicInfo(ComicInfoDefect)` | past 64 KiB, an entry the archive refused, markup that is not well formed, or a root that is not `ComicInfo`; the pages are unaffected | — |
@@ -360,7 +374,14 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   are one producer asked for three **shapes** — one solid folder, five folders
   (`-ms=off`), and three LZMA2 chunks with a dictionary reset each
   (`-m0=LZMA2:d8k:c8k`) — because the default shape makes the folder walk and
-  the chunk loop each run exactly once. `tests/cbz/README.md` records what that
+  the chunk loop each run exactly once. `python-lzma.cbz` is the sixth ZIP:
+  CPython's `zipfile` with `ZIP_LZMA`, every entry method 14, and
+  `a_real_archiver_s_lzma_entries_are_the_files_that_went_in` holds each
+  decoded entry to the committed file it was made from, byte for byte, before
+  the archive joins the cross-producer identity. It is not in `INVENTORY.tsv`,
+  whose second reader is .NET's and would infer `deflate` from the lengths;
+  `a_damaged_lzma_header_is_a_placeholder_page_naming_it` changes one header
+  byte and asserts the placeholder names `LzmaHeader`. `tests/cbz/README.md` records what that
   still does not buy: a second 7z *writer*, which this machine cannot produce.
 - `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
   archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 28 unit tests over
@@ -377,7 +398,9 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   document byte-hashes covers the synthesised bytes whole, including the
   writer's deflate encoder and the pages no fingerprint renders.
 - Fuzzing ([verification](../verification.md)) — `fuzz_targets/zip_archive.rs`
-  drives both parsers over the same bytes and asserts, beyond "no panic", that
+  drives both parsers over the same bytes, reading through `cbz::read_entry`
+  so ZIP method 14's header and the LZMA decoder behind it are driven too
+  (seed `lzma-method-14`), and asserts, beyond "no panic", that
   a successful read produced exactly the declared length, spent no more than
   the archive's total, and that every entry is either checksummed or refused;
   `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take,

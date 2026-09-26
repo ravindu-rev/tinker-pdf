@@ -1397,7 +1397,7 @@ impl<'a> Reader<'a> {
     /// hundred lines away.
     fn read(&mut self, index: usize) -> Result<Cow<'a, [u8]>, PageDefect> {
         match self {
-            Reader::Zip(archive) => archive.read(index).map_err(PageDefect::EntryRefused),
+            Reader::Zip(archive) => read_entry(archive, index).map_err(PageDefect::EntryRefused),
             Reader::Tar(archive) => archive
                 .read(index)
                 .map(Cow::Borrowed)
@@ -1751,6 +1751,59 @@ pub fn open_archive<'a>(
         ArchiveError::MultiDisk => ArchiveRefusal::MultiDisk,
         ArchiveError::Zip64OutOfBounds => ArchiveRefusal::Zip64OutOfBounds,
         ArchiveError::TooManyEntries => ArchiveRefusal::TooLarge,
+    })
+}
+
+/// Reads one entry of a comic's ZIP, checked, with ZIP method 14 decoded.
+///
+/// [`Archive::read`] with the one thing `tinker-pdf-zip` cannot carry: an
+/// LZMA decoder. That crate may depend on `tinker-pdf-filters` and nothing
+/// else, and the range decoder is `tinker_pdf_archive::lzma`, written for 7z —
+/// so the facade, which already depends on both, hands it in through
+/// [`Archive::read_with`]. Everything that is ZIP's stays ZIP's: APPNOTE
+/// 5.8.8's header is read and checked there (a damaged one is
+/// [`ZipEntryError::LzmaHeader`]), the declared size is bounded and charged
+/// against the archive's total there, and what comes back is held to the
+/// declared length and the recorded CRC-32 there. So a decoder wrong by one
+/// byte is refused by the archive's own checksum, exactly as a `.cb7`'s is.
+///
+/// **Only the comic path takes this door.** OPC forbids every compression
+/// method but DEFLATE and OCF 3.3 §4.3.2 allows Stored and Deflated
+/// (`epub::ocf`'s header records both), so an XPS or an EPUB item compressed
+/// with LZMA is a package outside its own format, and those readers keep
+/// [`Archive::read`]'s refusal by number.
+///
+/// # Errors
+/// [`ZipEntryError`], one variant per refusal. The decoder's own failures are
+/// mapped onto the reader's vocabulary: a property byte whose `lc + lp` is
+/// past 4 is [`ZipEntryError::LzmaHeader`] — it is one of the five header
+/// bytes — a stream that runs out or ends before its declared length is
+/// [`ZipEntryError::Truncated`], and anything else is
+/// [`ZipEntryError::Corrupt`].
+pub fn read_entry<'a>(
+    archive: &mut Archive<'a>,
+    index: usize,
+) -> Result<Cow<'a, [u8]>, ZipEntryError> {
+    archive.read_with(index, decode_lzma)
+}
+
+/// ZIP method 14's stream through the decoder 7z already uses.
+fn decode_lzma(stream: &tinker_pdf_zip::LzmaStream<'_>) -> Result<Vec<u8>, ZipEntryError> {
+    use tinker_pdf_archive::lzma;
+    // The ceiling is the declared size, which `tinker-pdf-zip` has already
+    // bounded by the per-entry cap and charged against the archive's total, so
+    // the decoder may produce exactly what the archive was permitted to spend.
+    let limits = lzma::Limits {
+        max_unpacked: stream.unpacked,
+    };
+    lzma::decode(stream.stream, stream.properties, stream.unpacked, &limits).map_err(|e| match e {
+        lzma::Error::BadProperties => ZipEntryError::LzmaHeader,
+        lzma::Error::Truncated | lzma::Error::ShortOutput => ZipEntryError::Truncated,
+        lzma::Error::TooLarge => ZipEntryError::EntryTooLarge,
+        // `lzma::Error` is `#[non_exhaustive]`: a bad range-coder start, a
+        // match reaching past the output, and whatever is added later are all
+        // a stream that is not the one the entry claims to hold.
+        _ => ZipEntryError::Corrupt,
     })
 }
 

@@ -32,6 +32,14 @@
 //!   at a guessed length.
 //! - **The entry list does not change under reading.** A caller enumerates
 //!   pages once and reads them in any order.
+//!
+//! The first pass reads through `tinker_pdf::cbz::read_entry`, which is
+//! `Archive::read_with` with the LZMA decoder handed in, so ZIP method 14 —
+//! APPNOTE 5.8.8's header and the range decoder behind it — is driven under
+//! the same three assertions; the pass under the shipped bounds keeps plain
+//! `Archive::read`, so both doors are fuzzed. `lzma-method-14` is the seed that
+//! reaches the decoder: CPython 3.11's `zipfile` with `ZIP_LZMA` (one method-14
+//! entry and one stored), behind a control byte of `0xFF`.
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: a name past the cap is refused,
@@ -110,7 +118,7 @@ fuzz_target!(|data: &[u8]| {
     // viewer scrolls, and any state the reader keeps between reads has to
     // survive that.
     for index in (0..listed.len()).rev() {
-        match archive.read(index) {
+        match tinker_pdf::cbz::read_entry(&mut archive, index) {
             Ok(bytes) => {
                 assert_eq!(
                     bytes.len() as u64,
