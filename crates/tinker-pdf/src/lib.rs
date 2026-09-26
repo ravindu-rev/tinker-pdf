@@ -80,8 +80,8 @@ pub use structure::{
 /// Font subsetting on rewrite (9.6.4, 9.9).
 pub use subset::{SubsetReport, Subsetted, Untouched, UntouchedReason};
 pub use tinker_pdf_content::{
-    HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, TextBlock, TextChar, TextLine,
-    TextPage, TextWarning, TextWord, WritingMode,
+    HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, SearchOptions, TextBlock,
+    TextChar, TextLine, TextPage, TextWarning, TextWord, WritingMode,
 };
 /// The strict validator's verdict (ruling 13), behind [`Document::validate`].
 ///

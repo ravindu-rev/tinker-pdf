@@ -40,6 +40,14 @@ fuzz_target!(|data: &[u8]| {
     for line in text.lines() {
         let _ = line.words();
     }
+    let _ = text.search_with(
+        "e",
+        &tinker_pdf::SearchOptions {
+            case_sensitive: false,
+            whole_word: true,
+            diacritic_insensitive: true,
+        },
+    );
     let _ = doc.form_fields();
     let _ = doc.outline();
     // 14.7's `/K` graph and `/RoleMap` rewriting system, both attacker-shaped
