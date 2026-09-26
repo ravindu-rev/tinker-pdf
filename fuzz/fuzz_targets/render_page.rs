@@ -6,7 +6,7 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** Six calls,
+//! **Only that the code did not panic, hang, or exhaust memory.** Seven calls,
 //! every one discarded. A page that rendered blank, upside down, in the wrong
 //! colours, or with the wrong glyphs passes. So a run that returned the
 //! *wrong* answer passes this target exactly as a correct one does, and a
@@ -58,6 +58,12 @@ fuzz_target!(|data: &[u8]| {
         let _ = tree.element_count();
         let _ = tree.text_for_page(0, &page.text()).plain_text();
     }
+
+    // Image extraction: every image dictionary the page reaches, described
+    // rather than drawn, through the same sample decoders the render below
+    // uses — so a colour space, a mask or a palette the renderer never reads
+    // this way is parsed here.
+    let _ = page.images();
 
     // A low resolution on purpose: a fuzzer's inputs claim enormous page
     // boxes, and the interesting failures are in the operators rather than in

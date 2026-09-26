@@ -622,7 +622,7 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| Image extraction with decoded samples and colour space | raw streams through `Document::cos()` only. The decode path exists — `PageResources::image` yields a `DecodedImage` the renderer already uses — but it carries **no colour space**, being RGB by the time it is returned, and `ImageData` is the *write* side's enum rather than a read-side type | a read-side image type carrying decoded samples **and** the space they were in, since neither existing type is it; `Page::images()`; `tpdf images` | M |
+| `tpdf images`: CLI lane | **the library half landed**: `Page::images()` returns a `PageImage` per image the page draws, carrying its samples before any colour conversion, the space they are in (`ImageSpace`), `/Decode`, its masks, every placement and its reference, from the same sample decoders the renderer calls (`crates/tinker-pdf/tests/page_images.rs`). What is left is the subcommand, which is the CLI row's | `tpdf images` writes each image's samples and space out, a wrapper over `Page::images()` with no logic of its own (ruling 11) | S |
 | A CJK fallback face | none bundled or fetched; the 202 predefined CMaps extract CJK text, and nothing draws it without a host face | an OFL face behind `bundled-fonts` — `deny.toml` already admits OFL-1.1 — kept out of the wasm default so the 2.5 MB gate holds | M |
 | Hinting | outlines are unhinted by design | decision: an autohinter is L and a fidelity question ruling 13 cannot adjudicate; stem darkening is S and measurable as stem width at small pixel sizes; revisit with a corpus of small-text scans | decision |
 

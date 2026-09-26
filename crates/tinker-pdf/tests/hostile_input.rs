@@ -266,6 +266,11 @@ fn exercise(bytes: Vec<u8>) {
             let _ = joined.unmarked;
         }
 
+        // Image extraction describes every image dictionary the page reaches
+        // — its space, palette, masks and samples — which the renderer reads
+        // only as far as drawing needs.
+        let _ = page.images();
+
         // Deliberately coarse: a mutated file may claim a vast page box, and
         // the interesting failures are in the operators rather than in how
         // many pixels they cover. Rasterizing a full page of every mutation

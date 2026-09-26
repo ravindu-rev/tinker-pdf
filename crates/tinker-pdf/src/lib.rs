@@ -29,6 +29,7 @@ pub mod epub;
 pub mod fontlist;
 pub mod fonts;
 pub mod form_data;
+mod images;
 pub mod layers;
 pub mod mdp;
 mod optional;
@@ -139,6 +140,9 @@ pub use annotations::{
     AnnotationList, AnnotationPayload, Border, BorderEffect, FileSpec, Linked, RichText,
     MAX_ANNOTATION_BYTES,
 };
+/// Images a page draws, with their samples before any colour conversion and
+/// the space they are in, behind [`Page::images`].
+pub use images::{ImageMask, ImageSpace, PageImage, SampleCodec};
 /// Why [`Bitmap::from_png`] would not read a file: the decoder's own reason,
 /// named rather than collapsed, because "not a PNG" and "a colour type Table
 /// 11.1 does not permit" are different answers to show a person.

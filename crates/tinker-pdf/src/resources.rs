@@ -171,7 +171,24 @@ fn invert_if_decode_reverses(decode: &[(f64, f64)], rgb: &mut [u8]) {
 
 /// What an inline image is called in a warning. It has no resource name to be
 /// called anything else by, which is also why it is not cached.
-const INLINE_NAME: &str = "inline";
+pub(crate) const INLINE_NAME: &str = "inline";
+
+/// What an inline image's filter chain produced: samples, or the still-coded
+/// bytes of a codec that returns its own pixels.
+pub(crate) enum InlineSamples {
+    /// Samples for the sample loop; `fax` when they are a fax's packed
+    /// one-bit samples, whatever `/BitsPerComponent` said.
+    Samples {
+        /// The samples.
+        bytes: Vec<u8>,
+        /// Whether a CCITT decode produced them.
+        fax: bool,
+    },
+    /// A JPEG, for [`jpeg_samples`].
+    Jpeg(Vec<u8>),
+    /// A JPEG 2000 codestream, for [`PageResources::jpx_samples`].
+    Jpx(Vec<u8>),
+}
 
 /// A JPEG's pixels, ready to blit (7.4.8).
 ///
@@ -188,7 +205,7 @@ fn jpeg_image(
     decode: &[(f64, f64)],
     interpolate: bool,
 ) -> Result<DecodedImage, String> {
-    let image = jpeg_decode(raw, 1 << 28).map_err(|e| format!("{e:?}"))?;
+    let image = jpeg_samples(raw)?;
     let mut rgb = jpeg_to_rgb(&image);
     invert_if_decode_reverses(decode, &mut rgb);
     Ok(DecodedImage {
@@ -199,6 +216,17 @@ fn jpeg_image(
         stencil: false,
         interpolate,
     })
+}
+
+/// A JPEG's samples, decoded and **not** converted: one byte a component, in
+/// the components the frame carries — YCbCr already turned into RGB and an
+/// Adobe-inverted CMYK already turned back into ink values, which are the
+/// decoder's to undo, and nothing else (7.4.8).
+///
+/// The one decode both [`jpeg_image`] and [`crate::Page::images`] make, under
+/// the one ceiling.
+fn jpeg_samples(raw: &[u8]) -> Result<tinker_pdf_filters::JpegImage, String> {
+    jpeg_decode(raw, 1 << 28).map_err(|e| format!("{e:?}"))
 }
 
 /// Rewrites an inline image's dictionary into the long spellings the shared
@@ -626,7 +654,7 @@ impl PageResources {
         )
     }
 
-    fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
+    pub(crate) fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
         let resources = self.resources.as_ref()?;
         let value = self.doc.resolve_key(resources, self.doc.intern(b"XObject"));
         let dict = value.as_dict()?;
@@ -2388,12 +2416,7 @@ impl PageResources {
             return Err("JPXDecode with /ImageMask".to_string());
         }
 
-        let image = tinker_pdf_filters::jpx_decode(
-            raw,
-            &tinker_pdf_filters::Limits::new(limits::MAX_DECODED_STREAM),
-            warnings,
-        )
-        .map_err(|e| format!("{e:?}"))?;
+        let image = Self::jpx_samples(raw, warnings)?;
 
         let count = (image.width as usize) * (image.height as usize);
         let mut rgb = Vec::with_capacity(count * 3);
@@ -2494,6 +2517,107 @@ impl PageResources {
         })
     }
 
+    /// The final filter a stream dictionary names (7.4), which decides how
+    /// its bytes are read.
+    fn last_filter(&self, dict: &Dict) -> Option<Vec<u8>> {
+        let filters = self.doc.resolve_key(dict, Name::FILTER);
+        match filters.as_name() {
+            Some(n) => self.doc.name_bytes(n).map(|b| b.to_vec()),
+            None => filters
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(Object::as_name)
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|b| b.to_vec()),
+        }
+    }
+
+    /// An image XObject's samples as the sample loop reads them — **before**
+    /// any colour conversion — and the depth they are at, for every final
+    /// filter but the two codecs that describe themselves (`/DCTDecode` and
+    /// `/JPXDecode`, whose samples come from [`jpeg_samples`] and
+    /// [`Self::jpx_samples`]).
+    ///
+    /// Split out of [`Self::decode_image_at`] so the renderer and
+    /// [`crate::Page::images`] read one set of samples through one set of
+    /// rules: a fax or a JBIG2 stream is packed one-bit samples in PDF's
+    /// polarity whatever `/BitsPerComponent` says, and anything else is the
+    /// stream with its filters applied. `geometry` is the dictionary's
+    /// width, height and clamped depth.
+    fn stream_samples(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        last_filter: Option<&[u8]>,
+        geometry: (u32, u32, u32),
+        name: &[u8],
+    ) -> Result<(Vec<u8>, u32), String> {
+        let (width, height, bpc) = geometry;
+        // CCITT data likewise arrives still coded, and carries its own
+        // parameters in /DecodeParms — but unlike a JPEG it decodes to
+        // *samples*, one bit per pixel, which is what the image dictionary
+        // says it is. So it joins the path below rather than returning its own
+        // pixels: `/ImageMask`, `/Decode` and `/ColorSpace` are read once,
+        // where they have always been read, and apply to a fax because a fax
+        // now arrives there like everything else.
+        let fax = matches!(last_filter, Some(b"CCITTFaxDecode") | Some(b"CCF"));
+        // JBIG2 takes the same road, and for the same reason (gap 17). Both
+        // are bilevel codecs that produce samples rather than pixels, and a
+        // scanned page is an `/ImageMask` about as often as it is a DeviceGray
+        // image — so composing correctly means arriving where those keys are
+        // read, not reimplementing them.
+        let jbig2 = matches!(last_filter, Some(b"JBIG2Decode"));
+        let data = if jbig2 {
+            let raw = self
+                .doc
+                .stream_image_input(reference)
+                .map_err(|_| "JBIG2Decode".to_string())?;
+            // The refusal. A stream whose regions this build cannot decode —
+            // the symbol-dictionary lineage an OCR pipeline emits — comes back
+            // `None`, and the caller draws the neutral placeholder. Returning
+            // the blank page it was composited onto would be indistinguishable
+            // from a correct decode of a blank scan.
+            self.jbig2_samples(dict, &raw, width, height, name)
+                .ok_or_else(|| "JBIG2Decode".to_string())?
+        } else if fax {
+            let raw = self
+                .doc
+                .stream_image_input(reference)
+                .map_err(|_| "CCITTFaxDecode".to_string())?;
+            self.ccitt_samples(dict, &raw, width, height, name)
+        } else {
+            // Everything else decodes to raw samples.
+            self.doc
+                .stream_decoded(reference)
+                .map_err(|_| "undecodable".to_string())?
+        };
+        // 7.4.6 and 7.4.7: both bilevel codecs produce one bit per pixel,
+        // whatever the dictionary claims. Producers that omit
+        // `/BitsPerComponent` are common and the clamp already reads an absent
+        // key as 1; one that writes 8 would otherwise read each row eight
+        // times too wide.
+        let bpc = if fax || jbig2 { 1 } else { bpc };
+        Ok((data, bpc))
+    }
+
+    /// A JPEG 2000 codestream's samples, decoded and **not** converted: the
+    /// codestream's own components at its own precision, big-endian pairs
+    /// past eight bits, with any opacity channel carried apart (8.9.5.4).
+    ///
+    /// The one decode both [`Self::jpx_image`] and [`crate::Page::images`]
+    /// make, under the one ceiling.
+    fn jpx_samples(
+        raw: &[u8],
+        warnings: &mut Vec<tinker_pdf_filters::Warning>,
+    ) -> Result<tinker_pdf_filters::JpxImage, String> {
+        tinker_pdf_filters::jpx_decode(
+            raw,
+            &tinker_pdf_filters::Limits::new(limits::MAX_DECODED_STREAM),
+            warnings,
+        )
+        .map_err(|e| format!("{e:?}"))
+    }
+
     /// Decodes an image from its dictionary, wherever that came from.
     fn decode_image_at(
         &self,
@@ -2555,16 +2679,7 @@ impl PageResources {
             .unwrap_or_default();
 
         // The final filter decides how the bytes are read.
-        let filters = self.doc.resolve_key(&dict, Name::FILTER);
-        let last_filter = match filters.as_name() {
-            Some(n) => self.doc.name_bytes(n).map(|b| b.to_vec()),
-            None => filters
-                .as_array()
-                .and_then(|a| a.last())
-                .and_then(Object::as_name)
-                .and_then(|n| self.doc.name_bytes(n))
-                .map(|b| b.to_vec()),
-        };
+        let last_filter = self.last_filter(&dict);
 
         // DCTDecode data comes out of the stream tier still encoded, which is
         // exactly what the JPEG decoder wants.
@@ -2601,53 +2716,13 @@ impl PageResources {
             return decoded;
         }
 
-        // CCITT data likewise arrives still coded, and carries its own
-        // parameters in /DecodeParms — but unlike a JPEG it decodes to
-        // *samples*, one bit per pixel, which is what the image dictionary
-        // says it is. So it joins the path below rather than returning its own
-        // pixels: `/ImageMask`, `/Decode` and `/ColorSpace` are read once,
-        // where they have always been read, and apply to a fax because a fax
-        // now arrives there like everything else.
-        let fax = matches!(
+        let (data, bpc) = self.stream_samples(
+            &dict,
+            reference,
             last_filter.as_deref(),
-            Some(b"CCITTFaxDecode") | Some(b"CCF")
-        );
-        // JBIG2 takes the same road, and for the same reason (gap 17). Both
-        // are bilevel codecs that produce samples rather than pixels, and a
-        // scanned page is an `/ImageMask` about as often as it is a DeviceGray
-        // image — so composing correctly means arriving where those keys are
-        // read, not reimplementing them.
-        let jbig2 = matches!(last_filter.as_deref(), Some(b"JBIG2Decode"));
-        let data = if jbig2 {
-            let raw = self
-                .doc
-                .stream_image_input(reference)
-                .map_err(|_| "JBIG2Decode".to_string())?;
-            // The refusal. A stream whose regions this build cannot decode —
-            // the symbol-dictionary lineage an OCR pipeline emits — comes back
-            // `None`, and the caller draws the neutral placeholder. Returning
-            // the blank page it was composited onto would be indistinguishable
-            // from a correct decode of a blank scan.
-            self.jbig2_samples(&dict, &raw, width, height, name)
-                .ok_or_else(|| "JBIG2Decode".to_string())?
-        } else if fax {
-            let raw = self
-                .doc
-                .stream_image_input(reference)
-                .map_err(|_| "CCITTFaxDecode".to_string())?;
-            self.ccitt_samples(&dict, &raw, width, height, name)
-        } else {
-            // Everything else decodes to raw samples.
-            self.doc
-                .stream_decoded(reference)
-                .map_err(|_| "undecodable".to_string())?
-        };
-        // 7.4.6 and 7.4.7: both bilevel codecs produce one bit per pixel,
-        // whatever the dictionary claims. Producers that omit
-        // `/BitsPerComponent` are common and the clamp already reads an absent
-        // key as 1; one that writes 8 would otherwise read each row eight
-        // times too wide.
-        let bpc = if fax || jbig2 { 1 } else { bpc };
+            (width, height, bpc),
+            name,
+        )?;
 
         let space = self.doc.resolve_key(&dict, self.doc.intern(b"ColorSpace"));
         let space = self
@@ -2767,60 +2842,20 @@ impl PageResources {
         Some(ranges)
     }
 
-    /// Decodes an inline image's samples (8.9.7).
+    /// An inline image's samples as its filter chain leaves them (8.9.7), or
+    /// the still-coded bytes of a codec that describes itself.
     ///
-    /// Separate from [`Self::decode_image_at`] because an inline image has no
-    /// object number: its bytes are in hand rather than behind a stream tier,
-    /// so the filter chain is run here instead of by the document.
-    fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
+    /// Split out of [`Self::decode_inline`] so the renderer and
+    /// [`crate::Page::images`] run one chain: the one the document would have
+    /// built had these bytes been an object.
+    fn inline_samples(
+        &self,
+        dict: &Dict,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<InlineSamples, String> {
         use tinker_pdf_filters::{apply_chain, ChainOutput, ImageCodec, Limits};
-
-        let int = |key: &[u8]| {
-            self.doc
-                .resolve_key(dict, self.doc.intern(key))
-                .as_int()
-                .unwrap_or(0)
-        };
-        let width = int(b"Width").clamp(0, 1 << 16) as u32;
-        let height = int(b"Height").clamp(0, 1 << 16) as u32;
-        if width == 0 || height == 0 {
-            return Err("inline".to_string());
-        }
-
-        let is_mask = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"ImageMask"))
-            .as_bool()
-            .unwrap_or(false);
-        // 8.9.6.2: a mask is one bit per sample whatever /BPC claims.
-        let bpc = if is_mask {
-            1
-        } else {
-            int(b"BitsPerComponent").clamp(1, 16) as u32
-        };
-
-        // Table 93 abbreviates /Interpolate to /I, and the caller has already
-        // rewritten the short form, so only the long one is looked for here.
-        let interpolate = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"Interpolate"))
-            .as_bool()
-            .unwrap_or(false);
-
-        // 8.9.5.2. Read before the chain rather than after it, because the DCT
-        // branch below returns its own pixels and would otherwise never see
-        // this — which is the mistake the XObject path made until gap 16.
-        let decode: Vec<(f64, f64)> = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"Decode"))
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|o| self.doc.resolve(o).as_number())
-                    .collect::<Vec<f64>>()
-            })
-            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
-            .unwrap_or_default();
 
         // The filters, in the order they were applied — read here only to name
         // one in a warning, since the chain itself is built by the document.
@@ -2895,10 +2930,7 @@ impl PageResources {
                 warnings,
             }) => {
                 report(warnings);
-                // The same decoder, through the same helper, as an image
-                // XObject: a JPEG returns its own dimensions and its own
-                // colour, so it does not join the sample loop below.
-                return jpeg_image(&data, &decode, interpolate);
+                return Ok(InlineSamples::Jpeg(data));
             }
             Ok(ChainOutput::EncodedImage {
                 kind: ImageCodec::Ccitt,
@@ -2924,18 +2956,92 @@ impl PageResources {
                 warnings,
             }) => {
                 report(warnings);
+                // 8.9.7 does not list JPXDecode among the inline abbreviations
+                // and `/JPXDecode` cannot be spelled in a content stream's
+                // dictionary, so this arm is reachable only through a file
+                // that writes the full name. It exists anyway: the cost is one
+                // arm, and the alternative is a second call site drifting from
+                // the XObject path's.
+                return Ok(InlineSamples::Jpx(data));
+            }
+            // JBIG2 stays a gated capability wherever it appears (ruling 2),
+            // inline included -- and unlike JPX it has no inline path at all,
+            // since `/JBIG2Globals` cannot be an indirect reference inside a
+            // content stream.
+            Ok(ChainOutput::EncodedImage { .. }) => {
+                return Err(named(chain.len().saturating_sub(1)))
+            }
+            Err(_) => return Err(named(chain.len())),
+        };
+        Ok(InlineSamples::Samples { bytes, fax })
+    }
+
+    /// Decodes an inline image's samples (8.9.7).
+    ///
+    /// Separate from [`Self::decode_image_at`] because an inline image has no
+    /// object number: its bytes are in hand rather than behind a stream tier,
+    /// so the filter chain is run here instead of by the document.
+    fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
+        let int = |key: &[u8]| {
+            self.doc
+                .resolve_key(dict, self.doc.intern(key))
+                .as_int()
+                .unwrap_or(0)
+        };
+        let width = int(b"Width").clamp(0, 1 << 16) as u32;
+        let height = int(b"Height").clamp(0, 1 << 16) as u32;
+        if width == 0 || height == 0 {
+            return Err("inline".to_string());
+        }
+
+        let is_mask = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"ImageMask"))
+            .as_bool()
+            .unwrap_or(false);
+        // 8.9.6.2: a mask is one bit per sample whatever /BPC claims.
+        let bpc = if is_mask {
+            1
+        } else {
+            int(b"BitsPerComponent").clamp(1, 16) as u32
+        };
+
+        // Table 93 abbreviates /Interpolate to /I, and the caller has already
+        // rewritten the short form, so only the long one is looked for here.
+        let interpolate = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Interpolate"))
+            .as_bool()
+            .unwrap_or(false);
+
+        // 8.9.5.2. Read before the chain rather than after it, because the DCT
+        // branch below returns its own pixels and would otherwise never see
+        // this — which is the mistake the XObject path made until gap 16.
+        let decode: Vec<(f64, f64)> = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Decode"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+            .unwrap_or_default();
+
+        let (bytes, fax) = match self.inline_samples(dict, data, width, height)? {
+            InlineSamples::Samples { bytes, fax } => (bytes, fax),
+            // The same decoder, through the same helper, as an image XObject:
+            // a JPEG returns its own dimensions and its own colour, so it does
+            // not join the sample loop below.
+            InlineSamples::Jpeg(data) => return jpeg_image(&data, &decode, interpolate),
+            InlineSamples::Jpx(data) => {
                 // The same entry point the XObject path takes, for the same
                 // reason gap 16 gave the fax one and gap 08 was reordered
                 // behind it: a second call site here would not change any
                 // signature, so nothing in the build could notice it drifting
                 // from 8.9.5.4's rules about which of the dictionary's claims
                 // survive a codestream that describes itself.
-                //
-                // 8.9.7 does not list JPXDecode among the inline abbreviations
-                // and `/JPXDecode` cannot be spelled in a content stream's
-                // dictionary, so this arm is reachable only through a file
-                // that writes the full name. It exists anyway: the cost is one
-                // arm, and the alternative is the divergence above.
                 let smask_in_data = dict.get_int(self.doc.intern(b"SMaskInData")).unwrap_or(0);
                 let image_mask = dict
                     .get_bool(self.doc.intern(b"ImageMask"))
@@ -2953,14 +3059,6 @@ impl PageResources {
                 }
                 return decoded;
             }
-            // JBIG2 stays a gated capability wherever it appears (ruling 2),
-            // inline included -- and unlike JPX it has no inline path at all,
-            // since `/JBIG2Globals` cannot be an indirect reference inside a
-            // content stream.
-            Ok(ChainOutput::EncodedImage { .. }) => {
-                return Err(named(chain.len().saturating_sub(1)))
-            }
-            Err(_) => return Err(named(chain.len())),
         };
         // 7.4.6: fax output is one bit per pixel whatever the dictionary
         // claims, exactly as on the XObject path.
@@ -3026,6 +3124,493 @@ impl PageResources {
         // decoding it through the top-level entry point would recurse.
         self.decode_image_at(&mask, reference, "SMask").ok()
     }
+}
+
+// ---- extraction: the samples before conversion -----------------------------
+//
+// `crate::Page::images` reads here. Every sample it hands out comes from the
+// same four functions the renderer's decode calls — `stream_samples`,
+// `jpeg_samples`, `jpx_samples`, `inline_samples` — so the two cannot disagree
+// about what an image's samples are. What differs is only what happens next:
+// the renderer converts, and this describes.
+
+impl PageResources {
+    /// An image XObject as [`crate::PageImage`] reports it, or `None` when
+    /// the dictionary is not `/Subtype /Image`.
+    pub(crate) fn extract_image(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        name: &[u8],
+    ) -> Option<crate::PageImage> {
+        let subtype = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Subtype"))
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n));
+        if subtype.as_deref() != Some(b"Image".as_slice()) {
+            return None;
+        }
+        Some(self.extract_at(dict, reference, name, 0))
+    }
+
+    /// An image dictionary and its stream, described; `depth` is 1 for a mask
+    /// or soft mask, which carries no mask of its own (11.6.5.3, 8.9.6.3).
+    fn extract_at(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        name: &[u8],
+        depth: u32,
+    ) -> crate::PageImage {
+        let (width, height, stencil, bpc) = self.geometry(dict);
+        let space = if stencil {
+            None
+        } else {
+            dict.get(self.doc.intern(b"ColorSpace"))
+                .map(|space| self.describe_space(space, false, 0))
+        };
+        let mut image = crate::PageImage {
+            reference: Some(reference),
+            name: name.to_vec(),
+            width,
+            height,
+            bits_per_component: bpc as u8,
+            components: components_of(stencil, space.as_ref()),
+            color_space: space,
+            decode: self.decode_array(dict),
+            stencil,
+            samples: Vec::new(),
+            codec: crate::SampleCodec::Stream,
+            mask: None,
+            soft_mask: None,
+            placements: Vec::new(),
+            refused: None,
+        };
+        if width == 0 || height == 0 {
+            image.refused = Some("empty".to_string());
+            return image;
+        }
+
+        let last = self.last_filter(dict);
+        match last.as_deref() {
+            Some(b"DCTDecode" | b"DCT") => {
+                image.codec = crate::SampleCodec::Dct;
+                let decoded = self
+                    .doc
+                    .stream_image_input(reference)
+                    .map_err(|_| "DCTDecode".to_string())
+                    .and_then(|raw| jpeg_samples(&raw));
+                match decoded {
+                    Ok(jpeg) => take_jpeg(&mut image, jpeg),
+                    Err(why) => image.refused = Some(why),
+                }
+            }
+            Some(b"JPXDecode") => {
+                image.codec = crate::SampleCodec::Jpx;
+                let mut warnings = Vec::new();
+                let decoded = self
+                    .doc
+                    .stream_image_input(reference)
+                    .map_err(|_| "JPXDecode".to_string())
+                    .and_then(|raw| Self::jpx_samples(&raw, &mut warnings));
+                for warning in &warnings {
+                    self.report_damaged_image(name, *warning);
+                }
+                match decoded {
+                    Ok(jpx) => take_jpx(&mut image, jpx),
+                    Err(why) => image.refused = Some(why),
+                }
+            }
+            other => {
+                image.codec = match other {
+                    Some(b"CCITTFaxDecode" | b"CCF") => crate::SampleCodec::CcittFax,
+                    Some(b"JBIG2Decode") => crate::SampleCodec::Jbig2,
+                    _ => crate::SampleCodec::Stream,
+                };
+                match self.stream_samples(dict, reference, other, (width, height, bpc), name) {
+                    Ok((data, bits)) => take_samples(&mut image, data, bits),
+                    Err(why) => image.refused = Some(why),
+                }
+            }
+        }
+
+        if depth == 0 {
+            let mask_key = self.doc.intern(b"Mask");
+            match dict.get(mask_key) {
+                Some(Object::Ref(r)) => {
+                    let mask = self.doc.get(*r).ok();
+                    if let Some(mask) = mask.as_deref().and_then(Object::as_dict) {
+                        image.mask = Some(crate::ImageMask::Stencil(Box::new(self.extract_at(
+                            mask,
+                            *r,
+                            b"",
+                            depth + 1,
+                        ))));
+                    }
+                }
+                Some(_) => {
+                    image.mask = self
+                        .color_key(dict, usize::from(image.components), bpc)
+                        .map(crate::ImageMask::ColorKey);
+                }
+                None => {}
+            }
+            if let Some(r) = dict.get_ref(self.doc.intern(b"SMask")) {
+                let mask = self.doc.get(r).ok();
+                if let Some(mask) = mask.as_deref().and_then(Object::as_dict) {
+                    image.soft_mask = Some(Box::new(self.extract_at(mask, r, b"", depth + 1)));
+                }
+            }
+        }
+        image
+    }
+
+    /// An inline image (8.9.7) as [`crate::PageImage`] reports it, or `None`
+    /// when its dictionary is not one.
+    pub(crate) fn extract_inline(&self, dict: &[u8], data: &[u8]) -> Option<crate::PageImage> {
+        let text = expand_inline_abbreviations(dict);
+        let mut sink = tinker_pdf_cos::WarningSink::new();
+        let parsed = tinker_pdf_cos::parse_object_at(&text, 0, self.doc.names_table(), &mut sink);
+        let dict = parsed.object.as_dict()?;
+
+        let (width, height, stencil, bpc) = self.geometry(dict);
+        let space = if stencil {
+            None
+        } else {
+            dict.get(self.doc.intern(b"ColorSpace"))
+                .map(|space| self.describe_space(space, true, 0))
+        };
+        let mut image = crate::PageImage {
+            reference: None,
+            name: Vec::new(),
+            width,
+            height,
+            bits_per_component: bpc as u8,
+            components: components_of(stencil, space.as_ref()),
+            color_space: space,
+            decode: self.decode_array(dict),
+            stencil,
+            samples: Vec::new(),
+            codec: crate::SampleCodec::Stream,
+            mask: None,
+            soft_mask: None,
+            placements: Vec::new(),
+            refused: None,
+        };
+        if width == 0 || height == 0 {
+            image.refused = Some("empty".to_string());
+            return Some(image);
+        }
+        match self.inline_samples(dict, data, width, height) {
+            Ok(InlineSamples::Samples { bytes, fax }) => {
+                if fax {
+                    image.codec = crate::SampleCodec::CcittFax;
+                }
+                take_samples(&mut image, bytes, if fax { 1 } else { bpc });
+            }
+            Ok(InlineSamples::Jpeg(bytes)) => {
+                image.codec = crate::SampleCodec::Dct;
+                match jpeg_samples(&bytes) {
+                    Ok(jpeg) => take_jpeg(&mut image, jpeg),
+                    Err(why) => image.refused = Some(why),
+                }
+            }
+            Ok(InlineSamples::Jpx(bytes)) => {
+                image.codec = crate::SampleCodec::Jpx;
+                let mut warnings = Vec::new();
+                match Self::jpx_samples(&bytes, &mut warnings) {
+                    Ok(jpx) => take_jpx(&mut image, jpx),
+                    Err(why) => image.refused = Some(why),
+                }
+                for warning in &warnings {
+                    self.report_damaged_image(INLINE_NAME.as_bytes(), *warning);
+                }
+            }
+            Err(why) => image.refused = Some(why),
+        }
+        // 8.9.7: an inline image's `/Mask` can only be the colour-key array,
+        // since there is nothing inline a reference could name.
+        if dict.get(self.doc.intern(b"Mask")).is_some() {
+            image.mask = self
+                .color_key(dict, usize::from(image.components), bpc)
+                .map(crate::ImageMask::ColorKey);
+        }
+        Some(image)
+    }
+
+    /// `/Width`, `/Height`, `/ImageMask` and the depth, read as the renderer's
+    /// decode reads them: the geometry clamped to what it will allocate, and a
+    /// stencil mask one bit a sample whatever `/BitsPerComponent` says
+    /// (8.9.6.2).
+    fn geometry(&self, dict: &Dict) -> (u32, u32, bool, u32) {
+        let int = |key: &[u8]| {
+            self.doc
+                .resolve_key(dict, self.doc.intern(key))
+                .as_int()
+                .unwrap_or(0)
+        };
+        let width = int(b"Width").clamp(0, 1 << 16) as u32;
+        let height = int(b"Height").clamp(0, 1 << 16) as u32;
+        let stencil = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"ImageMask"))
+            .as_bool()
+            .unwrap_or(false);
+        let bpc = if stencil {
+            1
+        } else {
+            int(b"BitsPerComponent").clamp(1, 16) as u32
+        };
+        (width, height, stencil, bpc)
+    }
+
+    /// `/Decode` as written, in pairs (8.9.5.2).
+    fn decode_array(&self, dict: &Dict) -> Vec<(f64, f64)> {
+        self.doc
+            .resolve_key(dict, self.doc.intern(b"Decode"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+            .unwrap_or_default()
+    }
+
+    /// A colour space as an image states it, described rather than
+    /// evaluated (8.6).
+    ///
+    /// `inline` admits 8.9.7's one extra spelling: an inline image may name a
+    /// space in the page's `/ColorSpace` resources, which an image XObject's
+    /// dictionary may not (8.6.3). Depth-capped like the renderer's own
+    /// parser, since an `/Indexed` base and a tint alternate are spaces too.
+    fn describe_space(&self, object: &Object, inline: bool, depth: u32) -> crate::ImageSpace {
+        use crate::ImageSpace;
+        let unreadable = |family: &[u8]| ImageSpace::Unreadable {
+            family: family.to_vec(),
+        };
+        if depth > 8 {
+            return unreadable(b"");
+        }
+        let resolved = self.doc.resolve(object);
+
+        if let Some(name) = resolved.as_name() {
+            let Some(bytes) = self.doc.name_bytes(name) else {
+                return unreadable(b"");
+            };
+            return match bytes.as_ref() {
+                b"DeviceGray" | b"G" => ImageSpace::DeviceGray,
+                b"DeviceRGB" | b"RGB" => ImageSpace::DeviceRgb,
+                b"DeviceCMYK" | b"CMYK" => ImageSpace::DeviceCmyk,
+                other if inline => {
+                    let entry = self.resources.as_ref().and_then(|resources| {
+                        let table = self
+                            .doc
+                            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
+                        table.as_dict()?.get(self.doc.intern(other)).cloned()
+                    });
+                    match entry {
+                        // A resource entry is the space itself, so it is read
+                        // as an XObject's would be: it cannot name another.
+                        Some(entry) => self.describe_space(&entry, false, depth + 1),
+                        None => unreadable(other),
+                    }
+                }
+                other => unreadable(other),
+            };
+        }
+
+        let Some(items) = resolved.as_array() else {
+            return unreadable(b"");
+        };
+        let Some(family) = items
+            .first()
+            .and_then(Object::as_name)
+            .and_then(|n| self.doc.name_bytes(n))
+        else {
+            return unreadable(b"");
+        };
+        let parameters = || {
+            items
+                .get(1)
+                .map(|o| self.doc.resolve(o))
+                .and_then(|p| p.as_dict().cloned())
+        };
+        let triple = |dict: Option<&Dict>, key: &[u8], default: [f64; 3]| {
+            dict.and_then(|d| self.numbers(d, key, 3))
+                .map_or(default, |v| [v[0], v[1], v[2]])
+        };
+        match family.as_ref() {
+            b"ICCBased" => {
+                let stream = items.get(1).and_then(Object::as_objref);
+                let header = items.get(1).map(|o| self.doc.resolve(o));
+                let dict = header.as_deref().and_then(Object::as_dict);
+                let components = dict
+                    .and_then(|d| d.get_int(self.doc.intern(b"N")))
+                    .unwrap_or(0)
+                    .clamp(0, 255) as u8;
+                let alternate = dict
+                    .and_then(|d| d.get(self.doc.intern(b"Alternate")))
+                    .map(|a| Box::new(self.describe_space(a, inline, depth + 1)));
+                let profile = stream
+                    .and_then(|r| self.doc.stream_decoded(r).ok())
+                    .unwrap_or_default();
+                ImageSpace::Icc {
+                    components,
+                    profile,
+                    alternate,
+                }
+            }
+            b"Indexed" | b"I" => {
+                let base = items.get(1).map_or_else(
+                    || unreadable(b""),
+                    |b| self.describe_space(b, inline, depth + 1),
+                );
+                let high = items
+                    .get(2)
+                    .and_then(|o| self.doc.resolve(o).as_int())
+                    .unwrap_or(0)
+                    .clamp(0, 255) as u8;
+                let lookup = match items.get(3).map(|o| self.doc.resolve(o)) {
+                    Some(value) => match value.as_string() {
+                        Some(s) => s.bytes.clone(),
+                        None => items
+                            .get(3)
+                            .and_then(Object::as_objref)
+                            .and_then(|r| self.doc.stream_decoded(r).ok())
+                            .unwrap_or_default(),
+                    },
+                    None => Vec::new(),
+                };
+                ImageSpace::Indexed {
+                    base: Box::new(base),
+                    high,
+                    lookup,
+                }
+            }
+            b"Separation" => ImageSpace::Separation {
+                colorant: items
+                    .get(1)
+                    .and_then(|o| self.doc.resolve(o).as_name())
+                    .and_then(|n| self.doc.name_bytes(n))
+                    .map(|b| b.to_vec())
+                    .unwrap_or_default(),
+                alternate: Box::new(items.get(2).map_or_else(
+                    || unreadable(b""),
+                    |a| self.describe_space(a, inline, depth + 1),
+                )),
+            },
+            b"DeviceN" => ImageSpace::DeviceN {
+                colorants: items
+                    .get(1)
+                    .map(|o| self.doc.resolve(o))
+                    .and_then(|names| {
+                        names.as_array().map(|names| {
+                            names
+                                .iter()
+                                .take(limits::MAX_ARRAY_LEN)
+                                .filter_map(|n| {
+                                    self.doc
+                                        .resolve(n)
+                                        .as_name()
+                                        .and_then(|n| self.doc.name_bytes(n))
+                                        .map(|b| b.to_vec())
+                                })
+                                .collect()
+                        })
+                    })
+                    .unwrap_or_default(),
+                alternate: Box::new(items.get(2).map_or_else(
+                    || unreadable(b""),
+                    |a| self.describe_space(a, inline, depth + 1),
+                )),
+            },
+            b"CalGray" => {
+                let dict = parameters();
+                ImageSpace::CalGray {
+                    white: triple(dict.as_ref(), b"WhitePoint", WHITE_D50),
+                    gamma: dict
+                        .as_ref()
+                        .map(|d| self.doc.resolve_key(d, self.doc.intern(b"Gamma")))
+                        .and_then(|g| g.as_number())
+                        .unwrap_or(1.0),
+                }
+            }
+            b"CalRGB" => {
+                let dict = parameters();
+                let mut matrix = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+                if let Some(values) = dict.as_ref().and_then(|d| self.numbers(d, b"Matrix", 9)) {
+                    matrix.copy_from_slice(&values[..9]);
+                }
+                ImageSpace::CalRgb {
+                    white: triple(dict.as_ref(), b"WhitePoint", WHITE_D50),
+                    gamma: triple(dict.as_ref(), b"Gamma", [1.0; 3]),
+                    matrix,
+                }
+            }
+            b"Lab" => {
+                let dict = parameters();
+                let range = dict
+                    .as_ref()
+                    .and_then(|d| self.numbers(d, b"Range", 4))
+                    .map_or([-100.0, 100.0, -100.0, 100.0], |v| [v[0], v[1], v[2], v[3]]);
+                ImageSpace::Lab {
+                    white: triple(dict.as_ref(), b"WhitePoint", WHITE_D50),
+                    range,
+                }
+            }
+            other => unreadable(other),
+        }
+    }
+}
+
+/// Values a pixel of an image with this space, as far as it says: one for a
+/// stencil mask and for a space nothing describes, which is the count the
+/// renderer's own fallback to grey reads the samples with.
+fn components_of(stencil: bool, space: Option<&crate::ImageSpace>) -> u8 {
+    if stencil {
+        return 1;
+    }
+    space.and_then(crate::ImageSpace::components).unwrap_or(1)
+}
+
+/// Keeps as many samples as the geometry lays out and no more (8.9.3): rows
+/// of `width × components × bits`, each padded to a byte.
+fn take_samples(image: &mut crate::PageImage, mut data: Vec<u8>, bits: u32) {
+    image.bits_per_component = bits as u8;
+    let row_bits = u64::from(image.width)
+        .saturating_mul(u64::from(image.components))
+        .saturating_mul(u64::from(bits));
+    let wanted = row_bits.div_ceil(8).saturating_mul(u64::from(image.height));
+    if let Ok(wanted) = usize::try_from(wanted) {
+        data.truncate(wanted);
+    }
+    image.samples = data;
+}
+
+/// A JPEG's own geometry and samples, which describe the image rather than
+/// the dictionary.
+fn take_jpeg(image: &mut crate::PageImage, jpeg: tinker_pdf_filters::JpegImage) {
+    image.width = jpeg.width;
+    image.height = jpeg.height;
+    image.components = match jpeg.color {
+        JpegColor::Gray => 1,
+        JpegColor::Rgb => 3,
+        JpegColor::Cmyk | JpegColor::CmykInverted => 4,
+    };
+    take_samples(image, jpeg.data, 8);
+}
+
+/// A JPEG 2000 codestream's own geometry, components, precision and
+/// samples (8.9.5.4).
+fn take_jpx(image: &mut crate::PageImage, jpx: tinker_pdf_filters::JpxImage) {
+    image.width = jpx.width;
+    image.height = jpx.height;
+    image.components = jpx.components;
+    let bits = if jpx.precision > 8 { 16 } else { 8 };
+    take_samples(image, jpx.samples, bits);
 }
 
 /// Applies a soft mask's luminance as the image's per-sample opacity

@@ -76,6 +76,37 @@ makes `/` its own delimiter. The rewritten dictionary then runs the same
 COS filter chain every stream uses: predictors, LZW with `/EarlyChange`,
 DCT (progressive included), CCITT — one image path, not two.
 
+**Image extraction.** `Page::images()` runs the page through the same
+interpreter with a fourth device, which follows form scopes the way the
+renderer's does, and returns one `PageImage` per image XObject the page's
+content draws — once, however often it is drawn, with every placement — and
+one per inline image. Each carries its **samples before any colour
+conversion**: rows from the top, each padded to a byte, `components` values a
+pixel at `bits_per_component` bits, sixteen-bit values big-endian and whole.
+They come from the same functions the renderer's decode calls —
+`stream_samples`, `jpeg_samples`, `jpx_samples` and `inline_samples`, each
+split out of the renderer's path so the two read one set of samples through
+one set of rules, and no render fingerprint moved. Beside them: the colour
+space as the image states it (`ImageSpace`: the three device spaces,
+`CalGray`, `CalRGB` and `Lab` with their parameters, `ICCBased` with its `/N`,
+its `/Alternate` and the profile's bytes, `Indexed` with its base, `hival` and
+palette, `Separation` and `DeviceN` with their colorants' names and
+alternate), `/Decode` as written and not applied, `/ImageMask`, `/Mask` as
+colour-key ranges or a stencil image, `/SMask` as an image of its own, the
+current transformation matrix at each drawing, and the object reference. A
+JPEG's samples are the frame's own components (YCbCr and Adobe's inverted
+CMYK already undone by the decoder); a JPEG 2000 image's are the
+codestream's, at its precision, with any opacity channel left out; a fax or
+JBIG2 image's are one bit a pixel in PDF's polarity whatever the dictionary
+claims. An inline image may name a page colour space resource (8.9.7) and
+that is followed; an image XObject's `/ColorSpace` may not (8.6.3), and a
+name other than a device family is reported as `Unreadable`. An image that
+will not decode is still listed, with no samples and `refused` naming why;
+a stream longer than its geometry is cut to it and a shorter one is
+reported short. What is not walked: images inside a tiling pattern's cell, a
+soft-mask group or an annotation appearance, which are not drawings of the
+page's own content.
+
 **The text device.** Glyphs become `TextChar`s with a device-space `Quad`
 each (9.4.4), grouped into `TextLine`s by baseline continuation and
 `TextBlock`s by vertical proximity. An `ET` is *not* a line break — a
@@ -166,6 +197,8 @@ back to the glyphs it covers. `Quad` carries four corners and
 `plain_text_with(options)` are the opt-in siblings of `search` and
 `plain_text()`, below, `TextLine::words()` splits a line into words with a
 box each, and `TextWriter` serialises pages as JSON, XML or HTML.
+`Page::images()` returns `Vec<PageImage>`; `ImageSpace`, `ImageMask` and
+`SampleCodec` are the types it is built from, all `#[non_exhaustive]`.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
@@ -407,6 +440,8 @@ crate has an API of its own; see [architecture](../architecture.md).
 | An `/MCR` with no `/Stm` whose `/MCID` is in no page-stream sequence but in exactly one other stream on the page | `StructureWarning::ContentStreamAssumed { page, mcid }` | a producer that tags content inside a form and omits `/Stm` writes something 14.7.4.2 does not define; where one reading exists it is taken and named, and where two streams share the identifier it is refused, because that is the collision `/Stm` exists to resolve | 14.7.4.2 |
 | A marked-content sequence in a stream `/StmOwn` says another object owns — an annotation's `/AP` | — | page text extraction runs the page's stream and the forms it invokes, never an annotation's appearance, so such a reference matches nothing here rather than taking whatever else shares its number; extracting appearance-stream text is separate work | 14.7.4.2, 12.5.5 |
 | `/ActualText` on a property list carrying no `/MCID` | — | the map is keyed by `(stream, /MCID)`, so a list with no identifier reaches no consumer | 14.9.4 |
+| Images inside a tiling pattern's cell, a soft-mask group or an annotation appearance | `Page::images()` does not list them | none is a drawing of the page's content: the renderer reaches a pattern cell and a mask group through its own device, not through the interpreter's `Do`, and an appearance belongs to the annotation | 8.7.3, 11.6.5, 12.5.5 |
+| A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |
 | `/Alt`, `/ActualText`, `/E` and `/Lang` on **written** structure elements | — | `PageBuilder::tagged` writes the type and the content, not the 14.9 properties; an empty element is therefore dropped rather than kept, since an empty `Figure` carrying `/Alt` is the case that would want one | 14.9 |
 
 The rendering side of a hidden layer is reported too —
@@ -414,6 +449,20 @@ The rendering side of a hidden layer is reported too —
 painted — but that row belongs to [rendering](rendering.md).
 
 ## Verified
+
+`crates/tinker-pdf/tests/page_images.rs` builds each fixture with
+`DocumentBuilder` from a known sample array and asserts `Page::images()`
+returns exactly that array and the stated space — grey, RGB, CMYK, indexed
+with its palette, ICC with its profile's bytes, one bit a sample with its row
+padding, sixteen bits a sample whole, `/Separation` and `/DeviceN` with their
+colorants, a colour-key mask and a soft mask; an image drawn twice and inside
+a form listed once with three placements; an image only a form's resources
+name found through the form's scope; inline images, one naming a page colour
+space resource; a fax, lossless, one bit a sample even where its dictionary
+claims eight; a JPEG held to the decoder's own output; fifteen hostile
+dictionaries and three hostile inline images listed without a panic; and a
+deterministic mutation sweep. `hostile_input.rs` and the `render_page` fuzz
+target call `images()` on every page they reach.
 
 Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),
