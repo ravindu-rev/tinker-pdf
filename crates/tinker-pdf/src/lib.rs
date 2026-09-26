@@ -81,7 +81,7 @@ pub use structure::{
 pub use subset::{SubsetReport, Subsetted, Untouched, UntouchedReason};
 pub use tinker_pdf_content::{
     HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, TextBlock, TextChar, TextLine,
-    TextPage, TextWarning, WritingMode,
+    TextPage, TextWarning, TextWord, WritingMode,
 };
 /// The strict validator's verdict (ruling 13), behind [`Document::validate`].
 ///

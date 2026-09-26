@@ -11,6 +11,7 @@ pub mod record;
 pub mod state;
 pub mod text;
 pub mod tokenizer;
+pub mod words;
 
 pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 pub use interpret::{interpret, FontSource, Form, Group, GroupSpace, Layer, MaskGroup, SoftMask};
@@ -23,3 +24,4 @@ pub use text::{
     Quad, TextBlock, TextChar, TextDevice, TextLine, TextPage, TextWarning, WritingMode,
 };
 pub use tokenizer::{Token, Tokenizer};
+pub use words::{word_boundaries, TextWord};

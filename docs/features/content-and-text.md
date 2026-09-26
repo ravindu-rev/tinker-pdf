@@ -150,7 +150,8 @@ offers `plain_text()` (one line per line), `lines()` (flattened), and
 `search(needle)` — literal, case-insensitive, one `Quad` per match, mapped
 back to the glyphs it covers. `Quad` carries four corners and
 `bounds()` for the enclosing rectangle. `plain_text_with(options)` is the
-opt-in sibling of `plain_text()`, below.
+opt-in sibling of `plain_text()`, below, and `TextLine::words()` splits a line
+into words with a box each.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
@@ -164,6 +165,35 @@ for warning in &text.warnings {
     eprintln!("tolerated: {warning:?}"); // TextWarning
 }
 ```
+
+### Words and word boxes (UAX #29)
+
+`TextLine::words()` returns the line's words as `TextWord`s — the word's
+`text`, its `quad`, and the range of `TextLine::chars` it covers — on
+**UAX #29's default word boundaries**, not on spaces. `can't`, `3.14` and
+`a_b` are one word each, `e.g.` is `e.g` and a full stop, a combining accent
+stays with its letter, and a regional-indicator pair is one flag. The spaces
+and punctuation between words are segments too, and are not returned: a
+segment is a word when it holds a letter or a digit (`Word_Break` `ALetter`,
+`Hebrew_Letter`, `Numeric` or `Katakana`, or Unicode `Alphabetic` or
+`Numeric`, which is how an ideograph is a word of its own).
+`tinker_pdf_content::word_boundaries` is the unfiltered segmentation.
+
+The rules are the default ones, untailored, and UAX #29 names their limit:
+scripts written without spaces between words need a dictionary, which this
+build does not carry, so an unspaced run of Han breaks after every ideograph
+and an unspaced run of Thai is one segment.
+
+A word's `quad` is the union of its characters' quads **in the frame of the
+line's own baseline**: the enclosing rectangle for upright text, and a turned
+rectangle for a turned line, where an axis-aligned one would cover the
+neighbouring words too. A boundary that falls inside one character — a
+ligature UAX #29 splits — puts that character in both words, since its quad is
+the only box either half has.
+
+The `Word_Break` table is compiled from a third vendored copy of the UCD
+(`crates/tinker-pdf-content/data/ucd`, [THIRDPARTY.md](../../THIRDPARTY.md))
+by the crate's `build.rs`, the way `tinker-pdf-layout` compiles UAX #14's.
 
 ### Hyphen rejoining, opt-in
 
@@ -286,7 +316,11 @@ Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),
 `text.rs` (artifact scopes nest, `ET` continuation versus baseline gaps,
 search hit geometry, wmode/rtl separation, non-finite glyphs dropped),
-`plain.rs` (hyphen rejoining: a soft hyphen at a line end and inside one, a
+`words.rs` (the table compiled from the file, segments of contractions,
+decimals and abbreviations, combining marks, flag pairs, word boxes from a
+real content stream, a raised character widening its word's box, a turned
+line's turned box, a ligature inside its word, a 200 000-indicator line in
+linear time), `plain.rs` (hyphen rejoining: a soft hyphen at a line end and inside one, a
 hard hyphen before lower case, upper case, a digit and an uncased letter,
 the dashes and U+2011 left alone, joins chaining, the default unchanged),
 `interpret.rs` (group offer/decline, state save discipline), `record.rs` (a
@@ -305,6 +339,10 @@ suppress a hidden image *itself* while its comment claimed it recorded
 "whether it was asked at all", so it proved the weaker of the two. The
 interpreter hands a hidden image to the device inside a hidden scope, and the
 test now says so.
+
+`crates/tinker-pdf-content/tests/uax29_conformance.rs` runs every one of
+`WordBreakTest.txt`'s 1 944 cases against the segmenter `words()` calls, and
+all 1 944 agree; the count is pinned, so a truncated file fails.
 
 Facade integration tests: `crates/tinker-pdf/tests/text_options.rs` (the
 text options through `Page::text()` on a written document, every type named
