@@ -70,13 +70,10 @@
 //! the caller believes the content is gone and distributes the file. So a run
 //! this module cannot *measure* is left whole and named in
 //! [`RedactionReport::warnings`], rather than cut from positions that are
-//! approximately right. Four classes qualify, and two of them were being cut
-//! wrongly before this file carried a matrix — the rotation refusal was
-//! guarding the axis it knew about and none of the others:
+//! approximately right. Three classes qualify:
 //!
 //! | Class | Why it cannot be measured |
 //! | --- | --- |
-//! | [`RedactionWarning::VerticalRun`] | 9.4.4's vertical branch advances by `w1` **down** the page and takes its metrics from `/W2`; a `TJ` number displaces vertically too. Every one of those is a different formula, not a different matrix |
 //! | [`RedactionWarning::RescaledType3Font`] | 9.6.5: a Type 3 font's `/Widths` are in *its own* glyph space, which `/FontMatrix` maps to text space. `Font::width_of` hands them back raw and this module divides by 1000, which is right for the 1/1000 default and wrong by exactly the matrix for anything else |
 //! | [`RedactionWarning::UnknownFont`] | no metrics at all: the `Tf` named a font the resource dictionary in scope does not have |
 //! | [`RedactionWarning::UnmeasurableFrame`] | a non-finite entry in the text or transformation matrix, or a position that has run away to infinity |
@@ -86,7 +83,26 @@
 //! which is the whole reason it will not cut one. That is why warnings are
 //! raised only when there is at least one rectangle to fall under.
 //!
-//! # A form drawn twice, and the fifth warning
+//! # Vertical writing
+//!
+//! A fourth class, `VerticalRun`, was refused until September 2026 and is
+//! measured now. 9.4.4's vertical branch is a different formula rather than a
+//! different matrix — the pen walks text-space **y** by `/W2`'s `w1`, which is
+//! signed and carries no horizontal scale, the glyph is drawn with its
+//! horizontal origin at minus the position vector `v`, and a `TJ` number
+//! displaces along y in thousandths of `Tfs` alone — so [`Pen`] carries one
+//! position along the run's own axis and asks the font's writing mode which
+//! axis that is. The box is the horizontal one stood on end
+//! ([`Pen::glyph_box`]), the replacement gap is emitted in the vertical
+//! thousandth ([`Pen::thousandth`]), and nothing else changes: a vertical run
+//! is cut by the same separating-axis test, under the same rotated, skewed
+//! or scaled matrices, as a horizontal one.
+//!
+//! The class had hidden behind the rotation refusal, whose matrix test a
+//! vertical run passes, and was being cut *horizontally* before it was
+//! refused; the variant is gone because nothing raises it.
+//!
+//! # A form drawn twice, and the warning about forms
 //!
 //! A form XObject drawn in two places is two placements of **one stream**
 //! (8.10), and until September 2026 only the first was ever measured: the
@@ -188,7 +204,7 @@ pub struct Redaction {
 /// Something a redaction could not do exactly, named rather than left silent
 /// (ruling 10).
 ///
-/// Four of the five are a **run left whole** because this module could not
+/// Three of the four are a **run left whole** because this module could not
 /// measure it, and each names the resource name of the font in force and how
 /// many bytes of showing operand were left in place, because "a run was
 /// skipped" with neither is a sentence a caller cannot act on — and this is
@@ -197,11 +213,15 @@ pub struct Redaction {
 ///
 /// `bytes` rather than glyphs: a run whose font is unknown cannot be decoded
 /// into glyphs at all, and a count that is a guess for one variant and a
-/// measurement for the other three is a count nobody can compare. Warnings
-/// with the same cause and the same resource are merged, so a page of
-/// vertical text yields one entry per font rather than one per operator.
+/// measurement for the other two is a count nobody can compare. Warnings
+/// with the same cause and the same resource are merged, so a page of text
+/// in a font that is not in scope yields one entry per font rather than one
+/// per operator.
 ///
-/// The fifth, [`RedactionWarning::RepeatedForm`], is the other direction and
+/// A fifth, `VerticalRun`, existed until September 2026 and is gone because
+/// vertical runs are measured now (see the module's "Vertical writing").
+///
+/// The fourth, [`RedactionWarning::RepeatedForm`], is the other direction and
 /// is the reason this type is no longer only about runs left whole: it says a
 /// cut was made *wider* than the rectangles asked for. Both are leniencies
 /// and both are things a caller must be told, so both live here; use
@@ -220,25 +240,6 @@ pub enum RedactionWarning {
     /// placed. `font` is empty when no `Tf` preceded the showing operator.
     UnknownFont {
         /// The resource name the `Tf` named.
-        font: Vec<u8>,
-        /// How many bytes of showing operand were left in place.
-        bytes: usize,
-    },
-    /// The font's writing mode is vertical — 9.7.5's `/WMode` in the encoding
-    /// CMap, which is why only a composite font can have one.
-    ///
-    /// 9.4.4 then computes `ty` from the glyph's *vertical* displacement `w1`
-    /// instead of `tx` from `w0`, and the vertical formula has no horizontal
-    /// scale in it at all, where the horizontal one ends in `× Th`. 9.7.4.3
-    /// puts `w1` in `/W2` and `/DW2`, not in the `/W` and `/DW` this module
-    /// reads. A different formula over different entries, rather than a
-    /// different matrix, and one this module does not implement.
-    ///
-    /// This was being cut *horizontally* until September 2026: the rotation
-    /// refusal it hid behind looked at the matrix, and a vertical run's
-    /// matrix is perfectly ordinary.
-    VerticalRun {
-        /// The resource name of the font.
         font: Vec<u8>,
         /// How many bytes of showing operand were left in place.
         bytes: usize,
@@ -318,14 +319,13 @@ impl RedactionWarning {
     pub fn font(&self) -> &[u8] {
         match self {
             RedactionWarning::UnknownFont { font, .. }
-            | RedactionWarning::VerticalRun { font, .. }
             | RedactionWarning::RescaledType3Font { font, .. }
             | RedactionWarning::UnmeasurableFrame { font, .. } => font,
             RedactionWarning::RepeatedForm { .. } => &[],
         }
     }
 
-    /// The resource name this warning is about — a font for four of the five
+    /// The resource name this warning is about — a font for three of the four
     /// variants, a form XObject for [`RedactionWarning::RepeatedForm`].
     ///
     /// This is what distinguishes two warnings of the same kind, so it is
@@ -347,7 +347,6 @@ impl RedactionWarning {
     pub fn bytes(&self) -> usize {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
-            | RedactionWarning::VerticalRun { bytes, .. }
             | RedactionWarning::RescaledType3Font { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => *bytes,
             RedactionWarning::RepeatedForm { .. } => 0,
@@ -379,7 +378,6 @@ impl RedactionWarning {
     fn absorb(&mut self, other: &RedactionWarning) {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
-            | RedactionWarning::VerticalRun { bytes, .. }
             | RedactionWarning::RescaledType3Font { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => {
                 *bytes = bytes.saturating_add(other.bytes());
@@ -395,7 +393,7 @@ impl RedactionWarning {
 
 /// How many distinct warnings one redaction keeps.
 ///
-/// Five causes times the resources on a page: a document that reaches this cap
+/// Four causes times the resources on a page: a document that reaches this cap
 /// has a resource dictionary a caller is not going to read through anyway, and
 /// the counts of the ones past it are lost rather than the list growing with
 /// the file (ruling 1).
@@ -1205,16 +1203,24 @@ struct XObjectUse {
 /// formula, and nothing else.
 ///
 /// Positions live in **unscaled text space** — the space the text matrix maps
-/// *out of*. That is the run's own frame: `x` is how far along the baseline
-/// the pen has walked, whatever direction the baseline points on the page, and
-/// `rise` and `size` are the glyph box's bottom and top in the same units. A
-/// `TJ` displacement is defined in exactly this space (9.4.3), which is why a
-/// rewritten run needs no new matrix of its own.
+/// *out of*. That is the run's own frame: `along` is how far the pen has
+/// walked along the run's own axis, whatever direction that axis points on
+/// the page, and the glyph box's other two sides are measured across it in
+/// the same units. A `TJ` displacement is defined in exactly this space
+/// (9.4.3), which is why a rewritten run needs no new matrix of its own.
+///
+/// **The axis is the font's writing mode** (9.7.4.3). Horizontal text walks
+/// text-space x, by `w0` and the horizontal scale; vertical text walks
+/// text-space y, by `/W2`'s `w1`, which is signed — negative, down the page —
+/// and has no horizontal scale in it. A `TJ` number displaces along the same
+/// axis in both. One number therefore carries both, and [`Pen::vertical`]
+/// says which axis it is.
 #[derive(Clone)]
 struct Pen {
-    /// How far along the baseline the pen has walked since the text matrix
-    /// was last set, in unscaled text space.
-    x: f64,
+    /// How far along the run's axis the pen has walked since the text matrix
+    /// was last set, in unscaled text space: text-space x for horizontal
+    /// writing, text-space y for vertical.
+    along: f64,
     /// The text matrix, `T_m` (9.4.2).
     text: Matrix,
     /// The text line matrix, `T_lm`. `Td`, `TD` and `T*` are relative to
@@ -1245,7 +1251,7 @@ struct Pen {
 impl Default for Pen {
     fn default() -> Pen {
         Pen {
-            x: 0.0,
+            along: 0.0,
             text: Matrix::IDENTITY,
             line: Matrix::IDENTITY,
             ctm: Matrix::IDENTITY,
@@ -1269,7 +1275,7 @@ impl Pen {
     fn offset(&mut self, tx: f64, ty: f64) {
         self.line = Matrix::translate(tx, ty).then(self.line);
         self.text = self.line;
-        self.x = 0.0;
+        self.along = 0.0;
     }
 
     /// Moves to the next line, per `T*`.
@@ -1282,12 +1288,38 @@ impl Pen {
         self.text.then(self.ctm)
     }
 
-    /// The displacement of one decoded code, per 9.4.4.
+    /// Whether the font in force writes vertically (9.7.4.3): `/WMode 1` in
+    /// its encoding CMap, which only a composite font has.
+    fn vertical(&self) -> bool {
+        self.font.as_ref().is_some_and(|f| f.font.is_vertical())
+    }
+
+    /// The displacement of one decoded code along the run's axis, per 9.4.4.
     ///
-    /// In unscaled text space: the horizontal scale is in, because 9.4.4 puts
-    /// it there, and the text matrix is *not*, because that is what
-    /// [`Pen::frame`] applies and what a `TJ` number is measured before.
+    /// In unscaled text space: the text matrix is *not* in it, because that
+    /// is what [`Pen::frame`] applies and what a `TJ` number is measured
+    /// before.
+    ///
+    /// The two branches are 9.4.4's two formulas, and they differ in more
+    /// than the axis:
+    ///
+    /// - horizontal, `tx = (w0 · Tfs / 1000 + Tc + Tw) · Th`;
+    /// - vertical, `ty = w1 · Tfs / 1000 + Tc`, where `w1` is the CID's
+    ///   `/W2` entry (or `/DW2`'s) and is **signed** — a run that goes down
+    ///   the page has a negative one, added rather than subtracted — and
+    ///   there is no `Th`, because horizontal scaling scales horizontal
+    ///   motion and a vertical run has none.
+    ///
+    /// Word spacing is left out of the vertical branch because this engine's
+    /// interpreter leaves it out (`interpret.rs`, the glyph loop of `show`),
+    /// and a cut is measured where the renderer draws. It can only matter for
+    /// a single-byte code 32, which a vertical CMap — two bytes a code for
+    /// `Identity-V` and every predefined one — does not produce.
     fn advance(&self, code: &tinker_pdf_cos::DecodedCode) -> f64 {
+        if let Some(selected) = self.font.as_ref().filter(|f| f.font.is_vertical()) {
+            let (_, _, w1) = selected.font.vertical_metrics(code.cid);
+            return w1 / 1000.0 * self.size + self.char_spacing;
+        }
         // Word spacing applies to single-byte code 32 only — the classic bug
         // is applying it to a two-byte CID that happens to equal 32.
         let word = if code.code == 32 && code.bytes == 1 {
@@ -1296,6 +1328,39 @@ impl Pen {
             0.0
         };
         (code.width / 1000.0 * self.size + self.char_spacing + word) * self.horizontal_scale
+    }
+
+    /// The box one glyph occupies, as four corners in unscaled text space,
+    /// with the pen at `along` on the run's axis.
+    ///
+    /// Horizontal: from the pen to the pen plus the advance along x, and from
+    /// the rise to one em above it across — the em box, approximated from
+    /// the advance and the font size rather than from an outline, which errs
+    /// toward removal ([`redact_string`] says why that is right).
+    ///
+    /// Vertical, the same box stood on end (9.7.4.3): along y it runs from
+    /// the pen to the pen plus the (negative) advance, shifted by the rise,
+    /// which 9.4.4 puts in text-space y in both modes; across it, the glyph is
+    /// drawn with its horizontal origin at *minus* the position vector `v`,
+    /// so it spans `-v_x` to `w0 - v_x` — centred on the pen for the default
+    /// `v_x = w0 / 2`. That is where this engine's interpreter puts a
+    /// vertical glyph, and the ideographic em cell a CJK face fills.
+    fn glyph_box(&self, code: &tinker_pdf_cos::DecodedCode, along: f64) -> [(f64, f64); 4] {
+        let advance = self.advance(code);
+        if let Some(selected) = self.font.as_ref().filter(|f| f.font.is_vertical()) {
+            let (v_x, _, _) = selected.font.vertical_metrics(code.cid);
+            let unit = self.size / 1000.0 * self.horizontal_scale;
+            let (x0, x1) = (-v_x * unit, (code.width - v_x) * unit);
+            let (y0, y1) = (along + self.rise, along + self.rise + advance);
+            return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        }
+        let (y0, y1) = (self.rise, self.rise + self.size);
+        [
+            (along, y0),
+            (along + advance, y0),
+            (along + advance, y1),
+            (along, y1),
+        ]
     }
 
     /// The displacement of a whole string.
@@ -1313,8 +1378,16 @@ impl Pen {
 
     /// The unit a `TJ` number is measured in: one thousandth of this moves the
     /// pen by one (9.4.3).
+    ///
+    /// `Tfs · Th` along a horizontal run and `Tfs` alone along a vertical one:
+    /// 9.4.4's `ty` subtracts `Tj / 1000` inside the product with `Tfs` and
+    /// has no `Th` to multiply by.
     fn thousandth(&self) -> f64 {
-        self.size * self.horizontal_scale
+        if self.vertical() {
+            self.size
+        } else {
+            self.size * self.horizontal_scale
+        }
     }
 }
 
@@ -1391,7 +1464,7 @@ fn rewrite(
                 // The text matrices reset; the text *state* does not.
                 pen.text = Matrix::IDENTITY;
                 pen.line = Matrix::IDENTITY;
-                pen.x = 0.0;
+                pen.along = 0.0;
             }
             b"Tf" => {
                 pen.size = number(0);
@@ -1429,7 +1502,7 @@ fn rewrite(
                     f: number(0),
                 };
                 pen.text = pen.line;
-                pen.x = 0.0;
+                pen.along = 0.0;
             }
             b"T*" => pen.next_line(),
             b"Tj" | b"'" | b"\"" => {
@@ -1467,7 +1540,7 @@ fn rewrite(
                         emit_array(&mut out, &cut.runs, pen.thousandth());
                         rewritten = true;
                     }
-                    pen.x += pen.advance_of(&bytes);
+                    pen.along += pen.advance_of(&bytes);
                 }
             }
             b"TJ" => {
@@ -1486,14 +1559,14 @@ fn rewrite(
                             }
                             removed += cut.removed;
                             runs.extend(cut.runs);
-                            local.x += local.advance_of(s);
+                            local.along += local.advance_of(s);
                         }
                         Token::Number(v) if v.is_finite() => {
                             // 9.4.3: the number moves the pen *backwards* by
                             // its value in thousandths, along the baseline.
                             let shift = -v / 1000.0 * local.thousandth();
                             runs.push(Run::Gap(shift));
-                            local.x += shift;
+                            local.along += shift;
                         }
                         _ => {}
                     }
@@ -1604,8 +1677,9 @@ struct Cut {
 
 /// Removes the glyphs of `bytes` that fall inside a redaction.
 ///
-/// The glyph box is measured in the run's own frame — `x` along the baseline,
-/// `rise` to `rise + size` across it — and carried into page space by
+/// The glyph box is measured in the run's own frame — along the run's axis
+/// by the advance, across it by the em ([`Pen::glyph_box`], which stands the
+/// box on end for vertical writing) — and carried into page space by
 /// [`Pen::frame`], which is the text matrix and the transformation matrix
 /// composed. A rotated or skewed matrix turns that box into a parallelogram
 /// rather than making it unmeasurable, and [`quad_meets_rect`] answers
@@ -1641,12 +1715,6 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
             bytes: left,
         }));
     };
-    if selected.font.is_vertical() {
-        return whole(Some(RedactionWarning::VerticalRun {
-            font: font(),
-            bytes: left,
-        }));
-    }
     if selected.rescaled_type3 {
         return whole(Some(RedactionWarning::RescaledType3Font {
             font: font(),
@@ -1656,7 +1724,7 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
 
     let frame = pen.frame();
     if !frame.is_finite()
-        || !pen.x.is_finite()
+        || !pen.along.is_finite()
         || !pen.size.is_finite()
         || !pen.rise.is_finite()
         || !pen.horizontal_scale.is_finite()
@@ -1670,22 +1738,15 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
     // Measured in full before anything is cut, so that a run which turns out
     // to be unmeasurable part-way along is left whole rather than half-cut.
     let codes = selected.font.decode(bytes);
-    let y0 = pen.rise;
-    let y1 = pen.rise + pen.size;
     let mut boxes: Vec<([(f64, f64); 4], f64)> = Vec::with_capacity(codes.len());
-    let mut x = pen.x;
+    let mut along = pen.along;
     for code in &codes {
         let advance = pen.advance(code);
         // The glyph's box, approximated from its advance and the font size.
         // Approximating is right here: an exact outline would let a descender
         // poking one hundredth of a point into the box decide the redaction,
         // and erring towards removal is the safe direction anyway.
-        let quad = [
-            frame.apply(x, y0),
-            frame.apply(x + advance, y0),
-            frame.apply(x + advance, y1),
-            frame.apply(x, y1),
-        ];
+        let quad = pen.glyph_box(code, along).map(|(x, y)| frame.apply(x, y));
         if !advance.is_finite() || quad.iter().any(|p| !p.0.is_finite() || !p.1.is_finite()) {
             return whole(Some(RedactionWarning::UnmeasurableFrame {
                 font: font(),
@@ -1693,7 +1754,7 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
             }));
         }
         boxes.push((quad, advance));
-        x += advance;
+        along += advance;
     }
 
     let mut runs: Vec<Run> = Vec::new();
@@ -3406,36 +3467,6 @@ mod refusals {
         }
     }
 
-    /// 9.4.4's vertical branch: the pen advances downward by `/W2`'s `w1`,
-    /// and a `TJ` number displaces along that axis too.
-    ///
-    /// This is the class that arrived *with* the rotation cut rather than
-    /// surviving it. A vertical run's text matrix is perfectly ordinary, so
-    /// the old rotation guard never looked at it, and every vertical run on
-    /// every page was being measured left to right and cut from the result.
-    #[test]
-    fn a_vertical_run_is_left_uncut_and_reported() {
-        let doc = open(vertical_document("BT /F0 10 Tf 100 100 Td (SECRET) Tj ET"));
-        assert!(all_streams(&doc).contains("SECRET"));
-
-        let (bytes, report) = redact(doc, &[everywhere()]);
-        assert_eq!(report.glyphs, 0, "nothing was cut");
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::VerticalRun {
-                font: b"F0".to_vec(),
-                bytes: 6,
-            }],
-            "and the caller was told which font and how much"
-        );
-
-        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
-        assert!(
-            streams.contains("SECRET"),
-            "the run is intact rather than half-removed: {streams}"
-        );
-    }
-
     /// 9.6.5: a Type 3 font's `/Widths` are in its own glyph space.
     ///
     /// `/FontMatrix [0.01 0 0 0.01 0 0]` makes every advance ten times what
@@ -3540,31 +3571,255 @@ mod refusals {
     }
 
     /// A refusal is about a rectangle, so with no rectangles there is nothing
-    /// to refuse. Warning on every vertical run of every page a caller merely
-    /// opened would make the list say nothing.
+    /// to refuse. Warning on every unmeasurable run of every page a caller
+    /// merely opened would make the list say nothing.
+    ///
+    /// Written over a vertical run until September 2026, when vertical runs
+    /// stopped being refused; a font that is not in scope is the refusal now.
     #[test]
     fn nothing_is_refused_when_there_is_nothing_to_redact() {
-        let doc = open(vertical_document("BT /F0 10 Tf 100 100 Td (SECRET) Tj ET"));
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "BT /Missing 10 Tf 100 100 Td (SECRET) Tj ET",
+        ));
         let (_, report) = redact(doc, &[]);
         assert_eq!(report, RedactionReport::default());
     }
 
     /// Warnings with the same cause and the same font merge, so a page of
-    /// vertical text yields one entry rather than one per operator.
+    /// text in a font that is not in scope yields one entry rather than one
+    /// per operator.
     #[test]
     fn refusals_of_the_same_cause_and_font_merge() {
-        let doc = open(vertical_document(
-            "BT /F0 10 Tf 100 100 Td (SECRET) Tj 0 -12 Td (AGAIN) Tj ET",
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "BT /Missing 10 Tf 100 100 Td (SECRET) Tj 0 -12 Td (AGAIN) Tj ET",
         ));
         let (_, report) = redact(doc, &[everywhere()]);
         assert_eq!(
             report.warnings,
-            vec![RedactionWarning::VerticalRun {
-                font: b"F0".to_vec(),
+            vec![RedactionWarning::UnknownFont {
+                font: b"Missing".to_vec(),
                 bytes: 11,
             }],
             "one entry, carrying both runs' operand lengths"
         );
+    }
+}
+
+/// Vertical runs (9.7.4.3), which this module refused until September 2026.
+///
+/// # What is adjudicated by what
+///
+/// The fixture's font writes every one of its metrics out — `/W`, `/W2` with
+/// one glyph of a different height — so the expected column is arithmetic
+/// from 9.4.4 and 9.7.4.3 done by hand and written into the comments: glyph
+/// by glyph, where each box starts and ends. What reads the result back is
+/// this engine's own extractor, and the positions it reports are compared
+/// **with themselves**, before and after the cut: the property is that every
+/// glyph the redaction kept is exactly where it was. That is
+/// self-consistency and is labelled as such — it says the rewrite moved
+/// nothing, and it is the interpreter's placement (`interpret.rs`, `show`)
+/// that says where "where it was" is. The font has no program, so there is no
+/// ink to read; the needle bytes are read out of every decoded stream as
+/// everywhere else in this file.
+#[cfg(test)]
+mod vertical_runs {
+    use super::tests_support::*;
+    use super::*;
+
+    fn band(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// `PUBLICSECRET` down a column from page (100, 180), ten point.
+    ///
+    /// Each glyph advances ten points down and `I` five, so the boxes run
+    /// P 170..180, U 160..170, B 150..160, L 140..150, **I 135..140**,
+    /// C 125..135, S 115..125, E 105..115, C 95..105, R 85..95, E 75..85,
+    /// T 65..75 — all at x 95..105.
+    fn column(prefix: &str) -> Vec<u8> {
+        cid_vertical_document(&format!(
+            "BT /F0 10 Tf {prefix} 100 180 Td {} Tj ET",
+            cid_hex("PUBLICSECRET")
+        ))
+    }
+
+    /// The needle as it sits in a stream: two bytes a code.
+    fn wide(text: &str) -> String {
+        text.chars().flat_map(|c| ['\0', c]).collect()
+    }
+
+    /// What survived, in order, with where it was drawn.
+    fn kept_positions(before: &[(String, (f64, f64))], kept: &str) -> Vec<(String, (f64, f64))> {
+        let mut out = Vec::new();
+        let mut wanted = kept.chars().peekable();
+        for (text, origin) in before {
+            if wanted.peek().map(|c| c.to_string()) == Some(text.clone()) {
+                wanted.next();
+                out.push((text.clone(), *origin));
+            }
+        }
+        out
+    }
+
+    fn assert_same_places(after: &[(String, (f64, f64))], expected: &[(String, (f64, f64))]) {
+        assert_eq!(
+            after.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            expected.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "the kept glyphs, in order"
+        );
+        for ((text, got), (_, want)) in after.iter().zip(expected) {
+            assert!(
+                (got.0 - want.0).abs() < 1e-6 && (got.1 - want.1).abs() < 1e-6,
+                "{text} moved from {want:?} to {got:?}"
+            );
+        }
+    }
+
+    /// **The pin, flipped.** The fixture the refusal was written against —
+    /// `Identity-V` with nothing but `/DW` — is measured and cut now, and
+    /// nothing is reported, because nothing was left unmeasured.
+    #[test]
+    fn a_vertical_run_is_measured_rather_than_refused() {
+        let doc = open(vertical_document("BT /F0 10 Tf 100 100 Td (SECRET) Tj ET"));
+        assert!(all_streams(&doc).contains("SECRET"));
+
+        let (bytes, report) = redact(doc, &[band(0.0, 0.0, 200.0, 200.0)]);
+        assert_eq!(report.glyphs, 3, "three two-byte codes: SE, CR and ET");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(!streams.contains("SECRET"), "got: {streams}");
+    }
+
+    /// The row's exit criterion: a rectangle over part of a column cuts
+    /// exactly the glyphs it covers, and every glyph it does not cover is
+    /// still drawn exactly where it was.
+    ///
+    /// The band is y 64..124: `T`'s box (65..75) is inside it and `S`'s
+    /// (115..125) reaches into it; `C`'s (125..135) stops a point above its
+    /// top. So `SECRET` goes and `PUBLIC` stays — and a build that walked the
+    /// column horizontally would find every glyph at y 180 and cut nothing.
+    #[test]
+    fn a_vertical_run_is_cut_exactly_at_the_covered_glyphs() {
+        let bytes = column("");
+        let before = extracted(bytes.clone());
+        assert_eq!(
+            before.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "PUBLICSECRET",
+            "the extractor reads the column before the cut"
+        );
+
+        let secret = band(90.0, 64.0, 110.0, 124.0);
+        let (after_bytes, report) = redact(open(bytes), &[secret]);
+        assert_eq!(report.glyphs, 6, "S, E, C, R, E and T");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(!streams.contains(&wide("SECRET")), "the codes are gone");
+        assert!(
+            streams.contains(&wide("PUBLIC")),
+            "the kept codes are there"
+        );
+
+        let after = extracted(after_bytes);
+        assert_same_places(&after, &kept_positions(&before, "PUBLIC"));
+    }
+
+    /// A cut in the middle of the column leaves the tail where it was, which
+    /// is only true if the gap was emitted **down** the column and in the
+    /// vertical thousandth.
+    ///
+    /// The band (y 136..149) takes `L` (140..150) and the short `I`
+    /// (135..140) and neither neighbour: the gap is fifteen points, not
+    /// twenty, so a gap computed from `/W` or from a uniform `w1` puts the
+    /// tail five points off. The run is at `50 Tz` as well, which 9.4.4 puts
+    /// in `tx` and not in `ty`: a gap divided by `Tfs · Th` rather than `Tfs`
+    /// is emitted twice as long.
+    #[test]
+    fn removing_a_vertical_glyph_leaves_the_tail_where_it_was() {
+        let bytes = column("50 Tz");
+        let before = extracted(bytes.clone());
+
+        // At `50 Tz` the box is x 97.5..102.5; the band still spans it.
+        let (after_bytes, report) = redact(open(bytes), &[band(90.0, 136.0, 110.0, 149.0)]);
+        assert_eq!(report.glyphs, 2, "L and I");
+
+        let after = extracted(after_bytes);
+        assert_same_places(&after, &kept_positions(&before, "PUBCSECRET"));
+    }
+
+    /// A `TJ` number in a vertical run displaces **down** the column, and one
+    /// the array already carried keeps its sign and its size.
+    ///
+    /// `[P 500 SECRET]`: the adjustment carries the pen five points further
+    /// down after `P`, so `S` is 165..160 — its box 155..165 — and the band
+    /// (y 156..164) takes it alone.
+    #[test]
+    fn a_tj_number_in_a_vertical_run_keeps_its_axis() {
+        let bytes = cid_vertical_document(&format!(
+            "BT /F0 10 Tf 100 180 Td [{} 500 {}] TJ ET",
+            cid_hex("P"),
+            cid_hex("SECRET")
+        ));
+        let before = extracted(bytes.clone());
+
+        let (after_bytes, report) = redact(open(bytes), &[band(90.0, 156.0, 110.0, 164.0)]);
+        assert_eq!(report.glyphs, 1, "the S alone");
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("500"),
+            "the adjustment came back: {streams}"
+        );
+
+        let after = extracted(after_bytes);
+        assert_same_places(&after, &kept_positions(&before, "PECRET"));
+    }
+
+    /// A vertical glyph is drawn centred on its pen — its horizontal origin
+    /// at minus the position vector, `v_x = 500` — so a rectangle over the
+    /// left half of the column covers it.
+    ///
+    /// The band is x 94..99 over `S` (y 116..124): all of it left of the
+    /// pen at x 100. A box measured from the pen rightward, as a horizontal
+    /// glyph's is, starts at x 100 and misses it.
+    #[test]
+    fn a_vertical_glyph_is_centred_on_its_pen() {
+        let (after_bytes, report) = redact(open(column("")), &[band(94.0, 116.0, 99.0, 124.0)]);
+        assert_eq!(report.glyphs, 1, "the S");
+        let after = extracted(after_bytes);
+        assert_eq!(
+            after.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "PUBLICECRET"
+        );
+    }
+
+    /// A column turned a quarter turn runs **left to right** across the
+    /// page, and is cut along its own axis all the same.
+    ///
+    /// `0 1 -1 0 20 100 Tm` maps text `(x, y)` to page `(20 - y, 100 + x)`,
+    /// so a pen walking text-space y downward walks page x rightward: glyph
+    /// boxes P 20..30, U 30..40, B 40..50, L 50..60, I 60..65, C 65..75 and
+    /// then S 75..85 onwards, all at page y 95..105.
+    #[test]
+    fn a_turned_vertical_run_is_cut_along_its_own_axis() {
+        let bytes = cid_vertical_document(&format!(
+            "BT /F0 10 Tf 0 1 -1 0 20 100 Tm {} Tj ET",
+            cid_hex("PUBLICSECRET")
+        ));
+        let before = extracted(bytes.clone());
+
+        let (after_bytes, report) = redact(open(bytes), &[band(76.0, 90.0, 200.0, 110.0)]);
+        assert_eq!(report.glyphs, 6, "SECRET");
+        let after = extracted(after_bytes);
+        assert_same_places(&after, &kept_positions(&before, "PUBLIC"));
     }
 }
 
@@ -3984,6 +4239,66 @@ mod tests_support {
         out.extend_from_slice(b"\nendstream\nendobj\n");
         out.extend_from_slice(b"trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
         out
+    }
+
+    /// A one-page document with an `/Identity-V` font whose metrics are all
+    /// written out, and a `/ToUnicode` so that extraction reads letters back.
+    ///
+    /// CIDs 65..=90 are the capital letters, each `/W` 1000. `/W2` gives each
+    /// `w1 = -1000` and the position vector `(500, 880)` — except CID 73,
+    /// `I`, whose `w1` is `-500`, so the column is not a lattice and a gap of
+    /// the wrong length moves every glyph after it. At `10 Tf` a glyph's box
+    /// is x `-5..5` about the pen and one advance tall below it.
+    pub fn cid_vertical_document(content: &str) -> Vec<u8> {
+        let to_unicode = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+            /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+            /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+            1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+            1 beginbfrange\n<0041> <005A> <0041>\nendbfrange\n\
+            endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend";
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 7 0 R >>\nendobj\n",
+        );
+        out.push_str(
+            "4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Column\n\
+             /Encoding /Identity-V /DescendantFonts [5 0 R] /ToUnicode 6 0 R >>\nendobj\n",
+        );
+        out.push_str(
+            "5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Column\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n\
+             /DW 1000 /W [65 90 1000]\n\
+             /W2 [65 72 -1000 500 880 73 [-500 500 880] 74 90 -1000 500 880] >>\nendobj\n",
+        );
+        out.push_str(&stream_object(6, to_unicode));
+        out.push_str(&stream_object(7, content));
+        out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    /// Two-byte `Identity` codes for capital letters, as a hex string.
+    pub fn cid_hex(text: &str) -> String {
+        let mut out = String::from("<");
+        for c in text.chars() {
+            out.push_str(&format!("{:04X}", c as u32));
+        }
+        out.push('>');
+        out
+    }
+
+    /// Every character the facade's extractor reports on page zero, with the
+    /// origin it placed it at.
+    pub fn extracted(bytes: Vec<u8>) -> Vec<(String, (f64, f64))> {
+        let doc = crate::Document::open(bytes).expect("it reopens");
+        let text = doc.page(0).expect("a page").text();
+        text.lines()
+            .into_iter()
+            .flat_map(|line| line.chars.iter())
+            .map(|c| (c.text.clone(), c.origin))
+            .collect()
     }
 
     /// A one-page document whose font writes vertically (`/Identity-V`).

@@ -308,7 +308,17 @@ measures a `TJ` number in unscaled text space — the run's own frame — and
 the gap a removed glyph leaves therefore rotates with the run for free. The
 surviving sub-runs keep the original text matrix untouched; giving each a
 fresh `Tm` at its own origin is the answer that looks plausible on screen
-and is wrong four ways, which `emit_array`'s doc comment sets out. A glyph
+and is wrong four ways, which `emit_array`'s doc comment sets out. A
+**vertical** run (9.7.4.3) is cut down its own column by the same test: the
+pen walks text-space y by `/W2`'s `w1` (signed, and with no horizontal scale
+in it), the glyph box is the horizontal one stood on end about the pen —
+`-v_x` to `w0 - v_x` across, where the interpreter draws it — and a `TJ`
+number or a removed glyph's gap displaces along y in thousandths of `Tfs`
+alone. Until September 2026 a vertical run was left whole as `VerticalRun`,
+and before that it was cut as if it were horizontal (`redact.rs`'s
+`vertical_runs` module, against an `Identity-V` font whose `/W2` gives one
+glyph a different advance, so a gap of the wrong length moves every glyph
+after it). A glyph
 the rectangle covers only *partly* is removed, because a content stream can
 show a glyph or not show it and only one of those two can leak. The page is
 read **as the editor has it** — its place in the editor's page order, its
@@ -319,8 +329,8 @@ first had removed, redacted the file's page *n* when the editor had moved
 pages, and silently skipped every form and image on a page whose resources
 were inherited (`redact.rs`'s `editor_reads` module, one test each). What
 redaction cannot **measure** it still leaves whole and names in
-`RedactionReport::warnings` — four of that type's five classes, in the
-refusal table below; the fifth is the form placement one further down —
+`RedactionReport::warnings` — three of that type's four classes, in the
+refusal table below; the fourth is the form placement one further down —
 because a redaction that silently fails to redact is worse than one that
 refuses: the caller believes the content is gone and distributes the file.
 A warning says the run was not measured, not that it was covered, so
@@ -534,7 +544,6 @@ if report.untouched.is_empty() {
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| Redacting a **vertical** text run (9.4.4) | the run is left whole and `RedactionReport::warnings` carries a `VerticalRun` naming the font and how many operand bytes stayed (`a_vertical_run_is_left_uncut_and_reported`) | the vertical branch advances by `/W2`'s `w1` down the page and a `TJ` number displaces along that axis too — a different formula, not a different matrix. This class used to hide behind the rotation refusal, whose matrix test a vertical run passes, so it was being cut horizontally | — |
 | Redacting a run in a **Type 3 font whose `/FontMatrix` is not the 1/1000 default** (9.6.5) | left whole, `RescaledType3Font` (`a_rescaled_type3_font_is_left_uncut_and_reported`); the same font with the conventional matrix is cut (`a_type3_font_with_the_conventional_matrix_is_cut`) | `/Widths` are in the font's own glyph space, and `width / 1000` is right for the conventional matrix and wrong by exactly that matrix for any other, so every position after the first glyph drifts | — |
 | Redacting a run whose `Tf` named a font the resources in scope do not have | left whole, `UnknownFont` (`a_run_whose_font_is_not_in_scope_is_left_uncut_and_reported`) | no metrics at all, so no glyph can be placed. Permanent, and it was silent before: the run was kept, nothing was counted, and the report looked like a rectangle that covered nothing | — |
 | Redacting a run whose text rendering matrix is not finite | left whole, `UnmeasurableFrame` (`a_non_finite_text_matrix_is_left_uncut_and_reported`) | a position that is not a number cannot be compared with a rectangle. Permanent. The whole showing operand is left, never half of it | — |
@@ -669,9 +678,13 @@ if report.untouched.is_empty() {
   decompressed stream. Three further modules carry the rotated cut: a
   quarter turn, an oblique rotation, a skew, a rotation that lives in the
   `cm` rather than the `Tm`, and the matrix and the `TJ` gaps re-emitted in
-  the run's own units (`rotated_runs`); `'`, `"` and an existing `TJ`
+  the run's own units (`rotated_runs`); a vertical column cut exactly at the
+  covered glyphs with every kept glyph extracted where it was, the gap
+  emitted down the column in the vertical thousandth, a `TJ` number keeping
+  its axis, the box centred on the pen, and a column turned a quarter turn
+  (`vertical_runs`); `'`, `"` and an existing `TJ`
   adjustment surviving a cut (`showing_operators`); and one test per
-  unmeasurable-run `RedactionWarning` variant (`refusals`) — the fifth
+  unmeasurable-run `RedactionWarning` variant (`refusals`) — the fourth
   variant, `RepeatedForm`, is about a form rather than a run and its tests
   sit with the other form ones. Their fixtures are a Type 3 font
   whose every glyph fills its em square, so the geometry a test computes by
