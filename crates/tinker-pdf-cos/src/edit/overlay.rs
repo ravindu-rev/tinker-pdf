@@ -38,7 +38,11 @@ impl Resolve for DocumentEditor {
     }
 
     fn trailer(&self) -> Cow<'_, Dict> {
-        Cow::Borrowed(self.doc.trailer())
+        if self.trailer.is_empty() {
+            Cow::Borrowed(self.doc.trailer())
+        } else {
+            Cow::Owned(self.merged_trailer())
+        }
     }
 
     fn stream_decoded(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
