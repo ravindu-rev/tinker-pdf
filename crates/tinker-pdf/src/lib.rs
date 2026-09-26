@@ -83,6 +83,9 @@ pub use tinker_pdf_content::{
     HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, SearchOptions, TextBlock,
     TextChar, TextLine, TextPage, TextWarning, TextWord, WritingMode,
 };
+/// Structured text serialisation — JSON, XML and HTML with fonts, sizes and
+/// boxes — behind [`Page::text_frame`] and [`TextPage::serialize`].
+pub use tinker_pdf_content::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
 /// The strict validator's verdict (ruling 13), behind [`Document::validate`].
 ///
 /// `kind_counts` and `tier_counts` are how a report says *which* rules a file
@@ -1812,6 +1815,32 @@ impl Page {
             device.warn(TextWarning::UnknownFont { name });
         }
         device.finish()
+    }
+
+    /// What a serialisation of [`Page::text`] needs to know about the page:
+    /// its index, its crop box — the space the text's coordinates are in —
+    /// and its `/Rotate`, which those coordinates do not have applied.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let bytes = std::fs::read("document.pdf")?;
+    /// use tinker_pdf::{TextFormat, TextWriter};
+    /// let doc = tinker_pdf::Document::open(bytes)?;
+    /// let mut writer = TextWriter::new(TextFormat::Json);
+    /// for page in doc.pages() {
+    ///     writer.page(&page.text_frame(), &page.text());
+    /// }
+    /// println!("{}", writer.finish());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn text_frame(&self) -> PageFrame {
+        PageFrame {
+            index: self.index(),
+            bounds: self.crop_box(),
+            rotation: self.rotation(),
+        }
     }
 
     /// The page's text in **structure order**, joined with the document's

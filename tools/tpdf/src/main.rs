@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 
 use tinker_pdf::{
     Bitmap, CosDocument, Dict, Document, LadderLevel, ObjRef, Object, Page, RenderOptions,
-    SimpleFontProvider, StreamObj, StructureTree, Tier, WriteMode, WriteOptions, XrefEntry,
+    SimpleFontProvider, StreamObj, StructureTree, TextFormat, TextWriter, Tier, WriteMode,
+    WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -24,7 +25,7 @@ tpdf — inspect and convert PDFs with the tinker-pdf engine
 
 usage:
   tpdf info    <file.pdf> [--password P]
-  tpdf text    <file.pdf> [--page N] [--password P]
+  tpdf text    <file.pdf> [--page N] [--password P] [--json | --xml | --html]
   tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--jobs N]
                                     [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
@@ -49,6 +50,11 @@ options:
   --quiet      only report failures
   --strict     with check, also validate against ISO 32000 strictly
   --pdfa       with check, also validate against ISO 19005 (PDF/A)
+  --json       with text, the structured text as JSON: pages, blocks, lines,
+               spans with their font and size, and characters with their boxes
+  --xml        the same model as XML
+  --html       the same model as an HTML page that shows each line where the
+               page puts it
 
 `--jobs` is the one flag that is meant to change nothing but the clock. A
 `Document` is `Send + Sync` and the pages of one are independent — each
@@ -173,6 +179,9 @@ struct Options {
     /// valid PDF, `--pdfa` asks whether it is a valid *archival* PDF. A file
     /// can be one and not the other in both directions.
     pdfa: bool,
+    /// `text` in a structured format rather than as plain text: one of
+    /// `--json`, `--xml` and `--html`, and at most one.
+    format: Option<TextFormat>,
     /// Print the record format version and stop, naming no file.
     ///
     /// The corpus runner asks before it spawns anything, because a child one
@@ -200,6 +209,7 @@ impl Options {
             stream: false,
             strict: false,
             pdfa: false,
+            format: None,
             record_version: false,
         };
 
@@ -265,6 +275,17 @@ impl Options {
                 "--strict" => options.strict = true,
                 "--pdfa" => options.pdfa = true,
                 "--record-version" => options.record_version = true,
+                "--json" | "--xml" | "--html" => {
+                    let format = match arg {
+                        "--json" => TextFormat::Json,
+                        "--xml" => TextFormat::Xml,
+                        _ => TextFormat::Html,
+                    };
+                    if options.format.is_some_and(|f| f != format) {
+                        return Err("choose one of --json, --xml and --html".to_string());
+                    }
+                    options.format = Some(format);
+                }
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }
@@ -503,6 +524,19 @@ fn info(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
 }
 
 fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
+    // The model and every escape are the library's (`TextWriter`); this loop
+    // only chooses the pages and prints what it is handed, a page at a time.
+    if let Some(format) = options.format {
+        let mut writer = TextWriter::new(format);
+        for index in options.pages(doc) {
+            if let Some(page) = doc.page(index) {
+                writer.page(&page.text_frame(), &page.text());
+                print!("{}", writer.take());
+            }
+        }
+        print!("{}", writer.finish());
+        return Ok(());
+    }
     for index in options.pages(doc) {
         let Some(page) = doc.page(index) else {
             continue;
@@ -2459,6 +2493,31 @@ mod tests {
                 "`--jobs {raw}` must be refused"
             );
         }
+    }
+
+    /// Plain text unless a format is asked for, and one format at most: two
+    /// would be two documents on one stdout with nothing to split them by.
+    #[test]
+    fn text_takes_one_structured_format_or_none() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let plain = Options::parse(&args(&["a.pdf"])).expect("parses");
+        assert_eq!(plain.format, None);
+        for (flag, format) in [
+            ("--json", TextFormat::Json),
+            ("--xml", TextFormat::Xml),
+            ("--html", TextFormat::Html),
+        ] {
+            let asked = Options::parse(&args(&[flag, "a.pdf"])).expect("parses");
+            assert_eq!(asked.format, Some(format), "{flag}");
+            let twice = Options::parse(&args(&[flag, flag, "a.pdf"])).expect("parses");
+            assert_eq!(twice.format, Some(format), "{flag} twice is still {flag}");
+        }
+        assert_eq!(
+            Options::parse(&args(&["--json", "--html", "a.pdf"]))
+                .err()
+                .as_deref(),
+            Some("choose one of --json, --xml and --html")
+        );
     }
 
     /// A page that will not write is counted, and every other page still runs.

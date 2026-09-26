@@ -527,6 +527,7 @@ mod tests {
             origin: quad.ll,
             mcid: None,
             stream: 0,
+            font: None,
         }
     }
 

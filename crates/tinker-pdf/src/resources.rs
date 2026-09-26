@@ -1081,6 +1081,14 @@ impl FontSource for PageResources {
         self.font_ids.get(font).copied().unwrap_or(0)
     }
 
+    /// `/BaseFont` as the dictionary writes it; `None` for a name this scope
+    /// does not define and for a font that states none (a Type 3 font may
+    /// omit it, 9.6.5 Table 110).
+    fn font_name(&self, font: &[u8]) -> Option<Arc<str>> {
+        let name = self.fonts.get(font)?.base_font();
+        (!name.is_empty()).then(|| Arc::from(name))
+    }
+
     fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
         // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
         // returns None here, which leaves the ordinary outline path untouched.

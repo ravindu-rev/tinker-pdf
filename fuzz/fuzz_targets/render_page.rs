@@ -48,6 +48,7 @@ fuzz_target!(|data: &[u8]| {
             diacritic_insensitive: true,
         },
     );
+    let _ = text.serialize(tinker_pdf::TextFormat::Json, &page.text_frame());
     let _ = doc.form_fields();
     let _ = doc.outline();
     // 14.7's `/K` graph and `/RoleMap` rewriting system, both attacker-shaped
