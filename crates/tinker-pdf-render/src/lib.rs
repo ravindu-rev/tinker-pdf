@@ -76,16 +76,6 @@ impl CancelToken {
 // an `f64`. `PartialEq` is what the deduplication in the renderer uses.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderWarning {
-    /// A transparency group declared a blending space this build does not
-    /// composite in, so its contents were blended in RGB instead (11.6.6).
-    ///
-    /// Named rather than silent, which is the whole of ruling 2: a group
-    /// declared in `/DeviceCMYK` has 11.3.5's separable formulas applied to
-    /// subtractive components, and applying them to RGB instead is not a
-    /// near-miss — `Multiply` over ink is `Screen`'s shape over light. The
-    /// page still renders, and it says which group and which space.
-    ///
-    /// One- and three-component spaces are *not* reported, because for those
     /// One of 11.3.5.3's four non-separable blend modes was applied inside a
     /// `/DeviceCMYK` transparency group.
     ///
