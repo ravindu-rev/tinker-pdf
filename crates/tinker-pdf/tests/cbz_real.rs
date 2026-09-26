@@ -124,6 +124,8 @@ const ZIPS: &[&str] = &[
 /// each asked for a coder 7-Zip's three were not: `py7zr-bcj.cb7` puts BCJ in
 /// front of LZMA2, and lists the two coders in the opposite order from 7-Zip;
 /// `py7zr-bzip2.cb7` is coder `040202` and `py7zr-ppmd.cb7` coder `030401`.
+/// `7zz-bcj2.cb7` is 7-Zip's own BCJ2 folder, four coders meeting in one,
+/// written by the Linux build of the program that wrote the three above it.
 const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-tar.cbt", Container::Tar),
     ("7z-lzma2.cb7", Container::SevenZip),
@@ -132,6 +134,7 @@ const READ_CONTAINERS: &[(&str, Container)] = &[
     ("py7zr-bcj.cb7", Container::SevenZip),
     ("py7zr-bzip2.cb7", Container::SevenZip),
     ("py7zr-ppmd.cb7", Container::SevenZip),
+    ("7zz-bcj2.cb7", Container::SevenZip),
     ("python-lzma.cbz", Container::Zip),
     ("python-bzip2.cbz", Container::Zip),
 ];

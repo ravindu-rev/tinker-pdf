@@ -371,11 +371,11 @@ fn the_committed_sevenz_seeds_replay() {
     }
     println!("RAN: {} sevenz seeds, {read_ok} entries read, {crc_checked} CRC-checked, {refused} refused outright", seeds.len());
     // Seven hand-built by `write_the_fuzz_seeds`, and one per coder a real
-    // writer made, by `tests/coders/make-coders.py`: `bcj-lzma2`, `bzip2`
-    // and `ppmd`.
+    // writer made, by `tests/coders/make-coders.py` (`bcj-lzma2`, `bzip2`,
+    // `ppmd`) and `make-bcj2.sh` (`bcj2`).
     assert_eq!(
         seeds.len(),
-        10,
+        11,
         "the seed count changed; `write_the_fuzz_seeds` or `make-coders.py` is \
          what should have changed it, and the new file needs a reason there"
     );
@@ -424,7 +424,7 @@ fn the_coder_seeds_reach_their_coders() {
         println!("SKIPPED: fuzz/corpus/sevenz is not in this tree");
         return;
     };
-    let named = ["bcj-lzma2", "bzip2", "ppmd"];
+    let named = ["bcj-lzma2", "bcj2", "bzip2", "ppmd"];
     for want in named {
         let Some((_, data)) = seeds.iter().find(|(name, _)| name == want) else {
             panic!("the {want} seed is missing");

@@ -62,12 +62,12 @@ pub const MAX_7Z_FOLDERS: usize = 4_096;
 /// The most coders in one folder, **and** the most streams one coder may
 /// declare on either side.
 ///
-/// A chain is what this build decodes and the longest one a real writer emits
-/// is three — a filter, a compressor and, historically, a second filter.
+/// The largest folder a real writer emits is BCJ2's: four coders, BCJ2 and
+/// an LZMA for each of its three compressible streams.
 ///
 /// | | Coders |
 /// | --- | --- |
-/// | The most any fixture here spends | 2 (`py7zr-bcj.cb7` and `tests/coders/py7zr-bcj.7z`: BCJ fed by LZMA2) |
+/// | The most any fixture here spends | 4 (`7zz-bcj2.cb7` and `tests/coders/7zz-bcj2.7z`: BCJ2 fed by three LZMA coders), and 4 streams into one coder |
 /// | `-mf=BCJ -m0=LZMA2` with a delta filter | 3 |
 /// | **This cap** | **32** |
 ///

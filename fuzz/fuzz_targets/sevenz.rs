@@ -15,7 +15,7 @@
 //!   how many substreams a folder has, `kSize` lists all but the last, and
 //!   `kCRC` lists only the ones the folder's own CRC does not already cover.
 //!   Getting two of the three to agree and the third not is the whole class.
-//! - **A folder graph that is not a chain.** Bind pairs are indices into a
+//! - **A folder graph that is not a tree.** Bind pairs are indices into a
 //!   stream list the same header defines, so a cycle, a self-reference and an
 //!   index past the end are all one byte away from a valid archive.
 //! - **A `kCodersUnpackSize` of 2^62 in a 40-byte file.** Every allocation

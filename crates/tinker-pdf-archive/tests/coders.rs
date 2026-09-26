@@ -108,6 +108,22 @@ fn py7zr_s_ppmd_entries_are_the_files_that_went_in() {
     }
 }
 
+/// **BCJ2, 7z coder `0303011B`, from the only writer of it there is.**
+///
+/// 7-Zip 26.02's own Linux build, `-m0=BCJ2 -m1=LZMA:d20 -m2=LZMA:d20
+/// -m3=LZMA:d20 -mb0:1 -mb0s1:2 -mb0s2:3` (`make-bcj2.sh`): BCJ2's main, call
+/// and jump streams each LZMA-compressed, its decision stream packed as it
+/// is — four coders and four pack streams meeting in one output, the folder
+/// shape the chain-only reader refused as `NotAChain`. `x86.bin` gives BCJ2
+/// calls, jumps and conditional jumps to convert; that it converted them is
+/// asserted in `sevenz/tests.rs`, which can see the call and jump streams.
+#[test]
+fn seven_zip_s_bcj2_entries_are_the_files_that_went_in() {
+    let names = every_entry_is_its_input("7zz-bcj2.7z");
+    // 7-Zip orders a solid block by extension, so the text comes first.
+    assert_eq!(names, ["prose.txt", "x86.bin"]);
+}
+
 /// One local file header of a ZIP, walked by hand: the method, the CRC-32,
 /// the name and the compressed bytes. This crate has no ZIP reader and should
 /// not grow one for a test; APPNOTE 4.3.7's thirty bytes are enough to find a
@@ -252,6 +268,16 @@ fn hostile_bytes_through_a_bzip2_folder_never_panic() {
 #[test]
 fn hostile_bytes_through_a_ppmd_folder_never_panic() {
     sweep("ppmd", "PPMd");
+}
+
+/// And over the `bcj2` seed, 7-Zip's BCJ2 and three LZMA coders over 768
+/// bytes of branches whose targets are inside them (`make-bcj2.sh`), so BCJ2
+/// converted them: flips in the folder's bind pairs and pack-stream list
+/// reach the graph check, and flips in the four streams reach BCJ2 with
+/// streams of the wrong lengths.
+#[test]
+fn hostile_bytes_through_a_bcj2_folder_never_panic() {
+    sweep("bcj2", "BCJ2");
 }
 
 /// Flips two bits of every byte of a real-writer 7z seed and cuts it at every

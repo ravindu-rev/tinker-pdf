@@ -50,10 +50,12 @@ because a `-sys` crate's manifest says whatever its author typed.
 - **Sparse files.** Refused rather than returned with their holes closed up,
   which is what a reader that ignored the flag would hand back: bytes in the
   wrong places are a picture that decodes to the wrong thing.
-- **7z coders beyond the ones listed** (BCJ joined the four on 26 September
-  2026), and **folders whose coder graph is not a chain**. BCJ2 is the one that exists in the wild and it takes four input
-  streams; a reader that walked it as a chain would hand back a quarter of a
-  file.
+- **7z coders beyond the ones listed** (BCJ, BCJ2, bzip2 and PPMd joined the
+  four on 26 September 2026), and **folders whose coder graph is not a tree**.
+  This line read "not a chain" until BCJ2 was read: BCJ2 takes four input
+  streams, and the folder walk was generalised from a chain to a tree rather
+  than taught one more shape, so what is refused now is a graph with no
+  answer — a cycle, a stream fed twice or by nothing.
 - **RAR 5 compression methods 1–5**, and **RAR 4 entirely.** Both have a
   section of their own below, because both are decisions rather than omissions,
   and the first of them is a *permanent* non-goal rather than a staged one —
@@ -191,7 +193,7 @@ Ruling 2. One bad entry is a placeholder page, not a lost archive, and the
 line is drawn at *what a host can act on*:
 
 - **Archive-level** (`ArchiveRefusal`): no signature, an encrypted archive, a
-  coder this build does not read, a folder that is not a chain, a header that
+  coder this build does not read, a folder that is not a tree, a header that
   does not checksum. All of these are true of the whole file.
 - **Page-level** (`PageDefect`): a sparse tar entry, a 7z entry whose CRC does
   not match, a RAR entry compressed with a method this build does not
@@ -396,8 +398,9 @@ BCJ now, and `tinker-pdf-archive/tests/coders/py7zr-bcj.7z` is a real writer's
 BCJ over a file shaped for the filter. This is the one place in this corpus
 where "the fixture before the reader" was *not* the right move, and the
 difference is that a refused-at-open archive proves nothing about the coder it
-would have run. BCJ2 stays refused by `Error::NotAChain` by design: four input
-streams is not a chain.
+would have run. BCJ2 was refused by `Error::NotAChain` by design, because four
+input streams are not a chain, until the folder walk became a tree walk; its
+fixture is 7-Zip 26.02's own, from the Linux build (`7zz-bcj2.7z`).
 
 The residual risk after all of that is unchanged in kind and smaller in size:
 the unit tests cover the container's grammar with the Copy coder and the

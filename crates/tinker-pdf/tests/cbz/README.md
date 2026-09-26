@@ -23,11 +23,11 @@ implementation's idea of a ZIP over content nobody else owns.
 
 ## What produced them
 
-Sixteen archives, eight of them ZIPs, from five independent implementations —
-ten on the machine described below, and `python-lzma.cbz`, `python-jpx.cbz`,
-`python-bzip2.cbz` and the three `py7zr-*.cb7`s later, on the one their own
-rows name. Fifteen hold the same five pages; `python-jpx.cbz` holds a picture
-T.800 publishes instead.
+Seventeen archives, eight of them ZIPs, from five independent implementations
+— ten on the machine described below, and `python-lzma.cbz`, `python-jpx.cbz`,
+`python-bzip2.cbz`, the three `py7zr-*.cb7`s and `7zz-bcj2.cb7` later, on the
+one their own rows name. Sixteen hold the same five pages; `python-jpx.cbz`
+holds a picture T.800 publishes instead.
 
 | Producer | Files | What it is |
 | --- | --- | --- |
@@ -38,6 +38,7 @@ T.800 publishes instead.
 | **CPython 3.11.15 `zipfile`**, `ZIP_LZMA`, over liblzma 5.4.5 (Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`) | `python-lzma.cbz` | The same writer asked for APPNOTE method 14 — the one writer on hand that emits it — by `make-lzma.py`, on Linux x86_64, 26 September 2026. Added later; see *The LZMA ZIP* below. |
 | **CPython 3.11.15 `zipfile`**, `ZIP_STORED` | `python-jpx.cbz` | T.800 Annex J.10's codestream as two JPEG 2000 pages, by `make-jpx.py`, on Linux x86_64, 26 September 2026. See *The JPEG 2000 ZIP* below. |
 | **CPython 3.11.15 `zipfile`**, `ZIP_BZIP2`, over libbzip2 1.0.8 (Ubuntu `1.0.8-5.1build0.1`) | `python-bzip2.cbz` | The same writer asked for APPNOTE method 12, by `make-bzip2.py`, on Linux x86_64, 26 September 2026. |
+| **7-Zip 26.02** (x64) for Linux, `7zz` | `7zz-bcj2.cb7` | The same program as the Windows row, its Linux build from the ip7z/7zip release (`7z2602-linux-x64.tar.xz`, SHA-256 `41aaba7b…c28c03e`), by `make-bcj2.sh`, on Linux x86_64, 26 September 2026: the one writer of BCJ2. |
 | **py7zr 1.1.3** on CPython 3.11.15, over liblzma 5.4.5, libbzip2 1.0.8 and pyppmd 1.3.1 | `py7zr-bcj.cb7`, `py7zr-bzip2.cb7`, `py7zr-ppmd.cb7` | The second 7z writer, a separate implementation of the container, by `make-py7zr.py`, on Linux x86_64, 26 September 2026. LGPL-2.1-or-later. See *The py7zr `.cb7`s* below. |
 
 **RAR 4 cannot be produced on this machine, and that is recorded rather than
@@ -77,14 +78,14 @@ rerunning a producer.
 
 ## What is committed
 
-285 793 bytes, which is the sum of the Bytes column below and nothing else —
+303 470 bytes, which is the sum of the Bytes column below and nothing else —
 the pages in `source/` are another 18 483 and the four text files here are not
 counted at all. (The figure that stood here before the two later `.cb7`s landed
 was 183 776, which was the sum of nothing: the eight archives it described came
 to 155 074. Re-measured rather than carried, and again when `python-lzma.cbz`
 added 18 939 to 191 755, `python-jpx.cbz` 495 more, `py7zr-bcj.cb7`
 17 643, `py7zr-bzip2.cb7` and `python-bzip2.cbz` 39 185 between them, and
-`py7zr-ppmd.cb7` 17 776.)
+`py7zr-ppmd.cb7` 17 776, and `7zz-bcj2.cb7` 17 677.)
 `sha256` is the first sixteen hex
 digits, enough to tell a file from a regeneration of it.
 
@@ -104,6 +105,7 @@ digits, enough to tell a file from a regeneration of it.
 | `py7zr-bcj.cb7` | 17 643 | py7zr, `[FILTER_X86, FILTER_LZMA2]` | The same five pages from **a second 7z writer**, BCJ (`03030103`) fed by LZMA2 in one solid folder, the two coders listed in the opposite order from 7-Zip's | `e4042a54e44e9a66` |
 | `py7zr-bzip2.cb7` | 18 443 | py7zr, `[FILTER_BZIP2]` | The same five pages as 7z coder `040202`, one bzip2 block in one solid folder | `40fc68e031f52f68` |
 | `py7zr-ppmd.cb7` | 17 776 | py7zr, `[FILTER_PPMD]` order 6, 16 MiB | The same five pages as 7z coder `030401`, PPMd var.H through pyppmd — 7-Zip's own encoder | `e2447d6ec2f19f0a` |
+| `7zz-bcj2.cb7` | 17 677 | 7-Zip (Linux) `-m0=BCJ2 -m1=LZMA:d20 -m2=LZMA:d20 -m3=LZMA:d20 -mb0:1 -mb0s1:2 -mb0s2:3` | The same five pages as a **BCJ2 folder**: four coders and four pack streams meeting in one output, BCJ2 listed last | `8acbf5deac63ace7` |
 | `7z-tar.cbt` | 23 552 | 7-Zip `-ttar` | A CBT holding the same five pages, in GNU's tar dialect. Read since tier 4 | `97911001905ea8b5` |
 | `winrar-rar5.cbr` | 18 860 | `Rar.exe` (RAR 5) | A CBR holding the same five pages, and the fifth finding below: **four stored, one compressed with method 3**, plus a `QO` service record. Container read since tier 4; the compressed entry is a placeholder page | `b8f7d4de4b0933a1` |
 
@@ -256,8 +258,10 @@ and was not the same kind of gap. `-mf=BCJ` writes coder id `03030103`, which
 was outside the allow-list in `sevenz.rs` and would have been **refused at
 open** — so a BCJ fixture would not have tested the decoder that existed, it
 would have sat in the tree waiting for the capability that did not. It arrived
-with the work that added it, from the second writer. BCJ2 stays refused by
-`Error::NotAChain` by design: it takes four input streams and is not a chain.
+with the work that added it, from the second writer. BCJ2 was refused by
+`Error::NotAChain` by design, since four input streams are not a chain, until
+the folder walk became a tree walk; `7zz-bcj2.cb7` is its archive, from 7-Zip's
+Linux build.
 
 ## The py7zr `.cb7`s
 
@@ -356,8 +360,8 @@ in `INVENTORY.tsv` either: that table describes the archives of the five pages.
 
 `make-corpus.ps1` writes the ten archives and prints a hash for each;
 `inventory.ps1` regenerates `INVENTORY.tsv` from the five ZIPs through .NET's
-reader; `make-lzma.py` and `make-jpx.py` write two more, and `make-py7zr.py`
-the py7zr `.cb7`s. None runs in CI — they are how these files were obtained.
+reader; `make-lzma.py`, `make-jpx.py` and `make-bzip2.py` write three more,
+`make-py7zr.py` the py7zr `.cb7`s, and `make-bcj2.sh` the BCJ2 one. None runs in CI — they are how these files were obtained.
 
 ```
 cargo test -p tinker-pdf --test cbz_real -- --ignored write_the_source_pages
@@ -402,8 +406,8 @@ is no way back.
   having: five implementations that share no code, disagree about what to
   store and what to deflate, and lay their directories out differently, must
   still give this reader the same five pictures at the same five sizes.
-  Nothing outside this repository renders any of it. It runs over **fourteen**
-  archives now rather than five — the seven non-ZIPs this build reads, and
+  Nothing outside this repository renders any of it. It runs over **fifteen**
+  archives now rather than five — the eight non-ZIPs this build reads, and
   `python-lzma.cbz` and `python-bzip2.cbz`, join it rather than getting a check
   of their own, because
   what is worth asserting
@@ -412,7 +416,7 @@ is no way back.
 - `the_tar_a_real_archiver_wrote_pages_in_natural_order` and
   `the_7z_a_real_archiver_wrote_pages_in_natural_order` add the order
   assertion for the two containers with no central directory to re-order
-  things behind; the `.cb7` one runs over all six `.cb7`s.
+  things behind; the `.cb7` one runs over all seven `.cb7`s.
 - `the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not`
   is the one that holds `winrar-rar5.cbr` to four pictures and one placeholder
   **named by method number**, which is what stops the CBR row closing quietly.

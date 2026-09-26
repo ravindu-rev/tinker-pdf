@@ -97,19 +97,24 @@ so a wrong window or an ignored LZMA2 dictionary reset fails the *format's*
 check and becomes a placeholder page rather than a picture with the wrong
 pixels in it. That is what let a hand-rolled LZMA decoder be written with no
 oracle to check it against (ruling 13); `docs/design/comic-archives.md` carries
-the argument. Coders read: Copy, LZMA, LZMA2, Deflate, bzip2, PPMd and BCJ
-— 7z method `030401` is Dmitry Shkarin's PPMd var.H under 7-Zip's range
+the argument. Coders read: Copy, LZMA, LZMA2, Deflate, bzip2, PPMd, BCJ and
+BCJ2 — 7z method `030401` is Dmitry Shkarin's PPMd var.H under 7-Zip's range
 coder, transcribed from 7-Zip's public-domain `Ppmd7.c`, whose model arena is
 bounded by the same cap as the folder's output; `040202` is a whole bzip2
 stream, exactly as ZIP method 12 is,
 `040108` is RFC 1951 with no wrapper, exactly as ZIP method 8 is, and
 `03030103` is the x86 branch filter `-mf=BCJ` puts in front of LZMA2, which
 turns the absolute addresses the encoder wrote back into relative call and jump
-operands. A folder is walked by its bind pairs rather than by the order its
-coders are listed in, because the two writers here list them in opposite
-orders. Every other method is refused **by its own method id**, and a folder
-whose coder graph is not a chain (BCJ2 takes four input streams) is refused as
-that.
+operands; `0303011B` is BCJ2, which takes the converted targets out of the
+code altogether and needs four streams back to rebuild it — the code, the call
+targets, the jump targets, and a range-coded stream of its decisions. **A
+folder is a tree of coders**, walked from its output down its bind pairs and
+never by the order its coders are listed in: a BCJ2 folder is four coders and
+four pack streams meeting in one output, and the writers here disagree about
+the order to list them in (7-Zip 26 lists BCJ2 last). Every other method is
+refused **by its own method id**, and a folder whose graph has no answer — a
+cycle, a stream fed twice or by nothing, a coder with two outputs — is refused
+as that.
 
 **A `.cbr` is a RAR 5, read as far as this repository's own rules allow.** The
 container is read in full: the signature, the `vint`, the header chain, file
@@ -344,7 +349,7 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | A solid RAR entry | `PageDefect::RarEntryRefused` | its dictionary is the entry before it, and this build decompresses neither | — |
 | An encrypted RAR, or one volume of a set | `ArchiveRefusal::Encrypted` / `MultiDisk` | named non-goals; the fragment that happens to be here is not the archive | — |
 | A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `03` is the delta filter and `0A` ARM64's branch filter — so a host can say what to re-pack without | — |
-| A 7z folder that is not a chain of coders | `ArchiveRefusal::NotAZip` | BCJ2 takes four input streams; a reader that walked it as a chain would hand back a quarter of a file | — |
+| A 7z folder whose coders do not form a tree | `ArchiveRefusal::NotAZip` (leaf: `sevenz::Error::NotAChain`) | a cycle, a stream fed twice or by nothing, a coder with two outputs, or a known coder with stream counts not its own: a graph with no answer, refused at open | — |
 | An encrypted 7z | `ArchiveRefusal::Encrypted` | AES-256 is a named non-goal, as it is for ZIP | — |
 | A 7z entry whose recorded CRC-32 does not match | `PageDefect::SevenZipEntryRefused` | placeholder page; **this is the check that adjudicates the LZMA decoder**, so it is never tolerated | — |
 | A sparse or multi-volume tar entry | `PageDefect::TarEntryRefused(TarEntryError)` | placeholder page; a reader that ignored the flag hands back bytes in the wrong places, which is worse than a page that failed | — |
@@ -399,9 +404,9 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   what to deflate, must give this reader the same five pictures at the same
   sizes. It is a relation between two reads rather than an oracle — nothing
   outside this repository renders any of it ([verification](../verification.md)).
-  The non-ZIPs beside them hold the *same five pages*: six `.cb7`s and the
+  The non-ZIPs beside them hold the *same five pages*: seven `.cb7`s and the
   `.cbt` join that identity with `python-lzma.cbz` and `python-bzip2.cbz`, so
-  fourteen archives must give the same pictures, and the `.cbr` does not — it is four fifths of a comic and is held to
+  fifteen archives must give the same pictures, and the `.cbr` does not — it is four fifths of a comic and is held to
   `PageDefect::RarEntryRefused` naming its method instead. 7-Zip's three
   `.cb7`s are one producer asked for three **shapes** — one solid folder, five folders
   (`-ms=off`), and three LZMA2 chunks with a dictionary reset each
@@ -420,6 +425,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   asserts each page's image is `/JPXDecode` over the entry's bytes with no
   `/ColorSpace` or `/BitsPerComponent`, and that each renders to J.10.5's nine
   published samples — an expected picture no decoder here produced.
+  `7zz-bcj2.cb7`, 7-Zip 26.02's own BCJ2 folder from its Linux build, joins
+  it; BCJ2 is held to `x86.bin` in `tinker-pdf-archive`'s `tests/coders.rs`.
   `py7zr-bzip2.cb7` and `py7zr-ppmd.cb7` join it too, and the PPMd model is
   held to two arenas in `tinker-pdf-archive`'s `tests/coders.rs` — py7zr's
   16 MiB default, and 64 KiB at order 32, which fills and restarts the model

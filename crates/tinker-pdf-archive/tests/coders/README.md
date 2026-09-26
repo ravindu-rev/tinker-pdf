@@ -36,6 +36,7 @@ same bytes on any Python 3.
 | `py7zr-bzip2.7z` | 41 604 | py7zr 1.1.3, `[FILTER_BZIP2]` | 7z `040202`; `prose.txt`, `runs.bin` and `x86.bin` in one solid folder, one level-9 block | `091fb3303fa690e5` |
 | `py7zr-ppmd.7z` | 37 965 | py7zr 1.1.3, `[FILTER_PPMD]` order 6, `mem` 24 | 7z `030401` in a 16 MiB arena the model never fills | `a7b31f4828f5d068` |
 | `py7zr-ppmd-tight.7z` | 56 394 | py7zr 1.1.3, `[FILTER_PPMD]` order 32, `mem` 16 | The same coder in **64 KiB**: the arena fills and the model restarts again and again over 148 KB — counted by `the_ppmd_fixtures_run_in_the_arenas_they_are_named_for` | `31de4d89ffcd0f68` |
+| `7zz-bcj2.7z` | 47 068 | 7-Zip 26.02 for Linux (`7zz`), `-m0=BCJ2 -m1=LZMA:d20 -m2=LZMA:d20 -m3=LZMA:d20 -mb0:1 -mb0s1:2 -mb0s2:3` | 7z `0303011B`: BCJ2's main, call and jump streams each out of an LZMA coder, its decisions packed as they are — four coders, four pack streams, one output; `prose.txt` and `x86.bin` | `a18b64c4f11c5646` |
 | `python-bzip2.zip` | 41 656 | CPython 3.11.15 `zipfile`, `ZIP_BZIP2`, `compresslevel=1` | APPNOTE method 12 on all four inputs: `prose.txt` is **two** blocks at level 1's 100 000-byte limit, and `empty.txt` a stream with **no** block | `8ca8493ac60b6287` |
 
 Obtained on Linux x86_64 with CPython 3.11.15, py7zr 1.1.3, liblzma 5.4.5
@@ -47,7 +48,15 @@ pip install --user py7zr
 cd crates/tinker-pdf-archive/tests/coders
 python3 make-inputs.py
 python3 make-coders.py
+sh make-bcj2.sh
 ```
+
+`make-bcj2.sh` needs 7-Zip 26.02's Linux build on the path as `7zz`: the
+`7z2602-linux-x64.tar.xz` asset of the ip7z/7zip GitHub release 26.02,
+SHA-256 `41aaba7b1235304ab5aa0624530c67ae829496cd29e875925271efdccc28c03e`,
+unpacked as it comes. It leaves timestamps out of the archive and runs
+single-threaded, so a rerun writes the same bytes, and it also writes the
+`sevenz/bcj2` seed.
 
 `make-coders.py` pins py7zr's clock to one instant, so a rerun under the same
 versions writes the same bytes; every hash above was measured twice. It also
@@ -71,6 +80,11 @@ one matters, because the coder is what these files adjudicate.
 - **bzip2**: py7zr and CPython's `zipfile` both call CPython's `bz2`, which is
   libbzip2 1.0.8 — the reference implementation, so the one whose reading of
   the format is the format.
+- **BCJ2**: 7-Zip is the only writer of it, so `7zz-bcj2.7z` is the same
+  program as `tests/cbz/`'s Windows `.cb7`s, on another platform. Its folder
+  lists BCJ2 last of the four coders, where the command line numbers it
+  first — the listing order is the writer's, and the bind pairs are what
+  the reader follows.
 - **PPMd**: py7zr calls pyppmd 1.3.1, which is 7-Zip's own `Ppmd7.c` and
   `Ppmd7Enc.c` compiled for CPython — the same public-domain code this
   crate's decoder was transcribed from. So these archives are **not** a
@@ -85,4 +99,5 @@ Yes, for the reason `crates/tinker-pdf/tests/cbz/README.md` gives: a coder's
 licence does not reach the bytes it codes, the inputs are ours, and nothing of
 any writer is vendored, linked or redistributed. py7zr is LGPL-2.1-or-later;
 liblzma is public domain (0BSD from 5.6); libbzip2 is under its own BSD-style
-licence.
+licence; 7-Zip is LGPL-2.1-or-later with an unRAR restriction, none of which
+reaches an archive of our bytes.

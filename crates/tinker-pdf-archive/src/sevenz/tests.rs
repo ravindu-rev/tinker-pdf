@@ -466,25 +466,23 @@ fn a_coder_this_build_does_not_read_is_refused_by_its_method_id() {
     );
 }
 
-/// A folder whose coder graph is not a chain is refused by name.
-///
-/// BCJ2 is the shape that exists: four input streams into one output, so a
-/// reader that walked it as a chain would decode the first quarter of the data
-/// and hand it over as the file. The `0x10` flag bit is what declares it.
-#[test]
-fn a_folder_that_is_not_a_chain_is_refused_by_name() {
-    let mut folder = Vec::new();
-    folder.extend(number(1));
-    folder.push(0x14); // idSize 4, isComplex
-    folder.extend_from_slice(&[0x03, 0x03, 0x01, 0x1B]); // BCJ2
-    folder.extend(number(4)); // four in-streams
-    folder.extend(number(1));
-
+/// A one-file archive whose folder is `folder`, written out byte for byte by
+/// the caller, over `pack_sizes` pack streams laid end to end in `packed`,
+/// with one unpack size per coder.
+fn graph_archive(
+    folder: Vec<u8>,
+    pack_sizes: &[usize],
+    unpack_sizes: &[u64],
+    packed: Vec<u8>,
+    file: &[u8],
+) -> Vec<u8> {
     let mut streams = vec![K_PACK_INFO];
     streams.extend(number(0));
-    streams.extend(number(1));
+    streams.extend(number(pack_sizes.len() as u64));
     streams.push(K_SIZE);
-    streams.extend(number(6));
+    for size in pack_sizes {
+        streams.extend(number(*size as u64));
+    }
     streams.push(K_END);
     streams.push(K_UNPACK_INFO);
     streams.push(K_FOLDER);
@@ -492,17 +490,193 @@ fn a_folder_that_is_not_a_chain_is_refused_by_name() {
     streams.push(0);
     streams.extend_from_slice(&folder);
     streams.push(K_CODERS_UNPACK_SIZE);
-    streams.extend(number(6));
+    for size in unpack_sizes {
+        streams.extend(number(*size));
+    }
+    streams.push(K_END);
+    streams.push(K_SUBSTREAMS_INFO);
+    streams.push(K_CRC);
+    streams.push(1);
+    streams.extend_from_slice(&crc32(file).to_le_bytes());
     streams.push(K_END);
     streams.push(K_END);
 
     let mut header = vec![K_HEADER, K_MAIN_STREAMS];
     header.extend_from_slice(&streams);
+    header.push(K_FILES_INFO);
+    header.extend(number(1));
+    let mut names = vec![0u8];
+    names.extend(utf16("code.bin"));
+    header.extend(number(u64::from(K_NAME)));
+    header.extend(number(names.len() as u64));
+    header.extend_from_slice(&names);
+    header.extend(number(0));
     header.push(K_END);
-    let bytes = wrap(b"a page".to_vec(), header);
+    wrap(packed, header)
+}
+
+/// A coder record: its id, and its stream counts when they are not one each.
+fn coder_record(id: &[u8], streams: Option<(u64, u64)>) -> Vec<u8> {
+    let mut out = vec![id.len() as u8 | if streams.is_some() { 0x10 } else { 0 }];
+    out.extend_from_slice(id);
+    if let Some((ins, outs)) = streams {
+        out.extend(number(ins));
+        out.extend(number(outs));
+    }
+    out
+}
+
+/// BCJ2's decision stream for "no conversion, every time": a zero, then a
+/// code of zero, which is below every bound the decoder can compute.
+const NO_CONVERSIONS: [u8; 9] = [0; 9];
+
+/// x86-shaped bytes with branch opcodes in them, which a BCJ2 decoder must
+/// pass through untouched when every decision says so.
+const CODE: &[u8] = b"\x55\x48\x89\xE5\xE8\x10\x20\x30\x40\x0F\x85\x01\x02\x03\x04\xE9\xC3";
+
+/// **A folder whose coders are not a chain is read when they are a tree.**
+///
+/// BCJ2 is the coder that made the chain-only walk wrong: four inputs meet in
+/// one output. Two folders, built from the grammar:
+///
+/// - BCJ2 alone, its four in-streams fed straight from four pack streams;
+/// - BCJ2 fed by three Copy coders through bind pairs, with its decision
+///   stream packed as it is — the shape 7-Zip writes for
+///   `-m0=BCJ2 -m1=LZMA -m2=LZMA -m3=LZMA`, Copy standing in for LZMA — and
+///   the pack streams listed in a different order from the in-streams, so a
+///   walk that took them in list order would hand BCJ2 its streams crossed.
+#[test]
+fn a_bcj2_folder_is_walked_as_a_tree() {
+    let mut folder = number(1);
+    folder.extend(coder_record(BCJ2, Some((4, 1))));
+    for index in 0..4 {
+        folder.extend(number(index));
+    }
+    let mut packed = CODE.to_vec();
+    packed.extend_from_slice(&NO_CONVERSIONS);
+    let bytes = graph_archive(
+        folder,
+        &[CODE.len(), 0, 0, NO_CONVERSIONS.len()],
+        &[CODE.len() as u64],
+        packed,
+        CODE,
+    );
+    let mut archive = open(&bytes);
     assert_eq!(
-        Archive::open(&bytes, &Limits::DEFAULT).err(),
-        Some(Error::NotAChain)
+        archive.read(0).as_deref(),
+        Ok(CODE),
+        "BCJ2 over four pack streams"
+    );
+
+    // BCJ2 (in-streams 0-3) fed by Copy coders 1, 2 and 3 (in-streams 4, 5
+    // and 6) through three bind pairs; the pack streams are listed jump,
+    // decisions, main, call.
+    let mut folder = number(4);
+    folder.extend(coder_record(BCJ2, Some((4, 1))));
+    for _ in 0..3 {
+        folder.extend(coder_record(&[0x00], None));
+    }
+    for (input, output) in [(0u64, 1u64), (1, 2), (2, 3)] {
+        folder.extend(number(input));
+        folder.extend(number(output));
+    }
+    for stream in [6u64, 3, 4, 5] {
+        folder.extend(number(stream));
+    }
+    let mut packed = Vec::new();
+    packed.extend_from_slice(&NO_CONVERSIONS);
+    packed.extend_from_slice(CODE);
+    let bytes = graph_archive(
+        folder,
+        &[0, NO_CONVERSIONS.len(), CODE.len(), 0],
+        &[CODE.len() as u64, CODE.len() as u64, 0, 0],
+        packed,
+        CODE,
+    );
+    let mut archive = open(&bytes);
+    let folder = &archive.folders[0];
+    assert_eq!(folder.final_out(), Some(0), "BCJ2 is the folder's output");
+    assert_eq!(folder.pack_ranges.len(), 4, "four pack streams");
+    assert_eq!(
+        archive.read(0).as_deref(),
+        Ok(CODE),
+        "BCJ2 over three coders"
+    );
+}
+
+/// **A folder whose coder graph has no answer is refused by name** — the
+/// sentence the chain-only reader said about every BCJ2 folder, now kept for
+/// the graphs that really cannot be walked.
+#[test]
+fn a_folder_whose_graph_cannot_be_walked_is_refused_by_name() {
+    let refused = |folder: Vec<u8>, packs: usize, unpacks: &[u64]| {
+        let sizes = vec![1usize; packs];
+        let bytes = graph_archive(folder, &sizes, unpacks, vec![0x90; packs], b"\x90");
+        Archive::open(&bytes, &Limits::DEFAULT).err()
+    };
+
+    // A coder with two out-streams: nothing this build reads has one.
+    let mut folder = number(1);
+    folder.extend(coder_record(&[0x00], Some((1, 2))));
+    folder.extend(number(0));
+    folder.extend(number(1));
+    assert_eq!(
+        refused(folder, 1, &[1, 1]),
+        Some(Error::NotAChain),
+        "two outputs"
+    );
+
+    // BCJ2 declaring three inputs is not BCJ2.
+    let mut folder = number(1);
+    folder.extend(coder_record(BCJ2, Some((3, 1))));
+    for index in 0..3 {
+        folder.extend(number(index));
+    }
+    assert_eq!(
+        refused(folder, 3, &[1]),
+        Some(Error::NotAChain),
+        "BCJ2 with three"
+    );
+
+    // Copy feeding itself: coder 1's output bound to its own input, so a walk
+    // down from the folder's output never reaches it.
+    let mut folder = number(2);
+    folder.extend(coder_record(&[0x00], None));
+    folder.extend(coder_record(&[0x00], None));
+    folder.extend(number(1));
+    folder.extend(number(1));
+    assert_eq!(
+        refused(folder, 1, &[1, 1]),
+        Some(Error::NotAChain),
+        "a cycle"
+    );
+
+    // A bind pair naming an in-stream the folder does not have.
+    let mut folder = number(2);
+    folder.extend(coder_record(&[0x00], None));
+    folder.extend(coder_record(&[0x00], None));
+    folder.extend(number(9));
+    folder.extend(number(1));
+    assert_eq!(
+        refused(folder, 1, &[1, 1]),
+        Some(Error::NotAChain),
+        "stream 9"
+    );
+
+    // BCJ2 carrying properties is a different filter, as BCJ is.
+    let mut folder = number(1);
+    let mut record = coder_record(BCJ2, Some((4, 1)));
+    record[0] |= 0x20;
+    record.extend(number(1));
+    record.push(0);
+    folder.extend(record);
+    for index in 0..4 {
+        folder.extend(number(index));
+    }
+    assert_eq!(
+        refused(folder, 4, &[1]),
+        Some(Error::UnsupportedCoder { id: BCJ2.to_vec() }),
+        "BCJ2 with properties"
     );
 }
 
@@ -1166,4 +1340,80 @@ fn the_ppmd_fixtures_run_in_the_arenas_they_are_named_for() {
             "{name}: the model restarted {counted} times"
         );
     }
+}
+
+/// **`7zz-bcj2.7z` is the shape it is named for, and BCJ2 converted in it.**
+///
+/// `tests/coders.rs` holds the decoded entries to the files that went in. What
+/// it cannot see is the folder: four coders, BCJ2 reading four in-streams —
+/// three of them bound to the three LZMA coders' outputs, the fourth, its
+/// range-coded decisions, a pack stream of its own — and whether the call and
+/// jump streams hold anything at all. A BCJ2 that converted nothing would
+/// decode just as correctly and test only the main stream's copy loop, so the
+/// two target streams are held to being non-empty, whole four-byte targets,
+/// and to adding up with the main stream to the output.
+///
+/// **7-Zip 26.02 lists BCJ2 last**, after the three LZMA coders, though the
+/// command line numbers it `-m0`, and binds the jump stream's coder first;
+/// its pack streams are in yet another order. Nothing but the bind pairs
+/// says which stream is which, which is the point of walking them.
+#[test]
+fn the_bcj2_fixture_is_four_streams_meeting_in_one() {
+    let bytes = coder_fixture("7zz-bcj2.7z");
+    let archive = open(&bytes);
+    assert_eq!(archive.folders.len(), 1, "one solid folder");
+    let folder = &archive.folders[0];
+    let ids: Vec<&[u8]> = folder.coders.iter().map(|c| c.id.as_slice()).collect();
+    let lzma: &[u8] = &[0x03, 0x01, 0x01];
+    assert_eq!(
+        ids,
+        [lzma, lzma, lzma, BCJ2],
+        "three LZMA coders, then BCJ2"
+    );
+    let bcj2 = 3;
+    assert_eq!(folder.coders[bcj2].in_streams, 4, "BCJ2 reads four streams");
+    assert_eq!(
+        folder.final_out(),
+        Some(bcj2),
+        "BCJ2's output is the folder's"
+    );
+
+    // BCJ2's in-streams are main, call, jump, decisions; each of the first
+    // three is some LZMA coder's output, and the fourth is packed.
+    let first = folder.first_in(bcj2);
+    let feeder = |k: usize| {
+        folder
+            .bind_pairs
+            .iter()
+            .find(|(input, _)| *input == first + k)
+            .map(|(_, output)| *output)
+    };
+    let (main, call, jump) = (feeder(0), feeder(1), feeder(2));
+    assert!(
+        [main, call, jump]
+            .iter()
+            .all(|f| f.is_some_and(|c| c < bcj2)),
+        "main, call and jump each come out of an LZMA coder: {:?}",
+        folder.bind_pairs
+    );
+    assert_eq!(feeder(3), None, "the decision stream is bound to nothing");
+    assert!(
+        folder.packed.contains(&(first + 3)),
+        "and is packed as it is"
+    );
+    assert_eq!(folder.pack_ranges.len(), 4, "four pack streams");
+
+    let size = |coder: Option<usize>| folder.unpack_sizes[coder.unwrap_or(0)];
+    let out = folder.unpack_sizes[bcj2];
+    let (main, call, jump) = (size(main), size(call), size(jump));
+    assert!(
+        call > 0 && jump > 0,
+        "BCJ2 converted calls ({call}) and jumps ({jump})"
+    );
+    assert_eq!((call % 4, jump % 4), (0, 0), "targets are four bytes each");
+    assert_eq!(
+        main + call + jump,
+        out,
+        "the three streams are the output between them"
+    );
 }

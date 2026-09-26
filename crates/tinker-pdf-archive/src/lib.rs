@@ -23,9 +23,10 @@
 //! for that reason and one more: it has a second caller, ZIP method 12, which
 //! the facade hands it to through `tinker_pdf_zip::Archive::read_coded`
 //! exactly as it hands [`lzma::decode`] to method 14; [`ppmd`] is public for
-//! the first reason alone, since only 7z carries it. `bcj`, the x86 branch
-//! filter, is private, because it cannot fail and has no error for a caller
-//! to reach — `sevenz` is the only door to it.
+//! the first reason alone, since only 7z carries it. `bcj` and `bcj2`, the
+//! two x86 branch converters, are private: the first cannot fail, the
+//! second's two failures surface as `sevenz::EntryError`s, and `sevenz` is
+//! the only door to either.
 //!
 //! What [`tar`], `sevenz` and `rar` have in common is a *negative* — they
 //! are the archive containers that are not ZIP — which is a weaker binding
@@ -85,6 +86,7 @@
 #![forbid(unsafe_code)]
 
 mod bcj;
+mod bcj2;
 pub mod bzip2;
 pub mod lzma;
 pub mod ppmd;

@@ -1679,8 +1679,9 @@ pub fn pages_from_rar(
 ///
 /// **`UnsupportedCoder` lands on `NotAZip` and that is deliberate.** It is the
 /// refusal whose sentence is *"this build does not read that"*, which is what
-/// a `.cb7` compressed with PPMd is; calling it `Damaged` would tell a host
-/// the file is broken when it is fine and only this engine is short.
+/// a `.cb7` compressed with a coder this build does not implement is; calling
+/// it `Damaged` would tell a host the file is broken when it is fine and only
+/// this engine is short.
 pub fn open_sevenz<'a>(
     bytes: &'a [u8],
     limits: &SevenZipLimits,
