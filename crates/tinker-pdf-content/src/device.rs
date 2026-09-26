@@ -122,6 +122,16 @@ pub struct Glyph {
     pub vertical: bool,
     /// An identifier for the font, stable within one interpretation.
     pub font_id: u64,
+    /// The font's name as its dictionary writes it — `/BaseFont`, subset tag
+    /// and all — or `None` where [`crate::FontSource::font_name`] gave none.
+    ///
+    /// **Carried here rather than looked up from [`Glyph::font_id`] later**,
+    /// because the id is the interned *resource name*, which is scope-relative:
+    /// a form XObject with its own `/Resources` may bind `/F1` to a different
+    /// font from the page that invoked it, and only the interpreter knows which
+    /// scope a glyph was shown in. Shared, so a page of glyphs in one font holds
+    /// one copy of the name.
+    pub font_name: Option<std::sync::Arc<str>>,
 }
 
 /// What a content stream asks to be drawn.

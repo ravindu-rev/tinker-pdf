@@ -241,6 +241,15 @@ fn exercise(bytes: Vec<u8>) {
                 diacritic_insensitive: true,
             },
         );
+        // And the three serialisations, whose escaping is what a hostile
+        // `/ToUnicode` or `/BaseFont` attacks.
+        for format in [
+            tinker_pdf::TextFormat::Json,
+            tinker_pdf::TextFormat::Xml,
+            tinker_pdf::TextFormat::Html,
+        ] {
+            let _ = text.serialize(format, &page.text_frame());
+        }
 
         // The join, over the same `TextPage`. Reached through the tree bound
         // above rather than through `Page::structured_text` so the walk is

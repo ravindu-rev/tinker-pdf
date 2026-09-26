@@ -249,6 +249,18 @@ pub trait FontSource {
         0
     }
 
+    /// The named font's own name — its `/BaseFont`, as the dictionary writes
+    /// it — for [`Glyph::font_name`].
+    ///
+    /// Asked once per text-showing operator, in the scope the operator runs
+    /// in, which is the only place the resource name can be resolved
+    /// correctly. `None` — the default — where the source has no name to
+    /// give, which is also the honest answer for a font that has none.
+    fn font_name(&self, font: &[u8]) -> Option<Arc<str>> {
+        let _ = font;
+        None
+    }
+
     /// A form XObject, when the interpreter should recurse into one.
     /// Returning `None` skips it.
     fn form(&self, name: &[u8]) -> Option<Form> {
@@ -1653,6 +1665,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         };
         let vertical = self.fonts.is_vertical(&font_name);
         let font_id = self.fonts.font_id(&font_name);
+        let font_label = self.fonts.font_name(&font_name);
 
         for (code, text, width) in self.fonts.decode(&font_name, bytes) {
             let ts = self.gs.text.clone();
@@ -1759,6 +1772,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 size: ts.size,
                 vertical,
                 font_id,
+                font_name: font_label.clone(),
             };
             self.device.show_glyph(&glyph, &self.gs);
 

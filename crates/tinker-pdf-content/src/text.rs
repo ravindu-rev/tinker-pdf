@@ -98,6 +98,11 @@ pub struct TextChar {
     ///
     /// `0` whenever [`TextChar::mcid`] is `None`, where it means nothing.
     pub stream: u64,
+    /// The name of the font it was shown in — `/BaseFont` as the dictionary
+    /// writes it, subset tag included, since two subsets of one face are two
+    /// fonts to a file — or `None` where the font has no name this build could
+    /// read. See [`Glyph::font_name`] for why it travels with the character.
+    pub font: Option<std::sync::Arc<str>>,
 }
 
 /// Which way a line runs.
@@ -710,6 +715,7 @@ impl Device for TextDevice {
                 origin,
                 mcid: self.mcids.last().map(|(_, mcid)| *mcid),
                 stream: self.mcids.last().map_or(0, |(stream, _)| *stream),
+                font: glyph.font_name.clone(),
             });
         }
     }
@@ -758,6 +764,7 @@ mod tests {
             size,
             vertical: false,
             font_id: 1,
+            font_name: None,
         }
     }
 

@@ -213,6 +213,7 @@ mod tests {
                         size: 10.0,
                         vertical: false,
                         font_id: 1,
+                        font_name: None,
                     },
                     &state,
                 );

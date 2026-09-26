@@ -142,6 +142,19 @@ order and never asks which dictionary a font came from; its name is what is
 one preset short, and that is written down in `subset.rs` rather than fixed
 by renaming a public constant from a row that is about fonts.
 
+**Structured text serialisation landed without it**, which corrects the count
+above to five. It serialises the `TextPage` the text device already builds —
+a second walk of the content stream would be a second extractor, the failure
+the structured view below is designed against — and the one thing a
+`TextPage` lacked was the font. The subsetter's finding decided where that is
+resolved: a resource name is scope-relative, so the name cannot be looked up
+from `Glyph::font_id` afterwards. The interpreter asks
+`FontSource::font_name` at each text-showing operator, in the scope that
+operator runs in, and the answer rides on `Glyph::font_name` into
+`TextChar::font` — which `a_forms_own_font_is_the_one_its_text_reports` in
+`crates/tinker-pdf/tests/text_serialize.rs` holds, with a page and a form
+that both call their font `/F0`.
+
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a
@@ -151,8 +164,8 @@ offers `plain_text()` (one line per line), `lines()` (flattened), and
 back to the glyphs it covers. `Quad` carries four corners and
 `bounds()` for the enclosing rectangle. `search_with(needle, options)` and
 `plain_text_with(options)` are the opt-in siblings of `search` and
-`plain_text()`, below, and `TextLine::words()` splits a line into words with a
-box each.
+`plain_text()`, below, `TextLine::words()` splits a line into words with a
+box each, and `TextWriter` serialises pages as JSON, XML or HTML.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
@@ -270,6 +283,55 @@ let joined = page.text().plain_text_with(&PlainTextOptions { rejoin_hyphens: tru
 println!("{}", joined.text);
 eprintln!("{} joins, {} of them inferred", joined.hyphens.joins(), joined.hyphens.hard_joins);
 ```
+
+### Structured text: JSON, XML and HTML
+
+`TextWriter` writes pages of text as JSON, XML or HTML with their fonts,
+sizes and boxes, a page at a time; `TextPage::serialize(format, frame)` is one
+page as a whole document, and `Page::text_frame()` supplies the frame — the
+page's index, its crop box and its `/Rotate`, which a `TextPage` does not know.
+The writers are hand-written (rule 1); `crates/tinker-pdf-content/src/serialize.rs`
+carries the model and every escaping decision in its module documentation.
+
+```rust
+let mut writer = TextWriter::new(TextFormat::Json);
+for page in doc.pages() {
+    writer.page(&page.text_frame(), &page.text());
+    print!("{}", writer.take()); // a page at a time
+}
+print!("{}", writer.finish());
+```
+
+The model is the same in all three, one level per `TextPage` level plus one:
+
+| Level | Fields |
+| --- | --- |
+| document | `format` `"tinker-pdf/text"`, `version` (`TEXT_FORMAT_VERSION`, 1) |
+| page | `index`, `box` (the crop box), `rotation`, `blocks`, `warnings` (`unknown-font` with `name`, `unmapped-code` with `code`) |
+| block | `bbox`, `lines` |
+| line | `bbox`, `wmode` (`horizontal`, `vertical`), `rtl`, `size`, `text`, `spans` |
+| span | `font`, `size`, `bbox`, `text`, `chars` |
+| char | `c`, `quad` (upper-left, upper-right, lower-left, lower-right, eight numbers), `origin` |
+
+A **span** is a run of consecutive characters on one line sharing a font name
+and a size, and is where the font name is carried. The name is `/BaseFont` as
+the file writes it — subset tag included, since two subsets of one face are
+two fonts to the file — and absent (`null` in JSON) where the font states
+none. Coordinates are PDF user space, y upward, with `rotation` **not**
+applied, at three decimal places; a non-finite number is `null` in JSON and an
+absent attribute in XML. JSON has `pages` as an array, XML a `document`
+element of `page` elements with the model in attributes, and HTML a page of
+absolutely positioned lines with the model in `data-` attributes — the font
+name only ever in `data-font`, never in CSS.
+
+Escaping is per format: JSON per RFC 8259 §7, every control character escaped
+(and U+2028/U+2029 for JavaScript's sake), and lossless; XML with markup as
+entities and tab, line feed and carriage return as references, and the
+characters XML 1.0 cannot carry in any form — C0 controls other than those
+three, U+FFFE, U+FFFF — written as U+FFFD, which is a loss this format
+cannot avoid; HTML with markup as references and every control character but
+tab and line feed, and every noncharacter, as U+FFFD. `tpdf text --json`
+(`--xml`, `--html`) writes the same through the same writer and adds nothing.
 
 ### The structured view (14.7, 14.8)
 
@@ -390,9 +452,21 @@ test now says so.
 `WordBreakTest.txt`'s 1 944 cases against the segmenter `words()` calls, and
 all 1 944 agree; the count is pinned, so a truncated file fails.
 
+`serialize.rs`'s unit tests hold each format's escaping to exact strings over
+one hostile string — every C0 control, DEL, NEL, U+2028/U+2029, markup
+characters, both noncharacters U+FFFE/U+FFFF, U+FDD0, and a character outside
+the BMP — and check that a whole document in each format, over a page whose
+text and font name are hostile, keeps them inside their quotes; spans split
+at a font or size change and nowhere else.
+
 Facade integration tests: `crates/tinker-pdf/tests/text_options.rs` (the
 text options through `Page::text()` on a written document, every type named
-from the facade), `inline_images.rs` (a
+from the facade), `text_serialize.rs` (`testdata/simple-text.pdf` written as
+JSON and read back by a strict hand-written RFC 8259 parser in the test, with
+Helvetica at 18 points and the boxes asserted on the parsed structure; the
+same font and size in the XML and HTML; hostile text and a hostile font name
+round-tripping through JSON exactly; a page and a form that both name their
+font `/F0` reporting two different fonts), `inline_images.rs` (a
 predictor-filtered inline image matches the identical XObject pixel for
 pixel; compact `/F/Fl` dictionaries; `/EarlyChange` LZW; progressive inline
 JPEG; `/Decode` inversion; a zlib bomb stops at the shared ceiling),
