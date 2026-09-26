@@ -55,10 +55,10 @@ impl DocumentEditor {
             self.certify(signature_ref);
         }
         let set = self.changed_set();
-        let trailer = self.doc.trailer().clone();
+        let trailer = self.merged_trailer();
         let key = self.doc.file_key();
         let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
-        let catalog = self.doc.trailer().get_ref(Name::ROOT);
+        let catalog = trailer.get_ref(Name::ROOT);
         let reserved = crate::sign::Reserved::build(request, catalog);
         let (mut out, placeholder) = write::incremental_update_reserving(
             self.doc.bytes(),

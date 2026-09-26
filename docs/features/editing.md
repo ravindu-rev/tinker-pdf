@@ -41,6 +41,18 @@ had been taken and never reached the file. `add_name_tree` and
 `add_number_tree` write a 7.9.6 / 7.9.7 tree as new objects and return its
 root ([document model](document-model.md)).
 
+**Trailer entries.** `set_trailer_entry(key, value)` lays an entry over the
+document's trailer (7.5.5), and every save writes the merged trailer —
+incremental, rewrite and signed — so it is editor state like the overlay: a
+checkpoint takes it and a rollback restores it. The writer's own keys are
+refused (`/Size`, `/Prev`, `/XRefStm`, `/ID`, `/Encrypt` and the
+cross-reference stream's), since a value for them would be overwritten or
+believed. `set_info(key, value)` is the use it exists for: an existing
+`/Info` is updated where it is, and a document with none gets one, which
+until September 2026 no save could name — `save` wrote the document's own
+trailer and nothing else. The value is a text string, encoded as the
+builder's `set_info` encodes it.
+
 **Page surgery** (7.7.3). `delete_page`, `move_page`, `rotate_page` (any
 multiple of 90, stored as `/Rotate`), `set_crop_box` (14.11.2, written as the
 caller states it and never clipped here — 14.11.2 lets a crop box and a media
@@ -53,7 +65,7 @@ call), `append_content` (operators appended to a page's content array) and
 builds — rewrite or incremental — so a reordered `/Kids` reaches the file
 either way.
 
-**Transactions.** `transaction(|tx| ...)` snapshots all four mutable fields
+**Transactions.** `transaction(|tx| ...)` snapshots all five mutable fields
 and restores them if the closure returns `Err`. It is a closure rather than
 a begin/commit/rollback triple because the failure it prevents is silent —
 a closure has no scope exit that neither commits nor rolls back. The
@@ -222,7 +234,8 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `DocumentEditor` (facade re-export of `tinker_pdf_cos::DocumentEditor`):
 `document()`, `is_dirty()`, `allocate()`, `get()`, `put()`, `put_stream()`,
 `delete()`, `intern()`, `stream_bytes()`, `catalog()`, `update_catalog()`,
-`add_name_tree()`, `add_number_tree()`, `transaction()`, `page_refs()`,
+`add_name_tree()`, `add_number_tree()`, `set_trailer_entry()`, `set_info()`,
+`transaction()`, `checkpoint()`, `restore()`, `page_refs()`,
 `delete_page()`,
 `move_page()`, `rotate_page()`, `set_crop_box()`, `insert_page()`,
 `import_page()`,
@@ -317,7 +330,8 @@ if report.untouched.is_empty() {
   insert, import, keep, append; each saved in both modes, because a page
   operation once reached only the incremental set and nothing caught it.
 - `crates/tinker-pdf-cos/tests/form_transactions.rs` — `transaction`
-  restores all four fields; injection puts each restore under exactly one
+  restores the first four fields (the fifth, the trailer entries, is
+  `trailer_overlay.rs`'s); injection puts each restore under exactly one
   test.
 - `crates/tinker-pdf/tests/annotation_appearances.rs` — synthesised
   appearances render and flatten.

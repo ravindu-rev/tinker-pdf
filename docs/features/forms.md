@@ -117,8 +117,8 @@ into `/V` and removes `/V` where there is no `/DV` (12.7.5.3) — "never
 filled" and "filled with nothing" are different states.
 
 **Transactions.** `DocumentEditor::transaction` snapshots the editor's
-whole mutable state — overlay, deletions, page order and the object-number
-counter — runs a closure, and restores everything on `Err`. A closure
+whole mutable state — overlay, deletions, page order, trailer entries and the
+object-number counter — runs a closure, and restores everything on `Err`. A closure
 rather than a begin/commit/rollback triple because the failure it prevents
 is silent: there is no way to leave the scope without either committing or
 rolling back. It nests, the snapshot copies only what has been edited (the

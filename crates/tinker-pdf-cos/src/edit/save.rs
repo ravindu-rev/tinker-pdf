@@ -100,7 +100,9 @@ impl DocumentEditor {
         // the binding stays because the rewrite arm below needs them too.
         let tree_updates = self.page_tree_updates();
 
-        let trailer = self.doc.trailer().clone();
+        // The document's trailer with this editor's entries over it, for both
+        // modes: an `/Info` created here is named by it or by nothing.
+        let trailer = self.merged_trailer();
         match options.mode {
             WriteMode::Incremental => {
                 // 7.6.2: the update is sealed with the key the document was

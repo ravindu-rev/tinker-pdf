@@ -31,6 +31,7 @@ mod save;
 mod signing;
 #[cfg(test)]
 mod tests;
+mod trailer;
 mod trees;
 
 pub use forms::{FillError, FillRejection, SkippedWidget, WidgetDefect};
@@ -85,11 +86,18 @@ pub struct DocumentEditor {
     next: u32,
     /// The page order, as references, once it has been disturbed.
     page_order: Option<Vec<ObjRef>>,
+    /// Trailer entries (7.5.5) this editor sets, laid over the document's
+    /// own by every save: incremental, rewrite and signed.
+    ///
+    /// Held here rather than in an [`crate::write::ObjectSet`] trailer hint,
+    /// which only the cross-reference-stream path reads; the trailer a save
+    /// hands the writer is the one thing all three paths share.
+    trailer: Dict,
 }
 
 /// Everything a rollback restores: an editor's state, taken as a value.
 ///
-/// Exhaustive by construction: [`DocumentEditor`] holds these four fields and
+/// Exhaustive by construction: [`DocumentEditor`] holds these five fields and
 /// one more -- the `Arc<CosDocument>` it overlays, which is immutable and
 /// therefore has nothing to restore. A field added to the editor without being
 /// added here is a silent hole in every transaction, which is why the two
@@ -107,7 +115,7 @@ pub struct DocumentEditor {
 /// left in a condition a later reader cannot classify -- has no spelling here.
 ///
 /// The fields stay private. A checkpoint is meaningful only to the editor it
-/// came from, and this crate does not promise which four things an editor
+/// came from, and this crate does not promise which five things an editor
 /// keeps.
 ///
 /// Restoring a checkpoint into a *different* editor is not checked and not
@@ -120,6 +128,7 @@ pub struct EditCheckpoint {
     deleted: HashSet<u32>,
     next: u32,
     page_order: Option<Vec<ObjRef>>,
+    trailer: Dict,
 }
 
 impl core::fmt::Debug for EditCheckpoint {
@@ -131,6 +140,7 @@ impl core::fmt::Debug for EditCheckpoint {
             .field("deleted", &self.deleted.len())
             .field("next", &self.next)
             .field("page_order_disturbed", &self.page_order.is_some())
+            .field("trailer_entries", &self.trailer.len())
             .finish()
     }
 }
@@ -147,6 +157,7 @@ impl DocumentEditor {
             deleted: HashSet::new(),
             next,
             page_order: None,
+            trailer: Dict::new(),
         }
     }
 
@@ -212,7 +223,10 @@ impl DocumentEditor {
     /// Whether anything has been changed.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
-        !self.overlay.is_empty() || !self.deleted.is_empty() || self.page_order.is_some()
+        !self.overlay.is_empty()
+            || !self.deleted.is_empty()
+            || self.page_order.is_some()
+            || !self.trailer.is_empty()
     }
 
     /// Allocates an unused object number.
@@ -226,9 +240,10 @@ impl DocumentEditor {
     /// nothing does.
     ///
     /// `Err` out of `body` rolls the editor back to exactly what it was before
-    /// the call -- objects written, objects deleted, the page order, and the
-    /// object-number counter (see [`DocumentEditor`]'s `next` for why that
-    /// last one is restored and what it costs). `Ok` keeps everything, and the
+    /// the call -- objects written, objects deleted, the page order, the
+    /// trailer entries, and the object-number counter (see
+    /// [`DocumentEditor`]'s `next` for why that last one is restored and what
+    /// it costs). `Ok` keeps everything, and the
     /// error type is the caller's, so a transaction composes with whatever
     /// result the work already produces.
     ///
@@ -301,6 +316,7 @@ impl DocumentEditor {
             deleted: self.deleted.clone(),
             next: self.next,
             page_order: self.page_order.clone(),
+            trailer: self.trailer.clone(),
         }
     }
 
@@ -308,8 +324,9 @@ impl DocumentEditor {
     ///
     /// Restores exactly what a rolled-back [`DocumentEditor::transaction`]
     /// restores, because it is the same function: objects written, objects
-    /// deleted, the page order, and the object-number counter (see
-    /// [`DocumentEditor`]'s `next` for why that last one, and what it costs).
+    /// deleted, the page order, the trailer entries, and the object-number
+    /// counter (see [`DocumentEditor`]'s `next` for why that last one, and
+    /// what it costs).
     ///
     /// **Idempotent.** Restoring the same checkpoint twice leaves the editor
     /// where restoring it once did, so a caller that cannot tell whether it
@@ -324,6 +341,7 @@ impl DocumentEditor {
         self.deleted = saved.deleted.clone();
         self.next = saved.next;
         self.page_order = saved.page_order.clone();
+        self.trailer = saved.trailer.clone();
     }
 
     /// Reads an object, seeing this editor's changes.
