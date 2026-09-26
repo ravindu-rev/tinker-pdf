@@ -109,6 +109,20 @@ September 2026 the content-stream side wrote the bytes raw: `form(b"Fm B")`
 wrote `/Fm B Do`, which is the name `/Fm` and a stray operand, and the page
 drew nothing while its `/Resources` held the form under the whole name.
 
+**Layers.** `add_layer(name, visible)` writes an optional content group
+(8.11.2.1) and returns a `LayerId`; `optional(layer, |page| ...)` draws
+inside `/OC /OCn BDC … EMC` (8.11.3.2) with the group in the page's
+`/Properties`; `finish` writes `/OCProperties` — `/OCGs`, and a default
+configuration whose `/Order` is the order the layers were added and whose
+`/OFF` names the hidden ones. A layer inside a `tagged` element splits the
+element's sequence around itself, so each `EMC` closes the scope it was
+written for: without that, a child element's close would end the layer and
+the child would draw in plain view with every byte balanced. A layer a page
+cannot name, or one nested past `MAX_NEST_DEPTH`, is refused and its closure
+not run — content drawn outside the layer it was meant for shows when the
+layer is hidden. Part 1 of ISO 19005 forbids optional content, and the
+archival profile refuses a layer by that clause.
+
 **Navigation.** `link(x0, y0, x1, y1, &Target)` adds a link annotation
 (12.5.6.5); `set_outline(Vec<OutlineEntry>)` writes the document outline
 (12.3.3). `Target` is `Page { index, view: DestKind }`, `Named(bytes)` or
@@ -170,7 +184,7 @@ let pdf: Vec<u8> = b.finish();
 
 `DocumentBuilder`, `PageBuilder`, `ImageData`, `DeviceSpace`, `ExtGState`,
 `TransparencyGroup`, `FormXObject`, `Function`, `CalculatorOp`,
-`DeviceNAttributes`, `Shading`, `ShadingPattern`,
+`DeviceNAttributes`, `LayerId`, `Shading`, `ShadingPattern`,
 `TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`,
 `StateMask`,
 `Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade.
@@ -226,6 +240,13 @@ byte-deterministic XMP packet and the header version its part requires.
   `writer_navigation.rs` exercise ExtGStates, patterns, shadings, forms,
   links and outlines through the facade and read the result back through
   the [document model](document-model.md).
+- `crates/tinker-pdf/tests/writer_layers.rs` reads every written layer back
+  through `Document::layers()` with its name and default, renders a hidden
+  layer unpainted until the editor shows it, renders an element in a hidden
+  layer inside a visible element hidden while its parent's pieces are not,
+  reads nested tagged and optional content in structure order with nothing
+  orphaned, and holds a layered level A document to the PDF/A validator;
+  `build.rs`'s `layer_tests` pin the split sequences byte for byte.
 - `crates/tinker-pdf/tests/writer_tints.rs` renders `/Separation` and
   `/DeviceN` fills, strokes and images and holds every sampled pixel to the
   tint transform's own arithmetic — `c0 + t (c1 − c0)` for a ramp, the

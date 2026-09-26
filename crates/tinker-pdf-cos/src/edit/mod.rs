@@ -28,6 +28,7 @@ mod boxes;
 mod dests;
 mod docops;
 mod forms;
+mod layers;
 mod metadata;
 mod overlay;
 mod page_ops;

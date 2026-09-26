@@ -773,6 +773,7 @@ fn every_refusal_names_the_clause_it_refuses_under() {
         ArchivalRefusal::UntaggedPage { page: 3 },
         ArchivalRefusal::LanguageMissing,
         ArchivalRefusal::DestinationProfileMissing,
+        ArchivalRefusal::OptionalContent,
     ];
     for refusal in &refusals {
         assert!(refusal.clause().starts_with("6."), "{refusal:?}");

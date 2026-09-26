@@ -261,7 +261,11 @@ pub use tinker_pdf_cos::{
 /// variant cannot be built and the method cannot be called from outside this
 /// workspace — the omission the `ExtGState` paragraph above records (ruling
 /// 11).
-pub use tinker_pdf_cos::{CalculatorOp, DeviceNAttributes};
+///
+/// [`LayerId`] is what [`DocumentBuilder::add_layer`] hands back and what
+/// [`PageBuilder::optional`] takes, so without it the two could not be joined
+/// from outside this workspace.
+pub use tinker_pdf_cos::{CalculatorOp, DeviceNAttributes, LayerId};
 /// Signing on an incremental save (12.8.1), behind
 /// [`DocumentEditor::save_signed`].
 ///

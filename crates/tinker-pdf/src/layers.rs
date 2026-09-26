@@ -16,9 +16,11 @@
 //! content mentioned, and those are exactly the two the reader already keeps
 //! apart internally.
 //!
-//! **Nothing here is written.** `DocumentBuilder::add_layer` and the editor's
-//! default-configuration toggle are the other half of the roadmap's optional
-//! content row and are left for their own commit; this is the read half.
+//! **Nothing here is written**, and nothing needs to be: the write half is
+//! `DocumentBuilder::add_layer` with `PageBuilder::optional`, and
+//! `DocumentEditor::set_layer_visible`, which takes the
+//! [`OptionalGroup::reference`] this list hands out. `writer_layers.rs` holds
+//! the two halves to each other — a layer written, listed here and drawn.
 
 use tinker_pdf_cos::{decode_text_string, CosDocument, ObjRef};
 

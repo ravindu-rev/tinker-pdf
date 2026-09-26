@@ -45,6 +45,13 @@ tree with every entry the old one held plus the new one — a `/Names` that is
 an indirect object is replaced at its own number, a direct one through
 `update_catalog` — and refuses a name the tree already holds.
 
+**Layers.** `set_layer_visible(group, visible)` changes an optional content
+group's state in the default configuration `/OCProperties /D` (8.11.4.3):
+the group leaves both `/ON` and `/OFF` and joins whichever disagrees with
+`/BaseState`, an emptied list is removed, and an indirect `/D` or
+`/OCProperties` is replaced at its own number. A group `/OCGs` does not list
+is refused. `group` is the reference `Document::layers()` reports.
+
 **Trailer entries.** `set_trailer_entry(key, value)` lays an entry over the
 document's trailer (7.5.5), and every save writes the merged trailer —
 incremental, rewrite and signed — so it is editor state like the overlay: a
@@ -400,6 +407,7 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `document()`, `is_dirty()`, `allocate()`, `get()`, `put()`, `put_stream()`,
 `delete()`, `intern()`, `stream_bytes()`, `catalog()`, `update_catalog()`,
 `add_name_tree()`, `add_number_tree()`, `add_named_destination()`,
+`set_layer_visible()`,
 `set_trailer_entry()`, `set_info()`,
 `view()`,
 `transaction()`, `checkpoint()`, `restore()`, `page_refs()`,

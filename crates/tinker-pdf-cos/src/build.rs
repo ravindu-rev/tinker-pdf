@@ -914,6 +914,23 @@ pub enum Shading {
     },
 }
 
+/// An optional content group (8.11.2.1) a [`DocumentBuilder`] registered —
+/// a layer — for [`PageBuilder::optional`] to draw into.
+///
+/// A handle rather than a name the caller picks, because the name an `/OC`
+/// sequence uses is a key in the page's `/Properties` that no caller has any
+/// reason to spell, and a handle cannot be misspelled. It is meaningful only
+/// to the builder that made it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LayerId(u32);
+
+impl LayerId {
+    /// The key this layer is registered under in `/Properties`.
+    fn resource(self) -> Vec<u8> {
+        format!("OC{}", self.0).into_bytes()
+    }
+}
+
 /// What a `/DeviceN` space's attributes dictionary says (8.6.6.5, Table 71),
 /// as far as this writer emits one.
 ///
@@ -1053,6 +1070,10 @@ struct ResourceSet {
     shadings: Vec<(Vec<u8>, ObjRef)>,
     patterns: Vec<(Vec<u8>, ObjRef)>,
     color_spaces: Vec<(Vec<u8>, ObjRef)>,
+    /// `/Properties` (14.6.2): the optional content groups
+    /// [`DocumentBuilder::add_layer`] registered, under the names an `/OC`
+    /// marked-content sequence uses for them (8.11.3.2).
+    properties: Vec<(Vec<u8>, ObjRef)>,
     /// `/N` for each registered `/ICCBased` space, by resource name.
     ///
     /// Carried beside `color_spaces` rather than inside it because the
@@ -1091,6 +1112,7 @@ impl ResourceSet {
             (b"Shading", &self.shadings),
             (b"Pattern", &self.patterns),
             (b"ColorSpace", &self.color_spaces),
+            (b"Properties", &self.properties),
         ] {
             if entries.is_empty() {
                 continue;
@@ -1729,6 +1751,8 @@ pub struct PageBuilder {
     archival_space: Option<DeviceSpace>,
     /// Refusals made while drawing, merged into the document's at push.
     refusals: Vec<ArchivalRefusal>,
+    /// How many [`PageBuilder::optional`] scopes are open.
+    optional_depth: usize,
 }
 
 /// One structure element under construction, and what it claims.
@@ -1923,24 +1947,108 @@ impl PageBuilder {
 
         // Reopen the parent so anything drawn after this child still belongs
         // to it. If nothing is, `close_marked` takes the reopening back.
-        if let Some(tag) = resume {
-            let mcid = self.open_marked(&tag);
-            let parent = self.tag_stack.last_mut().expect("resume implies a parent");
-            // The resumption reads **after** the child that interrupted it, so
-            // it takes an order past the child's rather than the parent's own.
-            // Without this a paragraph's second half sorts back in front of the
-            // span that split it.
-            let order = parent
-                .kids
-                .iter()
-                .map(|kid| match kid {
-                    TaggedKid::Content { order, .. } => *order,
-                    TaggedKid::Element(child) => child.order,
-                })
-                .max()
-                .unwrap_or(0);
-            parent.kids.push(TaggedKid::Content { mcid, order });
+        if resume.is_some() {
+            self.resume_parent();
         }
+    }
+
+    /// Opens a fresh marked-content sequence for the innermost open structure
+    /// element, if there is one, so what is drawn next belongs to it.
+    ///
+    /// The one way a sequence is reopened, whether a nested element or an
+    /// optional-content scope interrupted it.
+    fn resume_parent(&mut self) {
+        let Some(tag) = self.tag_stack.last().map(|parent| parent.tag.clone()) else {
+            return;
+        };
+        let mcid = self.open_marked(&tag);
+        let Some(parent) = self.tag_stack.last_mut() else {
+            return;
+        };
+        // The resumption reads **after** whatever interrupted it, so it takes
+        // an order past its siblings' rather than the parent's own. Without
+        // this a paragraph's second half sorts back in front of the span that
+        // split it.
+        let order = parent
+            .kids
+            .iter()
+            .map(|kid| match kid {
+                TaggedKid::Content { order, .. } => *order,
+                TaggedKid::Element(child) => child.order,
+            })
+            .max()
+            .unwrap_or(0);
+        parent.kids.push(TaggedKid::Content { mcid, order });
+    }
+
+    /// Draws inside an optional content group — `/OC /name BDC … EMC`
+    /// (8.11.3.2) — so what is drawn shows or hides with the layer
+    /// [`DocumentBuilder::add_layer`] returned.
+    ///
+    /// # Nesting with tagged content
+    ///
+    /// A layer and a structure element are both marked-content sequences, and
+    /// `EMC` closes whichever is innermost. [`PageBuilder::tagged`] keeps the
+    /// sequence carrying an element's `/MCID` innermost at all times — it
+    /// closes the parent's before a child's opens and reopens it after — and
+    /// a layer opened between the two would break that: the parent's `EMC`
+    /// would close the layer, and the layer's the parent. So a layer opened
+    /// inside an element **splits** the element's sequence around itself: the
+    /// open sequence is closed, the layer opened, and a fresh sequence for the
+    /// same element opened inside the layer, with the mirror image on the way
+    /// out. Every `/MCID` sequence stays innermost, the element claims every
+    /// piece in reading order, and the layer contains exactly what the
+    /// closure drew. An element opened inside a layer nests inside it with no
+    /// splitting at all.
+    ///
+    /// A layer whose closure drew nothing writes nothing, for the reason an
+    /// empty `tagged` writes nothing.
+    ///
+    /// Returns false, drawing **nothing**, for a layer this page cannot name —
+    /// one registered after the page was begun, or on another builder — and
+    /// past [`crate::limits::MAX_NEST_DEPTH`] nested layers. Nothing rather
+    /// than the content unmarked, because content drawn outside the layer its
+    /// caller put it in shows when the layer is hidden, and hiding it was the
+    /// point.
+    pub fn optional(&mut self, layer: LayerId, draw: impl FnOnce(&mut PageBuilder)) -> bool {
+        let resource = layer.resource();
+        if !holds(&self.resources.properties, &resource) {
+            return false;
+        }
+        if self.optional_depth >= MAX_TAG_DEPTH {
+            return false;
+        }
+        let tagged = !self.tag_stack.is_empty();
+        if tagged {
+            self.close_marked();
+        }
+        let start = self.content.len();
+        self.content.extend_from_slice(b"/OC ");
+        self.resource_name(&resource);
+        self.content.extend_from_slice(b" BDC\n");
+        let opened = self.content.len();
+        if tagged {
+            self.resume_parent();
+        }
+
+        self.optional_depth += 1;
+        draw(self);
+        self.optional_depth -= 1;
+
+        if tagged {
+            self.close_marked();
+        }
+        if self.content.len() == opened {
+            // Nothing was drawn since the `BDC`, so the bytes from `start`
+            // are exactly the ones written above.
+            self.content.truncate(start);
+        } else {
+            self.content.extend_from_slice(b"EMC\n");
+        }
+        if tagged {
+            self.resume_parent();
+        }
+        true
     }
 
     /// Writes a resource name into the content stream as a name token.
@@ -2852,6 +2960,9 @@ pub enum ArchivalRefusal {
     LanguageMissing,
     /// A profile with no destination profile bytes.
     DestinationProfileMissing,
+    /// Optional content in a part 1 document, which forbids it outright: the
+    /// catalog of such a file may not carry `/OCProperties`.
+    OptionalContent,
 }
 
 impl ArchivalRefusal {
@@ -2873,6 +2984,7 @@ impl ArchivalRefusal {
             | ArchivalRefusal::LanguageMissing => "6.7.11",
             ArchivalRefusal::UntaggedPage { .. } => "6.8.2",
             ArchivalRefusal::DestinationProfileMissing => "6.2.2",
+            ArchivalRefusal::OptionalContent => "6.1.13",
         }
     }
 }
@@ -2917,6 +3029,10 @@ impl core::fmt::Display for ArchivalRefusal {
             ArchivalRefusal::DestinationProfileMissing => {
                 f.write_str("an output intent needs an ICC destination profile")
             }
+            ArchivalRefusal::OptionalContent => f.write_str(
+                "part 1 admits no optional content, and a layer is an optional \
+                 content group",
+            ),
         }
     }
 }
@@ -2961,6 +3077,10 @@ pub struct DocumentBuilder {
     /// Each registered `/Separation` space by resource name: its colorant
     /// and the space's own object, for a `/DeviceN`'s `/Colorants` to name.
     separations: BTreeMap<Vec<u8>, (Vec<u8>, ObjRef)>,
+    /// Optional content groups (8.11.2.1), in the order they were added —
+    /// the order `/OCGs` and `/Order` list them in — and whether the default
+    /// configuration shows each.
+    layers: Vec<(ObjRef, bool)>,
     /// The version the header declares when no profile decides it. Fixed at
     /// construction, because text strings are encoded for it as they arrive
     /// (see [`DocumentBuilder::with_version`]).
@@ -2999,6 +3119,7 @@ impl DocumentBuilder {
             outline: Vec::new(),
             destinations: BTreeMap::new(),
             separations: BTreeMap::new(),
+            layers: Vec::new(),
             version: WriteOptions::default().version,
             profile: None,
             refusals: Vec::new(),
@@ -4937,6 +5058,7 @@ impl DocumentBuilder {
             opened_end: 0,
             archival_space: self.profile.as_ref().map(|p| p.destination_space),
             refusals: Vec::new(),
+            optional_depth: 0,
         }
     }
 
@@ -5051,6 +5173,51 @@ impl DocumentBuilder {
         }
         self.destinations.insert(name.to_vec(), (index, view));
         true
+    }
+
+    /// Adds a layer: an optional content group (8.11.2.1) named `name`, shown
+    /// by the document's default configuration when `visible` is true and
+    /// hidden when it is false.
+    ///
+    /// The group is written now as `<< /Type /OCG /Name (name) >>`; `finish`
+    /// writes the catalog's `/OCProperties` (8.11.4.2) — `/OCGs` listing every
+    /// group, and a default configuration `/D` whose `/Order` lists them in the
+    /// order they were added, which is the order a layer panel shows, and
+    /// whose `/OFF` names the hidden ones. `/D` carries a `/Name` too: ISO
+    /// 19005-2 6.9 requires one of every configuration, and a reader that
+    /// shows configurations by name has one to show.
+    ///
+    /// Pages begun after this call can draw into the layer with
+    /// [`PageBuilder::optional`]; the group lands in their `/Properties` the
+    /// way a font lands in `/Font`. `name` is a text string, encoded for the
+    /// version this document declares.
+    ///
+    /// Returns `None`, adding nothing, **under a part 1 [`ArchivalProfile`]**:
+    /// ISO 19005-1 6.1.13 forbids `/OCProperties` outright, and
+    /// [`Self::refusals`] records [`ArchivalRefusal::OptionalContent`]. Parts
+    /// 2 to 4 admit optional content, and a document built under one keeps
+    /// its layers.
+    pub fn add_layer(&mut self, name: &str, visible: bool) -> Option<LayerId> {
+        if self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.part == ArchivalPart::One)
+        {
+            self.refuse(ArchivalRefusal::OptionalContent);
+            return None;
+        }
+        let id = LayerId(u32::try_from(self.layers.len()).ok()?);
+        let reference = self.allocate();
+        let mut group = Dict::new();
+        group.insert(Name::TYPE, Object::Name(self.names.intern(b"OCG")));
+        group.insert(
+            self.names.intern(b"Name"),
+            Object::String(encode_text_string(name, self.declared_version())),
+        );
+        self.objects.insert(reference.num, Object::Dict(group));
+        self.layers.push((reference, visible));
+        self.resources.properties.push((id.resource(), reference));
+        Some(id)
     }
 
     /// Every name a link or outline entry uses that `finish` would refuse as
@@ -5553,6 +5720,33 @@ impl DocumentBuilder {
             }
             self.objects.insert(root.num, Object::Dict(dict));
             catalog.insert(self.names.intern(b"Outlines"), Object::Ref(root));
+        }
+
+        // 8.11.4.2: the optional content properties, when any layer was
+        // added. `/OCGs` lists every group; `/D` is the configuration a reader
+        // applies when it opens the file, and its `/BaseState` is left at the
+        // default `/ON` so that `/OFF` alone names what is hidden.
+        if !self.layers.is_empty() {
+            let every: Vec<Object> = self.layers.iter().map(|(r, _)| Object::Ref(*r)).collect();
+            let hidden: Vec<Object> = self
+                .layers
+                .iter()
+                .filter(|(_, visible)| !visible)
+                .map(|(r, _)| Object::Ref(*r))
+                .collect();
+            let mut configuration = Dict::new();
+            configuration.insert(
+                self.names.intern(b"Name"),
+                Object::String(encode_text_string("Default", self.declared_version())),
+            );
+            configuration.insert(self.names.intern(b"Order"), Object::Array(every.clone()));
+            if !hidden.is_empty() {
+                configuration.insert(self.names.intern(b"OFF"), Object::Array(hidden));
+            }
+            let mut properties = Dict::new();
+            properties.insert(self.names.intern(b"OCGs"), Object::Array(every));
+            properties.insert(self.names.intern(b"D"), Object::Dict(configuration));
+            catalog.insert(self.names.intern(b"OCProperties"), Object::Dict(properties));
         }
 
         // 12.3.2.3 and 7.7.4: the named destinations, as the catalog's
@@ -9377,5 +9571,243 @@ mod tint_tests {
             .cloned()
             .expect("CS0");
         assert_eq!(named, &registered, "the image names the space's object");
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    //! Optional content on write (8.11): what the builder puts in the file.
+    //! What the file *draws*, and what the reader lists, is
+    //! `crates/tinker-pdf/tests/writer_layers.rs`.
+
+    use super::*;
+    use crate::CosDocument;
+
+    fn opened(builder: DocumentBuilder) -> CosDocument {
+        CosDocument::open(builder.finish()).expect("the built document opens")
+    }
+
+    fn content(doc: &CosDocument) -> String {
+        let pages = crate::pages::collect(doc);
+        let bytes = crate::pages::content_bytes(doc, pages.first().expect("a page"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn refs(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<u32> {
+        doc.resolve_key(dict, doc.intern(key))
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Object::as_objref)
+                    .map(|r| r.num)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// `BDC` and `EMC` balance, and never close more than is open.
+    fn balanced(text: &str) -> bool {
+        let mut depth = 0i32;
+        for token in text.split_whitespace() {
+            match token {
+                "BDC" | "BMC" => depth += 1,
+                "EMC" => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                return false;
+            }
+        }
+        depth == 0
+    }
+
+    /// 8.11.2.1 and 8.11.4.2: each layer an `/OCG` with its `/Name`, the
+    /// catalog listing every one in `/OCGs` and in `/D /Order` in the order
+    /// they were added, `/D /OFF` naming the hidden one, and each page
+    /// carrying them in `/Properties` for its `/OC` sequences.
+    #[test]
+    fn a_layer_is_a_group_the_catalog_lists_with_its_default() {
+        let mut builder = DocumentBuilder::new();
+        let shown = builder.add_layer("Shown", true).expect("a layer");
+        let hidden = builder.add_layer("Hidden", false).expect("a layer");
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.optional(shown, |page| page.fill_rect(0.0, 0.0, 5.0, 5.0, 0.0)));
+            assert!(page.optional(hidden, |page| page.fill_rect(5.0, 5.0, 5.0, 5.0, 0.0)));
+        });
+        let doc = opened(builder);
+
+        let catalog = doc.catalog().expect("a catalog");
+        let properties = doc.resolve_key(&catalog, doc.intern(b"OCProperties"));
+        let properties = properties.as_dict().expect("/OCProperties");
+        let groups = refs(&doc, properties, b"OCGs");
+        assert_eq!(groups.len(), 2);
+        let configuration = doc.resolve_key(properties, doc.intern(b"D"));
+        let configuration = configuration.as_dict().expect("/D");
+        assert_eq!(refs(&doc, configuration, b"Order"), groups);
+        assert_eq!(refs(&doc, configuration, b"OFF"), vec![groups[1]]);
+        assert!(configuration.get(doc.intern(b"ON")).is_none());
+        assert!(configuration.get(doc.intern(b"Name")).is_some());
+
+        for (at, name) in [(0, "Shown"), (1, "Hidden")] {
+            let group = doc
+                .get(ObjRef::new(groups[at], 0))
+                .expect("the group resolves");
+            let group = group.as_dict().expect("a group dictionary");
+            assert_eq!(
+                group
+                    .get_name(Name::TYPE)
+                    .and_then(|n| doc.name_bytes(n))
+                    .as_deref(),
+                Some(&b"OCG"[..])
+            );
+            let text = doc
+                .resolve_key(group, doc.intern(b"Name"))
+                .as_string()
+                .map(|s| crate::decode_text_string(&s.bytes));
+            assert_eq!(text.as_deref(), Some(name));
+        }
+
+        let pages = crate::pages::collect(&doc);
+        let resources = pages[0].resources.as_ref().expect("resources");
+        let table = doc.resolve_key(resources, doc.intern(b"Properties"));
+        let table = table.as_dict().expect("/Properties");
+        assert_eq!(
+            table.get_ref(doc.intern(b"OC0")).map(|r| r.num),
+            Some(groups[0])
+        );
+        assert_eq!(
+            table.get_ref(doc.intern(b"OC1")).map(|r| r.num),
+            Some(groups[1])
+        );
+        let text = content(&doc);
+        assert!(text.contains("/OC /OC0 BDC\n"), "{text}");
+        assert!(text.contains("/OC /OC1 BDC\n"), "{text}");
+        assert!(balanced(&text), "{text}");
+    }
+
+    /// A document with no layer has no `/OCProperties` and no `/Properties`,
+    /// and a layer whose closure drew nothing writes nothing.
+    #[test]
+    fn nothing_is_written_that_was_not_asked_for() {
+        let mut plain = DocumentBuilder::new();
+        plain.add_page(20.0, 20.0, |page| page.fill_rect(0.0, 0.0, 1.0, 1.0, 0.0));
+        let doc = opened(plain);
+        let catalog = doc.catalog().expect("a catalog");
+        assert!(catalog.get(doc.intern(b"OCProperties")).is_none());
+
+        let mut builder = DocumentBuilder::new();
+        let layer = builder.add_layer("Empty", true).expect("a layer");
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.optional(layer, |_| {}));
+            page.tagged(b"P", |page| {
+                assert!(page.optional(layer, |_| {}));
+                page.fill_rect(0.0, 0.0, 1.0, 1.0, 0.0);
+            });
+        });
+        let text = content(&opened(builder));
+        assert!(
+            !text.contains("/OC"),
+            "an empty layer wrote nothing: {text}"
+        );
+        assert_eq!(
+            text.matches("BDC").count(),
+            1,
+            "and it did not split the element it sat in: {text}"
+        );
+    }
+
+    /// A layer inside a structure element splits the element's sequence
+    /// around itself, so every `/MCID` sequence stays innermost and each `EMC`
+    /// closes what it should.
+    #[test]
+    fn a_layer_inside_an_element_splits_the_elements_sequence() {
+        let mut builder = DocumentBuilder::new();
+        let layer = builder.add_layer("Notes", true).expect("a layer");
+        builder.add_page(20.0, 20.0, |page| {
+            page.tagged(b"P", |page| {
+                page.raw(b"1 0 0 1 0 0 cm");
+                assert!(page.optional(layer, |page| page.raw(b"0 0 1 1 re f")));
+                page.raw(b"2 0 0 2 0 0 cm");
+            });
+        });
+        let text = content(&opened(builder));
+        assert_eq!(
+            text,
+            "/P <</MCID 0>> BDC\n1 0 0 1 0 0 cm\nEMC\n\
+             /OC /OC0 BDC\n/P <</MCID 1>> BDC\n0 0 1 1 re f\nEMC\nEMC\n\
+             /P <</MCID 2>> BDC\n2 0 0 2 0 0 cm\nEMC\n\n"
+        );
+    }
+
+    /// An element inside a layer nests inside it; an element inside a layer
+    /// inside an element is the child element, inside the layer, with the
+    /// parent's empty pieces taken back.
+    #[test]
+    fn an_element_inside_a_layer_nests_inside_it() {
+        let mut builder = DocumentBuilder::new();
+        let layer = builder.add_layer("Notes", true).expect("a layer");
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.optional(layer, |page| {
+                page.tagged(b"P", |page| page.raw(b"0 0 1 1 re f"));
+            }));
+            page.tagged(b"Div", |page| {
+                assert!(page.optional(layer, |page| {
+                    page.tagged(b"Span", |page| page.raw(b"1 1 1 1 re f"));
+                }));
+            });
+        });
+        let doc = opened(builder);
+        let text = content(&doc);
+        assert_eq!(
+            text,
+            "/OC /OC0 BDC\n/P <</MCID 0>> BDC\n0 0 1 1 re f\nEMC\nEMC\n\
+             /OC /OC0 BDC\n/Span <</MCID 1>> BDC\n1 1 1 1 re f\nEMC\nEMC\n\n"
+        );
+        assert!(balanced(&text));
+    }
+
+    /// A layer a page cannot name is refused, and its closure is not run —
+    /// content drawn outside the layer it was meant for would show when the
+    /// layer is hidden.
+    #[test]
+    fn a_layer_the_page_cannot_name_is_refused_and_draws_nothing() {
+        let mut other = DocumentBuilder::new();
+        let _ = other.add_layer("A", true);
+        let foreign = other.add_layer("B", true).expect("a layer");
+
+        let mut builder = DocumentBuilder::new();
+        let early = builder.begin_page(20.0, 20.0);
+        let late = builder.add_layer("Late", true).expect("a layer");
+        let mut page = early;
+        let mut ran = false;
+        assert!(!page.optional(late, |_| ran = true));
+        assert!(!ran, "the closure of a refused layer is not run");
+        builder.push_page(page);
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.optional(foreign, |page| page.raw(b"0 0 1 1 re f")));
+        });
+        let doc = opened(builder);
+        let pages = crate::pages::collect(&doc);
+        let text =
+            String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &pages[1])).into_owned();
+        assert!(!text.contains("re f"), "{text}");
+    }
+
+    /// ISO 19005-1 6.1.13: a part 1 document has no optional content, and a
+    /// layer is refused by that clause.
+    #[test]
+    fn a_part_one_document_refuses_a_layer() {
+        let mut builder = DocumentBuilder::archival(ArchivalProfile {
+            part: ArchivalPart::One,
+            level: Some(ArchivalLevel::B),
+            destination_profile: vec![0; 128],
+            destination_space: DeviceSpace::Rgb,
+            output_condition: "sRGB".to_string(),
+            language: None,
+        });
+        assert_eq!(builder.add_layer("Refused", true), None);
+        assert_eq!(builder.refusals(), &[ArchivalRefusal::OptionalContent]);
+        assert_eq!(ArchivalRefusal::OptionalContent.clause(), "6.1.13");
     }
 }

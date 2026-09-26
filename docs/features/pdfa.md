@@ -137,6 +137,7 @@ exits by verdict.
 | A conformance level the part does not define, or none where the part requires one | `ArchivalRefusal::LevelNotInPart`, `LevelMissing` | part 4 is the only part where declaring no level is correct | 6.7.11 |
 | Level A with an untagged page or no natural language | `ArchivalRefusal::UntaggedPage`, `LanguageMissing` | level A *is* a tagged structure tree with a stated language; claiming it without one would be the claim this profile exists to make honest | 6.8.2, 6.8.4 |
 | A profile with no destination profile bytes | `ArchivalRefusal::DestinationProfileMissing` | there is no vendored default and no `Option`; the licence decision is in [THIRDPARTY.md](../../THIRDPARTY.md) | 6.2.2 |
+| `add_layer` under part 1 | `ArchivalRefusal::OptionalContent` | part 1 forbids `/OCProperties` outright; parts 2 to 4 admit layers, and the builder writes the `/Name` on the default configuration ISO 19005-2 6.9 asks of every configuration | 6.1.13 |
 
 ## Coverage, as a measured number
 

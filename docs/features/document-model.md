@@ -206,9 +206,20 @@ and the painted page cannot disagree about the same file. A group with no
 toggling layers still has to see it. Most documents declare no optional
 content and get an empty list, which is an ordinary answer.
 
-Writing groups — `DocumentBuilder::add_layer`, and an editor that toggles a
-default configuration — is the other half of that roadmap row and is not in
-this build.
+**Layers are written too.** `DocumentBuilder::add_layer(name, visible)`
+writes an `/OCG` and returns a `LayerId`; `PageBuilder::optional(layer, |page|
+...)` draws inside `/OC /OCn BDC … EMC` with the group in the page's
+`/Properties`; `finish` writes `/OCProperties` with every group in `/OCGs`, and
+a default configuration `/D` whose `/Order` is the order they were added and
+whose `/OFF` names the hidden ones. A layer opened inside a structure element
+splits the element's marked-content sequence around itself, so every `/MCID`
+sequence stays innermost and each `EMC` closes the scope it was written for.
+`DocumentEditor::set_layer_visible(reference, visible)` changes a group's
+state in `/D` — out of both `/ON` and `/OFF`, then into whichever disagrees
+with `/BaseState` — replacing an indirect `/D` or `/OCProperties` at its own
+number. The reference is the one `layers()` reports, so a caller lists, picks
+and toggles through one vocabulary. Under a part 1 archival profile a layer is
+refused with `ArchivalRefusal::OptionalContent` (ISO 19005-1 6.1.13).
 
 ### Annotations, as built
 
