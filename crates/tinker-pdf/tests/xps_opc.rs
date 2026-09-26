@@ -504,24 +504,275 @@ fn directory_records_are_not_parts() {
     assert_eq!(document.page_count(), 1);
 }
 
-/// OPC 7.2.4's interleaving, recognised and refused rather than half-assembled.
+// ---- interleaving (7.2.4) ------------------------------------------------
+
+/// Piece suffixes and their bytes, in archive order.
+type Pieces<'a> = Vec<(&'a str, &'a [u8])>;
+
+/// `one_page_package` with one part replaced by the given pieces of it, each an
+/// item of its own, in the order given.
+fn in_pieces(name: &str, pieces: &[(&str, &[u8])]) -> Vec<Part> {
+    let mut parts: Vec<Part> = one_page_package()
+        .into_iter()
+        .filter(|p| p.name != name)
+        .collect();
+    let at = parts.len().saturating_sub(1);
+    for (offset, (suffix, bytes)) in pieces.iter().enumerate() {
+        parts.insert(
+            at + offset,
+            xps_support::binary_part(&format!("{name}/{suffix}"), bytes.to_vec()),
+        );
+    }
+    parts
+}
+
+/// The page part's markup, cut into `n` pieces that join back into it.
+fn page_in(n: usize) -> Vec<(String, Vec<u8>)> {
+    let markup = fixed_page("816", "1056").into_bytes();
+    let size = markup.len().div_ceil(n);
+    markup
+        .chunks(size)
+        .enumerate()
+        .map(|(k, chunk)| {
+            let name = if k + 1 == markup.chunks(size).count() {
+                format!("[{k}].last.piece")
+            } else {
+                format!("[{k}].piece")
+            };
+            (name, chunk.to_vec())
+        })
+        .collect()
+}
+
+/// **An interleaved part is read as the part it is**, and everything above the
+/// package layer sees one part.
 ///
-/// A reader that did nothing would see parts whose names end in `.piece` and no
-/// part with the name they belong to — which is a document silently missing
-/// whatever the pieces carried.
+/// The page part in three pieces and `[Content_Types].xml` in two, written
+/// after everything else so the content-types item is still last. What comes
+/// back is the one-page document the whole package opens as, and the part's
+/// bytes are the markup that was cut up.
 #[test]
-fn an_interleaved_package_is_refused_by_name() {
+fn an_interleaved_part_is_read_as_the_part_its_pieces_join_into() {
+    let page = page_in(3);
+    let pieces: Vec<(&str, &[u8])> = page
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let mut parts = in_pieces("Documents/1/Pages/1.fpage", &pieces);
+    let types = CONTENT_TYPES.as_bytes();
+    let half = types.len() / 2;
+    parts.retain(|p| p.name != "[Content_Types].xml");
+    parts.push(xps_support::binary_part(
+        "[Content_Types].xml/[0].piece",
+        types[..half].to_vec(),
+    ));
+    parts.push(xps_support::binary_part(
+        "[Content_Types].xml/[1].last.piece",
+        types[half..].to_vec(),
+    ));
+    let bytes = archive(parts);
+
+    let document = open(&bytes).expect("an interleaved XPS opens");
+    assert_eq!(document.page_count(), 1);
+    assert_eq!(document.page(0).map(|p| p.size()), Some((612.0, 792.0)));
+    let report = document.archive().expect("a synthesised document");
+    assert!(
+        report.pages().iter().all(|p| p.defect.is_none()),
+        "{:?}",
+        report.pages()
+    );
+
+    let mut package = opened(&bytes);
+    let name = PartName::from_absolute("/Documents/1/Pages/1.fpage").expect("a part name");
+    assert_eq!(
+        package.part_count(),
+        4,
+        "the pieces are one part, not three"
+    );
+    assert_eq!(
+        package.read_part(&name).expect("the joined part"),
+        fixed_page("816", "1056").as_bytes(),
+        "the pieces, joined in number order, are the part"
+    );
+    assert_eq!(
+        package.media_type(&name).expect("the content types read"),
+        Some("application/vnd.ms-package.xps-fixedpage+xml"),
+        "the content-types item joined from its own pieces"
+    );
+    assert_eq!(package.validate(xps::MAX_XPS_PARTS), Ok(()));
+}
+
+/// **The pieces are joined by number, not by where they sit in the archive.**
+///
+/// The same three pieces written last-first. 7.2.4 numbers them precisely so
+/// the order is the producer's statement and not the archive's.
+#[test]
+fn pieces_are_joined_in_number_order_whatever_the_archive_order() {
+    let page = page_in(3);
+    let reversed: Vec<(&str, &[u8])> = page
+        .iter()
+        .rev()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let bytes = archive(in_pieces("Documents/1/Pages/1.fpage", &reversed));
+    let mut package = opened(&bytes);
+    let name = PartName::from_absolute("/Documents/1/Pages/1.fpage").expect("a part name");
+    assert_eq!(
+        package.read_part(&name).expect("the joined part"),
+        fixed_page("816", "1056").as_bytes()
+    );
+    assert_eq!(open(&bytes).expect("it opens").page_count(), 1);
+}
+
+/// **Pieces that do not join into one part refuse the package by name**,
+/// rather than half-assembling a page out of what happened to be there.
+///
+/// Every way a set of pieces fails to determine its part's bytes, each beside
+/// a sound package: a gap, a repeat, no `.last`, a `.last` that is not the
+/// highest, a number written with a leading zero, a name that is only nearly a
+/// piece's, and a part stored both whole and in pieces — the last being the
+/// shape this test's predecessor used, when every interleaved package was
+/// refused.
+#[test]
+fn pieces_that_do_not_assemble_are_refused_by_name() {
+    let one: &[u8] = b"<FixedPage xmlns=\"http://schemas.microsoft.com/xps/2005/06\" ";
+    let two: &[u8] = b"Width=\"816\" Height=\"1056\" />";
+    let cases: Vec<(&str, Pieces<'_>)> = vec![
+        ("a gap", vec![("[0].piece", one), ("[2].last.piece", two)]),
+        (
+            "a number twice",
+            vec![
+                ("[0].piece", one),
+                ("[0].piece", one),
+                ("[1].last.piece", two),
+            ],
+        ),
+        (
+            "no last piece",
+            vec![("[0].piece", one), ("[1].piece", two)],
+        ),
+        (
+            "a last piece that is not the highest",
+            vec![("[0].last.piece", one), ("[1].piece", two)],
+        ),
+        (
+            "two last pieces",
+            vec![("[0].last.piece", one), ("[1].last.piece", two)],
+        ),
+        (
+            "a leading zero",
+            vec![("[0].piece", one), ("[01].last.piece", two)],
+        ),
+        (
+            "a name that is only nearly a piece's",
+            vec![("[0].piece", one), ("[1]last.piece", two)],
+        ),
+        (
+            "no number at all",
+            vec![("[0].piece", one), ("[].last.piece", two)],
+        ),
+    ];
+    for (why, pieces) in cases {
+        let bytes = archive(in_pieces("Documents/1/Pages/1.fpage", &pieces));
+        assert_eq!(refusal(&bytes), Some(ArchiveRefusal::Interleaved), "{why}");
+    }
+    // Stored whole and in pieces: the part is two things at once.
     for piece in [
-        "Documents/1/Pages/1.fpage/[0].piece",
-        "Big.bin/[3].last.piece",
+        "Documents/1/Pages/1.fpage/[0].last.piece",
+        "documents/1/PAGES/1.fpage/[0].last.piece",
     ] {
         let bytes = archive(with(one_page_package(), piece, "a piece of a part"));
         assert_eq!(
             refusal(&bytes),
             Some(ArchiveRefusal::Interleaved),
-            "{piece}"
+            "{piece} beside the whole part"
         );
     }
+    // And a lone `.last` piece of something with no piece `[0]`.
+    let bytes = archive(with(one_page_package(), "Big.bin/[3].last.piece", "x"));
+    assert_eq!(refusal(&bytes), Some(ArchiveRefusal::Interleaved));
+}
+
+/// **A joined part is held to the per-entry cap as a whole**, before a byte of
+/// any piece is read — so a producer cannot step around `max_entry_bytes` by
+/// cutting a part into pieces each under it.
+#[test]
+fn a_joined_part_is_held_to_the_per_entry_cap_as_a_whole() {
+    let page = page_in(4);
+    let pieces: Vec<(&str, &[u8])> = page
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let bytes = archive(in_pieces("Documents/1/Pages/1.fpage", &pieces));
+    let largest = page.iter().map(|(_, b)| b.len()).max().expect("pieces");
+    let whole = fixed_page("816", "1056").len();
+    // Every piece fits and the part does not.
+    let limits = ZipLimits {
+        max_entry_bytes: largest + 1,
+        ..ZipLimits::DEFAULT
+    };
+    assert!(
+        whole >= limits.max_entry_bytes,
+        "the fixture has to straddle the cap"
+    );
+    let archive = cbz::open_archive(&bytes, &limits).expect("a ZIP");
+    let mut package = xps::opc::Package::open(
+        archive,
+        zip_limits::MAX_ZIP_NAME_LEN,
+        tinker_pdf_xml::Limits::DEFAULT,
+    );
+    let name = PartName::from_absolute("/Documents/1/Pages/1.fpage").expect("a part name");
+    assert_eq!(
+        package.read_part(&name),
+        Err(xps::opc::PackageDefect::Entry(
+            tinker_pdf_zip::EntryError::EntryTooLarge
+        ))
+    );
+    assert_eq!(
+        package.archive().inflated(),
+        0,
+        "refused before any piece was inflated"
+    );
+    // One byte more of cap and it reads.
+    let limits = ZipLimits {
+        max_entry_bytes: whole + 1,
+        ..ZipLimits::DEFAULT
+    };
+    let archive = cbz::open_archive(&bytes, &limits).expect("a ZIP");
+    let mut package = xps::opc::Package::open(
+        archive,
+        zip_limits::MAX_ZIP_NAME_LEN,
+        tinker_pdf_xml::Limits::DEFAULT,
+    );
+    assert_eq!(
+        package.read_part(&name).expect("the part"),
+        fixed_page("816", "1056").as_bytes()
+    );
+}
+
+/// A piece's suffix is compared case-insensitively, as every OPC item name is,
+/// and a comic archive that merely carries a file named like a piece is still
+/// a comic: the pieces only mean anything once E.3 has said this is an XPS.
+#[test]
+fn piece_suffixes_fold_case_and_mean_nothing_outside_a_package() {
+    let page = page_in(2);
+    let shouted: Vec<(String, &[u8])> = page
+        .iter()
+        .map(|(n, b)| (n.to_ascii_uppercase(), b.as_slice()))
+        .collect();
+    let pieces: Vec<(&str, &[u8])> = shouted.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+    let bytes = archive(in_pieces("Documents/1/Pages/1.fpage", &pieces));
+    assert_eq!(open(&bytes).expect("it opens").page_count(), 1);
+
+    let comic = zip(
+        &[
+            ZipFile::stored("page1.png", &rgb_png(4, 4, &distinct_pixels(4, 4))),
+            ZipFile::stored("notes/[0].piece", b"not a package"),
+        ],
+        Damage::None,
+    );
+    let document = open(&comic).expect("a comic with a piece-shaped name");
+    assert_eq!(document.page_count(), 1);
 }
 
 // ---- media types --------------------------------------------------------
@@ -1070,4 +1321,39 @@ fn the_synthesised_document_fits_inside_what_was_charged_for_it() {
             report.synthesised_bytes()
         );
     }
+}
+
+/// **Hostile bytes through an interleaved package never panic** (ruling 1).
+///
+/// The derived fixture in `tests/xps_interleaved`, damaged one byte at a time
+/// across its whole length — local headers, piece names in both directories,
+/// deflated and stored piece data — and opened each time. Only that nothing
+/// panics is asserted, as `hostile_input.rs` asserts it: a damaged piece is a
+/// refused package, a checksum failure or a page that draws less, and all of
+/// those are answers.
+#[test]
+fn hostile_bytes_through_an_interleaved_package_never_panic() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/xps_interleaved/wpf-image-and-text-pieces.xps");
+    let original = std::fs::read(&path).expect("the derived fixture");
+    let mut tried = 0usize;
+    for at in (0..original.len()).step_by(251) {
+        let mut bytes = original.clone();
+        bytes[at] ^= 0xA5;
+        let _ = open(&bytes);
+        tried += 1;
+    }
+    // The central directory, where every piece name is spelled a second time,
+    // byte by byte.
+    let directory = original
+        .windows(4)
+        .position(|w| w == b"PK\x01\x02")
+        .expect("a central directory");
+    for at in (directory..original.len()).step_by(7) {
+        let mut bytes = original.clone();
+        bytes[at] ^= 0x01;
+        let _ = open(&bytes);
+        tried += 1;
+    }
+    assert!(tried > 300, "the sweep ran: {tried} inputs");
 }
