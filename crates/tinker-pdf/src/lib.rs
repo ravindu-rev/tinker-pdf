@@ -473,6 +473,45 @@ pub struct RenderOptions {
     /// threshold is a function of one pixel's coverage, and the coverage
     /// already agreed.
     pub antialias: bool,
+    /// Whether the page starts with nothing painted on it rather than white.
+    /// Off by default.
+    ///
+    /// Only a format with an alpha channel can hold *nothing* — `GrayA8`,
+    /// `Rgba8`, and `CmykA8` with [`RenderOptions::allow_cmyk`] — so with
+    /// `Gray8` or `Rgb8` this changes nothing, and a page comes back on white
+    /// as it always has. With one of those, a pixel nothing painted is
+    /// `(0, 0, 0, 0)`, a pixel a half-opaque fill covers has an alpha of half,
+    /// and an anti-aliased edge has the alpha its coverage gave it: the page as
+    /// a layer, for a caller who composites it over something else.
+    ///
+    /// The page is composited exactly as it is over white, against a backdrop
+    /// of nothing instead — 11.3.6's formulas with a backdrop alpha of zero,
+    /// which the canvas already computes for every transparency group, where a
+    /// group's buffer starts the same way.
+    pub transparent: bool,
+    /// Whether colour comes back **premultiplied** by alpha. Off by default.
+    ///
+    /// The canvas composites in straight alpha throughout — `tinker-pdf-raster`'s
+    /// compositing documents why, and it is the convention every blend formula
+    /// in 11.3 is written in — so this is a conversion at the very end: each
+    /// colour component `c` of a pixel with alpha `a` becomes `c·a/255`,
+    /// rounded to nearest (there is never a tie: `c·a` is an integer and 255 is
+    /// odd). [`Bitmap::premultiplied`] says which the bytes are.
+    ///
+    /// On a page composited over white every pixel is opaque, and a pixel with
+    /// an alpha of 255 is the same in both conventions — so this changes
+    /// nothing unless [`RenderOptions::transparent`] is on too, and it is only
+    /// meaningful for a format with alpha. It is kept independent of
+    /// `transparent` all the same, because a caller whose compositor takes
+    /// premultiplied input wants to say so once rather than know which pages
+    /// happen to be opaque.
+    ///
+    /// [`Bitmap::to_png`] writes straight alpha, which is the only kind PNG
+    /// has; a premultiplied bitmap is divided back out on the way. That is
+    /// exact for a pixel whose alpha is 255 and loses precision below it, the
+    /// same precision premultiplying lost: multiplying the PNG's samples by
+    /// their alpha again gives back the premultiplied bytes exactly.
+    pub premultiplied: bool,
 }
 
 impl Default for RenderOptions {
@@ -485,6 +524,8 @@ impl Default for RenderOptions {
             region: None,
             allow_cmyk: false,
             antialias: true,
+            transparent: false,
+            premultiplied: false,
         }
     }
 }
@@ -515,6 +556,13 @@ pub struct Bitmap {
     pub data: Vec<u8>,
     /// What the renderer could not do exactly (ruling 2).
     pub warnings: Vec<RenderWarning>,
+    /// Whether each colour component has been multiplied by its pixel's
+    /// alpha ([`RenderOptions::premultiplied`]).
+    ///
+    /// `false` for every format without alpha, where the question does not
+    /// arise, and for every bitmap [`Bitmap::from_png`] reads, because PNG's
+    /// alpha is straight.
+    pub premultiplied: bool,
 }
 
 impl Bitmap {
@@ -596,6 +644,12 @@ impl Bitmap {
     pub fn to_png(&self) -> Option<Vec<u8>> {
         use tinker_pdf_filters::{png_encode, PngColour, PngSource};
 
+        // PNG's alpha is straight, so premultiplied colour is divided back
+        // out first; see `RenderOptions::premultiplied` for what that keeps.
+        if self.premultiplied {
+            return self.straightened()?.to_png();
+        }
+
         // The four formats PNG already has a colour type for: no copy, and the
         // stride is handed through rather than flattened, because a padded
         // buffer's padding is not pixels.
@@ -624,6 +678,81 @@ impl Bitmap {
             }
         };
         png_encode(&source).ok()
+    }
+
+    /// Multiplies every colour component by its pixel's alpha, in place, and
+    /// records that it has. A format without alpha, or a bitmap that already
+    /// is, is left alone.
+    ///
+    /// Row by row over `stride`, so a padded buffer's padding is not touched,
+    /// and a row the buffer is too short to hold is skipped rather than read
+    /// past (ruling 1: the fields are public).
+    fn premultiply(&mut self) {
+        if self.premultiplied || !self.format.has_alpha() {
+            return;
+        }
+        let components = self.format.components();
+        let colours = components - 1;
+        let row_bytes = (self.width as usize).saturating_mul(components);
+        for y in 0..self.height as usize {
+            let Some(row) = y
+                .checked_mul(self.stride)
+                .and_then(|at| self.data.get_mut(at..at.checked_add(row_bytes)?))
+            else {
+                break;
+            };
+            for pixel in row.chunks_exact_mut(components) {
+                // `chunks_exact_mut` hands out exactly `components` bytes, so
+                // the alpha is the one byte after the colours.
+                let (colour, alpha) = pixel.split_at_mut(colours);
+                let a = u32::from(alpha.first().copied().unwrap_or(255));
+                for c in colour {
+                    // round(c·a/255): `c·a` is an integer and 255 is odd, so
+                    // the fraction is never exactly a half.
+                    *c = ((u32::from(*c) * a + 127) / 255) as u8;
+                }
+            }
+        }
+        self.premultiplied = true;
+    }
+
+    /// A straight-alpha copy of a premultiplied bitmap, or `None` when a row
+    /// the fields promise is not in the buffer.
+    ///
+    /// `round(c·255/a)`, clamped to 255 for a component the premultiplied
+    /// convention does not allow (`c > a`), and zero where the alpha is:
+    /// nothing is painted there and there is no colour to recover.
+    fn straightened(&self) -> Option<Bitmap> {
+        let components = self.format.components();
+        let colours = components.checked_sub(1)?;
+        let row_bytes = (self.width as usize).checked_mul(components)?;
+        let mut data = Vec::with_capacity(row_bytes.checked_mul(self.height as usize)?);
+        for y in 0..self.height as usize {
+            let at = y.checked_mul(self.stride)?;
+            let row = self.data.get(at..at.checked_add(row_bytes)?)?;
+            for pixel in row.chunks_exact(components) {
+                let (colour, alpha) = pixel.split_at(colours);
+                let a = u32::from(*alpha.first()?);
+                for c in colour {
+                    let straight = if a == 0 {
+                        0
+                    } else {
+                        ((u32::from(*c) * 255 + a / 2) / a).min(255)
+                    };
+                    data.push(straight as u8);
+                }
+                data.push(a as u8);
+            }
+        }
+        Some(Bitmap {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            stride: row_bytes,
+            data,
+            warnings: Vec::new(),
+            premultiplied: false,
+        })
     }
 
     /// The two formats PNG cannot carry, as straight RGBA.
@@ -1755,7 +1884,20 @@ impl Page {
         let canvas_format = page_space
             .map(tinker_pdf_render::group_format)
             .unwrap_or(options.format);
-        let canvas = tinker_pdf_render::region_canvas_in(view, canvas_format);
+        // What the caller is handed, decided before the canvas exists: a page
+        // may start with nothing on it only if the format it comes back in can
+        // say so. A transparent canvas converted to `Rgb8` at the end would
+        // drop an alpha of zero and keep the black stored under it.
+        let wanted = if options.allow_cmyk && options.format == PixelFormat::CmykA8 {
+            PixelFormat::CmykA8
+        } else {
+            tinker_pdf_render::page_format(options.format)
+        };
+        let canvas = if options.transparent && wanted.has_alpha() && canvas_format.has_alpha() {
+            tinker_pdf_render::region_canvas_clear(view, canvas_format)
+        } else {
+            tinker_pdf_render::region_canvas_in(view, canvas_format)
+        };
 
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources)
             .with_antialias(options.antialias);
@@ -1809,25 +1951,25 @@ impl Page {
         // Back to something a caller can read. A page group composited over
         // ink comes back as light, which is 11.4.7's own last step — unless
         // the caller asked for ink by name *and* said they know it is ink.
-        let wanted = if options.allow_cmyk && options.format == PixelFormat::CmykA8 {
-            PixelFormat::CmykA8
-        } else {
-            tinker_pdf_render::page_format(options.format)
-        };
         let canvas = if canvas.format == wanted {
             canvas
         } else {
             canvas.extract((0, 0), canvas.width, canvas.height, wanted)
         };
 
-        Bitmap {
+        let mut bitmap = Bitmap {
             width: canvas.width,
             height: canvas.height,
             format: canvas.format,
             stride: canvas.stride,
             data: canvas.data,
             warnings,
+            premultiplied: false,
+        };
+        if options.premultiplied {
+            bitmap.premultiply();
         }
+        bitmap
     }
 
     /// The page's link annotations, in `/Annots` order (12.5.6.5).

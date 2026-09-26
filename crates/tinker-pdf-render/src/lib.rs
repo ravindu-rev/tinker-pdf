@@ -3094,6 +3094,16 @@ pub fn region_canvas_in(region: PixelRegion, format: PixelFormat) -> Canvas {
     Canvas::new(region.width, region.height, format, Color::WHITE)
 }
 
+/// [`region_canvas_in`] with nothing painted on it: every pixel transparent.
+///
+/// For a page rendered as a layer rather than onto paper. Only a format with
+/// alpha can hold nothing, so the caller asks for this only with one; a format
+/// without it starts opaque whatever it is handed, and would come back black.
+#[must_use]
+pub fn region_canvas_clear(region: PixelRegion, format: PixelFormat) -> Canvas {
+    Canvas::new(region.width, region.height, format, Color::TRANSPARENT)
+}
+
 /// The largest canvas this will allocate for one page, in pixels.
 ///
 /// About 67 million, which is 201 MB at three bytes a pixel — larger than any

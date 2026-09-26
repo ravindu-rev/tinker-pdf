@@ -44,6 +44,7 @@ fn packed(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> Bitmap
         stride: width as usize * format.components(),
         data,
         warnings: Vec::new(),
+        premultiplied: false,
     }
 }
 
@@ -223,6 +224,29 @@ fn lab_is_decoded_back_to_srgb_and_not_relabelled() {
     assert_eq!(&out.data[..3], &[119, 119, 119]);
 }
 
+/// A premultiplied bitmap is written as the straight alpha PNG has, divided
+/// back out: half-alpha red stored as `(128, 0, 0, 128)` is `(255, 0, 0, 128)`
+/// in the file. Nothing painted stays nothing, and a component larger than its
+/// own alpha — which the premultiplied convention does not allow, and a
+/// hand-built bitmap can hold anyway — is clamped rather than wrapped.
+#[test]
+fn a_premultiplied_bitmap_is_written_straight() {
+    let mut bitmap = packed(
+        3,
+        1,
+        PixelFormat::Rgba8,
+        vec![128, 0, 0, 128, 0, 0, 0, 0, 200, 50, 0, 100],
+    );
+    bitmap.premultiplied = true;
+    let out = decode(&bitmap);
+    assert_eq!(out.colour, PngColour::Rgba);
+    assert_eq!(out.data, vec![255, 0, 0, 128, 0, 0, 0, 0, 255, 128, 0, 100]);
+
+    let mut grey = packed(1, 1, PixelFormat::GrayA8, vec![64, 128]);
+    grey.premultiplied = true;
+    assert_eq!(decode(&grey).data, vec![128, 128]);
+}
+
 /// A padded `stride` is honoured: the bytes between the end of one row and the
 /// start of the next are not pixels.
 ///
@@ -244,6 +268,7 @@ fn a_padded_bitmap_writes_only_its_pixels() {
         stride: 5,
         data,
         warnings: Vec::new(),
+        premultiplied: false,
     };
     assert_eq!(decode(&padded).data, vec![1, 2, 3, 4, 5, 6]);
     // And the file is the same file the unpadded twin produces, byte for byte.
@@ -268,6 +293,7 @@ fn a_bitmap_that_is_not_a_picture_declines_to_be_one() {
         // One byte short of the final pixel.
         data: vec![0; 47],
         warnings: Vec::new(),
+        premultiplied: false,
     };
     assert_eq!(short.to_png(), None, "a raster that stops short");
 
@@ -278,6 +304,7 @@ fn a_bitmap_that_is_not_a_picture_declines_to_be_one() {
         stride: 11,
         data: vec![0; 64],
         warnings: Vec::new(),
+        premultiplied: false,
     };
     assert_eq!(overlapping.to_png(), None, "a stride narrower than a row");
 
@@ -290,6 +317,7 @@ fn a_bitmap_that_is_not_a_picture_declines_to_be_one() {
         stride: 20,
         data: vec![0; 30],
         warnings: Vec::new(),
+        premultiplied: false,
     };
     assert_eq!(short_cmyk.to_png(), None);
 

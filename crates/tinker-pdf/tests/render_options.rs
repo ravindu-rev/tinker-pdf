@@ -58,17 +58,25 @@ fn render(bytes: Vec<u8>, options: &RenderOptions) -> Bitmap {
         .render(options)
 }
 
-/// Pixels something was painted on: any colour channel off the background,
-/// which is no ink for `CmykA8` and white for every other format.
+/// Pixels something was painted on. The background is white (no ink, for
+/// `CmykA8`) and opaque, or — on a transparent page — nothing at all.
 fn painted(bitmap: &Bitmap) -> usize {
     let components = bitmap.components();
+    let alpha_at = bitmap.format.has_alpha().then_some(components - 1);
     bitmap
         .data
         .chunks_exact(components)
-        .filter(|pixel| match bitmap.format {
-            PixelFormat::CmykA8 => pixel[..4].iter().any(|v| *v != 0),
-            PixelFormat::Gray8 | PixelFormat::Rgb8 => pixel.iter().any(|v| *v != 255),
-            _ => pixel[..components - 1].iter().any(|v| *v != 255),
+        .filter(|pixel| {
+            let alpha = alpha_at.map_or(255, |at| pixel[at]);
+            if alpha == 0 {
+                return false;
+            }
+            let colours = &pixel[..alpha_at.unwrap_or(components)];
+            alpha != 255
+                || match bitmap.format {
+                    PixelFormat::CmykA8 => colours.iter().any(|v| *v != 0),
+                    _ => colours.iter().any(|v| *v != 255),
+                }
         })
         .count()
 }
@@ -276,6 +284,8 @@ fn the_default_is_unchanged() {
     let spelled = RenderOptions {
         allow_cmyk: false,
         antialias: true,
+        transparent: false,
+        premultiplied: false,
         ..RenderOptions::default()
     };
     for (name, page, least, want) in [
@@ -293,6 +303,245 @@ fn the_default_is_unchanged() {
         assert_eq!(explicit.data, default.data, "{name}");
         assert_eq!(explicit.format, PixelFormat::Rgb8, "{name}");
     }
+}
+
+// ---- a page with nothing under it, and premultiplied alpha -------------------
+
+/// One pixel of a four- or two-component bitmap.
+fn pixel(bitmap: &Bitmap, x: u32, y: u32) -> &[u8] {
+    let n = bitmap.components();
+    let at = y as usize * bitmap.stride + x as usize * n;
+    &bitmap.data[at..at + n]
+}
+
+/// A page for premultiplication to be *arithmetic* on: text in a grey and a
+/// curved shape in an orange at 37 % opacity, neither of them a pure colour.
+///
+/// The ink page's colours are all 0 or 255 in every channel, and `c·a/255` of
+/// those is `0` or `a` exactly — so on it a premultiplication that truncated
+/// instead of rounding came out byte-identical, and a campaign injecting that
+/// defect was caught only by a pinned hash. Here every anti-aliased edge and
+/// every pixel of the translucent shape rounds.
+fn layer_page() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.set_subset_fonts(false);
+    assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
+    assert!(builder.add_ext_gstate(
+        b"G0",
+        &ExtGState {
+            fill_alpha: Some(0.37),
+            ..ExtGState::default()
+        }
+    ));
+    builder.add_page(96.0, 48.0, |page| {
+        page.raw(b"0.3 g");
+        page.text(b"F0", 15.0, 3.5, 26.0, "0123 fox");
+        page.raw(b"q");
+        assert!(page.set_ext_gstate(b"G0"));
+        page.raw(b"0.6 0.3 0.1 rg 40 4 m 80 2 90 30 60 22 c 45 30 l h f");
+        page.raw(b"Q");
+    });
+    builder.finish()
+}
+
+fn layer(format: PixelFormat, premultiplied: bool) -> RenderOptions {
+    RenderOptions {
+        format,
+        transparent: true,
+        premultiplied,
+        ..RenderOptions::default()
+    }
+}
+
+/// With `transparent`, nothing painted is nothing: `(0, 0, 0, 0)`. What is
+/// painted opaquely is its colour at full alpha, and the half-opaque
+/// `/Multiply` band where it lies over nothing is its own colour at half
+/// alpha — 11.3.6 with a backdrop alpha of zero, where the blend mode has
+/// nothing to blend with.
+#[test]
+fn a_transparent_page_is_nothing_where_nothing_is_painted() {
+    let page = render(ink_page(), &layer(PixelFormat::Rgba8, false));
+    assert_eq!(page.format, PixelFormat::Rgba8);
+    assert!(!page.premultiplied);
+    assert_eq!(pixel(&page, 1, 1), [0, 0, 0, 0], "nothing is transparent");
+    assert_eq!(pixel(&page, 14, 40), [0, 255, 255, 255], "cyan, opaque");
+    // x 25 is in the gap between the first two squares, y 31 inside the band.
+    assert_eq!(
+        pixel(&page, 25, 31),
+        [255, 0, 255, 128],
+        "magenta at the band's own alpha, over nothing"
+    );
+
+    let grey = render(ink_page(), &layer(PixelFormat::GrayA8, false));
+    assert_eq!(pixel(&grey, 1, 1), [0, 0]);
+    assert_eq!(pixel(&grey, 62, 40), [0, 255], "K is black, opaque");
+}
+
+/// A format without alpha cannot hold nothing, so `transparent` changes no
+/// byte of it — a page asked for in `Rgb8` is on white, as it always was.
+#[test]
+fn a_format_without_alpha_is_on_white_whatever_it_is_asked() {
+    for format in [PixelFormat::Gray8, PixelFormat::Rgb8] {
+        let plain = render(
+            ink_page(),
+            &RenderOptions {
+                format,
+                ..RenderOptions::default()
+            },
+        );
+        let asked = render(ink_page(), &layer(format, true));
+        assert_eq!(asked.data, plain.data, "{format:?}");
+        assert!(
+            !asked.premultiplied,
+            "{format:?} has no alpha to multiply by"
+        );
+    }
+}
+
+/// **Premultiplied is straight times alpha**, at every pixel of every format
+/// with alpha, computed here in floating point from the straight render rather
+/// than by the code under test — on [`layer_page`], whose partial alpha falls
+/// on colours that are not 0 or 255, so the rounding is exercised and not only
+/// the multiplication.
+#[test]
+fn premultiplied_is_straight_colour_times_alpha() {
+    for format in [PixelFormat::GrayA8, PixelFormat::Rgba8] {
+        let straight = render(layer_page(), &layer(format, false));
+        let pre = render(layer_page(), &layer(format, true));
+        assert!(pre.premultiplied && !straight.premultiplied);
+        let n = format.components();
+        let mut partial = 0;
+        for (s, p) in straight.data.chunks_exact(n).zip(pre.data.chunks_exact(n)) {
+            let a = s[n - 1];
+            assert_eq!(p[n - 1], a, "the alpha itself is untouched");
+            if a != 0 && a != 255 {
+                partial += 1;
+            }
+            for (c, got) in s[..n - 1].iter().zip(&p[..n - 1]) {
+                let want = (f64::from(*c) * f64::from(a) / 255.0).round() as u8;
+                assert_eq!(*got, want, "{format:?}: {c} at alpha {a}");
+            }
+        }
+        assert!(
+            partial > 150,
+            "{format:?}: only {partial} partly transparent pixels, too few to \
+             say anything"
+        );
+    }
+}
+
+/// On a page over white every pixel is opaque, and an opaque pixel is the
+/// same in both conventions: the switch changes no byte, and says it applied.
+#[test]
+fn premultiplied_changes_no_byte_of_an_opaque_page() {
+    let straight = render(
+        ink_page(),
+        &RenderOptions {
+            format: PixelFormat::Rgba8,
+            ..RenderOptions::default()
+        },
+    );
+    let pre = render(
+        ink_page(),
+        &RenderOptions {
+            format: PixelFormat::Rgba8,
+            premultiplied: true,
+            ..RenderOptions::default()
+        },
+    );
+    assert_eq!(pre.data, straight.data);
+    assert!(pre.premultiplied);
+}
+
+/// `to_png` writes straight alpha, which is the only kind PNG has, and the
+/// round trip loses exactly what premultiplying lost and nothing else:
+/// multiplying the PNG's samples by their alpha again gives back the
+/// premultiplied bytes, every one of them.
+#[test]
+fn a_premultiplied_page_writes_a_png_that_multiplies_back_exactly() {
+    for format in [PixelFormat::GrayA8, PixelFormat::Rgba8] {
+        let pre = render(layer_page(), &layer(format, true));
+        let read = Bitmap::from_png(&pre.to_png().expect("a picture")).expect("it reads");
+        assert!(!read.premultiplied, "PNG's alpha is straight");
+        let n = format.components();
+        for (r, p) in read.data.chunks_exact(n).zip(pre.data.chunks_exact(n)) {
+            let a = r[n - 1];
+            assert_eq!(a, p[n - 1]);
+            for (c, want) in r[..n - 1].iter().zip(&p[..n - 1]) {
+                let again = (f64::from(*c) * f64::from(a) / 255.0).round() as u8;
+                assert_eq!(again, *want, "{format:?}: {c} at alpha {a}");
+            }
+        }
+    }
+}
+
+/// Ink is premultiplied like light: the band's magenta over nothing is half
+/// its ink at half its alpha.
+#[test]
+fn ink_is_premultiplied_too() {
+    let ink = render(
+        ink_page(),
+        &RenderOptions {
+            format: PixelFormat::CmykA8,
+            allow_cmyk: true,
+            transparent: true,
+            premultiplied: true,
+            ..RenderOptions::default()
+        },
+    );
+    assert_eq!(ink.format, PixelFormat::CmykA8);
+    assert!(ink.premultiplied);
+    assert_eq!(pixel(&ink, 1, 1), [0, 0, 0, 0, 0]);
+    assert_eq!(pixel(&ink, 25, 31), [0, 128, 0, 0, 128]);
+}
+
+/// Ruling 5 holds for a page with nothing under it, premultiplied: a tile is
+/// the page under it, byte for byte.
+#[test]
+fn a_transparent_premultiplied_tile_is_the_page_under_it() {
+    let doc = Document::open(ink_page()).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let options = layer(PixelFormat::Rgba8, true);
+    let whole = page.render(&options);
+    for (x, y, w, h) in [(0, 0, 37, 23), (37, 23, 37, 25), (60, 11, 36, 30)] {
+        let tile = page.render(&RenderOptions {
+            region: Some(tinker_pdf::PixelRegion::new(x, y, w, h)),
+            ..options.clone()
+        });
+        assert!(tile.premultiplied);
+        for row in 0..h {
+            let from = (y + row) as usize * whole.stride + x as usize * 4;
+            let want = &whole.data[from..from + w as usize * 4];
+            let got = &tile.data[row as usize * tile.stride..][..w as usize * 4];
+            assert_eq!(got, want, "tile ({x}, {y}) row {row}");
+        }
+    }
+}
+
+/// **The fingerprint.** The ink page as a layer, straight and premultiplied,
+/// and the hard-edge page's anti-aliased edges as a premultiplied layer, where
+/// every partial pixel is partial in alpha rather than in colour.
+#[test]
+fn transparent_and_premultiplied_output_is_pinned() {
+    // 1 562 and 2 220 pixels painted today; the floors are about half.
+    pinned(
+        "ink page as a layer, straight",
+        &render(ink_page(), &layer(PixelFormat::Rgba8, false)),
+        780,
+        "dc8ad1fb83b335e6dae243b9c4deca910e6c0fe8d1ed709585542b7aaff9ad30",
+    );
+    pinned(
+        "ink page as a layer, premultiplied",
+        &render(ink_page(), &layer(PixelFormat::Rgba8, true)),
+        780,
+        "732b177c00dda1fb2755b569a6f27225bd7e5cead07bc58f164f227cfb013b31",
+    );
+    pinned(
+        "hard-edge page as a layer, premultiplied",
+        &render(hard_edge_page(), &layer(PixelFormat::Rgba8, true)),
+        1100,
+        "30569c270e26bb77f4597fbb04e7f9239554a05d6bb2132da6f9ffaa081cbce8",
+    );
 }
 
 // ---- the anti-aliasing switch -------------------------------------------------
