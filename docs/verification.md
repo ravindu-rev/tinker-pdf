@@ -7,7 +7,7 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 23 September 2026. `cargo test --workspace --no-fail-fast`
-is **5 028 passed, 0 failed, 60 ignored** across 221 suites on
+is **5 030 passed, 0 failed, 60 ignored** across 221 suites on
 `x86_64-pc-windows-msvc`, 26 September 2026, two lanes' work merged. Ten of
 the twenty-nine tests since 4 999 are the facade's save path — the font policy,
 the three-valued `SubsetOutcome`, and the rewrite-path census, which is the
