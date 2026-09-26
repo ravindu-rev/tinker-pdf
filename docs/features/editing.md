@@ -318,7 +318,16 @@ alone. Until September 2026 a vertical run was left whole as `VerticalRun`,
 and before that it was cut as if it were horizontal (`redact.rs`'s
 `vertical_runs` module, against an `Identity-V` font whose `/W2` gives one
 glyph a different advance, so a gap of the wrong length moves every glyph
-after it). A glyph
+after it). A **Type 3** run is measured in the font's own glyph space
+(9.6.5): the advance is the horizontal component of the width carried
+through `/FontMatrix` (`w0 · a`, what the interpreter advances by), and the
+glyph box is a glyph-space rectangle — `0` to `w0` along, the `/FontBBox`
+height joined with one em across — carried through all six numbers of the
+matrix, so a scaled, skewed, rotated or translated glyph space is cut where
+its procedures draw. Until September 2026 any matrix but the 1/1000 default
+was left whole as `RescaledType3Font` (`type3_glyph_space`, where the skewed
+and rotated fixtures each name the neighbour an upright box would have cut).
+A glyph
 the rectangle covers only *partly* is removed, because a content stream can
 show a glyph or not show it and only one of those two can leak. The page is
 read **as the editor has it** — its place in the editor's page order, its
@@ -329,8 +338,8 @@ first had removed, redacted the file's page *n* when the editor had moved
 pages, and silently skipped every form and image on a page whose resources
 were inherited (`redact.rs`'s `editor_reads` module, one test each). What
 redaction cannot **measure** it still leaves whole and names in
-`RedactionReport::warnings` — three of that type's four classes, in the
-refusal table below; the fourth is the form placement one further down —
+`RedactionReport::warnings` — two of that type's three classes, in the
+refusal table below; the third is the form placement one further down —
 because a redaction that silently fails to redact is worse than one that
 refuses: the caller believes the content is gone and distributes the file.
 A warning says the run was not measured, not that it was covered, so
@@ -544,7 +553,6 @@ if report.untouched.is_empty() {
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| Redacting a run in a **Type 3 font whose `/FontMatrix` is not the 1/1000 default** (9.6.5) | left whole, `RescaledType3Font` (`a_rescaled_type3_font_is_left_uncut_and_reported`); the same font with the conventional matrix is cut (`a_type3_font_with_the_conventional_matrix_is_cut`) | `/Widths` are in the font's own glyph space, and `width / 1000` is right for the conventional matrix and wrong by exactly that matrix for any other, so every position after the first glyph drifts | — |
 | Redacting a run whose `Tf` named a font the resources in scope do not have | left whole, `UnknownFont` (`a_run_whose_font_is_not_in_scope_is_left_uncut_and_reported`) | no metrics at all, so no glyph can be placed. Permanent, and it was silent before: the run was kept, nothing was counted, and the report looked like a rectangle that covered nothing | — |
 | Redacting a run whose text rendering matrix is not finite | left whole, `UnmeasurableFrame` (`a_non_finite_text_matrix_is_left_uncut_and_reported`) | a position that is not a number cannot be compared with a rectangle. Permanent. The whole showing operand is left, never half of it | — |
 | Partial image redaction | the whole image is scrubbed (`RedactionReport::images`) | a hole needs a re-encode through a codec this build may not write | [filters](filters.md) |
@@ -682,9 +690,13 @@ if report.untouched.is_empty() {
   covered glyphs with every kept glyph extracted where it was, the gap
   emitted down the column in the vertical thousandth, a `TJ` number keeping
   its axis, the box centred on the pen, and a column turned a quarter turn
-  (`vertical_runs`); `'`, `"` and an existing `TJ`
+  (`vertical_runs`); a Type 3 glyph space in hundredths, skewed, rotated
+  and translated, each cut at the glyph the arithmetic says the rectangle
+  covers with every other pixel of the page rendered as before, a malformed
+  `/FontMatrix` read as the renderer reads it, and a `/FontBBox` that
+  descends or understates (`type3_glyph_space`); `'`, `"` and an existing `TJ`
   adjustment surviving a cut (`showing_operators`); and one test per
-  unmeasurable-run `RedactionWarning` variant (`refusals`) — the fourth
+  unmeasurable-run `RedactionWarning` variant (`refusals`) — the third
   variant, `RepeatedForm`, is about a form rather than a run and its tests
   sit with the other form ones. Their fixtures are a Type 3 font
   whose every glyph fills its em square, so the geometry a test computes by

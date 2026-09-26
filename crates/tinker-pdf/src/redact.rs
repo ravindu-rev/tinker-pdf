@@ -70,11 +70,12 @@
 //! the caller believes the content is gone and distributes the file. So a run
 //! this module cannot *measure* is left whole and named in
 //! [`RedactionReport::warnings`], rather than cut from positions that are
-//! approximately right. Three classes qualify:
+//! approximately right. Two classes qualify, and neither has an exit — a run
+//! with no metrics, or with positions that are not numbers, has nothing to
+//! measure:
 //!
 //! | Class | Why it cannot be measured |
 //! | --- | --- |
-//! | [`RedactionWarning::RescaledType3Font`] | 9.6.5: a Type 3 font's `/Widths` are in *its own* glyph space, which `/FontMatrix` maps to text space. `Font::width_of` hands them back raw and this module divides by 1000, which is right for the 1/1000 default and wrong by exactly the matrix for anything else |
 //! | [`RedactionWarning::UnknownFont`] | no metrics at all: the `Tf` named a font the resource dictionary in scope does not have |
 //! | [`RedactionWarning::UnmeasurableFrame`] | a non-finite entry in the text or transformation matrix, or a position that has run away to infinity |
 //!
@@ -101,6 +102,18 @@
 //! The class had hidden behind the rotation refusal, whose matrix test a
 //! vertical run passes, and was being cut *horizontally* before it was
 //! refused; the variant is gone because nothing raises it.
+//!
+//! # A Type 3 font's own glyph space
+//!
+//! A third class, `RescaledType3Font`, was refused until September 2026 and
+//! is measured now. 9.6.5 puts a Type 3 font's `/Widths` in *its own* glyph
+//! space, which `/FontMatrix` maps to text space; this module divided by
+//! 1000, which is right for the conventional matrix and wrong by exactly the
+//! matrix for any other. [`GlyphSpace`] reads the matrix whole: the advance
+//! is the horizontal component of the width carried through it, and the
+//! glyph box is a glyph-space rectangle carried through all six numbers, so
+//! a skewed or rotated glyph space is cut where its procedures draw rather
+//! than where an upright em would have been.
 //!
 //! # A form drawn twice, and the warning about forms
 //!
@@ -178,6 +191,24 @@
 //!
 //! The three caught by exactly one test are each caught by the test written
 //! for them, which is what a count of one is supposed to mean here.
+//!
+//! The vertical and glyph-space defects were counted on 26 September 2026,
+//! over `cargo test --no-fail-fast -p tinker-pdf --lib` (every redaction
+//! test lives in the lib), 308 and then 315 tests. None reports zero, and
+//! every count of one is the test written for that defect:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a vertical advance read with the horizontal formula, from `/W` | 5 |
+//! | `w1` negated, so the column runs upward | 5 |
+//! | the vertical thousandth carrying `Th` | **1** |
+//! | a vertical box measured rightward from the pen, as a horizontal one is | **1** |
+//! | a Type 3 advance divided by 1000, the old formula | 3 |
+//! | a Type 3 box from the matrix's `a` and `d` alone, upright and untranslated | 3 |
+//! | a Type 3 box without the matrix's translation | **1** |
+//! | `/FontBBox` alone, not joined with the em | **1** |
+//! | `/FontBBox`'s bottom ignored | **1** |
+//! | the font selected inside a `q` surviving its `Q` | **1** |
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -204,7 +235,7 @@ pub struct Redaction {
 /// Something a redaction could not do exactly, named rather than left silent
 /// (ruling 10).
 ///
-/// Three of the four are a **run left whole** because this module could not
+/// Two of the three are a **run left whole** because this module could not
 /// measure it, and each names the resource name of the font in force and how
 /// many bytes of showing operand were left in place, because "a run was
 /// skipped" with neither is a sentence a caller cannot act on — and this is
@@ -213,15 +244,17 @@ pub struct Redaction {
 ///
 /// `bytes` rather than glyphs: a run whose font is unknown cannot be decoded
 /// into glyphs at all, and a count that is a guess for one variant and a
-/// measurement for the other two is a count nobody can compare. Warnings
-/// with the same cause and the same resource are merged, so a page of text
-/// in a font that is not in scope yields one entry per font rather than one
-/// per operator.
+/// measurement for the other is a count nobody can compare. Warnings with the
+/// same cause and the same resource are merged, so a page of text in a font
+/// that is not in scope yields one entry per font rather than one per
+/// operator.
 ///
-/// A fifth, `VerticalRun`, existed until September 2026 and is gone because
-/// vertical runs are measured now (see the module's "Vertical writing").
+/// Two more, `VerticalRun` and `RescaledType3Font`, existed until September
+/// 2026 and are gone because nothing raises them: vertical runs and a Type 3
+/// font's own glyph space are measured now (the module's "Vertical writing"
+/// and "A Type 3 font's own glyph space").
 ///
-/// The fourth, [`RedactionWarning::RepeatedForm`], is the other direction and
+/// The third, [`RedactionWarning::RepeatedForm`], is the other direction and
 /// is the reason this type is no longer only about runs left whole: it says a
 /// cut was made *wider* than the rectangles asked for. Both are leniencies
 /// and both are things a caller must be told, so both live here; use
@@ -240,26 +273,6 @@ pub enum RedactionWarning {
     /// placed. `font` is empty when no `Tf` preceded the showing operator.
     UnknownFont {
         /// The resource name the `Tf` named.
-        font: Vec<u8>,
-        /// How many bytes of showing operand were left in place.
-        bytes: usize,
-    },
-    /// 9.6.5: a Type 3 font whose `/FontMatrix` is not the 1/1000 default.
-    ///
-    /// `Font::width_of` returns `/Widths` as written, in the font's own glyph
-    /// space, and this module turns that into text space by dividing by 1000
-    /// — which is the `/FontMatrix` for every other font kind and for the
-    /// Type 3 fonts that use the conventional one. A font that picks a
-    /// different glyph space has every advance wrong by exactly that matrix,
-    /// so every position after the first glyph is wrong and the rectangle
-    /// cuts the wrong text.
-    ///
-    /// An absent `/FontMatrix` is read as the default rather than as a
-    /// refusal: 9.6.5 requires the entry, so a font without one is malformed,
-    /// and the conventional reading of a malformed one is what every
-    /// consumer does.
-    RescaledType3Font {
-        /// The resource name of the font.
         font: Vec<u8>,
         /// How many bytes of showing operand were left in place.
         bytes: usize,
@@ -319,13 +332,12 @@ impl RedactionWarning {
     pub fn font(&self) -> &[u8] {
         match self {
             RedactionWarning::UnknownFont { font, .. }
-            | RedactionWarning::RescaledType3Font { font, .. }
             | RedactionWarning::UnmeasurableFrame { font, .. } => font,
             RedactionWarning::RepeatedForm { .. } => &[],
         }
     }
 
-    /// The resource name this warning is about — a font for three of the four
+    /// The resource name this warning is about — a font for two of the three
     /// variants, a form XObject for [`RedactionWarning::RepeatedForm`].
     ///
     /// This is what distinguishes two warnings of the same kind, so it is
@@ -347,7 +359,6 @@ impl RedactionWarning {
     pub fn bytes(&self) -> usize {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
-            | RedactionWarning::RescaledType3Font { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => *bytes,
             RedactionWarning::RepeatedForm { .. } => 0,
         }
@@ -371,14 +382,13 @@ impl RedactionWarning {
 
     /// Folds another warning of the same cause into this one.
     ///
-    /// Each variant absorbs its own count — operand bytes for the four run
+    /// Each variant absorbs its own count — operand bytes for the two run
     /// classes, placements for a form — because a single `usize` that means
     /// bytes in one arm and placements in another is a number nobody can
     /// read.
     fn absorb(&mut self, other: &RedactionWarning) {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
-            | RedactionWarning::RescaledType3Font { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => {
                 *bytes = bytes.saturating_add(other.bytes());
             }
@@ -393,7 +403,7 @@ impl RedactionWarning {
 
 /// How many distinct warnings one redaction keeps.
 ///
-/// Four causes times the resources on a page: a document that reaches this cap
+/// Three causes times the resources on a page: a document that reaches this cap
 /// has a resource dictionary a caller is not going to read through anyway, and
 /// the counts of the ones past it are lost rather than the list growing with
 /// the file (ruling 1).
@@ -731,10 +741,111 @@ fn inherited_resources(editor: &DocumentEditor, page: &Dict) -> Dict {
 /// A font in scope, and what this module knows about measuring it.
 struct RunFont {
     font: Arc<Font>,
-    /// 9.6.5: a Type 3 font whose `/FontMatrix` is not the 1/1000 default, so
-    /// its `/Widths` are in a glyph space this module's `width / 1000` does
-    /// not map out of.
-    rescaled_type3: bool,
+    /// 9.6.5: a Type 3 font's glyph space, which its `/FontMatrix` maps into
+    /// text space. `None` for every other kind, whose widths are thousandths
+    /// of text space by definition (9.2.4).
+    glyph_space: Option<GlyphSpace>,
+}
+
+/// A Type 3 font's glyph space (9.6.5): where its `/Widths` are measured and
+/// its glyph procedures draw, and the matrix that carries both into text
+/// space.
+///
+/// Until September 2026 a Type 3 font whose `/FontMatrix` was not the 1/1000
+/// default was refused as `RescaledType3Font`, because this module turned a
+/// width into text space by dividing by 1000 — right for the conventional
+/// matrix and wrong by exactly the matrix for any other. It is read now,
+/// whole:
+///
+/// - **The advance** is the horizontal component of the width carried
+///   through the matrix, `w0 · a`. The PDF reference's note on a Type 3
+///   font's `/Widths` says so ("if `FontMatrix` specifies a rotation, only
+///   the horizontal component of the transformed width is used"), and it is
+///   what this engine's interpreter advances a Type 3 glyph by.
+/// - **The box** is a rectangle in glyph space — `0` to `w0` along the
+///   baseline, [`GlyphSpace::low`] to [`GlyphSpace::high`] across it —
+///   carried through the *whole* matrix, translation included, which is how
+///   the interpreter places a glyph procedure (`font_matrix.then(transform)`).
+///   A skewed matrix slants the glyph and a rotated one turns it about its
+///   origin, and the ink goes where the matrix sends it whichever way the
+///   advance points, so a box built from `a` alone would cut the neighbour of
+///   the glyph a rectangle actually covers.
+#[derive(Clone, Copy)]
+struct GlyphSpace {
+    matrix: Matrix,
+    /// The bottom of the glyph box, in glyph space: `/FontBBox`'s bottom
+    /// when that is below the baseline, and the baseline otherwise.
+    low: f64,
+    /// The top of the glyph box, in glyph space: one em up the glyph space's
+    /// own y axis — the length the matrix carries to one unit of text space,
+    /// `1 / |(c, d)|`, which is 1000 for the conventional matrix — or
+    /// `/FontBBox`'s top when that is higher.
+    ///
+    /// Joined with the em rather than taken from `/FontBBox` alone because a
+    /// bounding box a producer wrote too small would shrink the box under
+    /// the ink, which is the one direction a redaction may not err in; one
+    /// written too large over-removes, which is the direction this module
+    /// errs in everywhere.
+    high: f64,
+}
+
+impl GlyphSpace {
+    /// 9.6.5's conventional glyph space, the one every other font kind has
+    /// implicitly.
+    const DEFAULT_MATRIX: Matrix = Matrix {
+        a: 0.001,
+        b: 0.0,
+        c: 0.0,
+        d: 0.001,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    /// The conventional glyph space with nothing known about the glyphs'
+    /// extent: one em, from the baseline up.
+    const DEFAULT: GlyphSpace = GlyphSpace {
+        matrix: GlyphSpace::DEFAULT_MATRIX,
+        low: 0.0,
+        high: 1000.0,
+    };
+
+    /// Reads one font dictionary's `/FontMatrix` and `/FontBBox`.
+    ///
+    /// A `/FontMatrix` that is absent, or whose first six entries are not all
+    /// numbers, is read as the default. 9.6.5 requires the entry, so either
+    /// is malformed, and the default is how this engine's renderer reads it
+    /// too: its Type 3 path (`PageResources::type3_glyph`) needs six numbers,
+    /// and a font without them is advanced by `w0 / 1000` like any other — so
+    /// reading it that way measures the run where it is drawn.
+    fn read(doc: &CosDocument, font: &Dict) -> GlyphSpace {
+        let first = |key: &[u8], count: usize| -> Option<Vec<f64>> {
+            let value = doc.resolve_key(font, doc.intern(key));
+            let array = value.as_array()?;
+            (0..count)
+                .map(|i| array.get(i).and_then(Object::as_number))
+                .collect()
+        };
+        let matrix = first(b"FontMatrix", 6)
+            .and_then(|v| Matrix::from_operands(&v))
+            .unwrap_or(GlyphSpace::DEFAULT_MATRIX);
+
+        let em = 1.0 / (matrix.c * matrix.c + matrix.d * matrix.d).sqrt();
+        let em = if em.is_finite() && em > 0.0 {
+            em
+        } else {
+            1000.0
+        };
+        // Table 112: four zeros mean "no assumptions are made based on the
+        // font bounding box", which is the same as having none.
+        let across = first(b"FontBBox", 4)
+            .filter(|v| v.iter().all(|x| x.is_finite()) && v.iter().any(|x| *x != 0.0))
+            .and_then(|v| Some((*v.get(1)?, *v.get(3)?)));
+        let (low, high) = match across {
+            Some((y0, y1)) => (y0.min(y1).min(0.0), y0.max(y1).max(em)),
+            None => (0.0, em),
+        };
+        GlyphSpace { matrix, low, high }
+    }
 }
 
 /// The fonts one resource dictionary puts in scope, by the raw name bytes.
@@ -743,31 +854,24 @@ struct RunFont {
 /// rewrite matches against what the `Tf` operator literally says, and it has
 /// no document to intern with.
 fn fonts_in(doc: &CosDocument, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont>> {
-    let default_matrix = type3_matrices(doc, resources);
+    let spaces = glyph_spaces(doc, resources);
     cos_font::from_resources(doc, resources)
         .into_iter()
         .filter_map(|(name, font)| {
             let bytes = doc.name_bytes(name)?.to_vec();
-            let rescaled_type3 = font.kind() == cos_font::FontKind::Type3
-                && !default_matrix.get(&name).copied().unwrap_or(true);
-            Some((
-                bytes,
-                Arc::new(RunFont {
-                    font,
-                    rescaled_type3,
-                }),
-            ))
+            let glyph_space = (font.kind() == cos_font::FontKind::Type3)
+                .then(|| spaces.get(&name).copied().unwrap_or(GlyphSpace::DEFAULT));
+            Some((bytes, Arc::new(RunFont { font, glyph_space })))
         })
         .collect()
 }
 
-/// Whether each font in `/Font` carries the conventional 1/1000 `/FontMatrix`.
+/// The glyph space each font in `/Font` declares (9.6.5).
 ///
-/// Read here rather than through `cos_font::Font`, which does not carry the
-/// entry: this module is the only caller that needs it, and it needs it only
-/// to decide whether to refuse. A font with no `/FontMatrix` at all answers
-/// `true` — see [`RedactionWarning::RescaledType3Font`].
-fn type3_matrices(doc: &CosDocument, resources: &Dict) -> HashMap<Name, bool> {
+/// Read here rather than through `cos_font::Font`, which carries neither
+/// `/FontMatrix` nor `/FontBBox`: this module is the only caller that builds
+/// a glyph box from them. Only a Type 3 font's answer is ever used.
+fn glyph_spaces(doc: &CosDocument, resources: &Dict) -> HashMap<Name, GlyphSpace> {
     let mut out = HashMap::new();
     let value = doc.resolve_key(resources, doc.intern(b"Font"));
     let Some(fonts) = value.as_dict() else {
@@ -779,22 +883,7 @@ fn type3_matrices(doc: &CosDocument, resources: &Dict) -> HashMap<Name, bool> {
         let Some(dict) = resolved.as_dict() else {
             continue;
         };
-        let matrix = doc.resolve_key(dict, doc.intern(b"FontMatrix"));
-        let default = match matrix.as_array() {
-            None => true,
-            Some(array) => {
-                let v = array
-                    .iter()
-                    .filter_map(Object::as_number)
-                    .collect::<Vec<f64>>();
-                let wanted = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
-                v.len() == 6
-                    && v.iter()
-                        .zip(wanted)
-                        .all(|(got, want)| (got - want).abs() < 1e-12)
-            }
-        };
-        out.insert(*key, default);
+        out.insert(*key, GlyphSpace::read(doc, dict));
     }
     out
 }
@@ -1315,11 +1404,20 @@ impl Pen {
     /// and a cut is measured where the renderer draws. It can only matter for
     /// a single-byte code 32, which a vertical CMap — two bytes a code for
     /// `Identity-V` and every predefined one — does not produce.
+    ///
+    /// `w0` is in thousandths of text space for every font but a Type 3 one,
+    /// whose `/Widths` are in its own glyph space: there the width in text
+    /// space is `w0 · a`, the horizontal component of the width carried
+    /// through `/FontMatrix` ([`GlyphSpace`]).
     fn advance(&self, code: &tinker_pdf_cos::DecodedCode) -> f64 {
         if let Some(selected) = self.font.as_ref().filter(|f| f.font.is_vertical()) {
             let (_, _, w1) = selected.font.vertical_metrics(code.cid);
             return w1 / 1000.0 * self.size + self.char_spacing;
         }
+        let width = match self.font.as_ref().and_then(|f| f.glyph_space) {
+            Some(space) => code.width * space.matrix.a,
+            None => code.width / 1000.0,
+        };
         // Word spacing applies to single-byte code 32 only — the classic bug
         // is applying it to a two-byte CID that happens to equal 32.
         let word = if code.code == 32 && code.bytes == 1 {
@@ -1327,7 +1425,7 @@ impl Pen {
         } else {
             0.0
         };
-        (code.width / 1000.0 * self.size + self.char_spacing + word) * self.horizontal_scale
+        (width * self.size + self.char_spacing + word) * self.horizontal_scale
     }
 
     /// The box one glyph occupies, as four corners in unscaled text space,
@@ -1345,7 +1443,30 @@ impl Pen {
     /// so it spans `-v_x` to `w0 - v_x` — centred on the pen for the default
     /// `v_x = w0 / 2`. That is where this engine's interpreter puts a
     /// vertical glyph, and the ideographic em cell a CJK face fills.
+    ///
+    /// Type 3, a rectangle in the font's own glyph space carried through its
+    /// `/FontMatrix` and then scaled as any text-space point is (9.4.4):
+    /// `0` to `w0` along, [`GlyphSpace::low`] to [`GlyphSpace::high`] across.
+    /// Without the character and word spacing the other two boxes take from
+    /// the advance, because the glyph procedure draws the glyph and spacing is
+    /// only where the pen goes next.
     fn glyph_box(&self, code: &tinker_pdf_cos::DecodedCode, along: f64) -> [(f64, f64); 4] {
+        if let Some(space) = self.font.as_ref().and_then(|f| f.glyph_space) {
+            let w0 = code.width;
+            return [
+                (0.0, space.low),
+                (w0, space.low),
+                (w0, space.high),
+                (0.0, space.high),
+            ]
+            .map(|(x, y)| {
+                let (x, y) = space.matrix.apply(x, y);
+                (
+                    along + x * self.size * self.horizontal_scale,
+                    self.rise + y * self.size,
+                )
+            });
+        }
         let advance = self.advance(code);
         if let Some(selected) = self.font.as_ref().filter(|f| f.font.is_vertical()) {
             let (v_x, _, _) = selected.font.vertical_metrics(code.cid);
@@ -1715,13 +1836,6 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
             bytes: left,
         }));
     };
-    if selected.rescaled_type3 {
-        return whole(Some(RedactionWarning::RescaledType3Font {
-            font: font(),
-            bytes: left,
-        }));
-    }
-
     let frame = pen.frame();
     if !frame.is_finite()
         || !pen.along.is_finite()
@@ -3416,11 +3530,16 @@ mod rotated_runs {
     /// faces differ, which is the "approximately right" cut this whole module
     /// refuses.
     ///
-    /// Inside the pair the font is a Type 3 face with a non-default
-    /// `/FontMatrix`, which redaction refuses to measure. The run after the
-    /// `Q` names no font of its own — the `Tf` before the `q` is the one that
-    /// still applies — so a selection that leaked past the `Q` would refuse
-    /// the outer run too and cut nothing.
+    /// Inside the pair the font is a Type 3 face whose glyph space is ten
+    /// times the conventional one, so each of its glyphs is ten ems wide. The
+    /// run after the `Q` names no font of its own — the `Tf` before the `q`
+    /// is the one that still applies — so a selection that leaked past the
+    /// `Q` would measure the outer run a hundred points a glyph, and the band
+    /// over `SECRET` would take `P` and `U` instead.
+    ///
+    /// Until September 2026 the inner face was one redaction refused to
+    /// measure, and the leak showed as a refusal in the report; it shows in
+    /// the geometry now, which is where the cut is.
     #[test]
     fn a_font_selected_inside_a_q_does_not_outlive_it() {
         let doc = open(two_font_document(
@@ -3429,15 +3548,17 @@ mod rotated_runs {
              BT 0 1 -1 0 100 20 Tm (PUBLICSECRET) Tj ET",
         ));
 
-        let (_, report) = redact(doc, &[upper_band()]);
+        let (bytes, report) = redact(doc, &[upper_band()]);
         assert_eq!(report.glyphs, 6, "the outer run was measured and cut");
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::RescaledType3Font {
-                font: b"F1".to_vec(),
-                bytes: 6,
-            }],
-            "and only the inner run was refused"
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "the six it cut were SECRET's: {streams}"
+        );
+        assert!(
+            streams.contains("INSIDE"),
+            "and the inner run, whose ten-em glyphs start above the band, is whole"
         );
     }
 }
@@ -3465,48 +3586,6 @@ mod refusals {
             },
             mark: false,
         }
-    }
-
-    /// 9.6.5: a Type 3 font's `/Widths` are in its own glyph space.
-    ///
-    /// `/FontMatrix [0.01 0 0 0.01 0 0]` makes every advance ten times what
-    /// this module's `width / 1000` computes, so the third glyph is already a
-    /// full em from where the rectangle thinks it is.
-    #[test]
-    fn a_rescaled_type3_font_is_left_uncut_and_reported() {
-        let doc = open(boxed_glyph_document(
-            200.0,
-            200.0,
-            "[0.01 0 0 0.01 0 0]",
-            "BT /F0 10 Tf 10 100 Td (SECRET) Tj ET",
-        ));
-        assert!(all_streams(&doc).contains("SECRET"));
-
-        let (bytes, report) = redact(doc, &[everywhere()]);
-        assert_eq!(report.glyphs, 0, "nothing was cut");
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::RescaledType3Font {
-                font: b"F0".to_vec(),
-                bytes: 6,
-            }]
-        );
-        assert!(all_streams(&CosDocument::open(bytes).expect("it reopens")).contains("SECRET"));
-    }
-
-    /// The same font with the conventional matrix is measured and cut, which
-    /// is what says the refusal is about the matrix and not about Type 3.
-    #[test]
-    fn a_type3_font_with_the_conventional_matrix_is_cut() {
-        let doc = open(boxed_glyph_document(
-            200.0,
-            200.0,
-            DEFAULT_FONT_MATRIX,
-            "BT /F0 10 Tf 10 100 Td (SECRET) Tj ET",
-        ));
-        let (_, report) = redact(doc, &[everywhere()]);
-        assert_eq!(report.glyphs, 6);
-        assert!(report.warnings.is_empty());
     }
 
     /// A `Tf` naming a font the resource dictionary does not have leaves the
@@ -3823,6 +3902,317 @@ mod vertical_runs {
     }
 }
 
+/// A Type 3 font's own glyph space (9.6.5), which this module refused to
+/// measure until September 2026 whenever its `/FontMatrix` was not the
+/// 1/1000 default.
+///
+/// # What is adjudicated by what
+///
+/// Each fixture's glyph procedure fills a known rectangle of glyph space, so
+/// where every glyph's ink lands is arithmetic from 9.4.4 and the font matrix,
+/// done by hand in each test's comment. The render is this engine's own and
+/// is compared **with itself**: the property is that the redacted page draws
+/// nothing inside the rectangle, draws every pixel outside the removed
+/// glyphs' own boxes exactly as it did before the cut, and that the codes
+/// removed are the ones the arithmetic says were covered. A box built from
+/// the matrix's `a` alone — the plausible half-fix — cuts the neighbour of
+/// the covered glyph in the skewed and rotated fixtures, and each of those
+/// says which neighbour.
+#[cfg(test)]
+mod type3_glyph_space {
+    use super::tests_support::*;
+    use super::*;
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    fn band(area: Rect) -> Redaction {
+        Redaction { area, mark: false }
+    }
+
+    /// A glyph space in hundredths: `/FontMatrix [0.01 0 0 0.01 0 0]`, each
+    /// glyph 100 units wide and filling `0 0 100 100` — one em square.
+    ///
+    /// At `10 Tf` from `10 100 Td`, glyph `k` of `PUBLICSECRET` is page
+    /// x `10 + 10k` .. `20 + 10k`, y 100..110; `SECRET` is x 70..130. The
+    /// band (x 72..125) reaches into `S` and `T` and covers the four between.
+    /// `width / 1000` would put all twelve glyphs in x 10..22 and cut none.
+    #[test]
+    fn a_glyph_space_in_hundredths_is_cut_exactly_at_the_covered_glyphs() {
+        let bytes = type3_document(
+            200.0,
+            "[0.01 0 0 0.01 0 0]",
+            "/FontBBox [0 0 100 100]",
+            100,
+            "100 0 d0 0 0 100 100 re f",
+            "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let over = area(72.0, 95.0, 125.0, 115.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 200.0, over) > 0, "the band starts inked");
+
+        let (after_bytes, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6, "S, E, C, R, E and T");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+
+        let after = render(after_bytes);
+        assert_eq!(ink_in(&after, 200.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &after, 200.0, area(70.0, 100.0, 130.0, 110.0)),
+            0,
+            "PUBLIC renders exactly as it did"
+        );
+    }
+
+    /// A skewed glyph space: `/FontMatrix [0.001 0 0.0005 0.001 0 0]` slants
+    /// each glyph half an em to the right over its height.
+    ///
+    /// At `20 Tf` from `10 100 Td` glyph `k`'s pen is at x `10 + 20k` and
+    /// its ink is the parallelogram whose bottom edge is pen..pen+20 at
+    /// y 100 and whose top edge is pen+10..pen+30 at y 120. `S` (k = 6, pen
+    /// 130) spans x 137.5..157.5 at y 115 and 139.5..159.5 at y 119; the
+    /// band x 151..157, y 115..119 is inside it. `E` (pen 150) starts at
+    /// x 157.5 at y 115, past the band. An upright box from `a` alone puts
+    /// `S` at x 130..150 and `E` at 150..170 — and cuts `E`.
+    #[test]
+    fn a_skewed_glyph_space_is_cut_at_the_glyph_its_slant_carries_under_the_band() {
+        let bytes = type3_document(
+            300.0,
+            "[0.001 0 0.0005 0.001 0 0]",
+            "/FontBBox [0 0 1500 1000]",
+            1000,
+            "1000 0 d0 0 0 1000 1000 re f",
+            "BT /F0 20 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let over = area(151.0, 115.0, 157.0, 119.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 200.0, over) > 0, "the band starts inked");
+
+        let (after_bytes, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "S alone");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && streams.contains("ECRET") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+
+        let after = render(after_bytes);
+        assert_eq!(ink_in(&after, 200.0, over), 0, "no ink under the band");
+        assert!(
+            ink_in(&after, 200.0, area(159.0, 115.0, 162.0, 119.0)) > 0,
+            "E, the glyph an upright box would have cut, is still drawn beside it"
+        );
+        assert_eq!(
+            differing_outside(&before, &after, 200.0, area(130.0, 100.0, 160.0, 120.0)),
+            0,
+            "every other glyph renders exactly as it did"
+        );
+    }
+
+    /// A rotated glyph space: `/FontMatrix [0.0008 0.0006 -0.0006 0.0008 0 0]`
+    /// turns each glyph about 36.87° about its origin, at the conventional
+    /// scale.
+    ///
+    /// Table 112's advance is the horizontal component of the transformed
+    /// width, `1000 · 0.0008`: sixteen points at `20 Tf`, so glyph `k`'s pen
+    /// is at x `30 + 16k`. Its ink is the square with corners pen + (0, 0),
+    /// (16, 12), (4, 28) and (−12, 16) at baseline y 100. The band
+    /// x 127..133, y 122..126 sits under `S`'s top corner (k = 6, pen 126,
+    /// the corner at 130, 128): `S` spans x 122..134.5 at y 122, `E` (pen
+    /// 142) starts at x 138 there and `C` (pen 110) ends at 118.5. An upright
+    /// box from `a` alone reaches y 120 and cuts nothing at all.
+    #[test]
+    fn a_rotated_glyph_space_is_cut_where_its_glyphs_are_turned_to() {
+        let bytes = type3_document(
+            300.0,
+            "[0.0008 0.0006 -0.0006 0.0008 0 0]",
+            "/FontBBox [0 0 1000 1000]",
+            1000,
+            "1000 0 d0 0 0 1000 1000 re f",
+            "BT /F0 20 Tf 30 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let over = area(127.0, 122.0, 133.0, 126.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 200.0, over) > 0, "the band starts inked");
+
+        let (after_bytes, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "S alone");
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && streams.contains("ECRET") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+
+        let after = render(after_bytes);
+        assert_eq!(ink_in(&after, 200.0, over), 0, "no ink under the band");
+        // S's own bounding box: x 114..142, y 100..128.
+        assert_eq!(
+            differing_outside(&before, &after, 200.0, area(114.0, 100.0, 142.0, 128.0)),
+            0,
+            "every other glyph renders exactly as it did"
+        );
+    }
+
+    /// A glyph space with a translation: `/FontMatrix [0.001 0 0 0.001 0.5 0]`
+    /// draws every glyph half an em to the right of its pen, and advances it
+    /// by the width alone — a width is a displacement, which a translation
+    /// does not move.
+    ///
+    /// At `10 Tf` glyph `k`'s pen is x `10 + 10k` and its ink x `15 + 10k` ..
+    /// `25 + 10k`. The band x 81..84 is inside `S`'s ink (75..85); a box that
+    /// dropped the translation puts `S` at 70..80 and `E` at 80..90, and cuts
+    /// `E`.
+    #[test]
+    fn a_translated_glyph_space_is_cut_where_it_is_drawn() {
+        let bytes = type3_document(
+            200.0,
+            "[0.001 0 0 0.001 0.5 0]",
+            "/FontBBox [0 0 1000 1000]",
+            1000,
+            "1000 0 d0 0 0 1000 1000 re f",
+            "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let over = area(81.0, 101.0, 84.0, 109.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 200.0, over) > 0, "the band starts inked");
+
+        let (after_bytes, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "S alone");
+        let after = render(after_bytes);
+        assert_eq!(ink_in(&after, 200.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &after, 200.0, area(75.0, 100.0, 85.0, 110.0)),
+            0,
+            "E, the glyph a box without the translation would have cut, and \
+             every other glyph render exactly as they did"
+        );
+    }
+
+    /// **The pin, flipped.** The fixture the refusal was written against —
+    /// `/FontMatrix [0.01 0 0 0.01 0 0]` over thousand-unit widths, so each
+    /// glyph is ten ems wide — is measured and cut, and nothing is reported.
+    ///
+    /// At `10 Tf` from x 10 the glyphs of `SECRET` are a hundred points each:
+    /// `S` x 10..110 and `E` x 110..210 meet a rectangle over the whole
+    /// 200-point page, and the four after them are past its edge.
+    #[test]
+    fn a_rescaled_type3_font_is_measured_rather_than_refused() {
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            "[0.01 0 0 0.01 0 0]",
+            "BT /F0 10 Tf 10 100 Td (SECRET) Tj ET",
+        ));
+        let (bytes, report) = redact(doc, &[band(area(0.0, 0.0, 200.0, 200.0))]);
+        assert_eq!(report.glyphs, 2, "the two on the page");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(
+            streams.contains("CRET") && !streams.contains("SE"),
+            "{streams}"
+        );
+    }
+
+    /// The conventional matrix is the same arithmetic as before any of this:
+    /// every glyph one em, cut where the rectangle is.
+    #[test]
+    fn a_type3_font_with_the_conventional_matrix_is_cut() {
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "BT /F0 10 Tf 10 100 Td (SECRET) Tj ET",
+        ));
+        let (_, report) = redact(doc, &[band(area(0.0, 0.0, 200.0, 200.0))]);
+        assert_eq!(report.glyphs, 6);
+        assert!(report.warnings.is_empty());
+    }
+
+    /// A `/FontMatrix` this engine cannot read — here three numbers — is read
+    /// as the default, which is where the renderer places the run too: its
+    /// Type 3 path needs six numbers, and without them it advances each code
+    /// by `w0 / 1000` like any other font.
+    ///
+    /// Read that way `SECRET` is x 70..130 at `10 Tf`, and the band over it
+    /// takes exactly those six.
+    #[test]
+    fn a_font_matrix_that_cannot_be_read_is_measured_as_the_default() {
+        for matrix in ["[0.01 0 0]", "(not an array)"] {
+            let doc = open(boxed_glyph_document(
+                200.0,
+                200.0,
+                matrix,
+                "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+            ));
+            let (bytes, report) = redact(doc, &[band(area(72.0, 95.0, 125.0, 115.0))]);
+            assert_eq!(report.glyphs, 6, "{matrix}");
+            let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+            assert!(
+                streams.contains("PUBLIC") && !streams.contains("SECRET"),
+                "{matrix}"
+            );
+        }
+    }
+
+    /// A `/FontBBox` that reaches below the baseline carries the box down
+    /// with it: these glyphs are drawn from half an em below the baseline to
+    /// one em above it, and a band under the baseline alone covers their
+    /// descenders.
+    ///
+    /// `S` is x 70..80 at `10 Tf`; its descender is y 95..100. The band
+    /// x 72..78, y 96..99 is inside that and nowhere else. An em box from the
+    /// baseline up misses it and leaves the ink.
+    #[test]
+    fn a_bounding_box_below_the_baseline_carries_the_glyph_box_down() {
+        let bytes = type3_document(
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "/FontBBox [0 -500 1000 1000]",
+            1000,
+            "1000 0 d0 0 -500 1000 1500 re f",
+            "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let under = area(72.0, 96.0, 78.0, 99.0);
+        assert!(ink_in(&render(bytes.clone()), 200.0, under) > 0);
+
+        let (after, report) = redact(open(bytes), &[band(under)]);
+        assert_eq!(report.glyphs, 1, "S, by its descender");
+        assert_eq!(ink_in(&render(after), 200.0, under), 0);
+    }
+
+    /// A `/FontBBox` written too small does not shrink the box under the
+    /// ink: the box is joined with one em, because a bounding box that
+    /// understates the glyphs would leave exactly the ink a rectangle
+    /// covered.
+    ///
+    /// These glyphs fill the whole em square and the font claims a tenth of
+    /// it. The band x 72..78, y 105..109 is over the top half of `S`.
+    #[test]
+    fn a_bounding_box_written_too_small_does_not_shrink_the_glyph_box() {
+        let bytes = type3_document(
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "/FontBBox [0 0 1000 100]",
+            1000,
+            "1000 0 d0 0 0 1000 1000 re f",
+            "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let top = area(72.0, 105.0, 78.0, 109.0);
+        assert!(ink_in(&render(bytes.clone()), 200.0, top) > 0);
+
+        let (after, report) = redact(open(bytes), &[band(top)]);
+        assert_eq!(report.glyphs, 1, "S");
+        assert_eq!(ink_in(&render(after), 200.0, top), 0);
+    }
+}
+
 /// A cut run is re-emitted as `TJ`, and what the original operator did
 /// *besides* showing has to survive that.
 ///
@@ -4124,6 +4514,77 @@ mod tests_support {
         )
     }
 
+    /// How many pixels differ between two renders of one page, counting only
+    /// those whose centre lies **outside** a page-space rectangle.
+    ///
+    /// What says a cut was exact: everything a redaction did not remove
+    /// renders as it did before, bit for bit, so every pixel outside the
+    /// removed glyphs' own boxes is unchanged.
+    pub fn differing_outside(
+        before: &crate::Bitmap,
+        after: &crate::Bitmap,
+        page_height: f64,
+        area: Rect,
+    ) -> usize {
+        assert_eq!(
+            (before.width, before.height),
+            (after.width, after.height),
+            "the same page"
+        );
+        let mut differ = 0;
+        for y in 0..before.height {
+            let py = page_height - (f64::from(y) + 0.5);
+            for x in 0..before.width {
+                let px = f64::from(x) + 0.5;
+                if (area.x0..=area.x1).contains(&px) && (area.y0..=area.y1).contains(&py) {
+                    continue;
+                }
+                let at = (y as usize) * before.stride + (x as usize) * before.components();
+                if before.data.get(at) != after.data.get(at) {
+                    differ += 1;
+                }
+            }
+        }
+        differ
+    }
+
+    /// A one-page document, `width` by 200 points, whose one font `/F0` is a
+    /// Type 3 face in the glyph space `font_matrix` declares.
+    ///
+    /// Codes 65..=90 are each `em` wide in that glyph space and drawn by
+    /// `procedure` (object 5); `font_bbox` is written as given, so a test can
+    /// make it honest, too small or absent.
+    pub fn type3_document(
+        width: f64,
+        font_matrix: &str,
+        font_bbox: &str,
+        em: u32,
+        procedure: &str,
+        content: &str,
+    ) -> Vec<u8> {
+        let widths = vec![em.to_string(); 26].join(" ");
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(&format!(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 7 0 R >>\nendobj\n"
+        ));
+        out.push_str(&format!(
+            "4 0 obj\n<< /Type /Font /Subtype /Type3 {font_bbox}\n\
+             /FontMatrix {font_matrix}\n\
+             /CharProcs << /g 5 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences [65 {}] >>\n\
+             /FirstChar 65 /LastChar 90 /Widths [{widths}]\n\
+             /Resources << >> >>\nendobj\n",
+            ["/g"; 26].join(" ")
+        ));
+        out.push_str(&stream_object(5, procedure));
+        out.push_str(&stream_object(7, content));
+        out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
     /// A one-page document with one Type 3 font whose every glyph fills its em
     /// square, and `content` as the page's content stream.
     pub fn boxed_glyph_document(
@@ -4154,9 +4615,10 @@ mod tests_support {
         out.into_bytes()
     }
 
-    /// The same page with a second font, `/F1`, whose `/FontMatrix` redaction
-    /// refuses to measure — so which font is in force is visible in the
-    /// report rather than only in the geometry.
+    /// The same page with a second font, `/F1`, whose glyph space is ten
+    /// times the conventional one (`/FontMatrix [0.01 0 0 0.01 0 0]` over the
+    /// same thousand-unit widths and procedure), so each of its glyphs is ten
+    /// ems wide and which font is in force shows in where a cut lands.
     pub fn two_font_document(content: &str) -> Vec<u8> {
         let (differences, widths) = every_letter();
         let font = |number: u32, matrix: &str| {
