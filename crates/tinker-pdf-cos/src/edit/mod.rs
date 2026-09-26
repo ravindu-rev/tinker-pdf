@@ -30,6 +30,7 @@ mod forms;
 mod metadata;
 mod overlay;
 mod page_ops;
+mod sanitise;
 mod save;
 mod signing;
 #[cfg(test)]
@@ -42,6 +43,9 @@ pub use forms::{FillError, FillRejection, SkippedWidget, WidgetDefect};
 
 pub use docops::{AttachError, EmbeddedFile, PageLabelError, PageLabelRange};
 pub use metadata::MetadataSync;
+pub use sanitise::{
+    DeletedObject, EntryHolder, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport,
+};
 
 /// A copy of `dict` with one key gone.
 ///

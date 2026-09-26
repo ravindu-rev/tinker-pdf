@@ -148,6 +148,48 @@ rewrite writes an unreferenced object unless it is garbage-collected and an old
 outline's titles are content. What a node *points at* (a file specification, a
 label dictionary) is left, since the replacement may point at it too.
 
+**Sanitising.** `sanitise(&Sanitise) -> SanitiseReport` takes out what the
+four switches name: `javascript` (every JavaScript action — `/S
+/JavaScript`, a `javascript:` URI, a `/Rendition` carrying `/JS` — plus
+`/Names /JavaScript` and `/AcroForm`'s `/CO` and `/XFA`), `actions` (the
+ones that leave the document, send its data or play media: `/Launch`,
+`/URI`, `/SubmitForm`, `/ImportData`, `/GoToR`, `/GoToE`, `/Sound`,
+`/Movie`, `/Rendition`, `/RichMediaExecute`; navigation inside it stays),
+`embedded_files` (`/Names /EmbeddedFiles` and every file specification's
+`/EF` and `/RF`) and `metadata` (`/Info` and every `/Metadata` stream).
+`Sanitise::ALL` is the four.
+
+It is **a sweep over every object the editor has**, not the form's script
+walkers: `script_summary` and its walkers read the field tree's `/AA`, the
+catalog's and `/Names /JavaScript`, and never a page's `/AA`, an
+annotation's `/AA` or `/A`, an outline item's `/A` or an action's `/Next` —
+each of which a viewer runs. The walkers are how the tests prove the sweep
+left nothing *they* can see; the fixture carries the places they cannot see
+as well and asserts those by hand. An action is a dictionary whose `/S` is a
+Table 198 type, whose `/Type` if any is `/Action`, and which has neither `/P`
+nor `/K` — the keys every structure element has — and a value that is one,
+in place or by reference, is removed wherever it sits. Arrays lose elements in
+two places only, an action's `/Next` and a page's `/Annots`: a name tree's
+`/Names` is positional, and taking an element out elsewhere could shift every
+key onto the wrong value. A `/Link` whose `/A` goes and which has no `/Dest`
+goes with it, out of `/Annots` — a link to nowhere is a hot spot the strict
+validator refuses (12.5.6.5) — while a widget whose `/A` goes stays, because
+it is a field first.
+
+**What is deleted is decided on the document as it will be.** An entry
+removed is a reference removed; an object only removed entries reached is
+deleted, and one anything else still reaches is not — so a script and its
+`/JS` stream go, the page a removed action's `/Next` pointed at stays, and no
+reference is left dangling. An orphan the file carries — a script object
+nothing names, an embedded file stream, a metadata stream — is found by what
+it is and goes too. The report accounts for every change:
+`SanitiseReport::removed` names each entry taken out of an object that stays
+(its `EntryHolder` — an object or the trailer — and the `PathStep`s to it)
+and `deleted` each object deleted, both with a `Removal` saying why, and an
+object in neither is exactly as it was. As with redaction, **save with
+`WriteMode::Rewrite` for the removal to be real**: an incremental update
+appends and the original objects are still in the prefix.
+
 **Transactions.** `transaction(|tx| ...)` snapshots all five mutable fields
 and restores them if the closure returns `Err`. It is a closure rather than
 a begin/commit/rollback triple because the failure it prevents is silent —
@@ -329,11 +371,13 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `set_title()`, `set_author()`, `set_subject()`, `set_keywords()`,
 `set_creator()`, `set_producer()`, `set_creation_date()`,
 `set_modification_date()`, `set_trapped()`, `set_xmp_metadata()`,
-`set_viewer_preferences()`, the [forms](forms.md) methods, and
+`set_viewer_preferences()`, `sanitise()`, the [forms](forms.md) methods, and
 `save(&WriteOptions) -> Vec<u8>`. The document operations' types are on the
 facade beside it: `PageLabelRange`, `PageLabelError`, `LabelStyle`,
 `EmbeddedFile`, `AttachError`, `MetadataSync`, `ViewerPreferences` and its
-enums, `PageBoundary`, `TreeWriteError`. `redact::{Redaction, RedactionReport, RedactionWarning, apply}`
+enums, `PageBoundary`, `TreeWriteError`, and for sanitising `Sanitise`,
+`SanitiseReport`, `RemovedEntry`, `DeletedObject`, `EntryHolder`, `PathStep`
+and `Removal`. `redact::{Redaction, RedactionReport, RedactionWarning, apply}`
 live in the facade
 (`apply` returns `Option<RedactionReport>`, `None` for a page that does not
 exist; the report counts `operations`, `glyphs` and `images`, and carries
@@ -419,6 +463,11 @@ if report.untouched.is_empty() {
 | A second attachment under a name already filed | `AttachError::NameTaken`, nothing written | two entries under one key is a tree a reader resolves by whichever it reaches first | 7.9.6 |
 | A MIME type that cannot be a name, or a date 7.9.4 cannot spell | `AttachError::MimeType`, `AttachError::Date`; `set_creation_date` returns `None` | a `/Subtype` with a space in it is not a MIME type, and a year of five digits is not a PDF date | 7.9.4 |
 | A viewer preference page range from page 0 or backwards, or zero copies | `set_viewer_preferences` returns false (`ViewerPreferences::is_writable`) | Table 147 numbers pages from 1; which of two numbers the caller meant is theirs to say | 12.2 |
+| Sanitising the bytes an incremental save keeps | nothing is refused; the original objects stay in the prefix, as redaction's do | 7.5.6: an update appends. The report says what left the *document*; only a rewrite makes that what left the *file* | [writing](writing.md) |
+| A link left with neither `/A` nor `/Dest` after sanitising | the link leaves its page's `/Annots` with its action, for its action's reason (`actions_alone_leave_the_scripts`) | 12.5.6.5: a link exists to be followed, and the strict validator refuses one that goes nowhere | 12.5.6.5 |
+| Removing an element from an array other than `/Next` or `/Annots` | never done; an action found there stays | a name tree's `/Names` is positional pairs, and one element out would shift every key onto the wrong value | 7.9.6 |
+| Removing an action's `/Next` successors that are not themselves removed | they go with the action when nothing else reaches them | the chain is part of the action (12.6.2); what else still reaches stays | 12.6.2 |
+| Reading an XFA form's scripts to decide what to keep | `/XFA` is removed whole under `javascript` (`Removal::XfaForm`) | XFA is a named non-goal and its packets carry `<script>` elements this engine does not parse | [forms](forms.md) |
 | Paying for the walk on a save that changed one annotation | `FontPolicy::Keep` on `write::save`, or `DocumentEditor::save`, which is unchanged | the pass is whole-document and order-dependent and costs a full interpretation of every page. The default is still `Subset`, because forgetting costs a disclosure and paying costs time | [writing](writing.md) |
 
 ## Verified
@@ -451,6 +500,25 @@ if report.untouched.is_empty() {
   taken over the wrong bytes 1, a label style's case 2, a closed entry's
   `/Count` sign 3, the page-0 rule 1, an `/Info` write that never reports the
   packet 1, `/Trapped` 1, a taken attachment name 1.
+- `crates/tinker-pdf-cos/tests/sanitise.rs` — one hand-written fixture with
+  every kind in every place a viewer looks (listed in the file's header) and
+  what must survive beside them. After `Sanitise::ALL`, saved both ways:
+  `script_summary` is empty, no attachment, packet or `/Info` is left, the
+  page and annotation `/AA` the walkers miss are asserted by hand, the named
+  destinations, the `/GoTo` in the same `/AA` and the viewer preferences
+  stay, the strict validator passes, and a rewrite's bytes hold none of the
+  scripts, file contents, metadata or URLs. The report is checked against
+  the object sets themselves: every object that differs is a holder or
+  deleted, every reported path was there before and is gone after, and an
+  object named nowhere is unchanged. Each switch is run alone against the
+  same fixture, and a second pass finds nothing. Seventeen defects put back:
+  `/S /JavaScript` not recognised 3, a rendition's `/JS` 1, a padded
+  `javascript:` URI 1, the `/P`/`/K` exclusion 1, `/Next` not swept 2, a
+  targetless link kept 4, `/CO` kept 3, `/Names /JavaScript` kept 3,
+  `/Metadata` kept 3, `/EF` kept 2, nothing deleted 5, deletion ignoring what
+  still reaches 3, a cleaned stream losing its data 1, the trailer's `/Info`
+  kept 3, a null trailer entry written rather than dropped 2, orphans not
+  found 2, one removal per object left unreported 5.
 - Redaction tests live beside `crates/tinker-pdf/src/redact.rs`: multi-page
   fixtures (a two-page file once redacted page 0's image and left page 1's
   secret), text inside form XObjects, a self-referential form that

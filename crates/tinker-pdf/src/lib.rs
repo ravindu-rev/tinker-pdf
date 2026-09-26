@@ -186,7 +186,8 @@ pub use tinker_pdf_cos::{
     PageBuilder, SkippedWidget, SubsetRefusal, Target, WidgetDefect, WriteMode, WriteOptions,
 };
 /// Document operations on [`DocumentEditor`]: page labels, embedded files,
-/// `/Info` and XMP, viewer preferences and the production page boundaries.
+/// `/Info` and XMP, viewer preferences, the production page boundaries, and
+/// sanitising.
 ///
 /// Each is the argument or the answer of an editor method, so each is here for
 /// the reason `ExtGState` is above (ruling 11): a method whose argument cannot
@@ -196,10 +197,14 @@ pub use tinker_pdf_cos::{
 /// [`ViewerPreferences`] and [`PageBoundary`] are the reading side's types too
 /// — [`Document::viewer_preferences`] and [`Page::trim_box`] hand back the
 /// same values the editor takes, so a write followed by a read is an equality.
+/// [`SanitiseReport`] is what [`DocumentEditor::sanitise`] answers with, and
+/// every type its entries are built from comes with it, because a report whose
+/// fields cannot be named cannot be read.
 pub use tinker_pdf_cos::{
-    AttachError, Duplex, EmbeddedFile, EnforcedPreference, LabelStyle, MetadataSync,
-    NonFullScreenPageMode, PageBoundary, PageLabelError, PageLabelRange, PrintScaling,
-    ReadingDirection, TreeWriteError, ViewerPreferences,
+    AttachError, DeletedObject, Duplex, EmbeddedFile, EnforcedPreference, EntryHolder, LabelStyle,
+    MetadataSync, NonFullScreenPageMode, PageBoundary, PageLabelError, PageLabelRange, PathStep,
+    PrintScaling, ReadingDirection, Removal, RemovedEntry, Sanitise, SanitiseReport,
+    TreeWriteError, ViewerPreferences,
 };
 /// Form calculations: running the `/AA` calculate actions a form carries.
 ///

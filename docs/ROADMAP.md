@@ -636,7 +636,6 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 | Watermark and stamp on existing pages | `append_content` is the primitive; nothing registers a resource on an existing page | `DocumentEditor::add_resource` and `stamp(page, form)` | M |
 | Image recompression and downsampling on rewrite | never, by contract | an opt-in `WriteOptions::images` once the encoders above exist; original bytes untouched by default | M |
 | Stream deduplication | declined until content hashing exists | SHA-256 over decoded bytes plus dictionary equality — identical means identical, since a wrong merge silently swaps two fonts | S |
-| Sanitise: strip JavaScript, actions, embedded files, metadata | scripts are reported, nothing is stripped | `DocumentEditor::sanitise(Sanitise)` with a typed report of what left | S |
 | Encryption on save below R6 — R4 with AES-128, RC4 — for readers that stop at 1.6 | R6 only | decision: the readers that need it are the whole reason | decision |
 
 ### Annotations and forms

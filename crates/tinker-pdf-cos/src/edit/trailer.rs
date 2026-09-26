@@ -29,10 +29,18 @@ const WRITER_OWNED: [&[u8]; 11] = [
 impl DocumentEditor {
     /// The trailer as a save will write it: the document's (merged across its
     /// revisions), with every entry this editor has set laid over it.
+    ///
+    /// An entry set to null is left out: 7.3.9 makes a null value the entry
+    /// being absent, and writing `/Info null` would leave a reader to know
+    /// that — this is how [`DocumentEditor::sanitise`] takes `/Info` out.
     pub(crate) fn merged_trailer(&self) -> Dict {
         let mut trailer = self.doc.trailer().clone();
         for (key, value) in self.trailer.iter() {
-            trailer.insert(*key, value.clone());
+            if matches!(value, Object::Null) {
+                trailer = super::without(&trailer, *key);
+            } else {
+                trailer.insert(*key, value.clone());
+            }
         }
         trailer
     }

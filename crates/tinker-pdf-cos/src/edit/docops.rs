@@ -197,7 +197,7 @@ fn byte_file_name(name: &str) -> Vec<u8> {
 impl DocumentEditor {
     /// The catalog's `/Names` dictionary (7.7.4) as this editor has it, and
     /// the object it lives in when it is indirect.
-    fn names_dictionary(&self) -> (Dict, Option<ObjRef>) {
+    pub(super) fn names_dictionary(&self) -> (Dict, Option<ObjRef>) {
         let key = self.intern(b"Names");
         match self.catalog().and_then(|c| c.get(key).cloned()) {
             Some(Object::Ref(r)) => match self.get(r) {

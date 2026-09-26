@@ -111,7 +111,10 @@ pub use edit::{
 };
 // Document operations on the editor: page labels, embedded files and
 // metadata, each read back by the readers in `outline`.
-pub use edit::{AttachError, EmbeddedFile, MetadataSync, PageLabelError, PageLabelRange};
+pub use edit::{
+    AttachError, DeletedObject, EmbeddedFile, EntryHolder, MetadataSync, PageLabelError,
+    PageLabelRange, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport,
+};
 pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
 pub use form::{

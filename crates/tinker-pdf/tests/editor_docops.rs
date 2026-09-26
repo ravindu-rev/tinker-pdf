@@ -17,10 +17,11 @@
 //! written after.
 
 use tinker_pdf::{
-    AttachError, Date, DestKind, Destination, Document, DocumentBuilder, DocumentEditor, Duplex,
-    EmbeddedFile, EnforcedPreference, LabelStyle, MetadataSync, NonFullScreenPageMode,
-    OutlineEntry, PageBoundary, PageLabelError, PageLabelRange, PrintScaling, ReadingDirection,
-    Target, Trapped, ViewerPreferences, WriteMode, WriteOptions,
+    AttachError, Date, DeletedObject, DestKind, Destination, Document, DocumentBuilder,
+    DocumentEditor, Duplex, EmbeddedFile, EnforcedPreference, EntryHolder, LabelStyle,
+    MetadataSync, NonFullScreenPageMode, OutlineEntry, PageBoundary, PageLabelError,
+    PageLabelRange, PathStep, PrintScaling, ReadingDirection, Removal, RemovedEntry, Sanitise,
+    SanitiseReport, Target, Trapped, ViewerPreferences, WriteMode, WriteOptions,
 };
 
 /// Three pages of text, a title, and nothing else the tests below write.
@@ -664,5 +665,50 @@ fn every_setter_on_one_editor_composes() {
             (1.0, 1.0, 199.0, 299.0)
         );
         assert_eq!(reopened.page_count(), 3);
+    }
+}
+
+// ---- sanitising what the editor wrote -----------------------------------------
+
+/// `sanitise` through the facade, over what the setters above wrote: the
+/// attachment, the packet and `/Info` leave, the outline's web link leaves
+/// its item, and the report's every type is nameable from here.
+#[test]
+fn sanitising_takes_back_out_what_the_editor_wrote() {
+    let doc = plain();
+    let mut editor = doc.editor();
+    editor.attach_file(&csv()).expect("attachment");
+    let _ = editor.set_xmp_metadata(PACKET).expect("a catalog");
+    let _ = editor.set_author("Ada");
+    assert!(editor.set_outline(&outline()));
+
+    let report: SanitiseReport = editor.sanitise(&Sanitise::ALL);
+    assert!(report.removed.contains(&RemovedEntry {
+        holder: EntryHolder::Trailer,
+        path: vec![PathStep::Key(b"Info".to_vec())],
+        what: Removal::Info,
+    }));
+    // The embedded file stream is deleted, for the attachment tree that was
+    // the first removed entry to reach it.
+    assert!(report
+        .deleted
+        .iter()
+        .any(|d: &DeletedObject| d.what == Removal::EmbeddedFileTree));
+
+    for mode in MODES {
+        let (bytes, reopened) = saved(&editor, mode, false);
+        assert!(reopened.attachments().is_empty(), "{mode:?}");
+        assert_eq!(reopened.xmp_metadata(), None);
+        assert_eq!(reopened.metadata(), tinker_pdf::Metadata::default());
+        assert!(reopened.script_summary().is_empty());
+        let items = reopened.outline();
+        assert_eq!(items.len(), 2, "the outline itself stays");
+        assert!(
+            items[1].destination.is_none(),
+            "the item whose target left the document goes nowhere now"
+        );
+        if mode == WriteMode::Rewrite {
+            assert!(!bytes.windows(9).any(|w| w == b"quarter,r"), "the CSV left");
+        }
     }
 }
