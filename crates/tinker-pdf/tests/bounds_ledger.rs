@@ -1,5 +1,41 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 26 September 2026, the `jbig2` fuzz row.* **One more row, the
+//! forty-fourth, and it is the first here whose cap is a *ratio* rather than a
+//! quantity.**
+//!
+//! `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` bounds one symbol against the page it will
+//! be composited onto. Every other row in this table compares a count, a byte
+//! total or a pixel total against a constant; this one compares a symbol's
+//! width with `/Width` and its height with `/Height`, so its currency is a
+//! *multiple* and its ledger publishes `4` rather than a quantity.
+//!
+//! Two things about it are worth reading before the row.
+//!
+//! **It is the first JBIG2 row whose yardstick is a measurement.** The three
+//! that landed at tier 1 publish `(estimate)` because the corpus could not
+//! supply their figures: `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are
+//! counts, and the corpus's counts were synthetic until tier 0's production
+//! shard arrived. A symbol's *size* is different in kind — it is nowhere in any
+//! segment header, because 6.5.5 accumulates both dimensions inside the
+//! arithmetic coder — so the measurement needed a decode rather than a walk,
+//! which is why `jbig2_census.rs` carried a `max_symbol_pixels` field that
+//! nothing assigned from the day it was written. It assigns it now, and the figure this row
+//! is calibrated on comes with it: **88 736 symbols over 243 dictionaries in
+//! 502 images, and not one of them wider or taller than its page.** See
+//! [`SCAN_SYMBOL_PAGE_MULTIPLE`].
+//!
+//! **And it is not `MAX_JBIG2_SYMBOL_PIXELS` wearing a second name**, which is
+//! the objection this header raises twice already and which kept the `jbig2`
+//! fuzz row open rather than closing it under a number nobody could argue for.
+//! That cap bounds the pixels **one dictionary** decodes in total; this one
+//! bounds **one symbol** against a quantity that cap never reads. The
+//! distinction is the one `MAX_JBIG2_SYMBOL_PIXELS`'s own ledger draws in its
+//! first sentence — *"a per-symbol bound is not a work bound once the count
+//! branches"* — taken in the other direction: a total is not a per-item bound
+//! either, and 105 bytes spending the whole 67 108 864 on a page of one pixel
+//! is what that gap looked like from the outside (`docs/verification.md`).
+//!
 //! *Amended, 5 September 2026, tier 0's memory row.* **Two more rows, and the
 //! first amendment to what a [`Bound`] is allowed to be.**
 //!
@@ -384,7 +420,8 @@ use tinker_pdf::xps::{
 use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
-    MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES,
+    MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_SYMBOL_PIXELS,
+    MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES,
 };
 use tinker_pdf_layout::limits as layout_limits;
 use tinker_pdf_xml::limits as xml_limits;
@@ -468,7 +505,7 @@ struct Bound {
     /// The most gap 31's yardstick spends: **a 300-page reflowable book**.
     ///
     /// The third yardstick, and unlike the first two it is not an estimate.
-    /// Sixteen of these forty-three rows are figures a real book can be
+    /// Sixteen of these forty-four rows are figures a real book can be
     /// *measured* against, and
     /// [`the_book_yardstick_is_not_below_a_real_book`] measures every book in
     /// both corpora against them on every run — the committed six always, the
@@ -568,7 +605,50 @@ const SCAN_SYMBOL_PIXELS: u128 = SCAN_SYMBOLS * 25 * 50;
 /// One **page** of [`SCAN_SYMBOLS`]'s document, because `SBNUMINSTANCES` is a
 /// text region's own count and a page carries one region or a few. A dense A4
 /// text page sets a few thousand characters.
-const SCAN_TEXT_INSTANCES: u128 = 4_000;
+///
+/// **Raised from 4 000 on 26 September 2026, and by this file's own rule rather
+/// than by preference.** [`SCAN_SYMBOLS`]'s comment says a yardstick below the
+/// real population is the failure worth catching, and
+/// [`the_book_yardstick_is_not_below_a_real_book`] says what to do about one:
+/// *the yardstick is the row that is wrong, not the book — raise it, and check
+/// whether the cap above it still stands over the new figure*. The 6 September
+/// measurement recorded 4 440 real placements in one text region of
+/// `safedocs/0000425.pdf` and left this at 4 000, so the only yardstick in this
+/// table that a real document exceeded stood unchanged until now.
+/// `MAX_JBIG2_TEXT_INSTANCES` stands over the new figure by 839x.
+const SCAN_TEXT_INSTANCES: u128 = 5_000;
+
+/// **The fourth JBIG2 row's yardstick, and the only one of the four that is a
+/// measurement rather than arithmetic: one.**
+///
+/// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` bounds a single symbol against the page it
+/// will be composited onto, so its currency is a *multiple of the page* and not
+/// a count of anything — which is what let it be measured where the other three
+/// could not. A symbol's width and height are nowhere in a segment header (6.5.5
+/// accumulates both inside the arithmetic coder), so
+/// `crates/tinker-pdf/tests/jbig2_census.rs` takes the figure by decoding: every
+/// symbol of every JBIG2 image in the five fetched corpora, through
+/// `tinker_pdf_filters::jbig2_decode_measured`.
+///
+/// **88 736 symbols, 243 dictionaries, 502 images, 118 files, and not one symbol
+/// is wider or taller than its page.** The measurement is **1**, and the tightest
+/// fit in the population is *exactly* 1 — `pdfjs/test/pdfs/bitmap-symbol-big-segmentid.pdf`
+/// holds a symbol 399 pixels wide on a page 399 pixels wide. Neither the comic
+/// nor the fixed-document column can hold anything else, for the reason
+/// [`SCAN_SYMBOLS`] gives at length: neither format decodes JBIG2, so both carry
+/// the 200-page bilevel scan instead, whose symbols are glyphs a fiftieth of the
+/// page across.
+///
+/// That the population's ceiling *is* its tightest fit is why the cap is not 1.
+/// A bound set at the worst real document is the failure
+/// [`no_bound_refuses_a_real_book`] exists to catch, reached from the direction
+/// where the measurement flatters it. There is no tail here to clear — the
+/// distribution stops at one — so the margin is chosen the way this table's
+/// other tail-free rows are: `MAX_JBIG2_SYMBOL_PIXELS` is 2.7x its yardstick and
+/// `MAX_JBIG2_SYMBOLS` is 5x its own, and **4** sits between them. Four times
+/// the page in each dimension is sixteen times its area, which is still nothing
+/// a page can show.
+const SCAN_SYMBOL_PAGE_MULTIPLE: u128 = 1;
 
 /// The widest code table anybody has published: B.9 and B.10, at 22 lines.
 ///
@@ -1609,6 +1689,39 @@ fn ledger() -> Vec<Bound> {
             ),
         },
         Bound {
+            name: "MAX_JBIG2_SYMBOL_PAGE_MULTIPLE",
+            cap: MAX_JBIG2_SYMBOL_PAGE_MULTIPLE as u128,
+            // **No `(estimate)`, and it is the only JBIG2 row without one.**
+            // The three above publish arithmetic about a plausible scan; this
+            // one publishes a corpus measurement. See `SCAN_SYMBOL_PAGE_MULTIPLE`.
+            published: "4",
+            // Every committed fuzz seed that decodes a symbol at all, measured
+            // through `jbig2_decode_measured` at the page its own control byte
+            // chooses: Annex H's 6 x 8 symbols against a 64 x 56 page, the
+            // sub-rectangle seed's 14 x 6 against 37 x 8. The one seed that
+            // exceeds this is `symbol-dictionary-spends-the-pixel-budget`,
+            // which is the finding this cap closes rather than a fixture it
+            // has to clear: 246 988 x 1 against a page of 1 x 1, refused at
+            // its first symbol at 69 x 1.
+            fixtures: SCAN_SYMBOL_PAGE_MULTIPLE,
+            comic: SCAN_SYMBOL_PAGE_MULTIPLE,
+            document: SCAN_SYMBOL_PAGE_MULTIPLE,
+            book: 0,
+            // **One symbol against a one-pixel page.** A symbol's width
+            // accumulates from Annex B deltas and is refused only above
+            // `u32::MAX`, and `Jbig2Params::width` may be 1, so the multiple
+            // one symbol may span its page is `u32::MAX` — the only row here
+            // whose ceiling is a field width divided by a caller's parameter.
+            reachable: u32::MAX as u128,
+            reachable_because:
+                "one symbol's width, clamped at `u32::MAX`, against a page one pixel wide",
+            declared_in: JBIG2,
+            fires_in: (
+                "a_symbol_larger_than_its_page_is_refused_at_the_first_symbol",
+                JBIG2,
+            ),
+        },
+        Bound {
             name: "MAX_JBIG2_TEXT_INSTANCES",
             cap: MAX_JBIG2_TEXT_INSTANCES as u128,
             published: "4 194 304 (estimate)",
@@ -1774,7 +1887,8 @@ fn ledger() -> Vec<Bound> {
 /// ledger rows add the five that were fired but unrecorded — ICC's two and
 /// JBIG2's three; and tier 0's memory row adds the two largest **runtime**
 /// bounds, `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`; and Tier 2's custom
-/// code tables add `MAX_JBIG2_TABLE_LINES`. All **forty-three** are here, and
+/// code tables add `MAX_JBIG2_TABLE_LINES`; and the `jbig2` fuzz row adds
+/// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`. All **forty-four** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -1821,6 +1935,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_ICC_BYTES",
             "MAX_JBIG2_SYMBOLS",
             "MAX_JBIG2_SYMBOL_PIXELS",
+            "MAX_JBIG2_SYMBOL_PAGE_MULTIPLE",
             "MAX_JBIG2_TEXT_INSTANCES",
             "MAX_JBIG2_TABLE_LINES",
             "MAX_PAGE_PIXELS",
@@ -1930,7 +2045,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 43, "the ledger is forty-three rows");
+    assert_eq!(measured, 44, "the ledger is forty-four rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -1962,7 +2077,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 43, "the ledger is forty-three rows");
+    assert_eq!(ledger().len(), 44, "the ledger is forty-four rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

@@ -13,18 +13,28 @@
 //! what a seed corpus is. It prints `RAN` or `SKIPPED` for the reason every
 //! check that can be absent does ([verification](../../../docs/verification.md)).
 //!
-//! **This test takes about twelve seconds in a debug build and seven of them
-//! are one seed**, `symbol-dictionary-spends-the-pixel-budget`, which is the
-//! input the 20 September 2026 CI run timed out on. It spends
+//! **This test used to take about twelve seconds in a debug build and seven of
+//! them were one seed**, `symbol-dictionary-spends-the-pixel-budget`, which is
+//! the input the 20 September 2026 CI run timed out on. It spent
 //! `MAX_JBIG2_SYMBOL_PIXELS` in full — 67 219 222 decoded pixels across 546
-//! symbols, from 105 bytes — and that is the cap working rather than failing.
-//! The seconds are the point: remove the cap and this test does not get
-//! slower, it stops finishing. `docs/verification.md` records why the cap is
-//! not lowered to buy them back.
+//! symbols, from 105 bytes — on a page of one pixel by one pixel, and that
+//! total budget was the only thing that ever stopped it.
+//!
+//! **It takes ten milliseconds now**, because
+//! `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` refuses that dictionary at its *first*
+//! symbol: 69 pixels wide against a page one pixel wide. That one seed went
+//! from 6.49 s to 0.99 ms in a debug build and from 564 ms to 23.5 µs in
+//! release.
+//! [`the_pixel_budget_seed_is_refused_at_its_first_symbol`] pins that by its
+//! cause rather than by its duration, which is the whole discipline here — a
+//! budget proved by a clock passes on a fast machine with the budget removed.
+//! `docs/verification.md` records why the total budget is not lowered instead.
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_filters::{jbig2_decode, Capability, FilterError, Jbig2Params};
+use tinker_pdf_filters::{
+    jbig2_decode, jbig2_decode_measured, Capability, FilterError, Jbig2Params, Jbig2Refusal,
+};
 
 /// The seed directory, from this crate rather than from the working directory.
 fn seeds() -> Option<PathBuf> {
@@ -129,4 +139,65 @@ fn every_committed_seed_decodes_or_refuses_by_name() {
     }
 
     println!("jbig2-seeds: RAN over {} committed seeds", paths.len());
+}
+
+/// **The seed the 20 September 2026 fuzz run timed out on, refused at its
+/// first symbol.**
+///
+/// The regression guard for `docs/verification.md`'s `jbig2` row, and it is
+/// deliberately not a timing assertion. What made that input twenty seconds
+/// under instrumentation was 67 219 222 decoded pixels across 546 symbols, and
+/// what makes it a millisecond now is that the **first** of those symbols is
+/// 69 pixels wide against a page one pixel wide — so the thing worth pinning is
+/// the symbol count and the name of the refusal, not the clock.
+///
+/// Every figure here is read out of the seed rather than asserted about it:
+/// `symbols` is 1 because the dictionary stops there, `widest` is that symbol's
+/// own width, and `SymbolLargerThanPage` is the reason. A change that let the
+/// dictionary run on would move `symbols` off 1 whether or not the machine
+/// running this test was fast enough to hide it.
+#[test]
+fn the_pixel_budget_seed_is_refused_at_its_first_symbol() {
+    let Some(dir) = seeds() else {
+        println!("jbig2-seed-budget: SKIPPED (no fuzz/corpus/jbig2)");
+        return;
+    };
+    let path = dir.join("symbol-dictionary-spends-the-pixel-budget");
+    let data = std::fs::read(&path).expect("the seed reads");
+    assert_eq!(data.len(), 106, "one control byte and 105 of payload");
+    let (width, height, globals, own) = knobs(&data);
+    assert_eq!(
+        (width, height),
+        (1, 1),
+        "the seed's first byte chooses a one-pixel page, which is the whole \
+         finding: 67 million decoded pixels for a page that holds one"
+    );
+
+    let params = Jbig2Params {
+        globals,
+        width,
+        height,
+    };
+    let mut refusals = Vec::new();
+    let (out, extent) = jbig2_decode_measured(own, &params, 1 << 16, &mut refusals);
+    assert!(out.is_err(), "the seed decoded to a page");
+    assert!(
+        refusals.contains(&Jbig2Refusal::SymbolLargerThanPage),
+        "the seed is no longer refused for being larger than its page: \
+         {refusals:?}"
+    );
+    assert!(
+        !refusals.contains(&Jbig2Refusal::SymbolPixelCap),
+        "the total pixel budget is what stopped it again, which is the row \
+         this test closes: {refusals:?}"
+    );
+    assert_eq!(
+        (extent.symbols, extent.widest, extent.tallest),
+        (1, 69, 1),
+        "the seed's first symbol is 69 by 1 and the dictionary stops there"
+    );
+    println!(
+        "jbig2-seed-budget: RAN; refused at symbol {} of {}x{}",
+        extent.symbols, extent.widest, extent.tallest
+    );
 }

@@ -14,6 +14,30 @@
 //! It also has to survive segments the decoder refuses, which is most of them
 //! today.
 //!
+//! # The half that has to use the decoder, and why it is not a retreat
+//!
+//! *Added 26 September 2026, for `docs/verification.md`'s `jbig2` fuzz row.*
+//! One figure this census is asked for cannot be reached from a header at all:
+//! **how large a dictionary's symbols are.** 6.5.5 accumulates a symbol's
+//! height from `IADH` deltas and its width from `IADW` deltas *inside the
+//! arithmetic coder*, and on the Huffman road from Annex B deltas inside the bit
+//! stream, so neither dimension is a field anywhere in clause 7.4.3. A walk that
+//! shares nothing with the decoder therefore cannot see one, and [`Tally`]'s
+//! `max_symbol_pixels` field sat declared, merged by [`Tally::add`] and assigned
+//! by nothing from the day this file was written — reading a structural zero
+//! over every file, which is why it was printed as `not measured` instead.
+//!
+//! [`measure`] takes that figure by *decoding*, through
+//! [`tinker_pdf_filters::jbig2_decode_measured`]. The independence above is not
+//! given up, because it was never independence about this: the argument for it is
+//! that a census of *what the format says* must not agree with the decoder by
+//! construction, and a symbol's size is not something the format says — it is
+//! something the coded data means, and there is exactly one thing in this
+//! repository that knows what coded data means. What the census keeps instead is
+//! its other property: a stream it could not walk is counted as unwalkable
+//! rather than guessed at, so an image whose decode refused is counted in
+//! `images_refused` and its figures read as a floor.
+//!
 //! Run it, and record what it says in `docs/design/jbig2-symbol-text.md`:
 //!
 //! ```sh
@@ -25,6 +49,33 @@ use std::path::{Path, PathBuf};
 
 use tinker_pdf::Document;
 use tinker_pdf_cos::{ObjRef, Object, XrefEntry};
+use tinker_pdf_filters::{jbig2_decode_measured, Jbig2Params, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE};
+
+/// The ceiling the measurement below decodes under, matching
+/// `jbig2_attribution.rs` so the two censuses are commensurable.
+const CEILING: usize = 1 << 22;
+
+/// How tightly one file's largest symbol fits the page it is drawn onto.
+struct Fit<'a> {
+    /// Thousandths of the page, so that `1.000` — a symbol exactly its page's
+    /// size — is distinguishable from any glyph.
+    permille: u32,
+    /// The same, rounded up to the whole multiple the bound is charged in.
+    multiple: u32,
+    name: &'a str,
+    /// The widest and the tallest symbol, and the page both were measured
+    /// against.
+    symbol: (u32, u32),
+    page: (u32, u32),
+}
+
+/// A thousandth, printed as a fraction of one rather than as a permille.
+///
+/// `1.000` is the interesting reading — a symbol exactly its page's size — and
+/// `1000` beside a column of whole multiples reads like a whole multiple.
+fn permille_of(permille: u32) -> String {
+    format!("{}.{:03}", permille / 1_000, permille % 1_000)
+}
 
 /// Segment types this census names (T.88 Table 34).
 mod kind {
@@ -132,9 +183,47 @@ struct Tally {
     /// The largest total `width x height` over one dictionary's symbols, which
     /// is what a pixel budget is a budget of. Zero where the dictionary could
     /// not be walked far enough to know.
+    ///
+    /// **Assigned since 26 September 2026, and it is not the header walk that
+    /// assigns it.** See [`measure`] for why it cannot be: neither dimension of
+    /// a symbol is in any segment header.
     max_symbol_pixels: u64,
     /// The largest `SBNUMINSTANCES` any one text region declares.
     max_instances: u32,
+
+    // --- the measurement, from the decoder rather than from a header ---
+    /// The most pixels any *one* symbol occupies, and its dimensions.
+    max_one_symbol_pixels: u64,
+    max_one_symbol: (u32, u32),
+    /// The widest and the tallest single symbol, which are three different
+    /// symbols from the one above as often as not.
+    widest_symbol: u32,
+    tallest_symbol: u32,
+    /// **The figure a per-symbol bound has to clear**: the smallest whole
+    /// multiple of the page's own width and height that admits every symbol in
+    /// this file, over every image in it. One means no symbol is larger than
+    /// the page it is drawn onto.
+    worst_multiple: u32,
+    /// The same thing in thousandths rather than rounded up to a whole
+    /// multiple, because the whole multiple cannot tell a glyph a fiftieth of
+    /// its page wide from a symbol that fills it exactly — and which of those
+    /// the corpus's tightest fit is decides whether a bound of one is a bound
+    /// or the measurement itself.
+    tightest_permille: u32,
+    /// The symbol and the page that produced *that* figure, so the number and
+    /// the evidence for it always name the same image. Selecting them on the
+    /// whole multiple instead printed a pair from one image beside a ratio from
+    /// another, which is a report that cannot be checked.
+    tightest_symbol: (u32, u32),
+    tightest_page: (u32, u32),
+    /// Symbols decoded, and dictionaries decoded to the end.
+    symbols_decoded: u64,
+    dictionaries_decoded: u32,
+    /// Images whose decode refused, so their figures above are a floor rather
+    /// than a measurement — the census's own property, kept: a stream it could
+    /// not walk is counted as unwalkable rather than guessed at.
+    images_refused: u32,
+    images_measured: u32,
 }
 
 impl Tally {
@@ -174,6 +263,24 @@ impl Tally {
         self.max_exported_symbols = self.max_exported_symbols.max(other.max_exported_symbols);
         self.max_symbol_pixels = self.max_symbol_pixels.max(other.max_symbol_pixels);
         self.max_instances = self.max_instances.max(other.max_instances);
+        if other.max_one_symbol_pixels > self.max_one_symbol_pixels {
+            self.max_one_symbol_pixels = other.max_one_symbol_pixels;
+            self.max_one_symbol = other.max_one_symbol;
+        }
+        self.widest_symbol = self.widest_symbol.max(other.widest_symbol);
+        self.tallest_symbol = self.tallest_symbol.max(other.tallest_symbol);
+        self.worst_multiple = self.worst_multiple.max(other.worst_multiple);
+        // `>` rather than `>=`, so the first file in sort order wins a tie and
+        // the figure this prints is the same on every target (ruling 4).
+        if other.tightest_permille > self.tightest_permille {
+            self.tightest_permille = other.tightest_permille;
+            self.tightest_symbol = other.tightest_symbol;
+            self.tightest_page = other.tightest_page;
+        }
+        self.symbols_decoded += other.symbols_decoded;
+        self.dictionaries_decoded += other.dictionaries_decoded;
+        self.images_refused += other.images_refused;
+        self.images_measured += other.images_measured;
     }
 
     fn count(&self, kind: u8) -> u32 {
@@ -400,10 +507,28 @@ fn read_segment<'a>(reader: &mut Reader<'a>) -> Option<Segment<'a>> {
     Some(Segment { kind, data })
 }
 
-/// Every JBIG2 stream in one document: its bytes, and its globals.
-fn jbig2_streams(bytes: Vec<u8>) -> Vec<Vec<u8>> {
+/// One JBIG2 image, as the decoder takes it.
+///
+/// Separate from the header walk's own list of streams, and not a refinement of
+/// it: the walk reads `stream_raw` because it is parsing segment headers out of
+/// whatever the file literally holds, and a decode needs `stream_decoded` —
+/// which stops *at* the image filter, so a `[FlateDecode, JBIG2Decode]` chain
+/// arrives inflated and a bare `JBIG2Decode` arrives unchanged.
+struct Image {
+    data: Vec<u8>,
+    globals: Vec<u8>,
+    /// ISO 32000-1 7.4.7 makes the image dictionary's `/Width` and `/Height`
+    /// the authority for an embedded stream, so this is the page geometry the
+    /// decoder is given and the one a per-symbol bound is charged against.
+    width: u32,
+    height: u32,
+}
+
+/// Every JBIG2 stream in one document: its bytes, and its globals — and, beside
+/// them, the same images in the shape a decode takes.
+fn jbig2_streams(bytes: Vec<u8>) -> (Vec<Vec<u8>>, Vec<Image>) {
     let Ok(doc) = Document::open(bytes) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let cos = doc.cos();
     let filter = cos.intern(b"Filter");
@@ -422,7 +547,11 @@ fn jbig2_streams(bytes: Vec<u8>) -> Vec<Vec<u8>> {
         }
     };
 
+    let width_key = cos.intern(b"Width");
+    let height_key = cos.intern(b"Height");
+
     let mut out = Vec::new();
+    let mut images = Vec::new();
     for (number, entry) in cos.xref().iter() {
         if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
             continue;
@@ -444,10 +573,12 @@ fn jbig2_streams(bytes: Vec<u8>) -> Vec<Vec<u8>> {
         // The globals stream is a separate object the image points at, and it
         // carries the shared symbol dictionaries — which is exactly what this
         // census is counting, so it has to be walked too.
+        let mut shared = Vec::new();
         let parms_value = cos.resolve_key(dict, parms);
         if let Some(parms_dict) = parms_value.as_dict() {
             if let Some(reference) = parms_dict.get_ref(globals) {
                 if let Ok(data) = cos.stream_decoded(reference) {
+                    shared = data.clone();
                     out.push(data);
                 }
             }
@@ -455,8 +586,89 @@ fn jbig2_streams(bytes: Vec<u8>) -> Vec<Vec<u8>> {
         if let Ok(data) = cos.stream_raw(reference) {
             out.push(data);
         }
+        // And the same image again, in the shape a decode takes. A missing or
+        // unreadable `/Width` or `/Height` leaves it out of the measurement
+        // rather than guessing a page: the ratio is *against* that geometry, so
+        // an invented one would invent the answer.
+        let (Some(width), Some(height)) = (
+            cos.resolve_key(dict, width_key)
+                .as_int()
+                .and_then(|v| u32::try_from(v).ok()),
+            cos.resolve_key(dict, height_key)
+                .as_int()
+                .and_then(|v| u32::try_from(v).ok()),
+        ) else {
+            continue;
+        };
+        if let Ok(data) = cos.stream_decoded(reference) {
+            images.push(Image {
+                data,
+                globals: shared,
+                width,
+                height,
+            });
+        }
     }
-    out
+    (out, images)
+}
+
+/// **The measurement the header walk cannot take**, over one file's images.
+///
+/// Neither of a symbol's dimensions is in a segment header. 6.5.5 accumulates
+/// both from `IADH` and `IADW` deltas *inside* the arithmetic coder, and on the
+/// Huffman road from Annex B deltas inside the bit stream — so the only way to
+/// know how large a dictionary's symbols are is to decode it. That is why
+/// `Tally::max_symbol_pixels` sat declared, merged and unassigned from the day
+/// this file was written: the walk above shares nothing with the decoder on
+/// purpose, and this one figure is not reachable from where it stands.
+///
+/// So this half of the census uses [`jbig2_decode_measured`] — the same decode
+/// `jbig2_attribution.rs` runs, with 6.5.5's own tally handed back. The
+/// census's property is kept rather than dropped: an image whose decode refused
+/// is counted in `images_refused` and its figures are a **floor**, because a
+/// dictionary cut short asked for at least what it got.
+fn measure(images: &[Image], tally: &mut Tally) {
+    for image in images {
+        let params = Jbig2Params {
+            globals: &image.globals,
+            width: image.width,
+            height: image.height,
+        };
+        let mut refusals = Vec::new();
+        let (out, extent) = jbig2_decode_measured(&image.data, &params, CEILING, &mut refusals);
+        tally.images_measured += 1;
+        if out.is_err() {
+            tally.images_refused += 1;
+        }
+        tally.max_symbol_pixels = tally.max_symbol_pixels.max(extent.total_pixels);
+        if extent.largest_pixels > tally.max_one_symbol_pixels {
+            tally.max_one_symbol_pixels = extent.largest_pixels;
+            tally.max_one_symbol = extent.largest;
+        }
+        tally.widest_symbol = tally.widest_symbol.max(extent.widest);
+        tally.tallest_symbol = tally.tallest_symbol.max(extent.tallest);
+        tally.symbols_decoded += extent.symbols;
+        tally.dictionaries_decoded += extent.dictionaries;
+
+        // The page's own width and height, floored at one so a degenerate
+        // `/Width 0` divides rather than panics — and a page of one pixel is a
+        // real thing the fuzz target asks for.
+        let (page_w, page_h) = (image.width.max(1), image.height.max(1));
+        let multiple = extent
+            .widest
+            .div_ceil(page_w)
+            .max(extent.tallest.div_ceil(page_h));
+        tally.worst_multiple = tally.worst_multiple.max(multiple);
+        let permille = |symbol: u32, page: u32| {
+            u32::try_from(u64::from(symbol) * 1_000 / u64::from(page)).unwrap_or(u32::MAX)
+        };
+        let permille = permille(extent.widest, page_w).max(permille(extent.tallest, page_h));
+        if permille > tally.tightest_permille {
+            tally.tightest_permille = permille;
+            tally.tightest_symbol = (extent.widest, extent.tallest);
+            tally.tightest_page = (page_w, page_h);
+        }
+    }
 }
 
 /// The corpora, if they have been fetched.
@@ -517,7 +729,7 @@ fn census_of_the_corpus_jbig2() {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        let streams = jbig2_streams(bytes);
+        let (streams, images) = jbig2_streams(bytes);
         if streams.is_empty() {
             continue;
         }
@@ -528,6 +740,7 @@ fn census_of_the_corpus_jbig2() {
         if tally.segments.is_empty() {
             continue;
         }
+        measure(&images, &mut tally);
         carriers += 1;
         total.add(&tally);
         let name = path
@@ -686,27 +899,105 @@ fn census_of_the_corpus_jbig2() {
         total.max_exported_symbols
     );
     println!("largest SBNUMINSTANCES    {:>10}", total.max_instances);
-    // **The fourth yardstick is missing, and saying so is the point.**
+    // **The fourth yardstick, taken at last — and the three above are not it.**
     //
-    // `MAX_JBIG2_SYMBOL_PIXELS` is a *pixel* budget, and the three figures
-    // above are counts — of symbols and of instances. Neither bounds the
-    // pixels, so none of them is this cap's yardstick. `Tally` carries a
-    // `max_symbol_pixels` field for it, `add` merges it across files, and
-    // **nothing ever assigns it**: no walk here reaches a symbol's width and
-    // height, so it is structurally zero over all 117 files and always has
-    // been. A cap whose census reports a measurement it never took is worse
-    // than one with no census, because the zero reads as "no real document
-    // comes close" rather than as "nobody looked".
+    // `MAX_JBIG2_SYMBOL_PIXELS` is a *pixel* budget and those three figures are
+    // counts, of symbols and of instances, so none of them bounds the pixels.
+    // `Tally::max_symbol_pixels` sat declared, merged by `add` and **assigned by
+    // nothing** from the day this file was written until 26 September 2026: the
+    // walk above shares no code with the decoder on purpose, and neither of a
+    // symbol's dimensions is in any segment header — 6.5.5 accumulates both
+    // inside the coder. Printed for the first time on 23 September it read 0
+    // over 117 files, which reads as "no real document comes close" and meant
+    // "nobody looked", so it was printed as `not measured` and asserted still
+    // unassigned, to tell whoever populated it to take the measurement too.
     //
-    // It is printed as absent rather than as a number, and asserted so, until
-    // something measures it — which is what the jbig2 row in
-    // `docs/verification.md` says has to happen before that row can close.
-    println!("largest symbol pixels       not measured (see the jbig2 row in verification.md)");
-    assert_eq!(
-        total.max_symbol_pixels, 0,
-        "`max_symbol_pixels` is now assigned somewhere — print the figure and \
-         retire this assertion, and take the jbig2 row's measurement with it"
+    // [`measure`] is that measurement. It is the decoder's own tally rather than
+    // a header walk, because nothing else can reach a symbol's size, and the
+    // figures below are what `docs/verification.md`'s jbig2 row was waiting on.
+    println!(
+        "largest dictionary pixels {:>10}   <- MAX_JBIG2_SYMBOL_PIXELS's own yardstick",
+        total.max_symbol_pixels
     );
+    println!(
+        "largest single symbol     {:>10}   {} x {}",
+        total.max_one_symbol_pixels, total.max_one_symbol.0, total.max_one_symbol.1
+    );
+    println!(
+        "widest symbol             {:>10}   tallest {}",
+        total.widest_symbol, total.tallest_symbol
+    );
+    println!(
+        "symbols decoded           {:>10}   over {} dictionaries in {} images",
+        total.symbols_decoded, total.dictionaries_decoded, total.images_measured
+    );
+    println!(
+        "images whose decode refused{:>9}   (their figures above are a floor)",
+        total.images_refused
+    );
+    println!();
+    println!("--- the largest symbol relative to its page ---");
+    println!(
+        "smallest whole multiple of the page that admits every symbol: {}",
+        total.worst_multiple
+    );
+    println!(
+        "the tightest fit, unrounded: {} of the page it is drawn onto",
+        permille_of(total.tightest_permille)
+    );
+    // **The measurement is load-bearing, so it is asserted and not only
+    // printed.** Two directions, and the census is worthless without both.
+    //
+    // A census that measured nothing reads exactly like a census that found
+    // nothing — the `RAN` / `SKIPPED` discipline one level down — so the first
+    // assertion is that symbols were decoded at all. The second is the figure
+    // `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` was chosen from: every symbol in the
+    // corpus fits inside the bound, with the margin its ledger publishes. If
+    // this fires, either the corpus grew a document the bound refuses — in
+    // which case the bound is wrong and `jbig2_attribution.rs`'s pinned count
+    // will have moved too — or the bound was narrowed without re-measuring.
+    assert!(
+        total.symbols_decoded > 0 && total.images_measured > 0,
+        "the measurement decoded no symbols at all, so every figure above is a \
+         zero that means `nobody looked` — which is the exact failure this half \
+         of the census was added to end"
+    );
+    assert!(
+        total.worst_multiple <= MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
+        "a corpus symbol spans its page {}x and the cap admits {}: narrow the \
+         bound rather than re-pinning this, and expect \
+         `jbig2_attribution.rs`'s refused count to have moved with it",
+        total.worst_multiple,
+        MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
+    );
+    let mut ratios: Vec<Fit<'_>> = per_file
+        .iter()
+        .filter(|(_, t)| t.worst_multiple > 0)
+        .map(|(name, t)| Fit {
+            permille: t.tightest_permille,
+            multiple: t.worst_multiple,
+            name: name.as_str(),
+            symbol: t.tightest_symbol,
+            page: t.tightest_page,
+        })
+        .collect();
+    // By the unrounded fit rather than by the whole multiple, because every
+    // file in the corpus shares the same whole multiple and the ordering would
+    // otherwise be the file names.
+    ratios.sort_by(|a, b| b.permille.cmp(&a.permille).then(a.name.cmp(b.name)));
+    println!("the five tightest files:");
+    for fit in ratios.iter().take(5) {
+        println!(
+            "  {:>7} ({}x)  widest {:>6} tallest {:>6} against a page of {} x {}   {}",
+            permille_of(fit.permille),
+            fit.multiple,
+            fit.symbol.0,
+            fit.symbol.1,
+            fit.page.0,
+            fit.page.1,
+            fit.name,
+        );
+    }
     let mut worst: Vec<(u32, &str)> = per_file
         .iter()
         .map(|(name, t)| (t.max_instances, name.as_str()))

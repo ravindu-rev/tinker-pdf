@@ -50,7 +50,7 @@ what a reader of PDFs is entitled to expect.
 | --- | --- | --- |
 | Correctness on documents nobody here wrote | 5 525 files: three readers' test suites, one association's examples, and **1 000 documents a crawler found on the open web** spanning 462 distinct `/Producer` strings | **ratcheted**; `corpus/corpora.lock`'s fifth entry, run nightly, every failure attributed by producer |
 | Speed | seven criterion operations, weekly; `crates/tinker-pdf/benches/baseline.json` records each one's fastest figure on `ubuntu-latest` over **fifteen dispatches of one revision**, and each one's own band above its own measured swing — 22.61 % for the text extractor, 88.36 % for the text renderer | **ratcheted**; `cargo xtask bench-check --machine ubuntu-latest` in `bench.yml`, which fails where criterion's own comparison exits 0 |
-| Memory | 42 caps in `bounds_ledger.rs`, two of them the runtime bounds a *process* spends; every corpus child measures its own peak resident set, `report.json` carries it per file and `ratchet.json` bands the per-corpus maximum within a **measured 2 % tolerance** — a high-water mark swings 0.06 % to 0.76 % between two runs of one binary, and an exact band failed on that within a day of being recorded | ratcheted, over five corpora |
+| Memory | 44 caps in `bounds_ledger.rs`, two of them the runtime bounds a *process* spends and one of them a relation between a symbol and its page rather than a quantity; every corpus child measures its own peak resident set, `report.json` carries it per file and `ratchet.json` bands the per-corpus maximum within a **measured 2 % tolerance** — a high-water mark swings 0.06 % to 0.76 % between two runs of one binary, and an exact band failed on that within a day of being recorded | ratcheted, over five corpora |
 | Fidelity | arithmetic fixtures, metamorphic relations, committed fingerprints | tier 1's differential pairs and reviewed goldens; ruling 13's amendment of 5 September 2026 on dated outside measurements |
 | Capability coverage | tiers 2 to 5 of this file | each row's exit criterion |
 | Footprint | 2.03 MB of wasm, 1.40 MB gzipped, gated at 2.5 MB in `release.yml` | already ratcheted |
@@ -85,11 +85,25 @@ pages the crawler saved under a `.pdf` name.
 `MAX_JBIG2_SYMBOLS`, `MAX_JBIG2_SYMBOL_PIXELS` and `MAX_JBIG2_TEXT_INSTANCES`
 published the word "estimate" because the largest `SDNUMEXSYMS` anywhere in the
 corpus was **11**, every one of them synthetic, so a cap calibrated on them
-would have admitted anything. Over 117 JBIG2-bearing files including the
+would have admitted anything. Over 118 JBIG2-bearing files including the
 production corpus's, the largest is **2 478 exported symbols, 2 468 new ones
 and 4 440 text instances** — real OCR output, from documents scanned by people.
 The caps stand at 100 000 symbols and 4 194 304 instances, which is 40 and 944
 times what a real document has asked for.
+
+**Two of those three settled; the middle one settled on 26 September 2026 and
+brought a fourth row with it.** `MAX_JBIG2_SYMBOL_PIXELS` is a *pixel* budget
+and the figures above are counts, so none of them was its yardstick — and the
+reason nobody had taken its measurement is a fact about the format rather than
+an oversight: **neither of a symbol's dimensions is in any segment header**, so
+`jbig2_census.rs`, which shares no code with the decoder on purpose, could count
+symbols and could not measure one. It decodes for that half now. The largest
+dictionary in five corpora spends **1 568 118** pixels, which the cap clears by
+42.8x. The same pass answered the question `verification.md`'s open `jbig2` fuzz
+row had been left on — the largest symbol *relative to its page*, which over
+88 736 corpus symbols is **never more than one** — and
+`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` is the bound chosen from it, at 4. That row is
+closed.
 
 **And the fourth closed on 19 September 2026: speed has a ratchet.** The row
 said it was *"blocked on runs of a machine nobody owns"*, and it was not.
@@ -462,7 +476,8 @@ what caught four wrong Annex B tables and what caught these.
 
 **What the JBIG2 rows left behind, since it is the number this tier was
 measured by.** **1 of the 118** JBIG2-bearing corpus files still reports a
-refusal, down from 34, and it is `pdfjs/issue3371.pdf` — a stream that stops
+refusal — unchanged by `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` on 26 September 2026,
+which was the condition on that bound landing at all — down from 34, and it is `pdfjs/issue3371.pdf` — a stream that stops
 inside a segment, which `Jbig2Refusal::is_malformed` calls damage rather than a
 capability. Halftone, custom code tables, transposed placement, 7.2.7's unknown
 data length, a blank page, 7.4.2's retained bitmap-coding contexts, a text

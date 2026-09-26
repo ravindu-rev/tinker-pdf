@@ -101,6 +101,57 @@ pub struct Jbig2Params<'a> {
     pub height: u32,
 }
 
+/// **What one stream's symbol dictionaries asked for, in pixels.**
+///
+/// The measurement `MAX_JBIG2_SYMBOL_PIXELS` never had. That cap is a *pixel*
+/// budget and the three figures `crates/tinker-pdf/tests/jbig2_census.rs`
+/// could take off a segment header — `SDNUMNEWSYMS`, `SDNUMEXSYMS`,
+/// `SBNUMINSTANCES` — are every one of them counts, so none of them is its
+/// yardstick. A symbol's width and height are not in any header: 6.5.5
+/// accumulates both from `IADH` and `IADW` deltas *inside* the arithmetic
+/// coder, so nothing short of decoding the dictionary can say how large its
+/// symbols are. This is that decode's own tally, and
+/// [`decode_measured`] is how a census reads it.
+///
+/// Every figure is **what the dictionary asked for**, which includes the
+/// symbol that tripped a cap: a dictionary refused at its 546th symbol is
+/// recorded as having asked for 546, because the question a bound is chosen
+/// against is what the file wanted rather than what it got.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Jbig2SymbolExtent {
+    /// The widest single symbol any dictionary in the stream asked for.
+    pub widest: u32,
+    /// The tallest single symbol.
+    pub tallest: u32,
+    /// The most pixels any *one* symbol occupies — which is a third symbol
+    /// again, since the widest need not be the tallest.
+    pub largest_pixels: u64,
+    /// The width and height of that symbol, so a census can name it.
+    pub largest: (u32, u32),
+    /// The most pixels any one dictionary asked for in total — the quantity
+    /// [`MAX_JBIG2_SYMBOL_PIXELS`] bounds.
+    pub total_pixels: u64,
+    /// How many symbols were asked for, over every dictionary in the stream.
+    pub symbols: u64,
+    /// How many symbol dictionary segments were decoded to the end.
+    pub dictionaries: u32,
+}
+
+impl Jbig2SymbolExtent {
+    /// One symbol's dimensions, as 6.5.5 has just accumulated them.
+    fn record(&mut self, width: u32, height: u32, spent: u64) {
+        self.widest = self.widest.max(width);
+        self.tallest = self.tallest.max(height);
+        let pixels = u64::from(width) * u64::from(height);
+        if pixels > self.largest_pixels {
+            self.largest_pixels = pixels;
+            self.largest = (width, height);
+        }
+        self.total_pixels = self.total_pixels.max(spent);
+        self.symbols += 1;
+    }
+}
+
 /// A parsed segment header (T.88 7.2) and the data block that follows it.
 ///
 /// The number and the referred-to list are both kept now. They were both
@@ -293,6 +344,15 @@ pub enum Jbig2Refusal {
     SymbolCountCap,
     /// [`MAX_JBIG2_SYMBOL_PIXELS`] would be spent by one dictionary.
     SymbolPixelCap,
+    /// One symbol spans the page it will be composited onto more than
+    /// [`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`] times, in width or in height.
+    ///
+    /// The one refusal here that reads two things at once: the symbol 6.5.5
+    /// has just sized, and the page 7.4.7 says it will be drawn onto. T.88
+    /// permits the combination, so this is this build's number and not the
+    /// file's fault — which is why it sits with the caps and not with the
+    /// contradictions below.
+    SymbolLargerThanPage,
     /// 6.5.8.2's `REFAGGNINST` past [`MAX_JBIG2_TEXT_INSTANCES`].
     AggregateInstanceCap,
     /// 6.5.10's export-run loop ran longer than [`MAX_JBIG2_SYMBOLS`] turns.
@@ -408,6 +468,7 @@ impl Jbig2Refusal {
 
             Self::SymbolCountCap
             | Self::SymbolPixelCap
+            | Self::SymbolLargerThanPage
             | Self::AggregateInstanceCap
             | Self::ExportRunGuard
             | Self::TextInstanceCap
@@ -1312,7 +1373,7 @@ impl ArithContexts {
 /// | | Symbols |
 /// | --- | --- |
 /// | The most any fixture in this repository spends | 3 |
-/// | The most any file in the corpus spends | 11 |
+/// | The most any file in the corpus spends | 2 478 |
 /// | A 200-page bilevel scan sharing one global dictionary | 20 000 |
 /// | A 300-page reflowable book | 0 |
 /// | **This cap** | **100 000 (estimate)** |
@@ -1320,7 +1381,7 @@ impl ArithContexts {
 /// **The third figure is arithmetic and the ledger says so.** Milestone 7 of
 /// `docs/design/jbig2-symbol-text.md` asked for a measurement against a real
 /// `jbig2enc`/OCRmyPDF file and the census taken to make it found the corpus's
-/// largest `SDNUMEXSYMS` is **11** across 102 JBIG2-bearing files — every one
+/// largest `SDNUMEXSYMS` was **11** across 102 JBIG2-bearing files — every one
 /// of them a synthetic fixture built to exercise one placement variant. A cap
 /// calibrated on that would let anything through, so the number here is
 /// argued instead: a 300 dpi A4 text page reduces to a few hundred distinct
@@ -1330,6 +1391,14 @@ impl ArithContexts {
 /// yardsticks are already in — *arithmetic about a plausible file, written
 /// down so it can be argued with* — and the word **estimate** is in the
 /// published figure so a reader cannot mistake it for the other kind.
+///
+/// The second row is a measurement and was **11** until tier 0's production
+/// corpus arrived with real OCR JBIG2; the figure above it is that corpus's,
+/// re-measured 26 September 2026 by `crates/tinker-pdf/tests/jbig2_census.rs`
+/// over 118 JBIG2-bearing files. It corroborates the estimate from below — a
+/// real scanned document asks for a fortieth of this cap — which is the
+/// direction that makes an estimate safe rather than the one that makes it
+/// wrong.
 ///
 /// Reachable: `SDNUMNEWSYMS` is a 32-bit field at 7.4.3.1.5, read straight off
 /// the segment header, so **twelve bytes of dictionary data** may ask for
@@ -1347,14 +1416,35 @@ pub const MAX_JBIG2_SYMBOLS: u32 = 100_000;
 /// | | Pixels |
 /// | --- | --- |
 /// | The most any fixture in this repository spends | 72 — Annex H's two six-by-six symbols |
+/// | The most any file in the corpus spends | 1 568 118 |
 /// | A 200-page bilevel scan sharing one global dictionary | 25 000 000 |
 /// | A 300-page reflowable book | 0 |
 /// | **This cap** | **67 108 864 (estimate)** |
 ///
-/// The second figure is [`MAX_JBIG2_SYMBOLS`]'s estimate carried through: 20 000
+/// The third figure is [`MAX_JBIG2_SYMBOLS`]'s estimate carried through: 20 000
 /// glyph bitmaps at a 25 x 50 box, which is roughly what a 10-point glyph
 /// occupies at 300 dpi. The margin over it is 2.7x — the same order as
 /// [`crate::MAX_PNG_SAMPLES`]'s over a comic page, and the same `1 << 26`.
+///
+/// **The second row arrived on 26 September 2026 and was blank before it**, and
+/// the blank is worth a sentence because of how long it lasted. A symbol's
+/// width and height are nowhere in a segment header — 6.5.5 accumulates both
+/// inside the arithmetic coder — so `crates/tinker-pdf/tests/jbig2_census.rs`,
+/// which shares no code with this decoder on purpose, could count symbols and
+/// could not measure one. It carried a `max_symbol_pixels` field that nothing
+/// assigned, and printed `not measured` rather than the zero that field held.
+/// It now decodes instead, through [`decode_measured`], and the figure is the
+/// largest total any one dictionary in five corpora spends: **1 568 118**, in
+/// `safedocs/0000337.pdf`. This cap clears it by **42.8x** and the estimate
+/// above it by 16x, so the arithmetic was not wrong — a real scan spends a
+/// fortieth of it, exactly as [`MAX_JBIG2_SYMBOLS`]'s does.
+///
+/// It is also why this cap is **not** lowered to bound the time a dictionary
+/// spends, which `docs/verification.md`'s `jbig2` fuzz row records at length:
+/// the 25 000 000 is what a plausible 200-page scan sharing one dictionary
+/// asks for, the corpus's own worst is a 46-page one, and a cap set below the
+/// estimate on the strength of a smaller document is the failure
+/// `no_bound_refuses_a_real_book` exists to catch.
 ///
 /// Reachable: a symbol's width and height each accumulate from Annex B deltas
 /// whose tables carry 32-bit ranges, and each is refused only above
@@ -1363,6 +1453,101 @@ pub const MAX_JBIG2_SYMBOLS: u32 = 100_000;
 /// `a_dictionary_past_the_symbol_pixel_cap_is_refused_before_it_allocates`
 /// builds, in two.
 pub const MAX_JBIG2_SYMBOL_PIXELS: u64 = 1 << 26;
+
+/// **The most times one symbol may span the page it will be drawn onto.**
+///
+/// The three caps above bound counts and totals. This one bounds a *single
+/// symbol*, and it is the only bound in this crate that is a property of the
+/// symbol and its page **together** — 7.4.7 makes the image dictionary's
+/// `/Width` and `/Height` the page an embedded stream's regions are composited
+/// onto, and a symbol wider or taller than that is drawable only by clipping.
+///
+/// | | Multiples of the page |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 1 |
+/// | The most any file in the corpus spends | 1 |
+/// | A 200-page bilevel scan sharing one global dictionary | 1 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **4** |
+///
+/// **Measured rather than argued, which is the difference between this row and
+/// the three above it.** `crates/tinker-pdf/tests/jbig2_census.rs` decodes
+/// every symbol of every JBIG2 image in the five fetched corpora and reports
+/// the smallest whole multiple of each image's own page that admits all of its
+/// symbols. Over 118 JBIG2-bearing files it is **1**: not one symbol in the
+/// corpus — synthetic fixture or real OCR scan — is wider or taller than the
+/// page it is drawn onto. The margin here is therefore **4x the worst real
+/// document**, which is the same order as
+/// [`MAX_JBIG2_SYMBOL_PIXELS`]'s 2.7x over its own yardstick and
+/// [`crate::MAX_PNG_SAMPLES`]'s over a comic page.
+///
+/// **T.88 does not forbid a symbol larger than its page**, so this is a bound
+/// this build chooses rather than one the format states — which under ruling 3
+/// is exactly why it needed the measurement first.
+///
+/// Charged **per dimension** rather than per area, deliberately. A symbol one
+/// row tall and a page's worth of pixels wide has the page's *area* and none
+/// of its shape, and clipping it to the page loses all but one row of it; an
+/// area bound admits that symbol and a per-dimension bound does not. The seed
+/// `fuzz/corpus/jbig2/symbol-dictionary-spends-the-pixel-budget` is that
+/// symbol, 246 988 by 1 against a page of 1 by 1.
+///
+/// Reachable: a symbol's width accumulates from Annex B deltas to `u32::MAX`
+/// while the page may be one pixel wide, so **one** symbol may span the page
+/// 4 294 967 295 times — which
+/// `a_symbol_larger_than_its_page_is_refused_at_the_first_symbol` builds.
+pub const MAX_JBIG2_SYMBOL_PAGE_MULTIPLE: u32 = 4;
+
+/// **What a symbol dictionary is decoded against.**
+///
+/// Three things that used to be two loose parameters and a field nobody
+/// carried: the caller's output ceiling, the page geometry every symbol in
+/// this dictionary will be composited onto, and the tally
+/// [`Jbig2SymbolExtent`] hands a census. They travel together because the
+/// second exists for the first time here — a dictionary decoded without
+/// knowing its page cannot tell a glyph from a symbol a quarter of a million
+/// pixels wide on a one-pixel page.
+struct SymbolPage {
+    /// [`Jbig2Params::width`]: the page's own width, which is the authority
+    /// for an embedded stream (ISO 32000-1 7.4.7) and not the page
+    /// information segment's.
+    width: u32,
+    /// [`Jbig2Params::height`], likewise.
+    height: u32,
+    /// The caller's output ceiling, unchanged.
+    ceiling: usize,
+    /// What this stream's dictionaries have asked for so far. Carried by value
+    /// because [`Jbig2SymbolExtent`] is `Copy` and a borrow of one field of
+    /// [`Page`] cannot live across a call that already holds references into
+    /// another.
+    extent: Jbig2SymbolExtent,
+}
+
+impl SymbolPage {
+    fn new(width: u32, height: u32, ceiling: usize, extent: Jbig2SymbolExtent) -> SymbolPage {
+        SymbolPage {
+            width,
+            height,
+            ceiling,
+            extent,
+        }
+    }
+
+    /// Whether one symbol spans this page more than
+    /// [`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`] times, in either dimension.
+    ///
+    /// `max(1)` on each side because a page of no pixels would refuse every
+    /// symbol there is, and a page of *one* pixel is a real thing a caller
+    /// asks for — the fuzz target's first knob bit chooses it.
+    ///
+    /// Computed in `u64` because the allowance is a product of two 32-bit
+    /// numbers and the point of the check is to be reached by the large ones.
+    fn oversized(&self, width: u32, height: u32) -> bool {
+        let multiple = u64::from(MAX_JBIG2_SYMBOL_PAGE_MULTIPLE);
+        u64::from(width) > u64::from(self.width.max(1)) * multiple
+            || u64::from(height) > u64::from(self.height.max(1)) * multiple
+    }
+}
 
 /// **Clause 6.5.9: a symbol dictionary, Huffman-coded.**
 ///
@@ -1378,9 +1563,10 @@ fn symbol_dictionary_huffman(
     reader: &mut Reader<'_>,
     imported: &[Bitmap],
     custom: &mut CustomTables<'_>,
-    ceiling: usize,
+    page: &mut SymbolPage,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<Vec<Bitmap>> {
+    let ceiling = page.ceiling;
     // 7.4.3.1.1 bits 2 to 7 pick the tables, and 7.4.3.1.6 says a selector
     // asking for a custom one takes the next referred-to Tables segment in
     // reference order -- so these four are read in the clause's own order and
@@ -1493,6 +1679,14 @@ fn symbol_dictionary_huffman(
             }
             total = total.checked_add(width)?;
             spent = spent.checked_add((width as u64).checked_mul(height as u64)?)?;
+            page.extent.record(width as u32, height as u32, spent);
+            // Before the total, because this one is about *this* symbol and
+            // says so: a dictionary whose first symbol is larger than the page
+            // is refused at that symbol rather than after spending the budget.
+            if page.oversized(width as u32, height as u32) {
+                note(warnings, Jbig2Refusal::SymbolLargerThanPage);
+                return None;
+            }
             if spent > MAX_JBIG2_SYMBOL_PIXELS {
                 note(warnings, Jbig2Refusal::SymbolPixelCap);
                 return None;
@@ -1732,9 +1926,10 @@ fn symbol_dictionary(
     tables: &[&HuffTable],
     consumed: Option<&RetainedContexts>,
     retained: &mut Option<RetainedContexts>,
-    ceiling: usize,
+    page: &mut SymbolPage,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<Vec<Bitmap>> {
+    let ceiling = page.ceiling;
     let mut custom = CustomTables::new(tables);
     let mut reader = Reader::new(segment.data);
     // 7.4.3.1.1.
@@ -1759,7 +1954,7 @@ fn symbol_dictionary(
             &mut reader,
             imported,
             &mut custom,
-            ceiling,
+            page,
             warnings,
         );
     }
@@ -1871,6 +2066,15 @@ fn symbol_dictionary(
             }
 
             spent = spent.checked_add((width as u64).checked_mul(height as u64)?)?;
+            page.extent.record(width as u32, height as u32, spent);
+            // The per-symbol bound, before the running total and before the
+            // allocation: on this road every symbol's pixels are decoded one
+            // decision at a time, so the symbol refused here is the one whose
+            // work has not been spent yet.
+            if page.oversized(width as u32, height as u32) {
+                note(warnings, Jbig2Refusal::SymbolLargerThanPage);
+                return None;
+            }
             if spent > MAX_JBIG2_SYMBOL_PIXELS {
                 note(warnings, Jbig2Refusal::SymbolPixelCap);
                 return None;
@@ -2039,8 +2243,8 @@ fn symbol_dictionary(
 /// | | Instances |
 /// | --- | --- |
 /// | The most any fixture in this repository spends | 5 |
-/// | The most any file in the corpus spends | 9 |
-/// | One page of a 200-page bilevel scan | 4 000 |
+/// | The most any file in the corpus spends | 4 440 |
+/// | One page of a 200-page bilevel scan | 5 000 |
 /// | A 300-page reflowable book | 0 |
 /// | **This cap** | **4 194 304 (estimate)** |
 ///
@@ -2049,6 +2253,15 @@ fn symbol_dictionary(
 /// text page sets a few thousand characters, so the estimate is a page's worth
 /// and not a document's — [`MAX_JBIG2_SYMBOLS`] carries the argument, and the
 /// word **estimate** is in the published figure for its reason.
+///
+/// The second row was **9** until tier 0's production corpus arrived, and the
+/// figure there now is `safedocs/0000425.pdf`'s, re-measured 26 September 2026
+/// over 118 JBIG2-bearing files. It is the one row in this set that lands
+/// *above* the estimate as it was first written — 4 440 real placements against
+/// a page's argued 4 000 — which is the yardstick being low rather than the cap
+/// being wrong, so the yardstick moved to 5 000 and `SCAN_TEXT_INSTANCES` in
+/// `crates/tinker-pdf/tests/bounds_ledger.rs` says why. This cap clears the
+/// real figure by 944x either way.
 ///
 /// Reachable: `SBNUMINSTANCES` is a 32-bit field at 7.4.4.5, checked before a
 /// symbol is placed, so **twenty-three bytes of region data** may ask for
@@ -4086,9 +4299,36 @@ pub fn decode_attributed(
     max_output: usize,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Result<Vec<u8>, FilterError> {
+    decode_measured(data, params, max_output, warnings).0
+}
+
+/// [`decode_attributed`], with what its symbol dictionaries asked for.
+///
+/// The same decode again; the difference is that the tally 6.5.5 accumulates
+/// on the way past comes back instead of being dropped. It exists because a
+/// symbol's width and height are **not in any segment header** — both come out
+/// of the arithmetic coder — so a census that walks headers can count symbols
+/// and cannot measure one, which is the hole
+/// `crates/tinker-pdf/tests/jbig2_census.rs` printed as `not measured` until
+/// this existed.
+///
+/// A decode that refuses still reports what it had asked for by then, because
+/// that is the honest figure for a bound to be chosen against.
+///
+/// # Errors
+/// As [`decode`]: [`FilterError::Unsupported`] when no region was composited.
+pub fn decode_measured(
+    data: &[u8],
+    params: &Jbig2Params<'_>,
+    max_output: usize,
+    warnings: &mut Vec<Jbig2Refusal>,
+) -> (Result<Vec<u8>, FilterError>, Jbig2SymbolExtent) {
     let Some(bitmap) = Bitmap::new(params.width, params.height, max_output) else {
         note(warnings, Jbig2Refusal::RegionTooLarge);
-        return Err(FilterError::Unsupported(Capability::Jbig2));
+        return (
+            Err(FilterError::Unsupported(Capability::Jbig2)),
+            Jbig2SymbolExtent::default(),
+        );
     };
     let mut page = Page {
         intermediate: BTreeMap::new(),
@@ -4102,6 +4342,7 @@ pub fn decode_attributed(
         bitmap,
         number: None,
         regions: 0,
+        extent: Jbig2SymbolExtent::default(),
     };
 
     // D.3: the globals stream's segments are read first and are visible to
@@ -4178,10 +4419,13 @@ pub fn decode_attributed(
         // first half; `page.number` being unset is the second.
         if page.declared_content || page.number.is_none() || !warnings.is_empty() {
             note(warnings, Jbig2Refusal::NoRegion);
-            return Err(FilterError::Unsupported(Capability::Jbig2));
+            return (
+                Err(FilterError::Unsupported(Capability::Jbig2)),
+                page.extent,
+            );
         }
     }
-    Ok(page.bitmap.bits)
+    (Ok(page.bitmap.bits), page.extent)
 }
 
 /// Whether a segment of this type is the page's *content* rather than its
@@ -4331,6 +4575,12 @@ struct Page {
     number: Option<u32>,
     /// How many regions were composited. Zero is the refusal.
     regions: usize,
+    /// What this stream's symbol dictionaries asked for, in pixels.
+    ///
+    /// Always accumulated rather than switched on: it is five integers and a
+    /// `max` per symbol, and a measurement that only the measuring entry point
+    /// collects is a measurement of a different decode.
+    extent: Jbig2SymbolExtent,
 }
 
 impl Page {
@@ -4491,17 +4741,30 @@ impl Page {
             .rev()
             .find_map(|number| self.retained.get(number));
         let mut retained = None;
+        // The page geometry the same call was given, threaded to the one place
+        // that can tell a glyph from a symbol larger than the page it is drawn
+        // onto. `self.bitmap` carries the caller's width and height and not the
+        // page information segment's, which [`Page::begin`] deliberately does
+        // not believe over them.
+        //
+        // Copied out and put back rather than borrowed in place: `tables` holds
+        // references into `self.tables` for the length of the call, so nothing
+        // else about `self` can be borrowed mutably across it.
+        let mut geometry =
+            SymbolPage::new(self.bitmap.width, self.bitmap.height, ceiling, self.extent);
         let decoded = symbol_dictionary(
             segment,
             &imported,
             &tables,
             consumed,
             &mut retained,
-            ceiling,
+            &mut geometry,
             warnings,
         );
+        self.extent = geometry.extent;
         match decoded {
             Some(exported) => {
+                self.extent.dictionaries += 1;
                 self.symbols.insert(segment.number, exported);
                 if let Some(kept) = retained {
                     self.retained.insert(segment.number, kept);
@@ -4672,6 +4935,19 @@ impl Page {
 
 #[cfg(test)]
 mod tests {
+
+    /// A page every symbol in these tests fits comfortably inside.
+    ///
+    /// [`symbol_dictionary`] charges each symbol against the page it will be
+    /// composited onto, and almost every test here is about something else —
+    /// a template, a refinement offset, an export run, one of the other three
+    /// caps. `65 536` on each side is larger than any fixture in this file and
+    /// larger than the 8 193-wide symbol the pixel-budget test builds, so a
+    /// test that fails does so for the reason it was written for. The tests
+    /// that *are* about the page-relative bound name their own page.
+    fn test_page(ceiling: usize) -> SymbolPage {
+        SymbolPage::new(1 << 16, 1 << 16, ceiling, Jbig2SymbolExtent::default())
+    }
 
     /// **B.3's code assignment is canonical**, checked against a table small
     /// enough to write the answer out by hand.
@@ -5511,7 +5787,7 @@ mod tests {
             &[],
             None,
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut Vec::new(),
         )
         .expect("the reference dictionary decodes");
@@ -5541,7 +5817,7 @@ mod tests {
             &[],
             None,
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut warnings,
         )
         .expect("the refining dictionary decodes");
@@ -5827,9 +6103,16 @@ mod tests {
                 unknown_length: false,
             };
             let mut warnings = Vec::new();
-            let exported =
-                symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
-                    .unwrap_or_else(|| panic!("template {template} did not decode: {warnings:?}"));
+            let exported = symbol_dictionary(
+                &segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings,
+            )
+            .unwrap_or_else(|| panic!("template {template} did not decode: {warnings:?}"));
 
             let expected: Vec<&[&str]> = classes.iter().flat_map(|c| c.iter().copied()).collect();
             assert_eq!(exported.len(), expected.len(), "template {template}");
@@ -5889,7 +6172,7 @@ mod tests {
             &[],
             None,
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut warnings,
         )
         .unwrap_or_else(|| panic!("it did not decode: {warnings:?}"));
@@ -5946,7 +6229,7 @@ mod tests {
             &[],
             Some(&kept),
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut warnings
         )
         .is_none());
@@ -5965,7 +6248,7 @@ mod tests {
             &[],
             Some(&matching),
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut warnings,
         );
         assert!(
@@ -6012,8 +6295,16 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
-                    .is_none(),
+                symbol_dictionary(
+                    &segment,
+                    &[],
+                    &[],
+                    None,
+                    &mut None,
+                    &mut test_page(1 << 20),
+                    &mut warnings
+                )
+                .is_none(),
                 "flags {flags:#06x} decoded"
             );
             assert_eq!(
@@ -6049,10 +6340,16 @@ mod tests {
             unknown_length: false,
         };
         let mut warnings = Vec::new();
-        assert!(
-            symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
-                .is_none()
-        );
+        assert!(symbol_dictionary(
+            &segment,
+            &[],
+            &[],
+            None,
+            &mut None,
+            &mut test_page(1 << 20),
+            &mut warnings
+        )
+        .is_none());
         assert!(
             warnings.contains(&Jbig2Refusal::ExportCountMismatch),
             "{warnings:?}"
@@ -6108,8 +6405,16 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
-                    .is_none(),
+                symbol_dictionary(
+                    &segment,
+                    &[],
+                    &[],
+                    None,
+                    &mut None,
+                    &mut test_page(1 << 20),
+                    &mut warnings
+                )
+                .is_none(),
                 "{num_ex}/{num_new} was not refused"
             );
             assert!(
@@ -6167,8 +6472,15 @@ mod tests {
                 unknown_length: false,
             };
             let mut warnings = Vec::new();
-            let out =
-                symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings);
+            let out = symbol_dictionary(
+                &segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings,
+            );
             (
                 out.is_none() && warnings.contains(&Jbig2Refusal::SymbolPixelCap),
                 warnings,
@@ -6206,8 +6518,16 @@ mod tests {
         };
         let mut warnings = Vec::new();
         assert!(
-            symbol_dictionary(&segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
-                .is_none(),
+            symbol_dictionary(
+                &segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings
+            )
+            .is_none(),
             "a truncated collective bitmap is still not a dictionary"
         );
         assert!(
@@ -6216,6 +6536,148 @@ mod tests {
                 .any(|r| r.warning() == Warning::Jbig2SymbolLimitHit),
             "exactly at the cap is admitted, and this warning says it was not: \
              {warnings:?}"
+        );
+    }
+
+    /// **[`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`] fires, at the first symbol.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names as proving
+    /// this cap, and it is the only one of the four that reads the *page*: the
+    /// other three could be checked with no idea what the symbols were for.
+    ///
+    /// The Huffman road again, for the pixel budget's reason — two Annex B
+    /// codes state a height class and a width, so the whole segment is small
+    /// enough to read — and with the same property: on this road the widths of
+    /// a class are collected before its collective bitmap is read, so the
+    /// charge lands before `Bitmap::new` is reached and **nothing is
+    /// allocated**.
+    ///
+    /// Both dimensions are exercised, and the two symbols are chosen so that
+    /// **an area bound would admit both of them** — which is what makes this
+    /// test say something about the per-dimension choice rather than only about
+    /// the constant. Against a page of 8 by 8 the per-dimension allowance is 32
+    /// each way and the area allowance would be 1 024; 512 by 1 and 1 by 512
+    /// are 512 pixels each, so an area bound lets them through and this one
+    /// does not. 67 108 864 pixels is far away in both cases, so the total
+    /// budget is not what refuses them either — asserted, not assumed.
+    ///
+    /// **And the other direction**, which is the half that keeps this a bound
+    /// rather than a refusal of the format: 32 by 8 is exactly four times the
+    /// page's width and one times its height, so it is admitted, and the
+    /// dictionary then goes on to refuse for the collective bitmap that is not
+    /// there. The absence of `Jbig2SymbolLimitHit` is what says so.
+    ///
+    /// No clock. The assertion is the named warning — which matters more here
+    /// than anywhere else in this file, because the finding this cap closes was
+    /// found *by* a clock: `docs/verification.md`'s `jbig2` fuzz row, a
+    /// twenty-second libFuzzer timeout on 105 bytes.
+    #[test]
+    fn a_symbol_larger_than_its_page_is_refused_at_the_first_symbol() {
+        // A Huffman dictionary: DH over B.4, DW over B.2, no refinement, no
+        // custom tables — the shape the pixel-budget test above builds.
+        let dictionary = |height: i32, width: i32| {
+            let mut data = Vec::new();
+            data.extend_from_slice(&1u16.to_be_bytes());
+            data.extend_from_slice(&4u32.to_be_bytes()); // SDNUMEXSYMS
+            data.extend_from_slice(&4u32.to_be_bytes()); // SDNUMNEWSYMS
+            let mut writer = BitWriter::new();
+            write_huff(&mut writer, &table_b4(), height);
+            write_huff(&mut writer, &table_b2(), width);
+            write_huff_oob(&mut writer, &table_b2());
+            data.extend(writer.finish());
+            data
+        };
+        let decode = |data: &[u8], page: u32| {
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            let mut geometry = SymbolPage::new(page, page, 1 << 20, Jbig2SymbolExtent::default());
+            let out = symbol_dictionary(
+                &segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut geometry,
+                &mut warnings,
+            );
+            (out, warnings, geometry.extent)
+        };
+
+        assert_eq!(
+            MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, 4,
+            "the allowances written into this test are four times a side"
+        );
+
+        // Too wide, and too tall, against a page of 8 by 8 — and each of them
+        // inside the area an area bound would have allowed.
+        for (height, width) in [(1, 512), (512, 1)] {
+            assert!(
+                u64::from(width as u32) * u64::from(height as u32)
+                    < 8 * 8 * u64::from(MAX_JBIG2_SYMBOL_PAGE_MULTIPLE)
+                        * u64::from(MAX_JBIG2_SYMBOL_PAGE_MULTIPLE),
+                "{width} by {height} is outside the area allowance too, so it                  would not tell a per-dimension bound from an area one"
+            );
+            let (out, warnings, extent) = decode(&dictionary(height, width), 8);
+            assert!(
+                out.is_none(),
+                "{width} by {height} against a page of 8 by 8 decoded"
+            );
+            assert!(
+                warnings.contains(&Jbig2Refusal::SymbolLargerThanPage),
+                "{width} by {height}: {warnings:?}"
+            );
+            assert!(
+                !warnings.contains(&Jbig2Refusal::SymbolPixelCap),
+                "{width} by {height} is {} pixels, nowhere near the total \
+                 budget, and the total budget is what refused it: {warnings:?}",
+                u64::from(width as u32) * u64::from(height as u32)
+            );
+            // **At the first symbol**, which is the whole point: the fuzz seed
+            // this cap closes spent 67 219 222 pixels across 546 symbols
+            // before the total budget noticed.
+            assert_eq!(
+                extent.symbols, 1,
+                "{width} by {height} was refused after more than one symbol"
+            );
+            // And outwardly it is the cap warning rather than a variant or a
+            // truncation, because a caller acts on `Warning` and not on this.
+            assert_eq!(
+                Jbig2Refusal::SymbolLargerThanPage.warning(),
+                Warning::Jbig2SymbolLimitHit,
+                "the refusal reports the wrong warning outwardly"
+            );
+            assert!(
+                !Jbig2Refusal::SymbolLargerThanPage.is_malformed(),
+                "this is this build's number rather than the file's fault"
+            );
+        }
+
+        // Four times the width and once the height is the allowance itself, so
+        // it is admitted and the dictionary refuses for the collective bitmap
+        // that is not there instead.
+        let (out, warnings, extent) = decode(&dictionary(8, 32), 8);
+        assert!(
+            out.is_none(),
+            "a truncated collective bitmap is still not a dictionary"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|r| r.warning() == Warning::Jbig2SymbolLimitHit),
+            "exactly at the allowance is admitted, and this warning says it \
+             was not: {warnings:?}"
+        );
+        assert_eq!(
+            (extent.widest, extent.tallest),
+            (32, 8),
+            "the symbol was measured before it was judged"
         );
     }
 
@@ -6806,6 +7268,7 @@ mod tests {
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,
+            extent: Jbig2SymbolExtent::default(),
         };
         let data = page_info(8, 8, 0x04);
         let segment = Segment {
@@ -6838,6 +7301,7 @@ mod tests {
             bitmap: Bitmap::new(8, 8, 64).expect("eight by eight"),
             number: None,
             regions: 0,
+            extent: Jbig2SymbolExtent::default(),
         };
         let mut warnings = Vec::new();
         page.begin(
@@ -7162,9 +7626,16 @@ mod tests {
                 .find(|s| s.number == number)
                 .expect("the segment");
             let mut warnings = Vec::new();
-            let symbols =
-                symbol_dictionary(segment, &[], &[], None, &mut None, 1 << 20, &mut warnings)
-                    .expect("a symbol dictionary");
+            let symbols = symbol_dictionary(
+                segment,
+                &[],
+                &[],
+                None,
+                &mut None,
+                &mut test_page(1 << 20),
+                &mut warnings,
+            )
+            .expect("a symbol dictionary");
             assert!(warnings.is_empty(), "segment {number}: {warnings:?}");
             symbols
         };
@@ -7876,7 +8347,7 @@ mod tests {
             &[],
             None,
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut Vec::new(),
         )
         .expect("the shared dictionary decodes");
@@ -7887,7 +8358,7 @@ mod tests {
             &[],
             None,
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut warnings,
         )
         .expect("the refining dictionary decodes");
@@ -8396,7 +8867,7 @@ mod tests {
             &[],
             None,
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut Vec::new(),
         )
         .expect("the reference dictionary decodes");
@@ -8411,7 +8882,7 @@ mod tests {
             &[],
             None,
             &mut None,
-            1 << 20,
+            &mut test_page(1 << 20),
             &mut Vec::new(),
         )
         .expect("the plain dictionary decodes");
@@ -8435,7 +8906,7 @@ mod tests {
                 &[],
                 None,
                 &mut None,
-                1 << 20,
+                &mut test_page(1 << 20),
                 &mut warnings,
             )
             .unwrap_or_else(|| panic!("({rdx}, {rdy}) did not decode: {warnings:?}"));
