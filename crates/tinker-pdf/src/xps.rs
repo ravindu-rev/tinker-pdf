@@ -767,6 +767,12 @@ pub enum XpsElementDefect {
     /// the synthetic slant or weight — which is the paint-unreadable side of
     /// the asymmetry rather than the geometry side, and dropping the text
     /// would lose far more than the simulation does.
+    ///
+    /// Owed rather than approximated: the italic skew and the bold widening
+    /// are numbers ECMA-388 states, and a simulation drawn from a remembered
+    /// number would be a picture nothing here can say is right (ruling 13).
+    /// The clause could not be read when tier 4's XPS row was last worked
+    /// (`docs/ROADMAP.md` records the attempt), so the warning stays.
     GlyphsStyleSimulated,
     /// An `ImageSource` that resolves to no part in the package, or to one the
     /// package does not hold.

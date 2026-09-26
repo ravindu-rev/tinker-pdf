@@ -579,6 +579,18 @@ impl<'a> Archive<'a> {
         self.route
     }
 
+    /// The bounds this archive was opened under.
+    ///
+    /// Public for a caller that joins entries into something larger than one
+    /// of them — OPC's interleaved pieces, which make one part out of several
+    /// entries — and must hold the joined whole to the same
+    /// [`Limits::max_entry_bytes`] a single entry is held to, rather than to a
+    /// copy of the number that could disagree with the one this archive used.
+    #[must_use]
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
     /// Everything tolerated so far, including by reads already made.
     #[must_use]
     pub fn warnings(&self) -> &[Warning] {

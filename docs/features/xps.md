@@ -35,7 +35,13 @@ attributes (`ImageSource`, `FontUri`) as well as relationship targets,
 because XPS 1.0 writes them absolute and OpenXPS writes them relative. The
 spine is `FixedDocumentSequence → FixedDocument → FixedPage`, pages in
 markup order (12.3.1 defines no other), each payload resolved by media type
-rather than by extension.
+rather than by extension. **Interleaved packages are read** (OPC 7.2.4): a part
+written as `…/[0].piece` through `…/[n].last.piece` — `[Content_Types].xml`
+included — is joined in piece-number order into one part, held as a whole to the
+archive's per-entry cap before a piece is read, with every piece checksummed and
+charged as an entry is. Pieces that do not determine a part — a gap, a repeat, no
+`.last` or one that is not the highest, a leading zero, a part stored both whole
+and in pieces — refuse the package by name.
 
 **The XML parser** is a leaf crate, `tinker-pdf-xml`: a pull parser that
 refuses `<!DOCTYPE` with an internal subset *by name* before reading one
@@ -138,10 +144,10 @@ the page synthesis.
 | An image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | a part neither the content type nor the magic bytes name is not one to guess at. **JPEG XR left this row**: 9.1.5.1's format now decodes and draws, so all four of 9.1.5's formats reach the page and the pre-emptive refusal loop that used to sit in front of both identification rules is gone | [filters](filters.md) |
 | A content type and magic bytes that disagree about two formats this build draws | `XpsElementDefect::ImageMediaTypeMismatch` | **the picture is drawn**, from the format its bytes name, because a decoder reads bytes — so this is a leniency and not a refusal, and what is lost is the producer's statement about the part. It rides the *success* side, on `Image::lenience`, because `Images::get` returns a `Result` whose `Err` is a refusal and a refusal here would lose a picture the package plainly holds; `State::tile` pushes it into `paint.rs`'s `defects`, where `warn` deduplicates it — set once per part, read once per use. Silence from one rule is not disagreement with it, so a part with no content type or no recognised signature owes nothing. Neither does one whose bytes then fail to decode: that is `ImageUnreadable`. Pinned by `a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named` and, for the deduplication, `one_mis_declared_part_used_twice_is_named_once` | [rulings](../rulings.md) ruling 10 |
 | A wrapper around an `ImageSource` that is **not** `{ColorConvertedBitmap picture profile}` | `XpsElementDefect::ImageProfileUnsupported` | the references inside a wrapper cannot be told apart: one with three of them is not this wrapper, and reading its first two would draw a picture in a profile the file never paired it with. `{ColorConvertedBitmap …}` itself is **read** — the picture drawn, the profile embedded as the `/ICCBased` space its samples are values in | [colour](colour.md) |
-| `StyleSimulations` | `XpsElementDefect::GlyphsStyleSimulated` | reported; glyphs drawn unsimulated | — |
+| `StyleSimulations` | `XpsElementDefect::GlyphsStyleSimulated` | reported; glyphs drawn unsimulated. **Still owed, and not implemented from memory**: the skew angle and the emboldening width are ECMA-388's to state, and its text could not be fetched when this was last attempted (26 September 2026, the `ecma-international.org` transfer reset twice); a simulation built from a remembered number would be exactly the unverified picture ruling 13 forbids calling right | [ROADMAP](../ROADMAP.md) |
 | Gradient stops with differing alphas; a `ColorInterpolationMode` this build does not interpolate in | `XpsElementDefect::BrushApproximated` | the brush reached the page and not exactly — one constant alpha cannot express per-stop alphas — and the approximation is named | — |
 | Unknown element | `XpsElementDefect::ElementUnknown` | drawn around, never silently skipped | — |
-| Broken fixed representation, interleaved parts, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic | [cbz](cbz.md) |
+| Broken fixed representation, interleaved pieces that do not assemble into a part, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic. **Interleaving itself left this row**: pieces that assemble are joined, and `wpf-image-and-text-pieces.xps` is in the conservation sweep | [cbz](cbz.md) |
 | Page-level defects | `XpsPageDefect::{SourceUnresolved, DocumentUnresolved, Unreadable, ContentUnreadable, SizeUnusable, MediaTypeMismatch, PageBoxUnusable}` | the page becomes a placeholder that keeps its number | — |
 | Signatures, print tickets, 3D, story fragments | not read | parts the spine does not reach are ignored | — |
 
@@ -231,7 +237,10 @@ on 14 September 2026** when that wrapper was read.
   this reader parses with, not the image decoders that give a picture its pixel
   count, not `geometry`'s reader of 11.2.3, and not 18.1's scale and flip,
   written out from the clause. **All thirteen packages conserve every fact** and
-  the census is recorded in `tests/xps/CONSERVATION.tsv`. Twelve did until 14
+  the census is recorded in `tests/xps/CONSERVATION.tsv`, with a fourteenth
+  row for `tests/xps_interleaved/wpf-image-and-text-pieces.xps` — one of the
+  thirteen cut into OPC pieces, whose census and rendered page must equal its
+  source's; the harness joins its pieces by its own reading of 7.2.4. Twelve did until 14
   September 2026: `gs-images.xps` stated two pictures this build refused at the
   element, and its divergence was pinned by a test of its own until the
   `{ColorConvertedBitmap}` wrapper was read. Bringing it in needed two fixes to

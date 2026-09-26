@@ -365,12 +365,14 @@ pub enum ArchiveRefusal {
     /// a comic archive, and so is an OPC package that names no fixed
     /// representation at all.
     UnreadablePackage,
-    /// An interleaved package: OPC 7.2.4's `…/[0].piece` items.
+    /// An interleaved package whose pieces (OPC 7.2.4's `…/[0].piece` items)
+    /// do not assemble into a part: a piece number missing or repeated, no
+    /// `.last` piece or one that is not the highest, a number with a leading
+    /// zero, or a part stored both whole and in pieces.
     ///
-    /// Recognised and refused by name rather than half-assembled. Reassembling
-    /// them is a second addressing model layered on the first, and no package
-    /// in gap 30 milestone 1's corpus uses one — so the refusal is tied to
-    /// evidence rather than to taste, and the plan says what would change it.
+    /// Refused by name rather than half-assembled, because the package does
+    /// not determine the part's bytes. **An interleaved package whose pieces
+    /// do assemble is read** since tier 4's XPS row: `xps::opc` joins them.
     Interleaved,
     /// A package holding an item that is not a part name (OPC 6.2.2.2) and is
     /// not the content-types item.
@@ -485,7 +487,7 @@ impl core::fmt::Display for ArchiveRefusal {
             ArchiveRefusal::UnreadablePackage => {
                 "an XPS package whose own structure could not be read"
             }
-            ArchiveRefusal::Interleaved => "an interleaved package, which is not reassembled here",
+            ArchiveRefusal::Interleaved => "an interleaved part whose pieces do not assemble",
             ArchiveRefusal::InvalidPartName => "an item that is not a part name",
             ArchiveRefusal::AmbiguousPartNames => "two part names one package may not both hold",
             ArchiveRefusal::NoFixedPages => "a fixed payload that names no page",

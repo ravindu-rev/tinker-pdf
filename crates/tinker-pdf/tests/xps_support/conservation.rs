@@ -379,6 +379,14 @@ fn colour_converted_bitmap(uri: &str) -> Option<&str> {
 /// XPS 1.0 writes `ImageSource="/Resources/x.png"` and OpenXPS writes it
 /// relative to the page part, and resolving both to one spelling is the only
 /// way a census over the two dialects compares like with like.
+///
+/// **Interleaved pieces are joined here, by this harness's own reading of
+/// 7.2.4** and not by `xps::opc`'s: an item named `<part>/[<n>].piece` or
+/// `<part>/[<n>].last.piece` is piece `n` of `<part>`, and the part is its
+/// pieces in number order. Crude on purpose — it checks nothing a reader
+/// should refuse — because its job is to find the part the markup is in, and
+/// a harness that asked the reader how to do that would inherit the reader's
+/// answer.
 fn parts(package: &[u8]) -> BTreeMap<String, Vec<u8>> {
     let mut out = BTreeMap::new();
     let Ok(mut archive) = Archive::open(package, &Limits::DEFAULT) else {
@@ -390,10 +398,37 @@ fn parts(package: &[u8]) -> BTreeMap<String, Vec<u8>> {
         .enumerate()
         .map(|(index, entry)| (index, entry.name.clone()))
         .collect();
+    let mut pieces: BTreeMap<String, Vec<(u64, Vec<u8>)>> = BTreeMap::new();
     for (index, name) in names {
-        if let Ok(bytes) = archive.read(index) {
-            out.insert(format!("/{name}"), bytes.into_owned());
+        let Ok(bytes) = archive.read(index) else {
+            continue;
+        };
+        let piece = name.rsplit_once('/').and_then(|(part, last)| {
+            let number = last
+                .strip_suffix(".last.piece")
+                .or_else(|| last.strip_suffix(".piece"))?
+                .strip_prefix('[')?
+                .strip_suffix(']')?
+                .parse::<u64>()
+                .ok()?;
+            Some((part.to_owned(), number))
+        });
+        match piece {
+            Some((part, number)) => pieces
+                .entry(format!("/{part}"))
+                .or_default()
+                .push((number, bytes.into_owned())),
+            None => {
+                out.insert(format!("/{name}"), bytes.into_owned());
+            }
         }
+    }
+    for (part, mut group) in pieces {
+        group.sort_by_key(|(number, _)| *number);
+        out.insert(
+            part,
+            group.into_iter().flat_map(|(_, bytes)| bytes).collect(),
+        );
     }
     out
 }

@@ -112,6 +112,16 @@ fn corpus(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
+/// A package this repository derived from one in `tests/xps`, kept apart from
+/// that directory because its README's first claim is that nothing here wrote
+/// a byte of anything in it.
+fn derived(name: &str) -> Vec<u8> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
 /// A package whose one 816 x 1056 fixed page carries `body`.
 fn package(body: &str) -> Vec<u8> {
     package_with_resources("", body)
@@ -1111,8 +1121,11 @@ fn the_document_census_reads_the_pages_in_page_order() {
 fn every_committed_package_conserves_the_figure_the_record_states() {
     let recorded = record();
     let mut measured: Vec<String> = Vec::new();
-    for name in COMMITTED {
-        let bytes = corpus(name);
+    let packages = COMMITTED
+        .iter()
+        .map(|name| (*name, corpus(name)))
+        .chain(DERIVED.iter().map(|name| (*name, derived(name))));
+    for (name, bytes) in packages {
         let markup = markup_census(&bytes);
         let verdict = conservation(&bytes);
 
@@ -1154,7 +1167,75 @@ fn every_committed_package_conserves_the_figure_the_record_states() {
         measured, recorded,
         "tests/xps/CONSERVATION.tsv is out of date"
     );
-    assert_eq!(recorded.len(), 13, "the sweep covers thirteen packages");
+    assert_eq!(
+        recorded.len(),
+        14,
+        "the sweep covers thirteen real packages and one derived from them"
+    );
+}
+
+/// The packages the sweep covers that no producer wrote, by their path under
+/// `tests/`.
+///
+/// **One**, and it exists because no producer on hand writes an interleaved
+/// package (OPC 7.2.4). `wpf-image-and-text-pieces.xps` is
+/// `wpf-image-and-text.xps` with six of its eight items cut into pieces and
+/// the pieces written round-robin — `[Content_Types].xml`, both relationships
+/// parts, the page, the PNG and the ODTTF font — by
+/// `tests/xps_interleaved/make-interleaved.py`, so every byte of every part is
+/// a real producer's and only the container is this repository's.
+/// `an_interleaved_package_states_the_census_of_the_one_it_was_cut_from` holds
+/// the two to one census.
+const DERIVED: &[&str] = &["xps_interleaved/wpf-image-and-text-pieces.xps"];
+
+/// **An interleaved package conserves, and states the census of the package
+/// it was cut from.**
+///
+/// The two carry the same parts byte for byte, so anything the pieces changed
+/// about the page — a part joined out of order, a piece dropped, a font whose
+/// obfuscation key came from the wrong name — is a divergence between two
+/// censuses that must be equal.
+#[test]
+fn an_interleaved_package_states_the_census_of_the_one_it_was_cut_from() {
+    let whole = markup_census(&corpus("wpf-image-and-text.xps"));
+    let pieces_bytes = derived("xps_interleaved/wpf-image-and-text-pieces.xps");
+    let pieces = markup_census(&pieces_bytes);
+    assert_eq!(whole.facts(), pieces.facts());
+    assert!(
+        conserve(&whole, &pieces).holds(),
+        "{:?}",
+        conserve(&whole, &pieces).divergences
+    );
+    let verdict = conservation(&pieces_bytes);
+    assert!(verdict.holds(), "{:?}", verdict.divergences);
+    assert_eq!(verdict.figure(), (3, 3), "the image, the run and the page");
+
+    // And the page is the same picture, which the census's counts and places
+    // do not say: a font joined from its pieces in the wrong order still
+    // yields a run at the right place, in glyphs that are not the file's.
+    let render = |bytes: Vec<u8>| {
+        let document = Document::open(bytes).expect("the package opens");
+        assert!(
+            document.archive().expect("a report").warnings().is_empty(),
+            "{:?}",
+            document.archive().map(|r| r.warnings().to_vec())
+        );
+        document
+            .page(0)
+            .expect("a page")
+            .render(&tinker_pdf::RenderOptions::default())
+    };
+    let one = render(corpus("wpf-image-and-text.xps"));
+    let other = render(pieces_bytes);
+    assert_eq!((one.width, one.height), (other.width, other.height));
+    assert!(
+        one.data == other.data,
+        "the two packages draw different pages"
+    );
+    assert!(
+        one.data.iter().any(|&b| b != 0xFF),
+        "the page drew something, so agreeing means something"
+    );
 }
 
 /// The packages the sweep covers, which is the list rather than the record of
