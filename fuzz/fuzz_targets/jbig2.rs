@@ -53,6 +53,14 @@ fuzz_target!(|data: &[u8]| {
     // other half of that: a region is bounded before it allocates, and a
     // generous ceiling here would let one input spend seconds inside
     // `decode_arithmetic` and time the run out instead of exploring it.
+    //
+    // **These four are load-bearing since 26 September 2026 and were not
+    // before.** `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` bounds one symbol against the
+    // page the same call was given, so a small page here is a small symbol
+    // budget rather than only a small output — which is what stopped the seed
+    // `symbol-dictionary-spends-the-pixel-budget` spending 67 million decoded
+    // pixels on a page of one (`docs/verification.md`, the `jbig2` fuzz row).
+    // A knob that grew the page would relax that bound as well as the buffer.
     let width = match knobs & 3 {
         0 => 1,
         1 => 8,

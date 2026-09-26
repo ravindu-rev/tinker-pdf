@@ -340,51 +340,113 @@ did not have the same standing:
   `MAX_JPX_WORK` had. The number does not move; it is now charged on the
   wider of what is read and what is written, and the same file is refused at
   247 times the cap before anything is allocated.
-- **`jbig2` (`timeout-`): the cap is right, is spent against, and is still
-  the whole answer — so this row stays open.** 105 bytes make a symbol
-  dictionary decode **67 219 222 pixels** across 546 symbols before
-  `MAX_JBIG2_SYMBOL_PIXELS` (67 108 864) refuses it: 0.65 s in release, 6.9 s
-  in a debug build, and past libFuzzer's twenty-second timeout under
-  coverage and sanitizer instrumentation. The memory is fine — 2^26 *bits* is
-  8 MiB — and the number is the one its ledger argues, 2.7x a 200-page
-  bilevel scan's shared dictionary. What is missing is a bound on the
-  dictionary's *work*, and it cannot simply be added: work here is counted in
-  decoded pixels, which is the quantity this cap already bounds, and
-  `bounds_ledger.rs` refuses a cap set under another cap over a quantity that
-  other cap has already bounded — "the other cap wearing a second name".
-  Lowering `MAX_JBIG2_SYMBOL_PIXELS` to bound the time would put it under the
-  25 000 000 its own yardstick says a real document spends. **Production is
-  more exposed than the fuzz target, not less**: `resources.rs` passes
-  `MAX_DECODED_STREAM` as the ceiling, so one image stream per page buys
-  0.65 s per page. Left as a named gap rather than closed under a number that
-  cannot be argued for.
+- **`jbig2` (`timeout-`): the cap was right, was spent against, and was not the
+  whole answer — closed 26 September 2026 by a bound on one symbol against its
+  page.** 105 bytes made a symbol dictionary decode **67 219 222 pixels**
+  across 546 symbols before `MAX_JBIG2_SYMBOL_PIXELS` (67 108 864) refused it:
+  **564 ms measured in release and 6.49 s in a debug build**, and past libFuzzer's
+  twenty-second timeout under coverage and sanitizer instrumentation. The memory
+  was never the problem — 2^26 *bits* is 8 MiB — and the cap's number is the one
+  its ledger argues, 2.7x a 200-page bilevel scan's shared dictionary. What was
+  missing was a bound on the dictionary's *work*.
 
-  **What would close it**, so nobody re-derives the search: a *per-symbol*
-  bound against the page geometry the same call was given. A symbol wider or
-  taller than the page it will be composited onto is drawable only by
-  clipping, and the seed's symbols are 246 988 x 1 against a page of 1 x 1;
-  a per-symbol bound refuses those at the first one while leaving the total
-  budget a shared dictionary needs untouched, which is the distinction the
+  **The two obvious fixes were both blocked, and the reasoning is kept because
+  it is what the answer had to get past.** A separate work cap could not be
+  added: work here is counted in decoded pixels, which is the quantity
+  `MAX_JBIG2_SYMBOL_PIXELS` already bounds, and `bounds_ledger.rs` refuses a cap
+  set under another cap over a quantity that other cap has already bounded —
+  "the other cap wearing a second name". And lowering
+  `MAX_JBIG2_SYMBOL_PIXELS` to bound the time would put it under the 25 000 000
+  its own yardstick says a plausible 200-page scan spends. **Production was more
+  exposed than the fuzz target, not less**: `resources.rs` passes
+  `MAX_DECODED_STREAM` as the ceiling, so one image stream per page bought
+  0.65 s per page.
+
+  **What closed it is `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`: a per-symbol bound
+  against the page geometry the same call was given.** A symbol wider or taller
+  than the page it will be composited onto is drawable only by clipping, and
+  this seed's symbols run to 246 988 x 1 against a page of 1 x 1. Charged per
+  dimension rather than per area — a symbol one row tall and a page's worth of
+  pixels wide has the page's area and none of its shape — so it refuses that
+  dictionary at its *first* symbol while leaving the total budget a shared
+  dictionary needs untouched, which is the distinction the
   `MAX_JBIG2_SYMBOL_PIXELS` row already draws between a per-item cap and a
-  total. What it needs first is evidence, under ruling 3: the largest symbol
-  relative to its page across the JBIG2-bearing corpus files, measured
-  the way `docs/design/jbig2-symbol-text.md` milestone 7 measured
-  `SDNUMNEWSYMS`. Without that number the bound is a guess, and T.88 does not
-  forbid a symbol larger than its page.
+  total. It is a bound this build chooses rather than one the format states:
+  **T.88 does not forbid a symbol larger than its page**, which under ruling 3
+  is exactly why it needed the corpus first.
 
-  **And the census cannot supply it today, which was found by printing it.**
-  `jbig2_census.rs`'s `Tally` has carried a `max_symbol_pixels` field since it
-  was written, merged across files by `add` and reported by nothing. Printed
-  for the first time on 23 September 2026 it reads **0 over all 117
-  JBIG2-bearing files**, and the reason is that no walk in that file ever
-  reaches a symbol's width and height: the field is declared, merged, and never
-  assigned. So the three yardsticks that section prints — largest
-  `SDNUMNEWSYMS` 2 468, largest `SDNUMEXSYMS` 2 478, largest `SBNUMINSTANCES`
-  4 440 — are every one of them *counts*, and `MAX_JBIG2_SYMBOL_PIXELS` is the
-  one cap of the four with no corpus figure behind it at all. The census now
-  prints `not measured` rather than a zero, and asserts the field is still
-  unassigned, because a zero reads as "no real document comes close" when what
-  it means is "nobody looked".
+  **The evidence, and the instrument that had to be built to take it.** The
+  measurement wanted was the largest symbol relative to its page across the
+  JBIG2-bearing files, and `jbig2_census.rs` could not take it. Its `Tally` had
+  carried a `max_symbol_pixels` field since the day it was written, merged
+  across files by `add` and **assigned by nothing**; printed for the first time
+  on 23 September 2026 it read 0 over all 117 files, so it was made to print
+  `not measured` and to assert the field was still unassigned — because a zero
+  reads as "no real document comes close" when what it means is "nobody looked".
+  The reason no walk could assign it is now written down: **neither of a
+  symbol's dimensions is in any segment header.** 6.5.5 accumulates both from
+  `IADH` and `IADW` deltas inside the arithmetic coder, and on the Huffman road
+  from Annex B deltas inside the bit stream, so a census that shares no code
+  with the decoder — which this one does on purpose — can count symbols and
+  cannot measure one. So the census now *decodes*, through a new
+  `jbig2_decode_measured` that hands back 6.5.5's own tally, and keeps its
+  property rather than dropping it: an image whose decode refused is counted as
+  refused and its figures read as a floor.
+
+  **What it found, 26 September 2026, over 118 JBIG2-bearing files:** 502
+  images, 243 dictionaries, **88 736 symbols, and not one of them wider or
+  taller than the page it is drawn onto.** The whole-multiple figure is **1**,
+  and the tightest fit in the population is *exactly* 1 —
+  `pdfjs/test/pdfs/bitmap-symbol-big-segmentid.pdf` holds a symbol 399 pixels
+  wide on a page 399 pixels wide. The largest single symbol anywhere is
+  713 x 437 (311 581 pixels), the widest is 2 242 and the tallest 3 200, each on
+  a page far larger than itself. **The cap is 4**, a margin of 4x over the worst
+  real document — sixteen times the page's area — chosen the way this table's
+  other tail-free rows are: `MAX_JBIG2_SYMBOL_PIXELS` is 2.7x its yardstick and
+  `MAX_JBIG2_SYMBOLS` 5x its own, and 4 sits between them. It is not 1, because
+  the population's ceiling *is* its tightest fit and a bound set at the worst
+  real document is the failure `no_bound_refuses_a_real_book` exists to catch.
+
+  **The seed: 564 ms to 23.5 µs in release, and 6.49 s to 0.99 ms in a debug
+  build** (each measured here, best of three), refused at its first symbol
+  — 69 pixels wide against a page one pixel wide — by `SymbolLargerThanPage`
+  rather than by the total budget. `jbig2_seeds.rs`'s whole 23-seed replay went
+  from about twelve seconds to ten milliseconds.
+  `the_pixel_budget_seed_is_refused_at_its_first_symbol` pins that **by its
+  cause and not by a clock**, asserting the symbol count is 1 and naming the
+  refusal, because a budget proved by a clock passes on a fast machine with the
+  budget removed. **No corpus file moved**: `jbig2_attribution.rs` still reports
+  1 of 118, `pdfjs/issue3371.pdf`, for the reason it always did.
+
+  **And the same measurement filled the hole this row was really about.**
+  `MAX_JBIG2_SYMBOL_PIXELS` was the one cap of the four with no corpus figure
+  behind it at all — the other three publish counts, and it is a pixel budget.
+  It has one now: the largest total any one dictionary in five corpora spends is
+  **1 568 118** pixels, in `safedocs/0000337.pdf`, so the cap clears the worst
+  real document by **42.8x** and its own argued yardstick by 16x. That
+  corroborates the arithmetic from below rather than licensing a lower cap: the
+  25 000 000 is a *200-page* scan sharing one dictionary and the corpus's worst
+  is a 46-page one, so lowering the cap to the measurement would be setting it
+  under the estimate on the strength of a smaller document. It stays where it
+  is, and now with a number under it.
+
+  **What this bound does not do, stated rather than implied, with the
+  arithmetic.** It bounds a symbol against its page; it does not bound a
+  dictionary's total work, and it was not allowed to. One symbol is now at most
+  sixteen times the page's *area* — four times each side — so `MAX_JBIG2_SYMBOLS`
+  and `MAX_JBIG2_SYMBOL_PIXELS` between them still permit 67 108 864 decoded
+  pixels, about 560 ms in release, from a page of roughly **42 pixels** upward:
+  100 000 x 16 x 42 crosses the budget. Below that the budget is out of reach,
+  and that is the class this finding was in — a page of one pixel now buys at
+  most 1 600 000 decoded pixels rather than 67 million, a factor of 42. Of the
+  sixteen page shapes this target's first byte can choose, **four are under that
+  threshold** (1x1, 1x8, 8x1, 37x1) and the other twelve can still reach the
+  budget. So what the bound removes from this target is the *shape* the finding
+  had — a page too small to display what was decoded for it — and not the
+  possibility of a slow input in general. The residual is the two existing caps
+  behaving exactly as their own ledgers argue, on a page large enough to make
+  them proportionate; that is what a bound against page geometry buys, and the
+  most one can.
 
 ### What a green fuzz run does not mean
 
@@ -1394,12 +1456,16 @@ been.**
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in
-`crates/tinker-pdf/tests/bounds_ledger.rs` — **43 rows**, each carrying a
-figure for a real book, comic and document rather than a guess. Forty of
+`crates/tinker-pdf/tests/bounds_ledger.rs` — **44 rows**, each carrying a
+figure for a real book, comic and document rather than a guess. Forty-one of
 those figures are measurements or arithmetic about a plausible file; the
-three JBIG2 rows publish the word **estimate** in the number itself, because
-the corpus holds no real OCR JBIG2 to measure against and a row that reads
-like a measurement when it is not is the failure this file exists to prevent.
+three JBIG2 count-and-total rows publish the word **estimate** in the number
+itself, because their caps were derived as arithmetic about a plausible scan
+rather than read off a file, and a row that reads like a measurement when it is
+not is the failure this file exists to prevent. The fourth JBIG2 row,
+`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`, does not carry the word, because its yardstick
+*is* a measurement: 88 736 corpus symbols, none of them larger than the page it
+is drawn onto (the `jbig2` fuzz row above).
 The ledger also asserts that no bound is proved by a clock — `Instant::now` is
 banned from every source a row names as firing it — so the caps are properties
 of inputs, not of machines.

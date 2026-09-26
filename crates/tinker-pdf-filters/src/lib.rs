@@ -66,9 +66,11 @@ pub use deflate::{deflate, zlib_compress};
 pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{
     decode as jbig2_decode, decode_attributed as jbig2_decode_attributed,
-    generic_encode as jbig2_generic_encode, generic_region_segment as jbig2_generic_region_segment,
-    Jbig2EncodeError, Jbig2GenericSource, Jbig2Params, Jbig2Refusal, MAX_JBIG2_SYMBOLS,
-    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TABLE_LINES, MAX_JBIG2_TEXT_INSTANCES,
+    decode_measured as jbig2_decode_measured, generic_encode as jbig2_generic_encode,
+    generic_region_segment as jbig2_generic_region_segment, Jbig2EncodeError, Jbig2GenericSource,
+    Jbig2Params, Jbig2Refusal, Jbig2SymbolExtent, MAX_JBIG2_SYMBOLS,
+    MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TABLE_LINES,
+    MAX_JBIG2_TEXT_INSTANCES,
 };
 pub use jpeg::{
     decode as jpeg_decode, jpeg_encode, JpegColor, JpegEncodeError, JpegError, JpegImage,

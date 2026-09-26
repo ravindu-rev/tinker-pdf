@@ -326,7 +326,8 @@ document sharing one global dictionary reaches the low tens of thousands of
 symbols and the low thousands of instances per region.
 
 **Landed on that footing, 4 September 2026.** The three caps are `pub` and are
-rows 38, 39 and 40 of `bounds_ledger.rs`'s forty, each with a `**This cap**`
+rows 38, 39 and 40 of `bounds_ledger.rs`'s forty *as it stood that day*, each
+with a `**This cap**`
 table in its own doc comment and a clock-free `#[test]` in `jbig2.rs` that
 fires it by name. The second cap is `MAX_JBIG2_SYMBOL_PIXELS` rather than the
 `MAX_JBIG2_SYMBOL_BYTES` this section first named it: what the decoder charges
@@ -335,10 +336,57 @@ is pixels, and a byte figure would have to pick a packing.
 | | `MAX_JBIG2_SYMBOLS` | `MAX_JBIG2_SYMBOL_PIXELS` | `MAX_JBIG2_TEXT_INSTANCES` |
 | --- | ---: | ---: | ---: |
 | The most any fixture in this repository spends | 3 | 72 | 5 |
-| The most any file in the corpus spends | 11 | — | 9 |
-| A 200-page bilevel scan sharing one global dictionary | 20 000 | 25 000 000 | 4 000 per region |
+| The most any file in the corpus spends | 2 478 | 1 568 118 | 4 440 |
+| A 200-page bilevel scan sharing one global dictionary | 20 000 | 25 000 000 | 5 000 per region |
 | A 300-page reflowable book | 0 | 0 | 0 |
 | The cap | 100 000 | 67 108 864 | 4 194 304 |
+
+**The corpus row was `11 | — | 9` when this table was written and every cell of
+it has since moved**, which is the whole argument for writing a measurement down
+beside an estimate rather than instead of it. The counts moved on 6 September
+2026 when tier 0's production shard arrived with real OCR JBIG2. The dash under
+the pixel budget moved on **26 September 2026**, and it took longer for a reason
+worth stating: a symbol's *size* is nowhere in a segment header — 6.5.5
+accumulates both dimensions inside the arithmetic coder — so the census, which
+shares no code with the decoder on purpose, could count symbols and could not
+measure one. The figure is taken by decoding now, through
+`tinker_pdf_filters::jbig2_decode_measured`, and the cap clears the worst real
+dictionary by **42.8x**. The per-region estimate went from 4 000 to 5 000 in the
+same pass, because 4 440 real placements had stood above it since September and
+a yardstick below the real population is the failure worth catching.
+
+### The fourth cap, and it is a relation rather than a quantity
+
+**`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`, landed 26 September 2026**, closing
+[../verification.md](../verification.md)'s `jbig2` fuzz row. The three caps
+above bound counts and totals; this one bounds **one symbol against the page it
+will be composited onto**, so its currency is a multiple of `/Width` and
+`/Height` and its published figure is `4`.
+
+| | Multiples of the page |
+| --- | ---: |
+| The most any fixture in this repository spends | 1 |
+| The most any file in the corpus spends | 1 |
+| A 200-page bilevel scan sharing one global dictionary | 1 |
+| A 300-page reflowable book | 0 |
+| The cap | 4 |
+
+It is the **first** of the four whose yardstick is a measurement rather than
+arithmetic, and the measurement is the one milestone 7 could not take: over 118
+JBIG2-bearing files, 502 images, 243 dictionaries and **88 736 symbols, not one
+symbol is wider or taller than its page**, and the tightest fit in the
+population is *exactly* one — `pdfjs/test/pdfs/bitmap-symbol-big-segmentid.pdf`
+holds a symbol 399 pixels wide on a page 399 wide. The cap is 4 and not 1
+because the population's ceiling *is* its tightest fit: there is no tail to
+clear, so the margin is taken the way the tail-free rows beside it are —
+`MAX_JBIG2_SYMBOL_PIXELS` is 2.7x its yardstick, `MAX_JBIG2_SYMBOLS` 5x its
+own, and 4 sits between them.
+
+Charged **per dimension** rather than per area, which is the design decision in
+it. A symbol one row tall and a page's worth of pixels wide has the page's area
+and none of its shape, and clipping it to the page loses all but one row; an
+area bound admits that symbol and this one does not. The input that made the row
+is exactly that symbol, 246 988 by 1 against a page of 1 by 1.
 
 Two things in that table are the reason it is worth reading rather than
 skimming. The **estimate is in the published figure**: each row's `published`
@@ -835,7 +883,7 @@ Annex H test and were all wrong, so "it decodes and looks like a picture" is
 exactly as weak as this paragraph always said it was.
 
 | 6 | Huffman variants: Annex B tables, type-53 custom tables, 7.4.3.1.7 symbol IDs, MMR collective bitmaps via `T6Rows` | H.1's Huffman-coded page decodes pixel-identical to its arithmetic twin; an over-subscribed custom table refuses with an asserted warning | M |
-| 7 | Bounds and fuzz hardening | **Done**, with the exit criterion corrected rather than met: the three rows are in `bounds_ledger.rs` (the second as `MAX_JBIG2_SYMBOL_PIXELS`, which is what the decoder charges) and none refuses a real scan, and the yardstick was stated arithmetic until 6 September 2026, when tier 0's production corpus arrived with real OCR JBIG2: the largest dictionary in 117 JBIG2-bearing files exports **2 478 symbols** and places **4 440 text instances**, against caps of 100 000 and 4 194 304. See the note above | S |
+| 7 | Bounds and fuzz hardening | **Done, and re-opened and closed once more on 26 September 2026.** The three rows are in `bounds_ledger.rs` (the second as `MAX_JBIG2_SYMBOL_PIXELS`, which is what the decoder charges) and none refuses a real scan; the yardstick was stated arithmetic until 6 September 2026, when tier 0's production corpus arrived with real OCR JBIG2 — the largest dictionary in 118 JBIG2-bearing files exports **2 478 symbols** and places **4 440 text instances**, against caps of 100 000 and 4 194 304. What the fuzzer then found was that all three bound *counts and totals* and none bounded a **single symbol against its page**, so 105 bytes spent the whole pixel budget on a page of one pixel and timed a libFuzzer session out. The fourth row, `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`, is that bound, and the measurement behind it is the one this milestone asked for and could not take: 88 736 corpus symbols, none wider or taller than its page. See the note above and [../verification.md](../verification.md) | S |
 | 8 | Corpus closure and docs | `cargo xtask corpus-run` shows `Capability::Jbig2` hit-rate ~0 in `ratchet.json`; every JBIG2-bearing corpus file renders without a placeholder warning, counted; one JBIG2 fingerprint in `determinism.rs`; the symbol/text refusal rows leave [../features/filters.md](../features/filters.md) | S |
 
 ### What Annex H.1 cannot adjudicate, and when it can

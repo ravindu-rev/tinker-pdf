@@ -163,6 +163,21 @@ place — a page that looks like text and says something else. T.88 Annex H.1's
 own page 2 is that case, its arithmetic text region referring to page 1's
 Huffman dictionary.
 
+Every symbol of every one of those files is measured as well as counted, since
+26 September 2026, and the reason it took until then is a fact about the format:
+**neither of a symbol's dimensions is in any segment header.** 6.5.5 accumulates
+both from `IADH` and `IADW` deltas inside the arithmetic coder, and on the
+Huffman road from Annex B deltas inside the bit stream, so
+[`jbig2_census.rs`](../../crates/tinker-pdf/tests/jbig2_census.rs) — which
+shares no code with this decoder on purpose — could count symbols and could not
+measure one. It decodes for that half now, through `jbig2_decode_measured`, and
+what it reports is the yardstick `MAX_JBIG2_SYMBOL_PIXELS` never had (the
+largest dictionary spends **1 568 118** pixels against a cap of 67 108 864) and
+the one `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` was chosen from: over **88 736 symbols
+in 243 dictionaries across 502 images, not one symbol is wider or taller than
+the page it is drawn onto**, and the tightest fit is exactly one — the 399 by
+400 picture above, whose widest symbol is 399 pixels across.
+
 Measured over the corpus's JBIG2-bearing files, counting those whose decode
 reports any refusal: **65 before this lineage landed, 52 after the arithmetic
 variant, 49 after the Huffman one, 35 after refinement, 30 once the Huffman road
@@ -631,6 +646,7 @@ make both enums wrong.
 | JBIG2 reference that does not resolve: a retained bitmap-coding context (7.4.2) no referred-to segment left behind, a retained context of the wrong shape for the template consuming it, or a selector naming a custom table the segment did not refer to | `Warning::Jbig2VariantSkipped` | **Every one of these is now a file contradicting itself rather than a lineage nobody has started.** SDHUFF, SBHUFF, SDREFAGG, SBREFINE, segment types 40/42/43, `TRANSPOSED`, clause 7.4.13's custom code tables and 7.4.2's retained contexts have all left this row. **The whole symbol lineage decodes** — arithmetic and Huffman, with and without refinement, in either combination, either placement orientation, standard tables or the file's own, adaptive state carried across dictionaries or started fresh, and a non-zero refinement delta through **B.14 and B.15** on both the text region's road and the dictionary's | T.88 7.4.2, 7.4.3.1.6 |
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | T.88 7.4.3 |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
+| JBIG2 symbol more than four times the page it is composited onto, in width or in height | `Warning::Jbig2SymbolLimitHit` | The three caps above bound counts and totals, and none of them bounds **one** symbol: 105 bytes spent the whole pixel budget on a page of one pixel and timed a fuzz session out. A symbol larger than its page is drawable only by clipping, and `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` refuses one at the symbol rather than after the budget. Charged per dimension, because a symbol one row tall and a page's worth of pixels wide has the page's area and none of its shape. T.88 permits the combination, so the figure is measured rather than taken from the standard: **88 736 corpus symbols in 243 dictionaries, and not one wider or taller than its page** | [verification](../verification.md), [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPX markers SOP and EPH in a header (T.800 A.8) | `Warning::JpxMarkerUnsupported` | **No Table A.2 marker is refused as a capability any more, and these two are refused for where they are rather than for what they are.** A.8 puts both inside the bit stream and tier-2 reads them there; a header is the one place neither has a meaning. **Five markers have left this row, each for its own reason**: CRG, because A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied; RGN, because Annex H was implemented; PPM and PPT, because A.7.4 and A.7.5 were; and POC last, on 21 September 2026, because A.6.6's progressions are B.12.2's progression order volumes and tier-2 sequences the packets from them | T.800 A.8.1, A.8.2 |
 | JPX POC field values: a `Ppoc` Table A.16 does not define, a bound outside Table A.32, an `Lpoc` that is not equation (A-6)'s, two POC segments in one header, a tile-part POC with none in the tile's first tile-part header | `Warning::JpxFeatureUnsupported`, `Warning::JpxStructureInvalid` | What is left of POC after the marker was implemented, and the same shape RGN's refusal took: a *value inside* the segment rather than the segment. A volume whose bounds run backwards is not a volume, and clamping one into shape would decode a packet sequence the codestream never described — the same failure as skipping the marker, reached from the other side | T.800 A.6.6, Table A.32, B.12.3 |
