@@ -20,8 +20,8 @@
 //! has to remember to bump.
 //!
 //! There are **three** trees now, not two: `tinker-pdf-content` segments words
-//! with UAX #29 for `TextLine::words`, and may depend on neither of the other
-//! two crates. The argument above holds a third time — a word boundary and a
+//! with UAX #29 for `TextLine::words` and folds diacritics for
+//! `TextPage::search_with`, and may depend on neither of the other two crates. The argument above holds a third time — a word boundary and a
 //! line-break opportunity disagreeing about whether a code point is assigned is
 //! the same failure — so the third tree is held to the same pin here rather than
 //! by a test of its own that could drift from this one.
@@ -236,6 +236,8 @@ fn each_tree_holds_the_files_its_algorithms_need() {
         names("crates/tinker-pdf-content/data/ucd"),
         vec![
             "LICENSE.txt",
+            "PropList.txt",
+            "UnicodeData.txt",
             "WordBreakProperty.txt",
             "WordBreakTest.txt",
             "emoji-data.txt",
@@ -252,8 +254,41 @@ fn each_tree_holds_the_files_its_algorithms_need() {
 ///   [`both_crates_carry_the_same_licence_text`];
 /// - `UnicodeData.txt`, whose very first line is data — it is the one UCD data
 ///   file published without a header — pinned by
-///   [`unicode_data_covers_the_repertoire_the_versioned_files_name`].
+///   [`unicode_data_covers_the_repertoire_the_versioned_files_name`] in the
+///   first tree, and every other tree's copy by
+///   [`every_unicode_data_is_the_pinned_one`].
 const UNVERSIONED: &[&str] = &["LICENSE.txt", "UnicodeData.txt"];
+
+/// Every tree that carries a `UnicodeData.txt` carries the one the repertoire
+/// cross-check below pins, byte for byte.
+///
+/// The cross-check can only be run against a file with a `Scripts.txt` beside
+/// it, which is the shaping tree alone. A second copy elsewhere — the content
+/// crate's, which folds diacritics with its decompositions — would otherwise
+/// be the one data file in any tree that nothing held to a version at all.
+#[test]
+fn every_unicode_data_is_the_pinned_one() {
+    let root = repo_root();
+    let pinned = std::fs::read(root.join(TREES[0]).join("UnicodeData.txt"))
+        .expect("the pinned UnicodeData.txt");
+    let mut copies = 0usize;
+    for tree in TREES.iter().skip(1) {
+        let Ok(copy) = std::fs::read(root.join(tree).join("UnicodeData.txt")) else {
+            continue;
+        };
+        copies += 1;
+        assert!(
+            copy == pinned,
+            "{tree}/UnicodeData.txt differs from {}/UnicodeData.txt, which is the \
+             copy the repertoire cross-check pins to the tree's version",
+            TREES[0]
+        );
+    }
+    assert!(
+        copies >= 1,
+        "no second copy was found, so nothing was compared"
+    );
+}
 
 /// Every code point `Scripts.txt` names is one `UnicodeData.txt` knows about.
 ///

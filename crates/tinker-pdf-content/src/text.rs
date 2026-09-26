@@ -291,7 +291,7 @@ impl TextPage {
 }
 
 /// The quad covering glyphs `a..=b` of a line.
-fn span_quad(line: &TextLine, a: usize, b: usize) -> Option<Quad> {
+pub(crate) fn span_quad(line: &TextLine, a: usize, b: usize) -> Option<Quad> {
     let first = line.chars.get(a)?;
     let last = line.chars.get(b)?;
     Some(Quad {

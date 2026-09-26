@@ -228,10 +228,19 @@ fn exercise(bytes: Vec<u8>) {
         let _ = text.search("e");
         let _ = text.lines();
         let _ = text.blocks.len();
-        // UAX #29 over whatever a mutated font decoded to.
+        // UAX #29 over whatever a mutated font decoded to, and the search
+        // options, which fold and segment the same text.
         for line in text.lines() {
             let _ = line.words();
         }
+        let _ = text.search_with(
+            "e",
+            &tinker_pdf::SearchOptions {
+                case_sensitive: false,
+                whole_word: true,
+                diacritic_insensitive: true,
+            },
+        );
 
         // The join, over the same `TextPage`. Reached through the tree bound
         // above rather than through `Page::structured_text` so the walk is

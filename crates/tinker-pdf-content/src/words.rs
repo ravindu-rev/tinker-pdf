@@ -94,7 +94,7 @@ fn lookup<T: Copy>(table: &[(u32, u32, T)], code: u32, default: T) -> T {
 }
 
 /// Whether a code point is in a sorted `(first, last)` table.
-fn member(table: &[(u32, u32)], code: u32) -> bool {
+pub(crate) fn member(table: &[(u32, u32)], code: u32) -> bool {
     table
         .binary_search_by(|&(first, last)| {
             if code < first {

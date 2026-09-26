@@ -149,9 +149,10 @@ Everything is on the facade (ruling 11): `Page::text()` returns a
 offers `plain_text()` (one line per line), `lines()` (flattened), and
 `search(needle)` — literal, case-insensitive, one `Quad` per match, mapped
 back to the glyphs it covers. `Quad` carries four corners and
-`bounds()` for the enclosing rectangle. `plain_text_with(options)` is the
-opt-in sibling of `plain_text()`, below, and `TextLine::words()` splits a line
-into words with a box each.
+`bounds()` for the enclosing rectangle. `search_with(needle, options)` and
+`plain_text_with(options)` are the opt-in siblings of `search` and
+`plain_text()`, below, and `TextLine::words()` splits a line into words with a
+box each.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
@@ -165,6 +166,46 @@ for warning in &text.warnings {
     eprintln!("tolerated: {warning:?}"); // TextWarning
 }
 ```
+
+### Search options
+
+`search_with(needle, &SearchOptions)` is `search`'s sibling, and with
+`SearchOptions::default()` it returns `search`'s quads, one for one — `search`
+itself, and its parity pins, are unchanged. Three switches, each off by
+default and each composable with the others:
+
+- **`case_sensitive`** — match case exactly. Off, both sides are lower-cased
+  character by character, which is what `search` has always done: it is
+  `str::to_lowercase`, not Unicode case folding, so `ß` does not find `SS`.
+- **`whole_word`** — a match counts only where it begins and ends on a
+  **UAX #29 word boundary** of the text searched, the same segmentation
+  `TextLine::words()` reports below. `cat` is not found in `concat`, in `scat`,
+  or — since UAX #29 keeps an apostrophe between letters inside a word — in
+  `cat's`. A rejected candidate does not hide an overlapping one that is whole
+  (`x x` in `xx x x` is found once, starting inside the rejected one).
+- **`diacritic_insensitive`** — both sides are **canonically decomposed**
+  (`UnicodeData.txt`'s untagged mappings, fully expanded) and every
+  nonspacing mark that Unicode also classes `Diacritic` is removed.
+  `resume` finds `résumé` whether its accents are precomposed or combining;
+  Arabic harakat and Hebrew points are ignored; a Devanagari vowel sign, which
+  is `Mn` but a vowel rather than an accent, still has to match. The property
+  decides and this build does not second-guess it: the Arabic hamza and madda
+  above (U+0653..U+0655) are not `Diacritic`, so `أ` and `آ` still differ
+  from `ا`. Compatibility mappings (`ﬁ`, `①`) are not applied, Hangul
+  syllables stay composed, and canonical reordering is not performed.
+  `tinker_pdf_content::fold_diacritics` is the folding on its own.
+
+Regular expressions are not an option, and whether they should be is a
+decision the [roadmap](../ROADMAP.md) keeps: the tree has no regex engine and
+links none.
+
+```rust
+let options = SearchOptions { whole_word: true, diacritic_insensitive: true, ..Default::default() };
+for quad in page.text().search_with("resume", &options) { /* … */ }
+```
+
+The decomposition and `Diacritic` tables are compiled from the same vendored
+UCD tree as the word-break table below.
 
 ### Words and word boxes (UAX #29)
 
@@ -320,7 +361,12 @@ search hit geometry, wmode/rtl separation, non-finite glyphs dropped),
 decimals and abbreviations, combining marks, flag pairs, word boxes from a
 real content stream, a raised character widening its word's box, a turned
 line's turned box, a ligature inside its word, a 200 000-indicator line in
-linear time), `plain.rs` (hyphen rejoining: a soft hyphen at a line end and inside one, a
+linear time), `search.rs` (the default equal to `search` quad for quad over
+repeats, a two-character lower case, ligatures and lone marks; each option
+alone and composed; whole word at UAX #29 boundaries without hiding an
+overlapping candidate; precomposed and combining accents folded alike; harakat
+and niqqud folded and a Devanagari vowel sign kept), `plain.rs` (hyphen
+rejoining: a soft hyphen at a line end and inside one, a
 hard hyphen before lower case, upper case, a digit and an uncased letter,
 the dashes and U+2011 left alone, joins chaining, the default unchanged),
 `interpret.rs` (group offer/decline, state save discipline), `record.rs` (a

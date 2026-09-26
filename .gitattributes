@@ -87,7 +87,8 @@ crates/tinker-pdf-layout/data/** -text linguist-vendored
 # reviewer reads and out of the language statistics.
 crates/tinker-pdf-shape/data/** -text linguist-vendored
 # The UCD a third time (THIRDPARTY.md), for `tinker-pdf-content`'s UAX #29 word
-# boundaries. `-text` and `linguist-vendored` for the layout tree's reasons.
+# boundaries and its search's diacritic folding. `-text` and
+# `linguist-vendored` for the layout tree's reasons.
 crates/tinker-pdf-content/data/** -text linguist-vendored
 # RFC 7932's static dictionary (THIRDPARTY.md). `-text` because it is binary --
 # the RFC publishes it as hexadecimal and this is that dump decoded, so it is
