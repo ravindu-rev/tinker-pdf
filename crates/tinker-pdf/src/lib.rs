@@ -252,6 +252,16 @@ pub use tinker_pdf_cos::{
     CalcError, DisplayString, EventVerdict, Keystroke, Recalculation, ScriptBudget, ScriptError,
     ScriptPolicy, ScriptScope, Trigger,
 };
+/// Graphics on write: the tint spaces, and the calculator a `/DeviceN` tint
+/// transform is written as.
+///
+/// [`CalculatorOp`] is the payload of [`Function::Calculator`] and
+/// [`DeviceNAttributes`] the argument to
+/// [`DocumentBuilder::add_device_n_color_space`], so without them here the
+/// variant cannot be built and the method cannot be called from outside this
+/// workspace — the omission the `ExtGState` paragraph above records (ruling
+/// 11).
+pub use tinker_pdf_cos::{CalculatorOp, DeviceNAttributes};
 /// Signing on an incremental save (12.8.1), behind
 /// [`DocumentEditor::save_signed`].
 ///

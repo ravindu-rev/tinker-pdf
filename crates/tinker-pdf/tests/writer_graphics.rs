@@ -1258,11 +1258,17 @@ fn an_image_in_an_icc_space_draws_what_a_hand_written_one_draws() {
         page.image(b"Im0", 10.0, 10.0, 40.0, 40.0);
     });
 
+    // The hand-written twin states the space the way Table 89 spells an
+    // image's `/ColorSpace` — the space itself, `[/ICCBased 5 0 R]` — and not
+    // as the resource name `/CS0`. This twin used to name `/CS0`, which is how
+    // the builder wrote it: 8.6.3 looks a name up in `/Resources` only for a
+    // content stream's `cs`, this reader drew both documents' samples as grey,
+    // and the two agreed with each other while neither drew the picture.
     let mut objects = profile_object(&profile);
     objects.extend_from_slice(
         format!(
             "6 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2 \
-             /BitsPerComponent 8 /ColorSpace /CS0 /Length {} >>\nstream\n",
+             /BitsPerComponent 8 /ColorSpace [/ICCBased 5 0 R] /Length {} >>\nstream\n",
             samples.len()
         )
         .as_bytes(),
@@ -1280,11 +1286,31 @@ fn an_image_in_an_icc_space_draws_what_a_hand_written_one_draws() {
     );
 
     let built = builder.finish();
-    same_picture(
-        render(built.clone()),
-        render(written),
-        "an image in an ICC space",
-    );
+    let picture = render(built.clone());
+    // The four samples, one a quadrant, in the colours they name — which is
+    // the assertion the comparison below cannot make on its own, since two
+    // documents drawing the same wrong picture agree.
+    for ((x, y), (name, want)) in [
+        ((20.0, 40.0), ("red", [true, false, false])),
+        ((40.0, 40.0), ("green", [false, true, false])),
+        ((20.0, 20.0), ("blue", [false, false, true])),
+        ((40.0, 20.0), ("yellow", [true, true, false])),
+    ] {
+        let (r, g, b) = at(&picture, x, y);
+        let got = [r > 150, g > 150, b > 150];
+        let dark = [r < 110, g < 110, b < 110];
+        for channel in 0..3 {
+            assert!(
+                if want[channel] {
+                    got[channel]
+                } else {
+                    dark[channel]
+                },
+                "the {name} sample, at ({x}, {y}): ({r}, {g}, {b})"
+            );
+        }
+    }
+    same_picture(picture, render(written), "an image in an ICC space");
 
     // **The sample width, which the picture cannot see either.** An ICC image
     // reporting one component instead of three writes `/DecodeParms /Colors 1`

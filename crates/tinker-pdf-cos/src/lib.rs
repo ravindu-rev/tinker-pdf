@@ -89,10 +89,10 @@ mod streams;
 pub use appearance::synthesize as synthesize_appearance;
 pub use build::{
     jpeg_shape, subset_tag, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal,
-    BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, EmbeddedWhole, ExtGState,
-    FormXObject, Function, Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind, OutlineEntry,
-    PageBuilder, PlacedGlyph, Shading, ShadingPattern, SoftMask, StateMask, SubsetRefusal, Target,
-    TilingPattern, TilingType, TransparencyGroup,
+    BlendMode, CalculatorOp, CompressedImage, DeviceNAttributes, DeviceSpace, DocumentBuilder,
+    EmbeddedWhole, ExtGState, FormXObject, Function, Glyph, ImageColorSpace, ImageData,
+    ImageFilter, MaskKind, OutlineEntry, PageBuilder, PlacedGlyph, Shading, ShadingPattern,
+    SoftMask, StateMask, SubsetRefusal, Target, TilingPattern, TilingType, TransparencyGroup,
 };
 // `calc::keystroke` and `calc::validate` are deliberately *not* re-exported
 // here: this root already has a `validate`, which is the strict structural

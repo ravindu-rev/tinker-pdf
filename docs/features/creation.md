@@ -50,17 +50,45 @@ and the writer never re-encodes a stream that already declares a `/Filter`.
 `tinker_pdf_cos::build::jpeg_shape(bytes)` reads a JPEG's dimensions and
 component count from its SOF marker so the caller need not. Indexed images take a `DeviceSpace` base
 only — 8.6.6.3 forbids an `/Indexed` over `/Indexed`, and this writer emits
-no CIE, `/Separation` or `/DeviceN` space. It **does** write an `/ICCBased`
+no CIE-based space. It **does** write an `/ICCBased`
 space: `add_icc_color_space` registers one as an indirect object with `/N`
 checked against Table 66, `set_fill_icc` and `set_stroke_icc` name it on the
-page, and `ImageColorSpace::Icc` names it on an image (8.9.5.4) — so one
-embedded profile serves a page's operators and its pictures alike.
+page, and `ImageColorSpace::Icc` puts it on an image — so one embedded
+profile serves a page's operators and its pictures alike. The image's
+`/ColorSpace` is a reference to the space's own array, not the resource name:
+Table 89 makes it a colour space, and only a content stream's `cs` looks a
+name up in `/Resources` (8.6.3). The name was written until September 2026,
+and this reader drew those samples as grey.
+
+**Spot colours.** `add_separation_color_space(resource, colorant, alternate,
+&tint)` registers `[/Separation /colorant /Alternate tint]` (8.6.6.4) and
+`add_device_n_color_space(resource, &colorants, alternate, &tint,
+attributes)` registers `[/DeviceN [...] /Alternate tint]` (8.6.6.5), each an
+indirect array with the tint transform its own object. A `/Separation` takes
+any one-input function — a type 2 ramp from no ink to full strength is the
+ordinary one — and a `/DeviceN` takes a `Function::Calculator`, a type 4
+PostScript calculator whose program is a `Vec<CalculatorOp>` value rather than
+text: the builder checks that every operator is Table 42's, that none is
+reached short of operands, that an `if` leaves the stack where it found it
+and an `ifelse`'s arms agree, and that the program ends with one value per
+alternate component, since a reader takes the last *n* and a program leaving
+another count writes outputs nobody meant. A type 0 sampled function is not
+offered: this reader evaluates one along its first input only, so a
+multi-input one would be written and read back wrong. `DeviceNAttributes`
+writes Table 71's `/Colorants` from separations registered earlier.
+Colorant names are unique but for `/None`, and at most 32 (Annex C).
+`set_fill_tint` and `set_stroke_tint` write `/Name cs t1 … tn scn`, and
+`ImageColorSpace::Tint { resource, components }` puts such a space on an
+image — refused when `components` is not the space's colorant count. Under an
+`ArchivalProfile` the alternate is the device colour a reader without the ink
+paints, and is refused where the destination profile would refuse it.
 
 **The operand count comes from the space rather than from the caller.** 8.6.5.5's
 `/N` says how many operands `scn` takes, so four values against a three-channel
-profile lose the fourth and one value gains two zeros. A content stream whose
-arity disagrees with its own space is one every reader has to guess about, and
-the guesses differ.
+profile lose the fourth and one value gains two zeros; a tint space takes one
+tint a colorant, and a missing tint is written as zero, which is no ink. A
+content stream whose arity disagrees with its own space is one every reader has
+to guess about, and the guesses differ.
 
 **Graphics.** `add_ext_gstate` (`ExtGState`: blend mode, alphas, soft mask
 with `MaskKind` and `StateMask`), `add_form` (`FormXObject`, optionally a
@@ -141,7 +169,8 @@ let pdf: Vec<u8> = b.finish();
 ```
 
 `DocumentBuilder`, `PageBuilder`, `ImageData`, `DeviceSpace`, `ExtGState`,
-`TransparencyGroup`, `FormXObject`, `Function`, `Shading`, `ShadingPattern`,
+`TransparencyGroup`, `FormXObject`, `Function`, `CalculatorOp`,
+`DeviceNAttributes`, `Shading`, `ShadingPattern`,
 `TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`,
 `StateMask`,
 `Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade.
@@ -185,7 +214,7 @@ byte-deterministic XMP packet and the header version its part requires.
 | --- | --- | --- | --- |
 | Any image encoder but deflate | `Rgb8`/`Gray8` are deflated; JPEG and PNG-IDAT pass through; nothing is encoded to JPEG, CCITT, JBIG2 or JPX | **The reason has now changed twice and the refusal has not.** It used to be "the engine decodes those codecs; it does not write them"; on 15 September 2026 `tinker-pdf-filters` gained CCITT G4 and JBIG2 generic regions, and on 16 September a baseline JPEG encoder, so three of the four codecs named here have a writer in the leaf crate and this builder calls none of them. What is missing is not a coder. It is the decision of *when* a raster is better off lossy, or as a fax coding, than as deflate — and, per codec, the framing: for JBIG2 D.3's embedded-stream assembly, which the filter crate deliberately does not write, and for JPEG the `/DCTDecode` XObject's own colour and `/Decode` agreement. JPX has no encoder at all | [filters](filters.md), [ROADMAP](../ROADMAP.md) |
 | Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS and neither will: `glyph_run` is the shaped entry point, through `tinker-pdf-shape` | [fonts](fonts.md), [design/shaping.md](../design/shaping.md) |
-| CIE, `/Separation` and `/DeviceN` on write | `DeviceSpace` and `/ICCBased` on the fill, stroke and image setters | a `/Separation` or `/DeviceN` space is a tint transform into an alternate space, and this writer emits no function for one. **ICC is not in this row**: `add_icc_color_space` registers a space, `set_fill_icc` and `set_stroke_icc` name it, and `ImageColorSpace::Icc` puts it on an image | [ROADMAP](../ROADMAP.md) |
+| CIE-based spaces on write: `/CalGray`, `/CalRGB`, `/Lab` | `DeviceSpace`, `/ICCBased` and the two tint spaces on the fill, stroke and image setters | `/ICCBased` is this writer's device-independent colour, and it carries everything a CIE-based array can say; no caller has needed the older spelling. `/Separation` and `/DeviceN` left this row in September 2026 | — |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
 | Layout | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API | — |
 | Everything an `ArchivalProfile` forbids | the call returns `false` and pushes a typed `ArchivalRefusal` naming its clause; `finish_archival` returns `Err` for what only a finished document can be judged on | a builder that emitted what the validator rejects would make the validator the last line of defence rather than the second | [pdfa](pdfa.md) |
@@ -197,6 +226,12 @@ byte-deterministic XMP packet and the header version its part requires.
   `writer_navigation.rs` exercise ExtGStates, patterns, shadings, forms,
   links and outlines through the facade and read the result back through
   the [document model](document-model.md).
+- `crates/tinker-pdf/tests/writer_tints.rs` renders `/Separation` and
+  `/DeviceN` fills, strokes and images and holds every sampled pixel to the
+  tint transform's own arithmetic — `c0 + t (c1 − c0)` for a ramp, the
+  program's formula for a calculator — through `round(v × 255)`, exactly,
+  with the strict validator clean; `build.rs`'s `tint_tests` hold the arrays,
+  the type 4 stream and each calculator refusal.
 - `crates/tinker-pdf/tests/writer_names.rs` holds each name-taking operator
   to one awkward name — a space, a `#`, a `/` and a byte past 0x7F: the
   stream carries the escaped token, the resource dictionary the name's own

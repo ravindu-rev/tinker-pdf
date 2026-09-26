@@ -120,17 +120,36 @@ pub enum ImageColorSpace<'a> {
     /// A registered `/ICCBased` space, by the resource name
     /// [`DocumentBuilder::add_icc_color_space`] gave it (8.6.5.5).
     ///
-    /// An image's `/ColorSpace` may name a resource rather than state a space
-    /// inline (8.9.5.4), which is what lets one embedded profile serve a page's
-    /// operators and its images alike instead of being copied into each. The
-    /// channel count comes from the registered space's `/N`, so this variant
-    /// carries no count of its own — and an image whose samples disagree with
-    /// that count is a defect this writer cannot see, exactly as it cannot see
-    /// inside the profile.
+    /// The image's `/ColorSpace` is written as a reference to the registered
+    /// space's own `[/ICCBased stream]` array, which is what lets one embedded
+    /// profile serve a page's operators and its images alike instead of being
+    /// copied into each. **Not as the resource name**: Table 89 makes an
+    /// image's `/ColorSpace` a colour space, and only a content stream's `cs`
+    /// looks a name up in `/Resources` (8.6.3). Until September 2026 the name
+    /// was written, and this repository's reader drew the samples as grey. An
+    /// image naming a resource no `/ICCBased` space was registered under is
+    /// refused. `components` must be the space's `/N`; an image whose samples
+    /// disagree with it is a defect this writer cannot see, exactly as it
+    /// cannot see inside the profile.
     Icc {
         /// The resource name the space was registered under.
         resource: &'a [u8],
         /// How many channels a sample has, which must be the space's `/N`.
+        components: u8,
+    },
+    /// A registered `/Separation` or `/DeviceN` space, by the resource name
+    /// [`DocumentBuilder::add_separation_color_space`] or
+    /// [`DocumentBuilder::add_device_n_color_space`] gave it (8.6.6.4,
+    /// 8.6.6.5): each sample is one tint per colorant.
+    ///
+    /// Unlike [`Self::Icc`] the count is checked: the builder knows how many
+    /// colorants the space it registered names, so an image whose `components`
+    /// disagree is refused rather than written with rows of the wrong width.
+    Tint {
+        /// The resource name the space was registered under.
+        resource: &'a [u8],
+        /// Tints per sample: one for a `/Separation`, the colorant count for
+        /// a `/DeviceN`.
         components: u8,
     },
     /// `[/Indexed base hival lookup]` (8.6.6.3).
@@ -158,7 +177,9 @@ impl ImageColorSpace<'_> {
             ImageColorSpace::DeviceGray | ImageColorSpace::Indexed { .. } => 1,
             ImageColorSpace::DeviceRgb => 3,
             ImageColorSpace::DeviceCmyk => 4,
-            ImageColorSpace::Icc { components, .. } => *components as u32,
+            ImageColorSpace::Icc { components, .. } | ImageColorSpace::Tint { components, .. } => {
+                *components as u32
+            }
         }
     }
 }
@@ -531,11 +552,16 @@ pub struct FormXObject<'a> {
     pub content: &'a [u8],
 }
 
-/// A PDF function (7.10), in the two types a gradient is built from.
+/// A PDF function (7.10): the two types a gradient is built from, and the
+/// calculator a `/DeviceN` tint transform needs.
 ///
-/// **`#[non_exhaustive]`**: 7.10 defines four types and this writer emits two.
-/// Sampled (type 0) and PostScript calculator (type 4) functions are additions
-/// a later gap can make without breaking a caller that matched with a wildcard.
+/// **`#[non_exhaustive]`**: 7.10 defines four types and this writer emits
+/// three. A sampled (type 0) function is an addition a later change can make
+/// without breaking a caller that matched with a wildcard — and it is not
+/// here yet for a reason worth stating: this repository's reader evaluates a
+/// sampled function along its **first** input only, so a multi-input one, the
+/// only kind a `/DeviceN` would want, would be written and then read back
+/// wrong. The calculator is evaluated in full.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Function {
@@ -569,6 +595,286 @@ pub enum Function {
         /// onto the domain that sub-function itself wants.
         encode: Vec<[f64; 2]>,
     },
+    /// Type 4, a PostScript calculator (7.10.5): any number of inputs, any
+    /// number of outputs, and a program over Table 42's operators.
+    ///
+    /// This is what a `/DeviceN` tint transform is made of, because it is the
+    /// one type that takes more than one input and that this repository's
+    /// reader evaluates in full. The program is a **value**, not text: there
+    /// is nothing to parse, and [`DocumentBuilder`] checks before writing it
+    /// that every operator is one Table 42 names, that no operator is reached
+    /// with too few operands, that both arms of an `ifelse` leave the stack
+    /// the same depth and an `if` leaves it where it found it, and that the
+    /// program ends with exactly one value per output on the stack.
+    Calculator {
+        /// `/Domain`: one `[lo hi]` per input.
+        domain: Vec<[f64; 2]>,
+        /// `/Range`: one `[lo hi]` per output. Required for this type
+        /// (7.10.5), and what a reader clips each output to.
+        range: Vec<[f64; 2]>,
+        /// The program, which runs with the inputs on the stack, first input
+        /// deepest.
+        program: Vec<CalculatorOp>,
+    },
+}
+
+/// One instruction of a [`Function::Calculator`] program (7.10.5).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CalculatorOp {
+    /// A number, pushed onto the stack.
+    Number(f64),
+    /// One of Table 42's operators by name — `add`, `mul`, `exch`, `index`,
+    /// `roll`, `true`, … — other than `if` and `ifelse`, which are the two
+    /// variants below.
+    ///
+    /// `copy`, `index` and `roll` take their counts from the stack, so a
+    /// program using one has to have pushed the count as a [`Self::Number`]
+    /// where the check can see it; a count computed at run time is refused,
+    /// since the depth after it cannot be known before the program runs.
+    Operator(&'static str),
+    /// `{ … } if`: the block runs when the value on top of the stack is true.
+    /// It must leave the stack as deep as it found it.
+    If(Vec<CalculatorOp>),
+    /// `{ … } { … } ifelse`: the first block runs when the value on top of
+    /// the stack is true, the second otherwise. Both must leave the stack
+    /// equally deep.
+    IfElse(Vec<CalculatorOp>, Vec<CalculatorOp>),
+}
+
+/// Table 42's operators, with how many operands each takes and leaves,
+/// **except** the three whose counts come from the stack and the two
+/// conditionals, which [`check_calculator`] reads separately.
+const CALCULATOR_OPERATORS: [(&str, usize, usize); 36] = [
+    ("abs", 1, 1),
+    ("add", 2, 1),
+    ("atan", 2, 1),
+    ("ceiling", 1, 1),
+    ("cos", 1, 1),
+    ("cvi", 1, 1),
+    ("cvr", 1, 1),
+    ("div", 2, 1),
+    ("exp", 2, 1),
+    ("floor", 1, 1),
+    ("idiv", 2, 1),
+    ("ln", 1, 1),
+    ("log", 1, 1),
+    ("mod", 2, 1),
+    ("mul", 2, 1),
+    ("neg", 1, 1),
+    ("round", 1, 1),
+    ("sin", 1, 1),
+    ("sqrt", 1, 1),
+    ("sub", 2, 1),
+    ("truncate", 1, 1),
+    ("and", 2, 1),
+    ("bitshift", 2, 1),
+    ("eq", 2, 1),
+    ("false", 0, 1),
+    ("ge", 2, 1),
+    ("gt", 2, 1),
+    ("le", 2, 1),
+    ("lt", 2, 1),
+    ("ne", 2, 1),
+    ("not", 1, 1),
+    ("or", 2, 1),
+    ("true", 0, 1),
+    ("xor", 2, 1),
+    ("dup", 1, 2),
+    ("exch", 2, 2),
+];
+
+/// How deeply a calculator's `if` and `ifelse` blocks may nest.
+///
+/// A compatibility limit rather than a resource bound, for
+/// [`MAX_FUNCTION_DEPTH`]'s reason: this repository's reader stops parsing a
+/// program's braces past depth 32, so a writer nesting deeper would write a
+/// function its own reader truncates. Sixteen is half that, which no tint
+/// transform approaches.
+const MAX_CALCULATOR_NESTING: u32 = 16;
+
+/// The deepest a calculator's operand stack may get: 7.10.5's own limit of
+/// 100, which the reader enforces by truncating.
+const MAX_CALCULATOR_STACK: usize = 100;
+
+/// How many tokens a calculator program may run to, braces included: the
+/// reader stops tokenising at 65 536.
+const MAX_CALCULATOR_TOKENS: usize = 1 << 16;
+
+/// Whether a calculator program is one this writer can promise a reader
+/// evaluates: see [`Function::Calculator`] for the checks.
+///
+/// The stack is modelled as a list of values that are either a number the
+/// program pushed as a literal or unknown, which is what lets `copy`, `index`
+/// and `roll` be checked when their counts are literals and refused when they
+/// are not. Recursion is over `if` blocks and bounded by
+/// [`MAX_CALCULATOR_NESTING`].
+fn check_calculator(
+    program: &[CalculatorOp],
+    stack: &mut Vec<Option<f64>>,
+    nesting: u32,
+    tokens: &mut usize,
+) -> bool {
+    if nesting > MAX_CALCULATOR_NESTING {
+        return false;
+    }
+    // A count operand: a literal non-negative integer the stack can supply.
+    fn count(value: Option<Option<f64>>) -> Option<usize> {
+        let value = value.flatten()?;
+        (value.fract() == 0.0 && (0.0..=MAX_CALCULATOR_STACK as f64).contains(&value))
+            .then_some(value as usize)
+    }
+    for op in program {
+        *tokens += 1;
+        match op {
+            CalculatorOp::Number(value) => {
+                if !value.is_finite() {
+                    return false;
+                }
+                stack.push(Some(*value));
+            }
+            CalculatorOp::Operator(name) => match *name {
+                "copy" => {
+                    let Some(n) = count(stack.pop()) else {
+                        return false;
+                    };
+                    let Some(from) = stack.len().checked_sub(n) else {
+                        return false;
+                    };
+                    let copied: Vec<Option<f64>> = stack[from..].to_vec();
+                    stack.extend(copied);
+                }
+                "index" => {
+                    let Some(n) = count(stack.pop()) else {
+                        return false;
+                    };
+                    let Some(at) = stack.len().checked_sub(n + 1) else {
+                        return false;
+                    };
+                    let value = stack[at];
+                    stack.push(value);
+                }
+                "roll" => {
+                    let shift = stack.pop().flatten();
+                    let Some(n) = count(stack.pop()) else {
+                        return false;
+                    };
+                    let Some(shift) = shift.filter(|j| j.fract() == 0.0 && j.abs() <= 1e6) else {
+                        return false;
+                    };
+                    let Some(from) = stack.len().checked_sub(n) else {
+                        return false;
+                    };
+                    if n > 0 {
+                        let by = (shift as i64).rem_euclid(n as i64) as usize;
+                        stack[from..].rotate_right(by);
+                    }
+                }
+                "pop" => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                }
+                other => {
+                    let Some(&(_, takes, leaves)) = CALCULATOR_OPERATORS
+                        .iter()
+                        .find(|(name, ..)| *name == other)
+                    else {
+                        return false;
+                    };
+                    let Some(from) = stack.len().checked_sub(takes) else {
+                        return false;
+                    };
+                    let taken: Vec<Option<f64>> = stack.drain(from..).collect();
+                    match other {
+                        "dup" => stack.extend([taken[0], taken[0]]),
+                        "exch" => stack.extend([taken[1], taken[0]]),
+                        _ => stack.extend(std::iter::repeat_n(None, leaves)),
+                    }
+                }
+            },
+            CalculatorOp::If(block) => {
+                // `{`, `}` and `if`.
+                *tokens += 3;
+                if stack.pop().is_none() {
+                    return false;
+                }
+                let mut taken = stack.clone();
+                if !check_calculator(block, &mut taken, nesting + 1, tokens) {
+                    return false;
+                }
+                if !merge_arms(stack, &taken) {
+                    return false;
+                }
+            }
+            CalculatorOp::IfElse(yes, no) => {
+                // Two pairs of braces and `ifelse`.
+                *tokens += 5;
+                if stack.pop().is_none() {
+                    return false;
+                }
+                let mut first = stack.clone();
+                let mut second = stack.clone();
+                if !check_calculator(yes, &mut first, nesting + 1, tokens)
+                    || !check_calculator(no, &mut second, nesting + 1, tokens)
+                {
+                    return false;
+                }
+                if !merge_arms(&mut first, &second) {
+                    return false;
+                }
+                *stack = first;
+            }
+        }
+        if stack.len() > MAX_CALCULATOR_STACK || *tokens > MAX_CALCULATOR_TOKENS {
+            return false;
+        }
+    }
+    true
+}
+
+/// Joins the stacks two paths through a conditional leave, keeping a literal
+/// only where both paths agree on it. False when the depths differ, which is
+/// a program whose output count depends on its input.
+fn merge_arms(into: &mut [Option<f64>], other: &[Option<f64>]) -> bool {
+    if into.len() != other.len() {
+        return false;
+    }
+    for (a, b) in into.iter_mut().zip(other) {
+        if *a != *b {
+            *a = None;
+        }
+    }
+    true
+}
+
+/// A calculator program as the text 7.10.5 puts in the function's stream.
+///
+/// Numbers are written with Rust's shortest round-trip form, which never uses
+/// an exponent: a constant in a tint transform is arithmetic, and the
+/// four-place rounding content streams use would change the answer.
+fn calculator_text(program: &[CalculatorOp], out: &mut Vec<u8>) {
+    out.push(b'{');
+    for op in program {
+        out.push(b' ');
+        match op {
+            CalculatorOp::Number(value) => {
+                let value = if *value == 0.0 { 0.0 } else { *value };
+                out.extend_from_slice(format!("{value}").as_bytes());
+            }
+            CalculatorOp::Operator(name) => out.extend_from_slice(name.as_bytes()),
+            CalculatorOp::If(block) => {
+                calculator_text(block, out);
+                out.extend_from_slice(b" if");
+            }
+            CalculatorOp::IfElse(yes, no) => {
+                calculator_text(yes, out);
+                out.push(b' ');
+                calculator_text(no, out);
+                out.extend_from_slice(b" ifelse");
+            }
+        }
+    }
+    out.extend_from_slice(b" }");
 }
 
 /// A shading (8.7.4.5), in the two gradient types.
@@ -606,6 +912,21 @@ pub enum Shading {
         /// `/Extend`, beyond the first and second circle.
         extend: (bool, bool),
     },
+}
+
+/// What a `/DeviceN` space's attributes dictionary says (8.6.6.5, Table 71),
+/// as far as this writer emits one.
+///
+/// `/Subtype` is left at its default, `/DeviceN`: an `/NChannel` space owes a
+/// `/Process` dictionary and per-colorant rules this writer has no API for,
+/// and claiming the subtype without them is a space a reader would reject.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceNAttributes<'a> {
+    /// `/Colorants`: `/Separation` spaces registered with
+    /// [`DocumentBuilder::add_separation_color_space`], by resource name. Each
+    /// is written under its own colorant name, which is how Table 71 keys the
+    /// dictionary.
+    pub colorants: &'a [&'a [u8]],
 }
 
 /// `/TilingType` (Table 75): how a reader may adjust a cell's spacing.
@@ -740,6 +1061,12 @@ struct ResourceSet {
     /// [`PageBuilder::set_fill_icc`] can write **exactly** the operand count
     /// 8.6.5.5 declares, instead of trusting a caller to count to `/N`.
     icc_channels: BTreeMap<Vec<u8>, u8>,
+    /// How many tint components each registered `/Separation` (one) or
+    /// `/DeviceN` (one per colorant) space takes, by resource name — the
+    /// operand count of `scn` in that space (8.6.6.4, 8.6.6.5), kept for
+    /// [`PageBuilder::set_fill_tint`]'s reason `icc_channels` is kept for
+    /// [`PageBuilder::set_fill_icc`]'s.
+    tints: BTreeMap<Vec<u8>, usize>,
 }
 
 impl ResourceSet {
@@ -839,6 +1166,14 @@ fn normalised(rect: [f64; 4]) -> [f64; 4] {
 /// a thousand deep is refused rather than overflowing a stack finding out.
 const MAX_FUNCTION_DEPTH: u32 = 8;
 
+/// The most colorants a `/DeviceN` space may name.
+///
+/// Not a resource bound either, for [`MAX_FUNCTION_DEPTH`]'s reason: it
+/// limits a value the caller built. It is ISO 32000-1 Annex C's implementation
+/// limit, which is the number a conforming reader is entitled to stop at, and
+/// a writer emitting more would be writing a space some readers cannot open.
+const MAX_DEVICE_N_COLORANTS: usize = 32;
+
 /// The most `<code> <text>` pairs one `beginbfchar` section may hold.
 ///
 /// The CMap specification's own limit, and not a resource bound either: a
@@ -847,20 +1182,29 @@ const MAX_FUNCTION_DEPTH: u32 = 8;
 const BFCHAR_PER_SECTION: usize = 100;
 
 impl Function {
-    /// Whether this is a function a reader can evaluate, given how many output
-    /// components it has to produce.
+    /// Whether this is a function a reader can evaluate, given how many inputs
+    /// it is handed and how many output components it has to produce.
+    ///
+    /// A gradient hands its function one input; a `/Separation` tint transform
+    /// one; a `/DeviceN` one per colorant. Types 2 and 3 take exactly one
+    /// (7.10.3, 7.10.4), so they are refused for anything else rather than
+    /// written where a reader would evaluate them on the first input and
+    /// ignore the rest.
     ///
     /// Checked without recursion. The tree is the caller's own value and its
     /// depth is the caller's choice, so a recursive validator would be a stack
     /// overflow reachable from a `Vec` push.
-    fn is_valid(&self, outputs: usize) -> bool {
-        let mut stack = vec![(self, 0u32)];
-        while let Some((function, depth)) = stack.pop() {
+    fn is_valid(&self, inputs: usize, outputs: usize) -> bool {
+        let mut stack = vec![(self, 0u32, inputs)];
+        while let Some((function, depth, inputs)) = stack.pop() {
             if depth > MAX_FUNCTION_DEPTH {
                 return false;
             }
             match function {
                 Function::Exponential { domain, c0, c1, n } => {
+                    if inputs != 1 {
+                        return false;
+                    }
                     if !all_finite(domain) || domain[1] <= domain[0] {
                         return false;
                     }
@@ -888,6 +1232,9 @@ impl Function {
                     bounds,
                     encode,
                 } => {
+                    if inputs != 1 {
+                        return false;
+                    }
                     if !all_finite(domain) || domain[1] <= domain[0] {
                         return false;
                     }
@@ -917,7 +1264,34 @@ impl Function {
                         return false;
                     }
                     for sub in functions {
-                        stack.push((sub, depth + 1));
+                        stack.push((sub, depth + 1, 1));
+                    }
+                }
+                Function::Calculator {
+                    domain,
+                    range,
+                    program,
+                } => {
+                    // 7.10.1: `/Domain` is 2 x m and `/Range` 2 x n, and 7.10.5
+                    // makes `/Range` required for this type.
+                    if domain.len() != inputs || range.len() != outputs || inputs == 0 {
+                        return false;
+                    }
+                    let ordered = |pair: &[f64; 2]| all_finite(pair) && pair[0] <= pair[1];
+                    if !domain.iter().all(ordered) || !range.iter().all(ordered) {
+                        return false;
+                    }
+                    let mut model = vec![None; inputs];
+                    // The two outer braces are tokens too.
+                    let mut tokens = 2;
+                    if !check_calculator(program, &mut model, 0, &mut tokens) {
+                        return false;
+                    }
+                    // Exactly one value per output. A reader takes the last
+                    // `n` values, so a program leaving more writes outputs
+                    // nobody meant, and one leaving fewer invents the rest.
+                    if model.len() != outputs {
+                        return false;
                     }
                 }
             }
@@ -1791,6 +2165,55 @@ impl PageBuilder {
         true
     }
 
+    /// Sets the non-stroking colour in a registered `/Separation` or
+    /// `/DeviceN` space: `/Name cs t1 … tn scn` (8.6.8, Table 74).
+    ///
+    /// The space must have been registered with
+    /// [`DocumentBuilder::add_separation_color_space`] or
+    /// [`DocumentBuilder::add_device_n_color_space`]. `tints` are the colorants'
+    /// tints in the order the space names them, each clamped to `[0, 1]`
+    /// (8.6.6.4: zero is no ink, one is the ink at full strength).
+    ///
+    /// **The operand count comes from the space**, as it does for
+    /// [`PageBuilder::set_fill_icc`] and for the same reason: a `/Separation`
+    /// takes one tint and a `/DeviceN` one per colorant, so extra values are
+    /// dropped and missing ones written as zero — no ink — rather than left
+    /// for a reader to guess about.
+    ///
+    /// Returns false for a name no such space was registered under.
+    pub fn set_fill_tint(&mut self, resource: &[u8], tints: &[f64]) -> bool {
+        self.set_tint(resource, tints, false)
+    }
+
+    /// The same for the **stroking** colour: `CS` and `SCN`.
+    pub fn set_stroke_tint(&mut self, resource: &[u8], tints: &[f64]) -> bool {
+        self.set_tint(resource, tints, true)
+    }
+
+    /// Both of the above. `stroking` picks Table 74's case.
+    fn set_tint(&mut self, resource: &[u8], tints: &[f64], stroking: bool) -> bool {
+        let Some(count) = self.resources.tints.get(resource).copied() else {
+            return false;
+        };
+        self.resource_name(resource);
+        self.content
+            .extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
+        for at in 0..count {
+            let value = tints.get(at).copied().unwrap_or(0.0);
+            // A NaN clamps to NaN, which is not a PDF number: it is no ink.
+            let value = if value.is_nan() {
+                0.0
+            } else {
+                value.clamp(0.0, 1.0)
+            };
+            self.content
+                .extend_from_slice(format!("{value} ").as_bytes());
+        }
+        self.content
+            .extend_from_slice(if stroking { b"SCN\n" } else { b"scn\n" });
+        true
+    }
+
     /// Whether the profile in force refuses this device space, recording the
     /// refusal if it does.
     fn refuses_device_space(&mut self, space: DeviceSpace) -> bool {
@@ -2535,6 +2958,9 @@ pub struct DocumentBuilder {
     /// A `BTreeMap`, so the tree's entries are in one order however they were
     /// registered — which is also the byte order 7.9.6 sorts keys in.
     destinations: BTreeMap<Vec<u8>, (u32, DestKind)>,
+    /// Each registered `/Separation` space by resource name: its colorant
+    /// and the space's own object, for a `/DeviceN`'s `/Colorants` to name.
+    separations: BTreeMap<Vec<u8>, (Vec<u8>, ObjRef)>,
     /// The version the header declares when no profile decides it. Fixed at
     /// construction, because text strings are encoded for it as they arrive
     /// (see [`DocumentBuilder::with_version`]).
@@ -2572,6 +2998,7 @@ impl DocumentBuilder {
             info: Dict::new(),
             outline: Vec::new(),
             destinations: BTreeMap::new(),
+            separations: BTreeMap::new(),
             version: WriteOptions::default().version,
             profile: None,
             refusals: Vec::new(),
@@ -3260,7 +3687,7 @@ impl DocumentBuilder {
             }
         };
 
-        if !function.is_valid(space.components() as usize) {
+        if !function.is_valid(1, space.components() as usize) {
             return None;
         }
 
@@ -3403,7 +3830,168 @@ impl DocumentBuilder {
         self.resources
             .icc_channels
             .insert(resource.to_vec(), components);
+        // The name now means this space; a tint space registered under it
+        // earlier no longer does.
+        self.resources.tints.remove(resource);
+        self.separations.remove(resource);
         true
+    }
+
+    /// Registers a `/Separation` colour space under a resource name
+    /// (8.6.6.4): one colorant, `colorant`, whose tint is turned into a colour
+    /// in `alternate` by `tint`.
+    ///
+    /// The space is `[/Separation /colorant /Alternate tint]`, written as an
+    /// indirect array so one space serves every page and every image that
+    /// names it; the tint transform is written as its own object. A
+    /// [`Function::Exponential`] from `[0 1]` is the ordinary transform — at
+    /// tint 0 its `c0` (no ink), at tint 1 its `c1` (the ink at full
+    /// strength) — and any one-input function is accepted.
+    ///
+    /// `/All` and `/None` are 8.6.6.4's two special colorant names and are
+    /// written like any other: marking every separation, and marking none.
+    ///
+    /// **Refused under an [`ArchivalProfile`]** whose destination profile does
+    /// not admit `alternate`: the alternate is what a reader without the ink
+    /// paints, which makes it a device colour in 6.2.3.3's sense.
+    ///
+    /// Returns false, registering nothing, for an empty colorant name, a
+    /// transform that is not a function of one input producing one value per
+    /// `alternate` component, or the archival refusal above.
+    pub fn add_separation_color_space(
+        &mut self,
+        resource: &[u8],
+        colorant: &[u8],
+        alternate: DeviceSpace,
+        tint: &Function,
+    ) -> bool {
+        if colorant.is_empty() || !tint.is_valid(1, alternate.components() as usize) {
+            return false;
+        }
+        if !DocumentBuilder::admits_device_space(self.profile.as_ref(), alternate) {
+            self.refuse(ArchivalRefusal::DeviceColour { space: alternate });
+            return false;
+        }
+        let function = self.write_function(tint);
+        let space = self.allocate();
+        self.objects.insert(
+            space.num,
+            Object::Array(vec![
+                Object::Name(self.names.intern(b"Separation")),
+                Object::Name(self.names.intern(colorant)),
+                Object::Name(self.names.intern(alternate.pdf_name())),
+                Object::Ref(function),
+            ]),
+        );
+        self.register_tint_space(resource, space, 1);
+        self.separations
+            .insert(resource.to_vec(), (colorant.to_vec(), space));
+        true
+    }
+
+    /// Registers a `/DeviceN` colour space under a resource name (8.6.6.5):
+    /// `colorants.len()` colorants, whose tints `tint` turns into a colour in
+    /// `alternate`.
+    ///
+    /// The space is `[/DeviceN [/c1 … /cn] /Alternate tint attributes?]`,
+    /// written as an indirect array. `tint` takes one input per colorant, in
+    /// the order `colorants` names them, and produces one value per
+    /// `alternate` component — which only [`Function::Calculator`] can, of the
+    /// types this writer emits. `attributes`, when given, writes Table 71's
+    /// `/Colorants` dictionary from `/Separation` spaces registered earlier
+    /// with [`DocumentBuilder::add_separation_color_space`], each under its
+    /// own colorant name, so a reader that renders one ink alone knows what
+    /// that ink looks like.
+    ///
+    /// Refused under an [`ArchivalProfile`] on
+    /// [`DocumentBuilder::add_separation_color_space`]'s terms.
+    ///
+    /// Returns false, registering nothing, for no colorants or more than 32
+    /// (Annex C's limit, and so what a reader is entitled to stop at), an
+    /// empty colorant name, a name given twice
+    /// (8.6.6.5 allows only `/None` to repeat), a transform that does not map
+    /// `colorants.len()` inputs to the alternate's components, an attribute
+    /// naming a resource that is not a registered `/Separation`, or the
+    /// archival refusal.
+    pub fn add_device_n_color_space(
+        &mut self,
+        resource: &[u8],
+        colorants: &[&[u8]],
+        alternate: DeviceSpace,
+        tint: &Function,
+        attributes: Option<&DeviceNAttributes<'_>>,
+    ) -> bool {
+        if colorants.is_empty() || colorants.len() > MAX_DEVICE_N_COLORANTS {
+            return false;
+        }
+        let mut seen = BTreeSet::new();
+        for colorant in colorants {
+            if colorant.is_empty() || (*colorant != b"None" && !seen.insert(*colorant)) {
+                return false;
+            }
+        }
+        if !tint.is_valid(colorants.len(), alternate.components() as usize) {
+            return false;
+        }
+        let mut described = Vec::new();
+        if let Some(attributes) = attributes {
+            for named in attributes.colorants {
+                let Some((colorant, space)) = self.separations.get(*named) else {
+                    return false;
+                };
+                described.push((colorant.clone(), *space));
+            }
+        }
+        if !DocumentBuilder::admits_device_space(self.profile.as_ref(), alternate) {
+            self.refuse(ArchivalRefusal::DeviceColour { space: alternate });
+            return false;
+        }
+
+        let function = self.write_function(tint);
+        let mut space = vec![
+            Object::Name(self.names.intern(b"DeviceN")),
+            Object::Array(
+                colorants
+                    .iter()
+                    .map(|colorant| Object::Name(self.names.intern(colorant)))
+                    .collect(),
+            ),
+            Object::Name(self.names.intern(alternate.pdf_name())),
+            Object::Ref(function),
+        ];
+        if attributes.is_some() {
+            let mut table = Dict::new();
+            for (colorant, reference) in described {
+                table.insert(self.names.intern(&colorant), Object::Ref(reference));
+            }
+            let mut dict = Dict::new();
+            dict.insert(self.names.intern(b"Colorants"), Object::Dict(table));
+            space.push(Object::Dict(dict));
+        }
+        let reference = self.allocate();
+        self.objects.insert(reference.num, Object::Array(space));
+        self.register_tint_space(resource, reference, colorants.len());
+        self.separations.remove(resource);
+        true
+    }
+
+    /// Puts a `/Separation` or `/DeviceN` space into `/ColorSpace` under
+    /// `resource`, with how many tints it takes.
+    fn register_tint_space(&mut self, resource: &[u8], space: ObjRef, components: usize) {
+        self.resources.color_spaces.push((resource.to_vec(), space));
+        self.resources.tints.insert(resource.to_vec(), components);
+        self.resources.icc_channels.remove(resource);
+    }
+
+    /// The indirect colour space registered under `resource`, the latest
+    /// registration winning as it does in `/Resources`.
+    fn color_space_ref(&self, resource: &[u8]) -> Option<ObjRef> {
+        self.resources
+            .color_spaces
+            .iter()
+            .rev()
+            .find(|(name, _)| name == resource)
+            .map(|(_, reference)| *reference)
     }
 
     /// Writes a function as an indirect object, returning its reference.
@@ -3461,6 +4049,31 @@ impl DocumentBuilder {
                             .collect(),
                     ),
                 );
+            }
+            Function::Calculator {
+                domain,
+                range,
+                program,
+            } => {
+                // 7.10.5: a type 4 function is a **stream**, its program the
+                // stream's data.
+                let pairs = |values: &[[f64; 2]]| {
+                    Object::Array(
+                        values
+                            .iter()
+                            .flat_map(|pair| [Object::Real(pair[0]), Object::Real(pair[1])])
+                            .collect(),
+                    )
+                };
+                dict.insert(self.names.intern(b"FunctionType"), Object::Int(4));
+                dict.insert(self.names.intern(b"Domain"), pairs(domain));
+                dict.insert(self.names.intern(b"Range"), pairs(range));
+                let mut data = Vec::new();
+                calculator_text(program, &mut data);
+                let reference = self.allocate();
+                self.objects
+                    .insert_stream(reference.num, StreamData { dict, data });
+                return reference;
             }
         }
 
@@ -4075,14 +4688,41 @@ impl DocumentBuilder {
             self.names.intern(b"BitsPerComponent"),
             Object::Int(i64::from(image.bits_per_component)),
         );
+        // A registered space is written as a **reference to its own array**,
+        // so one profile or one tint transform serves every image and page
+        // that names it. Not as the resource name: Table 89's `/ColorSpace`
+        // is a colour space, and only a content stream's `cs` looks a name up
+        // in `/Resources` (8.6.3) — an image XObject naming `/CS0` names a
+        // space no reader is obliged to find, and until September 2026 this
+        // repository's own reader did not find it and drew the samples as
+        // grey. Checked here, before the soft mask below writes anything.
+        let registered = match image.color_space {
+            ImageColorSpace::Icc { resource, .. } => {
+                if !self.resources.icc_channels.contains_key(resource) {
+                    return None;
+                }
+                Some(self.color_space_ref(resource)?)
+            }
+            ImageColorSpace::Tint {
+                resource,
+                components,
+            } => {
+                if self.resources.tints.get(resource) != Some(&usize::from(components)) {
+                    return None;
+                }
+                Some(self.color_space_ref(resource)?)
+            }
+            _ => None,
+        };
         let space = match image.color_space {
             ImageColorSpace::DeviceGray => Object::Name(self.names.intern(b"DeviceGray")),
             ImageColorSpace::DeviceRgb => Object::Name(self.names.intern(b"DeviceRGB")),
             ImageColorSpace::DeviceCmyk => Object::Name(self.names.intern(b"DeviceCMYK")),
-            // 8.9.5.4: a name, resolved through the page's `/Resources
-            // /ColorSpace`. Written as a bare name rather than as the array
-            // itself so one profile stream serves every image that names it.
-            ImageColorSpace::Icc { resource, .. } => Object::Name(self.names.intern(resource)),
+            ImageColorSpace::Icc { .. } | ImageColorSpace::Tint { .. } => match registered {
+                Some(reference) => Object::Ref(reference),
+                // Unreachable: both arms above returned `None` or set it.
+                None => return None,
+            },
             ImageColorSpace::Indexed { base, lookup } => Object::Array(vec![
                 Object::Name(self.names.intern(b"Indexed")),
                 Object::Name(self.names.intern(base.pdf_name())),
@@ -5210,6 +5850,9 @@ fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
             // device its values are for, which is exactly what 6.2.3.3 asks a
             // device space to have an output intent for. Nothing to refuse.
             ImageColorSpace::Icc { .. } => None,
+            // A tint space's alternate was judged when the space was
+            // registered, which is the one place its device colour is named.
+            ImageColorSpace::Tint { .. } => None,
         },
     }
 }
@@ -8289,5 +8932,450 @@ mod graphics_tests {
             form.contains_key(Name::FILTER),
             "the writer compressed the form's content stream"
         );
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    //! `/Separation` and `/DeviceN` on write (8.6.6.4, 8.6.6.5): what the
+    //! builder puts in the file and what it refuses. What the file *draws* is
+    //! `crates/tinker-pdf/tests/writer_tints.rs`, which has a renderer.
+
+    use super::*;
+    use crate::CosDocument;
+
+    fn opened(builder: DocumentBuilder) -> CosDocument {
+        CosDocument::open(builder.finish()).expect("the built document opens")
+    }
+
+    /// The colour space registered under `name` on the first page, resolved.
+    fn space(doc: &CosDocument, name: &[u8]) -> Vec<Object> {
+        let pages = crate::pages::collect(doc);
+        let page = pages.first().expect("a page");
+        let resources = page.resources.as_ref().expect("resources");
+        let table = doc.resolve_key(resources, doc.intern(b"ColorSpace"));
+        let entry = table
+            .as_dict()
+            .and_then(|t| t.get(doc.intern(name)))
+            .cloned()
+            .expect("the space is registered");
+        assert!(
+            entry.as_objref().is_some(),
+            "the space is one indirect object every page shares"
+        );
+        doc.resolve(&entry)
+            .as_array()
+            .map(<[Object]>::to_vec)
+            .expect("a colour space array")
+    }
+
+    fn name(doc: &CosDocument, object: &Object) -> Vec<u8> {
+        doc.resolve(object)
+            .as_name()
+            .and_then(|n| doc.name_bytes(n))
+            .map(|b| b.to_vec())
+            .expect("a name")
+    }
+
+    fn content(doc: &CosDocument) -> String {
+        let pages = crate::pages::collect(doc);
+        let bytes = crate::pages::content_bytes(doc, pages.first().expect("a page"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn ramp(c1: [f64; 3]) -> Function {
+        Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 1.0, 1.0],
+            c1: c1.to_vec(),
+            n: 1.0,
+        }
+    }
+
+    /// Two inks into RGB: `R = 1 - a`, `G = 1 - b`, `B = 1 - (a + b) / 2`.
+    fn two_inks() -> Function {
+        use CalculatorOp::{Number as N, Operator as Op};
+        Function::Calculator {
+            domain: vec![[0.0, 1.0], [0.0, 1.0]],
+            range: vec![[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+            program: vec![
+                N(1.0),
+                Op("index"),
+                N(1.0),
+                Op("exch"),
+                Op("sub"),
+                N(1.0),
+                Op("index"),
+                N(1.0),
+                Op("exch"),
+                Op("sub"),
+                N(3.0),
+                Op("index"),
+                N(3.0),
+                Op("index"),
+                Op("add"),
+                N(0.5),
+                Op("mul"),
+                N(1.0),
+                Op("exch"),
+                Op("sub"),
+                N(5.0),
+                N(3.0),
+                Op("roll"),
+                Op("pop"),
+                Op("pop"),
+            ],
+        }
+    }
+
+    /// 8.6.6.4: `[/Separation /name /Alternate tint]`, the transform its own
+    /// object, and `scn` with exactly one operand whatever the caller passed.
+    #[test]
+    fn a_separation_is_its_colorant_its_alternate_and_its_transform() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_separation_color_space(
+            b"CS0",
+            b"PANTONE 300 C",
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.37, 0.72]),
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_tint(b"CS0", &[0.5, 0.9]));
+            assert!(page.set_stroke_tint(b"CS0", &[]));
+        });
+        let doc = opened(builder);
+
+        let array = space(&doc, b"CS0");
+        assert_eq!(array.len(), 4);
+        assert_eq!(name(&doc, &array[0]), b"Separation");
+        assert_eq!(name(&doc, &array[1]), b"PANTONE 300 C");
+        assert_eq!(name(&doc, &array[2]), b"DeviceRGB");
+        let function = doc.resolve(&array[3]);
+        let function = function.as_dict().expect("a type 2 dictionary");
+        assert_eq!(function.get_int(doc.intern(b"FunctionType")), Some(2));
+
+        let text = content(&doc);
+        assert!(
+            text.contains("/CS0 cs\n0.5 scn"),
+            "one tint, the first: {text}"
+        );
+        assert!(
+            text.contains("/CS0 CS\n0 SCN"),
+            "a missing tint is no ink: {text}"
+        );
+    }
+
+    /// 8.6.6.5: `[/DeviceN [/a /b] /Alternate tint]`, a type 4 stream whose
+    /// program is the caller's, and two operands to `scn`.
+    #[test]
+    fn a_device_n_is_its_colorants_and_a_calculator_stream() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_device_n_color_space(
+            b"CS1",
+            &[b"Spot A", b"Spot B"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            None,
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_tint(b"CS1", &[0.25, 0.75, 1.0]));
+        });
+        let doc = opened(builder);
+
+        let array = space(&doc, b"CS1");
+        assert_eq!(array.len(), 4, "no attributes were asked for");
+        assert_eq!(name(&doc, &array[0]), b"DeviceN");
+        let names: Vec<Vec<u8>> = doc
+            .resolve(&array[1])
+            .as_array()
+            .expect("the colorant names")
+            .iter()
+            .map(|n| name(&doc, n))
+            .collect();
+        assert_eq!(names, [b"Spot A".to_vec(), b"Spot B".to_vec()]);
+        assert_eq!(name(&doc, &array[2]), b"DeviceRGB");
+
+        let reference = array[3].as_objref().expect("the transform is indirect");
+        let object = doc.get(reference).expect("it resolves");
+        let dict = object.as_dict().expect("a stream dictionary");
+        assert_eq!(dict.get_int(doc.intern(b"FunctionType")), Some(4));
+        let program = doc.stream_decoded(reference).expect("the program");
+        assert_eq!(
+            String::from_utf8_lossy(&program),
+            "{ 1 index 1 exch sub 1 index 1 exch sub 3 index 3 index add 0.5 mul 1 exch sub \
+             5 3 roll pop pop }"
+        );
+
+        let text = content(&doc);
+        assert!(text.contains("/CS1 cs\n0.25 0.75 scn"), "{text}");
+    }
+
+    /// Table 71's `/Colorants`: each named `/Separation` under its own
+    /// colorant, pointing at the space registered for it.
+    #[test]
+    fn device_n_attributes_name_the_separations_they_describe() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_separation_color_space(
+            b"SA",
+            b"Spot A",
+            DeviceSpace::Rgb,
+            &ramp([1.0, 0.0, 0.0]),
+        ));
+        assert!(!builder.add_device_n_color_space(
+            b"CS1",
+            &[b"Spot A", b"Spot B"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            Some(&DeviceNAttributes {
+                colorants: &[b"SA", b"nothing registered"],
+            }),
+        ));
+        assert!(builder.add_device_n_color_space(
+            b"CS1",
+            &[b"Spot A", b"Spot B"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            Some(&DeviceNAttributes {
+                colorants: &[b"SA"]
+            }),
+        ));
+        builder.add_page(20.0, 20.0, |_| {});
+        let doc = opened(builder);
+        let array = space(&doc, b"CS1");
+        let attributes = doc.resolve(&array[4]);
+        let colorants = doc.resolve_key(
+            attributes.as_dict().expect("an attributes dictionary"),
+            doc.intern(b"Colorants"),
+        );
+        let entry = colorants
+            .as_dict()
+            .and_then(|c| c.get(doc.intern(b"Spot A")))
+            .cloned()
+            .expect("Spot A is described");
+        let separation = doc.resolve(&entry);
+        let separation = separation.as_array().expect("a separation array");
+        assert_eq!(name(&doc, &separation[0]), b"Separation");
+        assert_eq!(name(&doc, &separation[1]), b"Spot A");
+    }
+
+    /// Everything a tint space can be wrong about is refused, and a refusal
+    /// registers nothing.
+    #[test]
+    fn a_tint_space_that_cannot_be_one_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        // An empty colorant.
+        assert!(!builder.add_separation_color_space(
+            b"X",
+            b"",
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.0, 0.0])
+        ));
+        // A transform producing two values for a three-component alternate.
+        assert!(!builder.add_separation_color_space(
+            b"X",
+            b"Ink",
+            DeviceSpace::Rgb,
+            &Function::Exponential {
+                domain: [0.0, 1.0],
+                c0: vec![1.0, 1.0],
+                c1: vec![0.0, 0.0],
+                n: 1.0,
+            },
+        ));
+        // A type 2 function cannot take the two inputs a two-ink DeviceN has.
+        assert!(!builder.add_device_n_color_space(
+            b"X",
+            &[b"A", b"B"],
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.0, 0.0]),
+            None,
+        ));
+        // A colorant named twice; `/None` alone may repeat.
+        assert!(!builder.add_device_n_color_space(
+            b"X",
+            &[b"A", b"A"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            None,
+        ));
+        assert!(builder.add_device_n_color_space(
+            b"Y",
+            &[b"None", b"None"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            None,
+        ));
+        // Past Annex C's thirty-two colorants.
+        let many: Vec<Vec<u8>> = (0..33).map(|i| format!("Ink{i}").into_bytes()).collect();
+        let many: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
+        assert!(!builder.add_device_n_color_space(
+            b"X",
+            &many,
+            DeviceSpace::Gray,
+            &two_inks(),
+            None
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.set_fill_tint(b"X", &[1.0]), "nothing is under X");
+            assert!(page.set_fill_tint(b"Y", &[1.0, 1.0]));
+        });
+    }
+
+    /// The calculator checks, one refusal at a time.
+    #[test]
+    fn a_calculator_that_cannot_be_evaluated_as_written_is_refused() {
+        use CalculatorOp::{If, IfElse, Number as N, Operator as Op};
+        let one_to_one = |program: Vec<CalculatorOp>| Function::Calculator {
+            domain: vec![[0.0, 1.0]],
+            range: vec![[0.0, 1.0]],
+            program,
+        };
+        let valid = |f: &Function| f.is_valid(1, 1);
+
+        assert!(valid(&one_to_one(vec![N(1.0), Op("exch"), Op("sub")])));
+        assert!(
+            !valid(&one_to_one(vec![Op("frobnicate")])),
+            "not a Table 42 operator"
+        );
+        assert!(
+            !valid(&one_to_one(vec![Op("if")])),
+            "if is a variant, not an operator"
+        );
+        assert!(!valid(&one_to_one(vec![Op("add")])), "one operand for two");
+        assert!(!valid(&one_to_one(vec![N(2.0)])), "two outputs for one");
+        assert!(!valid(&one_to_one(vec![Op("pop")])), "no output at all");
+        assert!(!valid(&one_to_one(vec![N(f64::NAN), Op("add")])));
+        // A count the check cannot see is refused; the same count as a literal
+        // is not.
+        assert!(!valid(&one_to_one(vec![Op("dup"), Op("copy"), Op("pop"),])));
+        assert!(valid(&one_to_one(vec![
+            Op("dup"),
+            N(1.0),
+            Op("copy"),
+            Op("pop"),
+            Op("pop"),
+        ])));
+        // `if` must leave the stack where it found it; `ifelse`'s arms must
+        // agree with each other.
+        assert!(valid(&one_to_one(vec![
+            Op("dup"),
+            N(0.5),
+            Op("gt"),
+            If(vec![N(0.5), Op("mul")]),
+        ])));
+        assert!(!valid(&one_to_one(vec![
+            Op("dup"),
+            N(0.5),
+            Op("gt"),
+            If(vec![Op("pop")]),
+        ])));
+        assert!(valid(&one_to_one(vec![
+            Op("dup"),
+            N(0.5),
+            Op("gt"),
+            IfElse(vec![N(1.0), Op("sub")], vec![N(2.0), Op("mul")]),
+        ])));
+        assert!(!valid(&one_to_one(vec![
+            Op("dup"),
+            N(0.5),
+            Op("gt"),
+            // The first arm alone would end one deep, which is the right
+            // count; the second ends two deep, so the output count depends on
+            // the input.
+            IfElse(vec![N(1.0), Op("add")], vec![N(2.0)]),
+        ])));
+        // A domain that does not match the inputs, and a reversed interval.
+        let mut wrong = one_to_one(vec![]);
+        if let Function::Calculator { domain, .. } = &mut wrong {
+            domain.push([0.0, 1.0]);
+        }
+        assert!(!valid(&wrong));
+        let mut reversed = one_to_one(vec![]);
+        if let Function::Calculator { range, .. } = &mut reversed {
+            range[0] = [1.0, 0.0];
+        }
+        assert!(!valid(&reversed));
+        // Nested past the reader's reach, and just inside it.
+        let nest = |levels: u32| {
+            let mut body = vec![N(1.0), Op("mul")];
+            for _ in 0..levels {
+                body = vec![Op("dup"), N(0.0), Op("gt"), If(body)];
+                // `dup 0 gt` leaves a boolean under the value, and the `if`
+                // consumes it; the block leaves the value where it was.
+            }
+            one_to_one(body)
+        };
+        assert!(valid(&nest(MAX_CALCULATOR_NESTING)));
+        assert!(!valid(&nest(MAX_CALCULATOR_NESTING + 1)));
+    }
+
+    /// The operand count of `scn` is the space's, whatever the caller passed,
+    /// and out-of-range tints are clamped rather than written.
+    #[test]
+    fn tints_are_counted_by_the_space_and_clamped() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_device_n_color_space(
+            b"CS1",
+            &[b"A", b"B"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            None,
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_tint(b"CS1", &[1.5]));
+            assert!(page.set_stroke_tint(b"CS1", &[-1.0, f64::NAN, 0.5]));
+        });
+        let text = content(&opened(builder));
+        assert!(text.contains("/CS1 cs\n1 0 scn"), "{text}");
+        assert!(text.contains("/CS1 CS\n0 0 SCN"), "{text}");
+    }
+
+    /// An image in a tint space names the space's own object, and one whose
+    /// component count disagrees with the space is refused.
+    #[test]
+    fn an_image_in_a_tint_space_names_the_space_object() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_separation_color_space(
+            b"CS0",
+            b"Ink",
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.0, 0.0]),
+        ));
+        let image = |components: u8, resource: &'static [u8]| {
+            ImageData::Compressed(CompressedImage {
+                width: 2,
+                height: 1,
+                bits_per_component: 8,
+                color_space: ImageColorSpace::Tint {
+                    resource,
+                    components,
+                },
+                filter: None,
+                data: &[0, 255, 0, 255],
+                color_key_mask: None,
+                soft_mask: None,
+            })
+        };
+        assert!(!builder.add_image(b"Bad", &image(2, b"CS0")));
+        assert!(!builder.add_image(b"Bad", &image(1, b"unregistered")));
+        assert!(builder.add_image(b"Im0", &image(1, b"CS0")));
+        builder.add_page(20.0, 20.0, |page| page.image(b"Im0", 0.0, 0.0, 20.0, 20.0));
+        let doc = opened(builder);
+
+        let pages = crate::pages::collect(&doc);
+        let resources = pages[0].resources.as_ref().expect("resources");
+        let xobjects = doc.resolve_key(resources, doc.intern(b"XObject"));
+        let xobjects = xobjects.as_dict().expect("an /XObject dictionary");
+        assert!(xobjects.get(doc.intern(b"Bad")).is_none());
+        let image = doc.resolve_key(xobjects, doc.intern(b"Im0"));
+        let image = image.as_dict().expect("the image");
+        let named = image.get(doc.intern(b"ColorSpace")).expect("a /ColorSpace");
+        let spaces = doc.resolve_key(resources, doc.intern(b"ColorSpace"));
+        let registered = spaces
+            .as_dict()
+            .and_then(|s| s.get(doc.intern(b"CS0")))
+            .cloned()
+            .expect("CS0");
+        assert_eq!(named, &registered, "the image names the space's object");
     }
 }
