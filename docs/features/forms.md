@@ -30,6 +30,42 @@ dictionary, never assumed to be `/Yes`. Values decode per type
 state rather than an absence), and choice options come from `/Opt` in both
 its string and `[export, display]` forms (12.7.4.4).
 
+**Creating.** `DocumentEditor::add_field(&NewField)` makes a text field, a
+check box, a radio group or a choice field (a combo box or a list box), and
+the field is a field at once: `fields()` in the same editor finds it and
+`fill_field` fills it, because both walk the tree through the editor's own
+overlay. A text, check box or choice field is merged with its one widget
+(12.7.3.3); a radio group is one field whose `/Kids` are a widget per
+button, each on whatever page the caller put it. Every widget is added to
+its page's `/Annots`, carries `/P` and `/F 4` (Print), and has an appearance
+for every state it can be in: a text or choice field is drawn by **the fill
+layer's own path** from the field as the tree walk reads it back, so creating
+a field with a value and filling it with that value produce the same
+appearance; a check box and each radio button get an `/Off` appearance and
+one for their on state keyed by the export value, drawn as paths rather than
+ZapfDingbats glyphs so no second font has to be in `/DR`, and `/AS` selects
+between them (12.7.4.2). A `/DA` names `/Helv`, and a form whose `/DR` has no
+`/Helv` is given Helvetica — once, however many fields are made; a form that
+has one keeps it. An initial value is written as `/V` and `/DV` both, so a
+reset (12.7.5.3) returns to it. A dotted name is a hierarchy (12.7.3.2):
+`a.b.c` joins or creates the non-terminal fields `a` and `a.b`. `/Ff` is
+written on every created field, zero included, because it is inheritable and
+a check box created under a node carrying the Radio bit would otherwise read
+back as a radio group. Everything that can refuse is checked before anything
+is written, inside a transaction, and each refusal is an `AddFieldError`
+naming what was wrong.
+
+**The `/DA` font is found through the editor.** `text_appearance` used to
+look the `/DA` font up in the *file*, so a field created and filled in one
+editor was laid out against a `/Helv` the file did not have yet — measured
+at half an em a character, which auto-sizes forty `i`s to 4.8 points where
+Helvetica's own widths give 10.8. The font dictionary is now read through the
+view. What is still read from the file is a font's subsidiary objects — its
+descriptor, `/Widths` array and program — because `font::read` takes a
+`CosDocument`: a standard-14 font, which is what a created field names, has
+none, and a composite font an editor adds together with its program is the
+case that remains.
+
 **Filling.** Setting `/V` is the easy half and the useless half: a value
 with no matching appearance shows only in viewers that regenerate, which is
 why filled forms so often print blank. So every fill rebuilds the widget's
@@ -112,7 +148,12 @@ the field refuses — over `/MaxLen`, not among a non-editable list's
 options, or written by a user into a ReadOnly field (12.7.4.1 Table 227) —
 is refused whole, because truncating hides a data error inside a file that
 then looks correctly filled. Checkboxes and radio groups set `/V` and every
-widget's `/AS` together, all widgets or none. `reset_form` restores `/DV`
+widget's `/AS` together, all widgets or none — through `set_checkbox` and
+`select_radio`, or through `fill_field` and `set_field_values` given the
+*name* of the state to show (`On`, `blue`, `Off`), which is what an FDF or
+XFDF file carries for a button. A state no widget's `/AP /N` offers is
+refused rather than written, because a `/V` naming a state nothing can draw
+is a box that reads as ticked and displays as empty. `reset_form` restores `/DV`
 into `/V` and removes `/V` where there is no `/DV` (12.7.5.3) — "never
 filled" and "filled with nothing" are different states.
 
@@ -343,9 +384,14 @@ three has a `_within` sibling taking a `ScriptBudget`, for a caller reading
 more than one surface under one total.
 
 Mutation goes through `Document::editor()`, a `DocumentEditor`:
-`fill_field`, `set_field_values`, `set_field_value`, `set_checkbox`,
-`select_radio`, `reset_form`, `transaction`, `recalculate`, and
-`set_calculated_values` for a host that computes values itself.
+`add_field`, `fill_field`, `set_field_values`, `set_field_value`,
+`set_checkbox`, `select_radio`, `reset_form`, `transaction`, `recalculate`,
+and `set_calculated_values` for a host that computes values itself.
+`add_field` takes a `NewField` — a fully qualified name, a `NewFieldKind`
+(`Text`, `Checkbox`, `Radio` with its `RadioButton`s, `Choice`) carrying the
+page, the `Rect` and the initial value, the caller's `/Ff` bits and a `/DA`
+font size — and answers the terminal field's `ObjRef` or an
+`AddFieldError`; the facade re-exports all five, and `Rect` with them.
 `recalculate_under` takes a `ScriptPolicy`; `formatted_value`, `keystroke`
 and `validate` take one too, and are the format event and the two event entry
 points. The free functions behind them are
@@ -403,7 +449,10 @@ let bytes = editor.save(&WriteOptions::default());
 | A script that does not terminate cheaply, or outgrows the size caps | `ScriptError::OutOfSteps` / `TooDeep` / `TooManyTokens` / `StringTooLong` / `ArrayTooLong` / `TooManyVars` | three independent bounds — depth, work, size — because none substitutes for another | — |
 | Script source past 64 KiB, or past what one read of the document has left of its 4 MiB `ScriptBudget` | `Script::Oversize(len)`; running it is `ScriptError::TooLong` | truncated source means something different from what the file says (ruling 10) | — |
 | More than 4 096 calculating fields in one pass | `CalcError::TooManyFields` | refused rather than truncated, for the same reason a failing script refuses the pass | — |
-| A value the field will not take — over `/MaxLen`, not an option, ReadOnly against a user write | `FillError::ValueRefused` (in a multi-field apply, `FillRejection` names the field) | refusing beats truncating, which hides a data error in a file that looks filled | — |
+| A value the field will not take — over `/MaxLen`, not an option, ReadOnly against a user write, a button state no widget offers | `FillError::ValueRefused` (in a multi-field apply, `FillRejection` names the field) | refusing beats truncating, which hides a data error in a file that looks filled | — |
+| Creating a field under a name that is taken, or beneath a terminal field | `AddFieldError::NameTaken` / `AncestorIsTerminal` | two fields answering to one name are one field a filler cannot address; a terminal field's kids are widgets | — |
+| Creating a field whose flags decide a different kind, or a list box marked editable | `AddFieldError::FlagsContradictKind` | Radio, Pushbutton, Combo and Edit are what `NewFieldKind` says, and a second answer to that question is a field that reads back as something else | — |
+| A button export value that is empty, `Off`, repeated, or not a name | `AddFieldError::ExportUnusable` | 12.7.4.2.3 reserves `Off`, and two buttons answering to one state are one button | — |
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
 | Shaping a value against a simple `/DA` font, a vertical CMap, or a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a byte cannot name a glyph past 255; a vertical run drawn along a baseline is stacked by the viewer; a CFF carries no `GSUB` | [design/shaping.md](../design/shaping.md) |
 | Shaping a value under a **registry CMap** in a build without `cmap-predefined` | `WarningKind::PredefinedCMapApproximate(name)` against the field, then the per-character warnings | the code-to-CID tables that would be inverted were never compiled in — a capability that depends on a feature has to say so | [fonts.md](fonts.md) |
@@ -442,6 +491,18 @@ calculation and refused to the user, cascades cut and reported, and the
 format string never landing in `/V`. Its module header carries the six
 policy defaults flipped one at a time and how many assertions each flip
 fired, four of which are zero and say so.
+
+`crates/tinker-pdf/tests/form_creation.rs` (9 tests) is the creation row's
+exit criterion, on a file with no form and on `testdata/form-fields.pdf`:
+each of the four kinds created, found by `fields()` in the same editor,
+filled through `fill_field`, saved incrementally and as a rewrite, reopened,
+read back with its value and held clean by the strict validator; rendered
+blank where it holds nothing and inked where it holds something, the tick
+and the selected radio button counted against the frames beside them;
+initial values restored by a reset; a dotted name creating its ancestors
+once; the `/DR` font joined or added exactly once; the auto-size that proves
+the `/DA` font is read through the editor; and every `AddFieldError` leaving
+the editor clean. Its header carries six reintroduced defects, each firing.
 
 `crates/tinker-pdf/tests/shaped_forms.rs` (12 tests, and the same 12 in a
 `--no-default-features` build — the registry pair swap places) holds up the

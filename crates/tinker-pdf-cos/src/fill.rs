@@ -227,7 +227,7 @@ struct ShapedLine {
 impl Composite {
     /// The font behind a `/DA`, if the conditions above hold, and the typed
     /// reason where one of them fails for a reason this build owns.
-    fn of(doc: &CosDocument, dict: &Dict, font: &Font) -> Shaping {
+    fn of<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &Font) -> Shaping {
         if font.kind() != FontKind::Type0 {
             return Shaping::No;
         }
@@ -450,6 +450,30 @@ pub fn text_appearance(
     value: &str,
     layout: &TextLayout<'_>,
 ) -> StreamData {
+    text_appearance_in(doc, rect, value, layout)
+}
+
+/// [`text_appearance`] through a view.
+///
+/// The `/DA` font is found **through the view**, so an editor that has just
+/// added a font to `/DR` — which is what
+/// [`crate::edit::DocumentEditor::add_field`] does for `/Helv` when a form
+/// has none — draws with its metrics rather than with the half-an-em guess a
+/// font that cannot be found gets. It used to be read from the file, so a
+/// field created and filled in one editor was laid out against a font the
+/// file did not have yet.
+///
+/// What is still read from the file is the font's own subsidiary objects —
+/// its descriptor, widths array and program — because [`font::read`] takes a
+/// [`CosDocument`]. A standard-14 font, which is what a created field names,
+/// has none of those; a composite font an editor added together with its
+/// program is the case that remains (see `docs/features/forms.md`).
+pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
+    doc: &R,
+    rect: Rect,
+    value: &str,
+    layout: &TextLayout<'_>,
+) -> StreamData {
     let TextLayout {
         da,
         quadding,
@@ -466,7 +490,9 @@ pub fn text_appearance(
         .and_then(|fonts| fonts.get_ref(doc.intern(&font_name)))
         .and_then(|r| doc.get(r).ok())
         .and_then(|object| object.as_dict().cloned());
-    let font = font_dict.as_ref().map(|dict| font::read(doc, dict));
+    let font = font_dict
+        .as_ref()
+        .map(|dict| font::read(doc.document(), dict));
     // Milestone 8: whether this field's value can be shaped and written as
     // glyphs rather than as bytes. `None` keeps every line on the single-byte
     // path this module has always had, which is still right for the `/Helv`
@@ -603,8 +629,8 @@ pub fn text_appearance(
         }
 
         content.extend_from_slice(b"ET\nQ\nEMC\n");
-        report(doc, field, &refusals, &unwritable);
-        return finish_appearance(doc, content, w, h, resources);
+        report(doc.document(), field, &refusals, &unwritable);
+        return finish_appearance(doc.document(), content, w, h, resources);
     }
 
     for (index, line) in lines.iter().enumerate() {
@@ -642,8 +668,8 @@ pub fn text_appearance(
     }
 
     content.extend_from_slice(b"ET\nQ\nEMC\n");
-    report(doc, field, &refusals, &unwritable);
-    finish_appearance(doc, content, w, h, resources)
+    report(doc.document(), field, &refusals, &unwritable);
+    finish_appearance(doc.document(), content, w, h, resources)
 }
 
 /// What this appearance could not do, against the field it could not do it to

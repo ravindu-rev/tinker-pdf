@@ -1,8 +1,13 @@
-//! Filling, resetting and recalculating interactive form fields (12.7).
+//! Creating, filling, resetting and recalculating interactive form fields
+//! (12.7).
 
 use super::{without, DocumentEditor};
+use crate::appearance::{self, ButtonStyle};
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
+use crate::pages::Rect;
+use crate::resolve::Resolve;
+use crate::text_string::{decode_text_string, encode_text_string};
 use crate::{fill, form};
 
 /// Why a field could not be filled at all (12.7.4.3).
@@ -158,7 +163,17 @@ impl DocumentEditor {
         .is_ok()
     }
 
-    /// Fills a text or choice field, saying exactly what happened.
+    /// Fills a field, saying exactly what happened.
+    ///
+    /// A text or choice field takes its text. A **check box or radio group**
+    /// takes the *name* of the state to show — its export value, such as `On`
+    /// or `blue`, or `Off` — which is what an FDF or XFDF file carries for one
+    /// and what [`crate::form::FieldValue::State`] reads back (12.7.4.2.3,
+    /// 12.7.4.2.4). The state must be one some widget's `/AP /N` offers,
+    /// because a `/V` naming a state nothing can draw is a box that reads as
+    /// ticked and displays as empty; every widget's `/AS` follows `/V`, all of
+    /// them or none, as [`DocumentEditor::set_checkbox`] and
+    /// [`DocumentEditor::select_radio`] do.
     ///
     /// - `Err` — nothing was written at all, and [`FillError`] says why.
     /// - `Ok(skipped)` with `skipped` empty — `/V` was written and every
@@ -189,6 +204,12 @@ impl DocumentEditor {
         let Some(field) = self.fields().into_iter().find(|f| f.name == name) else {
             return Err(FillError::NoSuchField);
         };
+        if matches!(
+            field.kind,
+            form::FieldKind::Checkbox | form::FieldKind::Radio
+        ) {
+            return self.write_button(&field, value, writer);
+        }
         let allowed = match writer {
             Writer::User => fill::accepts(&field, value),
             Writer::Calculation => fill::accepts_value(&field, value),
@@ -210,6 +231,67 @@ impl DocumentEditor {
         let skipped = self.regenerate_text(&field, value);
         self.clear_need_appearances();
         Ok(skipped)
+    }
+
+    /// A check box or radio group, set to the state `value` names.
+    ///
+    /// Everything that can refuse is checked before anything is written: the
+    /// field and every widget must be dictionaries, and the state must be
+    /// `Off` or one a widget's normal appearance offers. A state no widget
+    /// offers is refused rather than written, for the reason
+    /// [`DocumentEditor::set_checkbox`] gives.
+    fn write_button(
+        &mut self,
+        field: &form::Field,
+        value: &str,
+        writer: Writer,
+    ) -> Result<Vec<SkippedWidget>, FillError> {
+        if writer == Writer::User && field.is_read_only() {
+            return Err(FillError::ValueRefused);
+        }
+        // 7.3.5: a name is one to 127 bytes, and an empty one names nothing a
+        // widget could offer.
+        if value.is_empty() {
+            return Err(FillError::ValueRefused);
+        }
+        let off = self.intern(b"Off");
+        let wanted = self.intern(value.as_bytes());
+        let ap = self.intern(b"AP");
+        let n = self.intern(b"N");
+
+        let mut shows = Vec::with_capacity(field.widgets.len());
+        for widget in &field.widgets {
+            let Some(Object::Dict(dict)) = self.get(*widget) else {
+                return Err(FillError::FieldUnreadable);
+            };
+            let offers = wanted != off
+                && self
+                    .resolve_key(&dict, ap)
+                    .as_dict()
+                    .map(|ap| self.resolve_key(ap, n))
+                    .is_some_and(|states| {
+                        states
+                            .as_dict()
+                            .is_some_and(|states| states.get(wanted).is_some())
+                    });
+            shows.push((*widget, offers));
+        }
+        if wanted != off && !shows.iter().any(|(_, offers)| *offers) {
+            return Err(FillError::ValueRefused);
+        }
+        let Some(Object::Dict(mut dict)) = self.get(field.reference) else {
+            return Err(FillError::FieldUnreadable);
+        };
+
+        dict.insert(self.intern(b"V"), Object::Name(wanted));
+        self.put(field.reference, Object::Dict(dict));
+        for (widget, offers) in shows {
+            // Checked above to be a dictionary, and nothing since has
+            // replaced it with anything else.
+            self.set_appearance_state(widget, if offers { wanted } else { off });
+        }
+        self.clear_need_appearances();
+        Ok(Vec::new())
     }
 
     /// Fills several fields as one edit: all of them, or none of them.
@@ -538,9 +620,8 @@ impl DocumentEditor {
     /// Rewrites a text field's appearance for a value already stored,
     /// returning the widgets it could not draw.
     fn regenerate_text(&mut self, field: &form::Field, value: &str) -> Vec<SkippedWidget> {
-        // Read through the overlay: a widget or a form this editor has
-        // changed is drawn as it now is. The font program itself is still
-        // loaded from the file by `text_appearance`.
+        // Read through the overlay: a widget, a form or a `/DR` font this
+        // editor has changed or added is drawn as it now is.
         let resources = form::default_resources_in(self);
         let quadding = fill::quadding_in(self, field);
         let multiline = field.flags & fill::MULTILINE != 0;
@@ -561,8 +642,8 @@ impl DocumentEditor {
                 continue;
             };
             let da = fill::appearance_string_in(self, field, *widget);
-            let stream = fill::text_appearance(
-                &self.doc,
+            let stream = fill::text_appearance_in(
+                &*self,
                 rect,
                 value,
                 &fill::TextLayout {
@@ -688,6 +769,783 @@ impl DocumentEditor {
                 });
             }
         }
+    }
+}
+
+// ---- creating fields (12.7.3, 12.7.4) --------------------------------------
+
+/// 12.7.4.2.1 Table 226: a button that is one of a radio group.
+const FF_RADIO: i64 = 1 << 15;
+/// 12.7.4.2.1 Table 226: a button that only acts.
+const FF_PUSHBUTTON: i64 = 1 << 16;
+/// 12.7.4.4 Table 230: a choice field that drops down.
+const FF_COMBO: i64 = 1 << 17;
+/// 12.7.4.4 Table 230: a combo box whose text may be typed as well as picked.
+const FF_EDIT: i64 = 1 << 18;
+/// The `/Ff` bits that decide what a field *is* rather than how it behaves.
+/// [`NewFieldKind`] says that, so a caller's own flags may not.
+const KIND_BITS: i64 = FF_RADIO | FF_PUSHBUTTON | FF_COMBO | FF_EDIT;
+
+/// The resource name a created field's `/DA` names in the form's `/DR`.
+const DEFAULT_FONT: &[u8] = b"Helv";
+
+/// Annex C's limit on a name's length, which an export value becomes.
+const MAX_NAME_BYTES: usize = 127;
+
+/// One button of a radio group [`DocumentEditor::add_field`] creates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RadioButton {
+    /// The button's on state — its export value, and the name `/V` holds
+    /// while this button is the one selected (12.7.4.2.4). Not `Off`, which
+    /// 12.7.4.2.3 reserves for the state every button also has.
+    pub export: String,
+    /// The zero-based page the button is drawn on.
+    pub page: u32,
+    /// Where on that page, in default user space.
+    pub rect: Rect,
+}
+
+/// What [`DocumentEditor::add_field`] creates, and where its widgets go.
+///
+/// Every initial value is written as both `/V` and `/DV`, so a reset
+/// (12.7.5.3) comes back to the value the field was created with.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum NewFieldKind {
+    /// A text field (12.7.4.3), merged with its one widget (12.7.3.3).
+    Text {
+        /// The zero-based page the widget is drawn on.
+        page: u32,
+        /// Where on that page, in default user space.
+        rect: Rect,
+        /// The initial value, if any.
+        value: Option<String>,
+        /// `/MaxLen`, the most characters the field takes.
+        max_len: Option<u32>,
+    },
+    /// A check box (12.7.4.2.3), merged with its one widget.
+    Checkbox {
+        /// The zero-based page the widget is drawn on.
+        page: u32,
+        /// Where on that page, in default user space.
+        rect: Rect,
+        /// The on state's name — `Yes` by convention, and anything but `Off`.
+        export: String,
+        /// Whether it starts ticked.
+        checked: bool,
+    },
+    /// A radio group (12.7.4.2.4): one field, and one widget per button.
+    Radio {
+        /// The buttons, at least one, with export values all different.
+        buttons: Vec<RadioButton>,
+        /// The export value of the button that starts selected, if any.
+        selected: Option<String>,
+    },
+    /// A choice field (12.7.4.4), merged with its one widget: a combo box or
+    /// a list box.
+    Choice {
+        /// The zero-based page the widget is drawn on.
+        page: u32,
+        /// Where on that page, in default user space.
+        rect: Rect,
+        /// `/Opt`: each option is its own export value and display text.
+        options: Vec<String>,
+        /// A combo box (a drop-down) rather than a list box.
+        combo: bool,
+        /// A combo box whose text may be typed as well as picked. Refused on
+        /// a list box, where 12.7.4.4 gives the flag no meaning.
+        editable: bool,
+        /// The initial selection, if any. One of `options` unless the field
+        /// is an editable combo box.
+        value: Option<String>,
+    },
+}
+
+/// A field for [`DocumentEditor::add_field`] to create.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewField {
+    /// The fully qualified name (12.7.3.2): the partial names of the field
+    /// and its ancestors, joined by periods. An ancestor the form already has
+    /// is joined; one it does not is created as a non-terminal field.
+    pub name: String,
+    /// What kind of field, and where its widgets go.
+    pub kind: NewFieldKind,
+    /// `/Ff` bits the caller adds — ReadOnly `1`, Required `2`, NoExport `4`
+    /// (12.7.4.1 Table 227), Multiline `1 << 12` and the rest of the
+    /// kind's own table. The four bits that decide the kind — Radio,
+    /// Pushbutton, Combo and Edit — are [`NewFieldKind`]'s to set and are
+    /// refused here.
+    pub flags: i64,
+    /// The `/DA` font size of a text or choice field; `0` auto-sizes
+    /// (12.7.4.3).
+    pub font_size: f64,
+}
+
+impl NewField {
+    /// A field of `kind` named `name`, with no flags of the caller's and an
+    /// auto-sized font.
+    #[must_use]
+    pub fn new(name: impl Into<String>, kind: NewFieldKind) -> NewField {
+        NewField {
+            name: name.into(),
+            kind,
+            flags: 0,
+            font_size: 0.0,
+        }
+    }
+}
+
+/// Why [`DocumentEditor::add_field`] created nothing.
+///
+/// Every variant means the editor is exactly as it was: the field is built
+/// inside a transaction, and everything that can refuse is checked before
+/// anything is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AddFieldError {
+    /// The name is empty, or one of its partial names is — a leading,
+    /// trailing or doubled period (12.7.3.2).
+    NameMalformed,
+    /// A field of that fully qualified name exists already, or one exists
+    /// beneath it; two fields answering to one name are one field a filler
+    /// cannot address.
+    NameTaken(String),
+    /// A field on the way down the name is a terminal field, which has
+    /// widgets rather than kids (12.7.3.1).
+    AncestorIsTerminal(String),
+    /// There is no page at that index.
+    NoSuchPage(u32),
+    /// A rectangle with no area, or with a coordinate that is not a number:
+    /// 12.5.2 Table 164 requires a real box to draw in.
+    RectUnusable,
+    /// A button's export value is empty, is `Off`, repeats another button's,
+    /// or cannot be a name (7.3.5: no NUL byte, and Annex C's 127 bytes).
+    ExportUnusable(String),
+    /// A radio group with no buttons.
+    NoButtons,
+    /// An initial value the field would refuse from a user: longer than
+    /// `/MaxLen`, not among a list's options, or not one of the radio
+    /// group's export values.
+    ValueRefused,
+    /// Flags that contradict the kind: one of the four bits the kind decides,
+    /// or Edit on a list box.
+    FlagsContradictKind,
+    /// A font size that is negative or not a number.
+    FontSizeUnusable,
+    /// The document has no catalog to hang a form on.
+    NoCatalog,
+}
+
+impl core::fmt::Display for AddFieldError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AddFieldError::NameMalformed => f.write_str("the field name has an empty part"),
+            AddFieldError::NameTaken(name) => write!(f, "a field named {name:?} exists"),
+            AddFieldError::AncestorIsTerminal(name) => {
+                write!(f, "{name:?} is a terminal field and cannot have kids")
+            }
+            AddFieldError::NoSuchPage(page) => write!(f, "no page {page}"),
+            AddFieldError::RectUnusable => f.write_str("the rectangle has no area"),
+            AddFieldError::ExportUnusable(export) => {
+                write!(f, "{export:?} cannot be a button's export value")
+            }
+            AddFieldError::NoButtons => f.write_str("a radio group needs a button"),
+            AddFieldError::ValueRefused => f.write_str("the field would refuse that value"),
+            AddFieldError::FlagsContradictKind => {
+                f.write_str("the flags contradict the kind of field")
+            }
+            AddFieldError::FontSizeUnusable => f.write_str("the font size is not usable"),
+            AddFieldError::NoCatalog => f.write_str("the document has no catalog"),
+        }
+    }
+}
+
+impl std::error::Error for AddFieldError {}
+
+/// The partial names of a fully qualified one, each non-empty (12.7.3.2).
+fn partial_names(name: &str) -> Result<Vec<&str>, AddFieldError> {
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(AddFieldError::NameMalformed);
+    }
+    Ok(parts)
+}
+
+/// `rect` ordered, or `None` when it has no area or is not finite.
+fn usable_rect(rect: Rect) -> Option<Rect> {
+    let values = [rect.x0, rect.y0, rect.x1, rect.y1];
+    if !values.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let ordered = Rect {
+        x0: rect.x0.min(rect.x1),
+        y0: rect.y0.min(rect.y1),
+        x1: rect.x0.max(rect.x1),
+        y1: rect.y0.max(rect.y1),
+    };
+    (ordered.x1 - ordered.x0 > 0.0 && ordered.y1 - ordered.y0 > 0.0).then_some(ordered)
+}
+
+/// Whether `export` can be a button's on state: a name (7.3.5) that is not
+/// `Off`.
+fn usable_export(export: &str) -> Result<(), AddFieldError> {
+    if export.is_empty()
+        || export == "Off"
+        || export.contains('\0')
+        || export.len() > MAX_NAME_BYTES
+    {
+        return Err(AddFieldError::ExportUnusable(export.to_string()));
+    }
+    Ok(())
+}
+
+/// One widget a new field places: its page, its rectangle and, for a button,
+/// the state it turns on.
+struct Placement<'a> {
+    page: ObjRef,
+    rect: Rect,
+    export: Option<&'a str>,
+}
+
+impl DocumentEditor {
+    /// Creates an interactive form field (12.7.3), with a widget on the page
+    /// and an appearance for every state the field can be in.
+    ///
+    /// A text or choice field is drawn by the same layout a fill uses, from
+    /// a `/DA` naming `/Helv` in the form's `/DR` — which is added, as
+    /// Helvetica, to a form that has no `/Helv` — so creating a field and
+    /// filling it produce the same appearance for the same value. A check box
+    /// and every radio button get an `/Off` appearance and one for their on
+    /// state, keyed by the export value, and `/AS` selects between them
+    /// (12.7.4.2). Nothing asks a viewer to draw them: `/NeedAppearances` is
+    /// neither set nor needed.
+    ///
+    /// The field is found by [`DocumentEditor::fields`] at once, and filled
+    /// by [`DocumentEditor::fill_field`] like any field the file already had.
+    /// Returns the terminal field's object — for a radio group, the field
+    /// whose kids are the buttons' widgets.
+    ///
+    /// A dotted name creates the hierarchy it describes (12.7.3.2): `a.b.c`
+    /// joins or creates the non-terminal fields `a` and `a.b`, and puts `c`
+    /// beneath them.
+    ///
+    /// # Errors
+    ///
+    /// [`AddFieldError`], and then nothing was written.
+    pub fn add_field(&mut self, spec: &NewField) -> Result<ObjRef, AddFieldError> {
+        self.transaction(|tx| tx.create_field(spec))
+    }
+
+    fn create_field(&mut self, spec: &NewField) -> Result<ObjRef, AddFieldError> {
+        let partials = partial_names(&spec.name)?;
+        let Some((last, ancestors)) = partials.split_last() else {
+            return Err(AddFieldError::NameMalformed);
+        };
+        if spec.flags & KIND_BITS != 0 {
+            return Err(AddFieldError::FlagsContradictKind);
+        }
+        if !spec.font_size.is_finite() || spec.font_size < 0.0 {
+            return Err(AddFieldError::FontSizeUnusable);
+        }
+        let placements = self.placements(&spec.kind)?;
+
+        let below = format!("{}.", spec.name);
+        for field in self.fields() {
+            if field.name.is_empty() {
+                continue;
+            }
+            if field.name == spec.name || field.name.starts_with(&below) {
+                return Err(AddFieldError::NameTaken(spec.name.clone()));
+            }
+            if spec.name.starts_with(&format!("{}.", field.name)) {
+                return Err(AddFieldError::AncestorIsTerminal(field.name));
+            }
+        }
+        if self.catalog().is_none() {
+            return Err(AddFieldError::NoCatalog);
+        }
+
+        // Everything that can refuse has been checked; from here on the
+        // field is built.
+        self.ensure_default_font();
+        let parent = self.field_ancestors(ancestors)?;
+        let field_ref = self.allocate();
+        let da = Object::String(crate::object::PdfString::literal(
+            format!(
+                "/{} {} Tf 0 g",
+                String::from_utf8_lossy(DEFAULT_FONT),
+                crate::build::number(spec.font_size)
+            )
+            .into_bytes(),
+        ));
+        let version = self.text_version();
+
+        let mut widgets: Vec<(ObjRef, ObjRef)> = Vec::new();
+        let mut text_value: Option<String> = None;
+        match &spec.kind {
+            NewFieldKind::Text { value, max_len, .. } => {
+                let place = placements.first().ok_or(AddFieldError::RectUnusable)?;
+                let mut dict = self.widget_dict(place);
+                self.field_entries(&mut dict, b"Tx", last, parent, spec.flags);
+                dict.insert(self.intern(b"DA"), da);
+                if let Some(max) = max_len {
+                    dict.insert(self.intern(b"MaxLen"), Object::Int(i64::from(*max)));
+                }
+                if let Some(value) = value {
+                    let v = fill::value_object_in(value, version);
+                    dict.insert(self.intern(b"V"), v.clone());
+                    dict.insert(self.intern(b"DV"), v);
+                }
+                self.put(field_ref, Object::Dict(dict));
+                widgets.push((field_ref, place.page));
+                text_value = Some(value.clone().unwrap_or_default());
+            }
+            NewFieldKind::Choice {
+                options,
+                combo,
+                editable,
+                value,
+                ..
+            } => {
+                let place = placements.first().ok_or(AddFieldError::RectUnusable)?;
+                let mut flags = spec.flags;
+                if *combo {
+                    flags |= FF_COMBO;
+                }
+                if *editable {
+                    flags |= FF_EDIT;
+                }
+                let mut dict = self.widget_dict(place);
+                self.field_entries(&mut dict, b"Ch", last, parent, flags);
+                dict.insert(self.intern(b"DA"), da);
+                let opt = options
+                    .iter()
+                    .map(|o| Object::String(encode_text_string(o, version)))
+                    .collect();
+                dict.insert(self.intern(b"Opt"), Object::Array(opt));
+                if let Some(value) = value {
+                    let v = fill::value_object_in(value, version);
+                    dict.insert(self.intern(b"V"), v.clone());
+                    dict.insert(self.intern(b"DV"), v);
+                }
+                self.put(field_ref, Object::Dict(dict));
+                widgets.push((field_ref, place.page));
+                text_value = Some(value.clone().unwrap_or_default());
+            }
+            NewFieldKind::Checkbox { checked, .. } => {
+                let place = placements.first().ok_or(AddFieldError::RectUnusable)?;
+                let export = self.intern(place.export.unwrap_or("Yes").as_bytes());
+                let state = if *checked {
+                    export
+                } else {
+                    self.intern(b"Off")
+                };
+                let mut dict = self.widget_dict(place);
+                self.field_entries(&mut dict, b"Btn", last, parent, spec.flags);
+                dict.insert(self.intern(b"V"), Object::Name(state));
+                dict.insert(self.intern(b"DV"), Object::Name(state));
+                dict.insert(self.intern(b"AS"), Object::Name(state));
+                let ap = self.button_states(place.rect, ButtonStyle::Check, export);
+                dict.insert(self.intern(b"AP"), Object::Dict(ap));
+                self.put(field_ref, Object::Dict(dict));
+                widgets.push((field_ref, place.page));
+            }
+            NewFieldKind::Radio { selected, .. } => {
+                let off = self.intern(b"Off");
+                let state = selected
+                    .as_deref()
+                    .map_or(off, |s| self.intern(s.as_bytes()));
+                let mut kids = Vec::with_capacity(placements.len());
+                for place in &placements {
+                    let widget = self.allocate();
+                    let export = self.intern(place.export.unwrap_or("Off").as_bytes());
+                    let mut dict = self.widget_dict(place);
+                    dict.insert(self.intern(b"Parent"), Object::Ref(field_ref));
+                    let shown = if export == state { export } else { off };
+                    dict.insert(self.intern(b"AS"), Object::Name(shown));
+                    let ap = self.button_states(place.rect, ButtonStyle::Radio, export);
+                    dict.insert(self.intern(b"AP"), Object::Dict(ap));
+                    self.put(widget, Object::Dict(dict));
+                    kids.push(Object::Ref(widget));
+                    widgets.push((widget, place.page));
+                }
+                let mut dict = Dict::new();
+                self.field_entries(&mut dict, b"Btn", last, parent, spec.flags | FF_RADIO);
+                dict.insert(self.intern(b"V"), Object::Name(state));
+                dict.insert(self.intern(b"DV"), Object::Name(state));
+                dict.insert(Name::KIDS, Object::Array(kids));
+                self.put(field_ref, Object::Dict(dict));
+            }
+        }
+
+        self.attach_field(parent, field_ref);
+        for (widget, page) in widgets {
+            self.append_to_page_annots(page, widget);
+        }
+        if let Some(value) = text_value {
+            // Drawn by the fill layer's own path, from the field as the tree
+            // walk reads it back: what `fields()` says about the field is what
+            // the appearance was laid out from.
+            if let Some(field) = self
+                .fields()
+                .into_iter()
+                .find(|field| field.reference == field_ref)
+            {
+                self.regenerate_text(&field, &value);
+            }
+        }
+        Ok(field_ref)
+    }
+
+    /// Every widget `kind` places, after checking everything about the kind
+    /// that could refuse.
+    fn placements<'a>(&self, kind: &'a NewFieldKind) -> Result<Vec<Placement<'a>>, AddFieldError> {
+        let pages = self.page_refs();
+        let place = |page: u32, rect: Rect, export: Option<&'a str>| {
+            let page_ref = pages
+                .get(page as usize)
+                .copied()
+                .ok_or(AddFieldError::NoSuchPage(page))?;
+            let rect = usable_rect(rect).ok_or(AddFieldError::RectUnusable)?;
+            Ok::<_, AddFieldError>(Placement {
+                page: page_ref,
+                rect,
+                export,
+            })
+        };
+        match kind {
+            NewFieldKind::Text {
+                page,
+                rect,
+                value,
+                max_len,
+            } => {
+                if let (Some(value), Some(max)) = (value, max_len) {
+                    // `/MaxLen 0` caps nothing, which is how the fill layer
+                    // reads it too.
+                    if *max > 0 && value.chars().count() > *max as usize {
+                        return Err(AddFieldError::ValueRefused);
+                    }
+                }
+                Ok(vec![place(*page, *rect, None)?])
+            }
+            NewFieldKind::Checkbox {
+                page, rect, export, ..
+            } => {
+                usable_export(export)?;
+                Ok(vec![place(*page, *rect, Some(export.as_str()))?])
+            }
+            NewFieldKind::Radio { buttons, selected } => {
+                if buttons.is_empty() {
+                    return Err(AddFieldError::NoButtons);
+                }
+                let mut out = Vec::with_capacity(buttons.len());
+                for (index, button) in buttons.iter().enumerate() {
+                    usable_export(&button.export)?;
+                    if buttons[..index].iter().any(|b| b.export == button.export) {
+                        return Err(AddFieldError::ExportUnusable(button.export.clone()));
+                    }
+                    out.push(place(
+                        button.page,
+                        button.rect,
+                        Some(button.export.as_str()),
+                    )?);
+                }
+                if let Some(selected) = selected {
+                    if !buttons.iter().any(|b| &b.export == selected) {
+                        return Err(AddFieldError::ValueRefused);
+                    }
+                }
+                Ok(out)
+            }
+            NewFieldKind::Choice {
+                page,
+                rect,
+                options,
+                combo,
+                editable,
+                value,
+            } => {
+                if *editable && !*combo {
+                    return Err(AddFieldError::FlagsContradictKind);
+                }
+                if let Some(value) = value {
+                    if !(*editable || options.iter().any(|o| o == value)) {
+                        return Err(AddFieldError::ValueRefused);
+                    }
+                }
+                Ok(vec![place(*page, *rect, None)?])
+            }
+        }
+    }
+
+    /// A widget annotation's own entries (12.5.2, 12.5.6.19).
+    fn widget_dict(&self, place: &Placement<'_>) -> Dict {
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.intern(b"Annot")));
+        dict.insert(
+            self.intern(b"Subtype"),
+            Object::Name(self.intern(b"Widget")),
+        );
+        dict.insert(
+            self.intern(b"Rect"),
+            Object::Array(vec![
+                Object::Real(place.rect.x0),
+                Object::Real(place.rect.y0),
+                Object::Real(place.rect.x1),
+                Object::Real(place.rect.y1),
+            ]),
+        );
+        // 12.5.3 Table 165: Print, so the field is on paper as well as on
+        // screen.
+        dict.insert(self.intern(b"F"), Object::Int(4));
+        dict.insert(self.intern(b"P"), Object::Ref(place.page));
+        dict
+    }
+
+    /// A field dictionary's own entries (12.7.3.1 Table 226).
+    ///
+    /// `/Ff` is written even when it is zero: it is inheritable, and a field
+    /// created under an existing parent would otherwise take the parent's —
+    /// a check box under a node carrying the Radio bit would read back as a
+    /// radio group.
+    fn field_entries(
+        &self,
+        dict: &mut Dict,
+        kind: &[u8],
+        partial: &str,
+        parent: Option<ObjRef>,
+        flags: i64,
+    ) {
+        dict.insert(self.intern(b"FT"), Object::Name(self.intern(kind)));
+        dict.insert(
+            self.intern(b"T"),
+            Object::String(encode_text_string(partial, self.text_version())),
+        );
+        dict.insert(self.intern(b"Ff"), Object::Int(flags));
+        if let Some(parent) = parent {
+            dict.insert(self.intern(b"Parent"), Object::Ref(parent));
+        }
+    }
+
+    /// A button widget's `/AP`: an `/N` dictionary with the on state under
+    /// `export` and `/Off` beside it (12.7.4.2.3).
+    fn button_states(&mut self, rect: Rect, style: ButtonStyle, export: Name) -> Dict {
+        let (w, h) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
+        let on = self.allocate();
+        let stream = appearance::button(&self.doc, w, h, style, true);
+        self.put_stream(on, stream);
+        let off = self.allocate();
+        let stream = appearance::button(&self.doc, w, h, style, false);
+        self.put_stream(off, stream);
+        let mut states = Dict::new();
+        states.insert(export, Object::Ref(on));
+        states.insert(self.intern(b"Off"), Object::Ref(off));
+        let mut ap = Dict::new();
+        ap.insert(self.intern(b"N"), Object::Dict(states));
+        ap
+    }
+
+    /// The fields directly beneath `parent`, or the form's `/Fields` when
+    /// there is none.
+    fn field_kids(&self, parent: Option<ObjRef>) -> Vec<ObjRef> {
+        let list = match parent {
+            Some(parent) => self
+                .get(parent)
+                .and_then(|o| o.as_dict().map(|d| self.resolve_key(d, Name::KIDS))),
+            None => form::acro_form_in(self).map(|f| self.resolve_key(&f, self.intern(b"Fields"))),
+        };
+        list.and_then(|l| {
+            l.as_array()
+                .map(|items| items.iter().filter_map(Object::as_objref).collect())
+        })
+        .unwrap_or_default()
+    }
+
+    /// Joins or creates the non-terminal fields `ancestors` names, from the
+    /// root down, and returns the deepest.
+    fn field_ancestors(&mut self, ancestors: &[&str]) -> Result<Option<ObjRef>, AddFieldError> {
+        let t = self.intern(b"T");
+        let widget = self.intern(b"Widget");
+        let subtype = self.intern(b"Subtype");
+        let mut parent: Option<ObjRef> = None;
+        for (depth, partial) in ancestors.iter().enumerate() {
+            let found = self.field_kids(parent).into_iter().find_map(|kid| {
+                let dict = self.get(kid)?.as_dict()?.clone();
+                let name = dict
+                    .get(t)
+                    .and_then(Object::as_string)
+                    .map(|s| decode_text_string(&s.bytes))?;
+                (name == *partial).then_some((kid, dict))
+            });
+            let node = match found {
+                // A widget is a terminal field's own drawing, and cannot hold
+                // fields. The name check has already refused every terminal
+                // field `fields()` reports; this is the one that reports none
+                // because it has no type.
+                Some((_, dict)) if dict.get_name(subtype) == Some(widget) => {
+                    return Err(AddFieldError::AncestorIsTerminal(
+                        ancestors[..=depth].join("."),
+                    ));
+                }
+                Some((kid, _)) => kid,
+                None => {
+                    let node = self.allocate();
+                    let mut dict = Dict::new();
+                    dict.insert(
+                        t,
+                        Object::String(encode_text_string(partial, self.text_version())),
+                    );
+                    dict.insert(Name::KIDS, Object::Array(Vec::new()));
+                    if let Some(parent) = parent {
+                        dict.insert(self.intern(b"Parent"), Object::Ref(parent));
+                    }
+                    self.put(node, Object::Dict(dict));
+                    self.attach_field(parent, node);
+                    node
+                }
+            };
+            parent = Some(node);
+        }
+        Ok(parent)
+    }
+
+    /// Appends `child` to `parent`'s `/Kids`, or to the form's `/Fields`
+    /// when there is no parent — through the array's own object where it
+    /// is one.
+    fn attach_field(&mut self, parent: Option<ObjRef>, child: ObjRef) {
+        match parent {
+            Some(parent) => {
+                let Some(Object::Dict(mut dict)) = self.get(parent) else {
+                    return;
+                };
+                if self.push_to_list(&mut dict, Name::KIDS, child) {
+                    self.put(parent, Object::Dict(dict));
+                }
+            }
+            None => {
+                let Some((home, mut form)) = self.acroform() else {
+                    return;
+                };
+                let key = self.intern(b"Fields");
+                if self.push_to_list(&mut form, key, child) {
+                    self.put_acroform(home, form);
+                }
+            }
+        }
+    }
+
+    /// Appends `item` to the array at `holder[key]`, making one if there is
+    /// none. True when `holder` itself changed; an array that is its own
+    /// object is written there instead.
+    fn push_to_list(&mut self, holder: &mut Dict, key: Name, item: ObjRef) -> bool {
+        match holder.get(key).cloned() {
+            Some(Object::Ref(array_ref)) => {
+                let mut list = match self.get(array_ref) {
+                    Some(Object::Array(items)) => items,
+                    _ => Vec::new(),
+                };
+                list.push(Object::Ref(item));
+                self.put(array_ref, Object::Array(list));
+                false
+            }
+            other => {
+                let mut list = match other {
+                    Some(Object::Array(items)) => items,
+                    _ => Vec::new(),
+                };
+                list.push(Object::Ref(item));
+                holder.insert(key, Object::Array(list));
+                true
+            }
+        }
+    }
+
+    /// Gives the form's `/DR` a `/Helv` where it has none (12.7.3.3).
+    ///
+    /// Helvetica, because it is one of 9.6.2.2's standard fonts: nothing is
+    /// embedded, and every reader has its metrics. An existing `/Helv` is
+    /// left as it is and used, whatever it names — which is what a fill of
+    /// any field naming `/Helv` in that form already does.
+    fn ensure_default_font(&mut self) {
+        let Some((home, mut form)) = self.acroform() else {
+            return;
+        };
+        let dr_key = self.intern(b"DR");
+        match form.get(dr_key).cloned() {
+            Some(Object::Ref(dr_ref)) => {
+                let mut dr = match self.get(dr_ref) {
+                    Some(Object::Dict(dict)) => dict,
+                    _ => Dict::new(),
+                };
+                if self.add_default_font(&mut dr) {
+                    self.put(dr_ref, Object::Dict(dr));
+                }
+            }
+            other => {
+                let mut dr = match other {
+                    Some(Object::Dict(dict)) => dict,
+                    _ => Dict::new(),
+                };
+                if self.add_default_font(&mut dr) {
+                    form.insert(dr_key, Object::Dict(dr));
+                    self.put_acroform(home, form);
+                }
+            }
+        }
+    }
+
+    /// Adds `/Font /Helv` to `dr` when it has none. True when `dr` itself
+    /// changed; a `/Font` that is its own object is written there instead.
+    fn add_default_font(&mut self, dr: &mut Dict) -> bool {
+        let font_key = self.intern(b"Font");
+        let helv = self.intern(DEFAULT_FONT);
+        match dr.get(font_key).cloned() {
+            Some(Object::Ref(fonts_ref)) => {
+                let mut fonts = match self.get(fonts_ref) {
+                    Some(Object::Dict(dict)) => dict,
+                    _ => Dict::new(),
+                };
+                if fonts.get(helv).is_none() {
+                    let font = self.helvetica();
+                    fonts.insert(helv, font);
+                    self.put(fonts_ref, Object::Dict(fonts));
+                }
+                false
+            }
+            other => {
+                let mut fonts = match other {
+                    Some(Object::Dict(dict)) => dict,
+                    _ => Dict::new(),
+                };
+                if fonts.get(helv).is_some() {
+                    return false;
+                }
+                let font = self.helvetica();
+                fonts.insert(helv, font);
+                dr.insert(font_key, Object::Dict(fonts));
+                true
+            }
+        }
+    }
+
+    /// A new Helvetica font object (9.6.2.2), in `WinAnsiEncoding` so a
+    /// value's Latin-1 characters draw as themselves.
+    fn helvetica(&mut self) -> Object {
+        let r = self.allocate();
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(self.intern(b"Font")));
+        dict.insert(self.intern(b"Subtype"), Object::Name(self.intern(b"Type1")));
+        dict.insert(
+            self.intern(b"BaseFont"),
+            Object::Name(self.intern(b"Helvetica")),
+        );
+        dict.insert(
+            self.intern(b"Encoding"),
+            Object::Name(self.intern(b"WinAnsiEncoding")),
+        );
+        self.put(r, Object::Dict(dict));
+        Object::Ref(r)
     }
 }
 

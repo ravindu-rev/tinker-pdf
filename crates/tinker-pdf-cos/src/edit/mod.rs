@@ -39,7 +39,10 @@ mod trailer;
 mod trees;
 mod view;
 
-pub use forms::{FillError, FillRejection, SkippedWidget, WidgetDefect};
+pub use forms::{
+    AddFieldError, FillError, FillRejection, NewField, NewFieldKind, RadioButton, SkippedWidget,
+    WidgetDefect,
+};
 
 pub use docops::{AttachError, EmbeddedFile, PageLabelError, PageLabelRange};
 pub use metadata::MetadataSync;

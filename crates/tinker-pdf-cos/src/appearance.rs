@@ -340,6 +340,114 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
     })
 }
 
+/// Which mark a button's on appearance draws (12.7.4.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ButtonStyle {
+    /// A square box, ticked when on — a check box (12.7.4.2.3).
+    Check,
+    /// A round box, dotted when on — one button of a radio group
+    /// (12.7.4.2.4).
+    Radio,
+}
+
+/// The normal appearance of one state of a check box or radio button, in a
+/// `width` by `height` box at the origin.
+///
+/// A widget's appearance is mapped onto its `/Rect` by 12.5.5, so the box is
+/// the widget's own size at the origin — the convention
+/// [`crate::fill::text_appearance`] uses for a text field, and the one every
+/// producer writes for a widget. Both states draw the frame, so an unticked
+/// box still shows where it is; only the on state draws the mark.
+///
+/// Drawn with paths rather than a ZapfDingbats glyph, which is the other
+/// convention: a glyph needs a font in the form's `/DR` and a reader that can
+/// draw it, and a path needs neither.
+pub(crate) fn button(
+    doc: &CosDocument,
+    width: f64,
+    height: f64,
+    style: ButtonStyle,
+    on: bool,
+) -> StreamData {
+    let (w, h) = (width.max(0.0), height.max(0.0));
+    let side = w.min(h);
+    let border = (side * 0.06).clamp(0.5, 1.5);
+    let mut content = Vec::new();
+    op(&mut content, &[0.0], b"G");
+    op(&mut content, &[border], b"w");
+    match style {
+        ButtonStyle::Check => {
+            let whole = Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: w,
+                y1: h,
+            };
+            let frame = inset(whole, border / 2.0);
+            op(
+                &mut content,
+                &[frame.x0, frame.y0, frame.x1 - frame.x0, frame.y1 - frame.y0],
+                b"re",
+            );
+            content.extend_from_slice(b"S\n");
+            if on {
+                // A tick: down to a foot a third of the way along, then up to
+                // the top right.
+                op(&mut content, &[(side * 0.12).max(0.5)], b"w");
+                content.extend_from_slice(b"1 J\n1 j\n");
+                op(&mut content, &[w * 0.22, h * 0.52], b"m");
+                op(&mut content, &[w * 0.42, h * 0.26], b"l");
+                op(&mut content, &[w * 0.78, h * 0.76], b"l");
+                content.extend_from_slice(b"S\n");
+            }
+        }
+        ButtonStyle::Radio => {
+            let (cx, cy) = (w / 2.0, h / 2.0);
+            let r = (side / 2.0 - border / 2.0).max(0.0);
+            circle(&mut content, cx, cy, r);
+            content.extend_from_slice(b"S\n");
+            if on {
+                op(&mut content, &[0.0], b"g");
+                circle(&mut content, cx, cy, r * 0.5);
+                content.extend_from_slice(b"f\n");
+            }
+        }
+    }
+
+    let mut dict = Dict::new();
+    dict.insert(Name::TYPE, Object::Name(doc.intern(b"XObject")));
+    dict.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(b"Form")));
+    dict.insert(
+        doc.intern(b"BBox"),
+        Object::Array(vec![
+            Object::Int(0),
+            Object::Int(0),
+            Object::Real(w),
+            Object::Real(h),
+        ]),
+    );
+    dict.insert(Name::RESOURCES, Object::Dict(Dict::new()));
+    StreamData {
+        dict,
+        data: content,
+    }
+}
+
+/// A circle as four cubics — the path [`synthesize`] draws a `/Circle` with,
+/// for the round case.
+fn circle(out: &mut Vec<u8>, cx: f64, cy: f64, r: f64) {
+    // The constant that makes four cubics approximate a circle to within
+    // about one part in a thousand.
+    const K: f64 = 0.552_284_749_83;
+    let o = r * K;
+    op(out, &[cx - r, cy], b"m");
+    op(out, &[cx - r, cy + o, cx - o, cy + r, cx, cy + r], b"c");
+    op(out, &[cx + o, cy + r, cx + r, cy + o, cx + r, cy], b"c");
+    op(out, &[cx + r, cy - o, cx + o, cy - r, cx, cy - r], b"c");
+    op(out, &[cx - o, cy - r, cx - r, cy - o, cx - r, cy], b"c");
+    out.extend_from_slice(b"h\n");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

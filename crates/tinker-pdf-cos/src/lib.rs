@@ -108,7 +108,8 @@ pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
 pub use edit::{
-    annot, DocumentEditor, EditCheckpoint, FillError, FillRejection, SkippedWidget, WidgetDefect,
+    annot, AddFieldError, DocumentEditor, EditCheckpoint, FillError, FillRejection, NewField,
+    NewFieldKind, RadioButton, SkippedWidget, WidgetDefect,
 };
 // Document operations on the editor: page labels, embedded files and
 // metadata, each read back by the readers in `outline`.

@@ -136,6 +136,15 @@ const CONTAINER_SNIFF: u64 = 1024;
 pub use png_read::PngReadError;
 /// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
 pub use render_part::{NotDrawn, RenderPartError};
+/// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
+///
+/// Here for the reason `ExtGState` is: [`NewField`] is the method's argument
+/// and [`AddFieldError`] its refusal, and a method whose argument cannot be
+/// named is callable by nobody outside this workspace (ruling 11). [`Rect`]
+/// comes with them because every widget a field places is one; it is the
+/// object model's own rectangle rather than a second spelling of four
+/// numbers.
+pub use tinker_pdf_cos::{AddFieldError, NewField, NewFieldKind, RadioButton, Rect};
 /// Writing: creation, editing and saving.
 ///
 /// Without these on the facade a caller depending only on this crate could

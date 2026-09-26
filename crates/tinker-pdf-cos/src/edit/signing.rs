@@ -163,7 +163,7 @@ impl DocumentEditor {
         Ok(())
     }
 
-    fn append_to_page_annots(&mut self, page: ObjRef, widget: ObjRef) {
+    pub(super) fn append_to_page_annots(&mut self, page: ObjRef, widget: ObjRef) {
         let annots = self.intern(b"Annots");
         let Some(Object::Dict(mut dict)) = self.get(page) else {
             return;
