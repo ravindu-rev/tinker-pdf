@@ -1569,6 +1569,20 @@ impl PageBuilder {
         }
     }
 
+    /// Writes a resource name into the content stream as a name token.
+    ///
+    /// **Every name an operator here takes goes through this**, and through
+    /// the same escaper the writer uses for dictionary keys. 7.3.5 makes a
+    /// delimiter, white space, `#` and any byte outside `!`..`~` a `#xx`
+    /// escape; written raw, `/Fm B Do` is the name `/Fm` and an operand `B`,
+    /// so the page names a resource its `/Resources` does not carry and draws
+    /// nothing — while the dictionary, which was always escaped, holds the
+    /// resource under the whole name. One escaper for both sides is what
+    /// makes the name a page uses and the name it registered the same bytes.
+    fn resource_name(&mut self, resource: &[u8]) {
+        crate::write::write_name(&mut self.content, resource);
+    }
+
     /// Writes `/Tag <</MCID n>> BDC` and returns the id it handed out.
     fn open_marked(&mut self, tag: &[u8]) -> u32 {
         let mcid = self.next_mcid;
@@ -1628,8 +1642,8 @@ impl PageBuilder {
             .or_default()
             .extend(text.chars());
 
-        self.content.extend_from_slice(b"BT /");
-        self.content.extend_from_slice(font);
+        self.content.extend_from_slice(b"BT ");
+        self.resource_name(font);
         self.content
             .extend_from_slice(format!(" {size} Tf {x} {y} Td (").as_bytes());
 
@@ -1675,8 +1689,8 @@ impl PageBuilder {
             .extend(characters.chars());
 
         let (character_spacing, word_spacing) = spacing;
-        self.content.extend_from_slice(b"BT /");
-        self.content.extend_from_slice(font);
+        self.content.extend_from_slice(b"BT ");
+        self.resource_name(font);
         self.content.extend_from_slice(
             format!(" {size} Tf {character_spacing} Tc {word_spacing} Tw {x} {y} Td (").as_bytes(),
         );
@@ -1709,8 +1723,8 @@ impl PageBuilder {
     /// a matter of the transform — which is what this writes.
     pub fn image(&mut self, resource: &[u8], x: f64, y: f64, w: f64, h: f64) {
         self.content
-            .extend_from_slice(format!("q {w} 0 0 {h} {x} {y} cm /").as_bytes());
-        self.content.extend_from_slice(resource);
+            .extend_from_slice(format!("q {w} 0 0 {h} {x} {y} cm ").as_bytes());
+        self.resource_name(resource);
         self.content.extend_from_slice(b" Do Q\n");
     }
 
@@ -1764,8 +1778,7 @@ impl PageBuilder {
         let Some(channels) = self.resources.icc_channels.get(resource).copied() else {
             return false;
         };
-        self.content.push(b'/');
-        self.content.extend_from_slice(resource);
+        self.resource_name(resource);
         self.content
             .extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
         for at in 0..usize::from(channels) {
@@ -1824,8 +1837,7 @@ impl PageBuilder {
         if !holds(&self.resources.ext_gstates, resource) {
             return false;
         }
-        self.content.push(b'/');
-        self.content.extend_from_slice(resource);
+        self.resource_name(resource);
         self.content.extend_from_slice(b" gs\n");
         true
     }
@@ -1839,8 +1851,7 @@ impl PageBuilder {
         if !holds(&self.resources.forms, resource) {
             return false;
         }
-        self.content.push(b'/');
-        self.content.extend_from_slice(resource);
+        self.resource_name(resource);
         self.content.extend_from_slice(b" Do\n");
         true
     }
@@ -1856,8 +1867,7 @@ impl PageBuilder {
         if !holds(&self.resources.shadings, resource) {
             return false;
         }
-        self.content.push(b'/');
-        self.content.extend_from_slice(resource);
+        self.resource_name(resource);
         self.content.extend_from_slice(b" sh\n");
         true
     }
@@ -1873,8 +1883,8 @@ impl PageBuilder {
         if !holds(&self.resources.patterns, resource) {
             return false;
         }
-        self.content.extend_from_slice(b"/Pattern cs /");
-        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b"/Pattern cs ");
+        self.resource_name(resource);
         self.content.extend_from_slice(b" scn\n");
         true
     }
@@ -1884,8 +1894,8 @@ impl PageBuilder {
         if !holds(&self.resources.patterns, resource) {
             return false;
         }
-        self.content.extend_from_slice(b"/Pattern CS /");
-        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b"/Pattern CS ");
+        self.resource_name(resource);
         self.content.extend_from_slice(b" SCN\n");
         true
     }
@@ -1921,8 +1931,8 @@ impl PageBuilder {
             }
         }
 
-        self.content.extend_from_slice(b"BT /");
-        self.content.extend_from_slice(font);
+        self.content.extend_from_slice(b"BT ");
+        self.resource_name(font);
         self.content
             .extend_from_slice(format!(" {size} Tf {x} {y} Td <").as_bytes());
         for glyph in glyphs {
@@ -2844,8 +2854,8 @@ impl DocumentBuilder {
             }
         }
 
-        out.extend_from_slice(b"BT /");
-        out.extend_from_slice(font);
+        out.extend_from_slice(b"BT ");
+        crate::write::write_name(out, font);
         out.extend_from_slice(format!(" {} Tf ", number(size)).as_bytes());
         for value in matrix {
             out.extend_from_slice(number(value).as_bytes());

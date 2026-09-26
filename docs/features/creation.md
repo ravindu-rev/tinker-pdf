@@ -73,6 +73,14 @@ the page side applies them with `set_ext_gstate`, `form`,
 anything else. Each page-side call returns `false` when the named resource
 was never added — a typo is a `false`, never a dangling `/Resources` entry.
 
+**A resource name may be any bytes.** Every operator that names one — `Tf`,
+`Do`, `gs`, `sh`, `cs`/`CS` and the pattern `scn`/`SCN` — writes it through
+the same 7.3.5 escaper the dictionary keys go through, so a delimiter, white
+space, `#` or a byte outside `!`..`~` is a `#xx` escape on both sides. Until
+September 2026 the content-stream side wrote the bytes raw: `form(b"Fm B")`
+wrote `/Fm B Do`, which is the name `/Fm` and a stray operand, and the page
+drew nothing while its `/Resources` held the form under the whole name.
+
 **Navigation.** `link(x0, y0, x1, y1, &Target)` adds a link annotation
 (12.5.6.5); `set_outline(Vec<OutlineEntry>)` writes the document outline
 (12.3.3). `Target` is `Page { index, view: DestKind }` or `Uri(String)`, and
@@ -181,6 +189,10 @@ byte-deterministic XMP packet and the header version its part requires.
   `writer_navigation.rs` exercise ExtGStates, patterns, shadings, forms,
   links and outlines through the facade and read the result back through
   the [document model](document-model.md).
+- `crates/tinker-pdf/tests/writer_names.rs` holds each name-taking operator
+  to one awkward name — a space, a `#`, a `/` and a byte past 0x7F: the
+  stream carries the escaped token, the resource dictionary the name's own
+  bytes, and the page draws what the same document draws under a plain name.
 - `crates/tinker-pdf/tests/png_passthrough.rs` asserts a PNG's IDAT reaches
   the page untouched and decodes identically.
 - `crates/tinker-pdf-cos/tests/page_operations.rs` covers embedded and
