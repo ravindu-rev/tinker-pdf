@@ -210,15 +210,29 @@ how ruling 10's "name what you touched" is satisfied for a list: a caller
 auditing a file counts what this build does not model instead of comparing
 lengths to find out what went missing.
 
-Past 4 096 the list is shortened and **nothing says so**. That is forced
-rather than chosen: the only place a truncation could be reported is
-`Document::warnings()`, and appending to it from a read would make the
-warnings depend on whether anyone had called `annotations()` first — the same
-argument that keeps `fonts()` off `cos::font::read`. The bound is pinned by
+Past 4 096 the list is shortened, and **the value it returns says by how
+much**: `Page::annotation_list()` is the same read as an `AnnotationList`,
+whose `dropped` counts the entries past the bound. Not a warning: appending to
+`Document::warnings()` from a read would make the warnings depend on whether
+anyone had called `annotations()` first — the same argument that keeps
+`fonts()` off `cos::font::read` — and until September 2026 that argument ended
+at "so nothing says so". A count in the answer mutates nothing, and the same
+page read twice says the same thing twice. The bound is pinned by
 `a_hostile_annots_array_is_capped`, which exists because raising the constant
-to a hundred thousand previously failed nothing in the crate; the corpus's
-largest page carries 122, three orders of magnitude below it, so no real file
-is affected. Reporting the truncation is a roadmap row, not a claim made here.
+to a hundred thousand previously failed nothing in the crate, and which now
+holds the count and the warnings too; the corpus's largest page carries 122,
+three orders of magnitude below it.
+
+**The listing's copies are bounded too**, by `MAX_ANNOTATION_BYTES` (64 MiB a
+page). Everything an `Annotation` carries is a copy of an object the parser
+already holds, and an indirect object is parsed once and may be named by
+every one of the 4 096 entries — so one 9 MB `/Contents` string, or one
+`/InkList` of a million numbers, named four thousand times asked for tens of
+gigabytes. That was true of `/Contents`, `/T` and `/M` from the day the model
+landed, and the payloads below would have made it true of every array in
+12.5.6's tables. Each copy is charged before it is made; one the budget
+cannot pay for reads as absent, the annotation says `incomplete`, and the
+list counts them in `incomplete`. It has a `bounds_ledger.rs` row.
 
 `AnnotationKind` covers ISO 32000-1 Table 169's twenty-six subtypes and ISO
 32000-2's two, and the table is transcribed a second time in the test beside
@@ -226,17 +240,43 @@ it and compared. Each entry carries Table 164's common entries and Table 170's
 markup ones: `/Rect` normalised so `x0 <= x1` (7.9.5), `/Contents`, `/T`, `/M`
 both as the file's own text *and* as a parsed 7.9.4 date, `/F` as a raw
 `AnnotationFlags` with Table 165's ten bit accessors, `/Popup`, `/Parent`, and
-whether `/AP` carries an `/N`. A pop-up's `/Contents`, `/T` and `/M` come from
-its `/Parent` (12.5.6.14 Table 183) — and only that way: a markup annotation's
-text is never read through its own `/Popup`, which the clause does not licence
-and which would report a note's text as whatever its window happened to carry.
+whether `/AP` carries an `/N`; and `/AS`, `/NM`, `/C`, the border (`/BS`, or
+the legacy `/Border` with its corner radii and dash array, 12.5.4), and on a
+markup annotation `/CA`, `/RC` (a text string decoded, a stream named by
+reference and not decoded, since decoding would add to the document's
+warnings), `/Subj`, `/CreationDate` as text and as a date, `/IRT`, `/RT` and
+`/IT`. A pop-up's `/Contents`, `/T`, `/M` and `/C` come from its `/Parent`
+(12.5.6.14 Table 183, whose list includes `/C`) — and only that way: a markup
+annotation's text is never read through its own `/Popup`, which the clause
+does not licence and which would report a note's text as whatever its window
+happened to carry.
+
+**The per-family payloads.** `Annotation::payload` is an `AnnotationPayload`,
+one variant per 12.5.6 family — a family being a clause, so `/Square` and
+`/Circle` share `Shape`, the four text markup subtypes share `TextMarkup`,
+`/Polygon` and `/PolyLine` share `Polygon` — twenty-three in all, and `None`
+for an entry the model could not type. Each variant's fields are its table's
+entries with its table's defaults: `Text` (Table 172: `/Open`, `/Name`,
+`/State`, `/StateModel`), `Link` (173: `/H`, `/QuadPoints`), `FreeText` (174:
+`/DA`, `/Q`, `/DS`, `/CL`, `/BE`, `/RD`, `/LE`), `Line` (175: `/L`, `/LE`,
+`/IC`, `/LL`, `/LLE`, `/LLO`, `/Cap`, `/CP`, `/CO`), `Shape` (177), `Polygon`
+(178: `/Vertices`, a polyline's `/LE`), `TextMarkup` (179: `/QuadPoints` as
+the file orders the corners), `Caret` (180), `Stamp` (181), `Ink` (182:
+`/InkList`, one path per stroke), `Popup` (183), `FileAttachment` (184: `/FS`
+as a `FileSpec` — `/UF` before `/F`, `/Desc`, the embedded stream), `Sound`
+(185), `Movie` (186), `Screen` (187), `Widget` (188), `PrinterMark`,
+`TrapNet`, `Watermark` (190), `Redact` (191), `ThreeD` (13.6.2), and ISO
+32000-2's `Projection` and `RichMedia`. What is referenced rather than read —
+a sound, a movie, 3D artwork, rich media, a redaction's overlay — is a
+`Linked`: the reference, or `Direct` for one written inline. Geometry that is
+not what its table says is not half read: a partial quad, an odd vertex, a
+non-number in an ink path, a `/L` of three numbers each come back as nothing.
+`carries_required()` says whether the entries the family's table marks
+required are present, and is what the census counts.
 
 `Page::links()` is unchanged and stays the narrower navigation view over the
 same array: `/Link` annotations with their destinations **resolved**, which is
-a question about targets rather than about annotations (ruling 6). What is
-*not* here is per-subtype geometry — `/QuadPoints`, `/InkList`, `/Vertices`,
-`/L` and their relatives — which is one payload per 12.5.6 family and has a
-roadmap row of its own.
+a question about targets rather than about annotations (ruling 6).
 
 **Measured over the corpus.** `crates/tinker-pdf/tests/annotation_census.rs`,
 `#[ignore]`d and run with `-- --ignored --nocapture`, over the 1 012 fetched
@@ -289,15 +329,20 @@ As of 15 September 2026, in the workspace suite of 4 779 passing tests
 (0 failed, 58 ignored, 218 suites, Windows x86_64, measured on this
 branch — other lanes are moving the total in parallel):
 
-- `crates/tinker-pdf/src/layers.rs` and `src/annotations.rs` — 6 and 13 unit
+- `crates/tinker-pdf/src/layers.rs` and `src/annotations.rs` — 6 and 20 unit
   tests beside the code: `/BaseState` inverted by `/ON`, a nameless group
   still listed, the listing reading the renderer's own bound configuration;
   Table 169 transcribed a second time and compared against the enum, nothing
-  in `/Annots` dropped, 12.5.6.14 in both directions, a pop-up parent cycle
-  that terminates, Table 165 bit by bit, a reversed `/Rect` ordered, a
-  `/M` that is not a date carried as text, and a 4 097-entry `/Annots` array
-  cut to ruling 1's bound — the last written after an injection found the cap
-  guarded by nothing at all.
+  in `/Annots` dropped, 12.5.6.14 in both directions and for `/C`, a pop-up
+  parent cycle that terminates, Table 165 bit by bit, a reversed `/Rect`
+  ordered, a `/M` that is not a date carried as text, and a 4 099-entry
+  `/Annots` array cut to ruling 1's bound with the three it left out counted
+  and the warnings untouched — the cap test written after an injection found
+  the cap guarded by nothing at all. The payloads: every family's read against
+  its table on one page, every family's defaults and required entries on
+  another, the common and markup entries, malformed geometry refused rather
+  than guessed at, and four thousand annotations naming one shared array cut
+  by the copy budget and saying so. Ten reintroduced defects each fire.
 - `crates/tinker-pdf/tests/facade_read.rs` — 7 tests over one fixture, run
   from **outside** the crate the way ruling 11 makes the contract: each is
   named for the defect it re-creates rather than for the feature, and one of
@@ -305,7 +350,14 @@ branch — other lanes are moving the total in parallel):
   `Document::warnings()` where it was.
 - `crates/tinker-pdf/tests/annotation_census.rs` — the two `#[ignore]`d corpus
   censuses above, printing `RAN`/`SKIPPED` so a missing corpus cannot read as
-  a pass, with floors at the counts recorded here.
+  a pass, with floors at the counts recorded here, honouring
+  `TINKER_CORPUS_REQUIRED`, and run nightly by `corpus.yml` since 26 September
+  2026. The annotation census also counts the payloads per family, asserts
+  that each covered subtype reads into its own family (a second transcription
+  of 12.5.6's grouping) and that neither listing bound touches a corpus page —
+  **and the per-family counts themselves are owed**: that half was written
+  where the fetched corpora could not be reached, so it has printed nothing
+  yet and holds no floors.
 - `crates/tinker-pdf/tests/tinker_parity.rs` — the ported parity tests
   ([ruling 12](../rulings.md)): `pdf_version()` returns exactly `"PDF 1.7"`, the three-level
   outline nests with zero-based page indices, and a document without an

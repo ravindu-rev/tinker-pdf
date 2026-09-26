@@ -331,7 +331,7 @@ grid model serve two designs.
   records no scope at all; the real-content group here needs `structure:
   true`, and that sentence should be corrected when milestone 5 lands.
 - **`Page::annotations()`** — the 28-subtype model with `/F`, `/Contents`
-  and `/Popup`. Exists; the per-family payloads the roadmap lists as unread
+  and `/Popup`. Exists; the per-family payloads (read since 26 September 2026)
   are not needed here.
 - **PDF 2.0 namespaced structure types** — a tier 3 roadmap row; milestone 6
   waits on it for the `/RoleMapNs` fixtures.

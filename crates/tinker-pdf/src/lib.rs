@@ -131,6 +131,14 @@ pub use tinker_pdf_cos::{FontKind, ProgramKey};
 /// `cbz::container` tests fixed positions and reads no further than byte 262;
 /// one kilobyte is that with room, and it is one head read either way.
 const CONTAINER_SNIFF: u64 = 1024;
+/// The per-family annotation payloads (12.5.6) behind [`Annotation::payload`],
+/// the types they are built from, and [`Page::annotation_list`]'s answer —
+/// every one of them a field type or a return type of the read surface, so a
+/// caller can name what it is handed (ruling 11).
+pub use annotations::{
+    AnnotationList, AnnotationPayload, Border, BorderEffect, FileSpec, Linked, RichText,
+    MAX_ANNOTATION_BYTES,
+};
 /// Why [`Bitmap::from_png`] would not read a file: the decoder's own reason,
 /// named rather than collapsed, because "not a PNG" and "a colour type Table
 /// 11.1 does not permit" are different answers to show a person.
@@ -2104,10 +2112,10 @@ impl Page {
     ///
     /// **Total by construction**, up to ruling 1's bound of 4 096 entries per
     /// page: one [`Annotation`] per array entry, however malformed. Past the
-    /// bound the list is shortened and nothing says so — a read cannot append
-    /// to [`Document::warnings`] without changing what the document reports
-    /// about itself — which is a gap the roadmap carries rather than one this
-    /// method hides. The corpus's largest page carries 122.
+    /// bound the list is shortened; [`Page::annotation_list`] is the same
+    /// read with the count of what the bound left out, which a read cannot
+    /// put on [`Document::warnings`] without changing what the document
+    /// reports about itself. The corpus's largest page carries 122.
     ///
     /// A subtype ISO 32000 does not define comes back as
     /// [`AnnotationKind::Other`] carrying the name the file used, a
@@ -2118,10 +2126,13 @@ impl Page {
     /// wondering what went missing (ruling 10).
     ///
     /// Carries 12.5.2 Table 164's common entries and Table 170's markup ones
-    /// — `/Contents`, `/T`, `/M`, `/F`, `/Rect`, `/Popup`, `/Parent` — with
-    /// 12.5.6.14's rule applied: a pop-up's text comes from its parent.
-    /// Per-subtype geometry (`/QuadPoints`, `/InkList`, `/Vertices`, `/L`)
-    /// is not here; see the roadmap.
+    /// — `/Contents`, `/T`, `/M`, `/F`, `/Rect`, `/Popup`, `/Parent`, `/C`,
+    /// `/BS` or `/Border`, `/AS`, `/NM`, `/CA`, `/RC`, `/Subj`,
+    /// `/CreationDate`, `/IRT`, `/RT`, `/IT` — with 12.5.6.14's rule applied:
+    /// a pop-up's text and colour come from its parent. The family's own
+    /// entries — `/QuadPoints`, `/InkList`, `/Vertices`, `/L`, `/DA`, `/IC`,
+    /// `/CL`, `/FS`, … — are [`Annotation::payload`], one
+    /// [`AnnotationPayload`] variant per 12.5.6 family.
     ///
     /// [`Page::links`] is the narrower navigation view over the same array
     /// and is unchanged: it returns `/Link` annotations with their targets
@@ -2129,6 +2140,23 @@ impl Page {
     /// annotations (ruling 6).
     #[must_use]
     pub fn annotations(&self) -> Vec<Annotation> {
+        self.annotation_list().annotations
+    }
+
+    /// [`Page::annotations`], with what the listing's two bounds left out
+    /// counted in the value it returns.
+    ///
+    /// [`AnnotationList::dropped`] is how many `/Annots` entries lay past the
+    /// 4 096 the listing reads, and [`AnnotationList::incomplete`] how many
+    /// annotations were read with an entry left out because the page spent
+    /// [`MAX_ANNOTATION_BYTES`] on copies. The first is zero on every page the
+    /// corpus held when it was measured, the busiest carrying 122; the census
+    /// asserts both are, and the second has not yet been measured there. The
+    /// counts are part of the answer rather than warnings,
+    /// so reading a page twice says the same thing twice and
+    /// [`Document::warnings`] is left as it was.
+    #[must_use]
+    pub fn annotation_list(&self) -> AnnotationList {
         annotations::of_page(&self.doc, self.inner.reference)
     }
 

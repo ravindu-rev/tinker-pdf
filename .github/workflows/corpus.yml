@@ -94,6 +94,7 @@ jobs:
       - name: Hold every corpus census
         run: |
           cargo test --release --no-fail-fast -p tinker-pdf \
+            --test annotation_census \
             --test certificates \
             --test cff_subset_census \
             --test cmap_census \

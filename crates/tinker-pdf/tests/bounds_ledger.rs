@@ -1,5 +1,16 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 26 September 2026, the annotation payloads row.* **One more row,
+//! `MAX_ANNOTATION_BYTES`, and it is a cap on copies rather than on anything
+//! parsed.** Everything a page's annotation listing hands back is a copy of an
+//! object the parser already holds, and an indirect object is parsed once and
+//! may be named by every one of the 4 096 entries `/Annots` is read to — so a
+//! file of a few megabytes asks for tens of gigabytes. That was true of
+//! `/Contents`, `/T` and `/M` from the day the listing landed, and the
+//! per-family payloads would have made it true of every array in 12.5.6's
+//! tables. The row's `fixtures` is the cap for `MAX_DECODED_STREAM`'s reason:
+//! the test that fires it spends it.
+//!
 //! *Amended, 26 September 2026, the `jbig2` fuzz row.* **One more row, the
 //! forty-fourth, and it is the first here whose cap is a *ratio* rather than a
 //! quantity.**
@@ -417,6 +428,7 @@ use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
 };
+use tinker_pdf::MAX_ANNOTATION_BYTES;
 use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
@@ -464,6 +476,10 @@ const RENDER: &str = include_str!("../../tinker-pdf-render/src/lib.rs");
 const PAGE_GEOMETRY_TESTS: &str = include_str!("page_geometry.rs");
 const COS_LIMITS: &str = include_str!("../../tinker-pdf-cos/src/limits.rs");
 const INLINE_IMAGE_TESTS: &str = include_str!("inline_images.rs");
+/// The annotation payloads' copy budget: declared beside the payload readers
+/// that spend it, and fired by a test beside the listing that owns the budget.
+const ANNOTATION_PAYLOADS: &str = include_str!("../src/annotations/payload.rs");
+const ANNOTATION_TESTS: &str = include_str!("../src/annotations.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -1874,6 +1890,38 @@ fn ledger() -> Vec<Bound> {
                 INLINE_IMAGE_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_ANNOTATION_BYTES",
+            cap: MAX_ANNOTATION_BYTES as u128,
+            published: "64 MiB",
+            // The cap, for `MAX_DECODED_STREAM`'s reason one row up: the test
+            // that proves it fires names one 4 096-number array from four
+            // thousand annotations and spends the budget to the byte it runs
+            // out at. Every other fixture that lists a page's annotations —
+            // measured over all of them on 26 September 2026 — spends at most
+            // 923 bytes.
+            fixtures: MAX_ANNOTATION_BYTES as u128,
+            // A comic page carries no annotation at all.
+            comic: 0,
+            // The XPS path writes `/Link`s with a `/Rect`, a `/Dest` and a
+            // three-zero `/Border`, and the listing copies none of those at a
+            // cost: the budget is spent on strings, names and variable-length
+            // arrays, and a `/Border` of three numbers is none of them.
+            document: 0,
+            // The EPUB path writes the same `/Link`s through the same builder.
+            book: 0,
+            // One page may be read to 4 096 `/Annots` entries, and every one
+            // of them may name the same indirect string or array — parsed
+            // once, copied per annotation — as long as the file, which on the
+            // narrowest target is at most `u32::MAX` bytes.
+            reachable: 4_096 * (1u128 << 32),
+            reachable_because: "4 096 annotations naming one shared object as long as a 4 GiB file",
+            declared_in: ANNOTATION_PAYLOADS,
+            fires_in: (
+                "a_listing_past_its_copy_budget_says_what_it_cut",
+                ANNOTATION_TESTS,
+            ),
+        },
     ]
 }
 
@@ -1888,7 +1936,8 @@ fn ledger() -> Vec<Bound> {
 /// JBIG2's three; and tier 0's memory row adds the two largest **runtime**
 /// bounds, `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`; and Tier 2's custom
 /// code tables add `MAX_JBIG2_TABLE_LINES`; and the `jbig2` fuzz row adds
-/// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`. All **forty-four** are here, and
+/// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`; and the annotation payloads row adds
+/// `MAX_ANNOTATION_BYTES`. All **forty-five** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -1940,6 +1989,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_JBIG2_TABLE_LINES",
             "MAX_PAGE_PIXELS",
             "MAX_DECODED_STREAM",
+            "MAX_ANNOTATION_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2045,7 +2095,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 44, "the ledger is forty-four rows");
+    assert_eq!(measured, 45, "the ledger is forty-five rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2077,7 +2127,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 44, "the ledger is forty-four rows");
+    assert_eq!(ledger().len(), 45, "the ledger is forty-five rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -2381,6 +2431,7 @@ fn every_bound_names_a_test_that_exists() {
         JBIG2,
         PAGE_GEOMETRY_TESTS,
         INLINE_IMAGE_TESTS,
+        ANNOTATION_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),
