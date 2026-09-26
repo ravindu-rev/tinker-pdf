@@ -5,11 +5,17 @@
 //! and otherwise PDFDocEncoding — which is Latin-1 with a different set of
 //! characters in the 0x18..0x20 range and a handful of substitutions above
 //! 0x7F.
+//!
+//! [`encode_text_string`] is the one writer, and it is the decoder's inverse:
+//! every string this crate writes as text goes through it, so what a caller
+//! set is what [`decode_text_string`] reads back.
+
+use crate::object::PdfString;
 
 /// PDFDocEncoding for the bytes that differ from Latin-1 (Annex D.2).
 ///
-/// Codes 0x00..0x17, 0x20..0x7E and 0xA0..0xFF map to themselves as Latin-1
-/// does; only these two ranges need a table.
+/// Codes 0x00..0x17, 0x20..0x7E and 0xA1..0xFF map to themselves as Latin-1
+/// does; only these two ranges and 0xA0, the Euro sign, need a table.
 const PDF_DOC_18_1F: [char; 8] = [
     '\u{02D8}', // 0x18 breve
     '\u{02C7}', // 0x19 caron
@@ -99,10 +105,89 @@ pub fn decode_pdf_doc(bytes: &[u8]) -> String {
                 .get(usize::from(b - 0x80))
                 .copied()
                 .unwrap_or('\u{FFFD}'),
+            // Annex D.2 Table D.2 puts the Euro sign at 0xA0 (octal 240),
+            // where Latin-1 has a no-break space. Reading it as Latin-1 turned
+            // every "€" a PDFDocEncoded string carried into a blank.
+            0xA0 => '\u{20AC}',
             // The rest coincides with Latin-1.
             _ => char::from(b),
         })
         .collect()
+}
+
+/// The PDFDocEncoding code for `c`, when it has one every reader agrees on.
+///
+/// The inverse of [`decode_pdf_doc`] over the codes Annex D.2 defines: tab,
+/// line feed and carriage return, printable ASCII, the two substitution
+/// ranges, the Euro sign at 0xA0, and Latin-1 from 0xA1 up. Left out are the
+/// codes the table leaves undefined — the other C0 controls, 0x7F, 0x9F and
+/// 0xAD — because a reader may map an undefined code to anything, and the
+/// point of choosing an encoding here is that the text comes back.
+fn pdf_doc_code(c: char) -> Option<u8> {
+    match c {
+        '\t' | '\n' | '\r' | ' '..='~' => u8::try_from(c).ok(),
+        '\u{20AC}' => Some(0xA0),
+        '\u{AD}' => None,
+        '\u{A1}'..='\u{FF}' => u8::try_from(c).ok(),
+        _ => {
+            if let Some(i) = PDF_DOC_18_1F.iter().position(|&m| m == c) {
+                return u8::try_from(0x18 + i).ok();
+            }
+            // 0x9F is undefined, and the table holds U+FFFD there only so the
+            // decoder has something to return; the replacement character is
+            // not encoded as an undefined code.
+            PDF_DOC_80_9F
+                .iter()
+                .take(0x1F)
+                .position(|&m| m == c)
+                .and_then(|i| u8::try_from(0x80 + i).ok())
+        }
+    }
+}
+
+/// Encodes `text` as a text string (7.9.2.2) for a document declaring PDF
+/// `version`, in a form [`decode_text_string`] reads back exactly.
+///
+/// - **PDFDocEncoding** when every character has a code there, written as a
+///   literal: the form every reader of every version accepts, one byte per
+///   character, and legible in the file.
+/// - Otherwise **UTF-16BE** behind `FE FF` (ISO 32000-1 7.9.2.2), which
+///   carries any text.
+/// - Except that a document declaring **2.0 or later** gets **UTF-8** behind
+///   `EF BB BF` (ISO 32000-2 7.9.2.2) instead. That form is new in 2.0, so a
+///   1.x reader would take the mark for three PDFDocEncoded characters and
+///   show them; it is offered only where the version makes it a promise.
+///
+/// Both marked forms are written as hex strings, as a viewer does.
+///
+/// One trap the first form has: PDFDocEncoding gives `þÿ` the bytes `FE FF`
+/// and `ï»¿` the bytes `EF BB BF`, so text *beginning* with either would read
+/// back as a byte-order mark followed by nonsense. Such text takes a marked
+/// form instead.
+///
+/// PDF 2.0's language escape (U+001B, 7.9.2.2.1) is not produced: this takes
+/// text, not text plus a language, and a U+001B in `text` is written as the
+/// character it is.
+#[must_use]
+pub fn encode_text_string(text: &str, version: (u8, u8)) -> PdfString {
+    let pdf_doc: Option<Vec<u8>> = text.chars().map(pdf_doc_code).collect();
+    if let Some(bytes) = pdf_doc {
+        if !bytes.starts_with(&[0xFE, 0xFF]) && !bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            return PdfString::literal(bytes);
+        }
+    }
+    if version >= (2, 0) {
+        let mut bytes = Vec::with_capacity(text.len() + 3);
+        bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        bytes.extend_from_slice(text.as_bytes());
+        return PdfString::hex(bytes);
+    }
+    let mut bytes = Vec::with_capacity(text.len() * 2 + 2);
+    bytes.extend_from_slice(&[0xFE, 0xFF]);
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_be_bytes());
+    }
+    PdfString::hex(bytes)
 }
 
 /// A date from a `D:` string (7.9.4), with everything after the year optional
@@ -210,6 +295,17 @@ mod tests {
         assert_eq!(decode_text_string(&[0x18]), "\u{02D8}");
         // 0xE9 coincides with Latin-1.
         assert_eq!(decode_text_string(&[0xE9]), "é");
+    }
+
+    /// Annex D.2 Table D.2: 0xA0 is the Euro sign in PDFDocEncoding, where
+    /// Latin-1 has a no-break space.
+    #[test]
+    fn the_euro_sign_is_at_a0() {
+        assert_eq!(decode_text_string(&[0x35, 0xA0]), "5€");
+        assert_eq!(encode_text_string("5€", (1, 7)).bytes, [0x35, 0xA0]);
+        // So a no-break space has no PDFDocEncoding code, and needs a mark.
+        let nbsp = encode_text_string("5\u{A0}", (1, 7));
+        assert_eq!(nbsp.bytes, [0xFE, 0xFF, 0x00, 0x35, 0x00, 0xA0]);
     }
 
     #[test]

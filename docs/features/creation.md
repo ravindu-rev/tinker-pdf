@@ -85,6 +85,19 @@ three chapters — and `open` is written as the sign of `/Count` exactly as
 12.3.3 spells it, only for entries that have children.
 
 **Metadata.** `set_info(key, value)` writes the `/Info` dictionary (14.3.3).
+Its values and the outline's titles are text strings, written by
+`encode_text_string` for the version the document declares
+([document-model](document-model.md)): PDFDocEncoding where it carries the
+text, UTF-16BE where it does not, and UTF-8 instead of UTF-16BE in a
+document made with `DocumentBuilder::with_version(2, 0)` or later. They were
+written as bare UTF-8 bytes until September 2026, which 7.9.2.2 has every
+reader decode as PDFDocEncoding — "Ä" read back as "Ã—", in this engine too.
+
+**Version.** `DocumentBuilder::new()` declares 1.7; `with_version(major,
+minor)` declares another, fixed at construction because text is encoded for
+it as it arrives; an archival profile declares its part's version instead.
+Declaring 2.0 is not conforming to it: what 2.0 deprecates (`/Info` beyond
+the two dates, an unembedded standard font) is still written when asked for.
 
 **Finish.** `finish()` serialises through the writer and returns the bytes
 — the same writer every edited document goes through, so a built document

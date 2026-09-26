@@ -2,8 +2,9 @@
 
 use crate::doc::CosDocument;
 use crate::name::Name;
-use crate::object::{Dict, Object, PdfString};
+use crate::object::{Dict, Object};
 use crate::pages::Rect;
+use crate::text_string::encode_text_string;
 
 /// A colour, as components from zero to one.
 #[derive(Clone, Copy, Debug)]
@@ -102,7 +103,11 @@ pub fn text_note(doc: &CosDocument, rect: Rect, contents: &str, open: bool) -> D
     let mut dict = base(doc, b"Text", rect);
     dict.insert(
         doc.intern(b"Contents"),
-        Object::String(PdfString::literal(contents.as_bytes().to_vec())),
+        // 12.5.2 Table 166: `/Contents` is a text string.
+        Object::String(encode_text_string(
+            contents,
+            crate::outline::text_version(doc),
+        )),
     );
     dict.insert(doc.intern(b"Name"), Object::Name(doc.intern(b"Note")));
     dict.insert(doc.intern(b"Open"), Object::Bool(open));

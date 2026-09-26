@@ -133,7 +133,7 @@ pub use sign::{
     SigningRequest, SigningTarget,
 };
 pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
-pub use text_string::{decode_text_string, parse_date, Date};
+pub use text_string::{decode_text_string, encode_text_string, parse_date, Date};
 pub use tiff_embed::{tiff_image, TiffImageData, TiffRoute};
 pub use trees::{name_tree, name_tree_lookup, number_tree};
 pub use validate::{kind_counts, tier_counts, validate, Defect, DefectKind, Tier};
