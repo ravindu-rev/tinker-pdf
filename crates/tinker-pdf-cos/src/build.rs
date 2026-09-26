@@ -11,6 +11,7 @@ use tinker_pdf_filters::CcittParams;
 use crate::dest::DestKind;
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
+use crate::text_string::encode_text_string;
 use crate::write::{rewrite, ObjectSet, StreamData, WriteOptions};
 
 /// Image data to embed.
@@ -2464,6 +2465,10 @@ pub struct DocumentBuilder {
     embedded_whole: Vec<EmbeddedWhole>,
     info: Dict,
     outline: Vec<OutlineEntry>,
+    /// The version the header declares when no profile decides it. Fixed at
+    /// construction, because text strings are encoded for it as they arrive
+    /// (see [`DocumentBuilder::with_version`]).
+    version: (u8, u8),
     /// The ISO 19005 profile this document is written under, if any.
     profile: Option<ArchivalProfile>,
     /// Every call that profile refused, in the order they were made.
@@ -2496,9 +2501,42 @@ impl DocumentBuilder {
             embedded_whole: Vec::new(),
             info: Dict::new(),
             outline: Vec::new(),
+            version: WriteOptions::default().version,
             profile: None,
             refusals: Vec::new(),
         }
+    }
+
+    /// An empty document whose header declares PDF `major.minor` (7.5.2).
+    ///
+    /// [`DocumentBuilder::new`] declares the writer's default, 1.7. The
+    /// version is fixed here rather than settable later because it decides how
+    /// text is encoded (7.9.2.2): a document declaring 2.0 or later may carry
+    /// a text string as UTF-8, and one declaring less may not, so an `/Info`
+    /// entry set before a change of version would be encoded for the wrong
+    /// one.
+    ///
+    /// Declaring a version is not conforming to it. Nothing this builder
+    /// writes is refused by 2.0, but 2.0 deprecates some of it — `/Info`
+    /// beyond the two dates (14.3.3), an unembedded standard font (9.6.2.2)
+    /// — and those are still written when asked for.
+    ///
+    /// An [`ArchivalProfile`] decides the version itself, because each part
+    /// of ISO 19005 names one; [`DocumentBuilder::archival`] ignores this.
+    #[must_use]
+    pub fn with_version(major: u8, minor: u8) -> DocumentBuilder {
+        DocumentBuilder {
+            version: (major, minor),
+            ..DocumentBuilder::new()
+        }
+    }
+
+    /// The version the header will declare: the profile's part's, or the one
+    /// this builder was made with.
+    fn declared_version(&self) -> (u8, u8) {
+        self.profile
+            .as_ref()
+            .map_or(self.version, |profile| profile.part.version())
     }
 
     fn allocate(&mut self) -> ObjRef {
@@ -4210,6 +4248,13 @@ impl DocumentBuilder {
 
     /// Sets an `/Info` field.
     ///
+    /// The value is a text string (14.3.3 Table 349), written by
+    /// [`crate::text_string::encode_text_string`] for the version this
+    /// document declares, so it reads back through
+    /// [`crate::outline::metadata`] as the text it was given. It used to be
+    /// written as its UTF-8 bytes with no byte-order mark, which every reader
+    /// decodes as PDFDocEncoding: "Ä" came back as "Ã—".
+    ///
     /// **Under a part 4 [`ArchivalProfile`]** ISO 19005-4 6.1.3 admits a
     /// document information dictionary only where a `/PieceInfo` justifies it,
     /// and admits no entry in it but `/ModDate`; anything else is refused
@@ -4241,10 +4286,8 @@ impl DocumentBuilder {
             return false;
         }
         let name = self.names.intern(key);
-        self.info.insert(
-            name,
-            Object::String(PdfString::literal(value.as_bytes().to_vec())),
-        );
+        let value = encode_text_string(value, self.declared_version());
+        self.info.insert(name, Object::String(value));
         true
     }
 
@@ -4730,12 +4773,14 @@ impl DocumentBuilder {
         }
 
         // 6.1.2: each part is defined on a version of PDF and requires the
-        // header to say which. An unprofiled document keeps the writer's
-        // default, so nothing that was byte-stable before this moved.
-        let mut options = WriteOptions::default();
-        if let Some(profile) = &self.profile {
-            options.version = profile.part.version();
-        }
+        // header to say which. An unprofiled document declares the version it
+        // was built with, which is the writer's default unless
+        // `with_version` said otherwise, so nothing that was byte-stable
+        // before this moved.
+        let options = WriteOptions {
+            version: self.declared_version(),
+            ..WriteOptions::default()
+        };
         let bytes = rewrite(&self.objects, &trailer, &options, &self.names);
         (bytes, std::mem::take(&mut self.embedded_whole))
     }
@@ -4772,10 +4817,10 @@ impl DocumentBuilder {
             let children = self.write_outline(&entry.children, pages, reference);
 
             let mut dict = Dict::new();
-            dict.insert(
-                self.names.intern(b"Title"),
-                Object::String(PdfString::literal(entry.title.as_bytes().to_vec())),
-            );
+            // 12.3.3 Table 153: `/Title` is a text string, encoded as `/Info`'s
+            // entries are and for the same reason.
+            let title = encode_text_string(&entry.title, self.declared_version());
+            dict.insert(self.names.intern(b"Title"), Object::String(title));
             dict.insert(Name::PARENT, Object::Ref(parent));
 
             // Ruling 6: an explicit destination, never a name that looks like

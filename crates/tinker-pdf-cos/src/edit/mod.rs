@@ -350,4 +350,11 @@ impl DocumentEditor {
     pub fn intern(&self, bytes: &[u8]) -> Name {
         self.doc.intern(bytes)
     }
+
+    /// The version text strings this editor writes are encoded for
+    /// (7.9.2.2): the one the document declares, header or catalog, and 1.7
+    /// when it declares none.
+    fn text_version(&self) -> (u8, u8) {
+        crate::outline::text_version(&self.doc)
+    }
 }

@@ -21,7 +21,17 @@ string, read as `Trapped::True`/`False`/`Unknown`, where `Some(Unknown)` is
 the document answering — including with a name outside the three — and
 `None` is the document silent. Text strings decode per 7.9.2.2: UTF-16BE
 behind `FE FF`, PDF 2.0's UTF-8 behind `EF BB BF`, PDFDocEncoding (Annex D)
-otherwise, with damage becoming U+FFFD rather than an error. Dates parse
+otherwise, with damage becoming U+FFFD rather than an error; 0xA0 is the
+Euro sign Table D.2 puts there, not Latin-1's no-break space.
+`encode_text_string(text, version)` is the inverse and the only writer of
+text: PDFDocEncoding when every character has a code Annex D defines,
+otherwise UTF-8 behind `EF BB BF` for a document declaring 2.0 or later and
+UTF-16BE behind `FE FF` for one declaring less — the UTF-8 form is new in
+2.0, and a 1.x reader would show its mark as three characters. Text whose
+PDFDocEncoding would itself begin `FE FF` or `EF BB BF` (`þÿ…`, `ï»¿…`)
+takes a marked form, since it would otherwise read back as a mark. `/Info`,
+outline titles, field values and the editor's annotation text all go
+through it, and read back byte-exact (`text_string_roundtrip.rs`). Dates parse
 leniently per 7.9.4 through `Metadata::created()`/`modified()`, with the raw
 strings kept beside them.
 

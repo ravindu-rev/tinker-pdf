@@ -2,8 +2,9 @@
 
 use super::DocumentEditor;
 use crate::name::Name;
-use crate::object::{Dict, ObjRef, Object, PdfString};
+use crate::object::{Dict, ObjRef, Object};
 use crate::sign::{SignError, SigningRequest, SigningTarget};
+use crate::text_string::encode_text_string;
 use crate::write::{self, WriteMode, WriteOptions};
 
 impl DocumentEditor {
@@ -148,7 +149,9 @@ impl DocumentEditor {
         dict.insert(self.intern(b"FT"), Object::Name(self.intern(b"Sig")));
         dict.insert(
             self.intern(b"T"),
-            Object::String(PdfString::literal(name.as_bytes().to_vec())),
+            // 12.7.3.1 Table 226: `/T` is a text string, and the name a
+            // later `fields()` matches is its decoding.
+            Object::String(encode_text_string(name, self.text_version())),
         );
         dict.insert(self.intern(b"Rect"), Object::Array(vec![Object::Int(0); 4]));
         dict.insert(self.intern(b"F"), Object::Int(132));

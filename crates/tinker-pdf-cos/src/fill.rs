@@ -20,7 +20,7 @@ use crate::doc::CosDocument;
 use crate::font::{self, Font, FontKind};
 use crate::form::{self, FieldKind};
 use crate::name::Name;
-use crate::object::{Dict, ObjRef, Object, PdfString};
+use crate::object::{Dict, ObjRef, Object};
 use crate::pages::Rect;
 use crate::warn::{WarningKind, WarningSink};
 use crate::write::StreamData;
@@ -806,25 +806,33 @@ pub fn accepts_value(field: &form::Field, value: &str) -> bool {
     }
 }
 
-/// Builds the `/V` object for a text or choice value.
+/// Builds the `/V` object for a text or choice value, in a document declaring
+/// PDF 1.7 or earlier.
+///
+/// [`value_object_in`] with the version fixed below 2.0, so the value is
+/// never written in the UTF-8 form a 1.x reader cannot read.
 #[must_use]
 pub fn value_object(value: &str) -> Object {
-    // 7.9.2.2: UTF-16BE with a byte-order mark is the only encoding that
-    // covers everything, and it is what viewers write. Pure ASCII stays a
-    // plain literal so simple files stay readable.
-    if value.is_ascii() {
-        return Object::String(PdfString::literal(value.as_bytes().to_vec()));
-    }
-    let mut bytes = vec![0xFE, 0xFF];
-    for unit in value.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_be_bytes());
-    }
-    Object::String(PdfString::hex(bytes))
+    value_object_in(value, (1, 7))
+}
+
+/// Builds the `/V` object for a text or choice value, in a document declaring
+/// PDF `version`.
+///
+/// 12.7.4.3 Table 229 makes a text field's value a text string, so it is
+/// written by [`crate::text_string::encode_text_string`], the same writer
+/// `/Info` and outline titles use: ASCII, and any value PDFDocEncoding
+/// carries, as a literal; anything else behind a byte-order mark — UTF-16BE,
+/// or UTF-8 when the document declares 2.0 or later.
+#[must_use]
+pub fn value_object_in(value: &str, version: (u8, u8)) -> Object {
+    Object::String(crate::text_string::encode_text_string(value, version))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text_string::decode_text_string;
 
     fn doc() -> CosDocument {
         let bytes: &[u8] = b"%PDF-1.7\n\
@@ -1222,17 +1230,38 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
         assert_eq!(content.matches(" Tj").count(), 1, "one run, not four");
     }
 
+    /// A value comes back as the text it was: PDFDocEncoded where that
+    /// carries it, and behind a byte-order mark where it does not.
+    ///
+    /// This used to assert that *any* non-ASCII value was UTF-16, which was
+    /// this function's own rule; the rule is now the shared text-string
+    /// writer's, and "naïve" is three PDFDocEncoding bytes short of needing a
+    /// mark. What the assertion protected -- that the value reads back -- is
+    /// asserted for every form directly.
     #[test]
-    fn non_ascii_values_are_written_as_utf16() {
+    fn non_ascii_values_are_written_in_a_form_that_reads_back() {
         let Object::String(ascii) = value_object("plain") else {
             panic!("a string");
         };
         assert!(!ascii.hex && ascii.bytes == b"plain");
 
-        let Object::String(wide) = value_object("naïve") else {
+        let Object::String(latin) = value_object("naïve") else {
+            panic!("a string");
+        };
+        assert_eq!(latin.bytes, b"na\xEFve", "PDFDocEncoding carries it");
+        assert_eq!(decode_text_string(&latin.bytes), "naïve");
+
+        let Object::String(wide) = value_object("日本") else {
             panic!("a string");
         };
         assert_eq!(&wide.bytes[..2], &[0xFE, 0xFF], "a byte-order mark");
+        assert_eq!(decode_text_string(&wide.bytes), "日本");
+
+        let Object::String(utf8) = value_object_in("日本", (2, 0)) else {
+            panic!("a string");
+        };
+        assert_eq!(&utf8.bytes[..3], &[0xEF, 0xBB, 0xBF], "2.0's mark");
+        assert_eq!(decode_text_string(&utf8.bytes), "日本");
     }
 
     #[test]

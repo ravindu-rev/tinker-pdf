@@ -212,7 +212,10 @@ impl DocumentEditor {
 
         // Every reason to refuse has been checked, so from here nothing can
         // fail and leave the field half written.
-        dict.insert(self.intern(b"V"), fill::value_object(value));
+        dict.insert(
+            self.intern(b"V"),
+            fill::value_object_in(value, self.text_version()),
+        );
         self.put(field.reference, Object::Dict(dict));
         let skipped = self.regenerate_text(&field, value);
         self.clear_need_appearances();

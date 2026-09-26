@@ -39,8 +39,11 @@ rather than setting it. Layout honours the `/DA` font, size and colour
 (replayed verbatim, so an operator this build does not interpret still
 comes out right), `/Q` quadding, multiline wrap, auto-size for `Tf 0`, and
 comb fields (12.7.4.3): `/MaxLen` equal cells, one character centred in
-each, overflow dropped rather than drawn outside the last box. Non-ASCII
-values are written as UTF-16BE with a byte-order mark (7.9.2.2).
+each, overflow dropped rather than drawn outside the last box. The value is
+a text string written by the shared encoder (7.9.2.2,
+[document-model](document-model.md)): PDFDocEncoding where it carries the
+value, otherwise UTF-16BE behind `FE FF`, or UTF-8 behind `EF BB BF` in a
+document declaring 2.0 or later.
 
 **Non-Latin values are shaped** (milestone 8 of
 [design/shaping.md](../design/shaping.md)). Until it landed, this module
