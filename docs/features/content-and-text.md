@@ -149,7 +149,8 @@ Everything is on the facade (ruling 11): `Page::text()` returns a
 offers `plain_text()` (one line per line), `lines()` (flattened), and
 `search(needle)` — literal, case-insensitive, one `Quad` per match, mapped
 back to the glyphs it covers. `Quad` carries four corners and
-`bounds()` for the enclosing rectangle.
+`bounds()` for the enclosing rectangle. `plain_text_with(options)` is the
+opt-in sibling of `plain_text()`, below.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
@@ -162,6 +163,41 @@ for quad in text.search("invoice") {
 for warning in &text.warnings {
     eprintln!("tolerated: {warning:?}"); // TextWarning
 }
+```
+
+### Hyphen rejoining, opt-in
+
+`plain_text()` reports what the page drew and never changes it; the parity
+suite pins that. `plain_text_with(&PlainTextOptions)` is the sibling that may,
+and with `PlainTextOptions::default()` it returns `plain_text()` to the byte.
+With `rejoin_hyphens: true` it applies two rules, different in kind and
+therefore counted apart in the returned `PlainText::hyphens`:
+
+- **A soft hyphen, always.** U+00AD is discretionary — invisible except where
+  a line breaks at it — so one ending a line is a word the producer broke,
+  joined whatever follows (`soft_joins`), and one inside a line is a break the
+  producer recorded and did not use. Every one is removed (`soft_removed`).
+- **A hard hyphen at a line end, before a lower-case start.** U+002D or
+  U+2010, after a letter, when the next line's first character has the
+  Unicode `Lowercase` property (`hard_joins`). This one is an **inference**:
+  a compound broken at its own hyphen (`well-` / `known`) comes back as
+  `wellknown`, and nothing on the page says which it was — which is why it is
+  opt-in and counted separately from the certain case. U+2011 NON-BREAKING
+  HYPHEN, the dashes, the small and full-width hyphen-minus, a hyphen after a
+  space, and a hyphen before a capital, a digit or an uncased letter are left
+  alone.
+
+A join joins consecutive lines in the order `plain_text()` emits them, block
+boundaries included, because a word broken at the foot of one column
+continues at the head of the next. `StructuredText::plain_text_with` applies
+the same function to structure runs, with one consequence of what a run is: a
+run holds no line ends, so a word hyphenated inside one paragraph already
+reads `hyphen-ation` there and only its soft hyphens can be removed.
+
+```rust
+let joined = page.text().plain_text_with(&PlainTextOptions { rejoin_hyphens: true });
+println!("{}", joined.text);
+eprintln!("{} joins, {} of them inferred", joined.hyphens.joins(), joined.hyphens.hard_joins);
 ```
 
 ### The structured view (14.7, 14.8)
@@ -250,6 +286,9 @@ Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),
 `text.rs` (artifact scopes nest, `ET` continuation versus baseline gaps,
 search hit geometry, wmode/rtl separation, non-finite glyphs dropped),
+`plain.rs` (hyphen rejoining: a soft hyphen at a line end and inside one, a
+hard hyphen before lower case, upper case, a digit and an uncased letter,
+the dashes and U+2011 left alone, joins chaining, the default unchanged),
 `interpret.rs` (group offer/decline, state save discipline), `record.rs` (a
 small stream's whole event list asserted in order including the nesting; two
 paints with different states asserted separately, which is what catches a
@@ -267,7 +306,9 @@ suppress a hidden image *itself* while its comment claimed it recorded
 interpreter hands a hidden image to the device inside a hidden scope, and the
 test now says so.
 
-Facade integration tests: `crates/tinker-pdf/tests/inline_images.rs` (a
+Facade integration tests: `crates/tinker-pdf/tests/text_options.rs` (the
+text options through `Page::text()` on a written document, every type named
+from the facade), `inline_images.rs` (a
 predictor-filtered inline image matches the identical XObject pixel for
 pixel; compact `/F/Fl` dictionaries; `/EarlyChange` LZW; progressive inline
 JPEG; `/Decode` inversion; a zlib bomb stops at the shared ceiling),

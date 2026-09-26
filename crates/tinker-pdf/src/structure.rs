@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use tinker_pdf_content::{TextChar, TextPage};
+use tinker_pdf_content::{PlainText, PlainTextOptions, TextChar, TextPage};
 use tinker_pdf_cos::{
     decode_text_string, limits, number_tree, pages as cos_pages, CosDocument, Dict, Name, ObjRef,
     Object,
@@ -447,6 +447,32 @@ impl StructuredText {
             out.push('\n');
         }
         out
+    }
+
+    /// The page's text in structure order, assembled as `options` asks, with
+    /// a count of what assembling it changed.
+    ///
+    /// With [`PlainTextOptions::default`] this is
+    /// [`StructuredText::plain_text`] to the byte. With
+    /// [`PlainTextOptions::rejoin_hyphens`] the rule is the one
+    /// [`TextPage::plain_text_with`] applies — the same function applies it —
+    /// with one difference that comes from what a run is rather than from a
+    /// second rule: **a run holds no line ends.** Its characters are
+    /// concatenated across the visual lines they were drawn on, so a word
+    /// hyphenated inside one paragraph already reads `hyphen-ation` here, and
+    /// its hyphen cannot be told from a compound's without the geometry. Soft
+    /// hyphens are removed wherever they stand, which is exactly right inside
+    /// a run; a hard hyphen is joined only where a run ends in one and the
+    /// next begins lower-case.
+    #[must_use]
+    pub fn plain_text_with(&self, options: &PlainTextOptions) -> PlainText {
+        tinker_pdf_content::plain::assemble(
+            self.nodes
+                .iter()
+                .filter(|node| !node.text.is_empty())
+                .map(|node| node.text.as_str()),
+            options,
+        )
     }
 }
 
@@ -1310,6 +1336,60 @@ trailer\n<< /Size 400 /Root 1 0 R >>\n%%EOF\n"
 
     fn tree(root: &str, objects: &str) -> StructureTree {
         bind(&document(root, objects)).expect("a structure tree")
+    }
+
+    /// A structured view of paragraphs, one run each, for the assembly tests.
+    fn runs(texts: &[&str]) -> StructuredText {
+        StructuredText {
+            nodes: texts
+                .iter()
+                .map(|text| StructuredNode {
+                    raw_type: "P".to_string(),
+                    standard_type: "P".to_string(),
+                    depth: 0,
+                    text: (*text).to_string(),
+                    source: TextSource::Glyphs,
+                    alt: None,
+                    lang: None,
+                    expansion: None,
+                    chars: Vec::new(),
+                })
+                .collect(),
+            matched: 0,
+            orphans: 0,
+            unmarked: 0,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// The structured view's hyphen rejoining is the page's rule over runs:
+    /// soft hyphens go wherever they stand, a run ending in a hard hyphen
+    /// joins a run starting lower-case, and the default is `plain_text` to
+    /// the byte — empty runs skipped the same way.
+    #[test]
+    fn the_structured_view_rejoins_hyphens_between_runs() {
+        let text = runs(&[
+            "a soft\u{AD}ware hyphen-ation",
+            "",
+            "cross-",
+            "run",
+            "Kept-",
+            "Apart",
+        ]);
+        let default = text.plain_text_with(&PlainTextOptions::default());
+        assert_eq!(default.text, text.plain_text());
+        assert_eq!(default.hyphens.joins(), 0);
+
+        let joined = text.plain_text_with(&PlainTextOptions {
+            rejoin_hyphens: true,
+        });
+        assert_eq!(
+            joined.text, "a software hyphen-ation\ncrossrun\nKept-\nApart\n",
+            "a hyphen inside a run is a line end nobody can see, and stays"
+        );
+        assert_eq!(joined.hyphens.soft_removed, 1);
+        assert_eq!(joined.hyphens.soft_joins, 0);
+        assert_eq!(joined.hyphens.hard_joins, 1);
     }
 
     /// The simplest tagged shape there is, and the baseline every hostile

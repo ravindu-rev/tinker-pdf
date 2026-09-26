@@ -6,6 +6,7 @@
 
 pub mod device;
 pub mod interpret;
+pub mod plain;
 pub mod record;
 pub mod state;
 pub mod text;
@@ -13,6 +14,7 @@ pub mod tokenizer;
 
 pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 pub use interpret::{interpret, FontSource, Form, Group, GroupSpace, Layer, MaskGroup, SoftMask};
+pub use plain::{HyphenCounts, PlainText, PlainTextOptions};
 pub use record::{Answers, Capture, Event, EventKind, MarkedScope, RecordingDevice};
 pub use state::{
     BlendMode, GraphicsState, LineCap, LineJoin, Matrix, Rgb, TextRenderMode, TextState,
