@@ -65,7 +65,9 @@ use crate::Page;
 /// A stream shorter than its geometry needs is reported as it is — the
 /// samples are then fewer than `width × height` asks for — and one longer is
 /// cut to the geometry. An image that could not be decoded at all is still
-/// listed, with no samples and [`Self::refused`] saying why (ruling 2).
+/// listed, with no samples and [`Self::refused`] saying why (ruling 2); one
+/// that decoded only with a leniency says which in [`Self::warnings`]
+/// (ruling 10).
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct PageImage {
@@ -109,6 +111,15 @@ pub struct PageImage {
     pub placements: Vec<[f64; 6]>,
     /// Why the samples could not be decoded, when they could not.
     pub refused: Option<String>,
+    /// What the decoder tolerated to produce [`Self::samples`] — a fax row
+    /// that did not decode and was replicated from the one above, a JBIG2
+    /// segment skipped, a JPEG 2000 codestream cut short — each named as
+    /// [`crate::RenderWarning::DamagedImage`]'s `reason` names it when the
+    /// page is rendered, and each once. Empty for a clean decode (ruling 10):
+    /// an image decoded with a leniency is listed with its samples, and this
+    /// is what tells it from one that needed none. A mask's own warnings are
+    /// on the mask.
+    pub warnings: Vec<String>,
 }
 
 /// Which decoder produced a [`PageImage`]'s samples.

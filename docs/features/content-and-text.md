@@ -92,7 +92,9 @@ space as the image states it (`ImageSpace`: the three device spaces,
 its `/Alternate` and the profile's bytes, `Indexed` with its base, `hival` and
 palette, `Separation` and `DeviceN` with their colorants' names and
 alternate), `/Decode` as written and not applied, `/ImageMask`, `/Mask` as
-colour-key ranges or a stencil image, `/SMask` as an image of its own, the
+colour-key ranges or a stencil image — decided by what a reference reaches, so
+an indirect `[0 0]` is a colour key as the renderer reads it — `/SMask` as an
+image of its own, the
 current transformation matrix at each drawing, and the object reference. A
 JPEG's samples are the frame's own components (YCbCr and Adobe's inverted
 CMYK already undone by the decoder); a JPEG 2000 image's are the
@@ -103,7 +105,11 @@ that is followed; an image XObject's `/ColorSpace` may not (8.6.3), and a
 name other than a device family is reported as `Unreadable`. An image that
 will not decode is still listed, with no samples and `refused` naming why;
 a stream longer than its geometry is cut to it and a shorter one is
-reported short. What is not walked: images inside a tiling pattern's cell, a
+reported short. What a decoder tolerated for an image — a fax row replicated
+from the one above, a JBIG2 segment skipped, a JPEG 2000 codestream cut short
+— is on that image's `warnings`, named as the render's
+`RenderWarning::DamagedImage` names it (ruling 10), so a damaged image is not
+listed as a clean one. What is not walked: images inside a tiling pattern's cell, a
 soft-mask group or an annotation appearance, which are not drawings of the
 page's own content.
 
@@ -459,7 +465,9 @@ colorants, a colour-key mask and a soft mask; an image drawn twice and inside
 a form listed once with three placements; an image only a form's resources
 name found through the form's scope; inline images, one naming a page colour
 space resource; a fax, lossless, one bit a sample even where its dictionary
-claims eight; a JPEG held to the decoder's own output; fifteen hostile
+claims eight, and a damaged fax, as an XObject and inline, whose `warnings`
+are the reasons the render of the same page names; an indirect colour-key
+mask read as the renderer reads it; a JPEG held to the decoder's own output; fifteen hostile
 dictionaries and three hostile inline images listed without a panic; and a
 deterministic mutation sweep. `hostile_input.rs` and the `render_page` fuzz
 target call `images()` on every page they reach.

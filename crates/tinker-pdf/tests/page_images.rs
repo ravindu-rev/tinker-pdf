@@ -63,6 +63,11 @@ fn exactly(image: &PageImage, bits: u8, components: u8, samples: &[u8]) {
     assert_eq!(image.samples, samples);
     assert!(!image.stencil);
     assert!(image.reference.is_some(), "an XObject has its reference");
+    assert!(
+        image.warnings.is_empty(),
+        "a clean decode tolerated nothing: {:?}",
+        image.warnings
+    );
 }
 
 #[test]
@@ -543,6 +548,155 @@ fn a_fax_is_one_bit_samples_whatever_the_dictionary_claims() {
         assert_eq!(image.bits_per_component, 1);
         assert_eq!(image.samples, raster);
         assert_eq!(image.refused, None);
+    }
+}
+
+/// A one-page document over hand-written bytes: `objects` are appended after
+/// the catalog, the page tree, the page (whose `/Resources` is `resources`)
+/// and its content stream `content`, which are objects 1 to 4.
+fn written(width: u32, height: u32, resources: &str, content: &[u8], objects: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n");
+    out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+    out.extend_from_slice(
+        format!(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}]\n\
+             /Resources {resources} /Contents 4 0 R >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
+    out.extend_from_slice(content);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    out.extend_from_slice(objects);
+    out.extend_from_slice(b"trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n");
+    out
+}
+
+/// A `/Mask` that is a reference is a stencil mask or a colour key according
+/// to what it reaches (8.9.6.3, 8.9.6.4): an indirect `[0 0]` is a colour key,
+/// as the renderer reads it — the sample it names is not painted — and not a
+/// stencil mask that would not open.
+#[test]
+fn an_indirect_colour_key_mask_is_read_as_the_renderer_reads_it() {
+    let mut objects = Vec::new();
+    objects.extend_from_slice(
+        b"5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 1 \
+          /BitsPerComponent 8 /ColorSpace /DeviceGray /Mask 6 0 R /Length 2 >>\nstream\n",
+    );
+    objects.extend_from_slice(&[0, 128]);
+    objects.extend_from_slice(b"\nendstream\nendobj\n6 0 obj\n[0 0]\nendobj\n");
+    let bytes = written(
+        20,
+        10,
+        "<< /XObject << /Im0 5 0 R >> >>",
+        b"q 20 0 0 10 0 0 cm /Im0 Do Q",
+        &objects,
+    );
+    let document = Document::open(bytes).expect("it opens");
+    let image = only(&document);
+    exactly(&image, 8, 1, &[0, 128]);
+    assert_eq!(image.mask, Some(ImageMask::ColorKey(vec![(0, 0)])));
+
+    let bitmap = document
+        .page(0)
+        .expect("a page")
+        .render(&tinker_pdf::RenderOptions::default());
+    let at = |x: usize| {
+        let i = 5 * bitmap.stride + x * bitmap.components();
+        (bitmap.data[i], bitmap.data[i + 1], bitmap.data[i + 2])
+    };
+    assert_eq!(at(5), (255, 255, 255), "the renderer keys the 0 out");
+    assert_eq!(at(15), (128, 128, 128), "and paints the 128");
+}
+
+/// Packs a pattern of `0` and `1` into bytes, most significant bit first,
+/// ignoring anything else — `ccitt.rs`'s helper, so T.4's codes can be spaced
+/// as its tables print them.
+fn bits(pattern: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut byte = 0u8;
+    let mut count = 0u32;
+    for c in pattern.chars().filter(|c| *c == '0' || *c == '1') {
+        byte = (byte << 1) | u8::from(c == '1');
+        count += 1;
+        if count % 8 == 0 {
+            out.push(byte);
+            byte = 0;
+        }
+    }
+    if count % 8 != 0 {
+        out.push(byte << (8 - count % 8));
+    }
+    out
+}
+
+/// Ruling 10 on the extraction path: a fax the decoder had to forgive — a row
+/// that would not decode, replicated from the one above — is listed with its
+/// samples **and** with what was forgiven, as an XObject and inline, and the
+/// reasons are the ones the render of the same page names. A damaged image
+/// that looked like a clean one was the defect.
+#[test]
+fn a_damaged_fax_says_what_the_decoder_forgave_on_the_image() {
+    // `ccitt.rs`'s damaged row: one good row, then a code T.4 does not have.
+    let coded = bits(concat!("001 00110101 011 1 ", "111 ", "00000001"));
+    let parms = "/K -1 /Columns 8 /Rows 4";
+
+    let mut content = Vec::new();
+    content.extend_from_slice(b"q 20 0 0 20 0 0 cm /Im0 Do Q q 20 0 0 20 20 0 cm ");
+    content.extend_from_slice(
+        format!("BI /W 8 /H 4 /CS /G /BPC 1 /F /CCF /DP << {parms} >> ID ").as_bytes(),
+    );
+    content.extend_from_slice(&coded);
+    content.extend_from_slice(b" EI Q");
+    let mut objects = Vec::new();
+    objects.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 8 /Height 4 \
+             /ColorSpace /DeviceGray /BitsPerComponent 1 \
+             /Filter /CCITTFaxDecode /DecodeParms << {parms} >> /Length {} >>\nstream\n",
+            coded.len()
+        )
+        .as_bytes(),
+    );
+    objects.extend_from_slice(&coded);
+    objects.extend_from_slice(b"\nendstream\nendobj\n");
+    let document = Document::open(written(
+        40,
+        20,
+        "<< /XObject << /Im0 5 0 R >> >>",
+        &content,
+        &objects,
+    ))
+    .expect("it opens");
+
+    let page = document.page(0).expect("a page");
+    let images = page.images();
+    assert_eq!(images.len(), 2, "{images:#?}");
+    let rendered = page.render(&tinker_pdf::RenderOptions::default());
+    for (image, name) in images.iter().zip(["Im0", "inline"]) {
+        assert_eq!(image.codec, SampleCodec::CcittFax, "{name}");
+        assert_eq!(image.refused, None, "{name}: decoded, with a leniency");
+        assert_eq!(image.samples.len(), 4, "{name}: all four rows are there");
+        assert!(
+            !image.warnings.is_empty(),
+            "{name}: the image says what the decoder forgave"
+        );
+        let mut named: Vec<String> = rendered
+            .warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                tinker_pdf::RenderWarning::DamagedImage { name: n, reason } if n == name => {
+                    Some(reason.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut listed = image.warnings.clone();
+        named.sort();
+        listed.sort();
+        assert_eq!(listed, named, "{name}: the render names the same");
     }
 }
 

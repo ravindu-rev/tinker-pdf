@@ -119,6 +119,12 @@ pub struct PageResources {
     /// what the decoder tolerated)`. Ruling 10: the leaf crate says what it
     /// forgave, and this is where the object it happened in gets attached.
     damaged_images: Mutex<Vec<(String, String)>>,
+    /// While [`crate::Page::images`] decodes one image, what the decoders
+    /// tolerated for **that** image, so the leniency lands on the
+    /// [`crate::PageImage`] it happened to rather than only on the page's
+    /// list above — which dedups by resource name, and which `images` has no
+    /// bitmap to carry out on (ruling 10). `None` when nothing is capturing.
+    image_capture: Mutex<Option<Vec<String>>>,
     /// Nested scopes already built, by the form's own object number.
     ///
     /// A page may invoke one form a thousand times — a stamp, a rule, a
@@ -382,6 +388,7 @@ impl PageResources {
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            image_capture: Mutex::new(None),
             provider: provider.cloned(),
             optional: OptionalContent::bind(doc),
         }
@@ -487,6 +494,7 @@ impl PageResources {
             outlines: RwLock::new(HashMap::new()),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            image_capture: Mutex::new(None),
             provider: provider.cloned(),
             optional: OptionalContent::bind(doc),
         }
@@ -2221,6 +2229,36 @@ impl PageResources {
                 damaged.push(entry);
             }
         }
+        if let Ok(mut capture) = self.image_capture.lock() {
+            if let Some(caught) = capture.as_mut() {
+                // Bounded without a cap: the warning set is closed, and each
+                // is kept once.
+                let reason = warning.as_str().to_string();
+                if !caught.contains(&reason) {
+                    caught.push(reason);
+                }
+            }
+        }
+    }
+
+    /// Runs `decode`, and returns with its result every leniency
+    /// [`Self::report_damaged_image`] heard while it ran — the warnings of the
+    /// one image `decode` is decoding. Whatever was capturing before is
+    /// restored, so a mask decoded inside an image keeps its own.
+    fn capturing<T>(&self, decode: impl FnOnce() -> T) -> (T, Vec<String>) {
+        let outer = self
+            .image_capture
+            .lock()
+            .ok()
+            .and_then(|mut capture| capture.replace(Vec::new()));
+        let result = decode();
+        let caught = self
+            .image_capture
+            .lock()
+            .ok()
+            .and_then(|mut capture| std::mem::replace(&mut *capture, outer))
+            .unwrap_or_default();
+        (result, caught)
     }
 
     /// Decodes a CCITT stream into the packed one-bit samples the sample loop
@@ -3186,6 +3224,7 @@ impl PageResources {
             soft_mask: None,
             placements: Vec::new(),
             refused: None,
+            warnings: Vec::new(),
         };
         if width == 0 || height == 0 {
             image.refused = Some("empty".to_string());
@@ -3193,7 +3232,7 @@ impl PageResources {
         }
 
         let last = self.last_filter(dict);
-        match last.as_deref() {
+        let ((), warnings) = self.capturing(|| match last.as_deref() {
             Some(b"DCTDecode" | b"DCT") => {
                 image.codec = crate::SampleCodec::Dct;
                 let decoded = self
@@ -3233,28 +3272,40 @@ impl PageResources {
                     Err(why) => image.refused = Some(why),
                 }
             }
-        }
+        });
+        image.warnings = warnings;
 
         if depth == 0 {
             let mask_key = self.doc.intern(b"Mask");
-            match dict.get(mask_key) {
-                Some(Object::Ref(r)) => {
-                    let mask = self.doc.get(*r).ok();
-                    if let Some(mask) = mask.as_deref().and_then(Object::as_dict) {
-                        image.mask = Some(crate::ImageMask::Stencil(Box::new(self.extract_at(
-                            mask,
-                            *r,
-                            b"",
-                            depth + 1,
-                        ))));
-                    }
+            // 8.9.6.3 and 8.9.6.4: `/Mask` is a stencil-mask stream or a
+            // colour-key *array*, and a reference can name either — so what
+            // decides is the object the reference reaches, not that it is one.
+            // `color_key` resolves the entry, as the renderer's decode does,
+            // so an indirect `[0 0]` is a colour key here as it is there. It
+            // used to be taken for a stencil mask that would not open, and
+            // dropped, while the render of the same image honoured it.
+            let stencil = match dict.get(mask_key) {
+                Some(Object::Ref(r)) => self
+                    .doc
+                    .get(*r)
+                    .ok()
+                    .filter(|object| object.as_array().is_none())
+                    .map(|object| (object, *r)),
+                _ => None,
+            };
+            if let Some((object, r)) = stencil {
+                if let Some(mask) = object.as_dict() {
+                    image.mask = Some(crate::ImageMask::Stencil(Box::new(self.extract_at(
+                        mask,
+                        r,
+                        b"",
+                        depth + 1,
+                    ))));
                 }
-                Some(_) => {
-                    image.mask = self
-                        .color_key(dict, usize::from(image.components), bpc)
-                        .map(crate::ImageMask::ColorKey);
-                }
-                None => {}
+            } else if dict.get(mask_key).is_some() {
+                image.mask = self
+                    .color_key(dict, usize::from(image.components), bpc)
+                    .map(crate::ImageMask::ColorKey);
             }
             if let Some(r) = dict.get_ref(self.doc.intern(b"SMask")) {
                 let mask = self.doc.get(r).ok();
@@ -3297,38 +3348,41 @@ impl PageResources {
             soft_mask: None,
             placements: Vec::new(),
             refused: None,
+            warnings: Vec::new(),
         };
         if width == 0 || height == 0 {
             image.refused = Some("empty".to_string());
             return Some(image);
         }
-        match self.inline_samples(dict, data, width, height) {
-            Ok(InlineSamples::Samples { bytes, fax }) => {
-                if fax {
-                    image.codec = crate::SampleCodec::CcittFax;
+        let ((), warnings) =
+            self.capturing(|| match self.inline_samples(dict, data, width, height) {
+                Ok(InlineSamples::Samples { bytes, fax }) => {
+                    if fax {
+                        image.codec = crate::SampleCodec::CcittFax;
+                    }
+                    take_samples(&mut image, bytes, if fax { 1 } else { bpc });
                 }
-                take_samples(&mut image, bytes, if fax { 1 } else { bpc });
-            }
-            Ok(InlineSamples::Jpeg(bytes)) => {
-                image.codec = crate::SampleCodec::Dct;
-                match jpeg_samples(&bytes) {
-                    Ok(jpeg) => take_jpeg(&mut image, jpeg),
-                    Err(why) => image.refused = Some(why),
+                Ok(InlineSamples::Jpeg(bytes)) => {
+                    image.codec = crate::SampleCodec::Dct;
+                    match jpeg_samples(&bytes) {
+                        Ok(jpeg) => take_jpeg(&mut image, jpeg),
+                        Err(why) => image.refused = Some(why),
+                    }
                 }
-            }
-            Ok(InlineSamples::Jpx(bytes)) => {
-                image.codec = crate::SampleCodec::Jpx;
-                let mut warnings = Vec::new();
-                match Self::jpx_samples(&bytes, &mut warnings) {
-                    Ok(jpx) => take_jpx(&mut image, jpx),
-                    Err(why) => image.refused = Some(why),
+                Ok(InlineSamples::Jpx(bytes)) => {
+                    image.codec = crate::SampleCodec::Jpx;
+                    let mut warnings = Vec::new();
+                    match Self::jpx_samples(&bytes, &mut warnings) {
+                        Ok(jpx) => take_jpx(&mut image, jpx),
+                        Err(why) => image.refused = Some(why),
+                    }
+                    for warning in &warnings {
+                        self.report_damaged_image(INLINE_NAME.as_bytes(), *warning);
+                    }
                 }
-                for warning in &warnings {
-                    self.report_damaged_image(INLINE_NAME.as_bytes(), *warning);
-                }
-            }
-            Err(why) => image.refused = Some(why),
-        }
+                Err(why) => image.refused = Some(why),
+            });
+        image.warnings = warnings;
         // 8.9.7: an inline image's `/Mask` can only be the colour-key array,
         // since there is nothing inline a reference could name.
         if dict.get(self.doc.intern(b"Mask")).is_some() {
