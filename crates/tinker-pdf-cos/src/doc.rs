@@ -779,6 +779,34 @@ impl CosDocument {
         self.security.read_lock().key.clone()
     }
 
+    /// Takes `from`'s security state — decryptor, file key and how far its
+    /// password got — for a document that is `from` with an update appended.
+    ///
+    /// `pub(crate)` and nothing wider: this copies a handler from one document
+    /// to another, and a handler is only right for the file whose `/Encrypt`
+    /// and `/ID` it was derived from. The one caller
+    /// is [`crate::edit::DocumentEditor::view`], whose bytes are `from`'s own
+    /// followed by an update sealed with this same key (7.6.2), so the
+    /// `/Encrypt` dictionary and the first `/ID` string are the ones the
+    /// handler was built over. A `from` that was never authenticated passes
+    /// nothing on, and the view is exactly as locked as the document.
+    pub(crate) fn inherit_security(&self, from: &CosDocument) {
+        let (decryptor, installed, key, level) = {
+            let security = from.security.read_lock();
+            (
+                Arc::clone(&security.decryptor),
+                security.has_decryptor,
+                security.key.clone(),
+                security.auth_level,
+            )
+        };
+        if !installed {
+            return;
+        }
+        self.install_security(decryptor, key);
+        self.security.write_lock().auth_level = level;
+    }
+
     fn install_security(&self, decryptor: Arc<dyn Decryptor>, key: Option<FileKey>) {
         {
             let mut security = self.security.write_lock();

@@ -53,6 +53,24 @@ until September 2026 no save could name — `save` wrote the document's own
 trailer and nothing else. The value is a text string, encoded as the
 builder's `set_info` encodes it.
 
+**A view as a document.** `view()` returns an `Arc<CosDocument>` in which
+everything the editor has done resolves — objects put or allocated, streams
+written, deletions as null, the page order, the trailer entries — for a
+caller that has to hand something built over a `CosDocument` (a page's
+`PageResources`, an interpreter) a reference the editor has only just
+allocated. It is the incremental update `save` would write, built in memory
+and reopened, so object numbers are the editor's own and every read goes
+through the ordinary reader, filters included. An encrypted document is
+viewed decrypted: the update is sealed with the file's key as a save seals
+it, and the view inherits the security handler the document was
+authenticated with; a document never authenticated gives a view that was not
+either. A view is a snapshot costing a copy of the file and a parse of its
+tables; an untouched editor answers with its own document and copies
+nothing. `editor_view.rs` resolves an allocated form XObject through the page
+that names it, at the same number, plain and encrypted, and the facade's
+`resources_over_an_editors_view_resolve_what_it_allocated` does the same
+through `PageResources`.
+
 **Page surgery** (7.7.3). `delete_page`, `move_page`, `rotate_page` (any
 multiple of 90, stored as `/Rotate`), `set_crop_box` (14.11.2, written as the
 caller states it and never clipped here — 14.11.2 lets a crop box and a media
@@ -235,6 +253,7 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `document()`, `is_dirty()`, `allocate()`, `get()`, `put()`, `put_stream()`,
 `delete()`, `intern()`, `stream_bytes()`, `catalog()`, `update_catalog()`,
 `add_name_tree()`, `add_number_tree()`, `set_trailer_entry()`, `set_info()`,
+`view()`,
 `transaction()`, `checkpoint()`, `restore()`, `page_refs()`,
 `delete_page()`,
 `move_page()`, `rotate_page()`, `set_crop_box()`, `insert_page()`,
