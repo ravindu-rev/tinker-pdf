@@ -75,6 +75,12 @@ impl DocumentEditor {
     pub fn set_info(&mut self, key: &[u8], value: &str) {
         let key = self.intern(key);
         let value = Object::String(encode_text_string(value, self.text_version()));
+        self.set_info_entry(key, value);
+    }
+
+    /// [`DocumentEditor::set_info`] for a value already built: a text string,
+    /// or the name `/Trapped` holds (14.3.3 Table 349).
+    pub(super) fn set_info_entry(&mut self, key: Name, value: Object) {
         match self.merged_trailer().get(Name::INFO).cloned() {
             Some(Object::Ref(info)) => {
                 let mut dict = match self.get(info) {

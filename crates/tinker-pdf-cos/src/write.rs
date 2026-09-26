@@ -554,6 +554,13 @@ pub(crate) fn maybe_compress(
     if !compress || data.is_empty() || dict.contains_key(Name::FILTER) {
         return data.to_vec();
     }
+    // 14.3.2: a metadata stream is written for tools that read XMP without
+    // reading PDF — a packet scanner looks for `<?xpacket` in the raw bytes —
+    // and ISO 19005 forbids a `/Filter` on one outright. So compression never
+    // reaches it, whatever the caller asked for.
+    if dict.get_name(Name::TYPE) == Some(names.intern(b"Metadata")) {
+        return data.to_vec();
+    }
 
     let packed = tinker_pdf_filters::zlib_compress(data);
     if packed.len() >= data.len() {

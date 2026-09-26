@@ -2074,7 +2074,7 @@ pub enum Target {
 
 impl Target {
     /// Whether this target can be written.
-    fn is_writable(&self) -> bool {
+    pub(crate) fn is_writable(&self) -> bool {
         match self {
             Target::Page { view, .. } => view.is_writable(),
             Target::Uri(uri) => crate::dest::is_writable_uri(uri),
@@ -2088,7 +2088,7 @@ impl Target {
     /// exactly one is inserted, never both — and which one is decided by the
     /// kind of target rather than by a flag, so the malformed shape is not
     /// expressible.
-    fn write(&self, names: &NameTable, pages: &[ObjRef], dict: &mut Dict) {
+    pub(crate) fn write(&self, names: &NameTable, pages: &[ObjRef], dict: &mut Dict) {
         match self {
             Target::Page { index, view } => {
                 // An index past the end writes nothing; see the type's own
@@ -2159,7 +2159,7 @@ pub struct OutlineEntry {
 /// A writer whose output its own reader silently truncates is not a writer.
 /// The walk is **iterative**, so a caller handing over a tree a thousand deep
 /// is refused rather than overflowing a stack finding out.
-fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
+pub(crate) fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
     let mut stack: Vec<(&[OutlineEntry], u32)> = vec![(entries, 0)];
     while let Some((level, depth)) = stack.pop() {
         if depth > crate::limits::MAX_NEST_DEPTH {

@@ -68,7 +68,11 @@ project's own encoder and records `/FlateDecode`. Two hard rules: a stream
 that already declares a `/Filter` is handed through untouched — that is a
 contract, not an optimisation, since pass-through image data depends on its
 declared filter still describing its bytes — and a result no smaller than
-the input is discarded, so an already-compressed image never grows. The
+the input is discarded, so an already-compressed image never grows. A
+`/Type /Metadata` stream is never compressed at all: a packet scanner reads
+XMP from the raw bytes without decoding PDF filters, and ISO 19005 forbids a
+filter on one, so `compress` does not reach it — the editor's
+`set_xmp_metadata` relies on that ([editing](editing.md)). The
 object-stream container is compressed whenever compression is on at all;
 a cross-reference stream never is, because a reader finds it by offset
 before it knows anything about filters.
@@ -238,6 +242,7 @@ remove anything.
 | Linearizing a document with no catalog or no pages | none — `linearize` returns no layout and the ordinary rewrite is emitted | there is no first page to put first, and a file claiming `/Linearized` falsely is worse than an ordinary one | Annex F |
 | `object_streams` under `linearize` | none — ignored when linearization succeeds | packing page one's objects into a container with everything else is the opposite of the layout's point | 7.5.7 |
 | Re-compressing a stream that declares a `/Filter` | none — handed through untouched, asserted in both directions | the dictionary is the only signal the bytes are already encoded; wrapping them again yields a stream no reader can undo | [filters](filters.md) |
+| Compressing a `/Type /Metadata` stream | none — written unfiltered whatever `compress` says (`a_caller_supplied_packet_is_written_verbatim_and_uncompressed`) | an XMP packet is read from the raw bytes by tools that do not decode PDF, and ISO 19005 forbids a filter on one | 14.3.2 |
 | A font-subsetting switch on `WriteOptions` | none, and deliberately — the field does not exist and `WriteOptions`' own doc comment says why | the pass is driven by the interpreter, which `tinker-pdf-cos` is below; a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts` | [fonts](fonts.md) |
 | Subsetting that *removes* anything on an incremental save | `SubsetOutcome::CutButTheOriginalsRemain`, and `removed()` is false | 7.5.6: the output starts with the original bytes, the original font programs among them. The pass still runs, because the smaller programs are what a reader resolves — but nothing has left the file | 7.5.6 |
 

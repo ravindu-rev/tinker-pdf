@@ -81,7 +81,72 @@ another `CosDocument`), `keep_pages` (the complement of delete, in one
 call), `append_content` (operators appended to a page's content array) and
 `page_box`. Page operations apply to whichever object set the save mode
 builds — rewrite or incremental — so a reordered `/Kids` reaches the file
-either way.
+either way. `set_trim_box`, `set_art_box` and `set_bleed_box` — and
+`set_page_boundary(index, PageBoundary, ..)` for any of the five — follow
+`set_crop_box`'s rules and write on the page itself, because 7.7.3.3 Table 30
+does not make the three production boxes inheritable and a value on a
+`/Pages` node describes no page.
+
+**Document operations.** Typed setters over the catalog and the trailer, each
+read back by the reader this crate already had, so a write followed by a read
+is an equality rather than a translation. Every one of them checks
+everything before it puts anything, so a refusal leaves the editor exactly as
+it was.
+
+- `set_page_labels(&[PageLabelRange])` writes `/PageLabels` as a 12.4.2 number
+  tree through `add_number_tree`, one `/Type /PageLabel` dictionary per range
+  with Table 159's `/S`, `/P` and `/St`, and `page_labels()` reads it. A list
+  with no range at page 0 (12.4.2 requires one), a range past the last page,
+  one numbering from 0 and two at one page are each a `PageLabelError`. An
+  empty list removes the labels.
+- `attach_file(&EmbeddedFile)` embeds a file (7.11.4): a `/Type
+  /EmbeddedFile` stream whose `/Subtype` is the MIME type and whose `/Params`
+  carry `/Size`, the MD5 `/CheckSum` Table 45 asks for and the dates given,
+  under a `/Filespec` with `/F`, `/UF`, `/Desc` and an `/EF` naming the stream,
+  filed in `/Names /EmbeddedFiles` beside whatever is filed there already —
+  `attachments()` lists it. A name already filed is `AttachError::NameTaken`
+  rather than a second entry under one key, which a reader resolves by
+  whichever it reaches first.
+- `set_outline(&[OutlineEntry])` adds an outline or replaces one, in the
+  builder's own vocabulary: a `Target::Page` is an **explicit** destination
+  naming the page by reference (ruling 6), so it is never collapsed into a name
+  and a page moved afterwards takes its destination with it. The builder's
+  writability rule is the editor's — a tree the reader would truncate is
+  refused whole.
+- `set_title`, `set_author`, `set_subject`, `set_keywords`, `set_creator`,
+  `set_producer`, `set_creation_date(Date)`, `set_modification_date(Date)` and
+  `set_trapped(Trapped)` are `/Info` (14.3.3) typed, over `set_info`. A date is
+  spelled as 7.9.4 spells one — the closing apostrophe for a 1.x document,
+  without it for 2.0 — and one with a field the syntax has no digits for is
+  refused (`None`).
+- `set_xmp_metadata(packet)` makes a caller's packet the catalog's
+  `/Metadata`, `/Type /Metadata /Subtype /XML`, verbatim. **Never
+  compressed**: the writer leaves every `/Type /Metadata` stream unfiltered
+  whatever `compress` says ([writing](writing.md)), because ISO 19005 forbids a
+  filter there and a packet scanner reads the raw bytes.
+- `set_viewer_preferences(&ViewerPreferences)` writes 12.2 Table 147 typed:
+  every entry the type models is written as stated, a `None` removed, and a key
+  it does not model kept where it was.
+
+**`/Info` and XMP are not kept in step, and that is decided rather than
+drifted into.** Keeping them in step means parsing a packet and rewriting part
+of it, and `tinker-pdf-cos` neither parses nor rewrites XML — it has no edge to
+`tinker-pdf-xml`, for the reason `xmp_metadata`'s own documentation gives —
+while deriving `/Info` from a caller's packet would be a second, smaller XMP
+reader. So neither half is derived from the other, and every setter says what
+it left: a `#[must_use]` `MetadataSync`, `Alone` when the other half does not
+exist and `OtherHalfUnchanged` when it does and may now say something else. A
+caller who gets the second is the one who can make the two agree, by supplying
+a packet that says what `/Info` says — which is what the builder's archival
+profile does for the documents it creates.
+
+**Replacing deletes what it replaces.** A second `set_outline`,
+`set_page_labels` or `attach_file` deletes the nodes of the structure it
+supersedes — outline items, tree nodes, walked cycle-guarded and capped at the
+readers' `MAX_TREE_ENTRIES` — rather than leaving them unreferenced, because a
+rewrite writes an unreferenced object unless it is garbage-collected and an old
+outline's titles are content. What a node *points at* (a file specification, a
+label dictionary) is left, since the replacement may point at it too.
 
 **Transactions.** `transaction(|tx| ...)` snapshots all five mutable fields
 and restores them if the closure returns `Err`. It is a closure rather than
@@ -259,8 +324,16 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `move_page()`, `rotate_page()`, `set_crop_box()`, `insert_page()`,
 `import_page()`,
 `keep_pages()`, `append_content()`, `page_box()`, `flatten_annotations()`,
-`add_annotation()`, the [forms](forms.md) methods, and `save(&WriteOptions)
--> Vec<u8>`. `redact::{Redaction, RedactionReport, RedactionWarning, apply}`
+`add_annotation()`, `set_page_boundary()`, `set_trim_box()`, `set_art_box()`,
+`set_bleed_box()`, `set_page_labels()`, `attach_file()`, `set_outline()`,
+`set_title()`, `set_author()`, `set_subject()`, `set_keywords()`,
+`set_creator()`, `set_producer()`, `set_creation_date()`,
+`set_modification_date()`, `set_trapped()`, `set_xmp_metadata()`,
+`set_viewer_preferences()`, the [forms](forms.md) methods, and
+`save(&WriteOptions) -> Vec<u8>`. The document operations' types are on the
+facade beside it: `PageLabelRange`, `PageLabelError`, `LabelStyle`,
+`EmbeddedFile`, `AttachError`, `MetadataSync`, `ViewerPreferences` and its
+enums, `PageBoundary`, `TreeWriteError`. `redact::{Redaction, RedactionReport, RedactionWarning, apply}`
 live in the facade
 (`apply` returns `Option<RedactionReport>`, `None` for a page that does not
 exist; the report counts `operations`, `glyphs` and `images`, and carries
@@ -341,6 +414,11 @@ if report.untouched.is_empty() {
 | Subsetting a program a `/FontDescriptor` embeds that **no font dictionary names** | whole face, `NoFontNamesIt` (`a_program_no_font_dictionary_names_is_left_whole_and_reported`) | there is no font, so no encoding and no glyph usage — nothing to subset it against. It is *reported* because a `Rewrite` keeps unreferenced objects unless `garbage_collect` asks otherwise, so every outline is still in the output; it was silently invisible until the corpus census counted 73 of them across eight of 5 605 documents | 9.8.1 |
 | Running the subsetter automatically from `DocumentEditor::save` | it cannot: `save` takes `&self` and the pass rewrites the editor, and `WriteOptions` is a crate below the interpreter that drives the walk. That door writes every program through as it arrived and does not offer to do otherwise | a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts`, which **defaults to subsetting** | [writing](writing.md) |
 | Running the subsetter from `tpdf` | nowhere to put it: all nine subcommands are read-only, so the CLI has no write path for a flag to attach to | tier 5's "A user-facing CLI" [roadmap](../ROADMAP.md) row owns the write half and now carries the font policy in its exit criterion, so the flag arrives with the door rather than before it (ruling 11: a subcommand is a wrapper over the facade with no logic of its own) | — |
+| Keeping `/Info` and the XMP packet in step | each `/Info` setter and `set_xmp_metadata` returns `MetadataSync::OtherHalfUnchanged` when the other half exists and was left as it was (`a_caller_supplied_packet_is_written_verbatim_and_uncompressed`) | `tinker-pdf-cos` neither parses nor rewrites XML, and deriving `/Info` from a caller's packet would be a second XMP reader; the caller who is told is the one who can make them agree | [document model](document-model.md) |
+| Page labels with no range at page 0, past the last page, numbering from 0, or two at one page | `PageLabelError`, nothing written (`page_label_refusals_write_nothing`) | 12.4.2 requires page 0's entry and Table 159 a `/St` of at least 1; which of two ranges at one page the caller meant is theirs to say | 12.4.2 |
+| A second attachment under a name already filed | `AttachError::NameTaken`, nothing written | two entries under one key is a tree a reader resolves by whichever it reaches first | 7.9.6 |
+| A MIME type that cannot be a name, or a date 7.9.4 cannot spell | `AttachError::MimeType`, `AttachError::Date`; `set_creation_date` returns `None` | a `/Subtype` with a space in it is not a MIME type, and a year of five digits is not a PDF date | 7.9.4 |
+| A viewer preference page range from page 0 or backwards, or zero copies | `set_viewer_preferences` returns false (`ViewerPreferences::is_writable`) | Table 147 numbers pages from 1; which of two numbers the caller meant is theirs to say | 12.2 |
 | Paying for the walk on a save that changed one annotation | `FontPolicy::Keep` on `write::save`, or `DocumentEditor::save`, which is unchanged | the pass is whole-document and order-dependent and costs a full interpretation of every page. The default is still `Subset`, because forgetting costs a disclosure and paying costs time | [writing](writing.md) |
 
 ## Verified
@@ -354,6 +432,25 @@ if report.untouched.is_empty() {
   test.
 - `crates/tinker-pdf/tests/annotation_appearances.rs` — synthesised
   appearances render and flatten.
+- `crates/tinker-pdf/tests/editor_docops.rs` — the document operations, from
+  outside the crate: each setter's output saved **incrementally and as a
+  rewrite**, reopened through `Document::open`, read back through the public
+  reader (`page_labels`, `attachments` and the stream's own bytes and MD5,
+  `outline` with its destination kinds, `metadata`, `xmp_metadata`,
+  `viewer_preferences`, `Page::trim_box` and its siblings) and handed to the
+  strict validator, which must find nothing. Replacement deletes the old
+  structure; every refusal leaves the editor as it was; every setter on one
+  editor composes through the catalog. Sixteen defects put back one at a time
+  (`cargo test --no-fail-fast` over this file and the crate's unit tests):
+  production boxes inherited from `/Pages` 1, not clipped to the media box 2,
+  a date's zone sign flipped 3, the 1.x closing apostrophe on the wrong
+  version 1, the metadata stream compressed 1, a `None` preference left
+  standing 1, `/Direction`'s two names swapped in reader and writer alike 2
+  (the reader's own tests; a round trip cannot see a consistent swap), the
+  old outline or label tree orphaned rather than deleted 1 each, the checksum
+  taken over the wrong bytes 1, a label style's case 2, a closed entry's
+  `/Count` sign 3, the page-0 rule 1, an `/Info` write that never reports the
+  packet 1, `/Trapped` 1, a taken attachment name 1.
 - Redaction tests live beside `crates/tinker-pdf/src/redact.rs`: multi-page
   fixtures (a two-page file once redacted page 0's image and left page 1's
   secret), text inside form XObjects, a self-referential form that

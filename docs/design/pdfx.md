@@ -291,9 +291,9 @@ carries — `PdfA { part, level }`, `PdfX(flavour)`, or both — with the shared
 fields shared and three new ones: `trapped: bool`, the `/Info` identification
 strings derived from the flavour rather than supplied, and the box the writer
 puts on every page. `PageBuilder` has `set_crop_box` and `set_bleed_box` and
-**no `set_trim_box` or `set_art_box`**; the flavour needs one of the two, and
-the roadmap already lists trim and art boxes as neither read nor written on
-the editor. Refusals, in `ArchivalRefusal`'s style: `DeviceRGB` and
+**no `set_trim_box` or `set_art_box`**; the flavour needs one of the two.
+(The page reader reads all five boundaries, and the *editor* writes the trim
+and art boxes, since September 2026 — the builder is the half still owed.) Refusals, in `ArchivalRefusal`'s style: `DeviceRGB` and
 `ICCBased` under X-1a, transparency under any 2003 level, a page with no trim
 or art box, an annotation inside the trim box, `add_base_font` under any
 flavour (the variant exists). Nothing is discovered at validation time that

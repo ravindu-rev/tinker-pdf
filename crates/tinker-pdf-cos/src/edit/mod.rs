@@ -24,7 +24,10 @@ use crate::write::{StreamData, Written};
 
 pub mod annot;
 mod annotations;
+mod boxes;
+mod docops;
 mod forms;
+mod metadata;
 mod overlay;
 mod page_ops;
 mod save;
@@ -36,6 +39,9 @@ mod trees;
 mod view;
 
 pub use forms::{FillError, FillRejection, SkippedWidget, WidgetDefect};
+
+pub use docops::{AttachError, EmbeddedFile, PageLabelError, PageLabelRange};
+pub use metadata::MetadataSync;
 
 /// A copy of `dict` with one key gone.
 ///

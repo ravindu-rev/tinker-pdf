@@ -185,6 +185,22 @@ pub use tinker_pdf_cos::{
     EditCheckpoint, EmbeddedWhole, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
     PageBuilder, SkippedWidget, SubsetRefusal, Target, WidgetDefect, WriteMode, WriteOptions,
 };
+/// Document operations on [`DocumentEditor`]: page labels, embedded files,
+/// `/Info` and XMP, viewer preferences and the production page boundaries.
+///
+/// Each is the argument or the answer of an editor method, so each is here for
+/// the reason `ExtGState` is above (ruling 11): a method whose argument cannot
+/// be named from outside this workspace is a method nobody outside it can
+/// call. `LabelStyle` was the reader's already and was never re-exported, so
+/// [`Document::page_labels`]' vocabulary arrives with the writer's.
+/// [`ViewerPreferences`] and [`PageBoundary`] are the reading side's types too
+/// — [`Document::viewer_preferences`] and [`Page::trim_box`] hand back the
+/// same values the editor takes, so a write followed by a read is an equality.
+pub use tinker_pdf_cos::{
+    AttachError, Duplex, EmbeddedFile, EnforcedPreference, LabelStyle, MetadataSync,
+    NonFullScreenPageMode, PageBoundary, PageLabelError, PageLabelRange, PrintScaling,
+    ReadingDirection, TreeWriteError, ViewerPreferences,
+};
 /// Form calculations: running the `/AA` calculate actions a form carries.
 ///
 /// The interpreter itself is [`tinker_pdf_cos::script`]; these are the types a
@@ -1550,6 +1566,17 @@ impl Document {
         tinker_pdf_cos::xmp_metadata(&self.inner)
     }
 
+    /// How the document asks to be shown and printed (12.2, Table 147).
+    ///
+    /// Every entry typed and every one an `Option`: `None` is the document
+    /// saying nothing, which a viewer answers with the table's default, and is
+    /// not the same file as one stating that default. Most documents state
+    /// none of them.
+    #[must_use]
+    pub fn viewer_preferences(&self) -> ViewerPreferences {
+        tinker_pdf_cos::viewer_preferences(self.inner.as_ref())
+    }
+
     /// Every font the document's pages can reach (9.5 to 9.9).
     ///
     /// Name, family, whether the program is embedded, the subset tag, and
@@ -1778,6 +1805,38 @@ impl Page {
     #[must_use]
     pub fn crop_box(&self) -> (f64, f64, f64, f64) {
         let r = self.inner.crop_box;
+        (r.x0, r.y0, r.x1, r.y1)
+    }
+
+    /// `/BleedBox` (14.11.2): the page's own, clipped to the media box, and
+    /// the crop box when the page states none.
+    ///
+    /// Never inherited from the page tree: 7.7.3.3 Table 30 does not make the
+    /// three production boxes inheritable, so a value on a `/Pages` node
+    /// describes no page.
+    #[must_use]
+    pub fn bleed_box(&self) -> (f64, f64, f64, f64) {
+        self.boundary(PageBoundary::BleedBox)
+    }
+
+    /// `/TrimBox` (14.11.2): the finished page after trimming, under
+    /// [`Page::bleed_box`]'s rules.
+    #[must_use]
+    pub fn trim_box(&self) -> (f64, f64, f64, f64) {
+        self.boundary(PageBoundary::TrimBox)
+    }
+
+    /// `/ArtBox` (14.11.2): the extent of the page's meaningful content, under
+    /// [`Page::bleed_box`]'s rules.
+    #[must_use]
+    pub fn art_box(&self) -> (f64, f64, f64, f64) {
+        self.boundary(PageBoundary::ArtBox)
+    }
+
+    /// Any of the five boundaries, as `(x0, y0, x1, y1)` in points.
+    #[must_use]
+    pub fn boundary(&self, boundary: PageBoundary) -> (f64, f64, f64, f64) {
+        let r = self.inner.boundary(boundary);
         (r.x0, r.y0, r.x1, r.y1)
     }
 

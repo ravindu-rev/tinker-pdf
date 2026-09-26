@@ -57,6 +57,27 @@ reporting the displayed size with the quarter-turn axis swap applied.
 `/Count` is a claim like any other: a document that lies about it gets
 counted by walking instead of believed.
 
+The three production boundaries of 14.11.2 — `/BleedBox`, `/TrimBox`,
+`/ArtBox` — are read beside them and are **not** inherited: Table 30 marks
+four attributes inheritable and these are not among them, so a value on a
+`/Pages` node describes no page. Each defaults to the page's crop box
+(Table 30) and is reduced to its intersection with the media box
+(14.11.2.1); one that misses the media box entirely reads as the crop box,
+the way a crop box that misses it reads as the media box. `PageBoundary`
+names the five, and is also what a viewer preference's area and clip
+entries hold.
+
+**Viewer preferences.** `/ViewerPreferences` (12.2) is read whole and typed:
+all eighteen entries of ISO 32000-2 Table 147, the six flags, the page mode,
+the reading direction, the four area and clip boundaries, print scaling,
+duplex, tray selection, the page ranges (numbered from 1, as the table numbers
+them), the copy count and 2.0's `/Enforce`. Each is an `Option`, because
+absent-not-default is the same contract `/Info` keeps: a document stating
+`/Direction /L2R` said something a document stating nothing did not. A value of
+the wrong type or a name the table does not define reads as absent — the table
+has a processor use the default then, which is what absent means — and a
+half pair in `/PrintPageRange` is dropped.
+
 **Name and number trees.** One module (7.9.6, 7.9.7) serves `/Dests`,
 `/EmbeddedFiles` and `/PageLabels`. Keys are byte strings matched literally,
 never text-decoded first. Full enumeration walks every leaf and sorts
@@ -115,6 +136,14 @@ so listing costs less than extracting. The catalog's `/Metadata` stream
 (14.3.2) comes back as decoded raw bytes: XMP is RDF/XML, and a caller that
 wants it parsed already has a reader.
 
+**The writing side, on an existing document.** Each of these — page labels,
+an attachment, an outline, every `/Info` entry, a caller's XMP packet, viewer
+preferences and the production boxes — has a typed setter on
+`DocumentEditor` that this section's readers read back as it was given
+([editing](editing.md)). `/Info` and the packet are deliberately not kept in
+step by the editor, and each setter says whether it left the other half
+standing (`MetadataSync`).
+
 **Page labels.** The `/PageLabels` number tree (12.4.2) yields one label
 per page: all five styles of Table 159 plus the bare prefix, with the
 letter styles repeating — 27 is "AA", not spreadsheet base-26 — and roman
@@ -124,12 +153,15 @@ numerals capped so a hostile `/St` cannot emit a page of M's.
 
 Everything is on the facade `Document` and `Page`: `metadata()`,
 `pdf_version()`, `outline()`, `page_labels()`, `attachments()`,
-`xmp_metadata()`, `page_count()`, `pages()`, `page(index)`, `layers()`,
-`fonts()`, and `Page::media_box()`, `crop_box()`, `rotation()`, `size()`,
-`links()`, `annotations()`. The types they hand back — `Metadata`, `Trapped`,
-`OutlineItem`, `Destination`, `DestKind`, `Action`, `Link`, `Attachment`,
-`OptionalGroup`, `Annotation`, `AnnotationKind`, `AnnotationFlags` — are
-re-exported from the same crate. The writing side takes the same vocabulary: `Target` wraps a page
+`xmp_metadata()`, `viewer_preferences()`, `page_count()`, `pages()`,
+`page(index)`, `layers()`, `fonts()`, and `Page::media_box()`, `crop_box()`,
+`bleed_box()`, `trim_box()`, `art_box()`, `boundary(PageBoundary)`,
+`rotation()`, `size()`, `links()`, `annotations()`. The types they hand back —
+`Metadata`, `Trapped`, `OutlineItem`, `Destination`, `DestKind`, `Action`,
+`Link`, `Attachment`, `LabelStyle`, `ViewerPreferences`,
+`NonFullScreenPageMode`, `ReadingDirection`, `PrintScaling`, `Duplex`,
+`EnforcedPreference`, `PageBoundary`, `OptionalGroup`, `Annotation`,
+`AnnotationKind`, `AnnotationFlags` — are re-exported from the same crate. The writing side takes the same vocabulary: `Target` wraps a page
 plus `DestKind` or a URI for `PageBuilder::link` and `OutlineEntry`, so a
 write followed by a read is an equality, not a translation.
 
@@ -241,6 +273,8 @@ and 5 129 annotations carry a normal appearance.
 | A `/Kids` graph that revisits a node | `WarningKind::PageTreeCycle` | 7.7.3.2 makes the tree a tree; following a repeat duplicates pages forever | [ruling 10](../rulings.md) |
 | A page tree past the depth or page cap | `WarningKind::PageTreeTruncated` | bounded truncation beats an unbounded walk over hostile input | [ruling 1](../rulings.md) |
 | No usable `/MediaBox` on the whole path | `WarningKind::MediaBoxMissing` | 7.7.3.3 requires one; US Letter is guessed and the guess recorded | [ruling 10](../rulings.md) |
+| A `/BleedBox`, `/TrimBox` or `/ArtBox` on a `/Pages` node | none — the page reads its own or its crop box (`the_production_boxes_are_not_inherited`) | 7.7.3.3 Table 30 does not make them inheritable; taking a parent's would report a box the page never stated | 14.11.2 |
+| A viewer preference of the wrong type, or a name Table 147 does not define | none — the field reads `None` (`malformed_entries_read_as_absent`) | the table has a processor use the default, which is what absent means; a read that warned would make `Document::warnings` depend on who asked first | 12.2 |
 | A `/Count` that disagrees with the walk | `WarningKind::PageCountMismatch` | the count is a claim; the walk is the fact | [ruling 10](../rulings.md) |
 | An outline `/First`/`/Next` loop, or one past the caps | `WarningKind::OutlineCycle`, `OutlineTruncated` | a looping sibling chain never ends on its own | [ruling 1](../rulings.md) |
 | A name/number tree cycle, cap breach, or odd-length leaf | `WarningKind::TreeCycle`, `TreeTruncated`, `TreeOddEntries` | the last key of an odd `/Names` array has no value | [ruling 10](../rulings.md) |
@@ -285,17 +319,25 @@ branch — other lanes are moving the total in parallel):
   `/Rotate` moves ink to the right corner at every quarter turn and a
   shifted `/CropBox` origin lands content where it should.
 - `crates/tinker-pdf/tests/hostile_input.rs` — mutation rounds that call
-  `metadata()`, `pdf_version()`, `outline()` and `page_labels()` on every
-  damaged document that still opens.
+  `metadata()`, `pdf_version()`, `outline()`, `page_labels()`,
+  `viewer_preferences()` and every page boundary on every damaged document
+  that still opens.
 - `crates/tinker-pdf-cos/tests/semantics.rs` and `semantics_extras.rs` —
   fixture-based assertions on geometry, version, metadata, outlines and
   explicit-not-named destinations, plus attachments, XMP bytes, and
   `/Limits` descent including a node whose limits lie.
 - Unit tests beside the code in `pages.rs`, `outline.rs`, `dest.rs`,
-  `trees.rs` and `text_string.rs`: version comparison as numbers, blank
-  against absent for every `/Info` field, `/Trapped`'s three names, corner
-  ordering, rotation normalisation, the 27 → "AA" letter repetition, and
+  `trees.rs`, `text_string.rs` and `viewer.rs`: version comparison as numbers,
+  blank against absent for every `/Info` field, `/Trapped`'s three names,
+  corner ordering, rotation normalisation, the production boxes neither
+  inherited nor left outside the media box, the 27 → "AA" letter repetition,
+  every Table 147 entry read and a stated default told from an absent one, and
   the URI/named-destination distinction pinned as a type inequality.
+- `crates/tinker-pdf/tests/editor_docops.rs` — the writing side: page
+  labels, attachments, an outline, every `/Info` entry, an XMP packet, viewer
+  preferences and the production boxes, each set on an existing document by
+  `DocumentEditor`, saved both ways and read back here
+  ([editing](editing.md)).
 - The `cos_document` fuzz target — one of the 24 — walks the page tree and
   reads content bytes after every successful open, so a document that opens
   and then panics on use counts as a crash. The corpus run backs it at

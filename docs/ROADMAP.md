@@ -631,7 +631,6 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| Page labels; embedded files; an outline; `/Info` and XMP; a caller-supplied XMP packet; viewer preferences; trim and art boxes — each **on `DocumentEditor`** | page labels and attachments read only; outline and `/Info` on the builder only; XMP generated only for archival; viewer preferences, trim and art boxes neither read nor written | a typed setter for each, read back by this reader | S each |
 | Named destinations on write | deliberately absent: a name is a destination only once the catalog carries a `/Names /Dests` tree | write the tree; ruling 6 still holds, and a named destination is never collapsed | S |
 | Optional content: writing groups and configurations | **the reader half landed**: `Document::layers()` returns the catalog's `/OCGs` in the catalog's own order (8.11.4.2), each with its `/Name` and whether the default configuration `/D` shows it (8.11.4.3 Table 101), read from the same bound `OptionalContent` the renderer paints from — so the list and the page cannot disagree. Nothing is written | `DocumentBuilder::add_layer`; the editor toggles a default configuration; a written group read back by `layers()` | M |
 | Watermark and stamp on existing pages | `append_content` is the primitive; nothing registers a resource on an existing page | `DocumentEditor::add_resource` and `stamp(page, form)` | M |

@@ -185,6 +185,7 @@ fn exercise(bytes: Vec<u8>) {
     let _ = doc.page_count();
     let _ = doc.outline();
     let _ = doc.page_labels();
+    let _ = doc.viewer_preferences();
     let _ = doc.form_fields();
     // 14.7: `/K` is a graph with no promise of acyclicity and `/RoleMap` is a
     // rewriting system the file writes for itself, so the structure walk is
@@ -221,6 +222,9 @@ fn exercise(bytes: Vec<u8>) {
         let _ = page.size();
         let _ = page.media_box();
         let _ = page.crop_box();
+        let _ = page.bleed_box();
+        let _ = page.trim_box();
+        let _ = page.art_box();
         let _ = page.rotation();
 
         let text = page.text();

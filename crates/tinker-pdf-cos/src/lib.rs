@@ -72,6 +72,7 @@ pub mod text_string;
 pub mod tiff_embed;
 pub mod trees;
 pub mod validate;
+pub mod viewer;
 pub mod warn;
 pub mod write;
 pub mod xref;
@@ -108,6 +109,9 @@ pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
 pub use edit::{
     annot, DocumentEditor, EditCheckpoint, FillError, FillRejection, SkippedWidget, WidgetDefect,
 };
+// Document operations on the editor: page labels, embedded files and
+// metadata, each read back by the readers in `outline`.
+pub use edit::{AttachError, EmbeddedFile, MetadataSync, PageLabelError, PageLabelRange};
 pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
 pub use form::{
@@ -123,7 +127,7 @@ pub use outline::{
     attachments, metadata, outline, page_labels, xmp_metadata, Attachment, LabelStyle, Metadata,
     OutlineItem, Trapped,
 };
-pub use pages::{Page, Rect};
+pub use pages::{Page, PageBoundary, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use pubsec::{PubSecError, Recipient};
@@ -141,6 +145,10 @@ pub use trees::{
     name_tree, name_tree_lookup, number_tree, write_name_tree, write_number_tree, TreeWriteError,
 };
 pub use validate::{kind_counts, tier_counts, validate, Defect, DefectKind, Tier};
+pub use viewer::{
+    viewer_preferences, Duplex, EnforcedPreference, NonFullScreenPageMode, PrintScaling,
+    ReadingDirection, ViewerPreferences,
+};
 pub use warn::{Warning, WarningKind, WarningSink};
 pub use write::{Encryption, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 pub use xref::{Revision, XrefEntry, XrefTable};
