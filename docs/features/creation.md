@@ -83,11 +83,19 @@ drew nothing while its `/Resources` held the form under the whole name.
 
 **Navigation.** `link(x0, y0, x1, y1, &Target)` adds a link annotation
 (12.5.6.5); `set_outline(Vec<OutlineEntry>)` writes the document outline
-(12.3.3). `Target` is `Page { index, view: DestKind }` or `Uri(String)`, and
-exactly one of `/Dest` or `/A` is written, decided by the variant — the
-malformed both-at-once shape is not expressible (ruling 6,
+(12.3.3). `Target` is `Page { index, view: DestKind }`, `Named(bytes)` or
+`Uri(String)`, and exactly one of `/Dest` or `/A` is written, decided by the
+variant — the malformed both-at-once shape is not expressible (ruling 6,
 [rulings.md](../rulings.md)). A `Target::Page` past the last page writes
-*no* destination rather than a link to whichever page was last. An
+*no* destination rather than a link to whichever page was last.
+`add_named_destination(name, index, view)` registers a name, and `finish`
+writes the catalog's `/Names /Dests` tree (12.3.2.3) through the same tree
+writer the editor uses; a `Target::Named` keeps the name in `/Dest` as a byte
+string and reads back as `Destination::Named`, never flattened to the array
+it stands for. A name unregistered at `finish`, or registered for a page
+that never arrived, is dangling and refused — the link is not written, the
+outline entry becomes a heading — and `dangling_destinations()` names each
+one before the document is finished. An
 `OutlineEntry` with `target: None` is a real shape — a part title above
 three chapters — and `open` is written as the sign of `/Count` exactly as
 12.3.3 spells it, only for entries that have children.

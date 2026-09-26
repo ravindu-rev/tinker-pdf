@@ -612,6 +612,7 @@ impl DocumentEditor {
         let refs: Vec<ObjRef> = entries.iter().map(|_| self.allocate()).collect();
         let mut visible: i64 = 0;
         let names = std::sync::Arc::clone(&self.doc);
+        let live = self.live_destination_names();
 
         for (index, entry) in entries.iter().enumerate() {
             let Some(&reference) = refs.get(index) else {
@@ -626,7 +627,7 @@ impl DocumentEditor {
             );
             dict.insert(Name::PARENT, Object::Ref(parent));
             if let Some(target) = &entry.target {
-                target.write(names.names_table(), pages, &mut dict);
+                target.write(names.names_table(), pages, &live, &mut dict);
             }
             if let Some(&previous) = index.checked_sub(1).and_then(|i| refs.get(i)) {
                 dict.insert(self.intern(b"Prev"), Object::Ref(previous));

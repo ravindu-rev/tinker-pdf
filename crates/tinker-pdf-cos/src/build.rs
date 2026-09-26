@@ -2046,14 +2046,14 @@ pub fn jpeg_shape(data: &[u8]) -> Option<(u32, u32, u8)> {
 
 /// Where a link annotation or an outline entry goes.
 ///
-/// **Two kinds and not three**, which is the writing side of the distinction
+/// **Three kinds**, which is the writing side of the distinction
 /// [`crate::dest::Destination`] draws on the reading side (ruling 6): a page in
-/// this document, and a URI that leaves it altogether. A *named* destination —
-/// the third thing a `/Dest` may be — is deliberately absent, because a name
-/// is only a destination once the catalog carries a `/Names /Dests` tree to
-/// look it up in, and this builder writes no name tree. Offering a name with
-/// nowhere to resolve it would produce exactly the dead link the header of
-/// `dest.rs` exists to describe.
+/// this document, a *name* the document's own `/Names /Dests` tree resolves to
+/// a page, and a URI that leaves it altogether. None is ever written as
+/// another. A named destination is written as the name and stays one when it
+/// is read back — it is never flattened to the explicit array it stands for,
+/// because the name is the part a later edit can repoint without touching a
+/// single link.
 ///
 /// A [`Target::Page`] naming an index past the end of the document is **not**
 /// an error and is not repaired. Nothing here knows how many pages there will
@@ -2065,6 +2065,18 @@ pub fn jpeg_shape(data: &[u8]) -> Option<(u32, u32, u8)> {
 /// entry with no destination, which is the shape 12.3.3 gives a heading. The
 /// alternative is a link to whichever page happened to be last, which is the
 /// plausible-and-wrong answer this repository refuses everywhere else.
+///
+/// A [`Target::Named`] follows the same rule for the same reason, one step
+/// removed: the name may be registered after the link that uses it, so it is
+/// judged at `finish`. A name that by then is not registered with
+/// [`DocumentBuilder::add_named_destination`], or whose page never arrived, is
+/// **dangling**, and a dangling name is refused rather than written: a link
+/// naming one is not written at all — a rectangle that goes nowhere is a
+/// defect the strict validator reports, where a missing link is not — and an
+/// outline entry naming one is written with no destination, which is the
+/// shape 12.3.3 gives a heading. [`DocumentBuilder::dangling_destinations`]
+/// names every such name before the document is finished, so the refusal is
+/// not silent.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Target {
@@ -2080,6 +2092,15 @@ pub enum Target {
     /// 7-bit ASCII, per that clause; see [`crate::dest::is_writable_uri`] for
     /// what is refused and why.
     Uri(String),
+    /// A named destination (12.3.2.3), written as a byte string `/Dest` and
+    /// resolved through the catalog's `/Names /Dests` tree, which `finish`
+    /// writes from [`DocumentBuilder::add_named_destination`].
+    ///
+    /// The name is bytes, not text: 7.9.6 compares name-tree keys byte for
+    /// byte, so a name is matched literally, never after a decoding that might
+    /// normalise it. An empty name is refused — it cannot be told apart from
+    /// a destination nobody named.
+    Named(Vec<u8>),
 }
 
 impl Target {
@@ -2088,6 +2109,15 @@ impl Target {
         match self {
             Target::Page { view, .. } => view.is_writable(),
             Target::Uri(uri) => crate::dest::is_writable_uri(uri),
+            Target::Named(name) => !name.is_empty(),
+        }
+    }
+
+    /// The name this target resolves through, if it is a named one.
+    fn name(&self) -> Option<&[u8]> {
+        match self {
+            Target::Named(name) => Some(name),
+            Target::Page { .. } | Target::Uri(_) => None,
         }
     }
 
@@ -2098,7 +2128,17 @@ impl Target {
     /// exactly one is inserted, never both — and which one is decided by the
     /// kind of target rather than by a flag, so the malformed shape is not
     /// expressible.
-    pub(crate) fn write(&self, names: &NameTable, pages: &[ObjRef], dict: &mut Dict) {
+    ///
+    /// `live` is the set of names the document's `/Dests` tree holds. A name
+    /// outside it is dangling and writes nothing, for the reason the type's
+    /// own documentation gives.
+    pub(crate) fn write(
+        &self,
+        names: &NameTable,
+        pages: &[ObjRef],
+        live: &BTreeMap<Vec<u8>, (u32, DestKind)>,
+        dict: &mut Dict,
+    ) {
         match self {
             Target::Page { index, view } => {
                 // An index past the end writes nothing; see the type's own
@@ -2115,6 +2155,18 @@ impl Target {
                     names.intern(b"A"),
                     Object::Dict(crate::dest::uri_action(names, uri)),
                 );
+            }
+            // 12.3.2.3: in PDF 1.2 and later a name in `/Dest` is a byte
+            // string, looked up in the `/Names /Dests` tree, whose keys are
+            // strings. A name *object* is the pre-1.2 `/Dests` dictionary's
+            // spelling, which this writer does not emit.
+            Target::Named(name) => {
+                if live.contains_key(name) {
+                    dict.insert(
+                        names.intern(b"Dest"),
+                        Object::String(PdfString::literal(name.clone())),
+                    );
+                }
             }
         }
     }
@@ -2475,6 +2527,14 @@ pub struct DocumentBuilder {
     embedded_whole: Vec<EmbeddedWhole>,
     info: Dict,
     outline: Vec<OutlineEntry>,
+    /// Named destinations (12.3.2.3): each name, the zero-based page it
+    /// resolves to and the view. Written at `finish` as the catalog's
+    /// `/Names /Dests` tree, because a page index resolves to a reference only
+    /// once every page exists.
+    ///
+    /// A `BTreeMap`, so the tree's entries are in one order however they were
+    /// registered — which is also the byte order 7.9.6 sorts keys in.
+    destinations: BTreeMap<Vec<u8>, (u32, DestKind)>,
     /// The version the header declares when no profile decides it. Fixed at
     /// construction, because text strings are encoded for it as they arrive
     /// (see [`DocumentBuilder::with_version`]).
@@ -2511,6 +2571,7 @@ impl DocumentBuilder {
             embedded_whole: Vec::new(),
             info: Dict::new(),
             outline: Vec::new(),
+            destinations: BTreeMap::new(),
             version: WriteOptions::default().version,
             profile: None,
             refusals: Vec::new(),
@@ -4321,6 +4382,71 @@ impl DocumentBuilder {
         true
     }
 
+    /// Registers a named destination (12.3.2.3): `name` resolves to the page
+    /// at zero-based `index`, positioned as `view` says.
+    ///
+    /// Written at `finish` as the catalog's `/Names /Dests` name tree (7.9.6)
+    /// through the same tree writer the editor uses, and read back by
+    /// [`crate::dest::Resolver::resolve_named`] — while a link or outline entry
+    /// naming it with [`Target::Named`] keeps the *name* and never the array it
+    /// stands for (ruling 6).
+    ///
+    /// The page index is judged at `finish`, as [`Target::Page`]'s is: a
+    /// destination registered for a page that never arrives is not written,
+    /// and whatever names it is dangling — see
+    /// [`DocumentBuilder::dangling_destinations`].
+    ///
+    /// Returns false, registering nothing, for an empty name, a name already
+    /// registered (7.9.6 maps each key to one value, and which of two the
+    /// caller meant is not this builder's to guess), a view that cannot be
+    /// written ([`DestKind::is_writable`]), or a tree already holding
+    /// [`crate::limits::MAX_TREE_ENTRIES`] names — past which this repository's
+    /// own reader stops walking one.
+    pub fn add_named_destination(&mut self, name: &[u8], index: u32, view: DestKind) -> bool {
+        if name.is_empty() || !view.is_writable() || self.destinations.contains_key(name) {
+            return false;
+        }
+        if self.destinations.len() >= crate::limits::MAX_TREE_ENTRIES {
+            return false;
+        }
+        self.destinations.insert(name.to_vec(), (index, view));
+        true
+    }
+
+    /// Every name a link or outline entry uses that `finish` would refuse as
+    /// dangling if it were called now: a name never registered with
+    /// [`DocumentBuilder::add_named_destination`], or one registered for a
+    /// page index past the pages pushed so far.
+    ///
+    /// Sorted, and each name once. Empty is the answer a finished document
+    /// wants; a caller that is still adding pages may see a name here that a
+    /// later page resolves, which is why this reports rather than refuses.
+    #[must_use]
+    pub fn dangling_destinations(&self) -> Vec<Vec<u8>> {
+        let resolves = |name: &[u8]| {
+            self.destinations
+                .get(name)
+                .is_some_and(|(index, _)| (*index as usize) < self.pages.len())
+        };
+        let mut used: Vec<&[u8]> = Vec::new();
+        for page in &self.pages {
+            used.extend(page.links.iter().filter_map(|link| link.target.name()));
+        }
+        let mut stack: Vec<&[OutlineEntry]> = vec![&self.outline];
+        while let Some(level) = stack.pop() {
+            for entry in level {
+                used.extend(entry.target.as_ref().and_then(Target::name));
+                stack.push(&entry.children);
+            }
+        }
+        let dangling: BTreeSet<Vec<u8>> = used
+            .into_iter()
+            .filter(|name| !resolves(name))
+            .map(<[u8]>::to_vec)
+            .collect();
+        dangling.into_iter().collect()
+    }
+
     /// Writes the merged structure elements and returns the refs a parent
     /// should list as its kids.
     ///
@@ -4423,6 +4549,14 @@ impl DocumentBuilder {
 
         let pages = std::mem::take(&mut self.pages);
 
+        // The named destinations whose page arrived. Anything naming one that
+        // is not here is dangling and is written with no destination at all
+        // (see `Target`), the rule an index past the last page already follows.
+        let live: BTreeMap<Vec<u8>, (u32, DestKind)> = std::mem::take(&mut self.destinations)
+            .into_iter()
+            .filter(|(_, (index, _))| (*index as usize) < page_refs.len())
+            .collect();
+
         // Every character every page drew, per font resource. Gathered before
         // anything is written because the embedded programs are subset to it.
         let mut used: BTreeMap<Vec<u8>, BTreeSet<char>> = BTreeMap::new();
@@ -4515,6 +4649,14 @@ impl DocumentBuilder {
             // above follows.
             let mut annots = Vec::with_capacity(page.links.len());
             for link in &page.links {
+                // A dangling name is refused whole: see `Target`.
+                if link
+                    .target
+                    .name()
+                    .is_some_and(|name| !live.contains_key(name))
+                {
+                    continue;
+                }
                 let mut annot = Dict::new();
                 annot.insert(Name::TYPE, Object::Name(self.names.intern(b"Annot")));
                 annot.insert(
@@ -4530,7 +4672,8 @@ impl DocumentBuilder {
                 // screen and not on paper, which is `edit::annot`'s rule for
                 // every annotation it builds and is this one's too.
                 annot.insert(self.names.intern(b"F"), Object::Int(4));
-                link.target.write(&self.names, &page_refs, &mut annot);
+                link.target
+                    .write(&self.names, &page_refs, &live, &mut annot);
 
                 let annot_ref = self.allocate();
                 self.objects.insert(annot_ref.num, Object::Dict(annot));
@@ -4756,7 +4899,7 @@ impl DocumentBuilder {
         let outline = std::mem::take(&mut self.outline);
         if !outline.is_empty() {
             let root = self.allocate();
-            let children = self.write_outline(&outline, &page_refs, root);
+            let children = self.write_outline(&outline, &page_refs, &live, root);
             let mut dict = Dict::new();
             dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Outlines")));
             if let Some((first, last, visible)) = children {
@@ -4770,6 +4913,41 @@ impl DocumentBuilder {
             }
             self.objects.insert(root.num, Object::Dict(dict));
             catalog.insert(self.names.intern(b"Outlines"), Object::Ref(root));
+        }
+
+        // 12.3.2.3 and 7.7.4: the named destinations, as the catalog's
+        // `/Names /Dests` tree, each value the explicit array the name stands
+        // for. Written only when there are some — a `/Names` dictionary with
+        // nothing in it is a statement where its absence is not.
+        if !live.is_empty() {
+            let entries: Vec<(Vec<u8>, Object)> = live
+                .iter()
+                .filter_map(|(name, (index, view))| {
+                    let page = page_refs.get(*index as usize)?;
+                    Some((
+                        name.clone(),
+                        crate::dest::destination_array(&self.names, *page, view),
+                    ))
+                })
+                .collect();
+            let next = &mut self.next;
+            let objects = &mut self.objects;
+            let tree = crate::trees::write_name_tree(entries, &self.names, |node| {
+                let reference = ObjRef::new(*next, 0);
+                *next = next.saturating_add(1);
+                objects.insert(reference.num, node);
+                reference
+            });
+            // Neither refusal is reachable: `add_named_destination` refused a
+            // second registration of a name and a tree past the reader's cap,
+            // which are the only two things the tree writer refuses. A tree
+            // that was somehow refused is left out whole rather than half
+            // written, and the names pointing at it dangle.
+            if let Ok(tree) = tree {
+                let mut names = Dict::new();
+                names.insert(self.names.intern(b"Dests"), Object::Ref(tree));
+                catalog.insert(self.names.intern(b"Names"), Object::Dict(names));
+            }
         }
         self.objects.insert(1, Object::Dict(catalog));
 
@@ -4811,6 +4989,7 @@ impl DocumentBuilder {
         &mut self,
         entries: &[OutlineEntry],
         pages: &[ObjRef],
+        live: &BTreeMap<Vec<u8>, (u32, DestKind)>,
         parent: ObjRef,
     ) -> Option<(ObjRef, ObjRef, i64)> {
         if entries.is_empty() {
@@ -4824,7 +5003,7 @@ impl DocumentBuilder {
             let Some(&reference) = refs.get(index) else {
                 continue;
             };
-            let children = self.write_outline(&entry.children, pages, reference);
+            let children = self.write_outline(&entry.children, pages, live, reference);
 
             let mut dict = Dict::new();
             // 12.3.3 Table 153: `/Title` is a text string, encoded as `/Info`'s
@@ -4833,11 +5012,13 @@ impl DocumentBuilder {
             dict.insert(self.names.intern(b"Title"), Object::String(title));
             dict.insert(Name::PARENT, Object::Ref(parent));
 
-            // Ruling 6: an explicit destination, never a name that looks like
-            // one. This is the writer side of the defect that made the engine
-            // being replaced turn "#page=2" into a dead named destination.
+            // Ruling 6: each kind of destination as itself — an explicit one
+            // never written as a name that looks like one, and a name never
+            // flattened into the array it resolves to. This is the writer side
+            // of the defect that made the engine being replaced turn "#page=2"
+            // into a dead named destination.
             if let Some(target) = &entry.target {
-                target.write(&self.names, pages, &mut dict);
+                target.write(&self.names, pages, live, &mut dict);
             }
 
             if let Some(&previous) = index.checked_sub(1).and_then(|i| refs.get(i)) {

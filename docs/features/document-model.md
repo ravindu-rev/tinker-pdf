@@ -113,7 +113,21 @@ are read, with `null` components kept as `None` — "leave the current value" �
 and a zoom of 0 folded onto `None` because 12.3.2.2 gives both spellings
 one meaning. Named destinations resolve through the `/Names` → `/Dests`
 name tree (12.3.2.3) and the legacy catalog `/Dests` dictionary, accepting
-the entry as a bare array or a dictionary carrying it under `/D`.
+the entry as a bare array or a dictionary carrying it under `/D`. `/Names`
+may be a direct dictionary or a reference (7.7.2); only the reference was
+followed until September 2026, so a tree under a direct `/Names` resolved no
+name at all.
+
+**Named destinations are written too.** `DocumentBuilder::add_named_destination`
+registers a name for a page index and a view, and `finish` writes the
+catalog's `/Names /Dests` tree through `write_name_tree`; `Target::Named`
+puts the name in a link's or an outline entry's `/Dest` as a byte string, and
+it reads back as `Destination::Named` — the name, never the array it stands
+for. A name that is not registered at `finish`, or whose page never arrived,
+is dangling and is refused: the link is not written and the outline entry is
+written as a heading, and `dangling_destinations()` names each such name
+beforehand. `DocumentEditor::add_named_destination` adds one to an existing
+document, rewriting the tree with every old entry plus the new one.
 
 **Outline.** The `/First`/`/Next` walk of 12.3.3, cycle-guarded on both
 axes, titles decoded as text strings, the open state from the sign of
@@ -162,8 +176,9 @@ Everything is on the facade `Document` and `Page`: `metadata()`,
 `NonFullScreenPageMode`, `ReadingDirection`, `PrintScaling`, `Duplex`,
 `EnforcedPreference`, `PageBoundary`, `OptionalGroup`, `Annotation`,
 `AnnotationKind`, `AnnotationFlags` — are re-exported from the same crate. The writing side takes the same vocabulary: `Target` wraps a page
-plus `DestKind` or a URI for `PageBuilder::link` and `OutlineEntry`, so a
-write followed by a read is an equality, not a translation.
+plus `DestKind`, a registered name or a URI for `PageBuilder::link` and
+`OutlineEntry`, so a write followed by a read is an equality, not a
+translation.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;

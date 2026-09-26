@@ -25,6 +25,7 @@ use crate::write::{StreamData, Written};
 pub mod annot;
 mod annotations;
 mod boxes;
+mod dests;
 mod docops;
 mod forms;
 mod metadata;

@@ -39,7 +39,11 @@ through, so two compose; before it, `/NeedAppearances`' clean-up read the
 certifying save's `/Perms /DocMDP` was made after the update's object set
 had been taken and never reached the file. `add_name_tree` and
 `add_number_tree` write a 7.9.6 / 7.9.7 tree as new objects and return its
-root ([document model](document-model.md)).
+root ([document model](document-model.md)). `add_named_destination(name,
+page, view)` is the first caller: it rewrites the catalog's `/Names /Dests`
+tree with every entry the old one held plus the new one — a `/Names` that is
+an indirect object is replaced at its own number, a direct one through
+`update_catalog` — and refuses a name the tree already holds.
 
 **Trailer entries.** `set_trailer_entry(key, value)` lays an entry over the
 document's trailer (7.5.5), and every save writes the merged trailer —
@@ -395,7 +399,8 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `DocumentEditor` (facade re-export of `tinker_pdf_cos::DocumentEditor`):
 `document()`, `is_dirty()`, `allocate()`, `get()`, `put()`, `put_stream()`,
 `delete()`, `intern()`, `stream_bytes()`, `catalog()`, `update_catalog()`,
-`add_name_tree()`, `add_number_tree()`, `set_trailer_entry()`, `set_info()`,
+`add_name_tree()`, `add_number_tree()`, `add_named_destination()`,
+`set_trailer_entry()`, `set_info()`,
 `view()`,
 `transaction()`, `checkpoint()`, `restore()`, `page_refs()`,
 `delete_page()`,
