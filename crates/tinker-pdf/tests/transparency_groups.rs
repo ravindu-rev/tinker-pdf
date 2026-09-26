@@ -1363,7 +1363,11 @@ fn a_lab_group_composites_in_lab_rather_than_in_rgb() {
     }
 }
 
-/// **A page cannot come back in CMYK**, however it is asked for.
+/// **A page does not come back in CMYK for asking by format alone.**
+///
+/// `RenderOptions::allow_cmyk` is the opt-in, and `render_options.rs` holds it;
+/// this is the half that has to stay true for every caller that never heard of
+/// it.
 ///
 /// `CmykA8` exists so a group can composite over ink; it is not a shape a
 /// `Bitmap` is handed back in, because `Bitmap` says how many components it

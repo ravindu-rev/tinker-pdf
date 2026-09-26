@@ -132,12 +132,27 @@ averages colour values in the group's own space. The four non-separable modes
 so on a CMYK buffer their operands convert to light, blend, and convert back.
 A page-level group decides the format of the page canvas itself and is
 converted for the caller at the end, which is 11.4.7's own last step; a page is
-never handed back in CMYK or in Lab, because a `Bitmap` says how many
-components it has and nothing about what they mean. *Lab was handed back until
+never handed back in Lab, and in CMYK only when asked for twice, because a
+`Bitmap` says how many components it has and nothing about what they mean. *Lab was handed back until
 September 2026*: `page_format` named `CmykA8` alone, so `format: LabA8` returned
 four bytes of encoded `L*a*b*` while `PixelFormat::LabA8`'s own documentation
 said it was not a page format;
 `a_page_asked_for_in_lab_comes_back_in_rgb` pins the correction.
+
+**CMYK page output** is the one way past that, and it takes two fields rather
+than one: `format: PixelFormat::CmykA8` *and* `RenderOptions::allow_cmyk`, so a
+caller has said they know the bytes are ink. The page composites over ink on a
+canvas that starts with none — which it already did for `format: CmykA8`, and
+then converted — and the buffer comes back as it stands. **The ink is light
+turned back into ink**, not the document's own components: colour is flattened
+to sRGB where a resource is read, and a CMYK buffer takes that back through
+8.6.4.4's relation inverted with maximum undercolour removal, so `1 0 0 0 k`
+arrives as exactly `(255, 0, 0, 0)` and a rich black `1 1 1 1 k` arrives as pure
+`K`. `a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink` pins both, the
+second as the limitation it is. `Bitmap::to_png` writes an ink page as the light
+it stands for — PNG has no CMYK — and those bytes are exactly what the same
+render without the switch returns, which
+`an_ink_page_written_as_png_is_the_light_the_switch_would_have_returned` holds.
 
 **`/Lab` composites in Lab too**, which was the last space that did not. Its
 components are not in the unit interval — `L*` runs 0..100 and `a`/`b` roughly
@@ -223,8 +238,9 @@ The facade is the whole public surface (ruling 11): `Page::render` takes a
 `RenderOptions` — `scale` (pixels per point, or `RenderOptions::at_dpi`),
 `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
 checked between operations and scanline bands), `annotations` (on by
-default) and `region` (an optional `PixelRegion`, `None` for the whole page)
-— and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
+default), `region` (an optional `PixelRegion`, `None` for the whole page) and
+`allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
+light) — and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
 `data`, and `warnings`, the `Vec<RenderWarning>` that carries every named
 degradation. Rendering never fails; it degrades and reports.
 
@@ -310,6 +326,7 @@ un-tiled spelling left for a defect to hide in.
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |
+| The document's own CMYK components on a page asked for in ink | stated on `RenderOptions::allow_cmyk` | Colour is flattened to sRGB where a resource is read, so an ink page is light converted back with maximum undercolour removal: a rich black arrives as pure `K`. Separations want the file's components, carried through the resource seam, which is its own row | [ROADMAP](../ROADMAP.md) |
 | A PNG read back whose raster stops short of its declared height | `PngReadError::Incomplete`, carrying the decoder's own identifiers | The decoder degrades for a comic page; a file read back to be *compared* would have its missing rows scored as a rendering difference. Every refusal the decoder makes is `PngReadError::Refused` with its own reason | [filters](filters.md) |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
@@ -321,6 +338,11 @@ un-tiled spelling left for a defect to hide in.
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
   `annotation_appearances.rs` — each asserting pixels, not absence of error.
+- Output options: `crates/tinker-pdf/tests/render_options.rs` pins each
+  `RenderOptions` field that changes what a page's bytes are with its own
+  SHA-256, computed as `determinism.rs` computes one and floored by ink the same
+  way, beside the claim that the default render is unchanged — the blend grid's
+  default render still hashes to `determinism.rs`'s `analytic_blend` value.
 - Output: `png_output.rs` holds `Bitmap::to_png` over all six formats, and
   `png_input.rs` holds `Bitmap::from_png` — the round trip over every page
   format, 16-bit rounding at the samples where truncation would differ, every
