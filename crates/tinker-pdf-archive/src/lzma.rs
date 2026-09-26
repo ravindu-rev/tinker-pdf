@@ -8,6 +8,14 @@
 //! rather than two decoders — [`decode_lzma2`] is a chunk framing over exactly
 //! the `State` this module already had — which is why they share a file.
 //!
+//! [`decode`] has a second caller: ZIP method 14. `tinker-pdf-zip` reads
+//! APPNOTE 5.8.8's header, bounds and charges the entry and checks its CRC-32,
+//! and the facade hands this function in through `Archive::read_with` rather
+//! than giving that crate a second dependency. The shape fits unchanged: a ZIP
+//! entry declares its uncompressed size, so the output-as-window design holds,
+//! and a stream carrying an end marker stops at the declared length before the
+//! marker is reached.
+//!
 //! # No `lzma-rs`, and the reason is written down in `deny.toml`
 //!
 //! CONTRIBUTING rule 1. The range decoder below, the eleven probability arrays

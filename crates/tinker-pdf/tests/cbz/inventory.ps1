@@ -26,7 +26,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $rows = New-Object System.Collections.Generic.List[string]
 $rows.Add("archive`tentry`tmethod`tcompressed`tuncompressed`tcrc32")
 
-foreach ($file in Get-ChildItem -LiteralPath $Dir -Filter *.cbz | Sort-Object Name) {
+# `python-lzma.cbz` is skipped by name. Every entry in it is ZIP method 14,
+# and the inference below would write `deflate` for each -- a claim .NET cannot
+# make and this reader would rightly disagree with. README.md, "The LZMA ZIP".
+$skip = @('python-lzma.cbz')
+
+foreach ($file in Get-ChildItem -LiteralPath $Dir -Filter *.cbz | Where-Object { $skip -notcontains $_.Name } | Sort-Object Name) {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($file.FullName)
     try {
         foreach ($entry in $zip.Entries) {
