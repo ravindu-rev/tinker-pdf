@@ -247,6 +247,30 @@ wholly off the page, which trims to nothing and says so. `Bitmap`'s fields
 are public besides, so a caller may always build one by hand. `tpdf render`
 writes `.png` through it, and so does `examples/render.rs`.
 
+`Bitmap::from_png` is the other direction, over the same
+`tinker_pdf_filters::png_decode` CBZ pages go through. The decoder has already
+widened sub-byte samples, applied the palette and applied `tRNS`, so what it
+hands back is one of four layouts and each is one `PixelFormat` byte for byte —
+grey `Gray8`, grey and alpha `GrayA8`, truecolour `Rgb8`, truecolour and alpha
+`Rgba8`. Sixteen-bit samples round to the nearest eight, `round(v / 257)`, the
+exact inverse of the replication that widens eight to sixteen and not the high
+byte. **For the four formats `to_png` writes as they are, the round trip is
+exact** — dimensions, stride and bytes — which
+`render_to_png_and_back_is_byte_identical_for_every_page_format`
+(`crates/tinker-pdf/tests/png_input.rs`) holds over four pages at four formats
+and two scales; `CmykA8` and `LabA8` come back as the `Rgba8` light `to_png`
+wrote for them, because PNG has no colour type that could carry them back.
+Every decoder refusal comes through by name as `PngReadError::Refused`, and one
+more is added: a raster that stops short of its declared height is
+`PngReadError::Incomplete` rather than a picture with zeroes for its missing
+rows, because the caller this exists for — `pdfcmp` — would score the damage as
+a rendering difference. Damage that costs no pixels, an ancillary chunk with a
+bad CRC, is named on `warnings` as `RenderWarning::DamagedImage` with the name
+`PNG`. The decoder's `MAX_PNG_SAMPLES` is the only budget, which leaves one
+asymmetry stated rather than discovered: the largest page this engine renders
+writes a PNG this will not read back, because a reader's budget against a
+thirteen-byte header asking for 2^63 samples is not a writer's.
+
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
 
@@ -286,6 +310,7 @@ un-tiled spelling left for a defect to hide in.
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |
+| A PNG read back whose raster stops short of its declared height | `PngReadError::Incomplete`, carrying the decoder's own identifiers | The decoder degrades for a comic page; a file read back to be *compared* would have its missing rows scored as a rendering difference. Every refusal the decoder makes is `PngReadError::Refused` with its own reason | [filters](filters.md) |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -296,6 +321,12 @@ un-tiled spelling left for a defect to hide in.
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
   `annotation_appearances.rs` — each asserting pixels, not absence of error.
+- Output: `png_output.rs` holds `Bitmap::to_png` over all six formats, and
+  `png_input.rs` holds `Bitmap::from_png` — the round trip over every page
+  format, 16-bit rounding at the samples where truncation would differ, every
+  decoded layout, both refusals, and a fixed-seed campaign of random and
+  mutated files that must never panic and must reach both a picture and a
+  refusal more than five hundred times each.
 - Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Ten
   fixtures over four rasterizer paths, three of them turned and three cropped,
   tiled at 64, 37, 23 and 53 pixels against a 91×131 page and down to a

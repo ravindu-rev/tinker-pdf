@@ -613,14 +613,20 @@ returns bytes, which is all ruling 8 asks of a leaf. The parameter names
 `CcittParams` has been public with those names since the decoder landed, and one
 name per concept in a crate beats two.
 
-`png_encode` is the one filter entry point with a visible counterpart on the
-facade, and the shape is a projection rather than a re-export: ruling 11 keeps
+`png_encode` and `png_decode` are the two filter entry points with a visible
+counterpart on the facade, and the shape is a projection rather than a
+re-export: ruling 11 keeps
 `tinker_pdf` the public surface for a *document*, and what a caller has is a
 rendered page, so `tinker_pdf::Bitmap::to_png` maps a `PixelFormat` onto one of
 PNG's colour types and calls this. Two of the six formats have no colour type
 to map onto and are converted there rather than here — `CmykA8` through
 8.6.4.4's device relation and `LabA8` back out of `L*a*b*` — because this crate
-holds no PDF colour and ruling 8 keeps it that way.
+holds no PDF colour and ruling 8 keeps it that way. `tinker_pdf::Bitmap::from_png`
+is the inverse projection: each of the four decoded layouts is one
+`PixelFormat`, sixteen bits round to eight there rather than here, and a raster
+this decoder returns incomplete — a degradation, correctly, for a comic page —
+is refused there, because the caller it exists for compares pictures and would
+score missing rows as a difference.
 
 `ccitt_g4_encode`, `jbig2_generic_encode` and `jpeg_encode` have **no** facade
 counterpart, and
@@ -786,6 +792,10 @@ wants the reason to survive it.
   reader: the signature, IHDR first with 11.2.2's thirteen bytes, IEND last and
   empty, every chunk's CRC recomputed over its type and its data, and the IDAT
   payload equal to `zlib_compress` of the filtered stream.
+- `crates/tinker-pdf/tests/png_input.rs` — `Bitmap::from_png`, the other
+  direction of the same mapping: the round trip through `to_png` exact for
+  every page format, and every expectation named from the bytes the test wrote
+  rather than decoded a second way.
 - `crates/tinker-pdf/tests/png_output.rs` — `Bitmap::to_png` over all six
   `PixelFormat`s, which is the half PngSuite cannot see because PngSuite has no
   `Bitmap`. It owns the format mapping: the colour type in IHDR for each, alpha

@@ -680,9 +680,9 @@ fn render_pages(
 /// `--format` switch is the one consumer in this repository that reads what
 /// this writes, `tools/pdfcmp`; the case against is that a debug tool with two
 /// output paths has one that is rarely taken and eventually wrong, and that
-/// PNM was only ever here because there was no encoder. `pdfcmp` still reads a
-/// `.pnm` from any source and takes a `.pdf` directly, which its own usage
-/// text calls the usual shape of a comparison.
+/// PNM was only ever here because there was no encoder. `pdfcmp` reads what
+/// this writes through `Bitmap::from_png`, as well as a `.pnm` from any source
+/// and a `.pdf` directly.
 ///
 /// Alpha is **kept** rather than dropped, which the PNM path could not do:
 /// `Bitmap::to_png` maps `Rgba8` onto colour type 6 and `Gray8` onto type 0.

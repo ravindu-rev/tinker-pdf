@@ -32,6 +32,7 @@ pub mod layers;
 pub mod mdp;
 mod optional;
 pub mod pdfa;
+mod png_read;
 pub mod redact;
 mod resources;
 pub mod shaping;
@@ -128,6 +129,10 @@ pub use tinker_pdf_cos::{FontKind, ProgramKey};
 /// `cbz::container` tests fixed positions and reads no further than byte 262;
 /// one kilobyte is that with room, and it is one head read either way.
 const CONTAINER_SNIFF: u64 = 1024;
+/// Why [`Bitmap::from_png`] would not read a file: the decoder's own reason,
+/// named rather than collapsed, because "not a PNG" and "a colour type Table
+/// 11.1 does not permit" are different answers to show a person.
+pub use png_read::PngReadError;
 /// Writing: creation, editing and saving.
 ///
 /// Without these on the facade a caller depending only on this crate could
@@ -309,6 +314,7 @@ pub use tinker_pdf_crypto::Permissions;
 /// writer is how a `/Rows` that is a strip's rather than an image's gets to
 /// disagree with itself.
 pub use tinker_pdf_filters::CcittParams;
+pub use tinker_pdf_filters::PngError;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, PixelRegion, RenderWarning};
 /// Signature verdicts (12.8), behind [`Document::verify_signatures`].
@@ -511,6 +517,10 @@ impl Bitmap {
     /// 16-bit file would carry eight bits of information in each pair of
     /// bytes. **A 16-bit PNG read into a `Bitmap` and written back out comes
     /// back at 8-bit precision**, which is the precision the `Bitmap` had.
+    ///
+    /// [`Bitmap::from_png`] is the other direction, and for the four formats
+    /// written byte for byte it is an exact inverse: dimensions, stride and
+    /// bytes all come back as they went out.
     ///
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
