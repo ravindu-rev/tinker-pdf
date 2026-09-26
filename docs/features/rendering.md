@@ -222,15 +222,24 @@ top-left — not points, and not PDF user space's upward `y`. The bitmap is
 already turned and already cropped, so a region indexes the picture a reader
 sees: `(0, 0, 32, 32)` of a `/Rotate 90` page is the top-left of the sideways
 picture, never the corner of the upright sheet. The mechanism is ruling 5's
-translated viewport and nothing else — `region_view_transform` composes a
-pixel translation *after* `page_view_transform`, so the same interpreter,
-the same glyphs, the same sampler and a smaller canvas draw the tile. A
-region reaching past the page is **intersected**, never slid back on, because
-a moved rectangle returns real pixels from coordinates the caller did not
-name; one that misses entirely comes back with no pixels. Both trims are
-reported as `RenderWarning::RegionClamped`. Ruling 5's byte-equality guard,
-its fixtures and the one scale-dependent exception are in
-[rulings](../rulings.md).
+one pipeline and nothing else: the page is drawn through `page_view_transform`
+whatever part of it is asked for, onto a canvas that **stands at the region's
+corner of the page** (`Canvas::origin`), so the same interpreter, the same
+glyphs, the same sampler and a smaller canvas draw the tile, and every
+coordinate they compute is the number the whole page computes. (Until
+September 2026 the region was a translation composed after the page view;
+exact as arithmetic, it rounded an ulp apart from the page and reached a byte
+at some scales — [rulings](../rulings.md) 5 records what that was.) A group's
+buffer, a soft mask's and a mesh's stand in the same frame, and the few
+decisions taken by rectangle rather than by pixel — which cells of a tiling
+lattice to composite, which neighbours a mesh's fringe reads, whether a
+lattice, a mesh or an image run is within its budget — are taken on
+rectangles the renderer keeps in the page's frame (`Bounds`), so a tile takes
+the page's decision. A region reaching past the page is **intersected**, never
+slid back on, because a moved rectangle returns real pixels from coordinates
+the caller did not name; one that misses entirely comes back with no pixels.
+Both trims are reported as `RenderWarning::RegionClamped`. Ruling 5's
+byte-equality guard and its fixtures are in [rulings](../rulings.md).
 
 **Anti-aliasing off.** `RenderOptions::antialias` is on by default; off, every
 pixel of every shape is wholly covered or not covered at all. It is one
@@ -381,11 +390,13 @@ interpreter's `Device` trait and pulls outlines, images, shadings, patterns
 and tiles through the `GlyphSource` seam — implemented by the facade's
 `PageResources`, so no COS type enters the render crate. `page_scale`,
 `page_pixels`, `page_canvas` and `page_view_transform` are the geometry
-helpers `Page::render` composes, with `region_view_transform` and
-`region_canvas_in` the two that take a `PixelRegion`. `None` is not a special
-case in the facade: it becomes the region covering the whole page, whose
-translation is zero, so a tile and a page take one code path and there is no
-un-tiled spelling left for a defect to hide in.
+helpers `Page::render` composes, with `region_canvas_in` and
+`region_canvas_clear` the two that take a `PixelRegion` — a canvas standing at
+the region's corner — and `Renderer::with_page_size` telling the renderer how
+large the page around it is. `None` is not a special case in the facade: it
+becomes the region covering the whole page, whose corner is the origin, so a
+tile and a page take one code path and there is no un-tiled spelling left for
+a defect to hide in.
 
 ## Refused by name
 
@@ -444,12 +455,15 @@ un-tiled spelling left for a defect to hide in.
   decoded layout, both refusals, and a fixed-seed campaign of random and
   mutated files that must never panic and must reach both a picture and a
   refusal more than five hundred times each.
-- Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Ten
-  fixtures over four rasterizer paths, three of them turned and three cropped,
-  tiled at 64, 37, 23 and 53 pixels against a 91×131 page and down to a
-  one-pixel lattice, each tile asserted **byte-equal** to its rectangle of the
-  whole render with no tolerance; plus the trim at the page edge and its
-  warning, a region wholly off the page, and — because tile equality alone is
+- Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Sixteen
+  fixtures over four rasterizer paths and the three kinds of canvas that stand
+  somewhere in the page — transparency and soft-mask groups, a tiling
+  pattern's cell, a mesh's buffer — five of them turned and five cropped,
+  tiled at 64, 37, 23 and 53 pixels against a 91×131 page at 0.5×, 0.75×, 1×,
+  1.5×, 2×, 3× and 4× and down to a one-pixel lattice, each tile asserted
+  **byte-equal** to its rectangle of the whole render with no tolerance at any
+  scale; a stroked rectangle whose miter corners sit on a sub-scanline, at 1×;
+  plus the trim at the page edge and its warning, a region wholly off the page, and — because tile equality alone is
   satisfied by a *consistent* mistake — two fixtures that assert which quadrant
   of the displayed picture one mark lands in, on a rotated page and on a
   cropped one. Every fixture carries an ink floor, because a blank page tiles

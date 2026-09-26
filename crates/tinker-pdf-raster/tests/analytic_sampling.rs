@@ -599,7 +599,7 @@ fn two_strips(a: u8, b: u8, conflation_free: bool) -> Vec<u8> {
                 &mut run,
                 &ImageDraw::new(source(rgb), t),
                 &mut Pyramid::new(),
-                (SIDE, SIDE),
+                (0, 0, SIDE, SIDE),
             );
         }
         run.composite(&mut canvas, 1.0, BlendMode::Normal, None, None);

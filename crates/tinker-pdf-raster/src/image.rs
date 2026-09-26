@@ -587,23 +587,22 @@ impl<'a> ImageDraw<'a> {
 /// throw them away, or keep one beside the image to reuse them.
 pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyramid) {
     let alpha = draw.alpha.clamp(0.0, 1.0);
-    let (width, height) = (canvas.width, canvas.height);
-    walk(
-        draw,
-        pyramid,
-        width,
-        height,
-        |px, py, color, covered, own| {
-            let clip = draw.clip.map_or(255, |mask| mask.at(px as i32, py as i32));
-            if clip == 0 {
-                return;
-            }
-            let effective = alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0
-                * f64::from(clip)
-                / 255.0;
-            canvas.blend_pixel_with(px, py, color, effective, draw.blend);
-        },
-    );
+    // The canvas's own device pixels, which is all a draw can reach. The walk
+    // is in device pixels — the frame every placement is stated in — and only
+    // the write below turns one into a canvas index (ruling 5).
+    let rect = canvas.device_rect();
+    walk(draw, pyramid, rect, |px, py, color, covered, own| {
+        let clip = draw.clip.map_or(255, |mask| mask.at(px, py));
+        if clip == 0 {
+            return;
+        }
+        let Some((x, y)) = canvas.local(px, py) else {
+            return;
+        };
+        let effective =
+            alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0 * f64::from(clip) / 255.0;
+        canvas.blend_pixel_with(x, y, color, effective, draw.blend);
+    });
 }
 
 /// Adds an image draw to a run instead of compositing it.
@@ -613,41 +612,44 @@ pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyram
 /// element for compositing purposes, which is the whole reason abutting strips
 /// stop conflating. See [`crate::fragments`].
 ///
-/// `bounds` is the canvas extent the draw is clipped to, which is the same
+/// `canvas` is the device rectangle the draw is clipped to, as `(x0, y0,
+/// width, height)` — the canvas's [`Canvas::device_rect`], which is the same
 /// extent [`draw_image`] would have used.
 pub fn accumulate_image(
     fragments: &mut Fragments,
     draw: &ImageDraw<'_>,
     pyramid: &mut Pyramid,
-    canvas: (u32, u32),
+    canvas: (i32, i32, u32, u32),
 ) {
-    walk(
-        draw,
-        pyramid,
-        canvas.0,
-        canvas.1,
-        |px, py, color, covered, own| {
-            fragments.add(
-                px,
-                py,
-                color,
-                mul255(u32::from(covered), u32::from(own)) as u8,
-            );
-        },
-    );
+    walk(draw, pyramid, canvas, |px, py, color, covered, own| {
+        fragments.add(
+            px,
+            py,
+            color,
+            mul255(u32::from(covered), u32::from(own)) as u8,
+        );
+    });
 }
 
-/// The device pixels an image draw can reach, as `(x0, y0, width, height)`.
+/// The device pixels an image draw can reach on a canvas at the origin, as
+/// `(x0, y0, width, height)`.
 ///
 /// What a caller needs to size a run before accumulating into one, and the
 /// same rectangle the draw itself will visit.
 #[must_use]
 pub fn image_bounds(t: &Transform, width: u32, height: u32) -> Option<(i32, i32, u32, u32)> {
-    let (x0, x1, y0, y1) = device_bounds(t, width, height)?;
+    image_bounds_in(t, (0, 0, width, height))
+}
+
+/// [`image_bounds`] against a canvas's device rectangle, `(x0, y0, width,
+/// height)`, wherever it stands.
+#[must_use]
+pub fn image_bounds_in(t: &Transform, rect: (i32, i32, u32, u32)) -> Option<(i32, i32, u32, u32)> {
+    let (x0, x1, y0, y1) = device_bounds(t, rect)?;
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
-    Some((x0 as i32, y0 as i32, x1 - x0, y1 - y0))
+    Some((x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)))
 }
 
 /// The coverage an image draw puts on each device pixel of a region.
@@ -680,9 +682,8 @@ pub fn image_coverage(
 fn walk(
     draw: &ImageDraw<'_>,
     pyramid: &mut Pyramid,
-    width: u32,
-    height: u32,
-    mut emit: impl FnMut(u32, u32, Color, u8, u8),
+    rect: (i32, i32, u32, u32),
+    mut emit: impl FnMut(i32, i32, Color, u8, u8),
 ) {
     let image = &draw.image;
     if image.width == 0 || image.height == 0 {
@@ -692,7 +693,7 @@ fn walk(
         return; // A degenerate transform maps the image to nothing.
     };
 
-    let Some((x0, x1, y0, y1)) = device_bounds(&draw.unit_to_device, width, height) else {
+    let Some((x0, x1, y0, y1)) = device_bounds(&draw.unit_to_device, rect) else {
         return;
     };
 
@@ -714,10 +715,10 @@ fn walk(
     // cancellation. `docs/design/image-edges.md` records what this trades.
     let mut shape = unit_quad(
         &draw.unit_to_device,
-        x0 as i32,
-        y0 as i32,
-        x1 - x0,
-        y1 - y0,
+        x0,
+        y0,
+        x1.abs_diff(x0),
+        y1.abs_diff(y0),
         draw.stop,
     );
     if !draw.antialias {
@@ -735,7 +736,7 @@ fn walk(
             return;
         }
         for px in x0..x1 {
-            let covered = shape.at(px as i32, py as i32);
+            let covered = shape.at(px, py);
             if covered == 0 {
                 continue;
             }
@@ -832,8 +833,13 @@ fn unit_quad(
     )
 }
 
-/// The destination pixels the unit square can reach, clipped to the canvas.
-fn device_bounds(t: &Transform, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+/// The destination pixels the unit square can reach, clipped to the canvas's
+/// device rectangle, as `(x0, x1, y0, y1)` with the far edges exclusive.
+///
+/// Each edge is clamped into the rectangle independently, so an image wholly
+/// off one side comes back with its far edge at or below its near one — which
+/// every caller reads as "nothing to draw".
+fn device_bounds(t: &Transform, rect: (i32, i32, u32, u32)) -> Option<(i32, i32, i32, i32)> {
     let corners = [
         t.apply(0.0, 0.0),
         t.apply(1.0, 0.0),
@@ -848,10 +854,20 @@ fn device_bounds(t: &Transform, width: u32, height: u32) -> Option<(u32, u32, u3
     }
     let xs = corners.iter().map(|(x, _)| *x);
     let ys = corners.iter().map(|(_, y)| *y);
-    let x0 = xs.clone().fold(f64::INFINITY, f64::min).floor().max(0.0) as u32;
-    let x1 = (xs.fold(f64::NEG_INFINITY, f64::max).ceil().max(0.0) as u32).min(width);
-    let y0 = ys.clone().fold(f64::INFINITY, f64::min).floor().max(0.0) as u32;
-    let y1 = (ys.fold(f64::NEG_INFINITY, f64::max).ceil().max(0.0) as u32).min(height);
+    let (left, top) = (f64::from(rect.0), f64::from(rect.1));
+    let right = left + f64::from(rect.2);
+    let bottom = top + f64::from(rect.3);
+    // In `f64` until the clamp is done: a corner at 1e300 must land on the
+    // canvas edge rather than saturate somewhere past it. Both ends of the
+    // clamp are integers well inside `i32`, so the conversion is exact.
+    let x0 = xs.clone().fold(f64::INFINITY, f64::min).floor().max(left);
+    let x1 = xs.fold(f64::NEG_INFINITY, f64::max).ceil().min(right);
+    let y0 = ys.clone().fold(f64::INFINITY, f64::min).floor().max(top);
+    let y1 = ys.fold(f64::NEG_INFINITY, f64::max).ceil().min(bottom);
+    let x0 = x0.min(right) as i32;
+    let y0 = y0.min(bottom) as i32;
+    let x1 = x1.max(left) as i32;
+    let y1 = y1.max(top) as i32;
     Some((x0, x1, y0, y1))
 }
 

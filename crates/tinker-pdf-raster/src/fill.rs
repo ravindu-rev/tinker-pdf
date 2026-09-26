@@ -130,11 +130,26 @@ impl Mask {
     /// the page for a comma. Every consumer walks this.
     #[must_use]
     pub fn overlap(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        self.overlap_at((0, 0), width, height)
+    }
+
+    /// [`Mask::overlap`] for a canvas standing at device pixel `origin`: the
+    /// canvas pixels this mask can reach, **in the canvas's own indices**, so
+    /// device pixel `(origin.0 + x, origin.1 + y)` is canvas pixel `(x, y)`.
+    ///
+    /// The mask stays in device pixels and the canvas says where it is, which
+    /// is what keeps a tile's arithmetic in the page's frame (ruling 5).
+    #[must_use]
+    pub fn overlap_at(&self, origin: (i32, i32), width: u32, height: u32) -> (u32, u32, u32, u32) {
         let clamp = |value: i64, limit: u32| value.clamp(0, i64::from(limit)) as u32;
-        let x0 = clamp(i64::from(self.x0), width);
-        let y0 = clamp(i64::from(self.y0), height);
-        let x1 = clamp(i64::from(self.x0) + i64::from(self.width), width);
-        let y1 = clamp(i64::from(self.y0) + i64::from(self.height), height);
+        let (left, top) = (
+            i64::from(self.x0) - i64::from(origin.0),
+            i64::from(self.y0) - i64::from(origin.1),
+        );
+        let x0 = clamp(left, width);
+        let y0 = clamp(top, height);
+        let x1 = clamp(left + i64::from(self.width), width);
+        let y1 = clamp(top + i64::from(self.height), height);
         (x0, y0, x1.max(x0), y1.max(y0))
     }
 

@@ -328,18 +328,17 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n"
 /// drawn in a `/BBox` of `[0 0 60 40]`.
 ///
 /// The frame's corners are placed **off** the filler's sixteenth-of-a-pixel
-/// grid on purpose, and the reason is a defect this file found and does not
-/// fix. A stroked rectangle whose miter corners land exactly on a sub-scanline
-/// — `3 3 54 34 re` at width 4, say — renders differently in a tile than in the
-/// page under it, at 1x: four pixels, by 15 levels, one sixteenth of a pixel's
-/// coverage each. The corner the stroker computes sits an ulp above the
-/// sub-scanline in one frame and an ulp below it in the other, and `fill`
-/// takes an edge's first sub-scanline as `ceil(y × 16)` with nothing to absorb
-/// the ulp. It is ruling 5's named exception reached through a stroke instead
-/// of a shading, it is independent of anything rendered here — a page with the
-/// same frame in its own content stream shows it, with no annotation in sight
-/// — and fixing it moves committed fingerprints, so it is reported instead.
-/// The same-frame comparison below does not depend on it either way.
+/// grid, and the reason is a defect this file found. A stroked rectangle whose
+/// miter corners land exactly on a sub-scanline — `3 3 54 34 re` at width 4,
+/// say — rendered differently in a tile than in the page under it, at 1x: four
+/// pixels, by 15 levels, one sixteenth of a pixel's coverage each, because a
+/// tile then had a frame of its own an ulp away from the page's and `fill`
+/// takes an edge's first sub-scanline as `ceil(y × 16)`. It was independent of
+/// anything rendered here, and it is **fixed**: a tile now stands in the page's
+/// one frame, and `render_regions.rs`'s
+/// `a_stroke_whose_corners_sit_on_a_sub_scanline_tiles_exactly_at_1x` holds
+/// that page with the frame on the grid. This fixture keeps its corners off
+/// the grid because the same-frame comparison below never depended on it.
 const FRAME: &str = "1 0 0 RG 4 w 3.3 2.7 53.4 34.6 re S 0 0 1 RG 1.5 w 8 8 m 52 32 l S";
 
 /// A page of 150 x 100 points whose content draws one grey rectangle, with an

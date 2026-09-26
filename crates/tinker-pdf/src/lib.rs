@@ -2017,11 +2017,11 @@ impl Page {
         // The rotation and the crop-box origin belong in the transform, not
         // only in the canvas size: sizing for a rotated page and then drawing
         // it upright fills a sideways canvas with clipped, upright content.
-        // The region's own translation composes after both, which is what
-        // makes it a rectangle of the displayed picture rather than of the
-        // upright sheet.
+        // The region is *not* in the transform: the page is drawn through the
+        // one transform whatever part of it is asked for, and the canvas
+        // stands at the region's corner of the displayed picture (ruling 5).
         let crop = self.crop_box();
-        let base = tinker_pdf_render::region_view_transform(crop, self.rotation(), applied, view);
+        let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), applied);
 
         let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
 
@@ -2053,6 +2053,7 @@ impl Page {
         };
 
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources)
+            .with_page_size(full_width, full_height)
             .with_antialias(options.antialias);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
@@ -2102,7 +2103,7 @@ impl Page {
         let canvas = if canvas.format == wanted {
             canvas
         } else {
-            canvas.extract((0, 0), canvas.width, canvas.height, wanted)
+            canvas.extract(canvas.origin(), canvas.width, canvas.height, wanted)
         };
 
         let mut bitmap = Bitmap {

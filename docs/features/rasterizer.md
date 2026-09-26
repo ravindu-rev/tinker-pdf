@@ -125,6 +125,23 @@ source's rectangle, and a canvas can carry the initial backdrop of a
 non-isolated transparency group (11.4.4) so that 11.4.7.2's removal step has
 the alpha it needs.
 
+**A canvas is a rectangle of a page.** `Canvas::origin` is the device pixel
+its top-left is — `(0, 0)` for a canvas that is the whole page, a tile's
+corner for a tile, a group's corner for a group's buffer — and every mask,
+every sampled coordinate and every `at` the crate is handed is in **device**
+pixels of the page. Only the index into `Canvas::data` subtracts the origin,
+which is an integer subtraction and cannot round. `Mask::overlap_at`,
+`image_bounds_in`, `Fragments` and `Canvas::composite`/`extract` all read it.
+This is ruling 5's lattice ([rulings](../rulings.md)): until September 2026 a
+region was drawn in a frame of its own, the page's transform less its corner,
+and `fl(u + e)` against `fl(u + e − tx)` put a tile and the page under it an
+ulp apart wherever the exact value sat on one of this crate's grids — a
+shading's colour step, and an edge's first sub-scanline, which `fill` takes as
+`ceil(y × 16)` with nothing to absorb an ulp. One frame makes every coordinate
+one number. The image quad's snap to the 1/256 grid, below, was the earlier
+defence against the same thing and is kept: it is the reason a *cropped* page
+and the page under it agree, which is a different transform and not a region.
+
 **Images.** `draw_image` maps every destination pixel backwards through the
 inverse transform into the samples — a forward map leaves seams and
 double-writes. Three things decide what a pixel gets: how much of it the image
@@ -211,7 +228,13 @@ one `MeshBuffer` — coverage from a single non-zero fill over every triangle,
 colour from a barycentric walk that interpolates the vertex inputs and only
 then asks the caller's closure what colour they are. One buffer rather than
 one fill per triangle is what removes the lattice of pale seams that
-per-triangle compositing paints along every shared edge.
+per-triangle compositing paints along every shared edge. A silhouette pixel no
+triangle's interior reaches takes its colour from a neighbour, spread two
+rounds outward, so what a pixel gets depends on two pixels around it:
+`draw_mesh_over` draws the part of the mesh a caller wants widened by that
+reach and kept inside the region a render of the whole page uses, and measures
+`MAX_MESH_WORK` over the whole region, so a tile's mesh is the page's mesh
+pixel for pixel and a tile refuses exactly the meshes the page refuses.
 
 **Cost and cancellation.** A paint costs what it covers: the caller asks for
 a region per shape clipped to the clip's rectangle, every consumer walks the
@@ -250,7 +273,8 @@ The crate root re-exports the working set: `Path`, `Verb`, `Point`,
 `FillRule`, `flatten`; `fill`, `Mask`; `stroke`, `StrokeStyle`, `LineCap`,
 `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `Transform`, `Filter`,
-`Sampling`, `Pyramid`; `draw_mesh`, `MeshDraw`, `MeshBuffer`. The bridge
+`Sampling`, `Pyramid`, `image_bounds_in`; `draw_mesh`, `draw_mesh_over`,
+`MeshDraw`, `MeshBuffer`. The bridge
 from PDF vocabulary — `/BM` names to `BlendMode`, content-stream operators
 to paths — lives one layer up, in [rendering](rendering.md).
 

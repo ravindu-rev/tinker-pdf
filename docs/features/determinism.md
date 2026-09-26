@@ -89,6 +89,14 @@ the first of this file's two failure modes — the same target renders
 differently — and not the second, which is why the hash was updated rather than
 investigated.
 
+**The canvas-origin change of the same month moved none of them, and that was
+its check.** Every canvas — a tile, a group's buffer, a soft mask's, a mesh's —
+is now drawn in the page's one frame rather than in a frame translated to its
+corner ([rulings](../rulings.md) 5). That changed what a *region* computes and
+was meant to leave every whole page's pixels where they were; the fingerprints
+are all of whole pages, so every one of them holding still, natively and under
+`wasm32-wasip1`, is the evidence that it did.
+
 Beside them, **three document byte-hashes** pin the writer as well as the
 renderer: a synthesised PDF, a synthesised fixed-layout document and a
 synthesised book are each hashed as *bytes*, which is where object
