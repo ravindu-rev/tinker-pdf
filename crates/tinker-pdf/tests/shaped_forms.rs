@@ -310,7 +310,7 @@ fn form_document(fixture: &Fixture<'_>) -> Arc<CosDocument> {
 /// Fills the field and returns the widget's regenerated appearance stream.
 ///
 /// Saved and reopened rather than read out of the editor's overlay, which is
-/// the pattern `edit.rs`'s own appearance tests use: what a viewer will see is
+/// the pattern `edit/tests.rs`'s own appearance tests use: what a viewer will see is
 /// what the writer emitted, and a stream still in the overlay has no encoded
 /// bytes to decode.
 fn filled(doc: &Arc<CosDocument>, value: &str) -> (Arc<CosDocument>, String) {
