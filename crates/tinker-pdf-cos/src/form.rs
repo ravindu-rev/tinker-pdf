@@ -15,6 +15,7 @@ use crate::doc::CosDocument;
 use crate::limits;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
+use crate::resolve::Resolve;
 use crate::text_string::decode_text_string;
 
 /// What a field does (12.7.4).
@@ -268,6 +269,13 @@ impl Field {
 /// The document's `/AcroForm` dictionary.
 #[must_use]
 pub fn acro_form(doc: &CosDocument) -> Option<Dict> {
+    acro_form_in(doc)
+}
+
+/// The `/AcroForm` dictionary as a [`Resolve`] view has it — an editor's own
+/// catalog, when it has changed one.
+#[must_use]
+pub fn acro_form_in<R: Resolve + ?Sized>(doc: &R) -> Option<Dict> {
     let catalog = doc.catalog()?;
     doc.resolve_key(&catalog, doc.intern(b"AcroForm"))
         .as_dict()
@@ -290,7 +298,12 @@ pub fn needs_appearances(doc: &CosDocument) -> bool {
 /// font.
 #[must_use]
 pub fn default_resources(doc: &CosDocument) -> Option<Dict> {
-    let form = acro_form(doc)?;
+    default_resources_in(doc)
+}
+
+/// [`default_resources`] through a view.
+pub(crate) fn default_resources_in<R: Resolve + ?Sized>(doc: &R) -> Option<Dict> {
+    let form = acro_form_in(doc)?;
     doc.resolve_key(&form, doc.intern(b"DR")).as_dict().cloned()
 }
 
@@ -307,7 +320,19 @@ pub fn fields(doc: &CosDocument) -> Vec<Field> {
 /// The same walk, spending a budget the caller owns.
 #[must_use]
 pub fn fields_within(doc: &CosDocument, budget: &mut ScriptBudget) -> Vec<Field> {
-    let Some(form) = acro_form(doc) else {
+    fields_in(doc, budget)
+}
+
+/// The same walk through a [`Resolve`] view: every object the tree reaches is
+/// read as the view has it.
+///
+/// Over a [`crate::edit::DocumentEditor`] that means a field the editor has
+/// put and listed in `/Fields` is found, and a value it has written is the
+/// value read — including one inherited from a parent it has changed, which
+/// is what a reader of the saved file would see.
+#[must_use]
+pub fn fields_in<R: Resolve + ?Sized>(doc: &R, budget: &mut ScriptBudget) -> Vec<Field> {
+    let Some(form) = acro_form_in(doc) else {
         return Vec::new();
     };
     let roots = doc.resolve_key(&form, doc.intern(b"Fields"));
@@ -358,8 +383,8 @@ struct Inherited {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn walk(
-    doc: &CosDocument,
+fn walk<R: Resolve + ?Sized>(
+    doc: &R,
     reference: ObjRef,
     prefix: &str,
     inherited: &Inherited,
@@ -479,7 +504,7 @@ fn walk(
     visited.remove(&reference.num);
 }
 
-fn classify(doc: &CosDocument, kind: Name, flags: i64) -> FieldKind {
+fn classify<R: Resolve + ?Sized>(doc: &R, kind: Name, flags: i64) -> FieldKind {
     let Some(bytes) = doc.name_bytes(kind) else {
         return FieldKind::Unknown;
     };
@@ -518,7 +543,7 @@ pub fn field_value(doc: &CosDocument, value: Option<&Object>, kind: FieldKind) -
     read_value(doc, value, kind)
 }
 
-fn read_value(doc: &CosDocument, value: Option<&Object>, kind: FieldKind) -> FieldValue {
+fn read_value<R: Resolve + ?Sized>(doc: &R, value: Option<&Object>, kind: FieldKind) -> FieldValue {
     let Some(value) = value else {
         return FieldValue::None;
     };
@@ -556,7 +581,7 @@ fn read_value(doc: &CosDocument, value: Option<&Object>, kind: FieldKind) -> Fie
 
 /// A choice field's `/Opt`, which is either strings or `[export, display]`
 /// pairs (12.7.4.4).
-fn options(doc: &CosDocument, dict: &Dict) -> Vec<String> {
+fn options<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Vec<String> {
     let value = doc.resolve_key(dict, doc.intern(b"Opt"));
     let Some(items) = value.as_array() else {
         return Vec::new();
@@ -582,7 +607,11 @@ fn options(doc: &CosDocument, dict: &Dict) -> Vec<String> {
 /// `/JS` is a text string or a stream holding one — a producer writes the
 /// stream form as soon as the script is longer than a line, so reading only
 /// the string form finds almost none of the scripts that matter.
-fn read_js(doc: &CosDocument, action: &Dict, budget: &mut ScriptBudget) -> Option<Script> {
+fn read_js<R: Resolve + ?Sized>(
+    doc: &R,
+    action: &Dict,
+    budget: &mut ScriptBudget,
+) -> Option<Script> {
     let js = action.get(doc.intern(b"JS"))?;
     let bytes: Vec<u8> = match js {
         Object::String(text) => text.bytes.clone(),
@@ -607,8 +636,8 @@ fn read_js(doc: &CosDocument, action: &Dict, budget: &mut ScriptBudget) -> Optio
 }
 
 /// One entry of an additional-actions dictionary.
-fn action_js(
-    doc: &CosDocument,
+fn action_js<R: Resolve + ?Sized>(
+    doc: &R,
     aa: &Dict,
     key: &[u8],
     budget: &mut ScriptBudget,
@@ -618,7 +647,11 @@ fn action_js(
 }
 
 /// A field's `/AA` scripts (12.6.3, table 198).
-fn field_scripts(doc: &CosDocument, dict: &Dict, budget: &mut ScriptBudget) -> FieldScripts {
+fn field_scripts<R: Resolve + ?Sized>(
+    doc: &R,
+    dict: &Dict,
+    budget: &mut ScriptBudget,
+) -> FieldScripts {
     let aa = doc.resolve_key(dict, doc.intern(b"AA"));
     let Some(aa) = aa.as_dict() else {
         return FieldScripts::default();
@@ -842,6 +875,11 @@ pub fn script_summary(doc: &CosDocument) -> ScriptSummary {
 /// `/Yes` ticks the wrong box.
 #[must_use]
 pub fn on_state(doc: &CosDocument, widget: ObjRef) -> Option<Name> {
+    on_state_in(doc, widget)
+}
+
+/// [`on_state`] through a view.
+pub(crate) fn on_state_in<R: Resolve + ?Sized>(doc: &R, widget: ObjRef) -> Option<Name> {
     let object = doc.get(widget).ok()?;
     let dict = object.as_dict()?;
     let ap = doc.resolve_key(dict, doc.intern(b"AP"));

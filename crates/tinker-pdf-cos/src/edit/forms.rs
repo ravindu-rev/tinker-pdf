@@ -107,15 +107,19 @@ impl core::fmt::Display for SkippedWidget {
 impl DocumentEditor {
     /// The document's form fields (12.7), **as this editor has them**.
     ///
-    /// The tree walk reads the document underneath the overlay, so a field
-    /// this editor has already written would otherwise come back with the
-    /// value it was saved with. Nothing depended on that before — `accepts`
-    /// looks at the kind and the flags, not the value — but a calculation
-    /// reads the values it computes from, and one that read them from under
-    /// its own writes would compute a total from inputs the file no longer
-    /// has. The value is taken from the overlay whenever the field's object is
-    /// in it, present *or* absent, because 12.7.5.3's reset removes `/V`
-    /// rather than blanking it and "absent" is an answer.
+    /// The tree is walked through the editor itself ([`crate::Resolve`]), so
+    /// every object on the way is read overlay first: a field this editor has
+    /// put and listed in `/Fields` is found, and a value it has written is
+    /// the value read. A calculation reads the values it computes from, and
+    /// one that read them from under its own writes would compute a total
+    /// from inputs the file no longer has. An absent `/V` is read as absent,
+    /// or as the parent's where there is one (12.7.3.1), which is what a
+    /// reader of the saved file sees — 12.7.5.3's reset removes `/V` rather
+    /// than blanking it, and "absent" is an answer.
+    ///
+    /// This used to walk the *file* and then patch in the `/V` of any field
+    /// whose own object the overlay held, which found no field the editor had
+    /// added and no value inherited from a parent it had changed.
     #[must_use]
     pub fn fields(&self) -> Vec<form::Field> {
         self.fields_within(&mut form::ScriptBudget::new())
@@ -128,21 +132,7 @@ impl DocumentEditor {
     /// starting from the total apiece.
     #[must_use]
     pub fn fields_within(&self, budget: &mut form::ScriptBudget) -> Vec<form::Field> {
-        let mut fields = form::fields_within(&self.doc, budget);
-        if self.overlay.is_empty() && self.deleted.is_empty() {
-            return fields;
-        }
-        let v = self.intern(b"V");
-        for field in &mut fields {
-            if !self.overlay.contains_key(&field.reference.num) {
-                continue;
-            }
-            let Some(Object::Dict(dict)) = self.get(field.reference) else {
-                continue;
-            };
-            field.value = form::field_value(&self.doc, dict.get(v), field.kind);
-        }
-        fields
+        form::fields_in(self, budget)
     }
 
     /// Fills a text or choice field, rebuilding its appearance.
@@ -400,7 +390,7 @@ impl DocumentEditor {
                 let Some(widget) = field.widgets.first() else {
                     return Err(());
                 };
-                match form::on_state(&tx.doc, *widget) {
+                match form::on_state_in(&*tx, *widget) {
                     Some(state) => state,
                     // Without an appearance for the on state there is nothing
                     // to draw, and setting /V alone would leave a box that
@@ -548,8 +538,11 @@ impl DocumentEditor {
     /// Rewrites a text field's appearance for a value already stored,
     /// returning the widgets it could not draw.
     fn regenerate_text(&mut self, field: &form::Field, value: &str) -> Vec<SkippedWidget> {
-        let resources = form::default_resources(&self.doc);
-        let quadding = fill::quadding(&self.doc, field);
+        // Read through the overlay: a widget or a form this editor has
+        // changed is drawn as it now is. The font program itself is still
+        // loaded from the file by `text_appearance`.
+        let resources = form::default_resources_in(self);
+        let quadding = fill::quadding_in(self, field);
         let multiline = field.flags & fill::MULTILINE != 0;
         let comb = (field.flags & fill::COMB != 0)
             .then_some(field.max_len)
@@ -557,7 +550,7 @@ impl DocumentEditor {
 
         let mut skipped = Vec::new();
         for widget in &field.widgets {
-            let Some(rect) = fill::widget_rect(&self.doc, *widget) else {
+            let Some(rect) = fill::widget_rect_in(self, *widget) else {
                 // 12.5.2 Table 164 makes /Rect required, so this is a damaged
                 // file rather than a widget with nothing to draw. It used to
                 // be a bare `continue` and the field still reported success.
@@ -567,7 +560,7 @@ impl DocumentEditor {
                 });
                 continue;
             };
-            let da = fill::appearance_string(&self.doc, field, *widget);
+            let da = fill::appearance_string_in(self, field, *widget);
             let stream = fill::text_appearance(
                 &self.doc,
                 rect,
@@ -626,32 +619,35 @@ impl DocumentEditor {
     /// Leaving it set asks every viewer to throw away what was just written
     /// and rebuild it from its own idea of the field, which is how a correctly
     /// filled form comes out looking different in each one.
+    ///
+    /// The form is found through this editor's own catalog. It was read from
+    /// the file's, which cost twice when `/AcroForm` sits directly in the
+    /// catalog: the flag an earlier edit had set was not seen, and the file's
+    /// catalog was written back over every earlier change to it.
     fn clear_need_appearances(&mut self) {
-        let Some(catalog) = self.doc.catalog() else {
+        let key = self.intern(b"AcroForm");
+        let flag = self.intern(b"NeedAppearances");
+        let Some(catalog) = self.catalog() else {
             return;
         };
-        let Some(form_ref) = catalog.get_ref(self.intern(b"AcroForm")) else {
+        match catalog.get(key) {
+            Some(Object::Ref(form_ref)) => {
+                let form_ref = *form_ref;
+                let Some(Object::Dict(form)) = self.get(form_ref) else {
+                    return;
+                };
+                self.put(form_ref, Object::Dict(without(&form, flag)));
+            }
             // A direct /AcroForm cannot be replaced without rewriting the
             // catalog, which is done here rather than skipped.
-            let key = self.intern(b"AcroForm");
-            let Some(form) = catalog.get_dict(key).cloned() else {
-                return;
-            };
-            let cleaned = without(&form, self.intern(b"NeedAppearances"));
-            let Some(root) = self.doc.trailer().get_ref(Name::ROOT) else {
-                return;
-            };
-            let mut updated = (*catalog).clone();
-            updated.insert(key, Object::Dict(cleaned));
-            self.put(root, Object::Dict(updated));
-            return;
-        };
-
-        let Some(Object::Dict(form)) = self.get(form_ref) else {
-            return;
-        };
-        let cleaned = without(&form, self.intern(b"NeedAppearances"));
-        self.put(form_ref, Object::Dict(cleaned));
+            Some(Object::Dict(form)) => {
+                let cleaned = without(form, flag);
+                self.update_catalog(|catalog| {
+                    catalog.insert(key, Object::Dict(cleaned));
+                });
+            }
+            _ => {}
+        }
     }
 
     /// The interactive form, read **through this editor's own changes**, and
@@ -664,10 +660,7 @@ impl DocumentEditor {
     /// the file came out structurally valid, strict-clean, and carrying a
     /// signature dictionary no field pointed at.
     pub(super) fn acroform(&mut self) -> Option<(FormHome, Dict)> {
-        let root = self.doc.trailer().get_ref(Name::ROOT)?;
-        let Some(Object::Dict(catalog)) = self.get(root) else {
-            return None;
-        };
+        let catalog = self.catalog()?;
         let key = self.intern(b"AcroForm");
         match catalog.get(key) {
             Some(Object::Ref(form_ref)) => {
@@ -677,24 +670,22 @@ impl DocumentEditor {
                 };
                 Some((FormHome::Indirect(*form_ref), form))
             }
-            Some(Object::Dict(form)) => Some((FormHome::InCatalog(root), form.clone())),
+            Some(Object::Dict(form)) => Some((FormHome::InCatalog, form.clone())),
             // A document with no `/AcroForm` gets one, written into the
             // catalog: an indirect form would need an object number for a
             // dictionary with two entries in it.
-            _ => Some((FormHome::InCatalog(root), Dict::new())),
+            _ => Some((FormHome::InCatalog, Dict::new())),
         }
     }
 
     pub(super) fn put_acroform(&mut self, home: FormHome, form: Dict) {
         match home {
             FormHome::Indirect(form_ref) => self.put(form_ref, Object::Dict(form)),
-            FormHome::InCatalog(root) => {
-                let Some(Object::Dict(mut catalog)) = self.get(root) else {
-                    return;
-                };
+            FormHome::InCatalog => {
                 let key = self.intern(b"AcroForm");
-                catalog.insert(key, Object::Dict(form));
-                self.put(root, Object::Dict(catalog));
+                self.update_catalog(|catalog| {
+                    catalog.insert(key, Object::Dict(form));
+                });
             }
         }
     }
@@ -706,6 +697,7 @@ impl DocumentEditor {
 pub(super) enum FormHome {
     /// Its own object.
     Indirect(ObjRef),
-    /// Directly inside the catalog, whose reference this is.
-    InCatalog(ObjRef),
+    /// Directly inside the catalog, which is written back through
+    /// [`DocumentEditor::update_catalog`].
+    InCatalog,
 }

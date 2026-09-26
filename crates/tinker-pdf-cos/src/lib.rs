@@ -63,6 +63,7 @@ pub mod pages;
 pub mod parse;
 pub mod png_embed;
 pub mod pubsec;
+pub mod resolve;
 pub mod script;
 pub mod security;
 pub mod sign;
@@ -126,6 +127,7 @@ pub use pages::{Page, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use pubsec::{PubSecError, Recipient};
+pub use resolve::Resolve;
 pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{

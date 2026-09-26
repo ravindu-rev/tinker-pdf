@@ -98,8 +98,10 @@ value diff would report every object of an encrypted document as changed.
 finishes the file, patches `/ByteRange` to describe what it finished, digests
 the covered spans and hands the digest to a `Signer` that returns finished CMS
 bytes. It can certify the document at any of 12.8.2.2's three levels and lock
-fields per 12.8.2.4. The writer and the reader share one `digest_spans`, so
-what is signed and what is checked cannot drift.
+fields per 12.8.2.4; a certifying save writes the catalog's `/Perms /DocMDP`
+(12.8.4), which until September 2026 it computed after the update's objects
+had been gathered and so never wrote. The writer and the reader share one
+`digest_spans`, so what is signed and what is checked cannot drift.
 
 ## API
 
