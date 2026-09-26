@@ -1313,7 +1313,7 @@ fn write_top(dict: &[(u16, Vec<f64>)], at: &Offsets, is_cid: bool) -> Option<Vec
 /// A DICT operand as a position in the file, refusing anything that is not
 /// one.
 fn usize_from(value: f64) -> Option<usize> {
-    if !value.is_finite() || value < 0.0 || value > 2_147_483_647.0 {
+    if !value.is_finite() || !(0.0..=2_147_483_647.0).contains(&value) {
         return None;
     }
     Some(value as usize)
