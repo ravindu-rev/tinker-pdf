@@ -151,6 +151,31 @@ impl Mask {
         self.data.get(index).copied().unwrap_or(0)
     }
 
+    /// Every pixel fully covered or fully uncovered: coverage of at least half
+    /// becomes 255, anything less becomes 0.
+    ///
+    /// What turning anti-aliasing off means here. The threshold is on the
+    /// coverage `fill` already measured rather than a second sampling rule
+    /// beside it, so a hard edge lands where the soft one is half-way — the
+    /// shape keeps its area rather than growing by a pixel on every side —
+    /// and it is a function of one pixel's coverage alone, so a tile and the
+    /// page under it still agree (ruling 5).
+    ///
+    /// **Two shapes sharing an edge partition the pixels along it.** A value
+    /// here is `floor(units / 16)` of the 4 096 units a pixel holds, so it is
+    /// at least 128 exactly when the shape holds at least 2 048 units; two
+    /// shapes that split a pixel's units between them therefore split the
+    /// pixel too, except at an exact half, where both take it. Neither leaves
+    /// a gap, which a threshold above one half would.
+    ///
+    /// The price is the one every such threshold pays: a feature narrower than
+    /// half a pixel can vanish where it straddles a pixel edge.
+    pub fn harden(&mut self) {
+        for value in &mut self.data {
+            *value = if *value >= 128 { 255 } else { 0 };
+        }
+    }
+
     /// Intersects with another mask, multiplying coverages.
     ///
     /// How clipping composes: a clip stack is the product of its masks, and
@@ -628,6 +653,68 @@ mod tests {
         assert_eq!(mask.at(7, 3), 0, "right of it");
         assert_eq!(mask.at(2, 2), 0, "above it");
         assert_eq!(mask.at(2, 7), 0, "below it");
+    }
+
+    /// A hardened mask holds the two extremes and nothing between, and where
+    /// the soft one was already whole or empty it is unchanged.
+    #[test]
+    fn a_hardened_mask_is_whole_or_empty_everywhere() {
+        let mut path = Path::new();
+        path.move_to(1.3, 2.7);
+        path.curve_to(18.1, 0.4, 19.9, 16.5, 2.2, 17.1);
+        path.close();
+        let soft = fill(&path, FillRule::NonZero, 0, 0, 20, 20, 0.1, None);
+        assert!(
+            soft.data.iter().any(|v| *v != 0 && *v != 255),
+            "the fixture has partial pixels to harden"
+        );
+        let mut hard = soft.clone();
+        hard.harden();
+        for (soft, hard) in soft.data.iter().zip(&hard.data) {
+            assert!(*hard == 0 || *hard == 255, "{hard} is neither");
+            let expected = if *soft >= 128 { 255 } else { 0 };
+            assert_eq!(*hard, expected, "a soft {soft} hardens to {expected}");
+        }
+    }
+
+    /// **Two shapes sharing an edge leave no gap and no double-painting
+    /// between them once hardened**, except at an exact half. The edge is a
+    /// diagonal across a square, so every pixel along it is split between the
+    /// two triangles at a different ratio.
+    #[test]
+    fn hardened_shapes_sharing_an_edge_partition_its_pixels() {
+        let triangle = |corner: (f64, f64)| {
+            let mut path = Path::new();
+            path.move_to(0.5, 0.5);
+            path.line_to(corner.0, corner.1);
+            path.line_to(19.25, 17.75);
+            path.close();
+            let mut mask = fill(&path, FillRule::NonZero, 0, 0, 20, 20, 0.1, None);
+            mask.harden();
+            mask
+        };
+        let (upper, lower) = (triangle((19.25, 0.5)), triangle((0.5, 17.75)));
+        let mut square = Path::new();
+        square.rect(0.5, 0.5, 18.75, 17.25);
+        let whole = fill(&square, FillRule::NonZero, 0, 0, 20, 20, 0.1, None);
+
+        let mut both = 0;
+        for y in 0..20 {
+            for x in 0..20 {
+                if whole.at(x, y) != 255 {
+                    continue; // the square's own soft rim is not the edge's business
+                }
+                let (a, b) = (upper.at(x, y), lower.at(x, y));
+                assert!(a == 255 || b == 255, "a gap at ({x}, {y})");
+                if a == 255 && b == 255 {
+                    both += 1;
+                }
+            }
+        }
+        assert!(
+            both <= 2,
+            "{both} pixels taken by both: only an exact half may be"
+        );
     }
 
     #[test]

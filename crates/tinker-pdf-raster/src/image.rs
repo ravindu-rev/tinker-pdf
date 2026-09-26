@@ -548,6 +548,15 @@ pub struct ImageDraw<'a> {
     /// Asked once per destination row; drawing stops as soon as it answers
     /// `true`.
     pub stop: Option<&'a dyn Fn() -> bool>,
+    /// Whether the image's own edge is anti-aliased.
+    ///
+    /// `false` hardens the unit square's coverage through [`Mask::harden`],
+    /// the same threshold every path takes when anti-aliasing is off, so an
+    /// image edge and a filled edge beside it still agree about which pixels
+    /// are in. Only the *edge*: the samples inside are resampled exactly as
+    /// before, because what a pixel's colour is and whether the pixel is
+    /// covered at all are different questions.
+    pub antialias: bool,
 }
 
 impl<'a> ImageDraw<'a> {
@@ -563,6 +572,7 @@ impl<'a> ImageDraw<'a> {
             clip: None,
             tint: None,
             stop: None,
+            antialias: true,
         }
     }
 }
@@ -702,7 +712,7 @@ fn walk(
     // measured a second time here, so an image edge anti-aliases exactly as a
     // filled path does — same sub-scanline grid, same fixed point, same
     // cancellation. `docs/design/image-edges.md` records what this trades.
-    let shape = unit_quad(
+    let mut shape = unit_quad(
         &draw.unit_to_device,
         x0 as i32,
         y0 as i32,
@@ -710,6 +720,9 @@ fn walk(
         y1 - y0,
         draw.stop,
     );
+    if !draw.antialias {
+        shape.harden();
+    }
 
     let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
     let filter = sampling.filter;
@@ -1078,6 +1091,59 @@ mod tests {
         assert!(
             canvas.data.iter().all(|byte| *byte == 255),
             "an image off every side of the canvas left ink on it"
+        );
+    }
+
+    /// With anti-aliasing off, a rotated image's edge is whole or absent at
+    /// every pixel — and the same draw with it on is not, so the fixture has
+    /// an edge worth hardening. One colour of samples, so every covered pixel
+    /// must be exactly that colour and every other one exactly the page.
+    #[test]
+    fn a_hard_edged_image_covers_each_pixel_wholly_or_not_at_all() {
+        let rgb = [0u8, 160, 40].repeat(4);
+        let image = ImageSource {
+            width: 2,
+            height: 2,
+            rgb: &rgb,
+            alpha: &[],
+        };
+        // A quarter of a turn and a bit, with a translation off the grid.
+        let placement = Transform {
+            a: 20.0,
+            b: 11.0,
+            c: -11.0,
+            d: 20.0,
+            e: 17.3,
+            f: 4.6,
+        };
+        let render = |antialias: bool| {
+            let mut canvas = Canvas::new(48, 48, PixelFormat::Rgb8, Color::WHITE);
+            let draw = ImageDraw {
+                antialias,
+                ..ImageDraw::new(image, placement)
+            };
+            draw_image(&mut canvas, &draw, &mut Pyramid::new());
+            canvas
+        };
+        let partial = |canvas: &Canvas| {
+            canvas
+                .data
+                .chunks_exact(3)
+                .filter(|p| *p != [255, 255, 255] && *p != [0, 160, 40])
+                .count()
+        };
+        let (soft, hard) = (render(true), render(false));
+        assert!(partial(&soft) > 20, "the soft edge has partial pixels");
+        assert_eq!(partial(&hard), 0, "the hard edge has none");
+        let inked = hard
+            .data
+            .chunks_exact(3)
+            .filter(|p| *p == [0, 160, 40])
+            .count();
+        // The quad's area is 20² + 11² = 521 pixels.
+        assert!(
+            inked.abs_diff(521) < 30,
+            "a hard edge keeps the image's area, {inked} against 521"
         );
     }
 

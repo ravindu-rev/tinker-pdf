@@ -449,6 +449,30 @@ pub struct RenderOptions {
     /// under colour type 6 — PNG has no CMYK — and those are exactly the bytes
     /// the same render without this switch returns.
     pub allow_cmyk: bool,
+    /// Whether edges are anti-aliased. On by default.
+    ///
+    /// Off, **every pixel of every shape is either wholly covered or not
+    /// covered at all**: a text glyph, a filled or stroked path, a clip, an
+    /// image's edge, a mesh shading's silhouette and a tiling pattern's cell
+    /// all take one threshold — half a pixel's coverage — on the coverage the
+    /// rasterizer already measures, so a hard edge lands where the soft one is
+    /// half-way and a shape keeps its area. Two shapes sharing an edge split
+    /// its pixels between them rather than leaving a gap.
+    ///
+    /// Only coverage is hardened. A constant alpha, a soft mask, an image's own
+    /// alpha channel and the colours inside an image are the document's, and a
+    /// page that uses them still has intermediate values where it asked for
+    /// them. A stroke is at least one whole pixel wide with this off (8.4.3.2's
+    /// thinnest line, on a device that cannot draw part of one), because a
+    /// narrower line straddling two pixels would leave each less than half
+    /// covered and disappear. A feature of a glyph narrower than half a pixel
+    /// can still disappear where it straddles a pixel edge, which is the price
+    /// every threshold pays.
+    ///
+    /// A tile is still byte-equal to the page under it (ruling 5): the
+    /// threshold is a function of one pixel's coverage, and the coverage
+    /// already agreed.
+    pub antialias: bool,
 }
 
 impl Default for RenderOptions {
@@ -460,6 +484,7 @@ impl Default for RenderOptions {
             annotations: true,
             region: None,
             allow_cmyk: false,
+            antialias: true,
         }
     }
 }
@@ -1732,7 +1757,8 @@ impl Page {
             .unwrap_or(options.format);
         let canvas = tinker_pdf_render::region_canvas_in(view, canvas_format);
 
-        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
+        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources)
+            .with_antialias(options.antialias);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }
