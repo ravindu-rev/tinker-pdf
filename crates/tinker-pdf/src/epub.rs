@@ -1481,6 +1481,7 @@ fn register_pictures(
             let registered = match &picture.data {
                 read::PictureData::Jpeg(bytes) => builder.add_image(&name, &ImageData::Jpeg(bytes)),
                 read::PictureData::Png(png) => builder.add_image(&name, &png.image()),
+                read::PictureData::Raster(raster) => builder.add_image(&name, &raster.image()),
             };
             if registered {
                 out[at].push((anchor, name));

@@ -560,7 +560,9 @@ fn an_unusable_entry_keeps_its_page_number() {
     let archive = zip(
         &[
             ZipFile::stored("p1.png", &good),
-            ZipFile::stored("p2.gif", b"GIF89a\x06\x00\x08\x00\x00\x00\x00;"),
+            // An AVIF: recognised by its `ftyp` brand and read by nothing here.
+            // This was a GIF until GIF had a decoder.
+            ZipFile::stored("p2.avif", b"\x00\x00\x00\x14ftypavif\x00\x00\x00\x00"),
             ZipFile::stored("p3.png", &broken_png()),
             ZipFile::stored("p4.png", &good),
         ],
@@ -574,14 +576,14 @@ fn an_unusable_entry_keeps_its_page_number() {
         report.pages().iter().map(|p| p.defect).collect::<Vec<_>>(),
         [
             None,
-            Some(PageDefect::UnsupportedFormat(ImageFormat::Gif)),
+            Some(PageDefect::UnsupportedFormat(ImageFormat::Avif)),
             Some(PageDefect::Undecodable),
             None,
         ]
     );
     assert_eq!(
         page_names(&document),
-        ["p1.png", "p2.gif", "p3.png", "p4.png"]
+        ["p1.png", "p2.avif", "p3.png", "p4.png"]
     );
 
     // Page four is the real fourth page and not the third slid up.
@@ -629,10 +631,11 @@ fn a_placeholder_is_the_books_own_size_and_the_neutral_grey() {
 
 /// A book that never says what size it is falls back to paper, and only then.
 ///
-/// The BMP is forty bytes of `BM` and zeros — an info header that says it is
-/// zero bytes long — so since BMP has a decoder it is a placeholder for being
-/// *undecodable* rather than for being BMP, which is the sentence this test
-/// asserted until the tier-4 archive row gave the format one.
+/// The GIF is a logical screen and a trailer with no image between them, and
+/// the BMP is forty bytes of `BM` and zeros — an info header that says it is
+/// zero bytes long — so now that both formats have a decoder each is a
+/// placeholder for being *undecodable* rather than for its format, which is
+/// the sentence this test asserted until the tier-4 archive row gave them one.
 #[test]
 fn a_book_of_nothing_but_placeholders_falls_back_to_paper() {
     let archive = zip(
@@ -660,10 +663,7 @@ fn a_book_of_nothing_but_placeholders_falls_back_to_paper() {
             .iter()
             .map(|p| p.defect)
             .collect::<Vec<_>>(),
-        [
-            Some(PageDefect::UnsupportedFormat(ImageFormat::Gif)),
-            Some(PageDefect::Undecodable),
-        ]
+        [Some(PageDefect::Undecodable), Some(PageDefect::Undecodable),]
     );
 }
 

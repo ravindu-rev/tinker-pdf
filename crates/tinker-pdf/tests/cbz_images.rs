@@ -1,4 +1,4 @@
-//! Comic pages in the formats that have no pass-through route: BMP.
+//! Comic pages in the formats that have no pass-through route: BMP and GIF.
 //!
 //! `tinker-pdf-filters/tests/image_fixtures.rs` holds each decoder to the
 //! pixels a third-party encoder was handed. This file holds the **page** to
@@ -181,4 +181,88 @@ fn a_bmp_that_will_not_decode_keeps_its_page_number() {
     assert_eq!(report.pages()[0].defect, None);
     assert_eq!(report.pages()[1].defect, Some(PageDefect::Undecodable));
     assert_eq!(document.page(1).expect("a page").size(), (13.0, 7.0));
+}
+
+/// The dictionary of a page's image.
+fn image_dict(document: &Document, page: usize) -> tinker_pdf_cos::Dict {
+    let cos = document.cos();
+    let object = cos.get(page_image(document, page)).expect("the image");
+    object.as_stream().expect("a stream").dict.clone()
+}
+
+#[test]
+fn gif_pages_are_the_pictures_they_were_made_from() {
+    let document = open(&[
+        ("p1.gif", fixture("gif/pillow-palette-13x7.gif")),
+        ("p2.gif", fixture("gif/pillow-interlaced-40x24.gif")),
+        ("p3.gif", fixture("gif/pillow-transparent-13x7.gif")),
+        ("p4.gif", fixture("gif/omggif-local-offset-13x7.gif")),
+        ("p5.gif", fixture("gif/pillow-animated-13x7.gif")),
+    ]);
+    assert_eq!(document.page_count(), 5);
+    assert_no_placeholders(&document);
+    let cos = document.cos();
+
+    // Opaque pages render to the recipe pixel for pixel, the interlaced one
+    // and the animation's first frame included.
+    let palette_colour = |x: u32, y: u32| recipe::palette(recipe::index(x, y, 256));
+    for (page, (w, h)) in [(0u32, (13, 7)), (1, (40, 24)), (4, (13, 7))] {
+        let bitmap = render(&document, page);
+        assert_eq!((bitmap.width, bitmap.height), (w, h), "page {page}");
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(
+                    rendered_rgb(&bitmap, x, y),
+                    palette_colour(x, y),
+                    "page {page} ({x}, {y})"
+                );
+            }
+        }
+    }
+    // Page three stays indexed and its transparent index is a colour key: a
+    // `/Mask` of one range, one index wide, and no `/SMask`.
+    let dict = image_dict(&document, 2);
+    let space = cos.resolve_key(&dict, cos.intern(b"ColorSpace"));
+    assert_eq!(
+        space.as_array().expect("/Indexed")[0].as_name(),
+        Some(cos.intern(b"Indexed"))
+    );
+    let mask = cos.resolve_key(&dict, cos.intern(b"Mask"));
+    let mask = mask.as_array().expect("a colour-key /Mask");
+    assert_eq!(mask.len(), 2);
+    assert_eq!(mask[0].as_int(), mask[1].as_int());
+    assert!(dict.get(cos.intern(b"SMask")).is_none());
+    // And the transparent pixels show the page through them.
+    let bitmap = render(&document, 2);
+    for y in 0..7 {
+        for x in 0..13 {
+            let want = if recipe::index(x, y, 256) == 5 {
+                [255, 255, 255]
+            } else {
+                palette_colour(x, y)
+            };
+            assert_eq!(rendered_rgb(&bitmap, x, y), want, "({x}, {y})");
+        }
+    }
+
+    // Page four had a local table on part of its screen, so it arrives as RGB
+    // over an `/SMask` holding exactly which pixels were transparent.
+    let dict = image_dict(&document, 3);
+    let Some(Object::Ref(smask)) = dict.get(cos.intern(b"SMask")) else {
+        panic!("an /SMask reference");
+    };
+    let alpha = cos.stream_decoded(*smask).expect("decodes");
+    let want: Vec<u8> = (0..7u32)
+        .flat_map(|y| {
+            (0..13u32).map(move |x| {
+                let inside = (3..9).contains(&x) && (2..6).contains(&y);
+                if inside && recipe::index(x - 3, y - 2, 8) == 2 {
+                    0
+                } else {
+                    255
+                }
+            })
+        })
+        .collect();
+    assert_eq!(alpha, want);
 }

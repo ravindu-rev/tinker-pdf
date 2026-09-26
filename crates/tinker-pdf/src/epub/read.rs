@@ -36,7 +36,7 @@
 
 use std::cell::RefCell;
 
-use tinker_pdf_cos::png_image;
+use tinker_pdf_cos::{gif_image, png_image};
 use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, StyleTree};
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
@@ -474,15 +474,18 @@ pub struct Picture {
 
 /// A picture's bytes, ready for `DocumentBuilder::add_image`.
 ///
-/// The same two routes `cbz.rs` takes and for its reasons: a JPEG is placed
+/// The same routes `cbz.rs` takes and for its reasons: a JPEG is placed
 /// verbatim because re-encoding is generational loss the caller cannot undo,
-/// and a PNG goes through the reader that decides between passing its `IDAT`
-/// through and decoding it.
+/// a PNG goes through the reader that decides between passing its `IDAT`
+/// through and decoding it, and a GIF — which no `/Filter` reads — is decoded
+/// and kept `/Indexed`.
 pub enum PictureData {
     /// A JPEG, placed as its own bytes.
     Jpeg(Vec<u8>),
     /// A PNG, read into whatever `tinker-pdf-cos` decided to write.
     Png(Box<tinker_pdf_cos::PngImageData>),
+    /// A GIF's first image, decoded and arranged by `tinker-pdf-cos`.
+    Raster(Box<tinker_pdf_cos::RasterImageData>),
 }
 
 impl std::fmt::Debug for PictureData {
@@ -492,6 +495,9 @@ impl std::fmt::Debug for PictureData {
         match self {
             PictureData::Jpeg(bytes) => write!(f, "Jpeg({} bytes)", bytes.len()),
             PictureData::Png(png) => write!(f, "Png({} by {})", png.width(), png.height()),
+            PictureData::Raster(raster) => {
+                write!(f, "Raster({} by {})", raster.width(), raster.height())
+            }
         }
     }
 }
@@ -610,6 +616,16 @@ fn picture(
             Ok((
                 (f64::from(png.width()), f64::from(png.height())),
                 PictureData::Png(Box::new(png)),
+            ))
+        }
+        // A core media type (§3.2) with no pass-through: decoded under the
+        // same ceiling, and its first image is the picture.
+        ImageFormat::Gif => {
+            let gif = gif_image(bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+                .map_err(|_| ImageDefect::Undecodable)?;
+            Ok((
+                (f64::from(gif.width()), f64::from(gif.height())),
+                PictureData::Raster(Box::new(gif)),
             ))
         }
         other => Err(ImageDefect::UnsupportedFormat(other)),

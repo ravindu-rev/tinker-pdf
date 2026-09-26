@@ -319,18 +319,41 @@ fn a_picture_is_classified_by_its_bytes_and_never_by_its_name() {
     assert_eq!((matrix[0], matrix[3]), points((56, 40)));
 }
 
-/// The same the other way: a `.png` holding a format this build does not read
+/// The same the other way: a `.png` holding a format this build does not place
 /// is named by **that** format, not by the one its name claims.
+///
+/// A BMP, which the comic path decodes and an `<img>` does not: it is not one
+/// of EPUB 3.3 §3.2's core media types. This was a GIF until GIF became one
+/// this build draws.
 #[test]
 fn a_misnamed_unsupported_picture_is_named_by_the_format_it_really_is() {
-    let mut gif = Vec::from(*b"GIF89a");
-    gif.extend_from_slice(&[8, 0, 8, 0, 0x80, 0, 0]);
-    let doc = open(r#"<p>a<img src="pic.png"/>b</p>"#, &[("pic.png", gif)]);
+    let mut bmp = Vec::from(*b"BM");
+    bmp.resize(40, 0);
+    let doc = open(r#"<p>a<img src="pic.png"/>b</p>"#, &[("pic.png", bmp)]);
     assert_eq!(
         not_drawn(&doc),
-        [(ImageDefect::UnsupportedFormat(ImageFormat::Gif), 1)],
-        "a GIF named .png was classified by its name"
+        [(ImageDefect::UnsupportedFormat(ImageFormat::Bmp), 1)],
+        "a BMP named .png was classified by its name"
     );
+}
+
+/// A GIF is a core media type and is drawn: its first image, at its own
+/// pixel size. The file is Pillow's, from `tinker-pdf-filters/tests/images/`,
+/// where the decoder is held to the pixels it was made from.
+#[test]
+fn a_gif_img_is_drawn_at_its_own_size() {
+    let gif = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tinker-pdf-filters/tests/images/gif/pillow-palette-13x7.gif"),
+    )
+    .expect("the committed GIF");
+    let doc = open(
+        r#"<img src="pic.gif" style="display: block"/>"#,
+        &[("pic.gif", gif)],
+    );
+    assert_eq!(not_drawn(&doc), []);
+    let (matrix, _) = only_placement(&doc, 0);
+    assert_eq!((matrix[0], matrix[3]), points((13, 7)));
 }
 
 /// §9.2.2's atomic inline-level box: an `<img>` with no `display` declaration
@@ -472,19 +495,28 @@ fn an_img_with_no_src_at_all_is_unresolved() {
 /// A **core media type** this build has no decoder for is named by its format,
 /// not collapsed into "unresolved".
 ///
-/// EPUB 3.3 §3.2 makes GIF and WebP core image media types a conforming book
-/// may use with no fallback, so a reader meeting one has met a legal book it
-/// cannot draw — a different sentence from a broken reference, and a host acts
-/// on the two differently.
+/// EPUB 3.3 §3.2 makes WebP a core image media type a conforming book may use
+/// with no fallback, so a reader meeting one has met a legal book it cannot
+/// draw — a different sentence from a broken reference, and a host acts on the
+/// two differently. This was a GIF until GIF had a decoder.
 #[test]
 fn a_core_media_type_with_no_decoder_here_is_named_by_its_format() {
+    let webp = b"RIFF\x0c\x00\x00\x00WEBPVP8 \x00\x00\x00\x00".to_vec();
+    let doc = open(r#"<p>a<img src="pic.webp"/>b</p>"#, &[("pic.webp", webp)]);
+    assert_eq!(
+        not_drawn(&doc),
+        [(ImageDefect::UnsupportedFormat(ImageFormat::WebP), 1)]
+    );
+}
+
+/// And a GIF whose bytes do not make an image is `Undecodable`, which is the
+/// sentence a PNG with a broken header gets.
+#[test]
+fn a_gif_that_will_not_decode_is_undecodable() {
     let mut gif = Vec::from(*b"GIF89a");
     gif.extend_from_slice(&[8, 0, 8, 0, 0x80, 0, 0]);
     let doc = open(r#"<p>a<img src="pic.gif"/>b</p>"#, &[("pic.gif", gif)]);
-    assert_eq!(
-        not_drawn(&doc),
-        [(ImageDefect::UnsupportedFormat(ImageFormat::Gif), 1)]
-    );
+    assert_eq!(not_drawn(&doc), [(ImageDefect::Undecodable, 1)]);
 }
 
 /// An SVG in an `<img>` lands in `Unknown`, and that is where it belongs.

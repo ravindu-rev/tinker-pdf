@@ -227,12 +227,15 @@ route is a claim about the file's structure and not about its bytes. The
 archive's own CRC-32 over the whole entry is what stands behind them, which is
 the same guarantee a placed JPEG has.
 
-**A BMP has no pass-through, and says so.** No `/Filter` reads a bottom-up
-pixel array padded to four bytes a row, nor either of BMP's RLE codings, so a
-`.bmp` page is decoded by `tinker_pdf_filters::bmp_decode` and arranged by
-`tinker_pdf_cos::bmp_image`: an indexed bitmap stays `/Indexed` over its own
-palette — one byte a pixel held rather than three — a direct one is
-`/DeviceRGB`, and an alpha mask becomes an `/SMask`. This is the one image
+**A BMP and a GIF have no pass-through, and say so.** No `/Filter` reads a
+bottom-up pixel array padded to four bytes a row, nor either of BMP's RLE
+codings, nor GIF's LZW — whose root set, bit order and width rule all differ
+from `/LZWDecode`'s — so those pages are decoded (`bmp_decode`, `gif_decode`)
+and arranged by `tinker_pdf_cos::bmp_image` and `gif_image`: an indexed
+picture stays `/Indexed` over its own palette — one byte a pixel held rather
+than three — a direct one is `/DeviceRGB`, an alpha mask becomes an `/SMask`,
+and a GIF's transparent index becomes a colour-key `/Mask`. A GIF page is its
+**first image**; an animation's later frames are not drawn. This is the one image
 route here whose cost is the picture's pixels rather than the entry's bytes,
 and the ceiling it decodes under is the PNG and TIFF decoded routes' — the
 largest entry this build will read out of an archive.
@@ -396,8 +399,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | A Zstandard frame that names a dictionary | `ZipEntryError::UnsupportedFeature(ZipMethodFeature::ZstandardDictionary)` (leaf: `zstd::Error::NeedsDictionary`) | placeholder page; a ZIP has nowhere to carry a dictionary, so no reader of the archive alone can decode the entry | — |
 | A randomised bzip2 block | `ZipEntryError::UnsupportedFeature(ZipMethodFeature::Bzip2Randomised)` (leaf: `bzip2::Error::Randomised`); in a 7z, `SevenZipEntryError::Bzip2Failed(bzip2::Error::Randomised)` | written by bzip2 0.9.0 alone, unwritten since 0.9.5 (1999); decoding one needs a 512-entry table this repository has no first-party source for, and no writer on hand can make a fixture | — |
 | A method-14 entry whose APPNOTE 5.8.8 header is damaged | `ZipEntryError::LzmaHeader` | placeholder page; fewer than nine bytes, a properties size other than five, or a property byte outside what LZMA encodes — a wrong offset or a different coder shows here first | — |
-| GIF, WebP, AVIF entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
-| A JPEG, PNG, TIFF, JPEG 2000 or BMP file that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a `Compression` or `PhotometricInterpretation` refused by name, a JPEG 2000 header the decoder refuses or a channel count other than 1, 3 or 4, a `biCompression` or `biBitCount` refused by name, a raster past the ceiling | [filters](filters.md) |
+| WebP and AVIF entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
+| A JPEG, PNG, TIFF, JPEG 2000, BMP or GIF file that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a `Compression` or `PhotometricInterpretation` refused by name, a JPEG 2000 header the decoder refuses or a channel count other than 1, 3 or 4, a `biCompression` or `biBitCount` refused by name, a raster past the ceiling | [filters](filters.md) |
 | A `ComicInfo.xml` that will not read | `ArchiveWarning::ComicInfo(ComicInfoDefect)` | past 64 KiB, an entry the archive refused, markup that is not well formed, or a root that is not `ComicInfo`; the pages are unaffected | — |
 
 ## Verified
@@ -422,7 +425,12 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   generator authored: an indexed BMP is `/Indexed` over the indices Pillow was
   handed, the rendered pages are the recipe pixel for pixel, and a
   `BITMAPV4HEADER` alpha mask reaches the page as an `/SMask` holding exactly
-  the recipe's alpha. A BMP the decoder refuses keeps its page number.
+  the recipe's alpha. A BMP the decoder refuses keeps its page number. The
+  GIF pages — palette, interlaced, an animation's first frame — render to the
+  recipe pixel for pixel; a transparent index arrives as a one-index
+  colour-key `/Mask` with no `/SMask`, and the page shows through exactly the
+  pixels the recipe marked; a local table on part of the screen arrives as
+  RGB over an `/SMask`.
 - `crates/tinker-pdf/tests/cbz_validated.rs` — the synthesised document and
   the same document saved back are both held to the strict validator, and the
   pages are read out of the catalog's own `/Kids` rather than through the

@@ -588,6 +588,23 @@ replication; an index past the colour table is black, with
 end-of-line skipped is index 0, with `Warning::BmpRleUndefinedPixels`, since
 the documentation says nothing about what it is.
 
+**GIF** is the fourth, 87a and 89a, and it is the one whose LZW could *not*
+be `lzw.rs`: GIF89a Appendix F sizes the root set from a byte in front of the
+data (anything from 2 to 256 roots), packs codes least significant bit first
+into 255-byte sub-blocks, and grows the width a code later than `/LZWDecode`
+does. `tiff.rs`'s old-style transcoder repacks LSB-first codes but assumes 256
+roots, so it would mis-size every code of a GIF whose table is not full; the
+dictionary in `gif.rs` is thirty lines and exists once. `gif_decode` returns
+the **first image** — a page is one picture, and the first is what every
+viewer shows before a timer runs — with `Warning::GifFramesIgnored` when there
+are more; §20.c's four interlace passes are put back in row order; the canvas
+is §18's logical screen, and a first image smaller than it leaves §18's
+background colour around it. A GIF stays `ImagePixels::Indexed` with the
+graphic control extension's transparent index carried as an index, which PDF's
+colour-key `/Mask` expresses exactly — except in one shape: a first image
+that brings its own local table and does not cover its screen puts two index
+spaces on one canvas, and that picture is expanded to RGBA.
+
 ## API
 
 The filters never appear on the facade — ruling 11 makes `tinker_pdf` the
@@ -624,8 +641,9 @@ to agree with the decode it stands in for. The encoder half is `deflate`, `zlib_
 `jpeg_encode` (takes a `JpegSource` and a `JpegOptions`, returns the whole
 interchange datastream or a `JpegEncodeError`); the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
-`inflate_raw`, `crc32`, `jxr_decode` (returns `JxrImage`) and `bmp_decode`
-(returns `BmpImage`, whose pixels are an `ImagePixels`).
+`inflate_raw`, `crc32`, `jxr_decode` (returns `JxrImage`), `bmp_decode`
+(returns `BmpImage`, whose pixels are an `ImagePixels`) and `gif_decode`
+(returns `GifImage`, the same pixels).
 
 Every one of those six takes plain numbers and a borrowed byte slice and
 returns bytes, which is all ruling 8 asks of a leaf. The parameter names
@@ -700,6 +718,10 @@ make both enums wrong.
 | BMP at 64 bits a pixel, or a depth its compression cannot carry | `BmpError::UnsupportedBitDepth` | 64 is scRGB fixed point, a number nothing here maps to a display value; `BI_RLE8` at anything but 8 is not RLE8 | — |
 | BMP colour masks that are split, or all zero | `BmpError::BadBitfields` | Shifting a mask with a hole in it produces numbers, and the numbers are not colours | — |
 | BMP past `MAX_BMP_SAMPLES` or the caller's ceiling | `BmpError::TooManySamples`, `ExceedsOutputLimit` | `biWidth` and `biHeight` are signed 32-bit fields; refused before allocation (ruling 1) | [rulings](../rulings.md) |
+| A GIF image with neither a local nor a global colour table | `GifError::NoColourTable` | §18 lets a decoder supply a system default; a guessed palette is a guessed picture | — |
+| A GIF LZW minimum code size outside 1 to 8 | `GifError::BadCodeSize` | The roots are the indices, and an index is a byte | — |
+| A GIF with no image before its trailer | `GifError::NoImage` | There is no picture, as distinct from a damaged one | — |
+| GIF past `MAX_GIF_SAMPLES` or the caller's ceiling | `GifError::TooManySamples`, `ExceedsOutputLimit` | Thirteen bytes can declare a 65 535-square logical screen; charged at four components, before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPEG XR fixed-point, half-float and 32-bit float pixel formats (Table A.6's SINT and Float rows) | `JxrRefusal::FloatOrFixedPointFormat` | 9.10.7's postscaling makes those numbers mean something `JxrImage`'s 8- and 16-bit unsigned samples cannot say; reinterpreting them returns a picture whose values are a different quantity | [design](../design/jpeg-xr.md) |
 | JPEG XR CMYK, CMYKDIRECT, NCOMPONENT and RGBE output formats | `JxrRefusal::UnsupportedColourFormat` | A colour pipeline with no consumer in this engine; a CMYK image read as RGB is a different picture, not a degraded one | [design](../design/jpeg-xr.md) |
 | A Table A.6 GUID this build has no row for | `JxrRefusal::UnknownPixelFormat` | The GUID is what names the channel order, so an unknown one cannot be guessed at | [design](../design/jpeg-xr.md) |
@@ -852,7 +874,16 @@ wants the reason to survive it.
   bmpsuite 2.8's files **as relations**: files that describe one picture must
   decode to one, so `pal8rle` is `pal8` and `pal8` is pinned by Pillow's
   authored palette. `src/bmp/tests.rs` reaches every `BmpError` and every BMP
-  warning with a file written from the Win32 structure layouts.
+  warning with a file written from the Win32 structure layouts. **GIF** is held
+  the same way to two encoders: Pillow, whose writer always codes with 256
+  roots, for the palette, grey, interlaced, local-table, transparent and
+  animated files; and omggif 1.0.10, which sizes the root set from the
+  palette, for two- and four-bit roots and for a first image smaller than its
+  screen, on the global table and on a local one. Each test reads the
+  descriptor byte that proves its fixture exercises what it claims — the
+  interlace flag, the local-table flag, the code size.
+  `src/gif/tests.rs` builds Appendix F's KwKwK code, every root size from 1 to
+  8, and one file per `GifError`.
 - In-crate: `jbig2.rs` decodes T.88 Annex H.1's published datastream example
   byte for byte; `mq.rs` holds Annex H.2's test sequence as a permanent
   fixture, because the coder serves two codecs; **`qm.rs` holds T.81 K.4.1's,

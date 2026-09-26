@@ -18,7 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_filters::{bmp_decode, BmpError, BmpImage, ImagePixels, Limits, Warning};
+use tinker_pdf_filters::{
+    bmp_decode, gif_decode, BmpError, BmpImage, GifError, GifImage, ImagePixels, Limits, Warning,
+};
 
 const CAP: Limits = Limits::new(1 << 24);
 
@@ -301,5 +303,209 @@ fn a_file_that_is_not_a_bitmap_is_refused_by_name() {
     assert_eq!(
         bmp_decode(&read("bmp", "../make-images.py"), &CAP),
         Err(BmpError::NotBmp)
+    );
+}
+
+// ---- GIF: authored pixels, two third-party encoders --------------------------
+
+fn gif(name: &str) -> GifImage {
+    let img = gif_decode(&read("gif", name), &CAP).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert!(
+        img.complete,
+        "{name} decoded incomplete: {:?}",
+        img.warnings
+    );
+    img
+}
+
+/// The first image descriptor's packed byte and the LZW minimum code size
+/// after it, read straight out of the file — so a test can say which feature
+/// of the format its fixture actually exercises, rather than trusting the
+/// encoder's documentation for it.
+fn first_descriptor(bytes: &[u8]) -> (u8, u8) {
+    let table = |packed: u8| {
+        if packed & 0x80 != 0 {
+            3usize << ((packed & 7) + 1)
+        } else {
+            0
+        }
+    };
+    let mut at = 13 + table(bytes[10]);
+    loop {
+        match bytes[at] {
+            0x21 => {
+                at += 2;
+                while bytes[at] != 0 {
+                    at += 1 + bytes[at] as usize;
+                }
+                at += 1;
+            }
+            0x2C => {
+                let packed = bytes[at + 9];
+                return (packed, bytes[at + 10 + table(packed)]);
+            }
+            other => panic!("block {other:#x} before any image"),
+        }
+    }
+}
+
+fn recipe_colour(x: u32, y: u32) -> [u8; 4] {
+    let [r, g, b] = recipe::palette(recipe::index(x, y, 256));
+    [r, g, b, 255]
+}
+
+#[test]
+fn pillow_gifs_decode_to_the_pixels_they_were_made_from() {
+    let img = gif("pillow-palette-13x7.gif");
+    assert!(matches!(
+        img.pixels,
+        ImagePixels::Indexed {
+            transparent: None,
+            ..
+        }
+    ));
+    assert_picture("palette", 13, 7, &img.pixels, recipe_colour);
+
+    let grey = gif("pillow-grey-13x7.gif");
+    assert_picture("grey", 13, 7, &grey.pixels, |x, y| {
+        let v = recipe::grey(x, y);
+        [v, v, v, 255]
+    });
+
+    // Pillow codes with 256 roots whatever the palette; the omggif files
+    // below are where the root size moves.
+    assert_eq!(
+        first_descriptor(&read("gif", "pillow-palette-13x7.gif")).1,
+        8
+    );
+}
+
+/// Interlaced: the fixture's own descriptor says so, and the rows come back in
+/// raster order.
+#[test]
+fn an_interlaced_gif_is_put_back_in_row_order() {
+    let bytes = read("gif", "pillow-interlaced-40x24.gif");
+    assert_ne!(
+        first_descriptor(&bytes).0 & 0x40,
+        0,
+        "the fixture is interlaced"
+    );
+    let img = gif("pillow-interlaced-40x24.gif");
+    assert_eq!((img.width, img.height), (40, 24));
+    assert_picture("interlaced", 40, 24, &img.pixels, recipe_colour);
+}
+
+/// A local colour table on the first image, per the descriptor's own flag.
+#[test]
+fn a_local_table_is_the_table_the_image_is_read_against() {
+    let bytes = read("gif", "pillow-local-table-13x7.gif");
+    assert_ne!(
+        first_descriptor(&bytes).0 & 0x80,
+        0,
+        "the fixture carries a local table"
+    );
+    let img = gif("pillow-local-table-13x7.gif");
+    assert_picture("local table", 13, 7, &img.pixels, recipe_colour);
+}
+
+/// The graphic control extension's transparent index stays an index: every
+/// pixel the recipe put index 5 on is transparent and every other pixel is
+/// its colour.
+#[test]
+fn a_transparent_index_is_carried_and_nothing_else_is_transparent() {
+    let img = gif("pillow-transparent-13x7.gif");
+    assert!(matches!(
+        img.pixels,
+        ImagePixels::Indexed {
+            transparent: Some(_),
+            ..
+        }
+    ));
+    let clear = (0..7)
+        .flat_map(|y| (0..13).map(move |x| (x, y)))
+        .filter(|&(x, y)| recipe::index(x, y, 256) == 5)
+        .count();
+    assert!(clear > 0, "the recipe puts index 5 somewhere");
+    assert_picture("transparent", 13, 7, &img.pixels, |x, y| {
+        let colour = recipe_colour(x, y);
+        if recipe::index(x, y, 256) == 5 {
+            [colour[0], colour[1], colour[2], 0]
+        } else {
+            colour
+        }
+    });
+}
+
+/// An animation is its first frame, and says it has others.
+#[test]
+fn an_animated_gif_is_its_first_frame() {
+    let img = gif("pillow-animated-13x7.gif");
+    assert!(img.warnings.contains(&Warning::GifFramesIgnored));
+    assert_picture("first frame", 13, 7, &img.pixels, recipe_colour);
+}
+
+/// omggif sizes the LZW root set from the palette: two bits for four colours,
+/// two (its floor) for two, four for sixteen. Each is the recipe exactly.
+#[test]
+fn omggif_root_sizes_two_and_four_decode_exactly() {
+    for (name, n, w, h, code_size) in [
+        ("omggif-4colour-13x7.gif", 4, 13, 7, 2),
+        ("omggif-2colour-21x5.gif", 2, 21, 5, 2),
+        ("omggif-16colour-21x9.gif", 16, 21, 9, 4),
+    ] {
+        assert_eq!(first_descriptor(&read("gif", name)).1, code_size, "{name}");
+        let img = gif(name);
+        assert_eq!((img.width, img.height), (w, h));
+        assert_picture(name, w, h, &img.pixels, |x, y| {
+            let [r, g, b] = recipe::palette(recipe::index(x, y, n));
+            [r, g, b, 255]
+        });
+    }
+}
+
+/// A first image smaller than its screen, on the global table: the uncovered
+/// pixels are §18's background colour and the picture stays indexed.
+#[test]
+fn an_uncovered_screen_is_the_background_colour() {
+    let img = gif("omggif-global-offset-13x7.gif");
+    assert!(matches!(img.pixels, ImagePixels::Indexed { .. }));
+    assert_picture("global offset", 13, 7, &img.pixels, |x, y| {
+        let i = if (2..10).contains(&x) && (1..6).contains(&y) {
+            recipe::index(x - 2, y - 1, 16)
+        } else {
+            7
+        };
+        let [r, g, b] = recipe::palette(i);
+        [r, g, b, 255]
+    });
+}
+
+/// The same, with a local table and a transparent index: two index spaces on
+/// one canvas, so the picture is expanded to RGBA — the background from the
+/// global table, the image from its own, index 2 transparent.
+#[test]
+fn a_local_table_on_part_of_the_screen_is_expanded() {
+    let img = gif("omggif-local-offset-13x7.gif");
+    assert!(matches!(img.pixels, ImagePixels::Rgba(_)));
+    assert_picture("local offset", 13, 7, &img.pixels, |x, y| {
+        if (3..9).contains(&x) && (2..6).contains(&y) {
+            let i = recipe::index(x - 3, y - 2, 8);
+            if i == 2 {
+                return [0, 0, 0, 0];
+            }
+            let [r, g, b] = recipe::palette(i + 100);
+            [r, g, b, 255]
+        } else {
+            let [r, g, b] = recipe::palette(1);
+            [r, g, b, 255]
+        }
+    });
+}
+
+#[test]
+fn a_file_that_is_not_a_gif_is_refused_by_name() {
+    assert_eq!(
+        gif_decode(&read("bmp", "pillow-rgb-13x7.bmp"), &CAP),
+        Err(GifError::NotGif)
     );
 }

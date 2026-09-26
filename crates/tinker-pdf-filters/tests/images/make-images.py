@@ -14,6 +14,10 @@
 #   imagecodecs 2026.3.6 pip install --user imagecodecs  (its BMP writer)
 #   numpy 2.4.6          what imagecodecs takes its arrays as
 #
+# `make-gif.js` beside this writes the GIFs Pillow cannot: Pillow's GIF
+# writer always codes with 256 roots, and a GIF's LZW root size is the thing
+# most worth varying.
+#
 # Not run by any test: the committed files are the record.
 
 import numpy as np
@@ -92,3 +96,20 @@ Image.fromarray(rgba_array(W, H), "RGBA").save("bmp/pillow-rgba-13x7.bmp")
 # imagecodecs' BMP writer: 32-bit BI_BITFIELDS under a BITMAPV4HEADER with an
 # alpha mask, which is the one way a BMP states alpha.
 open("bmp/imagecodecs-rgba-13x7.bmp", "wb").write(imagecodecs.bmp_encode(rgba_array(W, H)))
+
+
+# ---- GIF ---------------------------------------------------------------------
+
+# Pillow's GIF writer: GIF89a, a global table, LZW with 256 roots always, and
+# interlace on by default once both sides reach 16.
+palette_image(W, H, 256).save("gif/pillow-palette-13x7.gif")
+palette_image(40, 24, 256).save("gif/pillow-interlaced-40x24.gif", interlace=True)
+palette_image(W, H, 256).save("gif/pillow-transparent-13x7.gif", transparency=5)
+palette_image(W, H, 256).save("gif/pillow-local-table-13x7.gif", include_color_table=True)
+grey8.save("gif/pillow-grey-13x7.gif")
+
+# Two frames: the recipe, then its mirror. The first is the picture.
+second = palette_image(W, H, 256).transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+palette_image(W, H, 256).save(
+    "gif/pillow-animated-13x7.gif", save_all=True, append_images=[second], duration=100, loop=0
+)

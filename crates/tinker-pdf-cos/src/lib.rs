@@ -54,6 +54,7 @@ pub mod edit;
 pub mod fill;
 pub mod font;
 pub mod form;
+pub mod gif_embed;
 pub mod jxr_embed;
 pub mod lexer;
 pub mod limits;
@@ -129,6 +130,7 @@ pub use form::{
     document_scripts_within, field_value, fields, fields_within, script_summary, DocumentScript,
     Field, FieldKind, FieldScripts, FieldValue, Script, ScriptBudget, ScriptSummary,
 };
+pub use gif_embed::gif_image;
 pub use jxr_embed::{jxr_image, JxrImageData};
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};

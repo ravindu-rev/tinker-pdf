@@ -272,6 +272,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "gif"
+path = "fuzz_targets/gif.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "brotli"
 path = "fuzz_targets/brotli.rs"
 test = false

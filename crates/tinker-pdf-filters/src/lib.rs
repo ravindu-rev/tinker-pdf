@@ -33,10 +33,10 @@
 //! types and calls this — because ruling 11 makes the facade the public surface
 //! for a *document* and a rendered page is what a caller has.
 //!
-//! [`bmp_decode`] is a container decoder of the tier-4 archive row's, and the
-//! first with no coding a `/Filter` shares. It hands back [`ImagePixels`] —
-//! indexed or direct, eight bits — which is the one output shape the archive
-//! row's decoders share, so the embedder learns it once.
+//! [`bmp_decode`] and [`gif_decode`] are container decoders of the tier-4
+//! archive row's, the first with no coding a `/Filter` shares. Each hands back
+//! [`ImagePixels`] — indexed or direct, eight bits — which is the one output
+//! shape the archive row's decoders share, so the embedder learns it once.
 
 #![forbid(unsafe_code)]
 
@@ -46,6 +46,7 @@ mod brotli;
 mod ccitt;
 mod crc32;
 pub mod deflate;
+mod gif;
 mod inflate;
 mod jbig2;
 mod jpeg;
@@ -71,6 +72,7 @@ pub use ccitt::{
 };
 pub use crc32::{crc32, Crc32};
 pub use deflate::{deflate, zlib_compress};
+pub use gif::{gif_decode, GifError, GifImage, MAX_GIF_SAMPLES};
 pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{
     decode as jbig2_decode, decode_attributed as jbig2_decode_attributed,
@@ -398,6 +400,20 @@ pub enum Warning {
     /// BMP: an RLE run or literal reached past the end of its row or of the
     /// image. The excess was dropped rather than wrapped onto the next row.
     BmpRleOverrun,
+
+    // ---- GIF -------------------------------------------------------------
+    //
+    // Three, and each a *leniency*; LZW damage reuses [`Warning::BadLzwCode`]
+    // and [`Warning::TruncatedInput`], which already say it.
+    /// GIF: an index past the end of the active colour table. The table is
+    /// padded with black to 256 entries, so the pixel is black.
+    GifPaletteIndexOutOfRange,
+    /// GIF: the file holds more than one image. The first is the picture; the
+    /// rest are not decoded — an animation drawn as its first frame.
+    GifFramesIgnored,
+    /// GIF: the first image reaches past its logical screen, and the part
+    /// outside it was clipped.
+    GifFrameOutsideScreen,
 }
 
 impl Warning {
@@ -456,6 +472,9 @@ impl Warning {
             Self::BmpPaletteIndexOutOfRange => "bmp-palette-index-out-of-range",
             Self::BmpRleUndefinedPixels => "bmp-rle-undefined-pixels",
             Self::BmpRleOverrun => "bmp-rle-overrun",
+            Self::GifPaletteIndexOutOfRange => "gif-palette-index-out-of-range",
+            Self::GifFramesIgnored => "gif-frames-ignored",
+            Self::GifFrameOutsideScreen => "gif-frame-outside-screen",
         }
     }
 }
@@ -512,6 +531,9 @@ impl fmt::Display for Warning {
             Self::BmpPaletteIndexOutOfRange => "BMP pixel indexed past the end of its colour table",
             Self::BmpRleUndefinedPixels => "BMP RLE stream left pixels undefined; index 0 used",
             Self::BmpRleOverrun => "BMP RLE run past the end of its row, clipped",
+            Self::GifPaletteIndexOutOfRange => "GIF pixel indexed past the end of its colour table",
+            Self::GifFramesIgnored => "GIF images after the first are not decoded",
+            Self::GifFrameOutsideScreen => "GIF image reaches past its logical screen, clipped",
         };
         f.write_str(s)
     }

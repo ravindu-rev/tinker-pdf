@@ -1,8 +1,8 @@
-//! Nine committed fuzz corpora, replayed on stable, measured for *reach*.
+//! Ten committed fuzz corpora, replayed on stable, measured for *reach*.
 //!
 //! `jbig2_seeds.rs`, `jpx_seeds.rs` and `jxr_seeds.rs` do this one corpus at a
 //! time because each needs the target's own knob handling restated. These
-//! nine are simpler — most take the input whole — so they share a file.
+//! ten are simpler — most take the input whole — so they share a file.
 //!
 //! # The question these answer, which "it did not panic" does not
 //!
@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
     ascii85_decode, ascii_hex_decode, bmp_decode, brotli_decode, ccitt_decode, flate_decode,
-    jpeg_decode, lzw_decode, png_decode, png_scan, run_length_decode, tiff_decode, tiff_scan,
-    CcittParams, Limits,
+    gif_decode, jpeg_decode, lzw_decode, png_decode, png_scan, run_length_decode, tiff_decode,
+    tiff_scan, CcittParams, Limits,
 };
 
 /// One corpus directory, or `None` when the fuzz tree is not in this checkout.
@@ -68,7 +68,7 @@ fn report(name: &str, seeds: usize, reached: usize) {
     println!("RAN {name}-seeds: {seeds} seeds, {reached} reach the decoder");
 }
 
-/// The one-byte output-ceiling knob `png`, `tiff`, `bmp` and `brotli` share.
+/// The one-byte output-ceiling knob `png`, `tiff`, `bmp`, `gif` and `brotli` share.
 fn ceiling_knob(data: &[u8]) -> (Limits, &[u8]) {
     let (control, body) = data.split_at(data.len().min(1));
     let knobs = control.first().copied().unwrap_or(0);
@@ -125,6 +125,23 @@ fn the_bmp_seeds_reach_the_decoder() {
         let _ = bmp_decode(body, &limits);
     }
     report("bmp", files.len(), reached);
+}
+
+#[test]
+fn the_gif_seeds_reach_the_decoder() {
+    let Some(files) = seeds("gif") else {
+        println!("gif-seeds: SKIPPED (no fuzz/corpus/gif)");
+        return;
+    };
+    let mut reached = 0;
+    for (_label, data) in &files {
+        let (limits, body) = ceiling_knob(data);
+        if gif_decode(body, &Limits::new(1 << 22)).is_ok() {
+            reached += 1;
+        }
+        let _ = gif_decode(body, &limits);
+    }
+    report("gif", files.len(), reached);
 }
 
 #[test]

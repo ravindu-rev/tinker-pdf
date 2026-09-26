@@ -1,6 +1,6 @@
 # Container images somebody else encoded
 
-The decoders the tier-4 archive row added — BMP first — are held here to
+The decoders the tier-4 archive row added — BMP and GIF — are held here to
 pictures this repository **authored** and a **third-party encoder** wrote.
 Ruling 13's rule for a lossless codec is that the expected output is the
 generator's input, never another decoder's output, so the device is the one
@@ -8,9 +8,10 @@ generator's input, never another decoder's output, so the device is the one
 pixels: author the picture as a formula, let somebody else's encoder turn it
 into bytes once, commit the bytes, and recompute the formula in the test.
 
-`make-images.py` is the generator and `tests/image_fixtures.rs` is the test.
-Both carry the same six functions — `rgb`, `alpha`, `grey`, `index`,
-`palette`, `bit` — and a change to one without the other fails every picture.
+`make-images.py` and `make-gif.js` are the generators and
+`tests/image_fixtures.rs` is the test. All three carry the same functions —
+`rgb`, `alpha`, `grey`, `index`, `palette`, `bit`, or the subset a script
+needs — and a change to one without the others fails every picture.
 No test runs the script and no test spawns a program (`cargo xtask oracles`);
 the committed files are the record.
 
@@ -21,6 +22,8 @@ the committed files are the record.
 | `bmp/pillow-*.bmp` | **Pillow 12.3.0** (`PIL.BmpImagePlugin`), CPython 3.11.15, Linux x86_64 | `python3 make-images.py` | 26 September 2026 |
 | `bmp/imagecodecs-*.bmp` | **imagecodecs 2026.3.6** (`imagecodecs.bmp_encode`), numpy 2.4.6 | the same script | 26 September 2026 |
 | `bmpsuite/*.bmp` | **bmpsuite 2.8**, Jason Summers' generator, at [`jsummers/bmpsuite`](https://github.com/jsummers/bmpsuite) `555e43a` (2023-11-28) | `make` with gcc 13.3.0, then `make check`, which verified every generated file against upstream's own `checksums` | 26 September 2026 |
+| `gif/pillow-*.gif` | **Pillow 12.3.0** (`PIL.GifImagePlugin`) | `python3 make-images.py` | 26 September 2026 |
+| `gif/omggif-*.gif` | **omggif 1.0.10** (Dean McNamee, MIT, from npm), Node v22.22.2 | `npm install omggif@1.0.10`, then `node make-gif.js` | 26 September 2026 |
 
 Pillow's BMP writer produces `BITMAPINFOHEADER`, `BI_RGB`, bottom-up files at
 1, 8, 24 and 32 bits — and at 32 it puts an RGBA image's alpha into the byte
@@ -32,6 +35,18 @@ under a `BITMAPV4HEADER` with an alpha mask.
 **Neither writes RLE4, RLE8, 2 or 4 bits a pixel, 16-bit bit fields, a
 top-down file or an OS/2 header**, and nothing else installable here does.
 That is what bmpsuite is for.
+
+Pillow's GIF writer is GIF89a over a global table and **always codes LZW with
+256 roots**, whatever the palette, so it cannot exercise the one thing about
+GIF's LZW that is not `/LZWDecode`'s. It writes the palette, grey, interlaced
+(Pillow's default once both sides reach 16), local-table
+(`include_color_table=True`), transparent (`transparency=5`) and two-frame
+files. omggif sizes the root set from the palette — two bits for two or four
+colours, four for sixteen — and writes a first image smaller than its logical
+screen, over the global table and over a local one with a transparent index.
+It does not interlace, which is why the interlaced file is Pillow's. Every
+test that depends on one of those features reads the descriptor byte that
+says the fixture has it, rather than trusting either encoder's documentation.
 
 ## bmpsuite, and what it can prove
 

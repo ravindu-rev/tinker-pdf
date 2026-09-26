@@ -44,11 +44,13 @@
 //! a 200-page archive at 2000 x 3000 — and the failure would arrive only at
 //! the size that matters.
 //!
-//! **A BMP is the exception, and it is one by the format rather than by
-//! choice**: no `/Filter` reads a bottom-up pixel array padded to four bytes a
-//! row, nor either of its RLE codings, so a BMP page is decoded and costs its
-//! pixels. It is kept `/Indexed` where the file was, which is a third of the
-//! raster an expanded one would hold ([`RasterImageData`]).
+//! **A BMP and a GIF are the exceptions, and they are by the format rather
+//! than by choice**: no `/Filter` reads a bottom-up pixel array padded to four
+//! bytes a row, nor either of BMP's RLE codings, nor GIF's LZW — whose root
+//! set, bit order and width rule all differ from `/LZWDecode`'s — so those
+//! pages are decoded and cost their pixels. Each is kept `/Indexed` where the
+//! file was, which is a third of the raster an expanded one would hold
+//! ([`RasterImageData`]).
 //!
 //! # Two levels of refusal, and the difference is the feature
 //!
@@ -83,8 +85,8 @@ use std::cmp::Ordering;
 
 use tinker_pdf_archive::{rar, sevenz, tar};
 use tinker_pdf_cos::{
-    bmp_image, png_image, tiff_image, CompressedImage, DocumentBuilder, ImageColorSpace, ImageData,
-    ImageFilter, PngImageData, RasterImageData, TiffImageData,
+    bmp_image, gif_image, png_image, tiff_image, CompressedImage, DocumentBuilder, ImageColorSpace,
+    ImageData, ImageFilter, PngImageData, RasterImageData, TiffImageData,
 };
 use tinker_pdf_filters::{JpxHeader, Limits as FilterLimits};
 use tinker_pdf_zip::{Archive, ArchiveError};
@@ -531,7 +533,9 @@ pub enum ImageFormat {
     Jpeg,
     /// PNG. Read.
     Png,
-    /// GIF. Not read here.
+    /// GIF, 87a or 89a. Read — see `tinker_pdf_cos::gif_image`: the first
+    /// image, decoded, because a GIF's LZW is not `/LZWDecode`'s, and kept
+    /// `/Indexed` with its transparent index as a colour-key mask.
     Gif,
     /// WebP. Not read here.
     WebP,
@@ -568,11 +572,12 @@ pub enum ImageDefect {
     /// A format recognised by its magic bytes and not placed here, named rather
     /// than collapsed.
     ///
-    /// An EPUB `<img>` reaches the page through **JPEG and PNG**, which are the
-    /// two of EPUB 3.3 §3.2's core image media types this build has a
-    /// container-to-page route for. GIF and WebP are core media types with no
-    /// decoder here; the rest are foreign resources a §3.2-conforming book may
-    /// only use behind a manifest fallback this build does not follow.
+    /// An EPUB `<img>` reaches the page through **JPEG, PNG and GIF**, three
+    /// of EPUB 3.3 §3.2's core image media types. WebP is a core media type
+    /// with no decoder here; the rest — BMP, TIFF, JPEG 2000 — are foreign
+    /// resources a §3.2-conforming book may only use behind a manifest
+    /// fallback this build does not follow, so they are named rather than
+    /// decoded even where the comic path would read them.
     UnsupportedFormat(ImageFormat),
     /// Bytes whose leading magic matches no format [`image_format`] knows.
     ///
@@ -1571,8 +1576,8 @@ enum Content<'a> {
     /// A JPEG 2000 file, placed as the archive holds it, with what its header
     /// said about the decode.
     Jpx(Cow<'a, [u8]>, JpxHeader),
-    /// A format with no pass-through route — BMP — decoded and arranged by
-    /// `tinker_pdf_cos::raster_embed`.
+    /// A format with no pass-through route — BMP and GIF — decoded and
+    /// arranged by `tinker_pdf_cos::raster_embed`.
     Raster(Box<RasterImageData>),
     /// Nothing usable; the page is the neutral placeholder.
     Placeholder,
@@ -2232,12 +2237,16 @@ fn plan_entry<'a>(
                 defect: None,
             })
         }
-        // No pass-through route exists for a BMP, so the decode is the route:
-        // `raster_plan` bounds it by the same caller's ceiling the PNG and TIFF
-        // decoded routes take, and says why.
+        // No pass-through route exists for a BMP or a GIF, so the decode is the
+        // route: `raster_plan` bounds it by the same caller's ceiling the PNG
+        // and TIFF decoded routes take, and says why.
         ImageFormat::Bmp => Some(raster_plan(
             name,
             bmp_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)).ok(),
+        )),
+        ImageFormat::Gif => Some(raster_plan(
+            name,
+            gif_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)).ok(),
         )),
         // Recognised, named, and refused at the page level rather than the
         // archive's: an archive of a hundred JPEGs and one AVIF keeps its

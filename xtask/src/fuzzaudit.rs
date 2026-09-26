@@ -62,6 +62,7 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
     let mut m: BTreeMap<&'static str, Vec<Signature>> = BTreeMap::new();
     m.insert("png", vec![sig(0, b"\x89PNG\r\n\x1a\n")]);
     m.insert("bmp", vec![sig(0, b"BM")]);
+    m.insert("gif", vec![sig(0, b"GIF87a"), sig(0, b"GIF89a")]);
     m.insert(
         "tiff",
         vec![
