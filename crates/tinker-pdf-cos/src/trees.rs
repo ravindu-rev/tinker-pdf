@@ -5,11 +5,15 @@
 //! break that promise that this walks every leaf and sorts afterwards, which
 //! costs one pass and removes a whole class of "the destination exists but
 //! cannot be found" bug.
+//!
+//! The writers are here too, beside the readers they must satisfy:
+//! [`write_name_tree`] and [`write_number_tree`] sort, split into leaves under
+//! `/Kids` with `/Limits`, and refuse what the readers above would truncate.
 
 use crate::doc::CosDocument;
 use crate::limits;
-use crate::name::Name;
-use crate::object::{ObjRef, Object};
+use crate::name::{Name, NameTable};
+use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::warn::WarningKind;
 use std::collections::HashSet;
 
@@ -226,6 +230,210 @@ pub fn lookup_number_range(entries: &[(i64, Object)], index: i64) -> Option<&Obj
         .rev()
         .find(|(k, _)| *k <= index)
         .map(|(_, v)| v)
+}
+
+/// Entries in one leaf of a tree this module writes, and kids in one of its
+/// intermediate nodes.
+///
+/// 7.9.6 leaves the shape to the writer. Sixty-four keeps a leaf a few
+/// kilobytes for ordinary keys, and puts the reader's whole budget of
+/// [`limits::MAX_TREE_ENTRIES`] three levels below the root: 4 096 leaves
+/// under 64 intermediate nodes. A layout choice, not a limit on input, so it
+/// is not public.
+const TREE_FANOUT: usize = 64;
+
+/// Why a name or number tree was not written.
+///
+/// Every variant means **nothing was added**: the entries are checked before
+/// the first node is handed to the caller's sink, so a refusal leaves no
+/// orphaned leaves behind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TreeWriteError {
+    /// Two entries carry this name. 7.9.6 maps each key to one value, and a
+    /// reader given two finds whichever its search happens to reach first, so
+    /// which one the caller meant is a decision for the caller, not a policy
+    /// to hide here.
+    DuplicateName(Vec<u8>),
+    /// Two entries carry this number (7.9.7), for the same reason.
+    DuplicateNumber(i64),
+    /// More entries than [`limits::MAX_TREE_ENTRIES`], past which this
+    /// repository's own reader stops and warns. Writing a tree that reads back
+    /// truncated would be a file that looks complete and is not.
+    TooManyEntries(usize),
+}
+
+impl core::fmt::Display for TreeWriteError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TreeWriteError::DuplicateName(key) => {
+                write!(
+                    f,
+                    "the name ({}) appears twice",
+                    String::from_utf8_lossy(key)
+                )
+            }
+            TreeWriteError::DuplicateNumber(key) => write!(f, "the number {key} appears twice"),
+            TreeWriteError::TooManyEntries(count) => write!(
+                f,
+                "{count} entries, more than the {} a reader walks",
+                limits::MAX_TREE_ENTRIES
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TreeWriteError {}
+
+/// Writes a name tree (7.9.6) holding `entries`, and returns its root.
+///
+/// Keys are byte strings and are sorted by their bytes, which is the order
+/// 7.9.6 requires and the one [`name_tree_lookup`] compares `/Limits` in.
+///
+/// Every node is handed to `add`, which stores it as an indirect object and
+/// returns the reference: the way both writers in this crate hold objects, so
+/// `DocumentEditor::add_name_tree` passes its `allocate` and `put`, and a
+/// caller assembling an [`crate::write::ObjectSet`] passes a counter and
+/// `insert`. Children are added before the nodes that list them.
+///
+/// The shape (Table 36): up to 64 entries are one root node with `/Names`.
+/// More are leaves of 64 with `/Names` and `/Limits`, gathered under
+/// intermediate nodes of up to 64 `/Kids` with `/Limits`, as many levels as
+/// it takes, under a root with `/Kids` alone — the root is the one node Table
+/// 36 gives no `/Limits`. The root is indirect as well, because the readers
+/// here take a tree by reference.
+///
+/// # Errors
+///
+/// [`TreeWriteError`], before anything is added: a key given twice, or more
+/// entries than [`limits::MAX_TREE_ENTRIES`], past which the reader stops.
+pub fn write_name_tree(
+    entries: Vec<(Vec<u8>, Object)>,
+    names: &NameTable,
+    add: impl FnMut(Object) -> ObjRef,
+) -> Result<ObjRef, TreeWriteError> {
+    if entries.len() > limits::MAX_TREE_ENTRIES {
+        return Err(TreeWriteError::TooManyEntries(entries.len()));
+    }
+    let mut entries = entries;
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(key) = entries.windows(2).find_map(|pair| match pair {
+        [a, b] if a.0 == b.0 => Some(a.0.clone()),
+        _ => None,
+    }) {
+        return Err(TreeWriteError::DuplicateName(key));
+    }
+    let keyed = entries
+        .into_iter()
+        .map(|(key, value)| (Object::String(PdfString::literal(key)), value))
+        .collect();
+    Ok(write_tree(keyed, names.intern(b"Names"), names, add))
+}
+
+/// Writes a number tree (7.9.7) holding `entries`, and returns its root.
+///
+/// The same shape and the same `add` as [`write_name_tree`], with integer
+/// keys in ascending numeric order under `/Nums`.
+///
+/// # Errors
+///
+/// As [`write_name_tree`].
+pub fn write_number_tree(
+    entries: Vec<(i64, Object)>,
+    names: &NameTable,
+    add: impl FnMut(Object) -> ObjRef,
+) -> Result<ObjRef, TreeWriteError> {
+    if entries.len() > limits::MAX_TREE_ENTRIES {
+        return Err(TreeWriteError::TooManyEntries(entries.len()));
+    }
+    let mut entries = entries;
+    entries.sort_by_key(|entry| entry.0);
+    if let Some(key) = entries.windows(2).find_map(|pair| match pair {
+        [a, b] if a.0 == b.0 => Some(a.0),
+        _ => None,
+    }) {
+        return Err(TreeWriteError::DuplicateNumber(key));
+    }
+    let keyed = entries
+        .into_iter()
+        .map(|(key, value)| (Object::Int(key), value))
+        .collect();
+    Ok(write_tree(keyed, names.intern(b"Nums"), names, add))
+}
+
+/// One node already added, with the least and greatest key beneath it.
+struct Placed {
+    reference: ObjRef,
+    least: Object,
+    greatest: Object,
+}
+
+/// The shape both trees share, over keys already sorted and unique.
+fn write_tree(
+    entries: Vec<(Object, Object)>,
+    leaf_key: Name,
+    names: &NameTable,
+    mut add: impl FnMut(Object) -> ObjRef,
+) -> ObjRef {
+    let pairs = |chunk: Vec<(Object, Object)>| -> Vec<Object> {
+        chunk.into_iter().flat_map(|(k, v)| [k, v]).collect()
+    };
+    if entries.len() <= TREE_FANOUT {
+        let mut root = Dict::new();
+        root.insert(leaf_key, Object::Array(pairs(entries)));
+        return add(Object::Dict(root));
+    }
+
+    let limits_key = names.intern(b"Limits");
+    let node = |kind: Name, body: Vec<Object>, least: &Object, greatest: &Object| -> Object {
+        let mut dict = Dict::new();
+        dict.insert(kind, Object::Array(body));
+        dict.insert(
+            limits_key,
+            Object::Array(vec![least.clone(), greatest.clone()]),
+        );
+        Object::Dict(dict)
+    };
+
+    let mut level: Vec<Placed> = Vec::new();
+    let mut rest = entries.into_iter();
+    loop {
+        let chunk: Vec<(Object, Object)> = rest.by_ref().take(TREE_FANOUT).collect();
+        let (Some(first), Some(last)) = (chunk.first(), chunk.last()) else {
+            break;
+        };
+        let (least, greatest) = (first.0.clone(), last.0.clone());
+        let leaf = node(leaf_key, pairs(chunk), &least, &greatest);
+        level.push(Placed {
+            reference: add(leaf),
+            least,
+            greatest,
+        });
+    }
+
+    while level.len() > TREE_FANOUT {
+        let mut above = Vec::with_capacity(level.len().div_ceil(TREE_FANOUT));
+        for group in level.chunks(TREE_FANOUT) {
+            let (Some(first), Some(last)) = (group.first(), group.last()) else {
+                continue;
+            };
+            let kids = group.iter().map(|w| Object::Ref(w.reference)).collect();
+            let interior = node(Name::KIDS, kids, &first.least, &last.greatest);
+            above.push(Placed {
+                reference: add(interior),
+                least: first.least.clone(),
+                greatest: last.greatest.clone(),
+            });
+        }
+        level = above;
+    }
+
+    let mut root = Dict::new();
+    root.insert(
+        Name::KIDS,
+        Object::Array(level.iter().map(|w| Object::Ref(w.reference)).collect()),
+    );
+    add(Object::Dict(root))
 }
 
 #[cfg(test)]

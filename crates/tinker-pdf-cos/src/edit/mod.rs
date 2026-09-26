@@ -30,6 +30,7 @@ mod save;
 mod signing;
 #[cfg(test)]
 mod tests;
+mod trees;
 
 pub use forms::{FillError, FillRejection, SkippedWidget, WidgetDefect};
 
