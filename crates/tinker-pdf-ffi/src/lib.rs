@@ -2152,6 +2152,11 @@ unsafe fn write_options(options: *const TpdfWriteOptions) -> Result<WriteOptions
         compress: options.compress != 0,
         garbage_collect: options.garbage_collect != 0,
         encryption,
+        // Not projected yet: `TpdfWriteOptions` is a C struct whose layout the
+        // header and every binding pin, and a field added here is a layout
+        // change owed to the bindings row rather than made in passing. The
+        // facade's default is what crosses until then.
+        deduplicate_streams: false,
     })
 }
 

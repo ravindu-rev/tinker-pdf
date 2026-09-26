@@ -155,9 +155,10 @@ impl DocumentEditor {
     ///
     /// Every object the page reaches is copied with it and renumbered, because
     /// the two documents number independently and the source's numbers mean
-    /// nothing here. A shared resource copied twice is copied twice: dedup
-    /// needs content hashing to be safe, and a wrong dedup silently merges two
-    /// different fonts.
+    /// nothing here. A shared resource copied twice is copied twice here;
+    /// a rewrite with [`crate::write::WriteOptions::deduplicate_streams`]
+    /// merges the streams among the copies, by dictionary and content, since a
+    /// guess at sameness silently merges two different fonts.
     ///
     /// Returns the new page's reference, or `None` when the source has no such
     /// page.

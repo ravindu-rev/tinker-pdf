@@ -46,6 +46,7 @@ pub mod appearance;
 pub mod build;
 pub mod calc;
 pub mod decrypt;
+pub(crate) mod dedup;
 pub mod dest;
 pub mod doc;
 pub mod edit;

@@ -89,6 +89,30 @@ cross-reference table's own entries for the same reason, and the reader has
 been hardened against this shape since it was written
 (`limits::MAX_XREF_SLOTS`).
 
+**Stream deduplication.** `WriteOptions::deduplicate_streams` merges
+identical streams into one object on a rewrite, after garbage collection, and
+**identical means identical**: equal dictionaries — every key and value in
+order, `/Length` aside since the writer computes it — and equal content,
+compared byte for byte. SHA-256 over the content only puts streams in
+buckets worth comparing; it never decides a merge, because a wrong merge is
+not a bigger file but one font drawn with another's program and nothing in the
+output saying so. The content compared is the **decoded** bytes, so two
+encodings of one content under one dictionary merge; a decode that is not
+exact — a filter this build cannot run, an image codec the chain stops at, a
+decode that warned or hit the output cap — compares the stored bytes under a
+different tag instead, so a damaged stream that decodes to the same prefix as
+another is never taken for it. Every reference to a duplicate, the trailer's
+included, is pointed at the survivor (the lowest-numbered), and the pass
+repeats to a fixed point, since merging two images can make the two forms that
+drew them equal. Only streams are candidates, so nothing whose object number
+is its identity — a page, an annotation, an optional content group, a
+structure element, a signature dictionary — can be merged; among streams a
+cross-reference or object stream and one an `/OBJR` names (14.7.5.3) are held
+apart. Off by default, because it decodes every filtered stream to compare it;
+ignored on an incremental update, which appends and must not rewrite what a
+signature's revision covers. `DocumentEditor::import_page` still copies a
+shared resource per import, and this is the pass that merges the copies.
+
 **Encrypt-on-save.** `WriteOptions::encryption` encrypts a rewrite at R6
 (AES-256): every string and every stream (7.6.2), each under an
 initialisation vector derived from the file key and object number so
@@ -150,7 +174,8 @@ Everything goes through the facade (ruling 11, [rulings](../rulings.md)):
 traits in the core, because `wasm32-unknown-unknown` has no files.
 `WriteOptions` carries `mode` (`WriteMode::Rewrite` or
 `WriteMode::Incremental`), `linearize`, `version`, `object_streams`,
-`compress`, `encryption` (`Option<Encryption>`) and `garbage_collect`;
+`compress`, `encryption` (`Option<Encryption>`), `garbage_collect` and
+`deduplicate_streams`;
 the default is a plain uncompressed rewrite.
 
 ```rust
@@ -204,8 +229,9 @@ through `DocumentEditor::save` — the door this page documents — would set it
 get no subsetting, and be told nothing; and the caller who reaches for that
 flag is by definition the caller redacting something. A silent flag on the
 disclosure path is worse than no flag, so there is none: `WriteOptions` has
-seven fields, all of them about bytes on disk, and its own documentation says
-why there is no eighth. Moving the subsetting down into `tinker-pdf-cos`
+eight fields, all of them about bytes on disk and every one acted on where it
+is carried, and its own documentation says why there is no ninth. Moving the
+subsetting down into `tinker-pdf-cos`
 instead would mean moving the interpreter down or writing a second glyph
 resolver there, and a second answer to "what does this code decode to" is a
 second engine.
@@ -242,6 +268,10 @@ remove anything.
 | Linearizing a document with no catalog or no pages | none — `linearize` returns no layout and the ordinary rewrite is emitted | there is no first page to put first, and a file claiming `/Linearized` falsely is worse than an ordinary one | Annex F |
 | `object_streams` under `linearize` | none — ignored when linearization succeeds | packing page one's objects into a container with everything else is the opposite of the layout's point | 7.5.7 |
 | Re-compressing a stream that declares a `/Filter` | none — handed through untouched, asserted in both directions | the dictionary is the only signal the bytes are already encoded; wrapping them again yields a stream no reader can undo | [filters](filters.md) |
+| Deduplicating on an incremental update | none — `deduplicate_streams` is ignored there, documented on the field (`an_incremental_update_merges_nothing`) | an update appends; merging would rewrite objects an earlier revision, and a signature over it, covers | 7.5.6 |
+| Merging two streams whose digests agree and whose bytes or dictionaries do not | never; the digest only chooses what to compare (`a_colliding_digest_never_merges_different_bytes`, `equal_bytes_under_different_decode_parameters_stay_apart`) | a wrong merge silently swaps one font's program for another's | — |
+| Comparing a stream by decoded content when the decode warned | its stored bytes are compared instead (`two_damaged_streams_that_decode_alike_stay_apart`) | a partial decode of two different streams can be equal | [filters](filters.md) |
+| Merging a cross-reference or object stream, or a stream an `/OBJR` names | held apart (`a_stream_with_identity_is_never_merged`) | the first two describe the file they came from; the third is a structure element's claim on that object, and two claims must stay two | 14.7.5.3 |
 | Compressing a `/Type /Metadata` stream | none — written unfiltered whatever `compress` says (`a_caller_supplied_packet_is_written_verbatim_and_uncompressed`) | an XMP packet is read from the raw bytes by tools that do not decode PDF, and ISO 19005 forbids a filter on one | 14.3.2 |
 | A font-subsetting switch on `WriteOptions` | none, and deliberately — the field does not exist and `WriteOptions`' own doc comment says why | the pass is driven by the interpreter, which `tinker-pdf-cos` is below; a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts` | [fonts](fonts.md) |
 | Subsetting that *removes* anything on an incremental save | `SubsetOutcome::CutButTheOriginalsRemain`, and `removed()` is false | 7.5.6: the output starts with the original bytes, the original font programs among them. The pass still runs, because the smaller programs are what a reader resolves — but nothing has left the file | 7.5.6 |
@@ -315,6 +345,27 @@ is measured rather than asserted; and
 `a_program_left_whole_means_the_disclosure_is_not_out_of_the_file` pins
 `removed()` against a report with one `FieldResource` entry in it, which is
 the case where "the pass ran" and "the file is clean" come apart.
+
+Stream deduplication is held at two levels. `crates/tinker-pdf/tests/stream_dedup.rs`
+embeds the vendored Liberation Serif twice under two font dictionaries and
+shows a deduplicating rewrite carries it once — both descriptors name one
+`/FontFile2`, the file shrinks by the face — and **renders the page byte for
+byte as before**, which is the proof a merge did not swap anything; the output
+passes the strict validator. Beside it: equal bytes under different
+`/DecodeParms` stay two, a zlib stream of stored blocks and the encoder's
+output of the same content merge (the comparison is on decoded bytes), two
+damaged streams that decode to the same prefix stay two, and an incremental
+update merges nothing. `crates/tinker-pdf-cos/src/dedup.rs`'s own tests cover
+what a real digest cannot be made to do: an injected digest that collides on
+everything, under which only true duplicates merge; the fixed point through
+two forms naming two copies of one image; the trailer redirected; and the
+`/OBJR` and cross-reference holds. Injections, counted over both suites: bytes
+not compared under a shared digest 1, the dictionary compared as empty 2,
+`/Length` compared 1, a warned decode compared as whole 1, the `/OBJR` hold
+dropped 1, the trailer not redirected 1, one round only 1, bucketing by stored
+bytes 1, the pass never run 2 — and the dictionary dropped from the bucket key
+alone **0**, because the comparison that decides checks it again; that is the
+second layer doing its job, not a hole.
 
 `crates/tinker-pdf-cos/tests/encrypt_on_save.rs` round-trips encrypted
 output ([encryption](encryption.md)); `tests/page_operations.rs` and the

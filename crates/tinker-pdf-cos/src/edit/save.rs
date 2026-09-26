@@ -210,8 +210,46 @@ impl DocumentEditor {
                 if options.garbage_collect {
                     all = self.reachable(&all, &trailer);
                 }
+                let mut trailer = trailer;
+                if options.deduplicate_streams {
+                    let content = |num: u32, stream: &StreamData| self.dedup_content(num, stream);
+                    let (merged, redirected, _) = crate::dedup::deduplicate(
+                        &all,
+                        &trailer,
+                        self.doc.names_table(),
+                        &content,
+                        &tinker_pdf_crypto::sha2::sha256,
+                    );
+                    all = merged;
+                    trailer = redirected;
+                }
                 write::rewrite(&all, &trailer, options, self.doc.names_table())
             }
+        }
+    }
+
+    /// A stream's content as stream deduplication compares it: decoded
+    /// through its whole `/Filter` chain when that is exact, and its stored
+    /// bytes when it is not.
+    ///
+    /// "Exact" is a decode that raised no warning at all: a filter this build
+    /// cannot run, an image codec the chain stops at, damage, and the output
+    /// cap each warn, and a truncated decode compared as if whole could make
+    /// two different streams look alike. The warnings go nowhere: a save that
+    /// changed what `CosDocument::warnings` reports would make the document's
+    /// answer depend on whether it had been saved.
+    fn dedup_content(&self, num: u32, stream: &StreamData) -> crate::dedup::Content {
+        use crate::dedup::Content;
+        if stream.dict.get(crate::name::Name::FILTER).is_none() {
+            return Content::Decoded(stream.data.clone());
+        }
+        let mut sink = crate::warn::WarningSink::new();
+        match self
+            .doc
+            .decode_with(&stream.data, &stream.dict, num, &mut sink)
+        {
+            Ok(decoded) if sink.is_empty() => Content::Decoded(decoded),
+            _ => Content::Stored(stream.data.clone()),
         }
     }
 

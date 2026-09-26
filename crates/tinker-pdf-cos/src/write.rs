@@ -47,10 +47,11 @@ pub struct Encryption {
 
 /// Options for writing.
 ///
-/// Seven fields, all of them about **bytes on disk**: layout, declared
-/// version, containers, compression, encryption and what is dropped on the
-/// way. That is deliberate and there is one absence worth naming, because it
-/// is the field the next person will reach for.
+/// Eight fields, all of them about **bytes on disk**: layout, declared
+/// version, containers, compression, encryption, what is dropped on the way
+/// and what is written once instead of twice. That is deliberate and there is
+/// one absence worth naming, because it is the field the next person will
+/// reach for.
 ///
 /// **There is no font-subsetting switch here, and there must not be.**
 /// Subsetting a rewrite's embedded font programs means walking every content
@@ -121,6 +122,24 @@ pub struct WriteOptions {
     /// it, and that is a guarantee it should keep making for itself rather
     /// than inheriting from a flag.
     pub garbage_collect: bool,
+    /// Merge identical streams into one object, on a rewrite.
+    ///
+    /// Identical means identical: equal dictionaries (`/Length` aside) and
+    /// equal decoded bytes, compared byte for byte — SHA-256 only chooses
+    /// which streams to compare. A wrong merge silently draws one font with
+    /// another's program, so nothing short of equality merges. Only streams
+    /// are merged, never the dictionaries whose object number carries
+    /// identity (pages, annotations, groups, structure elements, signatures),
+    /// nor a stream an `/OBJR` names or a cross-reference or object stream.
+    /// Runs after [`WriteOptions::garbage_collect`].
+    ///
+    /// Off by default: it decodes every filtered stream to compare it, and a
+    /// file whose streams all differ pays that for nothing. Ignored on an
+    /// incremental update, which appends and must not rewrite what a
+    /// signature's revision covers. Unlike the font-subsetting switch this
+    /// type's documentation refuses, this one is acted on here: the pass needs
+    /// the object set and the filters, and this crate has both.
+    pub deduplicate_streams: bool,
 }
 
 impl Default for WriteOptions {
@@ -133,6 +152,7 @@ impl Default for WriteOptions {
             compress: false,
             encryption: None,
             garbage_collect: false,
+            deduplicate_streams: false,
         }
     }
 }
