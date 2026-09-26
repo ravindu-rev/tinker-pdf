@@ -3335,4 +3335,79 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
             Some(tinker_pdf_content::Rgb { r: 0, g: 0, b: 0 }),
         );
     }
+
+    /// A page's resources built over `DocumentEditor::view` resolve an object
+    /// the editor has only just allocated; built over the editor's own
+    /// document they cannot, because that document never had it.
+    ///
+    /// This is the resolution path a redaction that copies a form per
+    /// placement needs: `PageResources` holds an `Arc<CosDocument>`, and the
+    /// view is one in which the copy exists at the number the editor gave it.
+    #[test]
+    fn resources_over_an_editors_view_resolve_what_it_allocated() {
+        use std::sync::Arc;
+        use tinker_pdf_cos::{
+            pages, CosDocument, Dict, DocumentBuilder, DocumentEditor, Name, Object, StreamData,
+        };
+
+        let mut builder = DocumentBuilder::new();
+        builder.add_page(100.0, 100.0, |page| {
+            page.fill_rect(10.0, 10.0, 20.0, 20.0, 0.0);
+        });
+        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+
+        let form = editor.allocate();
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(editor.intern(b"XObject")));
+        dict.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Form")),
+        );
+        dict.insert(
+            editor.intern(b"BBox"),
+            Object::Array(vec![
+                Object::Int(0),
+                Object::Int(0),
+                Object::Int(10),
+                Object::Int(10),
+            ]),
+        );
+        editor.put_stream(
+            form,
+            StreamData {
+                dict,
+                data: b"0 0 1 rg 0 0 10 10 re f".to_vec(),
+            },
+        );
+        let page_ref = editor.page_refs()[0];
+        let Some(Object::Dict(mut page)) = editor.get(page_ref) else {
+            panic!("a page dictionary");
+        };
+        let mut resources = page.get_dict(Name::RESOURCES).cloned().unwrap_or_default();
+        let mut xobjects = Dict::new();
+        xobjects.insert(editor.intern(b"Fm9"), Object::Ref(form));
+        resources.insert(editor.intern(b"XObject"), Object::Dict(xobjects));
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        editor.put(page_ref, Object::Dict(page));
+
+        let view = editor.view().expect("the view opens");
+        let viewed = &pages::collect(&view)[0];
+
+        let over_view = PageResources::new(&view, viewed, None);
+        let (form_dict, reference) = over_view.xobject(b"Fm9").expect("the form resolves");
+        assert_eq!(reference, form);
+        assert_eq!(
+            form_dict
+                .get_name(view.intern(b"Subtype"))
+                .and_then(|n| view.name_bytes(n))
+                .as_deref(),
+            Some(b"Form".as_slice())
+        );
+
+        // The same page dictionary over the document the editor was opened
+        // with names the form and cannot reach it.
+        let over_original = PageResources::new(&editor.shared_document(), viewed, None);
+        assert!(over_original.xobject(b"Fm9").is_none());
+    }
 }

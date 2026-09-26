@@ -33,6 +33,7 @@ mod signing;
 mod tests;
 mod trailer;
 mod trees;
+mod view;
 
 pub use forms::{FillError, FillRejection, SkippedWidget, WidgetDefect};
 
