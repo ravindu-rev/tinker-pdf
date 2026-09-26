@@ -157,6 +157,39 @@ is a box that reads as ticked and displays as empty. `reset_form` restores `/DV`
 into `/V` and removes `/V` where there is no `/DV` (12.7.5.3) — "never
 filled" and "filled with nothing" are different states.
 
+**Exchanging form data: FDF and XFDF** (`tinker_pdf::form_data`). Both
+directions, through one model: a `FormData` is a list of `FieldData` —
+a fully qualified name and the `FieldValue` the field-tree reader already
+uses — plus the source document's name and the warnings. `FormData::from_fields`
+exports from `Document::form_fields()` or `DocumentEditor::fields()`, the
+walk that joins `/T` with periods and inherits `/V`; `apply(editor, &data)`
+imports through `set_field_values`, so a name resolves against the same
+walk, a value a field would refuse from a user is refused, and the first
+refusal rolls back every field before it. A check box or radio group takes
+the name of its state, as the filling paragraph above says. FDF (12.7.8) is
+read by the same object reader every PDF is: the `/FDF` dictionary's
+`/Fields` tree, `/T` partial names joined as 12.7.3.2 joins them, `/V` as a
+text string, a name or an array of either, and `/F`; `/Kids` is walked with
+a visited set and the field tree's own depth bound. Written, the qualified
+names go back into a tree — `/T` is a *partial* name — a state is a name,
+and a cross-reference table is included although 12.7.8 makes it optional.
+XFDF is the XML form, read by `tinker-pdf-xml` under its default bounds,
+which refuse a document type declaration outright. **What XFDF is read as is
+the commonly documented core** — `<xfdf>`, `<f href>`, `<fields>`, nested
+`<field name>`, repeated `<value>` — because the specification that defines
+it, Adobe's *XML Forms Data Format Specification*, standardised as ISO
+19444-1, was not available to this build; a value is text, and the field it
+lands in decides whether `On` is a state. Everything either reader meets and
+does not read — FDF's `/Annots`, `/Pages`, `/JavaScript`, a field's `/AP`,
+`/Ff`, `/SetFf`, `/Opt`, `/RV`; XFDF's `<annots>`, `<ids>`,
+`<value-richtext>` — is named in `FormData::warnings` rather than skipped.
+A value XML 1.0 cannot carry (a C0 control other than tab, line feed and
+carriage return) is refused by `to_xfdf` rather than written some other way,
+and a carriage return is written `&#13;` so it does not come back a line
+feed. A name with an empty partial name (`.x`, `a..b`) is written whole, and
+a name deeper than a quarter of the object parser's nesting bound keeps its
+tail in the deepest `/T`, so every name reads back as the name it was.
+
 **Transactions.** `DocumentEditor::transaction` snapshots the editor's
 whole mutable state — overlay, deletions, page order, trailer entries and the
 object-number counter — runs a closure, and restores everything on `Err`. A closure
@@ -392,6 +425,19 @@ and `set_calculated_values` for a host that computes values itself.
 page, the `Rect` and the initial value, the caller's `/Ff` bits and a `/DA`
 font size — and answers the terminal field's `ObjRef` or an
 `AddFieldError`; the facade re-exports all five, and `Rect` with them.
+
+Form data lives in the facade module `tinker_pdf::form_data`:
+`read_fdf(bytes)`, `read_xfdf(bytes)`, `FormData::{from_fields, to_fdf,
+to_xfdf}`, `apply(editor, &data)`, and the types `FormData`, `FieldData`,
+`FormDataWarning` and `FormDataError`. It is not yet projected through the C
+ABI or the bindings.
+
+```rust
+let data = form_data::FormData::from_fields(&document.form_fields());
+let xfdf = data.to_xfdf()?;                      // or data.to_fdf()
+let mut editor = other.editor();
+form_data::apply(&mut editor, &form_data::read_xfdf(xfdf.as_bytes())?)?;
+```
 `recalculate_under` takes a `ScriptPolicy`; `formatted_value`, `keystroke`
 and `validate` take one too, and are the format event and the two event entry
 points. The free functions behind them are
@@ -453,6 +499,10 @@ let bytes = editor.save(&WriteOptions::default());
 | Creating a field under a name that is taken, or beneath a terminal field | `AddFieldError::NameTaken` / `AncestorIsTerminal` | two fields answering to one name are one field a filler cannot address; a terminal field's kids are widgets | — |
 | Creating a field whose flags decide a different kind, or a list box marked editable | `AddFieldError::FlagsContradictKind` | Radio, Pushbutton, Combo and Edit are what `NewFieldKind` says, and a second answer to that question is a field that reads back as something else | — |
 | A button export value that is empty, `Off`, repeated, or not a name | `AddFieldError::ExportUnusable` | 12.7.4.2.3 reserves `Off`, and two buttons answering to one state are one button | — |
+| XFDF beyond the commonly documented core, and FDF beyond `/Fields` and `/F` — annotations, page templates, JavaScript, appearances, flags, rich text | `FormDataWarning::NotRead`, naming the key or element and the field | ISO 19444-1 was not available to this build, and a skipped construct would read as one that was not there | — |
+| An encrypted FDF | `FormDataError::Encrypted` | reading one needs a key, and this reader takes none | — |
+| A multiple selection imported into a field | `FillError::ValueRefused` through `FillRejection` | this build fills one value per field; half a selection is a different answer | — |
+| A value XML 1.0 cannot carry, written as XFDF | `FormDataError::NotRepresentable`, naming the field | written any other way it would come back different; FDF carries it | — |
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
 | Shaping a value against a simple `/DA` font, a vertical CMap, or a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a byte cannot name a glyph past 255; a vertical run drawn along a baseline is stacked by the viewer; a CFF carries no `GSUB` | [design/shaping.md](../design/shaping.md) |
 | Shaping a value under a **registry CMap** in a build without `cmap-predefined` | `WarningKind::PredefinedCMapApproximate(name)` against the field, then the per-character warnings | the code-to-CID tables that would be inverted were never compiled in — a capability that depends on a feature has to say so | [fonts.md](fonts.md) |
@@ -503,6 +553,23 @@ initial values restored by a reset; a dotted name creating its ancestors
 once; the `/DR` font joined or added exactly once; the auto-size that proves
 the `/DA` font is read through the editor; and every `AddFieldError` leaving
 the editor clean. Its header carries six reintroduced defects, each firing.
+
+`crates/tinker-pdf/tests/form_data.rs` (14 tests) is the exchange row's
+exit criterion: export then import reproduces every terminal field's value,
+in both formats, on `testdata/form-fields.pdf` before and after a fill, and
+on a form `add_field` builds with names three deep, a list box, a combo box,
+a check box and a radio group, and values that need every escape both
+formats have. Four hand-written fixtures in `tests/form_data/` — not written
+by this writer, and their README says what was and was not available to
+write them from — are read value by value, and imported into the form they
+were written for. The refusals, the unread keys and a name ten thousand
+partial names deep are asserted; `hostile_input.rs`'s
+`mutated_form_data_never_panics` sweeps the fixtures on every commit, and
+`form_data` is a fuzz target whose body is a round-trip property rather than
+a crash hunt. That property, run once as a stable-toolchain sweep of 360 000
+mutations before the target was committed, found two writer defects — a
+valueless field beneath which other fields sat was lost, and `.x` came back
+as `x` — and both are pinned. Seven reintroduced defects each fire.
 
 `crates/tinker-pdf/tests/shaped_forms.rs` (12 tests, and the same 12 in a
 `--no-default-features` build — the registry pair swap places) holds up the

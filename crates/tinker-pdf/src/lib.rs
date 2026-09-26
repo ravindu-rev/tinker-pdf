@@ -28,6 +28,7 @@ pub mod cbz;
 pub mod epub;
 pub mod fontlist;
 pub mod fonts;
+pub mod form_data;
 pub mod layers;
 pub mod mdp;
 mod optional;

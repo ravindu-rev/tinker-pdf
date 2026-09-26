@@ -165,6 +165,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "key, IV and plaintext carved from the body",
     ),
     ("css", "a stylesheet is text"),
+    (
+        "form_data",
+        "FDF and XFDF are text, and both readers see every seed whichever it is",
+    ),
     ("form_script", "a generator over field and action shapes"),
     ("inflate", "a raw DEFLATE stream begins with a bit field"),
     ("jbig2", "an embedded JBIG2 stream has no file header"),

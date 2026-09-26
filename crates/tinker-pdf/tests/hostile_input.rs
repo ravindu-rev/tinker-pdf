@@ -501,3 +501,54 @@ trailer\n<< /Size 2 /Root 1 0 R >>\n%%EOF\n",
         exercise(bytes.to_vec());
     }
 }
+
+/// FDF and XFDF (`tinker_pdf::form_data`), damaged the same way.
+///
+/// The four hand-authored fixtures in `tests/form_data/`, put through the
+/// sweep above: both readers see every mutation — the two formats announce
+/// themselves, so a damaged FDF is a hostile XFDF too — and whatever either
+/// reads is written back out in both formats and read again, because the
+/// writers take names and values a hostile file chose.
+/// `fuzz/fuzz_targets/form_data.rs` is the deep version of this; this is the
+/// one that runs on every commit.
+#[test]
+fn mutated_form_data_never_panics() {
+    use tinker_pdf::form_data::{read_fdf, read_xfdf, FormData};
+
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/form_data");
+    let mut inputs: Vec<(String, Vec<u8>)> = Vec::new();
+    for name in [
+        "form-fields.fdf",
+        "hierarchy.fdf",
+        "form-fields.xfdf",
+        "hierarchy.xfdf",
+    ] {
+        let bytes = std::fs::read(dir.join(name)).unwrap_or_default();
+        assert!(
+            !bytes.is_empty(),
+            "{name} is missing, so this proves nothing"
+        );
+        inputs.push((name.to_string(), bytes));
+    }
+
+    let rewrite = |data: &FormData| {
+        let _ = read_fdf(&data.to_fdf());
+        if let Ok(xml) = data.to_xfdf() {
+            let _ = read_xfdf(xml.as_bytes());
+        }
+    };
+    for (name, original) in &inputs {
+        let mut rng = Rng(0xF0F0_1207_8000_0001 ^ name.len() as u64);
+        for case in 0..sweep(2000) {
+            let mutated = mutate(original, &mut rng);
+            let label = format!("{name} case {case}");
+            let _guard = Guard(&label);
+            if let Ok(data) = read_fdf(&mutated) {
+                rewrite(&data);
+            }
+            if let Ok(data) = read_xfdf(&mutated) {
+                rewrite(&data);
+            }
+        }
+    }
+}

@@ -270,3 +270,9 @@ name = "woff"
 path = "fuzz_targets/woff.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "form_data"
+path = "fuzz_targets/form_data.rs"
+test = false
+doc = false

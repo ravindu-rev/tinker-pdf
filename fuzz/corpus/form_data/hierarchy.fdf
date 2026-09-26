@@ -1,0 +1,22 @@
+%FDF-1.2
+1 0 obj
+<< /FDF << /Fields [ << /T (applicant)
+                        /Kids [ << /T (name)
+                                   /Kids [ << /T (first) /V (Ada) >>
+                                           << /T (last) /V (Lovelace) >> ] >>
+                                << /T (born) /V (1815-12-10) >> ] >>
+                     << /T (languages) /V [ (English) (French) ] >>
+                     << /T (consent) /V /Yes >>
+                     << /T (remarks) /V (a \(bracketed\) aside, and a back\\slash) >>
+                     << /T (untouched) >>
+                     << /T (styled) /V (plain) /Ff 1 /SetFf 2 >>
+                     2 0 R ]
+          /F << /Type /Filespec /UF (application.pdf) /F (applic~1.pdf) >>
+          /Status (Imported by the test) >> >>
+endobj
+2 0 obj
+<< /T (indirect) /V (through a reference) >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
