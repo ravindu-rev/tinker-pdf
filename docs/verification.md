@@ -1526,11 +1526,12 @@ fix was to sharpen the injection rather than to shrug at the number.
   a glyph moving one pixel barely moves a mean, so the metric is changed
   pixels, not mean difference. `--diff` writes a per-pixel heat map beside
   the verdict, because a number that fails without a picture wastes a
-  human's morning. It reads a `.pnm` or a `.pdf` and **not** a `.png`, so
-  `tpdf render`'s output no longer feeds it directly; reading one would need a
-  PNG decoder, and `xtask`'s `TOOLS` table keeps a tool to the facade, which
-  publishes an encoder and no decoder. The seam is a [ROADMAP](ROADMAP.md) row
-  rather than a silent gap.
+  human's morning. It reads a `.png`, a `.pnm` or a `.pdf`, recognising each
+  by its signature as well as its extension, so `tpdf render`'s output feeds it
+  directly. The PNG goes through `Bitmap::from_png` on the facade rather than
+  through `tinker-pdf-filters`' decoder, which `xtask`'s `TOOLS` table keeps
+  out of a tool's reach; a PNG carrying alpha is compared as it looks over
+  white, and one whose raster stops short is refused rather than scored.
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary:
   no test may spawn a program the workspace did not build), `vendor`

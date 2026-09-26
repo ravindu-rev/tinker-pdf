@@ -10,19 +10,24 @@
 //! `visual_regression.rs`, so budgets tuned there transfer here rather than
 //! having to be rediscovered.
 //!
-//! Inputs are PNM files or PDFs, which are rendered first. Comparing a PDF
-//! against a reference image is the usual shape of a comparison, and it is now
-//! the only shape that reaches `tpdf render`'s output: **that command writes
-//! PNG** as of the `Bitmap::to_png` row, and this tool reads no PNG.
+//! Inputs are PNG files, PNM files or PDFs, which are rendered first. Comparing
+//! a PDF against a reference image is the usual shape of a comparison, and a
+//! PNG is what `tpdf render` writes, so the two ends of the render tools meet
+//! here.
 //!
-//! That is a real seam and it is recorded rather than papered over. Reading one
-//! here would mean a PNG decoder, and the only one in this workspace is
-//! `tinker-pdf-filters`' — which `xtask`'s `TOOLS` table deliberately keeps out
-//! of a tool's reach, on the rule that a tool exercises what a user gets
-//! through the facade rather than reaching past it into a leaf. The facade
-//! publishes an encoder and no decoder, because a `Bitmap` is a render going
-//! out and nothing in the engine reads one back in. Until it does, compare the
-//! two PDFs directly, which is what the usage text below asks for first.
+//! **A PNG is read through the facade**, `tinker_pdf::Bitmap::from_png`, and
+//! not through `tinker-pdf-filters`' decoder directly. `xtask`'s `TOOLS` table
+//! keeps a tool to the facade on the rule that a tool exercises what a user
+//! gets rather than reaching past it into a leaf; this tool used to read no PNG
+//! at all for that reason, because the facade published an encoder and no
+//! decoder. It publishes both now, and this is the caller that asked.
+//!
+//! A PNG carrying alpha is composited over white before it is compared — the
+//! colour a page shows where nothing is painted, and the only background a
+//! render this tool makes itself is ever compared on. A PNG whose raster ends
+//! before its declared height is refused rather than compared, because the
+//! missing rows would be counted as a rendering difference; damage that costs
+//! no pixels is named on standard error and the comparison goes ahead.
 
 use std::process::ExitCode;
 
@@ -35,7 +40,8 @@ usage:
   pdfcmp <a> <b> [--budget F] [--threshold N] [--dpi D] [--page N]
                  [--diff FILE] [--quiet]
 
-<a> and <b> may each be a .pnm image or a .pdf, which is rendered first.
+<a> and <b> may each be a .png or .pnm image or a .pdf, which is rendered
+first. A PNG with alpha is compared as it looks over white.
 
 options:
   --budget F     the largest acceptable fraction of changed pixels, 0..1
@@ -174,11 +180,21 @@ fn run(args: &[String]) -> Result<bool, String> {
     Ok(within)
 }
 
-/// A PNM as written by `tpdf render`, or a page of a PDF.
+/// A PNG as `tpdf render` writes it, a PNM, or a page of a PDF.
 fn load(path: &str, dpi: f64, page: u32) -> Result<Image, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
+    load_bytes(path, bytes, dpi, page)
+}
 
-    if path.to_ascii_lowercase().ends_with(".pdf") || bytes.starts_with(b"%PDF") {
+/// [`load`] once the file has been read, so the choice of reader can be tested
+/// without a filesystem.
+///
+/// Each format is recognised by its own signature as well as by its extension:
+/// a `tpdf render` output renamed, or a PNG saved without one, is still read
+/// as what it is rather than failing as a malformed PNM.
+fn load_bytes(path: &str, bytes: Vec<u8>, dpi: f64, page: u32) -> Result<Image, String> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".pdf") || bytes.starts_with(b"%PDF") {
         let doc = Document::open(bytes).map_err(|e| format!("{path}: {e:?}"))?;
         let rendered = doc
             .page(page)
@@ -190,8 +206,23 @@ fn load(path: &str, dpi: f64, page: u32) -> Result<Image, String> {
         return Ok(Image::from_bitmap(&rendered));
     }
 
+    if lower.ends_with(".png") || bytes.starts_with(&PNG_SIGNATURE) {
+        let bitmap = Bitmap::from_png(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        // Ruling 10 reaches a command line as a sentence: the picture is
+        // compared, and the reader is told what had to be tolerated to get it.
+        for warning in &bitmap.warnings {
+            eprintln!("pdfcmp: {path}: tolerated {warning:?}");
+        }
+        return Ok(Image::from_bitmap(&bitmap));
+    }
+
     read_pnm(&bytes).map_err(|e| format!("{path}: {e}"))
 }
+
+/// ISO/IEC 15948 5.2's eight bytes, spelled here rather than imported: the
+/// facade is this tool's only dependency, and a PNG is recognised before it is
+/// decoded.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
 /// An image reduced to what the comparison needs.
 struct Image {
@@ -202,24 +233,50 @@ struct Image {
 }
 
 impl Image {
+    /// Three bytes a pixel, with any alpha composited over white.
+    ///
+    /// Over white because that is what a page is where nothing is painted,
+    /// and a straight-alpha pixel `(c, a)` over it is `c·a + 255·(1 − a)`,
+    /// rounded. Dropping the alpha instead would compare a transparent pixel by
+    /// whatever colour happens to be stored under it, which a PNG encoder is
+    /// free to choose.
     fn from_bitmap(bitmap: &Bitmap) -> Image {
+        // Ink and Lab are not light, and reading their first three bytes as
+        // red, green and blue is the defect `Bitmap::to_png` exists to refuse.
+        // Neither reaches here from `load` — a render is asked for in RGB and a
+        // PNG has no colour type for either — but the match is exhaustive, so
+        // the conversion is the facade's own rather than a guess.
+        if matches!(bitmap.format, PixelFormat::CmykA8 | PixelFormat::LabA8) {
+            if let Some(light) = bitmap.to_png().and_then(|png| Bitmap::from_png(&png).ok()) {
+                return Image::from_bitmap(&light);
+            }
+        }
         let components = bitmap.components();
-        let mut pixels = Vec::with_capacity((bitmap.width * bitmap.height * 3) as usize);
-        for y in 0..bitmap.height as usize {
-            let row = y * bitmap.stride;
-            for x in 0..bitmap.width as usize {
-                let at = row + x * components;
-                let pixel = bitmap.data.get(at..at + components).unwrap_or(&[]);
+        let (width, height) = (bitmap.width as usize, bitmap.height as usize);
+        let mut pixels = Vec::with_capacity(width.saturating_mul(height).saturating_mul(3));
+        let over_white = |c: u8, a: u8| -> u8 {
+            let (c, a) = (u32::from(c), u32::from(a));
+            ((c * a + 255 * (255 - a) + 127) / 255) as u8
+        };
+        for y in 0..height {
+            let row = y.saturating_mul(bitmap.stride);
+            for x in 0..width {
+                let at = row.saturating_add(x.saturating_mul(components));
+                let pixel = bitmap
+                    .data
+                    .get(at..at.saturating_add(components))
+                    .unwrap_or(&[]);
+                let channel = |i: usize| pixel.get(i).copied().unwrap_or(0);
                 match components {
-                    1 | 2 => {
-                        let grey = pixel.first().copied().unwrap_or(0);
-                        pixels.extend_from_slice(&[grey, grey, grey]);
-                    }
+                    1 => pixels.extend_from_slice(&[channel(0); 3]),
+                    2 => pixels.extend_from_slice(&[over_white(channel(0), channel(1)); 3]),
+                    3 => pixels.extend_from_slice(&[channel(0), channel(1), channel(2)]),
                     _ => {
+                        let a = channel(3);
                         pixels.extend_from_slice(&[
-                            pixel.first().copied().unwrap_or(0),
-                            pixel.get(1).copied().unwrap_or(0),
-                            pixel.get(2).copied().unwrap_or(0),
+                            over_white(channel(0), a),
+                            over_white(channel(1), a),
+                            over_white(channel(2), a),
                         ]);
                     }
                 }
@@ -562,6 +619,93 @@ mod tests {
         assert!(read_pnm(b"P3\n1 1\n255\n0 0 0").is_err(), "ascii PNM");
         assert!(read_pnm(b"not an image at all").is_err());
         assert!(read_pnm(b"P6\n1 1\n65535\n").is_err(), "16-bit samples");
+    }
+
+    /// A bitmap over a tightly packed buffer, as the facade would hand one out.
+    fn bitmap(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> Bitmap {
+        Bitmap {
+            width,
+            height,
+            format,
+            stride: width as usize * format.components(),
+            data,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// **The seam this tool had**: `tpdf render` writes PNG through
+    /// `Bitmap::to_png`, and this is the loader reading that file back. The
+    /// pixels are named rather than compared with a second decode, so a loader
+    /// that routed a PNG to the PNM reader, or read it at the wrong stride,
+    /// fails on the values.
+    #[test]
+    fn a_png_the_facade_wrote_is_loaded_as_the_pixels_it_holds() {
+        let written = bitmap(
+            2,
+            2,
+            PixelFormat::Rgb8,
+            vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 200, 210, 220],
+        );
+        let png = written.to_png().expect("a picture");
+        let read = load_bytes("page-0001.png", png, 150.0, 0).expect("it loads");
+        assert_eq!((read.width, read.height), (2, 2));
+        assert_eq!(read.at(0, 0), [10, 20, 30]);
+        assert_eq!(read.at(1, 0), [40, 50, 60]);
+        assert_eq!(read.at(0, 1), [70, 80, 90]);
+        assert_eq!(read.at(1, 1), [200, 210, 220]);
+    }
+
+    /// Recognised by what it is, not only by what it is called: a render saved
+    /// without its extension is still a PNG, and reading it as a PNM would
+    /// report a header error about a file that is perfectly good.
+    #[test]
+    fn a_png_is_recognised_by_its_signature_without_an_extension() {
+        let grey = bitmap(3, 1, PixelFormat::Gray8, vec![0, 128, 255]);
+        let png = grey.to_png().expect("a picture");
+        let read = load_bytes("reference", png, 150.0, 0).expect("it loads");
+        assert_eq!(read.at(0, 0), [0, 0, 0]);
+        assert_eq!(read.at(1, 0), [128, 128, 128], "grey is widened, not lost");
+        assert_eq!(read.at(2, 0), [255, 255, 255]);
+    }
+
+    /// Alpha is composited over white, the page's own background. Dropping it
+    /// would compare a fully transparent pixel by whatever colour is stored
+    /// under it — black here — against a render that shows white there.
+    #[test]
+    fn a_png_with_alpha_is_compared_as_it_looks_over_white() {
+        let rgba = bitmap(
+            3,
+            1,
+            PixelFormat::Rgba8,
+            vec![0, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 255],
+        );
+        let read =
+            load_bytes("a.png", rgba.to_png().expect("a picture"), 150.0, 0).expect("it loads");
+        assert_eq!(read.at(0, 0), [255, 255, 255], "transparent is the page");
+        // 255 x (255 - 128) / 255 = 127, rounded.
+        assert_eq!(read.at(1, 0), [127, 127, 127], "half-covered black");
+        assert_eq!(read.at(2, 0), [0, 0, 0], "opaque black");
+
+        let grey_alpha = bitmap(1, 1, PixelFormat::GrayA8, vec![0, 0]);
+        let read = load_bytes("b.png", grey_alpha.to_png().expect("a picture"), 150.0, 0)
+            .expect("it loads");
+        assert_eq!(read.at(0, 0), [255, 255, 255]);
+    }
+
+    /// A PNG whose rows stop early is refused with the facade's reason, and
+    /// exits as "could not be compared" rather than being scored: the missing
+    /// rows would otherwise count as a rendering difference.
+    #[test]
+    fn a_png_that_is_not_whole_is_refused_rather_than_compared() {
+        let rgb = bitmap(4, 4, PixelFormat::Rgb8, (0..48).collect());
+        let mut png = rgb.to_png().expect("a picture");
+
+        let not_png = load_bytes("x.png", b"\x89PNG but not really".to_vec(), 150.0, 0);
+        assert!(not_png.is_err(), "a bad signature is refused");
+
+        png.truncate(png.len() / 2);
+        let halved = load_bytes("x.png", png, 150.0, 0);
+        assert!(halved.is_err(), "half a file is refused, not half-compared");
     }
 
     #[test]
