@@ -132,8 +132,12 @@ averages colour values in the group's own space. The four non-separable modes
 so on a CMYK buffer their operands convert to light, blend, and convert back.
 A page-level group decides the format of the page canvas itself and is
 converted for the caller at the end, which is 11.4.7's own last step; a page is
-never handed back in CMYK, because a `Bitmap` says how many components it has
-and nothing about what they mean.
+never handed back in CMYK or in Lab, because a `Bitmap` says how many
+components it has and nothing about what they mean. *Lab was handed back until
+September 2026*: `page_format` named `CmykA8` alone, so `format: LabA8` returned
+four bytes of encoded `L*a*b*` while `PixelFormat::LabA8`'s own documentation
+said it was not a page format;
+`a_page_asked_for_in_lab_comes_back_in_rgb` pins the correction.
 
 **`/Lab` composites in Lab too**, which was the last space that did not. Its
 components are not in the unit interval — `L*` runs 0..100 and `a`/`b` roughly
