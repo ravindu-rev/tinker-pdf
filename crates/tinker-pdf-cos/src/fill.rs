@@ -22,6 +22,7 @@ use crate::form::{self, FieldKind};
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
 use crate::pages::Rect;
+use crate::resolve::Resolve;
 use crate::warn::{WarningKind, WarningSink};
 use crate::write::StreamData;
 
@@ -727,6 +728,11 @@ fn rect_top_baseline(inner_h: f64, size: f64) -> f64 {
 /// The rectangle of a widget annotation.
 #[must_use]
 pub fn widget_rect(doc: &CosDocument, widget: ObjRef) -> Option<Rect> {
+    widget_rect_in(doc, widget)
+}
+
+/// [`widget_rect`] through a view.
+pub(crate) fn widget_rect_in<R: Resolve + ?Sized>(doc: &R, widget: ObjRef) -> Option<Rect> {
     let object = doc.get(widget).ok()?;
     let dict = object.as_dict()?;
     doc.resolve_key(dict, doc.intern(b"Rect"))
@@ -738,6 +744,15 @@ pub fn widget_rect(doc: &CosDocument, widget: ObjRef) -> Option<Rect> {
 /// The `/DA` a widget should use: its own, its field's, or the form's.
 #[must_use]
 pub fn appearance_string(doc: &CosDocument, field: &form::Field, widget: ObjRef) -> Vec<u8> {
+    appearance_string_in(doc, field, widget)
+}
+
+/// [`appearance_string`] through a view.
+pub(crate) fn appearance_string_in<R: Resolve + ?Sized>(
+    doc: &R,
+    field: &form::Field,
+    widget: ObjRef,
+) -> Vec<u8> {
     if let Ok(object) = doc.get(widget) {
         if let Some(da) = object
             .as_dict()
@@ -756,10 +771,15 @@ pub fn appearance_string(doc: &CosDocument, field: &form::Field, widget: ObjRef)
 /// A text field's quadding, inherited from the form when it says nothing.
 #[must_use]
 pub fn quadding(doc: &CosDocument, field: &form::Field) -> i64 {
+    quadding_in(doc, field)
+}
+
+/// [`quadding`] through a view.
+pub(crate) fn quadding_in<R: Resolve + ?Sized>(doc: &R, field: &form::Field) -> i64 {
     doc.get(field.reference)
         .ok()
         .and_then(|o| o.as_dict().and_then(|d| d.get_int(doc.intern(b"Q"))))
-        .or_else(|| form::acro_form(doc).and_then(|f| f.get_int(doc.intern(b"Q"))))
+        .or_else(|| form::acro_form_in(doc).and_then(|f| f.get_int(doc.intern(b"Q"))))
         .unwrap_or(0)
 }
 

@@ -25,6 +25,7 @@ use crate::write::{StreamData, Written};
 pub mod annot;
 mod annotations;
 mod forms;
+mod overlay;
 mod page_ops;
 mod save;
 mod signing;
@@ -185,6 +186,20 @@ impl DocumentEditor {
             return None;
         }
         match self.overlay.get(&r.num) {
+            // A stream written here is normally plain; one copied in from a
+            // file (`import_page`) keeps the bytes and the `/Filter` the file
+            // stored, and is decoded as the file's own would be. Handing back
+            // the stored bytes spliced deflate output into a page as
+            // operators the first time `append_content` met an imported page.
+            Some(Written::Stream(stream)) if stream.dict.get(Name::FILTER).is_some() => {
+                let mut sink = crate::warn::WarningSink::new();
+                sink.set_context(Some(r));
+                let decoded = self
+                    .doc
+                    .decode_with(&stream.data, &stream.dict, r.num, &mut sink);
+                self.doc.absorb(sink);
+                decoded.ok()
+            }
             Some(Written::Stream(stream)) => Some(stream.data.clone()),
             // An overlay entry that is not a stream replaced the stream with
             // something else, and the file's bytes are no longer what this
@@ -350,12 +365,5 @@ impl DocumentEditor {
     /// Interns a name in the document's table.
     pub fn intern(&self, bytes: &[u8]) -> Name {
         self.doc.intern(bytes)
-    }
-
-    /// The version text strings this editor writes are encoded for
-    /// (7.9.2.2): the one the document declares, header or catalog, and 1.7
-    /// when it declares none.
-    fn text_version(&self) -> (u8, u8) {
-        crate::outline::text_version(&self.doc)
     }
 }

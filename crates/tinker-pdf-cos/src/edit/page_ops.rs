@@ -386,7 +386,7 @@ impl DocumentEditor {
         let Some(order) = &self.page_order else {
             return Vec::new();
         };
-        let Some(catalog) = self.doc.catalog() else {
+        let Some(catalog) = self.catalog() else {
             return Vec::new();
         };
         let Some(tree_ref) = catalog.get_ref(Name::PAGES) else {

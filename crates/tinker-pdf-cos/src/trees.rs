@@ -14,6 +14,7 @@ use crate::doc::CosDocument;
 use crate::limits;
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
+use crate::resolve::Resolve;
 use crate::warn::WarningKind;
 use std::collections::HashSet;
 
@@ -23,6 +24,13 @@ use std::collections::HashSet;
 /// never after a text decoding that might normalize it.
 #[must_use]
 pub fn name_tree(doc: &CosDocument, root: ObjRef) -> Vec<(Vec<u8>, Object)> {
+    name_tree_in(doc, root)
+}
+
+/// [`name_tree`] through a [`Resolve`] view — an editor reading a tree it
+/// has written or changed and not yet saved.
+#[must_use]
+pub fn name_tree_in<R: Resolve + ?Sized>(doc: &R, root: ObjRef) -> Vec<(Vec<u8>, Object)> {
     let mut out = Vec::new();
     let mut visited = HashSet::new();
     walk(doc, root, 0, &mut visited, &mut out, Key::Names);
@@ -48,12 +56,22 @@ pub fn name_tree(doc: &CosDocument, root: ObjRef) -> Vec<(Vec<u8>, Object)> {
 /// damaged is the opposite of what the leniency ladder is for.
 #[must_use]
 pub fn name_tree_lookup(doc: &CosDocument, root: ObjRef, key: &[u8]) -> Option<Object> {
+    name_tree_lookup_in(doc, root, key)
+}
+
+/// [`name_tree_lookup`] through a [`Resolve`] view.
+#[must_use]
+pub fn name_tree_lookup_in<R: Resolve + ?Sized>(
+    doc: &R,
+    root: ObjRef,
+    key: &[u8],
+) -> Option<Object> {
     let mut visited = HashSet::new();
     descend(doc, root, key, 0, &mut visited)
 }
 
-fn descend(
-    doc: &CosDocument,
+fn descend<R: Resolve + ?Sized>(
+    doc: &R,
     node: ObjRef,
     key: &[u8],
     depth: u32,
@@ -100,7 +118,7 @@ fn descend(
 ///
 /// Absent or malformed limits admit everything: the index being damaged is no
 /// reason to conclude the entry is not there.
-fn within_limits(doc: &CosDocument, node: ObjRef, key: &[u8]) -> bool {
+fn within_limits<R: Resolve + ?Sized>(doc: &R, node: ObjRef, key: &[u8]) -> bool {
     let Ok(object) = doc.get(node) else {
         return true;
     };
@@ -125,6 +143,12 @@ fn within_limits(doc: &CosDocument, node: ObjRef, key: &[u8]) -> bool {
 /// Collects every entry of a number tree rooted at `root` (7.9.7).
 #[must_use]
 pub fn number_tree(doc: &CosDocument, root: ObjRef) -> Vec<(i64, Object)> {
+    number_tree_in(doc, root)
+}
+
+/// [`number_tree`] through a [`Resolve`] view.
+#[must_use]
+pub fn number_tree_in<R: Resolve + ?Sized>(doc: &R, root: ObjRef) -> Vec<(i64, Object)> {
     let mut out = Vec::new();
     let mut visited = HashSet::new();
     walk(doc, root, 0, &mut visited, &mut out, Key::Nums);
@@ -152,8 +176,8 @@ enum KeyValue {
     Number(i64),
 }
 
-fn walk(
-    doc: &CosDocument,
+fn walk<R: Resolve + ?Sized>(
+    doc: &R,
     node: ObjRef,
     depth: u32,
     visited: &mut HashSet<u32>,

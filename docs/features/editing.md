@@ -19,7 +19,27 @@ never observe a half-applied edit and never dangle.
 reads through the overlay so a later edit sees an earlier one (a field
 filled and then read back returns the filled value, not the saved one);
 `put`, `put_stream` and `delete` write; `intern` turns bytes into a `Name`
-through the document's name table.
+through the document's name table. `stream_bytes` reads a stream as the
+editor has it, decoded — including a stream copied in by `import_page`,
+which keeps the file's `/Filter` and was handed back still compressed until
+September 2026, so `append_content` on an imported page spliced deflate
+output into it as operators.
+
+**Every read of the editor's own state goes through the overlay.** The
+editor implements `Resolve` — the trait `CosDocument` implements too, with
+`CosDocument`'s own method names — and the walks that serve its edits take
+that view: the field tree (`fields()`), the widget, form and quadding reads
+behind an appearance, and `trees::name_tree_in` / `number_tree_in` /
+`name_tree_lookup_in`. So a field the editor has put and listed in
+`/Fields` is a field before anything is saved, and `fill_field` fills and
+draws it. `catalog()` is the catalog as the editor has it and
+`update_catalog(|catalog| ...)` is the one door every catalog edit goes
+through, so two compose; before it, `/NeedAppearances`' clean-up read the
+*file's* catalog and wrote it back over every earlier change to it, and a
+certifying save's `/Perms /DocMDP` was made after the update's object set
+had been taken and never reached the file. `add_name_tree` and
+`add_number_tree` write a 7.9.6 / 7.9.7 tree as new objects and return its
+root ([document model](document-model.md)).
 
 **Page surgery** (7.7.3). `delete_page`, `move_page`, `rotate_page` (any
 multiple of 90, stored as `/Rotate`), `set_crop_box` (14.11.2, written as the
@@ -201,7 +221,9 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 
 `DocumentEditor` (facade re-export of `tinker_pdf_cos::DocumentEditor`):
 `document()`, `is_dirty()`, `allocate()`, `get()`, `put()`, `put_stream()`,
-`delete()`, `intern()`, `transaction()`, `page_refs()`, `delete_page()`,
+`delete()`, `intern()`, `stream_bytes()`, `catalog()`, `update_catalog()`,
+`add_name_tree()`, `add_number_tree()`, `transaction()`, `page_refs()`,
+`delete_page()`,
 `move_page()`, `rotate_page()`, `set_crop_box()`, `insert_page()`,
 `import_page()`,
 `keep_pages()`, `append_content()`, `page_box()`, `flatten_annotations()`,

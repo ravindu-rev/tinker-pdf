@@ -47,14 +47,18 @@ impl DocumentEditor {
             }
         }
 
+        // Before the object set is taken, or the catalog's `/Perms` is an edit
+        // made and never written — which is what it was: the signature's own
+        // `/Reference` still said DocMDP, so reading the certification back
+        // did not notice the catalog entry 12.8.4 asks for was missing.
+        if request.certification.is_some() {
+            self.certify(signature_ref);
+        }
         let set = self.changed_set();
         let trailer = self.doc.trailer().clone();
         let key = self.doc.file_key();
         let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
         let catalog = self.doc.trailer().get_ref(Name::ROOT);
-        if request.certification.is_some() {
-            self.certify(signature_ref);
-        }
         let reserved = crate::sign::Reserved::build(request, catalog);
         let (mut out, placeholder) = write::incremental_update_reserving(
             self.doc.bytes(),
@@ -77,30 +81,25 @@ impl DocumentEditor {
     /// which is what lets a reader find the document's certification without
     /// walking every field looking for a `/Reference`.
     fn certify(&mut self, signature: ObjRef) {
-        let Some(root) = self.doc.trailer().get_ref(Name::ROOT) else {
-            return;
-        };
-        let Some(Object::Dict(mut catalog)) = self.get(root) else {
-            return;
-        };
         let perms_key = self.intern(b"Perms");
         let docmdp = self.intern(b"DocMDP");
-        let mut perms = match catalog.get(perms_key).cloned() {
-            Some(Object::Dict(dict)) => dict,
-            Some(Object::Ref(perms_ref)) => match self.get(perms_ref) {
-                Some(Object::Dict(dict)) => {
-                    let mut dict = dict;
-                    dict.insert(docmdp, Object::Ref(signature));
-                    self.put(perms_ref, Object::Dict(dict));
-                    return;
-                }
+        // An indirect `/Perms` is its own object and is written there.
+        if let Some(Object::Ref(perms_ref)) = self.catalog().and_then(|c| c.get(perms_key).cloned())
+        {
+            if let Some(Object::Dict(mut perms)) = self.get(perms_ref) {
+                perms.insert(docmdp, Object::Ref(signature));
+                self.put(perms_ref, Object::Dict(perms));
+                return;
+            }
+        }
+        self.update_catalog(|catalog| {
+            let mut perms = match catalog.get(perms_key) {
+                Some(Object::Dict(dict)) => dict.clone(),
                 _ => Dict::new(),
-            },
-            _ => Dict::new(),
-        };
-        perms.insert(docmdp, Object::Ref(signature));
-        catalog.insert(perms_key, Object::Dict(perms));
-        self.put(root, Object::Dict(catalog));
+            };
+            perms.insert(docmdp, Object::Ref(signature));
+            catalog.insert(perms_key, Object::Dict(perms));
+        });
     }
 
     /// Points an existing empty signature field at `signature`.
