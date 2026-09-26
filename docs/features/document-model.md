@@ -66,6 +66,21 @@ subtrees whose declared range excludes the key — and a node whose `/Limits`
 are missing or malformed is descended into anyway, since a damaged index is
 no evidence the entry is gone.
 
+The writers sit beside those readers. `write_name_tree` and
+`write_number_tree` sort their entries (bytes for names, integers for
+numbers), write up to 64 as a single root with `/Names` or `/Nums`, and past
+that as leaves of 64 with `/Limits` under intermediate nodes of up to 64
+`/Kids`, under a root with no `/Limits` (Table 36). Each node goes to a sink
+the caller supplies, which is how both the editor
+(`DocumentEditor::add_name_tree`, `add_number_tree`) and a caller assembling
+an `ObjectSet` allocate. A key given twice is refused with
+`TreeWriteError::DuplicateName` or `DuplicateNumber`, naming it — which of two
+values the caller meant is theirs to decide, and a reader handed both finds
+whichever its search reaches first — and more than `MAX_TREE_ENTRIES` entries
+is refused as `TooManyEntries`, since the reader stops there. A refusal
+writes nothing. `tree_writer.rs` reads every shape back through the three
+readers above, `/Limits` descent included.
+
 **Destinations.** `Destination` is a three-variant enum — `Explicit` (a
 page and a `DestKind` view), `Named` (bytes to look up in the document's own
 tables) and `Uri` — and the three are never conflated, in either direction
