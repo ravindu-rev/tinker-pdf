@@ -141,7 +141,10 @@ this build.
 ### Annotations, as built
 
 `Page::annotations()` returns one `Annotation` per entry of the page's
-`/Annots`, in the array's own order (12.5.2). It is **total by construction up
+`/Annots`, in the array's own order (12.5.2). That order is the index
+`Page::render_annotation` takes ([rendering](rendering.md)): `reference` is
+`None` for a direct dictionary, so a position is the one handle every entry
+has. It is **total by construction up
 to ruling 1's bound of 4 096 entries per page**: a `/Subtype` no edition of ISO
 32000 defines comes back as `AnnotationKind::Other` carrying the name the file
 used, a dictionary with no `/Subtype` as `Unnamed`, and an entry that is not a

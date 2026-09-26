@@ -80,7 +80,7 @@ use tinker_pdf_cos::{decode_text_string, parse_date, CosDocument, Date, Dict, Ob
 /// it cannot quietly go away: `a_hostile_annots_array_is_capped` does that,
 /// and before it existed raising this constant to `usize::MAX` passed every
 /// other test in the crate.
-const MAX_ANNOTS: usize = 4096;
+pub(crate) const MAX_ANNOTS: usize = 4096;
 
 /// How far a pop-up's `/Parent` chain is followed before it is abandoned.
 ///
