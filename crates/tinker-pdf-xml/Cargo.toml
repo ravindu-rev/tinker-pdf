@@ -6,7 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "XML 1.0 with namespaces, hand-rolled: a pull parser over the well-formed subset, UTF-8 and UTF-16, and DTD content refused by name. No PDF types"
+description = "XML 1.0 with namespaces, hand-rolled: a pull parser over the well-formed subset, UTF-8 and UTF-16, DTD content refused by name, and XHTML 1.0's named character references under an XHTML declaration. No PDF types"
+
+# The vendored XHTML entity sets ship with the crate, for the reason
+# `tinker-pdf-layout` gives for its UCD: `build.rs` compiles them and panics when
+# they are missing, so a crate published without `data/` is one nobody who
+# downloads it can build. `target/` would otherwise be swept in by the default
+# on a machine that has built here.
+exclude = ["target/"]
 
 # No dependencies, deliberately, and this is the third crate in that position
 # beside `filters` and `crypto`. A markup reader needs nothing but the bytes it

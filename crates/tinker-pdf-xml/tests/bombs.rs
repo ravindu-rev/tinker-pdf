@@ -403,3 +403,37 @@ fn a_declaration_outside_the_prolog_is_still_refused_in_the_relaxed_mode() {
         None
     );
 }
+
+/// **The declaration that turns the XHTML entity table on does not turn the
+/// internal subset on with it.**
+///
+/// Tier 3's XML row gave `Doctype::SkipExternalId` a table of XHTML 1.0's 253
+/// names, keyed on the declaration's public identifier. The four bombs are
+/// re-asserted here with that identifier in front of their subsets, because a
+/// build that treated an XHTML declaration as trusted — and read the subset
+/// "since the DTD is known" — would pass every assertion above: none of the
+/// four committed files names XHTML. `&lol;` is undeclared in XHTML 1.0 as
+/// well, so even a subset skipped rather than refused would leave it
+/// `UnknownEntity`; what is asserted is that it is never reached.
+#[test]
+fn an_xhtml_declaration_does_not_open_the_internal_subset() {
+    for (name, bytes) in FOUR_BOMBS {
+        let text = String::from_utf8_lossy(bytes);
+        let at = text.find("<!DOCTYPE").expect("every bomb declares one");
+        let rest = &text[at..];
+        let bracket = rest.find('[').expect("every bomb has a subset");
+        let root = rest["<!DOCTYPE".len()..bracket].split_whitespace().next();
+        let root = root.expect("a document type name");
+        let xhtml = format!(
+            "{}<!DOCTYPE {root} PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"x.dtd\" {}",
+            &text[..at],
+            &rest[bracket..]
+        );
+        let (error, _, _) = first_refusal_as(xhtml.as_bytes(), Doctype::SkipExternalId);
+        assert_eq!(
+            error,
+            Some(Error::InternalSubset),
+            "{name} behind an XHTML declaration was not refused at its subset"
+        );
+    }
+}

@@ -27,6 +27,7 @@ allow = [
   "CC0-1.0",
   "Unicode-3.0",
   "Unlicense",
+  "W3C",            # XHTML 1.0's entity sets, vendored as data in tinker-pdf-xml (THIRDPARTY.md)
   "Zlib",
   # OFL-1.1 for the Liberation family, an asset rather than code. It left this
   # list once, when an audit found it describing faces that did not exist —

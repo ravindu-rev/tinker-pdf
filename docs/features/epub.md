@@ -34,7 +34,13 @@ algorithms.
 **The content document** (`xhtml`). Parsed by `tinker-pdf-xml` in its
 doctype mode, because pandoc writes `<!DOCTYPE html>` on every document and
 calibre writes none; the internal subset — where every entity bomb lives —
-stays refused by name under both modes.
+stays refused by name under both modes. A document whose declaration names an
+XHTML 1.x DTD — the XHTML 1.1 identifier every EPUB 2 book of one measured
+producer carries, or XHTML 1.0's three, or XHTML Basic's two — has XHTML 1.0's
+253 named character references resolved (`&nbsp;`, `&mdash;`, `&eacute;`), from
+the W3C's three entity sets vendored in `tinker-pdf-xml/data/xhtml-entities`;
+one with `<!DOCTYPE html>` or none does not, since no DTD declares them there,
+and `&nbsp;` in it is refused by name as XML 1.0 requires.
 
 **The CSS engine** (`tinker-pdf-css`, a leaf crate): a `css-syntax-3`
 tokenizer with the spec's normative error recovery; `selectors-4` matching
@@ -184,6 +190,9 @@ order, at nine page boxes.
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
+| A document type declaration with an **internal subset** | `tinker_pdf_xml::Error::InternalSubset`, reaching the page as `ArchiveWarning::Markup` | **permanent, not a debt.** The subset is where every entity bomb lives — billion laughs, quadratic blowup, an external entity and a parameter entity are all declarations inside `[ … ]` — and EPUB 3.3 §3.9 forbids one in a content document in as many words. Reading it would need a declaration grammar and an expander this parser is built not to have; it is refused at the `[` with nothing inside read, under an XHTML declaration as under any other (`an_xhtml_declaration_does_not_open_the_internal_subset`) | `crates/tinker-pdf-xml/tests/bombs.rs` |
+| A named character reference nothing declared: any name but XML's five in a document whose declaration names no XHTML 1.x DTD, or a name outside XHTML 1.0's 253 in one that does | `tinker_pdf_xml::Error::UnknownEntity`, as `ArchiveWarning::Markup` | XML 1.0's *Entity Declared* constraint; the chapter keeps what came before the reference. **Permanent**: the HTML standard's larger list is not what an XHTML DTD declares, and it has names that expand to two code points | [THIRDPARTY.md](../../THIRDPARTY.md) |
+| An external identifier outside EPUB 3.3 Appendix B's three (SVG 1.1, MathML 3.0, NCX) | `tinker_pdf_xml::Warning::ExternalIdentifierNotAllowed` | a warning, not a refusal, and **not a debt**: the three are the specification's closed list, and XHTML 1.1's identifier is outside it because EPUB 3 banned it — so an EPUB 2 book warns, reads, and still gets its named references | — |
 | Inside an SVG content document: `<filter>`, `<mask>`, `<pattern>` as a paint, `<marker>`, `<foreignObject>`, SMIL animation, `<script>`, `<textPath>`/`<tref>`/`<altGlyph>`, and `spreadMethod` other than `pad` | `ArchiveWarning::Svg { item, warning }` | the document draws; each of these is a subsystem this build declines, named per document and deduplicated by the crate that met it. §14.5's group `opacity` is **flattened** into each descendant's alpha — exact for a shape painted one way, too dark where a fill and a stroke overlap, so `GroupOpacityFlattened` fires only where it shows | [design/svg.md](../design/svg.md) |
 | An `<image>` inside an SVG whose reference does not resolve, or whose bytes are neither JPEG nor PNG | `ArchiveWarning::SvgImageUnresolved { item, images }` | those two are embedded through the same `ImageData` path `cbz.rs` uses; anything else is counted per page rather than drawn as nothing | [design/svg.md](../design/svg.md) |
 | An XHTML `<img>` that did not become a box on the page | `ArchiveWarning::ImageNotDrawn { item, defect, images }` | four defects, because each is a different party's fault: `Unresolved` (no `src`, or one the container has no entry for), `UnsupportedFormat(f)` (GIF and WebP are EPUB 3.3 §3.2 core media types with no decoder here, named by format), `Unknown` (bytes matching no magic number — **an SVG lands here**, having none, and is a spine item in this build rather than a replaced box) and `Undecodable` (a JPEG or PNG whose bytes would not make an image). Counted per content document and per defect, so a comic whose forty pictures are all WebP is one sentence a host can act on. The ruling 10 companion to `SvgImageUnresolved`, which is an SVG `<image>` and could never say this | [design/epub-layout.md](../design/epub-layout.md) |

@@ -58,7 +58,10 @@
 //!   document.
 //! - **Nothing decoded is longer than what it was decoded from.** The structural
 //!   half of the answer to entity expansion, asserted on every text run rather
-//!   than argued in a comment.
+//!   than argued in a comment — and it holds with XHTML 1.0's 253 named
+//!   references resolving too, which `doctype-xhtml1-named-entities` seeds.
+//! - **The XHTML entity table is live exactly when an XHTML 1.x declaration
+//!   was read by the relaxed mode**, and never in the strict one.
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: a name past the cap is refused
@@ -259,6 +262,19 @@ fn walk<'s>(source: &'s Source<'_>, limits: &Limits, doctype: Doctype, text: &st
             .external_identifier()
             .is_some_and(|identifier| !identifier.is_allowed()),
         "the identifier warning and the identifier disagree"
+    );
+
+    // The XHTML entity table is live exactly when the relaxed mode read a
+    // declaration naming one of XHTML 1.x's DTDs, and never otherwise: a
+    // table that switched on for `<!DOCTYPE html>`, for an SVG identifier or
+    // in the strict mode would resolve names no DTD in the document declared.
+    assert_eq!(
+        reader.resolves_xhtml_entities(),
+        doctype == Doctype::SkipExternalId
+            && reader
+                .external_identifier()
+                .is_some_and(|identifier| identifier.declares_xhtml_entities()),
+        "the entity table's state and the declaration disagree"
     );
 
     if refusal.is_some() {

@@ -671,78 +671,276 @@ fn the_near_misses_keep_their_own_names_in_the_relaxed_mode() {
     }
 }
 
-/// **Skipping the DTD does not declare what the DTD would have declared.**
-///
-/// This is the decision gap 31's milestone 1 settled against this plan's own
-/// working assumption: **zero** uses of a named character reference across all
-/// 270 content documents of both corpora, against 83 240 literal non-ASCII
-/// characters — so the ~250-entry table is not built, and an undeclared name is
-/// [`Error::UnknownEntity`] per XML 1.0 in **both** modes. A reader that
-/// acquired a table along with the relaxed mode would pass every other test in
-/// this file.
-#[test]
-fn an_undeclared_named_reference_is_refused_by_name_in_both_modes() {
-    for name in [
-        "nbsp", "mdash", "ndash", "hellip", "eacute", "aacute", "alpha", "beta", "larr", "rarr",
-        "bull", "dagger", "lsquo", "rsquo", "ldquo", "rdquo", "trade", "hearts", "euro", "middot",
-    ] {
-        let plain = format!("<p>&{name};</p>");
-        assert_eq!(
-            refusal_as(plain.as_bytes(), Doctype::Refuse),
-            Error::UnknownEntity,
-            "&{name};",
-        );
-        assert_eq!(
-            refusal_as(plain.as_bytes(), Doctype::SkipExternalId),
-            Error::UnknownEntity,
-            "&{name};",
-        );
-        // And with the declaration that declares it in front of it, skipped.
-        let declared = format!("{XHTML11_DOUBLE}<p>&{name};</p>");
-        assert_eq!(
-            refusal_as(declared.as_bytes(), Doctype::SkipExternalId),
-            Error::UnknownEntity,
-            "&{name}; was resolved by a DTD this reader discarded",
-        );
+/// The twenty names the entity census sampled across the Latin-1, special and
+/// symbol blocks, with the character XHTML 1.0's sets declare for each.
+const SAMPLED: [(&str, char); 20] = [
+    ("nbsp", '\u{A0}'),
+    ("mdash", '\u{2014}'),
+    ("ndash", '\u{2013}'),
+    ("hellip", '\u{2026}'),
+    ("eacute", '\u{E9}'),
+    ("aacute", '\u{E1}'),
+    ("alpha", '\u{3B1}'),
+    ("beta", '\u{3B2}'),
+    ("larr", '\u{2190}'),
+    ("rarr", '\u{2192}'),
+    ("bull", '\u{2022}'),
+    ("dagger", '\u{2020}'),
+    ("lsquo", '\u{2018}'),
+    ("rsquo", '\u{2019}'),
+    ("ldquo", '\u{201C}'),
+    ("rdquo", '\u{201D}'),
+    ("trade", '\u{2122}'),
+    ("hearts", '\u{2665}'),
+    ("euro", '\u{20AC}'),
+    ("middot", '\u{B7}'),
+];
+
+/// The text a document decoded to under a stated mode, or its refusal.
+fn text_as(bytes: &[u8], doctype: Doctype) -> Result<String, Error> {
+    let source = Source::new(bytes).expect("decodes");
+    let mut out = String::new();
+    for event in source.reader_with(&Limits::DEFAULT, doctype) {
+        match event? {
+            Event::Text(text) | Event::Cdata(text) => out.push_str(&text),
+            _ => {}
+        }
     }
-    // The five that are predefined are still the five, in the relaxed mode.
-    let document = format!("{HTML5}<p>&lt;&gt;&amp;&apos;&quot;</p>");
-    read_as(document.as_bytes(), Doctype::SkipExternalId, |events, _| {
-        let text: String = events
-            .iter()
-            .filter_map(|event| match event {
-                Event::Text(run) => Some(run.as_ref()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(text, "<>&'\"");
-    });
+    Ok(out)
 }
 
-/// No entity table and no expander exists in either mode, **asserted against
-/// this crate's own source** rather than against a reading of the diff.
+/// **A named reference resolves exactly when the document's declaration names
+/// an XHTML DTD, and is refused by name everywhere else.**
 ///
-/// Prose cannot enforce it and the compiler will not: a `static ENTITIES` beside
-/// `text::reference` would compile perfectly and every behavioural test above
-/// would keep passing, because a table that is present and unused is invisible
-/// from outside. So the code — comments stripped, since the comments discuss
-/// the very names the code may not hold — is read back out and checked.
+/// This test asserted the opposite until tier 3's XML row: gap 31's milestone
+/// 1 counted zero named references across 270 content documents and chose no
+/// table. The table arrived anyway, for the reason the census could not see —
+/// an XHTML 1.x document that writes `&nbsp;` is well formed under the DTD it
+/// names, and refusing it lost the chapter's text from the refusal onward.
+/// What did not change is everything around that one case, and each is
+/// asserted here: no declaration, the strict mode, `<!DOCTYPE html>`, and an
+/// identifier that is not XHTML's all still refuse `&nbsp;` as
+/// [`Error::UnknownEntity`].
 #[test]
-fn neither_mode_holds_an_entity_table_or_an_expander() {
+fn a_named_reference_resolves_under_an_xhtml_declaration_and_nowhere_else() {
+    let svg = "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"svg.dtd\">";
+    for (name, want) in SAMPLED {
+        let plain = format!("<p>&{name};</p>");
+        assert_eq!(
+            text_as(plain.as_bytes(), Doctype::Refuse),
+            Err(Error::UnknownEntity),
+            "&{name}; with no declaration, strict mode",
+        );
+        assert_eq!(
+            text_as(plain.as_bytes(), Doctype::SkipExternalId),
+            Err(Error::UnknownEntity),
+            "&{name}; with no declaration, relaxed mode",
+        );
+        for other in [HTML5, svg] {
+            let document = format!("{other}<p>&{name};</p>");
+            assert_eq!(
+                text_as(document.as_bytes(), Doctype::SkipExternalId),
+                Err(Error::UnknownEntity),
+                "&{name}; under {other}, whose DTD declares no such name",
+            );
+        }
+        // Both quote styles the census found, and in an attribute value too.
+        for declaration in [XHTML11_DOUBLE, XHTML11_SINGLE] {
+            let document = format!("{declaration}<p title=\"&{name};\">a&{name};b</p>");
+            read_as(
+                document.as_bytes(),
+                Doctype::SkipExternalId,
+                |events, reader| {
+                    assert!(reader.resolves_xhtml_entities());
+                    let text: String = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            Event::Text(run) => Some(run.as_ref()),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(text, format!("a{want}b"), "&{name}; in character data");
+                    let title = events
+                        .iter()
+                        .find_map(|event| match event {
+                            Event::Start(element) => element.attribute(None, "title"),
+                            _ => None,
+                        })
+                        .expect("the attribute");
+                    assert_eq!(title, want.to_string(), "&{name}; in an attribute value");
+                },
+            );
+        }
+        // The strict mode never reads the declaration, so it never gets as far.
+        let declared = format!("{XHTML11_DOUBLE}<p>&{name};</p>");
+        assert_eq!(
+            text_as(declared.as_bytes(), Doctype::Refuse),
+            Err(Error::DoctypeUnsupported),
+        );
+    }
+    // The five that are predefined are still the five, with and without it.
+    for declaration in [HTML5, XHTML11_DOUBLE] {
+        let document = format!("{declaration}<p>&lt;&gt;&amp;&apos;&quot;</p>");
+        assert_eq!(
+            text_as(document.as_bytes(), Doctype::SkipExternalId).as_deref(),
+            Ok("<>&'\""),
+        );
+    }
+}
+
+/// **Every one of the 253 names the vendored sets declare decodes to its code
+/// point, read out of the `.ent` files independently of the table.**
+///
+/// `build.rs` compiles the three files into `XHTML_ENTITIES`, and a test that
+/// iterated that array would be asking the table about itself. So this reads
+/// the same three files with a parser of its own — every `<!ENTITY name "&#N;"`
+/// outside a comment, `&#38;#N;` included — and drives each name through a
+/// real document under an XHTML 1.0 Strict declaration. A row the build
+/// dropped, a code point it mis-parsed, a sort the binary search disagrees
+/// with: each is a name here that does not decode to its number.
+///
+/// `&lang;` and `&rang;` are pinned by value as well, because they are the two
+/// where the HTML living standard now disagrees: XHTML 1.0 declares U+2329 and
+/// U+232A, HTML's table U+27E8 and U+27E9. This reader resolves what the DTD
+/// the document names declares, and the disagreement is recorded in
+/// `data/xhtml-entities` rather than resolved in HTML's favour.
+#[test]
+fn every_vendored_name_decodes_to_the_code_point_its_set_declares() {
+    const SETS: [(&str, &str, usize); 3] = [
+        (
+            "xhtml-lat1.ent",
+            include_str!("../data/xhtml-entities/xhtml-lat1.ent"),
+            96,
+        ),
+        (
+            "xhtml-symbol.ent",
+            include_str!("../data/xhtml-entities/xhtml-symbol.ent"),
+            124,
+        ),
+        (
+            "xhtml-special.ent",
+            include_str!("../data/xhtml-entities/xhtml-special.ent"),
+            33,
+        ),
+    ];
+    const STRICT: &str = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \
+                          \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">";
+
+    let mut all: Vec<(String, u32)> = Vec::new();
+    for (file, text, expected) in SETS {
+        // Comments out, since each file's header carries an `<!ENTITY %`
+        // example inside one.
+        let mut code = String::new();
+        let mut rest = text;
+        while let Some(open) = rest.find("<!--") {
+            code.push_str(&rest[..open]);
+            let close = rest[open..].find("-->").expect("a closed comment");
+            rest = &rest[open + close + 3..];
+        }
+        code.push_str(rest);
+
+        let mut found = 0usize;
+        for declaration in code.split("<!ENTITY").skip(1) {
+            let mut words = declaration.split_whitespace();
+            let name = words.next().expect("a name").to_string();
+            let value = words.next().expect("a value");
+            let digits: String = value
+                .trim_matches('"')
+                .trim_start_matches("&#38;")
+                .trim_start_matches("&#")
+                .trim_start_matches('#')
+                .trim_end_matches(';')
+                .to_string();
+            let scalar: u32 = digits.parse().unwrap_or_else(|_| panic!("{file}: {name}"));
+            all.push((name, scalar));
+            found += 1;
+        }
+        assert_eq!(found, expected, "{file}");
+    }
+    assert_eq!(all.len(), 253, "XHTML 1.0's three sets declare 253 names");
+
+    for (name, scalar) in &all {
+        let want = char::from_u32(*scalar).expect("a scalar value");
+        let document = format!("{STRICT}<p>&{name};</p>");
+        assert_eq!(
+            text_as(document.as_bytes(), Doctype::SkipExternalId),
+            Ok(want.to_string()),
+            "&{name}; is U+{scalar:04X} in the vendored set",
+        );
+        // And never longer than its own reference, which is the crate's
+        // standing invariant rather than a property of these particular names.
+        assert!(want.len_utf8() <= name.len() + 2, "&{name};");
+    }
+    assert_eq!(crate::text::xhtml_entity("lang"), Some('\u{2329}'));
+    assert_eq!(crate::text::xhtml_entity("rang"), Some('\u{232A}'));
+}
+
+/// **A lookup that misses is still refused by name**, under a declaration that
+/// makes the table live.
+///
+/// The near misses are the ones a table invites: a name from the HTML living
+/// standard's larger list that XHTML 1.0 never declared (`&nGt;` is two code
+/// points there, which is why that list is not this one), one of HTML's
+/// semicolon-less legacy upper-case spellings, a case fold of a real name, a
+/// prefix and an extension of one, and a name that is a real *parameter*
+/// entity of the DTD rather than a general one.
+#[test]
+fn a_name_the_vendored_sets_do_not_declare_is_refused_by_name() {
+    for miss in [
+        "nGt",
+        "NotEqualTilde",
+        "NBSP",
+        "Nbsp",
+        "COPY",
+        "nbs",
+        "nbspx",
+        "xhtml-lat1",
+        "",
+        "hellip2",
+        "euro ",
+    ] {
+        let document = format!("{XHTML11_DOUBLE}<p>&{miss};</p>");
+        assert_eq!(
+            text_as(document.as_bytes(), Doctype::SkipExternalId),
+            Err(Error::UnknownEntity),
+            "&{miss}; is not an XHTML 1.0 name",
+        );
+    }
+    assert_eq!(crate::text::xhtml_entity("nGt"), None);
+    assert_eq!(crate::text::xhtml_entity("NBSP"), None);
+    // The first and last names in byte order, which are where an off-by-one in
+    // a binary search shows.
+    assert_eq!(crate::text::xhtml_entity("AElig"), Some('\u{C6}'));
+    assert_eq!(crate::text::xhtml_entity("zwnj"), Some('\u{200C}'));
+}
+
+/// **One table, compiled from the vendored files, and nothing that expands.**
+///
+/// This test used to assert that no table existed at all. What it guards now is
+/// the shape of the one that does, **against this crate's own source** rather
+/// than a reading of the diff, because a hand-written `static` beside
+/// `text::reference` would compile perfectly and every behavioural test would
+/// keep passing:
+///
+/// - no entity name appears as a string literal in the code — the table is
+///   `build.rs`'s output, included once, and nothing is spelled by hand;
+/// - nothing shaped like a second table or an expander exists — no map type,
+///   no `phf`, no function that expands;
+/// - the one table's element type is `(&str, char)`, so a name maps to exactly
+///   one character and cannot map to text that would itself be parsed;
+/// - the five predefined names are still declared exactly once, in the one
+///   `match` that declares them.
+#[test]
+fn the_one_entity_table_is_the_vendored_one_and_cannot_expand() {
     const SOURCES: [(&str, &str); 4] = [
         ("lib.rs", include_str!("lib.rs")),
         ("limits.rs", include_str!("limits.rs")),
         ("scan.rs", include_str!("scan.rs")),
         ("text.rs", include_str!("text.rs")),
     ];
-    /// The names option 2 would have vendored, sampled across the Latin-1,
-    /// special and symbol blocks.
-    const NAMED: [&str; 20] = [
-        "nbsp", "mdash", "ndash", "hellip", "eacute", "aacute", "alpha", "beta", "larr", "rarr",
-        "bull", "dagger", "lsquo", "rsquo", "ldquo", "rdquo", "trade", "hearts", "euro", "middot",
-    ];
 
     let mut checked = 0usize;
+    let mut included = 0usize;
     for (file, source) in SOURCES {
         let code: String = source
             .lines()
@@ -750,25 +948,32 @@ fn neither_mode_holds_an_entity_table_or_an_expander() {
             .collect::<Vec<_>>()
             .join("\n");
         checked += code.lines().count();
-        for name in NAMED {
-            // As a string literal, which is the only shape a table could hold
-            // one in — `is_ascii_alphabetic` is not a declaration of `alpha`.
+        for (name, _) in SAMPLED {
             let quoted = format!("\"{name}\"");
             assert!(
                 !code.contains(&quoted),
-                "{quoted} appears in {file}'s code, so a table is being built",
+                "{quoted} appears in {file}'s code, so a table is being written by hand",
             );
         }
-        // Nothing shaped like one, either.
-        for shape in ["HashMap", "BTreeMap", "phf", "ENTITIES", "entity_table"] {
+        for shape in ["HashMap", "BTreeMap", "phf", "entity_table", "fn expand"] {
             assert!(
                 !code.contains(shape),
-                "`{shape}` appears in {file}, which is what a table looks like",
+                "`{shape}` appears in {file}, which is what a second table looks like",
             );
         }
+        included += code.matches("xhtml_entities.rs").count();
     }
-    // The filter did not strip the file: the five that *are* declared are still
-    // visible, each exactly once, in the one `match` that declares them.
+    assert_eq!(included, 1, "the generated table is included exactly once");
+
+    let table: &[(&str, char)] = &crate::text::XHTML_ENTITIES;
+    assert_eq!(table.len(), 253);
+    assert!(
+        table
+            .windows(2)
+            .all(|w| w[0].0.as_bytes() < w[1].0.as_bytes()),
+        "sorted and without duplicates, which the binary search relies on"
+    );
+
     let text = SOURCES[3].1;
     for name in ["\"amp\"", "\"lt\"", "\"gt\"", "\"apos\"", "\"quot\""] {
         assert_eq!(
@@ -1893,4 +2098,32 @@ fn a_second_byte_order_mark_is_text_and_is_refused_where_it_stands() {
     // And it is not text the prolog admits.
     let mut reader = source.reader(&Limits::DEFAULT);
     assert_eq!(reader.next(), Some(Err(Error::TextBeforeRoot)));
+}
+
+/// The `xml` fuzz target's named-entity seed reaches the table, replayed on
+/// stable, so the seed that exists to drive `text::xhtml_entity` is known to
+/// get there rather than to stop at the declaration.
+#[test]
+fn the_named_entity_fuzz_seed_reaches_the_table() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus/xml/doctype-xhtml1-named-entities");
+    let Ok(seed) = std::fs::read(&path) else {
+        println!("xml-seed: SKIPPED (no fuzz/corpus/xml)");
+        return;
+    };
+    // The target's first byte is its knobs; the rest is the document.
+    let body = seed.get(1..).expect("a seed with a body");
+    read_as(body, Doctype::SkipExternalId, |events, reader| {
+        assert!(reader.resolves_xhtml_entities());
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Text(run) => Some(run.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.starts_with("caf\u{E9}\u{A0}\u{2014} \u{2026}\u{2329}x\u{232A}"));
+        assert!(text.ends_with("\u{C6}\u{200C}\u{20AC}\u{3B1}\u{3A9}\u{3D1}\u{2660}"));
+    });
+    println!("RAN xml-seed: the named-entity seed reached the table");
 }

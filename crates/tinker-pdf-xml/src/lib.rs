@@ -41,12 +41,22 @@
 //! What is left cannot expand, in either mode. The five predefined entities and
 //! both radixes of numeric character reference each produce exactly one
 //! character from at least four bytes of source, so decoded text is never
-//! longer than the text it came from — and there is no sixth name, because
-//! there is no table to look one up in. Gap 31's milestone 1 counted **zero**
-//! uses of `&nbsp;` and its relatives across 270 real content documents, so a
-//! table would be a data commitment nobody's book needs;
-//! [`Error::UnknownEntity`] is the answer in both modes and the absence of a
-//! table is asserted against this crate's own source.
+//! longer than the text it came from.
+//!
+//! **One table of names exists, and it is a table and not an expander.** A
+//! document whose declaration names one of XHTML 1.x's DTDs
+//! ([`XHTML_PUBLIC_IDENTIFIERS`]) has, by that DTD, the 253 names of XHTML
+//! 1.0's three entity sets declared — `&nbsp;`, `&mdash;`, `&eacute;` — and
+//! under [`Doctype::SkipExternalId`] this reader resolves them from those
+//! three `.ent` files, vendored verbatim from the W3C and compiled by
+//! `build.rs` into one sorted `(name, char)` array. Every value is a single
+//! code point, so a lookup is still one character out of at least four bytes
+//! in, and `build.rs` checks that for all 253 rather than trusting it; a name
+//! the table does not hold is [`Error::UnknownEntity`] exactly as before, and
+//! so is every name in a document that names no XHTML DTD. The HTML living
+//! standard's own list is deliberately **not** the table: it declares names
+//! that expand to two code points (`&nGt;` is U+226B U+20D2), which would end
+//! the invariant above, and it is not what an XHTML DTD declares.
 //!
 //! **It is a pull parser, and an empty-element tag produces two events.**
 //! `<a/>` is [`Event::Start`] followed by [`Event::End`], so a caller matching
@@ -167,6 +177,7 @@ impl Default for Limits {
 /// | `<!DOCTYPE html PUBLIC "…" "…">` | [`Error::DoctypeUnsupported`] | the two literals read and discarded |
 /// | `<!DOCTYPE html SYSTEM "…">` | [`Error::DoctypeUnsupported`] | the literal read and discarded |
 /// | an identifier outside [`ALLOWED_PUBLIC_IDENTIFIERS`] | [`Error::DoctypeUnsupported`] | discarded, and [`Warning::ExternalIdentifierNotAllowed`] |
+/// | an identifier in [`XHTML_PUBLIC_IDENTIFIERS`] | [`Error::DoctypeUnsupported`] | discarded and warned as above, **and** XHTML 1.0's 253 named references resolve from then on |
 /// | `<!DOCTYPE html [ … ]>` | [`Error::DoctypeUnsupported`] | [`Error::InternalSubset`] |
 /// | one of the four bombs | [`Error::DoctypeUnsupported`] | [`Error::InternalSubset`] |
 ///
@@ -179,11 +190,13 @@ impl Default for Limits {
 /// read as two strings and thrown away, and this engine performs no I/O, so it
 /// names a file that will never be opened.
 ///
-/// **Neither mode parses a declaration.** There is no entity table in either,
-/// no expander, and no code path one refactor away from resolving an external
-/// entity: `SkipExternalId` reads the external identifier's two literals *as
-/// literals* — so a `>` inside one does not end the declaration — and refuses
-/// at `[`.
+/// **Neither mode parses a declaration.** There is no expander in either and
+/// no code path one refactor away from resolving an external entity:
+/// `SkipExternalId` reads the external identifier's two literals *as literals*
+/// — so a `>` inside one does not end the declaration — and refuses at `[`.
+/// The one table it consults is compiled in, is the one [`XHTML_PUBLIC_IDENTIFIERS`]'s
+/// DTDs all declare, and maps a name to exactly one character; the identifier
+/// chooses whether it is consulted and never *what* is in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Doctype {
     /// Refused before one byte past `<!DOCTYPE` is read, wherever it appears.
@@ -220,6 +233,43 @@ pub const ALLOWED_PUBLIC_IDENTIFIERS: [&str; 3] = [
     "-//NISO//DTD ncx 2005-1//EN",
 ];
 
+/// The public identifiers whose DTDs declare XHTML 1.0's three entity sets,
+/// against which [`Doctype::SkipExternalId`] decides whether named character
+/// references resolve.
+///
+/// Six, and each is here because its DTD, as the W3C publishes it, pulls in
+/// exactly `xhtml-lat1.ent`, `xhtml-symbol.ent` and `xhtml-special.ent` and no
+/// other entity set: XHTML 1.0's three DTDs directly, and XHTML 1.1 and both
+/// XHTML Basic DTDs through XHTML Modularization's framework module, which
+/// includes `xhtml-charent-1.mod`, which includes the three. The variants that
+/// add MathML or SVG are **not** here — their DTDs declare hundreds of MathML
+/// names this table does not hold, and resolving the XHTML names in such a
+/// document while refusing the MathML ones would be half an answer that looks
+/// like a whole one.
+///
+/// Compared after XML 1.0 §4.2.2's normalisation — runs of white space as one
+/// space, none at either end — which is how a public identifier is matched.
+///
+/// **Not the same set as [`ALLOWED_PUBLIC_IDENTIFIERS`], and the two answer
+/// different questions.** That one is what EPUB 3.3 permits and decides a
+/// warning; this one is what a DTD declares and decides a lookup. XHTML 1.1's
+/// identifier is in this set and not that one: EPUB 3 banned it, and every EPUB
+/// 2 content document of one measured producer carries it anyway.
+pub const XHTML_PUBLIC_IDENTIFIERS: [&str; 6] = [
+    "-//W3C//DTD XHTML 1.0 Strict//EN",
+    "-//W3C//DTD XHTML 1.0 Transitional//EN",
+    "-//W3C//DTD XHTML 1.0 Frameset//EN",
+    "-//W3C//DTD XHTML 1.1//EN",
+    "-//W3C//DTD XHTML Basic 1.0//EN",
+    "-//W3C//DTD XHTML Basic 1.1//EN",
+];
+
+/// XML 1.0 §4.2.2: two public identifiers are the same when they match after
+/// every run of white space is one space and none is left at either end.
+fn same_public_identifier(a: &str, b: &str) -> bool {
+    a.split_ascii_whitespace().eq(b.split_ascii_whitespace())
+}
+
 /// The external identifier a skipped declaration named, as two strings that
 /// were read and discarded.
 ///
@@ -255,8 +305,22 @@ impl<'a> ExternalId<'a> {
     /// form, so warning about it costs a book nothing.
     #[must_use]
     pub fn is_allowed(&self) -> bool {
-        self.public
-            .is_some_and(|public| ALLOWED_PUBLIC_IDENTIFIERS.contains(&public))
+        self.public.is_some_and(|public| {
+            ALLOWED_PUBLIC_IDENTIFIERS
+                .iter()
+                .any(|allowed| same_public_identifier(public, allowed))
+        })
+    }
+
+    /// Whether this names one of the DTDs [`XHTML_PUBLIC_IDENTIFIERS`] holds,
+    /// and so declares XHTML 1.0's 253 named character references.
+    #[must_use]
+    pub fn declares_xhtml_entities(&self) -> bool {
+        self.public.is_some_and(|public| {
+            XHTML_PUBLIC_IDENTIFIERS
+                .iter()
+                .any(|xhtml| same_public_identifier(public, xhtml))
+        })
     }
 }
 
@@ -410,9 +474,11 @@ pub enum Error {
     /// anything but the XML namespace, any other prefix bound to the XML or
     /// xmlns namespace, or `xmlns` used as a prefix in a name.
     ReservedNamespace,
-    /// A reference to an entity that is not one of the five predefined ones.
-    /// There is no table to look a sixth up in, because building one would mean
-    /// having parsed a DTD.
+    /// A reference to an entity nothing declared: not one of the five
+    /// predefined ones, and — in a document whose declaration names an XHTML
+    /// 1.x DTD ([`XHTML_PUBLIC_IDENTIFIERS`]) — not one of the 253 that DTD
+    /// declares either. Refused rather than guessed at, by a name that says
+    /// the entity was never declared rather than that the markup is broken.
     UnknownEntity,
     /// A numeric character reference naming a surrogate, a value past
     /// `U+10FFFF`, or a scalar §2.2 does not admit.
@@ -809,6 +875,7 @@ impl<'a> Source<'a> {
             warnings: self.warnings.clone(),
             external_id: None,
             saw_doctype: false,
+            xhtml_entities: false,
         }
     }
 }
@@ -856,6 +923,10 @@ pub struct Reader<'a> {
     /// makes a second one [`Error::MisplacedDoctype`] rather than a second
     /// skip.
     saw_doctype: bool,
+    /// Whether the declaration named an XHTML 1.x DTD, so that XHTML 1.0's
+    /// named references resolve. Set once, in the prolog, before any element
+    /// has been read — which is the only place a declaration may stand.
+    xhtml_entities: bool,
 }
 
 impl<'a> Iterator for Reader<'a> {
@@ -917,6 +988,19 @@ impl<'a> Reader<'a> {
     #[must_use]
     pub fn external_identifier(&self) -> Option<ExternalId<'a>> {
         self.external_id
+    }
+
+    /// Whether XHTML 1.0's 253 named character references resolve in this
+    /// document: under [`Doctype::SkipExternalId`], when its declaration named
+    /// one of [`XHTML_PUBLIC_IDENTIFIERS`]. Always false under
+    /// [`Doctype::Refuse`], which reads no declaration.
+    ///
+    /// Public for [`Reader::external_identifier`]'s reason: a `&nbsp;` that
+    /// became U+00A0 in one document and [`Error::UnknownEntity`] in another
+    /// should be a difference a caller can see the cause of.
+    #[must_use]
+    pub fn resolves_xhtml_entities(&self) -> bool {
+        self.xhtml_entities
     }
 
     fn warn(&mut self, warning: Warning) {
@@ -1135,7 +1219,7 @@ impl<'a> Reader<'a> {
         if raw.contains("]]>") {
             self.warn(Warning::CdataCloseInContent);
         }
-        let decoded = text::value(raw, false)?;
+        let decoded = text::value(raw, false, self.xhtml_entities)?;
         self.emit(Event::Text(decoded))
     }
 
@@ -1256,6 +1340,7 @@ impl<'a> Reader<'a> {
             if !external.is_allowed() {
                 self.warn(Warning::ExternalIdentifierNotAllowed);
             }
+            self.xhtml_entities = external.declares_xhtml_entities();
             self.cursor.skip_space();
         }
 
@@ -1361,7 +1446,7 @@ impl<'a> Reader<'a> {
             }
             self.cursor.skip_space();
             let literal = self.cursor.attribute_value()?;
-            raw.push((name, text::value(literal, true)?));
+            raw.push((name, text::value(literal, true, self.xhtml_entities)?));
         }
 
         // XML 1.0's own rule, before namespaces get a look in: no element may

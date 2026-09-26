@@ -30,6 +30,7 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-shape/data/aots` | [adobe-type-tools/aots](https://github.com/adobe-type-tools/aots) at `d256691` (2025-11-29), fonts via [harfbuzz/harfbuzz](https://github.com/harfbuzz/harfbuzz) `test/shape/data/aots/fonts` at `e0d7060` (2021-08-12) | `Apache-2.0` |
 | `crates/tinker-pdf-shape/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-shape/data/text-rendering-tests` | [unicode-org/text-rendering-tests](https://github.com/unicode-org/text-rendering-tests) at `26cfb96` (2026-08-24) | `Unicode-3.0` |
+| `crates/tinker-pdf-xml/data/xhtml-entities` | XHTML 1.0's three entity sets as XHTML Modularization 1.1 (2010-07-29) publishes them, from [w3c/markup-validator](https://github.com/w3c/markup-validator) `htdocs/sgml-lib/REC-xhtml-modularization-20100729/` at `724a15b` (fetched 2026-09-26) | `W3C` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -501,6 +502,73 @@ Upstream's README states that *"the contents of this repository are governed by
 the Unicode Terms of Use and are released under LICENSE"*, and that LICENSE is
 the Unicode License v3, the same `Unicode-3.0` the UCD carries and `deny.toml`
 already allows. Its text is reproduced above.
+
+### `crates/tinker-pdf-xml/data/xhtml-entities`
+
+The three character entity sets every XHTML 1.x DTD declares — Latin-1 (96
+names), symbols (124) and special (33), **253 names**, each a single code point
+— which is what a document whose `<!DOCTYPE` names XHTML 1.0, XHTML 1.1 or
+XHTML Basic has in scope as `&nbsp;`, `&mdash;` and the rest. `tinker-pdf-xml`
+resolves them under `Doctype::SkipExternalId` when, and only when, the
+declaration names one of those DTDs; `build.rs` compiles the three files into a
+sorted `(name, char)` array, and nothing under `data/` is opened at run time.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `xhtml-lat1.ent` | 8 758 | `3535a3cf7672ab1a511e4edd094e8e1da8b5874aba8ee8851bd2861d25b0dfd9` |
+| `xhtml-symbol.ent` | 12 771 | `5b173003c47aba07879397bccdd23ef240eb7578c6345a84f3453617410b7e7d` |
+| `xhtml-special.ent` | 4 259 | `348d006519736b764a86fd24aed49ad35114f030ede0f263d3c4638f04e12107` |
+| `LICENSE` | 2 701 | `df7429635bacfb82b3e92c2fff50553949afd97389890d53a67b67cbf9fba68e` |
+
+**Where they came from.** `w3c/markup-validator` is the W3C's own repository
+for the Markup Validation Service, and `htdocs/sgml-lib` is the catalogue of
+DTDs it validates against; fetched from `raw.githubusercontent.com` at commit
+`724a15b0dd40841b03a7a8bc4abde8bdb16c0385` on 26 September 2026. The three
+files sit in its `REC-xhtml-modularization-20100729/` directory, which is where
+its own `catalog.xml` maps the public identifiers `-//W3C//ENTITIES Latin 1 for
+XHTML//EN`, `…Symbols for XHTML//EN` and `…Special for XHTML//EN` — the three
+that `xhtml1-strict.dtd`, `xhtml1-transitional.dtd` and `xhtml1-frameset.dtd`
+name directly and that XHTML 1.1 and XHTML Basic reach through
+`xhtml-framework-1.mod` → `xhtml-charent-1.mod`, each of which was read at the
+same commit to check exactly that. The files are byte-for-byte what was
+fetched; `.gitattributes` leaves them as text with LF line ends, which is what
+they were.
+
+**The licence.** The repository's README states that its contents are under
+the *W3C Software License and Notice* at
+`http://www.w3.org/Consortium/Legal/2002/copyright-software-20021231`, which is
+SPDX `W3C`; the repository carries no licence file of its own, so `LICENSE`
+here is SPDX's canonical text of that identifier, from
+[spdx/license-list-data](https://github.com/spdx/license-list-data)
+`text/W3C.txt` at `31ba1a50e5397e00a304dbadc76531740e89ee48`, verbatim. Each
+`.ent` file also carries, inside its own header comment and therefore inside
+every copy, ISO 8879's notice for the portions derived from its entity sets —
+*"Permission to copy in any form is granted for use with conforming SGML
+systems and applications as defined in ISO 8879, provided this notice is
+included in all copies"* — which the verbatim copy satisfies. `W3C` was added
+to `deny.toml`'s allowlist for this tree; it is a permissive licence the FSF
+lists as GPL-compatible and the OSI approves, and it asks for the notice to
+travel with the files, which it does.
+
+**Cross-checked against the HTML standard's list, and it disagrees in two
+places, both deliberately.** `whatwg/html-build` at
+`283a3531a61106d07d9a7d9fb3e6f3b9bfd33d70`, `entities/out/entities.json`
+(145 897 bytes, SHA-256
+`d741d877ac77c4194c4ad526b5b4a19aef8dfe411ab840a466891cdbb9f362e6`), holds all
+253 names. **251 agree** on their code point. The two that do not are `&lang;`
+and `&rang;`: XHTML 1.0 declares U+2329 and U+232A (LEFT- and RIGHT-POINTING
+ANGLE BRACKET), and the HTML standard maps them to U+27E8 and U+27E9
+(MATHEMATICAL LEFT and RIGHT ANGLE BRACKET), having changed them because
+U+2329 and U+232A are canonically equivalent to the CJK brackets U+3008 and
+U+3009. A document that names an XHTML DTD gets what that DTD declares, so the
+table keeps U+2329 and U+232A, and
+`every_vendored_name_decodes_to_the_code_point_its_set_declares` pins both.
+The cross-check was a script run once over the two files on 26 September 2026,
+recorded here as the measurement it was rather than run by any test (ruling
+13); the HTML list itself is not vendored — its 2 125 names (2 231 entries with
+the semicolon-less legacy spellings) include ones that expand to two code points (`&nGt;` is U+226B U+20D2), which would end
+`tinker-pdf-xml`'s invariant that decoded text is never longer than its source,
+and it is not what any XHTML DTD declares.
 
 ### The predefined XMP schemas' property tables
 
