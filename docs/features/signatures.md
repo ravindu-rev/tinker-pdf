@@ -103,6 +103,26 @@ fields per 12.8.2.4; a certifying save writes the catalog's `/Perms /DocMDP`
 had been gathered and so never wrote. The writer and the reader share one
 `digest_spans`, so what is signed and what is checked cannot drift.
 
+**A visible seal.** `SigningTarget::NewVisibleField { name, page, rect,
+appearance }` adds a signature field whose widget draws: a normal appearance
+built by `appearance::signature`, beside the synthesis every other annotation
+appearance comes from, showing who signed, when, why and where — taken from
+the request's own `name`, `signed_at`, `reason` and `location`, so the seal
+cannot say something the signature dictionary does not — and an optional
+`SignatureImage` (a JPEG placed as it is, or eight-bit grey or RGB samples) in
+the left two-fifths of the box, aspect kept. The date is written as a person
+reads it, in the zone `/M` states. The text is Helvetica in `WinAnsiEncoding`
+carried in the appearance's own resources; a character above the single-byte
+range is drawn as `?` and named against the widget as
+`FieldCharacterUnrepresentable`, the rule a filled field's value follows. The
+seal is an object of the same incremental update as the signature, so the
+`/ByteRange` covers it: changing what it draws afterwards is a modification
+the signature detects. The page, the rectangle and the image are checked
+before anything is written (`SignError::NoSuchPage`, `RectUnusable`,
+`ImageUnusable`). The invisible field is unchanged: a zero `/Rect` and
+`/F 132`, which is Print and Locked — the comment beside it had called it
+the NoView bit, which is 32.
+
 ## API
 
 ```rust
@@ -131,7 +151,28 @@ for verdict in document.verify_signatures(&anchors, Some(now)) {
 Signing takes a `Signer` the host implements — two calls, `digest_algorithm`
 and `sign(&[u8]) -> Result<Vec<u8>, SignRefused>` — and a `SigningRequest`
 naming where the signature goes, how much space to reserve, and what to
-certify.
+certify. Where it goes is a `SigningTarget`: an existing empty field, a new
+invisible one, or a new visible one on a page and in a `Rect` with a
+`SignatureAppearance` (`new()` for text alone, `with_image(SignatureImage)`
+for a picture beside it). `SigningTarget` and `SignError` became
+`#[non_exhaustive]` with that variant, and `SigningTarget` lost `Eq`, since
+the rectangle is four `f64`s — one break, taken once.
+
+```rust
+let mut request = SigningRequest::new(
+    SigningTarget::NewVisibleField {
+        name: "Seal".into(),
+        page: 0,
+        rect: Rect { x0: 300.0, y0: 100.0, x1: 540.0, y1: 180.0 },
+        appearance: SignatureAppearance::with_image(SignatureImage::Jpeg(logo)),
+    },
+    &signer,
+);
+request.name = Some("Ada Lovelace".into());
+request.reason = Some("I approve this document".into());
+request.signed_at = Some(date); // supplied, never read from a clock
+let signed = document.editor().save_signed(&options, &request)?;
+```
 
 ## Refused by name
 
@@ -148,7 +189,6 @@ certify.
 | `adbe.pkcs7.sha1` (12.8.3.3.1) | `Unchecked::LegacySha1SubFilter` | deprecated in ISO 32000-2; one corpus file has it and that file is a fuzzer's output, so it is named rather than implemented on a sample of one | 12.8.3.3.1 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
 | A signature with no signed attributes | `Unchecked::NoSignedAttributes` | the signature is then over the content directly, and guessing at what that content is would be a verdict about the wrong bytes | RFC 5652 §5.4 |
-| Visible signature appearance generation | none — a signed field keeps whatever appearance the caller set | drawing seals is not signature work | [forms](forms.md) |
 
 ## Verified
 
@@ -204,6 +244,23 @@ spoiling the file, insist the answer is not `Verified`. The one link only this
 repository vouches for is the `/ByteRange` spans, because the generator and
 the reader are the same reading of 12.8.1 — the fixtures' own README says so,
 and `tests/ecdsa_verdict.rs` says it again at the top.
+
+**The first signature this engine wrote that it also verifies.** Every
+signing test before September 2026 used a stub that returned bytes, so the
+round trip ended at "the digest the signer saw is the digest the reader
+recomputes". `crates/tinker-pdf/tests/visible_signature.rs` signs for real: a
+throwaway 2048-bit RSA key and self-signed certificate OpenSSL generated once
+(`tests/signature_support/README.md`), a CMS `SignedData` the test assembles,
+and the private exponent applied with `tinker_pdf_crypto::bignum`. Over a
+document carrying a drawn seal the verdict is `WholeFile`, `Matches`,
+`Verified` and anchored to that certificate; the seal's object sits inside a
+covered span, and flipping one bit of what it draws turns the digest to
+`Differs`. Seven tests, and six reintroduced defects each firing — one of
+them only after the assertion was changed to look for the picture's own two
+greys, because a missing image draws ruling 2's placeholder and the first
+version counted ink. Both halves of the arithmetic are this repository's, so
+the evidence is the vectors that already gate `bignum` and the OpenSSL-made
+key and certificate, not a second verifier.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest

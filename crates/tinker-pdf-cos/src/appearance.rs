@@ -15,7 +15,7 @@
 
 use crate::doc::CosDocument;
 use crate::name::Name;
-use crate::object::{Dict, Object};
+use crate::object::{Dict, ObjRef, Object};
 use crate::pages::Rect;
 use crate::write::StreamData;
 
@@ -427,6 +427,136 @@ pub(crate) fn button(
         ]),
     );
     dict.insert(Name::RESOURCES, Object::Dict(Dict::new()));
+    StreamData {
+        dict,
+        data: content,
+    }
+}
+
+/// A visible signature's normal appearance (12.7.4.5, 12.5.5), in a `width`
+/// by `height` box at the origin.
+///
+/// `lines` of text in Helvetica, sized so the widest fits across and all of
+/// them fit down, at most twelve points; and an image in the left two-fifths
+/// of the box when there is one — the whole box when there is no text —
+/// scaled to fit with its aspect ratio kept and centred in its part.
+/// `image` is the image XObject's reference and its pixel size.
+///
+/// The font is Helvetica in `WinAnsiEncoding`, carried directly in the
+/// appearance's own `/Resources` rather than in a form's `/DR`, because a
+/// signature field's appearance is not regenerated from a `/DA` by anybody.
+/// A character above the single-byte range is drawn as `?` and pushed onto
+/// `unwritable`, for the caller to name against the widget (ruling 10) —
+/// the same rule and the same writer a filled field's value goes through.
+pub(crate) fn signature(
+    doc: &CosDocument,
+    width: f64,
+    height: f64,
+    lines: &[String],
+    image: Option<(ObjRef, u32, u32)>,
+    unwritable: &mut Vec<char>,
+) -> StreamData {
+    let (w, h) = (width.max(0.0), height.max(0.0));
+    let pad = (w.min(h) * 0.05).clamp(1.0, 4.0);
+    let mut content = Vec::new();
+
+    // The image's part of the box, and where the text starts.
+    let image_part = match (image, lines.is_empty()) {
+        (Some(_), true) => w,
+        (Some(_), false) => w * 0.4,
+        (None, _) => 0.0,
+    };
+    if let Some((_, iw, ih)) = image {
+        let (box_w, box_h) = ((image_part - 2.0 * pad).max(0.0), (h - 2.0 * pad).max(0.0));
+        let (iw, ih) = (f64::from(iw.max(1)), f64::from(ih.max(1)));
+        let scale = (box_w / iw).min(box_h / ih);
+        let (dw, dh) = (iw * scale, ih * scale);
+        let (x, y) = (pad + (box_w - dw) / 2.0, pad + (box_h - dh) / 2.0);
+        content.extend_from_slice(b"q\n");
+        op(&mut content, &[dw, 0.0, 0.0, dh, x, y], b"cm");
+        content.extend_from_slice(b"/Img0 Do\nQ\n");
+    }
+
+    let mut font = Dict::new();
+    font.insert(Name::TYPE, Object::Name(doc.intern(b"Font")));
+    font.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(b"Type1")));
+    font.insert(
+        doc.intern(b"BaseFont"),
+        Object::Name(doc.intern(b"Helvetica")),
+    );
+    font.insert(
+        doc.intern(b"Encoding"),
+        Object::Name(doc.intern(b"WinAnsiEncoding")),
+    );
+
+    if !lines.is_empty() {
+        let metrics = crate::font::read(doc, &font);
+        // Thousandths of an em, as the writer will encode each line: a code
+        // above the single-byte range is drawn as `?`.
+        let advance = |line: &str| -> f64 {
+            line.chars()
+                .map(|c| {
+                    let code = if u32::from(c) < 256 {
+                        u32::from(c)
+                    } else {
+                        u32::from(b'?')
+                    };
+                    metrics.width_of(code).0
+                })
+                .sum()
+        };
+        let text_x = image_part + pad;
+        let text_w = (w - text_x - pad).max(0.0);
+        let text_h = (h - 2.0 * pad).max(0.0);
+        let widest = lines.iter().map(|l| advance(l)).fold(0.0f64, f64::max) / 1000.0;
+        let by_height = text_h / (lines.len() as f64 * 1.2);
+        let by_width = if widest > 0.0 {
+            text_w / widest
+        } else {
+            by_height
+        };
+        let size = by_height.min(by_width).clamp(1.0, 12.0);
+        let leading = size * 1.2;
+        // Clipped to the text's part, so a box too small for a line cuts it
+        // off rather than drawing it over the image.
+        content.extend_from_slice(b"q\n");
+        op(&mut content, &[text_x, pad, text_w, text_h], b"re");
+        content.extend_from_slice(b"W n\nBT\n/Helv ");
+        op(&mut content, &[size], b"Tf");
+        content.extend_from_slice(b"0 g\n");
+        for (index, line) in lines.iter().enumerate() {
+            let y = h - pad - size * 0.9 - index as f64 * leading;
+            op(&mut content, &[1.0, 0.0, 0.0, 1.0, text_x, y], b"Tm");
+            content.push(b'(');
+            crate::fill::escape(&mut content, line, unwritable);
+            content.extend_from_slice(b") Tj\n");
+        }
+        content.extend_from_slice(b"ET\nQ\n");
+    }
+
+    let mut resources = Dict::new();
+    let mut fonts = Dict::new();
+    fonts.insert(doc.intern(b"Helv"), Object::Dict(font));
+    resources.insert(doc.intern(b"Font"), Object::Dict(fonts));
+    if let Some((image, _, _)) = image {
+        let mut xobjects = Dict::new();
+        xobjects.insert(doc.intern(b"Img0"), Object::Ref(image));
+        resources.insert(doc.intern(b"XObject"), Object::Dict(xobjects));
+    }
+
+    let mut dict = Dict::new();
+    dict.insert(Name::TYPE, Object::Name(doc.intern(b"XObject")));
+    dict.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(b"Form")));
+    dict.insert(
+        doc.intern(b"BBox"),
+        Object::Array(vec![
+            Object::Int(0),
+            Object::Int(0),
+            Object::Real(w),
+            Object::Real(h),
+        ]),
+    );
+    dict.insert(Name::RESOURCES, Object::Dict(resources));
     StreamData {
         dict,
         data: content,

@@ -106,7 +106,7 @@ fn width_of(font: Option<&Font>, text: &str) -> f64 {
 ///
 /// The shaped path is the *other* half of the answer, and where a composite
 /// `/DA` font makes it available nothing reaches here; see [`Composite`].
-fn escape(out: &mut Vec<u8>, text: &str, unwritable: &mut Vec<char>) {
+pub(crate) fn escape(out: &mut Vec<u8>, text: &str, unwritable: &mut Vec<char>) {
     for c in text.chars() {
         let code = u32::from(c);
         let byte = if code < 256 {

@@ -63,3 +63,38 @@ P-256 signature's `r` and `s` are both 32 octets, so they can be exchanged in
 place without moving a length), and a regeneration has roughly a one-in-four
 chance of needing that test adjusted. Nothing re-runs the script, and
 `cargo xtask oracles` would refuse a test that tried.
+
+## The visible-signature signer
+
+`visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA
+key (PKCS#1 `RSAPrivateKey`, DER) and the self-signed certificate over it,
+generated once on **26 September 2026** by **OpenSSL 3.0.13 (30 Jan 2024)**:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem \
+    -days 36500 -subj "/CN=tinker-pdf visible signature fixture/O=tinker-pdf/C=GB" \
+    -set_serial 2026092601 -sha256
+openssl rsa -in key.pem -traditional -outform DER -out visible-signer-key.der
+openssl x509 -in cert.pem -outform DER -out visible-signer.der
+```
+
+SHA-256: `a14845674594223bfa2fd6429ca357b0cc119412a565623fe8b852ec5141d291`
+(key) and `a4e5057fcbff906f61ef46dcc1c38251abaa68e4d362147a88302b2e07ed4c5e`
+(certificate).
+
+**Why a private key is committed at all.** `crates/tinker-pdf/tests/visible_signature.rs`
+has to show that a signature over a document carrying a drawn seal *verifies*,
+and the digest it signs exists only once this engine has laid the file out —
+so no signature can be made ahead of time, and no test may spawn OpenSSL to
+make one then (ruling 13). The test therefore signs in-process: it assembles
+the CMS `SignedData` itself and raises the PKCS#1 v1.5 block to this key's
+private exponent with `tinker_pdf_crypto::bignum`. The key signs nothing but
+test documents and protects nothing; it is fixture data in the sense that a
+committed JPEG is.
+
+What OpenSSL's half is worth: the key pair and the certificate are a second
+implementation's, so a certificate this engine could not read, or an `e` and
+`d` that were not inverses, would fail the test rather than agree with it.
+What it is not worth: the `SignedData` around the signature is this
+repository's own reading of RFC 5652, checked by this repository's own
+verifier.

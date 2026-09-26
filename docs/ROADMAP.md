@@ -649,7 +649,6 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| A visible signature appearance | an invisible field only; the type says drawing one is a separate capability | an `/AP` from name, date, reason and an optional image, through the appearance synthesis annotations already use | S |
 | Timestamps: creating one through a host seam, validating the token | tokens are located and handed out as opaque DER | a `Timestamper` seam like `Signer`, since the engine performs no I/O; validation held to a published token | M |
 | Long-term validation: `/DSS` and `/VRI` | absent | written from host-supplied CRL and OCSP bytes | M |
 | Public-key encryption on write | a non-goal because the engine would have to choose a certificate — and the caller can supply one | `Encryption::PublicKey { recipients }` sealing with caller-supplied certificates, held to the OpenSSL envelopes this reader already parses | M |
@@ -788,11 +787,13 @@ if the field's evidence asks.**
   ([features/filters.md](features/filters.md)).
 - **SVG `<switch>` conditional processing** ([design/svg.md](design/svg.md)).
 
-Six things the docs called non-goals are rows in tier 5 now, because the
+Six things the docs called non-goals became rows in tier 5, because the
 field offers each and the reason given was a scope choice rather than a
 limit: hinting, a visible signature appearance, timestamp creation, writing
 a public-key-encrypted document, image encoders, and inferred reading order
-for untagged pages. Each row says so.
+for untagged pages. Each row says so — and the visible signature
+appearance's has since closed (`SigningTarget::NewVisibleField`,
+[features/signatures.md](features/signatures.md)).
 
 ## How this file changes
 

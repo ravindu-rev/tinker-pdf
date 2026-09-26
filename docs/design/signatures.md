@@ -329,8 +329,12 @@ one returning a *positive* verdict is a forgery accepted. Both tests that catch 
   reports what is embedded, nothing more.
 - **The public-key security handler** (`/Filter /Adobe.PPKLite` encryption, 7.6.5) — related
   ASN.1, different feature.
-- **Visible signature appearance generation.** A signed field keeps whatever appearance the
-  caller set via the existing forms path; drawing seals is not signature work.
+- ~~**Visible signature appearance generation.** A signed field keeps whatever appearance the
+  caller set via the existing forms path; drawing seals is not signature work.~~ *No longer a
+  non-goal, 26 September 2026.* The reason given was a scope choice rather than a limit, and
+  the roadmap made it a row; it closed as `SigningTarget::NewVisibleField`, whose appearance is
+  built beside the annotation synthesis and is covered by the `/ByteRange` like everything else
+  the update writes ([features/signatures.md](../features/signatures.md)).
 
 ## Design
 

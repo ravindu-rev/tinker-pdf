@@ -144,7 +144,14 @@ pub use render_part::{NotDrawn, RenderPartError};
 /// comes with them because every widget a field places is one; it is the
 /// object model's own rectangle rather than a second spelling of four
 /// numbers.
-pub use tinker_pdf_cos::{AddFieldError, NewField, NewFieldKind, RadioButton, Rect};
+///
+/// [`SignatureAppearance`] and [`SignatureImage`] are the payload of
+/// [`SigningTarget::NewVisibleField`], the signature that draws a seal, and
+/// are here for the same reason: a variant whose payload cannot be named is a
+/// variant nobody outside this workspace can build.
+pub use tinker_pdf_cos::{
+    AddFieldError, NewField, NewFieldKind, RadioButton, Rect, SignatureAppearance, SignatureImage,
+};
 /// Writing: creation, editing and saving.
 ///
 /// Without these on the facade a caller depending only on this crate could

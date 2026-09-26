@@ -231,21 +231,109 @@ impl FieldLock {
 }
 
 /// Where the signature goes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `#[non_exhaustive]` since [`SigningTarget::NewVisibleField`] arrived, and
+/// `Eq` gone with it: that variant carries a rectangle, which is four `f64`s.
+/// Both are breaks and were taken together, once, rather than the second
+/// waiting for the next variant.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SigningTarget {
     /// An existing, empty `/FT /Sig` field, by its fully qualified name.
     ///
     /// Refused if the field is already signed, because overwriting a signature
     /// destroys evidence and the caller almost certainly meant to add one.
+    /// The field keeps whatever appearance it already has.
     Field(String),
     /// A new invisible signature field, added to the first page.
     ///
-    /// Invisible — a zero `/Rect` and the hidden flag — because generating a
-    /// visible appearance is a separate capability and a signature that draws
-    /// nothing is honest about that, where an empty box would not be.
+    /// Invisible because its `/Rect` is zero, for a caller that wants the
+    /// signature and not a seal on the page. Its `/F 132` is Print and
+    /// Locked (12.5.3 Table 165, bits 3 and 8) — the convention invisible
+    /// signatures carry — and not the hidden or no-view bit, which is what
+    /// this comment used to say.
     NewInvisibleField {
         /// The field's `/T`.
         name: String,
+    },
+    /// A new signature field that **draws**: a widget in `rect` on `page`
+    /// whose normal appearance shows who signed, when, why and where — the
+    /// request's own [`SigningRequest::name`], [`SigningRequest::signed_at`],
+    /// [`SigningRequest::reason`] and [`SigningRequest::location`] — and an
+    /// optional image beside them (12.7.4.5, 12.5.5).
+    ///
+    /// The text is taken from the request rather than supplied separately so
+    /// that the seal cannot say something the signature dictionary does not.
+    /// The appearance is an object of the same incremental update as the
+    /// signature, so the `/ByteRange` covers it: changing what the seal shows
+    /// afterwards is a modification the signature detects.
+    NewVisibleField {
+        /// The field's `/T`.
+        name: String,
+        /// The zero-based page the widget goes on.
+        page: u32,
+        /// Where on that page, in default user space.
+        rect: crate::pages::Rect,
+        /// What the appearance draws beyond the request's text.
+        appearance: SignatureAppearance,
+    },
+}
+
+/// What a visible signature's appearance draws beyond its text
+/// ([`SigningTarget::NewVisibleField`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SignatureAppearance {
+    /// An image — a handwritten signature, a company seal — drawn in the left
+    /// part of the box, its aspect ratio kept, with the text to its right.
+    /// `None` gives the text the whole box.
+    pub image: Option<SignatureImage>,
+}
+
+impl SignatureAppearance {
+    /// Text only.
+    #[must_use]
+    pub fn new() -> SignatureAppearance {
+        SignatureAppearance::default()
+    }
+
+    /// Text with `image` beside it.
+    #[must_use]
+    pub fn with_image(image: SignatureImage) -> SignatureAppearance {
+        SignatureAppearance { image: Some(image) }
+    }
+}
+
+/// An image for a visible signature, as the caller has it.
+///
+/// The minimal editor-side counterpart of
+/// [`crate::build::DocumentBuilder::add_image`]'s input: JPEG placed as it
+/// is, never re-encoded, and eight-bit samples written as they are. Owned
+/// rather than borrowed because it rides in a [`SigningTarget`], which has no
+/// lifetime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignatureImage {
+    /// JPEG bytes, placed as `/DCTDecode`; the size and component count are
+    /// read from the frame header rather than taken on trust.
+    Jpeg(Vec<u8>),
+    /// Eight-bit greyscale, one byte a pixel, rows from the top.
+    Gray8 {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// The samples: at least `width * height` of them.
+        data: Vec<u8>,
+    },
+    /// Eight-bit RGB, three bytes a pixel, rows from the top.
+    Rgb8 {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// The samples: at least `width * height * 3` of them.
+        data: Vec<u8>,
     },
 }
 
@@ -309,7 +397,11 @@ impl<'a> SigningRequest<'a> {
 }
 
 /// Why a signing save produced no file.
+///
+/// `#[non_exhaustive]` from the visible-signature commit on, which added
+/// three variants and took the break once.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignError {
     /// Signing needs [`crate::WriteMode::Incremental`]: a rewrite renumbers
     /// and relocates objects, so it cannot preserve a signature already in the
@@ -325,6 +417,17 @@ pub enum SignError {
     /// [`SigningTarget::NewInvisibleField`] on a document with no page to put
     /// the widget on.
     NoPages,
+    /// [`SigningTarget::NewVisibleField`] named a page the document does not
+    /// have.
+    NoSuchPage(u32),
+    /// [`SigningTarget::NewVisibleField`]'s rectangle has no area, or a
+    /// coordinate that is not a number: there is nowhere to draw the seal.
+    RectUnusable,
+    /// The [`SignatureImage`] does not describe an image: a JPEG whose frame
+    /// header cannot be read, a zero dimension, or fewer samples than the
+    /// dimensions promise. Refused rather than drawn as a placeholder, because
+    /// what a seal shows is part of what is signed.
+    ImageUnusable,
     /// The CMS blob the signer returned does not fit the reservation. The
     /// alternative is a truncated signature, which is a file that looks signed
     /// and is not.
@@ -350,6 +453,9 @@ impl std::fmt::Display for SignError {
             SignError::NotASignatureField(name) => write!(f, "{name:?} is not a signature field"),
             SignError::FieldAlreadySigned(name) => write!(f, "{name:?} is already signed"),
             SignError::NoPages => f.write_str("the document has no page to place a field on"),
+            SignError::NoSuchPage(page) => write!(f, "no page {page} to place the field on"),
+            SignError::RectUnusable => f.write_str("the signature's rectangle has no area"),
+            SignError::ImageUnusable => f.write_str("the signature image is not an image"),
             SignError::ReserveTooSmall { needed, reserved } => write!(
                 f,
                 "the signature needs {needed} bytes and {reserved} were reserved"
@@ -388,6 +494,32 @@ pub fn pdf_date(date: Date) -> String {
         }
         // An unspecified zone is legal and means local time, which is what a
         // signer who did not say meant.
+        None => {}
+    }
+    out
+}
+
+/// The same instant as a person reads it on a seal: `2026-09-26 14:05:09
+/// +01:00`, `Z` for UTC, and no zone at all where the date gives none —
+/// the same three cases [`pdf_date`] writes, so the seal and `/M` cannot
+/// disagree about which zone was meant.
+#[must_use]
+pub(crate) fn display_date(date: Date) -> String {
+    let mut out = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        date.year, date.month, date.day, date.hour, date.minute, date.second
+    );
+    match date.utc_offset_minutes {
+        Some(0) => out.push('Z'),
+        Some(offset) => {
+            let sign = if offset < 0 { '-' } else { '+' };
+            let magnitude = offset.abs();
+            out.push_str(&format!(
+                " {sign}{:02}:{:02}",
+                magnitude / 60,
+                magnitude % 60
+            ));
+        }
         None => {}
     }
     out

@@ -972,7 +972,7 @@ fn partial_names(name: &str) -> Result<Vec<&str>, AddFieldError> {
 }
 
 /// `rect` ordered, or `None` when it has no area or is not finite.
-fn usable_rect(rect: Rect) -> Option<Rect> {
+pub(super) fn usable_rect(rect: Rect) -> Option<Rect> {
     let values = [rect.x0, rect.y0, rect.x1, rect.y1];
     if !values.iter().all(|v| v.is_finite()) {
         return None;
