@@ -99,7 +99,7 @@ impl DeviceSpace {
         }
     }
 
-    const fn pdf_name(self) -> &'static [u8] {
+    pub(crate) const fn pdf_name(self) -> &'static [u8] {
         match self {
             DeviceSpace::Gray => b"DeviceGray",
             DeviceSpace::Rgb => b"DeviceRGB",
@@ -1140,7 +1140,7 @@ fn holds(entries: &[(Vec<u8>, ObjRef)], resource: &[u8]) -> bool {
 /// A `NaN` or an infinity would reach the file as `NaN` or `inf`, which is not
 /// a PDF number at all — so it is refused at the door rather than serialised
 /// into a token no reader can lex.
-fn all_finite(values: &[f64]) -> bool {
+pub(crate) fn all_finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
 }
 
@@ -1154,7 +1154,7 @@ fn is_alpha(value: f64) -> bool {
 }
 
 /// Whether a rectangle encloses an area, in the order `[x0 y0 x1 y1]`.
-fn is_box(rect: &[f64; 4]) -> bool {
+pub(crate) fn is_box(rect: &[f64; 4]) -> bool {
     all_finite(rect) && rect[2] > rect[0] && rect[3] > rect[1]
 }
 

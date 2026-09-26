@@ -210,7 +210,7 @@ impl DocumentEditor {
     /// Depth-capped and cycle-guarded through `mapping`: a page whose
     /// resources refer back to it is unusual but legal, and following it
     /// blindly does not terminate.
-    fn copy_value(
+    pub(super) fn copy_value(
         &mut self,
         source: &CosDocument,
         value: &Object,

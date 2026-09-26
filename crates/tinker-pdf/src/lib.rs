@@ -252,8 +252,8 @@ pub use tinker_pdf_cos::{
     CalcError, DisplayString, EventVerdict, Keystroke, Recalculation, ScriptBudget, ScriptError,
     ScriptPolicy, ScriptScope, Trigger,
 };
-/// Graphics on write: the tint spaces, and the calculator a `/DeviceN` tint
-/// transform is written as.
+/// Graphics on write and on existing pages: the tint spaces and the
+/// calculator a `/DeviceN` tint transform is written as, layers, and stamps.
 ///
 /// [`CalculatorOp`] is the payload of [`Function::Calculator`] and
 /// [`DeviceNAttributes`] the argument to
@@ -265,7 +265,10 @@ pub use tinker_pdf_cos::{
 /// [`LayerId`] is what [`DocumentBuilder::add_layer`] hands back and what
 /// [`PageBuilder::optional`] takes, so without it the two could not be joined
 /// from outside this workspace.
-pub use tinker_pdf_cos::{CalculatorOp, DeviceNAttributes, LayerId};
+///
+/// [`StampPlacement`] is the argument to [`DocumentEditor::stamp`], for the
+/// same reason.
+pub use tinker_pdf_cos::{CalculatorOp, DeviceNAttributes, LayerId, StampPlacement};
 /// Signing on an incremental save (12.8.1), behind
 /// [`DocumentEditor::save_signed`].
 ///

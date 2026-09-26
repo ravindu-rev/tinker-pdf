@@ -108,6 +108,7 @@ pub use calc::{
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
+pub use edit::StampPlacement;
 pub use edit::{
     annot, AddFieldError, DocumentEditor, EditCheckpoint, FillError, FillRejection, NewField,
     NewFieldKind, RadioButton, SkippedWidget, WidgetDefect,

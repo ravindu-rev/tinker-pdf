@@ -35,6 +35,7 @@ mod page_ops;
 mod sanitise;
 mod save;
 mod signing;
+mod stamp;
 #[cfg(test)]
 mod tests;
 mod trailer;
@@ -51,6 +52,7 @@ pub use metadata::MetadataSync;
 pub use sanitise::{
     DeletedObject, EntryHolder, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport,
 };
+pub use stamp::StampPlacement;
 
 /// A copy of `dict` with one key gone.
 ///

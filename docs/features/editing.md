@@ -237,6 +237,29 @@ object in neither is exactly as it was. As with redaction, **save with
 `WriteMode::Rewrite` for the removal to be real**: an incremental update
 appends and the original objects are still in the prefix.
 
+**Stamps and watermarks.** `add_resource(page, category, prefix, object)`
+registers an object in a page's `/Resources /<category>` under `prefix` and
+the smallest number the page's sub-dictionary does not already use, and
+returns the name. The page's resource dictionary may be inherited from the
+page tree (7.7.3.4) or shared by reference with other pages, so the
+*effective* dictionary is copied — with the category's sub-dictionary — and
+the copy written onto this page; the shared or inherited original is never
+changed. `stamp(page, form, StampPlacement::Over | Under)` registers a form
+XObject that way and adds a stream invoking it to the page's `/Contents`
+array — before the page's streams for `Under`, after them for `Over` — and
+the page's own streams are not rewritten or copied, so an incremental save
+carries the page dictionary and the new streams and nothing else. An `Over`
+stamp runs in whatever graphics state the page's content left behind, so the
+content is tokenized first: if every `q` has its `Q` and nothing outside them
+changes the state, the stamp is simply appended; otherwise the page's streams
+are bracketed by a `q` stream and a `Q` stream, and unreadable content or an
+inline image is bracketed rather than guessed about. An `Under` stamp needs no
+bracket: it runs in the initial state and `Do` restores whatever the form
+changes (8.10.1). `add_form(&FormXObject, resources)` writes a form in the
+editor, and `import_page_as_form(source, page, matrix)` turns another
+document's page into one — its content joined, its crop box the `/BBox`, its
+resources deep-copied by the copy `import_page` uses.
+
 **Transactions.** `transaction(|tx| ...)` snapshots all five mutable fields
 and restores them if the closure returns `Err`. It is a closure rather than
 a begin/commit/rollback triple because the failure it prevents is silent —
@@ -414,7 +437,8 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `delete_page()`,
 `move_page()`, `rotate_page()`, `set_crop_box()`, `insert_page()`,
 `import_page()`,
-`keep_pages()`, `append_content()`, `page_box()`, `flatten_annotations()`,
+`keep_pages()`, `append_content()`, `add_resource()`, `add_form()`,
+`import_page_as_form()`, `stamp()`, `page_box()`, `flatten_annotations()`,
 `add_annotation()`, `set_page_boundary()`, `set_trim_box()`, `set_art_box()`,
 `set_bleed_box()`, `set_page_labels()`, `attach_file()`, `set_outline()`,
 `set_title()`, `set_author()`, `set_subject()`, `set_keywords()`,
@@ -521,6 +545,15 @@ if report.untouched.is_empty() {
 
 ## Verified
 
+- `crates/tinker-pdf/tests/editor_stamp.rs` — a stamp over paints on top and
+  one under beneath; the page's own content streams are the same objects,
+  unredefined by the update, with the same bytes; two pages sharing one
+  `/Resources` are stamped independently, neither touching the shared object
+  and the new name stepping past an existing `Stamp0`; a page ending with a
+  stray `cm` is bracketed and the stripe lands at the page's scale; inherited
+  resources are copied onto the page and the tree node is not in the update;
+  another document's page stamps as a form with its image; every saved file
+  is clean under the strict validator.
 - `crates/tinker-pdf-cos/tests/page_operations.rs` — delete, move, rotate,
   insert, import, keep, append; each saved in both modes, because a page
   operation once reached only the incremental set and nothing caught it.
