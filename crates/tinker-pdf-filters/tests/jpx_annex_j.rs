@@ -41,7 +41,7 @@
 //! its comments so a reader can check any line against the standard without
 //! converting anything.
 
-use tinker_pdf_filters::{jpx_decode, Limits};
+use tinker_pdf_filters::{jpx_decode, jpx_header, JpxColour, Limits};
 
 /// T.800 J.10's codestream, transcribed field by field from J.10.1 and
 /// J.10.2's annotated listings rather than from the raw hex dump.
@@ -199,6 +199,90 @@ fn annex_j10_decodes_to_the_samples_the_standard_publishes() {
     assert_eq!(
         image.samples, &ANNEX_J10_SAMPLES,
         "T.800 J.10.5 publishes these nine samples"
+    );
+}
+
+/// The header read the comic path places a `.j2k` page on, against J.10.1's
+/// own statement of the image: 1 x 9, one component, 8 bits unsigned, and —
+/// a bare codestream carrying no `colr` box — no stated colour space.
+#[test]
+fn annex_j10_s_header_reads_as_j10_1_describes_it() {
+    let header = jpx_header(ANNEX_J10, &Limits::new(1 << 20)).expect("J.10's header reads");
+    assert_eq!(
+        (header.width, header.height),
+        (1, 9),
+        "J.10.1's Xsiz and Ysiz"
+    );
+    assert_eq!(header.components, 1, "J.10.1: Csiz = 1");
+    assert_eq!(header.precision, 8, "J.10.1: Ssiz = 7, 8 bits unsigned");
+    assert_eq!(
+        header.colour,
+        JpxColour::Unstated,
+        "a bare codestream has no colr"
+    );
+    assert!(!header.opacity);
+
+    // The header read refuses what the decode refuses at the same stage: the
+    // codestream cut inside its main header, and an output past the ceiling.
+    assert!(jpx_header(&ANNEX_J10[..40], &Limits::new(1 << 20)).is_err());
+    assert!(
+        jpx_header(ANNEX_J10, &Limits::new(8)).is_err(),
+        "nine samples do not fit an eight-byte ceiling"
+    );
+}
+
+/// One JP2 box: `LBox`, `TBox`, contents (T.800 I.4).
+fn jp2_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut out = u32::try_from(body.len() + 8)
+        .expect("a small box")
+        .to_be_bytes()
+        .to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(body);
+    out
+}
+
+/// **A palette is charged at what it expands to, in the header read as in the
+/// decode.**
+///
+/// J.10's one component of nine samples, wrapped in a JP2 whose `pclr` box is
+/// the identity over 256 entries in three columns and whose `cmap` sends the
+/// component through all three (I.5.3.4, I.5.3.5). The codestream is nine
+/// samples, so its own budget passes a ceiling of 26 bytes; the *output* is
+/// twenty-seven. A header read that charged the codestream and not the output
+/// would say yes to a file the decode then refuses — which on the comic path
+/// is a page placed and then drawn grey.
+#[test]
+fn a_palette_is_charged_at_what_it_expands_to_in_the_header_read_too() {
+    let mut pclr = vec![0x01, 0x00, 3, 7, 7, 7]; // NE = 256, NPC = 3, 8-bit unsigned
+    for i in 0..=255u8 {
+        pclr.extend_from_slice(&[i, i, i]);
+    }
+    let cmap: Vec<u8> = (0..3u8).flat_map(|column| [0, 0, 1, column]).collect();
+    let mut header = jp2_box(b"ihdr", &[0, 0, 0, 9, 0, 0, 0, 1, 0, 1, 7, 7, 0, 0]);
+    header.extend(jp2_box(b"colr", &[1, 0, 0, 0, 0, 0, 16])); // EnumCS 16, sRGB
+    header.extend(jp2_box(b"pclr", &pclr));
+    header.extend(jp2_box(b"cmap", &cmap));
+    let mut file = vec![0, 0, 0, 12, b'j', b'P', b' ', b' ', 0x0D, 0x0A, 0x87, 0x0A];
+    file.extend(jp2_box(b"ftyp", b"jp2 \0\0\0\0jp2 "));
+    file.extend(jp2_box(b"jp2h", &header));
+    file.extend(jp2_box(b"jp2c", ANNEX_J10));
+
+    let fits = Limits::new(27);
+    let image = jpx_decode(&file, &fits, &mut Vec::new()).expect("27 bytes fit 27");
+    let expanded: Vec<u8> = ANNEX_J10_SAMPLES.iter().flat_map(|&s| [s, s, s]).collect();
+    assert_eq!(
+        image.samples, expanded,
+        "the identity palette, three times over"
+    );
+    let read = jpx_header(&file, &fits).expect("and the header read agrees");
+    assert_eq!(read.components, 3, "three channels out of one component");
+
+    let short = Limits::new(26);
+    assert!(jpx_decode(&file, &short, &mut Vec::new()).is_err());
+    assert!(
+        jpx_header(&file, &short).is_err(),
+        "the header read charged the codestream's nine samples, not the output's 27"
     );
 }
 

@@ -559,6 +559,79 @@ pub fn jpx_decode_attributed(input: &[u8], limits: &Limits) -> Result<JpxImage, 
     decode_inner(input, limits, &mut clamped)
 }
 
+/// What a JPEG 2000 file says about itself before one sample is decoded.
+///
+/// The shape [`jpx_decode`] would hand back, without the samples: a caller
+/// that places the file's own bytes rather than decoding them — the comic
+/// path, which puts a `.jp2` page into a document as a `/JPXDecode` stream —
+/// needs the page's size and whether the file is one this build could draw,
+/// and it needs them at the cost of a header rather than of a raster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JpxHeader {
+    pub width: u32,
+    pub height: u32,
+    /// Colour channels a decode would produce, excluding any opacity channel
+    /// — which a `pclr` palette makes different from the codestream's `Csiz`.
+    pub components: u8,
+    /// 8 or 16: the precision a decode would widen every channel to.
+    pub precision: u8,
+    /// What the container's `colr` box declares, or [`JpxColour::Unstated`].
+    pub colour: JpxColour,
+    /// Whether a `cdef` box typed a channel as opacity.
+    pub opacity: bool,
+}
+
+/// Reads a [`JpxHeader`]: every stage of [`jpx_decode`] that runs before
+/// tier-2, and none after.
+///
+/// That is Annex I's box walk, Annex A's main header and every tile-part
+/// header, the three budgets, Annex I's channel plan and the precision and
+/// channel-count refusals — so a file this returns `Ok` for is refused later
+/// only for damage inside its packets, which is a statement about the bit
+/// stream rather than about anything the file declared. What it does not do is
+/// the work: no packet is parsed, no code-block decoded and no plane
+/// allocated.
+///
+/// # Errors
+/// The [`Refusal`] a decode would have stopped on at the same stage.
+pub fn jpx_header(input: &[u8], limits: &Limits) -> Result<JpxHeader, Refusal> {
+    let container = boxes::parse(input)?;
+    let stream = codestream::parse(container.codestream)?;
+    stream.check_budget(limits)?;
+    let header = container.header.as_ref();
+    let plan = colour::plan(header, &stream.siz.components)?;
+    if plan.precision > MAX_JPX_PRECISION {
+        return Err(Refusal::Precision(plan.precision));
+    }
+    if plan.colour.len() > MAX_JPX_COMPONENTS as usize {
+        return Err(Refusal::Budget("output colour channels"));
+    }
+    let precision = if plan.precision > 8 { 16u8 } else { 8 };
+    let width = stream.siz.width();
+    let height = stream.siz.height();
+    // The same output charge `decode_inner` makes, so a file whose raster the
+    // caller's ceiling would refuse is refused here rather than placed and
+    // then refused by the renderer.
+    let channels = plan.colour.len() + usize::from(plan.opacity.is_some());
+    let bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|n| n.checked_mul(channels as u64))
+        .and_then(|n| n.checked_mul(u64::from(precision / 8)))
+        .ok_or(Refusal::Budget("output samples"))?;
+    if bytes > limits.max_output as u64 {
+        return Err(Refusal::Budget("the caller's output ceiling"));
+    }
+    Ok(JpxHeader {
+        width,
+        height,
+        components: u8::try_from(plan.colour.len())
+            .map_err(|_| Refusal::Budget("output colour channels"))?,
+        precision,
+        colour: header.map_or(JpxColour::Unstated, |h| h.colour),
+        opacity: plan.opacity.is_some(),
+    })
+}
+
 fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<JpxImage, Refusal> {
     let container = boxes::parse(input)?;
     let stream = codestream::parse(container.codestream)?;

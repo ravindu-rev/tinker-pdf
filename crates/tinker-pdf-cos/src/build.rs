@@ -231,6 +231,23 @@ pub enum ImageFilter {
     /// image's - is exactly the disagreement that produces a page with the
     /// right dictionary and the wrong picture.
     CcittFax(CcittParams),
+    /// `/JPXDecode` (7.4.9): a JPEG 2000 file, as a bare codestream or in its
+    /// JP2 wrapper, placed as it is.
+    ///
+    /// **The image dictionary carries no `/BitsPerComponent` and no
+    /// `/ColorSpace`.** Table 89 makes both optional for this filter and for
+    /// no other, and the codestream's own precision and colour specification
+    /// then apply. Writing them would not be harmless: a `/ColorSpace` present
+    /// overrides the file's `colr` box, so a JP2 carrying an ICC profile or an
+    /// sYCC declaration would be re-labelled with whatever device space a
+    /// caller guessed, and `/BitsPerComponent` cannot even state a 12-bit
+    /// codestream. So [`CompressedImage::bits_per_component`] and
+    /// [`CompressedImage::color_space`] are *descriptions* for this filter —
+    /// what a decode produces, checked as for any image, and **not written** —
+    /// and a colour-key [`CompressedImage::color_key_mask`] is refused, since
+    /// 8.9.6.4's ranges are raw sample values at a `/BitsPerComponent` this
+    /// dictionary does not state.
+    Jpx,
 }
 
 /// Per-sample opacity, as the `/DeviceGray` sub-image 11.6.5.3 asks for.
@@ -3895,6 +3912,14 @@ impl DocumentBuilder {
             }
         }
 
+        // Table 89: a `/JPXDecode` image states neither its depth nor its
+        // space, so a colour-key mask would be ranges over samples of a width
+        // the dictionary does not say. Refused rather than written.
+        let jpx = image.filter == Some(ImageFilter::Jpx);
+        if jpx && image.color_key_mask.is_some() {
+            return None;
+        }
+
         if let Some(ranges) = image.color_key_mask {
             // 8.9.6.4: 2 x n integers, "each in the range 0 to
             // 2^BitsPerComponent - 1", and a min above its max names an empty
@@ -3931,6 +3956,12 @@ impl DocumentBuilder {
             self.names.intern(b"Height"),
             Object::Int(i64::from(image.height)),
         );
+        // `ImageFilter::Jpx` says why these two are not written for it: the
+        // codestream states both, and a `/ColorSpace` here would override it.
+        if jpx {
+            self.insert_filter(dict, ImageFilter::Jpx);
+            return self.soft_mask_then_data(dict, image);
+        }
         dict.insert(
             self.names.intern(b"BitsPerComponent"),
             Object::Int(i64::from(image.bits_per_component)),
@@ -3970,6 +4001,16 @@ impl DocumentBuilder {
                 ),
             );
         }
+        self.soft_mask_then_data(dict, image)
+    }
+
+    /// The `/SMask`, if any, then the image's own bytes — the tail every
+    /// compressed image shares, `/JPXDecode` included.
+    fn soft_mask_then_data(
+        &mut self,
+        dict: &mut Dict,
+        image: &CompressedImage<'_>,
+    ) -> Option<Vec<u8>> {
         if let Some(mask) = &image.soft_mask {
             let reference = self.allocate();
             let mut md = Dict::new();
@@ -4023,6 +4064,7 @@ impl DocumentBuilder {
             | ImageFilter::FlateTiffPredictor { .. } => b"FlateDecode",
             ImageFilter::Lzw | ImageFilter::LzwTiffPredictor { .. } => b"LZWDecode",
             ImageFilter::CcittFax(_) => b"CCITTFaxDecode",
+            ImageFilter::Jpx => b"JPXDecode",
         };
         dict.insert(Name::FILTER, Object::Name(self.names.intern(name)));
 
@@ -4920,6 +4962,9 @@ fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
         // it before the call that owns it. It is left to the validator, and
         // `super::STAGED`'s neighbour in the writer is this comment.
         ImageData::Jpeg(_) => None,
+        // A JPEG 2000 image's colour is its codestream's, exactly as a JPEG's
+        // is its SOF marker's, and the dictionary names no space to judge.
+        ImageData::Compressed(image) if image.filter == Some(ImageFilter::Jpx) => None,
         ImageData::Compressed(image) => match image.color_space {
             ImageColorSpace::DeviceGray => Some(DeviceSpace::Gray),
             ImageColorSpace::DeviceRgb => Some(DeviceSpace::Rgb),
@@ -5581,6 +5626,70 @@ mod image_tests {
         assert!(
             bytes.windows(jpeg.len()).any(|w| w == jpeg),
             "the JPEG data is embedded byte for byte"
+        );
+    }
+
+    /// A JPEG 2000 file is placed as `/JPXDecode` with its own bytes, and
+    /// the dictionary states neither a depth nor a space (Table 89).
+    ///
+    /// Read back through the parser rather than searched for as text, so the
+    /// absence of `/ColorSpace` is a fact about the image dictionary and not
+    /// about the file: a `/DeviceGray` elsewhere in the document would
+    /// satisfy a text search for the wrong reason.
+    #[test]
+    fn a_jpx_image_is_placed_without_a_depth_or_a_space() {
+        // Not a codestream: this writer never reads the bytes it places, and
+        // the test is about the dictionary around them.
+        const BODY: &[u8] = b"\xFF\x4F\xFF\x51 a JPEG 2000 codestream";
+        let jpx = || CompressedImage {
+            width: 1,
+            height: 9,
+            bits_per_component: 8,
+            color_space: ImageColorSpace::DeviceGray,
+            filter: Some(ImageFilter::Jpx),
+            data: BODY,
+            color_key_mask: None,
+            soft_mask: None,
+        };
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_image(b"Im", &ImageData::Compressed(jpx())));
+        builder.add_page(1.0, 9.0, |page| page.image(b"Im", 0.0, 0.0, 1.0, 9.0));
+        let bytes = builder.finish();
+        assert!(
+            bytes.windows(BODY.len()).any(|w| w == BODY),
+            "the bytes are placed as they are"
+        );
+
+        let doc = CosDocument::open(bytes).expect("the writer's own output parses");
+        let dict = (1..20u32)
+            .filter_map(|num| doc.get(ObjRef::new(num, 0)).ok())
+            .filter_map(|o| o.as_dict().cloned())
+            .find(|d| {
+                d.get_name(Name::FILTER)
+                    .and_then(|n| doc.name_bytes(n))
+                    .is_some_and(|n| &*n == b"JPXDecode")
+            })
+            .expect("an image dictionary naming /JPXDecode");
+        assert_eq!(dict.get_int(doc.intern(b"Width")), Some(1));
+        assert_eq!(dict.get_int(doc.intern(b"Height")), Some(9));
+        assert!(
+            !dict.contains_key(doc.intern(b"BitsPerComponent")),
+            "the codestream's precision applies"
+        );
+        assert!(
+            !dict.contains_key(doc.intern(b"ColorSpace")),
+            "the codestream's colour specification applies, unoverridden"
+        );
+        assert!(!dict.contains_key(Name::DECODE_PARMS));
+
+        // A colour-key mask has no depth to be ranges over.
+        let keyed = CompressedImage {
+            color_key_mask: Some(&[(0, 0)]),
+            ..jpx()
+        };
+        assert!(
+            !DocumentBuilder::new().add_image(b"Im", &ImageData::Compressed(keyed)),
+            "a colour-key mask over a /JPXDecode image is refused"
         );
     }
 

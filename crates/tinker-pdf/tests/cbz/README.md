@@ -23,9 +23,10 @@ implementation's idea of a ZIP over content nobody else owns.
 
 ## What produced them
 
-Eleven archives, six of them ZIPs, from four independent implementations —
-ten on the machine described below, and `python-lzma.cbz` later, on the one its
-own row names.
+Twelve archives, seven of them ZIPs, from four independent implementations —
+ten on the machine described below, and `python-lzma.cbz` and `python-jpx.cbz`
+later, on the one their own rows name. Eleven hold the same five pages;
+`python-jpx.cbz` holds a picture T.800 publishes instead.
 
 | Producer | Files | What it is |
 | --- | --- | --- |
@@ -34,6 +35,7 @@ own row names.
 | **.NET `System.IO.Compression`** | `pwsh.cbz` | Through PowerShell's `Compress-Archive`. Microsoft's ZIP writer, and the one most Windows software reaches for. |
 | **CPython 3.12 `zipfile`** | `python.cbz` | The standard library's writer, and the one most tooling that touches comics is written against. |
 | **CPython 3.11.15 `zipfile`**, `ZIP_LZMA`, over liblzma 5.4.5 (Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`) | `python-lzma.cbz` | The same writer asked for APPNOTE method 14 — the one writer on hand that emits it — by `make-lzma.py`, on Linux x86_64, 26 September 2026. Added later; see *The LZMA ZIP* below. |
+| **CPython 3.11.15 `zipfile`**, `ZIP_STORED` | `python-jpx.cbz` | T.800 Annex J.10's codestream as two JPEG 2000 pages, by `make-jpx.py`, on Linux x86_64, 26 September 2026. See *The JPEG 2000 ZIP* below. |
 
 **RAR 4 cannot be produced on this machine, and that is recorded rather than
 worked around.** RAR 7.20's `rar.exe` has no `-ma` switch at all: `-ma4`
@@ -72,12 +74,12 @@ rerunning a producer.
 
 ## What is committed
 
-210 694 bytes, which is the sum of the Bytes column below and nothing else —
+211 189 bytes, which is the sum of the Bytes column below and nothing else —
 the pages in `source/` are another 18 483 and the four text files here are not
 counted at all. (The figure that stood here before the two later `.cb7`s landed
 was 183 776, which was the sum of nothing: the eight archives it described came
 to 155 074. Re-measured rather than carried, and again when `python-lzma.cbz`
-added 18 939 to 191 755.) `sha256` is the first sixteen hex
+added 18 939 to 191 755 and `python-jpx.cbz` 495 more.) `sha256` is the first sixteen hex
 digits, enough to tell a file from a regeneration of it.
 
 | File | Bytes | Producer | What it demonstrates | sha256 |
@@ -87,6 +89,7 @@ digits, enough to tell a file from a regeneration of it.
 | `winrar.cbz` | 19 039 | WinRAR `-afzip` | A second ZIP writer that makes the same per-entry store/deflate choices as 7-Zip and lays its central directory out differently | `1db56f83e8cac68e` |
 | `pwsh.cbz` | 18 879 | .NET `System.IO.Compression` | The second finding: **deflates every entry, including the three it makes larger** | `944a422eb61cd0fa` |
 | `python.cbz` | 18 879 | CPython 3.12 `zipfile` | A fourth implementation doing the same, so the finding is not one library's quirk | `48bd76da17bc6a61` |
+| `python-jpx.cbz` | 495 | CPython 3.11 `zipfile`, stored | **Two JPEG 2000 pages**, T.800 J.10's 100-byte codestream bare (`page1.j2k`) and in Annex I's JP2 boxes (`page2.jp2`): the entries the comic path places as `/JPXDecode` | `322249c87ea1a56b` |
 | `python-lzma.cbz` | 18 939 | CPython 3.11 `zipfile`, `ZIP_LZMA` | **Every entry ZIP method 14**, with APPNOTE 5.8.8's header and an end-of-stream marker (general-purpose bit 1). Read since tier 4's archive row wired the LZMA decoder | `22543533a5094f1b` |
 | `7z-lzma2.cb7` | 17 663 | 7-Zip `-t7z -m0=LZMA2` | A CB7 holding the same five pages, in one solid LZMA2 block under an **LZMA-compressed header**. Read since tier 4 | `f211476cb9b199d9` |
 | `7z-nonsolid.cb7` | 18 608 | 7-Zip `-t7z -m0=LZMA2 -ms=off` | The same five pages in **five folders**, one per page: the folder walk runs past folder 0 and sets a coder up five times | `6a10817c1df4905f` |
@@ -280,12 +283,39 @@ for a reason that is .NET's and not the archive's. `inventory.ps1` skips the
 file by name and says why, so a regeneration does not quietly put that claim
 in the table; the entries' CRC-32 is what adjudicates the decoder instead.
 
+## The JPEG 2000 ZIP
+
+`python-jpx.cbz` does not hold the five pages, and cannot usefully: nothing
+here writes a JPEG 2000 file, and a page this repository encoded would test
+its decoder against its own encoder. What it holds instead is the one JPEG 2000
+file whose decoded picture a standard publishes — T.800 Annex J.10's 100-byte
+codestream, whose samples J.10.5 prints as 101, 103, 104, 105, 96, 97, 96, 102
+and 109 — twice: bare, as `page1.j2k`, and inside T.800 Annex I's JP2 boxes
+(signature, `ftyp`, a `jp2h` of `ihdr` and a greyscale `colr`, and `jp2c`), as
+`page2.jp2`. The boxes are this repository's, written from Annex I; the
+codestream is the standard's, read by `make-jpx.py` out of
+`tinker-pdf-filters/tests/jpx_annex_j.rs` rather than transcribed a second
+time. Both entries are stored.
+
+```
+cd crates/tinker-pdf/tests/cbz && python3 make-jpx.py
+```
+
+One fixed timestamp again, so a rerun writes the same bytes — SHA-256
+`322249c87ea1a56baf6e1c0423906ca20a9c84e65346417e314510240275784e`, measured
+twice. `cbz_real.rs`'s
+`a_jpeg_2000_page_is_placed_as_jpxdecode_and_draws_the_samples_t800_publishes`
+holds both pages to J.10.5's samples after a render, and
+`a_jpeg_2000_entry_whose_header_is_refused_is_a_placeholder_naming_it` damages
+the JP2's codestream in two places and asserts a named placeholder. It is not
+in `INVENTORY.tsv` either: that table describes the archives of the five pages.
+
 ## The scripts
 
 `make-corpus.ps1` writes the ten archives and prints a hash for each;
 `inventory.ps1` regenerates `INVENTORY.tsv` from the five ZIPs through .NET's
-reader; `make-lzma.py` writes the eleventh. None runs in CI — they are how
-these files were obtained.
+reader; `make-lzma.py` and `make-jpx.py` write the other two. None runs in
+CI — they are how these files were obtained.
 
 ```
 cargo test -p tinker-pdf --test cbz_real -- --ignored write_the_source_pages

@@ -76,7 +76,10 @@ pub use jpeg::{
     decode as jpeg_decode, jpeg_encode, JpegColor, JpegEncodeError, JpegError, JpegImage,
     JpegOptions, JpegQuantisation, JpegSampling, JpegSource, JpegSourceColour,
 };
-pub use jpx::{jpx_decode, jpx_decode_attributed, JpxColour, JpxImage, Refusal as JpxRefusal};
+pub use jpx::{
+    jpx_decode, jpx_decode_attributed, jpx_header, JpxColour, JpxHeader, JpxImage,
+    Refusal as JpxRefusal,
+};
 pub use jxr::{
     jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,
 };

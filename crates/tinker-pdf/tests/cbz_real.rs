@@ -633,6 +633,205 @@ fn a_damaged_lzma_header_is_a_placeholder_page_naming_it() {
     );
 }
 
+/// T.800 J.10.5: "After the inverse 5-3 reversible filter and level shifting,
+/// the component samples in decimal are: 101, 103, 104, 105, 96, 97, 96, 102,
+/// 109". The same nine numbers `tinker-pdf-filters`' `jpx_annex_j.rs` holds
+/// its decoder to, one column of them, top to bottom.
+const ANNEX_J10_SAMPLES: [u8; 9] = [101, 103, 104, 105, 96, 97, 96, 102, 109];
+
+/// Every image XObject in a document whose `/Filter` is `/JPXDecode`, with
+/// its dictionary and the bytes its stream carries before that filter runs.
+fn jpx_images(document: &Document) -> Vec<(tinker_pdf::Dict, Vec<u8>)> {
+    let cos = document.cos();
+    (1..=cos.max_object_number())
+        .map(|num| tinker_pdf::ObjRef::new(num, 0))
+        .filter_map(|r| {
+            let dict = cos.get(r).ok()?.as_dict()?.clone();
+            let filter = dict.get_name(Name::FILTER)?;
+            if cos.name_bytes(filter).as_deref() != Some(b"JPXDecode".as_slice()) {
+                return None;
+            }
+            Some((dict, cos.stream_raw(r).ok()?))
+        })
+        .collect()
+}
+
+/// **A JPEG 2000 page reaches the document as its own bytes under
+/// `/JPXDecode`, and draws the samples T.800 publishes.**
+///
+/// `python-jpx.cbz` is CPython's `zipfile` over T.800 Annex J.10's 100-byte
+/// codestream twice (`tests/cbz/make-jpx.py`): bare as `page1.j2k`, and inside
+/// Annex I's JP2 boxes as `page2.jp2`. J.10.5 publishes the decoded samples,
+/// so both pages have an expected picture no decoder here produced.
+///
+/// Three claims, in the order they would fail:
+///
+/// - **the pass-through**: each page's image XObject is `/JPXDecode`, its
+///   stream is the entry's bytes exactly, and its dictionary states **no**
+///   `/ColorSpace` and **no** `/BitsPerComponent` — Table 89 lets a JPX image
+///   omit both, and a `/ColorSpace` would override the JP2's own `colr` box;
+/// - **the geometry**: each page is 1 x 9 points, J.10.1's `Xsiz` and `Ysiz`,
+///   read from the header at plan time;
+/// - **the picture**: rendered at one pixel a point, the nine pixels of each
+///   page are J.10.5's nine samples, grey.
+#[test]
+fn a_jpeg_2000_page_is_placed_as_jpxdecode_and_draws_the_samples_t800_publishes() {
+    let bytes = read("python-jpx.cbz");
+    let mut archive = Archive::open(&bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+    let entries: Vec<(String, Vec<u8>)> = (0..archive.entries().len())
+        .map(|i| {
+            let name = archive.entries()[i].name.clone();
+            let data = archive.read(i).expect("a stored entry").into_owned();
+            (name, data)
+        })
+        .collect();
+    assert_eq!(
+        entries.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        ["page1.j2k", "page2.jp2"]
+    );
+    assert_eq!(
+        cbz::image_format(&entries[0].1),
+        Some(cbz::ImageFormat::Jpeg2000),
+        "a bare codestream is recognised by SOC and SIZ"
+    );
+    assert_eq!(
+        cbz::image_format(&entries[1].1),
+        Some(cbz::ImageFormat::Jpeg2000),
+        "a JP2 by its signature box"
+    );
+
+    let document = Document::open(bytes).expect("the comic opens");
+    let report = document.archive().expect("a synthesised document");
+    assert_eq!(
+        report
+            .pages()
+            .iter()
+            .map(|p| (p.name.as_str(), p.defect))
+            .collect::<Vec<_>>(),
+        [("page1.j2k", None), ("page2.jp2", None)],
+        "both pages are their entries' own pictures, not placeholders"
+    );
+    assert!(
+        report.warnings().is_empty(),
+        "nothing about J.10 is degraded: {:?}",
+        report.warnings()
+    );
+
+    let images = jpx_images(&document);
+    assert_eq!(images.len(), 2, "one /JPXDecode image per page");
+    let cos = document.cos();
+    for ((name, entry), (dict, stream)) in entries.iter().zip(&images) {
+        assert!(
+            stream == entry,
+            "{name}: the /JPXDecode stream is the entry's bytes, untouched"
+        );
+        assert_eq!(
+            dict.get_int(cos.intern(b"Width")),
+            Some(1),
+            "{name}: J.10.1's Xsiz"
+        );
+        assert_eq!(
+            dict.get_int(cos.intern(b"Height")),
+            Some(9),
+            "{name}: J.10.1's Ysiz"
+        );
+        assert!(
+            !dict.contains_key(cos.intern(b"ColorSpace")),
+            "{name}: no /ColorSpace, so the codestream's own applies"
+        );
+        assert!(
+            !dict.contains_key(cos.intern(b"BitsPerComponent")),
+            "{name}: no /BitsPerComponent, so the codestream's precision applies"
+        );
+    }
+
+    for (index, (name, _)) in entries.iter().enumerate() {
+        let bitmap = document
+            .page(index as u32)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        assert_eq!(
+            (bitmap.width, bitmap.height),
+            (1, 9),
+            "{name}: one pixel a point"
+        );
+        let column: Vec<(u8, u8, u8)> = (0..9)
+            .map(|y| {
+                let at = y * bitmap.stride;
+                let p = &bitmap.data[at..at + 3];
+                (p[0], p[1], p[2])
+            })
+            .collect();
+        let want: Vec<(u8, u8, u8)> = ANNEX_J10_SAMPLES.iter().map(|&s| (s, s, s)).collect();
+        assert_eq!(column, want, "{name}: T.800 J.10.5's nine samples");
+    }
+}
+
+/// **A JPEG 2000 entry whose header this build refuses is a placeholder page
+/// that names it** — the page keeps its number and its neighbours' size.
+///
+/// The JP2 page with its codestream damaged inside the `jp2c` box. The
+/// signature box still says JPEG 2000, so the classifier does too, and only
+/// the plan-time header read can say no — which is the case that read exists
+/// for. Two damages: SIZ's marker code changed, and an `Lsiz` reaching past
+/// the codestream. (A *bare* codestream with its SIZ broken is not JPEG 2000
+/// to the classifier at all, which wants SOC and SIZ together, so it is not a
+/// page — the same answer any unrecognised entry gets.)
+#[test]
+fn a_jpeg_2000_entry_whose_header_is_refused_is_a_placeholder_naming_it() {
+    let bytes = read("python-jpx.cbz");
+    let mut archive = Archive::open(&bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+    let jp2 = archive.read(1).expect("page2.jp2").into_owned();
+    let good = archive.read(0).expect("page1.j2k").into_owned();
+
+    // `jp2c`'s contents start with SOC, SIZ; break the SIZ marker inside the
+    // box, which the box walk passes and the codestream header refuses.
+    let at = jp2
+        .windows(4)
+        .position(|w| w == b"jp2c")
+        .expect("a jp2c box")
+        + 4;
+    assert_eq!(&jp2[at..at + 4], &[0xFF, 0x4F, 0xFF, 0x51]);
+    let mut broken = jp2.clone();
+    broken[at + 3] = 0x52;
+    // Lsiz past the codestream, the other header damage a file can carry.
+    let mut long = jp2.clone();
+    long[at + 4..at + 6].copy_from_slice(&[0x7F, 0xFF]);
+
+    for (why, damaged) in [("SIZ is not SIZ", &broken), ("Lsiz past the end", &long)] {
+        let comic = cbz_support::zip(
+            &[
+                cbz_support::ZipFile::stored("page1.j2k", &good),
+                cbz_support::ZipFile::stored("page2.jp2", damaged),
+            ],
+            cbz_support::Damage::None,
+        );
+        let document = Document::open(comic).unwrap_or_else(|e| panic!("{why}: {e:?}"));
+        let report = document.archive().expect("a synthesised document");
+        assert_eq!(
+            report
+                .pages()
+                .iter()
+                .map(|p| (p.name.as_str(), p.defect))
+                .collect::<Vec<_>>(),
+            [
+                ("page1.j2k", None),
+                ("page2.jp2", Some(cbz::PageDefect::Undecodable))
+            ],
+            "{why}: the damaged page is a named placeholder and the other is a picture"
+        );
+        let bitmap = document
+            .page(1)
+            .expect("page 2")
+            .render(&RenderOptions::default());
+        assert_eq!(
+            (bitmap.width, bitmap.height),
+            (1, 9),
+            "{why}: the placeholder takes its neighbour's size"
+        );
+    }
+}
+
 /// **Hostile bytes through the method-14 path never panic** (ruling 1).
 ///
 /// The LZMA decoder was written for 7z, where a header CRC stands in front of
