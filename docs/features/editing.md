@@ -321,7 +321,13 @@ warnings are raised only when there is at least one rectangle to fall under.
 Form XObjects are rewritten recursively, each
 resolving names against its own `/Resources` (8.10.1), because forms are how
 most producers place repeated content and a redaction driven straight
-through one would leave the secret in the form. A form is rewritten **once
+through one would leave the secret in the form. A rewritten form is written
+back as plain operators with the encoding keys of its dictionary dropped
+(`/Filter`, `/DecodeParms`, `/DL` and the external-file keys): until
+September 2026 a compressed form kept `/Filter /FlateDecode` over bytes that
+were never deflated, and the saved form drew nothing at all
+(`a_compressed_form_is_written_back_as_a_stream_that_decodes`, which holds
+the saved file to the strict validator). A form is rewritten **once
 per distinct placement**, each pass reading the bytes the pass before it
 left, so a rectangle over a form's second placement is measured against that
 placement rather than against nothing. The guard that stops a

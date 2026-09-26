@@ -958,6 +958,10 @@ fn follow(
                 // Overwritten in place, for the same reason the page's content
                 // is: a freshly allocated object leaves the original text in
                 // the file, unreferenced and perfectly readable.
+                //
+                // The operators are plain, so the dictionary must stop saying
+                // otherwise ([`plain_stream_dict`]).
+                let dict = plain_stream_dict(editor, &dict);
                 editor.put_stream(reference, StreamData { dict, data });
                 follow(
                     editor,
@@ -972,6 +976,40 @@ fn follow(
             _ => {}
         }
     }
+}
+
+/// A stream dictionary made fit for bytes this module wrote.
+///
+/// [`StreamData::data`] is the stream's *encoded* bytes, and what a rewrite
+/// hands over is plain operators. So every key that describes an encoding the
+/// data is no longer in goes (7.3.8.2, Table 5): `/Filter` and `/DecodeParms`,
+/// `/DL` (the decoded length of bytes that are gone), `/Length` (the writer
+/// computes it), and the three external-file keys `/F`, `/FFilter` and
+/// `/FDecodeParms`, since the data now lives in the stream rather than in a
+/// file they name. Everything else — `/BBox`, `/Matrix`, `/Resources`,
+/// `/Group` — is the form's and stays.
+///
+/// Until September 2026 a compressed form kept its `/Filter /FlateDecode` over
+/// the plain operators, and the saved file carried a stream no reader can
+/// decode: the form drew nothing at all, the text it was *not* asked to
+/// remove included.
+fn plain_stream_dict(editor: &DocumentEditor, dict: &Dict) -> Dict {
+    let encoding: Vec<Name> = [
+        b"Filter".as_slice(),
+        b"DecodeParms",
+        b"DL",
+        b"Length",
+        b"F",
+        b"FFilter",
+        b"FDecodeParms",
+    ]
+    .iter()
+    .map(|key| editor.intern(key))
+    .collect();
+    dict.iter()
+        .filter(|(key, _)| !encoding.contains(key))
+        .cloned()
+        .collect()
 }
 
 /// The reference and dictionary a resource name selects from `/XObject`.
@@ -2665,6 +2703,103 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
         assert!(!streams.contains("BBB"), "the middle word is gone");
     }
 
+    /// A form whose content was **compressed** is written back as a stream
+    /// that decodes.
+    ///
+    /// The rewrite hands the writer plain operators, and until September 2026
+    /// it handed them over with the file's own stream dictionary, so a
+    /// `/FlateDecode` form kept its `/Filter` over bytes that were never
+    /// deflated. The saved file then carried a stream no reader can decode:
+    /// the form drew nothing — the text nobody asked to remove included — and
+    /// the strict validator names it (7.4). Every level is asserted, because
+    /// the failure showed at all of them: the validator, the streams,
+    /// extraction and the ink. Both writer settings too, since `compress`
+    /// is the path that would have encoded plain bytes and so hidden the
+    /// defect on half the saves.
+    #[test]
+    fn a_compressed_form_is_written_back_as_a_stream_that_decodes() {
+        use super::tests_support::{compressed_form_document, ink_in, open, render};
+
+        // Ten-point boxes one em wide from x 20: `PUBLIC` is x 20..80 and
+        // `SECRET` is x 80..140, all on y 100..110. The Helvetica line below
+        // is for the extractor: `PUBLIC ` ends near x 59 at ten point.
+        let doc = open(compressed_form_document(
+            "BT /F0 10 Tf 20 100 Td (PUBLICSECRET) Tj ET \
+             BT /F1 10 Tf 20 50 Td (PUBLIC SECRET) Tj ET",
+        ));
+        assert!(
+            all_streams(&doc).contains("PUBLICSECRET"),
+            "the needle starts present, compressed"
+        );
+        let band = Redaction {
+            area: Rect {
+                x0: 82.0,
+                y0: 95.0,
+                x1: 150.0,
+                y1: 115.0,
+            },
+            mark: false,
+        };
+
+        let line = Redaction {
+            area: Rect {
+                x0: 60.0,
+                y0: 45.0,
+                x1: 150.0,
+                y1: 65.0,
+            },
+            mark: false,
+        };
+
+        for compress in [false, true] {
+            let mut editor = DocumentEditor::new(Arc::clone(&doc));
+            let report = apply(&mut editor, 0, &[band, line]).expect("the page exists");
+            assert_eq!(report.glyphs, 12, "SECRET twice, measured inside the form");
+            let bytes = editor.save(&WriteOptions {
+                mode: WriteMode::Rewrite,
+                compress,
+                ..WriteOptions::default()
+            });
+
+            let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
+            let defects = tinker_pdf_cos::validate(&reopened);
+            assert!(
+                defects.is_empty(),
+                "the saved file is clean (compress: {compress}): {defects:?}"
+            );
+            let streams = all_streams(&reopened);
+            assert!(!streams.contains("SECRET"), "got: {streams}");
+            assert!(streams.contains("PUBLIC"), "got: {streams}");
+
+            let text = crate::Document::open(bytes.clone())
+                .expect("it reopens")
+                .page(0)
+                .expect("a page")
+                .text()
+                .plain_text();
+            assert!(
+                text.contains("PUBLIC") && !text.contains("SECRET"),
+                "the form still draws what it kept (compress: {compress}): {text:?}"
+            );
+
+            let bitmap = render(bytes);
+            assert_eq!(ink_in(&bitmap, 200.0, band.area), 0, "no ink under it");
+            assert!(
+                ink_in(
+                    &bitmap,
+                    200.0,
+                    Rect {
+                        x0: 22.0,
+                        y0: 102.0,
+                        x1: 78.0,
+                        y1: 108.0,
+                    }
+                ) > 100,
+                "and the first word still renders (compress: {compress})"
+            );
+        }
+    }
+
     /// A content stream the tokenizer cannot make sense of must come back
     /// intact rather than truncated — never fail the page (ruling 2).
     #[test]
@@ -3704,6 +3839,62 @@ mod tests_support {
         out.push_str(&font(8, "[0.01 0 0 0.01 0 0]"));
         out.push_str("trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
         out.into_bytes()
+    }
+
+    /// A one-page document drawing `/Fm0`, a form XObject whose content is
+    /// `form` **compressed** (`/FlateDecode`). Two fonts are in its scope:
+    /// `/F0`, a Type 3 font whose every glyph fills its em square, for the
+    /// ink, and `/F1`, Helvetica, for extraction — this engine's extractor
+    /// reports no glyph for a Type 3 font, whose procedure it runs instead.
+    pub fn compressed_form_document(form: &str) -> Vec<u8> {
+        let letters: Vec<String> = (b'A'..=b'Z').map(|c| format!("/{}", c as char)).collect();
+        let procs: Vec<String> = (b'A'..=b'Z')
+            .map(|c| format!("/{} 5 0 R", c as char))
+            .collect();
+        let packed = tinker_pdf_filters::zlib_compress(form.as_bytes());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+              /Resources << /XObject << /Fm0 8 0 R >> >> /Contents 7 0 R >>\nendobj\n",
+        );
+        out.extend_from_slice(
+            format!(
+                // `/BaseFont` is not a Type 3 entry (Table 112); it is here
+                // because the strict validator asks every simple font for
+                // one, and this fixture is held to that validator.
+                "4 0 obj\n<< /Type /Font /Subtype /Type3 /BaseFont /Boxed\n\
+                 /FontBBox [0 0 1000 1000]\n\
+                 /FontMatrix {DEFAULT_FONT_MATRIX}\n/CharProcs << {} >>\n\
+                 /Encoding << /Type /Encoding /Differences [65 {}] >>\n\
+                 /FirstChar 65 /LastChar 90 /Widths [{}]\n/Resources << >> >>\nendobj\n",
+                procs.join(" "),
+                letters.join(" "),
+                ["1000"; 26].join(" ")
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(stream_object(5, "1000 0 d0 0 0 1000 1000 re f").as_bytes());
+        out.extend_from_slice(
+            b"6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        );
+        out.extend_from_slice(stream_object(7, "q /Fm0 Do Q").as_bytes());
+        out.extend_from_slice(
+            format!(
+                "8 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 200]\n\
+                 /Resources << /Font << /F0 4 0 R /F1 6 0 R >> >>\n\
+                 /Filter /FlateDecode /Length {} >>\nstream\n",
+                packed.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&packed);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(b"trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
+        out
     }
 
     /// A one-page document whose font writes vertically (`/Identity-V`).
