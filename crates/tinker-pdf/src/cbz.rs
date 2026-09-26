@@ -44,6 +44,12 @@
 //! a 200-page archive at 2000 x 3000 — and the failure would arrive only at
 //! the size that matters.
 //!
+//! **A BMP is the exception, and it is one by the format rather than by
+//! choice**: no `/Filter` reads a bottom-up pixel array padded to four bytes a
+//! row, nor either of its RLE codings, so a BMP page is decoded and costs its
+//! pixels. It is kept `/Indexed` where the file was, which is a third of the
+//! raster an expanded one would hold ([`RasterImageData`]).
+//!
 //! # Two levels of refusal, and the difference is the feature
 //!
 //! **Archive level** ([`ArchiveRefusal`], via [`crate::OpenError`]): not a ZIP,
@@ -77,8 +83,8 @@ use std::cmp::Ordering;
 
 use tinker_pdf_archive::{rar, sevenz, tar};
 use tinker_pdf_cos::{
-    png_image, tiff_image, CompressedImage, DocumentBuilder, ImageColorSpace, ImageData,
-    ImageFilter, PngImageData, TiffImageData,
+    bmp_image, png_image, tiff_image, CompressedImage, DocumentBuilder, ImageColorSpace, ImageData,
+    ImageFilter, PngImageData, RasterImageData, TiffImageData,
 };
 use tinker_pdf_filters::{JpxHeader, Limits as FilterLimits};
 use tinker_pdf_zip::{Archive, ArchiveError};
@@ -529,7 +535,9 @@ pub enum ImageFormat {
     Gif,
     /// WebP. Not read here.
     WebP,
-    /// Windows bitmap. Not read here.
+    /// Windows bitmap. Read — see [`bmp_image`]: decoded, because no
+    /// `/Filter` reads a bottom-up, four-byte-padded pixel array or either of
+    /// its RLE codings, and kept `/Indexed` when the file was.
     Bmp,
     /// TIFF, either byte order. Read — see [`tiff_image`], which places a
     /// single-strip G3, G4, LZW, DEFLATE or JPEG file's own bytes and decodes
@@ -1563,6 +1571,9 @@ enum Content<'a> {
     /// A JPEG 2000 file, placed as the archive holds it, with what its header
     /// said about the decode.
     Jpx(Cow<'a, [u8]>, JpxHeader),
+    /// A format with no pass-through route — BMP — decoded and arranged by
+    /// `tinker_pdf_cos::raster_embed`.
+    Raster(Box<RasterImageData>),
     /// Nothing usable; the page is the neutral placeholder.
     Placeholder,
 }
@@ -1997,6 +2008,7 @@ fn pages_from_reader(
                 IMAGE_RESOURCE,
                 &ImageData::Compressed(jpx_image(data, header)),
             ),
+            Content::Raster(raster) => builder.add_image(IMAGE_RESOURCE, &raster.image()),
             Content::Placeholder => false,
         };
 
@@ -2220,10 +2232,49 @@ fn plan_entry<'a>(
                 defect: None,
             })
         }
+        // No pass-through route exists for a BMP, so the decode is the route:
+        // `raster_plan` bounds it by the same caller's ceiling the PNG and TIFF
+        // decoded routes take, and says why.
+        ImageFormat::Bmp => Some(raster_plan(
+            name,
+            bmp_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)).ok(),
+        )),
         // Recognised, named, and refused at the page level rather than the
-        // archive's: an archive of a hundred JPEGs and one GIF keeps its
-        // hundred readable pages, and the GIF keeps its page number.
+        // archive's: an archive of a hundred JPEGs and one AVIF keeps its
+        // hundred readable pages, and the AVIF keeps its page number.
         other => Some(placeholder(PageDefect::UnsupportedFormat(other))),
+    }
+}
+
+/// A page from a decoder with no pass-through route, or its placeholder.
+///
+/// The decode ran under the largest entry this build will read out of an
+/// archive, the PNG and TIFF decoded routes' ceiling for their reason: a page
+/// whose raster is bigger than the biggest file the archive may hold is not a
+/// comic page. **This is the one route here whose cost is `w x h x c`** rather
+/// than the entry's own bytes, and the module note's peak argument is why an
+/// indexed file is kept indexed on the way through.
+fn raster_plan<'a>(name: &str, raster: Option<RasterImageData>) -> Plan<'a> {
+    let Some(raster) = raster.filter(|r| r.width() > 0 && r.height() > 0) else {
+        return Plan {
+            name: name.to_owned(),
+            size: None,
+            content: Content::Placeholder,
+            defect: Some(PageDefect::Undecodable),
+            degraded: false,
+            charge: PAGE_OVERHEAD,
+        };
+    };
+    let size = (f64::from(raster.width()), f64::from(raster.height()));
+    let degraded = !raster.complete();
+    let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&raster.image()));
+    Plan {
+        name: name.to_owned(),
+        size: Some(size),
+        content: Content::Raster(Box::new(raster)),
+        defect: None,
+        degraded,
+        charge,
     }
 }
 

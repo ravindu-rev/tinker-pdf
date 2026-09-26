@@ -32,10 +32,16 @@
 //! is a projection over it — it maps a `PixelFormat` onto one of PNG's colour
 //! types and calls this — because ruling 11 makes the facade the public surface
 //! for a *document* and a rendered page is what a caller has.
+//!
+//! [`bmp_decode`] is a container decoder of the tier-4 archive row's, and the
+//! first with no coding a `/Filter` shares. It hands back [`ImagePixels`] —
+//! indexed or direct, eight bits — which is the one output shape the archive
+//! row's decoders share, so the embedder learns it once.
 
 #![forbid(unsafe_code)]
 
 mod ascii;
+mod bmp;
 mod brotli;
 mod ccitt;
 mod crc32;
@@ -51,11 +57,13 @@ mod packbits;
 mod png;
 mod predictors;
 mod qm;
+mod raster;
 mod runlength;
 mod tiff;
 
 use core::fmt;
 
+pub use bmp::{bmp_decode, BmpError, BmpImage, MAX_BMP_SAMPLES};
 pub use brotli::{brotli_decode, BrotliError};
 pub use ccitt::{
     decode as ccitt_decode, g4_encode as ccitt_g4_encode, CcittEncodeError, CcittParams,
@@ -90,6 +98,7 @@ pub use png::{
     MAX_PNG_SAMPLES, PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
+pub use raster::ImagePixels;
 pub use tiff::{
     tiff_decode, tiff_scan, TiffCcitt, TiffColour, TiffCompression, TiffError, TiffImage,
     TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffScan, MAX_TIFF_SAMPLES,
@@ -373,6 +382,22 @@ pub enum Warning {
     /// ruling 2 makes it a black pixel here, because refusing the image would
     /// throw away every pixel that was fine.
     PngPaletteIndexOutOfRange,
+
+    // ---- BMP -------------------------------------------------------------
+    //
+    // Three, and every one of them is a *leniency*: what a bitmap can get
+    // wrong that costs meaning is a [`bmp::BmpError`], for `png.rs`'s reason.
+    /// BMP: a pixel indexed past the end of the colour table the file
+    /// supplied. The table is padded with black to the depth's own size, so the
+    /// pixel is black — [`Warning::PngPaletteIndexOutOfRange`]'s bargain.
+    BmpPaletteIndexOutOfRange,
+    /// BMP: an RLE delta or an early end-of-line or end-of-bitmap left pixels
+    /// the stream never defined. The documentation does not say what they
+    /// are, and they are index 0 here.
+    BmpRleUndefinedPixels,
+    /// BMP: an RLE run or literal reached past the end of its row or of the
+    /// image. The excess was dropped rather than wrapped onto the next row.
+    BmpRleOverrun,
 }
 
 impl Warning {
@@ -428,6 +453,9 @@ impl Warning {
             Self::PngChunkCrcMismatch => "png-chunk-crc-mismatch",
             Self::PngChunkDropped => "png-chunk-dropped",
             Self::PngPaletteIndexOutOfRange => "png-palette-index-out-of-range",
+            Self::BmpPaletteIndexOutOfRange => "bmp-palette-index-out-of-range",
+            Self::BmpRleUndefinedPixels => "bmp-rle-undefined-pixels",
+            Self::BmpRleOverrun => "bmp-rle-overrun",
         }
     }
 }
@@ -481,6 +509,9 @@ impl fmt::Display for Warning {
             Self::PngChunkCrcMismatch => "PNG ancillary chunk CRC-32 mismatch, chunk dropped",
             Self::PngChunkDropped => "PNG chunk dropped as misplaced or malformed",
             Self::PngPaletteIndexOutOfRange => "PNG sample indexed past the end of PLTE",
+            Self::BmpPaletteIndexOutOfRange => "BMP pixel indexed past the end of its colour table",
+            Self::BmpRleUndefinedPixels => "BMP RLE stream left pixels undefined; index 0 used",
+            Self::BmpRleOverrun => "BMP RLE run past the end of its row, clipped",
         };
         f.write_str(s)
     }

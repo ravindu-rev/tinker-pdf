@@ -266,6 +266,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "bmp"
+path = "fuzz_targets/bmp.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "brotli"
 path = "fuzz_targets/brotli.rs"
 test = false

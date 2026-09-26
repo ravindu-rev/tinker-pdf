@@ -43,6 +43,7 @@
 #![deny(missing_docs)]
 
 pub mod appearance;
+pub mod bmp_embed;
 pub mod build;
 pub mod calc;
 pub mod decrypt;
@@ -64,6 +65,7 @@ pub mod pages;
 pub mod parse;
 pub mod png_embed;
 pub mod pubsec;
+pub mod raster_embed;
 pub mod resolve;
 pub mod script;
 pub mod security;
@@ -87,6 +89,7 @@ mod store;
 mod streams;
 
 pub use appearance::synthesize as synthesize_appearance;
+pub use bmp_embed::bmp_image;
 pub use build::{
     jpeg_shape, subset_tag, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal,
     BlendMode, CalculatorOp, CompressedImage, DeviceNAttributes, DeviceSpace, DocumentBuilder,
@@ -138,6 +141,7 @@ pub use pages::{Page, PageBoundary, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use pubsec::{PubSecError, Recipient};
+pub use raster_embed::RasterImageData;
 pub use resolve::Resolve;
 pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};

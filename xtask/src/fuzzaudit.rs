@@ -61,6 +61,7 @@ const fn sig(within: usize, bytes: &'static [u8]) -> Signature {
 fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
     let mut m: BTreeMap<&'static str, Vec<Signature>> = BTreeMap::new();
     m.insert("png", vec![sig(0, b"\x89PNG\r\n\x1a\n")]);
+    m.insert("bmp", vec![sig(0, b"BM")]);
     m.insert(
         "tiff",
         vec![

@@ -569,6 +569,25 @@ encoder that forgot p.23's scaling; it is read as one, with
 that is uniformly almost black and reads as a decoder bug rather than as the
 file's.
 
+**BMP** is the third container decoder, and the first with no coding a
+`/Filter` shares: Microsoft's `BITMAPFILEHEADER` and its five info-header
+layouts (`BITMAPCOREHEADER`, `BITMAPINFOHEADER`, the V2 and V3 extensions
+that move the masks into the header, `BITMAPV4HEADER`, `BITMAPV5HEADER`) plus
+OS/2 2.x's, at 1, 2, 4, 8, 16, 24 and 32 bits, bottom-up or top-down, with
+`BI_RGB`, `BI_RLE8`, `BI_RLE4`, `BI_BITFIELDS` and `BI_ALPHABITFIELDS`. What
+comes out is `ImagePixels` — the one shape `bmp_decode` and the two decoders
+that follow it share: **indexed or direct, eight bits**, because a bitmap is
+overwhelmingly paletted and expanding it would triple the allocation the
+comic path argues about. Four decisions the format forces are taken in the
+module note and not left to be inferred: the fourth byte of a 32-bit
+`BI_RGB` pixel is **not** alpha (the header documentation says it is unused,
+and alpha is read only from a stated alpha mask); a bit-field sample is scaled
+to eight bits by rounding `v x 255 / max`, the definition, rather than by bit
+replication; an index past the colour table is black, with
+`Warning::BmpPaletteIndexOutOfRange`; and a pixel an RLE delta or early
+end-of-line skipped is index 0, with `Warning::BmpRleUndefinedPixels`, since
+the documentation says nothing about what it is.
+
 ## API
 
 The filters never appear on the facade — ruling 11 makes `tinker_pdf` the
@@ -605,7 +624,8 @@ to agree with the decode it stands in for. The encoder half is `deflate`, `zlib_
 `jpeg_encode` (takes a `JpegSource` and a `JpegOptions`, returns the whole
 interchange datastream or a `JpegEncodeError`); the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
-`inflate_raw`, `crc32` and `jxr_decode` (returns `JxrImage`).
+`inflate_raw`, `crc32`, `jxr_decode` (returns `JxrImage`) and `bmp_decode`
+(returns `BmpImage`, whose pixels are an `ImagePixels`).
 
 Every one of those six takes plain numbers and a borrowed byte slice and
 returns bytes, which is all ruling 8 asks of a leaf. The parameter names
@@ -676,6 +696,10 @@ make both enums wrong.
 | TIFF `Predictor` 3, `PlanarConfiguration` past 2, `BitsPerSample` outside {1,2,4,8,16}, two depths in one image | `TiffError::UnsupportedPredictor`, `UnsupportedPlanarConfiguration`, `UnsupportedBitDepth`, `UnequalBitDepths` | Nothing in the sample path carries two depths at once, and half-expanding one is worse than saying so | — |
 | BigTIFF (magic 43) | `TiffError::BigTiff` | Eight-byte offsets and a different directory layout wearing the same two order bytes | — |
 | TIFF past `MAX_TIFF_SAMPLES`, `MAX_TIFF_SEGMENTS` or the caller's ceiling | `TiffError::TooManySamples`, `TooManySegments`, `ExceedsOutputLimit` | Width, height and `StripOffsets`'s count are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
+| BMP `BI_JPEG` (4) and `BI_PNG` (5), the `BI_CMYK` family (11 to 13), and OS/2 2.x's Huffman 1D and RLE24 under its own numbers 3 and 4 | `BmpError::UnsupportedCompression` | Named by the number the file used. The first two are a whole JPEG or PNG inside the bitmap, which the documentation restricts to printer device contexts; the CMYK family is a print-spooler format; OS/2's two have no writer on any machine this repository has seen | — |
+| BMP at 64 bits a pixel, or a depth its compression cannot carry | `BmpError::UnsupportedBitDepth` | 64 is scRGB fixed point, a number nothing here maps to a display value; `BI_RLE8` at anything but 8 is not RLE8 | — |
+| BMP colour masks that are split, or all zero | `BmpError::BadBitfields` | Shifting a mask with a hole in it produces numbers, and the numbers are not colours | — |
+| BMP past `MAX_BMP_SAMPLES` or the caller's ceiling | `BmpError::TooManySamples`, `ExceedsOutputLimit` | `biWidth` and `biHeight` are signed 32-bit fields; refused before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPEG XR fixed-point, half-float and 32-bit float pixel formats (Table A.6's SINT and Float rows) | `JxrRefusal::FloatOrFixedPointFormat` | 9.10.7's postscaling makes those numbers mean something `JxrImage`'s 8- and 16-bit unsigned samples cannot say; reinterpreting them returns a picture whose values are a different quantity | [design](../design/jpeg-xr.md) |
 | JPEG XR CMYK, CMYKDIRECT, NCOMPONENT and RGBE output formats | `JxrRefusal::UnsupportedColourFormat` | A colour pipeline with no consumer in this engine; a CMYK image read as RGB is a different picture, not a degraded one | [design](../design/jpeg-xr.md) |
 | A Table A.6 GUID this build has no row for | `JxrRefusal::UnknownPixelFormat` | The GUID is what names the channel order, so an unknown one cannot be guessed at | [design](../design/jpeg-xr.md) |
@@ -818,6 +842,17 @@ wants the reason to survive it.
   `cargo-fuzz`. All **seven** of the TIFF warnings are reached by a test that
   asserts them, for the reason `jpx`'s refusal suite exists: a variant nothing
   can reach is a claim rather than a check.
+- `crates/tinker-pdf-filters/tests/image_fixtures.rs` — the BMP decoder held
+  to **pictures a third-party encoder was handed**: `tests/images/make-images.py`
+  authors each as a formula, Pillow 12.3.0 and imagecodecs 2026.3.6 write it,
+  and the test recomputes the formula — ruling 13's lossless rule, where the
+  expected answer is the generator's input. 1, 8 grey, 8 palette, 24, 32
+  `BI_RGB` and 32 `BI_BITFIELDS` with alpha are exact. What no encoder here
+  writes — RLE4, RLE8, 2 bits, 16-bit bit fields, top-down, OS/2 — is held to
+  bmpsuite 2.8's files **as relations**: files that describe one picture must
+  decode to one, so `pal8rle` is `pal8` and `pal8` is pinned by Pillow's
+  authored palette. `src/bmp/tests.rs` reaches every `BmpError` and every BMP
+  warning with a file written from the Win32 structure layouts.
 - In-crate: `jbig2.rs` decodes T.88 Annex H.1's published datastream example
   byte for byte; `mq.rs` holds Annex H.2's test sequence as a permanent
   fixture, because the coder serves two codecs; **`qm.rs` holds T.81 K.4.1's,

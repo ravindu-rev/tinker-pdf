@@ -32,6 +32,16 @@
 //! tables. The row's `fixtures` is the cap for `MAX_DECODED_STREAM`'s reason:
 //! the test that fires it spends it.
 //!
+//! *Amended, 26 September 2026, the tier-4 archive row's BMP decoder.* **One
+//! more row, the forty-eighth: `MAX_BMP_SAMPLES`.** It is `MAX_PNG_SAMPLES`'s
+//! figure for `MAX_PNG_SAMPLES`'s reason — a decoded comic page lives under
+//! one ceiling whichever container it came in — and it is a row of its own
+//! rather than that cap under a second name because it bounds a different
+//! header: `biWidth` and `biHeight` are signed 32-bit fields where IHDR's are
+//! 31-bit, so the reachable product is its own arithmetic. Its `document` and
+//! `book` columns are measured zeros, and the comment on each says why: XPS
+//! admits no BMP part and an EPUB `<img>` does not place one.
+//!
 //! *Amended, 26 September 2026, the `jbig2` fuzz row.* **One more row, the
 //! forty-fourth, and it is the first here whose cap is a *ratio* rather than a
 //! quantity.**
@@ -455,7 +465,7 @@ use tinker_pdf::MAX_ANNOTATION_BYTES;
 use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
-    MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_SYMBOL_PIXELS,
+    MAX_BMP_SAMPLES, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_SYMBOL_PIXELS,
     MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES,
 };
 use tinker_pdf_layout::limits as layout_limits;
@@ -498,6 +508,10 @@ const JBIG2: &str = include_str!("../../tinker-pdf-filters/src/jbig2.rs");
 const RENDER: &str = include_str!("../../tinker-pdf-render/src/lib.rs");
 const PAGE_GEOMETRY_TESTS: &str = include_str!("page_geometry.rs");
 const COS_LIMITS: &str = include_str!("../../tinker-pdf-cos/src/limits.rs");
+/// The tier-4 archive row's container decoders, which keep their caps beside
+/// the decoder that spends them — `png.rs`'s shape.
+const BMP: &str = include_str!("../../tinker-pdf-filters/src/bmp.rs");
+const BMP_TESTS: &str = include_str!("../../tinker-pdf-filters/src/bmp/tests.rs");
 const INLINE_IMAGE_TESTS: &str = include_str!("inline_images.rs");
 /// The annotation payloads' copy budget: declared beside the payload readers
 /// that spend it, and fired by a test beside the listing that owns the budget.
@@ -549,7 +563,7 @@ struct Bound {
     /// The most gap 31's yardstick spends: **a 300-page reflowable book**.
     ///
     /// The third yardstick, and unlike the first two it is not an estimate.
-    /// Sixteen of these forty-four rows are figures a real book can be
+    /// Sixteen of these forty-five rows are figures a real book can be
     /// *measured* against, and
     /// [`the_book_yardstick_is_not_below_a_real_book`] measures every book in
     /// both corpora against them on every run — the committed six always, the
@@ -2000,6 +2014,36 @@ fn ledger() -> Vec<Bound> {
             declared_in: REDACT,
             fires_in: ("a_walk_past_its_copy_budget_cuts_the_form_in_place", REDACT),
         },
+        Bound {
+            name: "MAX_BMP_SAMPLES",
+            cap: MAX_BMP_SAMPLES as u128,
+            published: "67 108 864",
+            // bmpsuite's alpha files: 127 x 64 at four components. The unit
+            // test that proves the cap fires builds a header *at* it, but is
+            // answered by the caller's ceiling and allocates nothing.
+            fixtures: 127 * 64 * 4,
+            // A 2000 x 3000 page with an alpha mask, `MAX_PNG_SAMPLES`'s own
+            // comic figure: a BMP has no pass-through, so every BMP page
+            // spends this.
+            comic: 24_000_000,
+            // Zero, measured rather than absent: ECMA-388 admits JPEG, PNG,
+            // TIFF and JPEG XR image parts and nothing else, so a fixed
+            // document holds no BMP for this cap to count.
+            document: 0,
+            // Zero again: BMP is not one of EPUB 3.3 §3.2's core image media
+            // types, and `epub::read`'s `<img>` path places only those, so a
+            // book's BMP is refused by name before it is decoded.
+            book: 0,
+            // `biWidth` and `biHeight` are signed 32-bit fields, so the widest
+            // positive product is (2^31 - 1)^2, charged at four components.
+            reachable: 0x7FFF_FFFFu128 * 0x8000_0000 * 4,
+            reachable_because: "two signed 32-bit dimensions, times four components",
+            declared_in: BMP,
+            fires_in: (
+                "an_image_past_the_sample_cap_is_refused_before_it_allocates",
+                BMP_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2017,7 +2061,8 @@ fn ledger() -> Vec<Bound> {
 /// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`; and the annotation payloads row adds
 /// `MAX_ANNOTATION_BYTES`; and the review of the form data exchange row adds
 /// `MAX_FORM_DATA_BYTES`; and the review of the redaction row adds
-/// `MAX_FORM_COPY_BYTES`. All **forty-seven** are here, and
+/// `MAX_FORM_COPY_BYTES`; and the tier-4 archive row's BMP decoder adds
+/// `MAX_BMP_SAMPLES`. All **forty-eight** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2072,6 +2117,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_ANNOTATION_BYTES",
             "MAX_FORM_DATA_BYTES",
             "MAX_FORM_COPY_BYTES",
+            "MAX_BMP_SAMPLES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2177,7 +2223,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 47, "the ledger is forty-seven rows");
+    assert_eq!(measured, 48, "the ledger is forty-eight rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2209,7 +2255,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 47, "the ledger is forty-seven rows");
+    assert_eq!(ledger().len(), 48, "the ledger is forty-eight rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

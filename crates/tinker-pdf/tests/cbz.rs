@@ -628,6 +628,11 @@ fn a_placeholder_is_the_books_own_size_and_the_neutral_grey() {
 }
 
 /// A book that never says what size it is falls back to paper, and only then.
+///
+/// The BMP is forty bytes of `BM` and zeros — an info header that says it is
+/// zero bytes long — so since BMP has a decoder it is a placeholder for being
+/// *undecodable* rather than for being BMP, which is the sentence this test
+/// asserted until the tier-4 archive row gave the format one.
 #[test]
 fn a_book_of_nothing_but_placeholders_falls_back_to_paper() {
     let archive = zip(
@@ -657,7 +662,7 @@ fn a_book_of_nothing_but_placeholders_falls_back_to_paper() {
             .collect::<Vec<_>>(),
         [
             Some(PageDefect::UnsupportedFormat(ImageFormat::Gif)),
-            Some(PageDefect::UnsupportedFormat(ImageFormat::Bmp)),
+            Some(PageDefect::Undecodable),
         ]
     );
 }

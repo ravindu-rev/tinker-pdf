@@ -144,3 +144,14 @@ crates/tinker-pdf-filters/tests/brotli/** binary
 *.woff binary
 *.woff2 binary
 crates/tinker-pdf-font/tests/woff/*.ttf binary
+
+# The container images the tier-4 archive row's decoders are held to
+# (`crates/tinker-pdf-filters/tests/images/`). Bytes a third-party encoder
+# wrote once from authored pixels; a normalised line ending inside one is a
+# different picture, and a GIF or a WebP of a small image is short enough to
+# carry no NUL in the first 8 KB for `text=auto` to find.
+*.bmp binary
+*.gif binary
+*.webp binary
+*.tif binary
+*.tiff binary
