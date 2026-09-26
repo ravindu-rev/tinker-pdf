@@ -3209,27 +3209,59 @@ pub fn group_format(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
 
 /// The format a *page* may be handed back in.
 ///
-/// `CmykA8` exists so a transparency group can composite over ink (11.6.6). It
-/// is deliberately not a format a page comes back in, and the reason is that
-/// `Bitmap` says how many components it has and nothing about what they mean:
-/// every consumer that reads three bytes and calls them red, green and blue —
-/// this repository's own `examples/render.rs` writes a PPM that way — would
-/// emit cyan, magenta and yellow under those names and look almost right.
+/// `CmykA8` exists so a transparency group can composite over ink (11.6.6), and
+/// `LabA8` so one can composite in Lab. Neither is a format a page comes back
+/// in, and the reason is that `Bitmap` says how many components it has and
+/// nothing about what they mean: every consumer that reads three bytes and
+/// calls them red, green and blue — this repository's own `examples/render.rs`
+/// writes a PPM that way — would emit cyan, magenta and yellow, or lightness
+/// and two opponent axes, under those names and look almost right.
 ///
-/// So a caller asking for it gets `Rgba8`, which carries the same alpha and
+/// So a caller asking for either gets `Rgba8`, which carries the same alpha and
 /// the colours the name promises. Silently, because there is nothing for the
 /// caller to do about it: the request was for pixels, and pixels are what comes
 /// back.
+///
+/// *`LabA8` was let through until September 2026*, while its own documentation
+/// and this function's both said a page never came back in it: the `match`
+/// named `CmykA8` alone, so `format: LabA8` handed a caller four bytes of
+/// encoded `L*a*b*` under a format that stores no light at all.
 #[must_use]
 pub fn page_format(format: PixelFormat) -> PixelFormat {
     match format {
-        PixelFormat::CmykA8 => PixelFormat::Rgba8,
+        PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
         other => other,
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Every format a page may come back in, and the two it may not.
+    ///
+    /// Exhaustive over `PixelFormat` on purpose: a seventh format added to the
+    /// rasterizer fails to compile here until somebody decides which side of
+    /// this line it is on.
+    #[test]
+    fn only_formats_that_store_light_are_page_formats() {
+        for format in [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::CmykA8,
+            PixelFormat::LabA8,
+        ] {
+            let expected = match format {
+                PixelFormat::Gray8
+                | PixelFormat::GrayA8
+                | PixelFormat::Rgb8
+                | PixelFormat::Rgba8 => format,
+                PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
+            };
+            assert_eq!(page_format(format), expected, "{format:?}");
+        }
+    }
 
     /// **The two crates agree about ink and light.**
     ///

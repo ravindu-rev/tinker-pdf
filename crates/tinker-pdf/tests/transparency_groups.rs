@@ -1383,6 +1383,30 @@ fn a_page_asked_for_in_cmyk_comes_back_in_rgb() {
     assert_eq!(bitmap.components(), 4);
 }
 
+/// **Nor in Lab**, which is the same hazard with different letters: `LabA8`
+/// stores `L*`, `a` and `b` encoded into bytes, and a consumer reading its first
+/// three as red, green and blue gets a picture of the encoding.
+///
+/// `page_format` named `CmykA8` alone until September 2026, so this request
+/// came back as `LabA8` while `PixelFormat::LabA8`'s own documentation said it
+/// was "not offered as a page format". Both a page whose own group is `/Lab`
+/// and one with no page group are asked, because the two reach a Lab canvas by
+/// different routes — one through 11.4.7's page group, one through the format.
+#[test]
+fn a_page_asked_for_in_lab_comes_back_in_rgb() {
+    for group in [Some("/Lab"), None] {
+        let doc = Document::open(group_in_space(None, group)).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let bitmap = page.render(&RenderOptions {
+            format: tinker_pdf::PixelFormat::LabA8,
+            ..RenderOptions::default()
+        });
+        assert_eq!(bitmap.format, tinker_pdf::PixelFormat::Rgba8, "{group:?}");
+        // White is white: an encoded Lab white would read (255, 128, 128).
+        assert_eq!(&bitmap.data[..4], &[255, 255, 255, 255], "{group:?}");
+    }
+}
+
 /// **A non-separable blend inside a CMYK group is reported** (ruling 10).
 ///
 /// 11.3.5.3's four modes reason about hue, saturation and luminosity, which ink
