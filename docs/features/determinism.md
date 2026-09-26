@@ -65,6 +65,18 @@ comes out the same on every target. Every fixture asserts a minimum ink count
 and the absence of `UnreadableFont` before it is hashed, so a fixture that
 draws nothing fails on the day it is added rather than becoming a baseline.
 
+**The options that change what a page's bytes are** — ink instead of light,
+hard edges, a page with nothing under it, premultiplied alpha — are pinned
+beside these rather than among them, in
+`crates/tinker-pdf/tests/render_options.rs`: this file's `Fixture` renders
+with the default options and nothing else, and its table is the one place a
+determinism bug shows, so a row meaning "this page, but differently" does not
+join it. Each is hashed the same way and floored by ink the same way, and the
+same file holds that the defaults did not move: the blend grid's default render
+there is this table's `analytic_blend`, copied. Those hashes were recorded on
+`x86_64-unknown-linux-gnu` in September 2026 and are *claimed*, not measured, for
+the other three targets until a run there says otherwise.
+
 Beside them, **three document byte-hashes** pin the writer as well as the
 renderer: a synthesised PDF, a synthesised fixed-layout document and a
 synthesised book are each hashed as *bytes*, which is where object

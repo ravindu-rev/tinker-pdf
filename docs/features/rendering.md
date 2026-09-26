@@ -254,6 +254,25 @@ and vanishes; `a_hard_edged_hairline_leaves_no_column_it_crosses_empty` sweeps
 eight slopes for it. A glyph feature narrower than half a pixel can still
 vanish where it straddles a pixel edge, which is what any threshold costs.
 
+**A page as a layer, and premultiplied alpha.** `RenderOptions::transparent`
+starts the page with nothing on it instead of white — `(0, 0, 0, 0)` where
+nothing paints, a half-opaque fill at half alpha, an anti-aliased edge at the
+alpha its coverage gave it — for a format with alpha to hold it in (`GrayA8`,
+`Rgba8`, and ink with `allow_cmyk`); a format without alpha is on white
+whatever it is asked, because a transparent canvas converted to `Rgb8` would
+keep the black stored under an alpha of zero. The page composites exactly as it
+does over white, against a backdrop alpha of zero, which is 11.3.6's formula and
+what every transparency group's buffer already starts from.
+`RenderOptions::premultiplied` hands the colour back multiplied by alpha, and
+`Bitmap::premultiplied` says which a bitmap is. The canvas stays straight
+throughout — every blend formula in 11.3 is written in straight alpha — so it
+is a conversion at the very end, `round(c·a/255)` with no tie possible because
+255 is odd, and on an opaque page it changes no byte. `Bitmap::to_png` divides
+it back out, because PNG's alpha is straight: exact at full alpha, and below it
+losing only what premultiplying lost, so multiplying the file's samples by their
+alpha again returns the premultiplied bytes exactly, which
+`a_premultiplied_page_writes_a_png_that_multiplies_back_exactly` holds.
+
 ## API
 
 The facade is the whole public surface (ruling 11): `Page::render` takes a
@@ -262,10 +281,12 @@ The facade is the whole public surface (ruling 11): `Page::render` takes a
 checked between operations and scanline bands), `annotations` (on by
 default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
-light) and `antialias` (on; off makes every pixel of every shape whole or
-empty) — and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
-`data`, and `warnings`, the `Vec<RenderWarning>` that carries every named
-degradation. Rendering never fails; it degrades and reports.
+light), `antialias` (on; off makes every pixel of every shape whole or
+empty), `transparent` (off; on starts a page whose format has alpha with
+nothing painted rather than white) and `premultiplied` (off) — and returns a
+`Bitmap`: `width`, `height`, `format`, `stride`, `data`, `warnings`, the
+`Vec<RenderWarning>` that carries every named degradation, and `premultiplied`,
+which says whether `data` is. Rendering never fails; it degrades and reports.
 
 `Bitmap::to_png` writes the page out as a PNG file (ISO/IEC 15948), eight bits
 a component, through `tinker_pdf_filters::png_encode` — which is where the
@@ -366,6 +387,9 @@ un-tiled spelling left for a defect to hide in.
   SHA-256, computed as `determinism.rs` computes one and floored by ink the same
   way, beside the claim that the default render is unchanged — the blend grid's
   default render still hashes to `determinism.rs`'s `analytic_blend` value.
+  Those hashes were recorded on `x86_64-unknown-linux-gnu` on 26 September
+  2026 and have not yet been run on the other three targets, which is the
+  difference between them and the nineteen `determinism.rs` carries.
   The anti-aliasing switch's exit criterion is
   `with_anti_aliasing_off_every_pixel_is_wholly_covered_or_not_at_all`: text,
   a diagonal fill, a stroked curve, a hairline and a rotated image's edge, each

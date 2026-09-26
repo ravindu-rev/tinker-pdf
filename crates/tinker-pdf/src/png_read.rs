@@ -203,6 +203,7 @@ impl Bitmap {
             stride,
             data,
             warnings,
+            premultiplied: false,
         })
     }
 }

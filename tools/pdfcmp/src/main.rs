@@ -254,9 +254,16 @@ impl Image {
         let components = bitmap.components();
         let (width, height) = (bitmap.width as usize, bitmap.height as usize);
         let mut pixels = Vec::with_capacity(width.saturating_mul(height).saturating_mul(3));
+        // A premultiplied colour has had its `a` applied already, so over
+        // white it only needs the white showing through added: `c + 255 - a`.
+        let premultiplied = bitmap.premultiplied;
         let over_white = |c: u8, a: u8| -> u8 {
             let (c, a) = (u32::from(c), u32::from(a));
-            ((c * a + 255 * (255 - a) + 127) / 255) as u8
+            if premultiplied {
+                (c + (255 - a)).min(255) as u8
+            } else {
+                ((c * a + 255 * (255 - a) + 127) / 255) as u8
+            }
         };
         for y in 0..height {
             let row = y.saturating_mul(bitmap.stride);
@@ -630,6 +637,7 @@ mod tests {
             stride: width as usize * format.components(),
             data,
             warnings: Vec::new(),
+            premultiplied: false,
         }
     }
 
@@ -690,6 +698,25 @@ mod tests {
         let read = load_bytes("b.png", grey_alpha.to_png().expect("a picture"), 150.0, 0)
             .expect("it loads");
         assert_eq!(read.at(0, 0), [255, 255, 255]);
+    }
+
+    /// A premultiplied bitmap is composited as what it is: its colour already
+    /// carries the alpha, and multiplying it in a second time would compare a
+    /// half-covered black edge as darker than it is.
+    #[test]
+    fn a_premultiplied_bitmap_is_composited_as_premultiplied() {
+        let mut rgba = bitmap(
+            2,
+            1,
+            PixelFormat::Rgba8,
+            vec![100, 100, 100, 128, 0, 0, 0, 0],
+        );
+        rgba.premultiplied = true;
+        let image = Image::from_bitmap(&rgba);
+        // 100 + (255 - 128) = 227; straight would have read (100·128 +
+        // 255·127) / 255 = 177.
+        assert_eq!(image.at(0, 0), [227, 227, 227]);
+        assert_eq!(image.at(1, 0), [255, 255, 255], "nothing is the page");
     }
 
     /// A PNG whose rows stop early is refused with the facade's reason, and
