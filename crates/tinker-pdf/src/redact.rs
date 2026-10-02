@@ -99,6 +99,14 @@
 //! which is the whole reason it will not cut one. That is why warnings are
 //! raised only when there is at least one rectangle to fall under.
 //!
+//! One more thing is named for the same reason, though it is not a run:
+//! a stream that invokes more XObjects than one stream's walk follows
+//! ([`MAX_XOBJECT_USES`], 4 096). The `Do`s past the bound are written back
+//! as they were and never resolved, so an image they draw is tested against
+//! no rectangle — [`RedactionWarning::TooManyXObjects`] says how many. Until
+//! October 2026 the bound was a bare number in [`rewrite`] and what lay past
+//! it was left with nothing in the report.
+//!
 //! # Vertical writing
 //!
 //! A fourth class, `VerticalRun`, was refused until September 2026 and is
@@ -362,6 +370,16 @@
 //! | --- | ---: |
 //! | the walk stopping at thirteen levels of forms, which is how it used to be | 2 |
 //! | the walk's depth test as strict as the interpreter's | 2 |
+//!
+//! And [`MAX_XOBJECT_USES`]'s, over 356:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the `Do`s past the cap dropped with nothing said, which is how it used to be | 2 |
+//! | the cap one `Do` looser | 2 |
+//! | the cap one `Do` tighter | 3 |
+//! | the warning raised with no rectangle | **1** |
+//! | two passes merged without summing | **1** |
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -388,7 +406,7 @@ pub struct Redaction {
 /// Something a redaction could not do exactly, named rather than left silent
 /// (ruling 10).
 ///
-/// Two of the three are a **run left whole** because this module could not
+/// Two of the four are a **run left whole** because this module could not
 /// measure it, and each names the resource name of the font in force and how
 /// many bytes of showing operand were left in place, because "a run was
 /// skipped" with neither is a sentence a caller cannot act on — and this is
@@ -417,6 +435,11 @@ pub struct Redaction {
 /// [`RedactionWarning::resource`] to name whichever of the two kinds of
 /// resource a warning is about, since [`RedactionWarning::font`] and
 /// [`RedactionWarning::bytes`] have nothing to say about a form.
+///
+/// The fourth, [`RedactionWarning::TooManyXObjects`] (October 2026), is a
+/// walk cut short rather than a run or a form: a stream whose `Do`s ran past
+/// what one stream's walk follows, the ones past it never resolved. It was
+/// silent before it existed.
 ///
 /// Closed rather than `#[non_exhaustive]`, for `WarningKind`'s reason: a new
 /// class this module will not do exactly is a deliberate change to documented
@@ -479,28 +502,48 @@ pub enum RedactionWarning {
         /// [`MAX_PLACEMENTS`].
         placements: usize,
     },
+    /// One content stream invoked more XObjects than this module follows in
+    /// one stream (4 096, a private bound), and the `Do`s past it were **not
+    /// followed**: an image they draw was tested against no rectangle, and a
+    /// form was not entered.
+    ///
+    /// The cap bounds what one stream's walk holds (ruling 1). Until October
+    /// 2026 it was a bare `4096` in the rewrite, and what lay past it was left
+    /// with nothing in the report — an image under a rectangle as the
+    /// 4 097th `Do` stayed in the file and the report read `images: 0`.
+    /// Raised only when there is a rectangle, as every warning here is.
+    TooManyXObjects {
+        /// How many `Do`s went unfollowed, summed over every pass that
+        /// reached the cap — a form's stream counted once at each of its
+        /// placements, since each is a pass over it.
+        skipped: usize,
+    },
 }
 
 impl RedactionWarning {
     /// The resource name of the font the run was showing in.
     ///
     /// Empty for [`RedactionWarning::RepeatedForm`], which is about a form
-    /// XObject and not about a font. [`RedactionWarning::resource`] is the
-    /// accessor that answers for every variant.
+    /// XObject and not about a font, and for
+    /// [`RedactionWarning::TooManyXObjects`], which is about a stream.
+    /// [`RedactionWarning::resource`] is the accessor that answers for every
+    /// variant.
     #[must_use]
     pub fn font(&self) -> &[u8] {
         match self {
             RedactionWarning::UnknownFont { font, .. }
             | RedactionWarning::UnmeasurableFrame { font, .. } => font,
-            RedactionWarning::RepeatedForm { .. } => &[],
+            RedactionWarning::RepeatedForm { .. } | RedactionWarning::TooManyXObjects { .. } => &[],
         }
     }
 
-    /// The resource name this warning is about — a font for two of the three
-    /// variants, a form XObject for [`RedactionWarning::RepeatedForm`].
+    /// The resource name this warning is about — a font for the two run
+    /// variants, a form XObject for [`RedactionWarning::RepeatedForm`], and
+    /// nothing for [`RedactionWarning::TooManyXObjects`], whose `Do`s past
+    /// the cap were never resolved to a resource at all.
     ///
     /// This is what distinguishes two warnings of the same kind, so it is
-    /// never empty except where the document gave no name to quote.
+    /// never empty except where there is no name to quote.
     #[must_use]
     pub fn resource(&self) -> &[u8] {
         match self {
@@ -513,13 +556,14 @@ impl RedactionWarning {
     ///
     /// Zero for [`RedactionWarning::RepeatedForm`], which leaves no operand
     /// in place — it counts placements instead
-    /// ([`RedactionWarning::placements`]).
+    /// ([`RedactionWarning::placements`]) — and for
+    /// [`RedactionWarning::TooManyXObjects`], which counts `Do`s.
     #[must_use]
     pub fn bytes(&self) -> usize {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => *bytes,
-            RedactionWarning::RepeatedForm { .. } => 0,
+            RedactionWarning::RepeatedForm { .. } | RedactionWarning::TooManyXObjects { .. } => 0,
         }
     }
 
@@ -542,9 +586,9 @@ impl RedactionWarning {
     /// Folds another warning of the same cause into this one.
     ///
     /// Each variant absorbs its own count — operand bytes for the two run
-    /// classes, placements for a form — because a single `usize` that means
-    /// bytes in one arm and placements in another is a number nobody can
-    /// read.
+    /// classes, placements for a form, `Do`s for a stream past the cap —
+    /// because a single `usize` that means bytes in one arm and placements in
+    /// another is a number nobody can read.
     fn absorb(&mut self, other: &RedactionWarning) {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
@@ -556,9 +600,26 @@ impl RedactionWarning {
                     .saturating_add(other.placements())
                     .min(MAX_PLACEMENTS);
             }
+            RedactionWarning::TooManyXObjects { skipped } => {
+                if let RedactionWarning::TooManyXObjects { skipped: more } = other {
+                    *skipped = skipped.saturating_add(*more);
+                }
+            }
         }
     }
 }
+
+/// How many `Do`s of one content stream a redaction follows.
+///
+/// What the walk holds per stream is a use per `Do` — a name, a transform and
+/// where it was written — and a content stream may be as large as
+/// `MAX_DECODED_STREAM`, so without a bound six bytes of `/a Do` a use would
+/// buy a hundred (ruling 1). The `Do`s past it are written back as they were
+/// and not followed, and [`RedactionWarning::TooManyXObjects`] says how many.
+/// A page of more than four thousand XObject placements is a map or a tiled
+/// scan, and one that wants them all measured has to be told it did not get
+/// that, rather than left to believe it did.
+const MAX_XOBJECT_USES: usize = 4096;
 
 /// How many distinct warnings one redaction keeps.
 ///
@@ -3039,6 +3100,8 @@ fn rewrite(
     };
     let mut saved: Vec<Pen> = Vec::new();
     let mut report = RedactionReport::default();
+    // `Do`s past [`MAX_XOBJECT_USES`], written back and not followed.
+    let mut unfollowed = 0usize;
 
     while let Some(token) = tokens.next_token() {
         let Token::Operator(op) = &token else {
@@ -3097,13 +3160,15 @@ fn rewrite(
                 // what to do about it, is the caller's business — this crate
                 // has the transform, and the caller has the dictionaries.
                 if let Some(Token::Name(name)) = operands.last() {
-                    if uses.len() < 4096 {
+                    if uses.len() < MAX_XOBJECT_USES {
                         uses.push(XObjectUse {
                             name: name.clone(),
                             ctm: pen.ctm,
                             at: 0..0,
                         });
                         recorded = true;
+                    } else {
+                        unfollowed = unfollowed.saturating_add(1);
                     }
                 }
             }
@@ -3270,6 +3335,14 @@ fn rewrite(
         operands.clear();
     }
 
+    if unfollowed > 0 && !areas.is_empty() {
+        note(
+            &mut report.warnings,
+            RedactionWarning::TooManyXObjects {
+                skipped: unfollowed,
+            },
+        );
+    }
     (out, report, uses)
 }
 
@@ -8531,5 +8604,117 @@ mod forms_elsewhere {
             "no stream holds the uncut text: {streams}"
         );
         assert_eq!(forms_in(&reopened), 3, "Fm0, Fm1 and one copy");
+    }
+}
+
+/// [`MAX_XOBJECT_USES`], at the line and one past it.
+#[cfg(test)]
+mod xobject_cap {
+    use super::tests_support::*;
+    use super::*;
+
+    /// A page whose content draws `/Im0` — two by two gray samples spelling
+    /// `SECR` — `placements` times: every placement but the last at
+    /// (300, 300), clear of the rectangle, and the last at the origin, under
+    /// it.
+    fn many(placements: usize) -> Vec<u8> {
+        let mut content = "q 10 0 0 10 300 300 cm /Im0 Do Q\n".repeat(placements - 1);
+        content.push_str("q 10 0 0 10 0 0 cm /Im0 Do Q\n");
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
+             /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream_object(4, &content));
+        out.push_str(
+            "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+             stream\nSECR\nendstream\nendobj\n",
+        );
+        out.push_str("trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    fn under() -> Redaction {
+        Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 20.0,
+                y1: 20.0,
+            },
+            mark: false,
+        }
+    }
+
+    /// Exactly as many `Do`s as the walk follows: the last is followed, and
+    /// the image it draws under the rectangle is scrubbed.
+    #[test]
+    fn as_many_xobjects_as_the_walk_follows_are_all_followed() {
+        let (bytes, report) = redact(open(many(MAX_XOBJECT_USES)), &[under()]);
+        assert_eq!(report.images, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(!all_streams(&open(bytes)).contains("SECR"));
+    }
+
+    /// One more, and the one past the cap is the one under the rectangle. It
+    /// is not followed and the image is not scrubbed — and the report says
+    /// so, where until October 2026 it read `images: 0` and nothing else.
+    #[test]
+    fn a_stream_of_more_xobjects_than_the_walk_follows_is_reported() {
+        let (bytes, report) = redact(open(many(MAX_XOBJECT_USES + 1)), &[under()]);
+        assert_eq!(report.images, 0, "the last Do was not followed");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::TooManyXObjects { skipped: 1 }]
+        );
+        assert!(
+            all_streams(&open(bytes)).contains("SECR"),
+            "which is what the warning is for"
+        );
+    }
+
+    /// No rectangle, nothing to be uncertain about, as for every warning.
+    #[test]
+    fn the_cap_raises_nothing_when_there_is_no_rectangle() {
+        let (_, report) = redact(open(many(MAX_XOBJECT_USES + 1)), &[]);
+        assert_eq!(report, RedactionReport::default());
+    }
+
+    /// A form whose content is past the cap, drawn at two placements: each
+    /// placement is a pass over the stream, each leaves one `Do` unfollowed,
+    /// and the one warning sums them.
+    #[test]
+    fn a_form_past_the_cap_counts_at_each_placement() {
+        let form = "/Im0 Do\n".repeat(MAX_XOBJECT_USES + 1);
+        let page = "/Fm0 Do q 1 0 0 1 0 50 cm /Fm0 Do Q";
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
+             /Resources << /XObject << /Fm0 6 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream_object(4, page));
+        out.push_str(
+            "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+             stream\nSECR\nendstream\nendobj\n",
+        );
+        out.push_str(&format!(
+            "6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Resources << /XObject << /Im0 5 0 R >> >> /Length {} >>\n\
+             stream\n{form}\nendstream\nendobj\n",
+            form.len() + 1
+        ));
+        out.push_str("trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n");
+
+        let (_, report) = redact(open(out.into_bytes()), &[under()]);
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::TooManyXObjects { skipped: 2 }]
+        );
     }
 }
