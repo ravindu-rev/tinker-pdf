@@ -118,9 +118,13 @@ configuration whose `/Order` is the order the layers were added and whose
 element's sequence around itself, so each `EMC` closes the scope it was
 written for: without that, a child element's close would end the layer and
 the child would draw in plain view with every byte balanced. A layer a page
-cannot name, or one nested past `MAX_NEST_DEPTH`, is refused and its closure
-not run — content drawn outside the layer it was meant for shows when the
-layer is hidden. Part 1 of ISO 19005 forbids optional content, and the
+cannot name — registered after the page was begun, or on another builder —
+or one nested past `MAX_NEST_DEPTH`, is refused and its closure not run:
+content drawn outside the layer it was meant for shows when the layer is
+hidden. A `LayerId` carries which builder made it as well as its position,
+because every builder's first layer is its zeroth and a position alone would
+let another builder's first layer draw into this one's. The builder's number
+is never written, so the bytes do not depend on it. Part 1 of ISO 19005 forbids optional content, and the
 archival profile refuses a layer by that clause.
 
 **Navigation.** `link(x0, y0, x1, y1, &Target)` adds a link annotation

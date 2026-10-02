@@ -5,6 +5,7 @@
 //! positioned is this crate's business, and composing paragraphs is not.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use tinker_pdf_filters::CcittParams;
 
@@ -919,15 +920,42 @@ pub enum Shading {
 ///
 /// A handle rather than a name the caller picks, because the name an `/OC`
 /// sequence uses is a key in the page's `/Properties` that no caller has any
-/// reason to spell, and a handle cannot be misspelled. It is meaningful only
-/// to the builder that made it.
+/// reason to spell, and a handle cannot be misspelled.
+///
+/// It is meaningful only to the builder that made it, and **carries which
+/// builder that was**: every builder's first layer is its zeroth, so a
+/// handle that was only the index would let another builder's layer draw
+/// into whichever of this one's shares the position — a hidden one, say.
+/// [`PageBuilder::optional`] refuses a handle from any other builder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct LayerId(u32);
+pub struct LayerId {
+    /// The [`DocumentBuilder`] that registered it: see [`BuilderSerial`].
+    builder: BuilderSerial,
+    /// Its position among that builder's layers.
+    index: u32,
+}
 
 impl LayerId {
     /// The key this layer is registered under in `/Properties`.
     fn resource(self) -> Vec<u8> {
-        format!("OC{}", self.0).into_bytes()
+        format!("OC{}", self.index).into_bytes()
+    }
+}
+
+/// Which [`DocumentBuilder`] a handle came from: a number no other builder
+/// in this process was given.
+///
+/// **Never written to a file.** Two runs building the same document number
+/// their builders differently, and the bytes they write are the same
+/// (ruling 4), because what reaches the file is the layer's index alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BuilderSerial(u64);
+
+impl BuilderSerial {
+    /// The next serial. 64 bits do not wrap at any rate builders can be made.
+    fn next() -> BuilderSerial {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        BuilderSerial(NEXT.fetch_add(1, AtomicOrdering::Relaxed))
     }
 }
 
@@ -1753,6 +1781,9 @@ pub struct PageBuilder {
     refusals: Vec<ArchivalRefusal>,
     /// How many [`PageBuilder::optional`] scopes are open.
     optional_depth: usize,
+    /// The builder this page was begun on, whose [`LayerId`]s alone it
+    /// takes.
+    builder: BuilderSerial,
 }
 
 /// One structure element under construction, and what it claims.
@@ -2012,7 +2043,7 @@ impl PageBuilder {
     /// point.
     pub fn optional(&mut self, layer: LayerId, draw: impl FnOnce(&mut PageBuilder)) -> bool {
         let resource = layer.resource();
-        if !holds(&self.resources.properties, &resource) {
+        if layer.builder != self.builder || !holds(&self.resources.properties, &resource) {
             return false;
         }
         if self.optional_depth >= MAX_TAG_DEPTH {
@@ -3089,6 +3120,8 @@ pub struct DocumentBuilder {
     profile: Option<ArchivalProfile>,
     /// Every call that profile refused, in the order they were made.
     refusals: Vec<ArchivalRefusal>,
+    /// Which builder this is, for the handles it gives out to carry.
+    serial: BuilderSerial,
 }
 
 impl Default for DocumentBuilder {
@@ -3123,6 +3156,7 @@ impl DocumentBuilder {
             version: WriteOptions::default().version,
             profile: None,
             refusals: Vec::new(),
+            serial: BuilderSerial::next(),
         }
     }
 
@@ -5059,6 +5093,7 @@ impl DocumentBuilder {
             archival_space: self.profile.as_ref().map(|p| p.destination_space),
             refusals: Vec::new(),
             optional_depth: 0,
+            builder: self.serial,
         }
     }
 
@@ -5206,7 +5241,10 @@ impl DocumentBuilder {
             self.refuse(ArchivalRefusal::OptionalContent);
             return None;
         }
-        let id = LayerId(u32::try_from(self.layers.len()).ok()?);
+        let id = LayerId {
+            builder: self.serial,
+            index: u32::try_from(self.layers.len()).ok()?,
+        };
         let reference = self.allocate();
         let mut group = Dict::new();
         group.insert(Name::TYPE, Object::Name(self.names.intern(b"OCG")));
@@ -9792,6 +9830,31 @@ mod layer_tests {
         let text =
             String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &pages[1])).into_owned();
         assert!(!text.contains("re f"), "{text}");
+    }
+
+    /// A layer from another builder is refused **even where this builder
+    /// holds a layer at the same position** — each builder's first layer is
+    /// its zeroth, so a handle that was only an index would draw the content
+    /// into whichever of this builder's layers shares it, here a hidden one.
+    #[test]
+    fn a_layer_from_another_builder_is_refused_at_an_index_this_one_holds() {
+        let mut other = DocumentBuilder::new();
+        let foreign = other.add_layer("Foreign", true).expect("a layer");
+        let mut builder = DocumentBuilder::new();
+        let mine = builder.add_layer("Mine", false).expect("a layer");
+        assert_ne!(foreign, mine, "two builders' first layers are two layers");
+        builder.add_page(20.0, 20.0, |page| {
+            let mut ran = false;
+            assert!(!page.optional(foreign, |_| ran = true));
+            assert!(!ran, "the closure of a refused layer is not run");
+            assert!(page.optional(mine, |page| page.raw(b"0 0 1 1 re f")));
+        });
+        let doc = opened(builder);
+        assert_eq!(content(&doc), "/OC /OC0 BDC\n0 0 1 1 re f\nEMC\n\n");
+        // And the handle still works on the builder that made it.
+        other.add_page(20.0, 20.0, |page| {
+            assert!(page.optional(foreign, |page| page.raw(b"0 0 1 1 re f")));
+        });
     }
 
     /// ISO 19005-1 6.1.13: a part 1 document has no optional content, and a
