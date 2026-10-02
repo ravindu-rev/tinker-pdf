@@ -762,6 +762,15 @@ same facts, and like the CAVP files it is a `cargo test` input compiled in
 only under `#[cfg(test)]`. `rsa_sigver_pss.rsp` beside the other CAVP files
 came from the same `186-2rsatestvectors.zip` as `rsa_sigver15.rsp`.
 
+`crates/tinker-pdf-crypto/tests/data/pkcs1/pkcs1v15crypt-vectors.txt` is the
+same archive's RSAES-PKCS1-v1_5 encryption vectors: fifteen keys, twenty
+messages each, every one printed with the padding it was encrypted under. It
+was fetched on 2 October 2026 from the same mirror, at
+`https://raw.githubusercontent.com/pyca/cryptography/main/vectors/cryptography_vectors/asymmetric/RSA/pkcs1v15crypt-vectors.txt`,
+SHA-256 `56489d946ad17b0b043812a06294e282d2b7ce095fd3f5899a7e8b60eaea7cba` as
+served (CRLF, normalised here), under the same licence terms and with the same
+header comment; a `cargo test` input only.
+
 These sit under `tests/data/` rather than `crates/<crate>/data/` because they
 are neither vendored *into* the engine nor redistributed by it; `cargo xtask
 vendor`'s allowlist governs the latter, and this is the former.

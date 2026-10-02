@@ -143,7 +143,7 @@ pub use outline::{
 pub use pages::{Page, PageBoundary, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
-pub use pubsec::{PubSecError, Recipient};
+pub use pubsec::{PubSecError, PublicKeyEncryption, Recipient, SealError};
 pub use raster_embed::RasterImageData;
 pub use resolve::Resolve;
 pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, ScriptScope, Trigger};
@@ -156,6 +156,9 @@ pub use sign::{
 pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
 pub use text_string::{decode_text_string, encode_text_string, parse_date, Date};
 pub use tiff_embed::{tiff_image, tiff_image_directory, TiffImageData, TiffRoute};
+/// The host's randomness, which a public-key encrypted save draws its seed,
+/// its content key and every recipient's padding from.
+pub use tinker_pdf_crypto::EntropySource;
 pub use trees::{
     name_tree, name_tree_lookup, number_tree, write_name_tree, write_number_tree, TreeWriteError,
 };

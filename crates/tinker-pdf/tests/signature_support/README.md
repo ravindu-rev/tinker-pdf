@@ -292,3 +292,10 @@ implementation's, so a certificate this engine could not read, or an `e` and
 What it is not worth: the `SignedData` around the signature is this
 repository's own reading of RFC 5652, checked by this repository's own
 verifier.
+
+**The same pair is a public-key encryption recipient.**
+`crates/tinker-pdf/tests/pubsec_write.rs` seals documents to
+`visible-signer.der`, and its test `Recipient` opens them with this key's
+private exponent. That is RFC 8017 §7.2.2 decryption done in the test,
+because the engine does no private-key operation. Nothing new was generated
+for it.

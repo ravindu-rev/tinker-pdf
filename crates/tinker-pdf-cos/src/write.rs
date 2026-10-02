@@ -488,6 +488,102 @@ fn walk_strings(
     }
 }
 
+/// Which security handler a rewrite seals with: the standard one's password
+/// ([`WriteOptions::encryption`]) or the public-key one's recipients
+/// ([`crate::DocumentEditor::save_sealed`]). Crate-private, so that neither
+/// public type had to change to carry the other.
+#[derive(Clone, Copy)]
+pub(crate) enum Sealing<'a> {
+    /// 7.6.4's standard handler at R6.
+    Password(&'a Encryption),
+    /// 7.6.5's `/Adobe.PubSec`, its file key already sealed.
+    PublicKey(&'a crate::pubsec::PublicKeyEncryption),
+}
+
+impl<'a> Sealing<'a> {
+    /// The scheme `options` asks for on its own.
+    pub(crate) fn from_options(options: &'a WriteOptions) -> Option<Sealing<'a>> {
+        options.encryption.as_ref().map(Sealing::Password)
+    }
+
+    /// The caller's entropy the file identifier is mixed with, which is what
+    /// keeps an encrypted file's `/ID` from confirming a guess at its
+    /// plaintext (see [`with_identifier`]).
+    fn identifier_entropy(self) -> &'a [u8; 48] {
+        match self {
+            Sealing::Password(encryption) => &encryption.entropy,
+            Sealing::PublicKey(sealed) => sealed.identifier_entropy(),
+        }
+    }
+}
+
+/// The `/Encrypt` dictionary and the cipher for either handler.
+pub(crate) fn build_sealing(
+    sealing: Sealing<'_>,
+    names: &NameTable,
+) -> Option<(Dict, StreamCipher)> {
+    match sealing {
+        Sealing::Password(encryption) => build_encryption(encryption, names),
+        Sealing::PublicKey(sealed) => Some(build_public_key(sealed, names)),
+    }
+}
+
+/// 7.6.5's `/Encrypt` for a public-key handler at AES-256: `/Filter
+/// /Adobe.PubSec`, `/SubFilter /adbe.pkcs7.s5` (crypt filters carry the
+/// recipients), `/V 5`, and one crypt filter — `/AESV3`, its `/Recipients`
+/// the sealed envelopes in the order the key was derived over.
+///
+/// From the file key on, everything is the standard handler's R6: AESV3
+/// takes the file key as it is, so the cipher is the same [`StreamCipher`]
+/// a password-encrypted rewrite uses, and only this dictionary differs.
+fn build_public_key(
+    sealed: &crate::pubsec::PublicKeyEncryption,
+    names: &NameTable,
+) -> (Dict, StreamCipher) {
+    let filter_name = names.intern(b"DefaultCryptFilter");
+    let mut filter = Dict::new();
+    filter.insert(Name::TYPE, Object::Name(names.intern(b"CryptFilter")));
+    filter.insert(names.intern(b"CFM"), Object::Name(names.intern(b"AESV3")));
+    filter.insert(
+        names.intern(b"AuthEvent"),
+        Object::Name(names.intern(b"DocOpen")),
+    );
+    filter.insert(names.intern(b"Length"), Object::Int(32));
+    filter.insert(
+        names.intern(b"Recipients"),
+        Object::Array(
+            sealed
+                .recipients()
+                .iter()
+                .map(|envelope| Object::String(PdfString::hex(envelope.clone())))
+                .collect(),
+        ),
+    );
+    // No `/EncryptMetadata`: Table 27 puts the public-key handler's in the
+    // crypt filter and this tree's reader looks for it on `/Encrypt` itself,
+    // so the one value every reader agrees on is the default both places
+    // share — true, which is what this writer does.
+    let mut cf = Dict::new();
+    cf.insert(filter_name, Object::Dict(filter));
+
+    let mut dict = Dict::new();
+    dict.insert(Name::FILTER, Object::Name(names.intern(b"Adobe.PubSec")));
+    dict.insert(
+        names.intern(b"SubFilter"),
+        Object::Name(names.intern(b"adbe.pkcs7.s5")),
+    );
+    dict.insert(names.intern(b"V"), Object::Int(5));
+    dict.insert(names.intern(b"Length"), Object::Int(256));
+    dict.insert(
+        names.intern(b"P"),
+        Object::Int(i64::from(sealed.permissions())),
+    );
+    dict.insert(names.intern(b"CF"), Object::Dict(cf));
+    dict.insert(names.intern(b"StmF"), Object::Name(filter_name));
+    dict.insert(names.intern(b"StrF"), Object::Name(filter_name));
+    (dict, StreamCipher::new(sealed.file_key()))
+}
+
 /// Builds the `/Encrypt` dictionary and the cipher that goes with it.
 pub(crate) fn build_encryption(
     encryption: &Encryption,
@@ -891,13 +987,30 @@ pub fn rewrite(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Vec<u8> {
+    rewrite_sealed(
+        objects,
+        trailer,
+        options,
+        names,
+        Sealing::from_options(options),
+    )
+}
+
+/// [`rewrite`], sealed with whichever handler `sealing` names.
+pub(crate) fn rewrite_sealed(
+    objects: &ObjectSet,
+    trailer: &Dict,
+    options: &WriteOptions,
+    names: &NameTable,
+    sealing: Option<Sealing<'_>>,
+) -> Vec<u8> {
     // Before the layout is chosen, so the linearized writer receives the same
     // trailer the ordinary one would.
     let identified = with_identifier(
         trailer,
         objects,
         names,
-        options.encryption.as_ref().map(|e| &e.entropy),
+        sealing.map(Sealing::identifier_entropy),
     );
     // 7.5.6: a rewrite is one revision, so it has no earlier section to chain
     // to. Both keys arrive from the *source* document's trailer — every file
@@ -920,7 +1033,9 @@ pub fn rewrite(
         // Encryption used to be a second reason to fall through here, and the
         // caller was told nothing: they asked for both and got an encrypted
         // file with an ordinary layout. `linearize` owns the cipher now.
-        if let Some(bytes) = crate::linearize::linearize(objects, trailer, options, names) {
+        if let Some(bytes) =
+            crate::linearize::linearize_sealed(objects, trailer, options, names, sealing)
+        {
             return bytes;
         }
     }
@@ -933,10 +1048,7 @@ pub fn rewrite(
 
     // 7.6.1: the /Encrypt dictionary is written in the clear and everything
     // else is not. Built first so the cipher exists before the first object.
-    let encryption = options
-        .encryption
-        .as_ref()
-        .and_then(|e| build_encryption(e, names));
+    let encryption = sealing.and_then(|sealing| build_sealing(sealing, names));
     let crypt: Option<&dyn ObjectCipher> = encryption
         .as_ref()
         .map(|(_, cipher)| cipher as &dyn ObjectCipher);

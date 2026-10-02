@@ -385,7 +385,7 @@ pub use tinker_pdf_cos::{
     CosDocument, CosError, Dict, Name, ObjRef, Object, PdfString, Revision, StreamObj, XrefEntry,
     XrefTable,
 };
-pub use tinker_pdf_cos::{PubSecError, Recipient};
+pub use tinker_pdf_cos::{EntropySource, PubSecError, PublicKeyEncryption, Recipient, SealError};
 pub use tinker_pdf_crypto::Permissions;
 /// 7.4.6 Table 11's `/CCITTFaxDecode` parameters, which
 /// [`ImageFilter::CcittFax`] carries and this facade would otherwise leave

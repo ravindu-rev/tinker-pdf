@@ -147,10 +147,27 @@ pub fn linearize(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Option<Vec<u8>> {
+    linearize_sealed(
+        objects,
+        trailer,
+        options,
+        names,
+        crate::write::Sealing::from_options(options),
+    )
+}
+
+/// [`linearize`], sealed with whichever handler `sealing` names.
+pub(crate) fn linearize_sealed(
+    objects: &ObjectSet,
+    trailer: &Dict,
+    options: &WriteOptions,
+    names: &NameTable,
+    sealing: Option<crate::write::Sealing<'_>>,
+) -> Option<Vec<u8>> {
     // The cipher is built before a single object is serialised, because every
     // length this layout depends on is a length of encrypted bytes.
-    let encryption = match options.encryption.as_ref() {
-        Some(request) => Some(crate::write::build_encryption(request, names)?),
+    let encryption = match sealing {
+        Some(sealing) => Some(crate::write::build_sealing(sealing, names)?),
         None => None,
     };
     let plan = Plan::build(objects, trailer, names, options.compress, encryption)?;

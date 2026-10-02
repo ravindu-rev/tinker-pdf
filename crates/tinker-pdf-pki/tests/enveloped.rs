@@ -186,3 +186,65 @@ fn pem_to_der(pem: &str) -> Vec<u8> {
     }
     out
 }
+
+// ---- the writer, held to OpenSSL's envelope -------------------------------
+
+/// A deterministic source: what is under test is the encoding, not the
+/// randomness.
+struct Counter(u8);
+
+impl tinker_pdf_crypto::EntropySource for Counter {
+    fn fill(&mut self, out: &mut [u8]) -> bool {
+        for byte in out {
+            self.0 = self.0.wrapping_add(1);
+            *byte = self.0;
+        }
+        true
+    }
+}
+
+/// `der` with the three fields sealing fills from randomness zeroed: the
+/// encrypted key, the IV and the ciphertext.
+fn without_randomness(der: &[u8]) -> Vec<u8> {
+    let parsed = EnvelopedData::parse(der).expect("parses");
+    let mut ranges = Vec::new();
+    let mut at = |slice: &[u8]| {
+        let start = slice.as_ptr() as usize - der.as_ptr() as usize;
+        ranges.push(start..start + slice.len());
+    };
+    at(parsed.recipients()[0].encrypted_key());
+    at(parsed
+        .content_algorithm()
+        .parameters()
+        .and_then(|node| node.as_octet_string().ok())
+        .expect("an IV"));
+    at(parsed.encrypted_content().expect("content"));
+    let mut out = der.to_vec();
+    for range in ranges {
+        out[range].fill(0);
+    }
+    out
+}
+
+/// **The writer's envelope is OpenSSL's, octet for octet, outside the three
+/// fields randomness fills.** The same content OpenSSL 3.5.5 sealed —
+/// `SEEDSEEDSEEDSEEDSEED` and four zeros — sealed here to the same
+/// certificate with AES-256-CBC: the same 484 octets, every tag, length, OID,
+/// version, the issuer and serial and the `NULL` parameters identical, and
+/// only the 256-octet encrypted key, the 16-octet IV and the 32 octets of
+/// ciphertext different, as they must be. This is what "held to the OpenSSL
+/// envelopes this reader already parses" means: the reader's own fixture is
+/// the writer's specification.
+#[test]
+fn a_sealed_envelope_is_openssls_outside_its_random_fields() {
+    let certificate = pem_to_der(include_str!("data/enveloped/recipient-cert.pem"));
+    let ours = tinker_pdf_pki::seal::seal(
+        b"SEEDSEEDSEEDSEEDSEED\0\0\0\0",
+        &[&certificate],
+        &mut Counter(0),
+    )
+    .expect("seals");
+    assert_eq!(ours.len(), AES_256.len(), "the same 484 octets");
+    assert_ne!(ours, AES_256, "and not a copy of them");
+    assert_eq!(without_randomness(&ours), without_randomness(AES_256));
+}

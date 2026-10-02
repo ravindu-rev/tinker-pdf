@@ -58,7 +58,11 @@
 //!
 //! # What this crate does *not* claim
 //!
-//! It parses; it does not adjudicate. Nothing here checks a signature — the
+//! It parses, and writes one thing: [`seal`] encodes the CMS
+//! `EnvelopedData` a public-key encrypted document carries, in the shape
+//! OpenSSL writes and [`enveloped`] reads. Everything else here is read-only.
+//!
+//! It does not adjudicate. Nothing here checks a signature — the
 //! arithmetic for that arrives in `tinker-pdf-crypto` at milestones 4 and 5 of
 //! the design — nothing here holds a trust anchor, and nothing here consults a
 //! clock. [`x509::Certificate::validity`] hands back the certificate's own
@@ -79,6 +83,7 @@ pub mod general_name;
 pub mod name;
 pub mod oid;
 pub mod pss;
+pub mod seal;
 pub mod tsp;
 pub mod x509;
 

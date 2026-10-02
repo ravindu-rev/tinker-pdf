@@ -150,6 +150,43 @@ impl DocumentEditor {
     /// breaking the signature over it.
     #[must_use]
     pub fn save(&self, options: &WriteOptions) -> Vec<u8> {
+        self.save_with(options, write::Sealing::from_options(options))
+    }
+
+    /// Saves the edits as a document **sealed to recipients** rather than to
+    /// a password (ISO 32000-2 7.6.5): a rewrite whose `/Encrypt` is the
+    /// public-key handler's, `/Recipients` the envelopes `sealed` carries, and
+    /// whose strings and streams are encrypted under the key derived from
+    /// them, exactly as a password-encrypted rewrite's are under its own.
+    ///
+    /// Beside [`DocumentEditor::save`] rather than inside
+    /// [`WriteOptions`], for two reasons recorded in
+    /// `docs/features/encryption.md`: `Encryption` is a struct its callers
+    /// build by its fields, so a second scheme in it would break every one
+    /// of them; and `save` has no error to return, where a sealed save has
+    /// two that are the caller's to hear about. The sealing itself — every
+    /// certificate read, every envelope written — happened in
+    /// [`crate::PublicKeyEncryption::seal`], before this was called.
+    ///
+    /// # Errors
+    /// [`crate::SealError::NotRewrite`] for an incremental save, and
+    /// [`crate::SealError::PasswordAlsoRequested`] when
+    /// [`WriteOptions::encryption`] is set too.
+    pub fn save_sealed(
+        &self,
+        options: &WriteOptions,
+        sealed: &crate::pubsec::PublicKeyEncryption,
+    ) -> Result<Vec<u8>, crate::pubsec::SealError> {
+        if options.mode != WriteMode::Rewrite {
+            return Err(crate::pubsec::SealError::NotRewrite);
+        }
+        if options.encryption.is_some() {
+            return Err(crate::pubsec::SealError::PasswordAlsoRequested);
+        }
+        Ok(self.save_with(options, Some(write::Sealing::PublicKey(sealed))))
+    }
+
+    fn save_with(&self, options: &WriteOptions, sealing: Option<write::Sealing<'_>>) -> Vec<u8> {
         let set = self.changed_set();
 
         // A reordered page tree needs its /Kids and /Count rewritten.
@@ -292,7 +329,7 @@ impl DocumentEditor {
                     all = merged;
                     trailer = redirected;
                 }
-                write::rewrite(&all, &trailer, options, self.doc.names_table())
+                write::rewrite_sealed(&all, &trailer, options, self.doc.names_table(), sealing)
             }
         }
     }

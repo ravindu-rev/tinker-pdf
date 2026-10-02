@@ -5,8 +5,11 @@ revision from R2 to R6 open, authenticate and decrypt, and documents are
 encrypted on save at R6 (AES-256). An *incremental* save is the one place the
 writer does not choose: it appends into a file whose `/Encrypt` still stands,
 so it re-encrypts with that file's own key and methods, whichever of the four
-they are ([writing](writing.md)). Every primitive — MD5, SHA-1, SHA-2,
-RC4, AES-CBC — is the project's own, living in the `tinker-pdf-crypto` leaf
+they are ([writing](writing.md)). The public-key handler goes both ways
+too: a document sealed to certificates opens with the holder's key, and a
+document can be sealed on save to certificates the caller supplies. Every
+primitive — MD5, SHA-1, SHA-2, RC4, AES-CBC, and RSA's public-key half — is
+the project's own, living in the `tinker-pdf-crypto` leaf
 crate (bytes and plain scalars in, bytes and values out, no PDF types on
 its surface — ruling 8, [rulings](../rulings.md)), which is what lets it be
 fuzzed on its own and gated on published vectors. PDF permissions are
@@ -78,6 +81,25 @@ encrypted document without the option decrypts on the way through and
 drops `/Encrypt`, because carrying it forward over plaintext would make
 every reader decrypt clear bytes into garbage.
 
+**Writing to recipients.** `PublicKeyEncryption::seal(certificates,
+permissions, entropy)` seals a document to DER X.509 certificates instead of a
+password (7.6.5), and `DocumentEditor::save_sealed(options, &sealed)` writes
+it: `/Filter /Adobe.PubSec`, `/SubFilter /adbe.pkcs7.s5`, `/V 5`, and one
+`/AESV3` crypt filter whose `/Recipients` is a single CMS `EnvelopedData`
+that every recipient can open. Sealing draws a twenty-byte seed, seals it with
+the permissions to each certificate's RSA key (RSAES-PKCS1-v1_5 key
+transport, AES-256-CBC content, the shape `openssl cms -encrypt -aes256`
+writes), and derives the file key from the seed and the envelope; from there
+the file is encrypted exactly as an R6 password write is, object streams and
+linearized layout included. The randomness is the caller's `EntropySource`,
+as for a password. Every certificate is checked before any entropy is drawn,
+so a bad one costs nothing, and each refusal names the recipient by its index. The
+sealing happens in `seal`, which can fail; `save_sealed` fails only when it is
+asked for an incremental save or for a password as well. It sits beside
+`save` rather than in `WriteOptions`, because `Encryption` is a struct its
+callers build by field and `save` has no error to return
+([design/pubsec.md](../design/pubsec.md)).
+
 ## API
 
 On `Document`: `is_encrypted()`, `authenticate(&self, password)`
@@ -118,13 +140,26 @@ let bytes = doc.editor().save(&WriteOptions {
 });
 ```
 
+Sealing to recipients instead, with certificates the host holds and the
+host's randomness:
+
+```rust
+let sealed = PublicKeyEncryption::seal(&[certificate_der], permissions, &mut entropy)?;
+let bytes = doc.editor().save_sealed(&WriteOptions::default(), &sealed)?;
+// A holder opens it with Document::authenticate_with_recipient(&their_key).
+```
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
 | A vendor's own `/Filter` | `AuthError::UnsupportedHandler` | only `Standard` and `Adobe.PubSec` are implemented; a foreign handler is refused rather than guessed | this page |
 | A password offered to a public-key document | `AuthError::UnsupportedHandler`, not `WrongPassword` | no password was ever going to work, and saying "wrong password" sends a caller looking for a better one | 7.6.5 |
-| Writing a public-key-encrypted document | none offered — reading only | sealing a key needs a certificate the engine has no business choosing | [design/pubsec.md](../design/pubsec.md) |
+| Sealing to a key that is not RSA | `SealError::NotRsa { index }` | key transport here is RSAES-PKCS1-v1_5, every PDF public-key handler's; key agreement is not read either | [design/pubsec.md](../design/pubsec.md) |
+| A sealed incremental save | `SealError::NotRewrite` | an update appends under an `/Encrypt` that still stands, and cannot change who the file is sealed to | this page |
+| A password and recipients both | `SealError::PasswordAlsoRequested` | a document has one security handler | 7.6 |
+| Recipients sealed with different permissions | none offered — one envelope, one `/P` for all | 7.6.5 allows an envelope per group; not yet asked for | [design/pubsec.md](../design/pubsec.md) |
+| Sealing below `/V 5` — `s3`, `s4`, RC4, AES-128 | none offered — the writer emits `AESV3` | as R6 is the password writer's only revision; reading all of them is unchanged | — |
 | An envelope's content cipher this build does not implement — AES-192-CBC and RC2 are the reachable ones | `PubSecError::UnsupportedContentCipher` | AES-128/256-CBC, RC4 and `des-ede3-cbc` are implemented, the last being what OpenSSL still picks by default for older recipients; anything else is named rather than silently unopenable | [design/pubsec.md](../design/pubsec.md) |
 | Recipient shapes other than key transport | `EnvelopedError::UnsupportedRecipientKind` | key agreement, KEK and password recipients are recognised by tag and refused; every PDF public-key handler in the wild uses key transport | RFC 5652 §6.2 |
 | Writing R5 | none offered — the writer emits R6 and nothing else | R5 is the withdrawn draft; reading it works and carries `HandlerNote::DeprecatedRevision5` | [pdf20-deltas](../pdf20-deltas.md) |
@@ -157,6 +192,21 @@ So a document this code opens is, at the derivation step, a document this code
 agrees with itself about. [design/pubsec.md](../design/pubsec.md) records that
 as an open risk rather than a footnote.
 
+Writing narrows the gap from the other side without closing it. The envelope
+the writer seals is OpenSSL's byte for byte outside its random fields, and
+**OpenSSL 3.0.13 opened one** (`cms -decrypt`, 2 October 2026) to the seed and
+the permissions, after which `openssl enc -aes-256-cbc` decrypted every
+content stream of the sealed file under the derived key. RSAES-PKCS1-v1_5 is
+held to all 300 of RSA Laboratories' encryption known answers. The key
+OpenSSL was handed, though, came from the same reading of 7.6.5 the reader
+uses, so the derivation is still one author agreeing with themselves.
+
+One reader gap the writer found and works around: ISO 32000-1 Table 27 puts the
+public-key handler's `/EncryptMetadata` in the crypt filter, and the reader
+looks for it on `/Encrypt` only. A third-party `/V 4` or `/V 5` file that
+says `false` in its crypt filter derives the wrong key here. The writer writes
+the flag nowhere, and both places default to true.
+
 ## Verified
 
 Published vectors are merge gates, in-module in `tinker-pdf-crypto`:
@@ -187,7 +237,10 @@ encrypt-on-save through the engine's own reader: password required,
 content and `/Info` strings ciphertext on disk and intact after
 authentication, owner and user passwords distinguished, `/P` surviving
 the trip, identical plaintexts encrypting differently, and encryption
-composed with object streams. `crates/tinker-pdf-cos/tests/strict_validator.rs`
+composed with object streams. `crates/tinker-pdf/tests/pubsec_write.rs`
+does the same for a document sealed to a certificate, its key holder a test
+`Recipient` over the committed `visible-signer-key.der`.
+`crates/tinker-pdf-cos/tests/strict_validator.rs`
 holds the encrypted output — plain and linearized — to ISO 32000 read
 strictly, including 7.5.5 Table 15's `/ID`, which no file this engine wrote
 carried until the validator refused one.

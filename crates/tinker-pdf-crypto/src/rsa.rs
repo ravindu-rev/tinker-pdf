@@ -1,11 +1,15 @@
-//! RSASSA-PKCS1-v1_5 signature **verification** (RFC 8017 §8.2.2).
+//! RSA with a **public key**: signature verification (RFC 8017 §8.2.2 and
+//! §8.1.2), and RSAES-PKCS1-v1_5 encryption (§7.2.1).
 //!
-//! Verification and nothing else. There is no key generation, no signing, no
-//! private-key operation and no key-file parsing here — a PDF signature
-//! arrives as a certificate's public key and a blob of bytes, and this module
-//! answers one question about them. `tinker-pdf-pki` will do the DER; this
-//! module takes `(n, e)` as big-endian integers and a digest that
-//! [`crate::sha1`] or [`crate::sha2`] already computed.
+//! Public-key operations and nothing else. There is no key generation, no
+//! signing, no decryption, no private-key operation and no key-file parsing
+//! here. A PDF signature arrives as a certificate's public key and a blob of
+//! bytes, and this module answers one question about them; a public-key
+//! encrypted document seals its file key to a recipient's certificate, which
+//! is the same public key used the other way round. `tinker-pdf-pki` does the
+//! DER; this module takes `(n, e)` as big-endian integers, and a digest that
+//! [`crate::sha1`] or [`crate::sha2`] already computed or a message and the
+//! caller's padding.
 //!
 //! # The whole encoding is compared, and that is the point
 //!
@@ -216,6 +220,16 @@ pub enum RsaRefusal {
     /// The recovered block is not the expected encoding. This is the ordinary
     /// "the signature is not valid" answer.
     EncodingMismatch,
+    /// A message longer than RSAES-PKCS1-v1_5 can carry under this key:
+    /// `k - 11` octets (RFC 8017 §7.2.1 step 1).
+    MessageTooLong {
+        /// The most this key can carry.
+        capacity: usize,
+    },
+    /// Encryption padding that is not exactly `k - 3 - mLen` octets, or that
+    /// contains a zero octet, which would end `PS` early and change what the
+    /// recipient reads as the message (§7.2.1 step 2b).
+    PaddingUnusable,
 }
 
 /// RSASSA-PSS's three choices (RFC 8017 §8.1 and A.2.3): the digest that
@@ -444,6 +458,77 @@ impl RsaPublicKey {
     ) -> Result<(), RsaRefusal> {
         let digest = parameters.hash.digest(message);
         self.verify_pss(parameters, digest.as_bytes(), signature)
+    }
+}
+
+impl RsaPublicKey {
+    /// How many padding octets RSAES-PKCS1-v1_5 needs to encrypt a message of
+    /// `message_len` octets under this key, or `None` when the key cannot
+    /// carry it (RFC 8017 §7.2.1: `k - 3 - mLen`, at least eight).
+    #[must_use]
+    pub fn pkcs1_v15_padding_len(&self, message_len: usize) -> Option<usize> {
+        let k = self.modulus.byte_len();
+        let capacity = k.checked_sub(11)?;
+        if message_len > capacity {
+            return None;
+        }
+        Some(k - 3 - message_len)
+    }
+
+    /// RSAES-PKCS1-v1_5 encryption (RFC 8017 §7.2.1): `EM = 0x00 || 0x02 ||
+    /// PS || 0x00 || M`, raised to the public exponent.
+    ///
+    /// **The padding is the caller's**, because this crate has no source of
+    /// randomness and will not pretend to: `padding` is `PS`, exactly
+    /// [`RsaPublicKey::pkcs1_v15_padding_len`] octets, none of them zero, drawn
+    /// by the caller from whatever it trusts. Taking it as a parameter is also
+    /// what makes the operation testable — RSA Laboratories' vectors publish
+    /// the `PS` each ciphertext was made with, so all 300 are exact known
+    /// answers rather than round trips through a decryptor this crate does not
+    /// have.
+    ///
+    /// A public-key operation on public values, so the constant-time question
+    /// the private side would raise does not arise; `padding` is secret only
+    /// in the sense that it must be unpredictable, and nothing here branches
+    /// on its value beyond refusing a zero.
+    ///
+    /// # Errors
+    ///
+    /// [`RsaRefusal::MessageTooLong`], [`RsaRefusal::PaddingUnusable`], and
+    /// [`RsaRefusal::ModulusTooShort`] for a key below the eleven octets any
+    /// message needs.
+    pub fn encrypt_pkcs1_v15(&self, message: &[u8], padding: &[u8]) -> Result<Vec<u8>, RsaRefusal> {
+        let k = self.modulus.byte_len();
+        let capacity = k.checked_sub(11).ok_or(RsaRefusal::ModulusTooShort)?;
+        if message.len() > capacity {
+            return Err(RsaRefusal::MessageTooLong { capacity });
+        }
+        let ps_len = k - 3 - message.len();
+        if padding.len() != ps_len || padding.contains(&0) {
+            return Err(RsaRefusal::PaddingUnusable);
+        }
+        let mut em = vec![0u8; k];
+        // Step 2c, laid out by offset: 0x00 at 0, 0x02 at 1, PS from 2, the
+        // separating 0x00 after it, then M.
+        if let Some(block_type) = em.get_mut(1) {
+            *block_type = 0x02;
+        }
+        if !put(&mut em, 2, padding) || !put(&mut em, 3 + ps_len, message) {
+            return Err(RsaRefusal::ModulusTooWide);
+        }
+        // Step 3a: OS2IP. The leading 0x00 0x02 keeps m below every modulus
+        // of k octets, so `m < n` is an invariant; checked rather than assumed.
+        let m = Uint::<RSA_LIMBS>::from_be_bytes(&em).ok_or(RsaRefusal::ModulusTooWide)?;
+        if m >= *self.modulus.value() {
+            return Err(RsaRefusal::ModulusTooShort);
+        }
+        // Steps 3b and 3c: c = m^e mod n, as exactly k octets.
+        let c = self.modulus.pow(&m, &self.exponent);
+        let mut out = vec![0u8; k];
+        if !c.to_be_bytes(&mut out) {
+            return Err(RsaRefusal::ModulusTooWide);
+        }
+        Ok(out)
     }
 }
 
@@ -1402,6 +1487,166 @@ mod tests {
                 "trailer 0x{trailer:02x}"
             );
         }
+    }
+
+    // ---- RSAES-PKCS1-v1_5 encryption ---------------------------------------
+
+    /// One `pkcs1v15crypt-vectors.txt` example: a key and its twenty
+    /// encryptions, each `(message, padding, ciphertext)`.
+    struct EncryptionExample {
+        modulus: Vec<u8>,
+        exponent: Vec<u8>,
+        encryptions: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    }
+
+    /// Reads RSA Laboratories' encryption vectors: the same labelled hex
+    /// blocks as `pss-vect.txt`, with `Seed` the padding `PS` and the private
+    /// section's second `Modulus` and `Exponent` ignored for the same reason.
+    fn encryption_examples() -> Vec<EncryptionExample> {
+        const VECTORS: &str = include_str!("../tests/data/pkcs1/pkcs1v15crypt-vectors.txt");
+        let mut examples: Vec<EncryptionExample> = Vec::new();
+        let mut label = String::new();
+        let mut current = Vec::<u8>::new();
+        let mut message = Vec::new();
+        let mut seed = Vec::new();
+
+        let mut flush = |label: &str, value: Vec<u8>, examples: &mut Vec<EncryptionExample>| {
+            let Some(example) = examples.last_mut() else {
+                return;
+            };
+            match label {
+                "Modulus" if example.modulus.is_empty() => example.modulus = value,
+                "Exponent" if example.exponent.is_empty() => example.exponent = value,
+                "Message" => message = value,
+                "Seed" => seed = value,
+                "Encryption" => {
+                    example
+                        .encryptions
+                        .push((message.clone(), seed.clone(), value));
+                }
+                _ => {}
+            }
+        };
+
+        for line in VECTORS.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix('#') {
+                let rest = rest.trim();
+                if !label.is_empty() {
+                    flush(&label, std::mem::take(&mut current), &mut examples);
+                }
+                label.clear();
+                current.clear();
+                if rest.starts_with("Example ") && rest.contains("RSA key pair") {
+                    examples.push(EncryptionExample {
+                        modulus: Vec::new(),
+                        exponent: Vec::new(),
+                        encryptions: Vec::new(),
+                    });
+                } else if let Some(name) = rest.strip_suffix(':') {
+                    label = name.trim().to_string();
+                }
+                continue;
+            }
+            if label.is_empty() || line.is_empty() {
+                continue;
+            }
+            current.extend(unhex(&line.replace(' ', "")));
+        }
+        if !label.is_empty() {
+            flush(&label, current, &mut examples);
+        }
+        examples
+    }
+
+    /// All 300 of RSA Laboratories' RSAES-PKCS1-v1_5 encryptions, octet for
+    /// octet, under fifteen keys from 1 024 to 2 048 bits.
+    ///
+    /// Exact known answers, because the file publishes the padding each one
+    /// was made with: the ciphertext is a function of the key, the message
+    /// and `PS`, and this computes it and compares every octet. Seven of the
+    /// keys are 1 025 to 1 031 bits, whose leading octet is not full — the
+    /// case where an encryptor that sized `EM` from the bit length rather than
+    /// the octet length would put `0x02` one octet early.
+    #[test]
+    fn rsa_laboratories_pkcs1_v15_encryption_vectors() {
+        let examples = encryption_examples();
+        assert_eq!(examples.len(), 15, "fifteen keys");
+        let mut bits = Vec::new();
+        let mut matched = 0usize;
+        for (index, example) in examples.iter().enumerate() {
+            let key = RsaPublicKey::new(&example.modulus, &example.exponent)
+                .expect("an RSA Laboratories key is usable");
+            bits.push(key.modulus_bits());
+            assert_eq!(example.encryptions.len(), 20, "example {}", index + 1);
+            for (number, (message, padding, ciphertext)) in example.encryptions.iter().enumerate() {
+                assert_eq!(
+                    key.pkcs1_v15_padding_len(message.len()),
+                    Some(padding.len()),
+                    "example {}.{}: k - 3 - mLen",
+                    index + 1,
+                    number + 1
+                );
+                assert_eq!(
+                    key.encrypt_pkcs1_v15(message, padding).as_deref(),
+                    Ok(&ciphertext[..]),
+                    "example {}.{}",
+                    index + 1,
+                    number + 1
+                );
+                matched += 1;
+            }
+        }
+        assert_eq!(matched, 300);
+        assert_eq!(
+            bits,
+            [
+                1024, 1024, 1024, 1024, 1024, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1536,
+                2048
+            ],
+            "the key sizes the file carries"
+        );
+    }
+
+    /// Each way a caller can hand over something RFC 8017 §7.2.1 does not
+    /// allow is refused by name, and none reaches the arithmetic.
+    #[test]
+    fn encryption_refuses_what_the_scheme_does_not_allow() {
+        let examples = encryption_examples();
+        let example = examples.first().expect("an example");
+        let key = RsaPublicKey::new(&example.modulus, &example.exponent).expect("usable");
+        let (message, padding, _) = example.encryptions.first().expect("an encryption");
+
+        // One octet too few, one too many.
+        assert_eq!(
+            key.encrypt_pkcs1_v15(message, &padding[1..]),
+            Err(RsaRefusal::PaddingUnusable)
+        );
+        let mut longer = padding.clone();
+        longer.push(0x5A);
+        assert_eq!(
+            key.encrypt_pkcs1_v15(message, &longer),
+            Err(RsaRefusal::PaddingUnusable)
+        );
+        // A zero octet anywhere in PS would end it there.
+        for at in [0, padding.len() / 2, padding.len() - 1] {
+            let mut zeroed = padding.clone();
+            zeroed[at] = 0;
+            assert_eq!(
+                key.encrypt_pkcs1_v15(message, &zeroed),
+                Err(RsaRefusal::PaddingUnusable),
+                "a zero at {at}"
+            );
+        }
+        // A 1024-bit key carries at most 117 octets.
+        assert_eq!(key.pkcs1_v15_padding_len(117), Some(8));
+        assert_eq!(key.pkcs1_v15_padding_len(118), None);
+        assert_eq!(
+            key.encrypt_pkcs1_v15(&[0x41; 118], &[0x01; 7]),
+            Err(RsaRefusal::MessageTooLong { capacity: 117 })
+        );
+        // The longest message it can carry, with the minimum eight octets.
+        assert!(key.encrypt_pkcs1_v15(&[0x41; 117], &[0x01; 8]).is_ok());
     }
 
     /// A salt length no modulus of this size could carry is a refusal about

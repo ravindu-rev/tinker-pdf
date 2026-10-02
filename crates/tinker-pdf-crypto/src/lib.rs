@@ -12,7 +12,8 @@
 //! Implementing MD5, RC4, SHA-2, AES, DES and now RSA and ECDSA verification
 //! by hand is unusual and deserves the scrutiny it invites. The honest
 //! framing, also recorded in `SECURITY.md`: the scope is document decryption,
-//! encryption-on-save and signature *verification*, not a protocol;
+//! encryption-on-save (to a password or to a recipient's public key) and
+//! signature *verification*, not a protocol;
 //! correctness is gated on published vectors (FIPS 197, FIPS 180-4, FIPS 46-3,
 //! RFC 6229, RFC 1321, and NIST CAVP for Triple DES and the two signature
 //! schemes) as merge requirements rather than aspirations; password comparison
@@ -24,11 +25,20 @@
 //!
 //! # No private keys, ever
 //!
-//! [`rsa`] and [`ecdsa`] verify and do nothing else. There is no signing, no
-//! key generation and no key-file parsing, which is what lets [`bignum`] skip
-//! the constant-time obligations a private-key implementation could not skip:
-//! every value those two modules touch is published in the document being
-//! checked. A signing feature would not extend this code, it would replace it.
+//! [`rsa`] and [`ecdsa`] verify, and [`rsa`] also encrypts to a public key
+//! (RSAES-PKCS1-v1_5, for a public-key encrypted save); neither does anything
+//! with a private key. There is no signing, no decryption, no key generation
+//! and no key-file parsing, which is what lets [`bignum`] skip the
+//! constant-time obligations a private-key implementation could not skip:
+//! every key those two modules touch is published, in the document being
+//! checked or in a recipient's certificate. **Encryption carries one secret
+//! through that arithmetic**, the content key it seals: the exponent is
+//! public, but a Montgomery product's final subtraction depends on the value,
+//! so the time a seal takes is not independent of the key it seals. Each
+//! seal is one operation on a fresh key under fresh padding, which is not
+//! the repeated-operation shape timing attacks on RSA need; a host for whom
+//! that is not enough should seal elsewhere. A signing feature would not
+//! extend this code, it would replace it.
 
 #![forbid(unsafe_code)]
 
