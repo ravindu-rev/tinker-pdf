@@ -154,10 +154,19 @@
 //! ([`with_names`]). A form whose placements cut the same shares one stream,
 //! and a form nothing was cut from is not written at all. The form's own
 //! object keeps an uncut outcome when there is one, so another page that
-//! draws the form draws it as it was; when every placement cut something it
-//! takes the first placement's outcome, so it is still drawn by this page and
-//! is never left in the file holding what a rectangle covered with nothing
-//! drawing it. [`crate::subset`] walks the editor's
+//! draws the form draws it as it was. When every placement cut something,
+//! the answer depends on whether anything else **draws** the form — another
+//! page, a form or an annotation there, a Type 3 glyph's procedure anywhere
+//! ([`Elsewhere`], read once and only when this case arises): if something
+//! does, the object is left as it was for that drawer and every placement
+//! here draws a copy; if nothing does, it takes the first placement's
+//! outcome, so it is still drawn by this page and is never left in the file
+//! holding what a rectangle covered with nothing drawing it. *Drawn*, not
+//! *named*: one `/Resources` dictionary shared by every page names every form
+//! on every page, and counting that would leave exactly that unreferenced
+//! uncut stream. Until October 2026 the first placement's outcome was taken
+//! whatever else drew the form, and a page that shared it lost what this
+//! page's rectangles covered, unreported. [`crate::subset`] walks the editor's
 //! [`view`](tinker_pdf_cos::DocumentEditor::view), where the copies resolve,
 //! so a glyph drawn only in a copy stays in the program.
 //!
@@ -330,6 +339,19 @@
 //! | an inline image a procedure draws not counted | **1** |
 //! | a form a procedure draws not followed | **1** |
 //! | a procedure that draws only an inline image not recognised as drawing anything | **1** |
+//!
+//! The read of what else draws a form ([`Elsewhere`]) was counted the same
+//! day, over 344 tests. None reports zero:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a drawer elsewhere never asked about, which is how it used to be | 4 |
+//! | the redacted page counted as a drawer elsewhere | 11 |
+//! | a form a page's resources name counted as one it draws | **1** |
+//! | a form drawn elsewhere not followed into | **1** |
+//! | another page's annotations not read | **1** |
+//! | a Type 3 face's procedures not read | **1** |
+//! | a procedure's `Do` resolved only in its face's own `/Resources` | **1** |
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -746,7 +768,7 @@ pub fn apply(
         .map(|appearance| walk.appearance(editor, appearance, &resources, areas, &mut report))
         .collect();
 
-    let targets = settle(editor, &walk, areas, &mut report);
+    let targets = settle(editor, &walk, reference, areas, &mut report);
     let inline_annotations = repoint_appearances(editor, &appearances, &shown, &targets);
 
     // The page's own `Do`s that draw a copy name it by a resource name the
@@ -1493,16 +1515,24 @@ type Outcome = (usize, Vec<(usize, ObjRef)>);
 /// (8.10: a `Do` executes one stream, so two outcomes need two streams), and
 /// each `Do` is pointed at the stream holding its placement's outcome. Which
 /// outcome keeps the form's own object is chosen so that the object is never
-/// left holding anything no placement on this page draws:
+/// left holding anything nothing draws, and never loses anything something
+/// else draws:
 ///
 /// - an **uncut** outcome keeps it untouched, when some placement cut nothing
 ///   — so every other page that draws the form draws it as it was;
+/// - when every placement cut something and **something other than this
+///   page's walk draws the form** — another page, a form or an annotation
+///   there, a Type 3 glyph's procedure anywhere ([`Elsewhere`]) — it is left
+///   untouched too and every placement here draws a copy: what it holds is
+///   what that other drawer shows, and none of it is under these rectangles
+///   there;
 /// - otherwise the **first** placement's outcome is written into it, which
 ///   that placement then draws.
 ///
-/// Either way the form's own object is drawn by this page, so it never
-/// becomes an unreferenced stream still holding what a rectangle covered —
-/// which a copy for every placement would have made it.
+/// So the form's own object is drawn by this page or by something else, and
+/// never becomes an unreferenced stream still holding what a rectangle
+/// covered — which a copy for every placement, with nothing else drawing the
+/// form, would have made it.
 ///
 /// Children are decided before the forms that draw them, because a form
 /// whose `Do` must point at a child's copy is itself a different outcome. A
@@ -1521,6 +1551,7 @@ type Outcome = (usize, Vec<(usize, ObjRef)>);
 fn settle(
     editor: &mut DocumentEditor,
     walk: &Walk,
+    page: ObjRef,
     areas: &[Redaction],
     report: &mut RedactionReport,
 ) -> Vec<Target> {
@@ -1588,9 +1619,10 @@ fn settle(
     }
     close_downward(&mut old_way, &kids);
 
+    let mut elsewhere = Elsewhere::new(page);
     for &form in &order {
         if exact(&old_way, form) {
-            decide(editor, walk, form, &mut targets, report);
+            decide(editor, walk, form, &mut targets, report, &mut elsewhere);
         }
     }
 
@@ -1629,6 +1661,7 @@ fn decide(
     form: usize,
     targets: &mut [Target],
     report: &mut RedactionReport,
+    elsewhere: &mut Elsewhere,
 ) {
     let Some(entry) = walk.forms.get(form) else {
         return;
@@ -1656,23 +1689,23 @@ fn decide(
     let unchanged = |outcome: &Outcome| {
         outcome.1.is_empty() && entry.cuts.get(outcome.0).is_none_or(|c| c.glyphs == 0)
     };
-    let Some(home) = outcomes
-        .iter()
-        .find(|o| unchanged(o))
-        .or_else(|| outcomes.first())
-        .cloned()
-    else {
-        return;
+    // The outcome the form's own object holds, or `None` when it is left as
+    // it was for something else to draw and every placement here draws a
+    // copy ([`settle`] says which).
+    let home: Option<Outcome> = match outcomes.iter().find(|o| unchanged(o)) {
+        Some(uncut) => Some(uncut.clone()),
+        None if elsewhere.draws(editor, entry.reference) => None,
+        None => outcomes.first().cloned(),
     };
 
     // (object, the placement whose scope it is written in, its outcome)
     let mut writes: Vec<(ObjRef, usize, Outcome)> = Vec::new();
     let mut copies: Vec<(Outcome, ObjRef)> = Vec::new();
-    let mut home_written = unchanged(&home);
+    let mut home_written = home.as_ref().is_none_or(unchanged);
     for (&n, outcome) in entry.nodes.iter().zip(&outcomes) {
-        if *outcome == home {
+        if home.as_ref() == Some(outcome) {
             if !home_written {
-                writes.push((entry.reference, n, home.clone()));
+                writes.push((entry.reference, n, outcome.clone()));
                 home_written = true;
             }
             continue;
@@ -1712,6 +1745,222 @@ fn decide(
         editor.put_stream(at, StreamData { dict, data });
         report.glyphs += cut.glyphs;
         report.operations += cut.operations;
+    }
+}
+
+/// Which forms something other than the redacted page's walk draws, read
+/// once, the first time [`decide`] needs to know.
+///
+/// It is asked only about a form every placement of which on this page cut
+/// something — the one case where the form's own object would otherwise take
+/// a cut, and a drawer elsewhere would lose what this page's rectangles
+/// covered. Read lazily for that reason, and for the reason it is safe to:
+/// until the first such form, [`decide`] has written only copies, so the
+/// forms the read follows are the objects as they were before this
+/// redaction.
+struct Elsewhere {
+    page: ObjRef,
+    drawn: Option<HashSet<u32>>,
+}
+
+impl Elsewhere {
+    fn new(page: ObjRef) -> Elsewhere {
+        Elsewhere { page, drawn: None }
+    }
+
+    /// Whether something other than this page's walk draws `form`.
+    fn draws(&mut self, editor: &DocumentEditor, form: ObjRef) -> bool {
+        let page = self.page;
+        self.drawn
+            .get_or_insert_with(|| drawn_elsewhere(editor, page))
+            .contains(&form.num)
+    }
+}
+
+/// Every form drawn by something other than `page`'s walk, by object
+/// number.
+///
+/// **Drawn, not named.** A page's resources naming a form is not a page
+/// drawing it — one `/Resources` dictionary shared by every page is an
+/// ordinary way to write a file — and counting a name would leave a form
+/// whose every placement here was cut whole in the file with nothing drawing
+/// it, holding exactly what the rectangles covered. So each other page's
+/// content is read for its `Do`s, resolved in the scope that makes them
+/// (8.10.1), into every form at any depth, every appearance of every
+/// annotation on it (12.5.5, every state, as the walk reads them), and the
+/// glyph procedures of every Type 3 face it selects (9.6.5).
+///
+/// This page is read too, for one thing only: the glyph procedures of the
+/// Type 3 faces it selects, whose `Do`s the walk does not enter — it
+/// measures a procedure rather than cutting it ([`cut_stream`]) — and whose
+/// forms are drawn, through the procedure, as they are in the file.
+///
+/// A procedure's `Do` is resolved in the enclosing scope, where this
+/// engine's interpreter runs it, **and** in the face's own `/Resources`,
+/// where 9.6.5 puts it: a drawer either reader would find counts. Every
+/// procedure of a face counts, not only those of the glyphs shown, and a face
+/// is read in the first scope that selects it; both err toward *drawn*,
+/// which costs a copy rather than a cut. Not read, as the walk does not read
+/// them: a tiling pattern's cell and a soft mask's group.
+///
+/// One read of each stream for each of the two roles, so the work is the
+/// document's size; [`MAX_FORM_DEPTH`] bounds the nesting, as it bounds the
+/// walk's.
+fn drawn_elsewhere(editor: &DocumentEditor, page: ObjRef) -> HashSet<u32> {
+    let mut scan = Scan {
+        editor,
+        drawn: HashSet::new(),
+        entered: HashSet::new(),
+        faces: HashSet::new(),
+    };
+    for other in editor.page_refs() {
+        let counting = other != page;
+        let Some(read) = EditorPage::read(editor, other) else {
+            continue;
+        };
+        scan.stream(&read.content, &read.resources, counting, 0);
+        for appearance in appearances_on(editor, other) {
+            if counting {
+                scan.drawn.insert(appearance.stream.num);
+            }
+            scan.form(
+                appearance.stream,
+                &appearance.dict,
+                &read.resources,
+                counting,
+                1,
+            );
+        }
+    }
+    scan.drawn
+}
+
+/// One [`drawn_elsewhere`] read in progress.
+struct Scan<'a> {
+    editor: &'a DocumentEditor,
+    drawn: HashSet<u32>,
+    /// Forms read, and whether their `Do`s counted: one drawn on this page
+    /// is read for its procedures, and again if a procedure draws it.
+    entered: HashSet<(u32, bool)>,
+    /// Type 3 faces whose procedures were read: by object, or by resource
+    /// name for a face written directly into a resource dictionary.
+    faces: HashSet<Vec<u8>>,
+}
+
+impl Scan<'_> {
+    /// Reads one content stream's `Do`s and `Tf`s.
+    fn stream(&mut self, content: &[u8], scope: &Dict, counting: bool, depth: u32) {
+        if depth > MAX_FORM_DEPTH {
+            return;
+        }
+        let mut tokens = Tokenizer::new(content);
+        let mut operands: Vec<Token> = Vec::new();
+        while let Some(token) = tokens.next_token() {
+            let Token::Operator(op) = &token else {
+                operands.push(token);
+                continue;
+            };
+            match op.as_slice() {
+                // 8.9.7: the samples are not tokens, and a `Do` spelled by
+                // them is not a `Do`.
+                b"BI" => {
+                    let consumed = tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                    let at = tokens.position();
+                    tokens.seek(at.saturating_add(consumed));
+                }
+                b"Do" => {
+                    if let Some(Token::Name(name)) = operands.last() {
+                        let name = name.clone();
+                        self.xobject(scope, &name, counting, depth);
+                    }
+                }
+                b"Tf" => {
+                    let named = operands.len().checked_sub(2).and_then(|i| operands.get(i));
+                    if let Some(Token::Name(name)) = named {
+                        let name = name.clone();
+                        self.face(scope, &name, depth);
+                    }
+                }
+                _ => {}
+            }
+            operands.clear();
+        }
+    }
+
+    fn xobject(&mut self, scope: &Dict, name: &[u8], counting: bool, depth: u32) {
+        let Some((reference, dict)) = resolve_xobject(self.editor, scope, name) else {
+            return;
+        };
+        let subtype = Resolve::resolve_key(self.editor, &dict, self.editor.intern(b"Subtype"))
+            .as_name()
+            .and_then(|n| self.editor.document().name_bytes(n));
+        if subtype.as_deref() != Some(b"Form".as_slice()) {
+            return;
+        }
+        if counting {
+            self.drawn.insert(reference.num);
+        }
+        self.form(reference, &dict, scope, counting, depth + 1);
+    }
+
+    /// Reads a form's content in its own resources, or the scope that drew
+    /// it (8.10.1).
+    fn form(&mut self, reference: ObjRef, dict: &Dict, scope: &Dict, counting: bool, depth: u32) {
+        if !self.entered.insert((reference.num, counting)) {
+            return;
+        }
+        let Some(content) = self.editor.stream_bytes(reference) else {
+            return;
+        };
+        let resources = Resolve::resolve_key(self.editor, dict, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .unwrap_or_else(|| scope.clone());
+        self.stream(&content, &resources, counting, depth);
+    }
+
+    /// Reads every glyph procedure of the Type 3 face `name` selects, which
+    /// draws for any page that shows its glyphs — so its `Do`s count
+    /// wherever it was selected.
+    fn face(&mut self, scope: &Dict, name: &[u8], depth: u32) {
+        let editor = self.editor;
+        let fonts = Resolve::resolve_key(editor, scope, editor.intern(b"Font"));
+        let Some(entry) = fonts.as_dict().and_then(|f| f.get(editor.intern(name))) else {
+            return;
+        };
+        let (key, font) = match entry {
+            Object::Ref(r) => (
+                format!("R{} {}", r.num, r.gen).into_bytes(),
+                editor.get(*r).and_then(|o| o.as_dict().cloned()),
+            ),
+            Object::Dict(d) => ([b"/".as_slice(), name].concat(), Some(d.clone())),
+            _ => return,
+        };
+        let Some(font) = font else {
+            return;
+        };
+        let subtype = font
+            .get_name(editor.intern(b"Subtype"))
+            .and_then(|n| editor.document().name_bytes(n));
+        if subtype.as_deref() != Some(b"Type3".as_slice()) || !self.faces.insert(key) {
+            return;
+        }
+        let own = Resolve::resolve_key(editor, &font, Name::RESOURCES)
+            .as_dict()
+            .cloned();
+        let procs = Resolve::resolve_key(editor, &font, editor.intern(b"CharProcs"));
+        let Some(procs) = procs.as_dict() else {
+            return;
+        };
+        for (_, value) in procs.iter() {
+            let Some(content) = value.as_objref().and_then(|r| editor.stream_bytes(r)) else {
+                continue;
+            };
+            self.stream(&content, scope, true, depth + 1);
+            if let Some(own) = &own {
+                self.stream(&content, own, true, depth + 1);
+            }
+        }
     }
 }
 
@@ -7819,5 +8068,333 @@ mod glyph_procedures {
         assert_eq!(report.glyphs, 1, "the upper placement's A");
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
         assert_eq!(lines_of(after), vec![(50.0, "SECRET".to_string())]);
+    }
+}
+
+/// A form the redacted page shares with something else, cut at **every**
+/// placement on the redacted page.
+///
+/// Every fixture is two pages over one form, `/Fm0`, drawing `PUBLIC SECRET`
+/// in the vendored Liberation Serif at y 50 (the form of
+/// [`tests_support::public_secret_drawn_by`]). Page one draws it at y 50 and
+/// at y 200, and the two rectangles take `SECRET` from the lower placement
+/// and `PUBLIC` from the upper, so no placement on page one is uncut. Page
+/// two draws the form some other way, or only names it.
+///
+/// Until October 2026 the form's own object took page one's first outcome
+/// whatever else drew it, and page two lost `SECRET` to a rectangle on page
+/// one, unreported.
+#[cfg(test)]
+mod forms_elsewhere {
+    use super::tests_support::*;
+    use super::*;
+
+    fn band(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// `SECRET` from the lower placement, `PUBLIC` from the upper.
+    fn bands() -> [Redaction; 2] {
+        [band(56.0, 45.0, 400.0, 70.0), band(0.0, 195.0, 52.0, 220.0)]
+    }
+
+    const PAGE_ONE: &[u8] = b"q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q";
+
+    /// Two pages: `/Fm0`, then `/Fm1` drawing `/Fm0` (registered after it, so
+    /// its resources name it), page one as above, and page two drawing
+    /// `page_two`.
+    fn two_pages(page_two: &[u8]) -> Vec<u8> {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        for (name, content) in [
+            (
+                b"Fm0".as_slice(),
+                b"BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET".as_slice(),
+            ),
+            (b"Fm1", b"/Fm0 Do"),
+        ] {
+            assert!(builder.add_form(
+                name,
+                &tinker_pdf_cos::FormXObject {
+                    bbox: [0.0, 0.0, 400.0, 300.0],
+                    matrix: None,
+                    group: None,
+                    content,
+                }
+            ));
+        }
+        builder.add_page(400.0, 300.0, |p| p.raw(PAGE_ONE));
+        builder.add_page(400.0, 300.0, |p| p.raw(page_two));
+        builder.finish()
+    }
+
+    /// Page `index`, rendered with its annotations.
+    fn render_page(bytes: Vec<u8>, index: u32) -> crate::Bitmap {
+        crate::Document::open(bytes)
+            .expect("it reopens")
+            .page(index)
+            .expect("the page")
+            .render(&crate::RenderOptions::default())
+    }
+
+    /// Page one lost exactly what its rectangles covered, at each placement.
+    fn page_one_is_cut_exactly(bytes: &[u8], report: &RedactionReport) {
+        assert_eq!(report.glyphs, 12, "SECRET below and PUBLIC above");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(
+            lines_of(bytes.to_vec()),
+            vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())]
+        );
+        let rendered = render_page(bytes.to_vec(), 0);
+        for redaction in bands() {
+            assert_eq!(ink_in(&rendered, 300.0, redaction.area), 0);
+        }
+    }
+
+    fn saved(editor: &DocumentEditor) -> Vec<u8> {
+        editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        })
+    }
+
+    /// The row's exit: page two draws `/Fm0` itself, and still draws all of
+    /// it. The form's own object is left as it was — page two is what draws
+    /// it now — and each of page one's placements draws a copy of its own.
+    #[test]
+    fn a_form_another_page_draws_is_left_whole_when_every_placement_here_is_cut() {
+        let bytes = two_pages(b"/Fm0 Do");
+        let before = render_page(bytes.clone(), 1);
+        let (after, report) = redact(open(bytes), &bands());
+        page_one_is_cut_exactly(&after, &report);
+
+        assert_eq!(
+            lines_on(after.clone(), 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())],
+            "page two was not redacted and lost nothing"
+        );
+        assert_eq!(
+            differing_outside(
+                &before,
+                &render_page(after.clone(), 1),
+                300.0,
+                Rect {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 0.0,
+                    y1: 0.0
+                }
+            ),
+            0,
+            "page two renders exactly as it did"
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            forms_in(&reopened),
+            4,
+            "Fm0 and Fm1 as they were, and a copy for each placement on page one"
+        );
+    }
+
+    /// Page two draws `/Fm0` only through `/Fm1`: drawn at a depth is drawn.
+    #[test]
+    fn a_form_another_page_draws_through_a_form_of_its_own_is_left_whole() {
+        let (after, report) = redact(open(two_pages(b"/Fm1 Do")), &bands());
+        page_one_is_cut_exactly(&after, &report);
+        assert_eq!(
+            lines_on(after, 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())]
+        );
+    }
+
+    /// Page two draws `/Fm0` as an annotation's appearance, not from its
+    /// content: 12.5.5 draws it there all the same.
+    #[test]
+    fn a_form_an_annotation_on_another_page_shows_is_left_whole() {
+        let bytes = two_pages(b"");
+        let mut editor = DocumentEditor::new(open(bytes));
+        let page_two = editor.page_refs()[1];
+        let Some(Object::Dict(page)) = editor.get(page_two) else {
+            panic!("page two is a dictionary");
+        };
+        let resources = inherited_resources(&editor, &page);
+        let (form, _) = resolve_xobject(&editor, &resources, b"Fm0").expect("Fm0 is in scope");
+        let mut ap = Dict::new();
+        ap.insert(editor.intern(b"N"), Object::Ref(form));
+        let mut annotation = Dict::new();
+        annotation.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Stamp")),
+        );
+        annotation.insert(
+            editor.intern(b"Rect"),
+            Object::Array([0, 0, 400, 300].iter().map(|v| Object::Int(*v)).collect()),
+        );
+        annotation.insert(editor.intern(b"AP"), Object::Dict(ap));
+        let mut page = page;
+        page.insert(
+            editor.intern(b"Annots"),
+            Object::Array(vec![Object::Dict(annotation)]),
+        );
+        editor.put(page_two, Object::Dict(page));
+        let bytes = saved(&editor);
+        let before = render_page(bytes.clone(), 1);
+        assert!(
+            ink_in(
+                &before,
+                300.0,
+                Rect {
+                    x0: 57.0,
+                    y0: 51.0,
+                    x1: 99.0,
+                    y1: 58.0
+                }
+            ) > 20,
+            "page two's stamp draws SECRET"
+        );
+
+        let (after, report) = redact(open(bytes), &bands());
+        page_one_is_cut_exactly(&after, &report);
+        assert_eq!(
+            differing_outside(
+                &before,
+                &render_page(after, 1),
+                300.0,
+                Rect {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 0.0,
+                    y1: 0.0
+                }
+            ),
+            0,
+            "page two's stamp renders exactly as it did"
+        );
+    }
+
+    /// Page two draws `/Fm0` from a Type 3 glyph's procedure, which runs it
+    /// in page two's scope: a glyph shown is a form drawn.
+    #[test]
+    fn a_form_a_glyph_procedure_on_another_page_draws_is_left_whole() {
+        let bytes = two_pages(b"");
+        let mut editor = DocumentEditor::new(open(bytes));
+        let page_two = editor.page_refs()[1];
+        let Some(Object::Dict(mut page)) = editor.get(page_two) else {
+            panic!("page two is a dictionary");
+        };
+        let procedure = editor.allocate();
+        editor.put_stream(
+            procedure,
+            StreamData {
+                dict: Dict::new(),
+                data: b"1000 0 d0 1000 0 0 1000 0 0 cm /Fm0 Do".to_vec(),
+            },
+        );
+        let mut face = Dict::new();
+        let mut procs = Dict::new();
+        procs.insert(editor.intern(b"a"), Object::Ref(procedure));
+        let mut encoding = Dict::new();
+        encoding.insert(
+            editor.intern(b"Differences"),
+            Object::Array(vec![Object::Int(65), Object::Name(editor.intern(b"a"))]),
+        );
+        for (key, value) in [
+            (b"Type".as_slice(), Object::Name(editor.intern(b"Font"))),
+            (b"Subtype", Object::Name(editor.intern(b"Type3"))),
+            (
+                b"FontMatrix",
+                Object::Array(
+                    [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]
+                        .iter()
+                        .map(|v| Object::Real(*v))
+                        .collect(),
+                ),
+            ),
+            (
+                b"FontBBox",
+                Object::Array([0, 0, 1000, 1000].iter().map(|v| Object::Int(*v)).collect()),
+            ),
+            (b"CharProcs", Object::Dict(procs)),
+            (b"Encoding", Object::Dict(encoding)),
+            (b"FirstChar", Object::Int(65)),
+            (b"LastChar", Object::Int(65)),
+            (b"Widths", Object::Array(vec![Object::Int(1000)])),
+        ] {
+            face.insert(editor.intern(key), value);
+        }
+        let face_ref = editor.allocate();
+        editor.put(face_ref, Object::Dict(face));
+
+        let mut resources = inherited_resources(&editor, &page);
+        let mut fonts = Resolve::resolve_key(&editor, &resources, editor.intern(b"Font"))
+            .as_dict()
+            .cloned()
+            .unwrap_or_default();
+        fonts.insert(editor.intern(b"T3"), Object::Ref(face_ref));
+        resources.insert(editor.intern(b"Font"), Object::Dict(fonts));
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        let content = editor.allocate();
+        editor.put_stream(
+            content,
+            StreamData {
+                dict: Dict::new(),
+                data: b"BT /T3 1 Tf 0 0 Td (A) Tj ET".to_vec(),
+            },
+        );
+        page.insert(Name::CONTENTS, Object::Ref(content));
+        editor.put(page_two, Object::Dict(page));
+        let bytes = saved(&editor);
+        assert_eq!(
+            lines_on(bytes.clone(), 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())],
+            "page two's one glyph draws the form"
+        );
+
+        let (after, report) = redact(open(bytes), &bands());
+        page_one_is_cut_exactly(&after, &report);
+        assert_eq!(
+            lines_on(after, 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())]
+        );
+    }
+
+    /// Page two's resources **name** `/Fm0` and its content never draws it.
+    /// Named is not drawn: the form's own object takes page one's first
+    /// outcome, as it does when nothing else names it, so the uncut text is
+    /// in no stream — leaving it whole for a page that never draws it would
+    /// have left it in the file with nothing drawing it.
+    #[test]
+    fn a_form_another_page_only_names_is_still_cut_in_place() {
+        let bytes = two_pages(b"");
+        let doc = open(bytes.clone());
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        let page_two = editor.page_refs()[1];
+        let Some(Object::Dict(page)) = editor.get(page_two) else {
+            panic!("page two is a dictionary");
+        };
+        let resources = inherited_resources(&editor, &page);
+        assert!(
+            resolve_xobject(&editor, &resources, b"Fm0").is_some(),
+            "the fixture: page two's resources name the form"
+        );
+
+        let report = apply(&mut editor, 0, &bands()).expect("page one");
+        let after = saved(&editor);
+        page_one_is_cut_exactly(&after, &report);
+        let reopened = CosDocument::open(after).expect("it reopens");
+        let streams = all_streams(&reopened);
+        assert!(
+            !streams.contains("PUBLIC SECRET"),
+            "no stream holds the uncut text: {streams}"
+        );
+        assert_eq!(forms_in(&reopened), 3, "Fm0, Fm1 and one copy");
     }
 }

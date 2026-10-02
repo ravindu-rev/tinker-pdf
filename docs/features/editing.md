@@ -363,9 +363,20 @@ drawn inside a copied form is decided first, because a form whose `Do` names
 a copy is itself a different outcome. Placements that cut the same share one
 stream, and a form nothing was cut from is not written at all. The form's
 own object keeps an uncut outcome when there is one, so another page that
-draws it draws it as it was; when every placement cut something it takes the
-first placement's outcome, so it is still drawn by the redacted page and
-never left in the file holding covered text with nothing drawing it. The
+draws it draws it as it was. When every placement cut something, the object
+is left as it was if anything else **draws** the form — another page, a form
+or an annotation appearance there, a Type 3 glyph's procedure anywhere — and
+every placement on the redacted page draws a copy; only when nothing else
+draws it does it take the first placement's outcome, so it is never left in
+the file holding covered text with nothing drawing it. Drawn rather than
+named, because one `/Resources` shared by every page names every form, and
+counting that would leave exactly such a stream behind. That read is made
+once per redaction, and only when such a form arises; until October 2026 it
+was not made at all, and a page sharing the form lost what the redacted
+page's rectangles covered (`redact.rs`'s `forms_elsewhere`, a page two that
+draws the form directly, through a form of its own, as an annotation's
+appearance and from a glyph procedure, and one whose resources only name
+it). The
 guard that stops a self-referential form recursing is keyed by the transform
 as well as by the object — bitwise and not by tolerance, because two
 transforms an ulp apart are two placements and calling them one is a
@@ -594,7 +605,7 @@ if report.untouched.is_empty() {
 | Redacting a run whose text rendering matrix is not finite | left whole, `UnmeasurableFrame` (`a_non_finite_text_matrix_is_left_uncut_and_reported`) | a position that is not a number cannot be compared with a rectangle. Permanent. The whole showing operand is left, never half of it | — |
 | Partial image redaction | the whole image is scrubbed (`RedactionReport::images`) | a hole needs a re-encode through a codec this build may not write | [filters](filters.md) |
 | Cutting exactly, a copy per placement, a form that **draws itself** (directly or through another form) or one **placed past `MAX_PLACEMENTS`** — and every form either draws | the cut is the union over every placement, in the one stream, and `RedactionWarning::RepeatedForm` names the form and its placement count when a cut was made or a placement went unmeasured (`a_self_referential_form_under_a_moving_transform_terminates`, `a_form_drawn_by_one_placed_past_the_cap_is_cut_the_old_way_too`) | a copy per placement of a form that draws itself would be a copy per round of a recursion, and a placement past the cap was never measured, so no copy could say what it should hold; what such a form draws goes the same way because its one stream names its children by their own objects. Over-removal is the direction this module errs in everywhere; the alternative here is the leak | 8.10 |
-| Leaving a form another page draws untouched when **every** placement of it on the redacted page was cut | the form's own object takes the first placement's outcome, so the other page loses what this page's rectangles covered, and nothing reports it | which pages or forms elsewhere draw an object is not something a redaction of one page reads; the object has to hold something this page draws, or it is left in the file holding the covered text with nothing drawing it. When some placement here is uncut the object is left whole, and the other page is exact (`a_form_another_page_draws_is_left_whole_when_a_placement_here_is_uncut`). A [roadmap](../ROADMAP.md) row | 8.10 |
+| Redacting what a **tiling pattern's cell** or a **soft mask's group** draws | not read, and the report does not say so: the walk follows `Do`, annotation appearances and Type 3 procedures, and a cell (8.7.3.1) or a mask's group (11.6.5.2) is reached through `scn` or `gs` instead; the read of what else draws a form does not follow them either | a cell is painted at every tile of whatever it fills, so cutting one is a form drawn at as many placements as the fill has tiles, which is a design rather than a fix. A [roadmap](../ROADMAP.md) row (Editing) | 8.7.3, 11.6.5 |
 | Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
 | Appearance synthesis for other subtypes | `add_annotation` inserts the dictionary; no `/AP` is generated | seven subtypes cover the common producer gap; others render only if they carry their own `/AP` | — |
 | Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` — after the default save too, because `subset::apply` cuts embedded programs and not Type 3 fonts | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. Dropping a procedure no use is left drawing is the [roadmap](../ROADMAP.md) Editing row's | 9.6.5 |
@@ -749,8 +760,13 @@ if report.untouched.is_empty() {
   rectangle — which is what lets each of them assert the safety property at
   both levels, the covered glyph's code absent from every stream **and** no
   ink inside the rectangle.
-- Two more redaction modules draw in the vendored Liberation Serif, so what
-  they cut is read back by the extractor as well as by ink. `appearance_streams`:
+- Three more redaction modules draw in the vendored Liberation Serif, so what
+  they cut is read back by the extractor as well as by ink. `forms_elsewhere`:
+  a form cut at every placement on page one, left whole for a page two that
+  draws it directly, through a form of its own, as an annotation's
+  appearance or from a glyph procedure — page two extracting and rendering
+  exactly as before — and cut in place when page two's resources only name
+  it. `appearance_streams`:
   an annotation's appearance cut where 12.5.5 fits it onto `/Rect`, a
   quarter-turned one where its `/Matrix` turns it, both states of `/N` and of
   `/D`, the `/R` and a hidden annotation's appearance all cut, one appearance
