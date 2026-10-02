@@ -108,7 +108,9 @@ it was.
   carry `/Size`, the MD5 `/CheckSum` Table 45 asks for and the dates given,
   under a `/Filespec` with `/F`, `/UF`, `/Desc` and an `/EF` naming the stream,
   filed in `/Names /EmbeddedFiles` beside whatever is filed there already —
-  `attachments()` lists it. A name already filed is `AttachError::NameTaken`
+  a tree written directly into `/Names` included, whose entries are carried
+  into the new tree rather than dropped — and `attachments()` lists it. A
+  name already filed is `AttachError::NameTaken`
   rather than a second entry under one key, which a reader resolves by
   whichever it reaches first.
 - `set_outline(&[OutlineEntry])` adds an outline or replaces one, in the
@@ -117,12 +119,26 @@ it was.
   and a page moved afterwards takes its destination with it. The builder's
   writability rule is the editor's — a tree the reader would truncate is
   refused whole.
+- Replacing labels, attachments or an outline **deletes the old structure's
+  nodes, and only those**. The old structure's links are the producer's, so
+  they are not trusted to stay inside it: below the root, a node is a
+  dictionary with no `/Type` (neither 7.9.6 Table 36's tree nodes nor 12.3.3
+  Table 153's items have one), and it is deleted only when nothing reaches it
+  once the replacement is in place — read as a save reads it, the pending
+  page order included. A last outline item whose `/Next` names an object the
+  file does not have names, once the editor allocates that number, the new
+  outline's own root, a page inserted earlier or an object a caller has put
+  and not yet linked; a `/Kids` into the page tree names pages. None of them
+  is deleted. A root written directly into the catalog has its nodes deleted
+  like an indirect one's.
 - `set_title`, `set_author`, `set_subject`, `set_keywords`, `set_creator`,
   `set_producer`, `set_creation_date(Date)`, `set_modification_date(Date)` and
   `set_trapped(Trapped)` are `/Info` (14.3.3) typed, over `set_info`. A date is
   spelled as 7.9.4 spells one — the closing apostrophe for a 1.x document,
   without it for 2.0 — and one with a field the syntax has no digits for is
-  refused (`None`).
+  refused (`None`), a UTC offset of a day or more among them, whatever the
+  caller's `i32` holds (`i32::MIN` included, which has no `i32` absolute
+  value).
 - `set_xmp_metadata(packet)` makes a caller's packet the catalog's
   `/Metadata`, `/Type /Metadata /Subtype /XML`, verbatim. **Never
   compressed**: the writer leaves every `/Type /Metadata` stream unfiltered
@@ -520,6 +536,22 @@ if report.untouched.is_empty() {
   taken over the wrong bytes 1, a label style's case 2, a closed entry's
   `/Count` sign 3, the page-0 rule 1, an `/Info` write that never reports the
   packet 1, `/Trapped` 1, a taken attachment name 1.
+- `crates/tinker-pdf-cos/tests/editor_structures.rs` — replacing a structure
+  on a file whose old one is damaged or written in place, each saved both
+  ways and held to the strict validator: an old outline's dangling `/Next` at
+  the number that becomes the new outline's root, a page inserted earlier, or
+  an object a caller has put and not linked, deletes none of them; a `/Next`
+  into a page and a label tree's `/Kids` into the page tree delete no page;
+  an outline and a label tree written directly into the catalog have their
+  nodes deleted; an attachment tree written directly into `/Names`, with its
+  leaves in place or as objects of their own, keeps its file beside the new
+  one; and a UTC offset no zone has, `i32::MIN` included, is refused by
+  `set_creation_date`, `set_modification_date` and `attach_file` rather than
+  panicking, with the widest offsets the syntax spells still written. Each of
+  the ten failed against the code before the fix. No injection campaign is
+  counted for this file yet: running the suites against a put-back defect
+  was refused by the permission policy of the session that wrote it, so the
+  evidence is the before-and-after run alone, and a campaign is owed.
 - `crates/tinker-pdf-cos/tests/sanitise.rs` — one hand-written fixture with
   every kind in every place a viewer looks (listed in the file's header) and
   what must survive beside them. After `Sanitise::ALL`, saved both ways:

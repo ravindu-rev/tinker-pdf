@@ -8,7 +8,7 @@
 //! a read is an equality rather than a translation. A setter that refuses
 //! writes nothing: every check runs before the first object is put.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use super::{without, DocumentEditor};
 use crate::build::{outline_is_writable, OutlineEntry};
@@ -159,7 +159,9 @@ pub(crate) fn pdf_date(date: &Date, version: (u8, u8)) -> Option<String> {
         && date.hour <= 23
         && date.minute <= 59
         && date.second <= 59
-        && date.utc_offset_minutes.is_none_or(|m| m.abs() < 24 * 60);
+        // `unsigned_abs`, because `i32::MIN` has no `i32` absolute value: an
+        // offset is whatever the caller's `i32` holds, and none of it panics.
+        && date.utc_offset_minutes.is_none_or(|m| m.unsigned_abs() < 24 * 60);
     if !in_range {
         return None;
     }
@@ -237,10 +239,12 @@ impl DocumentEditor {
         }
     }
 
-    /// Deletes the nodes of a structure this editor is replacing: `root` and
-    /// every node reached from it through the `links` keys, cycle-guarded and
-    /// capped at [`limits::MAX_TREE_ENTRIES`], the bound every reader of these
-    /// structures stops at.
+    /// Deletes the nodes of a structure this editor has just replaced: `old`,
+    /// the value the catalog held, when it is an object of its own, and every
+    /// node reached from it through the `links` keys, cycle-guarded and capped
+    /// at [`limits::MAX_TREE_ENTRIES`], the bound every reader of these
+    /// structures stops at. A root written directly into the catalog has no
+    /// object to delete; the nodes under it do.
     ///
     /// Nodes only — the dictionaries of a tree's `/Kids` chain or an outline's
     /// `/First` and `/Next` chain. What a node's entries *point at* (a file
@@ -248,25 +252,58 @@ impl DocumentEditor {
     /// replacement may point at it too. Deleted rather than orphaned because an
     /// orphan is still in a rewrite unless it is garbage-collected, and an old
     /// outline's titles are content.
-    fn retire(&mut self, root: ObjRef, links: &[Name]) {
+    ///
+    /// **The links are the producer's, so they are not trusted to stay inside
+    /// the structure.** Below the root, a node is deleted only when it is one —
+    /// a dictionary with no `/Type`, since neither 7.9.6 Table 36's tree nodes
+    /// nor 12.3.3 Table 153's outline items have one — and when nothing
+    /// reaches it once the replacement is in place, read as a save reads it
+    /// (the pending page order included). A last outline item whose `/Next`
+    /// names an object the file does not have names, once this edit or an
+    /// earlier one allocates that number, something new: the new outline's own
+    /// root, a page inserted before, an object a caller has put and not yet
+    /// linked. A `/Kids` or `/Next` into the page tree names pages. None of
+    /// them is deleted, and none is walked through, since whatever a live
+    /// object links to is live too.
+    fn retire(&mut self, old: &Object, links: &[Name]) {
+        let push = |dict: &Dict, stack: &mut Vec<(ObjRef, bool)>| {
+            for link in links {
+                match dict.get(*link) {
+                    Some(Object::Ref(r)) => stack.push((*r, false)),
+                    Some(Object::Array(items)) => {
+                        stack.extend(items.iter().filter_map(|i| Some((i.as_objref()?, false))));
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let mut stack = Vec::new();
+        match old {
+            Object::Ref(r) => stack.push((*r, true)),
+            Object::Dict(dict) => push(dict, &mut stack),
+            _ => {}
+        }
+        if stack.is_empty() {
+            return;
+        }
+        let live = self.reached(&self.merged_trailer(), &BTreeMap::new());
         let mut visited = HashSet::new();
-        let mut stack = vec![root];
-        while let Some(node) = stack.pop() {
+        while let Some((node, root)) = stack.pop() {
             if visited.len() >= limits::MAX_TREE_ENTRIES || !visited.insert(node.num) {
+                continue;
+            }
+            if live.contains(&node.num) {
                 continue;
             }
             let Some(Object::Dict(dict)) = self.get(node) else {
                 continue;
             };
-            for link in links {
-                match dict.get(*link) {
-                    Some(Object::Ref(r)) => stack.push(*r),
-                    Some(Object::Array(items)) => {
-                        stack.extend(items.iter().filter_map(Object::as_objref));
-                    }
-                    _ => {}
-                }
+            // The root is the structure's because the catalog said so; an
+            // outline's may say `/Type /Outlines`.
+            if !root && dict.contains_key(Name::TYPE) {
+                continue;
             }
+            push(&dict, &mut stack);
             self.delete(node);
         }
     }
@@ -275,7 +312,9 @@ impl DocumentEditor {
     ///
     /// Written as the catalog's `/PageLabels` number tree, one
     /// `/Type /PageLabel` dictionary per range, keyed by its first page; the
-    /// tree the document had is deleted. An empty slice removes the labels
+    /// tree the document had is deleted, node by node, where nothing else
+    /// reaches it (see `retire` for what counts as a node of a damaged
+    /// one). An empty slice removes the labels
     /// altogether, which reads back as no labels rather than as empty ones.
     /// The prefix is a text string, encoded for the version the document
     /// declares.
@@ -290,7 +329,7 @@ impl DocumentEditor {
         let Some(catalog) = self.catalog() else {
             return Err(PageLabelError::NoCatalog);
         };
-        let old = catalog.get_ref(key);
+        let old = catalog.get(key).cloned();
 
         let root = if ranges.is_empty() {
             None
@@ -355,13 +394,17 @@ impl DocumentEditor {
             None => *catalog = without(catalog, key),
         });
         if let Some(old) = old {
-            self.retire(old, &[Name::KIDS]);
+            self.retire(&old, &[Name::KIDS]);
         }
         Ok(())
     }
 
     /// Embeds a file (7.11.4) and files it under `file.name` in the catalog's
-    /// `/Names /EmbeddedFiles` tree, beside whatever is filed there already.
+    /// `/Names /EmbeddedFiles` tree, beside whatever is filed there already —
+    /// in a tree of its own objects or one written directly into `/Names`,
+    /// whose entries are carried into the new tree all the same. The old
+    /// tree's nodes are deleted where nothing else reaches them; the file
+    /// specifications they held are not.
     ///
     /// The file specification carries `/F`, `/UF` and `/Desc`, and an `/EF`
     /// naming one embedded file stream under both `/F` and `/UF`. The stream
@@ -412,10 +455,14 @@ impl DocumentEditor {
         }
 
         let tree_key = self.intern(b"EmbeddedFiles");
-        let old = self.names_dictionary().0.get_ref(tree_key);
-        let mut entries = match old {
-            Some(root) => trees::name_tree_in(self, root),
-            None => Vec::new(),
+        let old = self.names_dictionary().0.get(tree_key).cloned();
+        // A tree written directly into `/Names` holds the document's
+        // attachments all the same — 7.7.4 says indirect, and a viewer lists
+        // either — so its entries are carried into the new tree, not dropped.
+        let mut entries = match &old {
+            Some(Object::Ref(root)) => trees::name_tree_in(self, *root),
+            Some(Object::Dict(root)) => trees::name_tree_at(self, root),
+            _ => Vec::new(),
         };
         if entries
             .iter()
@@ -474,7 +521,7 @@ impl DocumentEditor {
             ));
             let root = editor.add_name_tree(entries).map_err(AttachError::Tree)?;
             editor.set_names_entry(tree_key, Some(Object::Ref(root)));
-            if let Some(old) = old {
+            if let Some(old) = &old {
                 editor.retire(old, &[Name::KIDS]);
             }
             Ok(stream)
@@ -494,7 +541,9 @@ impl DocumentEditor {
     /// the document's version; `/Count` carries 12.3.3's sign for each
     /// entry's `open`.
     ///
-    /// The outline the document had is deleted, item by item. An empty slice
+    /// The outline the document had is deleted, item by item — its own items,
+    /// which a damaged file's `/Next` into the page tree or to a number this
+    /// editor has since handed out does not stretch to. An empty slice
     /// removes the outline: no `/Outlines` at all, which is not the same file
     /// as an empty outline dictionary.
     ///
@@ -510,7 +559,7 @@ impl DocumentEditor {
         let Some(catalog) = self.catalog() else {
             return false;
         };
-        let old = catalog.get_ref(key);
+        let old = catalog.get(key).cloned();
 
         let root = if entries.is_empty() {
             None
@@ -540,7 +589,7 @@ impl DocumentEditor {
         });
         if let Some(old) = old {
             let (first, next) = (self.intern(b"First"), self.intern(b"Next"));
-            self.retire(old, &[first, next]);
+            self.retire(&old, &[first, next]);
         }
         true
     }

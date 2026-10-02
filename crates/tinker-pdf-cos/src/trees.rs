@@ -42,6 +42,23 @@ pub fn name_tree_in<R: Resolve + ?Sized>(doc: &R, root: ObjRef) -> Vec<(Vec<u8>,
         .collect()
 }
 
+/// [`name_tree_in`] for a root written **directly** where the tree belongs —
+/// 7.7.4 asks for an indirect `/Names` entry, a producer that wrote the
+/// dictionary in place still wrote a tree, and an editor adding to it must
+/// carry what it holds.
+#[must_use]
+pub(crate) fn name_tree_at<R: Resolve + ?Sized>(doc: &R, root: &Dict) -> Vec<(Vec<u8>, Object)> {
+    let mut out = Vec::new();
+    let mut visited = HashSet::new();
+    walk_node(doc, root, 0, &mut visited, &mut out, Key::Names);
+    out.into_iter()
+        .filter_map(|(k, v)| match k {
+            KeyValue::Bytes(b) => Some((b, v)),
+            KeyValue::Number(_) => None,
+        })
+        .collect()
+}
+
 /// Finds one entry of a name tree, descending by `/Limits` (7.9.6).
 ///
 /// A tree exists so a lookup does not have to read all of it: each interior
@@ -196,10 +213,23 @@ fn walk<R: Resolve + ?Sized>(
     let Ok(object) = doc.get(node) else {
         return;
     };
-    let Some(dict) = object.as_dict() else {
-        return;
-    };
+    if let Some(dict) = object.as_dict() {
+        walk_node(doc, dict, depth, visited, out, kind);
+    }
 
+    visited.remove(&node.num);
+}
+
+/// One node's entries and its `/Kids`, once [`walk`] has resolved it — or a
+/// root that is no object of its own ([`name_tree_at`]).
+fn walk_node<R: Resolve + ?Sized>(
+    doc: &R,
+    dict: &Dict,
+    depth: u32,
+    visited: &mut HashSet<u32>,
+    out: &mut Vec<(KeyValue, Object)>,
+    kind: Key,
+) {
     // 7.9.6: an intermediate node has /Kids, a leaf has /Names or /Nums. A
     // node may legally have both when it is the root of a one-level tree.
     let leaf_key = match kind {
@@ -229,8 +259,6 @@ fn walk<R: Resolve + ?Sized>(
             walk(doc, kid, depth + 1, visited, out, kind);
         }
     }
-
-    visited.remove(&node.num);
 }
 
 /// Looks one key up in a name tree.
