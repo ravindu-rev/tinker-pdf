@@ -107,6 +107,17 @@
 //! October 2026 the bound was a bare number in [`rewrite`] and what lay past
 //! it was left with nothing in the report.
 //!
+//! And two kinds of content a page draws that this module does not read at
+//! all: a **tiling pattern's cell** (8.7.3.1), painted at every tile of
+//! whatever it fills, and a **soft mask's group** (11.6.5.2), drawn as the
+//! alpha of what lies under it. Cutting a cell is a form drawn at as many
+//! placements as its fill has tiles, which is a design rather than a fix;
+//! so a cell or a group that shows text or draws an image is named instead,
+//! by the resource name the `scn` or the `gs` gave
+//! ([`RedactionWarning::PatternOrMask`], [`unread`]), and one that only
+//! paints paths is not, because nothing in it is anything this module
+//! removes. Until October 2026 neither was read or named.
+//!
 //! # Vertical writing
 //!
 //! A fourth class, `VerticalRun`, was refused until September 2026 and is
@@ -380,6 +391,20 @@
 //! | the cap one `Do` tighter | 3 |
 //! | the warning raised with no rectangle | **1** |
 //! | two passes merged without summing | **1** |
+//!
+//! And the patterns and masks named, over 364:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the page's own never read, which is how it used to be | 3 |
+//! | a form's never read | **1** |
+//! | a glyph procedure's never read | **1** |
+//! | a stroking pattern (`SCN`) not recognised | **1** |
+//! | a graphics state not read | 2 |
+//! | every pattern and mask named, whatever it draws | 2 |
+//! | named with no rectangle | **1** |
+//! | a procedure that paints with a pattern not measured | **1** |
+//! | a procedure that sets a state not measured | **1** |
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -406,7 +431,7 @@ pub struct Redaction {
 /// Something a redaction could not do exactly, named rather than left silent
 /// (ruling 10).
 ///
-/// Two of the four are a **run left whole** because this module could not
+/// Two of the five are a **run left whole** because this module could not
 /// measure it, and each names the resource name of the font in force and how
 /// many bytes of showing operand were left in place, because "a run was
 /// skipped" with neither is a sentence a caller cannot act on — and this is
@@ -436,10 +461,12 @@ pub struct Redaction {
 /// resource a warning is about, since [`RedactionWarning::font`] and
 /// [`RedactionWarning::bytes`] have nothing to say about a form.
 ///
-/// The fourth, [`RedactionWarning::TooManyXObjects`] (October 2026), is a
-/// walk cut short rather than a run or a form: a stream whose `Do`s ran past
-/// what one stream's walk follows, the ones past it never resolved. It was
-/// silent before it existed.
+/// The fourth and fifth (October 2026) are content this module does not
+/// read, rather than a run or a form: [`RedactionWarning::TooManyXObjects`],
+/// a stream whose `Do`s ran past what one stream's walk follows, and
+/// [`RedactionWarning::PatternOrMask`], a tiling pattern or a soft mask
+/// whose content shows text or draws an image. Both were silent before they
+/// existed.
 ///
 /// Closed rather than `#[non_exhaustive]`, for `WarningKind`'s reason: a new
 /// class this module will not do exactly is a deliberate change to documented
@@ -518,6 +545,22 @@ pub enum RedactionWarning {
         /// placements, since each is a pass over it.
         skipped: usize,
     },
+    /// A stream painted with a **tiling pattern** (8.7.3.1) or set a **soft
+    /// mask** (11.6.5.2) whose content shows text or draws an image, and
+    /// this module reads neither: what the cell or the mask's group draws
+    /// was tested against no rectangle.
+    ///
+    /// A cell is painted at every tile of whatever it fills, so cutting one
+    /// is a form drawn at as many placements as the fill has tiles, and a
+    /// mask's group is drawn as the alpha of what lies under it — glyph
+    /// shapes and all. Neither is measured; both are named, by the resource
+    /// name the `scn` or the `gs` gave. A cell or a group that only paints
+    /// paths is not named, because nothing it draws is anything this module
+    /// removes. Until October 2026 neither was named.
+    PatternOrMask {
+        /// The `/Pattern` or `/ExtGState` resource name.
+        resource: Vec<u8>,
+    },
 }
 
 impl RedactionWarning {
@@ -533,13 +576,16 @@ impl RedactionWarning {
         match self {
             RedactionWarning::UnknownFont { font, .. }
             | RedactionWarning::UnmeasurableFrame { font, .. } => font,
-            RedactionWarning::RepeatedForm { .. } | RedactionWarning::TooManyXObjects { .. } => &[],
+            RedactionWarning::RepeatedForm { .. }
+            | RedactionWarning::TooManyXObjects { .. }
+            | RedactionWarning::PatternOrMask { .. } => &[],
         }
     }
 
     /// The resource name this warning is about — a font for the two run
-    /// variants, a form XObject for [`RedactionWarning::RepeatedForm`], and
-    /// nothing for [`RedactionWarning::TooManyXObjects`], whose `Do`s past
+    /// variants, a form XObject for [`RedactionWarning::RepeatedForm`], a
+    /// pattern or a graphics state for [`RedactionWarning::PatternOrMask`],
+    /// and nothing for [`RedactionWarning::TooManyXObjects`], whose `Do`s past
     /// the cap were never resolved to a resource at all.
     ///
     /// This is what distinguishes two warnings of the same kind, so it is
@@ -548,6 +594,7 @@ impl RedactionWarning {
     pub fn resource(&self) -> &[u8] {
         match self {
             RedactionWarning::RepeatedForm { form, .. } => form,
+            RedactionWarning::PatternOrMask { resource } => resource,
             other => other.font(),
         }
     }
@@ -563,7 +610,9 @@ impl RedactionWarning {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => *bytes,
-            RedactionWarning::RepeatedForm { .. } | RedactionWarning::TooManyXObjects { .. } => 0,
+            RedactionWarning::RepeatedForm { .. }
+            | RedactionWarning::TooManyXObjects { .. }
+            | RedactionWarning::PatternOrMask { .. } => 0,
         }
     }
 
@@ -605,6 +654,9 @@ impl RedactionWarning {
                     *skipped = skipped.saturating_add(*more);
                 }
             }
+            // A name, and nothing to count: one entry says the resource was
+            // not read, however many times it was painted with.
+            RedactionWarning::PatternOrMask { .. } => {}
         }
     }
 }
@@ -813,6 +865,7 @@ pub fn apply(
     for warning in measured {
         note(&mut report.warnings, warning);
     }
+    unread(editor, &resources, &content, areas, &mut report.warnings);
 
     // 8.10: a form XObject holds content like any other, and a redaction that
     // stops at the page stream leaves whatever a form drew exactly where it
@@ -1024,8 +1077,9 @@ struct RunFont {
     /// text space. `None` for every other kind, whose widths are thousandths
     /// of text space by definition (9.2.4).
     glyph_space: Option<GlyphSpace>,
-    /// A Type 3 font's glyph procedures that can draw text or an image, by
-    /// code: the only things this module redacts that a procedure could put
+    /// A Type 3 font's glyph procedures that can draw text or an image, or
+    /// paint with a pattern or a mask that might ([`carries`]), by code: the
+    /// only things this module redacts, or names, that a procedure could put
     /// outside its glyph's box. A procedure that only paints paths is not
     /// here, because nothing it draws is anything a redaction removes.
     procedures: GlyphProcedures,
@@ -1250,18 +1304,121 @@ fn carrying_procedures(doc: &CosDocument, font: &Dict) -> GlyphProcedures {
     out
 }
 
-/// Whether a glyph procedure shows text or draws an image: an operator this
-/// module would have to measure were it in a page.
+/// Whether content shows text, draws an image, or paints with a pattern or
+/// a graphics state that might: an operator this module would have to
+/// measure, or name ([`unread`]), were it in a page.
+///
+/// `scn` and `SCN` count only with a name last, which is a pattern
+/// (8.6.6.2) — a colour's components are numbers, and a glyph that sets one
+/// draws nothing more than its paths. `gs` always names a state, and the
+/// state may set a mask.
 fn carries(content: &[u8]) -> bool {
     let mut tokens = Tokenizer::new(content);
+    let mut named = false;
     while let Some(token) = tokens.next_token() {
-        if let Token::Operator(op) = token {
-            if matches!(op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\"" | b"Do" | b"BI") {
-                return true;
+        match token {
+            Token::Operator(op) => {
+                match op.as_slice() {
+                    b"Tj" | b"TJ" | b"'" | b"\"" | b"Do" | b"BI" | b"gs" => return true,
+                    b"scn" | b"SCN" if named => return true,
+                    _ => {}
+                }
+                named = false;
             }
+            Token::Name(_) => named = true,
+            _ => named = false,
         }
     }
     false
+}
+
+/// Names every tiling pattern and soft mask one stream paints with whose
+/// content [`carries`] text or an image ([`RedactionWarning::PatternOrMask`]).
+///
+/// A pattern is selected by the name `scn` or `SCN` ends with (8.6.6.2), its
+/// cell the pattern's own stream (8.7.3.1); a soft mask is the `/SMask` of
+/// the `/ExtGState` a `gs` names,
+/// its group the form in `/G` (11.6.5.2). Both resolve in `scope`, the
+/// resources of the stream that painted, through the editor. Only when there
+/// is a rectangle, as every warning here is; each name is resolved once.
+fn unread(
+    editor: &DocumentEditor,
+    scope: &Dict,
+    content: &[u8],
+    areas: &[Redaction],
+    warnings: &mut Vec<RedactionWarning>,
+) {
+    if areas.is_empty() {
+        return;
+    }
+    let mut asked: HashSet<(bool, Vec<u8>)> = HashSet::new();
+    let mut tokens = Tokenizer::new(content);
+    let mut operands: Vec<Token> = Vec::new();
+    while let Some(token) = tokens.next_token() {
+        let Token::Operator(op) = &token else {
+            operands.push(token);
+            continue;
+        };
+        let pattern = match op.as_slice() {
+            // 8.9.7: the samples are not tokens.
+            b"BI" => {
+                let consumed = tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                let at = tokens.position();
+                tokens.seek(at.saturating_add(consumed));
+                None
+            }
+            b"scn" | b"SCN" => Some(true),
+            b"gs" => Some(false),
+            _ => None,
+        };
+        if let (Some(pattern), Some(Token::Name(name))) = (pattern, operands.last()) {
+            // Asked once each, while there are few enough names to remember
+            // (ruling 1); past that a new name is asked every time, which
+            // costs a lookup and not memory, and `note` merges what it finds.
+            let key = (pattern, name.clone());
+            let fresh = if asked.len() < MAX_XOBJECT_USES {
+                asked.insert(key)
+            } else {
+                !asked.contains(&key)
+            };
+            if fresh {
+                let drawn = if pattern {
+                    tiling_cell(editor, scope, name)
+                } else {
+                    mask_group(editor, scope, name)
+                };
+                if drawn.is_some_and(|content| carries(&content)) {
+                    note(
+                        warnings,
+                        RedactionWarning::PatternOrMask {
+                            resource: name.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        operands.clear();
+    }
+}
+
+/// The cell of the pattern `name` selects in `scope`, decoded: a pattern's
+/// stream, which only a tiling pattern has (8.7.3.1) — a shading pattern is
+/// a dictionary, and answers `None`.
+fn tiling_cell(editor: &DocumentEditor, scope: &Dict, name: &[u8]) -> Option<Vec<u8>> {
+    let table = Resolve::resolve_key(editor, scope, editor.intern(b"Pattern"));
+    let reference = table.as_dict()?.get_ref(editor.intern(name))?;
+    editor.stream_bytes(reference)
+}
+
+/// The group of the soft mask the graphics state `name` sets in `scope`,
+/// decoded — `None` for `/SMask /None` and for a state that sets no mask.
+fn mask_group(editor: &DocumentEditor, scope: &Dict, name: &[u8]) -> Option<Vec<u8>> {
+    let table = Resolve::resolve_key(editor, scope, editor.intern(b"ExtGState"));
+    let state = table.as_dict()?.get(editor.intern(name))?.clone();
+    let state = Resolve::resolve(editor, &state);
+    let mask = Resolve::resolve_key(editor, state.as_dict()?, editor.intern(b"SMask"));
+    let group = mask.as_dict()?.get_ref(editor.intern(b"G"))?;
+    editor.stream_bytes(group)
 }
 
 /// How deep form XObjects may nest before recursion is refused (8.10).
@@ -1529,6 +1686,13 @@ impl Walk {
         for warning in pass.warnings {
             note(&mut report.warnings, warning);
         }
+        unread(
+            editor,
+            &inner_resources,
+            &entry.content,
+            areas,
+            &mut report.warnings,
+        );
         let cut = match entry.cuts.iter().position(|c| c.data == data) {
             Some(index) => index,
             None => {
@@ -2235,6 +2399,13 @@ fn draws_under(
     for warning in pass.warnings {
         note(warnings, warning);
     }
+    unread(
+        measure.editor,
+        measure.scope,
+        content,
+        measure.areas,
+        warnings,
+    );
     if pass.glyphs > 0 || pass.images > 0 {
         return true;
     }
@@ -8715,6 +8886,185 @@ mod xobject_cap {
         assert_eq!(
             report.warnings,
             vec![RedactionWarning::TooManyXObjects { skipped: 2 }]
+        );
+    }
+}
+
+/// Tiling patterns and soft masks: not read, and named when what they draw is
+/// text or an image ([`RedactionWarning::PatternOrMask`]).
+///
+/// One page, in Helvetica: `/P0`, a tiling pattern whose cell shows `SECRET`,
+/// and `/P1`, one whose cell is a filled square; `/GS0`, a graphics state
+/// whose luminosity mask's group shows `SECRET`, `/GS1` setting
+/// `/SMask /None`, and `/GS2` — by reference — a mask whose group is a filled
+/// square; and `/Fm0`, a form with resources of its own that paints with its
+/// own `/Q0`, the same cell as `/P0`.
+#[cfg(test)]
+mod patterns_and_masks {
+    use super::tests_support::*;
+    use super::*;
+
+    fn document(content: &str) -> Vec<u8> {
+        let text_cell = "BT /F0 12 Tf 0 5 Td (SECRET) Tj ET";
+        let square = "0 0 25 10 re f";
+        let mask_text = "BT /F0 48 Tf 10 10 Td (SECRET) Tj ET";
+        let form = "/Pattern cs /Q0 scn 0 0 100 100 re f";
+        let pattern = |number: u32, body: &str| {
+            format!(
+                "{number} 0 obj\n<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1\n\
+                 /BBox [0 0 50 20] /XStep 50 /YStep 20 /Resources << /Font << /F0 6 0 R >> >>\n\
+                 /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+                body.len() + 1
+            )
+        };
+        let group = |number: u32, body: &str| {
+            format!(
+                "{number} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+                 /Group << /S /Transparency /CS /DeviceGray >>\n\
+                 /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\n\
+                 stream\n{body}\nendstream\nendobj\n",
+                body.len() + 1
+            )
+        };
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
+             /Resources << /Font << /F0 6 0 R /T3 13 0 R >> /Pattern << /P0 7 0 R /P1 8 0 R >>\n\
+             /ExtGState << /GS0 << /SMask << /S /Luminosity /G 9 0 R >> >>\n\
+             /GS1 << /SMask /None >> /GS2 10 0 R >>\n\
+             /XObject << /Fm0 11 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream_object(4, content));
+        out.push_str("6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        out.push_str(&pattern(7, text_cell));
+        out.push_str(&pattern(8, square));
+        out.push_str(&group(9, mask_text));
+        out.push_str(
+            "10 0 obj\n<< /Type /ExtGState /SMask << /S /Luminosity /G 12 0 R >> >>\nendobj\n",
+        );
+        out.push_str(&format!(
+            "11 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Resources << /Pattern << /Q0 7 0 R >> >> /Length {} >>\n\
+             stream\n{form}\nendstream\nendobj\n",
+            form.len() + 1
+        ));
+        out.push_str(&group(12, square));
+        out.push_str(
+            "13 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]\n\
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /p 14 0 R /q 15 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences [65 /p /q] >>\n\
+             /FirstChar 65 /LastChar 66 /Widths [1000 1000] >>\nendobj\n",
+        );
+        out.push_str(&stream_object(
+            14,
+            "1000 0 d0 /Pattern cs /P0 scn 0 0 1000 1000 re f",
+        ));
+        out.push_str(&stream_object(15, "1000 0 d0 /GS0 gs 0 0 1000 1000 re f"));
+        out.push_str("trailer\n<< /Size 16 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    fn anywhere() -> Redaction {
+        Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 400.0,
+                y1: 400.0,
+            },
+            mark: false,
+        }
+    }
+
+    fn warnings(content: &str, areas: &[Redaction]) -> Vec<RedactionWarning> {
+        redact(open(document(content)), areas).1.warnings
+    }
+
+    fn named(resource: &[u8]) -> RedactionWarning {
+        RedactionWarning::PatternOrMask {
+            resource: resource.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_tiling_pattern_whose_cell_shows_text_is_named() {
+        assert_eq!(
+            warnings(
+                "/Pattern cs /P0 scn 0 0 200 200 re f /P0 scn",
+                &[anywhere()]
+            ),
+            vec![named(b"P0")],
+            "once, however often it is painted with"
+        );
+    }
+
+    #[test]
+    fn a_stroking_pattern_is_named_too() {
+        assert_eq!(
+            warnings("/Pattern CS /P0 SCN 0 0 m 100 100 l S", &[anywhere()]),
+            vec![named(b"P0")]
+        );
+    }
+
+    #[test]
+    fn a_tiling_pattern_of_paths_is_not_named() {
+        assert_eq!(
+            warnings("/Pattern cs /P1 scn 0 0 200 200 re f", &[anywhere()]),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_soft_mask_whose_group_shows_text_is_named() {
+        assert_eq!(
+            warnings("/GS0 gs 0 0 200 200 re f", &[anywhere()]),
+            vec![named(b"GS0")]
+        );
+    }
+
+    #[test]
+    fn no_mask_and_a_mask_of_paths_are_not_named() {
+        assert_eq!(
+            warnings("/GS1 gs /GS2 gs 0 0 200 200 re f", &[anywhere()]),
+            Vec::new()
+        );
+    }
+
+    /// The name resolves in the resources of the stream that painted: the
+    /// page has no `/Q0`, the form does.
+    #[test]
+    fn a_pattern_a_form_paints_with_is_named_in_the_forms_scope() {
+        assert_eq!(warnings("/Fm0 Do", &[anywhere()]), vec![named(b"Q0")]);
+    }
+
+    #[test]
+    fn what_a_glyph_procedure_paints_with_is_named() {
+        // `/T3`'s `A` fills its em with `/P0` and its `B` under `/GS0`:
+        // each measured as a procedure that might draw text, and what it
+        // paints with named. The band is clear of the glyphs' own boxes,
+        // which would otherwise remove them unmeasured.
+        let clear = Redaction {
+            area: Rect {
+                x0: 200.0,
+                y0: 200.0,
+                x1: 400.0,
+                y1: 400.0,
+            },
+            mark: false,
+        };
+        assert_eq!(
+            warnings("BT /T3 10 Tf 10 10 Td (AB) Tj ET", &[clear]),
+            vec![named(b"P0"), named(b"GS0")]
+        );
+    }
+
+    #[test]
+    fn nothing_is_named_without_a_rectangle() {
+        assert_eq!(
+            warnings("/Pattern cs /P0 scn /GS0 gs 0 0 200 200 re f", &[]),
+            Vec::new()
         );
     }
 }
