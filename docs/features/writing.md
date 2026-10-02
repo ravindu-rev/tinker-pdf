@@ -259,7 +259,10 @@ program written through entire carries every outline it had — including the
 ones a redaction has just removed the text of. All eight `UntouchedReason`s
 are good reasons to keep a program and none of them is a reason to tell a
 caller the disclosure is gone, so a non-empty `untouched` is `false` here
-whatever is in it. `false` is the ordinary answer rather than a failure: over
+whatever is in it — and so is a non-empty `type3_untouched`, a Type 3 font
+whose glyph procedures went through whole: since October 2026 the pass empties
+the procedures nothing shown runs ([editing](editing.md)'s "Type 3 fonts"),
+and one it leaves whole is in the file. `false` is the ordinary answer rather than a failure: over
 the fetched corpora 4 950 of 10 832 programs went through whole, 3 406 of them
 because the rebuild came out no smaller than the producer's own subset. It is
 an instruction to read the report, which names each one (ruling 10).

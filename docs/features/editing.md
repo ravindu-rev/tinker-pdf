@@ -478,6 +478,23 @@ Counted are a page's own content stream; a form XObject it draws, at any depth
 today's state loses tomorrow's tick. A hidden annotation's appearance counts
 too: the flag is a viewer's instruction, and clearing it is one bit.
 
+**Type 3 fonts** have no program to cut: a glyph is a procedure in
+`/CharProcs`, and the procedures are the face's outlines — and can show text
+besides, which is what a redaction leaves in one when it removes a glyph's
+use rather than rewriting the procedure every use shares. So the same pass
+empties every procedure nothing the document shows still runs, writing
+`0 0 d0` over the stream in place and leaving the font dictionary as it was.
+Which procedures run is learned where the interpreter asks for one, since a
+Type 3 glyph is run rather than shown and no device hears of it. Kept: a
+procedure under **any** name `/Differences` gives a shown code, not only the
+first, which is the one this engine draws; and a stream another font keeps
+or leaves whole. A Type 3 font is left whole, and listed, for the reasons a
+program is — no walked scope names it, the AcroForm `/DR` does, a Type 3
+font's own `/Resources` does, or it has no object — and one left whole makes
+`SubsetOutcome::removed` false, as a program does. Until October 2026 Type 3
+fonts went through whole and unmentioned, and `removed` was true over them
+(`subset.rs`'s `type3_fonts`).
+
 **How the encoding survives.** `tinker_pdf_font::subset` does not renumber — a
 dropped glyph becomes a zero-length `loca` entry rather than a gap the later
 glyphs shuffle into — so `/FirstChar`, `/LastChar`, `/Widths`, `/W`, `/DW`,
@@ -554,12 +571,16 @@ rectangles at all)
 because glyph coverage needs both the content tokenizer and font metrics
 (ruling 8, [rulings.md](../rulings.md)).
 
-`subset::{SubsetReport, Subsetted, Untouched, UntouchedReason, apply}` are on
+`subset::{SubsetReport, Subsetted, Type3Subsetted, Untouched, UntouchedReason, apply}` are on
 the facade too. `apply(&mut editor) -> SubsetReport` takes no page: it is
 whole-document by construction. `SubsetReport::subsetted` carries each
 program's object, its new `/BaseFont`, the bytes before and after, and how many
 glyphs were asked for; `untouched` carries every program written through whole
-with its `UntouchedReason`, and `bytes_before()`/`bytes_after()` total both.
+with its `UntouchedReason`; `type3` carries each Type 3 font measured — its
+object, its name, its procedures' bytes before and after, and how many it
+kept and emptied — and `type3_untouched` each one left whole, with the font
+dictionary as `Untouched::program`; `bytes_before()`/`bytes_after()` total
+all four.
 An empty `untouched` is the answer a caller wants; a non-empty one is not an
 error list, since a document whose every face is already a tight subset reports
 all of them and is right to. Over the fetched corpora it is usually non-empty:
@@ -613,7 +634,7 @@ if report.untouched.is_empty() {
 | Redacting what a **tiling pattern's cell** or a **soft mask's group** draws | not read, and the report does not say so: the walk follows `Do`, annotation appearances and Type 3 procedures, and a cell (8.7.3.1) or a mask's group (11.6.5.2) is reached through `scn` or `gs` instead; the read of what else draws a form does not follow them either | a cell is painted at every tile of whatever it fills, so cutting one is a form drawn at as many placements as the fill has tiles, which is a design rather than a fix. A [roadmap](../ROADMAP.md) row (Editing) | 8.7.3, 11.6.5 |
 | Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
 | Appearance synthesis for other subtypes | `add_annotation` inserts the dictionary; no `/AP` is generated | seven subtypes cover the common producer gap; others render only if they carry their own `/AP` | — |
-| Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` — after the default save too, because `subset::apply` cuts embedded programs and not Type 3 fonts | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. Dropping a procedure no use is left drawing is the [roadmap](../ROADMAP.md) Editing row's | 9.6.5 |
+| Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`) | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font | 9.6.5 |
 | Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and nothing reports it (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`) | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
 | Removing an annotation's own text — `/Contents`, a rich-text `/RC`, a field's `/V` — when its appearance is cut | left as it was; only what the annotation draws is cut | what a redaction measures is what a page draws, and these have no position to compare with a rectangle. Deleting an annotation outright is the caller's decision, through the editor | 12.5 |
 | Subsetting a program `tinker_pdf_font::subset` will not rebuild — a Type 1 program, a CFF whose charstrings cannot be renumbered without guessing, bytes that are neither | the program is written through exactly as it arrived, `UntouchedReason::ProgramNotRebuildable` | ruling 2: a document that renders is worth more than one that is small | [fonts](fonts.md) |
@@ -807,7 +828,16 @@ if report.untouched.is_empty() {
   unchanged. `crates/tinker-pdf/src/write.rs` repeats that one through the
   **arranged** door, where nobody asked for a subset at all, and carries the
   counterfactual beside it: the same redaction under `FontPolicy::Keep` still
-  has every removed letter's outline in the file.
+  has every removed letter's outline in the file. Six more, `type3_fonts`,
+  over Type 3 faces written here whose procedures are boxes of different
+  heights: a procedure nothing shows emptied and one shown kept, the page
+  rendering exactly as it did; a stream two fonts share kept for the one that
+  shows it; every name `/Differences` gives a shown code kept; a glyph a form
+  shows keeping its procedure; a font no walked scope names, and one written
+  into the resources, left whole and listed; and `removed()` false over the
+  first and true once it is walked. `redact.rs`'s `glyph_procedures` carries
+  the disclosure half: a procedure whose last use was redacted is the empty
+  one after the default save.
 - **The same pass, over the corpus**:
   `crates/tinker-pdf/tests/cff_subset_census.rs` now runs
   `subset::apply` over all 5 605 fetched documents, not just
@@ -856,6 +886,20 @@ if report.untouched.is_empty() {
   an object — was reached by no test at all. It is now
   `a_glyph_in_an_appearance_state_reached_by_reference_is_kept`, and the same
   deletion scores 1.
+
+  The Type 3 half was counted the same way on 2 October 2026, over
+  `cargo test --no-fail-fast -p tinker-pdf --lib` (352 tests), none zero:
+
+  | defect reintroduced | tests that caught it |
+  | --- | --- |
+  | the Type 3 glyphs the interpreter runs never written down, so every procedure is emptied | 4 |
+  | only the first name `/Differences` gives a shown code kept | 1 |
+  | a procedure stream kept only for the font that shows it, not for one that shares it | 4 |
+  | a Type 3 font no walked scope names emptied anyway | 2 |
+  | a directly written Type 3 font's procedures not protected | 1 |
+  | a directly written Type 3 font not recognised as one | 1 |
+  | a form's own scope not written down in, so a glyph it shows is lost | 1 |
+  | `removed()` not asking about a Type 3 font left whole | 1 |
 
 - Every edited document is written through the [writer](writing.md), whose
   output is held to the strict validator (`strict_validator.rs`); the

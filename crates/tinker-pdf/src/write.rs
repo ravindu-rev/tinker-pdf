@@ -212,7 +212,9 @@ impl SubsetOutcome {
     /// program this build cannot rebuild, a subset that came out no smaller,
     /// a descriptor no font names. Each of those is a good reason to keep a
     /// program and none of them is a reason to tell a caller the disclosure is
-    /// gone.
+    /// gone. A Type 3 font whose procedures went through whole
+    /// ([`SubsetReport::type3_untouched`]) is `false` for the same reason:
+    /// its procedures are its outlines, and can show text besides.
     ///
     /// False for [`SubsetOutcome::Kept`], because nothing was cut, and false
     /// for [`SubsetOutcome::CutButTheOriginalsRemain`], because the originals
@@ -226,7 +228,11 @@ impl SubsetOutcome {
     /// smaller than the producer's own subset.
     #[must_use]
     pub fn removed(&self) -> bool {
-        matches!(self, SubsetOutcome::Cut(report) if report.untouched.is_empty())
+        matches!(
+            self,
+            SubsetOutcome::Cut(report)
+                if report.untouched.is_empty() && report.type3_untouched.is_empty()
+        )
     }
 }
 

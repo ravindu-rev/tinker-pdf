@@ -43,9 +43,12 @@
 //! of that glyph runs — is left in `/CharProcs` exactly as it was (the
 //! module's "A Type 3 glyph's procedure"). A procedure that shows the
 //! covered words as text says them in the file as plainly as an outline
-//! does, and [`crate::subset::apply`] cuts embedded programs, not Type 3
-//! fonts, so it is still there after the default save when the redaction
-//! removed its last use. Nor an annotation's own text — `/Contents`, a
+//! does. The same door is the answer: [`crate::subset::apply`] empties every
+//! procedure nothing the document shows still runs (its "Type 3 fonts"), so
+//! once the redaction removed a procedure's last use the default save
+//! leaves it saying nothing, and a Type 3 font it cannot bound is named
+//! (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`).
+//! Nor an annotation's own text — `/Contents`, a
 //! rich-text `/RC`, a field's `/V`: what a redaction cuts is what a page
 //! draws, and those are what a viewer *says*, with no position to compare
 //! with a rectangle.
@@ -8116,6 +8119,33 @@ mod glyph_procedures {
                 bytes: 6,
             }]
         );
+    }
+
+    /// The decision's cost, paid by the default save: the procedure a
+    /// redaction leaves in the font is emptied once the redaction removed its
+    /// last use. `A` is shown once, under the band, and `B` once beside it;
+    /// after [`crate::write::save`] with its defaults `A`'s procedure is the
+    /// empty one and no longer says `SECRET`, `B`'s still says `PUBLIC`, and
+    /// the page reads as the redaction left it.
+    #[test]
+    fn a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (B) Tj 0 75 Td (A) Tj ET");
+        let mut editor = DocumentEditor::new(open(bytes));
+        let report = apply(&mut editor, 0, &[band(area(20.0, 120.0, 80.0, 140.0))])
+            .expect("the page exists");
+        assert_eq!(report.glyphs, 1);
+        let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        let subset = saved.fonts.report().expect("the pass ran");
+        assert_eq!(
+            subset.type3.iter().map(|t| t.kept).collect::<Vec<_>>(),
+            vec![1],
+            "of the six procedures, B's alone is still run"
+        );
+
+        let reopened = CosDocument::open(saved.bytes.clone()).expect("it reopens");
+        assert_eq!(procedure(&reopened, "secret").trim_ascii_end(), b"0 0 d0");
+        assert_eq!(procedure(&reopened, "public"), PROCEDURES[1].1);
+        assert_eq!(lines_of(saved.bytes), vec![(50.0, "PUBLIC".to_string())]);
     }
 
     /// The procedure's measurement composes with every transform above it: a
