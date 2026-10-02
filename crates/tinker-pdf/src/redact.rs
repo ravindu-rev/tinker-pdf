@@ -9068,3 +9068,238 @@ mod patterns_and_masks {
         );
     }
 }
+
+/// Ruling 1 over everything a redaction now reads: annotation appearances
+/// and their states, Type 3 glyph procedures that show text, draw a form or
+/// paint with a pattern, forms drawn twice and on a second page, tiling
+/// patterns and soft masks — in one small file, put through deterministic
+/// damage and then redacted, subsetted and saved. Nothing is asserted but
+/// that nothing panics; `tests/hostile_input.rs` does the same for the
+/// reading surface, and this is the editing one.
+#[cfg(test)]
+mod hostile {
+    use super::*;
+
+    /// xorshift64, as `tests/hostile_input.rs` has it: the same damage on
+    /// every machine (ruling 4).
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            if bound == 0 {
+                0
+            } else {
+                (self.next() % bound as u64) as usize
+            }
+        }
+    }
+
+    fn stream(number: u32, dict: &str, body: &str) -> String {
+        format!(
+            "{number} 0 obj\n<< {dict} /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+            body.len() + 1
+        )
+    }
+
+    /// Two pages over everything the walk and its reads follow.
+    fn everything() -> Vec<u8> {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 20 0 R] >>\nendobj\n");
+        let resources = "/Resources << /Font << /F0 5 0 R /T3 6 0 R >>\n\
+             /XObject << /Fm0 9 0 R /Im0 10 0 R >> /Pattern << /P0 11 0 R >>\n\
+             /ExtGState << /GS0 << /SMask << /S /Luminosity /G 12 0 R >> >> >> >>";
+        out.push_str(&format!(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n{resources}\n\
+             /Annots [13 0 R << /Subtype /FreeText /Rect [10 100 210 120]\n\
+             /AP << /N 15 0 R >> >>] /Contents 4 0 R >>\nendobj\n"
+        ));
+        out.push_str(&stream(
+            4,
+            "",
+            "q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q\n\
+             BT /T3 1 Tf 10 50 Td (ABC) Tj 0 20 Td [(A) -5000 (B)] TJ ET\n\
+             /Pattern cs /P0 scn /GS0 gs 0 0 50 50 re f\n\
+             q 20 0 0 20 300 200 cm /Im0 Do Q\n\
+             q 10 0 0 10 350 250 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x7f EI Q",
+        ));
+        out.push_str("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        out.push_str(
+            "6 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]\n\
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 7 0 R /b 8 0 R /c 16 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences [65 /a /b /c] >>\n\
+             /FirstChar 65 /LastChar 67 /Widths [1000 1000 1000]\n\
+             /Resources << /Font << /F0 5 0 R >> >> >>\nendobj\n",
+        );
+        out.push_str(&stream(
+            7,
+            "",
+            "1000 0 d0 BT /F0 12000 Tf 0 0 Td (SECRET) Tj ET",
+        ));
+        out.push_str(&stream(8, "", "1000 0 d0 /Fm0 Do /Pattern cs /P0 scn"));
+        out.push_str(&stream(
+            9,
+            "/Type /XObject /Subtype /Form /BBox [0 0 400 300]\n\
+             /Resources << /Font << /F0 5 0 R >> /XObject << /Im0 10 0 R >> >>",
+            "BT /F0 12 Tf 10 60 Td (PUBLIC SECRET) Tj ET q 5 0 0 5 200 60 cm /Im0 Do Q",
+        ));
+        out.push_str(
+            "10 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+             stream\nSECR\nendstream\nendobj\n",
+        );
+        out.push_str(&stream(
+            11,
+            "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 50 20]\n\
+             /XStep 50 /YStep 20 /Resources << /Font << /F0 5 0 R >> >>",
+            "BT /F0 12 Tf 0 5 Td (SECRET) Tj ET",
+        ));
+        out.push_str(&stream(
+            12,
+            "/Type /XObject /Subtype /Form /BBox [0 0 400 300] /Group << /S /Transparency >>\n\
+             /Resources << /Font << /F0 5 0 R >> >>",
+            "BT /F0 48 Tf 10 10 Td (SECRET) Tj ET",
+        ));
+        out.push_str(
+            "13 0 obj\n<< /Type /Annot /Subtype /Widget /Rect [10 200 90 220] /AS /Off\n\
+             /AP << /N << /On 14 0 R /Off 15 0 R >> /D 14 0 R >> /F 2 >>\nendobj\n",
+        );
+        out.push_str(&stream(
+            14,
+            "/Type /XObject /Subtype /Form /BBox [0 0 80 20] /Matrix [0 1 -1 0 0 0]\n\
+             /Resources << /Font << /F0 5 0 R >> >>",
+            "BT /F0 10 Tf 2 2 Td (SECRET) Tj ET /Fm0 Do",
+        ));
+        out.push_str(&stream(
+            15,
+            "/Type /XObject /Subtype /Form /BBox [0 0 400 40]\n\
+             /Resources << /Font << /F0 5 0 R /T3 6 0 R >> /XObject << /Fm0 9 0 R >> >>",
+            "BT /F0 24 Tf 0 10 Td (PUBLIC SECRET) Tj /T3 1000 Tf (A) Tj ET",
+        ));
+        out.push_str(&stream(16, "", "1000 0 d0 BT /T3 1000 Tf (CC) Tj ET"));
+        out.push_str(&format!(
+            "20 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n{resources}\n\
+             /Contents 21 0 R >>\nendobj\n"
+        ));
+        out.push_str(&stream(21, "", "/Fm0 Do BT /T3 1 Tf 10 10 Td (B) Tj ET"));
+        out.push_str("trailer\n<< /Size 22 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    /// One deterministic injury: flipped bytes, a deleted span, a repeated
+    /// span, or a digit run replaced with a large or negative number.
+    fn mutate(original: &[u8], rng: &mut Rng) -> Vec<u8> {
+        let mut bytes = original.to_vec();
+        match rng.below(4) {
+            0 => {
+                for _ in 0..1 + rng.below(8) {
+                    let at = rng.below(bytes.len());
+                    if let Some(b) = bytes.get_mut(at) {
+                        *b ^= 1 << rng.below(8);
+                    }
+                }
+            }
+            1 => {
+                let at = rng.below(bytes.len());
+                let end = (at + 1 + rng.below(64)).min(bytes.len());
+                bytes.drain(at..end);
+            }
+            2 => {
+                let at = rng.below(bytes.len());
+                let end = (at + 1 + rng.below(64)).min(bytes.len());
+                let span: Vec<u8> = bytes.get(at..end).map(<[u8]>::to_vec).unwrap_or_default();
+                let _ = bytes.splice(at..at, span);
+            }
+            _ => {
+                let digits: Vec<usize> = bytes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.is_ascii_digit())
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&at) = digits.get(rng.below(digits.len())) {
+                    let with: &[u8] = match rng.below(4) {
+                        0 => b"99999999999",
+                        1 => b"-1",
+                        2 => b"0",
+                        _ => b"1e308",
+                    };
+                    let _ = bytes.splice(at..at + 1, with.iter().copied());
+                }
+            }
+        }
+        bytes
+    }
+
+    fn exercise(bytes: Vec<u8>) {
+        let Ok(doc) = CosDocument::open(bytes) else {
+            return;
+        };
+        let mut editor = DocumentEditor::new(Arc::new(doc));
+        let areas = [
+            Redaction {
+                area: Rect {
+                    x0: 56.0,
+                    y0: 40.0,
+                    x1: 400.0,
+                    y1: 70.0,
+                },
+                mark: true,
+            },
+            Redaction {
+                area: Rect {
+                    x0: 0.0,
+                    y0: 190.0,
+                    x1: 120.0,
+                    y1: 230.0,
+                },
+                mark: false,
+            },
+        ];
+        for page in 0..2 {
+            let _ = apply(&mut editor, page, &areas);
+        }
+        let _ = apply(&mut editor, 0, &areas[..1]);
+        let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        let _ = saved.fonts.removed();
+    }
+
+    #[test]
+    fn the_fixture_redacts_cleanly_before_it_is_damaged() {
+        let doc = Arc::new(CosDocument::open(everything()).expect("it opens"));
+        let mut editor = DocumentEditor::new(doc);
+        let report = apply(
+            &mut editor,
+            0,
+            &[Redaction {
+                area: Rect {
+                    x0: 56.0,
+                    y0: 40.0,
+                    x1: 400.0,
+                    y1: 70.0,
+                },
+                mark: false,
+            }],
+        )
+        .expect("page zero");
+        assert!(report.glyphs > 0, "{report:?}");
+    }
+
+    #[test]
+    fn damaged_fixtures_never_panic_through_redaction_and_the_save() {
+        let original = everything();
+        let mut rng = Rng(0x00C0_FFEE_D1CE_4003);
+        for case in 0..300 {
+            let mutated = mutate(&original, &mut rng);
+            let result = std::panic::catch_unwind(|| exercise(mutated));
+            assert!(result.is_ok(), "case {case} panicked");
+        }
+    }
+}

@@ -808,6 +808,17 @@ if report.untouched.is_empty() {
   that shows its own glyph ending; every use with a budget of its own; a
   procedure's text in a font no scope has reported; and a glyph in a form
   drawn twice measured at each placement.
+- Beside them, in Helvetica: `patterns_and_masks` (a tiling pattern or a
+  soft mask that shows text named, one of paths not, in the scope of the
+  stream that painted, and what a glyph procedure paints with), `xobject_cap`
+  (4 096 `Do`s followed, the 4 097th named), the depth pair in `tests`
+  (sixteen levels of forms redacted, seventeen not drawn), and `hostile`:
+  one two-page file over every kind of content above — appearances and their
+  states, procedures that show text and draw forms, a form drawn twice and
+  on the second page, a pattern, a mask, an inline image — put through 300
+  deterministic injuries and then redacted twice, subsetted and saved, with
+  nothing asserted but that nothing panics. `tests/hostile_input.rs` does the
+  same for the reading surface and does not edit.
 - Subsetting-on-rewrite tests live beside `crates/tinker-pdf/src/subset.rs` —
   26 of them over the **vendored Liberation faces**, which are third-party
   bytes: which of their glyphs are composite, what those are built from and
