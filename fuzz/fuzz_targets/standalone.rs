@@ -37,12 +37,13 @@
 //! `crates/tinker-pdf/tests/standalone.rs`, which holds a loose XHTML file to
 //! the pixels of the same file as an EPUB chapter, a bare PNG to the pixels of
 //! the same file as a comic page, and the decoders to RFC 4648's and RFC
-//! 2397's own examples.
+//! 2397's own examples. A bare picture is opened here and not drawn: drawing
+//! it is decoding it, which the codec targets and `render_page` cover.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf::standalone::{base64_decode, data_url, sniff};
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::{Document, RenderOptions, Standalone};
 
 fuzz_target!(|data: &[u8]| {
     let (control, body) = data.split_at(data.len().min(1));
@@ -105,9 +106,19 @@ fuzz_target!(|data: &[u8]| {
     if let Some(page) = doc.page(0) {
         let _ = page.text();
         let _ = page.links();
-        let _ = page.render(&RenderOptions {
-            scale: 0.1,
-            ..RenderOptions::default()
-        });
+        // A bare picture is not drawn here. Its page is the comic path's, and
+        // drawing it is decoding it: a JPEG may declare 32 769 x 1 537 in a
+        // hundred bytes, and the seconds a decoder spends on fifty million
+        // pixels are `jpeg`'s and `render_page`'s to measure, not this route's.
+        // What else is drawn is held to at most 256 pixels a side, for the
+        // same reason: a page at its own size can be 65 535 points across.
+        if !matches!(kind, Some(Standalone::Image(_))) {
+            let (width, height) = page.size();
+            let side = width.max(height).max(1.0);
+            let _ = page.render(&RenderOptions {
+                scale: (256.0 / side).min(0.1),
+                ..RenderOptions::default()
+            });
+        }
     }
 });
