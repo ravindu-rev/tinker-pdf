@@ -844,6 +844,8 @@ pub fn synthesise(
     let initial = initial_style(layout.font_size);
     let context = read::Context {
         ua: &ua,
+        // A book's sheets are all its own, named by its content documents.
+        author: &[],
         limits,
         css_limits: &limits.css,
         media: &media,
@@ -856,7 +858,6 @@ pub fn synthesise(
     // ---- pass 1: read and cascade ------------------------------------------
     let mut census = read::Census::default();
     let mut chapters: Vec<Chapter> = Vec::with_capacity(package.spine().len());
-    let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
     let mut declared: Vec<FontFace> = Vec::new();
     for itemref in package.spine() {
         let (name, path, mut defect, is_svg) = plan_page(book, package, &itemref.idref);
@@ -1015,10 +1016,99 @@ pub fn synthesise(
         });
     }
 
+    // ---- passes 3 and 4, and the pages ------------------------------------
+    let mut builder = DocumentBuilder::new();
+    // §5.5.3.1's metadata, reaching the document it describes. Without this the
+    // three required elements would be parsed and thrown away, which is exactly
+    // the failure gap 31 is organised around — one level up from a CSS property.
+    if let Some(title) = package.title() {
+        builder.set_info(b"Title", title);
+    }
+    if let Some(creator) = package.creator() {
+        builder.set_info(b"Author", creator);
+    }
+    let (pages, total_pages) = write_chapters(
+        book,
+        &mut builder,
+        &mut chapters,
+        &faces,
+        &census,
+        &options,
+        layout.page,
+        limits,
+        &mut layout_budget,
+        &mut warnings,
+    );
+
+    let entries = outline(book, package, &chapters, limits, total_pages);
+    if !entries.is_empty() && !builder.set_outline(entries) {
+        warnings.push(ArchiveWarning::OutlineUnwritable);
+    }
+
+    // Taken after every read, because reading is what most of them come from.
+    for warning in book.archive().warnings() {
+        warnings.push(ArchiveWarning::Zip(*warning));
+    }
+
+    let pdf = builder.finish();
+    if pdf.len() > limits.max_synthesised {
+        return Err(ArchiveRefusal::TooLarge);
+    }
+    let synthesised_bytes = pdf.len();
+    // Taken after the last charge and before anything is returned, so the
+    // figures are what the whole book cost rather than what one pass did.
+    let cost = BookCost {
+        manifest_items: package.items().len(),
+        spine_items: package.spine().len(),
+        css_tokens: css_budget.tokens(),
+        css_rules: css_budget.rules(),
+        css_declarations: css_budget.declarations(),
+        selector_matches: css_budget.matches(),
+        boxes: layout_budget.boxes(),
+        break_work: layout_budget.breaks(),
+        layout_work: layout_budget.layout(),
+        pages: total_pages,
+    };
+    Ok((
+        pdf,
+        ArchiveReport::book(warnings, pages, synthesised_bytes, *layout, cost),
+    ))
+}
+
+/// Passes 3 and 4 of [`synthesise`], and the writing: every chapter laid out,
+/// every character given a code, the caller told what the book cost, and the
+/// pages written into `builder`.
+///
+/// **One function for a book and for a single content document**, which is
+/// tier 5's formats row's reason for it existing at all. A loose XHTML file and
+/// a creation call handed markup are a book of one chapter; a second copy of
+/// this pass for them would be a second painter, and the two would disagree
+/// about the first thing either of them changed. What differs between the
+/// callers is decided before this runs — which chapters there are, which
+/// faces were declared, what the document information says — and after it —
+/// an outline, the container's own warnings.
+///
+/// `builder` arrives with whatever document information the caller has already
+/// set, and leaves holding every page; `page` is the box a placeholder page is
+/// drawn at. Returns where each page came from and how many there are.
+#[allow(clippy::too_many_arguments)]
+fn write_chapters<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    builder: &mut DocumentBuilder,
+    chapters: &mut [Chapter],
+    faces: &FaceSet,
+    census: &read::Census,
+    options: &LayoutOptions,
+    page: (f64, f64),
+    limits: &Limits,
+    layout_budget: &mut LayoutBudget,
+    warnings: &mut Vec<ArchiveWarning>,
+) -> (Vec<PageOrigin>, usize) {
+    let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
     // ---- pass 3: lay every chapter out -------------------------------------
-    let metrics = BookMetrics::with(&faces);
+    let metrics = BookMetrics::with(faces);
     let mut clipped: Vec<(String, usize)> = Vec::new();
-    for chapter in &mut chapters {
+    for chapter in chapters.iter_mut() {
         let Some(reading) = &chapter.reading else {
             continue;
         };
@@ -1041,14 +1131,14 @@ pub fn synthesise(
             // `epub_fixed_layout.rs`.
             LayoutOptions::new(chapter_width, chapter_height).unpaginated()
         } else {
-            options
+            *options
         };
         match layout_with(
             &reading.tree,
             &metrics,
             &chapter_options,
             &limits.layout,
-            &mut layout_budget,
+            layout_budget,
         ) {
             Err(_) => chapter.defect = Some(SpineDefect::NotFragmented),
             Ok(mut laid) => {
@@ -1092,15 +1182,15 @@ pub fn synthesise(
     }
 
     let mut at = 0usize;
-    for chapter in &mut chapters {
+    for chapter in chapters.iter_mut() {
         chapter.first_page = at;
         at += chapter.page_count();
     }
     let total_pages = at;
 
     // ---- pass 4: every face, and every character that needs a code ---------
-    let mut fonts = Fonts::new(&faces);
-    for chapter in &chapters {
+    let mut fonts = Fonts::new(faces);
+    for chapter in chapters.iter() {
         for page in &chapter.pages {
             for run in &page.runs {
                 if run.painted {
@@ -1138,7 +1228,7 @@ pub fn synthesise(
     // reason it is counted per item and per defect rather than per element is
     // `UnimplementedProperty`'s: a comic whose forty pictures are all AVIF is
     // one sentence a host can act on and forty identical warnings is not.
-    for chapter in &chapters {
+    for chapter in chapters.iter() {
         let Some(reading) = &chapter.reading else {
             continue;
         };
@@ -1169,22 +1259,12 @@ pub fn synthesise(
         });
     }
 
-    // ---- pass 3: write it --------------------------------------------------
-    let (width, height) = layout.page;
-    let mut builder = DocumentBuilder::new();
-    // §5.5.3.1's metadata, reaching the document it describes. Without this the
-    // three required elements would be parsed and thrown away, which is exactly
-    // the failure gap 31 is organised around — one level up from a CSS property.
-    if let Some(title) = package.title() {
-        builder.set_info(b"Title", title);
-    }
-    if let Some(creator) = package.creator() {
-        builder.set_info(b"Author", creator);
-    }
-    fonts.register(&mut builder);
-    let pictures = register_pictures(&mut builder, &chapters, &mut warnings);
+    // ---- write it ----------------------------------------------------------
+    let (width, height) = page;
+    fonts.register(builder);
+    let pictures = register_pictures(builder, chapters, warnings);
 
-    let links = cross_references(&chapters, limits, total_pages);
+    let links = cross_references(chapters, limits, total_pages);
 
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
     let mut unwritable_runs = 0usize;
@@ -1218,23 +1298,18 @@ pub fn synthesise(
             // the reader cannot resolve the name, and the gradient, the
             // transparency or the photograph is silently gone while every solid
             // stroke still draws. `svg::Registry` is that ordering as a type.
-            let registry = svg::register(&mut builder, scene, placement, |href: &str| {
+            let registry = svg::register(builder, scene, placement, |href: &str| {
                 // §5.7's reference, resolved against the container the document
                 // was read from — the caller's job, and the reason the leaf
                 // crate carries the href unread.
-                let target = resolve_reference(&source, href.split('#').next()?, limits).ok()?;
-                let index = book.index_of(&target)?;
-                book.read(index).ok().map(<[u8]>::to_vec)
+                resources
+                    .fetch(&source, href, limits)
+                    .ok()
+                    .map(|(_, bytes)| bytes)
             });
             let mut page = builder.begin_page(page_width, page_height);
             let drawn = svg::draw(
-                &mut builder,
-                &mut page,
-                scene,
-                &registry,
-                placement,
-                &fonts,
-                &metrics,
+                builder, &mut page, scene, &registry, placement, &fonts, &metrics,
             );
             unwritable_runs += drawn.refused;
             if drawn.images_unresolved > 0 {
@@ -1285,7 +1360,7 @@ pub fn synthesise(
                 page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
             }
             unwritable_runs += draw_page(
-                &mut builder,
+                builder,
                 &mut page,
                 laid,
                 &chapter_frame,
@@ -1318,39 +1393,7 @@ pub fn synthesise(
         });
     }
 
-    let entries = outline(book, package, &chapters, limits, total_pages);
-    if !entries.is_empty() && !builder.set_outline(entries) {
-        warnings.push(ArchiveWarning::OutlineUnwritable);
-    }
-
-    // Taken after every read, because reading is what most of them come from.
-    for warning in book.archive().warnings() {
-        warnings.push(ArchiveWarning::Zip(*warning));
-    }
-
-    let pdf = builder.finish();
-    if pdf.len() > limits.max_synthesised {
-        return Err(ArchiveRefusal::TooLarge);
-    }
-    let synthesised_bytes = pdf.len();
-    // Taken after the last charge and before anything is returned, so the
-    // figures are what the whole book cost rather than what one pass did.
-    let cost = BookCost {
-        manifest_items: package.items().len(),
-        spine_items: package.spine().len(),
-        css_tokens: css_budget.tokens(),
-        css_rules: css_budget.rules(),
-        css_declarations: css_budget.declarations(),
-        selector_matches: css_budget.matches(),
-        boxes: layout_budget.boxes(),
-        break_work: layout_budget.breaks(),
-        layout_work: layout_budget.layout(),
-        pages: total_pages,
-    };
-    Ok((
-        pdf,
-        ArchiveReport::book(warnings, pages, synthesised_bytes, *layout, cost),
-    ))
+    (pages, total_pages)
 }
 
 /// Where one reference points, once the spine has been paginated.

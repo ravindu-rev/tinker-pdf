@@ -119,31 +119,119 @@ impl Census {
     }
 }
 
+/// Why a reference a content document made did not produce bytes.
+///
+/// Two answers and not one, because they blame different parties and
+/// [`super::typeface::FaceDefect`] already tells them apart: a reference that
+/// names nothing is the document's mistake, and an entry that is there and
+/// will not inflate is the container's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Unavailable {
+    /// The reference is not one this provider can resolve, or it resolves to
+    /// nothing the provider holds.
+    Missing,
+    /// It resolves to something the provider holds, and the bytes would not
+    /// come out.
+    Unreadable,
+}
+
+/// Where a content document's references are read from: a stylesheet's
+/// `<link href>` and `@import`, an `<img src>`, an `@font-face` `url()`.
+///
+/// # Why this is a trait and not an OCF container
+///
+/// Until tier 5's formats row every one of those references was resolved
+/// against [`Ocf`], because a content document only ever arrived inside one.
+/// A loose XHTML file, a creation call handed markup and a stylesheet, and an
+/// FB2 whose pictures are `<binary>` elements in the same file are documents
+/// read by **the same cascade and the same layout** with different answers to
+/// *"what does `cover.jpg` mean here"* — and that answer is the only thing
+/// that differs. So the reader asks this, and each caller supplies its own;
+/// the EPUB path is the [`Ocf`] implementation below, which does exactly what
+/// the four call sites it replaced did.
+///
+/// The provider resolves as well as reads, and that is deliberate: a `data:`
+/// URL (RFC 2397) is a reference with no path at all, and §4.2.3's grammar,
+/// which [`resolve_reference`] enforces, refuses it by its scheme. A provider
+/// that was only handed paths could never answer one.
+pub trait Resources {
+    /// The path `reference` names when written in the document at
+    /// `referring`, and the bytes there.
+    ///
+    /// The path comes back because it is the base for anything the fetched
+    /// resource itself refers to — an `@import` inside an imported sheet — and
+    /// because two references spelled differently that name one file must be
+    /// recognisably one file ([`super::typeface::load`] deduplicates on it).
+    ///
+    /// # Errors
+    /// [`Unavailable`], naming which half failed.
+    fn fetch(
+        &mut self,
+        referring: &str,
+        reference: &str,
+        limits: &Limits,
+    ) -> Result<(String, Vec<u8>), Unavailable>;
+}
+
+/// An OCF container resolves a reference as §4.2.5 says: against the referring
+/// document, by [`resolve_reference`], to an entry compared case-sensitively.
+impl Resources for Ocf<'_> {
+    fn fetch(
+        &mut self,
+        referring: &str,
+        reference: &str,
+        limits: &Limits,
+    ) -> Result<(String, Vec<u8>), Unavailable> {
+        let path =
+            resolve_reference(referring, reference, limits).map_err(|_| Unavailable::Missing)?;
+        let index = self.index_of(&path).ok_or(Unavailable::Missing)?;
+        let bytes = self
+            .read(index)
+            .map_err(|_| Unavailable::Unreadable)?
+            .to_vec();
+        Ok((path, bytes))
+    }
+}
+
+/// A document with nothing beside it: every reference is missing.
+///
+/// A reference such a document makes is named as unresolved by whatever made
+/// it — [`crate::ArchiveWarning::ImageNotDrawn`] for a picture,
+/// [`super::typeface::FaceDefect::ResourceMissing`] for a face — rather than
+/// guessed at.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoResources;
+
+impl Resources for NoResources {
+    fn fetch(&mut self, _: &str, _: &str, _: &Limits) -> Result<(String, Vec<u8>), Unavailable> {
+        Err(Unavailable::Missing)
+    }
+}
+
 /// Where an `@import` in a book's stylesheet is resolved from.
 ///
 /// Milestone 6 built [`ImportResolver`] and shipped `NoImports` beside it,
 /// saying in as many words that *"a caller that has an OCF container
-/// implements this"*. This is that caller. The `RefCell` is not a shortcut:
-/// [`Ocf::read`] takes `&mut self` because inflating an entry spends the
-/// archive's budget, and the trait takes `&self` because a resolver is shared
-/// by a whole parse.
-struct Container<'a, 'b> {
-    ocf: RefCell<&'b mut Ocf<'a>>,
+/// implements this"*. This is that caller, over any [`Resources`]. The
+/// `RefCell` is not a shortcut: [`Ocf::read`] takes `&mut self` because
+/// inflating an entry spends the archive's budget, and the trait takes `&self`
+/// because a resolver is shared by a whole parse.
+struct Imports<'b, R: ?Sized> {
+    resources: RefCell<&'b mut R>,
     limits: Limits,
 }
 
-impl ImportResolver for Container<'_, '_> {
+impl<R: Resources + ?Sized> ImportResolver for Imports<'_, R> {
     fn resolve(&self, href: &str, base: Option<&str>) -> Option<(String, Vec<u8>)> {
         // A sheet with no address of its own is a `<style>` element, and its
         // base is the document that holds it — which the caller put in `base`
         // for exactly this. With neither there is nothing to resolve against
         // and the import is dropped rather than guessed at.
         let base = base?;
-        let path = resolve_reference(base, href, &self.limits).ok()?;
-        let mut ocf = self.ocf.borrow_mut();
-        let index = ocf.index_of(&path)?;
-        let bytes = ocf.read(index).ok()?.to_vec();
-        Some((path, bytes))
+        self.resources
+            .borrow_mut()
+            .fetch(base, href, &self.limits)
+            .ok()
     }
 }
 
@@ -159,6 +247,13 @@ impl ImportResolver for Container<'_, '_> {
 pub struct Context<'a> {
     /// The parsed user-agent stylesheet, parsed once per book.
     pub ua: &'a [Stylesheet],
+    /// Author sheets the caller supplies rather than the document links, in
+    /// the order they apply, ahead of every sheet the document names.
+    ///
+    /// Empty for a book, whose sheets are all its own. A creation call handed
+    /// markup and a stylesheet separately puts the stylesheet here, which is
+    /// what a `<link>` at the top of the document's `<head>` would have done.
+    pub author: &'a [Stylesheet],
     /// The container's own ceilings, for resolving a `<link href>`.
     pub limits: &'a Limits,
     /// What the cascade may spend.
@@ -227,22 +322,14 @@ pub struct Reading {
 /// walk. A markup failure is **not** an error — it is a
 /// [`super::xhtml::MarkupDefect`] on a partial tree, because a chapter that
 /// stops half way has still said most of itself.
-pub fn read_document(
-    book: &mut Ocf<'_>,
+pub fn read_document<R: Resources + ?Sized>(
+    book: &mut R,
     path: &str,
     bytes: &[u8],
     context: &Context<'_>,
     budget: &mut CssBudget,
 ) -> Result<Reading, CssRefusal> {
-    let Context {
-        ua,
-        limits,
-        css_limits,
-        media,
-        pre_paginated,
-        initial,
-    } = context;
-    let dom = match super::xhtml::read(bytes, &limits.xml) {
+    let dom = match super::xhtml::read(bytes, &context.limits.xml) {
         Ok(dom) => dom,
         // An encoding this build does not decode, or a character XML §2.2
         // forbids. There is no tree at all, and the page that results says so
@@ -252,6 +339,35 @@ pub fn read_document(
             ..Dom::default()
         },
     };
+    read_dom(book, path, dom, context, budget)
+}
+
+/// [`read_document`] for a tree something else already built.
+///
+/// The markup reader is the one step a content document's language decides:
+/// an EPUB's is XML, a loose `.html` file's is HTML's own tree builder, and an
+/// FB2's or a Markdown file's is a translation into this tree. Everything from
+/// the stylesheets on is the same reading of the same tree, which is why this
+/// is where [`read_document`] hands over rather than a second copy of it.
+///
+/// # Errors
+/// [`read_document`]'s.
+pub fn read_dom<R: Resources + ?Sized>(
+    book: &mut R,
+    path: &str,
+    dom: Dom,
+    context: &Context<'_>,
+    budget: &mut CssBudget,
+) -> Result<Reading, CssRefusal> {
+    let Context {
+        ua,
+        author: given,
+        limits,
+        css_limits,
+        media,
+        pre_paginated,
+        initial,
+    } = context;
 
     // §8.2.2.6's viewport, and the media context that follows from it. The
     // substitution happens **here** rather than at the caller because the
@@ -267,11 +383,15 @@ pub fn read_document(
         _ => media,
     };
 
-    let author = author_sheets(book, path, &dom, limits, css_limits, budget, media);
+    let own = author_sheets(book, path, &dom, limits, css_limits, budget, media);
+    // A caller's sheets come first, as a `<link>` at the top of `<head>` would:
+    // §6.1's order of appearance then lets the document's own rules win a tie,
+    // which is what an author who wrote a `<style>` element meant by it.
+    let author: Vec<&Stylesheet> = given.iter().chain(own.iter()).collect();
     let mut sheets: Vec<(Origin, &Stylesheet)> =
         ua.iter().map(|sheet| (Origin::UserAgent, sheet)).collect();
     for sheet in &author {
-        sheets.push((Origin::Author, sheet));
+        sheets.push((Origin::Author, *sheet));
     }
 
     let styles = cascade_from(&sheets, &dom.nodes, css_limits, budget, initial)?;
@@ -330,8 +450,8 @@ pub fn read_document(
 /// property at the same specificity are decided by which came later, and a
 /// build that read every `<link>` before every `<style>` would get that
 /// backwards for calibre's books, which write both.
-fn author_sheets(
-    book: &mut Ocf<'_>,
+fn author_sheets<R: Resources + ?Sized>(
+    book: &mut R,
     path: &str,
     dom: &Dom,
     limits: &Limits,
@@ -352,17 +472,11 @@ fn author_sheets(
                 let Some(href) = node.attr("href") else {
                     continue;
                 };
-                let Ok(target) = resolve_reference(path, href, limits) else {
+                let Ok((target, bytes)) = book.fetch(path, href, limits) else {
                     continue;
                 };
-                let Some(index) = book.index_of(&target) else {
-                    continue;
-                };
-                let Ok(bytes) = book.read(index).map(<[u8]>::to_vec) else {
-                    continue;
-                };
-                let resolver = Container {
-                    ocf: RefCell::new(book),
+                let resolver = Imports {
+                    resources: RefCell::new(&mut *book),
                     limits: *limits,
                 };
                 if let Ok(sheet) = tinker_pdf_css::parser::parse(
@@ -386,8 +500,8 @@ fn author_sheets(
                 if source.trim().is_empty() {
                     continue;
                 }
-                let resolver = Container {
-                    ocf: RefCell::new(book),
+                let resolver = Imports {
+                    resources: RefCell::new(&mut *book),
                     limits: *limits,
                 };
                 // The **document's** path is the base, not `None`: a `<style>`
@@ -555,7 +669,12 @@ impl Pictures {
 /// `epub_conservation.rs` compares. So a refused `<img>` generates **no box**,
 /// which is the other half of §4.8.4.4's own sentence: an element is *"expected
 /// to be treated as a replaced element"* only when the image is available.
-fn pictures(book: &mut Ocf<'_>, path: &str, dom: &Dom, limits: &Limits) -> Pictures {
+fn pictures<R: Resources + ?Sized>(
+    book: &mut R,
+    path: &str,
+    dom: &Dom,
+    limits: &Limits,
+) -> Pictures {
     let mut out = Pictures::default();
     for element in 0..dom.nodes.len() {
         let node = &dom.nodes[element];
@@ -575,8 +694,8 @@ fn pictures(book: &mut Ocf<'_>, path: &str, dom: &Dom, limits: &Limits) -> Pictu
 }
 
 /// One `<img>`, resolved and read, or the reason it was not.
-fn picture(
-    book: &mut Ocf<'_>,
+fn picture<R: Resources + ?Sized>(
+    book: &mut R,
     path: &str,
     element: usize,
     dom: &Dom,
@@ -588,24 +707,24 @@ fn picture(
         .attr("src")
         .ok_or(ImageDefect::Unresolved)?
         .to_owned();
-    let target = resolve_reference(path, &href, limits).map_err(|_| ImageDefect::Unresolved)?;
-    let index = book.index_of(&target).ok_or(ImageDefect::Unresolved)?;
-    let bytes = book.read(index).map_err(|_| ImageDefect::Unresolved)?;
+    let (_, bytes) = book
+        .fetch(path, &href, limits)
+        .map_err(|_| ImageDefect::Unresolved)?;
     // Classification by magic and never by extension, `cbz::image_format`'s
     // own rule: a `.jpg` that is a PNG is routine, and an extension is a claim
     // where the first bytes of a file are a fact.
-    match image_format(bytes).ok_or(ImageDefect::Unknown)? {
+    match image_format(&bytes).ok_or(ImageDefect::Unknown)? {
         ImageFormat::Jpeg => {
             // The same reader `add_image` uses, so the box and the `/Width`
             // cannot disagree.
             let (width, height, _) =
-                tinker_pdf_cos::jpeg_shape(bytes).ok_or(ImageDefect::Undecodable)?;
+                tinker_pdf_cos::jpeg_shape(&bytes).ok_or(ImageDefect::Undecodable)?;
             if width == 0 || height == 0 {
                 return Err(ImageDefect::Undecodable);
             }
             Ok((
                 (f64::from(width), f64::from(height)),
-                PictureData::Jpeg(bytes.to_vec()),
+                PictureData::Jpeg(bytes),
             ))
         }
         ImageFormat::Png => {
@@ -614,7 +733,7 @@ fn picture(
             // hold is not a picture, and the number is the *host's* rather than
             // the decoder's so a host that lowered it can tell its decision
             // from `MAX_PNG_SAMPLES`.
-            let png = png_image(bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+            let png = png_image(&bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
                 .map_err(|_| ImageDefect::Undecodable)?;
             if png.width() == 0 || png.height() == 0 {
                 return Err(ImageDefect::Undecodable);
@@ -627,7 +746,7 @@ fn picture(
         // A core media type (§3.2) with no pass-through: decoded under the
         // same ceiling, and its first image is the picture.
         ImageFormat::Gif => {
-            let gif = gif_image(bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+            let gif = gif_image(&bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
                 .map_err(|_| ImageDefect::Undecodable)?;
             Ok((
                 (f64::from(gif.width()), f64::from(gif.height())),
@@ -636,7 +755,7 @@ fn picture(
         }
         // The fourth core media type, the same way, lossless or lossy.
         ImageFormat::WebP => {
-            let webp = webp_image(bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+            let webp = webp_image(&bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
                 .map_err(|_| ImageDefect::Undecodable)?;
             Ok((
                 (f64::from(webp.width()), f64::from(webp.height())),

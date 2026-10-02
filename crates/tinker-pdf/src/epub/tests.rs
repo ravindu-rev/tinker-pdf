@@ -1837,3 +1837,142 @@ fn a_navigation_document_with_no_epub_type_still_has_a_list() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].title, "One");
 }
+
+// ---- Where a content document's references are read from --------------------
+
+/// A provider over a handful of named files, recording every question it was
+/// asked — the shape a loose document's own resolver has, with nothing behind
+/// it but this list.
+struct Files {
+    files: Vec<(&'static str, &'static [u8])>,
+    asked: Vec<(String, String)>,
+}
+
+impl super::read::Resources for Files {
+    fn fetch(
+        &mut self,
+        referring: &str,
+        reference: &str,
+        limits: &Limits,
+    ) -> Result<(String, Vec<u8>), super::read::Unavailable> {
+        self.asked
+            .push((referring.to_owned(), reference.to_owned()));
+        let path = resolve_reference(referring, reference, limits)
+            .map_err(|_| super::read::Unavailable::Missing)?;
+        self.files
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
+            .ok_or(super::read::Unavailable::Missing)
+    }
+}
+
+/// Reads `markup` as `text/doc.xhtml` against `resources`, with no user-agent
+/// sheet, and hands back the `<p>`'s computed `font-size` and the reading.
+fn read_through<R: super::read::Resources>(
+    resources: &mut R,
+    markup: &str,
+) -> (f64, super::read::Reading) {
+    use tinker_pdf_css::cascade::ComputedStyle;
+    use tinker_pdf_css::media::MediaContext;
+    use tinker_pdf_css::Budget as CssBudget;
+
+    let l = limits();
+    let media = MediaContext::screen(400.0, 600.0);
+    let initial = ComputedStyle::initial();
+    let context = super::read::Context {
+        ua: &[],
+        author: &[],
+        limits: &l,
+        css_limits: &l.css,
+        media: &media,
+        pre_paginated: false,
+        initial: &initial,
+    };
+    let mut budget = CssBudget::new(&l.css);
+    let reading = super::read::read_document(
+        resources,
+        "text/doc.xhtml",
+        markup.as_bytes(),
+        &context,
+        &mut budget,
+    )
+    .expect("a cascade");
+    let p = reading
+        .dom
+        .nodes
+        .iter()
+        .position(|node| node.name == "p")
+        .expect("a paragraph");
+    (reading.styles.styles[p].font_size, reading)
+}
+
+/// **Every reference a content document makes goes through its provider, and
+/// each is asked against the document that wrote it** — the `<link>` against
+/// the content document, the `@import` against the sheet that imported it, and
+/// the `<img>` against the content document again.
+///
+/// The `@import` is the one no committed book exercises (`epub_css.rs` asserts
+/// that none uses it), so before the provider seam nothing in the tree held the
+/// resolver that answers it: a build that dropped it would set this paragraph
+/// at the linked sheet's size and every other test would still pass.
+#[test]
+fn every_reference_a_document_makes_is_asked_of_its_provider() {
+    const MARKUP: &str = concat!(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>"#,
+        r#"<link rel="stylesheet" href="../css/a.css"/></head>"#,
+        r#"<body><p>text</p><img src="../img/missing.png"/></body></html>"#
+    );
+    let mut files = Files {
+        files: vec![
+            (
+                "css/a.css",
+                b"@import url(b.css); p { font-size: 20px }".as_slice(),
+            ),
+            ("css/b.css", b"p { font-size: 30px !important }".as_slice()),
+        ],
+        asked: Vec::new(),
+    };
+    let (size, reading) = read_through(&mut files, MARKUP);
+    assert_eq!(size, 30.0, "the imported sheet's rule did not apply");
+    assert_eq!(
+        files.asked,
+        [
+            ("text/doc.xhtml".to_owned(), "../css/a.css".to_owned()),
+            ("css/a.css".to_owned(), "b.css".to_owned()),
+            ("text/doc.xhtml".to_owned(), "../img/missing.png".to_owned()),
+        ],
+        "a reference was asked against the wrong base, or not asked at all"
+    );
+    assert_eq!(
+        reading.pictures.refused.len(),
+        1,
+        "the missing picture is named rather than guessed at"
+    );
+}
+
+/// **A document with nothing beside it** reads every reference as missing:
+/// the stylesheet is not applied, and the picture is refused by name.
+#[test]
+fn a_document_with_no_resources_reads_every_reference_as_missing() {
+    const MARKUP: &str = concat!(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>"#,
+        r#"<link rel="stylesheet" href="a.css"/></head>"#,
+        r#"<body><p>text</p><img src="cover.png"/></body></html>"#
+    );
+    let (size, reading) = read_through(&mut super::read::NoResources, MARKUP);
+    assert_eq!(
+        size,
+        tinker_pdf_css::cascade::ComputedStyle::initial().font_size
+    );
+    let img = reading
+        .dom
+        .nodes
+        .iter()
+        .position(|node| node.name == "img")
+        .expect("an img");
+    assert_eq!(
+        reading.pictures.refused,
+        [(img, crate::cbz::ImageDefect::Unresolved)]
+    );
+}
