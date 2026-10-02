@@ -473,10 +473,14 @@ default, clamped to 0.25–16; a value that is not a finite positive number is
 read as the default) and `max_bytes` (the markup's budget in bytes of
 elements, `tinker_pdf::MAX_SVG_BYTES` by default; a larger value is read as
 the cap, so it lowers the ceiling and cannot raise it). `SvgWarning` is
-`Rasterised { what: Rasterised }` with
-`Rasterised::{Shading, TilingPattern, PatternedStroke}`, `SoftMaskRefused`,
-`BlendModeRefused { mode }`, `KnockoutRefused`, `Truncated { limit }` and
-`Render(RenderWarning)`.
+`Rasterised { what: Rasterised, name }` with
+`Rasterised::{Shading, TilingPattern, PatternedStroke}` and the shading's or
+pattern's resource name, `SoftMaskRefused { group }` with the mask group's
+`ObjRef`, `BlendModeRefused { mode }`, `KnockoutRefused { form }` with the
+group form's resource name, `Truncated { limit }` and
+`Render(RenderWarning)` — each naming what it touched (ruling 10), except
+the blend mode, whose `ExtGState` no device is told: the interpreter hands
+every device the state a `gs` made, never the `gs`.
 The output is the same bytes every time, and nothing on its path calls a
 transcendental, so ruling 4's argument covers it — but no SVG fingerprint is
 committed beside `determinism.rs`'s, so the cross-target claim is argued and
@@ -577,8 +581,8 @@ a defect to hide in.
 | A PNG read back whose raster stops short of its declared height | `PngReadError::Incomplete`, carrying the decoder's own identifiers | The decoder degrades for a comic page; a file read back to be *compared* would have its missing rows scored as a rendering difference. Every refusal the decoder makes is `PngReadError::Refused` with its own reason | [filters](filters.md) |
 | A form render naming an XObject the page does not have, one that is not a form, or one whose stream cannot be read | `RenderPartError::NoSuchXObject`, `NotAForm { subtype }`, `UnreadableForm` | The page renders what it can; a caller who asked for one form asked about that form, and a blank bitmap is a wrong answer that looks right | — |
 | An annotation render at an index past `/Annots`, or of an entry that draws nothing | `RenderPartError::NoSuchAnnotation { count }`, `AnnotationNotDrawn { why }` with `NotDrawn::{NotADictionary, Hidden, Popup, NoRect, NoAppearance, UnreadableAppearance, Degenerate}` | Every reason `Page::render` skips an annotation silently, named where a caller asked for that one | [document model](document-model.md) |
-| A soft mask, a blend mode other than `Normal`, or a knockout group, on a page written as SVG | `SvgWarning::SoftMaskRefused`, `BlendModeRefused { mode }`, `KnockoutRefused` | SVG 1.1 says the first two only with `<mask>` and `<filter>`'s `feBlend`, which `tinker-pdf-svg` refuses, and the third not at all; what was masked is drawn unmasked, the blend as `Normal`, the group as an ordinary one — a file this repository cannot read back whole is not written | [design/svg.md](../design/svg.md) |
-| A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is no longer vectors there. A `<pattern>` would be exact for a tiling pattern and is the element the reader refuses | — |
+| A soft mask, a blend mode other than `Normal`, or a knockout group, on a page written as SVG | `SvgWarning::SoftMaskRefused { group }`, `BlendModeRefused { mode }`, `KnockoutRefused { form }` | SVG 1.1 says the first two only with `<mask>` and `<filter>`'s `feBlend`, which `tinker-pdf-svg` refuses, and the third not at all; what was masked is drawn unmasked, the blend as `Normal`, the group as an ordinary one — a file this repository cannot read back whole is not written | [design/svg.md](../design/svg.md) |
+| A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what, name }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is no longer vectors there. A `<pattern>` would be exact for a tiling pattern and is the element the reader refuses | — |
 | A page whose recording would hold more than `MAX_DISPLAY_LIST_BYTES` (64 MiB) | `DisplayList::is_retained()` is false | Not a warning, because nothing is drawn differently: the list keeps no calls and every render and SVG is a direct one, the same output at a direct render's cost. A fan of forms makes a short file record without bound, which a direct render's one canvas never does | `bounds_ledger.rs` |
 | A page whose SVG would pass `MAX_SVG_BYTES` (256 MiB) of elements, or the smaller `SvgOptions::max_bytes` | `SvgWarning::Truncated { limit }` | Markup grows with what the page does rather than with what the file holds, so it has a budget a render's one canvas does not need; what fits is written, the document is well-formed and ends there, and the replay stops | `bounds_ledger.rs` |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |

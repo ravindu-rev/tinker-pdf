@@ -781,16 +781,27 @@ fn what_svg_cannot_say_is_named() {
         resources,
         &[mesh, cell, mask_group, knockout],
     ));
+    // Each names what it touched (ruling 10): the shading and the pattern by
+    // resource name, the mask by its `/G` group's reference — object 7 — and
+    // the knockout group by the form's resource name. The blend mode names
+    // the mode, because a device is handed the state a `gs` made and never
+    // the `gs`.
     for expected in [
         SvgWarning::Rasterised {
             what: Rasterised::Shading,
+            name: "M".to_string(),
         },
         SvgWarning::Rasterised {
             what: Rasterised::TilingPattern,
+            name: "P".to_string(),
         },
-        SvgWarning::SoftMaskRefused,
+        SvgWarning::SoftMaskRefused {
+            group: Some(tinker_pdf::ObjRef { num: 7, gen: 0 }),
+        },
         SvgWarning::BlendModeRefused { mode: "Multiply" },
-        SvgWarning::KnockoutRefused,
+        SvgWarning::KnockoutRefused {
+            form: "K".to_string(),
+        },
     ] {
         assert!(
             svg.warnings.contains(&expected),
@@ -1071,7 +1082,8 @@ fn a_raster_drawn_again_is_written_once() {
     assert_eq!(
         svg.warnings,
         vec![SvgWarning::Rasterised {
-            what: Rasterised::Shading
+            what: Rasterised::Shading,
+            name: "S".to_string(),
         }]
     );
     assert_eq!(svg.markup.matches("data:image/png").count(), 1);

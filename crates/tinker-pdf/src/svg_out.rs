@@ -239,7 +239,8 @@ pub struct Svg {
 /// Something the page drew that the SVG says differently or not at all.
 ///
 /// Deduplicated: each distinct warning once per page, however many times the
-/// page asked.
+/// page asked — and each names the object it touched (ruling 10), so two
+/// shadings rasterised are two warnings and a caller can tell which.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum SvgWarning {
@@ -248,18 +249,35 @@ pub enum SvgWarning {
     Rasterised {
         /// What was.
         what: Rasterised,
+        /// Its resource name: the shading `sh` painted, or the pattern a fill
+        /// or a stroke was painted with, in the scope it was drawn in.
+        name: String,
     },
     /// A soft mask (11.6.5) was declined — SVG's `<mask>` is refused by
     /// `tinker-pdf-svg` — and what it masked is drawn unmasked.
-    SoftMaskRefused,
+    SoftMaskRefused {
+        /// The mask's transparency group, the `/SMask` dictionary's `/G`, by
+        /// reference; `None` for one reached without one. The group rather
+        /// than the `ExtGState` that installed it, because a device is handed
+        /// the state a `gs` made and never the `gs`.
+        group: Option<crate::ObjRef>,
+    },
     /// A blend mode other than `Normal` (11.3.5) — `feBlend`, a `<filter>` —
     /// drawn with the normal one.
+    ///
+    /// Named by the mode alone. The `ExtGState` that set it is the object a
+    /// caller would want, and a device never learns it: the interpreter
+    /// applies a `gs` to the state and hands every device the result.
     BlendModeRefused {
         /// The mode's name as ISO 32000 writes it.
         mode: &'static str,
     },
     /// A knockout transparency group (11.4.5), drawn as an ordinary one.
-    KnockoutRefused,
+    KnockoutRefused {
+        /// The group's form XObject, by the resource name it was invoked
+        /// with.
+        form: String,
+    },
     /// The markup reached its budget — [`SvgOptions::max_bytes`], at most
     /// [`MAX_SVG_BYTES`] — and what the page drew from that point on is not
     /// in it. The document is well-formed and ends there.
@@ -393,6 +411,9 @@ struct Geometry {
 struct Writer<'a> {
     glyphs: Scope<'a>,
     form_scopes: Vec<Option<Scope<'a>>>,
+    /// The resource name of every form entered and not yet ended, innermost
+    /// last, so a refusal about a group can name the form that carries it.
+    form_names: Vec<Vec<u8>>,
     pushed: Vec<Scope<'a>>,
     /// PDF default space to SVG units: displayed points, `y` down.
     base: Matrix,
@@ -437,6 +458,7 @@ impl<'a> Writer<'a> {
         Writer {
             glyphs: Scope::Borrowed(resources),
             form_scopes: Vec::new(),
+            form_names: Vec::new(),
             pushed: Vec::new(),
             base,
             geometry: Geometry {
@@ -697,13 +719,19 @@ impl<'a> Writer<'a> {
         }
         self.note_blend(state.blend);
         let scale = state.ctm.then(&self.base).expansion();
-        if state.stroke_pattern.is_some() {
+        if let Some(pattern) = &state.stroke_pattern {
+            let pattern = pattern.clone();
             let bounds = grow(path_bounds(path, &self.base), state.line_width * scale);
             let path = path.to_vec();
             let state = state.clone();
-            self.rasterise(bounds, Rasterised::PatternedStroke, move |renderer| {
-                renderer.stroke_path(&path, &state);
-            });
+            self.rasterise(
+                bounds,
+                Rasterised::PatternedStroke,
+                &pattern,
+                move |renderer| {
+                    renderer.stroke_path(&path, &state);
+                },
+            );
             return;
         }
         let d = path_data(path, &self.base);
@@ -785,10 +813,10 @@ impl<'a> Writer<'a> {
                     self.put(&element);
                     return;
                 }
-                self.rasterise_fill(path, even_odd, state, Rasterised::Shading);
+                self.rasterise_fill(path, even_odd, state, Rasterised::Shading, name);
             }
             Some(PatternPaint::Tiling(_)) => {
-                self.rasterise_fill(path, even_odd, state, Rasterised::TilingPattern);
+                self.rasterise_fill(path, even_odd, state, Rasterised::TilingPattern, name);
             }
             Some(PatternPaint::Unsupported) | None => {
                 self.warn(SvgWarning::Render(RenderWarning::UnsupportedPattern {
@@ -804,11 +832,12 @@ impl<'a> Writer<'a> {
         even_odd: bool,
         state: &GraphicsState,
         what: Rasterised,
+        name: &[u8],
     ) {
         let bounds = path_bounds(path, &self.base);
         let path = path.to_vec();
         let state = state.clone();
-        self.rasterise(bounds, what, move |renderer| {
+        self.rasterise(bounds, what, name, move |renderer| {
             renderer.fill_path(&path, &state, even_odd);
         });
     }
@@ -908,6 +937,7 @@ impl<'a> Writer<'a> {
         &mut self,
         bounds: [f64; 4],
         what: Rasterised,
+        name: &[u8],
         paint: impl FnOnce(&mut Renderer<'_, PageResources>),
     ) {
         if self.spent {
@@ -975,7 +1005,10 @@ impl<'a> Writer<'a> {
         };
         element.push('\n');
         if self.put(&element) {
-            self.warn(SvgWarning::Rasterised { what });
+            self.warn(SvgWarning::Rasterised {
+                what,
+                name: String::from_utf8_lossy(name).into_owned(),
+            });
         }
     }
 
@@ -1229,10 +1262,10 @@ impl Device for Writer<'_> {
             return;
         }
         let page = [0.0, 0.0, self.geometry.width, self.geometry.height];
-        let name = name.to_vec();
+        let shading = name.to_vec();
         let state = state.clone();
-        self.rasterise(page, Rasterised::Shading, move |renderer| {
-            renderer.draw_shading(&name, &state);
+        self.rasterise(page, Rasterised::Shading, name, move |renderer| {
+            renderer.draw_shading(&shading, &state);
         });
     }
 
@@ -1265,10 +1298,12 @@ impl Device for Writer<'_> {
         let nested = self.glyphs.form_scope(name);
         self.form_scopes
             .push(nested.map(|scope| std::mem::replace(&mut self.glyphs, Scope::Owned(scope))));
+        self.form_names.push(name.to_vec());
         true
     }
 
     fn end_form(&mut self, _id: u64) {
+        self.form_names.pop();
         if let Some(Some(outer)) = self.form_scopes.pop() {
             self.glyphs = outer;
         }
@@ -1285,7 +1320,14 @@ impl Device for Writer<'_> {
         }
         self.note_blend(state.blend);
         if group.knockout {
-            self.warn(SvgWarning::KnockoutRefused);
+            // The interpreter offers a group as the form that carries it,
+            // so the form most recently entered is this group's.
+            let form = self
+                .form_names
+                .last()
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .unwrap_or_default();
+            self.warn(SvgWarning::KnockoutRefused { form });
         }
         let mut element = String::from("<g");
         push_opacity(&mut element, "opacity", state.fill_alpha);
@@ -1309,11 +1351,18 @@ impl Device for Writer<'_> {
 
     fn begin_soft_mask(
         &mut self,
-        _mask: &MaskGroup,
+        mask: &MaskGroup,
         _bbox: &[PathSegment],
         _state: &GraphicsState,
     ) -> bool {
-        self.warn(SvgWarning::SoftMaskRefused);
+        // `Form::stream` packs the group's reference as `num << 16 | gen`,
+        // and is 0 for a group reached without one.
+        let stream = mask.form.stream;
+        let group = (stream != 0).then(|| crate::ObjRef {
+            num: u32::try_from(stream >> 16).unwrap_or(u32::MAX),
+            gen: (stream & 0xFFFF) as u16,
+        });
+        self.warn(SvgWarning::SoftMaskRefused { group });
         false
     }
 
