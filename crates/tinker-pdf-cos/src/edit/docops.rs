@@ -457,8 +457,8 @@ impl DocumentEditor {
         let tree_key = self.intern(b"EmbeddedFiles");
         let old = self.names_dictionary().0.get(tree_key).cloned();
         // A tree written directly into `/Names` holds the document's
-        // attachments all the same — 7.7.4 says indirect, and a viewer lists
-        // either — so its entries are carried into the new tree, not dropped.
+        // attachments all the same — a viewer lists either — so its entries
+        // are carried into the new tree, not dropped.
         let mut entries = match &old {
             Some(Object::Ref(root)) => trees::name_tree_in(self, *root),
             Some(Object::Dict(root)) => trees::name_tree_at(self, root),

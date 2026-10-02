@@ -42,10 +42,10 @@ pub fn name_tree_in<R: Resolve + ?Sized>(doc: &R, root: ObjRef) -> Vec<(Vec<u8>,
         .collect()
 }
 
-/// [`name_tree_in`] for a root written **directly** where the tree belongs —
-/// 7.7.4 asks for an indirect `/Names` entry, a producer that wrote the
-/// dictionary in place still wrote a tree, and an editor adding to it must
-/// carry what it holds.
+/// [`name_tree_in`] for a root written **directly** where the tree belongs,
+/// as a dictionary rather than a reference to one: a producer that wrote the
+/// root in place still wrote a tree, and an editor adding to it must carry
+/// what it holds.
 #[must_use]
 pub(crate) fn name_tree_at<R: Resolve + ?Sized>(doc: &R, root: &Dict) -> Vec<(Vec<u8>, Object)> {
     let mut out = Vec::new();
