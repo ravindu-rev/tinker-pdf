@@ -1,0 +1,16 @@
+<div>
+*not emphasis*
+
+</div>
+
+<table><tr><td>
+<pre>
+**x**
+</pre>
+</td></tr></table>
+
+<!--
+comment
+-->
+
+<custom-tag attr="v">

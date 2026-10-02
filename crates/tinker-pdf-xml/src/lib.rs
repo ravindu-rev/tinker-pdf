@@ -106,6 +106,20 @@ mod text;
 #[cfg(test)]
 mod tests;
 
+/// The character XHTML 1.0's three entity sets declare for `name`, or `None`.
+///
+/// The same vendored table a document declaring an XHTML 1.x DTD has its
+/// named references resolved from, for a caller that meets a named reference
+/// in text that is not XML — the facade's Markdown reader, where CommonMark
+/// §2.5 resolves `&copy;` in a paragraph. Case-sensitive, as XML names are:
+/// `&Eacute;` and `&eacute;` are two entries and `&NBSP;` is none. HTML's own
+/// larger list is not here, for the reason the entity sets' THIRDPARTY.md
+/// section gives.
+#[must_use]
+pub fn xhtml_entity(name: &str) -> Option<char> {
+    text::xhtml_entity(name)
+}
+
 use std::borrow::Cow;
 use std::fmt;
 

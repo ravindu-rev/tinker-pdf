@@ -483,6 +483,36 @@ jobs:
           grep -q 'vp8-test-vectors: RAN 182 key frames from 61 files, 0 failed' \
             vp8-vectors.log
 
+  commonmark-spec:
+    # Tier 5's Markdown row: the reader held to CommonMark 0.31.2's own 652
+    # examples. `spec.txt` is CC-BY-SA 4.0, which `deny.toml` bars from the
+    # repository exactly as it bars `epub3-samples` above, so it is fetched
+    # into `target/` at a pinned tag, its SHA-256 checked by the script and by
+    # the test, read, and thrown away with `target/`. The banner grep is the
+    # same as the job above's and for the same reason: a skip exits 0.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the specification that cannot be committed
+        run: sh crates/tinker-pdf/tests/commonmark/fetch-spec.sh
+      - name: Hold the reader to its examples
+        env:
+          TINKER_COMMONMARK_SPEC: ${{ github.workspace }}/target/commonmark-spec/spec.txt
+          TINKER_COMMONMARK_SPEC_REQUIRED: "1"
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test commonmark_spec -- --nocapture \
+            2>&1 | tee commonmark.log
+          if grep -q 'commonmark-spec: SKIPPED' commonmark.log; then
+            echo "::error::the CommonMark examples were not read, so the" \
+                 "floor SKIPPED rather than held"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' commonmark.log
+          grep -q 'commonmark-spec: RAN' commonmark.log
+
   licenses:
     runs-on: ubuntu-latest
     steps:

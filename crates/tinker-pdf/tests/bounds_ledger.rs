@@ -11,6 +11,14 @@
 //! reason, and its three yardsticks are zeros, because none of the
 //! container paths redacts.
 //!
+//! *Amended, 2 October 2026, tier 5's Markdown row.* **Two more rows, the
+//! first for a reader whose input is text a caller names rather than a file
+//! that names itself.** `MAX_MARKDOWN_NESTING` bounds how deep containers
+//! open, because every line walks every open container; `MAX_MARKDOWN_REFERENCE_BYTES`
+//! bounds what reference links copy out of their definitions, which is the
+//! one place in CommonMark where a short input asks for a long output. All
+//! three yardsticks are zeros, because no container path reads Markdown.
+//!
 //! *Amended, 2 October 2026, the review of the form data exchange row.* **One
 //! more row, `MAX_FORM_DATA_BYTES`, the second cap on copies.** The FDF and
 //! XFDF readers hand back qualified names, values and warnings, and each of
@@ -477,6 +485,7 @@ use tinker_pdf::epub::{
     MAX_EPUB_FALLBACK_DEPTH, MAX_EPUB_MANIFEST_ITEMS, MAX_EPUB_SPINE_ITEMS, MAX_OCF_PATH_LEN,
 };
 use tinker_pdf::form_data::MAX_FORM_DATA_BYTES;
+use tinker_pdf::markdown::{MAX_MARKDOWN_NESTING, MAX_MARKDOWN_REFERENCE_BYTES};
 use tinker_pdf::redact::MAX_FORM_COPY_BYTES;
 use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
@@ -553,6 +562,8 @@ const SVG_OUT: &str = include_str!("../src/svg_out.rs");
 const SVG_OUTPUT_TESTS: &str = include_str!("svg_output.rs");
 const RENDER_DISPLAY: &str = include_str!("../../tinker-pdf-render/src/display.rs");
 const DISPLAY_LIST_TESTS: &str = include_str!("display_list.rs");
+const MARKDOWN: &str = include_str!("../src/markdown.rs");
+const MARKDOWN_TESTS: &str = include_str!("markdown.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -2202,6 +2213,49 @@ fn ledger() -> Vec<Bound> {
                 DISPLAY_LIST_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_MARKDOWN_NESTING",
+            cap: MAX_MARKDOWN_NESTING as u128,
+            published: "100",
+            // The test that fires it nests five past the cap, so it spends the
+            // cap; every other fixture nests at most four (`markdown.rs`'s
+            // release notes and the fuzz seeds).
+            fixtures: MAX_MARKDOWN_NESTING as u128,
+            // None of the three container paths reads Markdown.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // A `>` is a block quote, so a file nests as deep as it is long —
+            // on the narrowest target at most `u32::MAX` bytes.
+            reachable: 1u128 << 32,
+            reachable_because: "one block quote per byte of a 4 GiB file",
+            declared_in: MARKDOWN,
+            fires_in: (
+                "a_container_past_the_nesting_cap_is_read_as_text_and_counted",
+                MARKDOWN_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_MARKDOWN_REFERENCE_BYTES",
+            cap: MAX_MARKDOWN_REFERENCE_BYTES as u128,
+            published: "100 KiB",
+            // The firing test spends the budget to the reference it runs out
+            // at, which is the cap less less than one destination.
+            fixtures: MAX_MARKDOWN_REFERENCE_BYTES as u128,
+            comic: 0,
+            document: 0,
+            book: 0,
+            // Half a file of destination copied by a quarter-file of
+            // three-byte `[a]`s: on the narrowest target, a 4 GiB file asks
+            // for 2^31 × 2^32 / 6 bytes.
+            reachable: (1u128 << 31) * (1u128 << 32) / 6,
+            reachable_because: "a destination half a 4 GiB file long, used by a sixth of it",
+            declared_in: MARKDOWN,
+            fires_in: (
+                "reference_links_past_the_copy_budget_read_as_text_and_are_counted",
+                MARKDOWN_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2241,7 +2295,9 @@ fn segment_size() -> u128 {
 /// `MAX_GIF_SAMPLES`; and the archive row's WebP decoder adds
 /// `MAX_WEBP_SAMPLES`; and the review of the SVG writer adds
 /// `MAX_SVG_BYTES`; and the review of the retained page adds
-/// `MAX_DISPLAY_LIST_BYTES`. All **fifty-two** are here, and
+/// `MAX_DISPLAY_LIST_BYTES`; and tier 5's Markdown row adds
+/// `MAX_MARKDOWN_NESTING` and `MAX_MARKDOWN_REFERENCE_BYTES`. All
+/// **fifty-four** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2301,6 +2357,8 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_WEBP_SAMPLES",
             "MAX_SVG_BYTES",
             "MAX_DISPLAY_LIST_BYTES",
+            "MAX_MARKDOWN_NESTING",
+            "MAX_MARKDOWN_REFERENCE_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2406,7 +2464,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 52, "the ledger is fifty-two rows");
+    assert_eq!(measured, 54, "the ledger is fifty-four rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2438,7 +2496,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 52, "the ledger is fifty-two rows");
+    assert_eq!(ledger().len(), 54, "the ledger is fifty-four rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

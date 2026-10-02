@@ -6649,3 +6649,36 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
          {shrunk:?}"
     );
 }
+
+/// **`P*` and `S*` together, from the vendored categories** — CommonMark
+/// 0.31's punctuation, which the facade's Markdown reader asks of the
+/// characters beside an emphasis delimiter. One of each of the twelve
+/// categories, a letter, a digit, a mark and a space that are none of them,
+/// and `Pi`/`Pf` agreeing with the line breaker's own two sets.
+#[test]
+fn punctuation_or_symbol_is_every_p_and_s_category() {
+    use crate::unicode::{is_final_punctuation, is_initial_punctuation, is_punctuation_or_symbol};
+    for (c, category) in [
+        ('_', "Pc"),
+        ('\u{2014}', "Pd"),
+        ('(', "Ps"),
+        (')', "Pe"),
+        ('\u{AB}', "Pi"),
+        ('\u{BB}', "Pf"),
+        ('\u{066A}', "Po"),
+        ('+', "Sm"),
+        ('\u{A3}', "Sc"),
+        ('^', "Sk"),
+        ('\u{A9}', "So"),
+        ('\u{20AC}', "Sc"),
+    ] {
+        assert!(is_punctuation_or_symbol(c), "{c:?} is {category}");
+    }
+    for c in ['a', '\u{0416}', '7', '\u{0301}', ' ', '\u{A0}'] {
+        assert!(!is_punctuation_or_symbol(c), "{c:?} is neither");
+    }
+    for c in ['\u{AB}', '\u{BB}', '\u{201C}', '\u{201D}'] {
+        assert!(is_initial_punctuation(c) || is_final_punctuation(c));
+        assert!(is_punctuation_or_symbol(c));
+    }
+}

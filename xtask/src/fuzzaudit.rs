@@ -187,6 +187,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "a structured generator: the body names a tree of boxes",
     ),
     ("lzw", "a raw LZW stream begins with a code, not a magic"),
+    (
+        "markdown",
+        "Markdown is text with no header and no control byte",
+    ),
     ("pki_cms", "DER: a SEQUENCE tag, which any DER shares"),
     ("pki_der", "DER: a SEQUENCE tag, which any DER shares"),
     ("render_page", "a generator over page content, not a file"),

@@ -308,6 +308,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "markdown"
+path = "fuzz_targets/markdown.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "woff"
 path = "fuzz_targets/woff.rs"
 test = false

@@ -1,0 +1,11 @@
+*a **b** c* and _d __e__ f_ and ***g*** and *a**b*
+`` code ` span `` with \*escapes\* and &copy; &#x263A; &bogus;
+[inline](/url "title") ![image](/img.png 'alt title') <http://auto.link> <me@example.org>
+[collapsed][] [full][ref] [shortcut] [nested [brackets]](</a b>)
+hard
+break\
+and <span class="raw">raw html</span> <!-- comment --> <?pi?> <![CDATA[x]]>
+
+[ref]: </dest> (paren title)
+[collapsed]: /c
+[shortcut]: /s

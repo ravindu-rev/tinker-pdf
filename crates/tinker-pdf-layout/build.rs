@@ -87,6 +87,7 @@ fn main() {
         &mut out,
     );
     combining(&data, &mut out);
+    punctuation_or_symbol(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
     std::fs::write(&target, out).expect("the generated table could not be written");
@@ -225,6 +226,33 @@ fn combining(data: &Path, out: &mut String) {
         out,
         "/// General_Category Mn or Mc, for LB1's SA resolution.\n\
          pub static COMBINING: &[(u32, u32)] = &[\n{body}];",
+    );
+}
+
+/// Every `P` and `S` general category together — CommonMark 0.31's *Unicode
+/// punctuation character*, which decides whether a run of `*` or `_` can open
+/// or close emphasis. A consumer outside line breaking, and the reason it is
+/// here rather than in a second copy of this file's reader: the category file
+/// is vendored once.
+fn punctuation_or_symbol(data: &Path, out: &mut String) {
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for (first, last, value) in rows(&data.join("DerivedGeneralCategory.txt")) {
+        if !value.starts_with('P') && !value.starts_with('S') {
+            continue;
+        }
+        for code in first..=last {
+            map.insert(code, String::new());
+        }
+    }
+    let merged = ranges(&map);
+    let mut body = String::new();
+    for (first, last, _) in &merged {
+        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
+    }
+    let _ = writeln!(
+        out,
+        "/// General_Category P* or S*, for CommonMark's punctuation.\n\
+         pub static PUNCTUATION_OR_SYMBOL: &[(u32, u32)] = &[\n{body}];",
     );
 }
 

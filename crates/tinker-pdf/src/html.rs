@@ -214,6 +214,34 @@ pub trait FromHtml: Sized {
         page: PageBox,
         resources: &mut R,
     ) -> Result<(Self, HtmlReport), HtmlError>;
+
+    /// [`FromHtml::from_html`] for **Markdown** (CommonMark 0.31.2, tier 5's
+    /// formats row): `text` is translated by [`crate::markdown`] into an XHTML
+    /// document and laid out exactly as that document would be, the
+    /// stylesheet applied ahead of it. What the translation had to do — raw
+    /// HTML set as text, containers past
+    /// [`crate::markdown::MAX_MARKDOWN_NESTING`] — comes first in the report,
+    /// as [`ArchiveWarning::Translation`].
+    ///
+    /// # Errors
+    /// The same as [`FromHtml::from_html`].
+    fn from_markdown(
+        text: &str,
+        stylesheet: &str,
+        page: PageBox,
+    ) -> Result<(Self, HtmlReport), HtmlError> {
+        let (xhtml, defects) = crate::markdown::to_xhtml(text);
+        let (built, mut report) = Self::from_html(xhtml, stylesheet, page)?;
+        let translation = defects
+            .into_iter()
+            .map(|(defect, count)| ArchiveWarning::Translation {
+                item: String::new(),
+                defect,
+                count,
+            });
+        report.warnings.splice(0..0, translation);
+        Ok((built, report))
+    }
 }
 
 impl FromHtml for DocumentBuilder {

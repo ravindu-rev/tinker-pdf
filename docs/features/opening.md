@@ -58,6 +58,18 @@ and resolves. A streamed open of one is whole-file, as a container's is, and
 its wider sniff is read only when the first kilobyte holds no PDF header, so
 a streamed PDF's reads are unchanged.
 
+**Markdown opens by name, not by sniff.** `Document::open_markdown(bytes,
+&OpenOptions)` reads the bytes as UTF-8 (each malformed sequence U+FFFD,
+counted), translates them with `tinker_pdf::markdown` — a hand-written
+CommonMark 0.31.2 reader held to the specification's own 652 examples, 651 of
+which it passes exactly — into an XHTML document, and lays that out as a loose
+XHTML file is, its first heading as `/Title`. It is a separate entry point
+because Markdown has no signature: a sniff that called text Markdown would turn
+every file that is not a PDF into a document of its own bytes, where `open`
+answers `NotAPdf` and `tinker_parity.rs` holds it to that. Raw HTML is set as
+the text it is (`TranslationDefect::RawHtmlAsText`), because a tag that is not
+well-formed XML would stop the reader and lose the rest of the document.
+
 **COS parsing.** A hand-written lexer covers the full token grammar of 7.2
 and every object form of 7.3: literal strings with all escapes and octal
 (7.3.4.2), hex strings (7.3.4.3), names with `#xx` escapes (7.3.5), numbers
@@ -173,6 +185,14 @@ Image(ImageFormat)}` (`#[non_exhaustive]`, re-exported on the facade) and
 `data_url` (RFC 2397) and `base64_decode` (RFC 4648 §4, white space skipped,
 padding optional), with `DataUrls`, the `epub::read::Resources` provider that
 answers `data:` URLs and hands every other reference to the one behind it.
+`Document::open_markdown(bytes, &OpenOptions)` is Markdown's door;
+`tinker_pdf::markdown` exposes the reader as `to_html` (CommonMark's HTML, raw
+HTML passed through) and `to_xhtml` (the document the page is laid out from,
+with what the translation did), and its two caps,
+`MAX_MARKDOWN_NESTING` (100 containers) and `MAX_MARKDOWN_REFERENCE_BYTES`
+(100 KiB, or the document's length if larger, of what reference links copy
+out of their definitions). What a translation had to do is
+`ArchiveWarning::Translation { item, defect: TranslationDefect, count }`.
 
 The streaming seam adds `open_streaming(source)` and
 `open_streaming_with(source, &OpenOptions)`, the `ByteSource` trait with
@@ -208,6 +228,9 @@ exceed it routinely — declared in one place,
 | Nothing PDF-shaped | `OpenError::NotAPdf` | Not one indirect object found, even after a full rescan | `CosDocument::open` → `OpenError::NoObjects` |
 | A RAR 4 | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | Recognised by its own signature and refused as *that version*; no producer here can write one to hold a decoder to | [cbz](cbz.md), [design/comic-archives.md](../design/comic-archives.md) |
 | HTML that is not well-formed XML — tag soup | `ArchiveWarning::Markup { defect: MarkupDefect::Truncated, .. }` on a document of what parsed | **The narrowed half of tier 5's row.** A loose HTML file is read by the XML reader, so it opens as far as it parses as XML and the report says where it stopped; HTML5's tokenizer and tree builder (WHATWG §13.2) are not in this build, and the roadmap row says what holding one to html5lib-tests would take | [ROADMAP](../ROADMAP.md) |
+| Raw HTML in Markdown | `ArchiveWarning::Translation { defect: TranslationDefect::RawHtmlAsText, .. }` | set as the text it is: CommonMark passes it through, and a tag that is not well-formed XML would stop the XML reader and lose the rest of the document. Every character still reaches the page | `crates/tinker-pdf/src/markdown.rs` |
+| A named character reference outside XHTML 1.0's 253, in Markdown | the reference stays literal | CommonMark resolves HTML's 2 231 names; this repository vendors XHTML 1.0's sets (W3C) and not HTML's list, so `&HilbertSpace;` is text. The one CommonMark example of 652 the reader fails | [THIRDPARTY.md](../../THIRDPARTY.md) |
+| Markdown containers past 100 deep, references past their copy budget | `TranslationDefect::{NestingTooDeep, ReferenceBudgetSpent}` | read as the text they then are; the two caps are `bounds_ledger.rs` rows. A reference is the one construct whose output is not bounded by its input, so its copies are held to 100 KiB or the document's own length, cmark's rule | `crates/tinker-pdf/src/markdown.rs` |
 | A bare BMP | `OpenError::NotAPdf` | `BM` is two bytes, and also how a text file about a car begins; the comic path can afford it because an archive's entries are already pictures, and a sniff over every input cannot | `crates/tinker-pdf/src/standalone.rs` |
 | An SVG or HTML whose root element is past byte 4 096 | `OpenError::NotAPdf` | the prolog is walked inside `SNIFF_WINDOW` and not searched past it, because a sniff that scans is one that finds `<svg` inside a PDF's stream | `crates/tinker-pdf/src/standalone.rs` |
 | A bare GIF, WebP or AVIF | `ArchiveWarning::PlaceholderPage { defect: PageDefect::UnsupportedFormat(f), .. }` | recognised by magic and not decoded here; one placeholder page naming the format, which is what a comic archive holding that one picture has always produced | [cbz](cbz.md) |
@@ -284,6 +307,19 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   RFC 2397 §4's examples; `hostile_input.rs` sweeps all six kinds damaged,
   buffered and streamed; `fuzz/fuzz_targets/standalone.rs` is the deep
   version.
+- **`crates/tinker-pdf/tests/commonmark_spec.rs`** — the Markdown reader held
+  to CommonMark 0.31.2's 652 examples, compared exactly, over a `spec.txt`
+  fetched at its pinned tag and SHA-256 by `tests/commonmark/fetch-spec.sh`
+  (CC-BY-SA 4.0, so never committed); it also asserts it reads the same 652
+  the tag's `spec_tests.py --dump-tests` writes as `spec.json`, by a recorded
+  fingerprint. **651 pass**, measured 2 October 2026, and every section but
+  the entity one is held whole; the `commonmark-spec` CI job greps its `RAN`
+  banner. `tests/markdown.rs` runs on every `cargo test`: reader answers worked
+  out from the rules, a Markdown document pixel for pixel the XHTML it
+  translates to, raw HTML and malformed UTF-8 counted, and both caps fired.
+  `hostile_input.rs` sweeps the shapes that make a CommonMark reader
+  quadratic at a size where one would hang, and holds the translation's XHTML
+  to being XML; `fuzz/fuzz_targets/markdown.rs` is the deep version.
 - **`crates/tinker-pdf/tests/streaming_determinism.rs`** — ruling 4 over a byte
   source. Every fixture, linearized ones included, renders identically from a
   buffer, from a slice source and from one answering a byte at a time.

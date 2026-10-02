@@ -894,6 +894,21 @@ pub enum ArchiveWarning {
         /// How many of its `<link>` elements did not resolve.
         sheets: usize,
     },
+    /// What translating a Markdown or FB2 document into the reader's tree had
+    /// to do (tier 5's formats rows), with how many times.
+    ///
+    /// Distinct from [`ArchiveWarning::Markup`], which is the XML reader
+    /// stopping: this is the step before it, deciding what of a language that
+    /// is not XHTML arrives as XHTML — and the cases where it arrives as
+    /// something else are what a host is told.
+    Translation {
+        /// The document translated (empty for one opened from bytes alone).
+        item: String,
+        /// What was done.
+        defect: crate::standalone::TranslationDefect,
+        /// How many times.
+        count: usize,
+    },
     /// A CSS property this build does not implement, and **how many elements
     /// it reached** (gap 31, milestone 8).
     ///

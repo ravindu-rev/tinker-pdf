@@ -79,6 +79,33 @@ pub const SNIFF_WINDOW: usize = 4_096;
 /// for before anything else is.
 const PDF_HEADER_WINDOW: usize = 1_024;
 
+/// What translating a document written in another language into the EPUB
+/// reader's tree had to do (tier 5's Markdown and FB2 rows), reported as
+/// [`ArchiveWarning::Translation`] with a count.
+///
+/// One vocabulary for both translators, because they answer the same
+/// question — *what of the source did not arrive as itself* — and a host
+/// that reads one reads the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TranslationDefect {
+    /// Markdown bytes that are not UTF-8, each malformed sequence read as
+    /// U+FFFD.
+    NotUtf8,
+    /// Raw HTML in Markdown, set as the text it is rather than passed through:
+    /// a tag that is not well-formed XML would stop the reader and lose the
+    /// rest of the document. Counted per tag or block.
+    RawHtmlAsText,
+    /// A Markdown block quote or list item that would have opened past
+    /// [`crate::markdown::MAX_MARKDOWN_NESTING`], read as text instead.
+    NestingTooDeep,
+    /// A Markdown reference link read as the text it is written as, because
+    /// the document's references had already copied
+    /// [`crate::markdown::MAX_MARKDOWN_REFERENCE_BYTES`] — or the document's
+    /// own length, if larger — out of their definitions.
+    ReferenceBudgetSpent,
+}
+
 /// What a one-file document turned out to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -234,22 +261,91 @@ pub(crate) fn synthesise(
     layout: &BookLayout,
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
     let limits = epub::Limits::DEFAULT;
-    if let Standalone::Image(format) = kind {
-        return image(bytes, format, &limits);
+    match kind {
+        Standalone::Image(format) => image(bytes, format, &limits),
+        Standalone::Svg => laid_out(
+            Loose::Svg(bytes),
+            Vec::new(),
+            &mut DataUrls(epub::read::NoResources),
+            layout,
+        ),
+        Standalone::Html => laid_out(
+            Loose::Markup(epub::read::markup(bytes, &limits.xml)),
+            Vec::new(),
+            &mut DataUrls(epub::read::NoResources),
+            layout,
+        ),
     }
-    let mut builder = DocumentBuilder::new();
-    let content = match kind {
-        Standalone::Svg => Loose::Svg(bytes),
-        _ => {
-            let dom = epub::read::markup(bytes, &limits.xml);
-            if let Some(title) = dom.title() {
-                builder.set_info(b"Title", &title);
-            }
-            Loose::Markup(dom)
-        }
-    };
-    let laid = epub::lay_out_one(
+}
+
+/// A Markdown document as a synthesised PDF (tier 5's Markdown row): the
+/// bytes read as UTF-8, translated by [`crate::markdown`] into an XHTML
+/// document, and laid out as a loose XHTML file is.
+///
+/// # Errors
+/// [`synthesise`]'s.
+pub(crate) fn markdown(
+    bytes: &[u8],
+    layout: &BookLayout,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    let limits = epub::Limits::DEFAULT;
+    let (text, malformed) = lossy_utf8(bytes);
+    let (xhtml, defects) = crate::markdown::to_xhtml(&text);
+    let mut before = Vec::new();
+    if malformed > 0 {
+        before.push(ArchiveWarning::Translation {
+            item: String::new(),
+            defect: TranslationDefect::NotUtf8,
+            count: malformed,
+        });
+    }
+    for (defect, count) in defects {
+        before.push(ArchiveWarning::Translation {
+            item: String::new(),
+            defect,
+            count,
+        });
+    }
+    laid_out(
+        Loose::Markup(epub::read::markup(xhtml.as_bytes(), &limits.xml)),
+        before,
         &mut DataUrls(epub::read::NoResources),
+        layout,
+    )
+}
+
+/// The bytes as UTF-8, each malformed sequence read as U+FFFD, and how many
+/// there were.
+pub(crate) fn lossy_utf8(bytes: &[u8]) -> (String, usize) {
+    let mut text = String::with_capacity(bytes.len());
+    let mut malformed = 0;
+    for chunk in bytes.utf8_chunks() {
+        text.push_str(chunk.valid());
+        if !chunk.invalid().is_empty() {
+            text.push('\u{FFFD}');
+            malformed += 1;
+        }
+    }
+    (text, malformed)
+}
+
+/// One loose content document laid out as a book of one chapter, written and
+/// reported; `before` is what was tolerated on the way to the tree.
+fn laid_out<R: Resources>(
+    content: Loose<'_>,
+    before: Vec<ArchiveWarning>,
+    resources: &mut R,
+    layout: &BookLayout,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    let limits = epub::Limits::DEFAULT;
+    let mut builder = DocumentBuilder::new();
+    if let Loose::Markup(dom) = &content {
+        if let Some(title) = dom.title() {
+            builder.set_info(b"Title", &title);
+        }
+    }
+    let laid = epub::lay_out_one(
+        resources,
         &mut builder,
         "",
         content,
@@ -263,15 +359,11 @@ pub(crate) fn synthesise(
         return Err(ArchiveRefusal::TooLarge);
     }
     let synthesised_bytes = pdf.len();
+    let mut warnings = before;
+    warnings.extend(laid.warnings);
     Ok((
         pdf,
-        ArchiveReport::book(
-            laid.warnings,
-            laid.pages,
-            synthesised_bytes,
-            *layout,
-            laid.cost,
-        ),
+        ArchiveReport::book(warnings, laid.pages, synthesised_bytes, *layout, laid.cost),
     ))
 }
 

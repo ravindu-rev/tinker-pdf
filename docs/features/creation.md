@@ -33,6 +33,11 @@ document the cascade or the layout refuses at one of its caps is
 because a creation call has no page count to keep. References: a `data:` URL
 carries its own bytes; anything else is missing and named under `from_html`,
 and asked of the caller's `epub::read::Resources` under `from_html_with`.
+`from_markdown(text, stylesheet, PageBox)` is the same call for Markdown:
+`tinker_pdf::markdown` translates CommonMark 0.31.2 into an XHTML document
+and `from_html` lays it out, with what the translation did — raw HTML set as
+text, a container past the nesting cap — first in the report as
+`ArchiveWarning::Translation` ([opening](opening.md)).
 
 **Pages.** `add_page(width, height, |page| ...)` hands a `PageBuilder` to a
 closure; the page's `/MediaBox` is the given size, and `set_crop_box` /
@@ -227,7 +232,7 @@ let pdf: Vec<u8> = b.finish();
 `TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`,
 `StateMask`,
 `Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade.
-The HTML half is `FromHtml` (`from_html`, `from_html_with`), `PageBox`
+The HTML half is `FromHtml` (`from_html`, `from_html_with`, `from_markdown`), `PageBox`
 (`new`, `with_margin`, `with_font_size`; `#[non_exhaustive]`), `HtmlReport`
 (`warnings`, `pages`, `layout`, `margin`, `cost`) and `HtmlError`, all on the
 facade:

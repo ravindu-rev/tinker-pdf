@@ -912,6 +912,12 @@ fn a_name_the_vendored_sets_do_not_declare_is_refused_by_name() {
     // a binary search shows.
     assert_eq!(crate::text::xhtml_entity("AElig"), Some('\u{C6}'));
     assert_eq!(crate::text::xhtml_entity("zwnj"), Some('\u{200C}'));
+    // And the public lookup the facade's Markdown reader resolves through is
+    // the same table, not a second one.
+    for name in ["AElig", "zwnj", "copy", "nGt", "NBSP", "HilbertSpace"] {
+        assert_eq!(crate::xhtml_entity(name), crate::text::xhtml_entity(name));
+    }
+    assert_eq!(crate::xhtml_entity("copy"), Some('\u{A9}'));
 }
 
 /// **One table, compiled from the vendored files, and nothing that expands.**

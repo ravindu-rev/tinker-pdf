@@ -33,6 +33,7 @@ pub mod form_data;
 pub mod html;
 mod images;
 pub mod layers;
+pub mod markdown;
 pub mod mdp;
 mod optional;
 pub mod pdfa;
@@ -1328,6 +1329,39 @@ impl Document {
             fonts: fonts::effective(options.fonts.clone()),
             archive: Some(Arc::new(report)),
         })
+    }
+
+    /// Opens bytes as a **Markdown** document (CommonMark 0.31.2, tier 5's
+    /// formats row), laid out as a loose XHTML file is.
+    ///
+    /// A separate entry point rather than a branch of [`Document::open`],
+    /// because Markdown has no signature: it is text, and a sniff that called
+    /// text Markdown would turn every file that is not a PDF into a document of
+    /// its own bytes — where `open` answers [`OpenError::NotAPdf`] for them,
+    /// and `tinker_parity.rs` holds it to that. The caller who knows the bytes
+    /// are Markdown says so here. See [`markdown`] for what is and is not
+    /// CommonMark, and [`standalone::TranslationDefect`] for what the report
+    /// names.
+    ///
+    /// # Errors
+    /// [`OpenError::Empty`] for no bytes, and
+    /// [`OpenError::UnsupportedArchive`]`(`[`ArchiveRefusal::TooLarge`]`)` for a
+    /// document past the synthesised-document ceiling. Nothing else refuses.
+    pub fn open_markdown(
+        bytes: impl Into<Arc<[u8]>>,
+        options: &OpenOptions,
+    ) -> Result<Document, OpenError> {
+        let bytes: Arc<[u8]> = bytes.into();
+        if bytes.is_empty() {
+            return Err(OpenError::Empty);
+        }
+        let (layout, unusable) = epub::BookLayout::sanitised(options.page, options.font_size);
+        let (pdf, mut report) =
+            standalone::markdown(&bytes, &layout).map_err(OpenError::UnsupportedArchive)?;
+        for defect in unusable {
+            report.warn(ArchiveWarning::UnusableOption(defect));
+        }
+        Document::synthesised((pdf, report), options)
     }
 
     /// Opens a document whose bytes are fetched from `source` as they are

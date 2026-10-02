@@ -240,3 +240,12 @@ pub fn is_initial_punctuation(c: char) -> bool {
 pub fn is_final_punctuation(c: char) -> bool {
     member(FINAL_PUNCTUATION, c as u32)
 }
+
+/// General_Category `P*` or `S*`: CommonMark 0.31 §2.1's *Unicode punctuation
+/// character*, which the facade's Markdown reader asks of the character either
+/// side of an emphasis delimiter run. From the same vendored
+/// `DerivedGeneralCategory.txt` as every other category here.
+#[must_use]
+pub fn is_punctuation_or_symbol(c: char) -> bool {
+    member(PUNCTUATION_OR_SYMBOL, c as u32)
+}

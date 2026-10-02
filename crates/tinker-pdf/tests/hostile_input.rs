@@ -816,3 +816,133 @@ fn mutated_standalone_documents_never_panic() {
         }
     }
 }
+
+/// Markdown is read from any bytes by a caller who says it is Markdown, so
+/// every byte sequence is an input (tier 5's Markdown row). Two halves: the
+/// shapes that make a CommonMark reader quadratic — a run of openers with no
+/// closer, a line of a hundred thousand `>`, a paragraph of definitions, links
+/// after a run of `[` — each written out at a size where a quadratic would be
+/// minutes, and a real document mutated. Over both, the XHTML the translation
+/// hands the reader must be **well-formed XML** wherever the depth allows,
+/// because raw HTML is escaped and nothing else is passed through: a
+/// `Truncated` that is not the depth cap is a defect here.
+/// `fuzz/fuzz_targets/markdown.rs` is the deep version.
+#[test]
+fn markdown_never_panics_hangs_or_hands_the_reader_bad_xml() {
+    use tinker_pdf::epub::read::markup;
+    use tinker_pdf::markdown::{to_html, to_xhtml};
+    use tinker_pdf::OpenOptions;
+
+    let n = 20_000;
+    let mut shapes: Vec<(&str, String)> = vec![
+        ("stars", "*a ".repeat(n)),
+        ("underscores", "_".repeat(n)),
+        (
+            "alternating",
+            "_*".repeat(n / 2) + "x" + &"*_".repeat(n / 2),
+        ),
+        ("brackets", "[".repeat(n) + &"]".repeat(n)),
+        ("images", "![".repeat(n / 2) + "x"),
+        (
+            "links after brackets",
+            "[".repeat(n / 4) + &"[a](b) ".repeat(n / 4),
+        ),
+        ("open destinations", "[a](".repeat(n / 4)),
+        (
+            "nested parentheses",
+            "[a](".to_owned() + &"(".repeat(n) + ")",
+        ),
+        ("comments", "<!--".repeat(n / 4)),
+        ("instructions", "<?".repeat(n / 2)),
+        ("cdata", "<![CDATA[".repeat(n / 8)),
+        ("declarations", "<!X".repeat(n / 3)),
+        ("open tags", "<a x=\"".repeat(n / 6)),
+        (
+            "entities",
+            "&#".repeat(n / 2) + "&amp" + &"&x".repeat(n / 2),
+        ),
+        ("quotes", ">".repeat(5 * n) + "\n" + &"a\n".repeat(n / 10)),
+        (
+            "lists",
+            (0..300)
+                .map(|i| format!("{}- x\n", "  ".repeat(i)))
+                .collect(),
+        ),
+        ("definitions", "[a]: /u\n".repeat(n / 8) + "text [a]"),
+        (
+            "references that multiply",
+            format!("[a]: /{}\n\n{}", "d".repeat(n / 2), "[a]".repeat(n / 6)),
+        ),
+        ("tabs", "\t>\t-\t".repeat(n / 5)),
+        ("fences", "```\n".repeat(n / 4)),
+        (
+            "controls",
+            (0u8..32).map(char::from).collect::<String>().repeat(50),
+        ),
+    ];
+    let mut ticks = String::new();
+    for k in (1..=150).rev() {
+        ticks.push_str(&"`".repeat(k));
+        ticks.push('x');
+    }
+    shapes.push(("tick runs", ticks));
+
+    let check = |name: &str, text: &str| {
+        let _ = to_html(text);
+        let (xhtml, _) = to_xhtml(text);
+        let dom = markup(xhtml.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT);
+        if !dom.defects.is_empty() {
+            // The only way the translation's XHTML may stop is the XML
+            // reader's depth cap, which deep emphasis reaches by design.
+            let deep = dom.nodes.iter().any(|node| {
+                let mut depth = 0;
+                let mut at = node.parent;
+                while let Some(p) = at {
+                    depth += 1;
+                    at = dom.nodes.get(p).and_then(|n| n.parent);
+                }
+                depth + 2 >= tinker_pdf_xml::limits::MAX_XML_DEPTH
+            });
+            assert!(
+                deep,
+                "{name}: the XHTML did not read as XML: {:?}",
+                dom.defects
+            );
+        }
+    };
+    for (name, text) in &shapes {
+        let _guard = Guard(name);
+        check(name, text);
+        if let Ok(doc) = Document::open_markdown(text.clone().into_bytes(), &OpenOptions::default())
+        {
+            let _ = doc.page_count();
+            if let Some(page) = doc.page(0) {
+                let _ = page.text();
+            }
+        }
+    }
+
+    let note = "# Title\n\nSome *emphasis*, `code`, [a link](http://x.org \"t\") and ![pic](p.png).\n\n\
+                > - quoted list\n>   continued\n\n1. one\n2. two\n\n    indented\n\n```\nfenced\n```\n\n\
+                <div>raw</div>\n\n[ref]: /url\n";
+    let mut rng = Rng(0x4D41_524B_444F_574E);
+    for case in 0..sweep(2000) {
+        let mutated = mutate(note.as_bytes(), &mut rng);
+        let label = format!("markdown case {case}");
+        let _guard = Guard(&label);
+        let text = String::from_utf8_lossy(&mutated).into_owned();
+        check(&label, &text);
+        if case % 8 == 0 {
+            if let Ok(doc) = Document::open_markdown(mutated, &OpenOptions::default()) {
+                let _ = doc.page_count();
+                if let Some(page) = doc.page(0) {
+                    let _ = page.text();
+                    let _ = page.render(&RenderOptions {
+                        scale: 0.25,
+                        ..RenderOptions::default()
+                    });
+                }
+            }
+        }
+    }
+}
