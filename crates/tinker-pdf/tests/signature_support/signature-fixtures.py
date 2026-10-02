@@ -60,7 +60,9 @@ PLACEHOLDER = "[0000000000 0000000000 0000000000 0000000000]"
 def build_pdf(reserve, sub_filter, reason, name, sig_type="Sig"):
     """A one-page document with one signature field whose `/ByteRange` covers
     every byte but the `/Contents` gap: the layout `ecdsa-fixtures.py` builds,
-    with the `/SubFilter` and `/Type` as parameters."""
+    with the `/SubFilter` and `/Type` as parameters. A `/DocTimeStamp` carries
+    none of a signer's claims -- no `/M`, `/Reason` or `/Name` -- so `reason`
+    and `name` are ignored for one."""
     count = 6
     fixed = [
         (1, "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /SigFlags 3 >> >>"),
@@ -70,10 +72,11 @@ def build_pdf(reserve, sub_filter, reason, name, sig_type="Sig"):
             "/Rect [0 0 0 0] /F 4 /P 3 0 R >>"),
     ]
     stream = b"0.2 0.6 0.3 rg 20 20 160 160 re f\n"
+    claims = "" if sig_type == "DocTimeStamp" else (
+        "/M (D:20261002120000Z) /Reason (" + reason + ") /Name (" + name + ") ")
     entries = (
-        "/Filter /Adobe.PPKLite /SubFilter /" + sub_filter + " "
-        "/M (D:20261002120000Z) /Reason (" + reason + ") /Name (" + name + ") "
-        "/ByteRange " + PLACEHOLDER + " /Contents <"
+        "/Filter /Adobe.PPKLite /SubFilter /" + sub_filter + " " + claims
+        + "/ByteRange " + PLACEHOLDER + " /Contents <"
     )
 
     out = bytearray(b"%PDF-1.7\n")
@@ -423,6 +426,35 @@ def signature_timestamp():
     save("signature-timestamp-tsa-root.der", der_of(w(tag + "-tsa-root.pem")))
 
 
+def document_timestamp():
+    """ISO 32000-2 12.8.5's document timestamp: `/Type /DocTimeStamp`,
+    `/SubFilter /ETSI.RFC3161`, and `/Contents` the RFC 3161 token itself,
+    whose imprint is SHA-256 of the covered bytes. The authority writes RFC
+    5816's `signingCertificateV2` under SHA-256 -- the other ESS version from
+    `signature-timestamp`'s."""
+    tag = "docts"
+    tsa(tag, "sha256")
+    reserve = 7000
+    out, contents_at, covered = build_pdf(
+        reserve, "ETSI.RFC3161", "", "", sig_type="DocTimeStamp")
+    token = timestamp(tag, hashlib.sha256(covered).digest())
+    save("document-timestamp.pdf", splice(out, contents_at, reserve, token))
+    save("document-timestamp-tsa-root.der", der_of(w(tag + "-tsa-root.pem")))
+
+
+def engine_timestamp(digest_hex):
+    """A token for the digest `tests/signature_shapes.rs` prints, so that a
+    document timestamp *this engine wrote* is held to a token a second
+    implementation made over exactly its bytes. The engine's output is
+    deterministic (ruling 4), so the digest is the same on every run, and the
+    test says so if it ever is not."""
+    tag = "engts"
+    tsa(tag, "sha256")
+    token = timestamp(tag, bytes.fromhex(digest_hex))
+    save("engine-timestamp-token.der", token)
+    save("engine-timestamp-tsa-root.der", der_of(w(tag + "-tsa-root.pem")))
+
+
 BUILDERS = {
     "rsa-pss": rsa_pss,
     "pkcs7-sha1": lambda: pkcs7_sha1(True),
@@ -430,7 +462,11 @@ BUILDERS = {
     "no-signed-attributes": no_signed_attributes,
     "cades-general-names": cades_general_names,
     "signature-timestamp": signature_timestamp,
+    "document-timestamp": document_timestamp,
 }
 
 for wanted in WANTED:
-    BUILDERS[wanted]()
+    if wanted.startswith("engine-timestamp="):
+        engine_timestamp(wanted.split("=", 1)[1])
+    else:
+        BUILDERS[wanted]()

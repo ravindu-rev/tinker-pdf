@@ -642,7 +642,6 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| Timestamps: creating one through a host seam, validating the token | tokens are located and handed out as opaque DER | a `Timestamper` seam like `Signer`, since the engine performs no I/O; validation held to a published token | M |
 | Long-term validation: `/DSS` and `/VRI` | absent | written from host-supplied CRL and OCSP bytes | M |
 | Public-key encryption on write | a non-goal because the engine would have to choose a certificate — and the caller can supply one | `Encryption::PublicKey { recipients }` sealing with caller-supplied certificates, held to the OpenSSL envelopes this reader already parses | M |
 
@@ -786,7 +785,9 @@ limit: hinting, a visible signature appearance, timestamp creation, writing
 a public-key-encrypted document, image encoders, and inferred reading order
 for untagged pages. Each row says so — and the visible signature
 appearance's has since closed (`SigningTarget::NewVisibleField`,
-[features/signatures.md](features/signatures.md)).
+[features/signatures.md](features/signatures.md)), and so has timestamp
+creation's (`DocumentEditor::save_timestamped` with a host `Timestamper`,
+held to real RFC 3161 tokens over this engine's own output).
 
 ## How this file changes
 

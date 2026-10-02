@@ -289,7 +289,7 @@ pub use tinker_pdf_cos::{CalculatorOp, DeviceNAttributes, LayerId, StampPlacemen
 /// signed and what is checked cannot drift apart.
 pub use tinker_pdf_cos::{
     Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer, SigningRequest,
-    SigningTarget,
+    SigningTarget, TimestampRequest, Timestamper,
 };
 /// The bytes-already-encoded image road: everything [`ImageData::Compressed`]
 /// is built out of.

@@ -201,6 +201,45 @@ and its certificates — is a second implementation's; the splice is this
 script's, and is checked by the outer signature still verifying, since an
 unsigned attribute is outside what that signature covers.
 
+### `document-timestamp.pdf` and its authority's root — 2 October 2026
+
+`python3 signature-fixtures.py <out> <work> document-timestamp`. The same
+one-page layout with the field's value a `/Type /DocTimeStamp` dictionary under
+`/SubFilter /ETSI.RFC3161` — no `/M`, `/Reason` or `/Name` — and `/Contents`
+the bare token from `openssl ts -reply -token_out` over SHA-256 of the covered
+bytes, its authority configured with `ess_cert_id_alg = sha256` so the token
+carries RFC 5816's `signingCertificateV2`, the other ESS version from
+`signature-timestamp.pdf`'s. `genTime` is `Oct  2 09:58:34 2026 GMT` by
+`ts -reply -text`.
+
+SHA-256: `b83122fa89da2a1bbaee6dd29c017bd714e4fcde7c8e3994b1d8849858501f8f`
+(`document-timestamp.pdf`) and
+`56942293dd3e83c156644c028cb4ac71dd89b1d3b7ca1958bc3c37bfc940656d`
+(`document-timestamp-tsa-root.der`).
+
+### `engine-timestamp-token.der` and its authority's root — 2 October 2026
+
+A token over a document **this engine wrote**. `tests/document_timestamp.rs`
+opens `no-signed-attributes.pdf`, adds a document timestamp in a new invisible
+field `DocumentTimestamp` with an 8 192-byte reservation, and records the
+digest its `Timestamper` is handed: on 2 October 2026 that was
+`47356d50e0ee90aebf1a3cea92dd9ff11fb6171b3dbc731fb1ee1650fafe307e`, the same
+on two runs. `python3 signature-fixtures.py <out> <work>
+engine-timestamp=<that digest>` asked a fresh authority (`ess_cert_id_alg =
+sha256`) for a token over it; `genTime` `Oct  2 09:59:31 2026 GMT`.
+
+SHA-256: `d46d89731d5614c7448f605af218041aa372651ac20494cc4b6657ac9beb3752`
+(`engine-timestamp-token.der`) and
+`c8a14c8920cc0dc151ec0621cab07b3a254e85430afaf1550ec7ea935a54e53d`
+(`engine-timestamp-tsa-root.der`).
+
+**When this has to be redone.** The engine's output is deterministic (ruling
+4), so the digest only moves if the incremental writer's bytes for this input
+change. If one does, `the_digest_the_engine_hands_its_timestamper_is_the_one_
+the_committed_token_stamps` fails first and prints both digests; if the
+change was meant, run the command above with the new one and commit the two
+files it writes.
+
 ## The visible-signature signer
 
 `visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA

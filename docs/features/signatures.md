@@ -155,6 +155,21 @@ fields per 12.8.2.4; a certifying save writes the catalog's `/Perms /DocMDP`
 had been gathered and so never wrote. The writer and the reader share one
 `digest_spans`, so what is signed and what is checked cannot drift.
 
+**A document timestamp.** `DocumentEditor::save_timestamped` adds ISO
+32000-2 12.8.5's `/Type /DocTimeStamp` with `/SubFilter /ETSI.RFC3161`, through
+the same reservation, layout and patching as a signature, so it covers every
+byte but its own `/Contents` — every signature already in the file included,
+which is what one is for. The engine performs no I/O and cannot ask an
+authority anything, so a `Timestamper` the host implements does: it is handed
+the digest of the covered bytes and returns the RFC 3161 token, which goes
+into `/Contents` as it is. The dictionary carries none of a signer's claims —
+no `/M`, `/Name` or `/Reason`; the time is the authority's. A timestamp is
+never drawn (`SignError::VisibleTimestamp`). Reading one, the verdict's four
+answers describe the token — the imprint against the covered bytes, the
+authority's signature over its `TSTInfo`, its chain at `genTime` — and the
+token's own `TimestampVerdict`, with its time and its certificate's fitness,
+rides in `timestamps`; `Verdict::is_trusted` requires that one too.
+
 **A visible seal.** `SigningTarget::NewVisibleField { name, page, rect,
 appearance }` adds a signature field whose widget draws: a normal appearance
 built by `appearance::signature`, beside the synthesis every other annotation
@@ -230,6 +245,19 @@ request.name = Some("Ada Lovelace".into());
 request.reason = Some("I approve this document".into());
 request.signed_at = Some(date); // supplied, never read from a clock
 let signed = document.editor().save_signed(&options, &request)?;
+```
+
+A document timestamp takes a `Timestamper` — `digest_algorithm` and
+`timestamp(&[u8]) -> Result<Vec<u8>, SignRefused>`, the token over the digest
+— and a `TimestampRequest` (`#[non_exhaustive]`, built with `new` and its
+16 KiB reservation adjusted in place):
+
+```rust
+let request = TimestampRequest::new(
+    SigningTarget::NewInvisibleField { name: "DocumentTimestamp".into() },
+    &authority, // the host's: it posts a TimeStampReq, the engine does not
+);
+let stamped = Document::open(signed)?.editor().save_timestamped(&options, &request)?;
 ```
 
 ## Refused by name
@@ -378,6 +406,18 @@ a token over a different signature, a flipped bit in the token's signature, a
 non-critical, and an ESS hash naming another certificate. The corpus carries
 seven tokens (`cms_census.rs`); what this code makes of them has not been
 measured, because the corpora could not be fetched where it was written.
+
+**Document timestamps** are held to two real tokens from the same OpenSSL
+TSA. One stamps a document the fixture script laid out
+(`tests/signature_support/document-timestamp.pdf`); the other stamps a document
+**this engine wrote** — `save_timestamped` over the signed
+`no-signed-attributes.pdf`, its digest handed to OpenSSL once and the token
+committed (`engine-timestamp-token.der`). The writer is deterministic, so the
+digest is the same on every run, and `tests/document_timestamp.rs` says so
+first, in as many words, if a writer change ever moves it. Over the engine's
+output the earlier signature reads `Revision` and still verifies, and the
+timestamp reads `WholeFile`, `Matches`, `Verified`, anchored and `Fit`; the
+strict validator finds nothing the update added. Nine tests.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest

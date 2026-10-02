@@ -4,7 +4,10 @@ use super::DocumentEditor;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
 use crate::pages::Rect;
-use crate::sign::{SignError, SignatureAppearance, SignatureImage, SigningRequest, SigningTarget};
+use crate::sign::{
+    SignError, SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget,
+    TimestampRequest,
+};
 use crate::text_string::encode_text_string;
 use crate::write::{self, WriteMode, WriteOptions};
 
@@ -69,12 +72,68 @@ impl DocumentEditor {
         if request.certification.is_some() {
             self.certify(signature_ref);
         }
+        self.seal_update(
+            options,
+            signature_ref,
+            |catalog| crate::sign::Reserved::build(request, catalog),
+            request.signer,
+        )
+    }
+
+    /// Saves the edits and adds a **document timestamp** (ISO 32000-2
+    /// 12.8.5): a `/DocTimeStamp` dictionary whose `/Contents` is an RFC 3161
+    /// token over the covered bytes, from the host's [`crate::Timestamper`].
+    ///
+    /// The same reservation, layout and patching as
+    /// [`DocumentEditor::save_signed`], so the token covers every byte of
+    /// the output but its own `/Contents` — including every signature already
+    /// in the file, which is what a document timestamp is for: it says those
+    /// bytes, signatures and all, existed by the authority's time.
+    ///
+    /// # Errors
+    /// As [`DocumentEditor::save_signed`], and [`SignError::VisibleTimestamp`]
+    /// for a target that would draw.
+    pub fn save_timestamped(
+        &mut self,
+        options: &WriteOptions,
+        request: &TimestampRequest<'_>,
+    ) -> Result<Vec<u8>, SignError> {
+        if options.mode != WriteMode::Incremental {
+            return Err(SignError::NotIncremental);
+        }
+        let timestamp_ref = self.allocate();
+        match &request.target {
+            SigningTarget::Field(name) => self.attach_to_field(name, timestamp_ref)?,
+            SigningTarget::NewInvisibleField { name } => {
+                self.attach_to_new_field(name, timestamp_ref)?;
+            }
+            SigningTarget::NewVisibleField { .. } => return Err(SignError::VisibleTimestamp),
+        }
+        let reserve = request.reserve;
+        self.seal_update(
+            options,
+            timestamp_ref,
+            |_| crate::sign::Reserved::document_timestamp(reserve),
+            &crate::sign::Stamp(request.timestamper),
+        )
+    }
+
+    /// Writes the update with `signature_ref` reserved and patches the blob
+    /// `producer` makes into it — the half of signing a signature and a
+    /// document timestamp share.
+    fn seal_update(
+        &mut self,
+        options: &WriteOptions,
+        signature_ref: ObjRef,
+        reserved: impl FnOnce(Option<ObjRef>) -> crate::sign::Reserved,
+        producer: &dyn Signer,
+    ) -> Result<Vec<u8>, SignError> {
         let set = self.changed_set();
         let trailer = self.update_trailer();
         let key = self.doc.file_key();
         let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
         let catalog = trailer.get_ref(Name::ROOT);
-        let reserved = crate::sign::Reserved::build(request, catalog);
+        let reserved = reserved(catalog);
         let (mut out, placeholder) = write::incremental_update_reserving(
             self.doc.bytes(),
             &set,
@@ -88,7 +147,7 @@ impl DocumentEditor {
             },
         );
         let placeholder = placeholder.ok_or(SignError::RangeDoesNotFit)?;
-        crate::sign::seal(&mut out, &placeholder, request.signer)?;
+        crate::sign::seal(&mut out, &placeholder, producer)?;
         Ok(out)
     }
 

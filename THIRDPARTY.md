@@ -804,6 +804,9 @@ before the third arrived:
 - `signature-timestamp.pdf` and its two roots, the same day: a signature
   countersigned by an RFC 3161 token from OpenSSL's own timestamping
   authority (`openssl ts -reply`), spliced into its unsigned attributes.
+- `document-timestamp.pdf`, `engine-timestamp-token.der` and their two
+  authorities' roots, the same day: ISO 32000-2 12.8.5 document timestamps,
+  the second a token over the digest of a file this engine wrote.
 
 The keys and certificates are generated for the fixtures and belong to nobody;
 there is no licence on any of it. Nothing re-runs OpenSSL — `cargo xtask

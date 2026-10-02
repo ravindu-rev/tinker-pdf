@@ -367,6 +367,18 @@ EKU's criticality unchecked fires 1; the ESS binding unchecked fires 1; `tsa` re
 implicitly fires 9; a fraction with a trailing zero accepted fires 1. No corpus token has
 been validated by this code: the seven `cms_census.rs` counts are unread here.
 
+**Document timestamps**, the same day: a `Timestamper` seam the shape of `Signer` —
+the engine hands over a digest and receives a token, and never speaks to an authority
+itself — and `DocumentEditor::save_timestamped`, which shares the reservation and the seal
+with `save_signed` through one `seal_update`; `Reserved::build`'s hard-coded `/Type /Sig`
+became `Reserved::build` and `Reserved::document_timestamp` over one `finish`. The reader
+gives an `ETSI.RFC3161` dictionary the token path: the imprint against the covered bytes,
+and `Verdict::is_trusted` requiring the document timestamp's own `TimestampVerdict`.
+Injections: the subfilter read as a detached signature fires 4; the imprint taken over the
+token rather than the covered bytes fires 3; `is_trusted` ignoring the document stamp
+fires 1; the dictionary typed `/Sig` fires 2; a visible target drawn as an invisible one
+fires 1; the adapter's digest ignored fires 1.
+
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,

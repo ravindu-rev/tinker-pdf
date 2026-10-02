@@ -150,7 +150,8 @@ pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, Script
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{
     digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused,
-    SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget,
+    SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget, TimestampRequest,
+    Timestamper,
 };
 pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
 pub use text_string::{decode_text_string, encode_text_string, parse_date, Date};

@@ -165,6 +165,75 @@ pub trait Signer {
     fn sign(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused>;
 }
 
+/// The host's timestamping authority, held by the host: the [`Signer`] of a
+/// document timestamp (ISO 32000-2 12.8.5).
+///
+/// The engine performs no I/O, so it cannot ask an authority anything. It
+/// hands over the digest of the covered bytes and receives an RFC 3161
+/// `TimeStampToken` — a CMS `ContentInfo` whose `TSTInfo` stamps that digest —
+/// which goes into `/Contents` exactly as returned. How the host reached the
+/// authority (a `TimeStampReq` posted over HTTP, a local service, a fixture)
+/// is the host's, and so is whether the authority deserves trust; the reader
+/// asks that against the anchors its caller supplies, as it does for a
+/// signature.
+pub trait Timestamper {
+    /// Which digest the authority is to stamp the covered bytes under: the
+    /// `TimeStampReq`'s `messageImprint.hashAlgorithm`.
+    fn digest_algorithm(&self) -> DigestAlgorithm;
+
+    /// The token over `digest`, or the host's refusal.
+    ///
+    /// # Errors
+    /// Whatever the host decides — an authority that did not answer, a
+    /// `PKIStatus` that was not `granted` — carried verbatim.
+    fn timestamp(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused>;
+}
+
+/// What a caller supplies to add a document timestamp on save
+/// ([`crate::DocumentEditor::save_timestamped`]).
+///
+/// `#[non_exhaustive]` so that a field can join it without a break; build one
+/// with [`TimestampRequest::new`] and set what differs.
+#[non_exhaustive]
+pub struct TimestampRequest<'a> {
+    /// Where the timestamp goes: an existing empty signature field, or a new
+    /// invisible one. A document timestamp is not drawn, so
+    /// [`SigningTarget::NewVisibleField`] is refused.
+    pub target: SigningTarget,
+    /// The host's authority.
+    pub timestamper: &'a dyn Timestamper,
+    /// How many bytes to reserve for the token — the same rule as
+    /// [`SigningRequest::reserve`]: a token that does not fit is
+    /// [`SignError::ReserveTooSmall`], never a truncation.
+    pub reserve: usize,
+}
+
+impl<'a> TimestampRequest<'a> {
+    /// A request with a 16 KiB reservation, which fits a token carrying its
+    /// authority's certificate and a short chain.
+    pub fn new(target: SigningTarget, timestamper: &'a dyn Timestamper) -> TimestampRequest<'a> {
+        TimestampRequest {
+            target,
+            timestamper,
+            reserve: 16 * 1024,
+        }
+    }
+}
+
+/// A [`Timestamper`] seen as the [`Signer`] the reservation and the seal are
+/// written for: one digest in, one blob out.
+pub(crate) struct Stamp<'a>(pub(crate) &'a dyn Timestamper);
+
+impl Signer for Stamp<'_> {
+    fn digest_algorithm(&self) -> DigestAlgorithm {
+        self.0.digest_algorithm()
+    }
+
+    fn sign(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused> {
+        self.0.timestamp(digest)
+    }
+}
+
 /// What a certifying signature permits afterwards (12.8.2.2, `/DocMDP` `/P`).
 ///
 /// A named enum rather than the integer the file carries, because `/P 0` and
@@ -439,6 +508,11 @@ pub enum SignError {
     },
     /// The host declined.
     SignerRefused(SignRefused),
+    /// A document timestamp was asked to draw: [`SigningTarget::NewVisibleField`]
+    /// on a [`TimestampRequest`]. A timestamp says when the covered bytes
+    /// existed and nothing about who signed them, so there is no seal to
+    /// draw that would not claim more than it is.
+    VisibleTimestamp,
     /// The digest could not be taken, which means the layout produced a
     /// `/ByteRange` that does not fit its own file. A bug here rather than in
     /// the document, and refusing beats signing something unknown.
@@ -462,6 +536,9 @@ impl std::fmt::Display for SignError {
             ),
             SignError::SignerRefused(refusal) => {
                 write!(f, "the signer refused: {}", refusal.reason)
+            }
+            SignError::VisibleTimestamp => {
+                f.write_str("a document timestamp is not drawn; its field must be invisible")
             }
             SignError::RangeDoesNotFit => {
                 f.write_str("the computed byte range does not fit the file")
@@ -674,7 +751,24 @@ impl Reserved {
             literal(&mut bytes, &pdf_date(date));
         }
         references(&mut bytes, request, catalog);
+        Reserved::finish(bytes, request.reserve)
+    }
 
+    /// A document timestamp dictionary (ISO 32000-2 12.8.5): `/Type
+    /// /DocTimeStamp` and `/SubFilter /ETSI.RFC3161`, and nothing a signer
+    /// claims — no `/M`, `/Name` or `/Reason`, because the token is the
+    /// whole of the statement and its time is the authority's.
+    pub(crate) fn document_timestamp(reserve: usize) -> Reserved {
+        let mut bytes = Vec::with_capacity(reserve * 2 + 256);
+        bytes.extend_from_slice(
+            b"<< /Type /DocTimeStamp /Filter /Adobe.PPKLite /SubFilter /ETSI.RFC3161",
+        );
+        Reserved::finish(bytes, reserve)
+    }
+
+    /// The `/ByteRange` and `/Contents` reservations both dictionaries end
+    /// with, and the offsets of each.
+    fn finish(mut bytes: Vec<u8>, reserve: usize) -> Reserved {
         bytes.extend_from_slice(b" /ByteRange ");
         let byte_range_at = bytes.len();
         bytes.extend_from_slice(BYTE_RANGE_TEMPLATE.as_bytes());
@@ -683,7 +777,7 @@ impl Reserved {
         bytes.extend_from_slice(b" /Contents ");
         let contents_at = bytes.len();
         bytes.push(b'<');
-        bytes.resize(bytes.len() + request.reserve * 2, b'0');
+        bytes.resize(bytes.len() + reserve * 2, b'0');
         bytes.push(b'>');
         let contents_len = bytes.len() - contents_at;
 

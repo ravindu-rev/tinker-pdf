@@ -266,11 +266,21 @@ impl Verdict {
     /// discards every distinction the fields make. Anything reporting to a
     /// person should read the fields.
     #[must_use]
+    ///
+    /// For a document timestamp the four answers describe the token, and its
+    /// [`TimestampVerdict`] must be trusted too — the authority's certificate
+    /// fit for timestamping is part of what a document timestamp is, where
+    /// for a signature's own countersignature it is a separate matter.
     pub fn is_trusted(&self) -> bool {
         self.coverage == Coverage::WholeFile
             && self.document_digest == DocumentDigest::Matches
             && self.signature == SignatureCheck::Verified
             && matches!(self.chain, Chain::AnchoredTo { .. })
+            && self
+                .timestamps
+                .iter()
+                .filter(|stamp| stamp.stamps == Stamped::Document)
+                .all(TimestampVerdict::is_trusted)
     }
 }
 
@@ -283,6 +293,10 @@ pub enum Stamped {
     /// attribute of that signer (RFC 3161 Appendix A): it says the signature
     /// existed by `time`.
     Signature,
+    /// The bytes a document timestamp's `/ByteRange` covers (ISO 32000-2
+    /// 12.8.5, `/SubFilter /ETSI.RFC3161`): it says the document, and every
+    /// signature already in it, existed by `time`.
+    Document,
 }
 
 /// RFC 3161 §2.3 and §2.4.1's two requirements on the certificate a token
@@ -422,6 +436,9 @@ pub(crate) fn verdict(
     if blob.is_empty() {
         return verdict;
     }
+    if signature.sub_filter == Some(SubFilter::EtsiRfc3161) {
+        return document_timestamp(document, signature, blob, anchors, verdict);
+    }
 
     let content = match ContentInfo::parse(blob) {
         Ok(content) => content,
@@ -502,8 +519,40 @@ pub(crate) fn verdict(
                 &|algorithm| Some(algorithm.digest(signer.signature()).as_bytes().to_vec()),
                 anchors,
             )
+            .0
         })
         .collect();
+    verdict
+}
+
+/// A document timestamp (ISO 32000-2 12.8.5): `/Contents` is the token
+/// itself, its imprint the digest of the covered bytes.
+///
+/// The four answers then describe the token — question 2 is the imprint
+/// against the covered bytes, question 3 the authority's signature over its
+/// `TSTInfo`, question 4 the authority's chain at `genTime` — and the token's
+/// own [`TimestampVerdict`] rides in `timestamps` beside them, which is where
+/// its time and its certificate's fitness are.
+fn document_timestamp(
+    document: &Document,
+    signature: &Signature,
+    blob: &[u8],
+    anchors: &TrustAnchors,
+    mut verdict: Verdict,
+) -> Verdict {
+    let (stamp, authority) = timestamp(
+        blob,
+        Stamped::Document,
+        &|algorithm| signature.digest(document, cos_digest(cms_digest(algorithm))),
+        anchors,
+    );
+    verdict.cms = stamp.token.clone();
+    verdict.document_digest = stamp.imprint.clone();
+    verdict.signature = stamp.signature.clone();
+    verdict.chain = stamp.chain.clone();
+    verdict.weaknesses.extend(stamp.weaknesses.iter().cloned());
+    verdict.signer = authority;
+    verdict.timestamps = vec![stamp];
     verdict
 }
 
@@ -519,7 +568,7 @@ fn timestamp(
     stamps: Stamped,
     imprinted: &dyn Fn(CryptoDigest) -> Option<Vec<u8>>,
     anchors: &TrustAnchors,
-) -> TimestampVerdict {
+) -> (TimestampVerdict, Option<SignerDescription>) {
     let mut verdict = TimestampVerdict {
         stamps,
         token: CmsState::Absent,
@@ -538,7 +587,7 @@ fn timestamp(
             let why = Unchecked::UnsupportedAlgorithm(format!("{error}"));
             verdict.imprint = DocumentDigest::NotChecked(why.clone());
             verdict.signature = SignatureCheck::NotChecked(why);
-            return verdict;
+            return (verdict, None);
         }
     };
     let info = token.info();
@@ -565,7 +614,7 @@ fn timestamp(
 
     let Some(signer) = signed.signer_infos().first() else {
         verdict.signature = SignatureCheck::NotChecked(Unchecked::NoSigner);
-        return verdict;
+        return (verdict, None);
     };
     let certificates: Vec<Certificate<'_>> = signed
         .x509_certificates()
@@ -578,8 +627,9 @@ fn timestamp(
         .or_else(|| certificate.map(|certificate| certificate.subject().to_rfc4514()));
     let Some(certificate) = certificate else {
         verdict.signature = SignatureCheck::NotChecked(Unchecked::SignerCertificateMissing);
-        return verdict;
+        return (verdict, None);
     };
+    let description = describe(certificate, signer, signed.signer_infos());
 
     // The token's `messageDigest` must be the digest of this `TSTInfo`, or
     // the signature is over some other one; with no signed attributes the
@@ -613,7 +663,7 @@ fn timestamp(
             subject: certificate.subject().to_rfc4514(),
         });
     }
-    verdict
+    (verdict, Some(description))
 }
 
 /// RFC 3161 §2.3 and §2.4.1, asked of the certificate a token was signed
@@ -1312,6 +1362,36 @@ mod tests {
             subject: "CN=A".into(),
         };
         assert!(!chain.is_trusted(), "self-signed is not anchored");
+
+        // A token whose authority certificate is not fit for timestamping:
+        // as a signature's countersignature it says nothing about the
+        // signature, and as a document timestamp it is the signature.
+        let unfit = |stamps| TimestampVerdict {
+            stamps,
+            token: CmsState::Read { signers: 1 },
+            time: Some(0),
+            authority: None,
+            imprint: DocumentDigest::Matches,
+            signature: SignatureCheck::Verified,
+            authority_certificate: AuthorityCertificate::NotForTimestamping,
+            chain: Chain::AnchoredTo {
+                anchor: "CN=TSA".into(),
+                links: 0,
+            },
+            weaknesses: Vec::new(),
+        };
+        let mut countersigned = good.clone();
+        countersigned.timestamps = vec![unfit(Stamped::Signature)];
+        assert!(
+            countersigned.is_trusted(),
+            "a bad countersignature is not a bad signature"
+        );
+        let mut document = good.clone();
+        document.timestamps = vec![unfit(Stamped::Document)];
+        assert!(
+            !document.is_trusted(),
+            "a document timestamp's authority must be fit to stamp"
+        );
     }
 
     /// The distinction the whole module exists to keep: "we did not look" is
