@@ -55,6 +55,20 @@
 //! stopped, which depends on when it stopped, so the replay's answer is the
 //! one a render cancelled before the first such font would give — less, and
 //! never more.
+//!
+//! # A page too large to retain
+//!
+//! A recording holds every call with its own state and path, so what it costs
+//! is the interpreter's work, and work multiplies through forms: ten forms
+//! each invoking the next four times are a million calls from two kilobytes.
+//! So the recording has a budget, `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES`
+//! (64 MiB), and a page that passes it is **not retained**: the list keeps no
+//! calls ([`DisplayList::is_retained`] says so), and every render interprets
+//! the page again exactly as [`Page::render`] does — the same bitmap and the
+//! same warnings, at a direct render's cost and in a direct render's memory.
+//! [`DisplayList::to_svg`] interprets it into the SVG writer the same way. A
+//! list that cannot be cheaper than the page is the page; it is never a
+//! partial picture.
 
 use std::sync::Arc;
 
@@ -81,6 +95,9 @@ pub struct DisplayList {
     /// Font names the recording's interpretation could not resolve — what a
     /// direct render's interpreter reports, met once rather than per render.
     interpreted_missing: Vec<String>,
+    /// Whether the calls are kept: false when recording them passed
+    /// `MAX_DISPLAY_LIST_BYTES`, and every render is then a direct one.
+    retained: bool,
 }
 
 impl Page {
@@ -99,6 +116,11 @@ impl Page {
     ///
     /// Annotations are recorded whatever a later render asks, and drawn only
     /// by a render that asks for them.
+    ///
+    /// A page whose recording would hold more than
+    /// `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES` is not retained: the list
+    /// keeps nothing and every render of it is a direct one, which is the
+    /// same bitmap ([`DisplayList::is_retained`]).
     #[must_use]
     pub fn display_list(&self) -> DisplayList {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
@@ -109,14 +131,30 @@ impl Page {
         // they list is the interpretation's.
         let interpreted_missing = resources.missing_fonts();
         let content = recorder.take();
-        let annotations =
-            annots::record(&self.doc, &self.inner, self.fonts.as_ref(), &mut recorder);
+        let annotations = if recorder.overflowed() {
+            Vec::new()
+        } else {
+            annots::record(&self.doc, &self.inner, self.fonts.as_ref(), &mut recorder)
+        };
+        if recorder.overflowed() {
+            // Everything recorded is dropped here, the content's calls too:
+            // a list that kept part of a page would replay part of a page.
+            return DisplayList {
+                page: self.clone(),
+                resources,
+                content: Vec::new(),
+                annotations: Vec::new(),
+                interpreted_missing: Vec::new(),
+                retained: false,
+            };
+        }
         DisplayList {
             page: self.clone(),
             resources,
             content,
             annotations,
             interpreted_missing,
+            retained: true,
         }
     }
 }
@@ -129,8 +167,14 @@ impl DisplayList {
     /// premultiplied page, cancellation, and whether annotations are drawn —
     /// because this is the same pipeline with the interpretation replaced by
     /// a replay of what the interpretation produced.
+    ///
+    /// A list that is not retained ([`DisplayList::is_retained`]) draws by
+    /// calling [`Page::render`].
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
+        if !self.retained {
+            return self.page.render(options);
+        }
         let resources = self.resources.for_one_render();
         self.page
             .render_layer_with(options, None, &resources, |renderer, resources| {
@@ -186,7 +230,9 @@ impl DisplayList {
         self.page.index()
     }
 
-    /// How many calls the page's content made, not counting its annotations.
+    /// How many of the page's content's calls the list holds, not counting
+    /// its annotations — all of them, or none for a list that is not
+    /// retained.
     ///
     /// A measure of what the list holds rather than of what it draws: a glyph
     /// is one call and so is a full-page image.
@@ -195,10 +241,23 @@ impl DisplayList {
         self.content.len()
     }
 
-    /// Whether the page's content made no calls at all.
+    /// Whether the list holds no calls: a page whose content made none, or a
+    /// list that is not retained.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.content.is_empty()
+    }
+
+    /// Whether the list holds the page's calls. False when recording them
+    /// would have held more than `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES`
+    /// (64 MiB) — a page whose forms fan out into millions of calls — in
+    /// which case it holds none, and every [`DisplayList::render`] and
+    /// [`DisplayList::to_svg`] interprets the page again, exactly as
+    /// [`Page::render`] and [`Page::to_svg`] do: the same output, at a direct
+    /// render's cost.
+    #[must_use]
+    pub fn is_retained(&self) -> bool {
+        self.retained
     }
 }
 
@@ -206,6 +265,7 @@ impl core::fmt::Debug for DisplayList {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DisplayList")
             .field("page", &self.page.index())
+            .field("retained", &self.retained)
             .field("calls", &self.content.len())
             .field("annotations", &self.annotations.len())
             .finish()

@@ -120,14 +120,16 @@ use std::sync::Arc;
 
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{
-    replay, BlendMode, Device, Glyph, GraphicsState, Group, ImageRef, LineCap, LineJoin,
+    interpret, replay, BlendMode, Device, Glyph, GraphicsState, Group, ImageRef, LineCap, LineJoin,
     MarkedProps, MaskGroup, Matrix, PathSegment, TextRenderMode,
 };
+use tinker_pdf_cos::pages as cos_pages;
 use tinker_pdf_render::{
     page_pixels, page_scale, page_view_transform, region_canvas_clear, DecodedImage, GlyphSource,
     PatternPaint, PixelRegion, Renderer, Shading,
 };
 
+use crate::annots::{self, AppearanceDevice};
 use crate::resources::PageResources;
 use crate::{DisplayList, Page, PixelFormat, RenderWarning};
 
@@ -302,11 +304,25 @@ impl Page {
 
 impl DisplayList {
     /// The recorded page as SVG 1.1. See [`Page::to_svg`].
+    ///
+    /// A list that is not retained ([`DisplayList::is_retained`]) has no
+    /// recording to replay, so the page is interpreted into the writer
+    /// directly, as [`Page::render`] interprets it into the renderer.
     #[must_use]
     pub fn to_svg(&self, options: &SvgOptions) -> Svg {
         let page = self.page();
         let (width, height) = page.size();
         let base = page_view_transform(page.crop_box(), page.rotation(), 1.0);
+        if !self.is_retained() {
+            let resources = PageResources::new(&page.doc, &page.inner, page.fonts.as_ref());
+            let mut writer = Writer::new(&resources, base, page, options);
+            let content = cos_pages::content_bytes(&page.doc, &page.inner);
+            interpret(&content, Matrix::IDENTITY, &mut writer, &resources);
+            if options.annotations {
+                annots::draw(&page.doc, &page.inner, page.fonts.as_ref(), &mut writer);
+            }
+            return writer.finish_with(&resources, width, height);
+        }
         // Resources of this write's own over the list's caches, so what it
         // reports is what it met — `DisplayList::render`'s reason exactly.
         let resources = self.resources().for_one_render();
@@ -321,6 +337,16 @@ impl DisplayList {
             }
         }
         writer.finish_with(&resources, width, height)
+    }
+}
+
+impl AppearanceDevice for Writer<'_> {
+    fn push_scope(&mut self, scope: Arc<PageResources>) {
+        self.push_resources(scope);
+    }
+
+    fn pop_scope(&mut self) {
+        self.pop_resources();
     }
 }
 

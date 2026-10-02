@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_content::{interpret, Event, Matrix};
+use tinker_pdf_content::{interpret, Device, Event, Matrix};
 use tinker_pdf_cos::{pages as cos_pages, CosDocument, Dict, Object, Rect};
 use tinker_pdf_render::{DisplayRecorder, Renderer};
 
@@ -25,12 +25,37 @@ use crate::resources::PageResources;
 const HIDDEN: i64 = 1 << 1;
 const NO_VIEW: i64 = 1 << 5;
 
+/// A device an appearance can be drawn through: one that resolves images,
+/// shadings and patterns by name in a scope it is handed, because an
+/// appearance's names are its own (12.5.5). The renderer, and the SVG writer
+/// when it draws a page the direct way.
+pub(crate) trait AppearanceDevice: Device {
+    /// Resolves names in `scope` until the matching [`pop_scope`].
+    ///
+    /// [`pop_scope`]: AppearanceDevice::pop_scope
+    fn push_scope(&mut self, scope: Arc<PageResources>);
+    /// Goes back to the scope in force before the last [`push_scope`].
+    ///
+    /// [`push_scope`]: AppearanceDevice::push_scope
+    fn pop_scope(&mut self);
+}
+
+impl AppearanceDevice for Renderer<'_, PageResources> {
+    fn push_scope(&mut self, scope: Arc<PageResources>) {
+        self.push_resources(scope);
+    }
+
+    fn pop_scope(&mut self) {
+        self.pop_resources();
+    }
+}
+
 /// Draws every visible annotation of a page.
-pub fn draw(
+pub(crate) fn draw(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     provider: Option<&Arc<dyn FontProvider>>,
-    device: &mut Renderer<'_, PageResources>,
+    device: &mut impl AppearanceDevice,
 ) {
     each_appearance(doc, page, |appearance| {
         draw_prepared(doc, appearance, provider, device);
@@ -225,7 +250,7 @@ pub(crate) fn draw_prepared(
     doc: &Arc<CosDocument>,
     appearance: &Appearance,
     provider: Option<&Arc<dyn FontProvider>>,
-    device: &mut Renderer<'_, PageResources>,
+    device: &mut impl AppearanceDevice,
 ) {
     let resources = PageResources::from_dict(doc, appearance.resources.clone(), provider);
 
@@ -234,7 +259,7 @@ pub(crate) fn draw_prepared(
     // instead. Both seams have to change: the device resolves images,
     // shadings and patterns, and an appearance that names one the page does
     // not define is the ordinary case, not the odd one.
-    device.push_resources(Arc::new(PageResources::from_dict(
+    device.push_scope(Arc::new(PageResources::from_dict(
         doc,
         appearance.resources.clone(),
         provider,
@@ -245,7 +270,7 @@ pub(crate) fn draw_prepared(
         device,
         &resources,
     );
-    device.pop_resources();
+    device.pop_scope();
 }
 
 /// The `/AP` `/N` stream, following `/AS` when the appearance has states.

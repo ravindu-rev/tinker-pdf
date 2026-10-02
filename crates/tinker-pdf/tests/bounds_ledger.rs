@@ -58,6 +58,11 @@
 //! input: markup grows with what the page draws, one element per operator, so
 //! a short content stream can ask for as much as it likes.
 //!
+//! *Amended the same day, the review of the retained page.* **The
+//! fifty-second, `MAX_DISPLAY_LIST_BYTES`**, output again: a recording grows
+//! with what the page draws, and a page that would pass it is drawn the direct
+//! way rather than refused, so the cap costs a replay and never a picture.
+//!
 //! *Amended, 26 September 2026, the `jbig2` fuzz row.* **One more row, the
 //! forty-fourth, and it is the first here whose cap is a *ratio* rather than a
 //! quantity.**
@@ -542,9 +547,12 @@ const ANNOTATION_TESTS: &str = include_str!("../src/annotations.rs");
 /// spend it, and fired by the exchange row's own suite.
 const FORM_DATA: &str = include_str!("../src/form_data.rs");
 const FORM_DATA_TESTS: &str = include_str!("form_data.rs");
-/// Lane 4C's review: the SVG writer's markup, declared beside the writer.
+/// Lane 4C's review: the SVG writer's markup, declared beside the writer, and
+/// the retained page's recording, declared beside the recorder.
 const SVG_OUT: &str = include_str!("../src/svg_out.rs");
 const SVG_OUTPUT_TESTS: &str = include_str!("svg_output.rs");
+const RENDER_DISPLAY: &str = include_str!("../../tinker-pdf-render/src/display.rs");
+const DISPLAY_LIST_TESTS: &str = include_str!("display_list.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -2162,7 +2170,56 @@ fn ledger() -> Vec<Bound> {
                 SVG_OUTPUT_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_DISPLAY_LIST_BYTES",
+            cap: tinker_pdf_render::MAX_DISPLAY_LIST_BYTES as u128,
+            published: "64 MiB",
+            // The cap, for `MAX_PAGE_PIXELS`'s reason: this bound **degrades
+            // rather than refuses** — a page past it is drawn the direct way —
+            // and the firing test records past it, with the recorder's count
+            // never passing it.
+            fixtures: tinker_pdf_render::MAX_DISPLAY_LIST_BYTES as u128,
+            // A synthesised comic page is `q`, the image's `cm` and `Do`, `Q`:
+            // three events and one state, rounded up.
+            comic: 1_000,
+            // Gap 30's own yardstick, two thousand drawable elements each with
+            // its state and forty thousand path segments, at this target's
+            // sizes rather than a remembered number.
+            document: 2_000 * (event_size() + state_size()) + 40_000 * segment_size(),
+            // A 6 x 9 page of text: 2 500 glyphs, each an event, a state and
+            // the character it shows.
+            book: 2_500 * (event_size() + state_size() + 4),
+            // `0 0 1 1 re f`, thirteen bytes of content, records one fill of
+            // five segments, and a content stream may be as long as the
+            // ceiling every stream decodes under — before any form fans it out.
+            reachable: (tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128 / 13)
+                * (event_size() + state_size() + 5 * segment_size()),
+            reachable_because: "a `MAX_DECODED_STREAM` content stream of `0 0 1 1 re f`, one \
+                                recorded five-segment fill per thirteen bytes",
+            declared_in: RENDER_DISPLAY,
+            fires_in: (
+                "a_page_too_large_to_retain_is_drawn_the_direct_way",
+                DISPLAY_LIST_TESTS,
+            ),
+        },
     ]
+}
+
+/// What one recorded call is before its heap parts, for
+/// `MAX_DISPLAY_LIST_BYTES`'s row: read off this target, as the recorder's own
+/// count reads it.
+fn event_size() -> u128 {
+    std::mem::size_of::<tinker_pdf_content::Event>() as u128
+}
+
+/// What one recorded call's graphics state is.
+fn state_size() -> u128 {
+    std::mem::size_of::<tinker_pdf_content::GraphicsState>() as u128
+}
+
+/// What one recorded path segment is.
+fn segment_size() -> u128 {
+    std::mem::size_of::<tinker_pdf_content::PathSegment>() as u128
 }
 
 /// Gap 29's bounds table has five rows and its code has seven, because two of
@@ -2183,7 +2240,8 @@ fn ledger() -> Vec<Bound> {
 /// `MAX_BMP_SAMPLES`; and the archive row's GIF decoder adds
 /// `MAX_GIF_SAMPLES`; and the archive row's WebP decoder adds
 /// `MAX_WEBP_SAMPLES`; and the review of the SVG writer adds
-/// `MAX_SVG_BYTES`. All **fifty-one** are here, and
+/// `MAX_SVG_BYTES`; and the review of the retained page adds
+/// `MAX_DISPLAY_LIST_BYTES`. All **fifty-two** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2242,6 +2300,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_GIF_SAMPLES",
             "MAX_WEBP_SAMPLES",
             "MAX_SVG_BYTES",
+            "MAX_DISPLAY_LIST_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2347,7 +2406,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 51, "the ledger is fifty-one rows");
+    assert_eq!(measured, 52, "the ledger is fifty-two rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2379,7 +2438,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 51, "the ledger is fifty-one rows");
+    assert_eq!(ledger().len(), 52, "the ledger is fifty-two rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

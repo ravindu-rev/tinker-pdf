@@ -150,6 +150,7 @@ fn a_display_list_is_a_plain_value() {
     let page = document.page(0).expect("a page");
     let list = page.display_list();
     assert_eq!(list.page_index(), 0);
+    assert!(list.is_retained(), "a page of five calls is kept");
     assert!(!list.is_empty());
     assert!(
         list.len() >= 4,
@@ -441,4 +442,129 @@ fn every_replay_names_the_glyph_its_font_could_not_resolve() {
         &[RenderOptions::default(), twice, RenderOptions::default()],
         "the unresolved-glyph page",
     );
+}
+
+// ---- a page too large to retain ---------------------------------------------
+
+/// A page whose forms fan out: four forms deep, each invoking the one below
+/// it four times at four offsets, and the page invoking the top one the same
+/// way — 4^4 = 256 leaves from a file of under fifty kilobytes. Each leaf is
+/// a blue one-point square, so the leaves tile a 16 x 16 grid two points
+/// apart, and sixteen red fills of four hundred segments each, off the page,
+/// which is what makes a recorded leaf large and leaves a render of it cheap.
+fn fan_out_page() -> Vec<u8> {
+    let heavy = format!(
+        "1 0 0 rg 91 1 m {}f\n",
+        "92 1 l 92 2 l 91 2 l 91 1 l ".repeat(100)
+    );
+    let leaf = format!("0 0 1 rg 1 1 1 1 re f\n{}", heavy.repeat(16));
+    let fan = |step: u32, name: &str| {
+        [(0, 0), (step, 0), (0, step), (step, step)]
+            .iter()
+            .map(|(x, y)| format!("q 1 0 0 1 {x} {y} cm /{name} Do Q "))
+            .collect::<String>()
+    };
+    let mut objects: Vec<Vec<u8>> = Vec::new();
+    // Object 4 + k is form F(k); F1 is the leaf, and F(k) steps by 2^(k-1)
+    // points so each level doubles the grid.
+    for k in 1..=4u32 {
+        let (content, resources) = if k == 1 {
+            (leaf.clone(), "<< >>".to_string())
+        } else {
+            (
+                fan(1 << (k - 1), &format!("F{}", k - 1)),
+                format!("<< /XObject << /F{} {} 0 R >> >>", k - 1, k + 3),
+            )
+        };
+        objects.push(stream_object(
+            &format!("/Type /XObject /Subtype /Form /BBox [0 0 40 40] /Resources {resources}"),
+            content.as_bytes(),
+        ));
+    }
+    let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+    page_with(
+        &fan(16, "F4"),
+        40,
+        40,
+        "<< /XObject << /F4 8 0 R >> >>",
+        &refs,
+    )
+}
+
+/// **The recording has a budget, and a page past it is not retained** —
+/// `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES`, fired at its own value and
+/// not a lowered one. The fan-out page records 4 096 fills of four hundred
+/// segments, more than 90 MB by the recorder's count, so the list keeps none
+/// of it; and what it draws is still the page, because every render of a
+/// list that is not retained is a direct one: the same pixels — all 256
+/// squares — the same warnings, and every leaf in the SVG.
+#[test]
+fn a_page_too_large_to_retain_is_drawn_the_direct_way() {
+    let document = Document::open(fan_out_page()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let list = page.display_list();
+    assert!(!list.is_retained(), "past the budget: {list:?}");
+    assert_eq!(list.len(), 0, "and nothing of it is kept");
+    assert!(list.is_empty());
+
+    let options = RenderOptions::default();
+    let direct = page.render(&options);
+    assert_eq!(
+        direct
+            .data
+            .chunks_exact(3)
+            .filter(|p| *p == [0, 0, 255])
+            .count(),
+        256,
+        "every leaf's square, one pixel each"
+    );
+    let replayed = list.render(&options);
+    assert_eq!(
+        (replayed.width, replayed.height, &replayed.warnings),
+        (direct.width, direct.height, &direct.warnings)
+    );
+    assert!(replayed.data == direct.data, "the same pixels");
+
+    let svg = list.to_svg(&tinker_pdf::SvgOptions::default());
+    assert!(svg.warnings.is_empty(), "{:?}", svg.warnings);
+    assert_eq!(
+        (
+            svg.markup.matches("fill=\"#0000ff\"").count(),
+            svg.markup.matches("fill=\"#ff0000\"").count()
+        ),
+        (256, 4_096),
+        "every leaf, interpreted into the writer"
+    );
+}
+
+/// **The review's own page**: ten forms, each invoking the next four times,
+/// the last filling a small square — about two kilobytes that recorded
+/// 1 310 719 calls and 635 MB before the budget. Recorded now, it stops at
+/// the budget and keeps nothing. Not rendered here: a direct render of a
+/// million fills is the interpreter's own cost — it bounds how deep forms
+/// nest, not how wide they fan — and a time exposure this list no longer adds
+/// memory to.
+#[test]
+fn the_review_s_fan_out_of_forms_is_not_retained() {
+    let mut objects: Vec<Vec<u8>> = Vec::new();
+    for k in 0..10u32 {
+        let (content, resources) = if k == 0 {
+            ("0 0 1 rg 1 1 2 2 re f".to_string(), "<< >>".to_string())
+        } else {
+            (
+                "/N Do ".repeat(4),
+                format!("<< /XObject << /N {} 0 R >> >>", k + 4),
+            )
+        };
+        objects.push(stream_object(
+            &format!("/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources {resources}"),
+            content.as_bytes(),
+        ));
+    }
+    let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+    let bytes = page_with("/N Do", 10, 10, "<< /XObject << /N 14 0 R >> >>", &refs);
+    assert!(bytes.len() < 3_000, "{} bytes", bytes.len());
+    let document = Document::open(bytes).expect("it opens");
+    let list = document.page(0).expect("a page").display_list();
+    assert!(!list.is_retained() && list.is_empty(), "{list:?}");
 }

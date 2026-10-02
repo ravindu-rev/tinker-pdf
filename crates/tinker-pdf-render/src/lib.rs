@@ -20,7 +20,7 @@ pub mod shading;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub use display::{Admission, DisplayRecorder};
+pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
 pub use shading::Shading;
 use tinker_pdf_content::{

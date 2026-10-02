@@ -285,6 +285,27 @@ changed one thing for a direct render too: an image drawn twice that will not
 decode used to report its codec the first time and, from the cache, its
 resource name standing in for a codec the second.
 
+**A page too large to retain is drawn the direct way.** A recording keeps
+every call with its own copy of the state and the path, so what it holds is
+the interpreter's *work*, and work multiplies through forms: the review of 2
+October 2026 measured a 1 940-byte file of ten forms, each invoking the next
+four times, record 1 310 719 calls at a peak of 635 376 kB, where a direct
+render holds one canvas. So the recording has a budget,
+`tinker_pdf_render::MAX_DISPLAY_LIST_BYTES` (64 MiB), counted by
+`kept_bytes` — each event's size, its state, its path at 56 bytes a segment,
+and every name, string, inline image and mask-group stream it copies. Past
+it `DisplayRecorder` drops what it kept, declines every question and tells
+the interpreter to stop, and the list is **not retained**
+(`DisplayList::is_retained`): it holds no calls, and every `render` is
+`Page::render` and every `to_svg` interprets the page into the writer —
+the same output at a direct render's cost, never a partial picture
+(`display_list.rs`'s `a_page_too_large_to_retain_is_drawn_the_direct_way`, at
+the cap's own value, and `the_review_s_fan_out_of_forms_is_not_retained`).
+The cap clears a dense fixed page's list — two thousand elements and forty
+thousand segments, about 3.2 MB — by 21x, and what it bounds is memory: the
+time a fan of forms costs is the interpreter's, which bounds how deep forms
+nest and not how wide they fan.
+
 **A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
 (`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
 rather than interpreting the page again, so `DisplayList::to_svg` writes the
@@ -432,7 +453,10 @@ which says whether `data` is. Rendering never fails; it degrades and reports.
 `Page::display_list()` returns a `DisplayList` — the page interpreted once —
 whose `render(&RenderOptions)` returns what `Page::render` returns for the
 same options, at any scale and for any region, without interpreting the page
-again; `len`, `is_empty` and `page_index` say what it holds. It owns what it
+again; `len`, `is_empty` and `page_index` say what it holds, and
+`is_retained` whether it holds the page's calls at all — false for a page
+whose recording would pass `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES`, whose
+every render is then a direct one. It owns what it
 needs (the page, its recorded calls and its resources), so it outlives the
 `Page` it came from and crosses threads.
 
@@ -552,6 +576,7 @@ a defect to hide in.
 | An annotation render at an index past `/Annots`, or of an entry that draws nothing | `RenderPartError::NoSuchAnnotation { count }`, `AnnotationNotDrawn { why }` with `NotDrawn::{NotADictionary, Hidden, Popup, NoRect, NoAppearance, UnreadableAppearance, Degenerate}` | Every reason `Page::render` skips an annotation silently, named where a caller asked for that one | [document model](document-model.md) |
 | A soft mask, a blend mode other than `Normal`, or a knockout group, on a page written as SVG | `SvgWarning::SoftMaskRefused`, `BlendModeRefused { mode }`, `KnockoutRefused` | SVG 1.1 says the first two only with `<mask>` and `<filter>`'s `feBlend`, which `tinker-pdf-svg` refuses, and the third not at all; what was masked is drawn unmasked, the blend as `Normal`, the group as an ordinary one — a file this repository cannot read back whole is not written | [design/svg.md](../design/svg.md) |
 | A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is no longer vectors there. A `<pattern>` would be exact for a tiling pattern and is the element the reader refuses | — |
+| A page whose recording would hold more than `MAX_DISPLAY_LIST_BYTES` (64 MiB) | `DisplayList::is_retained()` is false | Not a warning, because nothing is drawn differently: the list keeps no calls and every render and SVG is a direct one, the same output at a direct render's cost. A fan of forms makes a short file record without bound, which a direct render's one canvas never does | `bounds_ledger.rs` |
 | A page whose SVG would pass `MAX_SVG_BYTES` (256 MiB) of elements, or the smaller `SvgOptions::max_bytes` | `SvgWarning::Truncated { limit }` | Markup grows with what the page does rather than with what the file holds, so it has a budget a render's one canvas does not need; what fits is written, the document is well-formed and ends there, and the replay stops | `bounds_ledger.rs` |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
@@ -619,7 +644,11 @@ a defect to hide in.
   replay of every region fixture and an annotated page against the direct
   render; `display_list.rs` holds the answers on the pages where the renderer
   says no — past the group budget, inside hidden content — and a cancelled
-  replay against a cancelled render; `tinker-pdf-content`'s `replay.rs`
+  replay against a cancelled render, the warnings a replay reports render
+  after render, and a page past `MAX_DISPLAY_LIST_BYTES` drawn the direct
+  way, pixels, warnings and SVG; `tinker-pdf-render`'s `display.rs` holds the
+  recorder's count, its overflow and the interpreter told to stop;
+  `tinker-pdf-content`'s `replay.rs`
   holds a replay into a recorder equal to the recording, and what a replay
   does when the device answers differently.
 - Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Sixteen
