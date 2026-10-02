@@ -13,17 +13,19 @@
 
 mod cbz_support;
 mod epub_support;
+mod render_support;
 
 use std::sync::Arc;
 
 use cbz_support::{broken_png, distinct_pixels, grey_jpeg, rgb_png, zip, Damage, ZipFile};
 use epub_support::{ocf_zip, OcfEntry};
+use render_support::{curvy_font, ink};
 use tinker_pdf::cbz::{ImageDefect, ImageFormat, PageDefect};
 use tinker_pdf::epub::read::PX_TO_PT;
 use tinker_pdf::epub::{SpineDefect, DEFAULT_PAGE};
 use tinker_pdf::{
     ArchiveWarning, Bitmap, Document, OpenError, OpenOptions, RenderOptions, ShreddedSource,
-    SliceSource, Standalone,
+    SimpleFontProvider, SliceSource, Standalone,
 };
 
 // ---- helpers -----------------------------------------------------------------
@@ -38,6 +40,21 @@ fn render(document: &Document, page: u32) -> Bitmap {
         .expect("a page")
         .render(&RenderOptions::default())
 }
+
+/// `document` with a face to draw its text in.
+///
+/// A document that embeds no face draws **none** of its text without one — it
+/// extracts perfectly and renders `UnreadableFont` and a blank page — so two
+/// pages compared without it are two blank pages, equal whatever was laid out
+/// on them. The face is `render_support`'s synthetic one, attached after
+/// pagination: the line breaks are the ones `open` made from the built-in
+/// metrics, on both sides of a comparison, and only the glyphs are its.
+fn drawn(document: Document) -> Document {
+    document.with_fonts(Arc::new(SimpleFontProvider::new(curvy_font())))
+}
+
+/// Pixels that are not white: what says a comparison compared something.
+const LEAST_INK: usize = 200;
 
 fn pixel(bitmap: &Bitmap, x: u32, y: u32) -> (u8, u8, u8) {
     let at = (y as usize) * bitmap.stride + (x as usize) * bitmap.components();
@@ -262,8 +279,8 @@ fn an_svg_image_resolves_from_a_data_url_and_names_a_missing_file() {
 #[test]
 fn a_loose_xhtml_file_is_the_one_chapter_of_a_book_pixel_for_pixel() {
     let page = xhtml("<title>Loose</title>", &long_body());
-    let loose = open(page.as_bytes());
-    let book = open(&book_of(&page));
+    let loose = drawn(open(page.as_bytes()));
+    let book = drawn(open(&book_of(&page)));
     assert!(loose.page_count() >= 2, "the body needs two pages");
     assert_eq!(loose.page_count(), book.page_count());
     for at in 0..loose.page_count() as u32 {
@@ -273,6 +290,7 @@ fn a_loose_xhtml_file_is_the_one_chapter_of_a_book_pixel_for_pixel() {
             "page {at} is the default box"
         );
         let (a, b) = (render(&loose, at), render(&book, at));
+        assert!(ink(&a) >= LEAST_INK, "page {at} drew no text to compare");
         assert!(a.data == b.data, "page {at} differs from the book's");
     }
     assert!(page_text(&loose, 0).starts_with("Heading lorem ipsum"));

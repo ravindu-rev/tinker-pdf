@@ -9,12 +9,32 @@
 //! out **exactly** as the XHTML it translates to, that what is not CommonMark
 //! on the way is named, and that the nesting cap fires.
 
+mod render_support;
+
+use std::sync::Arc;
+
+use render_support::{curvy_font, ink};
 use tinker_pdf::markdown::{to_html, MAX_MARKDOWN_NESTING};
 use tinker_pdf::standalone::TranslationDefect;
 use tinker_pdf::{
     ArchiveWarning, Bitmap, Document, DocumentBuilder, FromHtml, OpenError, OpenOptions, PageBox,
-    RenderOptions,
+    RenderOptions, SimpleFontProvider,
 };
+
+/// `document` with a face to draw its text in.
+///
+/// A document that embeds no face draws **none** of its text without one — it
+/// extracts perfectly and renders `UnreadableFont` and a blank page — so two
+/// pages compared without it are two blank pages, equal whatever was laid out
+/// on them. The face is `render_support`'s synthetic one, attached after
+/// pagination: the line breaks are the ones `open` made from the built-in
+/// metrics, on both sides of a comparison, and only the glyphs are its.
+fn drawn(document: Document) -> Document {
+    document.with_fonts(Arc::new(SimpleFontProvider::new(curvy_font())))
+}
+
+/// Pixels that are not white: what says a comparison compared something.
+const LEAST_INK: usize = 200;
 
 fn render(document: &Document, page: u32) -> Bitmap {
     document
@@ -193,15 +213,14 @@ fn a_markdown_document_is_the_xhtml_it_translates_to() {
         to_html(NOTE)
     );
     let (from_html, _) = DocumentBuilder::from_html(xhtml, sheet, page).expect("lays out");
-    let a = Document::open(from_markdown.finish()).expect("opens");
-    let b = Document::open(from_html.finish()).expect("opens");
+    let a = drawn(Document::open(from_markdown.finish()).expect("opens"));
+    let b = drawn(Document::open(from_html.finish()).expect("opens"));
     assert_eq!(a.page_count(), b.page_count());
     assert_eq!(a.page_count() as usize, report.pages());
     for at in 0..a.page_count() {
-        assert!(
-            render(&a, at).data == render(&b, at).data,
-            "page {at} differs"
-        );
+        let (left, right) = (render(&a, at), render(&b, at));
+        assert!(ink(&left) >= LEAST_INK, "page {at} drew no text to compare");
+        assert!(left.data == right.data, "page {at} differs");
     }
 }
 

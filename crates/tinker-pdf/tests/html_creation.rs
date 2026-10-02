@@ -19,13 +19,17 @@
 //!   documents agree, and the mismatch is what stops that.
 
 mod epub_support;
+mod render_support;
+
+use std::sync::Arc;
 
 use epub_support::{ocf_zip, OcfEntry};
+use render_support::{curvy_font, ink};
 use tinker_pdf::epub::read::PX_TO_PT;
 use tinker_pdf::epub::BookOptionDefect;
 use tinker_pdf::{
     ArchiveWarning, Bitmap, Document, DocumentBuilder, FromHtml, HtmlError, OpenOptions, PageBox,
-    RenderOptions,
+    RenderOptions, SimpleFontProvider,
 };
 
 /// The face every pair is set in: Courier's 600/1000 advance, so a line
@@ -97,6 +101,21 @@ fn same(
         "{what}: the mismatch reference agrees too, so the pair proves nothing"
     );
 }
+
+/// `document` with a face to draw its text in.
+///
+/// A document that embeds no face draws **none** of its text without one — it
+/// extracts perfectly and renders `UnreadableFont` and a blank page — so two
+/// pages compared without it are two blank pages, equal whatever was laid out
+/// on them. The face is `render_support`'s synthetic one, attached after
+/// pagination: the line breaks are the ones `open` made from the built-in
+/// metrics, on both sides of a comparison, and only the glyphs are its.
+fn drawn(document: Document) -> Document {
+    document.with_fonts(Arc::new(SimpleFontProvider::new(curvy_font())))
+}
+
+/// Pixels that are not white: what says a comparison compared something.
+const LEAST_INK: usize = 200;
 
 fn render(document: &Document, page: u32) -> Bitmap {
     document
@@ -172,12 +191,14 @@ fn a_document_made_from_html_is_the_book_of_the_same_chapter() {
         let page = PageBox::new(width, height);
         let (builder, report) =
             DocumentBuilder::from_html(wrap(&made_head), sheet, page).expect("the markup lays out");
-        let made = Document::open(builder.finish()).expect("it opens");
-        let book = Document::open_with(
-            book_of(&wrap(&book_head), sheet),
-            &OpenOptions::at_page(width, height),
-        )
-        .expect("the book opens");
+        let made = drawn(Document::open(builder.finish()).expect("it opens"));
+        let book = drawn(
+            Document::open_with(
+                book_of(&wrap(&book_head), sheet),
+                &OpenOptions::at_page(width, height),
+            )
+            .expect("the book opens"),
+        );
         assert!(made.page_count() >= 2, "the body needs two pages");
         assert_eq!(made.page_count() as usize, report.pages());
         assert_eq!(
@@ -187,8 +208,10 @@ fn a_document_made_from_html_is_the_book_of_the_same_chapter() {
         );
         for at in 0..made.page_count() {
             assert_eq!(made.page(at).expect("a page").size(), (width, height));
+            let (a, b) = (render(&made, at), render(&book, at));
+            assert!(ink(&a) >= LEAST_INK, "page {at} drew no text to compare");
             assert!(
-                render(&made, at).data == render(&book, at).data,
+                a.data == b.data,
                 "page {at} at {width} x {height} differs from the book's"
             );
         }
