@@ -330,6 +330,16 @@ suites: the covered bytes always digested with SHA-1 fires 1, the digest never u
 `Matches` fires 1, upgraded even when the signature failed fires 2, and the old by-name
 refusal restored fires 4.
 
+**`adbe.pkcs7.sha1`**, the same day: the document digest is two links — the encapsulated
+twenty octets against the covered bytes' SHA-1, and the signer's `messageDigest` against
+those octets — and `a_document_and_its_encapsulated_digest_replaced_together_are_caught` is
+the test the second link exists for. Injections: the second link skipped fires 1; the
+document digested under the signer's algorithm rather than SHA-1 fires 2; the
+`messageDigest` taken under SHA-1 rather than the signer's algorithm fires 1; the `eContent`
+ignored when there are no signed attributes fires 2; the old by-name refusal restored
+fires 3. `Unchecked::LegacySha1SubFilter` is gone and `ContentNotEncapsulated` names the
+one refusal left, a message under the subfilter that is detached.
+
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,

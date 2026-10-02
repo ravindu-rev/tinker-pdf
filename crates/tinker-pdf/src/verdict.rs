@@ -146,12 +146,10 @@ pub enum Unchecked {
     /// whether the bytes changed or the signature was never theirs, so the
     /// digest is left unanswered rather than given the signature's answer.
     NoSignedAttributes,
-    /// The blob is an `adbe.pkcs7.sha1` (12.8.3.3.1), whose encapsulated
-    /// content is the document digest rather than a detached signature over
-    /// it. Deprecated in ISO 32000-2, one corpus file, and that file is a
-    /// fuzzer's output — so it is named rather than implemented on a sample
-    /// of one.
-    LegacySha1SubFilter,
+    /// The signature is `adbe.pkcs7.sha1` (12.8.3.3.1), whose `SignedData`
+    /// must encapsulate the SHA-1 digest of the covered bytes — and this one
+    /// is detached, so there is no document digest in it to compare.
+    ContentNotEncapsulated,
 }
 
 /// How far the certificate chain reached.
@@ -370,7 +368,7 @@ pub(crate) fn verdict(
         .collect();
 
     verdict.document_digest =
-        check_document_digest(document, signature, signer, &mut verdict.weaknesses);
+        check_document_digest(document, signature, signed, signer, &mut verdict.weaknesses);
 
     let signer_certificate = find_signer(signer, &certificates);
     if let Some(certificate) = signer_certificate {
@@ -473,11 +471,12 @@ impl<'a> Signed<'a> {
 fn check_document_digest(
     document: &Document,
     signature: &Signature,
+    signed: &tinker_pdf_pki::SignedData<'_>,
     signer: &SignerInfo<'_>,
     weaknesses: &mut Vec<Weakness>,
 ) -> DocumentDigest {
     if signature.sub_filter == Some(SubFilter::Pkcs7Sha1) {
-        return DocumentDigest::NotChecked(Unchecked::LegacySha1SubFilter);
+        return check_encapsulated_sha1(document, signature, signed, signer, weaknesses);
     }
     let Some(expected) = signer.message_digest() else {
         // No `messageDigest` to compare: the signature is over the content
@@ -507,6 +506,55 @@ fn check_document_digest(
     // — one is in the document and the other is computed from it — so there is
     // no secret for a timing difference to leak.
     if actual == expected {
+        DocumentDigest::Matches
+    } else {
+        DocumentDigest::Differs
+    }
+}
+
+/// Question 2 for `adbe.pkcs7.sha1` (ISO 32000-1 12.8.3.3.1), where the
+/// document's digest is *inside* the message: the `eContent` is the SHA-1
+/// digest of the covered bytes, and the signer signs that content like any
+/// other.
+///
+/// So there are two links where a detached signature has one, and both must
+/// hold. The twenty octets the message carries must be the covered bytes'
+/// SHA-1; and where the signer has signed attributes, its `messageDigest` must
+/// be the digest of those twenty octets under the signer's own algorithm —
+/// otherwise the message carries a document digest that nothing signed. With
+/// no signed attributes the signature is over the twenty octets directly, and
+/// question 3 is what checks that link.
+fn check_encapsulated_sha1(
+    document: &Document,
+    signature: &Signature,
+    signed: &tinker_pdf_pki::SignedData<'_>,
+    signer: &SignerInfo<'_>,
+    weaknesses: &mut Vec<Weakness>,
+) -> DocumentDigest {
+    // The subfilter fixes the document digest at SHA-1, whatever the signer
+    // used for the rest — which is why ISO 32000-2 deprecates it.
+    weaknesses.push(Weakness::Sha1Digest);
+    let Some(content) = signed.encap_content_info().content() else {
+        return DocumentDigest::NotChecked(Unchecked::ContentNotEncapsulated);
+    };
+    let Some(actual) = signature.digest(document, tinker_pdf_cos::DigestAlgorithm::Sha1) else {
+        return DocumentDigest::NotChecked(Unchecked::CoverageUnusable);
+    };
+    if content != actual.as_slice() {
+        return DocumentDigest::Differs;
+    }
+    let Some(expected) = signer.message_digest() else {
+        return DocumentDigest::Matches;
+    };
+    let algorithm = match signer.effective_digest() {
+        Ok(algorithm) => algorithm,
+        Err(error) => {
+            return DocumentDigest::NotChecked(Unchecked::UnsupportedAlgorithm(format!(
+                "{error:?}"
+            )))
+        }
+    };
+    if crypto_digest(algorithm).digest(content).as_bytes() == expected {
         DocumentDigest::Matches
     } else {
         DocumentDigest::Differs

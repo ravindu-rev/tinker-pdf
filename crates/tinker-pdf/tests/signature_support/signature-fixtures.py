@@ -196,6 +196,26 @@ def cms_sign(tag, content, *options):
         return f.read()
 
 
+def pkcs7_sha1(attributes):
+    """12.8.3.3.1's `adbe.pkcs7.sha1`: the SHA-1 digest of the covered bytes is
+    the *encapsulated content* (`-nodetach`), and the signer digests that
+    content with SHA-256 -- two digests, so a reader that confused them is
+    caught. With `attributes` false the signer carries none (`-noattr`), and
+    the signature is over the twenty octets directly."""
+    tag = "sha1" if attributes else "sha1-noattr"
+    rsa_chain(tag, "adbe.pkcs7.sha1")
+    reserve = 4000
+    out, contents_at, covered = build_pdf(
+        reserve, "adbe.pkcs7.sha1", "An adbe.pkcs7.sha1 signature",
+        "Tinker PDF adbe.pkcs7.sha1 Test Signer")
+    options = ["-nodetach", "-md", "sha256"]
+    options += ["-nosmimecap"] if attributes else ["-noattr"]
+    der = cms_sign(tag, hashlib.sha1(covered).digest(), *options)
+    name = "pkcs7-sha1" if attributes else "pkcs7-sha1-no-attributes"
+    save(name + ".pdf", splice(out, contents_at, reserve, der))
+    save(name + "-root.der", der_of(w(tag + "-root.pem")))
+
+
 def no_signed_attributes():
     """A detached `adbe.pkcs7.detached` signature with no signed attributes
     (`-noattr`): RFC 5652 §5.4's other case, where the signature is over the
@@ -213,6 +233,8 @@ def no_signed_attributes():
 
 BUILDERS = {
     "rsa-pss": rsa_pss,
+    "pkcs7-sha1": lambda: pkcs7_sha1(True),
+    "pkcs7-sha1-no-attributes": lambda: pkcs7_sha1(False),
     "no-signed-attributes": no_signed_attributes,
 }
 

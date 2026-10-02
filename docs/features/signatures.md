@@ -98,6 +98,18 @@ cannot say whether the bytes changed or the signature was never theirs, and
 the digest stays `NotChecked(NoSignedAttributes)` rather than borrowing the
 signature's answer.
 
+**`adbe.pkcs7.sha1`** (12.8.3.3.1), the legacy subfilter ISO 32000-2
+deprecates, is verified too. Its `SignedData` *encapsulates* the SHA-1 of the
+covered bytes rather than standing detached from them, so the document digest
+is two links where a detached signature has one: the twenty octets the message
+carries must be the covered bytes' SHA-1, and the signer's `messageDigest`
+must be the digest of those twenty octets under the signer's own algorithm. A
+reader that checked only the first would accept a document and its
+encapsulated digest replaced together — the signature over the attributes
+still verifies. Every such verdict carries `Weakness::Sha1Digest`, because the
+subfilter fixes the document digest at SHA-1, and a message under it that is
+detached is `NotChecked(ContentNotEncapsulated)`.
+
 **Modification detection.** `Signature::modifications()` lists every object a
 revision after the signed bytes wrote, classifies it, and marks it against the
 signature's `/DocMDP` level (12.8.2.2) and `/FieldMDP` field lock (12.8.2.4).
@@ -197,7 +209,6 @@ let signed = document.editor().save_signed(&options, &request)?;
 | Validating an RFC 3161 timestamp | `SignerDescription::timestamped` says one is there | validating a token means validating the authority's own chain, which is a later tier | [design](../design/signatures.md) |
 | An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; a curve nobody has produced a PDF signature on is a liability rather than a feature | RFC 5480 §2.1.1 |
 | A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3 |
-| `adbe.pkcs7.sha1` (12.8.3.3.1) | `Unchecked::LegacySha1SubFilter` | deprecated in ISO 32000-2; one corpus file has it and that file is a fuzzer's output, so it is named rather than implemented on a sample of one | 12.8.3.3.1 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
 
 ## Verified
@@ -302,6 +313,16 @@ digest unanswered; and naming SHA-384 in the signer's unsigned
 corpus has exactly one such signer, `bug854315.pdf`'s, and its first verdict
 under this code has not been measured: `tests/verdicts.rs` tallies it apart
 and prints it, and asserts only that it is no longer unchecked.
+
+**`adbe.pkcs7.sha1`** is held to two OpenSSL 3.0.13 fixtures
+(`tests/signature_support/pkcs7-sha1.pdf` and `pkcs7-sha1-no-attributes.pdf`,
+`cms -sign -nodetach` over the covered bytes' SHA-1, the signer digesting with
+SHA-256 so that the two digests cannot be confused) and five tests in
+`tests/signature_shapes.rs`, the one that matters being a document and its
+encapsulated digest replaced together. The corpus's one such file,
+`poppler-395-0-fuzzed.pdf`, is a fuzzer's mutation whose `/ByteRange` does not
+bracket its `/Contents`, so it reaches no CMS parser and its verdict does not
+move.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest

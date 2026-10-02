@@ -32,8 +32,8 @@
 use std::ops::Range;
 
 use tinker_pdf::{
-    Chain, CmsState, Coverage, Document, DocumentDigest, SignatureCheck, TrustAnchors, Unchecked,
-    Verdict, Weakness,
+    Chain, CmsState, Coverage, DigestAlgorithm, Document, DocumentDigest, SignatureCheck,
+    SubFilter, TrustAnchors, Unchecked, Verdict, Weakness,
 };
 use tinker_pdf_crypto::{DigestAlgorithm as CryptoDigest, PssParameters};
 use tinker_pdf_pki::{oid, pss, Certificate, ContentInfo, SignatureAlgorithm};
@@ -42,6 +42,10 @@ const PSS_PDF: &[u8] = include_bytes!("signature_support/rsa-pss.pdf");
 const PSS_ROOT: &[u8] = include_bytes!("signature_support/rsa-pss-root.der");
 const NO_ATTRS_PDF: &[u8] = include_bytes!("signature_support/no-signed-attributes.pdf");
 const NO_ATTRS_ROOT: &[u8] = include_bytes!("signature_support/no-signed-attributes-root.der");
+const SHA1_PDF: &[u8] = include_bytes!("signature_support/pkcs7-sha1.pdf");
+const SHA1_ROOT: &[u8] = include_bytes!("signature_support/pkcs7-sha1-root.der");
+const SHA1_BARE_PDF: &[u8] = include_bytes!("signature_support/pkcs7-sha1-no-attributes.pdf");
+const SHA1_BARE_ROOT: &[u8] = include_bytes!("signature_support/pkcs7-sha1-no-attributes-root.der");
 
 /// Inside every fixture certificate's validity window and nothing to do with
 /// now: 1 January 2027. Ruling 4 keeps the clock out of the engine.
@@ -316,7 +320,143 @@ fn an_unattributed_signature_is_read_under_the_digest_its_signer_names() {
     assert_eq!(verdict.signature, SignatureCheck::Failed);
 }
 
+// ---- adbe.pkcs7.sha1 ---------------------------------------------------------
+
+/// 12.8.3.3.1's shape, as OpenSSL wrote it: the `eContent` is the SHA-1 of the
+/// covered bytes, and the signer digests those twenty octets with SHA-256.
+#[test]
+fn the_sha1_fixtures_are_the_shape_they_claim_to_be() {
+    for (pdf, attributes) in [(SHA1_PDF, true), (SHA1_BARE_PDF, false)] {
+        let document = Document::open(pdf.to_vec()).expect("opens");
+        let signature = &document.signatures()[0];
+        assert_eq!(signature.sub_filter, Some(SubFilter::Pkcs7Sha1));
+        let digest = signature
+            .digest(&document, DigestAlgorithm::Sha1)
+            .expect("the spans fit");
+
+        let der = cms_of(pdf);
+        let content = ContentInfo::parse(&der).expect("the CMS parses");
+        let signed = content.signed_data();
+        assert_eq!(
+            signed.encap_content_info().content(),
+            Some(digest.as_slice()),
+            "the encapsulated content is the covered bytes' SHA-1"
+        );
+        let signer = signed.signer_infos().first().expect("one signer");
+        assert_eq!(signer.signed_attrs().is_some(), attributes);
+        assert_eq!(
+            signer.digest_algorithm(),
+            Ok(tinker_pdf_pki::DigestAlgorithm::Sha256),
+            "the signer's own digest is not the document's"
+        );
+    }
+}
+
+#[test]
+fn an_adbe_pkcs7_sha1_signature_reaches_every_one_of_the_four_answers() {
+    for (pdf, root) in [(SHA1_PDF, SHA1_ROOT), (SHA1_BARE_PDF, SHA1_BARE_ROOT)] {
+        let verdict = verdict_for(pdf, root);
+        assert_eq!(verdict.coverage, Coverage::WholeFile);
+        assert_eq!(verdict.document_digest, DocumentDigest::Matches);
+        assert_eq!(verdict.signature, SignatureCheck::Verified);
+        assert!(matches!(verdict.chain, Chain::AnchoredTo { links: 0, .. }));
+        assert_eq!(
+            verdict.weaknesses,
+            [Weakness::Sha1Digest],
+            "the subfilter fixes the document digest at SHA-1, and says so"
+        );
+        assert!(verdict.is_trusted());
+    }
+}
+
+#[test]
+fn a_changed_document_differs_and_its_sha1_signature_still_verifies() {
+    // The two questions come apart here exactly as they do for a detached
+    // signature: the signature is over the encapsulated digest, which did not
+    // change, and the document is not what that digest describes.
+    for (pdf, root) in [(SHA1_PDF, SHA1_ROOT), (SHA1_BARE_PDF, SHA1_BARE_ROOT)] {
+        let verdict = verdict_for(&tampered(pdf), root);
+        assert_eq!(verdict.document_digest, DocumentDigest::Differs);
+        assert_eq!(verdict.signature, SignatureCheck::Verified);
+        assert!(!verdict.is_trusted());
+    }
+}
+
+#[test]
+fn a_document_and_its_encapsulated_digest_replaced_together_are_caught() {
+    // The attack the second link exists for. Change the document, then write
+    // its new SHA-1 into the `eContent`: the first link — the twenty octets
+    // are the covered bytes' digest — holds again. With signed attributes the
+    // `messageDigest` still names the old content, so the document digest is
+    // `Differs` while the signature over the attributes still verifies; with
+    // none the signature is over the twenty octets, so it fails. Either way
+    // nothing reports a forged document as signed — and a reader that checked
+    // only the first link would have reported this one `Matches` and
+    // `Verified`.
+    for (pdf, root, attributes) in [
+        (SHA1_PDF, SHA1_ROOT, true),
+        (SHA1_BARE_PDF, SHA1_BARE_ROOT, false),
+    ] {
+        let changed = tampered(pdf);
+        let document = Document::open(changed.clone()).expect("opens");
+        let digest = document.signatures()[0]
+            .digest(&document, DigestAlgorithm::Sha1)
+            .expect("the spans fit");
+
+        let mut der = cms_of(pdf);
+        let at = {
+            let content = ContentInfo::parse(&der).expect("the CMS parses");
+            let econtent = content
+                .signed_data()
+                .encap_content_info()
+                .content()
+                .expect("it encapsulates");
+            offset_in(&der, econtent)
+        };
+        der[at].copy_from_slice(&digest);
+        let verdict = verdict_for(&replace_cms(&changed, &der), root);
+        if attributes {
+            assert_eq!(verdict.document_digest, DocumentDigest::Differs);
+            assert_eq!(verdict.signature, SignatureCheck::Verified);
+        } else {
+            assert_eq!(verdict.document_digest, DocumentDigest::Matches);
+            assert_eq!(verdict.signature, SignatureCheck::Failed);
+        }
+        assert!(!verdict.is_trusted());
+    }
+}
+
+#[test]
+fn a_detached_message_under_the_sha1_subfilter_has_no_digest_to_compare() {
+    // The no-signed-attributes fixture's blob is detached. Renaming its
+    // subfilter in place — padded with spaces so no offset moves — makes a
+    // document that claims `adbe.pkcs7.sha1` and carries no digest in its
+    // message, which is a named refusal rather than a comparison with nothing.
+    let mut pdf = NO_ATTRS_PDF.to_vec();
+    let at = find(&pdf, b"/adbe.pkcs7.detached").expect("the subfilter");
+    pdf[at..at + 20].copy_from_slice(b"/adbe.pkcs7.sha1    ");
+    let verdict = verdict_for(&pdf, NO_ATTRS_ROOT);
+    assert_eq!(
+        verdict.document_digest,
+        DocumentDigest::NotChecked(Unchecked::ContentNotEncapsulated)
+    );
+    assert_eq!(
+        verdict.signature,
+        SignatureCheck::Failed,
+        "the renaming is inside the covered bytes, so the signature over them fails too"
+    );
+}
+
 // ---- reading and rewriting the fixtures -----------------------------------
+
+/// The fixture with one byte of its page content changed, inside the first
+/// covered span.
+fn tampered(pdf: &[u8]) -> Vec<u8> {
+    let mut out = pdf.to_vec();
+    let at = find(&out, b"0.2 0.6 0.3 rg").expect("the content stream");
+    out[at + 2] = b'9';
+    out
+}
 
 fn verdict_for(pdf: &[u8], root: &[u8]) -> Verdict {
     let document = Document::open(pdf.to_vec()).expect("the fixture opens");

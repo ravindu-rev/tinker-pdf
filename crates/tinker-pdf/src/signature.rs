@@ -204,7 +204,9 @@ pub enum SubFilter {
     Pkcs7Detached,
     /// `adbe.pkcs7.sha1` (12.8.3.3.1) — the legacy shape, where the CMS
     /// encapsulates the SHA-1 digest of the covered bytes rather than being
-    /// detached from it. Deprecated in ISO 32000-2.
+    /// detached from it. Deprecated in ISO 32000-2, and verified: the verdict
+    /// checks the encapsulated digest against the covered bytes and the
+    /// signer's `messageDigest` against the encapsulated digest.
     Pkcs7Sha1,
     /// `adbe.x509.rsa_sha1` (12.8.3.2) — a bare PKCS#1 signature, with the
     /// certificate chain in `/Cert` rather than in `/Contents`.

@@ -122,6 +122,31 @@ The corpus has exactly one signer of this shape — `bug854315.pdf`'s, per
 `cms_census.rs` — and one is not enough to say the arm is right in both
 directions; this file is the second, and the one whose negatives can be made.
 
+### `pkcs7-sha1.pdf`, `pkcs7-sha1-no-attributes.pdf` and their roots — 2 October 2026
+
+`python3 signature-fixtures.py <out> <work> pkcs7-sha1 pkcs7-sha1-no-attributes`.
+Each is its own 2048-bit RSA root and leaf, and `openssl cms -sign -binary
+-nodetach -md sha256` over the twenty-octet SHA-1 digest of the covered bytes
+— ISO 32000-1 12.8.3.3.1's `adbe.pkcs7.sha1`, whose `SignedData` encapsulates
+the document's digest. The first adds `-nosmimecap` and keeps OpenSSL's signed
+attributes; the second is `-noattr`, so its signature is over the twenty
+octets themselves. The signer digests with SHA-256 on purpose: the subfilter
+fixes the *document* digest at SHA-1, and a reader that used one algorithm for
+both would be caught.
+
+SHA-256: `ada73945bc127cc41f54bc231f2c8a1a79d31b0efc0f57fd60c8e4b514c82c6c`
+(`pkcs7-sha1.pdf`),
+`58be5a73f71fbf67ee4a36e84e1ef33c445ec4122bf26c00461b8d9bbc9a153b`
+(`pkcs7-sha1-root.der`),
+`6c4dd3346597684c3427b813a1d026a0c17cf4ab2bbe9d14af9d45675c1ef78a`
+(`pkcs7-sha1-no-attributes.pdf`) and
+`15e1bdf324471f8e21de86e6640a517e33d90a3f606c510ef8a876eb7084b051`
+(`pkcs7-sha1-no-attributes-root.der`).
+
+The corpus's only `adbe.pkcs7.sha1` file is a fuzzer's mutation whose
+`/ByteRange` does not bracket its `/Contents`, so it has never reached a CMS
+parser; these two are the only ones that do.
+
 ## The visible-signature signer
 
 `visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA
