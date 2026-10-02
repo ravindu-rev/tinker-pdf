@@ -2075,9 +2075,16 @@ fn ledger() -> Vec<Bound> {
             // type and an `<img>` draws one. A full-page 300 dpi plate charged
             // at four components, `MAX_PNG_SAMPLES`'s book figure.
             book: 2_550 * 3_300 * 4,
-            // Two 16-bit logical screen dimensions, charged at four.
-            reachable: 0xFFFFu128 * 0xFFFF * 4,
-            reachable_because: "two 16-bit logical screen dimensions, times four components",
+            // The cap is charged twice, on two buffers, and both clear it. The
+            // canvas reaches furthest: a logical screen left at zero is the
+            // first image's extent, `left + width` by `top + height`, so each
+            // side is a sum of two 16-bit fields, and a local table on part of
+            // it expands it to four components. The image's own indices are
+            // the other charge — one byte each, `width x height` from its
+            // descriptor, at most 65 535 squared whatever the screen is.
+            reachable: (2u128 * 0xFFFF) * (2 * 0xFFFF) * 4,
+            reachable_because: "a zero logical screen is the image's extent, \
+                                two sums of 16-bit fields, times four components",
             declared_in: GIF,
             fires_in: (
                 "an_image_past_the_sample_cap_is_refused_before_it_allocates",

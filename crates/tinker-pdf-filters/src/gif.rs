@@ -54,9 +54,11 @@ use crate::{Limits, Warning, Warnings};
 
 // --- the budget ---------------------------------------------------------
 
-/// Samples in the **output** raster — `width x height x` one for an indexed
-/// picture, four for one that had to be expanded — charged at the wider of the
-/// two the file can produce, before any buffer exists.
+/// Samples in **either** of the two buffers a decode makes, each charged on
+/// its own before it exists: the canvas, `width x height x` one for an
+/// indexed picture or four for one that had to be expanded; and the first
+/// image's own indices, `width x height` bytes from its descriptor, which the
+/// LZW stage writes before any of them is placed on the canvas.
 ///
 /// | | Samples |
 /// | --- | --- |
@@ -64,13 +66,20 @@ use crate::{Limits, Warning, Warnings};
 /// | A comic page: 2000 x 3000, expanded | 24 000 000 |
 /// | **This cap** | **67 108 864** |
 ///
-/// `MAX_PNG_SAMPLES`'s `1 << 26`, for its arithmetic. GIF's dimensions are
-/// 16-bit, so a logical screen can ask for at most 65 535 x 65 535 x 4 — about
-/// 1.7 x 10^10 samples from thirteen bytes — and the cap is what stands
-/// between that and an allocation.
+/// `MAX_PNG_SAMPLES`'s `1 << 26`, for its arithmetic. GIF's fields are 16-bit,
+/// and three of them reach past it from a few bytes. A logical screen asks for
+/// up to 65 535 x 65 535 x 4 from thirteen. A screen left at zero makes the
+/// canvas the image's own extent, `left + width` by `top + height`, which is
+/// up to 131 070 a side and about 6.9 x 10^10 samples expanded. And the image
+/// descriptor's size is not bounded by the screen at all: a one-pixel screen
+/// over a 65 535 x 4 096 image is 268 million indices from thirty-five bytes,
+/// which is what this cap missed until the descriptor was charged too.
 ///
 /// **Reachable**: `an_image_past_the_sample_cap_is_refused_before_it_allocates`
-/// builds the thirteen bytes.
+/// builds the thirteen bytes, `a_zero_screen_is_charged_at_the_image_extent`
+/// the zero screen, and
+/// `an_image_descriptor_past_the_cap_is_refused_before_it_allocates` the
+/// thirty-five.
 pub const MAX_GIF_SAMPLES: u64 = 1 << 26;
 
 /// §20's "the largest code a table may hold is 4095": twelve bits.
@@ -101,10 +110,11 @@ pub enum GifError {
     /// An LZW minimum code size outside 1 to 8. The roots are the indices, and
     /// an index is a byte.
     BadCodeSize(u8),
-    /// [`MAX_GIF_SAMPLES`] would be spent. Refused before any buffer exists.
+    /// [`MAX_GIF_SAMPLES`] would be spent by the canvas or by the image's own
+    /// indices. Refused before any buffer exists.
     TooManySamples { samples: u64, max: u64 },
-    /// The raster would be larger than the caller's own
-    /// [`Limits::max_output`].
+    /// The canvas, or the image's own indices, would be larger than the
+    /// caller's own [`Limits::max_output`].
     ExceedsOutputLimit { bytes: u64, limit: usize },
 }
 
@@ -228,6 +238,24 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// [`MAX_GIF_SAMPLES`] and the caller's ceiling, charged on one buffer about
+/// to be made.
+fn charge(samples: u64, limits: &Limits) -> Result<(), GifError> {
+    if samples > MAX_GIF_SAMPLES {
+        return Err(GifError::TooManySamples {
+            samples,
+            max: MAX_GIF_SAMPLES,
+        });
+    }
+    if samples > limits.max_output as u64 {
+        return Err(GifError::ExceedsOutputLimit {
+            bytes: samples,
+            limit: limits.max_output,
+        });
+    }
+    Ok(())
+}
+
 /// A colour table of `2^(size + 1)` RGB triples (§18, §20).
 fn table<'a>(r: &mut Reader<'a>, packed: u8) -> Option<&'a [u8]> {
     let entries = 2usize << (packed & 0x07);
@@ -316,21 +344,20 @@ pub fn gif_decode(bytes: &[u8], limits: &Limits) -> Result<GifImage, GifError> {
     // canvas, so the picture has to be expanded.
     let expand = frame.local.is_some() && !covers;
     let components: u64 = if expand { 4 } else { 1 };
-    let samples = (canvas_w as u64)
-        .saturating_mul(canvas_h as u64)
-        .saturating_mul(components);
-    if samples > MAX_GIF_SAMPLES {
-        return Err(GifError::TooManySamples {
-            samples,
-            max: MAX_GIF_SAMPLES,
-        });
-    }
-    if samples > limits.max_output as u64 {
-        return Err(GifError::ExceedsOutputLimit {
-            bytes: samples,
-            limit: limits.max_output,
-        });
-    }
+    // Two buffers, and each is charged before either exists: the canvas at
+    // the components it comes back in, and the image's own indices — one
+    // byte each, which is what the LZW stage writes before any is placed,
+    // sized by the descriptor whatever the screen is.
+    charge(
+        (canvas_w as u64)
+            .saturating_mul(canvas_h as u64)
+            .saturating_mul(components),
+        limits,
+    )?;
+    charge(
+        (frame.width as u64).saturating_mul(frame.height as u64),
+        limits,
+    )?;
     if !(1..=8).contains(&frame.code_size) {
         return Err(GifError::BadCodeSize(frame.code_size));
     }

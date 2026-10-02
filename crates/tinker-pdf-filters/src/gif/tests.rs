@@ -478,3 +478,60 @@ fn an_image_past_the_sample_cap_is_refused_before_it_allocates() {
         Err(GifError::TooManySamples { .. })
     ));
 }
+
+/// The image descriptor's own 16-bit size is a buffer too: the LZW stage
+/// writes `width x height` indices before any of them is placed, whatever
+/// the screen is. A one-pixel screen does not make a 65 535 x 4 096 image
+/// cheap — thirty-five bytes of file asked for 268 million of them.
+#[test]
+fn an_image_descriptor_past_the_cap_is_refused_before_it_allocates() {
+    // §20's descriptor written by hand: its data is one root and the end
+    // code, and nothing about the stream is what is being charged.
+    let descriptor = |width: u16, height: u16| {
+        let mut block = vec![0x2C, 0, 0, 0, 0];
+        block.extend_from_slice(&width.to_le_bytes());
+        block.extend_from_slice(&height.to_le_bytes());
+        block.push(0);
+        block.push(2);
+        block.extend_from_slice(&sub_blocks(&literal(&[1], 2)));
+        block
+    };
+    let file = gif((1, 1), Some(&FOUR[..2]), 0, &[descriptor(u16::MAX, 4096)]);
+    assert_eq!(
+        gif_decode(&file, &Limits::new(16)),
+        Err(GifError::TooManySamples {
+            samples: 65_535 * 4_096,
+            max: MAX_GIF_SAMPLES,
+        })
+    );
+    // Under the cap and over the caller's ceiling: the caller's number is the
+    // one that answers, as it does for the screen.
+    let file = gif((1, 1), Some(&FOUR[..2]), 0, &[descriptor(u16::MAX, 1024)]);
+    assert_eq!(
+        gif_decode(&file, &Limits::new(16)),
+        Err(GifError::ExceedsOutputLimit {
+            bytes: 65_535 * 1_024,
+            limit: 16,
+        })
+    );
+}
+
+/// A zero logical screen makes the canvas the first image's own extent —
+/// `left + width` by `top + height` — so it reaches 131 070 a side, past
+/// what two 16-bit screen fields can say, and is charged before it exists.
+#[test]
+fn a_zero_screen_is_charged_at_the_image_extent() {
+    let file = gif(
+        (0, 0),
+        Some(&FOUR),
+        0,
+        &[image(u16::MAX, u16::MAX, 1, 1, None, false, 2, &[1])],
+    );
+    assert_eq!(
+        gif_decode(&file, &Limits::new(usize::MAX)),
+        Err(GifError::TooManySamples {
+            samples: 65_536 * 65_536,
+            max: MAX_GIF_SAMPLES,
+        })
+    );
+}
