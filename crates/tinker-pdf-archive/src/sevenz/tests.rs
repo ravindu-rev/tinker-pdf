@@ -604,6 +604,196 @@ fn a_bcj2_folder_is_walked_as_a_tree() {
     );
 }
 
+/// An LZMA coder record (`030101`) with its five property bytes: `lc=3`,
+/// `lp=0`, `pb=2` and a 1 MiB dictionary.
+fn lzma_record() -> Vec<u8> {
+    let mut out = vec![0x20 | 3, 0x03, 0x01, 0x01];
+    out.extend(number(5));
+    out.extend_from_slice(&[0x5D, 0x00, 0x00, 0x10, 0x00]);
+    out
+}
+
+/// Five bytes no LZMA stream starts with: its range coder's first byte is
+/// zero. A feeder over them fails the moment it is decoded, so a folder that
+/// answers anything else did not decode it.
+const NOT_LZMA: &[u8] = &[0xFF; 5];
+
+/// A BCJ2 folder whose four inputs — main, call, jump, decisions — each come
+/// out of a coder of their own, `(record, declared output, pack stream)`, over
+/// one pack stream each. `out` is BCJ2's output and the file's bytes.
+fn bcj2_fed(out: &[u8], declared_out: u64, feeders: [(Vec<u8>, u64, &[u8]); 4]) -> Vec<u8> {
+    let mut folder = number(5);
+    folder.extend(coder_record(BCJ2, Some((4, 1))));
+    for (record, _, _) in &feeders {
+        folder.extend_from_slice(record);
+    }
+    for (input, output) in [(0u64, 1u64), (1, 2), (2, 3), (3, 4)] {
+        folder.extend(number(input));
+        folder.extend(number(output));
+    }
+    for stream in [4u64, 5, 6, 7] {
+        folder.extend(number(stream));
+    }
+    let mut unpack = vec![declared_out];
+    let mut sizes = Vec::new();
+    let mut packed = Vec::new();
+    for (_, declared, bytes) in &feeders {
+        unpack.push(*declared);
+        sizes.push(bytes.len());
+        packed.extend_from_slice(bytes);
+    }
+    graph_archive(folder, &sizes, &unpack, packed, out)
+}
+
+/// A Copy feeder over `bytes`, declaring their own length unless told
+/// otherwise.
+fn copy_of(bytes: &[u8]) -> (Vec<u8>, u64, &[u8]) {
+    (coder_record(&[0x00], None), bytes.len() as u64, bytes)
+}
+
+/// **BCJ2's feeders are held to what BCJ2 can read, before any is decoded**
+/// (review of lane 5A).
+///
+/// Every byte BCJ2 reads from main, call and jump is written to its output
+/// once — a main byte as itself, a target as an operand's four bytes, the
+/// last cut short by the output's end by at most three — so between them they
+/// hold at most `out + 3` bytes it can read. Its decision stream is five
+/// opening bytes and at most one more per decision, one decision per output
+/// byte at most: `out + 5`. A header that declares more describes bytes
+/// nothing reads, and before this check each of the three feeders was held
+/// only to the folder cap on its own — a one-byte BCJ2 output over three LZMA
+/// feeders declaring a gigabyte each decoded all three.
+///
+/// Both bounds are exact, and both edges are here: `[90 E8 00]` is a call
+/// converted in the second byte with its target's four bytes cut to one, which
+/// reads `out + 3` (two main bytes, four call bytes) and decodes; one more
+/// byte declared in the jump stream, which nothing reads, is refused.
+#[test]
+fn bcj2_s_feeders_are_held_to_what_it_can_read_before_they_are_decoded() {
+    // The one decision is a 1: a code at the top of the range.
+    let convert: &[u8] = &[0, 0xFF, 0xFF, 0xFF, 0xFE];
+    // The target is absolute: the position after its four bytes, 2 + 4, is
+    // an operand of zero.
+    let target: &[u8] = &[0, 0, 0, 6];
+    let out: &[u8] = &[0x90, 0xE8, 0x00];
+    let at_the_edge = bcj2_fed(
+        out,
+        3,
+        [
+            copy_of(b"\x90\xE8"),
+            copy_of(target),
+            copy_of(&[]),
+            copy_of(convert),
+        ],
+    );
+    assert_eq!(
+        open(&at_the_edge).read(0).as_deref(),
+        Ok(out),
+        "main, call and jump at out + 3 between them decode"
+    );
+    let one_past = bcj2_fed(
+        out,
+        3,
+        [
+            copy_of(b"\x90\xE8"),
+            copy_of(target),
+            copy_of(&[0]),
+            copy_of(convert),
+        ],
+    );
+    assert_eq!(
+        open(&one_past).read(0),
+        Err(EntryError::Bcj2Failed),
+        "one byte past out + 3 is a stream nothing reads"
+    );
+
+    // The decision stream: a one-byte output makes no decision, so it reads
+    // the five opening bytes and nothing more; out + 5 decodes and out + 6
+    // does not.
+    let decisions = |n: usize| {
+        let rc = vec![0u8; n];
+        bcj2_fed(
+            b"\x90",
+            1,
+            [copy_of(b"\x90"), copy_of(&[]), copy_of(&[]), copy_of(&rc)],
+        )
+    };
+    assert_eq!(
+        open(&decisions(6)).read(0).as_deref(),
+        Ok(&b"\x90"[..]),
+        "a decision stream of out + 5 decodes"
+    );
+    assert_eq!(
+        open(&decisions(7)).read(0),
+        Err(EntryError::Bcj2Failed),
+        "and one of out + 6 is refused"
+    );
+
+    // **Before**, not after: the call stream is an LZMA coder declaring the
+    // whole folder cap over bytes that are not LZMA. Had it been decoded the
+    // answer would be its failure; the refusal is the header's sizes alone.
+    let bomb = bcj2_fed(
+        b"\x90",
+        1,
+        [
+            copy_of(b"\x90"),
+            (lzma_record(), MAX_7Z_UNPACKED as u64, NOT_LZMA),
+            copy_of(&[]),
+            copy_of(&[0; 5]),
+        ],
+    );
+    assert_eq!(
+        open(&bomb).read(0),
+        Err(EntryError::Bcj2Failed),
+        "a one-byte output does not decode a gigabyte of call targets"
+    );
+
+    // And BCJ2's own output is held to the cap before its feeders are
+    // decoded, not after all four have been.
+    let past_the_cap = bcj2_fed(
+        b"\x90",
+        MAX_7Z_UNPACKED as u64 + 1,
+        [
+            (lzma_record(), 1, NOT_LZMA),
+            copy_of(&[]),
+            copy_of(&[]),
+            copy_of(&NO_CONVERSIONS),
+        ],
+    );
+    assert_eq!(
+        open(&past_the_cap).read(0),
+        Err(EntryError::TooLarge),
+        "a folder past the cap is refused before its feeders run"
+    );
+}
+
+/// **A filter's decoded input is its output's length, checked before it is
+/// decoded** (review of lane 5A): Copy and BCJ write exactly what they read,
+/// so a header declaring their feeder at any other length is not describing
+/// them, and is refused without decompressing what it declared.
+#[test]
+fn a_filter_s_feeder_is_its_output_s_length_before_it_is_decoded() {
+    for filter in [&[0x00][..], BCJ_X86] {
+        let mut folder = number(2);
+        folder.extend(coder_record(filter, None));
+        folder.extend(lzma_record());
+        folder.extend(number(0));
+        folder.extend(number(1));
+        let bytes = graph_archive(
+            folder,
+            &[NOT_LZMA.len()],
+            &[1, MAX_7Z_UNPACKED as u64],
+            NOT_LZMA.to_vec(),
+            b"\x90",
+        );
+        assert_eq!(
+            open(&bytes).read(0),
+            Err(EntryError::Truncated),
+            "{filter:02X?} over a feeder declaring the cap for a one-byte output"
+        );
+    }
+}
+
 /// **A folder whose coder graph has no answer is refused by name** — the
 /// sentence the chain-only reader said about every BCJ2 folder, now kept for
 /// the graphs that really cannot be walked.

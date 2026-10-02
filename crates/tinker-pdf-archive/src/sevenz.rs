@@ -205,10 +205,14 @@ pub enum EntryError {
     /// reason — properties outside 7-Zip's ranges, an arena past the cap, or
     /// a stream the model cannot follow.
     PpmdFailed(ppmd::Error),
-    /// The folder's BCJ2 decision stream does not start as a range-coded
-    /// stream: its first byte is not zero, or its initial code is `FFFFFFFF`.
-    /// (One of BCJ2's streams running out before its output is
-    /// [`EntryError::Truncated`].)
+    /// The folder's BCJ2 streams are not ones BCJ2's encoder wrote: its
+    /// decision stream does not start as a range-coded stream (its first byte
+    /// is not zero, or its initial code is `FFFFFFFF`), or the header declares
+    /// the streams other coders decode for it longer than its output could
+    /// have read — main, call and jump past the output and three bytes
+    /// between them, or the decisions past the output and five. The second is
+    /// refused before any of those streams is decoded. (One of BCJ2's streams
+    /// running out before its output is [`EntryError::Truncated`].)
     Bcj2Failed,
     /// The folder decompressed and this entry's CRC-32 does not match what the
     /// archive recorded.
@@ -235,9 +239,7 @@ impl core::fmt::Display for EntryError {
             EntryError::FolderFailed(e) => write!(f, "a block that would not decompress: {e}"),
             EntryError::Bzip2Failed(e) => write!(f, "a bzip2 block that would not decompress: {e}"),
             EntryError::PpmdFailed(e) => write!(f, "a PPMd block that would not decompress: {e}"),
-            EntryError::Bcj2Failed => {
-                f.write_str("a BCJ2 block whose range-coded stream is damaged")
-            }
+            EntryError::Bcj2Failed => f.write_str("a BCJ2 block whose streams are not BCJ2's"),
             EntryError::CrcMismatch => f.write_str("an entry whose recorded CRC-32 does not match"),
             EntryError::Truncated => f.write_str("a block shorter than its own substream table"),
             EntryError::UnsupportedCoder => f.write_str("a coder this build does not read"),
@@ -632,7 +634,10 @@ enum FolderError {
     Lzma(lzma::Error),
     Bzip2(bzip2::Error),
     Ppmd(ppmd::Error),
-    /// BCJ2's range-coded stream does not open as one.
+    /// BCJ2's streams are not ones its encoder wrote: the range-coded stream
+    /// does not open as one, or the header declares the streams other coders
+    /// decode for it longer than its output could have read
+    /// ([`feeders_fit`]).
     Bcj2,
     /// A coder produced a length other than the one the header declared for
     /// its output — for a filter, whose output is its input, the header and
@@ -649,6 +654,11 @@ enum FolderError {
 /// BCJ2 folder is the case where one coder has four. The graph was checked at
 /// [`Archive::open`] to be a tree, and the depth bound here is the second
 /// line of that, so a walk cannot recurse further than there are coders.
+///
+/// **A coder's own declared output is held to the cap, and its feeders to
+/// what it can read, before any feeder is decoded** — so the decompression a
+/// folder does on the way to its output is charged against that output
+/// rather than against nothing ([`feeders_fit`]).
 fn decode_folder(bytes: &[u8], folder: &Folder, limits: &Limits) -> Result<Vec<u8>, FolderError> {
     let root = folder.final_out().ok_or(FolderError::Unsupported)?;
     decode_coder(bytes, folder, root, limits, 0)
@@ -665,6 +675,16 @@ fn decode_coder(
         return Err(FolderError::Unsupported);
     }
     let c = folder.coders.get(coder).ok_or(FolderError::Unsupported)?;
+    let out_size = folder
+        .unpack_sizes
+        .get(coder)
+        .copied()
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or(FolderError::TooLarge)?;
+    if out_size > limits.max_unpacked {
+        return Err(FolderError::TooLarge);
+    }
+    feeders_fit(folder, coder, c, out_size)?;
     let first = folder.first_in(coder);
     let mut owned: Vec<Vec<u8>> = Vec::new();
     let mut sources: Vec<Result<usize, &[u8]>> = Vec::with_capacity(c.in_streams);
@@ -692,16 +712,65 @@ fn decode_coder(
             Err(packed) => packed,
         })
         .collect();
-    let out_size = folder
-        .unpack_sizes
-        .get(coder)
-        .copied()
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or(FolderError::TooLarge)?;
-    if out_size > limits.max_unpacked {
-        return Err(FolderError::TooLarge);
-    }
     run_coder(c, &inputs, out_size, limits)
+}
+
+/// Whether the inputs other coders decode for `coder` fit what it can read
+/// for its declared `out_size`, judged on the header's sizes before any of
+/// them is decoded.
+///
+/// A pack stream costs nothing to hold — it is the file's own bytes — so only
+/// an input another coder must decompress is bounded here, and only a filter
+/// has a bound to give, because only a filter's output is a function of its
+/// input's length:
+///
+/// - **Copy and BCJ** write exactly what they read, so a decoded input of any
+///   other length is a header not describing them.
+/// - **BCJ2** writes every byte it reads from main, call and jump once — a
+///   main byte as itself, a target as an operand's four bytes, the last cut
+///   short by the output's end by at most three — so those three hold at most
+///   `out_size + 3` bytes it can read between them. Its decision stream is
+///   five opening bytes and at most one more per decision
+///   (`bcj2::Range::bit` normalises once), and there is at most one decision
+///   per output byte, so at most `out_size + 5`. A header declaring more
+///   describes bytes nothing reads; held only to the folder cap one by one,
+///   three feeders under a one-byte output were three caps of decompression
+///   charged to nothing.
+///
+/// A compressor has no such bound — its input may be any length — so a coder
+/// feeding one is held to the folder cap alone, as the folder's output is.
+/// No writer emits that shape: in every folder 7-Zip and py7zr write, what a
+/// coder feeds is a filter.
+fn feeders_fit(
+    folder: &Folder,
+    coder: usize,
+    c: &Coder,
+    out_size: usize,
+) -> Result<(), FolderError> {
+    let first = folder.first_in(coder);
+    // The declared length of in-stream `first + k` when another coder's
+    // output feeds it; a size the header does not have is no bound at all.
+    let decoded = |k: usize| {
+        let &(_, feeder) = folder.bind_pairs.iter().find(|(i, _)| *i == first + k)?;
+        Some(folder.unpack_sizes.get(feeder).copied().unwrap_or(u64::MAX))
+    };
+    let out = u64::try_from(out_size).unwrap_or(u64::MAX);
+    match c.id.as_slice() {
+        [0x00] | BCJ_X86 => match decoded(0) {
+            Some(n) if n != out => Err(FolderError::SizeMismatch),
+            _ => Ok(()),
+        },
+        BCJ2 => {
+            let copied = (0..3).filter_map(decoded).fold(0u64, u64::saturating_add);
+            let decisions = decoded(3).unwrap_or(0);
+            if copied > out.saturating_add(3) || decisions > out.saturating_add(5) {
+                Err(FolderError::Bcj2)
+            } else {
+                Ok(())
+            }
+        }
+        _ => Ok(()),
+    }
 }
 
 /// One coder, by its 7z method id, over its inputs in in-stream order.

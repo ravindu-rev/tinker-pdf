@@ -81,7 +81,9 @@ impl<'a> Range<'a> {
 
     /// One decision. Normalised before rather than after, as 7-Zip's decoder
     /// does, so the last decision never asks for a byte the encoder's flush
-    /// did not write.
+    /// did not write — and normalised once, so a decision reads at most one
+    /// byte, which is what lets `sevenz`'s `feeders_fit` bound a decision
+    /// stream another coder decodes by the output it serves.
     fn bit(&mut self, prob: &mut u16) -> Result<bool, Error> {
         if self.range < TOP {
             let byte = *self.input.get(self.at).ok_or(Error::Truncated)?;

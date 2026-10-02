@@ -118,7 +118,14 @@ targets, the jump targets, and a range-coded stream of its decisions. **A
 folder is a tree of coders**, walked from its output down its bind pairs and
 never by the order its coders are listed in: a BCJ2 folder is four coders and
 four pack streams meeting in one output, and the writers here disagree about
-the order to list them in (7-Zip 26 lists BCJ2 last). Every other method is
+the order to list them in (7-Zip 26 lists BCJ2 last). **What a coder's feeders
+decode is held to what it can read**, on the header's sizes and before any of
+them runs: a Copy's or a BCJ's to its declared output, BCJ2's main, call and
+jump streams to that output and three bytes between them and its decisions to
+that output and five — so a few bytes of header declaring a one-byte file
+cannot make the reader decompress three folder caps of streams nothing reads.
+A BCJ2 folder declaring more is `SevenZipEntryError::Bcj2Failed`, a Copy or
+BCJ one `Truncated`. Every other method is
 refused **by its own method id**, and a folder whose graph has no answer — a
 cycle, a stream fed twice or by nothing, a coder with two outputs — is refused
 as that.

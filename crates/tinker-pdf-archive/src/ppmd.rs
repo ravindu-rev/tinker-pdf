@@ -49,7 +49,13 @@ pub struct Limits {
     /// The most bytes one stream may decode to.
     pub max_unpacked: usize,
     /// The largest model arena a stream's properties may ask for. 7z callers
-    /// pass their folder cap, so a folder costs at most that twice over.
+    /// pass their folder cap,
+    /// [`MAX_7Z_UNPACKED`](crate::sevenz::limits::MAX_7Z_UNPACKED). The arena
+    /// lives only while its own stream decodes, so a folder holds one at a
+    /// time; what else it holds meanwhile — the outputs of the coders already
+    /// decoded for the same consumer — is bounded by that consumer's declared
+    /// output where it is a filter (`sevenz`'s `feeders_fit`), and by the cap
+    /// apiece where it is not.
     pub max_memory: usize,
 }
 
