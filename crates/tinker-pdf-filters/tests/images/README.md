@@ -27,7 +27,6 @@ the committed files are the record.
 | `gif/omggif-*.gif` | **omggif 1.0.10** (Dean McNamee, MIT, from npm), Node v22.22.2 | `npm install omggif@1.0.10`, then `node make-gif.js` | 26 September 2026 |
 | `webp/pillow-*.webp` | **Pillow 12.3.0** (`PIL.WebPImagePlugin`) over its bundled libwebp 1.6.0 | `python3 make-images.py` | 26 September 2026 (lossless), 2 October 2026 (lossy) |
 | `webp/imagecodecs-*.webp` | **imagecodecs 2026.3.6** (`imagecodecs.webp_encode`) over libwebp 1.6.0 | the same script | the same two days |
-| `webp/*.libwebp.png` | **libwebp 1.6.0's decode** of the lossy file beside it, through Pillow 12.3.0, written as PNG by Pillow | the same script | 2 October 2026 |
 | `tiff/tifffile-*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib; JPEG 2000 through OpenJPEG 2.5.4, `level=0`, lossless) | `python3 make-images.py` | 26 September 2026 |
 
 Pillow's BMP writer produces `BITMAPINFOHEADER`, `BI_RGB`, bottom-up files at
@@ -80,21 +79,40 @@ animation.
 imagecodecs writes RGBA through a second binding. The tests that claim a
 transform read the VP8L header bits that say the fixture has one.
 
-**A lossy WebP has no exact answer of its own**, so its answer is the
-reference decoder's: `make-images.py` decodes each lossy file once through the
-same Pillow, over libwebp 1.6.0, and commits that picture beside it as
-`<name>.libwebp.png`; `image_fixtures.rs` reads the PNG with this crate's own
-PNG decoder and holds every pixel to it. That is the standing the WebM
-project's MD5s have for VP8 itself — `src/webp/vp8/tests.rs` — and it is what
-makes the chroma upsampling and colour conversion checkable at all, since
-RFC 6386 ends at the Y, U and V planes. The files: quality 80 over the `rgb`
-recipe, quality 10 at method 6, 55 and 100 over `smooth` (gradients the
-encoder spends few bits on; at 55 one segment's loop-filter level is exactly
-15, where the high-edge-variance threshold steps), RGBA at `alpha_quality=100` — lossless alpha, so
-the alpha is also held to the recipe — once unfiltered and once at method 0,
-where libwebp chose the horizontal filter, a two-frame animation, and
-imagecodecs' `webp_encode(lossless=False)` over `rgb`. Sizes of 61 x 45 crop
-inside a macroblock and inside a chroma sample.
+**A lossy WebP has no exact answer of its own, and its answer is still not
+another decoder's.** Each layer is held to the nearest thing it has that this
+repository does not own an implementation of. The VP8 planes are held exactly
+to the WebM project's published test-vector MD5s (`src/webp/vp8/tests.rs`,
+fetched by `tests/vp8-vectors/fetch.sh` and run by CI's `vp8-vectors` job),
+since RFC 6386 ends at Y, U and V; the colour conversion is held to BT.601's
+matrix and the chroma upsampler to its 9:3:3:1 weights, worked out in exact
+arithmetic beside them. What is left for the files here is the container, the
+`ALPH` chunk and the plumbing between them, and `image_fixtures.rs` holds
+those to **the recipe each file was encoded from, at a stated distance**: a
+mean squared error per file, set about a quarter above what this decoder
+measured, which a decoder that reads a token in the wrong context, predicts
+from the wrong edge, swaps Cb and Cr or upsamples from the wrong chroma row
+breaks, and which one that skips the loop filter does not — the vectors catch
+that. The alpha, lossless at `alpha_quality=100`, is held to the recipe
+exactly.
+
+The files: quality 80 over the `rgb` recipe, quality 10 at method 6, 55 and
+100 over `smooth` (gradients the encoder spends few bits on; at 55 one
+segment's loop-filter level is exactly 15, where the high-edge-variance
+threshold steps), RGBA at `alpha_quality=100` once unfiltered and once at
+method 0, where libwebp chose the horizontal filter, a two-frame animation,
+and imagecodecs' `webp_encode(lossless=False)` over `rgb`. Sizes of 61 x 45
+crop inside a macroblock and inside a chroma sample.
+
+*Corrected 2 October 2026, on review.* These files first came with
+`<name>.libwebp.png` beside each — libwebp 1.6.0's decode of it through Pillow
+12.3.0 — and the test held every pixel to that PNG. That made an outside
+program's output the expected answer, which ruling 13 forbids, so the PNGs are
+deleted and nothing reads them. What they showed is kept as **a dated
+measurement, which gates nothing**: on 2 October 2026, before they were
+deleted, this decoder's picture of all eight lossy files was libwebp's on every
+pixel of every channel. That is a statement about that day's decoder, not a
+check, and nobody re-runs it.
 
 ## bmpsuite, and what it can prove
 

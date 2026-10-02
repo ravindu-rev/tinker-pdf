@@ -33,9 +33,10 @@
 //! Every assertion is structural; a decode that is well-formed and *wrong*
 //! passes. Correctness is `crates/tinker-pdf-filters/tests/image_fixtures.rs`,
 //! which holds the lossless decoder to pixels libwebp was handed through
-//! Pillow and imagecodecs and the lossy one to the pictures libwebp makes of
-//! its own files, and `src/webp/vp8/tests.rs`, which holds VP8 to the WebM
-//! project's test vectors when they are on disk.
+//! Pillow and imagecodecs and the lossy one to the pictures it was handed at a
+//! stated distance, and `src/webp/vp8/tests.rs`, which holds VP8 to the WebM
+//! project's published test vectors (fetched, pinned and run by CI's
+//! `vp8-vectors` job) and its colour conversion to BT.601.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

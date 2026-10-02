@@ -8,8 +8,10 @@
 //! own ZIP writer (`cbz_support`), opened through `Document::open`, and read
 //! back two ways — the image XObject's own samples and colour space out of
 //! the synthesised document, and the rendered page. The expected answer is
-//! the recipe `make-images.py` encoded, recomputed here; nothing outside this
-//! repository decodes anything.
+//! the recipe `make-images.py` encoded, recomputed here — except a lossy
+//! page's colour, which has no exact recipe and is held to this repository's
+//! own decoder of the same bytes; nothing outside this repository decodes
+//! anything.
 
 mod cbz_support;
 
@@ -277,8 +279,8 @@ fn gif_pages_are_the_pictures_they_were_made_from() {
 /// WebP pages: the opaque lossless one rendered to the recipe pixel for
 /// pixel, the one with alpha the recipe's colour over an `/SMask` of exactly
 /// the recipe's alpha, an animation's first frame — and a lossy one with
-/// alpha, whose colour is the picture libwebp makes of the file and whose
-/// `/SMask` is the recipe's alpha again.
+/// alpha, whose colour is the decoder's picture of the file, unaltered, and
+/// whose `/SMask` is the recipe's alpha again.
 #[test]
 fn webp_pages_are_the_pictures_they_were_made_from() {
     let document = open(&[
@@ -325,18 +327,23 @@ fn webp_pages_are_the_pictures_they_were_made_from() {
         .collect();
     assert_eq!(alpha, want);
 
-    // The lossy page: libwebp's picture of the file, read from the PNG
-    // committed beside it, and the recipe's alpha, which `alpha_quality=100`
-    // kept lossless.
-    let reference = tinker_pdf_filters::png_decode(
-        &fixture("webp/pillow-lossy-rgba-61x45.libwebp.png"),
+    // The lossy page. A lossy file has no exact colour of its own, and the
+    // decoder's is held elsewhere — to the VP8 test vectors and to BT.601 in
+    // `tinker-pdf-filters` — so what the *page* is held to is that it carries
+    // that decoder's picture unaltered: the same bytes through
+    // `webp_decode`, a relation between two first-party reads. Its alpha is
+    // the recipe's exactly, which `alpha_quality=100` kept lossless.
+    let decoded = tinker_pdf_filters::webp_decode(
+        &fixture("webp/pillow-lossy-rgba-61x45.webp"),
         &tinker_pdf_filters::Limits::new(1 << 20),
     )
-    .expect("the reference PNG");
-    let colour: Vec<u8> = reference
-        .data
-        .chunks_exact(4)
-        .flat_map(|p| [p[0], p[1], p[2]])
+    .expect("the lossy fixture decodes");
+    assert_eq!((decoded.width, decoded.height), (61, 45));
+    let colour: Vec<u8> = (0..61 * 45)
+        .flat_map(|i| {
+            let [r, g, b, _] = decoded.pixels.rgba_at(i).expect("a pixel");
+            [r, g, b]
+        })
         .collect();
     assert_eq!(
         cos.stream_decoded(page_image(&document, 3))

@@ -669,7 +669,10 @@ codes leaves those macroblocks black, with `Warning::TruncatedInput`. **How
 Y, U and V become a picture is a decision, and the one taken is libwebp's**:
 its "fancy" upsampling, which weights the four nearest chroma samples 9:3:3:1,
 and its 14-bit fixed-point BT.601 conversion — integer arithmetic both, so the
-picture is the same on every machine, and the picture every browser shows. An
+picture is the same on every machine, and the picture every browser shows.
+The decision is libwebp's and the evidence for it is not: the conversion is
+held to BT.601's matrix and the upsampler to its weights, worked out in exact
+arithmetic, never to libwebp's output (ruling 13). An
 `ALPH` chunk beside a lossy frame is decoded raw or as a headerless VP8L
 stream (its alpha the green channel) and §2.7.1.2's horizontal, vertical or
 gradient filter undone; one that will not decode leaves the picture opaque
@@ -983,24 +986,44 @@ wants the reason to survive it.
   neighbour is the first pixel of the same row) and a two-frame animation;
   imagecodecs for RGBA. Every pixel is the
   recipe, and the tests that claim a transform read the fixture's header bits
-  to show it is there. **Lossy WebP** has no generator input to be held to,
-  so its answer is its reference decoder's: each Pillow and imagecodecs file
-  — quality 10 at method 6, 55 (a filter level of exactly 15), 80 and 100,
-  sizes that crop inside a macroblock
-  and a chroma sample, alpha unfiltered and horizontally filtered, a two-frame
-  animation — was decoded once by libwebp 1.6.0 and the picture committed
-  beside it as a PNG, and every pixel here is that picture; the alpha,
-  lossless at `alpha_quality=100`, is the recipe's as well. `src/webp/tests.rs`
+  to show it is there. **Lossy WebP** has no exact generator input to be held to, and
+  its answer is still never another decoder's. **VP8 itself is held to the
+  WebM project's published test vectors**: `src/webp/vp8/tests.rs` decodes
+  every key frame of `webmproject/vp8-test-vectors` and compares the MD5 of
+  its I420 planes with the one published beside it — **182 key frames from
+  61 files, 0 failed**, run 2 October 2026 against `8afcf057`. The vectors
+  carry no licence, so they are not committed: `tests/vp8-vectors/fetch.sh`
+  fetches that commit into `target/` and checks every file against
+  `tests/vp8-vectors/SHA256SUMS`, and CI's `vp8-vectors` job runs it, sets
+  `TINKER_VP8_VECTORS_REQUIRED=1` (a missing set is then a failure, and so is
+  any set that is not the pinned 61 files and 182 key frames) and greps for
+  `vp8-test-vectors: RAN`. RFC 6386 ends at the planes, so the conversion to
+  RGB is held beside them to what it claims: BT.601's limited-range matrix,
+  worked out in exact integer arithmetic over all 2^24 inputs, which
+  `yuv_to_rgb` meets to within one level (169 223 channels of 50 331 648 miss
+  by one, none by more); the upsampler's 9:3:3:1 weights, to within one; and
+  which chroma row and column each pixel takes as nearer, by hand on a 4 x 4
+  picture. The Pillow and imagecodecs files — quality 10 at method 6, 55 (a
+  filter level of exactly 15), 80 and 100, sizes that crop inside a
+  macroblock and a chroma sample, alpha unfiltered and horizontally filtered,
+  a two-frame animation — are held to **the recipe they were encoded from, at
+  a stated distance**: a mean squared error per file, about a quarter above
+  what this decoder measured. That bound is coarse on purpose and the test
+  says what it catches, measured by injection — a token read in the wrong
+  context, a prediction from the wrong edge, Cb and Cr swapped, chroma from
+  the wrong row — and what it does not: a decoder that skips the loop filter
+  passes it, and fails 116 of the 182 vector frames. The alpha, lossless at
+  `alpha_quality=100`, is the recipe's exactly. *Corrected 2 October 2026, on
+  review*: these files were first held to libwebp 1.6.0's decode of each,
+  committed as a PNG — an outside program's output as the expected answer,
+  which ruling 13 forbids. The PNGs are deleted; that this decoder's picture
+  matched libwebp's on every pixel of all eight that day is recorded in
+  `tests/images/README.md` as a dated measurement that gates nothing.
+  `src/webp/tests.rs`
   builds VP8L streams bit by bit — literals, a back-reference, one before the
   first pixel, subtract-green, an `ANMF` frame at an offset on its canvas, a
   padded chunk — every `ALPH` filter and both codings, six `ALPH`s that will
-  not decode, and one file per `WebpError`. **VP8 itself is held to the WebM
-  project's test vectors**: `src/webp/vp8/tests.rs` decodes every key frame of
-  `webmproject/vp8-test-vectors` and compares the MD5 of its I420 planes with
-  the one libvpx published — run 2 October 2026 against `8afcf057`, **182 key
-  frames from 61 files, 0 failed**. The vectors carry no licence, so they are
-  not committed: the test reads them from `TINKER_VP8_VECTORS` and prints
-  `SKIPPED` without it, `png_suite.rs`'s arrangement. Beside that, frames
+  not decode, and one file per `WebpError`. Beside the vectors, frames
   built with §7.3's own boolean encoder: prediction alone, a token partition
   that ends early, and every lossy refusal.
 - In-crate: `jbig2.rs` decodes T.88 Annex H.1's published datastream example

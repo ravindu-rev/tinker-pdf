@@ -1429,25 +1429,36 @@ const fn yuv_to_rgb(y: u8, u: u8, v: u8) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+/// The chroma of a pixel in the first or last column, which has one chroma
+/// column beside it: the `near` row weighted 3:1 against the `far` one.
+const fn fancy_edge(near: u8, far: u8) -> u8 {
+    let (n, f) = (near as u32, far as u32);
+    ((3 * n + f + 2) >> 2) as u8
+}
+
+/// The chroma of the two pixels that sit between chroma columns `x - 1` and
+/// `x`: each is the four chroma samples around it weighted 9:3:3:1, nearest
+/// first — the left pixel nearest `n0`, the right nearest `n1` — in libwebp's
+/// two-step integer form, which is within one of the exact weighting.
+const fn fancy_pair(n0: u8, n1: u8, f0: u8, f1: u8) -> (u8, u8) {
+    let (n0, n1, f0, f1) = (n0 as u32, n1 as u32, f0 as u32, f1 as u32);
+    let avg = n0 + n1 + f0 + f1 + 8;
+    let left = (((avg + 2 * (n1 + f0)) >> 3) + n0) >> 1;
+    let right = (((avg + 2 * (n0 + f1)) >> 3) + n1) >> 1;
+    (left as u8, right as u8)
+}
+
 /// One output row through libwebp's "fancy" upsampler (`UpsampleRgbaLinePair`):
 /// each chroma sample weighted 9:3:3:1 among the four nearest, `near` being
 /// the chroma row on this row's side of the pair and `far` the other.
 fn upsample_row(y: &[u8], near: [&[u8]; 2], far: [&[u8]; 2], out: &mut [u32]) {
     let len = y.len();
-    let edge = |k: usize, x: usize| -> u8 {
-        let (n, f) = (u32::from(near[k][x]), u32::from(far[k][x]));
-        ((3 * n + f + 2) >> 2) as u8
-    };
+    let edge = |k: usize, x: usize| -> u8 { fancy_edge(near[k][x], far[k][x]) };
     out[0] = yuv_to_rgb(y[0], edge(0, 0), edge(1, 0));
     let last_pair = (len - 1) >> 1;
     for x in 1..=last_pair {
         let chroma = |k: usize| -> (u8, u8) {
-            let (n0, n1) = (u32::from(near[k][x - 1]), u32::from(near[k][x]));
-            let (f0, f1) = (u32::from(far[k][x - 1]), u32::from(far[k][x]));
-            let avg = n0 + n1 + f0 + f1 + 8;
-            let left = (((avg + 2 * (n1 + f0)) >> 3) + n0) >> 1;
-            let right = (((avg + 2 * (n0 + f1)) >> 3) + n1) >> 1;
-            (left as u8, right as u8)
+            fancy_pair(near[k][x - 1], near[k][x], far[k][x - 1], far[k][x])
         };
         let ((u0, u1), (v0, v1)) = (chroma(0), chroma(1));
         out[2 * x - 1] = yuv_to_rgb(y[2 * x - 1], u0, v0);

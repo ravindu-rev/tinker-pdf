@@ -2,9 +2,10 @@
 //! bitstreams built bit by bit from §3, with the decoder held to them.
 //!
 //! The Pillow and imagecodecs files in `tests/images/webp/` carry the exit
-//! criterion — authored pixels a real encoder compressed, and for a lossy
-//! file the picture libwebp makes of it. These build what an encoder was not
-//! asked for: a back-reference before the first pixel, a frame offset on its
+//! criterion — authored pixels a real encoder compressed, held exactly for a
+//! lossless file and at a stated distance for a lossy one, whose VP8 planes
+//! are held to published test vectors instead. These build what an encoder
+//! was not asked for: a back-reference before the first pixel, a frame offset on its
 //! canvas, a padded chunk, every `ALPH` filter and coding, an `ALPH` that
 //! will not decode, and one file per [`WebpError`]. The VP8 bitstream itself
 //! is `webp/vp8/tests.rs`'s.

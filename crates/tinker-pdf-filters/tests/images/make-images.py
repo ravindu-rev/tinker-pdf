@@ -5,9 +5,7 @@
 # is a formula, the same formula `tests/image_fixtures.rs` carries as
 # `recipe::*`, and a third-party encoder turns it into bytes once. The test
 # recomputes the pixels from the formula and compares them with what this
-# repository's decoder makes of the bytes; nothing here ever decodes anything
-# — except the lossy WebP block at the end, whose answer has to be a
-# decoder's, and which says so.
+# repository's decoder makes of the bytes; nothing here ever decodes anything.
 #
 #   cd crates/tinker-pdf-filters/tests/images && python3 make-images.py
 #
@@ -281,12 +279,20 @@ open("webp/imagecodecs-lossless-rgba-13x7.webp", "wb").write(
 #
 # Run 2 October 2026, the same Pillow and imagecodecs.
 #
-# A lossy picture has no exact answer of its own, so the answer is libwebp's:
-# each file is decoded once by the same Pillow, over libwebp 1.6.0, and the
-# picture that decode makes is committed beside it as `<name>.libwebp.png`.
-# The alpha of a lossy WebP is lossless at `alpha_quality=100`, so where a
-# file has alpha the test holds it to the recipe as well. `smooth` gives the
-# encoder gradients to spend few bits on; `rgb`'s wrap-arounds give it edges.
+# A lossy picture has no exact answer of its own, and its answer is still
+# not another decoder's (ruling 13): the test holds each file's colour to the
+# recipe within a stated error, and the VP8 decoder itself to the WebM
+# project's published test-vector MD5s. The alpha of a lossy WebP is lossless
+# at `alpha_quality=100`, so where a file has alpha the test holds it to the
+# recipe exactly. `smooth` gives the encoder gradients to spend few bits on;
+# `rgb`'s wrap-arounds give it edges.
+#
+# *Changed the same day, on review.* The first run also decoded each file
+# through Pillow, over libwebp 1.6.0, and committed the picture as
+# `<name>.libwebp.png`, which the test then took as its expected answer --
+# an outside program's output adjudicating this decoder. Those PNGs are
+# deleted and this script no longer writes them; the `.webp` files are the
+# bytes that run encoded, unchanged.
 
 
 def smooth(x, y):
@@ -300,10 +306,7 @@ def smooth_image(w, h):
 
 
 def lossy(im, name, **options):
-    path = f"webp/{name}.webp"
-    im.save(path, **options)
-    with Image.open(path) as decoded:
-        decoded.save(f"webp/{name}.libwebp.png")
+    im.save(f"webp/{name}.webp", **options)
 
 
 lossy(rgb_image(61, 45), "pillow-lossy-rgb-61x45", quality=80)
@@ -318,9 +321,5 @@ lossy(webp_rgba(61, 45), "pillow-lossy-rgba-m0-61x45", quality=80, alpha_quality
 first = smooth_image(61, 45)
 first.save("webp/pillow-animated-lossy-61x45.webp", quality=80, save_all=True,
            append_images=[first.transpose(Image.Transpose.FLIP_LEFT_RIGHT)], duration=100)
-with Image.open("webp/pillow-animated-lossy-61x45.webp") as decoded:
-    decoded.save("webp/pillow-animated-lossy-61x45.libwebp.png")
 open("webp/imagecodecs-lossy-rgb-61x45.webp", "wb").write(
     imagecodecs.webp_encode(np.asarray(rgb_image(61, 45)), level=75, lossless=False))
-with Image.open("webp/imagecodecs-lossy-rgb-61x45.webp") as decoded:
-    decoded.save("webp/imagecodecs-lossy-rgb-61x45.libwebp.png")

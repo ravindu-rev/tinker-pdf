@@ -1,23 +1,41 @@
 //! VP8 held to frames built bool by bool with RFC 6386 §7.3's own encoder,
-//! and — when they are on disk — to the WebM project's test vectors.
+//! to the WebM project's test vectors, and — for the colour conversion the
+//! vectors stop short of — to the arithmetic it claims.
 //!
 //! # The vectors
 //!
 //! `webmproject/vp8-test-vectors` is 61 IVF files and, beside each, the MD5
 //! of every frame libvpx decodes from it. The repository carries no licence,
-//! so nothing of it is committed here; point `TINKER_VP8_VECTORS` at a
-//! checkout and every **key frame** in it is decoded and hashed:
+//! so nothing of it is committed here: `tests/vp8-vectors/fetch.sh` fetches
+//! it into `target/`, pinned to its last commit and to the SHA-256 of every
+//! file in `tests/vp8-vectors/SHA256SUMS`, and every **key frame** in it is
+//! decoded and hashed:
 //!
 //! ```text
-//! git clone https://github.com/webmproject/vp8-test-vectors
-//! TINKER_VP8_VECTORS=$PWD/vp8-test-vectors \
+//! sh crates/tinker-pdf-filters/tests/vp8-vectors/fetch.sh
+//! TINKER_VP8_VECTORS=$PWD/target/vp8-test-vectors TINKER_VP8_VECTORS_REQUIRED=1 \
 //!     cargo test -p tinker-pdf-filters --lib vp8_test_vectors -- --nocapture
 //! ```
 //!
 //! A key frame decodes on its own — §9.3, §9.6 and §13.5 reset everything a
 //! key frame reads — so each is a still picture as a WebP would hold it, and
-//! its MD5 is the reference decoder's answer for it. Without the variable the
-//! test prints `SKIPPED` and passes, as `png_suite.rs` does.
+//! its MD5 is the published answer for it. That makes this the one check of
+//! the lossy decoder whose expected answers are published data rather than
+//! this repository's own reading of the RFC, and CI's `vp8-vectors` job runs
+//! it on every push with `TINKER_VP8_VECTORS_REQUIRED=1` and greps for
+//! [`VECTORS_RAN`]. Without the variable the test prints [`VECTORS_SKIPPED`]
+//! and passes, as `png_suite.rs` does; with the switch set the absence is a
+//! failure, and so is any vector set that is not the pinned commit's 61 files
+//! and 182 key frames.
+//!
+//! # The colour conversion
+//!
+//! RFC 6386 ends at the Y, U and V planes, and so do the vectors' MD5s.
+//! `to_argb` goes on to a picture by two stated rules — BT.601's
+//! limited-range matrix, and chroma upsampled by weighting the four nearest
+//! samples 9:3:3:1 — and the tests at the end of this file hold it to those
+//! rules as written, worked out here in exact arithmetic, and never to another
+//! decoder's output (ruling 13).
 
 use super::*;
 
@@ -455,13 +473,40 @@ fn ivf_key_frames(file: &[u8]) -> Vec<(usize, &[u8])> {
     out
 }
 
+/// Printed when the vectors were read. CI's `vp8-vectors` job greps for it.
+const VECTORS_RAN: &str = "vp8-test-vectors: RAN";
+
+/// Printed when they were not. CI greps for it too, and fails.
+const VECTORS_SKIPPED: &str = "vp8-test-vectors: SKIPPED";
+
+/// The pinned commit's vectors, counted when it was pinned: an `.ivf` and an
+/// `.ivf.md5` each, and the key frames shown among them.
+const PINNED_FILES: usize = 61;
+const PINNED_KEY_FRAMES: usize = 182;
+
+/// `TINKER_VP8_VECTORS_REQUIRED` makes the absence of the vectors a failure
+/// rather than a skip, and holds what is there to the pinned set.
+fn vectors_required() -> bool {
+    std::env::var_os("TINKER_VP8_VECTORS_REQUIRED").is_some_and(|value| value != "0")
+}
+
 #[test]
 fn vp8_test_vectors_key_frames_match_their_md5s() {
+    let required = vectors_required();
     let Some(dir) = std::env::var_os("TINKER_VP8_VECTORS") else {
-        println!("vp8-test-vectors: SKIPPED (set TINKER_VP8_VECTORS to a checkout)");
+        assert!(
+            !required,
+            "TINKER_VP8_VECTORS_REQUIRED is set and TINKER_VP8_VECTORS is not: \
+             run tests/vp8-vectors/fetch.sh and point it at the result"
+        );
+        println!("{VECTORS_SKIPPED} (set TINKER_VP8_VECTORS to the fetched vectors)");
         return;
     };
     let dir = std::path::PathBuf::from(dir);
+    assert!(
+        !required || dir.is_absolute(),
+        "TINKER_VP8_VECTORS must be absolute: a test runs from its crate directory"
+    );
     let mut names: Vec<_> = std::fs::read_dir(&dir)
         .expect("TINKER_VP8_VECTORS is a directory")
         .flatten()
@@ -505,8 +550,153 @@ fn vp8_test_vectors_key_frames_match_their_md5s() {
         }
     }
     println!(
-        "RAN vp8-test-vectors: {checked} key frames from {files} files, {} failed",
-        failures.len()
+        "{VECTORS_RAN} {checked} key frames from {files} files, {} failed ({})",
+        failures.len(),
+        dir.display()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    if required {
+        assert_eq!(
+            (files, checked),
+            (PINNED_FILES, PINNED_KEY_FRAMES),
+            "not the pinned vector set: run tests/vp8-vectors/fetch.sh"
+        );
+    }
+}
+
+// --- the colour conversion, which the vectors do not reach ----------------------
+
+/// BT.601's limited-range Y'CbCr to R'G'B' in exact integer arithmetic,
+/// rounded half up and clamped to a byte: the Recommendation's `Kr = 0.299`
+/// and `Kb = 0.114`, luma scaled from 219 levels to 255 and chroma from 224.
+///
+/// Every term is an integer over one common denominator, so nothing is
+/// rounded before the last step.
+fn bt601(y: u8, u: u8, v: u8) -> [i64; 3] {
+    // Kr, Kb and Kg in thousandths. R = 255/219 Y + 255/112 (1 - Kr) Cr, and
+    // so on, all over the denominator 219 * 112 * 1000 * Kg.
+    let (kr, kb, kg) = (299i64, 114i64, 587i64);
+    let d = 219 * 112 * 1000 * kg;
+    let (y, cb, cr) = (i64::from(y) - 16, i64::from(u) - 128, i64::from(v) - 128);
+    let luma = 255 * 112 * 1000 * kg * y;
+    let r = luma + 255 * 219 * kg * (1000 - kr) * cr;
+    let g = luma - 255 * 219 * ((1000 - kb) * kb * cb + (1000 - kr) * kr * cr);
+    let b = luma + 255 * 219 * kg * (1000 - kb) * cb;
+    // Half up: floor((2n + d) / 2d), `div_euclid` so the negative side floors.
+    [r, g, b].map(|n| (2 * n + d).div_euclid(2 * d).clamp(0, 255))
+}
+
+/// `yuv_to_rgb` is BT.601 to within one level on every one of the 2^24
+/// inputs, and exactly it on nearly all of them.
+///
+/// libwebp's 14-bit fixed point is what makes "within one" the claim rather
+/// than "equal": each product is truncated before the sum. Measured when this
+/// was written, 169 223 of the 50 331 648 channels miss by one and none by
+/// more. What this pins is that the matrix is BT.601's, that the range is the
+/// limited one and the rounding half up, and that the fixed point never
+/// wanders further than that off the exact answer.
+#[test]
+fn the_colour_conversion_is_bt_601_to_within_one_level() {
+    let (mut worst, mut off) = (0i64, 0u64);
+    for y in 0..=255u8 {
+        for u in 0..=255u8 {
+            for v in 0..=255u8 {
+                let got = yuv_to_rgb(y, u, v);
+                let have = [(got >> 16) & 0xff, (got >> 8) & 0xff, got & 0xff].map(i64::from);
+                for (h, w) in have.iter().zip(bt601(y, u, v)) {
+                    let miss = (h - w).abs();
+                    worst = worst.max(miss);
+                    off += u64::from(miss != 0);
+                }
+            }
+        }
+    }
+    assert!(worst <= 1, "{worst} levels off BT.601");
+    // Nearly all: fewer than one channel in two hundred misses at all.
+    assert!(
+        off < 3 * (1 << 24) / 200,
+        "{off} channels off BT.601 by one"
+    );
+}
+
+/// The upsampler's weights, held to their definition: a pixel between two
+/// chroma columns is 9:3:3:1 of the four samples around it, nearest first,
+/// and a pixel in an edge column 3:1 of the two beside it. libwebp's integer
+/// form rounds twice, so "within one" is the claim.
+#[test]
+fn the_chroma_upsampler_weighs_nine_three_three_one() {
+    let samples: Vec<u8> = (0..=255u8).step_by(15).chain([1, 254]).collect();
+    // `got` within one level of `sixteenths / 16`, exactly.
+    let within_one =
+        |got: u8, sixteenths: u32| (16 * i64::from(got) - i64::from(sixteenths)).abs() < 16;
+    for &n0 in &samples {
+        for &n1 in &samples {
+            for &f0 in &samples {
+                for &f1 in &samples {
+                    let (left, right) = fancy_pair(n0, n1, f0, f1);
+                    let [a, b, c, d] = [n0, n1, f0, f1].map(u32::from);
+                    assert!(
+                        within_one(left, 9 * a + 3 * b + 3 * c + d),
+                        "left of {n0} {n1} over {f0} {f1} is {left}"
+                    );
+                    assert!(
+                        within_one(right, 9 * b + 3 * a + 3 * d + c),
+                        "right of {n0} {n1} over {f0} {f1} is {right}"
+                    );
+                }
+            }
+        }
+        for &f in &samples {
+            let got = 4 * i64::from(fancy_edge(n0, f));
+            let exact = 3 * i64::from(n0) + i64::from(f);
+            assert!((got - exact).abs() <= 2, "edge of {n0} over {f}");
+        }
+    }
+    // And one sample everywhere is that sample everywhere: no weight lost.
+    for &c in &samples {
+        assert_eq!(fancy_pair(c, c, c, c), (c, c));
+        assert_eq!(fancy_edge(c, c), c);
+    }
+}
+
+/// Which chroma sample is *nearer*, worked out by hand on a 4 x 4 picture
+/// whose U plane is 2 x 2: grey luma, neutral V, and U differing by row in one
+/// picture and by column in the other.
+///
+/// 4:2:0 puts each chroma sample at the centre of a 2 x 2 block of luma, so an
+/// inner output row or column is three quarters of the way from the chroma
+/// row or column across from it to the one whose block it is in. Row 0 and
+/// the last row of an even height have one chroma row beside them and take it
+/// alone; so do the first and last columns.
+#[test]
+fn each_pixel_takes_its_chroma_nearest_first() {
+    let picture = |u: [u8; 4]| Picture {
+        width: 4,
+        height: 4,
+        y: vec![128; 16],
+        u: u.to_vec(),
+        v: vec![128; 4],
+        complete: true,
+    };
+    // 64 and 192 alone at the edges, 3:1 and 1:3 of them inside — and the
+    // 9:3:3:1 of an inner pixel is the same, since two of its four agree.
+    let ramp = [64u8, 96, 160, 192];
+    let at = |argb: &[u32], x: usize, row: usize| argb[row * 4 + x];
+
+    // U by row: 64 above, 192 below.
+    let argb = to_argb(&picture([64, 64, 192, 192]), None);
+    for (row, &u) in ramp.iter().enumerate() {
+        for x in 0..4 {
+            let want = 0xff00_0000 | yuv_to_rgb(128, u, 128);
+            assert_eq!(at(&argb, x, row), want, "({x}, {row}) is U {u}");
+        }
+    }
+    // U by column: 64 left, 192 right.
+    let argb = to_argb(&picture([64, 192, 64, 192]), None);
+    for (x, &u) in ramp.iter().enumerate() {
+        for row in 0..4 {
+            let want = 0xff00_0000 | yuv_to_rgb(128, u, 128);
+            assert_eq!(at(&argb, x, row), want, "({x}, {row}) is U {u}");
+        }
+    }
 }

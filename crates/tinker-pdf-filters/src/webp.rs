@@ -24,11 +24,15 @@
 //!   carries an alpha channel always and its `alpha_is_used` bit "SHOULD NOT
 //!   impact decoding" (§3.4), so opacity is read from the samples rather than
 //!   the flag — and an opaque picture needs no soft mask.
-//! - **A lossy picture is libwebp's picture.** RFC 6386 ends at the Y, U and
-//!   V planes; how they become RGB is a choice, and the choice taken is the
-//!   one every browser's WebP decoder makes: libwebp's "fancy" chroma
-//!   upsampling and its fixed-point BT.601 conversion, both integer
-//!   arithmetic, in `vp8::to_argb`.
+//! - **A lossy picture is converted the way libwebp converts one.** RFC 6386
+//!   ends at the Y, U and V planes; how they become RGB is a choice, and the
+//!   choice taken is the one every browser's WebP decoder makes: libwebp's
+//!   "fancy" chroma upsampling and its fixed-point BT.601 conversion, both
+//!   integer arithmetic, in `vp8::to_argb`. The choice is libwebp's; the
+//!   evidence is not. `vp8/tests.rs` holds the planes to the WebM project's
+//!   published test vectors and the conversion to BT.601's matrix and the
+//!   upsampler's 9:3:3:1 weights, and no test takes libwebp's output as an
+//!   answer (ruling 13).
 //! - **An `ALPH` chunk that will not decode leaves the picture opaque**, with
 //!   [`Warning::WebpAlphaDropped`]: the colour is intact and is still the
 //!   picture, which is ruling 2's trade. libwebp refuses the whole file.

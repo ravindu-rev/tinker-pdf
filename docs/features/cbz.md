@@ -259,8 +259,9 @@ transformed pixels or a VP8 key frame, so those pages are decoded (`bmp_decode`,
 byte a pixel held rather than three — a direct one is `/DeviceRGB`, an alpha
 channel becomes an `/SMask`, and a GIF's transparent index becomes a
 colour-key `/Mask`. A GIF page is its **first image**, and an animated WebP
-its first frame; later frames are not drawn. A lossy WebP's colour is the
-picture libwebp makes of it, and its `ALPH` chunk an `/SMask`. This is the one image
+its first frame; later frames are not drawn. A lossy WebP's colour is
+converted from VP8's planes the way libwebp converts it, and its `ALPH` chunk
+is an `/SMask`. This is the one image
 route here whose cost is the picture's pixels rather than the entry's bytes,
 and the ceiling it decodes under is the PNG and TIFF decoded routes' — the
 largest entry this build will read out of an archive.
@@ -463,8 +464,10 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   both rendering to the recipe; signed, float and BigTIFF pages are their
   pictures. Lossless WebP pages render to the recipe, an alpha one arrives
   as the recipe's colour over an `/SMask` of exactly its alpha, an animated
-  one is its first frame, and a lossy one with alpha is libwebp's picture of
-  the file over an `/SMask` of exactly the recipe's alpha.
+  one is its first frame, and a lossy one with alpha carries `webp_decode`'s
+  picture of the same bytes unaltered over an `/SMask` of exactly the
+  recipe's alpha — the decoder itself being held to the VP8 test vectors and
+  to BT.601 in `tinker-pdf-filters`, and never to libwebp's output.
 - `crates/tinker-pdf/tests/cbz_validated.rs` — the synthesised document and
   the same document saved back are both held to the strict validator, and the
   pages are read out of the catalog's own `/Kids` rather than through the

@@ -834,6 +834,19 @@ not redistributed in any built artefact.
 
 ## What is deliberately not here
 
+**No VP8 test vectors.** The WebM project's
+[`webmproject/vp8-test-vectors`](https://github.com/webmproject/vp8-test-vectors)
+— 61 IVF files and the MD5 of every frame the reference decoder makes of each,
+which the lossy WebP decoder is held to — carries no licence file and no
+licence statement, and material with no stated terms is not redistributable.
+So it is fetched rather than committed:
+`crates/tinker-pdf-filters/tests/vp8-vectors/fetch.sh` fetches commit
+`8afcf0579a9d5221ff892dd197af21ac3d56962d` (2013-06-06, the repository's last)
+into `target/`, and checks each of the 122 files it reads against the SHA-256
+recorded in `SHA256SUMS` beside the script on 2026-10-02. CI's `vp8-vectors`
+job runs both, and nothing of the vectors reaches the tree or a built
+artefact.
+
 No typefaces beyond the twelve above. Symbol and ZapfDingbats — the two of the
 standard 14 that are not text faces — have no Liberation equivalent, and
 substituting a text face for a symbolic font draws confidently wrong glyphs,

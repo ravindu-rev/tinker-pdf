@@ -8,6 +8,12 @@
 //! makes of the bytes. No decoder outside this repository is asked anything,
 //! and none of these files was produced by this repository's own writers.
 //!
+//! A lossy WebP's expected output is the generator's input too, at a stated
+//! distance rather than exactly, and only for what is left once the VP8
+//! planes are held to the WebM project's published MD5s and the colour
+//! conversion to BT.601 (`src/webp/vp8/tests.rs`). Its alpha, which
+//! `alpha_quality=100` keeps lossless, is held exactly.
+//!
 //! The bmpsuite files are the other kind of evidence, and the README in that
 //! directory says what they can and cannot prove: they are pictures Jason
 //! Summers' generator wrote in thirty ways, and what is asserted is that the
@@ -19,9 +25,9 @@
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
-    bmp_decode, gif_decode, png_decode, tiff_decode, tiff_scan, tiff_scan_directory, webp_decode,
-    BmpError, BmpImage, GifError, GifImage, ImagePixels, Limits, PngColour, TiffColour,
-    TiffCompression, TiffImage, TiffLayout, TiffSampleFormat, Warning, WebpError, WebpImage,
+    bmp_decode, gif_decode, tiff_decode, tiff_scan, tiff_scan_directory, webp_decode, BmpError,
+    BmpImage, GifError, GifImage, ImagePixels, Limits, TiffColour, TiffCompression, TiffImage,
+    TiffLayout, TiffSampleFormat, Warning, WebpError, WebpImage,
 };
 
 const CAP: Limits = Limits::new(1 << 24);
@@ -895,48 +901,48 @@ fn a_file_that_is_not_a_webp_is_refused_by_name() {
     );
 }
 
-// ---- WebP lossy: libwebp's own decode as the answer ------------------------------
+// ---- WebP lossy: the encoder's input, at a stated distance ----------------------
 
-/// The picture libwebp 1.6.0 made of a lossy fixture, decoded once by Pillow
-/// and committed beside it as `<name>.libwebp.png`, as RGBA.
-///
-/// A lossy codec's answer is its reference decoder's — there is no generator
-/// input to hold it to — and libwebp is the decoder every browser draws a
-/// WebP with. The PNG is read by this crate's own `png_decode`, which
-/// `png_suite.rs` and the PNG fixtures hold to their pixels.
-fn libwebp_picture(name: &str) -> (u32, u32, Vec<[u8; 4]>) {
-    let png = png_decode(&read("webp", &format!("{name}.libwebp.png")), &CAP)
-        .unwrap_or_else(|e| panic!("{name}.libwebp.png: {e:?}"));
-    assert_eq!(png.bits_per_component, 8);
-    let pixels = match png.colour {
-        PngColour::Rgb => png
-            .data
-            .chunks_exact(3)
-            .map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
-        PngColour::Rgba => png
-            .data
-            .chunks_exact(4)
-            .map(|p| [p[0], p[1], p[2], p[3]])
-            .collect(),
-        other => panic!("{name}: a {other:?} reference"),
-    };
-    (png.width, png.height, pixels)
+/// `make-images.py`'s lossy recipe: gradients an encoder spends few bits on,
+/// wrapping where a sum passes 255. Keep in step with that script.
+fn smooth(x: u32, y: u32) -> [u8; 3] {
+    [
+        ((x * 3 + y * 2) % 256) as u8,
+        // Python's `(200 - x - y) % 256` is never negative, and nor is this.
+        ((200 + 256 * 2 - x - y) % 256) as u8,
+        ((x * y / 16 + 40) % 256) as u8,
+    ]
 }
 
-/// Decodes `<name>.webp` and holds every pixel to libwebp's.
-fn webp_is_libwebps(name: &str) -> WebpImage {
-    let img = webp_decode(&read("webp", &format!("{name}.webp")), &CAP)
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
+/// Decodes `<name>.webp` from a lossy file, whole.
+fn lossy(name: &str) -> WebpImage {
+    let bytes = read("webp", &format!("{name}.webp"));
+    let img = webp_decode(&bytes, &CAP).unwrap_or_else(|e| panic!("{name}: {e}"));
     assert!(
         img.complete,
         "{name} decoded incomplete: {:?}",
         img.warnings
     );
-    let (w, h, want) = libwebp_picture(name);
-    assert_eq!((img.width, img.height), (w, h), "{name}");
-    assert_picture(name, w, h, &img.pixels, |x, y| want[(y * w + x) as usize]);
     img
+}
+
+/// The mean squared error of a decode's colour against the picture its
+/// encoder was handed, over every channel of every pixel.
+fn colour_error(img: &WebpImage, recipe: impl Fn(u32, u32) -> [u8; 3]) -> f64 {
+    let (w, h) = (img.width, img.height);
+    let mut sum = 0u64;
+    for y in 0..h {
+        for x in 0..w {
+            let have = img
+                .pixels
+                .rgba_at((y * w + x) as usize)
+                .expect("a pixel for every position");
+            for (got, want) in have.iter().zip(recipe(x, y)) {
+                sum += u64::from(got.abs_diff(want)).pow(2);
+            }
+        }
+    }
+    sum as f64 / f64::from(w * h * 3)
 }
 
 /// The offset of a chunk's payload in a fixture, so a test can show the
@@ -945,35 +951,84 @@ fn chunk_at(bytes: &[u8], kind: &[u8; 4]) -> Option<usize> {
     bytes.windows(4).position(|w| w == kind).map(|at| at + 8)
 }
 
-/// Every pixel, through VP8's prediction, transforms and loop filter and
-/// then libwebp's chroma upsampling and colour conversion: at quality 10
-/// (heavy quantization, a strong filter, libwebp's four segments), 55 (a
-/// segment whose filter level is exactly 15, where §15's high-edge-variance
-/// threshold steps), 80 and 100, odd sizes that crop inside a macroblock and
-/// a chroma sample, and a file from each binding.
+/// A recipe: the colour `make-images.py` handed the encoder at `(x, y)`.
+type Recipe = fn(u32, u32) -> [u8; 3];
+
+/// The lossy fixtures, the recipe each was encoded from, and the most mean
+/// squared error its decode may carry against that recipe.
+///
+/// **A lossy file has no exact answer, and these are not one.** The VP8
+/// planes are held exactly to published answers by the WebM project's test
+/// vectors (`src/webp/vp8/tests.rs`, which CI's `vp8-vectors` job runs and
+/// greps), the colour conversion to BT.601 and the upsampler to its 9:3:3:1
+/// weights by the tests beside them. What is left for these files is the
+/// container, the `ALPH` chunk and the plumbing between them, and for that the
+/// expected answer is the generator's input at a distance: each bound is
+/// about a quarter above the error this decoder measured on 2 October 2026
+/// (`rgb` at quality 80 is 1 723, `smooth` at quality 100 is 10.7).
+/// Measured by injection: a decoder that reads a token in the wrong context,
+/// predicts from the wrong edge, swaps Cb and Cr or upsamples from the wrong
+/// chroma row is outside them. **One that skips the loop filter altogether is
+/// not** — nor one off by a rounding — and the vectors are what catch those
+/// (116 of the 182 key frames, for the first).
+///
+/// The `rgb` recipe wraps every few pixels, which is noise to a lossy coder,
+/// so its bounds are loose; `smooth` is what a lossy coder is for, so its are
+/// tight. For scale, a mid-grey picture is an error of 5 286 against `rgb`
+/// and 2 657 to 3 547 against `smooth`.
+const LOSSY: [(&str, Recipe, f64); 8] = [
+    ("pillow-lossy-rgb-61x45", recipe::rgb, 2_200.0),
+    ("pillow-lossy-smooth-q10-m6-96x64", smooth, 240.0),
+    ("pillow-lossy-smooth-q100-61x45", smooth, 14.0),
+    ("pillow-lossy-smooth-q55-61x45", smooth, 32.0),
+    ("imagecodecs-lossy-rgb-61x45", recipe::rgb, 2_200.0),
+    ("pillow-lossy-rgba-61x45", recipe::rgb, 2_200.0),
+    ("pillow-lossy-rgba-m0-61x45", recipe::rgb, 2_200.0),
+    ("pillow-animated-lossy-61x45", smooth, 19.0),
+];
+
+fn lossy_bound(name: &str) -> (Recipe, f64) {
+    LOSSY
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|&(_, recipe, bound)| (recipe, bound))
+        .unwrap_or_else(|| panic!("{name} is not a lossy fixture"))
+}
+
+/// Every opaque lossy file decodes whole, opaque, at its size, and within its
+/// bound of the picture it was made from: quality 10 at method 6 (heavy
+/// quantization, a strong filter, libwebp's four segments), 55 (a segment
+/// whose filter level is exactly 15, where §15's high-edge-variance threshold
+/// steps), 80 and 100, sizes that crop inside a macroblock and a chroma
+/// sample, and a file from each binding.
 #[test]
-fn lossy_webps_are_the_pictures_libwebp_makes_of_them() {
-    for name in [
-        "pillow-lossy-rgb-61x45",
-        "pillow-lossy-smooth-q10-m6-96x64",
-        "pillow-lossy-smooth-q100-61x45",
-        "pillow-lossy-smooth-q55-61x45",
-        "imagecodecs-lossy-rgb-61x45",
+fn lossy_webps_are_near_the_pictures_they_were_made_from() {
+    for (name, size) in [
+        ("pillow-lossy-rgb-61x45", (61, 45)),
+        ("pillow-lossy-smooth-q10-m6-96x64", (96, 64)),
+        ("pillow-lossy-smooth-q100-61x45", (61, 45)),
+        ("pillow-lossy-smooth-q55-61x45", (61, 45)),
+        ("imagecodecs-lossy-rgb-61x45", (61, 45)),
     ] {
         let bytes = read("webp", &format!("{name}.webp"));
         assert_eq!(&bytes[12..16], b"VP8 ", "{name} is a simple lossy file");
-        let img = webp_is_libwebps(name);
+        let img = lossy(name);
+        assert_eq!((img.width, img.height), size, "{name}");
         assert!(
             matches!(img.pixels, ImagePixels::Rgb(_)),
             "{name} is opaque"
         );
+        let (recipe, bound) = lossy_bound(name);
+        let error = colour_error(&img, recipe);
+        assert!(error <= bound, "{name}: error {error:.1} past {bound}");
     }
 }
 
 /// A lossy picture's `ALPH` is lossless at `alpha_quality=100`, so its alpha
-/// is held to the recipe as well as to libwebp — through no filter, and
-/// through the horizontal filter libwebp chose at method 0, which the
-/// chunk's header byte says.
+/// is the recipe's **exactly** — the encoder's input, with no distance at all —
+/// through no filter, and through the horizontal filter libwebp chose at
+/// method 0, which the chunk's header byte says. The colour is held as the
+/// opaque files' is.
 #[test]
 fn a_lossy_webps_alpha_is_exactly_the_alpha_it_was_given() {
     for (name, filter) in [
@@ -984,18 +1039,33 @@ fn a_lossy_webps_alpha_is_exactly_the_alpha_it_was_given() {
         let header = bytes[chunk_at(&bytes, b"ALPH").expect("an ALPH chunk")];
         assert_eq!(header & 3, 1, "{name}: VP8L-compressed alpha");
         assert_eq!((header >> 2) & 3, filter, "{name}: the alpha filter");
-        let img = webp_is_libwebps(name);
+        let img = lossy(name);
+        assert_eq!((img.width, img.height), (61, 45), "{name}");
+        assert!(matches!(img.pixels, ImagePixels::Rgba(_)), "{name}");
         assert_picture(name, 61, 45, &img.pixels, |x, y| {
             let [r, g, b, _] = img.pixels.rgba_at((y * 61 + x) as usize).expect("a pixel");
             [r, g, b, recipe::alpha(x, y)]
         });
+        let (recipe, bound) = lossy_bound(name);
+        let error = colour_error(&img, recipe);
+        assert!(error <= bound, "{name}: error {error:.1} past {bound}");
     }
 }
 
+/// An animation is its first frame — `smooth`, not the mirror image after it
+/// — and says so.
 #[test]
 fn an_animated_lossy_webp_is_its_first_frame() {
-    let bytes = read("webp", "pillow-animated-lossy-61x45.webp");
+    let name = "pillow-animated-lossy-61x45";
+    let bytes = read("webp", &format!("{name}.webp"));
     assert!(chunk_at(&bytes, b"ANMF").is_some(), "the fixture animates");
-    let img = webp_is_libwebps("pillow-animated-lossy-61x45");
+    let img = lossy(name);
     assert!(img.warnings.contains(&Warning::WebpFramesIgnored));
+    assert_eq!((img.width, img.height), (61, 45));
+    let (recipe, bound) = lossy_bound(name);
+    let error = colour_error(&img, recipe);
+    assert!(error <= bound, "first frame: error {error:.1} past {bound}");
+    // And the second frame is far from it: the bound tells them apart.
+    let mirrored = colour_error(&img, |x, y| smooth(60 - x, y));
+    assert!(mirrored > 10.0 * bound, "the mirror is {mirrored:.1}");
 }

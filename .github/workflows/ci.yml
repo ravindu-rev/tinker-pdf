@@ -445,6 +445,44 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub-corpus.log
           grep -q 'epub-corpus: RAN' epub-corpus.log
 
+  vp8-vectors:
+    # The lossy WebP decoder's only expected answers from outside this
+    # repository: the WebM project's test vectors, every key frame's I420
+    # planes against the MD5 published beside it. Ruling 13 keeps libwebp's
+    # own output out of every test, so without this job nothing in CI holds
+    # the VP8 planes to anything but this repository's reading of RFC 6386.
+    #
+    # The vectors carry no licence, so they cannot be committed. The fetch
+    # pins them twice -- to the repository's last commit and to the SHA-256
+    # of every file in `tests/vp8-vectors/SHA256SUMS` -- into `target/`.
+    # And the job greps its own output, for epub-corpus's reason: a skip
+    # exits 0 and reads exactly like a pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the VP8 test vectors that cannot be committed
+        run: sh crates/tinker-pdf-filters/tests/vp8-vectors/fetch.sh
+      - name: Decode every key frame and compare its MD5
+        env:
+          TINKER_VP8_VECTORS: ${{ github.workspace }}/target/vp8-test-vectors
+          # Absence is a failure rather than a skip, and so is any set that
+          # is not the pinned commit's 61 files and 182 key frames.
+          TINKER_VP8_VECTORS_REQUIRED: "1"
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf-filters --lib vp8_test_vectors -- --nocapture \
+            2>&1 | tee vp8-vectors.log
+          if grep -q 'vp8-test-vectors: SKIPPED' vp8-vectors.log; then
+            echo "::error::the VP8 test vectors were not read, so the" \
+                 "lossy decoder's check SKIPPED rather than passed"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. 1 passed' vp8-vectors.log
+          grep -q 'vp8-test-vectors: RAN 182 key frames from 61 files, 0 failed' \
+            vp8-vectors.log
+
   licenses:
     runs-on: ubuntu-latest
     steps:
