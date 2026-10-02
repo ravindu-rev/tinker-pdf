@@ -58,9 +58,9 @@
 *.cb7 binary
 *.cbt binary
 
-# The coder fixtures (tier 4's archive row): archives real writers made over
-# `input/`, whose files are held byte for byte against what each entry decodes
-# to. `prose.txt` is text, and a normalised line ending in it would make every
+# The coder fixtures (tier 4's archive row): archives and Zstandard streams
+# real writers made over `input/`, whose files are held byte for byte against
+# what each entry decodes to. `prose.txt` is text, and a normalised line ending in it would make every
 # decode "wrong" against an original that had changed underneath it.
 crates/tinker-pdf-archive/tests/coders/input/** binary
 *.7z binary
@@ -106,6 +106,12 @@ crates/tinker-pdf-content/data/** -text linguist-vendored
 # `linguist-vendored` keeps it out of the diff a reviewer reads and out of the
 # repository's language statistics.
 crates/tinker-pdf-filters/data/** -text linguist-vendored
+# The zstd project's golden decompression files (THIRDPARTY.md). `-text`
+# because they are frames and not text, and a rewritten byte is another frame:
+# the three in `golden-decompression-errors/` are refused for one fault each,
+# and a normalised line ending could have one refused for a different reason
+# and the test still pass. `linguist-vendored` for the trees' reason above.
+crates/tinker-pdf-archive/data/** -text linguist-vendored
 
 # The committed Brotli reference streams (`tests/brotli_vectors.rs`). Bytes an
 # encoder emitted once, on a named day; a normalised line ending inside one is

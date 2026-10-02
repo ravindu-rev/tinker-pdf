@@ -1195,6 +1195,44 @@ fn a_method_12_entry_reaches_the_decoder_whole() {
 }
 
 #[test]
+fn a_method_93_entry_reaches_the_decoder_whole() {
+    let zip = coded_archive(
+        crate::ZSTANDARD,
+        b"the decoded page",
+        b"\x28\xB5\x2F\xFD frames".to_vec(),
+    );
+    let mut a = open(&zip).unwrap();
+    assert_eq!(a.entries()[0].method, Method::Other(93));
+
+    let mut seen = None;
+    let got = a
+        .read_coded(0, |coded| {
+            seen = Some(*coded);
+            Ok(b"the decoded page".to_vec())
+        })
+        .unwrap();
+    assert_eq!(&*got, b"the decoded page");
+    assert_eq!(
+        seen,
+        Some(Coded::Zstandard {
+            stream: b"\x28\xB5\x2F\xFD frames",
+            unpacked: 16
+        }),
+        "no framing is read off a Zstandard entry: its frames are its whole data"
+    );
+    assert_eq!(seen.map(|c| c.method()), Some(93));
+    assert_eq!(a.inflated(), 16, "charged like a deflated entry");
+
+    let mut a = open(&zip).unwrap();
+    assert_eq!(a.read(0), Err(EntryError::UnsupportedMethod(93)));
+    assert_eq!(
+        a.read_with(0, |_| panic!("the LZMA decoder ran on a Zstandard entry")),
+        Err(EntryError::UnsupportedMethod(93))
+    );
+    assert_eq!(a.inflated(), 0);
+}
+
+#[test]
 fn read_coded_hands_method_14_over_exactly_as_read_with_does() {
     let zip = lzma_archive(b"the decoded page", lzma_payload(b"\0range coded"));
     let mut a = open(&zip).unwrap();
@@ -1225,7 +1263,9 @@ fn read_coded_hands_method_14_over_exactly_as_read_with_does() {
 
 #[test]
 fn read_coded_refuses_a_method_whose_framing_it_does_not_read() {
-    for method in [1u16, 6, 9, 19, 93, 95, 98, 99] {
+    // 20 is Zstandard's deprecated number (APPNOTE 4.4.5), which no writer
+    // should use and this crate does not read as 93.
+    for method in [1u16, 6, 9, 19, 20, 95, 98, 99] {
         let zip = coded_archive(method, b"page", b"whatever".to_vec());
         let mut a = open(&zip).unwrap();
         assert_eq!(
@@ -1241,9 +1281,15 @@ fn read_coded_refuses_a_method_whose_framing_it_does_not_read() {
 }
 
 #[test]
-fn a_method_12_entry_is_bounded_checked_and_charged_like_the_others() {
+fn methods_12_and_93_are_bounded_checked_and_charged_like_the_others() {
+    for method in [crate::BZIP2, crate::ZSTANDARD] {
+        bounded_checked_and_charged(method);
+    }
+}
+
+fn bounded_checked_and_charged(method: u16) {
     // Past the per-entry cap: refused before the decoder is offered anything.
-    let mut zip = coded_archive(crate::BZIP2, b"small entry, large claim", b"BZh9".to_vec());
+    let mut zip = coded_archive(method, b"small entry, large claim", b"BZh9".to_vec());
     let central = crate::le::rfind(&zip, b"PK\x01\x02").unwrap();
     let huge = (MAX_ZIP_ENTRY_BYTES as u32).wrapping_add(1);
     zip[central + 24..central + 28].copy_from_slice(&huge.to_le_bytes());
@@ -1254,7 +1300,7 @@ fn a_method_12_entry_is_bounded_checked_and_charged_like_the_others() {
     );
 
     // What the decoder returns is held to the archive's length and CRC-32.
-    let zip = coded_archive(crate::BZIP2, b"the right page", b"BZh9".to_vec());
+    let zip = coded_archive(method, b"the right page", b"BZh9".to_vec());
     let mut a = open(&zip).unwrap();
     assert!(matches!(
         a.read_coded(0, |_| Ok(b"the wrong page".to_vec())),

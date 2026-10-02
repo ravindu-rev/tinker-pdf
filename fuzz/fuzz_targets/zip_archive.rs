@@ -34,14 +34,16 @@
 //!   pages once and reads them in any order.
 //!
 //! The first pass reads through `tinker_pdf::cbz::read_entry`, which is
-//! `Archive::read_coded` with the LZMA and bzip2 decoders handed in, so ZIP
-//! methods 14 and 12 — APPNOTE 5.8.8's header and the range decoder behind it,
-//! and a whole bzip2 stream — are driven under the same three assertions; the
-//! pass under the shipped bounds keeps plain `Archive::read`, so both doors
-//! are fuzzed. `lzma-method-14` and `bzip2-method-12` are the seeds that reach
-//! the decoders: CPython 3.11's `zipfile` with `ZIP_LZMA` (one method-14 entry
-//! and one stored) and with `ZIP_BZIP2` (one method-12 entry), behind a
-//! control byte of `0xFF`.
+//! `Archive::read_coded` with the LZMA, bzip2 and Zstandard decoders handed
+//! in, so ZIP methods 14, 12 and 93 — APPNOTE 5.8.8's header and the range
+//! decoder behind it, a whole bzip2 stream, and Zstandard frames — are driven
+//! under the same three assertions; the pass under the shipped bounds keeps
+//! plain `Archive::read`, so both doors are fuzzed. `lzma-method-14`,
+//! `bzip2-method-12` and `zstd-method-93` are the seeds that reach the
+//! decoders: CPython 3.11's `zipfile` with `ZIP_LZMA` (one method-14 entry
+//! and one stored) and with `ZIP_BZIP2` (one method-12 entry), and one
+//! method-93 entry of libzstd's frame in a ZIP `make-zstd.py` writes from
+//! APPNOTE 4.3, each behind a control byte of `0xFF`.
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: a name past the cap is refused,

@@ -118,7 +118,8 @@ const ZIPS: &[&str] = &[
 /// that wrote it — infers a method from two lengths and would call a method-14
 /// entry `deflate`. Its entries are held to the files that went into them in
 /// `a_real_archiver_s_lzma_entries_are_the_files_that_went_in` instead, and
-/// `python-bzip2.cbz` (method 12) is here for the same reason.
+/// `python-bzip2.cbz` (method 12) and `python-zstd.cbz` (method 93) are here
+/// for the same reason.
 ///
 /// The `py7zr-*.cb7`s are the second 7z writer (`tests/cbz/make-py7zr.py`),
 /// each asked for a coder 7-Zip's three were not: `py7zr-bcj.cb7` puts BCJ in
@@ -137,6 +138,7 @@ const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7zz-bcj2.cb7", Container::SevenZip),
     ("python-lzma.cbz", Container::Zip),
     ("python-bzip2.cbz", Container::Zip),
+    ("python-zstd.cbz", Container::Zip),
 ];
 
 /// The containers that open but do **not** produce all five pages, and what
@@ -620,6 +622,71 @@ fn a_real_archiver_s_bzip2_entries_are_the_files_that_went_in() {
                 archive.read(index),
                 Err(cbz::ZipEntryError::UnsupportedMethod(12)),
                 "{name}: {}: `Archive::read` carries no bzip2 decoder",
+                entry.name
+            );
+            let decoded = cbz::read_entry(&mut archive, index)
+                .unwrap_or_else(|e| panic!("{name}: {}: {e}", entry.name));
+            let want = match pages.iter().find(|(page, _)| *page == entry.name) {
+                Some((_, page)) => page.clone(),
+                None => std::fs::read(coders.join("input").join(&entry.name))
+                    .unwrap_or_else(|e| panic!("{name}: {}: {e}", entry.name)),
+            };
+            assert!(
+                *decoded == want[..],
+                "{name}: {} is the file that went into it",
+                entry.name
+            );
+            read_entries += 1;
+        }
+        assert!(
+            archive.warnings().is_empty(),
+            "{name}: {:?}",
+            archive.warnings()
+        );
+    }
+    assert_eq!(read_entries, 9, "five pages and four coder inputs");
+}
+
+/// **ZIP method 93, libzstd's frames, decodes to the files that went in** —
+/// through `cbz::read_entry`, and so through `tinker-pdf-zip`'s `read_coded`
+/// and `tinker-pdf-archive`'s Zstandard decoder.
+///
+/// No ZIP writer on hand makes method 93 (CPython's `zipfile` learned it in
+/// 3.14), so both archives are libzstd's frames — python-zstandard's
+/// compressor, the reference encoder — inside a ZIP written field by field
+/// from APPNOTE 4.3 by the script beside each: `python-zstd.cbz` holds the
+/// five pages (`tests/cbz/make-zstd.py`) and joins the cross-producer
+/// identity through `READ_CONTAINERS`, and
+/// `tinker-pdf-archive/tests/coders/zstd-method-93.zip` the four coder inputs
+/// (`make-zstd.py` there), one of them streamed with no content size and one
+/// empty. Each entry is held to the file it was made from, byte for byte, and
+/// `Archive::read` still names the method it has no decoder for.
+#[test]
+fn libzstd_s_method_93_entries_are_the_files_that_went_in() {
+    let coders = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tinker-pdf-archive/tests/coders");
+    let pages = source_pages();
+    let archives: [(Vec<u8>, &str); 2] = [
+        (read("python-zstd.cbz"), "python-zstd.cbz"),
+        (
+            std::fs::read(coders.join("zstd-method-93.zip")).expect("the coder fixture"),
+            "zstd-method-93.zip",
+        ),
+    ];
+    let mut read_entries = 0usize;
+    for (bytes, name) in &archives {
+        let mut archive = Archive::open(bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+        for index in 0..archive.entries().len() {
+            let entry = archive.entries()[index].clone();
+            assert_eq!(
+                entry.method,
+                Method::Other(tinker_pdf_zip::ZSTANDARD),
+                "{name}: {}: method 93",
+                entry.name
+            );
+            assert_eq!(
+                archive.read(index),
+                Err(cbz::ZipEntryError::UnsupportedMethod(93)),
+                "{name}: {}: `Archive::read` carries no Zstandard decoder",
                 entry.name
             );
             let decoded = cbz::read_entry(&mut archive, index)

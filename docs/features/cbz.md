@@ -46,7 +46,14 @@ framing round them, so the entry's data is a whole bzip2 stream, handed to the
 decoder 7z's `040202` also runs. What comes back is held to the declared
 length and the recorded CRC-32 inside the zip crate, so the archive's checksum
 adjudicates the decoder here exactly as a `.cb7`'s does — and bzip2 checks
-itself first, with a CRC per block and one over the stream. An XPS or an EPUB
+itself first, with a CRC per block and one over the stream. **Zstandard entries
+(method 93)** take it too: again no framing, the entry's data is one or more
+RFC 8878 frames, decoded by `tinker-pdf-archive`'s own Zstandard decoder —
+FSE and Huffman tables, sequences and their repeat offsets, a window it never
+allocates because the output is the window — which checks each frame's
+declared content size and XXH64 content checksum before ZIP's CRC-32 checks
+the entry. A frame that names a dictionary is refused by name: a ZIP has
+nowhere to carry one. An XPS or an EPUB
 item is still refused by method number: OPC and OCF allow stored and deflated
 and nothing else. Names decode as UTF-8 under
 bit 11 and as CP437 otherwise (APPNOTE D.1). **Every entry is CRC-32 checked
@@ -318,16 +325,19 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   one `Archive`.
 - `tinker_pdf_zip::Archive` — `open`, `entries()`, `read(index)` (checked;
   stored entries are handed back borrowed, copied nowhere), `read_coded(index,
-  decoder)` (the same, with the caller's decoder for methods 14 and 12, handed
-  a `Coded` — an `LzmaStream` with 5.8.8's header already read, or a bzip2
-  stream), `read_with(index, decoder)` (method 14 alone), `route()`,
-  `warnings()` and `inflated()`.
+  decoder)` (the same, with the caller's decoder for methods 14, 12 and 93,
+  handed a `Coded` — an `LzmaStream` with 5.8.8's header already read, a
+  bzip2 stream, or Zstandard frames), `read_with(index, decoder)` (method 14
+  alone), `route()`, `warnings()` and `inflated()`.
 - `cbz::read_entry(&mut archive, index)` — `read_coded` with this engine's
-  LZMA and bzip2 decoders, which is what the comic path reads every ZIP entry
-  through.
+  LZMA, bzip2 and Zstandard decoders, which is what the comic path reads every
+  ZIP entry through.
 - `tinker_pdf_archive::bzip2::decode(bytes, &Limits)` — one or more bzip2
   streams to bytes, bounded by `Limits::max_unpacked`, every block CRC and the
   stream CRC checked.
+- `tinker_pdf_archive::zstd::decode(bytes, &Limits)` — Zstandard frames to
+  bytes, skippable frames skipped, bounded by `Limits::max_unpacked`, every
+  declared content size and content checksum checked.
 - `cbz::open_tar` and `cbz::pages_from_tar`, the same two halves for a `.cbt`,
   over `tinker_pdf_archive::tar::Archive` — `open`, `entries()`,
   `read(index)` (a plain borrow), `warnings()`.
@@ -361,7 +371,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | Valid archive, no image entries | `ArchiveRefusal::NoImages` | a zero-page open is a failure dressed as a success | — |
 | Past a bound | `ArchiveRefusal::TooLarge` | `MAX_CBZ_PAGES`, `MAX_SYNTHESISED_PDF`, or one of the archive reader's own | — |
 | One encrypted or checksum-failed entry | `PageDefect::EntryRefused(ZipEntryError)` | placeholder page; the page count and every number after it are unchanged | — |
-| Compression method other than stored, deflated, LZMA or bzip2 | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, Zstandard — named by code so a refusal says which | — |
+| Compression method other than stored, deflated, LZMA, bzip2 or Zstandard | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, XZ, PPMd, and Zstandard under its deprecated number 20 — named by code so a refusal says which | — |
+| A Zstandard frame that names a dictionary | `ZipEntryError::Corrupt` (leaf: `zstd::Error::NeedsDictionary`) | placeholder page; a ZIP has nowhere to carry a dictionary, so no reader of the archive alone can decode the entry | — |
 | A randomised bzip2 block | `ZipEntryError::Corrupt` (leaf: `bzip2::Error::Randomised`); in a 7z, `SevenZipEntryError::Bzip2Failed` | written by bzip2 0.9.0 alone, unwritten since 0.9.5 (1999); decoding one needs a 512-entry table this repository has no first-party source for, and no writer on hand can make a fixture | — |
 | A method-14 entry whose APPNOTE 5.8.8 header is damaged | `ZipEntryError::LzmaHeader` | placeholder page; fewer than nine bytes, a properties size other than five, or a property byte outside what LZMA encodes — a wrong offset or a different coder shows here first | — |
 | GIF, WebP, BMP, AVIF entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
@@ -405,8 +416,9 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   sizes. It is a relation between two reads rather than an oracle — nothing
   outside this repository renders any of it ([verification](../verification.md)).
   The non-ZIPs beside them hold the *same five pages*: seven `.cb7`s and the
-  `.cbt` join that identity with `python-lzma.cbz` and `python-bzip2.cbz`, so
-  fifteen archives must give the same pictures, and the `.cbr` does not — it is four fifths of a comic and is held to
+  `.cbt` join that identity with `python-lzma.cbz`, `python-bzip2.cbz` and
+  `python-zstd.cbz`, so sixteen archives must give the same pictures, and the
+  `.cbr` does not — it is four fifths of a comic and is held to
   `PageDefect::RarEntryRefused` naming its method instead. 7-Zip's three
   `.cb7`s are one producer asked for three **shapes** — one solid folder, five folders
   (`-ms=off`), and three LZMA2 chunks with a dictionary reset each
@@ -438,6 +450,17 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   and not 7-Zip's — and its five pages join the cross-producer identity. The
   filter itself is held to a file shaped for it, `x86.bin`, in
   `tinker-pdf-archive`'s `tests/coders.rs`.
+  `python-zstd.cbz` is every page as ZIP method 93, libzstd's frames in a ZIP
+  `tests/cbz/make-zstd.py` writes from APPNOTE 4.3 because no ZIP writer on
+  hand makes the method; `libzstd_s_method_93_entries_are_the_files_that_went_in`
+  holds each entry, and each of `tinker-pdf-archive`'s `zstd-method-93.zip`'s,
+  to the file that went in. The decoder itself is held in
+  `tinker-pdf-archive` to RFC 8878's Appendix A state by state, to the zstd
+  project's own golden files (`data/zstd-golden/`, four it must read and three
+  it must refuse, each for its own fault), and to libzstd's frames over the
+  coder inputs, which a census test holds to reaching every coding a block can
+  have — every block and literals type, both Huffman weight forms, all four
+  modes of all three sequence tables, all four repeat offsets.
 - `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
   archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 28 unit tests over
   ordering, classification and the `ComicInfo.xml` mapping, which is asserted
@@ -467,5 +490,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   7z's `040202` share, holding a decode to its ceiling and to the same answer
   under a roomier one, and the `zip_archive` and `sevenz` targets reach it
   through their containers (seeds `bzip2-method-12` and `bzip2`).
+  `fuzz_targets/zstd.rs` covers the Zstandard decoder ZIP method 93 hands
+  entries to, with the same two assertions over libzstd's frames, and
+  `zip_archive` reaches it through the container (seed `zstd-method-93`).
 - The whole workspace: `cargo test --workspace` is 4 879 passed, 0 failed,
   58 ignored across 218 suites (Windows x86_64, 14 September 2026).

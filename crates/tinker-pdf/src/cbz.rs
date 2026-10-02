@@ -1767,14 +1767,15 @@ pub fn open_archive<'a>(
     })
 }
 
-/// Reads one entry of a comic's ZIP, checked, with ZIP methods 14 and 12
+/// Reads one entry of a comic's ZIP, checked, with ZIP methods 14, 12 and 93
 /// decoded.
 ///
-/// [`Archive::read`] with the two things `tinker-pdf-zip` cannot carry: an
-/// LZMA decoder and a bzip2 decoder. That crate may depend on
-/// `tinker-pdf-filters` and nothing else, and both decoders live in
-/// `tinker-pdf-archive` — LZMA's written for 7z, bzip2's for 7z and ZIP alike —
-/// so the facade, which already depends on both, hands them in through
+/// [`Archive::read`] with the three things `tinker-pdf-zip` cannot carry: an
+/// LZMA decoder, a bzip2 decoder and a Zstandard decoder. That crate may
+/// depend on `tinker-pdf-filters` and nothing else, and all three decoders
+/// live in `tinker-pdf-archive` — LZMA's written for 7z, bzip2's for 7z and
+/// ZIP alike, Zstandard's for ZIP — so the facade, which already depends on
+/// both, hands them in through
 /// [`Archive::read_coded`]. Everything that is ZIP's stays ZIP's: APPNOTE
 /// 5.8.8's header on a method-14 entry is read and checked there (a damaged
 /// one is [`ZipEntryError::LzmaHeader`]), the declared size is bounded and
@@ -1786,7 +1787,7 @@ pub fn open_archive<'a>(
 /// **Only the comic path takes this door.** OPC forbids every compression
 /// method but DEFLATE and OCF 3.3 §4.3.2 allows Stored and Deflated
 /// (`epub::ocf`'s header records both), so an XPS or an EPUB item compressed
-/// with LZMA or bzip2 is a package outside its own format, and those readers
+/// with LZMA, bzip2 or Zstandard is a package outside its own format, and those readers
 /// keep [`Archive::read`]'s refusal by number.
 ///
 /// # Errors
@@ -1794,8 +1795,8 @@ pub fn open_archive<'a>(
 /// mapped onto the reader's vocabulary: an LZMA property byte whose `lc + lp`
 /// is past 4 is [`ZipEntryError::LzmaHeader`] — it is one of the five header
 /// bytes — a stream that runs out or ends before its declared length is
-/// [`ZipEntryError::Truncated`], a bzip2 stream that would decode past it is
-/// [`ZipEntryError::OversizedStream`], and anything else is
+/// [`ZipEntryError::Truncated`], a bzip2 or Zstandard stream that would decode
+/// past it is [`ZipEntryError::OversizedStream`], and anything else is
 /// [`ZipEntryError::Corrupt`].
 pub fn read_entry<'a>(
     archive: &mut Archive<'a>,
@@ -1804,6 +1805,7 @@ pub fn read_entry<'a>(
     archive.read_coded(index, |coded| match coded {
         tinker_pdf_zip::Coded::Lzma(stream) => decode_lzma(stream),
         tinker_pdf_zip::Coded::Bzip2 { stream, unpacked } => decode_bzip2(stream, *unpacked),
+        tinker_pdf_zip::Coded::Zstandard { stream, unpacked } => decode_zstd(stream, *unpacked),
         // `Coded` is `#[non_exhaustive]`: a method the zip crate learns the
         // framing of later is one this facade has not wired a decoder for.
         other => Err(ZipEntryError::UnsupportedMethod(other.method())),
@@ -1826,6 +1828,28 @@ fn decode_bzip2(stream: &[u8], unpacked: usize) -> Result<Vec<u8>, ZipEntryError
         // `bzip2::Error` is `#[non_exhaustive]`: a bad table, a failed block
         // or stream CRC, a refused randomised block and whatever is added
         // later are all a stream that is not the one the entry claims.
+        _ => ZipEntryError::Corrupt,
+    })
+}
+
+/// ZIP method 93's frames through the Zstandard decoder.
+fn decode_zstd(stream: &[u8], unpacked: usize) -> Result<Vec<u8>, ZipEntryError> {
+    use tinker_pdf_archive::zstd;
+    // The ceiling is the declared size, bounded and charged by the zip crate,
+    // exactly as for methods 14 and 12.
+    let limits = zstd::Limits {
+        max_unpacked: unpacked,
+    };
+    zstd::decode(stream, &limits).map_err(|e| match e {
+        zstd::Error::Truncated => ZipEntryError::Truncated,
+        zstd::Error::TooLarge => ZipEntryError::OversizedStream {
+            declared: unpacked as u64,
+        },
+        // `zstd::Error` is `#[non_exhaustive]`: a damaged section, a failed
+        // content checksum or size, and whatever is added later are all a
+        // stream that is not the one the entry claims. So is a frame that
+        // names a dictionary: a ZIP has nowhere to carry one, so no reader of
+        // the archive alone can decode it.
         _ => ZipEntryError::Corrupt,
     })
 }

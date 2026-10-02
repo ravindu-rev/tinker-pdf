@@ -32,6 +32,7 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-shape/data/text-rendering-tests` | [unicode-org/text-rendering-tests](https://github.com/unicode-org/text-rendering-tests) at `26cfb96` (2026-08-24) | `Unicode-3.0` |
 | `crates/tinker-pdf-xml/data/xhtml-entities` | XHTML 1.0's three entity sets as XHTML Modularization 1.1 (2010-07-29) publishes them, from [w3c/markup-validator](https://github.com/w3c/markup-validator) `htdocs/sgml-lib/REC-xhtml-modularization-20100729/` at `724a15b` (fetched 2026-09-26) | `W3C` |
 | `crates/tinker-pdf-content/data/ucd` | The Unicode Character Database, version 17.0.0, via [unicode-org/unicodetools](https://github.com/unicode-org/unicodetools) `unicodetools/data/ucd/17.0.0` at `0509b4b` (fetched 2026-09-26) | `Unicode-3.0` |
+| `crates/tinker-pdf-archive/data/zstd-golden` | [facebook/zstd](https://github.com/facebook/zstd) `tests/golden-decompression/` and `tests/golden-decompression-errors/`, branch `dev` as served on 2026-09-26 (no commit could be resolved; pinned by SHA-256 below) | `BSD-3-Clause` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -609,6 +610,54 @@ at run time; `WordBreakTest.txt` is a test input and is not compiled into
 anything. It is here rather than fetched for the reason `LineBreakTest.txt` is:
 a skipped oracle exits 0 and reads exactly like a pass. `Unicode-3.0` is
 already on `deny.toml`'s allowlist, and its text is reproduced above.
+
+### `crates/tinker-pdf-archive/data/zstd-golden`
+
+The zstd project's own golden decompression files: seven frames that pin
+corners of RFC 8878 an encoder is careful never to write, four a decoder must
+accept and three it must refuse. `tinker-pdf-archive`'s Zstandard decoder is
+held to all seven by `the_golden_files_decode_to_what_zstd_s_own_tests_say`
+and `the_golden_error_files_are_refused_for_their_reasons`
+(`src/zstd/tests.rs`), and the expected answers are upstream's, not another
+decoder's: `tests/playTests.sh` compares `rle-first-block.zst` against a
+mebibyte of `/dev/zero` and `empty-block.zst` against an empty file; the other
+two accepted files are `zstd -t` there, and what they decode to is written in
+each as raw literals; and `tests/cli-tests/decompression/detectErrors.sh`
+requires every file in the errors directory to fail. They are test inputs,
+compiled into nothing.
+
+| File | Bytes | SHA-256 | What it pins |
+| --- | ---: | --- | --- |
+| `golden-decompression/rle-first-block.zst` | 45 | `dd31b3fa6bb8601710cbde2c625660763bf38adc5255501e3d3a681cc0e4e1a4` | An RLE block as a frame's first, which libzstd never writes because, in `playTests.sh`'s words, "older versions of zstd cli are not able to decode such corner case" |
+| `golden-decompression/empty-block.zst` | 11 | `ab5463fa31429bf81ced9f05e99b96b2fe88b1da37235a233f6bc96242332fbc` | A compressed block of no literals and no sequences |
+| `golden-decompression/zeroSeq_2B.zst` | 25 | `8505867ac00fb49eb455da1b1e44e7cba5126f03114a72fb195170f7c95f2ca7` | A sequence count of zero in its two-byte form |
+| `golden-decompression/block-128k.zst` | 131 081 | `6a226ab40e6abcfc4a36baa04bf48f7ee56f166b8a26fbe2adb8fe771dceccba` | A compressed block exactly `Block_Maximum_Size` long, as large as the format allows and larger than any encoder needs |
+| `golden-decompression-errors/zeroSeq_extraneous.zst` | 27 | `85d7b2010abde2ff96ab8e6798b422d3cb78f8dd2108f83dbdd488da7056a6db` | Bytes after a sequence count of zero |
+| `golden-decompression-errors/off0.bin.zst` | 17 | `144e2f029389c67c361bd3879ac142671592802f01f805a6c0c2b3e564d8022c` | A repeat offset of zero (the first repeat minus one, when the first is one) |
+| `golden-decompression-errors/truncated_huff_state.zst` | 19 | `c91a09d8824609d0643291803cbfb04b14213c02c890d5637bc3aed18e8a24f8` | A Huffman weight stream too short for its two initial states |
+| `LICENSE` | 1 549 | `7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8` | Upstream's root `LICENSE`, verbatim |
+
+**Where they came from, and what is not known about that.** Fetched on
+26 September 2026 from
+`https://raw.githubusercontent.com/facebook/zstd/dev/tests/<directory>/<file>`,
+byte for byte. They are **not pinned to a commit**: `dev` was fetched as
+served, because no commit could be resolved from where this was vendored —
+`api.github.com` and `github.com`'s own pages both answered 403 through the
+proxy, and that refusal was taken as final rather than routed around. The
+SHA-256s above are the pin. For the same reason **the set may be
+incomplete**: neither directory could be listed, so what is here is the four
+files upstream's own scripts name (`playTests.sh`: `rle-first-block`,
+`empty-block`, `zeroSeq_2B`, `zeroSeq_extraneous`) and three more fetched by
+the names this author knew the directories to hold (`block-128k`, `off0.bin`,
+`truncated_huff_state`). A golden file added upstream under another name is
+not here, and nothing here would notice.
+
+**The licence.** Every zstd source file offers *"both the BSD-style license
+... and the GPLv2 ... You may select, at your option, one of the
+above-listed licenses"*; this repository selects the first. `LICENSE` is that
+BSD licence — SPDX `BSD-3-Clause`, already on `deny.toml`'s allowlist for
+cmap-resources and Brotli's dictionary — fetched from the same branch on the
+same day. The golden files carry no header of their own.
 
 ### The predefined XMP schemas' property tables
 

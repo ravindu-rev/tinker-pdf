@@ -212,6 +212,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "zstd"
+path = "fuzz_targets/zstd.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "rar"
 path = "fuzz_targets/rar.rs"
 test = false

@@ -20,6 +20,20 @@
 #              255 to 260 (its run byte tops out at 251 past the four), and
 #              long ones; then every byte value once.
 #   empty.txt  Nothing, which a ZIP writer still compresses into a stream.
+#   modes.bin  10 876 bytes in five sections, which make-zstd.py flushes
+#              as Zstandard blocks of their own, each shaped to make
+#              libzstd choose a coding its other inputs never get:
+#              4 096 random nibbles (literals over sixteen equally likely
+#              values, whose Huffman weights are all one and so are written
+#              four bits each rather than FSE-coded); 100 records of `Q` and
+#              24 bytes copied from 3 993 to 4 092 bytes back (every literal
+#              the same byte, and every sequence the same three codes, so
+#              RLE literals and RLE for all three sequence tables); 800 bytes
+#              of prose, too few sequences for a fast level to describe a
+#              table (the predefined ones); 2 000 of one byte (an RLE
+#              block); and 40 records of a counter byte and the same 36
+#              bytes, flushed as two blocks, so the second block's first
+#              match repeats an offset (37) the first block left.
 #
 #   cd crates/tinker-pdf-archive/tests/coders && python3 make-inputs.py
 #
@@ -170,12 +184,39 @@ def runs():
     return bytes(out)
 
 
+def modes():
+    r = lcg(0x25D)
+    # Sixteen values, equally likely.
+    nibbles = bytes(next(r) & 0x0F for _ in range(4096))
+    out = bytearray(nibbles)
+    # `Q` never occurs in the nibbles, so each record is one literal and one
+    # 24-byte match that neither extends into the `Q` before it nor past the
+    # `Q` after it. Record i copies from 4 092 - i bytes back: every distance
+    # distinct, so no record repeats an offset, and all in [2045, 4092], so
+    # every Offset_Value is in [2048, 4095] and has one code. The sources
+    # are 26 bytes apart and never overlap, so no record can be matched
+    # against an earlier one instead.
+    for i in range(100):
+        source = len(out) + 1 - (4092 - i)
+        out += b"Q" + nibbles[source : source + 24]
+    words = []
+    while len(" ".join(words)) < 800:
+        words.append(WORDS[next(r) % len(WORDS)])
+    out += " ".join(words).encode("ascii")[:800]
+    out += b"Z" * 2000
+    for i in range(40):
+        out += bytes([0x80 + i]) + b"the same thirty-six bytes, each time"
+    assert len(out) == 4096 + 2500 + 800 + 2000 + 1480
+    return bytes(out)
+
+
 os.makedirs("input", exist_ok=True)
 for name, data in [
     ("x86.bin", x86()),
     ("prose.txt", prose()),
     ("runs.bin", runs()),
     ("empty.txt", b""),
+    ("modes.bin", modes()),
 ]:
     with open(os.path.join("input", name), "wb") as f:
         f.write(data)

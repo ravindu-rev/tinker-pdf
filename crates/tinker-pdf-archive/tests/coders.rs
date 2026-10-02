@@ -1,8 +1,8 @@
 //! The coders behind 7z's and ZIP's method ids, held to archives real writers
 //! made over this repository's own bytes.
 //!
-//! Every archive in `tests/coders/` is a third-party writer asked for one
-//! coder over the files in `tests/coders/input/`, which `make-inputs.py`
+//! Every archive and stream in `tests/coders/` is a third-party writer asked
+//! for one coder over the files in `tests/coders/input/`, which `make-inputs.py`
 //! makes by arithmetic (see `tests/coders/README.md` for the tool, version and
 //! command behind each). Every coder here is lossless, so the expected answer
 //! for an entry is **the file that went in** — not another decoder's output
@@ -213,6 +213,145 @@ fn cpython_s_method_12_streams_are_the_files_that_went_in() {
         [2, 1, 1, 0],
         "prose.txt is two blocks at level 1; empty.txt is none"
     );
+}
+
+/// **Zstandard, libzstd's frames, decode to the files that went in.**
+///
+/// python-zstandard 0.25.0 is libzstd 1.5.7's encoder, the reference one,
+/// and `make-zstd.py` asks it for every shape of frame and block RFC 8878
+/// has: one-shot frames that declare their size and streamed ones that do
+/// not, levels from 1 to 22, a 1 KiB window whose 118 blocks carry tables,
+/// trees and repeat offsets from block to block, four frames and a skippable
+/// one end to end, `modes.bin`'s sections for the codings the rest never
+/// get, a Huffman tree reused across a block whose literals were raw, and
+/// eighteen checksummed prefixes for XXH64. The unit test
+/// `the_fixtures_reach_every_part_of_the_format` holds them to reaching all
+/// of it. Each is decoded under a ceiling of exactly its expected length.
+#[test]
+fn libzstd_s_frames_are_the_files_that_went_in() {
+    use tinker_pdf_archive::zstd;
+    let (prose, x86, runs) = (input("prose.txt"), input("x86.bin"), input("runs.bin"));
+    let prefixes: Vec<u8> = [
+        0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 31, 32, 33, 63, 64, 65, 100, 1000,
+    ]
+    .iter()
+    .flat_map(|&n| prose[..n].to_vec())
+    .collect();
+    let cases = [
+        ("zstd-prose-l3.zst", prose.clone()),
+        ("zstd-prose-l19.zst", prose.clone()),
+        ("zstd-x86-l22.zst", x86.clone()),
+        ("zstd-runs-l1.zst", runs.clone()),
+        ("zstd-prose-w10.zst", prose.clone()),
+        ("zstd-frames.zst", [&prose[..], &x86, &runs].concat()),
+        ("zstd-modes.zst", input("modes.bin")),
+        (
+            "zstd-treeless.zst",
+            [&prose[..32768], &prose[..4000], &prose[32768..49152]].concat(),
+        ),
+        ("zstd-empty.zst", Vec::new()),
+        ("zstd-checksums.zst", prefixes),
+    ];
+    for (name, want) in cases {
+        let limits = zstd::Limits {
+            max_unpacked: want.len(),
+        };
+        let got = zstd::decode(&fixture(name), &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            got == want,
+            "{name}: the files that went in ({} bytes against {})",
+            got.len(),
+            want.len()
+        );
+    }
+}
+
+/// **Zstandard as ZIP method 93**, decoded here by the same decoder the
+/// facade hands `tinker-pdf-zip` for it. The frames are libzstd's; the ZIP
+/// around them is `make-zstd.py`'s, written from APPNOTE 4.3 because no ZIP
+/// writer on hand makes method 93. `runs.bin` is a streamed frame with no
+/// content size and `empty.txt` a frame with nothing in it. Each is held to
+/// the file that went in and to the CRC-32 the ZIP recorded.
+#[test]
+fn a_method_93_zip_s_frames_are_the_files_that_went_in() {
+    use tinker_pdf_archive::zstd;
+    let zip = fixture("zstd-method-93.zip");
+    let entries = locals(&zip);
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["prose.txt", "x86.bin", "runs.bin", "empty.txt"]);
+    for entry in &entries {
+        assert_eq!(entry.method, 93, "{}: APPNOTE method 93", entry.name);
+        assert_eq!(
+            &entry.data[..4],
+            b"\x28\xB5\x2F\xFD",
+            "{}: a frame",
+            entry.name
+        );
+        let want = input(&entry.name);
+        let got = zstd::decode(
+            entry.data,
+            &zstd::Limits {
+                max_unpacked: want.len(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", entry.name));
+        assert!(got == want, "{}: the file that went in", entry.name);
+        assert_eq!(tinker_pdf_filters::crc32(&got), entry.crc, "{}", entry.name);
+    }
+}
+
+/// Every damaged copy of every `zstd` fuzz seed — libzstd's frames over
+/// slices of the inputs — is refused or decoded, never a panic, and a decode
+/// that succeeds keeps to its ceiling. Two bits of every byte are flipped
+/// and every length is cut: a flip in a frame header reaches the window and
+/// size fields, one in a literals section the Huffman description and the
+/// jump table, and one in a sequences section the FSE descriptions and the
+/// backward bitstream, whose every bit steers the next state.
+#[test]
+fn hostile_bytes_through_zstd_never_panic() {
+    use tinker_pdf_archive::zstd;
+    let limits = zstd::Limits {
+        max_unpacked: 1 << 16,
+    };
+    let exercise = |bytes: &[u8]| {
+        if let Ok(out) = zstd::decode(bytes, &limits) {
+            assert!(
+                out.len() <= limits.max_unpacked,
+                "a decode keeps its ceiling"
+            );
+        }
+    };
+    let mut tried = 0usize;
+    for name in [
+        "prose-l3",
+        "x86-l19",
+        "runs-l1",
+        "window-1k",
+        "frames",
+        "empty",
+    ] {
+        let Some(original) = seed("zstd", name) else {
+            println!("SKIPPED: fuzz/corpus/zstd/{name} is not in this tree");
+            return;
+        };
+        assert!(
+            zstd::decode(&original, &limits).is_ok(),
+            "{name}: the seed decodes"
+        );
+        for at in 0..original.len() {
+            for bit in [0x01u8, 0x80] {
+                let mut bytes = original.clone();
+                bytes[at] ^= bit;
+                exercise(&bytes);
+                tried += 1;
+            }
+        }
+        for cut in 0..original.len() {
+            exercise(&original[..cut]);
+            tried += 1;
+        }
+    }
+    println!("RAN: {tried} damaged Zstandard streams, none panicked");
 }
 
 /// Reads every entry of a possibly damaged 7z and asserts only what

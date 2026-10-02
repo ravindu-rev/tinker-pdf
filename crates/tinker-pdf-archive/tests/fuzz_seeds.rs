@@ -1,5 +1,5 @@
-//! The committed `tar`, `sevenz`, `bzip2`, `ppmd` and `rar` fuzz seeds,
-//! replayed on stable.
+//! The committed `tar`, `sevenz`, `bzip2`, `ppmd`, `zstd` and `rar` fuzz
+//! seeds, replayed on stable.
 //!
 //! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each written
 //! by this crate's own `write_the_fuzz_seeds` tests — plus, in `sevenz/`, one
@@ -34,7 +34,7 @@
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_archive::tar::{Archive, EntryError, Kind, Limits};
-use tinker_pdf_archive::{bzip2, ppmd, rar, sevenz};
+use tinker_pdf_archive::{bzip2, ppmd, rar, sevenz, zstd};
 use tinker_pdf_filters::crc32;
 
 /// Every seed, by name, sorted so a failure names the same file on every
@@ -529,6 +529,56 @@ fn the_committed_ppmd_seeds_replay() {
     }
     println!("RAN: {} ppmd seeds, {bytes} bytes decoded", seeds.len());
     assert_eq!(seeds.len(), 4, "`make-coders.py` writes four ppmd seeds");
+}
+
+// ---- Zstandard --------------------------------------------------------------
+
+/// `fuzz_targets/zstd.rs`'s control-byte table, restated.
+fn zstd_bounds(knobs: u8) -> zstd::Limits {
+    zstd::Limits {
+        max_unpacked: match knobs & 3 {
+            0 => 1,
+            1 => 1 << 10,
+            2 => 1 << 16,
+            _ => 1 << 22,
+        },
+    }
+}
+
+/// Every committed Zstandard seed replays with the target's two invariants —
+/// a decode is within its ceiling, and a roomier ceiling gives the same
+/// answer — and every one of them **decodes**: they are libzstd's own frames
+/// (`tests/coders/make-zstd.py`), so a seed that stopped decoding would leave
+/// the fuzzer exercising refusals. `frames` is two frames, a skippable one
+/// between them and an empty one after, and `window-1k` six blocks of at
+/// most a kilobyte each.
+#[test]
+fn the_committed_zstd_seeds_replay() {
+    let Some(seeds) = corpus("zstd") else {
+        println!("SKIPPED: fuzz/corpus/zstd is not in this tree");
+        return;
+    };
+    let mut bytes = 0usize;
+    for (name, data) in &seeds {
+        let (control, body) = data.split_at(data.len().min(1));
+        let limits = zstd_bounds(control.first().copied().unwrap_or(0));
+        let out = zstd::decode(body, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            out.len() <= limits.max_unpacked,
+            "{name}: within the ceiling"
+        );
+        let roomier = zstd::Limits {
+            max_unpacked: 1 << 24,
+        };
+        assert_eq!(
+            zstd::decode(body, &roomier).as_ref(),
+            Ok(&out),
+            "{name}: a roomier ceiling"
+        );
+        bytes += out.len();
+    }
+    println!("RAN: {} zstd seeds, {bytes} bytes decoded", seeds.len());
+    assert_eq!(seeds.len(), 6, "`make-zstd.py` writes six zstd seeds");
 }
 
 // ---- RAR --------------------------------------------------------------------

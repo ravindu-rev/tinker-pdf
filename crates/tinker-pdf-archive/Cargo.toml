@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The archive containers that are not ZIP, hand-rolled: tar (ustar, GNU long names, PAX), 7z (LZMA, LZMA2, BCJ, BCJ2, bzip2, PPMd) and RAR 5, and the bzip2 ZIP method 12 shares. No PDF types"
+description = "The archive containers that are not ZIP, hand-rolled: tar (ustar, GNU long names, PAX), 7z (LZMA, LZMA2, BCJ, BCJ2, bzip2, PPMd) and RAR 5, and the bzip2 and Zstandard decoders ZIP methods 12 and 93 use. No PDF types"
 
 [dependencies]
 # CRC-32 and raw DEFLATE, and nothing else from anywhere. The same edge

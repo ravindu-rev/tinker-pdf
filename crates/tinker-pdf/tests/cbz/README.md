@@ -23,11 +23,12 @@ implementation's idea of a ZIP over content nobody else owns.
 
 ## What produced them
 
-Seventeen archives, eight of them ZIPs, from five independent implementations
-— ten on the machine described below, and `python-lzma.cbz`, `python-jpx.cbz`,
-`python-bzip2.cbz`, the three `py7zr-*.cb7`s and `7zz-bcj2.cb7` later, on the
-one their own rows name. Sixteen hold the same five pages; `python-jpx.cbz`
-holds a picture T.800 publishes instead.
+Eighteen archives, nine of them ZIPs, from five independent implementations
+and one ZIP this repository writes around another's frames — ten on the
+machine described below, and `python-lzma.cbz`, `python-jpx.cbz`,
+`python-bzip2.cbz`, the three `py7zr-*.cb7`s, `7zz-bcj2.cb7` and
+`python-zstd.cbz` later, on the one their own rows name. Seventeen hold the
+same five pages; `python-jpx.cbz` holds a picture T.800 publishes instead.
 
 | Producer | Files | What it is |
 | --- | --- | --- |
@@ -39,6 +40,7 @@ holds a picture T.800 publishes instead.
 | **CPython 3.11.15 `zipfile`**, `ZIP_STORED` | `python-jpx.cbz` | T.800 Annex J.10's codestream as two JPEG 2000 pages, by `make-jpx.py`, on Linux x86_64, 26 September 2026. See *The JPEG 2000 ZIP* below. |
 | **CPython 3.11.15 `zipfile`**, `ZIP_BZIP2`, over libbzip2 1.0.8 (Ubuntu `1.0.8-5.1build0.1`) | `python-bzip2.cbz` | The same writer asked for APPNOTE method 12, by `make-bzip2.py`, on Linux x86_64, 26 September 2026. |
 | **7-Zip 26.02** (x64) for Linux, `7zz` | `7zz-bcj2.cb7` | The same program as the Windows row, its Linux build from the ip7z/7zip release (`7z2602-linux-x64.tar.xz`, SHA-256 `41aaba7b…c28c03e`), by `make-bcj2.sh`, on Linux x86_64, 26 September 2026: the one writer of BCJ2. |
+| **python-zstandard 0.25.0** (libzstd 1.5.7) on CPython 3.11.15, in a ZIP `make-zstd.py` writes | `python-zstd.cbz` | APPNOTE method 93, which no ZIP writer on hand makes (CPython's `zipfile` learned it in 3.14): libzstd's frames — the reference encoder, level 3 with content checksums — inside local headers and a central directory `make-zstd.py` writes from APPNOTE 4.3, on Linux x86_64, 26 September 2026. BSD-3-Clause. |
 | **py7zr 1.1.3** on CPython 3.11.15, over liblzma 5.4.5, libbzip2 1.0.8 and pyppmd 1.3.1 | `py7zr-bcj.cb7`, `py7zr-bzip2.cb7`, `py7zr-ppmd.cb7` | The second 7z writer, a separate implementation of the container, by `make-py7zr.py`, on Linux x86_64, 26 September 2026. LGPL-2.1-or-later. See *The py7zr `.cb7`s* below. |
 
 **RAR 4 cannot be produced on this machine, and that is recorded rather than
@@ -78,14 +80,15 @@ rerunning a producer.
 
 ## What is committed
 
-303 470 bytes, which is the sum of the Bytes column below and nothing else —
+322 414 bytes, which is the sum of the Bytes column below and nothing else —
 the pages in `source/` are another 18 483 and the four text files here are not
 counted at all. (The figure that stood here before the two later `.cb7`s landed
 was 183 776, which was the sum of nothing: the eight archives it described came
 to 155 074. Re-measured rather than carried, and again when `python-lzma.cbz`
 added 18 939 to 191 755, `python-jpx.cbz` 495 more, `py7zr-bcj.cb7`
 17 643, `py7zr-bzip2.cb7` and `python-bzip2.cbz` 39 185 between them, and
-`py7zr-ppmd.cb7` 17 776, and `7zz-bcj2.cb7` 17 677.)
+`py7zr-ppmd.cb7` 17 776, `7zz-bcj2.cb7` 17 677, and `python-zstd.cbz`
+18 944.)
 `sha256` is the first sixteen hex
 digits, enough to tell a file from a regeneration of it.
 
@@ -99,6 +102,7 @@ digits, enough to tell a file from a regeneration of it.
 | `python-jpx.cbz` | 495 | CPython 3.11 `zipfile`, stored | **Two JPEG 2000 pages**, T.800 J.10's 100-byte codestream bare (`page1.j2k`) and in Annex I's JP2 boxes (`page2.jp2`): the entries the comic path places as `/JPXDecode` | `322249c87ea1a56b` |
 | `python-lzma.cbz` | 18 939 | CPython 3.11 `zipfile`, `ZIP_LZMA` | **Every entry ZIP method 14**, with APPNOTE 5.8.8's header and an end-of-stream marker (general-purpose bit 1). Read since tier 4's archive row wired the LZMA decoder | `22543533a5094f1b` |
 | `python-bzip2.cbz` | 20 742 | CPython 3.11 `zipfile`, `ZIP_BZIP2` | **Every entry ZIP method 12**, a whole bzip2 stream per entry with no framing round it. Read since tier 4's archive row wrote the bzip2 decoder | `3aecc1a5538058d6` |
+| `python-zstd.cbz` | 18 944 | libzstd's frames, in a ZIP `make-zstd.py` writes | **Every entry ZIP method 93**, one Zstandard frame per entry with its content checksum and no framing round it. Read since tier 4's archive row wrote the Zstandard decoder | `3f0e2edee0f60d50` |
 | `7z-lzma2.cb7` | 17 663 | 7-Zip `-t7z -m0=LZMA2` | A CB7 holding the same five pages, in one solid LZMA2 block under an **LZMA-compressed header**. Read since tier 4 | `f211476cb9b199d9` |
 | `7z-nonsolid.cb7` | 18 608 | 7-Zip `-t7z -m0=LZMA2 -ms=off` | The same five pages in **five folders**, one per page: the folder walk runs past folder 0 and sets a coder up five times | `6a10817c1df4905f` |
 | `7z-dictreset.cb7` | 18 073 | 7-Zip `-t7z -m0=LZMA2:d8k:c8k` | The same five pages in one folder of **three LZMA2 chunks**, each opening with a dictionary reset — two of them mid-stream | `7e9caaa4ff5fc706` |
@@ -360,7 +364,8 @@ in `INVENTORY.tsv` either: that table describes the archives of the five pages.
 
 `make-corpus.ps1` writes the ten archives and prints a hash for each;
 `inventory.ps1` regenerates `INVENTORY.tsv` from the five ZIPs through .NET's
-reader; `make-lzma.py`, `make-jpx.py` and `make-bzip2.py` write three more,
+reader; `make-lzma.py`, `make-jpx.py`, `make-bzip2.py` and `make-zstd.py`
+write four more,
 `make-py7zr.py` the py7zr `.cb7`s, and `make-bcj2.sh` the BCJ2 one. None runs in CI — they are how these files were obtained.
 
 ```
@@ -406,10 +411,10 @@ is no way back.
   having: five implementations that share no code, disagree about what to
   store and what to deflate, and lay their directories out differently, must
   still give this reader the same five pictures at the same five sizes.
-  Nothing outside this repository renders any of it. It runs over **fifteen**
+  Nothing outside this repository renders any of it. It runs over **sixteen**
   archives now rather than five — the eight non-ZIPs this build reads, and
-  `python-lzma.cbz` and `python-bzip2.cbz`, join it rather than getting a check
-  of their own, because
+  `python-lzma.cbz`, `python-bzip2.cbz` and `python-zstd.cbz`, join it rather
+  than getting a check of their own, because
   what is worth asserting
   about a `.cbt` or a `.cb7` is not that it opens, it is that it opens as *the
   same pictures* a `.cbz` of the same pages does.

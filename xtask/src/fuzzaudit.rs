@@ -79,6 +79,9 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
     m.insert("bzip2", vec![sig(0, b"BZh")]);
     // 7z's range coder opens with a zero byte, after the three parameter bytes.
     m.insert("ppmd", vec![sig(0, b"\0")]);
+    // RFC 8878's frame magic, `0xFD2FB528` little-endian. A skippable frame
+    // may come first in a stream, but every seed starts with a real one.
+    m.insert("zstd", vec![sig(0, b"\x28\xb5\x2f\xfd")]);
     m.insert(
         "rar",
         vec![sig(0, b"Rar!\x1a\x07\0"), sig(0, b"Rar!\x1a\x07\x01")],

@@ -5,7 +5,9 @@ are what the comic path is held to. They are the wrong input for a coder: five
 PNGs and a JPEG are already compressed, carry one BCJ candidate between them,
 and never repeat a byte four times. This directory is the other half — **one
 real third-party writer asked for one coder, over bytes shaped for that
-coder** — and `tests/coders.rs` is what reads it.
+coder** — and `tests/coders.rs` is what reads it. Zstandard, which ZIP carries
+as whole frames, is here as bare streams as well as in a ZIP, and
+`src/zstd/tests.rs` reads those too.
 
 The device is the comic corpus's: *author the input here, have somebody else's
 tool code it, commit the result.* Every coder here is lossless, so the expected
@@ -27,6 +29,7 @@ same bytes on any Python 3.
 | `prose.txt` | 120 021 | Long enough that bzip2 at level 1 cuts it into two blocks; repetitive enough that PPMd reaches high orders | `6b1e444d13a5c92d` |
 | `runs.bin` | 11 781 | Runs of one byte either side of every run-coder threshold (1–6, 250–261, 1 000, 4 096), then every byte value once | `37b63d50e7cdf6a7` |
 | `empty.txt` | 0 | A stream with nothing in it | `e3b0c44298fc1c14` |
+| `modes.bin` | 10 876 | Zstandard's rarer codings, a block or two per section: 4 096 random nibbles (sixteen equally likely literals, whose Huffman weights libzstd writes four bits each rather than FSE-coded); 100 records of `Q` and 24 bytes copied from 3 993 to 4 092 bytes back (every literal one byte and every sequence one set of codes: RLE literals and RLE for all three sequence tables); 800 bytes of prose (too few sequences for a fast level to describe a table: the predefined ones); 2 000 bytes of `Z` (an RLE block); and 40 records of a counter byte and the same 36 bytes, in two blocks, so the second block's first match repeats an offset the first block left | `340e83f7ec448581` |
 
 ## The archives
 
@@ -38,18 +41,52 @@ same bytes on any Python 3.
 | `py7zr-ppmd-tight.7z` | 56 394 | py7zr 1.1.3, `[FILTER_PPMD]` order 32, `mem` 16 | The same coder in **64 KiB**: the arena fills and the model restarts again and again over 148 KB — counted by `the_ppmd_fixtures_run_in_the_arenas_they_are_named_for` | `31de4d89ffcd0f68` |
 | `7zz-bcj2.7z` | 47 068 | 7-Zip 26.02 for Linux (`7zz`), `-m0=BCJ2 -m1=LZMA:d20 -m2=LZMA:d20 -m3=LZMA:d20 -mb0:1 -mb0s1:2 -mb0s2:3` | 7z `0303011B`: BCJ2's main, call and jump streams each out of an LZMA coder, its decisions packed as they are — four coders, four pack streams, one output; `prose.txt` and `x86.bin` | `a18b64c4f11c5646` |
 | `python-bzip2.zip` | 41 656 | CPython 3.11.15 `zipfile`, `ZIP_BZIP2`, `compresslevel=1` | APPNOTE method 12 on all four inputs: `prose.txt` is **two** blocks at level 1's 100 000-byte limit, and `empty.txt` a stream with **no** block | `8ca8493ac60b6287` |
+| `zstd-method-93.zip` | 54 553 | libzstd 1.5.7's frames (python-zstandard 0.25.0), in a ZIP `make-zstd.py` writes from APPNOTE 4.3 | APPNOTE method 93 on the first four inputs: `prose.txt` at level 3, `x86.bin` at level 19, `runs.bin` **streamed** (no content size) and `empty.txt` | `e660de472c478165` |
+
+### The Zstandard streams
+
+Bare frames, as libzstd writes them and as a method-93 entry holds them. What
+each is shaped to reach is in `make-zstd.py`; that together they reach every
+coding RFC 8878 gives a block — raw, RLE and compressed blocks; raw, RLE,
+Huffman and treeless literals in one and four streams; FSE-coded and direct
+Huffman weights; each of the four modes for each of the three sequence
+tables; all four repeat offsets, and one carried from block to block; a
+Huffman tree kept across a block whose literals were raw; single-segment and
+windowed frames; frames with and without a checksum; a skippable frame — is
+what
+`the_fixtures_reach_every_part_of_the_format` asserts.
+
+| File | Bytes | libzstd asked for | Decodes to | sha256 |
+| --- | ---: | --- | --- | --- |
+| `zstd-prose-l3.zst` | 40 430 | level 3, checksum, content size | `prose.txt` | `16644d22c7d9a245` |
+| `zstd-prose-l19.zst` | 35 223 | level 19, no checksum | `prose.txt` | `11cb2f1a264fbfa9` |
+| `zstd-x86-l22.zst` | 12 010 | level 22 | `x86.bin` | `9e28ab02946e472d` |
+| `zstd-runs-l1.zst` | 1 684 | level 1 | `runs.bin` | `2f15e7075cc61ac8` |
+| `zstd-prose-w10.zst` | 54 281 | level 7, `window_log=10`: 118 blocks of at most 1 KiB | `prose.txt` | `92c1f6b8da1470cb` |
+| `zstd-frames.zst` | 53 919 | four frames and a skippable one: `prose.txt` streamed in 16 KiB flushes, `x86.bin` streamed, the skippable frame, `runs.bin`, and an empty frame | `prose.txt`, `x86.bin`, `runs.bin` | `12f953ec609c159d` |
+| `zstd-modes.zst` | 2 814 | `modes.bin` a block per section, in three frames (level 3, level 1, level 3) | `modes.bin` | `4abdfb7cdcc31246` |
+| `zstd-treeless.zst` | 16 865 | `prose.txt` in 16 KiB flushes at level 5, with a block of text already seen — all match, literals raw — between two whose literals reuse the last tree | `prose.txt`'s first 32 768 bytes, its first 4 000, then the next 16 384 | `4a5bc7343703a692` |
+| `zstd-empty.zst` | 13 | the empty input | nothing | `f96deff1816083fd` |
+| `zstd-checksums.zst` | 1 214 | eighteen checksummed frames of `prose.txt`'s first 0 to 1 000 bytes, either side of every length XXH64 treats differently | those prefixes | `0108cc45d5c344ed` |
+| `zstd-dictionary.zst` | 1 341 | a frame naming a dictionary trained on `prose.txt` (ID `0x7E57`) | refused: `NeedsDictionary` | `4d4b0122a8c7901b` |
+| `zstd-raw-dictionary.zst` | 19 | a frame needing a raw-content dictionary it cannot name | refused: `BadOffset` | `6388fcb574a660ac` |
 
 Obtained on Linux x86_64 with CPython 3.11.15, py7zr 1.1.3, liblzma 5.4.5
 (Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`), libbzip2 1.0.8 (Ubuntu
-`1.0.8-5.1build0.1`) and pyppmd 1.3.1, on 26 September 2026:
+`1.0.8-5.1build0.1`), pyppmd 1.3.1 and python-zstandard 0.25.0 (its bundled
+libzstd 1.5.7), on 26 September 2026:
 
 ```
-pip install --user py7zr
+pip install --user py7zr zstandard
 cd crates/tinker-pdf-archive/tests/coders
 python3 make-inputs.py
 python3 make-coders.py
 sh make-bcj2.sh
+python3 make-zstd.py
 ```
+
+`modes.bin` arrived after the other four inputs, from its own seed and its
+own arithmetic, and adding it left their bytes unchanged.
 
 `make-bcj2.sh` needs 7-Zip 26.02's Linux build on the path as `7zz`: the
 `7z2602-linux-x64.tar.xz` asset of the ip7z/7zip GitHub release 26.02,
@@ -68,6 +105,14 @@ streams end to end — `sevenz/ppmd` (order 8 in 1 MiB, inside the `sevenz`
 target's roomiest bound), and the four bare streams of `ppmd/`, pyppmd's,
 behind the three parameter bytes that target reads: order 2 in 2 KiB,
 order 6 in 64 KiB, order 16 in 1 MiB and order 64 in 8 KiB.
+
+`make-zstd.py` reads no clock either, so a rerun under the same zstandard and
+libzstd writes the same bytes; every hash above was measured twice. It writes
+the six `zstd/` seeds — libzstd's frames over slices of the inputs, behind
+the target's `0xFF` control byte: level 3, level 19, level 1, a 1 KiB window,
+two frames with a skippable one between and an empty one after, and the empty
+input — and `zip_archive/zstd-method-93`, one method-93 entry in the same
+hand-written ZIP.
 
 ### Which implementation did the coding
 
@@ -93,11 +138,20 @@ one matters, because the coder is what these files adjudicate.
   are is the encoder every PPMd 7z in the world was written by, and the
   CRC-32 over the original bytes is what says this decoder inverts it.
 
+- **Zstandard**: python-zstandard is a CPython binding over libzstd itself,
+  the reference implementation, so these are the frames the format's
+  authors' encoder writes. The ZIP around the method-93 entries is not
+  libzstd's and is not a ZIP writer's either: CPython's `zipfile` learned
+  method 93 in 3.14, so `make-zstd.py` writes the local headers, central
+  directory and end record itself, from APPNOTE 4.3 — the part of the file
+  that is ZIP's, which `tinker-pdf-zip` is already held to by other writers.
+
 ## Whether they may be committed
 
 Yes, for the reason `crates/tinker-pdf/tests/cbz/README.md` gives: a coder's
 licence does not reach the bytes it codes, the inputs are ours, and nothing of
 any writer is vendored, linked or redistributed. py7zr is LGPL-2.1-or-later;
 liblzma is public domain (0BSD from 5.6); libbzip2 is under its own BSD-style
-licence; 7-Zip is LGPL-2.1-or-later with an unRAR restriction, none of which
+licence; 7-Zip is LGPL-2.1-or-later with an unRAR restriction; python-zstandard
+and libzstd are BSD-3-Clause (libzstd dual with GPL-2.0), none of which
 reaches an archive of our bytes.

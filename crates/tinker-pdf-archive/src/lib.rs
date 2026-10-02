@@ -23,7 +23,9 @@
 //! for that reason and one more: it has a second caller, ZIP method 12, which
 //! the facade hands it to through `tinker_pdf_zip::Archive::read_coded`
 //! exactly as it hands [`lzma::decode`] to method 14; [`ppmd`] is public for
-//! the first reason alone, since only 7z carries it. `bcj` and `bcj2`, the
+//! the first reason alone, since only 7z carries it; and [`zstd`] for the
+//! second alone, since no 7z this crate reads names it and ZIP method 93 is
+//! its only caller. `bcj` and `bcj2`, the
 //! two x86 branch converters, are private: the first cannot fail, the
 //! second's two failures surface as `sevenz::EntryError`s, and `sevenz` is
 //! the only door to either.
@@ -93,3 +95,4 @@ pub mod ppmd;
 pub mod rar;
 pub mod sevenz;
 pub mod tar;
+pub mod zstd;

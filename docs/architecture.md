@@ -65,10 +65,11 @@ RFC 1951, CFF against Adobe TN 5176) without a PDF in sight.
 
 Eight leaf-to-leaf edges exist, each pointing from a higher layer down:
 `font → filters` (the CMap asset pipeline), `zip → filters` (raw DEFLATE
-and CRC-32 — and **not** `zip → archive` for ZIP methods 14 and 12:
+and CRC-32 — and **not** `zip → archive` for ZIP methods 14, 12 and 93:
 `Archive::read_coded` takes the decoder as a callback and the facade, which
-already depends on both, hands `tinker_pdf_archive::lzma` and
-`tinker_pdf_archive::bzip2` in, so the methods that needed a second leaf's
+already depends on both, hands `tinker_pdf_archive::lzma`,
+`tinker_pdf_archive::bzip2` and `tinker_pdf_archive::zstd` in, so the methods
+that needed a second leaf's
 decoder cost an argument rather than an edge), `archive → filters` (the same two, for the same two reasons —
 7z method 040108 *is* RFC 1951, and 7z and RAR both record a per-file
 CRC-32), `layout → css` (computed styles in, boxes out),
