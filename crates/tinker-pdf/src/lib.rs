@@ -27,6 +27,7 @@ mod annots;
 pub mod cbz;
 mod display;
 pub mod epub;
+pub mod fb2;
 pub mod fontlist;
 pub mod fonts;
 pub mod form_data;
@@ -1178,6 +1179,37 @@ fn open_container(
         epub::Routing::Refused(why) => return Err(why),
         epub::Routing::NotEpub(archive) => archive,
     };
+    // **FB2's own packaging, before the comic fallthrough.** An `.fb2.zip` is
+    // a ZIP of exactly one file, and that file is a FictionBook document —
+    // decided by the sniff of its bytes and never by its name, for
+    // `cbz::image_format`'s reason. Anything else, a one-image comic
+    // included, is a comic as it always was; that comic's one entry is then
+    // inflated twice, which `MAX_ZIP_ENTRY_BYTES` (128 MiB) twice over keeps
+    // well inside the archive's 1 GiB `MAX_ZIP_INFLATED`.
+    let mut archive = archive;
+    let files: Vec<usize> = archive
+        .entries()
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.name.ends_with('/'))
+        .map(|(at, _)| at)
+        .collect();
+    if let [only] = files[..] {
+        if let Ok(inner) = cbz::read_entry(&mut archive, only) {
+            if standalone::sniff(&inner) == Some(Standalone::Fb2) {
+                let (layout, unusable) =
+                    epub::BookLayout::sanitised(options.page, options.font_size);
+                let (pdf, mut report) = standalone::synthesise(Standalone::Fb2, &inner, &layout)?;
+                for warning in archive.warnings() {
+                    report.warn(ArchiveWarning::Zip(*warning));
+                }
+                for defect in unusable {
+                    report.warn(ArchiveWarning::UnusableOption(defect));
+                }
+                return Ok((pdf, report));
+            }
+        }
+    }
     cbz::pages_from_archive(archive, &comic)
 }
 

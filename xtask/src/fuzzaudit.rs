@@ -176,6 +176,10 @@ const UNSIGNED: &[(&str, &str)] = &[
     ),
     ("css", "a stylesheet is text"),
     (
+        "fb2",
+        "FB2 is XML text, and a knob byte picks whether it is framed",
+    ),
+    (
         "form_data",
         "FDF and XFDF are text, and both readers see every seed whichever it is",
     ),

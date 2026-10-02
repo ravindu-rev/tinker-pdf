@@ -58,6 +58,19 @@ and resolves. A streamed open of one is whole-file, as a container's is, and
 its wider sniff is read only when the first kilobyte holds no PDF header, so
 a streamed PDF's reads are unchanged.
 
+**An FB2 opens like a loose XHTML file** — a root named `FictionBook`,
+and the `.fb2.zip` it is usually shipped as, a ZIP of one file whose bytes
+sniff as FB2. `tinker_pdf::fb2` translates FictionBook 2.1 into an XHTML
+document: sections, titles, epigraphs, poems, cites, subtitles and tables
+become `<div>`s and `<p>`s carrying the FB2 name as a class, which
+`fb2::STYLESHEET` — a reading system's sheet for a format with no presentation
+of its own — sets ahead of the book's own `<stylesheet>`; the inline elements
+become HTML's; a note reference is a link that lands on the note's page;
+`<book-title>` and the first `<author>` are `/Title` and `/Author`, the cover
+is the first page's picture, and the rest of the `<description>` is metadata
+and not text. Pictures are `<img src="#id">`, answered from the book's own
+`<binary>` elements through the `epub::read::Resources` seam.
+
 **Markdown opens by name, not by sniff.** `Document::open_markdown(bytes,
 &OpenOptions)` reads the bytes as UTF-8 (each malformed sequence U+FFFD,
 counted), translates them with `tinker_pdf::markdown` — a hand-written
@@ -193,6 +206,9 @@ with what the translation did), and its two caps,
 (100 KiB, or the document's length if larger, of what reference links copy
 out of their definitions). What a translation had to do is
 `ArchiveWarning::Translation { item, defect: TranslationDefect, count }`.
+`tinker_pdf::fb2` exposes `to_xhtml` (the translation, without its
+pictures), `STYLESHEET` and `FB2_NAMESPACE`; `Standalone::Fb2` is the sniff's
+answer.
 
 The streaming seam adds `open_streaming(source)` and
 `open_streaming_with(source, &OpenOptions)`, the `ByteSource` trait with
@@ -231,6 +247,8 @@ exceed it routinely — declared in one place,
 | Raw HTML in Markdown | `ArchiveWarning::Translation { defect: TranslationDefect::RawHtmlAsText, .. }` | set as the text it is: CommonMark passes it through, and a tag that is not well-formed XML would stop the XML reader and lose the rest of the document. Every character still reaches the page | `crates/tinker-pdf/src/markdown.rs` |
 | A named character reference outside XHTML 1.0's 253, in Markdown | the reference stays literal | CommonMark resolves HTML's 2 231 names; this repository vendors XHTML 1.0's sets (W3C) and not HTML's list, so `&HilbertSpace;` is text. The one CommonMark example of 652 the reader fails | [THIRDPARTY.md](../../THIRDPARTY.md) |
 | Markdown containers past 100 deep, references past their copy budget | `TranslationDefect::{NestingTooDeep, ReferenceBudgetSpent}` | read as the text they then are; the two caps are `bounds_ledger.rs` rows. A reference is the one construct whose output is not bounded by its input, so its copies are held to 100 KiB or the document's own length, cmark's rule | `crates/tinker-pdf/src/markdown.rs` |
+| An FB2 in `windows-1251`, `koi8-r` or another 8-bit encoding | one empty page and `ArchiveWarning::Markup(Truncated)` | `tinker-pdf-xml` decodes UTF-8 and UTF-16 and refuses the rest by name, and a book set in the wrong letters would be worse than one not set. The narrowed half of the FB2 row | [ROADMAP](../ROADMAP.md) |
+| An FB2 element the schema does not define; a `<binary>` that is not base64 | `TranslationDefect::{UnknownElement, BinaryUnreadable}`, and `ImageNotDrawn` for the picture | the unknown element's text is kept and its structure is not; the picture has nothing to draw | `crates/tinker-pdf/src/fb2.rs` |
 | A bare BMP | `OpenError::NotAPdf` | `BM` is two bytes, and also how a text file about a car begins; the comic path can afford it because an archive's entries are already pictures, and a sniff over every input cannot | `crates/tinker-pdf/src/standalone.rs` |
 | An SVG or HTML whose root element is past byte 4 096 | `OpenError::NotAPdf` | the prolog is walked inside `SNIFF_WINDOW` and not searched past it, because a sniff that scans is one that finds `<svg` inside a PDF's stream | `crates/tinker-pdf/src/standalone.rs` |
 | A bare GIF, WebP or AVIF | `ArchiveWarning::PlaceholderPage { defect: PageDefect::UnsupportedFormat(f), .. }` | recognised by magic and not decoded here; one placeholder page naming the format, which is what a comic archive holding that one picture has always produced | [cbz](cbz.md) |
@@ -304,9 +322,19 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   answers in pieces gave it one byte of `PK\x03\x04`, and a comic archive
   streamed from one was `NotAPdf`. The sniff's own walk and the two decoders
   are unit tests in `src/standalone.rs`, held to RFC 4648 §10's vectors and
-  RFC 2397 §4's examples; `hostile_input.rs` sweeps all six kinds damaged,
+  RFC 2397 §4's examples; `hostile_input.rs` sweeps all seven kinds damaged,
   buffered and streamed; `fuzz/fuzz_targets/standalone.rs` is the deep
   version.
+- **`crates/tinker-pdf/tests/fb2.rs`** — an FB2 written from FictionBook
+  2.1's schema: its words on its pages and its description off them, its
+  title and author as document information, set by the format's sheet (a
+  title centred, an epigraph to the right), **pixel for pixel** the XHTML it
+  translates to, its cover and picture drawn from its own `<binary>`, a note
+  link landing on its note, its own `<stylesheet>` winning over the format's,
+  an unknown element and a broken binary named, an 8-bit encoding an empty
+  page that says so, a cut book read as far as it goes, and an `.fb2.zip` the
+  same book while a ZIP of one picture stays a comic. `hostile_input.rs` sweeps a damaged FB2 and holds its translation to
+  being XML; `fuzz/fuzz_targets/fb2.rs` is the deep version.
 - **`crates/tinker-pdf/tests/commonmark_spec.rs`** — the Markdown reader held
   to CommonMark 0.31.2's 652 examples, compared exactly, over a `spec.txt`
   fetched at its pinned tag and SHA-256 by `tests/commonmark/fetch-spec.sh`

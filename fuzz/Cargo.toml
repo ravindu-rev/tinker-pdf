@@ -314,6 +314,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fb2"
+path = "fuzz_targets/fb2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "woff"
 path = "fuzz_targets/woff.rs"
 test = false

@@ -168,7 +168,10 @@ every sheet the document links; a book's is empty. A **loose content
 document is a book of one chapter** through the same passes
 (`epub::lay_out_one`, crate-internal): a standalone SVG and a loose XHTML file
 open that way ([opening](opening.md)), and `DocumentBuilder::from_html` builds
-one from markup and a stylesheet ([creation](creation.md)).
+one from markup and a stylesheet ([creation](creation.md)). Markdown and FB2
+reach it as translations into XHTML; an FB2's pictures are answered by a
+provider over its own `<binary>` elements, and every loose document's
+`data:` URLs by one in front of whatever else answers.
 
 ## Tagged output
 

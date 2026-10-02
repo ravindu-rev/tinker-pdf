@@ -775,6 +775,25 @@ fn mutated_standalone_documents_never_panic() {
             "soup",
             b"<!DOCTYPE html><html><body><p>a<p>b<br><img src=x></body>".to_vec(),
         ),
+        (
+            "fb2",
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><FictionBook ",
+                "xmlns=\"http://www.gribuser.ru/xml/fictionbook/2.0\" ",
+                "xmlns:l=\"http://www.w3.org/1999/xlink\"><description><title-info>",
+                "<author><first-name>A</first-name></author><book-title>T</book-title>",
+                "<coverpage><image l:href=\"#c\"/></coverpage></title-info></description>",
+                "<body><title><p>T</p></title><section id=\"s\"><title><p>One</p></title>",
+                "<p>a <emphasis>b</emphasis> <a l:href=\"#n\" type=\"note\">1</a></p>",
+                "<poem><stanza><v>v</v></stanza></poem><image l:href=\"#c\"/>",
+                "<table><tr><td>c</td></tr></table></section></body>",
+                "<body name=\"notes\"><section id=\"n\"><p>note</p></section></body>",
+                "<binary id=\"c\" content-type=\"image/png\">iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC</binary>",
+                "</FictionBook>"
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
         ("png", png),
         (
             "jpeg",
@@ -797,6 +816,22 @@ fn mutated_standalone_documents_never_panic() {
             let label = format!("{name} case {case}");
             let _guard = Guard(&label);
             exercise(mutated.clone());
+            // The FB2 translation writes every element it opens and closes it,
+            // so what it hands the reader is XML wherever the FB2 was — the
+            // property `fuzz/fuzz_targets/fb2.rs` holds deeply.
+            if *name == "fb2" {
+                if let Some(xhtml) = tinker_pdf::fb2::to_xhtml(&mutated) {
+                    let dom = tinker_pdf::epub::read::markup(
+                        xhtml.as_bytes(),
+                        &tinker_pdf_xml::Limits::DEFAULT,
+                    );
+                    assert!(
+                        dom.defects.is_empty(),
+                        "{label}: the translation is not XML: {:?}",
+                        dom.defects
+                    );
+                }
+            }
             // The creation call reads the same markup through the same reader
             // with a stylesheet of the caller's in front, and what it builds is
             // finished and opened like anything else.

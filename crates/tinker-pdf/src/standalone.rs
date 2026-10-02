@@ -46,6 +46,12 @@
 //!   decoded here — GIF, WebP, AVIF — or bytes that will not decode are one
 //!   placeholder page naming why, which is what a comic archive holding that
 //!   one picture has always produced.
+//! - **An FB2** — a root named `FictionBook`, since tier 5's FB2 row — is
+//!   translated by [`crate::fb2`] into an XHTML document and laid out as a
+//!   loose XHTML file is, with [`crate::fb2::STYLESHEET`] ahead of the book's
+//!   own sheet and its pictures answered from its own `<binary>` elements.
+//!   `Document::open` also takes the `.fb2.zip` it is shipped as: a ZIP of one
+//!   file whose bytes sniff as FB2.
 //!
 //! # References, and the one kind a loose file can resolve
 //!
@@ -104,6 +110,13 @@ pub enum TranslationDefect {
     /// [`crate::markdown::MAX_MARKDOWN_REFERENCE_BYTES`] — or the document's
     /// own length, if larger — out of their definitions.
     ReferenceBudgetSpent,
+    /// An FB2 element FictionBook 2.1's schema does not define, or one in
+    /// another namespace, read as its content: its text reaches the page and
+    /// its structure does not.
+    UnknownElement,
+    /// An FB2 `<binary>` whose base64 would not decode, so the picture that
+    /// names it is not drawn.
+    BinaryUnreadable,
 }
 
 /// What a one-file document turned out to be.
@@ -115,6 +128,8 @@ pub enum Standalone {
     /// An XHTML or HTML document: the root element is `html`, in any case, or
     /// the document type declaration names `html`.
     Html,
+    /// A FictionBook 2 document: the root element is `FictionBook`.
+    Fb2,
     /// An image, by its magic at offset zero.
     Image(ImageFormat),
 }
@@ -147,6 +162,7 @@ pub fn sniff(bytes: &[u8]) -> Option<Standalone> {
     match root {
         Some(b"svg") => Some(Standalone::Svg),
         Some(name) if name.eq_ignore_ascii_case(b"html") => Some(Standalone::Html),
+        Some(b"FictionBook") => Some(Standalone::Fb2),
         // HTML lets a document leave out its `<html>`, and says what it is in
         // its doctype instead. The reader will stop where the markup stops being
         // XML, and the report will say so.
@@ -267,13 +283,14 @@ pub(crate) fn synthesise(
             Loose::Svg(bytes),
             Vec::new(),
             &mut DataUrls(epub::read::NoResources),
-            layout,
+            Page::plain(layout),
         ),
+        Standalone::Fb2 => fb2(bytes, layout),
         Standalone::Html => laid_out(
             Loose::Markup(epub::read::markup(bytes, &limits.xml)),
             Vec::new(),
             &mut DataUrls(epub::read::NoResources),
-            layout,
+            Page::plain(layout),
         ),
     }
 }
@@ -310,7 +327,63 @@ pub(crate) fn markdown(
         Loose::Markup(epub::read::markup(xhtml.as_bytes(), &limits.xml)),
         before,
         &mut DataUrls(epub::read::NoResources),
-        layout,
+        Page::plain(layout),
+    )
+}
+
+/// A FictionBook 2 document as a synthesised PDF (tier 5's FB2 row):
+/// translated by [`crate::fb2`] into an XHTML document whose pictures are its
+/// own `<binary>` elements, and laid out with the format's reading-system sheet
+/// ahead of the book's own.
+fn fb2(bytes: &[u8], layout: &BookLayout) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    let limits = epub::Limits::DEFAULT;
+    let mut before = Vec::new();
+    let translated = match crate::fb2::translate(bytes, &limits.xml) {
+        Ok((translated, stopped)) => {
+            if stopped {
+                before.push(ArchiveWarning::Markup {
+                    item: String::new(),
+                    defect: epub::xhtml::MarkupDefect::Truncated,
+                });
+            }
+            Some(translated)
+        }
+        // An encoding the XML reader does not decode, or a character it may
+        // not read: no tree at all, which a loose XHTML file says the same way.
+        Err(_) => {
+            before.push(ArchiveWarning::Markup {
+                item: String::new(),
+                defect: epub::xhtml::MarkupDefect::Truncated,
+            });
+            None
+        }
+    };
+    let Some(translated) = translated else {
+        return laid_out(
+            Loose::Markup(epub::xhtml::Dom::default()),
+            before,
+            &mut DataUrls(epub::read::NoResources),
+            Page::plain(layout),
+        );
+    };
+    for (defect, count) in &translated.defects {
+        before.push(ArchiveWarning::Translation {
+            item: String::new(),
+            defect: *defect,
+            count: *count,
+        });
+    }
+    let dom = epub::read::markup(translated.xhtml.as_bytes(), &limits.xml);
+    let mut binaries = translated.binaries;
+    laid_out(
+        Loose::Markup(dom),
+        before,
+        &mut DataUrls(&mut binaries),
+        Page {
+            layout,
+            sheet: crate::fb2::STYLESHEET,
+            author: translated.author.as_deref(),
+        },
     )
 }
 
@@ -329,14 +402,40 @@ pub(crate) fn lossy_utf8(bytes: &[u8]) -> (String, usize) {
     (text, malformed)
 }
 
+/// What a loose document is laid out with besides its own markup.
+#[derive(Clone, Copy)]
+struct Page<'a> {
+    /// The page box and base font size.
+    layout: &'a BookLayout,
+    /// A reading system's sheet for the format, ahead of the document's own.
+    sheet: &'a str,
+    /// `/Author`, where the format names one outside its markup.
+    author: Option<&'a str>,
+}
+
+impl<'a> Page<'a> {
+    fn plain(layout: &'a BookLayout) -> Page<'a> {
+        Page {
+            layout,
+            sheet: "",
+            author: None,
+        }
+    }
+}
+
 /// One loose content document laid out as a book of one chapter, written and
 /// reported; `before` is what was tolerated on the way to the tree.
 fn laid_out<R: Resources>(
     content: Loose<'_>,
     before: Vec<ArchiveWarning>,
     resources: &mut R,
-    layout: &BookLayout,
+    page: Page<'_>,
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    let Page {
+        layout,
+        sheet,
+        author,
+    } = page;
     let limits = epub::Limits::DEFAULT;
     let mut builder = DocumentBuilder::new();
     if let Loose::Markup(dom) = &content {
@@ -344,12 +443,15 @@ fn laid_out<R: Resources>(
             builder.set_info(b"Title", &title);
         }
     }
+    if let Some(author) = author {
+        builder.set_info(b"Author", author);
+    }
     let laid = epub::lay_out_one(
         resources,
         &mut builder,
         "",
         content,
-        "",
+        sheet,
         epub::PAGE_MARGIN,
         &limits,
         layout,
@@ -713,6 +815,15 @@ mod tests {
             kind("<!doctype html><title>no html element</title>"),
             Some(Standalone::Html),
             "HTML may leave its root out, and the doctype says what it is"
+        );
+        assert_eq!(
+            kind("<?xml version=\"1.0\"?>\n<FictionBook xmlns=\"x\"><body/></FictionBook>"),
+            Some(Standalone::Fb2)
+        );
+        assert_eq!(
+            kind("<fictionbook/>"),
+            None,
+            "an FB2 root is case-sensitive"
         );
         assert_eq!(kind("<SVG/>"), None, "XML names are case-sensitive");
         assert_eq!(kind("<FixedPage/>"), None, "XML that is none of these");
