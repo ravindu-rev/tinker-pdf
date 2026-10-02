@@ -301,8 +301,23 @@ parent with `clip-path` on the `<clipPath>`, which is §14.3.5's
 intersection; an image is a PNG `data:` URI of its decoded samples — a
 stencil in the fill colour, a soft mask as its alpha — on the unit square,
 inside a `<g>` that names its clip because a clip named by the `<image>`
-would be read through the image's own transform; a transparency group is a
-`<g>` with the group's alpha as `opacity`. **Text is written as paths**, one
+would be read through the image's own transform; **a picture drawn again is
+not embedded again** — an image's PNG, or a rasterised paint's, of 512 bytes
+or more is written once into `<defs>` and every draw of the same bytes is a
+`<use>` carrying that draw's transform and opacity, up to the 4 096
+expansions `tinker-pdf-svg` allows, past which pictures are written in place
+so the reader never refuses a file for its references; a transparency group is a
+`<g>` with the group's alpha as `opacity`. **The markup has a budget**,
+`MAX_SVG_BYTES` (256 MiB) of elements or the smaller `SvgOptions::max_bytes`:
+markup grows with what a page *does* — every operator an element, every image
+`Do` a picture — so a short stream asks for as much as it likes, and an element
+that would pass the budget is not written, nothing after it is, the replay is
+told to stop and `SvgWarning::Truncated { limit }` says so; the document is
+well-formed and ends there. Before both, the review of 2 October 2026 measured
+a 252 112-byte file drawing one 200 x 200 image four hundred times write
+85 550 995 bytes of markup; the same drawing now writes 238 459, and four
+hundred `sh` of a 2 889-byte page whose shading is rasterised write one
+raster and four hundred references. **Text is written as paths**, one
 per glyph, from the outline the renderer draws: SVG 1.1 carries a font only
 as `@font-face` or `<font>`, and the reader this writer is held to reads
 neither, so glyph-positioned `<text>` would look like the page only where the
@@ -426,11 +441,15 @@ needs (the page, its recorded calls and its resources), so it outlives the
 displayed size in points, which are the root's `width`, `height` and
 `viewBox`), and `warnings`, a `Vec<SvgWarning>` deduplicated per page.
 `SvgOptions` (`#[non_exhaustive]`, `Default`) has `annotations` (on, as on a
-render) and `raster_scale` (pixels per point for what is rasterised, 2 by
+render), `raster_scale` (pixels per point for what is rasterised, 2 by
 default, clamped to 0.25–16; a value that is not a finite positive number is
-read as the default). `SvgWarning` is `Rasterised { what: Rasterised }` with
+read as the default) and `max_bytes` (the markup's budget in bytes of
+elements, `tinker_pdf::MAX_SVG_BYTES` by default; a larger value is read as
+the cap, so it lowers the ceiling and cannot raise it). `SvgWarning` is
+`Rasterised { what: Rasterised }` with
 `Rasterised::{Shading, TilingPattern, PatternedStroke}`, `SoftMaskRefused`,
-`BlendModeRefused { mode }`, `KnockoutRefused` and `Render(RenderWarning)`.
+`BlendModeRefused { mode }`, `KnockoutRefused`, `Truncated { limit }` and
+`Render(RenderWarning)`.
 The output is the same bytes every time, and nothing on its path calls a
 transcendental, so ruling 4's argument covers it — but no SVG fingerprint is
 committed beside `determinism.rs`'s, so the cross-target claim is argued and
@@ -533,6 +552,7 @@ a defect to hide in.
 | An annotation render at an index past `/Annots`, or of an entry that draws nothing | `RenderPartError::NoSuchAnnotation { count }`, `AnnotationNotDrawn { why }` with `NotDrawn::{NotADictionary, Hidden, Popup, NoRect, NoAppearance, UnreadableAppearance, Degenerate}` | Every reason `Page::render` skips an annotation silently, named where a caller asked for that one | [document model](document-model.md) |
 | A soft mask, a blend mode other than `Normal`, or a knockout group, on a page written as SVG | `SvgWarning::SoftMaskRefused`, `BlendModeRefused { mode }`, `KnockoutRefused` | SVG 1.1 says the first two only with `<mask>` and `<filter>`'s `feBlend`, which `tinker-pdf-svg` refuses, and the third not at all; what was masked is drawn unmasked, the blend as `Normal`, the group as an ordinary one — a file this repository cannot read back whole is not written | [design/svg.md](../design/svg.md) |
 | A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is no longer vectors there. A `<pattern>` would be exact for a tiling pattern and is the element the reader refuses | — |
+| A page whose SVG would pass `MAX_SVG_BYTES` (256 MiB) of elements, or the smaller `SvgOptions::max_bytes` | `SvgWarning::Truncated { limit }` | Markup grows with what the page does rather than with what the file holds, so it has a budget a render's one canvas does not need; what fits is written, the document is well-formed and ends there, and the replay stops | `bounds_ledger.rs` |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -576,8 +596,15 @@ a defect to hide in.
   the page states, worked out from the content stream's own numbers — a
   rectangle's corners, every control point of every glyph from `glyf` and
   the text matrix, an image's samples byte for byte and its corners, a
-  gradient's axis, focus and stops, a dashed stroke's whole pen — never with
-  a second rendering. A soft mask, a blend mode, a knockout group, a mesh and
+  gradient's axis, focus and stops, a dashed stroke's whole pen, and a
+  stroke under a non-uniform scale whose width is also counted in the
+  renderer's rows of ink — never with a second rendering. One noisy image
+  drawn four hundred times is one copy and four hundred references, each read
+  back where its `cm` puts it; a raster drawn three times is one; a tiny
+  picture is written in place, and 4 100 draws of a large one are exactly the
+  4 096 references the reader expands and four copies; three thousand squares
+  under a 4 KiB budget are cut short with `Truncated`, the replay stopping
+  before the operator the page ends on. A soft mask, a blend mode, a knockout group, a mesh and
   a tiling pattern on one page each produce their warning, no refused element
   is written and the reader reports none of its own refusals; the nested
   clip and the clipped image pin the reader's two shortfalls above; a

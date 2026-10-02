@@ -155,7 +155,7 @@ pub use png_read::PngReadError;
 /// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
 pub use render_part::{NotDrawn, RenderPartError};
 /// A page written as SVG 1.1: [`Page::to_svg`], and what it could not say.
-pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning};
+pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
 /// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
 ///
 /// Here for the reason `ExtGState` is: [`NewField`] is the method's argument

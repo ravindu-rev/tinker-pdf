@@ -51,6 +51,16 @@
 //!   reads a `<g>`'s clip on nothing under it, so the reader sees a clipped
 //!   image unclipped; the file is right and the reader is short, as with
 //!   nested clips below.)
+//! - **A picture drawn again is not embedded again.** An image's PNG, or a
+//!   rasterised paint's, of `REUSE_AT` (512 bytes) or more is written once, as
+//!   an `<image id>` on the unit square in `<defs>`, and every draw of the
+//!   same bytes is a `<use>` of it carrying that draw's transform and opacity
+//!   (SVG 1.1 §5.6). Without it a short content stream drawing one large
+//!   image four hundred times is four hundred copies of the image in the
+//!   markup. Smaller pictures are written in place, where a reference would
+//!   save less than it costs, and so is every picture past the
+//!   [`tinker_pdf_svg::Limits::DEFAULT`] number of expansions, so a file this
+//!   writes is never one its reader refuses for having too many.
 //! - **A number is never `inf` or `NaN`.** A non-finite value is written as
 //!   0 and one past 10^11 as a whole number, so a hostile page's coordinates
 //!   still make a document a reader parses.
@@ -88,7 +98,23 @@
 //! a text clip with no glyphs, and anything the renderer said while drawing a
 //! rasterised paint — is reported in the renderer's own words, as
 //! [`SvgWarning::Render`], so one vocabulary names one fact.
+//!
+//! # How large the output may be
+//!
+//! **At most [`MAX_SVG_BYTES`] of elements**, or the smaller
+//! [`SvgOptions::max_bytes`] a caller asks for. Markup is the one thing the
+//! writer allocates in proportion to what the page *does* rather than to what
+//! the file holds — every operator is an element, every image draw a picture,
+//! every rasterised paint a page-sized raster — so a short content stream,
+//! and a shorter one through a fan of forms, asks for as much as it likes. An
+//! element that would take the markup past the budget is not written, and
+//! nothing after it is: the writer reports [`SvgWarning::Truncated`] and
+//! tells the replay to stop, and the document it hands back is well-formed
+//! and ends where the budget did. The root element, `<defs>`' own tags and
+//! the `</g>` of each group still open are outside the count, a few hundred
+//! bytes in all.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -118,6 +144,11 @@ pub struct SvgOptions {
     /// clamped to `0.25..=16`, and a value that is not a finite positive
     /// number is read as the default.
     pub raster_scale: f64,
+    /// The most markup the writer may produce, in bytes of elements: see the
+    /// module documentation's *How large the output may be*.
+    /// [`MAX_SVG_BYTES`] by default, and never more — a larger value is read
+    /// as that cap, so this lowers the ceiling and cannot raise it.
+    pub max_bytes: usize,
 }
 
 impl Default for SvgOptions {
@@ -125,8 +156,65 @@ impl Default for SvgOptions {
         SvgOptions {
             annotations: true,
             raster_scale: 2.0,
+            max_bytes: MAX_SVG_BYTES,
         }
     }
+}
+
+/// The most markup one page's SVG may hold, in bytes of elements.
+///
+/// What a page's markup costs is what the page *does*: every operator an
+/// element, every image `Do` a picture, every rasterised paint a raster the
+/// size of the region it paints. So a short content stream — and a shorter
+/// one through a fan of forms — asks for as much as it likes, which a render
+/// of the same page, holding one canvas, never does. Past this the writer
+/// stops, says so ([`SvgWarning::Truncated`]) and hands back the well-formed
+/// document it has.
+///
+/// | | Bytes of markup |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 266 127 |
+/// | A 200-page comic, whose largest page is a 2000 x 3000 scan | 32 100 000 |
+/// | A dense 200-page fixed document, a 300 dpi US Letter scan on the page | 46 000 000 |
+/// | A 300-page reflowable book, the same plate on a page of text | 46 000 000 |
+/// | **This cap** | **256 MiB** |
+///
+/// The yardsticks are pictures, because a picture is the largest thing one
+/// element can be: every image is embedded as an RGBA PNG, so the worst case
+/// is its samples incompressible — four bytes a pixel and one a row, in
+/// base64's four characters for three. A 2000 x 3000 comic scan is 24 003 000
+/// bytes of PNG and 32 004 000 of markup, rounded up for the chunks; a
+/// 2 550 x 3 300 full-page scan at 300 dpi is 33 663 300 and 44 884 400, and a
+/// fixed page's two thousand elements and forty thousand segments, or a
+/// book page's text as glyph outlines, add about a megabyte. The cap clears
+/// the largest by 5.8x. The fixtures' figure is the largest page any suite
+/// writes at this cap, measured 2 October 2026: `svg_output.rs`'s 4 100 draws
+/// of one picture, 4 096 of them references. The test that fires this cap
+/// lowers [`SvgOptions::max_bytes`] rather than writing a quarter of a
+/// gigabyte, and a unit test holds the lowering to never being a raising.
+///
+/// Reachable: a content stream as long as `MAX_DECODED_STREAM` allows of
+/// `0 0 m 1 1 l S`, fourteen bytes an operator, writes a stroked `<path>` of
+/// about seventy bytes for each — 640 MiB, two and a half times this cap,
+/// before any form multiplies it.
+pub const MAX_SVG_BYTES: usize = 256 << 20;
+
+/// The size from which a picture — an image's PNG, or a rasterised paint's —
+/// is written once and referenced after, in bytes of PNG.
+///
+/// A `<use>` and its transform are about a hundred bytes, and a picture
+/// written in place is its PNG in base64 — a third larger — and a hundred and
+/// fifty bytes of attributes. From half a kilobyte, a reference costs an
+/// eighth of a copy.
+const REUSE_AT: usize = 512;
+
+/// How many `<use>` references one page's markup may make: as many as
+/// `tinker-pdf-svg` expands, so the reader never refuses a file for them.
+const MAX_REFERENCES: usize = tinker_pdf_svg::Limits::DEFAULT.max_uses;
+
+/// The budget a write runs under: the caller's, and never more than the cap.
+fn budget(options: &SvgOptions) -> usize {
+    options.max_bytes.min(MAX_SVG_BYTES)
 }
 
 /// A page as SVG 1.1.
@@ -168,6 +256,13 @@ pub enum SvgWarning {
     },
     /// A knockout transparency group (11.4.5), drawn as an ordinary one.
     KnockoutRefused,
+    /// The markup reached its budget — [`SvgOptions::max_bytes`], at most
+    /// [`MAX_SVG_BYTES`] — and what the page drew from that point on is not
+    /// in it. The document is well-formed and ends there.
+    Truncated {
+        /// The budget, in bytes of elements.
+        limit: usize,
+    },
     /// What a render of the page says, in the renderer's own words, about
     /// something the writer met too: a font with no outline, an image this
     /// build cannot decode (a grey placeholder stands in for it, as on a
@@ -225,20 +320,7 @@ impl DisplayList {
                 writer.pop_resources();
             }
         }
-        // What `Page::render` adds after its renderer finishes, for the same
-        // two reasons: a glyph a font could not name is a `.notdef` outline
-        // and never reaches the device's own count, and a damaged image is
-        // drawn and named (ruling 10).
-        if !resources.missing_fonts().is_empty() {
-            writer.warn(SvgWarning::Render(RenderWarning::UnreadableFont));
-        }
-        for (name, reason) in resources.damaged_images() {
-            writer.warn(SvgWarning::Render(RenderWarning::DamagedImage {
-                name,
-                reason,
-            }));
-        }
-        writer.finish(width, height)
+        writer.finish_with(&resources, width, height)
     }
 }
 
@@ -299,6 +381,16 @@ struct Writer<'a> {
     hidden: u32,
     groups: usize,
     warnings: Vec<SvgWarning>,
+    /// The most bytes `defs` and `body` may hold together.
+    limit: usize,
+    /// Whether an element was refused for the budget, after which nothing
+    /// more is written and the replay is told to stop.
+    spent: bool,
+    /// Every picture written once into `defs`, by its PNG and its
+    /// `image-rendering`, and the id it was written under.
+    pictures: HashMap<(Vec<u8>, Option<&'static str>), u32>,
+    /// `<use>` references written, against [`MAX_REFERENCES`].
+    references: usize,
 }
 
 impl<'a> Writer<'a> {
@@ -337,7 +429,106 @@ impl<'a> Writer<'a> {
             hidden: 0,
             groups: 0,
             warnings: Vec::new(),
+            limit: budget(options),
+            spent: false,
+            pictures: HashMap::new(),
+            references: 0,
         }
+    }
+
+    /// Whether `more` bytes of elements fit in the budget. The first time
+    /// they do not, the writer is spent: it says so once, writes nothing
+    /// more, and answers the replay's `is_cancelled` with yes.
+    fn room(&mut self, more: usize) -> bool {
+        if self.spent {
+            return false;
+        }
+        let total = self
+            .defs
+            .len()
+            .saturating_add(self.body.len())
+            .saturating_add(more);
+        if total > self.limit {
+            self.spent = true;
+            let limit = self.limit;
+            self.warn(SvgWarning::Truncated { limit });
+            return false;
+        }
+        true
+    }
+
+    /// Writes an element into the body, if the budget has room for it.
+    fn put(&mut self, element: &str) -> bool {
+        if !self.room(element.len()) {
+            return false;
+        }
+        self.body.push_str(element);
+        true
+    }
+
+    /// Writes a definition into `<defs>`, if the budget has room for it.
+    fn define(&mut self, element: &str) -> bool {
+        if !self.room(element.len()) {
+            return false;
+        }
+        self.defs.push_str(element);
+        true
+    }
+
+    /// A picture — PNG bytes on the unit square — placed by `to_page`, as the
+    /// element that draws it: an `<image>` in place, or a `<use>` of the one
+    /// written into `<defs>` the first time these bytes were drawn (see the
+    /// module documentation for which). `extra` is the draw's own
+    /// attributes. `None` when the budget had no room for the definition.
+    fn picture(
+        &mut self,
+        png: &[u8],
+        rendering: Option<&'static str>,
+        to_page: &Matrix,
+        extra: &str,
+    ) -> Option<String> {
+        let rendering_attr = rendering
+            .map(|r| format!(" image-rendering=\"{r}\""))
+            .unwrap_or_default();
+        let placed = matrix_attr(to_page);
+        if png.len() < REUSE_AT || self.references >= MAX_REFERENCES {
+            // Checked before the base64 is made, which is a third larger
+            // than what it encodes and pointless to build past the budget.
+            if !self.room(png.len().saturating_mul(4) / 3) {
+                return None;
+            }
+            return Some(format!(
+                "<image x=\"0\" y=\"0\" width=\"1\" height=\"1\" preserveAspectRatio=\"none\"\
+                 {rendering_attr} transform=\"{placed}\"{extra} \
+                 xlink:href=\"data:image/png;base64,{}\"/>",
+                base64(png)
+            ));
+        }
+        let key = (png.to_vec(), rendering);
+        let id = match self.pictures.get(&key) {
+            Some(&id) => id,
+            None => {
+                if !self.room(png.len().saturating_mul(4) / 3) {
+                    return None;
+                }
+                let id = self.id();
+                let definition = format!(
+                    "<image id=\"p{id}\" x=\"0\" y=\"0\" width=\"1\" height=\"1\" \
+                     preserveAspectRatio=\"none\"{rendering_attr} \
+                     xlink:href=\"data:image/png;base64,{}\"/>\n",
+                    base64(png)
+                );
+                if !self.define(&definition) {
+                    return None;
+                }
+                self.pictures.insert(key, id);
+                id
+            }
+        };
+        self.references += 1;
+        Some(format!(
+            "<use xlink:href=\"#p{id}\" transform=\"{placed}\"{extra}/>"
+        ))
     }
 
     fn push_resources(&mut self, resources: Arc<PageResources>) {
@@ -349,6 +540,23 @@ impl<'a> Writer<'a> {
         if let Some(outer) = self.pushed.pop() {
             self.glyphs = outer;
         }
+    }
+
+    /// [`Writer::finish`], after what `Page::render` adds once its renderer
+    /// finishes, for the same two reasons: a glyph a font could not name is a
+    /// `.notdef` outline and never reaches the device's own count, and a
+    /// damaged image is drawn and named (ruling 10).
+    fn finish_with(mut self, resources: &PageResources, width: f64, height: f64) -> Svg {
+        if !resources.missing_fonts().is_empty() {
+            self.warn(SvgWarning::Render(RenderWarning::UnreadableFont));
+        }
+        for (name, reason) in resources.damaged_images() {
+            self.warn(SvgWarning::Render(RenderWarning::DamagedImage {
+                name,
+                reason,
+            }));
+        }
+        self.finish(width, height)
     }
 
     fn finish(mut self, width: f64, height: f64) -> Svg {
@@ -431,6 +639,9 @@ impl<'a> Writer<'a> {
 
     /// A filled area: a solid colour, or a pattern.
     fn fill(&mut self, path: &[PathSegment], even_odd: bool, state: &GraphicsState) {
+        if self.spent {
+            return;
+        }
         self.note_blend(state.blend);
         if let Some(name) = &state.fill_pattern {
             let name = name.clone();
@@ -448,11 +659,14 @@ impl<'a> Writer<'a> {
         push_opacity(&mut element, "fill-opacity", state.fill_alpha);
         element.push_str(&self.clip_attr());
         element.push_str("/>\n");
-        self.body.push_str(&element);
+        self.put(&element);
     }
 
     /// A stroked outline.
     fn stroke(&mut self, path: &[PathSegment], state: &GraphicsState, text: bool) {
+        if self.spent {
+            return;
+        }
         self.note_blend(state.blend);
         let scale = state.ctm.then(&self.base).expansion();
         if state.stroke_pattern.is_some() {
@@ -513,7 +727,7 @@ impl<'a> Writer<'a> {
         push_opacity(&mut element, "stroke-opacity", state.stroke_alpha);
         element.push_str(&self.clip_attr());
         element.push_str("/>\n");
-        self.body.push_str(&element);
+        self.put(&element);
     }
 
     /// A fill with `/Pattern`: a gradient where one is exact, a raster
@@ -540,7 +754,7 @@ impl<'a> Writer<'a> {
                     push_opacity(&mut element, "fill-opacity", state.fill_alpha);
                     element.push_str(&self.clip_attr());
                     element.push_str("/>\n");
-                    self.body.push_str(&element);
+                    self.put(&element);
                     return;
                 }
                 self.rasterise_fill(path, even_odd, state, Rasterised::Shading);
@@ -644,19 +858,20 @@ impl<'a> Writer<'a> {
         } else {
             "</radialGradient>\n"
         };
-        self.defs
-            .push_str(&element.replace("{id}", &id.to_string()));
-        self.defs.push('\n');
+        let mut definition = element.replace("{id}", &id.to_string());
+        definition.push('\n');
         for (offset, rgb) in stops {
             let _ = writeln!(
-                self.defs,
+                definition,
                 "<stop offset=\"{}\" stop-color=\"{}\"/>",
                 num(offset),
                 colour_bytes(rgb)
             );
         }
-        self.defs.push_str(closing);
-        Some(id)
+        definition.push_str(closing);
+        // A gradient the budget has no room for is no gradient; the caller's
+        // fallback is a raster, which the spent budget refuses in turn.
+        self.define(&definition).then_some(id)
     }
 
     /// Draws `paint` through the renderer over `bounds` (SVG units), clipped
@@ -667,6 +882,9 @@ impl<'a> Writer<'a> {
         what: Rasterised,
         paint: impl FnOnce(&mut Renderer<'_, PageResources>),
     ) {
+        if self.spent {
+            return;
+        }
         let clip = self.clip_bounds();
         let bounds = [
             bounds[0].max(clip[0]),
@@ -713,21 +931,31 @@ impl<'a> Writer<'a> {
         let Some(png) = png(canvas.width, canvas.height, canvas.stride, &canvas.data) else {
             return;
         };
-        let _ = writeln!(
-            self.body,
-            "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" \
-             xlink:href=\"data:image/png;base64,{}\"/>",
-            num(x0 / scale),
-            num(y0 / scale),
-            num((x1 - x0) / scale),
-            num((y1 - y0) / scale),
-            base64(&png)
-        );
-        self.warn(SvgWarning::Rasterised { what });
+        // The pixels' rectangle in SVG units, as the unit square's transform,
+        // so a raster drawn again — the same `sh` four hundred times — is a
+        // picture written once.
+        let to_page = Matrix {
+            a: (x1 - x0) / scale,
+            b: 0.0,
+            c: 0.0,
+            d: (y1 - y0) / scale,
+            e: x0 / scale,
+            f: y0 / scale,
+        };
+        let Some(mut element) = self.picture(&png, None, &to_page, "") else {
+            return;
+        };
+        element.push('\n');
+        if self.put(&element) {
+            self.warn(SvgWarning::Rasterised { what });
+        }
     }
 
     /// A decoded image on the unit square of `state.ctm`.
     fn image(&mut self, image: &DecodedImage, state: &GraphicsState) {
+        if self.spent {
+            return;
+        }
         let (w, h) = (image.width, image.height);
         let pixels = (w as usize).saturating_mul(h as usize);
         if pixels == 0 || image.rgb.len() < pixels.saturating_mul(3) {
@@ -772,30 +1000,23 @@ impl<'a> Writer<'a> {
         } else {
             "optimizeSpeed"
         };
-        let mut element = format!(
-            "<image x=\"0\" y=\"0\" width=\"1\" height=\"1\" preserveAspectRatio=\"none\" \
-             image-rendering=\"{rendering}\" transform=\"{}\"",
-            matrix_attr(&to_page)
-        );
-        push_opacity(&mut element, "opacity", state.fill_alpha);
-        let _ = write!(
-            element,
-            " xlink:href=\"data:image/png;base64,{}\"/>",
-            base64(&png)
-        );
-        // Not `clip-path` on the `<image>` itself: SVG 1.1 §14.3.5 reads a
-        // `userSpaceOnUse` clip in the user space of the element that names
-        // it, and an element's own `transform` is part of that space — so the
-        // page-space clip would be carried through the unit square's
-        // transform with the picture. A `<g>` with no transform names it in
-        // page space instead.
+        let mut opacity = String::new();
+        push_opacity(&mut opacity, "opacity", state.fill_alpha);
+        let Some(element) = self.picture(&png, Some(rendering), &to_page, &opacity) else {
+            return;
+        };
+        // Not `clip-path` on the `<image>` (or the `<use>`) itself: SVG 1.1
+        // §14.3.5 reads a `userSpaceOnUse` clip in the user space of the
+        // element that names it, and an element's own `transform` is part of
+        // that space — so the page-space clip would be carried through the
+        // unit square's transform with the picture. A `<g>` with no transform
+        // names it in page space instead.
         let clip = self.clip_attr();
         if clip.is_empty() {
-            self.body.push_str(&element);
+            self.put(&format!("{element}\n"));
         } else {
-            let _ = write!(self.body, "<g{clip}>{element}</g>");
+            self.put(&format!("<g{clip}>{element}</g>\n"));
         }
-        self.body.push('\n');
     }
 
     /// The grey rectangle the renderer draws for an image it could not read.
@@ -816,7 +1037,7 @@ impl<'a> Writer<'a> {
         push_opacity(&mut element, "fill-opacity", state.fill_alpha);
         element.push_str(&self.clip_attr());
         element.push_str("/>\n");
-        self.body.push_str(&element);
+        self.put(&element);
     }
 }
 
@@ -972,7 +1193,7 @@ impl Device for Writer<'_> {
             push_opacity(&mut element, "fill-opacity", state.fill_alpha);
             element.push_str(&self.clip_attr());
             element.push_str("/>\n");
-            self.body.push_str(&element);
+            self.put(&element);
             return;
         }
         let page = [0.0, 0.0, self.geometry.width, self.geometry.height];
@@ -1037,7 +1258,12 @@ impl Device for Writer<'_> {
         let mut element = String::from("<g");
         push_opacity(&mut element, "opacity", state.fill_alpha);
         element.push_str(">\n");
-        self.body.push_str(&element);
+        // Declined when the budget has no room, so no `end_group` arrives for
+        // a `<g>` that was never opened. The closing tags are outside the
+        // count for that reason: each answers an opening tag that was in it.
+        if !self.put(&element) {
+            return false;
+        }
         self.groups = self.groups.saturating_add(1);
         true
     }
@@ -1058,11 +1284,20 @@ impl Device for Writer<'_> {
         self.warn(SvgWarning::SoftMaskRefused);
         false
     }
+
+    /// Yes once the budget is spent: nothing more would be written, so
+    /// nothing more is worth replaying or interpreting.
+    fn is_cancelled(&self) -> bool {
+        self.spent
+    }
 }
 
 impl Writer<'_> {
     /// Adds a clip — a path, or a text object's glyphs — to what is in force.
     fn add_clip(&mut self, path: Vec<PathSegment>, even_odd: bool) {
+        if self.spent {
+            return;
+        }
         let id = self.id();
         let d = path_data(&path, &self.base);
         let bounds = path_bounds(&path, &self.base);
@@ -1076,10 +1311,12 @@ impl Writer<'_> {
         } else {
             ""
         };
-        let _ = writeln!(
-            self.defs,
-            "<clipPath id=\"c{id}\" clipPathUnits=\"userSpaceOnUse\"{parent}><path d=\"{d}\"{rule}/></clipPath>"
-        );
+        // Pushed whether or not the budget had room for it: a refusal spends
+        // the budget, so nothing is written after it that could name the
+        // missing `<clipPath>`, and the stack stays balanced against `Q`.
+        self.define(&format!(
+            "<clipPath id=\"c{id}\" clipPathUnits=\"userSpaceOnUse\"{parent}><path d=\"{d}\"{rule}/></clipPath>\n"
+        ));
         self.clips.push(ClipEntry {
             id,
             path,
@@ -1486,6 +1723,25 @@ mod tests {
         ] {
             assert_eq!(base64(plain.as_bytes()), coded, "{plain:?}");
         }
+    }
+
+    /// The caller's budget lowers the cap and never raises it — the half of
+    /// `svg_output.rs`'s budget test that no page short of a quarter of a
+    /// gigabyte of markup could show.
+    #[test]
+    fn a_budget_past_the_cap_is_the_cap() {
+        let at = |max_bytes| {
+            budget(&SvgOptions {
+                max_bytes,
+                ..SvgOptions::default()
+            })
+        };
+        assert_eq!(at(usize::MAX), MAX_SVG_BYTES);
+        assert_eq!(at(MAX_SVG_BYTES + 1), MAX_SVG_BYTES);
+        assert_eq!(at(MAX_SVG_BYTES), MAX_SVG_BYTES);
+        assert_eq!(at(4_096), 4_096);
+        assert_eq!(at(0), 0);
+        assert_eq!(budget(&SvgOptions::default()), MAX_SVG_BYTES);
     }
 
     #[test]

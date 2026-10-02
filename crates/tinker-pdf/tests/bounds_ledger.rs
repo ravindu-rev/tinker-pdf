@@ -53,6 +53,11 @@
 //! arithmetic: of the two headers that can ask, a `VP8X` canvas's two 24-bit
 //! dimensions reach further than a lossless header's two 14-bit ones.
 //!
+//! *Amended the same day, the review of the SVG writer.* **The fifty-first,
+//! `MAX_SVG_BYTES`**, and the first row whose quantity is output rather than
+//! input: markup grows with what the page draws, one element per operator, so
+//! a short content stream can ask for as much as it likes.
+//!
 //! *Amended, 26 September 2026, the `jbig2` fuzz row.* **One more row, the
 //! forty-fourth, and it is the first here whose cap is a *ratio* rather than a
 //! quantity.**
@@ -537,6 +542,9 @@ const ANNOTATION_TESTS: &str = include_str!("../src/annotations.rs");
 /// spend it, and fired by the exchange row's own suite.
 const FORM_DATA: &str = include_str!("../src/form_data.rs");
 const FORM_DATA_TESTS: &str = include_str!("form_data.rs");
+/// Lane 4C's review: the SVG writer's markup, declared beside the writer.
+const SVG_OUT: &str = include_str!("../src/svg_out.rs");
+const SVG_OUTPUT_TESTS: &str = include_str!("svg_output.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -2117,6 +2125,43 @@ fn ledger() -> Vec<Bound> {
                 WEBP_TESTS,
             ),
         },
+        // ---- lane 4C's review: what a page's drawing allocates ----------
+        //
+        // A process's bound again, like the two above, and the first whose
+        // quantity is *output*: markup grows with what the page does, every
+        // operator an element, so a short stream asks for as much as it likes.
+        Bound {
+            name: "MAX_SVG_BYTES",
+            cap: tinker_pdf::MAX_SVG_BYTES as u128,
+            published: "256 MiB",
+            // Measured: `svg_output.rs`'s 4 100 draws of one picture, the
+            // largest page any suite writes at this cap. The firing test
+            // lowers `SvgOptions::max_bytes`, which is the one parameter this
+            // cap has; it can lower the cap and not raise it, and every column
+            // here is at the default, which is the cap.
+            fixtures: 266_127,
+            // A 2000 x 3000 scan as an incompressible RGBA PNG — 3 000 rows of
+            // a filter byte and 8 000 samples — in base64, rounded up for the
+            // chunks. A picture is the largest thing one element can be.
+            comic: 32_100_000,
+            // A full-page 300 dpi scan, 2 550 x 3 300, the plate
+            // `MAX_DECODED_STREAM` measures with: 44 884 400 bytes of base64,
+            // and a megabyte for the page's own two thousand elements.
+            document: 46_000_000,
+            // The same plate on a page of text written as glyph outlines.
+            book: 46_000_000,
+            // Fourteen bytes of `0 0 m 1 1 l S` write a stroked `<path>` of at
+            // least seventy, and a content stream may be as long as the
+            // ceiling every stream decodes under — before any form fans it out.
+            reachable: (tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128 / 14) * 70,
+            reachable_because: "a `MAX_DECODED_STREAM` content stream of `0 0 m 1 1 l S`, \
+                                at least seventy bytes of `<path>` per fourteen-byte operator",
+            declared_in: SVG_OUT,
+            fires_in: (
+                "markup_past_its_budget_is_cut_short_and_says_so",
+                SVG_OUTPUT_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2137,7 +2182,8 @@ fn ledger() -> Vec<Bound> {
 /// `MAX_FORM_COPY_BYTES`; and the tier-4 archive row's BMP decoder adds
 /// `MAX_BMP_SAMPLES`; and the archive row's GIF decoder adds
 /// `MAX_GIF_SAMPLES`; and the archive row's WebP decoder adds
-/// `MAX_WEBP_SAMPLES`. All **fifty** are here, and
+/// `MAX_WEBP_SAMPLES`; and the review of the SVG writer adds
+/// `MAX_SVG_BYTES`. All **fifty-one** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2195,6 +2241,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_BMP_SAMPLES",
             "MAX_GIF_SAMPLES",
             "MAX_WEBP_SAMPLES",
+            "MAX_SVG_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2300,7 +2347,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 50, "the ledger is fifty rows");
+    assert_eq!(measured, 51, "the ledger is fifty-one rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2332,7 +2379,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 50, "the ledger is fifty rows");
+    assert_eq!(ledger().len(), 51, "the ledger is fifty-one rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

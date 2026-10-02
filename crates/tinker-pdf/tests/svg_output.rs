@@ -842,6 +842,282 @@ fn the_output_is_deterministic_and_the_list_writes_the_same() {
         .contains("width=\"200pt\" height=\"100pt\" viewBox=\"0 0 200 100\""));
 }
 
+/// Deterministic noise, `count` bytes of it, as the hex an `ASCIIHexDecode`
+/// stream carries — samples no PNG filter can predict, so a picture of them
+/// is as large as its pixels.
+fn noise_hex(count: usize, seed: u64) -> String {
+    let mut state = seed | 1;
+    let mut out = String::with_capacity(count * 2 + 1);
+    for _ in 0..count {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push_str(&format!("{:02x}", state as u8));
+    }
+    out.push('>');
+    out
+}
+
+/// An RGB image XObject of `side` x `side` noisy samples.
+fn noisy_image(side: u32, seed: u64) -> String {
+    stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width {side} /Height {side} \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode"
+        ),
+        &noise_hex((side * side * 3) as usize, seed),
+    )
+}
+
+/// **A picture drawn again is written once.** The review's case, scaled down:
+/// one 64 x 64 image of noise drawn four hundred times wrote four hundred
+/// copies of its PNG, so the markup grew with the operator count times the
+/// image. Now it is one `<image>` in `<defs>` and four hundred `<use>`s, each
+/// read back where its `cm` puts it with the image's own samples.
+#[test]
+fn a_picture_drawn_again_is_written_once() {
+    let mut content = String::new();
+    for index in 0..400u32 {
+        let (x, y) = (index % 20 * 10, index / 20 * 5);
+        content.push_str(&format!("q 8 0 0 4 {x} {y} cm /Im0 Do Q\n"));
+    }
+    let svg = svg_of(pdf(
+        &content,
+        200,
+        100,
+        "<< /XObject << /Im0 5 0 R >> >>",
+        &[noisy_image(64, 7)],
+    ));
+    assert!(svg.warnings.is_empty(), "{:?}", svg.warnings);
+    assert_eq!(
+        svg.markup.matches("data:image/png").count(),
+        1,
+        "one copy of the picture"
+    );
+    assert_eq!(svg.markup.matches("<use ").count(), 400, "one use per draw");
+    // One 64 x 64 RGBA PNG of noise is 16 640 bytes before base64, so four
+    // hundred of them were 8.9 MB; one and four hundred references are not
+    // a tenth of one of those megabytes.
+    assert!(
+        svg.markup.len() < 100_000,
+        "{} bytes of markup",
+        svg.markup.len()
+    );
+
+    let (scene, k) = read_back(&svg);
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
+    let images: Vec<&Node> = scene
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, Node::Image { .. }))
+        .collect();
+    assert_eq!(images.len(), 400, "every draw reads back as the image");
+    for (index, node) in images.iter().enumerate() {
+        let Node::Image { matrix, href, .. } = node else {
+            unreachable!()
+        };
+        let (x, y) = ((index % 20 * 10) as f64, (index / 20 * 5) as f64);
+        let place = |u: f64, v: f64| {
+            [
+                (matrix[0] * u + matrix[2] * v + matrix[4]) / k,
+                (matrix[1] * u + matrix[3] * v + matrix[5]) / k,
+            ]
+        };
+        // The unit square's top edge is PDF's y + 4, which is y' = 96 - y.
+        close(
+            &[vec![place(0.0, 0.0)], vec![place(1.0, 1.0)]],
+            &[vec![[x, 96.0 - y]], vec![[x + 8.0, 100.0 - y]]],
+            &format!("draw {index}'s corners"),
+        );
+        if index == 0 {
+            let bitmap = picture(href);
+            assert_eq!((bitmap.width, bitmap.height), (64, 64));
+            let hex = noise_hex(64 * 64 * 3, 7);
+            let rgb: String = bitmap
+                .data
+                .chunks_exact(4)
+                .flat_map(|p| p[..3].to_vec())
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(rgb + ">", hex, "the samples, exactly");
+        }
+    }
+}
+
+/// **Small pictures are written in place, and so is any picture once the
+/// reader's budget of references is spent**, so a file this writes is never
+/// one `tinker-pdf-svg` refuses for its `<use>`s: a 2 x 2 image drawn three
+/// times is three `<image>`s, and a 32 x 32 one drawn 4 100 times is 4 096
+/// references and four copies.
+#[test]
+fn references_stop_where_the_reader_s_budget_does() {
+    let tiny = stream(
+        "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray \
+         /BitsPerComponent 8 /Filter /ASCIIHexDecode",
+        "00ff00ff>",
+    );
+    let svg = svg_of(pdf(
+        "q 5 0 0 5 0 0 cm /T Do Q q 5 0 0 5 10 0 cm /T Do Q q 5 0 0 5 20 0 cm /T Do Q",
+        100,
+        100,
+        "<< /XObject << /T 5 0 R >> >>",
+        &[tiny],
+    ));
+    assert_eq!(svg.markup.matches("data:image/png").count(), 3);
+    assert_eq!(svg.markup.matches("<use ").count(), 0);
+
+    let budget = tinker_pdf_svg::Limits::DEFAULT.max_uses;
+    let mut content = String::new();
+    for index in 0..budget + 4 {
+        content.push_str(&format!("q 1 0 0 1 {} 0 cm /N Do Q\n", index % 90));
+    }
+    let svg = svg_of(pdf(
+        &content,
+        100,
+        100,
+        "<< /XObject << /N 5 0 R >> >>",
+        &[noisy_image(32, 11)],
+    ));
+    assert_eq!(svg.markup.matches("<use ").count(), budget);
+    assert_eq!(
+        svg.markup.matches("data:image/png").count(),
+        1 + 4,
+        "the definition, and the four draws past the budget in place"
+    );
+    let (scene, _) = read_back(&svg);
+    assert_eq!(
+        scene
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, Node::Image { .. }))
+            .count(),
+        budget + 4,
+        "and the reader takes every one"
+    );
+}
+
+/// **A rasterised paint drawn again is written once**: a radial shading no
+/// gradient can state (`/Extend [false false]`), painted by `sh` three times
+/// under the same clip, is one raster and three references to it.
+#[test]
+fn a_raster_drawn_again_is_written_once() {
+    let radial = "<< /ShadingType 3 /ColorSpace /DeviceRGB /Coords [50 50 0 50 50 50] \
+                  /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> \
+                  /Extend [false false] >>";
+    let svg = svg_of(pdf(
+        "/S sh /S sh /S sh",
+        100,
+        100,
+        "<< /Shading << /S 5 0 R >> >>",
+        &[radial.to_string()],
+    ));
+    assert_eq!(
+        svg.warnings,
+        vec![SvgWarning::Rasterised {
+            what: Rasterised::Shading
+        }]
+    );
+    assert_eq!(svg.markup.matches("data:image/png").count(), 1);
+    assert_eq!(svg.markup.matches("<use ").count(), 3);
+    let (scene, k) = read_back(&svg);
+    let images: Vec<&Node> = scene
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, Node::Image { .. }))
+        .collect();
+    assert_eq!(images.len(), 3);
+    // Each covers the page: the raster's rectangle is the clip's, which is
+    // the page's.
+    for node in images {
+        let Node::Image { matrix, .. } = node else {
+            unreachable!()
+        };
+        let far = [
+            (matrix[0] + matrix[2] + matrix[4]) / k,
+            (matrix[1] + matrix[3] + matrix[5]) / k,
+        ];
+        close(
+            &[vec![[matrix[4] / k, matrix[5] / k]], vec![far]],
+            &[vec![[0.0, 0.0]], vec![[100.0, 100.0]]],
+            "the raster's corners",
+        );
+    }
+}
+
+/// **The markup has a budget, and a page past it is cut short and says so.**
+/// Three thousand filled squares under a budget of 4 KiB: what fits is
+/// written, the rest is not, the warning names the budget, and the document
+/// is still one the reader takes whole. The replay stops where the budget
+/// did — the image name the page ends on, which names nothing, is never
+/// reached. The default budget is the cap, and a caller can lower it but not
+/// raise it.
+#[test]
+fn markup_past_its_budget_is_cut_short_and_says_so() {
+    assert_eq!(SvgOptions::default().max_bytes, tinker_pdf::MAX_SVG_BYTES);
+    let mut content = String::new();
+    for index in 0..3_000u32 {
+        content.push_str(&format!(
+            "0 0 1 rg {} {} 1 1 re f\n",
+            index % 100,
+            index / 100
+        ));
+    }
+    content.push_str("/Nope Do\n");
+    let document = Document::open(pdf(&content, 100, 100, "<< >>", &[])).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let whole = page.to_svg(&SvgOptions::default());
+    assert_eq!(
+        whole.warnings,
+        vec![SvgWarning::Render(RenderWarning::UnsupportedImage {
+            codec: "Nope".to_string()
+        })],
+        "the whole page reaches its last operator"
+    );
+    assert_eq!(whole.markup.matches("<path ").count(), 3_000 + 1);
+
+    let mut options = SvgOptions::default();
+    options.max_bytes = 4_096;
+    let cut = page.to_svg(&options);
+    assert_eq!(
+        cut.warnings,
+        vec![SvgWarning::Truncated { limit: 4_096 }],
+        "named once, with the budget, and nothing after it was replayed"
+    );
+    let drawn = cut.markup.matches("<path ").count();
+    assert!(
+        drawn > 10 && drawn < 3_000,
+        "what fitted was written: {drawn} squares"
+    );
+    // Not a byte short of the budget's worth either: one more square would
+    // not have fitted. Every square here is one `<path>` of the same length
+    // give or take a digit, so the cut is within one of them of the budget.
+    assert!(
+        cut.markup.len() + 80 > 4_096,
+        "the budget was spent, not abandoned early: {} bytes",
+        cut.markup.len()
+    );
+    // The budget counts the elements; the root, `<defs>`' tags and the
+    // closing tags are the few hundred bytes outside it.
+    assert!(
+        cut.markup.len() <= 4_096 + 400,
+        "{} bytes",
+        cut.markup.len()
+    );
+    assert!(
+        whole
+            .markup
+            .starts_with(&cut.markup[..cut.markup.len() - "</svg>\n".len()]),
+        "and what was written is the start of the whole document"
+    );
+    let (scene, _) = read_back(&cut);
+    assert_eq!(paths(&scene).len(), drawn);
+
+    // A budget above the cap is read as the cap.
+    let mut options = SvgOptions::default();
+    options.max_bytes = usize::MAX;
+    assert_eq!(page.to_svg(&options), whole);
+}
+
 /// **The writer never panics on a hostile page.** Deterministically mutated
 /// versions of every page above — bytes flipped, runs deleted, numbers
 /// replaced with enormous and non-finite ones — written as SVG; each result
