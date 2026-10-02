@@ -8,6 +8,13 @@
 //! So the proof is a render — the page before and after, byte for byte —
 //! and not a count of objects.
 //!
+//! **A render of the two fonts alone could not fail on a wrong merge**: they
+//! embed one program, so whichever each named, the glyphs would be the same.
+//! The page therefore also draws two images under equal dictionaries whose
+//! samples differ, so a merge that did not compare the bytes would draw one
+//! image twice and change pixels, and the test asserts the two stay two
+//! objects as well.
+//!
 //! The program is the vendored Liberation Serif, third-party bytes (ruling
 //! 13): what its glyphs look like is a fact about the face, not about a
 //! fixture written to pass.
@@ -18,7 +25,8 @@
 //! collides on everything and shows the byte comparison still decides.
 
 use tinker_pdf::{
-    Dict, Document, DocumentBuilder, Name, ObjRef, Object, RenderOptions, WriteMode, WriteOptions,
+    Dict, Document, DocumentBuilder, ImageData, Name, ObjRef, Object, RenderOptions, WriteMode,
+    WriteOptions,
 };
 
 fn face() -> Vec<u8> {
@@ -28,18 +36,56 @@ fn face() -> Vec<u8> {
 }
 
 /// One page drawing text in two fonts, each embedding the whole face — two
-/// identical `/FontFile2` streams under two font dictionaries.
+/// identical `/FontFile2` streams under two font dictionaries — and two
+/// images under **equal dictionaries** whose samples differ.
+///
+/// The images are what lets the render catch a wrong merge. Two fonts that
+/// embed one program draw the same glyphs whichever program each names, so a
+/// merge that took them for each other would render the same; two images
+/// whose dictionaries agree differ only in their bytes, and a merge that did
+/// not compare those would draw one image twice.
 fn two_fonts_one_program() -> Document {
     let program = face();
     let mut builder = DocumentBuilder::new();
     builder.set_subset_fonts(false);
     assert!(builder.add_embedded_font(b"F0", b"LiberationSerif", &program));
     assert!(builder.add_embedded_font(b"F1", b"LiberationSerifTwin", &program));
+    for (name, samples) in [(b"Im0", [0u8, 255, 255, 0]), (b"Im1", [255u8, 0, 0, 255])] {
+        assert!(builder.add_image(
+            name,
+            &ImageData::Gray8 {
+                width: 2,
+                height: 2,
+                data: &samples,
+            }
+        ));
+    }
     builder.add_page(300.0, 120.0, |page| {
         page.text(b"F0", 28.0, 12.0, 70.0, "Glyphs, once");
         page.text(b"F1", 28.0, 12.0, 20.0, "and twice: Qxyz");
+        page.image(b"Im0", 200.0, 20.0, 40.0, 40.0);
+        page.image(b"Im1", 250.0, 20.0, 40.0, 40.0);
     });
     Document::open(builder.finish()).expect("the builder's output opens")
+}
+
+/// The image XObjects page 0 names, by resource name.
+fn images(doc: &Document) -> Vec<(Vec<u8>, ObjRef)> {
+    let cos = doc.cos();
+    let page = tinker_pdf_cos::pages::collect(cos)
+        .into_iter()
+        .next()
+        .expect("a page");
+    let resources = page.resources.expect("resources");
+    let xobjects = cos.resolve_key(&resources, cos.intern(b"XObject"));
+    let mut out: Vec<(Vec<u8>, ObjRef)> = xobjects
+        .as_dict()
+        .expect("an /XObject dictionary")
+        .iter()
+        .filter_map(|(name, value)| Some((cos.name_bytes(*name)?.to_vec(), value.as_objref()?)))
+        .collect();
+    out.sort();
+    out
 }
 
 fn rewrite(doc: &Document, deduplicate_streams: bool, mode: WriteMode) -> Vec<u8> {
@@ -124,6 +170,28 @@ fn two_copies_of_one_font_program_become_one_and_render_the_same() {
             .expect("the program decodes"),
         face(),
         "the program kept is the face, whole"
+    );
+    let pictures = images(&merged);
+    assert_eq!(pictures.len(), 2);
+    assert_ne!(
+        pictures[0].1, pictures[1].1,
+        "equal dictionaries over different samples stay two images"
+    );
+    let cos = original.cos();
+    let dictionaries: Vec<Vec<(Name, Object)>> = images(&original)
+        .iter()
+        .map(|(_, r)| {
+            let object = cos.resolve(&Object::Ref(*r));
+            let dict = object.as_dict().expect("an image dictionary");
+            dict.iter()
+                .filter(|(key, _)| *key != Name::LENGTH)
+                .cloned()
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        dictionaries[0], dictionaries[1],
+        "the premise: the two images' dictionaries are equal, `/Length` aside"
     );
     assert_eq!(render(&merged), pixels, "byte-equal render after the merge");
     assert_eq!(render(&plain), pixels);
@@ -309,4 +377,105 @@ fn two_damaged_streams_that_decode_alike_stay_apart() {
     let merged = Document::open(rewrite(&doc, true, WriteMode::Rewrite)).expect("reopens");
     let refs = probe(&merged);
     assert_ne!(refs[0], refs[1], "kept apart");
+}
+
+/// One page drawing one image, whose `/ColorSpace` is written directly or,
+/// with `indirect`, as a reference to a `/DeviceGray` name object of its own.
+fn image_page(indirect: bool) -> Document {
+    let mut builder = DocumentBuilder::new();
+    let samples = [0u8, 255, 255, 0];
+    assert!(builder.add_image(
+        b"Im0",
+        &ImageData::Gray8 {
+            width: 2,
+            height: 2,
+            data: &samples,
+        }
+    ));
+    builder.add_page(50.0, 50.0, |page| page.image(b"Im0", 0.0, 0.0, 50.0, 50.0));
+    let doc = Document::open(builder.finish()).expect("opens");
+    if !indirect {
+        return doc;
+    }
+    let image = images(&doc)[0].1;
+    let mut editor = doc.editor();
+    let data = editor.stream_bytes(image).expect("the image decodes");
+    let space = editor.allocate();
+    editor.put(space, Object::Name(editor.intern(b"DeviceGray")));
+    let mut dict = Dict::new();
+    let old = editor.get(image).expect("the image");
+    for (key, value) in old.as_dict().expect("a dictionary").iter() {
+        if *key == Name::FILTER || *key == Name::DECODE_PARMS || *key == Name::LENGTH {
+            continue;
+        }
+        let value = if *key == editor.intern(b"ColorSpace") {
+            Object::Ref(space)
+        } else {
+            value.clone()
+        };
+        dict.insert(*key, value);
+    }
+    editor.put_stream(image, tinker_pdf_cos::StreamData { dict, data });
+    let saved = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    Document::open(saved).expect("reopens")
+}
+
+/// How many image XObjects a document carries, anywhere.
+fn image_count(doc: &Document) -> usize {
+    let cos = doc.cos();
+    let subtype = cos.intern(b"Subtype");
+    let image = cos.intern(b"Image");
+    cos.xref()
+        .iter()
+        .filter(|(num, _)| *num != 0)
+        .filter(|(num, _)| {
+            cos.get(ObjRef::new(*num, 0)).is_ok_and(|object| {
+                object.as_stream().is_some()
+                    && object.as_dict().and_then(|d| d.get_name(subtype)) == Some(image)
+            })
+        })
+        .count()
+}
+
+/// What `import_page` leaves this pass to merge, and what it does not
+/// (writing.md says which): an image imported twice is one image after a
+/// deduplicating rewrite when its dictionary names nothing indirect, and
+/// stays two when it names an indirect `/ColorSpace` — the import copies that
+/// object per import, the two copies' dictionaries name two different
+/// objects, and only streams merge.
+#[test]
+fn an_imported_image_merges_unless_its_dictionary_names_a_copied_non_stream() {
+    for (indirect, expected) in [(false, 1), (true, 2)] {
+        let source = image_page(indirect);
+        assert_eq!(image_count(&source), 1, "the premise");
+        let mut builder = DocumentBuilder::new();
+        builder.add_page(50.0, 50.0, |_| {});
+        let target = Document::open(builder.finish()).expect("opens");
+        let mut editor = target.editor();
+        for index in [1, 2] {
+            editor
+                .import_page(source.cos(), 0, index)
+                .expect("the page imports");
+        }
+        let plain = validated(editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            garbage_collect: true,
+            ..WriteOptions::default()
+        }));
+        assert_eq!(
+            image_count(&plain),
+            2,
+            "indirect {indirect}: one per import"
+        );
+        let merged = validated(editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            garbage_collect: true,
+            deduplicate_streams: true,
+            ..WriteOptions::default()
+        }));
+        assert_eq!(image_count(&merged), expected, "indirect {indirect}");
+    }
 }

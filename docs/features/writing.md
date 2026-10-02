@@ -111,7 +111,14 @@ cross-reference or object stream and one an `/OBJR` names (14.7.5.3) are held
 apart. Off by default, because it decodes every filtered stream to compare it;
 ignored on an incremental update, which appends and must not rewrite what a
 signature's revision covers. `DocumentEditor::import_page` still copies a
-shared resource per import, and this is the pass that merges the copies.
+shared resource per import, and this pass merges the copies **only where
+every object the copies' dictionaries name is a stream or is direct**. A copy
+whose dictionary names an indirect object that is not a stream — an indirect
+`/ColorSpace`, `/DecodeParms` or `[/ICCBased …]` array — has that object
+copied afresh with it per import, the two dictionaries name two different
+objects, and no pass merges a non-stream to make them equal: two imports of
+such an image stay two images, where the same image with its `/ColorSpace`
+written directly becomes one.
 
 **Encrypt-on-save.** `WriteOptions::encryption` encrypts a rewrite at R6
 (AES-256): every string and every stream (7.6.2), each under an
@@ -350,16 +357,29 @@ Stream deduplication is held at two levels. `crates/tinker-pdf/tests/stream_dedu
 embeds the vendored Liberation Serif twice under two font dictionaries and
 shows a deduplicating rewrite carries it once — both descriptors name one
 `/FontFile2`, the file shrinks by the face — and **renders the page byte for
-byte as before**, which is the proof a merge did not swap anything; the output
-passes the strict validator. Beside it: equal bytes under different
+byte as before**; the output passes the strict validator. The two fonts alone
+could not make that render fail on a wrong merge, since they embed one program
+and draw the same glyphs whichever each names, so the same page draws two
+images under equal dictionaries whose samples differ: a merge that did not
+compare their bytes would draw one image twice, and the test asserts they stay
+two objects besides. The render guards that class of swap — a merge that
+looked at too little — and a swap behind a colliding digest rests on
+`dedup.rs`'s injected-digest test below, since SHA-256 cannot be made to
+collide here. Beside it: equal bytes under different
 `/DecodeParms` stay two, a zlib stream of stored blocks and the encoder's
 output of the same content merge (the comparison is on decoded bytes), two
-damaged streams that decode to the same prefix stay two, and an incremental
-update merges nothing. `crates/tinker-pdf-cos/src/dedup.rs`'s own tests cover
+damaged streams that decode to the same prefix stay two, an incremental
+update merges nothing, and an image `import_page` copied twice merges to one
+when its dictionary names nothing indirect and stays two when its
+`/ColorSpace` is a reference (`an_imported_image_merges_unless_its_dictionary_names_a_copied_non_stream`,
+the limit the paragraph on `import_page` above states).
+`crates/tinker-pdf-cos/src/dedup.rs`'s own tests cover
 what a real digest cannot be made to do: an injected digest that collides on
 everything, under which only true duplicates merge; the fixed point through
 two forms naming two copies of one image; the trailer redirected; and the
-`/OBJR` and cross-reference holds. Injections, counted over both suites: bytes
+`/OBJR` and cross-reference holds. Injections, counted over both suites before
+the two images and the import test were added (which adds assertions and
+removes none): bytes
 not compared under a shared digest 1, the dictionary compared as empty 2,
 `/Length` compared 1, a warned decode compared as whole 1, the `/OBJR` hold
 dropped 1, the trailer not redirected 1, one round only 1, bucketing by stored
