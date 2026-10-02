@@ -342,10 +342,11 @@ first had removed, redacted the file's page *n* when the editor had moved
 pages, and silently skipped every form and image on a page whose resources
 were inherited (`redact.rs`'s `editor_reads` module, one test each). What
 redaction cannot **measure** it still leaves whole and names in
-`RedactionReport::warnings` — two of that type's five classes, in the
+`RedactionReport::warnings` — two of that type's six classes, in the
 refusal table below; the third is the form placement one further down, the
-fourth a stream of more XObjects than one stream's walk follows, and the
-fifth a tiling pattern or soft mask that shows text or draws an image —
+fourth a stream of more XObjects than one stream's walk follows, the
+fifth a tiling pattern or soft mask that shows text or draws an image, and
+the sixth a glyph procedure whose measurement ran out of budget —
 because a redaction that silently fails to redact is worse than one that
 refuses: the caller believes the content is gone and distributes the file.
 A warning says the run was not measured, not that it was covered, so
@@ -435,7 +436,12 @@ procedure can draw far outside the glyph's own box; a use whose procedure
 draws under a rectangle is removed whole, as a partly covered glyph is, and
 the procedure is left as it was — it is the font's, and every other use of
 that glyph runs it (`glyph_procedures`, which also follows a procedure into
-a form it draws and bounds one that shows its own glyph). `mark` paints the area black
+a form it draws and bounds one that shows its own glyph). A procedure is
+measured in the scope that showed the glyph, where this engine runs it, and
+in the font's own `/Resources`, where 9.6.5 puts what it names — each way
+round, so a name only one has resolves and one they bind differently is
+measured as each binds it; until October 2026 a `Do` only the font's
+resources named was passed over in silence (`a_procedure_is_measured_in_the_fonts_own_resources_too`). `mark` paints the area black
 afterwards — cosmetic, because the content is already gone; it tells a
 reader something was removed rather than leaving a gap that reads as if
 nothing was there. The acceptance test is not "does it look right" but two
@@ -656,7 +662,7 @@ if report.untouched.is_empty() {
 | Following more than 4 096 `Do`s of one content stream | the ones past the bound are written back as they were and never resolved — an image they draw is tested against no rectangle, a form not entered — and `RedactionWarning::TooManyXObjects` counts them (`a_stream_of_more_xobjects_than_the_walk_follows_is_reported`); until October 2026 the bound was there and the warning was not | the walk holds a use per `Do`, and a content stream may be 128 MiB of six-byte `/a Do`s; a page of more than four thousand XObject placements — a map, a tiled scan — has to be told it was not measured whole | ruling 1 |
 | Appearance synthesis for other subtypes | `add_annotation` inserts the dictionary; no `/AP` is generated | seven subtypes cover the common producer gap; others render only if they carry their own `/AP` | — |
 | Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`) | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font | 9.6.5 |
-| Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and nothing reports it (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`) | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
+| Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and `RedactionWarning::UnboundedProcedure` names the font and counts the uses (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`); until October 2026 nothing reported it | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
 | Removing an annotation's own text — `/Contents`, a rich-text `/RC`, a field's `/V` — when its appearance is cut | left as it was; only what the annotation draws is cut | what a redaction measures is what a page draws, and these have no position to compare with a rectangle. Deleting an annotation outright is the caller's decision, through the editor | 12.5 |
 | Subsetting a program `tinker_pdf_font::subset` will not rebuild — a Type 1 program, a CFF whose charstrings cannot be renumbered without guessing, bytes that are neither | the program is written through exactly as it arrived, `UntouchedReason::ProgramNotRebuildable` | ruling 2: a document that renders is worth more than one that is small | [fonts](fonts.md) |
 | A subset that comes out no smaller than the face | whole face, `SubsetNotSmaller` (`a_subset_that_is_no_smaller_is_refused_and_named`) | the face is both smaller and the one the producer tested — the same reason the builder refuses it | [fonts](fonts.md) |

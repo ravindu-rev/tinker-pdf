@@ -263,7 +263,13 @@
 //! a form drawn twice used to cost, with no copy to give the uses that were
 //! not covered short of a new glyph in the font. A procedure that shows a
 //! glyph whose procedure shows a glyph is followed down, a fixed budget of
-//! streams per use ([`draws_under`]), past which the answer is *covered*.
+//! streams per use ([`draws_under`]), past which the answer is *covered* and
+//! [`RedactionWarning::UnboundedProcedure`] says so. A procedure is measured
+//! where either reader of 9.6.5 runs it: in the scope that showed the glyph,
+//! as this engine's interpreter does, and in the font's own `/Resources`,
+//! where Table 112 puts what it names ([`procedure_draws_under`]); until
+//! October 2026 a `Do` only the font's resources named was not measured and
+//! nothing said so.
 //!
 //! # The injections that were counted
 //!
@@ -413,7 +419,7 @@
 //! | a procedure that sets a state not measured | **1** |
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tinker_pdf_content::{Token, Tokenizer};
 use tinker_pdf_cos::{
@@ -437,7 +443,7 @@ pub struct Redaction {
 /// Something a redaction could not do exactly, named rather than left silent
 /// (ruling 10).
 ///
-/// Two of the five are a **run left whole** because this module could not
+/// Two of the six are a **run left whole** because this module could not
 /// measure it, and each names the resource name of the font in force and how
 /// many bytes of showing operand were left in place, because "a run was
 /// skipped" with neither is a sentence a caller cannot act on — and this is
@@ -472,7 +478,10 @@ pub struct Redaction {
 /// a stream whose `Do`s ran past what one stream's walk follows, and
 /// [`RedactionWarning::PatternOrMask`], a tiling pattern or a soft mask
 /// whose content shows text or draws an image. Both were silent before they
-/// existed.
+/// existed. The sixth, [`RedactionWarning::UnboundedProcedure`] (October
+/// 2026), is `RepeatedForm`'s direction again: a Type 3 glyph's use removed
+/// because measuring its procedure ran out of budget, not because anything
+/// was found under a rectangle.
 ///
 /// Closed rather than `#[non_exhaustive]`, for `WarningKind`'s reason: a new
 /// class this module will not do exactly is a deliberate change to documented
@@ -567,6 +576,21 @@ pub enum RedactionWarning {
         /// The `/Pattern` or `/ExtGState` resource name.
         resource: Vec<u8>,
     },
+    /// Measuring a Type 3 glyph's procedure ran past the [`MAX_PLACEMENTS`]
+    /// streams one use of a glyph may run — a procedure that shows glyphs
+    /// whose procedures show glyphs, or one that shows its own — and the use
+    /// was **removed as though covered**, whatever its procedure draws.
+    ///
+    /// Over-removal, the direction this module errs in, and named for
+    /// [`RedactionWarning::RepeatedForm`]'s reason: it is not something a
+    /// caller can see from `glyphs` alone. Until October 2026 the use went
+    /// and nothing said why.
+    UnboundedProcedure {
+        /// The resource name of the Type 3 font the use was shown in.
+        font: Vec<u8>,
+        /// How many uses were removed this way, summed over every pass.
+        uses: usize,
+    },
 }
 
 impl RedactionWarning {
@@ -581,7 +605,8 @@ impl RedactionWarning {
     pub fn font(&self) -> &[u8] {
         match self {
             RedactionWarning::UnknownFont { font, .. }
-            | RedactionWarning::UnmeasurableFrame { font, .. } => font,
+            | RedactionWarning::UnmeasurableFrame { font, .. }
+            | RedactionWarning::UnboundedProcedure { font, .. } => font,
             RedactionWarning::RepeatedForm { .. }
             | RedactionWarning::TooManyXObjects { .. }
             | RedactionWarning::PatternOrMask { .. } => &[],
@@ -618,7 +643,8 @@ impl RedactionWarning {
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => *bytes,
             RedactionWarning::RepeatedForm { .. }
             | RedactionWarning::TooManyXObjects { .. }
-            | RedactionWarning::PatternOrMask { .. } => 0,
+            | RedactionWarning::PatternOrMask { .. }
+            | RedactionWarning::UnboundedProcedure { .. } => 0,
         }
     }
 
@@ -658,6 +684,11 @@ impl RedactionWarning {
             RedactionWarning::TooManyXObjects { skipped } => {
                 if let RedactionWarning::TooManyXObjects { skipped: more } = other {
                     *skipped = skipped.saturating_add(*more);
+                }
+            }
+            RedactionWarning::UnboundedProcedure { uses, .. } => {
+                if let RedactionWarning::UnboundedProcedure { uses: more, .. } = other {
+                    *uses = uses.saturating_add(*more);
                 }
             }
             // A name, and nothing to count: one entry says the resource was
@@ -704,7 +735,8 @@ const MAX_WARNINGS: usize = 64;
 /// It is also how many streams one use of a Type 3 glyph may run while its
 /// procedure is measured — the procedure, and every form and glyph procedure
 /// below it, each a placement of a stream under a transform — past which the
-/// use is removed as covered ([`draws_under`]).
+/// use is removed as covered ([`draws_under`]) and named
+/// ([`RedactionWarning::UnboundedProcedure`]).
 pub const MAX_PLACEMENTS: usize = 64;
 
 /// Records a warning, merging it into one with the same cause and resource.
@@ -1089,6 +1121,14 @@ struct RunFont {
     /// outside its glyph's box. A procedure that only paints paths is not
     /// here, because nothing it draws is anything a redaction removes.
     procedures: GlyphProcedures,
+    /// A Type 3 font's own `/Resources`, when it has any entry: where 9.6.5
+    /// puts what a glyph procedure names, and where a reader that follows
+    /// it looks — this engine's interpreter looks in the enclosing scope
+    /// instead, so a procedure is measured in both ([`procedure_draws_under`]).
+    own: Option<Dict>,
+    /// The fonts `own` puts in scope, read the first time a procedure of
+    /// this font is measured there.
+    own_fonts: OnceLock<HashMap<Vec<u8>, Arc<RunFont>>>,
 }
 
 /// A Type 3 font's glyph procedures, decoded, by the code that shows each.
@@ -1206,13 +1246,14 @@ fn fonts_in(doc: &CosDocument, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont
         .into_iter()
         .filter_map(|(name, font)| {
             let bytes = doc.name_bytes(name)?.to_vec();
-            let (glyph_space, procedures) = if font.kind() == cos_font::FontKind::Type3 {
-                let (space, procedures) = spaces
-                    .remove(&name)
-                    .unwrap_or((GlyphSpace::DEFAULT, HashMap::new()));
-                (Some(space), procedures)
+            let (glyph_space, procedures, own) = if font.kind() == cos_font::FontKind::Type3 {
+                let (space, procedures, own) =
+                    spaces
+                        .remove(&name)
+                        .unwrap_or((GlyphSpace::DEFAULT, HashMap::new(), None));
+                (Some(space), procedures, own)
             } else {
-                (None, HashMap::new())
+                (None, HashMap::new(), None)
             };
             Some((
                 bytes,
@@ -1220,14 +1261,17 @@ fn fonts_in(doc: &CosDocument, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont
                     font,
                     glyph_space,
                     procedures,
+                    own,
+                    own_fonts: OnceLock::new(),
                 }),
             ))
         })
         .collect()
 }
 
-/// The glyph space each font in `/Font` declares (9.6.5), and its glyph
-/// procedures that can draw text or an image.
+/// The glyph space each font in `/Font` declares (9.6.5), its glyph
+/// procedures that can draw text or an image, and its own `/Resources` when
+/// they name anything.
 ///
 /// Read here rather than through `cos_font::Font`, which carries neither
 /// `/FontMatrix`, `/FontBBox` nor `/CharProcs`: this module is the only
@@ -1236,7 +1280,7 @@ fn fonts_in(doc: &CosDocument, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont
 fn glyph_spaces(
     doc: &CosDocument,
     resources: &Dict,
-) -> HashMap<Name, (GlyphSpace, GlyphProcedures)> {
+) -> HashMap<Name, (GlyphSpace, GlyphProcedures, Option<Dict>)> {
     let mut out = HashMap::new();
     let value = doc.resolve_key(resources, doc.intern(b"Font"));
     let Some(fonts) = value.as_dict() else {
@@ -1248,9 +1292,18 @@ fn glyph_spaces(
         let Some(dict) = resolved.as_dict() else {
             continue;
         };
+        let own = doc
+            .resolve_key(dict, Name::RESOURCES)
+            .as_dict()
+            .filter(|own| !own.is_empty())
+            .cloned();
         out.insert(
             *key,
-            (GlyphSpace::read(doc, dict), carrying_procedures(doc, dict)),
+            (
+                GlyphSpace::read(doc, dict),
+                carrying_procedures(doc, dict),
+                own,
+            ),
         );
     }
     out
@@ -2351,22 +2404,37 @@ fn cut_stream(
     warnings: &mut Vec<RedactionWarning>,
 ) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
     let mut procedures = Procedures::default();
-    let first = rewrite(content, areas, fonts, ctm, &mut procedures);
+    let first = rewrite(content, areas, &[fonts], ctm, &mut procedures);
     if procedures.found.is_empty() {
         return first;
     }
     let measure = Measure {
         editor,
-        scope,
-        fonts,
+        scopes: vec![scope],
+        fonts: vec![fonts],
         areas,
     };
     let mut drop = HashSet::new();
     for glyph in &procedures.found {
         // Per use: one glyph's procedures cannot spend another's.
-        let mut budget = MAX_PLACEMENTS;
-        if draws_under(&measure, &glyph.procedure, glyph.ctm, warnings, &mut budget) {
+        let mut budget = Budget {
+            left: MAX_PLACEMENTS,
+            spent: false,
+        };
+        if procedure_draws_under(&measure, glyph, warnings, &mut budget) {
             drop.insert(glyph.index);
+            // Removed because the measurement could not finish, not because
+            // anything was found under a rectangle: wider than asked, and
+            // said so.
+            if budget.spent {
+                note(
+                    warnings,
+                    RedactionWarning::UnboundedProcedure {
+                        font: glyph.font_name.clone(),
+                        uses: 1,
+                    },
+                );
+            }
         }
     }
     if drop.is_empty() {
@@ -2376,17 +2444,96 @@ fn cut_stream(
         drop,
         ..Procedures::default()
     };
-    rewrite(content, areas, fonts, ctm, &mut again)
+    rewrite(content, areas, &[fonts], ctm, &mut again)
+}
+
+/// How many streams one use of a Type 3 glyph may still run while its
+/// procedure is measured, and whether it ran out.
+struct Budget {
+    left: usize,
+    /// The budget ran out, and the answer *covered* was given for that
+    /// reason rather than for anything measured.
+    spent: bool,
 }
 
 /// What [`draws_under`] measures in.
 struct Measure<'a> {
     editor: &'a DocumentEditor,
-    /// The resources `Do` names are resolved in: the scope that showed the
-    /// glyph, which is where this engine's interpreter runs a procedure.
-    scope: &'a Dict,
-    fonts: &'a HashMap<Vec<u8>, Arc<RunFont>>,
+    /// The resource dictionaries a name is resolved in, the first that has
+    /// it winning: the scope that showed the glyph, which is where this
+    /// engine's interpreter runs a procedure, and — for a procedure of a
+    /// Type 3 font with `/Resources` of its own — those too, in the order
+    /// [`procedure_draws_under`] says.
+    scopes: Vec<&'a Dict>,
+    /// The fonts the same scopes put in scope, in the same order.
+    fonts: Vec<&'a HashMap<Vec<u8>, Arc<RunFont>>>,
     areas: &'a [Redaction],
+}
+
+/// Whether one use of a Type 3 glyph draws under a rectangle, its procedure
+/// measured where either reader of 9.6.5 runs it.
+///
+/// This engine's interpreter runs a procedure in the scope that showed the
+/// glyph; 9.6.5 (Table 112) puts a procedure's resources in the font's own
+/// `/Resources`, and a reader that follows it looks there. So a font with
+/// `/Resources` of its own has each procedure measured twice — names
+/// resolved in the enclosing scope first and then the font's, and then the
+/// other way round — and a use either measurement finds under a rectangle
+/// is removed: a name only one scope has resolves in both passes, and a
+/// name the two bind differently is measured as each binds it. Until
+/// October 2026 a `Do` the enclosing scope did not have was passed over in
+/// silence, and text in a font only the font's own resources named was
+/// left as `UnknownFont`.
+///
+/// The second pass reads the same names as the first, so a warning it
+/// raises for a cause and a resource the first already named is dropped
+/// rather than counted twice.
+fn procedure_draws_under(
+    measure: &Measure<'_>,
+    glyph: &GlyphUse,
+    warnings: &mut Vec<RedactionWarning>,
+    budget: &mut Budget,
+) -> bool {
+    let Some(own) = glyph.font.own.as_ref() else {
+        return draws_under(measure, &glyph.procedure, glyph.ctm, warnings, budget);
+    };
+    let own_fonts = glyph
+        .font
+        .own_fonts
+        .get_or_init(|| fonts_in(measure.editor.document(), own));
+
+    let mut scopes = measure.scopes.clone();
+    scopes.push(own);
+    let mut fonts = measure.fonts.clone();
+    fonts.push(own_fonts);
+    let enclosing = Measure {
+        editor: measure.editor,
+        scopes,
+        fonts,
+        areas: measure.areas,
+    };
+    if draws_under(&enclosing, &glyph.procedure, glyph.ctm, warnings, budget) {
+        return true;
+    }
+
+    let mut scopes = vec![own];
+    scopes.extend(measure.scopes.iter().copied());
+    let mut fonts = vec![own_fonts];
+    fonts.extend(measure.fonts.iter().copied());
+    let theirs = Measure {
+        editor: measure.editor,
+        scopes,
+        fonts,
+        areas: measure.areas,
+    };
+    let mut more = Vec::new();
+    let drawn = draws_under(&theirs, &glyph.procedure, glyph.ctm, &mut more, budget);
+    for warning in more {
+        if !warnings.iter().any(|w| w.same_cause(&warning)) {
+            note(warnings, warning);
+        }
+    }
+    drawn
 }
 
 /// Whether content drawn under `ctm` puts text or an image under a
@@ -2407,38 +2554,40 @@ struct Measure<'a> {
 /// for the stream would run out a few dozen uses in and remove every use
 /// after (`every_use_of_a_glyph_has_a_budget_of_its_own`: two runs a use, so
 /// thirty-two). Past it the answer is *yes*, the direction that removes a
-/// glyph rather than leaving one; only a face that recurses ever reaches it.
+/// glyph rather than leaving one, and `budget` records that it was spent so
+/// [`cut_stream`] can name the use ([`RedactionWarning::UnboundedProcedure`]);
+/// only a face that recurses ever reaches it.
 fn draws_under(
     measure: &Measure<'_>,
     content: &[u8],
     ctm: Matrix,
     warnings: &mut Vec<RedactionWarning>,
-    budget: &mut usize,
+    budget: &mut Budget,
 ) -> bool {
-    if *budget == 0 {
+    if budget.left == 0 {
+        budget.spent = true;
         return true;
     }
-    *budget -= 1;
+    budget.left -= 1;
 
     let mut procedures = Procedures::default();
-    let (_, pass, uses) = rewrite(content, measure.areas, measure.fonts, ctm, &mut procedures);
+    let (_, pass, uses) = rewrite(content, measure.areas, &measure.fonts, ctm, &mut procedures);
     for warning in pass.warnings {
         note(warnings, warning);
     }
-    unread(
-        measure.editor,
-        measure.scope,
-        content,
-        measure.areas,
-        warnings,
-    );
+    for scope in &measure.scopes {
+        unread(measure.editor, scope, content, measure.areas, warnings);
+    }
     if pass.glyphs > 0 || pass.images > 0 {
         return true;
     }
 
     for used in &uses {
-        let Some((reference, dict)) = resolve_xobject(measure.editor, measure.scope, &used.name)
-        else {
+        let resolved = measure
+            .scopes
+            .iter()
+            .find_map(|scope| resolve_xobject(measure.editor, scope, &used.name));
+        let Some((reference, dict)) = resolved else {
             continue;
         };
         let subtype =
@@ -2456,20 +2605,25 @@ fn draws_under(
                     continue;
                 };
                 // 8.10.1, as the walk reads it: the form's own resources, or
-                // the scope that drew it.
-                let resources = Resolve::resolve_key(measure.editor, &dict, Name::RESOURCES)
+                // the scopes that drew it.
+                let own = Resolve::resolve_key(measure.editor, &dict, Name::RESOURCES)
                     .as_dict()
-                    .cloned()
-                    .unwrap_or_else(|| measure.scope.clone());
-                let fonts = fonts_in(measure.editor.document(), &resources);
-                let inner = Measure {
-                    editor: measure.editor,
-                    scope: &resources,
-                    fonts: &fonts,
-                    areas: measure.areas,
-                };
+                    .cloned();
                 let placed = form_transform(measure.editor, &dict, used.ctm);
-                if draws_under(&inner, &inner_content, placed, warnings, budget) {
+                let drawn = match &own {
+                    Some(resources) => {
+                        let fonts = fonts_in(measure.editor.document(), resources);
+                        let inner = Measure {
+                            editor: measure.editor,
+                            scopes: vec![resources],
+                            fonts: vec![&fonts],
+                            areas: measure.areas,
+                        };
+                        draws_under(&inner, &inner_content, placed, warnings, budget)
+                    }
+                    None => draws_under(measure, &inner_content, placed, warnings, budget),
+                };
+                if drawn {
                     return true;
                 }
             }
@@ -2480,7 +2634,7 @@ fn draws_under(
     procedures
         .found
         .iter()
-        .any(|glyph| draws_under(measure, &glyph.procedure, glyph.ctm, warnings, budget))
+        .any(|glyph| procedure_draws_under(measure, glyph, warnings, budget))
 }
 
 /// The `Do`s of one stream that must draw a copy, and the copy each draws.
@@ -3311,6 +3465,11 @@ struct GlyphUse {
     index: usize,
     procedure: Arc<[u8]>,
     ctm: Matrix,
+    /// The font, for its own `/Resources` ([`procedure_draws_under`]).
+    font: Arc<RunFont>,
+    /// The resource name the `Tf` gave it, for a report that has to name
+    /// it.
+    font_name: Vec<u8>,
 }
 
 /// Rewrites a content stream with redacted glyphs removed.
@@ -3322,7 +3481,7 @@ struct GlyphUse {
 fn rewrite(
     content: &[u8],
     areas: &[Redaction],
-    fonts: &HashMap<Vec<u8>, Arc<RunFont>>,
+    fonts: &[&HashMap<Vec<u8>, Arc<RunFont>>],
     initial: Matrix,
     procedures: &mut Procedures,
 ) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
@@ -3451,7 +3610,10 @@ fn rewrite(
                         _ => None,
                     })
                     .unwrap_or_default();
-                pen.font = fonts.get(&pen.font_name).map(Arc::clone);
+                pen.font = fonts
+                    .iter()
+                    .find_map(|scope| scope.get(&pen.font_name))
+                    .map(Arc::clone);
             }
             b"Tc" => pen.char_spacing = number(0),
             b"Tw" => pen.word_spacing = number(0),
@@ -3785,6 +3947,8 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction], procedures: &mut 
                     index,
                     procedure: Arc::clone(procedure),
                     ctm: space.matrix.then(placed).then(frame),
+                    font: Arc::clone(selected),
+                    font_name: pen.font_name.clone(),
                 });
             }
         }
@@ -5608,7 +5772,7 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
         let (out, report, _) = rewrite(
             content,
             &[second_word()],
-            &fonts,
+            &[&fonts],
             Matrix::IDENTITY,
             &mut Procedures::default(),
         );
@@ -8326,7 +8490,10 @@ mod appearance_streams {
 /// `PUBLIC` in 12-point Liberation Serif from the glyph's origin, `C` draws
 /// a twelve-point square as an inline image, `D` draws `/Fm0` — a form
 /// showing `SECRET` — `E` shows its own glyph twice, and `F` shows text in a
-/// font no scope has. So a rectangle over a procedure's text, clear of the
+/// font no scope has. `G`, `H` and `I` name what only the font's own
+/// `/Resources` has, or has differently: `G` draws `/Im0`, a fifty-point
+/// image, `H` shows `SECRET` in `/Own`, and `I` draws `/Fm1`, which the page
+/// binds to an empty form and the font to `/Fm0`'s. So a rectangle over a procedure's text, clear of the
 /// glyph's own one-point box, is a rectangle only the procedure's
 /// measurement can see, and every test here puts one there.
 ///
@@ -8348,7 +8515,7 @@ mod glyph_procedures {
 
     /// Each glyph's procedure, by its name in `/CharProcs`, in code order
     /// from 65 (`A`).
-    const PROCEDURES: [(&str, &[u8]); 6] = [
+    const PROCEDURES: [(&str, &[u8]); 9] = [
         ("secret", b"1000 0 d0 BT /F0 12000 Tf 0 0 Td (SECRET) Tj ET"),
         ("public", b"1000 0 d0 BT /F0 12000 Tf 0 0 Td (PUBLIC) Tj ET"),
         (
@@ -8358,6 +8525,9 @@ mod glyph_procedures {
         ("form", b"1000 0 d0 /Fm0 Do"),
         ("itself", b"1000 0 d0 BT /T3 1000 Tf (EE) Tj ET"),
         ("lost", b"1000 0 d0 BT /Nowhere 12000 Tf (SECRET) Tj ET"),
+        ("image", b"1000 0 d0 q 50000 0 0 50000 0 0 cm /Im0 Do Q"),
+        ("own", b"1000 0 d0 BT /Own 12000 Tf 0 0 Td (SECRET) Tj ET"),
+        ("theirs", b"1000 0 d0 /Fm1 Do"),
     ];
 
     fn stream(editor: &mut DocumentEditor, dict: Dict, data: &[u8]) -> ObjRef {
@@ -8409,7 +8579,19 @@ mod glyph_procedures {
             ),
         );
         form.insert(Name::RESOURCES, Object::Dict(form_resources));
+        let empty = stream(&mut editor, form.clone(), b"");
         let form = stream(&mut editor, form, b"BT /F0 12000 Tf 0 0 Td (SECRET) Tj ET");
+        let mut image = Dict::new();
+        for (key, value) in [
+            ("Subtype", Object::Name(name(&editor, "Image"))),
+            ("Width", Object::Int(1)),
+            ("Height", Object::Int(1)),
+            ("ColorSpace", Object::Name(name(&editor, "DeviceGray"))),
+            ("BitsPerComponent", Object::Int(8)),
+        ] {
+            image.insert(name(&editor, key), value);
+        }
+        let image = stream(&mut editor, image, &[0]);
 
         let mut procs = Dict::new();
         let mut differences = vec![Object::Int(65)];
@@ -8421,8 +8603,14 @@ mod glyph_procedures {
         let mut xobjects = Dict::new();
         xobjects.insert(name(&editor, "Fm0"), Object::Ref(form));
         let mut own = Dict::new();
-        own.insert(name(&editor, "Font"), Object::Dict(fonts.clone()));
-        own.insert(name(&editor, "XObject"), Object::Dict(xobjects.clone()));
+        let mut own_fonts = fonts.clone();
+        own_fonts.insert(name(&editor, "Own"), Object::Ref(font));
+        own.insert(name(&editor, "Font"), Object::Dict(own_fonts));
+        let mut own_xobjects = xobjects.clone();
+        own_xobjects.insert(name(&editor, "Im0"), Object::Ref(image));
+        own_xobjects.insert(name(&editor, "Fm1"), Object::Ref(form));
+        own.insert(name(&editor, "XObject"), Object::Dict(own_xobjects));
+        xobjects.insert(name(&editor, "Fm1"), Object::Ref(empty));
 
         let mut encoding = Dict::new();
         encoding.insert(name(&editor, "Differences"), Object::Array(differences));
@@ -8441,8 +8629,8 @@ mod glyph_procedures {
             ("CharProcs", Object::Dict(procs)),
             ("Encoding", Object::Dict(encoding)),
             ("FirstChar", Object::Int(65)),
-            ("LastChar", Object::Int(70)),
-            ("Widths", Object::Array(vec![Object::Int(1000); 6])),
+            ("LastChar", Object::Int(73)),
+            ("Widths", Object::Array(vec![Object::Int(1000); 9])),
             ("Resources", Object::Dict(own)),
         ] {
             type3.insert(name(&editor, key), value);
@@ -8595,14 +8783,23 @@ mod glyph_procedures {
 
     /// `E`'s procedure shows `E` twice, so measuring it never bottoms out.
     /// It ends — the budget is spent — and the use is removed, which is the
-    /// direction a measurement that could not finish errs in. A face that
-    /// draws itself is not one a reader is looking at.
+    /// direction a measurement that could not finish errs in, and named,
+    /// because a caller cannot tell that removal from a covered one by
+    /// `glyphs` (until October 2026 nothing said so). A face that draws
+    /// itself is not one a reader is looking at.
     #[test]
     fn a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal() {
         let bytes = document("BT /T3 1 Tf 10 50 Td (E) Tj 100 0 Td (B) Tj ET");
         let far = area(300.0, 0.0, 400.0, 10.0);
         let (after, report) = redact(open(bytes), &[band(far)]);
         assert_eq!(report.glyphs, 1, "E, and not B");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::UnboundedProcedure {
+                font: b"T3".to_vec(),
+                uses: 1,
+            }]
+        );
         assert_eq!(
             lines_of(after.clone()),
             vec![(50.0, "PUBLIC".to_string())],
@@ -8628,6 +8825,41 @@ mod glyph_procedures {
                 bytes: 6,
             }]
         );
+    }
+
+    /// 9.6.5 puts a procedure's resources in the font's own `/Resources`,
+    /// and this engine runs a procedure in the enclosing scope instead. A
+    /// reader either way draws the glyph, so a procedure is measured in
+    /// both: `G`'s `/Im0` and `H`'s `/Own` are only in the font's, and `I`'s
+    /// `/Fm1` is an empty form in the page's and `SECRET` in the font's.
+    /// Each use under its band goes, and nothing is reported, because
+    /// nothing was left unmeasured. Until October 2026 the `Do` was resolved
+    /// in the enclosing scope alone and passed over when it missed —
+    /// `glyphs: 0, warnings: []` — and the text was named `UnknownFont`.
+    #[test]
+    fn a_procedure_is_measured_in_the_fonts_own_resources_too() {
+        for (glyph, over, what) in [
+            (
+                "G",
+                area(30.0, 70.0, 40.0, 80.0),
+                "an image only the font names",
+            ),
+            (
+                "H",
+                area(20.0, 45.0, 80.0, 65.0),
+                "text in a font only the font names",
+            ),
+            (
+                "I",
+                area(20.0, 45.0, 80.0, 65.0),
+                "a form the font binds differently",
+            ),
+        ] {
+            let bytes = document(&format!("BT /T3 1 Tf 10 50 Td ({glyph}) Tj ET"));
+            let (_, report) = redact(open(bytes), &[band(over)]);
+            assert_eq!(report.glyphs, 1, "{what}");
+            assert!(report.warnings.is_empty(), "{what}: {:?}", report.warnings);
+        }
     }
 
     /// The decision's cost, paid by the default save: the procedure a
