@@ -389,7 +389,26 @@ inline image the rectangles do not touch is written back byte for byte:
 until September 2026 the rewrite tokenized its samples like the rest of the
 stream and wrote back whatever tokens they spelled, corrupting every inline
 image on a redacted page and scrubbing none (`an_inline_image_is_carried_through_a_rewrite_byte_for_byte`,
-`an_inline_image_under_a_redaction_is_scrubbed`). `mark` paints the area black
+`an_inline_image_under_a_redaction_is_scrubbed`). An **annotation's
+appearance** (12.5.5) is a form the page draws over itself, and is cut as
+one: every appearance an annotation on the page can show — each of `/N`,
+`/R` and `/D`, every state of each whatever `/AS` selects, and a hidden
+annotation's too — is a placement of its form at the transform the renderer
+draws it with, the `/BBox` carried through the form's `/Matrix` and fitted
+onto `/Rect`. One annotation's appearance is cut in place; one that
+annotations share and that is covered under one of them gives that one a
+copy, through an `/AP` of its own, since a shared `/AP` dictionary draws for
+the others too. The annotation is rewritten rather than removed. Until
+October 2026 appearances were not read at all, and a FreeText note under a
+rectangle stayed on the page (`redact.rs`'s `appearance_streams`, every test
+read back flattened, by extraction, and by ink). A **Type 3 glyph whose
+procedure draws text or an image** (9.6.5) is measured through the
+procedure, under the transform the interpreter runs it with, because the
+procedure can draw far outside the glyph's own box; a use whose procedure
+draws under a rectangle is removed whole, as a partly covered glyph is, and
+the procedure is left as it was — it is the font's, and every other use of
+that glyph runs it (`glyph_procedures`, which also follows a procedure into
+a form it draws and bounds one that shows its own glyph). `mark` paints the area black
 afterwards — cosmetic, because the content is already gone; it tells a
 reader something was removed rather than leaving a gap that reads as if
 nothing was there. The acceptance test is not "does it look right" but two
@@ -578,7 +597,9 @@ if report.untouched.is_empty() {
 | Leaving a form another page draws untouched when **every** placement of it on the redacted page was cut | the form's own object takes the first placement's outcome, so the other page loses what this page's rectangles covered, and nothing reports it | which pages or forms elsewhere draw an object is not something a redaction of one page reads; the object has to hold something this page draws, or it is left in the file holding the covered text with nothing drawing it. When some placement here is uncut the object is left whole, and the other page is exact (`a_form_another_page_draws_is_left_whole_when_a_placement_here_is_uncut`). A [roadmap](../ROADMAP.md) row | 8.10 |
 | Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
 | Appearance synthesis for other subtypes | `add_annotation` inserts the dictionary; no `/AP` is generated | seven subtypes cover the common producer gap; others render only if they carry their own `/AP` | — |
-| Redaction of text inside a Type 3 glyph procedure or an annotation appearance | not rewritten | content streams reachable from a page are rewritten; glyph procedures and `/AP` streams are separate objects | — |
+| Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` — after the default save too, because `subset::apply` cuts embedded programs and not Type 3 fonts | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. Dropping a procedure no use is left drawing is the [roadmap](../ROADMAP.md) Editing row's | 9.6.5 |
+| Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and nothing reports it (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`) | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
+| Removing an annotation's own text — `/Contents`, a rich-text `/RC`, a field's `/V` — when its appearance is cut | left as it was; only what the annotation draws is cut | what a redaction measures is what a page draws, and these have no position to compare with a rectangle. Deleting an annotation outright is the caller's decision, through the editor | 12.5 |
 | Subsetting a program `tinker_pdf_font::subset` will not rebuild — a Type 1 program, a CFF whose charstrings cannot be renumbered without guessing, bytes that are neither | the program is written through exactly as it arrived, `UntouchedReason::ProgramNotRebuildable` | ruling 2: a document that renders is worth more than one that is small | [fonts](fonts.md) |
 | A subset that comes out no smaller than the face | whole face, `SubsetNotSmaller` (`a_subset_that_is_no_smaller_is_refused_and_named`) | the face is both smaller and the one the producer tested — the same reason the builder refuses it | [fonts](fonts.md) |
 | Subsetting a font any of whose shown codes resolved only by 9.6.6.4's **closing guess** — read the code as the glyph index | whole face, `CodeNotMapped` (`a_font_whose_codes_resolve_only_by_guess_is_left_whole_and_reported`) | the guess is not a statement the font made, and two readers are free to guess differently; a glyph dropped on one guess is a glyph the other reader draws and no longer has | 9.6.6.4 |
@@ -728,6 +749,20 @@ if report.untouched.is_empty() {
   rectangle — which is what lets each of them assert the safety property at
   both levels, the covered glyph's code absent from every stream **and** no
   ink inside the rectangle.
+- Two more redaction modules draw in the vendored Liberation Serif, so what
+  they cut is read back by the extractor as well as by ink. `appearance_streams`:
+  an annotation's appearance cut where 12.5.5 fits it onto `/Rect`, a
+  quarter-turned one where its `/Matrix` turns it, both states of `/N` and of
+  `/D`, the `/R` and a hidden annotation's appearance all cut, one appearance
+  two annotations share cut only under the one covered (whether that one is
+  an object or written into `/Annots`), one no rectangle touches left as it
+  was, and one with no `/Resources` measured in the page's.
+  `glyph_procedures`: a Type 3 glyph whose procedure shows text, draws an
+  inline image or draws a form, removed at the use that draws under a
+  rectangle and kept at the others with the procedure byte for byte; one
+  that shows its own glyph ending; every use with a budget of its own; a
+  procedure's text in a font no scope has reported; and a glyph in a form
+  drawn twice measured at each placement.
 - Subsetting-on-rewrite tests live beside `crates/tinker-pdf/src/subset.rs` —
   26 of them over the **vendored Liberation faces**, which are third-party
   bytes: which of their glyphs are composite, what those are built from and

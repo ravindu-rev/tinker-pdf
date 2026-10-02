@@ -38,6 +38,18 @@
 //! not, and does not claim to; [`crate::SubsetOutcome::removed`] is how a
 //! caller asks whether this file is finished.
 //!
+//! Nor a **Type 3 glyph's procedure**. A use of a glyph whose procedure
+//! draws under a rectangle is removed, and the procedure — which every use
+//! of that glyph runs — is left in `/CharProcs` exactly as it was (the
+//! module's "A Type 3 glyph's procedure"). A procedure that shows the
+//! covered words as text says them in the file as plainly as an outline
+//! does, and [`crate::subset::apply`] cuts embedded programs, not Type 3
+//! fonts, so it is still there after the default save when the redaction
+//! removed its last use. Nor an annotation's own text — `/Contents`, a
+//! rich-text `/RC`, a field's `/V`: what a redaction cuts is what a page
+//! draws, and those are what a viewer *says*, with no position to compare
+//! with a rectangle.
+//!
 //! # The cut happens in the run's own frame
 //!
 //! A redaction rectangle is given in page space. A glyph is placed in *text*
@@ -169,6 +181,53 @@
 //! tokenized them anyway and wrote back whatever tokens they spelled — every
 //! inline image on a redacted page corrupted, none of them ever scrubbed.
 //!
+//! # Annotation appearances
+//!
+//! An annotation is drawn by running its appearance stream (12.5.5), a form
+//! XObject placed over the page by 12.5.5's matrix **A**: the form's `/BBox`
+//! carried through its `/Matrix`, and the box that results scaled and moved
+//! onto `/Rect`. Until October 2026 this module cut the page's content and
+//! the forms it drew and nothing else, so the text of a FreeText note, a
+//! stamp or a filled field under a rectangle stayed exactly where it was,
+//! drawn on the page, and the report did not mention it.
+//!
+//! Every appearance an annotation on the page can show is now a placement of
+//! its form, entered by [`Walk`] at the transform the renderer draws it with
+//! ([`appearance_fit`], which is `annots::fit`'s arithmetic): each of `/N`,
+//! `/R` and `/D`, every state of each — not only the one `/AS` selects,
+//! since a viewer switches states with no edit to the file — and the
+//! appearance of an annotation flagged hidden, which is one bit from being
+//! drawn. So an appearance is cut as any form is ("A form drawn twice"): in
+//! place when one annotation draws it, and through a copy when annotations
+//! that share it are covered differently. The covered annotation is pointed
+//! at its copy through an `/AP` of its own ([`repoint_appearances`]),
+//! because the `/AP` dictionary — or the state dictionary under it — may be
+//! an object the others share and none of them draws the copy. An
+//! annotation written into `/Annots` itself is edited where it sits. An
+//! appearance with no `/Resources` names things in the page's, as the
+//! subsetter reads it (8.10.1).
+//!
+//! The annotation is **rewritten, not removed**: what goes is what the
+//! rectangle covers, and the rest of the note stays where it was, which is
+//! what a redaction does to a page's own text. What it does not reach is the
+//! annotation's own text — "What this module does not remove".
+//!
+//! # A Type 3 glyph's procedure
+//!
+//! 9.6.5: a Type 3 glyph is drawn by running its procedure, which can show
+//! text in another font or draw an image anywhere — not only inside the box
+//! a glyph is measured by. So a use of a glyph whose procedure can draw
+//! either is measured through it, under the transform the interpreter runs
+//! it with, and a use whose procedure draws under a rectangle is **removed
+//! whole**, as a glyph partly under one is ([`cut_stream`]). The procedure
+//! itself is not rewritten, and [`cut_stream`]'s doc is the decision: it is
+//! the font's, every use of the glyph on every page runs it, and cutting the
+//! covered text out of it would cut it out of all of them — the over-removal
+//! a form drawn twice used to cost, with no copy to give the uses that were
+//! not covered short of a new glyph in the font. A procedure that shows a
+//! glyph whose procedure shows a glyph is followed down, a fixed budget of
+//! streams per use ([`draws_under`]), past which the answer is *covered*.
+//!
 //! # The injections that were counted
 //!
 //! Each defect below was reintroduced on its own and
@@ -245,6 +304,32 @@
 //! | the old way not carried down to what such a form draws | **1** |
 //! | a form's content read from the file rather than from the editor | 2 |
 //! | [`crate::subset`]'s walk put back over the file, with the editor's bytes for a rewritten stream | **1** |
+//!
+//! The appearance and glyph-procedure defects were counted on 2 October
+//! 2026, over `cargo test --no-fail-fast -p tinker-pdf --lib`, 339 tests.
+//! None reports zero, and every count of one is the test written for it:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | appearances not walked, which is how it used to be | 6 |
+//! | an appearance placed in its own form space, the fit to `/Rect` ignored | 6 |
+//! | the fit computed from `/BBox` without the form's `/Matrix` | **1** |
+//! | only `/N` walked | **1** |
+//! | only the first state of a state dictionary walked | **1** |
+//! | the appearance of a hidden annotation skipped | **1** |
+//! | the copy written into an `/AP` object two annotations share | **1** |
+//! | annotations never pointed at their copies | 2 |
+//! | an annotation written into `/Annots` itself never edited | **1** |
+//! | an appearance with no `/Resources` measured in an empty scope | **1** |
+//! | glyph procedures never measured, which is how it used to be | 6 |
+//! | a procedure measured without `/FontMatrix` | 3 |
+//! | a procedure measured at the start of its run rather than at its own pen | **1** |
+//! | the second pass not removing the uses the first found covered | 5 |
+//! | one budget for the stream rather than one per use | 2 |
+//! | a spent budget answering *not covered* | **1** |
+//! | an inline image a procedure draws not counted | **1** |
+//! | a form a procedure draws not followed | **1** |
+//! | a procedure that draws only an inline image not recognised as drawing anything | **1** |
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -464,6 +549,11 @@ const MAX_WARNINGS: usize = 64;
 /// that invokes itself under a matrix that changes by a hair each time
 /// generates a fresh placement every round; [`MAX_FORM_DEPTH`] bounds one
 /// such chain and this bounds the rest (ruling 1).
+///
+/// It is also how many streams one use of a Type 3 glyph may run while its
+/// procedure is measured — the procedure, and every form and glyph procedure
+/// below it, each a placement of a stream under a transform — past which the
+/// use is removed as covered ([`draws_under`]).
 pub const MAX_PLACEMENTS: usize = 64;
 
 /// Records a warning, merging it into one with the same cause and resource.
@@ -617,7 +707,19 @@ pub fn apply(
     } = EditorPage::read(editor, reference)?;
     let fonts = fonts_in(editor.document(), &resources);
 
-    let (data, mut report, uses) = rewrite(&content, areas, &fonts, Matrix::IDENTITY);
+    let mut measured = Vec::new();
+    let (data, mut report, uses) = cut_stream(
+        editor,
+        &resources,
+        &content,
+        areas,
+        &fonts,
+        Matrix::IDENTITY,
+        &mut measured,
+    );
+    for warning in measured {
+        note(&mut report.warnings, warning);
+    }
 
     // 8.10: a form XObject holds content like any other, and a redaction that
     // stops at the page stream leaves whatever a form drew exactly where it
@@ -630,7 +732,22 @@ pub fn apply(
     // own ([`settle`]).
     let mut walk = Walk::default();
     let children = walk.uses(editor, &resources, &uses, areas, &mut report, 0);
+
+    // 12.5.5: every appearance stream an annotation on the page can show —
+    // each of `/N`, `/R` and `/D`, every state — is a form XObject the page
+    // draws over itself, placed where the algorithm in 12.5.5 fits it onto
+    // `/Rect`. Measured as a placement like any `Do`, so a stream two
+    // annotations share is cut exactly at each, the covered one drawing a
+    // copy. Hidden ones too: a flag is one bit a viewer or a caller can
+    // clear, and printing ignores `NoView`.
+    let appearances = appearances_on(editor, reference);
+    let shown: Vec<Option<usize>> = appearances
+        .iter()
+        .map(|appearance| walk.appearance(editor, appearance, &resources, areas, &mut report))
+        .collect();
+
     let targets = settle(editor, &walk, areas, &mut report);
+    let inline_annotations = repoint_appearances(editor, &appearances, &shown, &targets);
 
     // The page's own `Do`s that draw a copy name it by a resource name the
     // page did not have, so the page gets a resources dictionary of its own
@@ -694,6 +811,32 @@ pub fn apply(
     // of which draws the copies.
     if let Some(scope) = scope {
         dict.insert(Name::RESOURCES, Object::Dict(scope));
+    }
+    // An annotation written into `/Annots` itself rather than as an object
+    // is edited where it sits.
+    if !inline_annotations.is_empty() {
+        let key = editor.intern(b"Annots");
+        match dict.get(key).cloned() {
+            Some(Object::Array(mut items)) => {
+                for (index, annotation) in inline_annotations {
+                    if let Some(slot) = items.get_mut(index) {
+                        *slot = Object::Dict(annotation);
+                    }
+                }
+                dict.insert(key, Object::Array(items));
+            }
+            Some(Object::Ref(array)) => {
+                if let Some(Object::Array(mut items)) = editor.get(array) {
+                    for (index, annotation) in inline_annotations {
+                        if let Some(slot) = items.get_mut(index) {
+                            *slot = Object::Dict(annotation);
+                        }
+                    }
+                    editor.put(array, Object::Array(items));
+                }
+            }
+            _ => {}
+        }
     }
     editor.put(reference, Object::Dict(dict));
 
@@ -788,7 +931,15 @@ struct RunFont {
     /// text space. `None` for every other kind, whose widths are thousandths
     /// of text space by definition (9.2.4).
     glyph_space: Option<GlyphSpace>,
+    /// A Type 3 font's glyph procedures that can draw text or an image, by
+    /// code: the only things this module redacts that a procedure could put
+    /// outside its glyph's box. A procedure that only paints paths is not
+    /// here, because nothing it draws is anything a redaction removes.
+    procedures: GlyphProcedures,
 }
+
+/// A Type 3 font's glyph procedures, decoded, by the code that shows each.
+type GlyphProcedures = HashMap<u32, Arc<[u8]>>;
 
 /// A Type 3 font's glyph space (9.6.5): where its `/Widths` are measured and
 /// its glyph procedures draw, and the matrix that carries both into text
@@ -897,24 +1048,42 @@ impl GlyphSpace {
 /// rewrite matches against what the `Tf` operator literally says, and it has
 /// no document to intern with.
 fn fonts_in(doc: &CosDocument, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont>> {
-    let spaces = glyph_spaces(doc, resources);
+    let mut spaces = glyph_spaces(doc, resources);
     cos_font::from_resources(doc, resources)
         .into_iter()
         .filter_map(|(name, font)| {
             let bytes = doc.name_bytes(name)?.to_vec();
-            let glyph_space = (font.kind() == cos_font::FontKind::Type3)
-                .then(|| spaces.get(&name).copied().unwrap_or(GlyphSpace::DEFAULT));
-            Some((bytes, Arc::new(RunFont { font, glyph_space })))
+            let (glyph_space, procedures) = if font.kind() == cos_font::FontKind::Type3 {
+                let (space, procedures) = spaces
+                    .remove(&name)
+                    .unwrap_or((GlyphSpace::DEFAULT, HashMap::new()));
+                (Some(space), procedures)
+            } else {
+                (None, HashMap::new())
+            };
+            Some((
+                bytes,
+                Arc::new(RunFont {
+                    font,
+                    glyph_space,
+                    procedures,
+                }),
+            ))
         })
         .collect()
 }
 
-/// The glyph space each font in `/Font` declares (9.6.5).
+/// The glyph space each font in `/Font` declares (9.6.5), and its glyph
+/// procedures that can draw text or an image.
 ///
 /// Read here rather than through `cos_font::Font`, which carries neither
-/// `/FontMatrix` nor `/FontBBox`: this module is the only caller that builds
-/// a glyph box from them. Only a Type 3 font's answer is ever used.
-fn glyph_spaces(doc: &CosDocument, resources: &Dict) -> HashMap<Name, GlyphSpace> {
+/// `/FontMatrix`, `/FontBBox` nor `/CharProcs`: this module is the only
+/// caller that builds a glyph box from them. Only a Type 3 font's answer is
+/// ever used.
+fn glyph_spaces(
+    doc: &CosDocument,
+    resources: &Dict,
+) -> HashMap<Name, (GlyphSpace, GlyphProcedures)> {
     let mut out = HashMap::new();
     let value = doc.resolve_key(resources, doc.intern(b"Font"));
     let Some(fonts) = value.as_dict() else {
@@ -926,9 +1095,80 @@ fn glyph_spaces(doc: &CosDocument, resources: &Dict) -> HashMap<Name, GlyphSpace
         let Some(dict) = resolved.as_dict() else {
             continue;
         };
-        out.insert(*key, GlyphSpace::read(doc, dict));
+        out.insert(
+            *key,
+            (GlyphSpace::read(doc, dict), carrying_procedures(doc, dict)),
+        );
     }
     out
+}
+
+/// A Type 3 font's glyph procedures that show text or draw an image, by code.
+///
+/// A code reaches its procedure the way the interpreter reaches it
+/// (`PageResources::type3_glyph`): `/Encoding`'s `/Differences` names it and
+/// `/CharProcs` holds the stream under that name — there is no built-in
+/// encoding for a font whose glyphs the document invented. At most 256
+/// codes, one read each.
+fn carrying_procedures(doc: &CosDocument, font: &Dict) -> GlyphProcedures {
+    let mut out = HashMap::new();
+    let subtype = font
+        .get_name(doc.intern(b"Subtype"))
+        .and_then(|n| doc.name_bytes(n));
+    if subtype.as_deref() != Some(b"Type3".as_slice()) {
+        return out;
+    }
+    let procs = doc.resolve_key(font, doc.intern(b"CharProcs"));
+    let Some(procs) = procs.as_dict() else {
+        return out;
+    };
+    let encoding = doc.resolve_key(font, doc.intern(b"Encoding"));
+    let Some(encoding) = encoding.as_dict() else {
+        return out;
+    };
+    let differences = doc.resolve_key(encoding, doc.intern(b"Differences"));
+    let Some(differences) = differences.as_array() else {
+        return out;
+    };
+
+    // Read exactly as the interpreter reads it, number for number: the first
+    // name a code is given is the one it draws, and a real is truncated (a
+    // negative or a NaN to zero, which is what `as` does).
+    let mut named: HashSet<u32> = HashSet::new();
+    let mut code = 0u32;
+    for item in differences {
+        match doc.resolve(item).as_ref() {
+            Object::Int(v) => code = u32::try_from(*v).unwrap_or(0),
+            Object::Real(v) => code = *v as u32,
+            Object::Name(name) => {
+                if code <= 0xff && named.insert(code) {
+                    let content = procs
+                        .get_ref(*name)
+                        .and_then(|r| doc.stream_decoded(r).ok());
+                    if let Some(content) = content.filter(|c| carries(c)) {
+                        out.insert(code, Arc::from(content.as_slice()));
+                    }
+                }
+                code = code.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether a glyph procedure shows text or draws an image: an operator this
+/// module would have to measure were it in a page.
+fn carries(content: &[u8]) -> bool {
+    let mut tokens = Tokenizer::new(content);
+    while let Some(token) = tokens.next_token() {
+        if let Token::Operator(op) = token {
+            if matches!(op.as_slice(), b"Tj" | b"TJ" | b"'" | b"\"" | b"Do" | b"BI") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// How deep form XObjects may nest before recursion is refused (8.10).
@@ -1124,18 +1364,7 @@ impl Walk {
             scope,
         } = placing;
 
-        // 8.10.2: the form's own /Matrix sits between its space and the one
-        // that invoked it, so it composes with the transform the `Do` was
-        // made under.
-        let matrix = Resolve::resolve_key(editor, &dict, editor.intern(b"Matrix"))
-            .as_array()
-            .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
-            .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()))
-            .and_then(|v| Matrix::from_operands(&v));
-        let inner = match matrix {
-            Some(m) => m.then(used.ctm),
-            None => used.ctm,
-        };
+        let inner = form_transform(editor, &dict, used.ctm);
 
         let form = match self.by_number.get(&reference.num) {
             Some(&index) => index,
@@ -1183,7 +1412,15 @@ impl Walk {
             .cloned()
             .unwrap_or_else(|| scope.clone());
         let fonts = fonts_in(editor.document(), &inner_resources);
-        let (data, pass, inner_uses) = rewrite(&entry.content, areas, &fonts, inner);
+        let (data, pass, inner_uses) = cut_stream(
+            editor,
+            &inner_resources,
+            &entry.content,
+            areas,
+            &fonts,
+            inner,
+            &mut report.warnings,
+        );
         for warning in pass.warnings {
             note(&mut report.warnings, warning);
         }
@@ -1509,7 +1746,15 @@ fn union(
             continue;
         };
         let fonts = fonts_in(editor.document(), &node.resources);
-        let (next, pass, _) = rewrite(&data, areas, &fonts, node.ctm);
+        let (next, pass, _) = cut_stream(
+            editor,
+            &node.resources,
+            &data,
+            areas,
+            &fonts,
+            node.ctm,
+            &mut report.warnings,
+        );
         data = next;
         glyphs += pass.glyphs;
         report.operations += pass.operations;
@@ -1533,6 +1778,180 @@ fn union(
             },
         );
     }
+}
+
+/// The transform a form's content is drawn under: its own `/Matrix`, then
+/// the transform in force at the `Do` (8.10.2).
+fn form_transform(editor: &DocumentEditor, dict: &Dict, ctm: Matrix) -> Matrix {
+    let matrix = Resolve::resolve_key(editor, dict, editor.intern(b"Matrix"))
+        .as_array()
+        .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
+        .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()))
+        .and_then(|v| Matrix::from_operands(&v));
+    match matrix {
+        Some(m) => m.then(ctm),
+        None => ctm,
+    }
+}
+
+/// Cuts one content stream: [`rewrite`], and then again with every Type 3
+/// glyph removed whose procedure draws text or an image under a rectangle.
+///
+/// # A glyph procedure is measured per use, and is not rewritten
+///
+/// 9.6.5: a Type 3 glyph is drawn by running its procedure, and the
+/// procedure can show text in a font of its own or draw an image — anywhere,
+/// not only inside the box [`Pen::glyph_box`] measures. So every use of such
+/// a glyph is measured through its procedure, under the transform the
+/// interpreter runs it with ([`draws_under`]), and a use whose procedure
+/// draws under a rectangle is **removed whole**, the way a glyph partly under
+/// one is.
+///
+/// The procedure itself is left exactly as it is, and that is the decision
+/// this is written down for. A procedure is the font's: every use of that
+/// glyph, on this page and every other, runs the same stream. Cutting the
+/// covered text out of it would cut it out of every one of those — the
+/// over-removal a form drawn twice used to cost, with nowhere to put a copy
+/// short of a new glyph in the font. Worse, a bitmap face draws each glyph as
+/// an inline image a shade larger than its advance, so a rectangle beside a
+/// word would have blanked that letter throughout the document. Removed per
+/// use, what goes is what the rectangle covers at that use and nothing else.
+/// What that leaves is the procedure's own bytes in the font, as an embedded
+/// program keeps its outlines — see the module's "What this module does not
+/// remove".
+fn cut_stream(
+    editor: &DocumentEditor,
+    scope: &Dict,
+    content: &[u8],
+    areas: &[Redaction],
+    fonts: &HashMap<Vec<u8>, Arc<RunFont>>,
+    ctm: Matrix,
+    warnings: &mut Vec<RedactionWarning>,
+) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
+    let mut procedures = Procedures::default();
+    let first = rewrite(content, areas, fonts, ctm, &mut procedures);
+    if procedures.found.is_empty() {
+        return first;
+    }
+    let measure = Measure {
+        editor,
+        scope,
+        fonts,
+        areas,
+    };
+    let mut drop = HashSet::new();
+    for glyph in &procedures.found {
+        // Per use: one glyph's procedures cannot spend another's.
+        let mut budget = MAX_PLACEMENTS;
+        if draws_under(&measure, &glyph.procedure, glyph.ctm, warnings, &mut budget) {
+            drop.insert(glyph.index);
+        }
+    }
+    if drop.is_empty() {
+        return first;
+    }
+    let mut again = Procedures {
+        drop,
+        ..Procedures::default()
+    };
+    rewrite(content, areas, fonts, ctm, &mut again)
+}
+
+/// What [`draws_under`] measures in.
+struct Measure<'a> {
+    editor: &'a DocumentEditor,
+    /// The resources `Do` names are resolved in: the scope that showed the
+    /// glyph, which is where this engine's interpreter runs a procedure.
+    scope: &'a Dict,
+    fonts: &'a HashMap<Vec<u8>, Arc<RunFont>>,
+    areas: &'a [Redaction],
+}
+
+/// Whether content drawn under `ctm` puts text or an image under a
+/// rectangle. Measured only: nothing is written.
+///
+/// Text and inline images are what [`rewrite`] measures; an XObject is
+/// followed as the walk follows one — an image by its unit square, a form
+/// into its content — and a Type 3 glyph the content shows into its own
+/// procedure.
+///
+/// Every stream run spends one of `budget`, which [`cut_stream`] sets to
+/// [`MAX_PLACEMENTS`] for each use of a glyph: procedures that show glyphs
+/// whose procedures show glyphs branch at every level, a procedure can show
+/// its own glyph, and either would otherwise make the work exponential or
+/// endless. The budget is per use rather than per stream because a page of a
+/// benign two-level face — a glyph whose procedure draws a form, or shows a
+/// word in another Type 3 face — spends a few runs on every use, and a budget
+/// for the stream would run out a few dozen uses in and remove every use
+/// after (`every_use_of_a_glyph_has_a_budget_of_its_own`: two runs a use, so
+/// thirty-two). Past it the answer is *yes*, the direction that removes a
+/// glyph rather than leaving one; only a face that recurses ever reaches it.
+fn draws_under(
+    measure: &Measure<'_>,
+    content: &[u8],
+    ctm: Matrix,
+    warnings: &mut Vec<RedactionWarning>,
+    budget: &mut usize,
+) -> bool {
+    if *budget == 0 {
+        return true;
+    }
+    *budget -= 1;
+
+    let mut procedures = Procedures::default();
+    let (_, pass, uses) = rewrite(content, measure.areas, measure.fonts, ctm, &mut procedures);
+    for warning in pass.warnings {
+        note(warnings, warning);
+    }
+    if pass.glyphs > 0 || pass.images > 0 {
+        return true;
+    }
+
+    for used in &uses {
+        let Some((reference, dict)) = resolve_xobject(measure.editor, measure.scope, &used.name)
+        else {
+            continue;
+        };
+        let subtype =
+            Resolve::resolve_key(measure.editor, &dict, measure.editor.intern(b"Subtype"))
+                .as_name()
+                .and_then(|n| measure.editor.document().name_bytes(n));
+        match subtype.as_deref() {
+            Some(b"Image") => {
+                if covers_unit_square(used, measure.areas) {
+                    return true;
+                }
+            }
+            Some(b"Form") => {
+                let Some(inner_content) = measure.editor.stream_bytes(reference) else {
+                    continue;
+                };
+                // 8.10.1, as the walk reads it: the form's own resources, or
+                // the scope that drew it.
+                let resources = Resolve::resolve_key(measure.editor, &dict, Name::RESOURCES)
+                    .as_dict()
+                    .cloned()
+                    .unwrap_or_else(|| measure.scope.clone());
+                let fonts = fonts_in(measure.editor.document(), &resources);
+                let inner = Measure {
+                    editor: measure.editor,
+                    scope: &resources,
+                    fonts: &fonts,
+                    areas: measure.areas,
+                };
+                let placed = form_transform(measure.editor, &dict, used.ctm);
+                if draws_under(&inner, &inner_content, placed, warnings, budget) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    procedures
+        .found
+        .iter()
+        .any(|glyph| draws_under(measure, &glyph.procedure, glyph.ctm, warnings, budget))
 }
 
 /// The `Do`s of one stream that must draw a copy, and the copy each draws.
@@ -1610,6 +2029,285 @@ fn with_names(
     let mut resources = scope.clone();
     resources.insert(key, Object::Dict(table));
     (out, resources)
+}
+
+/// Where an annotation's dictionary is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnnotationAt {
+    /// An object of its own, which is how nearly every file writes one.
+    Object(ObjRef),
+    /// Written into `/Annots` itself, at this index.
+    Inline(usize),
+}
+
+/// One appearance stream an annotation on the page can show, and where
+/// 12.5.5 puts it.
+struct AppearanceAt {
+    annotation: AnnotationAt,
+    /// The annotation's dictionary as the walk read it, which is where an
+    /// inline one is edited from.
+    annotation_dict: Dict,
+    /// `N`, `R` or `D`.
+    key: &'static [u8],
+    /// The state, when the entry is a dictionary of them.
+    state: Option<Name>,
+    stream: ObjRef,
+    /// The stream's dictionary.
+    dict: Dict,
+    /// 12.5.5's matrix **A**: what maps the form's space, after its own
+    /// `/Matrix`, onto the page. The walk composes the `/Matrix` itself, as
+    /// it does for any form.
+    fit: Matrix,
+}
+
+/// Every appearance stream every annotation on a page can show, read through
+/// the editor.
+///
+/// All of `/N`, `/R` and `/D`, and every state of each — not only the one
+/// `/AS` selects, because a viewer switches states with no edit to the file,
+/// and the state that is off today draws tomorrow. An annotation without a
+/// `/Rect` enclosing any area, or an appearance whose `/BBox` 12.5.5 cannot
+/// fit onto it, is drawn nowhere by this engine's renderer
+/// (`annots::prepare`) and is not measured either.
+fn appearances_on(editor: &DocumentEditor, page: ObjRef) -> Vec<AppearanceAt> {
+    let mut out = Vec::new();
+    let Some(Object::Dict(page)) = editor.get(page) else {
+        return out;
+    };
+    let annots = Resolve::resolve_key(editor, &page, editor.intern(b"Annots"));
+    let Some(entries) = annots.as_array() else {
+        return out;
+    };
+
+    for (index, entry) in entries.iter().enumerate() {
+        let (at, annotation) = match entry {
+            Object::Ref(r) => match editor.get(*r).and_then(|o| o.as_dict().cloned()) {
+                Some(dict) => (AnnotationAt::Object(*r), dict),
+                None => continue,
+            },
+            Object::Dict(dict) => (AnnotationAt::Inline(index), dict.clone()),
+            _ => continue,
+        };
+        let Some(rect) = Resolve::resolve_key(editor, &annotation, editor.intern(b"Rect"))
+            .as_array()
+            .and_then(Rect::from_array)
+            .filter(|r| !r.is_empty())
+        else {
+            continue;
+        };
+        let ap = Resolve::resolve_key(editor, &annotation, editor.intern(b"AP"));
+        let Some(ap) = ap.as_dict() else {
+            continue;
+        };
+
+        for key in [b"N".as_slice(), b"R", b"D"] {
+            let Some(value) = ap.get(editor.intern(key)) else {
+                continue;
+            };
+            for (state, stream) in appearance_streams(editor, value) {
+                let Some(dict) = editor.get(stream).and_then(|o| o.as_dict().cloned()) else {
+                    continue;
+                };
+                let Some(fit) = appearance_fit(editor, &dict, rect) else {
+                    continue;
+                };
+                out.push(AppearanceAt {
+                    annotation: at,
+                    annotation_dict: annotation.clone(),
+                    key,
+                    state,
+                    stream,
+                    dict,
+                    fit,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The streams one `/AP` entry can be: a stream, or a dictionary of states
+/// each naming one — told apart by being a stream, as the renderer tells
+/// them apart, rather than by carrying a `/BBox`.
+fn appearance_streams(editor: &DocumentEditor, value: &Object) -> Vec<(Option<Name>, ObjRef)> {
+    let states = |dict: &Dict| -> Vec<(Option<Name>, ObjRef)> {
+        dict.iter()
+            .filter_map(|(name, v)| Some((Some(*name), v.as_objref()?)))
+            .collect()
+    };
+    match value {
+        Object::Ref(r) => {
+            if editor.stream_bytes(*r).is_some() {
+                return vec![(None, *r)];
+            }
+            editor
+                .get(*r)
+                .and_then(|o| o.as_dict().map(&states))
+                .unwrap_or_default()
+        }
+        Object::Dict(dict) => states(dict),
+        _ => Vec::new(),
+    }
+}
+
+/// 12.5.5's matrix **A**, as `annots::fit` computes it for the renderer: the
+/// form's `/BBox` carried through its `/Matrix`, and the axis-aligned box of
+/// the result scaled and moved onto `/Rect`.
+///
+/// `None` where the renderer draws nothing: a box with no extent, or one
+/// that is not finite. A form with no `/BBox` has nothing to fit and is drawn
+/// where its own matrix puts it, so **A** is the identity.
+fn appearance_fit(editor: &DocumentEditor, form: &Dict, rect: Rect) -> Option<Matrix> {
+    let Some(bbox) = Resolve::resolve_key(editor, form, editor.intern(b"BBox"))
+        .as_array()
+        .and_then(Rect::from_array)
+    else {
+        return Some(Matrix::IDENTITY);
+    };
+    if bbox.is_empty() {
+        return None;
+    }
+    let matrix = form_transform(editor, form, Matrix::IDENTITY);
+    let corners = [
+        matrix.apply(bbox.x0, bbox.y0),
+        matrix.apply(bbox.x1, bbox.y0),
+        matrix.apply(bbox.x1, bbox.y1),
+        matrix.apply(bbox.x0, bbox.y1),
+    ];
+    if corners
+        .iter()
+        .any(|(x, y)| !x.is_finite() || !y.is_finite())
+    {
+        return None;
+    }
+    let (mut x0, mut y0) = corners[0];
+    let (mut x1, mut y1) = corners[0];
+    for (x, y) in corners {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    if dx <= f64::EPSILON || dy <= f64::EPSILON {
+        return None;
+    }
+    let sx = (rect.x1 - rect.x0) / dx;
+    let sy = (rect.y1 - rect.y0) / dy;
+    Some(Matrix {
+        a: sx,
+        b: 0.0,
+        c: 0.0,
+        d: sy,
+        e: rect.x0 - x0 * sx,
+        f: rect.y0 - y0 * sy,
+    })
+}
+
+impl Walk {
+    /// Enters one annotation appearance as a placement of its form.
+    ///
+    /// Its scope is the page's resources, for an appearance that has none of
+    /// its own (8.10.1), and its name — for a report that has to name it — is
+    /// `AP/` and the entry, with the state when there is one.
+    fn appearance(
+        &mut self,
+        editor: &mut DocumentEditor,
+        appearance: &AppearanceAt,
+        page_resources: &Dict,
+        areas: &[Redaction],
+        report: &mut RedactionReport,
+    ) -> Option<usize> {
+        let mut name = b"AP/".to_vec();
+        name.extend_from_slice(appearance.key);
+        if let Some(state) = appearance.state {
+            name.push(b'/');
+            name.extend_from_slice(&editor.document().name_bytes(state).unwrap_or_default());
+        }
+        let used = XObjectUse {
+            name,
+            ctm: appearance.fit,
+            at: 0..0,
+        };
+        let placing = Placing {
+            reference: appearance.stream,
+            dict: appearance.dict.clone(),
+            used: &used,
+            scope: page_resources,
+        };
+        self.form(editor, placing, areas, report, 0)
+    }
+}
+
+/// Points each annotation whose appearance was given a copy at the copy.
+///
+/// The annotation's `/AP` is written as a direct dictionary of its own — and
+/// the state dictionary under it, when the entry is one — because either may
+/// be an object other annotations share, none of which draws the copy.
+/// Returns the edits to annotations written inline in `/Annots`, which the
+/// caller makes where the page is written.
+fn repoint_appearances(
+    editor: &mut DocumentEditor,
+    appearances: &[AppearanceAt],
+    shown: &[Option<usize>],
+    targets: &[Target],
+) -> Vec<(usize, Dict)> {
+    let mut edited: Vec<(AnnotationAt, Dict)> = Vec::new();
+    for (appearance, node) in appearances.iter().zip(shown) {
+        let Some(Target::Copy(copy)) = node.and_then(|n| targets.get(n).copied()) else {
+            continue;
+        };
+        let slot = match edited
+            .iter()
+            .position(|(at, _)| *at == appearance.annotation)
+        {
+            Some(slot) => slot,
+            None => {
+                let dict = match appearance.annotation {
+                    AnnotationAt::Object(r) => editor.get(r).and_then(|o| o.as_dict().cloned()),
+                    AnnotationAt::Inline(_) => Some(appearance.annotation_dict.clone()),
+                };
+                let Some(dict) = dict else {
+                    continue;
+                };
+                edited.push((appearance.annotation, dict));
+                edited.len() - 1
+            }
+        };
+        let Some((_, annotation)) = edited.get_mut(slot) else {
+            continue;
+        };
+
+        let ap_key = editor.intern(b"AP");
+        let key = editor.intern(appearance.key);
+        let mut ap = Resolve::resolve_key(editor, annotation, ap_key)
+            .as_dict()
+            .cloned()
+            .unwrap_or_default();
+        match appearance.state {
+            None => {
+                ap.insert(key, Object::Ref(copy));
+            }
+            Some(state) => {
+                let mut states = Resolve::resolve_key(editor, &ap, key)
+                    .as_dict()
+                    .cloned()
+                    .unwrap_or_default();
+                states.insert(state, Object::Ref(copy));
+                ap.insert(key, Object::Dict(states));
+            }
+        }
+        annotation.insert(ap_key, Object::Dict(ap));
+    }
+
+    let mut inline = Vec::new();
+    for (at, annotation) in edited {
+        match at {
+            AnnotationAt::Object(r) => editor.put(r, Object::Dict(annotation)),
+            AnnotationAt::Inline(index) => inline.push((index, annotation)),
+        }
+    }
+    inline
 }
 
 /// A stream dictionary made fit for bytes this module wrote.
@@ -2023,12 +2721,42 @@ impl Pen {
     }
 }
 
+/// The Type 3 glyphs one pass over a stream showed through a procedure that
+/// can draw text or an image, and those a second pass is to remove.
+///
+/// Counted by occurrence, in stream order: a pass is deterministic, so the
+/// `n`th such glyph of the first pass is the `n`th of the second.
+#[derive(Default)]
+struct Procedures {
+    /// Occurrences to remove whatever their box says.
+    drop: HashSet<usize>,
+    /// The next occurrence's index.
+    next: usize,
+    /// Every occurrence the pass kept, with where its procedure runs.
+    found: Vec<GlyphUse>,
+}
+
+/// One Type 3 glyph kept, and the transform its procedure runs under: the
+/// font matrix, then the text rendering matrix at the glyph's origin (9.4.4),
+/// then the transform in force — where the interpreter runs it.
+struct GlyphUse {
+    index: usize,
+    procedure: Arc<[u8]>,
+    ctm: Matrix,
+}
+
 /// Rewrites a content stream with redacted glyphs removed.
+///
+/// A glyph is measured by its box. The Type 3 glyph occurrences `procedures`
+/// names are removed whatever their box says, and the other Type 3 glyphs
+/// whose procedures could draw beyond it are recorded in it, for
+/// [`cut_stream`] to measure.
 fn rewrite(
     content: &[u8],
     areas: &[Redaction],
     fonts: &HashMap<Vec<u8>, Arc<RunFont>>,
     initial: Matrix,
+    procedures: &mut Procedures,
 ) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
     let mut out = Vec::with_capacity(content.len());
     let mut tokens = Tokenizer::new(content);
@@ -2182,7 +2910,7 @@ fn rewrite(
                     pen.char_spacing = number(1);
                 }
                 if let Some(Token::String(bytes)) = operands.last().cloned() {
-                    let cut = redact_string(&bytes, &pen, areas);
+                    let cut = redact_string(&bytes, &pen, areas, procedures);
                     if let Some(warning) = cut.warning {
                         note(&mut report.warnings, warning);
                     }
@@ -2220,7 +2948,7 @@ fn rewrite(
                 for token in &operands {
                     match token {
                         Token::String(s) => {
-                            let cut = redact_string(s, &local, areas);
+                            let cut = redact_string(s, &local, areas, procedures);
                             if let Some(warning) = cut.warning {
                                 note(&mut report.warnings, warning);
                             }
@@ -2369,7 +3097,13 @@ struct Cut {
 /// `mark`ed rectangle with a bite of blank page beside it where the
 /// over-removed glyph was, which is a thing a reader can see rather than a
 /// thing an extractor can find.
-fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
+///
+/// A Type 3 glyph whose procedure can draw text or an image
+/// ([`RunFont::procedures`]) is counted in `procedures`: removed when a
+/// previous pass found its procedure drawing under a rectangle, and otherwise
+/// recorded, with the transform its procedure runs under, for that pass to
+/// measure ([`cut_stream`]).
+fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction], procedures: &mut Procedures) -> Cut {
     let whole = |warning: Option<RedactionWarning>| Cut {
         runs: vec![Run::Text(bytes.to_vec())],
         removed: 0,
@@ -2409,8 +3143,10 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
     // to be unmeasurable part-way along is left whole rather than half-cut.
     let codes = selected.font.decode(bytes);
     let mut boxes: Vec<([(f64, f64); 4], f64)> = Vec::with_capacity(codes.len());
+    let mut origins: Vec<f64> = Vec::with_capacity(codes.len());
     let mut along = pen.along;
     for code in &codes {
+        origins.push(along);
         let advance = pen.advance(code);
         // The glyph's box, approximated from its advance and the font size.
         // Approximating is right here: an exact outline would let a descender
@@ -2432,10 +3168,39 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
     let mut gap = 0.0f64;
     let mut removed = 0usize;
 
-    for (code, (quad, advance)) in codes.iter().zip(&boxes) {
-        let inside = areas
+    for ((code, (quad, advance)), origin) in codes.iter().zip(&boxes).zip(&origins) {
+        let mut inside = areas
             .iter()
             .any(|redaction| quad_meets_rect(quad, redaction.area));
+
+        // 9.6.5: the procedure is what the glyph draws, and it can draw
+        // beyond the box — text in a font of its own, an image. A use whose
+        // procedure draws under a rectangle goes whole, as a glyph partly
+        // under one does; the procedure itself, which every use of the glyph
+        // shares, is left as it is.
+        if let (Some(space), Some(procedure)) =
+            (selected.glyph_space, selected.procedures.get(&code.code))
+        {
+            let index = procedures.next;
+            procedures.next += 1;
+            if procedures.drop.contains(&index) {
+                inside = true;
+            } else if !inside {
+                let placed = Matrix {
+                    a: pen.size * pen.horizontal_scale,
+                    b: 0.0,
+                    c: 0.0,
+                    d: pen.size,
+                    e: *origin,
+                    f: pen.rise,
+                };
+                procedures.found.push(GlyphUse {
+                    index,
+                    procedure: Arc::clone(procedure),
+                    ctm: space.matrix.then(placed).then(frame),
+                });
+            }
+        }
 
         if inside {
             removed += 1;
@@ -4035,7 +4800,13 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
     fn garbage_content_survives_the_rewrite() {
         let fonts = HashMap::new();
         let content = b"q 1 0 0 1 0 0 cm ) ) ) >> BI garbage EI Q";
-        let (out, report, _) = rewrite(content, &[second_word()], &fonts, Matrix::IDENTITY);
+        let (out, report, _) = rewrite(
+            content,
+            &[second_word()],
+            &fonts,
+            Matrix::IDENTITY,
+            &mut Procedures::default(),
+        );
         assert_eq!(report, RedactionReport::default());
         assert!(out.contains(&b'q'), "the operators survive");
     }
@@ -6145,5 +6916,908 @@ trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
 
         assert!(!text.contains("PAGE"), "page zero's samples are gone");
         assert!(text.contains("SECR"), "page one is untouched");
+    }
+}
+
+/// Annotation appearance streams (12.5.5), cut where 12.5.5 draws them.
+///
+/// Every fixture is one 400 by 300 page whose font is the vendored Liberation
+/// Serif, embedded whole, so an appearance both renders and — flattened into
+/// the page, which is how an extractor that does not read annotations comes
+/// to read one — extracts. The standard appearance draws `PUBLIC SECRET` at
+/// 24 points in a `/BBox` of `0 0 400 40`, and 12.5.5 fits that box onto a
+/// `/Rect` half its size, so on the page the words are 12 points tall:
+/// `PUBLIC` x 10..52.67, the space to 55.67 and `SECRET` to 100.35, on a
+/// baseline 5 points above the rectangle's bottom. None of that is in page
+/// space until the fit is applied, so a walk that drew an appearance where its
+/// form space lands — at the origin, twice the size — cuts nothing at all.
+///
+/// The positions read back are this engine's extractor and renderer compared
+/// with themselves before and after the cut: self-consistency, as the other
+/// modules here label it.
+#[cfg(test)]
+mod appearance_streams {
+    use super::tests_support::*;
+    use super::*;
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    fn band(area: Rect) -> Redaction {
+        Redaction { area, mark: false }
+    }
+
+    /// Over `SECRET` where the standard appearance puts it on a `/Rect`
+    /// whose bottom is y 40, and clear of the space before it.
+    fn over_secret_at(bottom: f64) -> Rect {
+        area(56.0, bottom, 400.0, bottom + 30.0)
+    }
+
+    fn numbers(values: &[f64]) -> Object {
+        Object::Array(values.iter().map(|v| Object::Real(*v)).collect())
+    }
+
+    /// The page: `KEEP` in Liberation Serif at the top, drawn by the builder
+    /// so the font is registered, and nothing else. Returns it opened, with
+    /// the font's object.
+    fn page() -> (Arc<CosDocument>, ObjRef) {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        builder.add_page(400.0, 300.0, |p| p.text(b"F0", 12.0, 300.0, 280.0, "KEEP"));
+        let doc = open(builder.finish());
+        let font = crate::subset::tests_support::only_font(&doc);
+        (doc, font)
+    }
+
+    /// An appearance stream drawing `content` in `/F0`, the page's font.
+    fn appearance(
+        editor: &mut DocumentEditor,
+        font: ObjRef,
+        bbox: [f64; 4],
+        matrix: Option<[f64; 6]>,
+        content: &str,
+    ) -> ObjRef {
+        let mut fonts = Dict::new();
+        fonts.insert(editor.intern(b"F0"), Object::Ref(font));
+        let mut resources = Dict::new();
+        resources.insert(editor.intern(b"Font"), Object::Dict(fonts));
+        let mut dict = Dict::new();
+        dict.insert(
+            editor.intern(b"Type"),
+            Object::Name(editor.intern(b"XObject")),
+        );
+        dict.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Form")),
+        );
+        dict.insert(editor.intern(b"BBox"), numbers(&bbox));
+        if let Some(matrix) = matrix {
+            dict.insert(editor.intern(b"Matrix"), numbers(&matrix));
+        }
+        dict.insert(Name::RESOURCES, Object::Dict(resources));
+        let stream = editor.allocate();
+        editor.put_stream(
+            stream,
+            StreamData {
+                dict,
+                data: content.as_bytes().to_vec(),
+            },
+        );
+        stream
+    }
+
+    /// The standard appearance: `PUBLIC SECRET` at 24 points in a box twice
+    /// the size of the `/Rect` it is fitted onto.
+    fn public_secret(editor: &mut DocumentEditor, font: ObjRef) -> ObjRef {
+        appearance(
+            editor,
+            font,
+            [0.0, 0.0, 400.0, 40.0],
+            None,
+            "BT /F0 24 Tf 0 10 Td (PUBLIC SECRET) Tj ET",
+        )
+    }
+
+    /// The `/Rect` the standard appearance is fitted onto, with its bottom at
+    /// `bottom`.
+    fn rect_at(bottom: f64) -> [f64; 4] {
+        [10.0, bottom, 210.0, bottom + 20.0]
+    }
+
+    /// An annotation dictionary of `subtype` whose `/AP` is `ap`.
+    fn annotation(editor: &DocumentEditor, subtype: &[u8], rect: [f64; 4], ap: Object) -> Dict {
+        let mut dict = Dict::new();
+        dict.insert(
+            editor.intern(b"Type"),
+            Object::Name(editor.intern(b"Annot")),
+        );
+        dict.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(subtype)),
+        );
+        dict.insert(editor.intern(b"Rect"), numbers(&rect));
+        dict.insert(editor.intern(b"AP"), ap);
+        dict
+    }
+
+    /// `/AP << /N stream >>`, direct.
+    fn normal(editor: &DocumentEditor, stream: ObjRef) -> Object {
+        let mut ap = Dict::new();
+        ap.insert(editor.intern(b"N"), Object::Ref(stream));
+        Object::Dict(ap)
+    }
+
+    /// An annotation as an object of its own.
+    fn object(editor: &mut DocumentEditor, annotation: Dict) -> Object {
+        let reference = editor.allocate();
+        editor.put(reference, Object::Dict(annotation));
+        Object::Ref(reference)
+    }
+
+    /// Page zero's `/Annots`, set to `entries`.
+    fn annots(editor: &mut DocumentEditor, entries: Vec<Object>) {
+        let page = editor.page_refs()[0];
+        let Some(Object::Dict(mut dict)) = editor.get(page) else {
+            panic!("the page is a dictionary");
+        };
+        dict.insert(editor.intern(b"Annots"), Object::Array(entries));
+        editor.put(page, Object::Dict(dict));
+    }
+
+    fn saved(editor: &DocumentEditor) -> Vec<u8> {
+        editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        })
+    }
+
+    /// What the extractor reads once page zero's annotations are flattened
+    /// into its content (12.5.5's fit, as `flatten_annotations` writes it),
+    /// bottom to top.
+    fn flattened_lines(bytes: Vec<u8>) -> Vec<(f64, String)> {
+        let mut editor = DocumentEditor::new(open(bytes));
+        editor.flatten_annotations(0).expect("page zero");
+        lines_of(saved(&editor))
+    }
+
+    /// The annotation at `index` in page zero's `/Annots`, resolved.
+    fn annotation_at(doc: &CosDocument, index: usize) -> Dict {
+        let pages = tinker_pdf_cos::pages::collect(doc);
+        let page = doc.get(pages[0].reference).expect("the page");
+        let annots = doc.resolve_key(page.as_dict().expect("a dict"), doc.intern(b"Annots"));
+        let entry = annots.as_array().expect("an array")[index].clone();
+        doc.resolve(&entry).as_dict().expect("a dict").clone()
+    }
+
+    /// The stream an annotation's `/AP` `/N` names.
+    fn normal_of(doc: &CosDocument, annotation: &Dict) -> ObjRef {
+        let ap = doc.resolve_key(annotation, doc.intern(b"AP"));
+        ap.as_dict()
+            .expect("an /AP")
+            .get_ref(doc.intern(b"N"))
+            .expect("an /N stream")
+    }
+
+    /// The row's exit, for an annotation: a FreeText annotation whose
+    /// appearance draws `PUBLIC SECRET`, and a rectangle over `SECRET` where
+    /// 12.5.5 puts it on the page.
+    ///
+    /// `SECRET` is gone from every stream, from the extractor and from the
+    /// render; `PUBLIC` is in all three, and renders exactly as it did. The
+    /// appearance is cut **in place**: one annotation draws it, so it needs
+    /// no copy, and its object is the one the annotation still names.
+    #[test]
+    fn an_appearance_under_a_redaction_is_cut_where_its_annotation_draws_it() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let ap = normal(&editor, stream);
+        let note = annotation(&editor, b"FreeText", rect_at(40.0), ap);
+        let entry = object(&mut editor, note);
+        annots(&mut editor, vec![entry]);
+        let bytes = saved(&editor);
+
+        assert_eq!(
+            flattened_lines(bytes.clone()),
+            vec![
+                (45.0, "PUBLIC SECRET".to_string()),
+                (280.0, "KEEP".to_string())
+            ],
+            "the fixture draws what its comment says, where it says"
+        );
+        let before = render(bytes.clone());
+        let over = over_secret_at(40.0);
+        assert!(ink_in(&before, 300.0, over) > 20, "SECRET starts inked");
+
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6, "S, E, C, R, E and T");
+        assert_eq!(report.operations, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        assert_eq!(
+            flattened_lines(after.clone()),
+            vec![(45.0, "PUBLIC".to_string()), (280.0, "KEEP".to_string())]
+        );
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, area(55.0, 40.0, 101.0, 60.0)),
+            0,
+            "PUBLIC, and everything else, renders exactly as it did"
+        );
+
+        let reopened = CosDocument::open(after).expect("it reopens");
+        let streams = all_streams(&reopened);
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+        let annotation = annotation_at(&reopened, 0);
+        let drawn = reopened
+            .stream_decoded(normal_of(&reopened, &annotation))
+            .expect("the appearance decodes");
+        assert!(
+            String::from_utf8_lossy(&drawn).contains("PUBLIC"),
+            "the annotation still names the stream that was cut"
+        );
+        assert_eq!(forms_in(&reopened), 1, "and no copy was made");
+    }
+
+    /// 12.5.5 maps the form's `/BBox` **through its `/Matrix`** before
+    /// fitting it, so an appearance turned a quarter turn runs up the page.
+    ///
+    /// `/Matrix [0 1 -1 0 0 0]` turns form (x, y) to (−y, x); the box
+    /// 0 0 400 40 turns to x −40..0, y 0..400, and fitted onto
+    /// `[300 10 320 210]` that is a halving and a move: page
+    /// (320 − y/2, 10 + x/2). `PUBLIC` runs up from y 10 to 52.67 and
+    /// `SECRET` from 55.67 to 100.35, both between x 303 and 315. A fit that
+    /// ignored the matrix squeezes the 400-wide box into 20 points across and
+    /// stretches it five times up, and cuts something else entirely.
+    #[test]
+    fn a_turned_appearance_is_cut_where_its_matrix_turns_it() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = appearance(
+            &mut editor,
+            font,
+            [0.0, 0.0, 400.0, 40.0],
+            Some([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]),
+            "BT /F0 24 Tf 0 10 Td (PUBLIC SECRET) Tj ET",
+        );
+        let ap = normal(&editor, stream);
+        let stamp = annotation(&editor, b"Stamp", [300.0, 10.0, 320.0, 210.0], ap);
+        let entry = object(&mut editor, stamp);
+        annots(&mut editor, vec![entry]);
+        let bytes = saved(&editor);
+
+        let over = area(295.0, 56.0, 325.0, 120.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 300.0, over) > 20, "SECRET starts inked");
+
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6, "SECRET, and not PUBLIC");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, area(300.0, 55.0, 318.0, 101.0)),
+            0,
+            "PUBLIC renders exactly as it did"
+        );
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+    }
+
+    /// Every stream a viewer can show is cut, not only the one it shows
+    /// today: both states of `/N` and of `/D`, the single `/R`, and the
+    /// appearance of an annotation flagged hidden.
+    ///
+    /// A checkbox's off state is what `/AS` selects; its on state draws on the
+    /// next click with no edit to the file, and a hidden annotation is one
+    /// bit from being drawn. Six streams, six glyphs each. Turned on after
+    /// the cut, the checkbox still draws nothing under the band.
+    #[test]
+    fn every_appearance_a_viewer_can_show_is_cut() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let states = |editor: &mut DocumentEditor| {
+            let on = public_secret(editor, font);
+            let off = public_secret(editor, font);
+            let mut dict = Dict::new();
+            dict.insert(editor.intern(b"On"), Object::Ref(on));
+            dict.insert(editor.intern(b"Off"), Object::Ref(off));
+            Object::Dict(dict)
+        };
+        let n = states(&mut editor);
+        let d = states(&mut editor);
+        let r = public_secret(&mut editor, font);
+        let mut ap = Dict::new();
+        ap.insert(editor.intern(b"N"), n);
+        ap.insert(editor.intern(b"D"), d);
+        ap.insert(editor.intern(b"R"), Object::Ref(r));
+        let mut checkbox = annotation(&editor, b"Widget", rect_at(40.0), Object::Dict(ap));
+        checkbox.insert(editor.intern(b"AS"), Object::Name(editor.intern(b"Off")));
+        let checkbox = object(&mut editor, checkbox);
+
+        let hidden_stream = public_secret(&mut editor, font);
+        let ap = normal(&editor, hidden_stream);
+        let mut hidden = annotation(&editor, b"FreeText", rect_at(40.0), ap);
+        hidden.insert(editor.intern(b"F"), Object::Int(2));
+        let hidden = object(&mut editor, hidden);
+        annots(&mut editor, vec![checkbox, hidden]);
+        let bytes = saved(&editor);
+
+        let over = over_secret_at(40.0);
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 36, "six streams, SECRET from each");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let reopened = CosDocument::open(after.clone()).expect("it reopens");
+        let streams = all_streams(&reopened);
+        assert!(!streams.contains("SECRET"), "{streams}");
+        assert_eq!(forms_in(&reopened), 6, "each cut in place, no copies");
+
+        // Ticked: the state that was not drawn when the page was redacted.
+        let mut editor = DocumentEditor::new(open(after));
+        let page_ref = editor.page_refs()[0];
+        let Some(Object::Dict(page)) = editor.get(page_ref) else {
+            panic!("the page is a dictionary");
+        };
+        let checkbox = Resolve::resolve_key(&editor, &page, editor.intern(b"Annots"))
+            .as_array()
+            .and_then(|a| a.first().and_then(Object::as_objref))
+            .expect("the checkbox is an object");
+        let Some(Object::Dict(mut dict)) = editor.get(checkbox) else {
+            panic!("the checkbox is a dictionary");
+        };
+        dict.insert(editor.intern(b"AS"), Object::Name(editor.intern(b"On")));
+        editor.put(checkbox, Object::Dict(dict));
+        let ticked = render(saved(&editor));
+        assert_eq!(ink_in(&ticked, 300.0, over), 0, "the on state is cut too");
+        assert!(
+            ink_in(&ticked, 300.0, area(11.0, 46.0, 51.0, 53.0)) > 20,
+            "and still draws PUBLIC"
+        );
+    }
+
+    /// One appearance stream, and one `/AP` dictionary, shared by two
+    /// annotations — one under the band and one not.
+    ///
+    /// Both are fitted onto `/Rect`s of the same size, at y 40 and y 190, so
+    /// they are one form at two placements and are cut exactly at each: the
+    /// covered annotation is given a copy, cut, through an `/AP` of its own,
+    /// and the other keeps the shared dictionary and the stream exactly as
+    /// they were. Writing the copy into the shared `/AP` would cut both.
+    #[test]
+    fn an_appearance_two_annotations_share_is_cut_only_where_it_is_covered() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let shared_ap = editor.allocate();
+        let ap = normal(&editor, stream);
+        editor.put(shared_ap, ap);
+        let lower = annotation(&editor, b"FreeText", rect_at(40.0), Object::Ref(shared_ap));
+        let upper = annotation(&editor, b"FreeText", rect_at(190.0), Object::Ref(shared_ap));
+        let lower = object(&mut editor, lower);
+        let upper = object(&mut editor, upper);
+        annots(&mut editor, vec![lower, upper]);
+        let bytes = saved(&editor);
+
+        let over = over_secret_at(40.0);
+        let before = render(bytes.clone());
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6, "one placement's SECRET");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        assert_eq!(
+            flattened_lines(after.clone()),
+            vec![
+                (45.0, "PUBLIC".to_string()),
+                (195.0, "PUBLIC SECRET".to_string()),
+                (280.0, "KEEP".to_string())
+            ],
+            "each annotation lost what its own placement put under the band"
+        );
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, area(55.0, 40.0, 101.0, 60.0)),
+            0,
+            "the upper annotation, and the lower's PUBLIC, render as they did"
+        );
+
+        let reopened = CosDocument::open(after).expect("it reopens");
+        let (lower, upper) = (annotation_at(&reopened, 0), annotation_at(&reopened, 1));
+        let (cut, whole) = (normal_of(&reopened, &lower), normal_of(&reopened, &upper));
+        assert_ne!(cut, whole, "the covered annotation draws a copy");
+        let text = |r: ObjRef| {
+            String::from_utf8_lossy(&reopened.stream_decoded(r).expect("it decodes")).into_owned()
+        };
+        assert!(text(whole).contains("PUBLIC SECRET"), "{}", text(whole));
+        assert!(
+            text(cut).contains("PUBLIC") && !text(cut).contains("SECRET"),
+            "{}",
+            text(cut)
+        );
+        assert!(
+            matches!(upper.get(reopened.intern(b"AP")), Some(Object::Ref(_))),
+            "the uncovered annotation still names the shared /AP"
+        );
+    }
+
+    /// The covered annotation is written **into** `/Annots` rather than as an
+    /// object, and shares its appearance with one that is not covered. It is
+    /// pointed at its copy where it sits, in the page's own array.
+    #[test]
+    fn an_annotation_written_into_annots_itself_is_pointed_at_its_copy() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let ap = normal(&editor, stream);
+        let lower = annotation(&editor, b"FreeText", rect_at(40.0), ap.clone());
+        let upper = annotation(&editor, b"FreeText", rect_at(190.0), ap);
+        let upper = object(&mut editor, upper);
+        annots(&mut editor, vec![Object::Dict(lower), upper]);
+        let bytes = saved(&editor);
+
+        let over = over_secret_at(40.0);
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert!(
+            ink_in(&rendered, 300.0, area(57.0, 196.0, 99.0, 203.0)) > 20,
+            "the upper annotation still draws SECRET"
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        let (lower, upper) = (annotation_at(&reopened, 0), annotation_at(&reopened, 1));
+        assert_ne!(normal_of(&reopened, &lower), normal_of(&reopened, &upper));
+    }
+
+    /// A rectangle that covers no appearance writes no appearance: every
+    /// stream, every `/AP` and every annotation is the object it was, and
+    /// nothing is copied.
+    #[test]
+    fn an_appearance_no_rectangle_touches_is_left_as_it_was() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let ap = normal(&editor, stream);
+        let note = annotation(&editor, b"FreeText", rect_at(40.0), ap);
+        let note = object(&mut editor, note);
+        annots(&mut editor, vec![note]);
+        let bytes = saved(&editor);
+        let original = open(bytes.clone());
+        let was = annotation_at(&original, 0);
+
+        let mut editor = DocumentEditor::new(Arc::clone(&original));
+        let report =
+            apply(&mut editor, 0, &[band(area(0.0, 100.0, 400.0, 150.0))]).expect("page zero");
+        assert_eq!(report, RedactionReport::default());
+        let reopened = CosDocument::open(saved(&editor)).expect("it reopens");
+        let is = annotation_at(&reopened, 0);
+        let (before, after) = (normal_of(&original, &was), normal_of(&reopened, &is));
+        assert_eq!(
+            original.stream_decoded(before).expect("it decodes"),
+            reopened.stream_decoded(after).expect("it decodes"),
+            "the appearance is byte for byte what it was"
+        );
+        assert_eq!(forms_in(&reopened), 1, "and was not copied");
+    }
+
+    /// An appearance with no `/Resources` of its own names its font in the
+    /// page's (8.10.1, as the subsetter reads an appearance too), and is
+    /// measured there — not left as a run in a font no scope has.
+    #[test]
+    fn an_appearance_without_resources_is_measured_in_the_pages() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let Some(Object::Dict(dict)) = editor.get(stream) else {
+            panic!("the appearance has a dictionary");
+        };
+        let dict: Dict = dict
+            .iter()
+            .filter(|(key, _)| *key != Name::RESOURCES)
+            .cloned()
+            .collect();
+        let data = editor
+            .stream_bytes(stream)
+            .expect("the appearance's content");
+        editor.put_stream(stream, StreamData { dict, data });
+        let ap = normal(&editor, stream);
+        let note = annotation(&editor, b"FreeText", rect_at(40.0), ap);
+        let note = object(&mut editor, note);
+        annots(&mut editor, vec![note]);
+
+        let (after, report) = redact(open(saved(&editor)), &[band(over_secret_at(40.0))]);
+        assert_eq!(report.glyphs, 6);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+    }
+}
+
+/// Type 3 glyph procedures (9.6.5) that draw text or an image, measured at
+/// each use and removed at the use that draws under a rectangle.
+///
+/// The fixture's face, `/T3`, has glyphs one point wide at `1 Tf` whose
+/// procedures draw far outside that point: `A` shows `SECRET` and `B`
+/// `PUBLIC` in 12-point Liberation Serif from the glyph's origin, `C` draws
+/// a twelve-point square as an inline image, `D` draws `/Fm0` — a form
+/// showing `SECRET` — `E` shows its own glyph twice, and `F` shows text in a
+/// font no scope has. So a rectangle over a procedure's text, clear of the
+/// glyph's own one-point box, is a rectangle only the procedure's
+/// measurement can see, and every test here puts one there.
+///
+/// The extractor reads a Type 3 glyph by running its procedure, so what it
+/// reads back is the procedure's text: this engine's extractor and renderer,
+/// compared with themselves before and after.
+#[cfg(test)]
+mod glyph_procedures {
+    use super::tests_support::*;
+    use super::*;
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    fn band(area: Rect) -> Redaction {
+        Redaction { area, mark: false }
+    }
+
+    /// Each glyph's procedure, by its name in `/CharProcs`, in code order
+    /// from 65 (`A`).
+    const PROCEDURES: [(&str, &[u8]); 6] = [
+        ("secret", b"1000 0 d0 BT /F0 12000 Tf 0 0 Td (SECRET) Tj ET"),
+        ("public", b"1000 0 d0 BT /F0 12000 Tf 0 0 Td (PUBLIC) Tj ET"),
+        (
+            "square",
+            b"1000 0 d0 q 12000 0 0 12000 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x00 EI Q",
+        ),
+        ("form", b"1000 0 d0 /Fm0 Do"),
+        ("itself", b"1000 0 d0 BT /T3 1000 Tf (EE) Tj ET"),
+        ("lost", b"1000 0 d0 BT /Nowhere 12000 Tf (SECRET) Tj ET"),
+    ];
+
+    fn stream(editor: &mut DocumentEditor, dict: Dict, data: &[u8]) -> ObjRef {
+        let reference = editor.allocate();
+        editor.put_stream(
+            reference,
+            StreamData {
+                dict,
+                data: data.to_vec(),
+            },
+        );
+        reference
+    }
+
+    /// A 400 by 300 page drawing `content` with `/T3` in scope, and `/F0`
+    /// (Liberation Serif, embedded whole) and `/Fm0` beside it — in the
+    /// page's scope, which is where this engine runs a procedure, and in the
+    /// Type 3 font's own `/Resources`, which is where 9.6.5 says to look.
+    fn document(content: &str) -> Vec<u8> {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        builder.add_page(400.0, 300.0, |p| p.text(b"F0", 12.0, 300.0, 280.0, "KEEP"));
+        let doc = open(builder.finish());
+        let font = crate::subset::tests_support::only_font(&doc);
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        let name = |editor: &DocumentEditor, n: &str| editor.intern(n.as_bytes());
+
+        let mut fonts = Dict::new();
+        fonts.insert(name(&editor, "F0"), Object::Ref(font));
+        let mut form_resources = Dict::new();
+        form_resources.insert(name(&editor, "Font"), Object::Dict(fonts.clone()));
+        let mut form = Dict::new();
+        form.insert(
+            name(&editor, "Subtype"),
+            Object::Name(name(&editor, "Form")),
+        );
+        form.insert(
+            name(&editor, "BBox"),
+            Object::Array(
+                [0, 0, 60000, 15000]
+                    .iter()
+                    .map(|v| Object::Int(*v))
+                    .collect(),
+            ),
+        );
+        form.insert(Name::RESOURCES, Object::Dict(form_resources));
+        let form = stream(&mut editor, form, b"BT /F0 12000 Tf 0 0 Td (SECRET) Tj ET");
+
+        let mut procs = Dict::new();
+        let mut differences = vec![Object::Int(65)];
+        for (glyph, body) in PROCEDURES {
+            let procedure = stream(&mut editor, Dict::new(), body);
+            procs.insert(name(&editor, glyph), Object::Ref(procedure));
+            differences.push(Object::Name(name(&editor, glyph)));
+        }
+        let mut xobjects = Dict::new();
+        xobjects.insert(name(&editor, "Fm0"), Object::Ref(form));
+        let mut own = Dict::new();
+        own.insert(name(&editor, "Font"), Object::Dict(fonts.clone()));
+        own.insert(name(&editor, "XObject"), Object::Dict(xobjects.clone()));
+
+        let mut encoding = Dict::new();
+        encoding.insert(name(&editor, "Differences"), Object::Array(differences));
+        let mut type3 = Dict::new();
+        for (key, value) in [
+            ("Type", Object::Name(name(&editor, "Font"))),
+            ("Subtype", Object::Name(name(&editor, "Type3"))),
+            ("FontMatrix", {
+                let m = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
+                Object::Array(m.iter().map(|v| Object::Real(*v)).collect())
+            }),
+            (
+                "FontBBox",
+                Object::Array([0, 0, 1000, 1000].iter().map(|v| Object::Int(*v)).collect()),
+            ),
+            ("CharProcs", Object::Dict(procs)),
+            ("Encoding", Object::Dict(encoding)),
+            ("FirstChar", Object::Int(65)),
+            ("LastChar", Object::Int(70)),
+            ("Widths", Object::Array(vec![Object::Int(1000); 6])),
+            ("Resources", Object::Dict(own)),
+        ] {
+            type3.insert(name(&editor, key), value);
+        }
+        let type3_ref = editor.allocate();
+        editor.put(type3_ref, Object::Dict(type3));
+
+        let mut page_fonts = fonts;
+        page_fonts.insert(name(&editor, "T3"), Object::Ref(type3_ref));
+        let mut resources = Dict::new();
+        resources.insert(name(&editor, "Font"), Object::Dict(page_fonts));
+        resources.insert(name(&editor, "XObject"), Object::Dict(xobjects));
+        let content = stream(&mut editor, Dict::new(), content.as_bytes());
+        let page_ref = editor.page_refs()[0];
+        let Some(Object::Dict(mut page)) = editor.get(page_ref) else {
+            panic!("the page is a dictionary");
+        };
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        page.insert(Name::CONTENTS, Object::Ref(content));
+        editor.put(page_ref, Object::Dict(page));
+        editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        })
+    }
+
+    /// The decoded procedure `/CharProcs` names `glyph` by.
+    fn procedure(doc: &CosDocument, glyph: &str) -> Vec<u8> {
+        for (_, dict) in crate::subset::tests_support::font_dicts(doc) {
+            let procs = doc.resolve_key(&dict, doc.intern(b"CharProcs"));
+            if let Some(r) = procs
+                .as_dict()
+                .and_then(|p| p.get_ref(doc.intern(glyph.as_bytes())))
+            {
+                return doc.stream_decoded(r).expect("the procedure decodes");
+            }
+        }
+        panic!("no procedure is named {glyph}");
+    }
+
+    /// The row's exit, for a glyph procedure: `A`, whose procedure shows
+    /// `SECRET`, at y 125 and again at y 200, and `B`, whose procedure shows
+    /// `PUBLIC`, at y 50; a band over the middle `SECRET` from x 20, ten
+    /// points clear of the glyph's own box (x 10..11).
+    ///
+    /// That use is removed — one glyph, gone from the extractor and the
+    /// render — and the other use of the same glyph, and `B`, are not. The
+    /// procedure, which both uses of `A` run, is byte for byte what it was:
+    /// the decision in [`cut_stream`]'s doc, pinned.
+    #[test]
+    fn a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (B) Tj 0 75 Td (A) Tj 0 75 Td (A) Tj ET");
+        assert_eq!(
+            lines_of(bytes.clone()),
+            vec![
+                (50.0, "PUBLIC".to_string()),
+                (125.0, "SECRET".to_string()),
+                (200.0, "SECRET".to_string()),
+            ],
+            "the fixture draws what its comment says, where it says"
+        );
+        let over = area(20.0, 120.0, 80.0, 140.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 300.0, over) > 20, "SECRET starts inked");
+
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "the one use of A under the band");
+        assert_eq!(report.operations, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        assert_eq!(
+            lines_of(after.clone()),
+            vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())]
+        );
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, area(9.0, 120.0, 60.0, 140.0)),
+            0,
+            "the other SECRET and PUBLIC render exactly as they did"
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            procedure(&reopened, "secret"),
+            PROCEDURES[0].1,
+            "the procedure every use of A runs is left as it was"
+        );
+    }
+
+    /// `C`'s procedure draws a twelve-point square as an inline image, the
+    /// way a bitmap face draws every glyph. Two uses in one `TJ`, the second
+    /// moved a hundred points along by the array's number, so it is a pen
+    /// position along the run rather than a line start; the band takes the
+    /// corner of the second square, not the glyph's own box (x 110..111).
+    /// That use goes, and the first square — the same procedure — stays.
+    #[test]
+    fn a_glyph_whose_procedure_draws_an_image_under_a_rectangle_is_removed_at_that_use() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td [(C) -99000 (C)] TJ ET");
+        let over = area(116.0, 55.0, 130.0, 70.0);
+        let second = area(109.0, 49.0, 123.0, 63.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 300.0, over) > 20, "the square starts inked");
+        assert!(
+            ink_in(&before, 300.0, area(9.0, 49.0, 23.0, 63.0)) > 100,
+            "and so does the first"
+        );
+
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1);
+        assert_eq!(report.images, 0, "nothing was scrubbed: a use was removed");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let rendered = render(after);
+        assert_eq!(ink_in(&rendered, 300.0, second), 0);
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, second),
+            0,
+            "the first square renders exactly as it did"
+        );
+    }
+
+    /// Forty uses of `D`, each of whose measurements runs two streams — the
+    /// procedure and the form it draws — and a band nowhere near any of
+    /// them. Nothing is removed: the budget is each use's, so a page of an
+    /// ordinary two-level face does not run a shared one out a few dozen
+    /// glyphs in and remove every use after.
+    #[test]
+    fn every_use_of_a_glyph_has_a_budget_of_its_own() {
+        let uses = "D".repeat(40);
+        let bytes = document(&format!("BT /T3 1 Tf 10 50 Td ({uses}) Tj ET"));
+        let (_, report) = redact(open(bytes), &[band(area(300.0, 0.0, 400.0, 10.0))]);
+        assert_eq!(report, RedactionReport::default());
+    }
+
+    /// `D`'s procedure draws a form, and the form shows `SECRET`: measured
+    /// through the form, under the transform the procedure draws it with.
+    #[test]
+    fn a_glyph_whose_procedure_draws_a_form_is_measured_through_the_form() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (D) Tj 0 150 Td (D) Tj ET");
+        assert_eq!(
+            lines_of(bytes.clone()),
+            vec![(50.0, "SECRET".to_string()), (200.0, "SECRET".to_string())]
+        );
+        let over = area(20.0, 45.0, 80.0, 65.0);
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(lines_of(after.clone()), vec![(200.0, "SECRET".to_string())]);
+        assert_eq!(ink_in(&render(after), 300.0, over), 0);
+    }
+
+    /// `E`'s procedure shows `E` twice, so measuring it never bottoms out.
+    /// It ends — the budget is spent — and the use is removed, which is the
+    /// direction a measurement that could not finish errs in. A face that
+    /// draws itself is not one a reader is looking at.
+    #[test]
+    fn a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (E) Tj 100 0 Td (B) Tj ET");
+        let far = area(300.0, 0.0, 400.0, 10.0);
+        let (after, report) = redact(open(bytes), &[band(far)]);
+        assert_eq!(report.glyphs, 1, "E, and not B");
+        assert_eq!(
+            lines_of(after.clone()),
+            vec![(50.0, "PUBLIC".to_string())],
+            "B's PUBLIC is still read"
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        assert_eq!(procedure(&reopened, "itself"), PROCEDURES[4].1);
+    }
+
+    /// `F`'s procedure shows text in `/Nowhere`, which no scope has: its run
+    /// cannot be measured, so it is named — under the name the procedure
+    /// gave — and the glyph is left, as every unmeasurable run is. The
+    /// renderer draws nothing for it either.
+    #[test]
+    fn a_procedure_showing_text_in_a_font_no_scope_has_is_reported_and_left() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (F) Tj ET");
+        let (_, report) = redact(open(bytes), &[band(area(20.0, 45.0, 80.0, 65.0))]);
+        assert_eq!(report.glyphs, 0);
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::UnknownFont {
+                font: b"Nowhere".to_vec(),
+                bytes: 6,
+            }]
+        );
+    }
+
+    /// The procedure's measurement composes with every transform above it: a
+    /// use of `A` inside a form placed twice, and in an annotation's
+    /// appearance, is measured where each draws it — the walk's placements,
+    /// with a procedure under each.
+    #[test]
+    fn a_glyph_in_a_form_drawn_twice_is_measured_at_each_placement() {
+        let mut editor = DocumentEditor::new(open(document("")));
+        let page_ref = editor.page_refs()[0];
+        let Some(Object::Dict(mut page)) = editor.get(page_ref) else {
+            panic!("the page is a dictionary");
+        };
+        let resources = Resolve::resolve_key(&editor, &page, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .expect("resources");
+        let mut form = Dict::new();
+        form.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Form")),
+        );
+        form.insert(
+            editor.intern(b"BBox"),
+            Object::Array([0, 0, 400, 100].iter().map(|v| Object::Int(*v)).collect()),
+        );
+        form.insert(Name::RESOURCES, Object::Dict(resources.clone()));
+        let form_ref = stream(&mut editor, form, b"BT /T3 1 Tf 10 50 Td (A) Tj ET");
+        let mut xobjects = Resolve::resolve_key(&editor, &resources, editor.intern(b"XObject"))
+            .as_dict()
+            .cloned()
+            .expect("an /XObject");
+        xobjects.insert(editor.intern(b"Twice"), Object::Ref(form_ref));
+        let mut resources = resources;
+        resources.insert(editor.intern(b"XObject"), Object::Dict(xobjects));
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        let content = stream(
+            &mut editor,
+            Dict::new(),
+            b"/Twice Do q 1 0 0 1 0 150 cm /Twice Do Q",
+        );
+        page.insert(Name::CONTENTS, Object::Ref(content));
+        editor.put(page_ref, Object::Dict(page));
+        let bytes = editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        });
+        assert_eq!(
+            lines_of(bytes.clone()),
+            vec![(50.0, "SECRET".to_string()), (200.0, "SECRET".to_string())]
+        );
+
+        let over = area(20.0, 195.0, 80.0, 215.0);
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "the upper placement's A");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(lines_of(after), vec![(50.0, "SECRET".to_string())]);
     }
 }
