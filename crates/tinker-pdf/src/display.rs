@@ -36,6 +36,25 @@
 //! Annotations are recorded too, each with the resource scope its appearance
 //! resolves in, and replayed only when [`RenderOptions::annotations`] asks —
 //! after the content, as `Page::render` draws them.
+//!
+//! # Why a replay's warnings are its own
+//!
+//! The resources a list keeps are also where a render's tolerances are
+//! written down — a font no glyph resolved in, an image decoded with damage,
+//! what a pattern cell met. A direct render builds its resources fresh, so its
+//! warnings are what *it* met. Each replay is given resources of its own over
+//! the list's caches (`PageResources::for_one_render`): a cached image or
+//! outline brings back what its first decode reported, so a replay that meets
+//! it says so as its own decode would, and a replay that does not meet it — a
+//! region that misses a patterned fill, a render cancelled before anything was
+//! drawn — says nothing about it. The interpretation itself ran once, when the
+//! list was recorded, so what *it* could not resolve (a font name the resource
+//! dictionary does not define) is kept beside the events and reported by every
+//! replay that runs to the end. A cancelled replay reports none of it: a
+//! cancelled direct render reports what its interpreter reached before it
+//! stopped, which depends on when it stopped, so the replay's answer is the
+//! one a render cancelled before the first such font would give — less, and
+//! never more.
 
 use std::sync::Arc;
 
@@ -59,6 +78,9 @@ pub struct DisplayList {
     resources: PageResources,
     content: Vec<Event>,
     annotations: Vec<Recorded>,
+    /// Font names the recording's interpretation could not resolve — what a
+    /// direct render's interpreter reports, met once rather than per render.
+    interpreted_missing: Vec<String>,
 }
 
 impl Page {
@@ -71,6 +93,10 @@ impl Page {
     /// draws one page more than once: a viewer zooming, a tiler asking for
     /// many regions, a thumbnail and a full view of the same page.
     ///
+    /// The warnings are each render's own, not the list's history: see the
+    /// module documentation, which also says the one place a cancelled
+    /// replay's can be fewer than a cancelled direct render's.
+    ///
     /// Annotations are recorded whatever a later render asks, and drawn only
     /// by a render that asks for them.
     #[must_use]
@@ -79,6 +105,9 @@ impl Page {
         let resources = PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
         let mut recorder = DisplayRecorder::new();
         interpret(&content, Matrix::IDENTITY, &mut recorder, &resources);
+        // Nothing has been drawn through these resources yet, so everything
+        // they list is the interpretation's.
+        let interpreted_missing = resources.missing_fonts();
         let content = recorder.take();
         let annotations =
             annots::record(&self.doc, &self.inner, self.fonts.as_ref(), &mut recorder);
@@ -87,6 +116,7 @@ impl Page {
             resources,
             content,
             annotations,
+            interpreted_missing,
         }
     }
 }
@@ -101,9 +131,16 @@ impl DisplayList {
     /// a replay of what the interpretation produced.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
+        let resources = self.resources.for_one_render();
         self.page
-            .render_layer_with(options, None, &self.resources, |renderer, _| {
-                replay(&self.content, renderer);
+            .render_layer_with(options, None, &resources, |renderer, resources| {
+                let replayed = replay(&self.content, renderer);
+                // What the interpretation could not resolve, reported by a
+                // replay that ran to the end. See the module documentation for
+                // why a cancelled one reports none of it.
+                if !replayed.cancelled {
+                    resources.note_missing_fonts(&self.interpreted_missing);
+                }
                 if options.annotations {
                     for annotation in &self.annotations {
                         renderer.push_resources(Arc::clone(&annotation.scope));
@@ -122,6 +159,11 @@ impl DisplayList {
     /// The resources a replay resolves names in.
     pub(crate) fn resources(&self) -> &PageResources {
         &self.resources
+    }
+
+    /// What the recording's interpretation could not resolve.
+    pub(crate) fn interpreted_missing(&self) -> &[String] {
+        &self.interpreted_missing
     }
 
     /// The page's own calls.

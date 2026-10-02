@@ -265,7 +265,25 @@ are open, the group-buffer budget), never on a pixel or a scale. A group or
 soft mask whose buffer misses the canvas is accepted over no pixels for the
 same reason ([rulings](../rulings.md) 5). Annotations are recorded with the
 resource scope each appearance resolves in and replayed when the options ask
-for them.
+for them. **The warnings are the replay's own.** The kept resources are also
+where a render writes down what it tolerated, so each replay gets resources of
+its own over the list's caches (`PageResources::for_one_render`): a cached
+image brings back the damage, or the codec failure, its first decode
+reported, and a cached outline the font that resolved no glyph, so a replay
+that meets them says what a direct render's own decode would; one that does
+not — a region that misses a patterned fill, a render cancelled before it drew
+— says nothing about them. What the recording's interpretation could not
+resolve is kept beside the events and reported by every replay that runs to
+the end; a cancelled one reports none of it, which is what a direct render
+cancelled before the first such font reports — less than a later
+cancellation might, never more (`display_list.rs`'s
+`a_cancelled_replay_reports_no_font_it_never_reached`,
+`a_region_that_draws_no_cell_reports_nothing_a_cell_met`,
+`every_replay_names_the_images_the_page_draws` and
+`every_replay_names_the_glyph_its_font_could_not_resolve`). Caching the codec failure
+changed one thing for a direct render too: an image drawn twice that will not
+decode used to report its codec the first time and, from the cache, its
+resource name standing in for a codec the second.
 
 **A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
 (`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list

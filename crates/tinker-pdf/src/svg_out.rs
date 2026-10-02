@@ -212,7 +212,11 @@ impl DisplayList {
         let page = self.page();
         let (width, height) = page.size();
         let base = page_view_transform(page.crop_box(), page.rotation(), 1.0);
-        let mut writer = Writer::new(self.resources(), base, page, options);
+        // Resources of this write's own over the list's caches, so what it
+        // reports is what it met — `DisplayList::render`'s reason exactly.
+        let resources = self.resources().for_one_render();
+        resources.note_missing_fonts(self.interpreted_missing());
+        let mut writer = Writer::new(&resources, base, page, options);
         replay(self.content(), &mut writer);
         if options.annotations {
             for (scope, events) in self.annotation_layers() {
@@ -225,7 +229,6 @@ impl DisplayList {
         // two reasons: a glyph a font could not name is a `.notdef` outline
         // and never reaches the device's own count, and a damaged image is
         // drawn and named (ruling 10).
-        let resources = self.resources();
         if !resources.missing_fonts().is_empty() {
             writer.warn(SvgWarning::Render(RenderWarning::UnreadableFont));
         }

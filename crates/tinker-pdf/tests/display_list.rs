@@ -15,6 +15,8 @@
 
 use tinker_pdf::{CancelToken, Document, RenderOptions, RenderWarning};
 
+mod render_support;
+
 /// A one-page document of `width` x `height` points around `content`, with
 /// `/G` a transparency-group form drawing a green square at half opacity and
 /// `/Off` an optional-content group the default configuration hides.
@@ -158,4 +160,285 @@ fn a_display_list_is_a_plain_value() {
 
     let empty = Document::open(pdf("", 12, 12)).expect("opens");
     assert!(empty.page(0).expect("a page").display_list().is_empty());
+}
+
+// ---- the warnings a replay reports are its own ------------------------------
+//
+// A retained page keeps its resources so a decoded image or a glyph outline is
+// paid for once; those resources also hold what the page had to tolerate — a
+// font the interpretation could not resolve, an image that decoded with damage,
+// what a pattern cell met. A replay reports what *it* met, as a direct render
+// does with resources of its own, and not what an earlier render or the
+// recording met.
+
+/// A one-page document of `width` x `height` points around `content`, with
+/// `resources` and further objects numbered from 5.
+fn page_with(
+    content: &str,
+    width: u32,
+    height: u32,
+    resources: &str,
+    objects: &[&[u8]],
+) -> Vec<u8> {
+    let mut out = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}]\n\
+   /Resources {resources} /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+        content.len()
+    )
+    .into_bytes();
+    for (index, object) in objects.iter().enumerate() {
+        out.extend_from_slice(format!("{} 0 obj\n", index + 5).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+            objects.len() + 5
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// A stream object around `body`.
+fn stream_object(dict: &str, body: &[u8]) -> Vec<u8> {
+    let mut out = format!("<< {dict} /Length {} >>\nstream\n", body.len()).into_bytes();
+    out.extend_from_slice(body);
+    out.extend_from_slice(b"\nendstream");
+    out
+}
+
+/// Packs `0` and `1` into bytes, most significant bit first, anything else
+/// ignored.
+fn bits(pattern: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let (mut byte, mut count) = (0u8, 0u32);
+    for c in pattern.chars().filter(|c| *c == '0' || *c == '1') {
+        byte = (byte << 1) | u8::from(c == '1');
+        count += 1;
+        if count % 8 == 0 {
+            out.push(byte);
+            byte = 0;
+        }
+    }
+    if count % 8 != 0 {
+        out.push(byte << (8 - count % 8));
+    }
+    out
+}
+
+/// Asserts a list's render reports what a direct render reports, for each
+/// set of options in turn and in that order — so an earlier render of the
+/// list is in front of every later one.
+#[track_caller]
+fn reports_as_it_renders(bytes: Vec<u8>, asks: &[RenderOptions], what: &str) {
+    let document = Document::open(bytes).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let list = page.display_list();
+    for (index, options) in asks.iter().enumerate() {
+        let direct = page.render(options);
+        let replayed = list.render(options);
+        assert_eq!(
+            replayed.data, direct.data,
+            "{what}, render {index}: the pixels"
+        );
+        assert_eq!(
+            replayed.warnings, direct.warnings,
+            "{what}, render {index}: the replay reported differently"
+        );
+    }
+}
+
+/// **A font the interpretation could not resolve**, which the list met once
+/// when it was recorded: a cancelled replay draws nothing and must not report
+/// it, and an uncancelled one must.
+#[test]
+fn a_cancelled_replay_reports_no_font_it_never_reached() {
+    let bytes = page_with(
+        "BT /Nope 12 Tf 10 10 Td (Hi) Tj ET 0 0 1 rg 1 1 8 8 re f",
+        40,
+        40,
+        "<< >>",
+        &[],
+    );
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let cancelled = RenderOptions {
+        cancel: Some(cancel),
+        ..RenderOptions::default()
+    };
+    reports_as_it_renders(
+        bytes,
+        &[cancelled.clone(), RenderOptions::default(), cancelled],
+        "the missing-font page",
+    );
+}
+
+/// **What a pattern cell met** is reported by the render that drew the cell:
+/// a region that misses the patterned fill draws no cell, so a direct render
+/// of it says nothing about the font the cell could not resolve, and a replay
+/// of it after a full render must not repeat what the full render said.
+#[test]
+fn a_region_that_draws_no_cell_reports_nothing_a_cell_met() {
+    let cell = stream_object(
+        "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+         /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << >>",
+        b"BT /Nope 6 Tf 1 1 Td (x) Tj ET 1 0 0 rg 0 0 5 5 re f",
+    );
+    let bytes = page_with(
+        "/Pattern cs /P scn 0 60 40 40 re f",
+        100,
+        100,
+        "<< /Pattern << /P 5 0 R >> >>",
+        &[&cell],
+    );
+    let region = RenderOptions {
+        region: Some(tinker_pdf::PixelRegion::new(50, 0, 50, 50)),
+        ..RenderOptions::default()
+    };
+    let document = Document::open(bytes.clone()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    assert!(
+        page.render(&RenderOptions::default())
+            .warnings
+            .contains(&RenderWarning::UnreadableFont)
+            && page.render(&region).warnings.is_empty(),
+        "the fixture is what it says"
+    );
+    reports_as_it_renders(
+        bytes,
+        &[
+            RenderOptions::default(),
+            region.clone(),
+            RenderOptions::default(),
+            region,
+        ],
+        "the patterned page",
+    );
+}
+
+/// **An image that decoded with damage**, and one this build cannot decode at
+/// all, are decoded once and kept — and every render that draws them says so,
+/// in the words a direct render's own decode uses.
+#[test]
+fn every_replay_names_the_images_the_page_draws() {
+    // `ccitt.rs`'s damaged row: a fax whose second row will not decode.
+    let fax = stream_object(
+        "/Type /XObject /Subtype /Image /Width 8 /Height 4 \
+         /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /CCITTFaxDecode \
+         /DecodeParms << /K -1 /Columns 8 /Rows 4 >>",
+        &bits(concat!("001 00110101 011 1 ", "111 ", "00000001")),
+    );
+    // `images.rs`'s placeholder: a JPX codestream of four zero bytes.
+    let odd = stream_object(
+        "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+         /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode",
+        &[0, 0, 0, 0],
+    );
+    let bytes = page_with(
+        "q 20 0 0 20 0 0 cm /Fax Do Q q 10 0 0 10 25 5 cm /Odd Do Q \
+         q 5 0 0 5 25 20 cm /Odd Do Q",
+        40,
+        30,
+        "<< /XObject << /Fax 5 0 R /Odd 6 0 R >> >>",
+        &[&fax, &odd],
+    );
+    let document = Document::open(bytes.clone()).expect("it opens");
+    let direct = document
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert!(
+        direct
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::DamagedImage { .. }))
+            && direct
+                .warnings
+                .iter()
+                .any(|w| matches!(w, RenderWarning::UnsupportedImage { .. })),
+        "the fixture is what it says: {:?}",
+        direct.warnings
+    );
+    // `/Odd` is drawn twice and fails once: the second draw meets the failure
+    // in the cache and says what the first said — its codec, not its resource
+    // name standing in for one, which is what a cached failure used to come
+    // back as.
+    assert_eq!(
+        direct
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::UnsupportedImage { .. }))
+            .collect::<Vec<_>>(),
+        [&RenderWarning::UnsupportedImage {
+            codec: "Unsupported(Jpx)".to_string()
+        }],
+        "one codec named, once"
+    );
+    let twice = RenderOptions {
+        scale: 2.0,
+        ..RenderOptions::default()
+    };
+    reports_as_it_renders(
+        bytes,
+        &[RenderOptions::default(), twice, RenderOptions::default()],
+        "the damaged-image page",
+    );
+}
+
+/// **A glyph its font resolves to `.notdef`**, extracted once and kept in the
+/// outline cache — and reported by every render that draws it, as a direct
+/// render's own extraction reports it.
+///
+/// A composite font over `render_support`'s TrueType face whose
+/// `/CIDToGIDMap` sends CID 1 to glyph 0, which 9.7.4.2 makes a CID the font
+/// does not carry, and CID 2 to a glyph it does.
+#[test]
+fn every_replay_names_the_glyph_its_font_could_not_resolve() {
+    let face = render_support::curvy_font();
+    let type0: &[u8] = b"<< /Type /Font /Subtype /Type0 /BaseFont /Curvy /Encoding /Identity-H \
+                         /DescendantFonts [6 0 R] >>";
+    let cid_font: &[u8] = b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Curvy \
+                            /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+                            /FontDescriptor 7 0 R /CIDToGIDMap 8 0 R /DW 600 >>";
+    let descriptor: &[u8] = b"<< /Type /FontDescriptor /FontName /Curvy /Flags 4 \
+                              /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 \
+                              /CapHeight 700 /StemV 80 /FontFile2 9 0 R >>";
+    let map = stream_object("", &[0, 0, 0, 0, 0, 3]);
+    let program = stream_object("", &face);
+    let bytes = page_with(
+        "BT /F0 20 Tf 5 10 Td <00010002> Tj ET",
+        60,
+        40,
+        "<< /Font << /F0 5 0 R >> >>",
+        &[type0, cid_font, descriptor, &map, &program],
+    );
+    let document = Document::open(bytes.clone()).expect("it opens");
+    let direct = document
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert!(
+        direct.warnings.contains(&RenderWarning::UnreadableFont),
+        "the fixture is what it says: {:?}",
+        direct.warnings
+    );
+    assert!(
+        direct.data.chunks_exact(3).any(|p| p != [255, 255, 255]),
+        "and CID 2 draws"
+    );
+    let twice = RenderOptions {
+        scale: 2.0,
+        ..RenderOptions::default()
+    };
+    reports_as_it_renders(
+        bytes,
+        &[RenderOptions::default(), twice, RenderOptions::default()],
+        "the unresolved-glyph page",
+    );
 }

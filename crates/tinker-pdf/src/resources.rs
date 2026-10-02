@@ -30,7 +30,71 @@ use crate::optional::OptionalContent;
 ///
 /// `None` records that a glyph was looked for and is not there, so a missing
 /// one costs the extraction attempt once rather than on every occurrence.
-type OutlineCache = HashMap<(u64, u32), Option<Arc<Outline>>>;
+/// Beside it, the font the extraction reported as resolving no glyph for the
+/// code, if it did — so a later render that meets the code from the cache
+/// says what the first one said ([`PageResources::for_one_render`]).
+type OutlineCache = HashMap<(u64, u32), (Option<Arc<Outline>>, Option<String>)>;
+
+/// A decoded image, or the codec that could not decode it, and the damage the
+/// decode tolerated as `(resource name, what was tolerated)`.
+///
+/// The failure is kept in the words the decode used and the damage beside
+/// the picture, because both are reported **per render**: a render that meets
+/// the image from the cache reports what the decode reported, rather than
+/// nothing (the damage) or the resource name standing in for a codec (the
+/// failure, which is what a cached `None` used to come back as).
+struct CachedImage {
+    image: Result<Arc<DecodedImage>, String>,
+    damage: Vec<(String, String)>,
+}
+
+/// What a page's resources work out once and every render of the page can
+/// reuse: font programs, decoded images, compiled ICC transforms, glyph
+/// outlines and the nested scopes of forms.
+///
+/// Behind one `Arc` so a retained page can give each render resources of its
+/// own — fresh lists of what that render had to tolerate — over the same
+/// caches ([`PageResources::for_one_render`]).
+#[derive(Default)]
+struct Caches {
+    /// The embedded font program of each font, by the id the interpreter uses.
+    ///
+    /// **Decoded on first use, not at construction.** A font program is an
+    /// inflate of a stream that is routinely a megabyte, and since a form
+    /// XObject's own `/Resources` became a scope of their own there is one of
+    /// these per form rather than one per page — a document of nine hundred
+    /// objects went from 537 ms to 24.7 s doing it eagerly, and one corpus
+    /// file stopped making progress at all. Most scopes are opened to resolve
+    /// an image or a pattern and never ask for a glyph.
+    ///
+    /// `None` is cached as firmly as a hit: a font with no embedded program
+    /// must not be looked up again on every glyph.
+    programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
+    /// Decoded images, kept because a page may draw one many times.
+    images: Mutex<HashMap<Vec<u8>, CachedImage>>,
+    /// Compiled ICC transforms, by the profile stream's object number.
+    ///
+    /// A transform is three 4 096-entry tables, and a page may name the same
+    /// `ICCBased` space at every one of a thousand `cs` operators. The `None`
+    /// is cached too: a profile that would not parse must be refused once
+    /// rather than re-read and re-refused a thousand times.
+    icc: Mutex<IccCache>,
+    /// Outlines already extracted, keyed by font and code.
+    outlines: RwLock<OutlineCache>,
+    /// Nested scopes already built, by the form's own object number.
+    ///
+    /// A page may invoke one form a thousand times — a stamp, a rule, a
+    /// letterhead — and building its resources is not cheap: every font in the
+    /// dictionary is parsed and the optional-content configuration is bound
+    /// again. Two pdf.js corpus files stopped making progress at all when this
+    /// was rebuilt per invocation, which is what put the cache here.
+    ///
+    /// Keyed by the XObject's reference rather than by the resource name,
+    /// because two names can reach one form and a name means nothing outside
+    /// the dictionary it was looked up in. `None` is cached too: "this form
+    /// brought no resources" is an answer worth not recomputing.
+    form_scopes: Mutex<HashMap<u64, Option<Arc<PageResources>>>>,
+}
 
 /// Compiled ICC transforms, by the profile stream's object number and
 /// generation.
@@ -85,32 +149,13 @@ pub struct PageResources {
     doc: Arc<CosDocument>,
     fonts: HashMap<Vec<u8>, Arc<cos_font::Font>>,
     font_ids: HashMap<Vec<u8>, u64>,
-    /// The embedded font program of each font, by the id the interpreter uses.
-    ///
-    /// **Decoded on first use, not at construction.** A font program is an
-    /// inflate of a stream that is routinely a megabyte, and since a form
-    /// XObject's own `/Resources` became a scope of their own there is one of
-    /// these per form rather than one per page — a document of nine hundred
-    /// objects went from 537 ms to 24.7 s doing it eagerly, and one corpus
-    /// file stopped making progress at all. Most scopes are opened to resolve
-    /// an image or a pattern and never ask for a glyph.
-    ///
-    /// `None` is cached as firmly as a hit: a font with no embedded program
-    /// must not be looked up again on every glyph.
-    programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
     /// Which glyph a code selects, per font, resolved lazily.
     resources: Option<Dict>,
-    /// Decoded images, kept because a page may draw one many times.
-    images: Mutex<HashMap<Vec<u8>, Option<Arc<DecodedImage>>>>,
-    /// Compiled ICC transforms, by the profile stream's object number.
-    ///
-    /// A transform is three 4 096-entry tables, and a page may name the same
-    /// `ICCBased` space at every one of a thousand `cs` operators. The `None`
-    /// is cached too: a profile that would not parse must be refused once
-    /// rather than re-read and re-refused a thousand times.
-    icc: Mutex<IccCache>,
-    /// Outlines already extracted, keyed by font and code.
-    outlines: RwLock<OutlineCache>,
+    /// Everything worked out once and reusable by every render: programs,
+    /// images, ICC transforms, outlines, form scopes. Shared, so
+    /// [`PageResources::for_one_render`] can hand a render its own lists of
+    /// what it tolerated over the same caches.
+    caches: Arc<Caches>,
     /// Resource names that named no font this build could resolve, and — when
     /// glyphs were being drawn — names whose font resolved no glyph for a
     /// code the page used.
@@ -125,19 +170,10 @@ pub struct PageResources {
     /// list above — which dedups by resource name, and which `images` has no
     /// bitmap to carry out on (ruling 10). `None` when nothing is capturing.
     image_capture: Mutex<Option<Vec<String>>>,
-    /// Nested scopes already built, by the form's own object number.
-    ///
-    /// A page may invoke one form a thousand times — a stamp, a rule, a
-    /// letterhead — and building its resources is not cheap: every font in the
-    /// dictionary is parsed and the optional-content configuration is bound
-    /// again. Two pdf.js corpus files stopped making progress at all when this
-    /// was rebuilt per invocation, which is what put the cache here.
-    ///
-    /// Keyed by the XObject's reference rather than by the resource name,
-    /// because two names can reach one form and a name means nothing outside
-    /// the dictionary it was looked up in. `None` is cached too: "this form
-    /// brought no resources" is an answer worth not recomputing.
-    form_scopes: Mutex<HashMap<u64, Option<Arc<PageResources>>>>,
+    /// The font the glyph lookup under way reported as resolving no glyph,
+    /// taken by [`GlyphSource::outline`] into the cache entry beside the
+    /// outline so a render that meets it there can say it again.
+    unresolved: Mutex<Option<String>>,
     /// The host's substitute faces, kept so a resource dictionary *inside*
     /// this one can be read with the same configuration.
     ///
@@ -155,7 +191,7 @@ pub struct PageResources {
     /// render — this build has no layer-toggle API to change it with — and a
     /// page that marks every drawing operator would otherwise walk
     /// `/OCProperties` thousands of times for one constant.
-    optional: OptionalContent,
+    optional: Arc<OptionalContent>,
 }
 
 /// Applies `/Decode [1 0]` to already-decoded samples.
@@ -353,6 +389,45 @@ impl PageResources {
             .unwrap_or_default()
     }
 
+    /// These resources again, for **one render** of a page whose resources
+    /// are kept across renders — a retained page's: every cache shared, so
+    /// nothing decoded or extracted is paid for twice, and nothing tolerated
+    /// yet, so what the render reports is what it met.
+    ///
+    /// A direct render builds its resources fresh and reports what its own
+    /// interpretation and drawing ran into. A retained page's resources
+    /// outlive its renders, and their lists used to as well: a cancelled
+    /// replay reported a font the recording had met, and a region reported
+    /// what a pattern cell drawn by an earlier render had met. What a cache
+    /// hit stands for — an image's damage, a glyph its font could not resolve —
+    /// is kept in the cache entry and said again by every render that meets
+    /// it, as that render's own decode would have.
+    #[must_use]
+    pub(crate) fn for_one_render(&self) -> PageResources {
+        PageResources {
+            doc: Arc::clone(&self.doc),
+            fonts: self.fonts.clone(),
+            font_ids: self.font_ids.clone(),
+            resources: self.resources.clone(),
+            caches: Arc::clone(&self.caches),
+            missing_fonts: Mutex::new(Vec::new()),
+            damaged_images: Mutex::new(Vec::new()),
+            image_capture: Mutex::new(None),
+            unresolved: Mutex::new(None),
+            provider: self.provider.clone(),
+            optional: Arc::clone(&self.optional),
+        }
+    }
+
+    /// Adds fonts some other pass over the same content could not resolve —
+    /// the interpretation a retained page recorded — to what this render
+    /// reports, as though its own interpretation had met them.
+    pub(crate) fn note_missing_fonts(&self, names: &[String]) {
+        for name in names {
+            self.note_missing_font(name.clone());
+        }
+    }
+
     /// Reads a page's resource dictionary.
     #[must_use]
     pub fn new(
@@ -380,17 +455,14 @@ impl PageResources {
             doc: doc.clone(),
             fonts,
             font_ids,
-            programs: Mutex::new(HashMap::new()),
-            form_scopes: Mutex::new(HashMap::new()),
             resources,
-            images: Mutex::new(HashMap::new()),
-            icc: Mutex::new(HashMap::new()),
-            outlines: RwLock::new(HashMap::new()),
+            caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
+            unresolved: Mutex::new(None),
             provider: provider.cloned(),
-            optional: OptionalContent::bind(doc),
+            optional: Arc::new(OptionalContent::bind(doc)),
         }
     }
 
@@ -409,7 +481,7 @@ impl PageResources {
         reference: tinker_pdf_cos::ObjRef,
     ) -> Option<Arc<tinker_pdf_color::icc::Transform>> {
         let key = (reference.num, reference.gen);
-        if let Ok(cache) = self.icc.lock() {
+        if let Ok(cache) = self.caches.icc.lock() {
             if let Some(found) = cache.get(&key) {
                 return found.clone();
             }
@@ -422,7 +494,7 @@ impl PageResources {
             .as_ref()
             .and_then(tinker_pdf_color::icc::Transform::compile)
             .map(Arc::new);
-        if let Ok(mut cache) = self.icc.lock() {
+        if let Ok(mut cache) = self.caches.icc.lock() {
             cache.insert(key, compiled.clone());
         }
         compiled
@@ -486,17 +558,14 @@ impl PageResources {
             doc: doc.clone(),
             fonts,
             font_ids,
-            programs: Mutex::new(HashMap::new()),
-            form_scopes: Mutex::new(HashMap::new()),
             resources: Some(dict),
-            images: Mutex::new(HashMap::new()),
-            icc: Mutex::new(HashMap::new()),
-            outlines: RwLock::new(HashMap::new()),
+            caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
+            unresolved: Mutex::new(None),
             provider: provider.cloned(),
-            optional: OptionalContent::bind(doc),
+            optional: Arc::new(OptionalContent::bind(doc)),
         }
     }
 
@@ -645,13 +714,13 @@ impl PageResources {
     fn form_resources(&self, name: &[u8]) -> Option<Arc<PageResources>> {
         let (dict, reference) = self.xobject(name)?;
         let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
-        if let Ok(cache) = self.form_scopes.lock() {
+        if let Ok(cache) = self.caches.form_scopes.lock() {
             if let Some(hit) = cache.get(&key) {
                 return hit.clone();
             }
         }
         let built = self.build_form_resources(&dict);
-        if let Ok(mut cache) = self.form_scopes.lock() {
+        if let Ok(mut cache) = self.caches.form_scopes.lock() {
             cache.insert(key, built.clone());
         }
         built
@@ -1482,17 +1551,30 @@ impl GlyphSource for PageResources {
     }
 
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline> {
-        if let Ok(cache) = self.outlines.read() {
-            if let Some(hit) = cache.get(&(font_id, code)) {
+        if let Ok(cache) = self.caches.outlines.read() {
+            if let Some((hit, unresolved)) = cache.get(&(font_id, code)) {
+                // What the extraction reported, reported again: this render
+                // met the glyph too, and a render of its own would have.
+                if let Some(name) = unresolved {
+                    self.note_missing_font(name.clone());
+                }
                 return hit.as_ref().map(|o| (**o).clone());
             }
         }
 
+        if let Ok(mut marker) = self.unresolved.lock() {
+            *marker = None;
+        }
         let outline = self.extract_outline(font_id, code).map(Arc::new);
-        if let Ok(mut cache) = self.outlines.write() {
+        let unresolved = self
+            .unresolved
+            .lock()
+            .ok()
+            .and_then(|mut marker| marker.take());
+        if let Ok(mut cache) = self.caches.outlines.write() {
             // Bounded: a hostile document could ask for millions of codes.
             if cache.len() < 1 << 16 {
-                cache.insert((font_id, code), outline.clone());
+                cache.insert((font_id, code), (outline.clone(), unresolved));
             }
         }
         outline.map(|o| (*o).clone())
@@ -1664,17 +1746,42 @@ impl GlyphSource for PageResources {
     }
 
     fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
-        if let Ok(cache) = self.images.lock() {
+        if let Ok(cache) = self.caches.images.lock() {
             if let Some(hit) = cache.get(name) {
-                return Ok(hit.as_ref().map(|i| (**i).clone()));
+                // What the decode said, said again: a render that meets the
+                // image here met it as surely as the one that decoded it.
+                for entry in &hit.damage {
+                    self.note_damaged_image(entry.clone());
+                }
+                return match &hit.image {
+                    Ok(image) => Ok(Some((**image).clone())),
+                    Err(codec) => Err(codec.clone()),
+                };
             }
         }
 
+        let label = String::from_utf8_lossy(name).into_owned();
         let decoded = self.decode_image(name);
-        let stored = decoded.as_ref().ok().cloned().map(Arc::new);
-        if let Ok(mut cache) = self.images.lock() {
+        // The damage this decode reported: every entry under this name, which
+        // only this image's decode (and its soft mask's, part of it) writes.
+        let damage: Vec<(String, String)> = self
+            .damaged_images
+            .lock()
+            .map(|damaged| {
+                damaged
+                    .iter()
+                    .filter(|(named, _)| *named == label)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let image = match &decoded {
+            Ok(image) => Ok(Arc::new(image.clone())),
+            Err(codec) => Err(codec.clone()),
+        };
+        if let Ok(mut cache) = self.caches.images.lock() {
             if cache.len() < 256 {
-                cache.insert(name.to_vec(), stored);
+                cache.insert(name.to_vec(), CachedImage { image, damage });
             }
         }
         decoded.map(Some)
@@ -1922,17 +2029,34 @@ impl PageResources {
     /// what its name says for the extraction path, which turns it into
     /// `TextWarning::UnknownFont`.
     fn report_unresolved_glyph(&self, font: &[u8]) {
+        let name = String::from_utf8_lossy(font).into_owned();
+        if let Ok(mut marker) = self.unresolved.lock() {
+            *marker = Some(name.clone());
+        }
+        self.note_missing_font(name);
+    }
+
+    /// Adds a font to what this render could not resolve, once.
+    fn note_missing_font(&self, name: String) {
         if let Ok(mut missing) = self.missing_fonts.lock() {
-            let name = String::from_utf8_lossy(font).into_owned();
             if missing.len() < 64 && !missing.contains(&name) {
                 missing.push(name);
             }
         }
     }
 
+    /// Adds an image's tolerated damage to what this render met, once.
+    fn note_damaged_image(&self, entry: (String, String)) {
+        if let Ok(mut damaged) = self.damaged_images.lock() {
+            if damaged.len() < 64 && !damaged.contains(&entry) {
+                damaged.push(entry);
+            }
+        }
+    }
+
     /// The embedded font program behind a font id, decoded once.
     fn program(&self, font_id: u64) -> Option<Arc<Vec<u8>>> {
-        if let Ok(cache) = self.programs.lock() {
+        if let Ok(cache) = self.caches.programs.lock() {
             if let Some(hit) = cache.get(&font_id) {
                 return hit.clone();
             }
@@ -1947,7 +2071,7 @@ impl PageResources {
             let resources = self.resources.as_ref()?;
             program_for(&self.doc, name, resources, font, self.provider.as_deref())
         });
-        if let Ok(mut cache) = self.programs.lock() {
+        if let Ok(mut cache) = self.caches.programs.lock() {
             cache.insert(font_id, built.clone());
         }
         built
