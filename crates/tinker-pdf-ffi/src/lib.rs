@@ -2011,9 +2011,10 @@ pub const TPDF_ENTROPY_LEN: usize = 48;
 
 /// Options for writing, as C sees `WriteOptions`.
 ///
-/// Field for field, with the two `bool`s and the version pair widened to
-/// integers so the layout has no packing surprises for a hand-written
-/// P/Invoke. Fill it with [`tpdf_write_options_init`] and change what you
+/// Field for field but one, with the two `bool`s and the version pair widened
+/// to integers so the layout has no packing surprises for a hand-written
+/// P/Invoke. The one is `WriteOptions::deduplicate_streams`, which this struct
+/// does not carry yet and which crosses at its default, off. Fill it with [`tpdf_write_options_init`] and change what you
 /// mean, rather than zeroing it: a zeroed struct is a *rewrite* at version
 /// 0.0, which is not the facade's default and not a version any reader knows.
 #[repr(C)]

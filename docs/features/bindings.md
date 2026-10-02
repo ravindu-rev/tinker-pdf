@@ -155,8 +155,12 @@ and `tpdf_fill_report_defect` the `TpdfWidgetDefect` — not only
 `tpdf_fill_report_message`'s sentence about them.
 
 *Two flat `#[repr(C)]` option structs.* `TpdfWriteOptions` maps `WriteOptions`
-field for field, with the booleans and the version pair widened to integers so
-a hand-written P/Invoke has no packing to guess at, and
+field for field **but one**, with the booleans and the version pair widened to
+integers so a hand-written P/Invoke has no packing to guess at. The one is
+`deduplicate_streams`: the struct does not carry it yet, because a field added
+there is a layout change the header and every binding pin, so a C caller's save
+crosses with it at its default, off — owed to the [roadmap](../ROADMAP.md)'s
+bindings row. And
 `tpdf_write_options_init` fills it with **the facade's own defaults** — because
 a C caller who guesses them writes a different file than a Rust caller with the
 same intent, which is the whole failure the parity suite exists to catch.

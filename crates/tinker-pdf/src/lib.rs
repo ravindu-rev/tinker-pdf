@@ -1746,10 +1746,13 @@ impl Document {
         tinker_pdf_cos::catalog_scripts(&self.inner)
     }
 
-    /// How much script this document carries, for a caller that has to say so
-    /// before it fills anything.
+    /// How much script this document's form carries — the fields' `/AA`,
+    /// `/CO`, `/Names /JavaScript` and the catalog's `/AA` — for a caller that
+    /// has to say so before it fills anything.
     ///
-    /// Reading a script runs nothing.
+    /// Not every script the document carries: `/OpenAction`, page and
+    /// annotation actions, outline actions and `/Next` chains are not counted
+    /// ([`tinker_pdf_cos::script_summary`]). Reading a script runs nothing.
     #[must_use]
     pub fn script_summary(&self) -> ScriptSummary {
         tinker_pdf_cos::script_summary(&self.inner)

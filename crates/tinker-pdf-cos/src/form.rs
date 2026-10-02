@@ -798,7 +798,8 @@ pub struct ScriptSummary {
 }
 
 impl ScriptSummary {
-    /// Whether the document carries no script anywhere.
+    /// Whether [`script_summary`] found no script on the surfaces it reads —
+    /// not that the document carries none anywhere (see there).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         *self == ScriptSummary::default()
@@ -821,12 +822,20 @@ impl ScriptSummary {
     }
 }
 
-/// Counts every script the document carries (12.6.3, 12.7.2).
+/// Counts the scripts a form carries and a filler should warn about: the
+/// fields' `/AA` (12.7.2), `/CO`, `/Names /JavaScript` (7.7.4) and the
+/// catalog's `/AA` (12.6.3).
+///
+/// **Not every script a document carries.** `/OpenAction`, a page's `/AA`, an
+/// annotation's `/AA` or `/A`, an outline item's `/A` and an action's `/Next`
+/// chain are run by a viewer and not looked at here;
+/// [`crate::edit::DocumentEditor::sanitise`] sweeps every object for that
+/// reason.
 #[must_use]
 pub fn script_summary(doc: &CosDocument) -> ScriptSummary {
     // One budget across all three, which is the whole reason `ScriptBudget`
-    // is a value: this is the call that reads every script a document
-    // carries, and three separate totals would let one document surface three
+    // is a value: this is the call that reads all three surfaces a form
+    // has, and three separate totals would let one document surface three
     // times the cap.
     let mut budget = ScriptBudget::new();
     let fields = fields_within(doc, &mut budget);

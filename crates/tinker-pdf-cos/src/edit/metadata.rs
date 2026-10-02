@@ -31,9 +31,9 @@ use crate::write::StreamData;
 /// What a metadata write did to the *other* statement of the same metadata.
 ///
 /// After an `/Info` setter the other half is the catalog's XMP packet; after
-/// [`DocumentEditor::set_xmp_metadata`] it is the `/Info` dictionary. See
-/// [this module](self) for why the editor keeps neither in step with the
-/// other.
+/// [`DocumentEditor::set_xmp_metadata`] it is the `/Info` dictionary. The
+/// editor keeps neither in step with the other: `docs/features/editing.md`
+/// ("`/Info` and XMP are not kept in step") says why.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[must_use = "an /Info entry and an XMP packet that disagree are a document that says two things"]
 pub enum MetadataSync {

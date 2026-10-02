@@ -175,7 +175,7 @@ value the caller carries: `fields_within`, `document_scripts_within` and
 `catalog_scripts_within` spend one between them, in that order (the order is
 fixed because which scripts come back as source and which as
 `Script::Oversize` depends on it, and determinism is a contract — ruling 4).
-`script_summary` — the one call that reads every script a document has —
+`script_summary` — the one call that reads all three surfaces —
 threads one. The bare `fields`, `document_scripts` and `catalog_scripts` are
 each **one read of one surface** and each start from the full total; a caller
 that reads more than one and wants the document's answer threads a budget.
@@ -331,8 +331,14 @@ On `Document`: `form_fields()` returns the typed `Field` model —
 and `scripts` (a `FieldScripts` of the four `/AA` sources, each a
 `Script::Source` or `Script::Oversize`). `calculation_order()`,
 `document_scripts()` and `catalog_scripts()` surface `/CO` and the
-document's own scripts; `script_summary()` counts everything for a caller
-that has to warn before filling — reading a script runs nothing. Each of the
+document's own scripts; `script_summary()` counts what those walkers see —
+the fields' `/AA` scripts, `/CO`, `/Names /JavaScript` and the catalog's
+`/AA` — for a caller that has to warn before filling; reading a script runs
+nothing. It is a form's count, **not every script a document carries**: it
+does not look at `/OpenAction`, a page's `/AA`, an annotation's `/AA` or
+`/A`, an outline item's `/A` or an action's `/Next` chain, all of which a
+viewer runs. `DocumentEditor::sanitise` sweeps every object for that reason
+([editing](editing.md)). Each of the
 three has a `_within` sibling taking a `ScriptBudget`, for a caller reading
 more than one surface under one total.
 
