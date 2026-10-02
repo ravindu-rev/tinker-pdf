@@ -245,6 +245,73 @@ fn fills_and_strokes_read_back_as_the_page_states_them() {
     assert_eq!(stroke.dash_offset, 1.0);
 }
 
+/// **A stroke under a transform that scales** is written with its width, its
+/// dashes and its phase scaled by the transform's expansion into page space,
+/// `sqrt(|det|)` — the number the renderer strokes with. The fixture above
+/// strokes under the identity, where a width that was never scaled and one
+/// that was are the same number.
+///
+/// `2 0 0 8 0 0 cm` has a determinant of 16, so an expansion of exactly 4:
+/// `1 w` is 4 points, `[2 1] 0.5 d` is `[8 4]` from 2. And the renderer agrees
+/// in pixels: the undashed line's column is four rows of ink at scale 1.
+#[test]
+fn a_stroke_under_a_scaling_transform_is_scaled_as_the_renderer_scales_it() {
+    let content = "q 2 0 0 8 0 0 cm 0 0 1 RG 1 w [2 1] 0.5 d 5 1 m 50 1 l S Q\n\
+                   q 2 0 0 8 0 0 cm 0 0 0 RG 1 w 5 5 m 50 5 l S Q";
+    let bytes = pdf(content, 200, 100, "<< >>", &[]);
+    let svg = svg_of(bytes.clone());
+    assert!(svg.warnings.is_empty(), "{:?}", svg.warnings);
+    let (scene, k) = read_back(&svg);
+    let nodes = paths(&scene);
+    assert_eq!(nodes.len(), 2, "two strokes");
+
+    let Node::Path {
+        outline, stroke, ..
+    } = nodes[0]
+    else {
+        unreachable!()
+    };
+    close(
+        &points(&outline.segments, k),
+        &[vec![[10.0, 92.0]], vec![[100.0, 92.0]]],
+        "the dashed line, its points through the CTM",
+    );
+    let stroke = stroke.as_ref().expect("a stroke");
+    assert_eq!(stroke.width, 4.0, "1 w under an expansion of 4");
+    assert_eq!(stroke.dashes, vec![8.0, 4.0], "[2 1] under the same");
+    assert_eq!(stroke.dash_offset, 2.0, "and the phase");
+
+    let Node::Path { stroke, .. } = nodes[1] else {
+        unreachable!()
+    };
+    let width = stroke.as_ref().expect("a stroke").width;
+    assert_eq!(width, 4.0);
+    assert!(
+        stroke.as_ref().is_some_and(|s| s.dashes.is_empty()),
+        "the second line is solid"
+    );
+
+    // The renderer's own pen, counted down column 50 across the solid line:
+    // page y 40 is pixel row 60, and the pen covers 58 to 62. Rows 40 to 79
+    // only, because the dashed line's ink is in this column too, at row 92.
+    let document = Document::open(bytes).expect("it opens");
+    let bitmap = document
+        .page(0)
+        .expect("a page")
+        .render(&tinker_pdf::RenderOptions::default());
+    let components = bitmap.components();
+    let inked = (40..80)
+        .filter(|&y| {
+            let at = y * bitmap.stride + 50 * components;
+            bitmap.data.get(at).is_some_and(|&v| v < 128)
+        })
+        .count();
+    assert_eq!(
+        inked as f64, width,
+        "the SVG's width is the renderer's, in rows of ink"
+    );
+}
+
 /// **A clip** is a `<clipPath>` the element names, and the reader hands back
 /// the clip's own rectangle beside the fill it clips.
 #[test]
