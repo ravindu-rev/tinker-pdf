@@ -216,9 +216,19 @@ impl Resources for NoResources {
 /// `RefCell` is not a shortcut: [`Ocf::read`] takes `&mut self` because
 /// inflating an entry spends the archive's budget, and the trait takes `&self`
 /// because a resolver is shared by a whole parse.
-struct Imports<'b, R: ?Sized> {
+pub(crate) struct Imports<'b, R: ?Sized> {
     resources: RefCell<&'b mut R>,
     limits: Limits,
+}
+
+impl<'b, R: Resources + ?Sized> Imports<'b, R> {
+    /// A resolver over `resources`, for one parse.
+    pub(crate) fn new(resources: &'b mut R, limits: Limits) -> Self {
+        Imports {
+            resources: RefCell::new(resources),
+            limits,
+        }
+    }
 }
 
 impl<R: Resources + ?Sized> ImportResolver for Imports<'_, R> {
@@ -305,6 +315,14 @@ pub struct Reading {
     /// that became replaced boxes, with their bytes, and the ones that did not,
     /// with the reason.
     pub pictures: Pictures,
+    /// `<link rel="stylesheet">` elements whose `href` produced no sheet.
+    ///
+    /// Counted because the document is then set without rules its author
+    /// wrote, and nothing on the page says so: a loose XHTML file opened from
+    /// its bytes alone has nothing beside it, so every sheet it links lands
+    /// here, and a book that names an entry its container does not hold is the
+    /// same sentence about a smaller mistake.
+    pub unresolved_sheets: usize,
 }
 
 /// Reads one content document: markup, stylesheets, cascade, box tree.
@@ -329,17 +347,26 @@ pub fn read_document<R: Resources + ?Sized>(
     context: &Context<'_>,
     budget: &mut CssBudget,
 ) -> Result<Reading, CssRefusal> {
-    let dom = match super::xhtml::read(bytes, &context.limits.xml) {
+    let dom = markup(bytes, &context.limits.xml);
+    read_dom(book, path, dom, context, budget)
+}
+
+/// A content document's markup, read as XML into a tree.
+///
+/// Never fails: a document the reader stops part way through is the tree it
+/// got to with [`super::xhtml::MarkupDefect::Truncated`] on it, and one it
+/// cannot begin — an encoding this build does not decode, or a character XML
+/// §2.2 forbids — is no tree at all with the same defect, so the page that
+/// results says so through its own defect rather than through this one.
+#[must_use]
+pub fn markup(bytes: &[u8], limits: &tinker_pdf_xml::Limits) -> Dom {
+    match super::xhtml::read(bytes, limits) {
         Ok(dom) => dom,
-        // An encoding this build does not decode, or a character XML §2.2
-        // forbids. There is no tree at all, and the page that results says so
-        // through its own defect rather than through this one.
         Err(_) => Dom {
             defects: vec![super::xhtml::MarkupDefect::Truncated],
             ..Dom::default()
         },
-    };
-    read_dom(book, path, dom, context, budget)
+    }
 }
 
 /// [`read_document`] for a tree something else already built.
@@ -383,7 +410,17 @@ pub fn read_dom<R: Resources + ?Sized>(
         _ => media,
     };
 
-    let own = author_sheets(book, path, &dom, limits, css_limits, budget, media);
+    let mut unresolved_sheets = 0;
+    let own = author_sheets(
+        book,
+        path,
+        &dom,
+        limits,
+        css_limits,
+        budget,
+        media,
+        &mut unresolved_sheets,
+    );
     // A caller's sheets come first, as a `<link>` at the top of `<head>` would:
     // §6.1's order of appearance then lets the document's own rules win a tie,
     // which is what an author who wrote a `<style>` element meant by it.
@@ -440,6 +477,7 @@ pub fn read_dom<R: Resources + ?Sized>(
         viewport,
         font_faces,
         pictures,
+        unresolved_sheets,
     })
 }
 
@@ -450,6 +488,12 @@ pub fn read_dom<R: Resources + ?Sized>(
 /// property at the same specificity are decided by which came later, and a
 /// build that read every `<link>` before every `<style>` would get that
 /// backwards for calibre's books, which write both.
+///
+/// `unresolved` counts the `<link rel="stylesheet" href>` elements whose
+/// reference produced no bytes — the one sheet a document names that this build
+/// can tell it did not apply, where a sheet that would not parse is the CSS
+/// crate's to report.
+#[allow(clippy::too_many_arguments)]
 fn author_sheets<R: Resources + ?Sized>(
     book: &mut R,
     path: &str,
@@ -458,6 +502,7 @@ fn author_sheets<R: Resources + ?Sized>(
     css_limits: &CssLimits,
     budget: &mut CssBudget,
     media: &MediaContext,
+    unresolved: &mut usize,
 ) -> Vec<Stylesheet> {
     let mut out = Vec::new();
     for node in &dom.nodes {
@@ -473,12 +518,10 @@ fn author_sheets<R: Resources + ?Sized>(
                     continue;
                 };
                 let Ok((target, bytes)) = book.fetch(path, href, limits) else {
+                    *unresolved += 1;
                     continue;
                 };
-                let resolver = Imports {
-                    resources: RefCell::new(&mut *book),
-                    limits: *limits,
-                };
+                let resolver = Imports::new(&mut *book, *limits);
                 if let Ok(sheet) = tinker_pdf_css::parser::parse(
                     &bytes,
                     Some(&target),
@@ -500,10 +543,7 @@ fn author_sheets<R: Resources + ?Sized>(
                 if source.trim().is_empty() {
                     continue;
                 }
-                let resolver = Imports {
-                    resources: RefCell::new(&mut *book),
-                    limits: *limits,
-                };
+                let resolver = Imports::new(&mut *book, *limits);
                 // The **document's** path is the base, not `None`: a `<style>`
                 // has no address of its own and HTML resolves a relative URL in
                 // it against the document. Passing `None` would drop every

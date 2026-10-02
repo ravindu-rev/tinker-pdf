@@ -42,6 +42,7 @@ mod render_part;
 mod resources;
 pub mod shaping;
 pub mod signature;
+pub mod standalone;
 pub mod structure;
 pub mod subset;
 mod svg_out;
@@ -81,6 +82,9 @@ pub use signature::{
     Anchor, Coverage, CoverageDefect, SecurityStore, SecurityStoreWarning, Signature,
     SignatureWarning, SubFilter, ValidationEntry,
 };
+/// One-file documents that are not PDFs: what [`Document::open`] does with a
+/// standalone SVG, a bare image and a loose XHTML file (tier 5).
+pub use standalone::Standalone;
 /// Tagged PDF: the logical structure tree, and the reading-order view over it
 /// (14.7, 14.8).
 pub use structure::{
@@ -136,7 +140,9 @@ pub use tinker_pdf_cos::{FontKind, ProgramKey};
 /// How many bytes are read to decide whether a source holds a container.
 ///
 /// `cbz::container` tests fixed positions and reads no further than byte 262;
-/// one kilobyte is that with room, and it is one head read either way.
+/// one kilobyte is that with room, and it is one head read either way. It is
+/// also the window a PDF header is looked for in, which is what lets a streamed
+/// PDF skip [`standalone::sniff`]'s larger one.
 const CONTAINER_SNIFF: u64 = 1024;
 /// The per-family annotation payloads (12.5.6) behind [`Annotation::payload`],
 /// the types they are built from, and [`Page::annotation_list`]'s answer —
@@ -1169,6 +1175,29 @@ fn open_container(
     cbz::pages_from_archive(archive, &comic)
 }
 
+/// The first `end` bytes of a source, or as many as it holds.
+///
+/// **A loop, because a source may answer a range in pieces** — `ByteSource`
+/// permits a short read and [`ShreddedSource`] serves exactly one byte. The
+/// container sniff used to be one `read`, and over a source that splits its
+/// answers it saw one byte of `PK\x03\x04`, so a comic archive streamed from
+/// one was "not a PDF". A source that ends early ends the loop rather than
+/// spinning on it: end of file is an answer, not a miss.
+fn filled(source: &dyn ByteSource, end: u64) -> Result<Vec<u8>, OpenError> {
+    let end = end.min(source.len());
+    let mut bytes = Vec::with_capacity(usize::try_from(end).unwrap_or(0));
+    let mut at = 0u64;
+    while at < end {
+        let got = source.read(at..end).map_err(OpenError::SourceUnavailable)?;
+        if got.is_empty() {
+            break;
+        }
+        at += got.len() as u64;
+        bytes.extend_from_slice(&got);
+    }
+    Ok(bytes)
+}
+
 impl Document {
     /// Opens a document from bytes.
     ///
@@ -1245,20 +1274,27 @@ impl Document {
         }
 
         if let Some(container) = cbz::container(&bytes) {
-            let (pdf, report) = open_container(container, &bytes, options)
+            let synthesised = open_container(container, &bytes, options)
                 .map_err(OpenError::UnsupportedArchive)?;
-            // These bytes came out of this repository's own writer moments
-            // ago, so a parse failure is a defect here rather than a claim
-            // about the archive — but ruling 1 forbids asserting it, and
-            // `Damaged` is the honest thing to say to a caller who cannot act
-            // on the difference either way.
-            let inner = CosDocument::open(pdf)
-                .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
-            return Ok(Document {
-                inner: Arc::new(inner),
-                fonts: fonts::effective(options.fonts.clone()),
-                archive: Some(Arc::new(report)),
-            });
+            return Document::synthesised(synthesised, options);
+        }
+        // After the containers, because every signature there is a fixed
+        // position a one-file document cannot also hold, and before the PDF
+        // parser, because that parser's rescan would read an SVG as a damaged
+        // PDF with no objects. `sniff` answers `None` for anything with a PDF
+        // header where 7.5.2 lets one sit, so a PDF never reaches this.
+        if let Some(kind) = standalone::sniff(&bytes) {
+            let (layout, unusable) = epub::BookLayout::sanitised(options.page, options.font_size);
+            let (pdf, mut report) = standalone::synthesise(kind, &bytes, &layout)
+                .map_err(OpenError::UnsupportedArchive)?;
+            // A bare image's page is its own pixels and never the caller's
+            // box, so a bad box is only news for a document laid out into one.
+            if report.layout().is_some() {
+                for defect in unusable {
+                    report.warn(ArchiveWarning::UnusableOption(defect));
+                }
+            }
+            return Document::synthesised((pdf, report), options);
         }
 
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
@@ -1266,6 +1302,26 @@ impl Document {
             inner: Arc::new(inner),
             fonts: fonts::effective(options.fonts.clone()),
             archive: None,
+        })
+    }
+
+    /// A document over a PDF this crate synthesised, and the report saying
+    /// where its pages came from.
+    fn synthesised(
+        (pdf, report): (Vec<u8>, ArchiveReport),
+        options: &OpenOptions,
+    ) -> Result<Document, OpenError> {
+        // These bytes came out of this repository's own writer moments ago, so
+        // a parse failure is a defect here rather than a claim about the
+        // input — but ruling 1 forbids asserting it, and `Damaged` is the
+        // honest thing to say to a caller who cannot act on the difference
+        // either way.
+        let inner = CosDocument::open(pdf)
+            .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
+        Ok(Document {
+            inner: Arc::new(inner),
+            fonts: fonts::effective(options.fonts.clone()),
+            archive: Some(Arc::new(report)),
         })
     }
 
@@ -1309,22 +1365,21 @@ impl Document {
         // The signatures are tested at a fixed position and nowhere else, so
         // one head window answers the question for every container this build
         // recognises -- `cbz::container` reads no further than byte 262.
-        let head = source
-            .read(0..CONTAINER_SNIFF)
-            .map_err(OpenError::SourceUnavailable)?;
-        if cbz::container(&head).is_some() {
+        let head = filled(&*source, CONTAINER_SNIFF)?;
+        // A one-file document is whole-file for a container's reason: an SVG's
+        // and an XHTML file's last element can be its first page's, and a bare
+        // image is one picture. Its sniff looks further in than the container
+        // one, so it is asked only when the first window holds no PDF header —
+        // which keeps every PDF's streamed open to the reads it always made.
+        let standalone = !head.windows(5).any(|w| w == b"%PDF-") && {
+            let wider = filled(&*source, standalone::SNIFF_WINDOW as u64)?;
+            standalone::sniff(&wider).is_some()
+        };
+        if cbz::container(&head).is_some() || standalone {
             // Whole-file by contract, and the only honest way to read one.
-            let mut bytes = Vec::with_capacity(source.len() as usize);
-            let mut at = 0u64;
-            while at < source.len() {
-                let got = source
-                    .read(at..source.len())
-                    .map_err(OpenError::SourceUnavailable)?;
-                if got.is_empty() {
-                    return Err(OpenError::NotAPdf);
-                }
-                at += got.len() as u64;
-                bytes.extend_from_slice(&got);
+            let bytes = filled(&*source, source.len())?;
+            if bytes.len() as u64 != source.len() {
+                return Err(OpenError::NotAPdf);
             }
             return Document::open_with(bytes, options);
         }

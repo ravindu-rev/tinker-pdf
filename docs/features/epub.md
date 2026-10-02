@@ -154,6 +154,21 @@ Option<&ArchiveReport>`. `tinker_pdf::epub` exposes `DEFAULT_PAGE`,
 `BookCost`, `BookOptionDefect`, `SpineDefect` and the `ocf`, `package`,
 `nav`, `xhtml`, `read`, `typeface`, `paint` and `obfuscation` modules.
 
+**Where a content document's references are read from** is a trait, since
+tier 5's formats row: `read::Resources` resolves and reads a `<link href>`, an
+`@import`, an `<img src>` and an `@font-face` `url()` written in a given
+document, answering the path and the bytes or `Unavailable::{Missing,
+Unreadable}`. `Ocf` implements it as §4.2.5 says, which is what the four call
+sites did before; `read::NoResources` answers every reference missing. So
+`read::read_document` — and `read::read_dom`, which takes a tree something
+else built, and `read::markup`, the XML reader that never fails — read a
+document that did not come out of a container by the same cascade and the
+same layout. `read::Context::author` carries sheets a caller supplies ahead of
+every sheet the document links; a book's is empty. A **loose content
+document is a book of one chapter** through the same passes
+(`epub::lay_out_one`, crate-internal): a standalone SVG and a loose XHTML file
+open that way ([opening](opening.md)).
+
 ## Tagged output
 
 The PDF an EPUB becomes carries a **structure tree**: `/MarkInfo << /Marked
@@ -196,6 +211,7 @@ order, at nine page boxes.
 | Inside an SVG content document: `<filter>`, `<mask>`, `<pattern>` as a paint, `<marker>`, `<foreignObject>`, SMIL animation, `<script>`, `<textPath>`/`<tref>`/`<altGlyph>`, and `spreadMethod` other than `pad` | `ArchiveWarning::Svg { item, warning }` | the document draws; each of these is a subsystem this build declines, named per document and deduplicated by the crate that met it. §14.5's group `opacity` is **flattened** into each descendant's alpha — exact for a shape painted one way, too dark where a fill and a stroke overlap, so `GroupOpacityFlattened` fires only where it shows | [design/svg.md](../design/svg.md) |
 | An `<image>` inside an SVG whose reference does not resolve, or whose bytes are neither JPEG nor PNG | `ArchiveWarning::SvgImageUnresolved { item, images }` | those two are embedded through the same `ImageData` path `cbz.rs` uses; anything else is counted per page rather than drawn as nothing | [design/svg.md](../design/svg.md) |
 | An XHTML `<img>` that did not become a box on the page | `ArchiveWarning::ImageNotDrawn { item, defect, images }` | four defects, because each is a different party's fault: `Unresolved` (no `src`, or one the container has no entry for), `UnsupportedFormat(f)` (BMP, TIFF, JPEG 2000 and AVIF are foreign resources an `<img>` does not place even where the comic path reads them — each named by format; every EPUB 3.3 §3.2 core raster type now has a decoder, so none lands here), `Unknown` (bytes matching no magic number — **an SVG lands here**, having none, and is a spine item in this build rather than a replaced box) and `Undecodable` (a JPEG, PNG, GIF or WebP whose bytes would not make an image; a GIF is drawn as its first image, an animated WebP as its first frame). Counted per content document and per defect, so a comic whose forty pictures are all WebP is one sentence a host can act on. The ruling 10 companion to `SvgImageUnresolved`, which is an SVG `<image>` and could never say this | [design/epub-layout.md](../design/epub-layout.md) |
+| A `<link rel="stylesheet">` whose `href` produced no sheet | `ArchiveWarning::StylesheetUnresolved { item, sheets }` | the document is set without rules its author wrote and the page looks finished, which is `ImageNotDrawn`'s hole for the other reference a content document makes. Counted per content document. Silent until tier 5's formats row, where a loose XHTML file — which has nothing beside it — made every linked sheet one of these | [opening](opening.md) |
 | A refused `<img>` — **not a refusal, a stated answer** | — | HTML §4.8.4.4 makes an element *"expected to be treated as a replaced element"* **only when the image is available**, so an unavailable one is an ordinary empty inline and generates **no box**. §10.3.2's 300 by 150 default would put a blank postcard into a paragraph for a reference that was merely misspelled, and carrying `alt` into it would put characters on the page the spine's markup does not contain — one per refused image, with no source character to answer it. Asserted as a byte-for-byte identity against the same book with an empty `<span>` in the `<img>`'s place | [design/epub-layout.md](../design/epub-layout.md) |
 | `object-fit`, `object-position` | `ArchiveWarning::UnimplementedProperty` | a replaced box's content fills its content box exactly, which is what CSS says happens when the property that would say otherwise is absent. An author who states a `width` and a `height` that disagree with the picture's proportions gets a stretched picture, asserted rather than assumed | [ROADMAP.md](../ROADMAP.md) |
 | An SVG content document that produced no picture at all | `SpineDefect::SvgUnreadable(tinker_pdf_svg::Refusal)` | six named causes — not XML, not an `<svg>` root, a `<use>` that reaches its own ancestor, or one of four ceilings — and the refusal travels, so a caller can tell a bomb from a truncated file | [design/svg.md](../design/svg.md) |

@@ -199,6 +199,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "the face sits after a text run whose length is a knob",
     ),
     ("signatures", "a generator over signature dictionaries"),
+    (
+        "standalone",
+        "SVG and XHTML text and bare images of five formats, the sniff being what is under test",
+    ),
     ("svg", "SVG is XML text"),
     (
         "type1",

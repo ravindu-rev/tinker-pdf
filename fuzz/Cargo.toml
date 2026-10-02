@@ -302,6 +302,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "standalone"
+path = "fuzz_targets/standalone.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "woff"
 path = "fuzz_targets/woff.rs"
 test = false

@@ -203,7 +203,7 @@ pub(crate) const PLACEHOLDER_GREY: f64 = 191.0 / 255.0;
 /// ordinary archive takes the size of the first real page instead, because a
 /// comic's pages are one size and a placeholder that matches its neighbours is
 /// the one a reader can page through.
-const FALLBACK_PAGE: (f64, f64) = (612.0, 792.0);
+pub(crate) const FALLBACK_PAGE: (f64, f64) = (612.0, 792.0);
 
 /// Resource ceilings for synthesising a document from an archive.
 ///
@@ -877,6 +877,22 @@ pub enum ArchiveWarning {
         defect: ImageDefect,
         /// How many `<img>` elements in that document failed that way.
         images: usize,
+    },
+    /// A `<link rel="stylesheet">` whose `href` produced no sheet, so the
+    /// document was set **without rules its author wrote** (tier 5's formats
+    /// row).
+    ///
+    /// The companion to [`ArchiveWarning::ImageNotDrawn`] for the other
+    /// reference a content document makes, and invisible in the same way: the
+    /// page is set by the user-agent sheet and looks finished. A book names an
+    /// entry its container does not hold; a loose XHTML file opened from its
+    /// bytes alone has nothing beside it at all, so every sheet it links lands
+    /// here.
+    StylesheetUnresolved {
+        /// The content document that links the sheets.
+        item: String,
+        /// How many of its `<link>` elements did not resolve.
+        sheets: usize,
     },
     /// A CSS property this build does not implement, and **how many elements
     /// it reached** (gap 31, milestone 8).
@@ -2397,7 +2413,7 @@ fn raster_plan<'a>(name: &str, raster: Option<RasterImageData>) -> Plan<'a> {
 
 /// The device space a JPEG 2000 file's decode lands in, by its channel count
 /// — the three counts the renderer draws — or `None` for any other.
-fn jpx_space(header: &JpxHeader) -> Option<ImageColorSpace<'static>> {
+pub(crate) fn jpx_space(header: &JpxHeader) -> Option<ImageColorSpace<'static>> {
     match header.components {
         1 => Some(ImageColorSpace::DeviceGray),
         3 => Some(ImageColorSpace::DeviceRgb),
@@ -2412,7 +2428,7 @@ fn jpx_space(header: &JpxHeader) -> Option<ImageColorSpace<'static>> {
 /// the header, and [`ImageFilter::Jpx`] is why neither reaches the dictionary:
 /// the codestream states both, and a `/ColorSpace` would override a JP2's own
 /// `colr` box.
-fn jpx_image<'b>(data: &'b [u8], header: &JpxHeader) -> CompressedImage<'b> {
+pub(crate) fn jpx_image<'b>(data: &'b [u8], header: &JpxHeader) -> CompressedImage<'b> {
     CompressedImage {
         width: header.width,
         height: header.height,

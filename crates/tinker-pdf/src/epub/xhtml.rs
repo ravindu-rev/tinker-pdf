@@ -396,6 +396,33 @@ impl Dom {
         })
     }
 
+    /// The document's `<title>`, white space collapsed, or `None` when it has
+    /// none or the element is empty.
+    ///
+    /// HTML's own definition — the first `title` element in the HTML
+    /// namespace, in tree order — which is why an SVG `<title>` inside the body
+    /// is never it. A book's title comes from its package document instead;
+    /// this is for a content document that is the whole document.
+    #[must_use]
+    pub fn title(&self) -> Option<String> {
+        let node = self
+            .nodes
+            .iter()
+            .find(|node| node.is_html() && node.name == "title")?;
+        let mut text = String::new();
+        for child in &node.children {
+            if let Child::Text(chunk) = child {
+                text.push_str(chunk);
+            }
+        }
+        let title = text
+            .split(is_document_white_space)
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!title.is_empty()).then_some(title)
+    }
+
     /// The `<body>`, or the document element when there is none.
     ///
     /// A content document without a `<body>` is not well-formed XHTML and is

@@ -26,6 +26,38 @@ unaffected. See [cbz](cbz.md), [xps](xps.md) and [epub](epub.md); a
 reflowable book additionally takes `OpenOptions`, because its page count is a
 function of the page box the caller passes, not a property of the file.
 
+**One-file documents that are not PDFs** open too (tier 5's formats row),
+through `tinker_pdf::standalone`: a **standalone SVG**, a **bare image** and a
+**loose XHTML file**. Each had a reader in the tree and was refused as
+not-a-PDF because nothing asked. The sniff comes after the containers and
+before the PDF parser, and a PDF always wins it — anything with `%PDF-` in its
+first 1 024 bytes, where 7.5.2's leniency lets a header sit, is a PDF, so a
+polyglot and a PDF with junk in front stay PDFs. Past that, an image is told
+by its magic at offset zero (JPEG, PNG, TIFF, JPEG 2000, GIF, WebP, AVIF — the
+comic path's own classifier, less BMP's two-byte signature) and a markup
+document by its root element once the prolog is walked: byte-order mark, white
+space, the XML declaration, processing instructions, comments and a doctype
+with its internal subset, all inside the first 4 096 bytes (`SNIFF_WINDOW`).
+A root named `svg` is an SVG; one named `html`, in any case, or a doctype
+naming `html`, is an HTML document. **Each is built by the code that builds
+the larger document it would be one part of**: an SVG is a book of one
+pre-paginated chapter — one page, the size its root states, the caller's
+`OpenOptions::page` as the viewport a root with no size fills; an XHTML file is
+a book of one reflowable chapter at the caller's box with the book's 36-point
+margin, its `<title>` the document's `/Title`; a bare image is a comic of one
+page, one pixel to one point. `tests/standalone.rs` holds that as two
+equalities — the same XHTML bytes render to the same pixels alone and as an
+EPUB's one chapter, and a bare PNG to the same pixels as a one-page CBZ.
+Nothing on these paths refuses a document the sniff recognised: an SVG the
+reader will not take, tag soup and an undecodable picture are each a page
+saying so in the report (ruling 2). A file opened from its bytes has nothing
+beside it, so a stylesheet, a picture or a face it names by a relative
+reference is **missing and named** (`StylesheetUnresolved`, `ImageNotDrawn`,
+`SvgImageUnresolved`, `FontFace`); RFC 2397's `data:` URL carries its own bytes
+and resolves. A streamed open of one is whole-file, as a container's is, and
+its wider sniff is read only when the first kilobyte holds no PDF header, so
+a streamed PDF's reads are unchanged.
+
 **COS parsing.** A hand-written lexer covers the full token grammar of 7.2
 and every object form of 7.3: literal strings with all escapes and octal
 (7.3.4.2), hex strings (7.3.4.3), names with `#xx` escapes (7.3.5), numbers
@@ -134,6 +166,14 @@ second dependency. On `CosDocument`: `get`, `resolve`, `trailer`,
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an
 image codec).
 
+`tinker_pdf::standalone` exposes the sniff as its own question —
+`sniff(bytes) -> Option<Standalone>` with `Standalone::{Svg, Html,
+Image(ImageFormat)}` (`#[non_exhaustive]`, re-exported on the facade) and
+`SNIFF_WINDOW` — and the two decoders a loose file's references go through,
+`data_url` (RFC 2397) and `base64_decode` (RFC 4648 §4, white space skipped,
+padding optional), with `DataUrls`, the `epub::read::Resources` provider that
+answers `data:` URLs and hands every other reference to the one behind it.
+
 The streaming seam adds `open_streaming(source)` and
 `open_streaming_with(source, &OpenOptions)`, the `ByteSource` trait with
 `SliceSource`, `CountingSource` and `ShreddedSource`, the `CHUNK_SIZE` the
@@ -167,6 +207,11 @@ exceed it routinely — declared in one place,
 | Zero bytes | `OpenError::Empty` | Almost always a caller's bug — a path that did not exist — and telling that apart from a bad file matters | `crates/tinker-pdf/src/lib.rs` |
 | Nothing PDF-shaped | `OpenError::NotAPdf` | Not one indirect object found, even after a full rescan | `CosDocument::open` → `OpenError::NoObjects` |
 | A RAR 4 | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | Recognised by its own signature and refused as *that version*; no producer here can write one to hold a decoder to | [cbz](cbz.md), [design/comic-archives.md](../design/comic-archives.md) |
+| HTML that is not well-formed XML — tag soup | `ArchiveWarning::Markup { defect: MarkupDefect::Truncated, .. }` on a document of what parsed | **The narrowed half of tier 5's row.** A loose HTML file is read by the XML reader, so it opens as far as it parses as XML and the report says where it stopped; HTML5's tokenizer and tree builder (WHATWG §13.2) are not in this build, and the roadmap row says what holding one to html5lib-tests would take | [ROADMAP](../ROADMAP.md) |
+| A bare BMP | `OpenError::NotAPdf` | `BM` is two bytes, and also how a text file about a car begins; the comic path can afford it because an archive's entries are already pictures, and a sniff over every input cannot | `crates/tinker-pdf/src/standalone.rs` |
+| An SVG or HTML whose root element is past byte 4 096 | `OpenError::NotAPdf` | the prolog is walked inside `SNIFF_WINDOW` and not searched past it, because a sniff that scans is one that finds `<svg` inside a PDF's stream | `crates/tinker-pdf/src/standalone.rs` |
+| A bare GIF, WebP or AVIF | `ArchiveWarning::PlaceholderPage { defect: PageDefect::UnsupportedFormat(f), .. }` | recognised by magic and not decoded here; one placeholder page naming the format, which is what a comic archive holding that one picture has always produced | [cbz](cbz.md) |
+| What a loose file names beside itself | `StylesheetUnresolved`, `ImageNotDrawn { defect: Unresolved }`, `SvgImageUnresolved`, `FontFace { defect: ResourceMissing }` | bytes arrive with no directory, so a relative reference has nothing to resolve against; each is named by the warning that already exists for it. RFC 2397's `data:` URL is the exception and resolves | `crates/tinker-pdf/src/standalone.rs` |
 | Encrypted, nothing authenticated | `DocumentError::PasswordRequired` | The document opened; reading it is the thing that waits | [encryption](encryption.md) |
 | Encryption handler not implemented | `DocumentError::UnsupportedEncryption` | A handler outside R2–R6 cannot be pretended at | [encryption](encryption.md) |
 | Decompression bomb | `WarningKind::Filter(Warning::OutputCapHit)` | `stream_decoded` output capped at `MAX_DECODED_STREAM` (128 MiB), so a 1 KB stream cannot buy unbounded memory | `limits.rs` |
@@ -224,6 +269,21 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   and are files the walk cannot answer for at all); 29 of the 43 have a page
   two, **every one of the 29 draws the page the main table draws**, and 20
   reach it without that table.
+- **`crates/tinker-pdf/tests/standalone.rs`** — a standalone SVG, a bare image
+  and a loose XHTML file through `Document::open`: an SVG's page at the size
+  its root states with its pixels and its text, a loose XHTML file **pixel for
+  pixel** the one chapter of an EPUB holding the same bytes, a bare PNG pixel
+  for pixel the one page of a CBZ, a JPEG, a G4 TIFF, the placeholders for a
+  GIF and an undecodable PNG, the `data:` URL resolved and the missing
+  references named, tag soup read as far as it parses and said so, and a
+  streamed open the same document. It also holds the defect the row found in
+  the streaming sniff: the container window was one `read`, a source that
+  answers in pieces gave it one byte of `PK\x03\x04`, and a comic archive
+  streamed from one was `NotAPdf`. The sniff's own walk and the two decoders
+  are unit tests in `src/standalone.rs`, held to RFC 4648 §10's vectors and
+  RFC 2397 §4's examples; `hostile_input.rs` sweeps all six kinds damaged,
+  buffered and streamed; `fuzz/fuzz_targets/standalone.rs` is the deep
+  version.
 - **`crates/tinker-pdf/tests/streaming_determinism.rs`** — ruling 4 over a byte
   source. Every fixture, linearized ones included, renders identically from a
   buffer, from a slice source and from one answering a byte at a time.

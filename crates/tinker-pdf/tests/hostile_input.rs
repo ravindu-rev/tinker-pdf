@@ -729,3 +729,77 @@ fn form_data_hands_back_no_more_than_its_budget() {
     let data = read_fdf(&doubling).expect("a self-naming /Kids array reads, and returns");
     assert!(held(&data) < 1024);
 }
+
+/// One-file documents that are not PDFs (tier 5's formats row), damaged the
+/// same way: a standalone SVG, a loose XHTML file, tag soup, and a PNG, JPEG and
+/// TIFF each opened bare. The sniff, the XML prolog walk, the `data:` URL and
+/// base64 readers, the cascade and the image embedders all see hostile bytes
+/// here, buffered and streamed. `fuzz/fuzz_targets/standalone.rs` is the deep
+/// version.
+#[test]
+fn mutated_standalone_documents_never_panic() {
+    let png = {
+        let mut out = b"\x89PNG\r\n\x1A\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x02\x08\x02\0\0\0".to_vec();
+        out.extend_from_slice(
+            b"\xFD\xD4\x9A\x73\0\0\0\x0CIDATx\x9Cc\xF8\xCF\xC0\0\0\x03\x01\x01\0",
+        );
+        out.extend_from_slice(b"\xC9\xFE\x92\xEF\0\0\0\0IEND\xAEB`\x82");
+        out
+    };
+    let inputs: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "svg",
+            concat!(
+                r##"<?xml version="1.0"?><!-- a comment --><svg xmlns="http://www.w3.org/2000/svg" "##,
+                r##"xmlns:xlink="http://www.w3.org/1999/xlink" width="40" height="20" viewBox="0 0 40 20">"##,
+                r##"<rect width="20" height="20" fill="#f00"/><circle cx="30" cy="10" r="5"/>"##,
+                r##"<text x="2" y="15" font-size="8">Hi</text>"##,
+                r##"<image width="4" height="4" xlink:href="data:image/png;base64,iVBORw0KGgo="/></svg>"##
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            "xhtml",
+            concat!(
+                r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml">"#,
+                r#"<head><title>t</title><style>p { margin: 1em; font-size: 14px } h1 { color: red }</style>"#,
+                r#"<link rel="stylesheet" href="a.css"/></head><body><h1 id="a">Head</h1>"#,
+                r##"<p>one <b>two</b> <a href="#a">three</a></p><ul><li>x</li></ul>"##,
+                r#"<table><tr><td>c</td></tr></table><img src="data:,abc"/></body></html>"#
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            "soup",
+            b"<!DOCTYPE html><html><body><p>a<p>b<br><img src=x></body>".to_vec(),
+        ),
+        ("png", png),
+        (
+            "jpeg",
+            b"\xFF\xD8\xFF\xC0\0\x0B\x08\0\x08\0\x08\x01\x01\x11\0\xFF\xD9".to_vec(),
+        ),
+        (
+            "tiff",
+            b"II\x2A\0\x08\0\0\0\x03\0\0\x01\x03\0\x01\0\0\0\x02\0\0\0\x01\x01\x03\0\x01\0\0\0\x02\0\0\0\x11\x01\x04\0\x01\0\0\0\x30\0\0\0\0\0\0\0\xFF\x00\xFF\x00"
+                .to_vec(),
+        ),
+    ];
+    for (name, original) in &inputs {
+        assert!(
+            tinker_pdf::standalone::sniff(original).is_some(),
+            "{name} is not sniffed, so its sweep would test the PDF parser"
+        );
+        let mut rng = Rng(0x0005_7A4D_A10E ^ name.len() as u64);
+        for case in 0..sweep(400) {
+            let mutated = mutate(original, &mut rng);
+            let label = format!("{name} case {case}");
+            let _guard = Guard(&label);
+            exercise(mutated.clone());
+            if case % 4 == 0 {
+                exercise_streamed(mutated);
+            }
+        }
+    }
+}
