@@ -475,7 +475,7 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   coder inputs, which a census test holds to reaching every coding a block can
   have — every block and literals type, both Huffman weight forms, all four
   modes of all three sequence tables, all four repeat offsets.
-- `crates/tinker-pdf-zip/src/tests.rs` — 40 tests over both routes of the
+- `crates/tinker-pdf-zip/src/tests.rs` — 53 tests over both routes of the
   archive reader; `crates/tinker-pdf/src/cbz/tests.rs` — 28 unit tests over
   ordering, classification and the `ComicInfo.xml` mapping, which is asserted
   as the table it is rather than as whatever the code emitted.
@@ -496,7 +496,7 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   a successful read produced exactly the declared length, spent no more than
   the archive's total, and that every entry is either checksummed or refused;
   `fuzz_targets/png.rs` covers the decoder the non-pass-through routes take,
-  and `fuzz_targets/tiff.rs` the one a scanned comic reaches. Three of the 32
+  and `fuzz_targets/tiff.rs` the one a scanned comic reaches. Three of the 43
   targets. `fuzz_targets/ppmd.rs` drives the PPMd model with the order, the
   arena and the length as its first three bytes, down to 7-Zip's smallest
   arena, where it restarts every few dozen symbols.
