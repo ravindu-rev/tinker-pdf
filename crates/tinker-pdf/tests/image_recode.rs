@@ -1073,6 +1073,63 @@ fn an_incremental_save_says_the_originals_remain() {
     );
 }
 
+/// **An image wider than sixty-five thousand samples is an image.** Its
+/// samples decode under the ceiling every stream decodes under, so a lossless
+/// coding of 70 000 x 1 is written and gives them back exactly; and a coding
+/// that cannot carry the width — a JPEG frame states it in sixteen bits
+/// (T.81 B.2.2) — leaves the image whole in the encoder's own words, never as
+/// samples that "would not decode", which is what a width cap in front of the
+/// decode said of a valid image.
+#[test]
+fn an_image_wider_than_a_jpeg_frame_is_recoded_or_refused_by_its_encoder() {
+    let width = 70_000usize;
+    let samples = grey(width, 1);
+    let objects = vec![hex_image(
+        "/Width 70000 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8",
+        &samples,
+    )];
+    let bytes = pdf(
+        "q 200 0 0 2 0 4 cm /A Do Q",
+        200,
+        10,
+        "<< /XObject << /A 5 0 R >> >>",
+        &objects,
+    );
+
+    let (document, report) = saved(
+        bytes.clone(),
+        &recode(ContinuousCodec::Flate, BilevelCodec::Keep),
+    );
+    assert!(report.untouched.is_empty(), "{:?}", report.untouched);
+    assert_eq!(report.recoded.len(), 1);
+    let got = document
+        .cos()
+        .stream_decoded(ObjRef::new(5, 0))
+        .expect("decodes");
+    assert_eq!(got, samples, "the samples, exactly");
+
+    let (_, report) = saved(
+        bytes,
+        &recode(
+            ContinuousCodec::Jpeg(JpegTables {
+                luminance: [4; 64],
+                chrominance: [6; 64],
+                subsampled: false,
+            }),
+            BilevelCodec::Keep,
+        ),
+    );
+    assert!(report.recoded.is_empty());
+    assert!(
+        matches!(
+            report.untouched.first().map(|u| &u.reason),
+            Some(UntouchedImageReason::Encoder(_))
+        ),
+        "the JPEG encoder's own refusal: {:?}",
+        report.untouched
+    );
+}
+
 /// **The pass never panics on a hostile document** (ruling 1): mutated
 /// versions of the fixtures above — bytes flipped, runs deleted, numbers
 /// replaced — saved with every coding and a resolution, and each save must

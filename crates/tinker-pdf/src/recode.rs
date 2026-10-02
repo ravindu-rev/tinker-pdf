@@ -224,7 +224,10 @@ pub enum UntouchedImageReason {
         name: String,
     },
     /// The general filters failed, or produced fewer bytes than `/Width`,
-    /// `/Height`, the components and `/BitsPerComponent` promise.
+    /// `/Height`, the components and `/BitsPerComponent` promise — or the
+    /// dictionary states no positive 32-bit `/Width`, `/Height` or a depth
+    /// 8.9.5.1 allows. A size is never refused for being large: what it costs
+    /// is samples, and those are bounded where every stream is decoded.
     Undecodable,
     /// A `/ColorSpace` whose component count this pass cannot read.
     UnknownColourSpace,
@@ -1076,12 +1079,22 @@ fn layout(editor: &DocumentEditor, dict: &Dict) -> Result<Layout, UntouchedImage
         Object::Int(value) => Some(value),
         _ => None,
     };
-    let width = int(b"Width")
-        .filter(|w| (1..=1 << 16).contains(w))
-        .ok_or(UntouchedImageReason::Undecodable)? as u32;
-    let height = int(b"Height")
-        .filter(|h| (1..=1 << 16).contains(h))
-        .ok_or(UntouchedImageReason::Undecodable)? as u32;
+    // Any positive 32-bit size, and no cap of this pass's own in front of it.
+    // The samples are what the size costs, and they are bounded already: they
+    // decode under the ceiling every stream decodes under, a size they do not
+    // fill is `Undecodable` when they are read, and every encoder this pass
+    // calls checks the size against the samples and refuses in its own words —
+    // a JPEG frame, which states each side in sixteen bits, among them. A
+    // `1 << 16` that stood here reported a valid 70 000-sample-wide image as
+    // samples that would not decode.
+    let side = |value: Option<i64>| {
+        value
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v >= 1)
+            .ok_or(UntouchedImageReason::Undecodable)
+    };
+    let width = side(int(b"Width"))?;
+    let height = side(int(b"Height"))?;
     let image_mask = matches!(
         resolve(
             editor,
