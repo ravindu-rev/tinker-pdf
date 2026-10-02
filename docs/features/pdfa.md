@@ -138,6 +138,8 @@ exits by verdict.
 | Level A with an untagged page or no natural language | `ArchivalRefusal::UntaggedPage`, `LanguageMissing` | level A *is* a tagged structure tree with a stated language; claiming it without one would be the claim this profile exists to make honest | 6.8.2, 6.8.4 |
 | A profile with no destination profile bytes | `ArchivalRefusal::DestinationProfileMissing` | there is no vendored default and no `Option`; the licence decision is in [THIRDPARTY.md](../../THIRDPARTY.md) | 6.2.2 |
 | `add_layer` under part 1 | `ArchivalRefusal::OptionalContent` | part 1 forbids `/OCProperties` outright; parts 2 to 4 admit layers, and the builder writes the `/Name` on the default configuration ISO 19005-2 6.9 asks of every configuration | 6.1.13 |
+| A `/DeviceN` naming a spot colour its `/Colorants` does not describe, under parts 2 to 4 | `ArchivalRefusal::UndescribedColorant` | ISO 19005-2 6.2.4.4 asks an entry of every spot colour — every colorant but `/None` and DeviceCMYK's four process names — so a reader rendering one ink alone knows what it looks like | 6.2.4.4 (parts 2 to 4; part 1 has none) |
+| A second `/Separation` of one colorant with another alternate or tint transform, under parts 2 to 4 | `ArchivalRefusal::InconsistentSeparation` | 6.2.4.4 makes every `/Separation` array of one name agree on both, compared as the objects written; the builder remembers each colorant's first spelling, since a page begun earlier still draws with it | 6.2.4.4 (parts 2 to 4) |
 
 ## Coverage, as a measured number
 

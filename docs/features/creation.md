@@ -54,7 +54,9 @@ no CIE-based space. It **does** write an `/ICCBased`
 space: `add_icc_color_space` registers one as an indirect object with `/N`
 checked against Table 66, `set_fill_icc` and `set_stroke_icc` name it on the
 page, and `ImageColorSpace::Icc` puts it on an image — so one embedded
-profile serves a page's operators and its pictures alike. The image's
+profile serves a page's operators and its pictures alike; an image whose
+`components` is not the `/N` the space was registered with is refused, since
+its rows would be the wrong width. The image's
 `/ColorSpace` is a reference to the space's own array, not the resource name:
 Table 89 makes it a colour space, and only a content stream's `cs` looks a
 name up in `/Resources` (8.6.3). The name was written until September 2026,
@@ -76,12 +78,21 @@ another count writes outputs nobody meant. A type 0 sampled function is not
 offered: this reader evaluates one along its first input only, so a
 multi-input one would be written and read back wrong. `DeviceNAttributes`
 writes Table 71's `/Colorants` from separations registered earlier.
-Colorant names are unique but for `/None`, and at most 32 (Annex C).
+Colorant names are unique but for `/None`, at most 32 (Annex C), and never
+`/All`, which 8.6.6.5 reserves for a `/Separation`.
 `set_fill_tint` and `set_stroke_tint` write `/Name cs t1 … tn scn`, and
 `ImageColorSpace::Tint { resource, components }` puts such a space on an
 image — refused when `components` is not the space's colorant count. Under an
 `ArchivalProfile` the alternate is the device colour a reader without the ink
-paints, and is refused where the destination profile would refuse it.
+paints, and is refused where the destination profile would refuse it. Under
+parts 2 to 4, ISO 19005-2 6.2.4.4 binds two more: a `/DeviceN` naming a spot
+colour — any colorant but `/None` and `/Cyan`, `/Magenta`, `/Yellow`, `/Black`
+— that its `/Colorants` does not describe is refused
+(`ArchivalRefusal::UndescribedColorant`), and so is a `/Separation` for a
+colorant an earlier one named with another alternate or tint transform
+(`InconsistentSeparation`), compared as the written objects and remembered
+across a reused resource name, because a page begun before still draws with
+the first.
 
 **The operand count comes from the space rather than from the caller.** 8.6.5.5's
 `/N` says how many operands `scn` takes, so four values against a three-channel
@@ -255,8 +266,12 @@ byte-deterministic XMP packet and the header version its part requires.
   `/DeviceN` fills, strokes and images and holds every sampled pixel to the
   tint transform's own arithmetic — `c0 + t (c1 − c0)` for a ramp, the
   program's formula for a calculator — through `round(v × 255)`, exactly,
-  with the strict validator clean; `build.rs`'s `tint_tests` hold the arrays,
-  the type 4 stream and each calculator refusal.
+  with the strict validator clean, and holds the archival refusals — the
+  alternate the output intent cannot reproduce, and ISO 19005-2 6.2.4.4's
+  undescribed spot colour and disagreeing `/Separation`, each admitted once
+  the document says what it should; `build.rs`'s `tint_tests` hold the
+  arrays, the type 4 stream, each calculator refusal, `/All` in a `/DeviceN`
+  and an ICC image whose count is not the space's `/N`.
 - `crates/tinker-pdf/tests/writer_names.rs` holds each name-taking operator
   to one awkward name — a space, a `#`, a `/` and a byte past 0x7F: the
   stream carries the escaped token, the resource dictionary the name's own

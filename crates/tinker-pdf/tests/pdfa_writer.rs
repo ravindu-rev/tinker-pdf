@@ -774,6 +774,12 @@ fn every_refusal_names_the_clause_it_refuses_under() {
         ArchivalRefusal::LanguageMissing,
         ArchivalRefusal::DestinationProfileMissing,
         ArchivalRefusal::OptionalContent,
+        ArchivalRefusal::UndescribedColorant {
+            colorant: b"Spot".to_vec(),
+        },
+        ArchivalRefusal::InconsistentSeparation {
+            colorant: b"Spot".to_vec(),
+        },
     ];
     for refusal in &refusals {
         assert!(refusal.clause().starts_with("6."), "{refusal:?}");

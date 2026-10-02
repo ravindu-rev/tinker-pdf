@@ -17,7 +17,8 @@
 
 use tinker_pdf::{
     ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, CalculatorOp, CompressedImage,
-    DeviceSpace, Document, DocumentBuilder, Function, ImageColorSpace, ImageData,
+    DeviceNAttributes, DeviceSpace, Document, DocumentBuilder, Function, ImageColorSpace,
+    ImageData,
 };
 
 mod pdfa_support;
@@ -344,4 +345,176 @@ fn an_archival_document_refuses_an_alternate_its_intent_cannot_reproduce() {
             n: 1.0,
         },
     ));
+}
+
+/// A level B builder for `part` with a CMYK output intent, which admits a
+/// CMYK alternate.
+fn archival_cmyk(part: ArchivalPart) -> DocumentBuilder {
+    DocumentBuilder::archival(ArchivalProfile {
+        part,
+        level: Some(ArchivalLevel::B),
+        destination_profile: pdfa_support::cmyk_like(),
+        destination_space: DeviceSpace::Cmyk,
+        output_condition: "a CMYK press".to_string(),
+        language: None,
+    })
+}
+
+/// A ramp from no ink to `c1` in CMYK.
+fn cmyk_ramp(c1: [f64; 4]) -> Function {
+    Function::Exponential {
+        domain: [0.0, 1.0],
+        c0: vec![0.0; 4],
+        c1: c1.to_vec(),
+        n: 1.0,
+    }
+}
+
+/// Two inks into CMYK: `(a, b) -> (a, b, 0, 0)`.
+fn two_inks_cmyk() -> Function {
+    Function::Calculator {
+        domain: vec![[0.0, 1.0], [0.0, 1.0]],
+        range: vec![[0.0, 1.0]; 4],
+        program: vec![CalculatorOp::Number(0.0), CalculatorOp::Number(0.0)],
+    }
+}
+
+/// ISO 19005-2 6.2.4.4, its first sentence: every spot colour a `/DeviceN`
+/// names has an entry in the space's `/Colorants`. A space with no
+/// attributes at all, and one whose attributes describe one of its two inks,
+/// are refused by the clause; `/None` and DeviceCMYK's four process
+/// colorants are not spot colours and need no entry; the space describing
+/// both inks is written, and the finished document is one the profile is
+/// satisfied with.
+#[test]
+fn an_archival_device_n_describes_every_spot_colour_it_names() {
+    let spots: [&[u8]; 2] = [b"Spot A", b"Spot B"];
+    let mut builder = archival_cmyk(ArchivalPart::Two);
+    assert!(!builder.add_device_n_color_space(
+        b"CS1",
+        &spots,
+        DeviceSpace::Cmyk,
+        &two_inks_cmyk(),
+        None,
+    ));
+    assert!(builder.add_separation_color_space(
+        b"SA",
+        b"Spot A",
+        DeviceSpace::Cmyk,
+        &cmyk_ramp([1.0, 0.5, 0.0, 0.1]),
+    ));
+    assert!(!builder.add_device_n_color_space(
+        b"CS1",
+        &spots,
+        DeviceSpace::Cmyk,
+        &two_inks_cmyk(),
+        Some(&DeviceNAttributes {
+            colorants: &[b"SA"]
+        }),
+    ));
+    assert_eq!(
+        builder.refusals(),
+        &[
+            ArchivalRefusal::UndescribedColorant {
+                colorant: b"Spot A".to_vec()
+            },
+            ArchivalRefusal::UndescribedColorant {
+                colorant: b"Spot B".to_vec()
+            },
+        ]
+    );
+    for refusal in builder.refusals() {
+        assert_eq!(refusal.clause(), "6.2.4.4");
+    }
+    assert!(builder.add_device_n_color_space(
+        b"CS2",
+        &[b"Cyan", b"None"],
+        DeviceSpace::Cmyk,
+        &two_inks_cmyk(),
+        None,
+    ));
+    assert!(builder.add_separation_color_space(
+        b"SB",
+        b"Spot B",
+        DeviceSpace::Cmyk,
+        &cmyk_ramp([0.0, 0.3, 1.0, 0.0]),
+    ));
+    assert!(builder.add_device_n_color_space(
+        b"CS1",
+        &spots,
+        DeviceSpace::Cmyk,
+        &two_inks_cmyk(),
+        Some(&DeviceNAttributes {
+            colorants: &[b"SA", b"SB"]
+        }),
+    ));
+    assert_eq!(builder.refusals().len(), 2, "nothing more was refused");
+    builder.add_page(PAGE, PAGE, |page| {
+        assert!(page.set_fill_tint(b"CS1", &[0.5, 0.5]));
+        page.raw(b"10 10 20 20 re f");
+        assert!(page.set_fill_tint(b"CS2", &[0.5, 0.0]));
+        page.raw(b"30 10 20 20 re f");
+    });
+    builder.finish_archival().expect("the profile is satisfied");
+
+    // Without a profile the clause does not apply.
+    let mut plain = DocumentBuilder::new();
+    assert!(plain.add_device_n_color_space(
+        b"CS1",
+        &spots,
+        DeviceSpace::Cmyk,
+        &two_inks_cmyk(),
+        None,
+    ));
+}
+
+/// ISO 19005-2 6.2.4.4, its second sentence: every `/Separation` array of one
+/// colorant name has the same tint transform and the same alternate. A
+/// second space for an ink already registered is refused when either
+/// differs — re-registered under the same resource name too, since a page
+/// begun before still names the first — and written when both agree, under
+/// any resource name.
+#[test]
+fn an_archival_document_refuses_a_second_separation_of_one_ink_that_disagrees() {
+    let ramp = cmyk_ramp([1.0, 0.5, 0.0, 0.1]);
+    let other = cmyk_ramp([0.0, 1.0, 0.0, 0.0]);
+    let grey = Function::Exponential {
+        domain: [0.0, 1.0],
+        c0: vec![0.0],
+        c1: vec![1.0],
+        n: 1.0,
+    };
+    let mut builder = archival_cmyk(ArchivalPart::Two);
+    assert!(builder.add_separation_color_space(b"S1", b"Spot A", DeviceSpace::Cmyk, &ramp));
+    builder.add_page(PAGE, PAGE, |page| {
+        assert!(page.set_fill_tint(b"S1", &[1.0]));
+        page.raw(b"10 10 20 20 re f");
+    });
+    assert!(!builder.add_separation_color_space(b"S2", b"Spot A", DeviceSpace::Cmyk, &other));
+    assert!(!builder.add_separation_color_space(b"S1", b"Spot A", DeviceSpace::Cmyk, &other));
+    assert!(!builder.add_separation_color_space(b"S3", b"Spot A", DeviceSpace::Gray, &grey));
+    let refused = ArchivalRefusal::InconsistentSeparation {
+        colorant: b"Spot A".to_vec(),
+    };
+    assert_eq!(
+        builder.refusals(),
+        &[refused.clone(), refused.clone(), refused]
+    );
+    assert_eq!(builder.refusals()[0].clause(), "6.2.4.4");
+    assert!(builder.add_separation_color_space(b"S2", b"Spot A", DeviceSpace::Cmyk, &ramp));
+    assert!(builder.add_separation_color_space(b"S4", b"Spot B", DeviceSpace::Gray, &grey));
+    builder.add_page(PAGE, PAGE, |page| {
+        assert!(page.set_fill_tint(b"S2", &[1.0]));
+        page.raw(b"10 10 20 20 re f");
+        assert!(page.set_fill_tint(b"S4", &[1.0]));
+        page.raw(b"30 10 20 20 re f");
+    });
+    builder.finish_archival().expect("the profile is satisfied");
+
+    // Part 1 has no such clause, and no profile has no clauses: the second
+    // spelling is written by both.
+    for mut unbound in [archival_cmyk(ArchivalPart::One), DocumentBuilder::new()] {
+        assert!(unbound.add_separation_color_space(b"S1", b"Spot A", DeviceSpace::Cmyk, &ramp));
+        assert!(unbound.add_separation_color_space(b"S2", b"Spot A", DeviceSpace::Cmyk, &other));
+    }
 }

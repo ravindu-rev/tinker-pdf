@@ -129,9 +129,11 @@ pub enum ImageColorSpace<'a> {
     /// looks a name up in `/Resources` (8.6.3). Until September 2026 the name
     /// was written, and this repository's reader drew the samples as grey. An
     /// image naming a resource no `/ICCBased` space was registered under is
-    /// refused. `components` must be the space's `/N`; an image whose samples
-    /// disagree with it is a defect this writer cannot see, exactly as it
-    /// cannot see inside the profile.
+    /// refused, and so is one whose `components` is not the `/N` the space
+    /// was registered with: the builder knows it, and an image written with
+    /// a different count has rows of the wrong width. Whether the samples
+    /// are values in that profile is what this writer cannot see, exactly as
+    /// it cannot see inside the profile.
     Icc {
         /// The resource name the space was registered under.
         resource: &'a [u8],
@@ -143,7 +145,7 @@ pub enum ImageColorSpace<'a> {
     /// [`DocumentBuilder::add_device_n_color_space`] gave it (8.6.6.4,
     /// 8.6.6.5): each sample is one tint per colorant.
     ///
-    /// Unlike [`Self::Icc`] the count is checked: the builder knows how many
+    /// The count is checked as [`Self::Icc`]'s is: the builder knows how many
     /// colorants the space it registered names, so an image whose `components`
     /// disagree is refused rather than written with rows of the wrong width.
     Tint {
@@ -1223,6 +1225,11 @@ const MAX_FUNCTION_DEPTH: u32 = 8;
 /// limit, which is the number a conforming reader is entitled to stop at, and
 /// a writer emitting more would be writing a space some readers cannot open.
 const MAX_DEVICE_N_COLORANTS: usize = 32;
+
+/// DeviceCMYK's four process colorants (8.6.6.4), which a `/DeviceN` may
+/// name without being a spot colour — the colorants ISO 19005-2 6.2.4.4 asks
+/// a `/Colorants` entry of are the others, `/None` aside.
+const PROCESS_COLORANTS: [&[u8]; 4] = [b"Cyan", b"Magenta", b"Yellow", b"Black"];
 
 /// The most `<code> <text>` pairs one `beginbfchar` section may hold.
 ///
@@ -2994,6 +3001,21 @@ pub enum ArchivalRefusal {
     /// Optional content in a part 1 document, which forbids it outright: the
     /// catalog of such a file may not carry `/OCProperties`.
     OptionalContent,
+    /// A `/DeviceN` naming a spot colour its `/Colorants` does not describe,
+    /// under parts 2 to 4: ISO 19005-2 6.2.4.4 requires an entry for every
+    /// spot colour a `/DeviceN` uses.
+    UndescribedColorant {
+        /// The first colorant without an entry.
+        colorant: Vec<u8>,
+    },
+    /// A `/Separation` for a colorant an earlier one already names, with a
+    /// different alternate or tint transform, under parts 2 to 4: ISO
+    /// 19005-2 6.2.4.4 requires every `/Separation` array of one name in a
+    /// file to agree on both.
+    InconsistentSeparation {
+        /// The colorant both name.
+        colorant: Vec<u8>,
+    },
 }
 
 impl ArchivalRefusal {
@@ -3002,7 +3024,8 @@ impl ArchivalRefusal {
     /// Part 1's numbering, once, for every part — the same choice
     /// `tinker_pdf::StagedRule` makes and for the same reason: a refusal is
     /// about a rule, and the rule is one thing however many numbers the parts
-    /// give it.
+    /// give it. The two spot-colour rules have no part 1 counterpart, and
+    /// are cited as parts 2 to 4 number them, 6.2.4.4.
     #[must_use]
     pub const fn clause(&self) -> &'static str {
         match self {
@@ -3016,6 +3039,8 @@ impl ArchivalRefusal {
             ArchivalRefusal::UntaggedPage { .. } => "6.8.2",
             ArchivalRefusal::DestinationProfileMissing => "6.2.2",
             ArchivalRefusal::OptionalContent => "6.1.13",
+            ArchivalRefusal::UndescribedColorant { .. }
+            | ArchivalRefusal::InconsistentSeparation { .. } => "6.2.4.4",
         }
     }
 }
@@ -3064,6 +3089,18 @@ impl core::fmt::Display for ArchivalRefusal {
                 "part 1 admits no optional content, and a layer is an optional \
                  content group",
             ),
+            ArchivalRefusal::UndescribedColorant { colorant } => write!(
+                f,
+                "the DeviceN space names the spot colour /{} and its \
+                 /Colorants has no entry for it",
+                String::from_utf8_lossy(colorant)
+            ),
+            ArchivalRefusal::InconsistentSeparation { colorant } => write!(
+                f,
+                "a Separation space for /{} is already written with another \
+                 alternate or tint transform, and every one of that name must agree",
+                String::from_utf8_lossy(colorant)
+            ),
         }
     }
 }
@@ -3108,6 +3145,12 @@ pub struct DocumentBuilder {
     /// Each registered `/Separation` space by resource name: its colorant
     /// and the space's own object, for a `/DeviceN`'s `/Colorants` to name.
     separations: BTreeMap<Vec<u8>, (Vec<u8>, ObjRef)>,
+    /// Every colorant a `/Separation` array has been written for, with the
+    /// alternate and tint transform the first one gave it. Never forgotten
+    /// when a resource name is reused, because a page begun before still
+    /// names the earlier array and it is still in the file — which is what
+    /// ISO 19005-2 6.2.4.4 holds every later array of that name to.
+    inks: BTreeMap<Vec<u8>, (DeviceSpace, Function)>,
     /// Optional content groups (8.11.2.1), in the order they were added —
     /// the order `/OCGs` and `/Order` list them in — and whether the default
     /// configuration shows each.
@@ -3152,6 +3195,7 @@ impl DocumentBuilder {
             outline: Vec::new(),
             destinations: BTreeMap::new(),
             separations: BTreeMap::new(),
+            inks: BTreeMap::new(),
             layers: Vec::new(),
             version: WriteOptions::default().version,
             profile: None,
@@ -4008,11 +4052,19 @@ impl DocumentBuilder {
     ///
     /// **Refused under an [`ArchivalProfile`]** whose destination profile does
     /// not admit `alternate`: the alternate is what a reader without the ink
-    /// paints, which makes it a device colour in 6.2.3.3's sense.
+    /// paints, which makes it a device colour in 6.2.3.3's sense. Under parts
+    /// 2 to 4 it is refused too when a `/Separation` for the same colorant was
+    /// written before with another alternate or another transform, with
+    /// [`ArchivalRefusal::InconsistentSeparation`]: ISO 19005-2 6.2.4.4 makes
+    /// every `/Separation` array of one name in a file agree on both,
+    /// compared as the objects written — so the same ramp spelled the same
+    /// way is admitted under any resource name, and re-registering a name with
+    /// a different one is not, since a page begun before still draws with the
+    /// first.
     ///
     /// Returns false, registering nothing, for an empty colorant name, a
     /// transform that is not a function of one input producing one value per
-    /// `alternate` component, or the archival refusal above.
+    /// `alternate` component, or the archival refusals above.
     pub fn add_separation_color_space(
         &mut self,
         resource: &[u8],
@@ -4027,6 +4079,22 @@ impl DocumentBuilder {
             self.refuse(ArchivalRefusal::DeviceColour { space: alternate });
             return false;
         }
+        // 6.2.4.4 compares the PDF objects. Two `Function` values that are
+        // equal are written as the same object, and two that differ are not
+        // (`write_function` is a pure function of the value).
+        let disagrees = self
+            .inks
+            .get(colorant)
+            .is_some_and(|(space, transform)| *space != alternate || transform != tint);
+        if disagrees && self.binds_spot_rules() {
+            self.refuse(ArchivalRefusal::InconsistentSeparation {
+                colorant: colorant.to_vec(),
+            });
+            return false;
+        }
+        self.inks
+            .entry(colorant.to_vec())
+            .or_insert_with(|| (alternate, tint.clone()));
         let function = self.write_function(tint);
         let space = self.allocate();
         self.objects.insert(
@@ -4059,11 +4127,18 @@ impl DocumentBuilder {
     /// that ink looks like.
     ///
     /// Refused under an [`ArchivalProfile`] on
-    /// [`DocumentBuilder::add_separation_color_space`]'s terms.
+    /// [`DocumentBuilder::add_separation_color_space`]'s terms, and under
+    /// parts 2 to 4 also when a spot colour the space names has no entry in
+    /// `attributes`' `/Colorants`, with
+    /// [`ArchivalRefusal::UndescribedColorant`] (ISO 19005-2 6.2.4.4). A spot
+    /// colour is any colorant but `/None` and DeviceCMYK's four process
+    /// colorants, `/Cyan`, `/Magenta`, `/Yellow` and `/Black`, so a space of
+    /// spot inks needs `attributes`, and one of process inks does not.
     ///
     /// Returns false, registering nothing, for no colorants or more than 32
     /// (Annex C's limit, and so what a reader is entitled to stop at), an
-    /// empty colorant name, a name given twice
+    /// empty colorant name, `/All` (8.6.6.5 reserves it for `/Separation`), a
+    /// name given twice
     /// (8.6.6.5 allows only `/None` to repeat), a transform that does not map
     /// `colorants.len()` inputs to the alternate's components, an attribute
     /// naming a resource that is not a registered `/Separation`, or the
@@ -4081,7 +4156,10 @@ impl DocumentBuilder {
         }
         let mut seen = BTreeSet::new();
         for colorant in colorants {
-            if colorant.is_empty() || (*colorant != b"None" && !seen.insert(*colorant)) {
+            if colorant.is_empty()
+                || *colorant == b"All"
+                || (*colorant != b"None" && !seen.insert(*colorant))
+            {
                 return false;
             }
         }
@@ -4100,6 +4178,19 @@ impl DocumentBuilder {
         if !DocumentBuilder::admits_device_space(self.profile.as_ref(), alternate) {
             self.refuse(ArchivalRefusal::DeviceColour { space: alternate });
             return false;
+        }
+        if self.binds_spot_rules() {
+            let undescribed = colorants.iter().find(|colorant| {
+                **colorant != b"None"
+                    && !PROCESS_COLORANTS.contains(*colorant)
+                    && !described.iter().any(|(name, _)| name == *colorant)
+            });
+            if let Some(colorant) = undescribed {
+                self.refuse(ArchivalRefusal::UndescribedColorant {
+                    colorant: colorant.to_vec(),
+                });
+                return false;
+            }
         }
 
         let function = self.write_function(tint);
@@ -4852,8 +4943,11 @@ impl DocumentBuilder {
         // repository's own reader did not find it and drew the samples as
         // grey. Checked here, before the soft mask below writes anything.
         let registered = match image.color_space {
-            ImageColorSpace::Icc { resource, .. } => {
-                if !self.resources.icc_channels.contains_key(resource) {
+            ImageColorSpace::Icc {
+                resource,
+                components,
+            } => {
+                if self.resources.icc_channels.get(resource) != Some(&components) {
                     return None;
                 }
                 Some(self.color_space_ref(resource)?)
@@ -6044,6 +6138,14 @@ impl DocumentBuilder {
     /// `DeviceGray` is admitted under any destination — a grey value is a
     /// value on the neutral axis of whatever device the intent names — and
     /// `DeviceRGB` and `DeviceCMYK` need their own kind.
+    /// Whether ISO 19005-2 6.2.4.4's spot-colour rules bind this document:
+    /// parts 2 to 4 share the clause, and part 1 has no counterpart.
+    fn binds_spot_rules(&self) -> bool {
+        self.profile
+            .as_ref()
+            .is_some_and(|profile| profile.part != ArchivalPart::One)
+    }
+
     fn admits_device_space(profile: Option<&ArchivalProfile>, space: DeviceSpace) -> bool {
         let Some(profile) = profile else {
             return true;
@@ -9451,6 +9553,70 @@ mod tint_tests {
             assert!(!page.set_fill_tint(b"X", &[1.0]), "nothing is under X");
             assert!(page.set_fill_tint(b"Y", &[1.0, 1.0]));
         });
+    }
+
+    /// 8.6.6.5: `/All` is a `/Separation`'s special name and shall not be
+    /// used in a `/DeviceN` names array; a `/Separation` of `/All` is still
+    /// written.
+    #[test]
+    fn a_device_n_naming_all_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        for names in [[&b"All"[..], b"B"], [b"A", b"All"]] {
+            assert!(
+                !builder.add_device_n_color_space(
+                    b"X",
+                    &names,
+                    DeviceSpace::Rgb,
+                    &two_inks(),
+                    None
+                ),
+                "{names:?}"
+            );
+        }
+        assert!(builder.add_separation_color_space(
+            b"Y",
+            b"All",
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.0, 0.0])
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.set_fill_tint(b"X", &[1.0, 1.0]), "nothing is under X");
+        });
+    }
+
+    /// An image in a registered `/ICCBased` space whose `components` is not
+    /// the space's `/N` is refused, as a tint image with the wrong count is:
+    /// one channel against a three-channel profile is rows a third as wide as
+    /// a reader reads them.
+    #[test]
+    fn an_icc_image_whose_components_are_not_the_spaces_n_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_icc_color_space(b"CS0", b"not read here", 3));
+        let image = |components: u8, data: &'static [u8]| {
+            ImageData::Compressed(CompressedImage {
+                width: 1,
+                height: 1,
+                bits_per_component: 8,
+                color_space: ImageColorSpace::Icc {
+                    resource: b"CS0",
+                    components,
+                },
+                filter: None,
+                data,
+                color_key_mask: None,
+                soft_mask: None,
+            })
+        };
+        assert!(!builder.add_image(b"Im0", &image(1, &[0])));
+        assert!(!builder.add_image(b"Im0", &image(4, &[0, 0, 0, 0])));
+        assert!(builder.add_image(b"Im1", &image(3, &[0, 0, 0])));
+        let registered: Vec<&[u8]> = builder
+            .resources
+            .images
+            .iter()
+            .map(|(name, _)| name.as_slice())
+            .collect();
+        assert_eq!(registered, [&b"Im1"[..]], "nothing was registered as Im0");
     }
 
     /// The calculator checks, one refusal at a time.
