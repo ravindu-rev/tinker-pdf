@@ -114,6 +114,30 @@ impl DisplayList {
             })
     }
 
+    /// The page the list was recorded from.
+    pub(crate) fn page(&self) -> &Page {
+        &self.page
+    }
+
+    /// The resources a replay resolves names in.
+    pub(crate) fn resources(&self) -> &PageResources {
+        &self.resources
+    }
+
+    /// The page's own calls.
+    pub(crate) fn content(&self) -> &[Event] {
+        &self.content
+    }
+
+    /// Each annotation's resource scope and calls, in `/Annots` order.
+    pub(crate) fn annotation_layers(
+        &self,
+    ) -> impl Iterator<Item = (&Arc<PageResources>, &[Event])> {
+        self.annotations
+            .iter()
+            .map(|annotation| (&annotation.scope, annotation.events.as_slice()))
+    }
+
     /// Which page of its document this is.
     #[must_use]
     pub fn page_index(&self) -> u32 {

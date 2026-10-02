@@ -210,6 +210,11 @@ says which of those an interpreter would also have done and which lose
 something. With the replay in the tree, the two designs below that were
 waiting for one — inferred reading order and table reconstruction — no longer
 need a second interpretation per page.
+The SVG writer (`Page::to_svg`) is the second consumer of a replay and the
+first that is not the renderer: it answers the three questions itself —
+every form, a group unless hidden content holds it, never a soft mask — and
+the replay's disagreement handling is what makes declining a mask that the
+recording accepted skip the mask's content rather than paint it.
 
 ## API
 

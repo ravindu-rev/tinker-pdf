@@ -69,4 +69,10 @@ fuzz_target!(|data: &[u8]| {
     // boxes, and the interesting failures are in the operators rather than in
     // how many pixels they cover.
     let _ = page.render(&RenderOptions::at_dpi(12.0));
+    // The SVG writer over the same page: a second device fed from a display
+    // list, whose numbers and data URIs a hostile page shapes. Rasterised
+    // paints at the lowest scale it takes, for the reason above.
+    let mut svg = tinker_pdf::SvgOptions::default();
+    svg.raster_scale = 0.25;
+    let _ = page.to_svg(&svg);
 });

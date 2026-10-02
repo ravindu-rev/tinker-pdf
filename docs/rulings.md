@@ -155,11 +155,11 @@ living in one feature's head.
 
 7. **The `Device` trait is the only seam between interpretation and
    consumers.** Binds [content-and-text](features/content-and-text.md) and
-   [rendering](features/rendering.md). Text extraction and rasterization are
-   both devices; nothing reaches around the interpreter to read content
-   streams directly, except the `ContentFilter` rewrite path built for
-   redaction ([editing](features/editing.md)) — which is itself part of the
-   interpreter.
+   [rendering](features/rendering.md). Text extraction, rasterization and
+   SVG output are all devices; nothing reaches around the interpreter to
+   read content streams directly, except the `ContentFilter` rewrite path
+   built for redaction ([editing](features/editing.md)) — which is itself
+   part of the interpreter.
 
 8. **Leaf crates stay PDF-free.** Binds every leaf crate. Bytes and plain
    parameters in, bytes and values out; no COS types, no PDF-spec vocabulary

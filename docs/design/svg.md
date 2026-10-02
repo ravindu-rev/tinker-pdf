@@ -72,7 +72,11 @@ A picture that quietly drops one of these looks finished.
 - **`switch`/`requiredFeatures` conditional processing** (§5.8). Every branch
   of a `<switch>` in a book is a language variant, and choosing one is a
   reading-system policy this build does not have.
-- **Writing an SVG.** This is a reader.
+- **Writing an SVG.** This is a reader. The writer is the facade's
+  (`crates/tinker-pdf/src/svg_out.rs`, `Page::to_svg`), a `Device` held to
+  this crate by reading every file it makes back through it; it never emits
+  the elements refused above, and names what would have needed one
+  ([features/rendering.md](../features/rendering.md)).
 
 ## Design
 

@@ -260,6 +260,54 @@ same reason ([rulings](../rulings.md) 5). Annotations are recorded with the
 resource scope each appearance resolves in and replayed when the options ask
 for them.
 
+**A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
+(`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
+rather than interpreting the page again, so `DisplayList::to_svg` writes the
+same bytes from a list already held. The decisions, each stated in the
+module header: coordinates are the page's displayed points (crop box and
+`/Rotate` applied, `y` down), with the root sized in `pt` so the picture keeps
+the page's physical size; numbers are rounded to four places, never `-0`,
+`inf` or `NaN`; every path carries its transform already applied, so only an
+image and a gradient carry a `transform`; fills and strokes carry colour,
+opacity, the fill rule and the whole pen — width and dashes scaled by the
+transform's expansion as the renderer scales them, caps, joins, miter limit;
+a clip is a `<clipPath>` in page space, and a clip inside a clip names its
+parent with `clip-path` on the `<clipPath>`, which is §14.3.5's
+intersection; an image is a PNG `data:` URI of its decoded samples — a
+stencil in the fill colour, a soft mask as its alpha — on the unit square,
+inside a `<g>` that names its clip because a clip named by the `<image>`
+would be read through the image's own transform; a transparency group is a
+`<g>` with the group's alpha as `opacity`. **Text is written as paths**, one
+per glyph, from the outline the renderer draws: SVG 1.1 carries a font only
+as `@font-face` or `<font>`, and the reader this writer is held to reads
+neither, so glyph-positioned `<text>` would look like the page only where the
+viewer happened to have the face. The trade, named: the SVG's text is no
+longer text — not selectable, not searchable. **An axial or radial shading is
+a gradient where that is exact** — DeviceRGB or DeviceGray, a piecewise
+linear function whose values stay inside 0 to 1, both ends extended, and for
+a radial one a first circle that is a point strictly inside the second, which
+is the only radial shape §13.2.3 and 8.7.4.5.4 draw alike — with a stop at
+every breakpoint and two at a discontinuity. Everything else — a mesh, a
+function-based shading, a CMYK ramp, a tiling pattern, a patterned stroke —
+is **rasterised** through the renderer at `SvgOptions::raster_scale`, clipped
+as the page clips it, and embedded as an image, and each is named
+(`SvgWarning::Rasterised`). The writer never emits a `<mask>`, a `<pattern>`
+or a `<filter>`, the three elements `tinker-pdf-svg` refuses, so a file it
+writes is one this repository reads back whole; what would need one is the
+writer's own named refusal (below). What a render of the same page reports —
+an undecodable image (drawn as the renderer's grey placeholder), a shading or
+pattern this build does not paint, an unreadable font, a hidden layer, an
+empty text clip, a damaged image, and anything the renderer said while
+drawing a rasterised paint — comes through in the renderer's words as
+`SvgWarning::Render(RenderWarning)`.
+
+Two places the reader is short of the file, both pinned so that a reader
+which learns them fails a test and the paragraph can be updated:
+`tinker-pdf-svg` follows one `clip-path` per element, so it reads the inner
+clip of a nested pair and not their intersection; and it carries no clip on
+an image node and none from a `<g>` to what is under it, so it reads a
+clipped image unclipped. The file says both correctly.
+
 **Anti-aliasing off.** `RenderOptions::antialias` is on by default; off, every
 pixel of every shape is wholly covered or not covered at all. It is one
 threshold — `Mask::harden`, half a pixel's coverage — applied wherever a
@@ -347,6 +395,21 @@ same options, at any scale and for any region, without interpreting the page
 again; `len`, `is_empty` and `page_index` say what it holds. It owns what it
 needs (the page, its recorded calls and its resources), so it outlives the
 `Page` it came from and crosses threads.
+
+`Page::to_svg(&SvgOptions)` and `DisplayList::to_svg(&SvgOptions)` return an
+`Svg`: `markup` (the document, UTF-8), `width` and `height` (the page's
+displayed size in points, which are the root's `width`, `height` and
+`viewBox`), and `warnings`, a `Vec<SvgWarning>` deduplicated per page.
+`SvgOptions` (`#[non_exhaustive]`, `Default`) has `annotations` (on, as on a
+render) and `raster_scale` (pixels per point for what is rasterised, 2 by
+default, clamped to 0.25–16; a value that is not a finite positive number is
+read as the default). `SvgWarning` is `Rasterised { what: Rasterised }` with
+`Rasterised::{Shading, TilingPattern, PatternedStroke}`, `SoftMaskRefused`,
+`BlendModeRefused { mode }`, `KnockoutRefused` and `Render(RenderWarning)`.
+The output is the same bytes every time, and nothing on its path calls a
+transcendental, so ruling 4's argument covers it — but no SVG fingerprint is
+committed beside `determinism.rs`'s, so the cross-target claim is argued and
+not yet measured.
 
 `Page::render_form(name, options)` and `Page::render_annotation(index,
 options)` return `Result<Bitmap, RenderPartError>`: one part of the page,
@@ -443,6 +506,8 @@ a defect to hide in.
 | A PNG read back whose raster stops short of its declared height | `PngReadError::Incomplete`, carrying the decoder's own identifiers | The decoder degrades for a comic page; a file read back to be *compared* would have its missing rows scored as a rendering difference. Every refusal the decoder makes is `PngReadError::Refused` with its own reason | [filters](filters.md) |
 | A form render naming an XObject the page does not have, one that is not a form, or one whose stream cannot be read | `RenderPartError::NoSuchXObject`, `NotAForm { subtype }`, `UnreadableForm` | The page renders what it can; a caller who asked for one form asked about that form, and a blank bitmap is a wrong answer that looks right | — |
 | An annotation render at an index past `/Annots`, or of an entry that draws nothing | `RenderPartError::NoSuchAnnotation { count }`, `AnnotationNotDrawn { why }` with `NotDrawn::{NotADictionary, Hidden, Popup, NoRect, NoAppearance, UnreadableAppearance, Degenerate}` | Every reason `Page::render` skips an annotation silently, named where a caller asked for that one | [document model](document-model.md) |
+| A soft mask, a blend mode other than `Normal`, or a knockout group, on a page written as SVG | `SvgWarning::SoftMaskRefused`, `BlendModeRefused { mode }`, `KnockoutRefused` | SVG 1.1 says the first two only with `<mask>` and `<filter>`'s `feBlend`, which `tinker-pdf-svg` refuses, and the third not at all; what was masked is drawn unmasked, the blend as `Normal`, the group as an ordinary one — a file this repository cannot read back whole is not written | [design/svg.md](../design/svg.md) |
+| A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is no longer vectors there. A `<pattern>` would be exact for a tiling pattern and is the element the reader refuses | — |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -481,6 +546,18 @@ a defect to hide in.
   decoded layout, both refusals, and a fixed-seed campaign of random and
   mutated files that must never panic and must reach both a picture and a
   refusal more than five hundred times each.
+- SVG output: `crates/tinker-pdf/tests/svg_output.rs` reads every file the
+  writer makes back through `tinker-pdf-svg` and compares the scene with what
+  the page states, worked out from the content stream's own numbers — a
+  rectangle's corners, every control point of every glyph from `glyf` and
+  the text matrix, an image's samples byte for byte and its corners, a
+  gradient's axis, focus and stops, a dashed stroke's whole pen — never with
+  a second rendering. A soft mask, a blend mode, a knockout group, a mesh and
+  a tiling pattern on one page each produce their warning, no refused element
+  is written and the reader reports none of its own refusals; the nested
+  clip and the clipped image pin the reader's two shortfalls above; a
+  fixed-seed campaign of mutated pages must never panic the writer, and the
+  `render_page` fuzz target writes every page it reaches as SVG.
 - The retained page: `determinism.rs`'s
   `a_display_list_replays_every_fingerprinted_page_byte_for_byte` records
   every fingerprinted page once and replays it at 1× (the fingerprints'

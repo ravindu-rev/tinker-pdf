@@ -43,6 +43,7 @@ pub mod shaping;
 pub mod signature;
 pub mod structure;
 pub mod subset;
+mod svg_out;
 pub mod verdict;
 pub mod write;
 pub mod xps;
@@ -141,7 +142,7 @@ pub use annotations::{
     AnnotationList, AnnotationPayload, Border, BorderEffect, FileSpec, Linked, RichText,
     MAX_ANNOTATION_BYTES,
 };
-/// A page recorded once and replayed at any scale, behind [`Page::display_list`].
+/// A page interpreted once and drawn at any scale: [`Page::display_list`].
 pub use display::DisplayList;
 /// Images a page draws, with their samples before any colour conversion and
 /// the space they are in, behind [`Page::images`].
@@ -152,6 +153,8 @@ pub use images::{ImageMask, ImageSpace, PageImage, SampleCodec};
 pub use png_read::PngReadError;
 /// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
 pub use render_part::{NotDrawn, RenderPartError};
+/// A page written as SVG 1.1: [`Page::to_svg`], and what it could not say.
+pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning};
 /// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
 ///
 /// Here for the reason `ExtGState` is: [`NewField`] is the method's argument
