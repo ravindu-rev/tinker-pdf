@@ -756,9 +756,12 @@ impl Unrun {
 
 /// Every pattern name a stream paints with: the name `scn` or `SCN` ends
 /// with (8.6.8), once each, in the order first met. An inline image's
-/// samples are skipped (8.9.7).
+/// samples are skipped (8.9.7). Linear in the stream: a set answers "met
+/// already", so a stream of a million distinct names costs a million
+/// lookups rather than their square (ruling 1).
 fn pattern_names(content: &[u8]) -> Vec<Vec<u8>> {
     let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut met: HashSet<Vec<u8>> = HashSet::new();
     let mut tokens = tinker_pdf_content::Tokenizer::new(content);
     let mut last: Option<Vec<u8>> = None;
     while let Some(token) = tokens.next_token() {
@@ -773,7 +776,7 @@ fn pattern_names(content: &[u8]) -> Vec<Vec<u8>> {
                     }
                     b"scn" | b"SCN" => {
                         if let Some(name) = last.take() {
-                            if !out.contains(&name) {
+                            if met.insert(name.clone()) {
                                 out.push(name);
                             }
                         }
@@ -1397,11 +1400,8 @@ fn type3(
         // this pass can name — a reader may look it up through a base
         // encoding — so which procedures the font needs is not something
         // this pass can state.
-        let unnamed = shown.is_some_and(|codes| {
-            codes
-                .iter()
-                .any(|code| !names.iter().any(|(named, _)| named == code))
-        });
+        let named: HashSet<u32> = names.iter().map(|(code, _)| *code).collect();
+        let unnamed = shown.is_some_and(|codes| codes.iter().any(|code| !named.contains(code)));
         let refused = usage
             .unbounded
             .get(&font)
