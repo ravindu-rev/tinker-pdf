@@ -291,6 +291,137 @@ fn a_page_that_leaves_its_state_changed_is_bracketed() {
     assert_eq!(at(&stamped, 0, 20.0, 20.0), BLUE, "the page's own square");
 }
 
+/// The last stream of page `index`'s `/Contents`, decoded: the stamp's.
+fn last_stream(document: &Document, index: u32) -> String {
+    let parts = contents(document, index);
+    let last = *parts.last().expect("a content stream");
+    String::from_utf8_lossy(&document.cos().stream_decoded(last).expect("it decodes")).into_owned()
+}
+
+/// A state change before a `q` the page never closes: the stamp's stream
+/// closes the page's `q` **and** the bracket's, so the `cm` is undone too.
+/// One `Q` would restore only what the page's own `q` saved, which already
+/// had the scale in it.
+#[test]
+fn a_change_before_an_unclosed_q_is_undone_as_well() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(PAGE, PAGE, |page| {
+        page.raw(b"2 0 0 2 0 0 cm q 0 0 1 rg 5 5 10 10 re f")
+    });
+    let document = Document::open(builder.finish()).expect("it opens");
+    let before = contents(&document, 0);
+    let mut editor = document.editor();
+    let form = stripe(&mut editor);
+    assert!(editor.stamp(0, form, StampPlacement::Over).is_some());
+    let stamped = clean(incremental(&editor));
+
+    let after = contents(&stamped, 0);
+    assert_eq!(
+        after.len(),
+        3,
+        "q, the page's stream, then Q Q and the stamp"
+    );
+    assert_eq!(after[1], before[0]);
+    assert_eq!(last_stream(&stamped, 0), "\nQ\nQ\n/Stamp0 Do\n");
+    assert_eq!(
+        at(&stamped, 0, 45.0, 30.0),
+        RED,
+        "the stripe at the page's scale"
+    );
+    assert_eq!(
+        at(&stamped, 0, 45.0, 55.0),
+        WHITE,
+        "and not at the content's"
+    );
+    assert_eq!(at(&stamped, 0, 20.0, 20.0), BLUE, "the page's own square");
+}
+
+/// A marked-content sequence the page opens and never closes — here a hidden
+/// layer's — is closed before the stamp, which would otherwise be drawn
+/// inside it and hide with the layer.
+#[test]
+fn a_layer_the_page_leaves_open_does_not_hide_the_stamp() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_layer("Hidden", false).expect("a layer");
+    builder.add_page(PAGE, PAGE, |page| {
+        // The builder's own `optional` always closes its sequence; this is
+        // the page a producer that forgot the `EMC` writes. `OC0` is the
+        // first layer's `/Properties` key.
+        page.raw(b"/OC /OC0 BDC 0 0 1 rg 5 5 10 10 re f");
+    });
+    let document = Document::open(builder.finish()).expect("it opens");
+    assert_eq!(at(&document, 0, 10.0, 10.0), WHITE, "the square is hidden");
+    let mut editor = document.editor();
+    let form = stripe(&mut editor);
+    assert!(editor.stamp(0, form, StampPlacement::Over).is_some());
+    let stamped = clean(incremental(&editor));
+
+    assert_eq!(last_stream(&stamped, 0), "\nEMC\nQ\n/Stamp0 Do\n");
+    assert_eq!(at(&stamped, 0, 45.0, 30.0), RED, "the stamp is not hidden");
+    assert_eq!(
+        at(&stamped, 0, 10.0, 10.0),
+        WHITE,
+        "and the page's square still is"
+    );
+}
+
+/// A source page drawing a 10-point red square as the glyph of a Type 3
+/// font, positioned with `T*` — so where it lands depends on the text
+/// leading the stamp inherits.
+fn leading_sensitive_source() -> Vec<u8> {
+    let content = "BT /F1 10 Tf 25 40 Td T* (A) Tj ET";
+    let glyph = "1000 0 d0 1 0 0 rg 0 0 1000 1000 re f";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 60] \
+/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+/FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /sq 6 0 R >> \
+/Encoding << /Type /Encoding /Differences [65 /sq] >> \
+/FirstChar 65 /LastChar 65 /Widths [1000] /Resources << >> >>\nendobj\n\
+6 0 obj\n<< /Length {} >>\nstream\n{glyph}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+        content.len(),
+        glyph.len()
+    )
+    .into_bytes()
+}
+
+/// Table 108: `TD` is `-ty TL tx ty Td`, so a page whose text object used it
+/// leaves a leading behind it that `ET` does not reset. A stamp using `T*`
+/// over it lands 20 points low unless the page is bracketed; over the same
+/// page with `Td`, which sets nothing, no bracket is needed and none is added.
+#[test]
+fn a_td_on_the_page_is_bracketed_and_a_td_that_sets_nothing_is_not() {
+    let source = Document::open(leading_sensitive_source()).expect("the source opens");
+    for (page_content, parts) in [(&b"BT 0 -20 TD ET"[..], 3), (&b"BT 0 -20 Td ET"[..], 2)] {
+        let mut builder = DocumentBuilder::new();
+        builder.add_page(PAGE, PAGE, |page| page.raw(page_content));
+        let document = Document::open(builder.finish()).expect("it opens");
+        let mut editor = document.editor();
+        let form = editor
+            .import_page_as_form(source.cos(), 0, None)
+            .expect("the source page");
+        assert!(editor.stamp(0, form, StampPlacement::Over).is_some());
+        let stamped = Document::open(incremental(&editor)).expect("it opens");
+        let what = String::from_utf8_lossy(page_content).into_owned();
+        assert_eq!(contents(&stamped, 0).len(), parts, "{what}");
+        assert_eq!(
+            at(&stamped, 0, 30.0, 45.0),
+            RED,
+            "{what}: the square where the stamp put it"
+        );
+        assert_eq!(
+            at(&stamped, 0, 30.0, 25.0),
+            WHITE,
+            "{what}: not a leading below"
+        );
+    }
+}
+
 /// Resources inherited from the page tree are copied onto the page, with
 /// what they already held, and the tree node is not part of the update.
 #[test]

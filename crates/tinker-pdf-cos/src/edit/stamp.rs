@@ -7,7 +7,8 @@
 //! or shared by reference with other pages, so it is copied before it is
 //! changed; the name a stamp is registered under must not be one the page
 //! already uses; and the page's own content may leave the graphics state
-//! changed, which a stamp drawn after it would inherit.
+//! changed, or a save, a text object or a marked-content sequence open, and a
+//! stamp drawn after it would inherit the one and be drawn inside the other.
 
 use std::collections::HashMap;
 
@@ -44,14 +45,69 @@ pub enum StampPlacement {
 /// `q`/`Q`, and an image changes no parameter at all; `sh` paints within the
 /// clip and changes nothing either. Everything **not** here — `cm`, the
 /// colour operators, `gs`, `w`, the clip operators `W` and `W*`, and the text
-/// *state* operators (`Tf`, `Tc`, `Tw`, `Tz`, `TL`, `Tr`, `Ts`, and `"`,
-/// which sets two of them), whose values outlive `ET` — is a change a stamp
-/// drawn afterwards would inherit.
-const NEUTRAL: [&[u8]; 32] = [
+/// *state* operators (`Tf`, `Tc`, `Tw`, `Tz`, `TL`, `Tr`, `Ts`), whose values
+/// outlive `ET` — is a change a stamp drawn afterwards would inherit. Two text
+/// operators that look like positioning are among them, because Table 108
+/// gives each a text-state side effect: `TD` is `-ty TL tx ty Td` and sets the
+/// leading, and `"` sets the word and character spacing.
+///
+/// `q`, `Q`, `BT`, `ET`, `BMC`, `BDC` and `EMC` are counted rather than
+/// listed: what matters about them is whether each is closed.
+const NEUTRAL: [&[u8]; 27] = [
     b"m", b"l", b"c", b"v", b"y", b"h", b"re", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b",
-    b"b*", b"n", b"BT", b"ET", b"Td", b"TD", b"Tm", b"T*", b"Tj", b"TJ", b"'", b"BMC", b"BDC",
-    b"EMC", b"MP", b"DP", b"Do",
+    b"b*", b"n", b"Td", b"Tm", b"T*", b"Tj", b"TJ", b"'", b"MP", b"DP", b"Do", b"sh",
 ];
+
+/// Something a page's content opened and may leave open when it ends
+/// (7.8.2: a page's content streams are one stream, so nothing closes at a
+/// stream boundary).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opened {
+    /// `q` (8.4.2), closed by `Q`.
+    Save,
+    /// `BT` (9.4.1), closed by `ET`.
+    Text,
+    /// `BMC` or `BDC` (14.6), closed by `EMC`.
+    Marked,
+}
+
+impl Opened {
+    const fn closer(self) -> &'static [u8] {
+        match self {
+            Opened::Save => b"Q",
+            Opened::Text => b"ET",
+            Opened::Marked => b"EMC",
+        }
+    }
+}
+
+/// What an over-stamp needs around a page's content to run in the page's
+/// **initial** graphics state, outside every sequence the page opened.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Bracket {
+    /// A `q` before the page's content: the content changes the state
+    /// outside any `q` of its own, so only a save taken before it can put
+    /// the initial state back.
+    open: bool,
+    /// Operators after the page's content and before the stamp: a closer for
+    /// everything the content left open, innermost first — `EMC` for a
+    /// marked-content sequence, `ET` for a text object, `Q` for a save — and
+    /// then the `Q` that matches [`Self::open`].
+    close: Vec<&'static [u8]>,
+}
+
+impl Bracket {
+    /// What content that cannot be read gets: one `q`/`Q` pair around it,
+    /// which isolates the stamp exactly when the content's own `q` and `Q`
+    /// balance and nothing is left open — the most that can be done without
+    /// knowing what the content does.
+    fn blind() -> Bracket {
+        Bracket {
+            open: true,
+            close: vec![b"Q"],
+        }
+    }
+}
 
 impl DocumentEditor {
     /// Registers `object` in page `page`'s `/Resources /<category>` under a
@@ -136,16 +192,29 @@ impl DocumentEditor {
     /// # When the page's content is wrapped in `q` … `Q`
     ///
     /// A stamp drawn **over** the page runs in whatever graphics state the
-    /// page's content left behind (8.4.2). A page ending with a `cm` outside
-    /// any `q`/`Q` would scale and move the stamp; a clip would cut it; a
-    /// `Tf` would change the text a stamp sets without choosing its own. So
-    /// the page's content is read first, and if every `q` has its `Q` and
-    /// nothing outside them changes the state — see [`NEUTRAL`] — the stamp
-    /// is simply appended. Otherwise the page's streams are bracketed by two
-    /// new ones, `q` before and `Q` after, and the stamp follows the `Q`: the
-    /// original streams are still untouched. Content that cannot be read, or
-    /// that holds an inline image (whose data the tokenizer cannot see
-    /// past), is bracketed rather than guessed about.
+    /// page's content left behind (8.4.2), and inside whatever it left open. A
+    /// page ending with a `cm` outside any `q`/`Q` would scale and move the
+    /// stamp; a clip would cut it; a `Tf` or a `TD` would change the text a
+    /// stamp sets without choosing its own; an `/OC … BDC` never closed would
+    /// hide the stamp with the layer. So the page's content is read first:
+    ///
+    /// - if every `q` has its `Q`, every `BT` its `ET` and every `BDC` or
+    ///   `BMC` its `EMC`, and nothing outside a `q` changes the state — see
+    ///   [`NEUTRAL`] — the stamp is simply appended;
+    /// - otherwise the stamp's stream first closes what the content left
+    ///   open, innermost first — an `EMC` per marked-content sequence, an
+    ///   `ET` for a text object, a `Q` per save — and when the content changed
+    ///   the state outside any `q` of its own, a new stream holding `q` goes
+    ///   before the page's streams and one more `Q` after them. The stamp then
+    ///   runs in the page's initial state, outside every sequence, and the
+    ///   original streams are still untouched.
+    ///
+    /// An inline image's data is skipped to its `EI` as the interpreter skips
+    /// it. Content that cannot be read at all — a stream that will not decode,
+    /// or a `Q` with no `q` to restore, which readers disagree about — gets one
+    /// `q` before and one `Q` after, and **that isolates the stamp only when
+    /// the content's own operators balance**: nothing more can be said about
+    /// content nothing here can follow.
     ///
     /// A stamp **under** the page needs no bracket at all: it runs first, in
     /// the page's initial state, and `Do` restores whatever the form changes
@@ -162,12 +231,16 @@ impl DocumentEditor {
             return None;
         };
         let existing = self.content_parts(reference);
-        let bracket = placement == StampPlacement::Over && !self.leaves_state_as_found(&existing);
+        let bracket = match placement {
+            StampPlacement::Over => self.bracket_for(&existing),
+            StampPlacement::Under => Bracket::default(),
+        };
 
         let name = self.add_resource(page, b"XObject", b"Stamp", Object::Ref(form))?;
-        let mut invocation = Vec::with_capacity(name.len() + 8);
-        if bracket {
-            invocation.extend_from_slice(b"\nQ");
+        let mut invocation = Vec::with_capacity(name.len() + 8 + 4 * bracket.close.len());
+        for closer in &bracket.close {
+            invocation.push(b'\n');
+            invocation.extend_from_slice(closer);
         }
         invocation.push(b'\n');
         crate::write::write_name(&mut invocation, &name);
@@ -181,7 +254,7 @@ impl DocumentEditor {
                 parts.extend_from_slice(&existing);
             }
             StampPlacement::Over => {
-                if bracket {
+                if bracket.open {
                     parts.push(self.new_content(b"q\n".to_vec()));
                 }
                 parts.extend_from_slice(&existing);
@@ -354,14 +427,14 @@ impl DocumentEditor {
         }
     }
 
-    /// Whether a page's content, run to its end, leaves the graphics state as
-    /// it found it: every `q` closed by its `Q`, and nothing outside them but
-    /// [`NEUTRAL`] operators. False whenever that cannot be established.
-    fn leaves_state_as_found(&self, parts: &[ObjRef]) -> bool {
+    /// What an over-stamp needs around a page's content, run to its end: see
+    /// [`Bracket`]. [`Bracket::blind`] whenever the content cannot be
+    /// followed.
+    fn bracket_for(&self, parts: &[ObjRef]) -> Bracket {
         let mut content = Vec::new();
         for part in parts {
             let Some(bytes) = self.stream_bytes(*part) else {
-                return false;
+                return Bracket::blind();
             };
             content.extend_from_slice(&bytes);
             // 7.8.2: the parts divide at token boundaries only if separated.
@@ -370,7 +443,12 @@ impl DocumentEditor {
 
         let mut lexer = Lexer::new(&content);
         let mut sink = WarningSink::new();
-        let mut depth = 0usize;
+        // What is open, outermost first, and how many of it are saves.
+        let mut open: Vec<Opened> = Vec::new();
+        let mut saves = 0usize;
+        let mut in_text = false;
+        // Whether an operator outside every `q` changed the state.
+        let mut changed = false;
         let mut at = 0u64;
         // Every token consumes at least a byte, so this bounds the walk; the
         // progress check below makes the bound unnecessary rather than load
@@ -378,41 +456,88 @@ impl DocumentEditor {
         for _ in 0..=content.len() {
             let token = lexer.next_token(&mut sink);
             match token.kind {
-                TokenKind::Eof => return depth == 0,
+                TokenKind::Eof => {
+                    let mut bracket = Bracket {
+                        open: changed,
+                        close: open.iter().rev().map(|opened| opened.closer()).collect(),
+                    };
+                    if changed {
+                        bracket.close.push(b"Q");
+                    }
+                    return bracket;
+                }
                 TokenKind::Unknown => {
                     let Some(operator) = usize::try_from(token.start)
                         .ok()
                         .zip(usize::try_from(token.end).ok())
                         .and_then(|(start, end)| content.get(start..end))
                     else {
-                        return false;
+                        return Bracket::blind();
                     };
                     match operator {
-                        b"q" => depth += 1,
-                        b"Q" => {
-                            // A `Q` with nothing to restore is ignored by a
-                            // reader, which makes it a stream whose balance
-                            // this cannot vouch for.
-                            let Some(outer) = depth.checked_sub(1) else {
-                                return false;
-                            };
-                            depth = outer;
+                        b"q" => {
+                            open.push(Opened::Save);
+                            saves += 1;
                         }
-                        // An inline image's data runs to `EI` in bytes the
-                        // tokenizer would read as operators.
-                        b"BI" | b"ID" | b"EI" => return false,
-                        other if depth == 0 && !NEUTRAL.contains(&other) => return false,
+                        b"Q" => {
+                            // A `Q` with nothing to restore is an error some
+                            // readers ignore and others do not, which makes
+                            // it content whose state this cannot follow.
+                            if !close_last(&mut open, Opened::Save) {
+                                return Bracket::blind();
+                            }
+                            saves -= 1;
+                        }
+                        // 9.4.1: text objects do not nest; a second `BT` is
+                        // the same object, and one `ET` ends it.
+                        b"BT" if !in_text => {
+                            open.push(Opened::Text);
+                            in_text = true;
+                        }
+                        b"BT" => {}
+                        b"ET" => {
+                            close_last(&mut open, Opened::Text);
+                            in_text = false;
+                        }
+                        b"BMC" | b"BDC" => open.push(Opened::Marked),
+                        // A stray `EMC` or `ET` closes nothing and changes no
+                        // state, so it costs a stamp nothing.
+                        b"EMC" => {
+                            close_last(&mut open, Opened::Marked);
+                        }
+                        // 8.9.7: an inline image's data is not tokenizable,
+                        // so it is skipped to its `EI` by the rule the
+                        // interpreter skips it by.
+                        b"BI" => {
+                            let from = usize::try_from(token.end).unwrap_or(content.len());
+                            let rest = content.get(from..).unwrap_or_default();
+                            let end = from.saturating_add(skip_inline_image(rest));
+                            lexer.seek(u64::try_from(end).unwrap_or(u64::MAX));
+                        }
+                        // `ID` and `EI` outside what `BI` skipped mean the
+                        // skip and the content disagree about where an
+                        // image's data ends.
+                        b"ID" | b"EI" => return Bracket::blind(),
+                        other if saves == 0 && !NEUTRAL.contains(&other) => changed = true,
                         _ => {}
+                    }
+                    // Deeper than any reader follows — Annex C puts the `q`
+                    // limit at 28, and this repository's interpreter keeps 64
+                    // saves — so past the parser's own nesting bound what a
+                    // reader restores is its own business. The bound also
+                    // keeps `close_last`'s search short.
+                    if open.len() > limits::MAX_NEST_DEPTH as usize {
+                        return Bracket::blind();
                     }
                 }
                 _ => {}
             }
             if token.end <= at {
-                return false;
+                return Bracket::blind();
             }
             at = token.end;
         }
-        false
+        Bracket::blind()
     }
 
     /// A new, unfiltered content stream holding `data`.
@@ -427,6 +552,55 @@ impl DocumentEditor {
         );
         reference
     }
+}
+
+/// Removes the innermost `kind` from `open`, and says whether there was one.
+///
+/// The innermost of that kind rather than the innermost of all: content that
+/// interleaves a save with a marked-content sequence still closes each where
+/// a reader closes it.
+fn close_last(open: &mut Vec<Opened>, kind: Opened) -> bool {
+    match open.iter().rposition(|opened| *opened == kind) {
+        Some(at) => {
+            open.remove(at);
+            true
+        }
+        None => false,
+    }
+}
+
+/// How many bytes after `BI` an inline image runs, to the end of its `EI`
+/// (8.9.7) — `EI` preceded by white space and followed by white space, a
+/// delimiter or the end — or to the end of `rest` when there is none.
+///
+/// The rule `tinker-pdf-content`'s interpreter skips an inline image by,
+/// restated because that crate reads this one and not the other way round: a
+/// skip that disagreed would count operators inside the image's data that the
+/// page does not run.
+fn skip_inline_image(rest: &[u8]) -> usize {
+    let delimiter = |c: u8| {
+        matches!(
+            c,
+            b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+        )
+    };
+    let mut i = 0usize;
+    while i + 1 < rest.len() {
+        if rest.get(i) == Some(&b'E') && rest.get(i + 1) == Some(&b'I') {
+            let before_ok = i == 0
+                || rest
+                    .get(i - 1)
+                    .is_some_and(|b| b.is_ascii_whitespace() || *b == 0);
+            let after_ok = rest
+                .get(i + 2)
+                .is_none_or(|b| b.is_ascii_whitespace() || delimiter(*b));
+            if before_ok && after_ok {
+                return i + 2;
+            }
+        }
+        i += 1;
+    }
+    rest.len()
 }
 
 #[cfg(test)]
@@ -452,16 +626,22 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         (editor, parts)
     }
 
-    fn balanced(content: &str) -> bool {
+    fn bracket(content: &str) -> Bracket {
         let (editor, parts) = editor(content);
-        editor.leaves_state_as_found(&parts)
+        editor.bracket_for(&parts)
+    }
+
+    fn balanced(content: &str) -> bool {
+        // Nothing before the page's content and nothing after it: the stamp
+        // simply follows.
+        bracket(content) == Bracket::default()
     }
 
     #[test]
     fn content_that_restores_what_it_changes_is_left_alone() {
         assert!(balanced(""));
         assert!(balanced("q 2 0 0 2 0 0 cm 1 0 0 rg 0 0 1 1 re f Q"));
-        assert!(balanced("0 0 m 1 1 l S /Fm0 Do BT (x) Tj ET"));
+        assert!(balanced("0 0 m 1 1 l S /Fm0 Do /Sh0 sh BT (x) Tj ET"));
         assert!(balanced(
             "q q 0.5 g Q 1 w Q /P <</MCID 0>> BDC 0 0 1 1 re f EMC"
         ));
@@ -469,6 +649,19 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
             balanced("q (a Q string) Tj Q"),
             "a Q inside a string is text"
         );
+        assert!(
+            balanced("BT 0 -20 Td T* (x) ' ET"),
+            "Td, T* and ' move within the text object only"
+        );
+        assert!(
+            balanced("q /P BMC Q EMC"),
+            "interleaved, and each closed where a reader closes it"
+        );
+        assert!(balanced("ET EMC"), "a stray closer closes nothing");
+        // An inline image is skipped to its `EI` as the interpreter skips it,
+        // so bytes in its data that spell operators are not counted.
+        assert!(balanced("BI /W 1 /H 1 /BPC 8 /CS /G ID \u{0} EI"));
+        assert!(balanced("BI /W 2 /H 1 /BPC 8 /CS /G ID q  EI"));
     }
 
     #[test]
@@ -481,10 +674,62 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
             "0 0 10 10 re W n",
             "BT /F1 12 Tf (x) Tj ET",
             "1 2 (x) \"",
-            "BI /W 1 /H 1 /BPC 8 /CS /G ID \u{0} EI",
+            // Table 108: `TD` is `-ty TL tx ty Td`, and `TL` outlives `ET`.
+            "BT 0 -20 TD ET",
+            "/OC /L BDC 0 0 1 1 re f",
+            "BI /W 1 /H 1 /BPC 8 /CS /G ID \u{0} EI 2 0 0 2 0 0 cm",
         ] {
             assert!(!balanced(content), "{content:?}");
         }
+    }
+
+    /// What the content left open is closed innermost first, and a `q` goes
+    /// before it only when something outside every `q` changed the state —
+    /// in which case one more `Q` follows the closers.
+    #[test]
+    fn what_is_left_open_is_closed_innermost_first() {
+        let cases: [(&str, bool, &[&[u8]]); 8] = [
+            ("q 0 0 1 1 re f", false, &[b"Q"]),
+            ("/OC /L BDC 0 0 1 1 re f", false, &[b"EMC"]),
+            ("q /P BMC BT (x) Tj", false, &[b"ET", b"EMC", b"Q"]),
+            ("BT BT (x) Tj", false, &[b"ET"]),
+            // The review's two pages: a `cm` before an unclosed `q`, whose
+            // `Q` alone would restore the scaled state; and a layer opened
+            // and never closed, which would hide the stamp with it.
+            ("2 0 0 2 0 0 cm q 0 0 1 rg", true, &[b"Q", b"Q"]),
+            ("/OC /L BDC 0 0 1 rg 5 5 10 10 re f", true, &[b"EMC", b"Q"]),
+            ("BT 0 -20 TD ET", true, &[b"Q"]),
+            ("1 w q /P BMC", true, &[b"EMC", b"Q", b"Q"]),
+        ];
+        for (content, open, close) in cases {
+            assert_eq!(
+                bracket(content),
+                Bracket {
+                    open,
+                    close: close.to_vec()
+                },
+                "{content:?}"
+            );
+        }
+    }
+
+    /// Content this cannot follow gets one pair around it and no more.
+    #[test]
+    fn content_that_cannot_be_followed_is_bracketed_blind() {
+        assert_eq!(bracket("0 0 1 1 re f Q"), Bracket::blind(), "Q underflows");
+        assert_eq!(bracket("ID EI"), Bracket::blind(), "image data with no BI");
+        assert_eq!(
+            bracket(&"q ".repeat(limits::MAX_NEST_DEPTH as usize + 1)),
+            Bracket::blind(),
+            "deeper than any reader follows"
+        );
+        assert_eq!(
+            bracket(&"q ".repeat(limits::MAX_NEST_DEPTH as usize))
+                .close
+                .len(),
+            limits::MAX_NEST_DEPTH as usize,
+            "and as deep as that is followed"
+        );
     }
 
     #[test]

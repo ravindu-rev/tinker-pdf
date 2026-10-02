@@ -249,13 +249,22 @@ XObject that way and adds a stream invoking it to the page's `/Contents`
 array — before the page's streams for `Under`, after them for `Over` — and
 the page's own streams are not rewritten or copied, so an incremental save
 carries the page dictionary and the new streams and nothing else. An `Over`
-stamp runs in whatever graphics state the page's content left behind, so the
-content is tokenized first: if every `q` has its `Q` and nothing outside them
-changes the state, the stamp is simply appended; otherwise the page's streams
-are bracketed by a `q` stream and a `Q` stream, and unreadable content or an
-inline image is bracketed rather than guessed about. An `Under` stamp needs no
-bracket: it runs in the initial state and `Do` restores whatever the form
-changes (8.10.1). `add_form(&FormXObject, resources)` writes a form in the
+stamp runs in whatever graphics state the page's content left behind, and
+inside whatever it left open, so the content is tokenized first (an inline
+image's data skipped to its `EI` by the interpreter's rule). If every `q` has
+its `Q`, every `BT` its `ET`, every `BMC`/`BDC` its `EMC`, and nothing outside
+a `q` changes the state, the stamp is simply appended. Otherwise the stamp's
+stream first closes what the content left open, innermost first — so an
+`/OC … BDC` a producer forgot to close does not hide the stamp with its layer
+— and when the content changed the state outside any `q` of its own, a `q`
+stream goes before the page's streams and one more `Q` after them, so a `cm`
+before an unclosed `q` is undone too. "Changes the state" includes `TD` and
+`"`, which look like positioning and set the leading and the spacings (Table
+108). Content that cannot be followed — a stream that will not decode, a `Q`
+with nothing to restore — gets one `q` before and one `Q` after, which
+isolates the stamp only when that content's own operators balance. An `Under`
+stamp needs no bracket: it runs in the initial state and `Do` restores
+whatever the form changes (8.10.1). `add_form(&FormXObject, resources)` writes a form in the
 editor, and `import_page_as_form(source, page, matrix)` turns another
 document's page into one — its content joined, its crop box the `/BBox`, its
 resources deep-copied by the copy `import_page` uses.
@@ -550,7 +559,11 @@ if report.untouched.is_empty() {
   unredefined by the update, with the same bytes; two pages sharing one
   `/Resources` are stamped independently, neither touching the shared object
   and the new name stepping past an existing `Stamp0`; a page ending with a
-  stray `cm` is bracketed and the stripe lands at the page's scale; inherited
+  stray `cm` is bracketed and the stripe lands at the page's scale, and so
+  does one whose `cm` precedes a `q` it never closes; a hidden layer the page
+  leaves open is closed before the stamp, which shows; a page whose text used
+  `TD` is bracketed, so a stamp positioned with `T*` lands where it would on a
+  blank page, while one that used `Td` is not; inherited
   resources are copied onto the page and the tree node is not in the update;
   another document's page stamps as a form with its image; every saved file
   is clean under the strict validator.
