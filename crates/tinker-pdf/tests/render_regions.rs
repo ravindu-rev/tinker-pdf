@@ -46,7 +46,7 @@
 //! - **Scales other than 1.0**, because a region that is silently ignored
 //!   whenever the scale is not 1 is a defect no unscaled fixture can see.
 //!
-//! # Does it hold at every scale? Yes, since September 2026
+//! # Does it hold at every scale? For every fixture here, since September 2026
 //!
 //! Every fixture, every tile size, down to a one-pixel lattice, at 0.5, 0.75,
 //! 1, 1.5, 2, 3 and 4. Until September 2026 the scales 0.75, 1.5 and 3 carried
@@ -56,9 +56,14 @@
 //! [`tiles_at_the_scales_where_two_frames_rounded_apart_are_byte_equal`] says
 //! why that stopped being true, and asserts equality where it used to assert a
 //! bound; [`a_stroke_whose_corners_sit_on_a_sub_scanline_tiles_exactly_at_1x`]
-//! is the stroke. Ruling 5 names the one shape of page the guard is not known
-//! to cover, which is geometric rather than a scale: two images that overlap
-//! outside a tile and abut inside it.
+//! is the stroke.
+//!
+//! **It does not hold for every page**, and the shape that parts them is
+//! geometric rather than a scale: two images that overlap outside a tile and
+//! abut inside it are one image run in the tile and two on the page.
+//! [`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`]
+//! pins it as measured — 40 pixels, 63 levels, at 1x — and ruling 5 and a
+//! ROADMAP row carry it until it is gone.
 //!
 //! # What this guard found
 //!
@@ -817,6 +822,86 @@ fn a_stroke_whose_corners_sit_on_a_sub_scanline_tiles_exactly_at_1x() {
     for size in [60u32, 17] {
         tiles_are_the_page(&page, &options, size, "the stroked frame at 1x");
     }
+}
+
+/// Three one-sample black images on a 100 x 100 page. The first and the third
+/// abut along `x = 40.5` across the page's top forty rows; the third overlaps
+/// the second in rows 60 to 69, which is the bottom half of the page.
+fn image_run_page() -> Vec<u8> {
+    let content = "q 40.5 0 0 40 0 60 cm /I Do Q \
+                   q 40 0 0 40 40.5 0 cm /I Do Q \
+                   q 40 0 0 70 40.5 30 cm /I Do Q";
+    let image = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 \
+                 /Filter /ASCIIHexDecode /Length 3 >>\nstream\n00>\nendstream";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
+   /Resources << /XObject << /I 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n{image}\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// **Ruling 5's one named exception, pinned to what it measures.**
+///
+/// Whether an image joins the run held back so that abutting images do not
+/// conflate is decided by whether it overlaps what the run holds, and the run
+/// holds fragments over the canvas only. On the page the third image overlaps
+/// the second, so the run of the first two is composited before the third is
+/// drawn and the seam between the first and the third conflates. In the tile
+/// over the top half the second image is off the canvas, the third joins the
+/// first's run, and the seam does not conflate. Measured 2 October 2026: 40
+/// pixels — column 40, rows 0 to 39 — differ by 63 levels at 1x.
+///
+/// Pinned exactly rather than bounded, so the day this changes in either
+/// direction the test says so: if it fails because the tile *is* the page,
+/// the ROADMAP row "A tile byte-equal to the page when an image run's overlap
+/// falls outside it" is done — delete it and ruling 5's paragraph, and turn
+/// this into a byte-equality assertion.
+#[test]
+fn an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception() {
+    let document = Document::open(image_run_page()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let options = RenderOptions::default();
+    let full = page.render(&options);
+    assert!(
+        ink(&full) > 4_000,
+        "the three images cover most of the page"
+    );
+    let region = PixelRegion::new(0, 0, 100, 50);
+    let tile = page.render(&RenderOptions {
+        region: Some(region),
+        ..options
+    });
+    let d = compare(&tile, &full, region)
+        .expect("the exception is gone: delete its ROADMAP row and assert byte equality here");
+    let components = full.components();
+    let mut columns = std::collections::BTreeSet::new();
+    for y in 0..tile.height as usize {
+        for x in 0..tile.width as usize {
+            let at = y * tile.stride + x * components;
+            let theirs = y * full.stride + x * components;
+            if tile.data.get(at..at + components) != full.data.get(theirs..theirs + components) {
+                columns.insert(x);
+            }
+        }
+    }
+    assert_eq!(
+        (
+            d.pixels,
+            d.worst,
+            d.at,
+            columns.into_iter().collect::<Vec<_>>()
+        ),
+        (40, 63, (40, 0), vec![40]),
+        "the run decided in the canvas is the named seam and nothing else"
+    );
 }
 
 /// **A one-pixel lattice**, on the smallest fixture, because a tile whose

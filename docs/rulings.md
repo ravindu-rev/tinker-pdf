@@ -54,8 +54,9 @@ living in one feature's head.
    guard.
 
    *Corrected 13 September 2026; satisfied, with one stated exception,
-   15 September 2026; satisfied without it, 26 September 2026.* The
-   correction is kept rather than overwritten,
+   15 September 2026; that exception closed 26 September 2026, and a
+   second, geometric rather than a scale, stated and pinned 2 October 2026.*
+   The correction is kept rather than overwritten,
    because it is the reason the present entry can be read at face value.
    This ruling used to say the tile rows "are pinned byte-equal" and that
    the test "is the permanent guard", in the present tense, when **there was
@@ -87,8 +88,11 @@ living in one feature's head.
    holds the stroke described below; `annotations_are_tiled_with_the_page`
    covers the annotation layer, which no other fixture there draws from.
 
-   **It is byte-equal at every scale.** From 15 to 26
-   September 2026 it was not, and what the exception was is kept because
+   **Every fixture in the guard is byte-equal at every scale** — which is
+   not the same claim as "a tile is byte-equal to the page", and the one
+   page shape known to part them is named below. From 15 to 26
+   September 2026 even the guard's fixtures were not, and what the exception
+   was is kept because
    it is the reason the mechanism is what it is. A tile used to be drawn
    in a frame of its own — the page's transform with a whole number of
    pixels taken off `e` and `f` — which is exact as arithmetic and not as
@@ -128,15 +132,28 @@ living in one feature's head.
    defects were found by the canvases-in-the-page fixtures the day the
    frame became one.
 
-   **One decision is still the canvas's, and it is named.** Whether an
-   image joins the run of images held back so that abutting ones do not
-   conflate is decided by whether it *overlaps* what the run already holds,
-   and the run holds fragments only over the canvas. Two images that
-   overlap outside a tile and abut inside it are one run in the tile and
-   two on the page, and the abutting edge then conflates on the page and
-   not in the tile. No fixture has that shape, and nothing short of holding
-   the run over the whole page reaches it; it is recorded here rather than
-   discovered.
+   **One decision is still the canvas's, so this ruling has an open
+   exception, and it is pinned.** Whether an image joins the run of images
+   held back so that abutting ones do not conflate is decided by whether it
+   *overlaps* what the run already holds, and the run holds fragments only
+   over the canvas. Two images that overlap outside a tile and abut inside
+   it are one run in the tile and two on the page, and the abutting edge
+   then conflates on the page and not in the tile. On 26 September 2026
+   this paragraph said no fixture had that shape and called the ruling
+   satisfied; a review on 2 October built one in three images — a 100×100
+   page, the first and third abutting at `x = 40.5` across the top forty
+   rows, the third overlapping the second at the bottom — and the tile over
+   the top half differs from the page on 40 pixels, all of column 40, by
+   **63 levels at 1×**.
+   `render_regions.rs`'s
+   `an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`
+   pins exactly that, so the day it changes the test says so, and the
+   ROADMAP keeps the row ("A tile byte-equal to the page when an image
+   run's overlap falls outside it") that a satisfied ruling would have had
+   no need of. What reaches it is holding the run's coverage over the whole
+   page rather than over the canvas, which costs a tile the image work of
+   the page — every image of a run walked over the page frame, per tile —
+   and that trade is the row's to make, not a fix's to slip in.
 
    *What the guard found on its first run is worth recording, because none
    of it was about tiles:* two defects in `tinker-pdf-raster`'s scanline

@@ -235,7 +235,14 @@ decisions taken by rectangle rather than by pixel — which cells of a tiling
 lattice to composite, which neighbours a mesh's fringe reads, whether a
 lattice, a mesh or an image run is within its budget — are taken on
 rectangles the renderer keeps in the page's frame (`Bounds`), so a tile takes
-the page's decision. A region reaching past the page is **intersected**, never
+the page's decision. **One is not, and it is a known gap rather than a
+guarantee:** whether an image *joins* the run held back so abutting images do
+not conflate is decided by overlap with what the run holds over the canvas
+only, so two images that overlap outside a tile and abut inside it are one run
+in the tile and two on the page — measured on a three-image page at 40 pixels
+of one seam column, 63 levels apart at 1× (`render_regions.rs`'s
+`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`,
+and a ROADMAP row). A region reaching past the page is **intersected**, never
 slid back on, because a moved rectangle returns real pixels from coordinates
 the caller did not name; one that misses entirely comes back with no pixels.
 Both trims are reported as `RenderWarning::RegionClamped`. Ruling 5's
@@ -578,6 +585,9 @@ a defect to hide in.
   1.5×, 2×, 3× and 4× and down to a one-pixel lattice, each tile asserted
   **byte-equal** to its rectangle of the whole render with no tolerance at any
   scale; a stroked rectangle whose miter corners sit on a sub-scanline, at 1×;
+  ruling 5's one named exception pinned exactly as measured — an image run
+  whose overlap falls outside the tile, 40 pixels at 63 levels — so a change
+  in either direction fails;
   plus the trim at the page edge and its warning, a region wholly off the page, and — because tile equality alone is
   satisfied by a *consistent* mistake — two fixtures that assert which quadrant
   of the displayed picture one mark lands in, on a rotated page and on a
