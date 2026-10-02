@@ -36,6 +36,7 @@ pub mod mdp;
 mod optional;
 pub mod pdfa;
 mod png_read;
+mod recode;
 pub mod redact;
 mod render_part;
 mod resources;
@@ -405,7 +406,11 @@ pub use verdict::{
 /// bare `save` at the crate root next to [`tinker_pdf_cos::DocumentEditor`]'s
 /// own `save` would be two doors with one name, and which door you used is
 /// the thing this module exists to make visible.
-pub use write::{FontPolicy, SaveOptions, Saved, SubsetOutcome};
+pub use write::{
+    BilevelCodec, ContinuousCodec, FontPolicy, ImageCoding, ImageOutcome, ImagePolicy,
+    ImageRecoding, ImageReport, JpegTables, Recoded, SaveOptions, Saved, SubsetOutcome,
+    UntouchedImage, UntouchedImageReason,
+};
 /// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
 pub use xps::{Dialect, XpsElementDefect, XpsPageDefect};
 

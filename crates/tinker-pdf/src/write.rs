@@ -104,17 +104,35 @@
 //! right row: a subcommand is a wrapper over this function with no logic of
 //! its own, so it cannot land before the door it wraps has a CLI at all.
 //!
+//! # Images, the second pass on this door
+//!
+//! [`SaveOptions::images`] recodes and downsamples image XObjects, and is
+//! **off by default**: [`ImagePolicy::Keep`] never enters the pass, so a
+//! default save writes every image stream through as the file stored it.
+//! The switch is here and not on a `WriteOptions::images` for the fonts'
+//! reason and one of its own — a resolution is a property of where an image
+//! is *drawn*, which only the interpreter's walk can say — and `recode.rs`'s
+//! header sets both out. It runs before the font pass and reports on
+//! [`Saved::images`] in the same shape as [`Saved::fonts`], including the
+//! incremental case: an appended save leaves every original image stream in
+//! the prefix, so a smaller file is not what it produces, and
+//! [`ImageOutcome::RecodedButTheOriginalsRemain`] says so.
+//!
 //! # What this module is not
 //!
 //! It is not a second serializer. Every byte still comes from
-//! [`DocumentEditor::save`]; this runs one pass over the editor first and then
-//! calls it. Signing ([`DocumentEditor::save_signed`]) has no door here on
+//! [`DocumentEditor::save`]; this runs its passes over the editor first and
+//! then calls it. Signing ([`DocumentEditor::save_signed`]) has no door here on
 //! purpose: it is incremental by definition, so the paragraph above applies to
 //! all of it, and a caller who wants a signed document with subset fonts
 //! subsets, rewrites, reopens and signs that.
 
 use tinker_pdf_cos::{DocumentEditor, WriteMode, WriteOptions};
 
+pub use crate::recode::{
+    BilevelCodec, ContinuousCodec, ImageCoding, ImagePolicy, ImageRecoding, ImageReport,
+    JpegTables, Recoded, UntouchedImage, UntouchedImageReason,
+};
 use crate::subset::{self, SubsetReport};
 
 /// What a save does to the document's embedded font programs.
@@ -147,7 +165,7 @@ pub enum FontPolicy {
 
 /// Options for [`save`].
 ///
-/// [`WriteOptions`] verbatim, plus the one decision it cannot make (see this
+/// [`WriteOptions`] verbatim, plus the two decisions it cannot make (see this
 /// module's documentation).
 #[derive(Clone, Debug, Default)]
 pub struct SaveOptions {
@@ -156,6 +174,37 @@ pub struct SaveOptions {
     pub write: WriteOptions,
     /// What happens to the embedded font programs before any of that.
     pub fonts: FontPolicy,
+    /// What happens to the image XObjects, before the fonts. [`ImagePolicy::Keep`]
+    /// — the default — leaves every image stream as the file stored it.
+    pub images: ImagePolicy,
+}
+
+/// What the image pass did, reported by [`save`]: [`SubsetOutcome`]'s three
+/// values, for the same reasons.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageOutcome {
+    /// [`ImagePolicy::Keep`]: the pass did not run.
+    Kept,
+    /// The pass ran and this was a [`WriteMode::Rewrite`], so the recoded
+    /// streams replaced the originals.
+    Recoded(ImageReport),
+    /// The pass ran and the save **appended** (7.5.6), so every original
+    /// image stream is still in the file's prefix: a reader draws the recoded
+    /// ones, and the file is larger, not smaller.
+    RecodedButTheOriginalsRemain(ImageReport),
+}
+
+impl ImageOutcome {
+    /// The report, when the pass ran.
+    #[must_use]
+    pub fn report(&self) -> Option<&ImageReport> {
+        match self {
+            ImageOutcome::Kept => None,
+            ImageOutcome::Recoded(report) | ImageOutcome::RecodedButTheOriginalsRemain(report) => {
+                Some(report)
+            }
+        }
+    }
 }
 
 /// What the font pass did, reported by [`save`].
@@ -248,6 +297,8 @@ pub struct Saved {
     pub bytes: Vec<u8>,
     /// What [`SaveOptions::fonts`] asked for, and what came of it.
     pub fonts: SubsetOutcome,
+    /// What [`SaveOptions::images`] asked for, and what came of it.
+    pub images: ImageOutcome,
 }
 
 /// Saves a document, subsetting its embedded fonts unless asked not to.
@@ -284,6 +335,20 @@ pub struct Saved {
 /// and the glyphs that redaction removed are glyphs it drops. Run the other
 /// way round it would keep exactly what the redaction was for.
 pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
+    // Images first: the font pass reads content streams, and nothing this
+    // pass writes is one, so the order is free — and this way a later reader
+    // of this function meets the passes in the order `SaveOptions` lists
+    // them after `write`.
+    let images = match &options.images {
+        ImagePolicy::Keep => ImageOutcome::Kept,
+        ImagePolicy::Recode(recoding) => {
+            let report = crate::recode::apply(editor, recoding);
+            match options.write.mode {
+                WriteMode::Rewrite => ImageOutcome::Recoded(report),
+                WriteMode::Incremental => ImageOutcome::RecodedButTheOriginalsRemain(report),
+            }
+        }
+    };
     let fonts = match options.fonts {
         FontPolicy::Keep => SubsetOutcome::Kept,
         FontPolicy::Subset => {
@@ -303,6 +368,7 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
     Saved {
         bytes: editor.save(&options.write),
         fonts,
+        images,
     }
 }
 

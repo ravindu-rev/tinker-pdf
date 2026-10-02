@@ -270,6 +270,62 @@ an instruction to read the report, which names each one (ruling 10).
 reason: signing is incremental by definition, so subsetting into it could never
 remove anything.
 
+**Images, on the same door, off by default.** `SaveOptions::images` is an
+`ImagePolicy`, `Keep` by default — the pass is not entered and every image
+stream is written through as the file stored it, so a default save is byte for
+byte the save this door made before the field existed. `Recode(ImageRecoding)`
+names a coding per image kind and, optionally, a resolution
+(`ImageRecoding::new(continuous, bilevel).with_max_ppi(ppi)`):
+
+- a **continuous** image (more than one bit or one component) as
+  `ContinuousCodec::Keep` (as stored, unless resampled — then deflated),
+  `Flate`, or `Jpeg(JpegTables)` — baseline T.81 with **the caller's**
+  luminance and chrominance tables in natural order and 4:4:4 unless
+  `subsampled`, eight bits and one or three components only;
+- a **bilevel** image (one bit, one component, `/ImageMask` included) as
+  `BilevelCodec::Keep`, `Flate`, `CcittG4` (`/K -1`, `BlackIs1` false, so a
+  sample's bits go through as they are) or `Jbig2Generic` (D.3's embedded
+  organisation: a page information segment, one immediate lossless generic
+  region at template 0 with TPGDON and the nominal AT pixels, an end of
+  page — the assembly the filter crate deliberately leaves to its caller —
+  with the samples inverted, because T.88 codes 1 for black);
+- `max_ppi`: an **integer box filter**, one whole factor per axis, chosen so
+  that no placement of the image is finer than that on either axis. Placements
+  come from interpreting every page, every form XObject it draws at any depth
+  (a form that draws itself is not re-entered) and every state of every
+  annotation's `/AP /N`, placed by 12.5.5's algorithm: an axis drawn `L`
+  points long shows its samples over `L / 72` inches, and the factor is
+  `ceil(finest ppi / max_ppi)`. Each output sample is its block's mean,
+  rounded half up, a partial block at the right or bottom edge the mean of
+  what it holds. An image's `/SMask` or `/Mask` is placed wherever the image
+  is.
+
+An image that is another's soft or stencil mask is coded losslessly whatever
+the continuous codec, since a quantiser's ringing on an edge of alpha is a
+halo. A recoding is kept only if it is **smaller** than the stream stored.
+`Saved::images` is an `ImageOutcome` with `SubsetOutcome`'s three shapes —
+`Kept`, `Recoded(ImageReport)` and `RecodedButTheOriginalsRemain(report)` for an
+appended save, whose prefix keeps every stored image — and the report names
+every image by object reference: `recoded` (coding, size before and after,
+bytes before and after, and `resolution_kept` when a resample was asked and
+not done) and `untouched` with an `UntouchedImageReason`.
+
+**Why the switch is not `WriteOptions::images`,** which is what the roadmap
+row first asked for: font subsetting's reason, and one of its own. A
+resolution is a property of where an image is *drawn* — one object placed as
+a thumbnail and as a page has two — and only the interpreter's walk can say
+where, which `tinker-pdf-cos` is below. And `WriteOptions` describes bytes on
+disk under a contract its writer has always kept, that it never re-encodes
+image bytes; this pass runs on the editor before that writer and the writer
+still re-encodes nothing.
+
+**A `/Decode` array never blocks it.** Every operation here preserves one: a
+lossless coding keeps the samples it applies to, and 8.9.5.2's map is affine
+per component, so a block mean of samples is the block mean of what they
+decode to and a quantiser's error is scaled by `(Dmax - Dmin) / 255`, never
+amplified. Inline images (8.9.7) live in content streams and are not
+touched.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
@@ -285,6 +341,12 @@ remove anything.
 | Compressing a `/Type /Metadata` stream | none — written unfiltered whatever `compress` says (`a_caller_supplied_packet_is_written_verbatim_and_uncompressed`) | an XMP packet is read from the raw bytes by tools that do not decode PDF, and ISO 19005 forbids a filter on one | 14.3.2 |
 | A font-subsetting switch on `WriteOptions` | none, and deliberately — the field does not exist and `WriteOptions`' own doc comment says why | the pass is driven by the interpreter, which `tinker-pdf-cos` is below; a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts` | [fonts](fonts.md) |
 | Subsetting that *removes* anything on an incremental save | `SubsetOutcome::CutButTheOriginalsRemain`, and `removed()` is false | 7.5.6: the output starts with the original bytes, the original font programs among them. The pass still runs, because the smaller programs are what a reader resolves — but nothing has left the file | 7.5.6 |
+| An image switch on `WriteOptions` | none, and deliberately; the switch is `SaveOptions::images` | a resolution is where an image is drawn, which only the interpreter's walk knows, and `WriteOptions`' writer promises never to re-encode image bytes | [ROADMAP](../ROADMAP.md) |
+| Recoding an image stored through an image codec (`DCTDecode`, `JPXDecode`, `CCITTFaxDecode`, `JBIG2Decode`), `Crypt`, an unknown filter or an external `/F` | `UntouchedImageReason::Filter { name }` | the pass reads samples through the general filters only; a codec's samples *in their own colour space* are the read side's images row, and a second decoder here would be a second answer to what those bytes mean | [ROADMAP](../ROADMAP.md) |
+| A lossy coding or a resample of an image with a colour-key `/Mask`; a resample of a `/Matte` soft mask or its image, an `/Indexed` image, one not at eight bits, a bilevel one, or one no walked stream draws | `UntouchedImageReason::ColourKeyMask`, `Matte`, `Indexed`, `Depth { bits }`, `Bilevel`, `Unplaced` — on `untouched`, or on `Recoded::resolution_kept` when a lossless coding still ran | each would change what the page shows: masked pixels decided by exact equality, a matte relation that needs equal dimensions, palette indices, grey from black and white, or a resolution with nothing to measure it by (a tiling pattern's cell, a Type 3 glyph and a soft mask's group are not walked) | 8.9.6.4, 11.6.5.3 |
+| JPEG for four components or an image that is not eight bits | `UntouchedImageReason::Components { count }`, `Depth { bits }` | baseline T.81 as `jpeg_encode` writes it: one or three components, eight bits | [filters](filters.md) |
+| A recoding no smaller than what the file stored | `UntouchedImageReason::NotSmaller` | the stored stream is both smaller and the producer's own | — |
+| Recoding into an incremental save | `ImageOutcome::RecodedButTheOriginalsRemain` | 7.5.6: every stored image stays in the prefix, so the file grows; the pass still runs, because the recoded streams are what a reader draws | 7.5.6 |
 
 ## Verified
 
@@ -389,6 +451,28 @@ dropped 1, the trailer not redirected 1, one round only 1, bucketing by stored
 bytes 1, the pass never run 2 — and the dictionary dropped from the bucket key
 alone **0**, because the comparison that decides checks it again; that is the
 second layer doing its job, not a hole.
+
+The image pass is `crates/tinker-pdf/tests/image_recode.rs`, and every
+expected answer there is the generator's input or arithmetic done in the file.
+`the_default_save_leaves_every_image_as_stored` holds a default save equal,
+byte for byte, to the font pass and the serializer alone, with every image
+stream as stored. `lossless_codings_give_back_exactly_the_samples_written`
+saves eight-bit grey and RGB, four-bit grey and an indexed image deflated, and
+a one-bit grey image and a stencil mask under each of deflate, G4 and JBIG2,
+and reads back exactly the samples the test wrote and a page drawn to the same
+pixels. `downsampling_is_an_exact_box_filter_at_the_finest_placement` places
+one image twice and another only inside a form whose `/Matrix` halves it, and
+holds the factors, the dimensions and every block mean against a box filter
+written in the test. `jpeg_decodes_within_the_bound_the_callers_tables_give`
+codes a textured grey and RGB image with the caller's tables, finds exactly
+those tables in the DQT segments, and holds every sample within a bound
+computed from them: T.81 A.3.3's basis applied to half of each quantiser,
+widened by what a 1/16384 basis and a flooring integer IDCT can add, and for
+RGB carried through T.871's inverse with the encoder's rounding and the
+decoder's truncation. `what_cannot_be_kept_is_left_whole_by_name` reaches
+every `UntouchedImageReason` a page can, and
+`a_hostile_document_never_panics_the_pass` saves mutated documents under three
+policies.
 
 `crates/tinker-pdf-cos/tests/encrypt_on_save.rs` round-trips encrypted
 output ([encryption](encryption.md)); `tests/page_operations.rs` and the

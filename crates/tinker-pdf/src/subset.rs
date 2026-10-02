@@ -247,7 +247,7 @@ use crate::resources::PageResources;
 /// document this pass must still return from (ruling 1). Reached only by a
 /// file that is lying about its size, since the sweep is one dictionary read
 /// per entry.
-const MAX_SWEPT_OBJECTS: usize = 1 << 21;
+pub(crate) const MAX_SWEPT_OBJECTS: usize = 1 << 21;
 
 /// Why a font's program was written through whole (ruling 10).
 ///

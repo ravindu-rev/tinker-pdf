@@ -436,9 +436,12 @@ measured, by injecting two such permutations and watching Annex H.1 still match
 byte for byte. T.88's Figures 8 to 11, transcribed pixel by pixel, are what pin
 it, and they pin all four templates rather than the one the annex uses.
 
-**Nothing in this repository calls either encoder outside the tests**, and the
-writer's contract — it never re-encodes image bytes — is unchanged by their
-existence ([creation](creation.md), [ROADMAP](../ROADMAP.md)).
+**One caller outside the tests, and only when asked**: the facade's save
+door recodes image XObjects through G4 and a JBIG2 generic region (and
+`jpeg_encode`) when `SaveOptions::images` names them, assembling the D.3
+embedded stream this crate leaves to its caller ([writing](writing.md)). The
+cos writer's contract — it never re-encodes image bytes — is unchanged
+([creation](creation.md), [ROADMAP](../ROADMAP.md)).
 
 **And a baseline JPEG encoder joined them on 16 September 2026**, which closes
 the roadmap's image-encoder row with one gap named rather than papered over.
