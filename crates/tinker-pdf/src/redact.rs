@@ -211,6 +211,11 @@
 //! its samples are not tokens, and until September 2026 the rewrite
 //! tokenized them anyway and wrote back whatever tokens they spelled — every
 //! inline image on a redacted page corrupted, none of them ever scrubbed.
+//! One a form draws is a change to the form as much as a glyph removed
+//! ([`FormCut::removed`]): until October 2026 a form's cut was written only
+//! when it removed a glyph, so an inline image in a form drawn once, or
+//! covered at every placement, or in an annotation's appearance, kept its
+//! samples, and the report said `images: 0`.
 //!
 //! # Annotation appearances
 //!
@@ -1500,6 +1505,17 @@ struct FormCut {
     names: Vec<std::ops::Range<usize>>,
     glyphs: usize,
     operations: usize,
+    /// Inline images the cut scrubbed (8.9.7). A change as much as a glyph
+    /// removed: a cut that scrubbed one and removed no glyph still has to be
+    /// written, or the samples stay in the file.
+    images: usize,
+}
+
+impl FormCut {
+    /// Whether the cut removed anything — a glyph or an inline image.
+    fn removed(&self) -> bool {
+        self.glyphs > 0 || self.images > 0
+    }
 }
 
 /// One placement of a form: which form, under which transform, and what it
@@ -1701,6 +1717,7 @@ impl Walk {
                     names: inner_uses.iter().map(|u| u.at.clone()).collect(),
                     glyphs: pass.glyphs,
                     operations: pass.operations,
+                    images: pass.images,
                 });
                 entry.cuts.len() - 1
             }
@@ -1934,7 +1951,7 @@ fn decide(
         .collect();
 
     let unchanged = |outcome: &Outcome| {
-        outcome.1.is_empty() && entry.cuts.get(outcome.0).is_none_or(|c| c.glyphs == 0)
+        outcome.1.is_empty() && entry.cuts.get(outcome.0).is_none_or(|c| !c.removed())
     };
     // The outcome the form's own object holds, or `None` when it is left as
     // it was for something else to draw and every placement here draws a
@@ -1992,6 +2009,7 @@ fn decide(
         editor.put_stream(at, StreamData { dict, data });
         report.glyphs += cut.glyphs;
         report.operations += cut.operations;
+        report.images += cut.images;
     }
 }
 
@@ -2237,6 +2255,7 @@ fn union(
     };
     let mut data = entry.content.clone();
     let mut glyphs = 0usize;
+    let mut images = 0usize;
     for &n in &entry.nodes {
         let Some(node) = walk.nodes.get(n) else {
             continue;
@@ -2253,10 +2272,16 @@ fn union(
         );
         data = next;
         glyphs += pass.glyphs;
+        images += pass.images;
         report.operations += pass.operations;
     }
     report.glyphs += glyphs;
-    if glyphs > 0 {
+    report.images += images;
+    // An inline image scrubbed is a change as much as a glyph removed: until
+    // October 2026 only a glyph wrote the stream, and an image this cut
+    // scrubbed stayed in the file.
+    let removed = glyphs > 0 || images > 0;
+    if removed {
         let dict = plain_stream_dict(editor, &entry.dict);
         editor.put_stream(entry.reference, StreamData { dict, data });
     }
@@ -2265,7 +2290,7 @@ fn union(
     // other warning in this module follows: with no rectangles nothing was
     // cut and nothing was widened.
     let placements = entry.nodes.len();
-    if !areas.is_empty() && placements >= 2 && (glyphs > 0 || entry.refused) {
+    if !areas.is_empty() && placements >= 2 && (removed || entry.refused) {
         note(
             &mut report.warnings,
             RedactionWarning::RepeatedForm {
@@ -2990,6 +3015,13 @@ fn blank_inline_image(span: &[u8]) -> &'static [u8] {
     }
 }
 
+/// Whether `span` — what follows a `BI`, through its `EI` — is already the
+/// blank image [`blank_inline_image`] writes in its place.
+fn is_blank_inline_image(blank: &[u8], span: &[u8]) -> bool {
+    let blank = blank.strip_prefix(b"BI".as_slice()).unwrap_or(blank);
+    blank.trim_ascii_start() == span.trim_ascii_start()
+}
+
 /// One `Do` invocation, and the transform in force when it happened.
 struct XObjectUse {
     name: Vec<u8>,
@@ -3317,8 +3349,15 @@ fn rewrite(
                     at: 0..0,
                 };
                 if covers_unit_square(&placed, areas) {
-                    report.images += 1;
-                    out.extend_from_slice(blank_inline_image(span));
+                    let blank = blank_inline_image(span);
+                    // One already blank — a scrub an earlier pass wrote —
+                    // is not scrubbed again: nothing is removed, so nothing
+                    // is counted, and a placement cut the old way after
+                    // another does not count the one image twice.
+                    if !is_blank_inline_image(blank, span) {
+                        report.images += 1;
+                    }
+                    out.extend_from_slice(blank);
                 } else {
                     out.extend_from_slice(b"BI");
                     out.extend_from_slice(span);
@@ -5205,6 +5244,138 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
                 "{what} draws nothing"
             );
         }
+    }
+
+    /// A page whose form `/Fm0` (object 8) draws a two-by-two inline image
+    /// over (100, 100)–(150, 150) of its own space, then `form_tail`. The
+    /// page's content is `page`, and `page_extra` is written into the page
+    /// dictionary — an `/Annots` array that shows the same form as an
+    /// appearance, for one.
+    fn inline_image_form_document(page: &str, form_tail: &str, page_extra: &str) -> Vec<u8> {
+        let mut form = b"q 50 0 0 50 100 100 cm BI /W 2 /H 2 /CS /G /BPC 8 ID ".to_vec();
+        form.extend_from_slice(&[0x10, 0x20, 0x30, 0x40]);
+        form.extend_from_slice(b" EI Q ");
+        form.extend_from_slice(form_tail.as_bytes());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.extend_from_slice(
+            format!(
+                "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+                 /Resources << /XObject << /Fm0 8 0 R >> >> /Contents 7 0 R {page_extra} >>\n\
+                 endobj\n"
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(super::tests_support::stream_object(7, page).as_bytes());
+        out.extend_from_slice(
+            format!(
+                "8 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 200]\n\
+                 /Resources << /XObject << /Fm0 8 0 R >> >> /Length {} >>\nstream\n",
+                form.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&form);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(b"trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
+        out
+    }
+
+    /// An inline image a **form** draws is scrubbed when a rectangle covers
+    /// it — at a form drawn once, at one drawn twice with both placements
+    /// covered, in an annotation's appearance, and in a form that draws
+    /// itself, which is cut the old way.
+    ///
+    /// Until October 2026 a form's cut counted as a change only when it
+    /// removed a glyph: the scrubbed image was in the cut data, and the
+    /// form's own object was never written, so the samples stayed in the
+    /// file and drew where they were, and the report said `images: 0`. Only
+    /// a form placed twice with the placements cut *differently* happened to
+    /// write the scrub, as a copy.
+    #[test]
+    fn an_inline_image_a_form_draws_under_a_redaction_is_scrubbed() {
+        let annotation = "/Annots [<< /Type /Annot /Subtype /Square /Rect [0 0 200 200] \
+                          /AP << /N 8 0 R >> >>]";
+        for (page, tail, extra, what) in [
+            ("/Fm0 Do", "", "", "a form drawn once"),
+            (
+                "/Fm0 Do q 1 0 0 1 0.5 0 cm /Fm0 Do Q",
+                "",
+                "",
+                "a form drawn twice, both placements covered",
+            ),
+            ("", "", annotation, "an annotation's appearance"),
+            ("/Fm0 Do", "/Fm0 Do", "", "a form that draws itself"),
+        ] {
+            let bytes = inline_image_form_document(page, tail, extra);
+            let over = Rect {
+                x0: 120.0,
+                y0: 120.0,
+                x1: 130.0,
+                y1: 130.0,
+            };
+            let image = Rect {
+                x0: 101.0,
+                y0: 101.0,
+                x1: 149.0,
+                y1: 149.0,
+            };
+            assert!(
+                super::tests_support::ink_in(
+                    &super::tests_support::render(bytes.clone()),
+                    200.0,
+                    image
+                ) > 0,
+                "{what}: the image starts inked"
+            );
+
+            let (after, report) = redact(
+                Arc::new(CosDocument::open(bytes).expect("it opens")),
+                &[Redaction {
+                    area: over,
+                    mark: false,
+                }],
+            );
+            assert_eq!(report.images, 1, "{what}: {report:?}");
+            let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+            assert!(
+                !streams.contains("\u{10} 0@"),
+                "{what}: the samples are gone: {streams:?}"
+            );
+            assert_eq!(
+                super::tests_support::ink_in(&super::tests_support::render(after), 200.0, image),
+                0,
+                "{what}: the image draws nothing"
+            );
+        }
+    }
+
+    /// An inline image already scrubbed is not scrubbed again: a second
+    /// redaction over it reports nothing removed, because nothing was.
+    #[test]
+    fn an_inline_image_already_blank_is_not_counted_again() {
+        let bytes = inline_image_page("/W 2 /H 2 /CS /G /BPC 8");
+        let over = Redaction {
+            area: Rect {
+                x0: 120.0,
+                y0: 120.0,
+                x1: 130.0,
+                y1: 130.0,
+            },
+            mark: false,
+        };
+        let (once, first) = redact(
+            Arc::new(CosDocument::open(bytes).expect("it opens")),
+            &[over],
+        );
+        let (_, second) = redact(
+            Arc::new(CosDocument::open(once).expect("it reopens")),
+            &[over],
+        );
+        assert_eq!((first.images, second.images), (1, 0));
     }
 
     /// An image the redaction does not touch is left alone. Scrubbing every

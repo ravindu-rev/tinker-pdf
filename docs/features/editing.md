@@ -407,7 +407,12 @@ inline image the rectangles do not touch is written back byte for byte:
 until September 2026 the rewrite tokenized its samples like the rest of the
 stream and wrote back whatever tokens they spelled, corrupting every inline
 image on a redacted page and scrubbing none (`an_inline_image_is_carried_through_a_rewrite_byte_for_byte`,
-`an_inline_image_under_a_redaction_is_scrubbed`). An **annotation's
+`an_inline_image_under_a_redaction_is_scrubbed`). One a **form** or an
+appearance draws is scrubbed the same way: until October 2026 a form's cut
+was written back only when it removed a glyph, so an inline image a form drew
+once, or drew at placements every one of which a rectangle covered, kept its
+samples and its ink, and the report said `images: 0` (`an_inline_image_a_form_draws_under_a_redaction_is_scrubbed`).
+An image already blank is not counted again. An **annotation's
 appearance** (12.5.5) is a form the page draws over itself, and is cut as
 one: every appearance an annotation on the page can show — each of `/N`,
 `/R` and `/D`, every state of each whatever `/AS` selects, and a hidden
