@@ -552,3 +552,169 @@ fn mutated_form_data_never_panics() {
         }
     }
 }
+
+/// What the form data readers hand back stays inside `MAX_FORM_DATA_BYTES`,
+/// on every shape that once multiplied a small file into a large allocation,
+/// at every scale from small to past the budget.
+///
+/// Each shape repeats one thing the file says once: a field's 32 KiB name in
+/// every warning met inside it, in FDF and in XFDF; one indirect `/T` in every
+/// name beneath it, down a chain of nested field objects; one indirect `/V`
+/// in every field; a 32 KiB inline name in every kid's. Before the budget the
+/// largest of these asked for 184 MB, more than 1 GB, 394 MB, 128 MiB and
+/// 148 MB, from under 150 KiB each. At every scale a read either refuses the
+/// file whole (`FormDataError::TooLarge`) or hands back no more than the
+/// budget — counted from what it handed back, so a copy the accounting forgot
+/// shows here — and the largest scale of every shape is refused. A `/Kids`
+/// array whose entries name it as their own `/Kids` is here too: it was
+/// walked `2^256` times, and now returns.
+#[test]
+fn form_data_hands_back_no_more_than_its_budget() {
+    use std::mem::size_of;
+    use tinker_pdf::form_data::{
+        read_fdf, read_xfdf, FieldData, FormData, FormDataError, FormDataWarning,
+        MAX_FORM_DATA_BYTES,
+    };
+    use tinker_pdf::FieldValue;
+
+    type Shape<'a> = (
+        &'a str,
+        bool,
+        Box<dyn Fn(usize) -> Vec<u8> + 'a>,
+        [usize; 5],
+    );
+
+    fn fdf(fields: &str, objects: &str) -> Vec<u8> {
+        format!(
+            "%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [ {fields} ] >> >>\nendobj\n{objects}\
+             trailer\n<< /Root 1 0 R >>\n%%EOF\n"
+        )
+        .into_bytes()
+    }
+    /// What `data` holds, counted the way the budget counts it.
+    fn held(data: &FormData) -> usize {
+        let value = |value: &FieldValue| match value {
+            FieldValue::Text(text) | FieldValue::State(text) => text.len(),
+            FieldValue::Many(values) => values.iter().map(|v| size_of::<String>() + v.len()).sum(),
+            _ => 0,
+        };
+        let fields: usize = data
+            .fields
+            .iter()
+            .map(|f| size_of::<FieldData>() + f.name.len() + value(&f.value))
+            .sum();
+        let warnings: usize = data
+            .warnings
+            .iter()
+            .map(|w| {
+                size_of::<FormDataWarning>()
+                    + match w {
+                        FormDataWarning::NotRead { what, field } => what.len() + field.len(),
+                        FormDataWarning::ValueUnreadable { field }
+                        | FormDataWarning::TreeCut { field } => field.len(),
+                        _ => 0,
+                    }
+            })
+            .sum();
+        fields + warnings + data.source.as_ref().map_or(0, String::len)
+    }
+
+    let name = "n".repeat(32 * 1024);
+    let shared = format!("2 0 obj\n({})\nendobj\n", "s".repeat(16 * 1024));
+    let shapes: Vec<Shape<'_>> = vec![
+        (
+            "unread keys in a long-named field",
+            false,
+            Box::new(|n| {
+                let keys: String = (0..n).map(|i| format!("/K{i} 1 ")).collect();
+                fdf(&format!("<< /T ({name}) /V (x) {keys} >>"), "")
+            }),
+            [250, 500, 1000, 2000, 4000],
+        ),
+        (
+            "one indirect /T down a chain of field objects",
+            false,
+            Box::new(|n| {
+                let mut objects = shared.clone();
+                for level in 0..n {
+                    let kids = if level + 1 == n {
+                        String::new()
+                    } else {
+                        format!("/Kids [ {} 0 R ]", level + 11)
+                    };
+                    objects.push_str(&format!(
+                        "{} 0 obj\n<< /T 2 0 R /V (x) {kids} >>\nendobj\n",
+                        level + 10
+                    ));
+                }
+                fdf("10 0 R", &objects)
+            }),
+            [16, 32, 64, 128, 256],
+        ),
+        (
+            "one indirect /V in every field",
+            false,
+            Box::new(|n| {
+                let fields: String = (0..n)
+                    .map(|i| format!("<< /T (f{i}) /V 2 0 R >> "))
+                    .collect();
+                fdf(&fields, &shared)
+            }),
+            [300, 600, 1200, 2400, 5000],
+        ),
+        (
+            "kids beneath a long inline name",
+            false,
+            Box::new(|n| {
+                let kids = "<< /T (a) /V (v) >> ".repeat(n);
+                fdf(&format!("<< /T ({name}) /Kids [ {kids} ] >>"), "")
+            }),
+            [250, 500, 1000, 2000, 4000],
+        ),
+        (
+            "unread XFDF elements in a long-named field",
+            true,
+            Box::new(|n| {
+                format!(
+                    "<xfdf><fields><field name=\"{name}\">{}<value>v</value></field></fields></xfdf>",
+                    "<x/>".repeat(n)
+                )
+                .into_bytes()
+            }),
+            [250, 500, 1000, 2000, 4000],
+        ),
+    ];
+
+    for (label, xml, build, scales) in &shapes {
+        for (at, &scale) in scales.iter().enumerate() {
+            let bytes = build(scale);
+            assert!(
+                bytes.len() < 150 * 1024,
+                "{label} at {scale}: the input is small"
+            );
+            let read = if *xml {
+                read_xfdf(&bytes)
+            } else {
+                read_fdf(&bytes)
+            };
+            match read {
+                Ok(data) => {
+                    assert!(
+                        held(&data) <= MAX_FORM_DATA_BYTES,
+                        "{label} at {scale}: {} bytes handed back",
+                        held(&data)
+                    );
+                    assert!(at + 1 < scales.len(), "{label}: the largest is read");
+                }
+                Err(error) => assert_eq!(error, FormDataError::TooLarge, "{label} at {scale}"),
+            }
+        }
+    }
+
+    let doubling = fdf(
+        "<< /T (r) /Kids 5 0 R >>",
+        "5 0 obj\n[ << /T (a) /Kids 5 0 R >> << /T (b) /Kids 5 0 R >> ]\nendobj\n",
+    );
+    let data = read_fdf(&doubling).expect("a self-naming /Kids array reads, and returns");
+    assert!(held(&data) < 1024);
+}

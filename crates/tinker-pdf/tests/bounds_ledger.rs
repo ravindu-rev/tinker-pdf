@@ -1,5 +1,15 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 2 October 2026, the review of the form data exchange row.* **One
+//! more row, `MAX_FORM_DATA_BYTES`, the second cap on copies.** The FDF and
+//! XFDF readers hand back qualified names, values and warnings, and each of
+//! those repeated something the file says once: a field's name in every
+//! warning met inside it, a shared indirect `/T` in every name beneath it, a
+//! shared `/V` in every field. The review found 67 KiB of FDF asking for
+//! 184 MB and 22 KiB asking for a gigabyte. Its `fixtures` is the cap, for
+//! `MAX_ANNOTATION_BYTES`'s reason, and its three yardsticks are zeros,
+//! because none of the container paths reads form data.
+//!
 //! *Amended, 26 September 2026, the annotation payloads row.* **One more row,
 //! `MAX_ANNOTATION_BYTES`, and it is a cap on copies rather than on anything
 //! parsed.** Everything a page's annotation listing hands back is a copy of an
@@ -424,6 +434,7 @@ use tinker_pdf::cbz::{
 use tinker_pdf::epub::{
     MAX_EPUB_FALLBACK_DEPTH, MAX_EPUB_MANIFEST_ITEMS, MAX_EPUB_SPINE_ITEMS, MAX_OCF_PATH_LEN,
 };
+use tinker_pdf::form_data::MAX_FORM_DATA_BYTES;
 use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
@@ -480,6 +491,10 @@ const INLINE_IMAGE_TESTS: &str = include_str!("inline_images.rs");
 /// that spend it, and fired by a test beside the listing that owns the budget.
 const ANNOTATION_PAYLOADS: &str = include_str!("../src/annotations/payload.rs");
 const ANNOTATION_TESTS: &str = include_str!("../src/annotations.rs");
+/// The form data readers' copy budget, declared beside the two readers that
+/// spend it, and fired by the exchange row's own suite.
+const FORM_DATA: &str = include_str!("../src/form_data.rs");
+const FORM_DATA_TESTS: &str = include_str!("form_data.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -1922,6 +1937,34 @@ fn ledger() -> Vec<Bound> {
                 ANNOTATION_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_FORM_DATA_BYTES",
+            cap: MAX_FORM_DATA_BYTES as u128,
+            published: "64 MiB",
+            // The cap, for `MAX_ANNOTATION_BYTES`'s reason one row up: the
+            // test that proves it fires builds files that ask for more and
+            // spends the budget to the byte it runs out at. Beside it, an
+            // honest form of ten thousand fields spends 4 140 000 bytes, and
+            // every other file `tests/form_data.rs` reads — measured over all
+            // of them on 2 October 2026 — at most 20 125, a name ten thousand
+            // partial names deep.
+            fixtures: MAX_FORM_DATA_BYTES as u128,
+            // None of the three container paths reads FDF or XFDF.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // An FDF's field tree nests 256 deep, and every level may name
+            // one indirect `/T` as long as the file: the deepest name alone
+            // is 256 copies of it, on the narrowest target at most
+            // `u32::MAX` bytes each.
+            reachable: 256 * (1u128 << 32),
+            reachable_because: "256 nested fields naming one shared /T as long as a 4 GiB file",
+            declared_in: FORM_DATA,
+            fires_in: (
+                "a_file_that_asks_for_more_than_the_budget_is_refused",
+                FORM_DATA_TESTS,
+            ),
+        },
     ]
 }
 
@@ -1937,7 +1980,8 @@ fn ledger() -> Vec<Bound> {
 /// bounds, `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`; and Tier 2's custom
 /// code tables add `MAX_JBIG2_TABLE_LINES`; and the `jbig2` fuzz row adds
 /// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`; and the annotation payloads row adds
-/// `MAX_ANNOTATION_BYTES`. All **forty-five** are here, and
+/// `MAX_ANNOTATION_BYTES`; and the review of the form data exchange row adds
+/// `MAX_FORM_DATA_BYTES`. All **forty-six** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -1990,6 +2034,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_PAGE_PIXELS",
             "MAX_DECODED_STREAM",
             "MAX_ANNOTATION_BYTES",
+            "MAX_FORM_DATA_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2095,7 +2140,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 45, "the ledger is forty-five rows");
+    assert_eq!(measured, 46, "the ledger is forty-six rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2127,7 +2172,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 45, "the ledger is forty-five rows");
+    assert_eq!(ledger().len(), 46, "the ledger is forty-six rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -2432,6 +2477,8 @@ fn every_bound_names_a_test_that_exists() {
         PAGE_GEOMETRY_TESTS,
         INLINE_IMAGE_TESTS,
         ANNOTATION_TESTS,
+        FORM_DATA,
+        FORM_DATA_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),

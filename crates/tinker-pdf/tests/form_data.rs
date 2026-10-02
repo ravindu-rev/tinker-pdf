@@ -553,6 +553,279 @@ fn a_value_xml_cannot_carry_is_refused() {
     assert_eq!(back.fields, data.fields);
 }
 
+/// An FDF of `body` as its `/Fields` entries, with `objects` after the root.
+fn fdf_of(fields: &str, objects: &str) -> Vec<u8> {
+    format!(
+        "%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [ {fields} ] >> >>\nendobj\n{objects}\
+         trailer\n<< /Root 1 0 R >>\n%%EOF\n"
+    )
+    .into_bytes()
+}
+
+/// **`MAX_FORM_DATA_BYTES` fires**, on each shape the review of the exchange
+/// row named and the ones beside them, and a file that fits reads whole.
+///
+/// Every one is small and asks for a great deal, because what a reader hands
+/// back repeats what the file says once: a name copied into every warning met
+/// inside its field, a shared `/T` copied into every level's name beneath it,
+/// a shared `/V` into every field, an XFDF name the same. Measured with a
+/// counting allocator before the budget, the unread keys peaked at 184 MB
+/// from 66 KiB, the inline shared `/T` at 252 MB from 12 KiB, the indirect
+/// one at 1.05 GB from 22 KiB, the shared `/V` at 394 MB from 142 KiB and the
+/// XFDF unread elements at 148 MB from 48 KiB; each is linear in both of its
+/// factors. The refusal it waits for is `FormDataError::TooLarge`, from both
+/// readers.
+#[test]
+fn a_file_that_asks_for_more_than_the_budget_is_refused() {
+    // One field, a 32 KiB name and four thousand keys this reader does not
+    // read: each `NotRead` names the field.
+    let name = "n".repeat(32 * 1024);
+    let keys: String = (0..4000).map(|i| format!("/K{i} 1 ")).collect();
+    let unread = fdf_of(&format!("<< /T ({name}) /V (x) {keys} >>"), "");
+    assert!(unread.len() < 70 * 1024);
+    assert_eq!(read_fdf(&unread), Err(FormDataError::TooLarge));
+
+    // 127 fields nested inline, as deep as the object parser nests, every
+    // one naming the same indirect 8 KiB string as its `/T`: the name at
+    // depth d is d copies of it.
+    let shared = "s".repeat(8 * 1024);
+    let shared_object = format!("2 0 obj\n({shared})\nendobj\n");
+    let tree = format!(
+        "{}<< /T 2 0 R /V (x) >>{}",
+        "<< /T 2 0 R /V (x) /Kids [ ".repeat(126),
+        " ] >>".repeat(126)
+    );
+    let deep = fdf_of(&tree, &shared_object);
+    assert!(deep.len() < 13 * 1024);
+    assert_eq!(read_fdf(&deep), Err(FormDataError::TooLarge));
+
+    // The same, with each of 256 levels an object of its own, which the
+    // object parser's nesting bound does not reach: as deep as the field
+    // tree's own bound walks.
+    let mut chain = shared_object.clone();
+    for level in 0..256u32 {
+        let kids = if level == 255 {
+            String::new()
+        } else {
+            format!("/Kids [ {} 0 R ]", level + 11)
+        };
+        chain.push_str(&format!(
+            "{} 0 obj\n<< /T 2 0 R /V (x) {kids} >>\nendobj\n",
+            level + 10
+        ));
+    }
+    let chain = fdf_of("10 0 R", &chain);
+    assert!(chain.len() < 23 * 1024);
+    assert_eq!(read_fdf(&chain), Err(FormDataError::TooLarge));
+
+    // A name built and never handed back is paid for too: 256 groups with no
+    // value, one shared 300 KiB `/T` apiece, and a last `/Kids` naming
+    // nothing that is a field, so no field, warning or cut ever copies the
+    // name — and the name the walk holds was 75 MiB at the bottom.
+    let mut groups = format!("2 0 obj\n({})\nendobj\n", "t".repeat(300 * 1024));
+    for level in 0..256u32 {
+        groups.push_str(&format!(
+            "{} 0 obj\n<< /T 2 0 R /Kids [ {} ] >>\nendobj\n",
+            level + 10,
+            if level == 255 {
+                "1".to_string()
+            } else {
+                format!("{} 0 R", level + 11)
+            }
+        ));
+    }
+    let groups = fdf_of("10 0 R", &groups);
+    assert!(groups.len() < 320 * 1024);
+    assert_eq!(read_fdf(&groups), Err(FormDataError::TooLarge));
+
+    // An inline name is the file's own bytes, but every field beneath it
+    // repeats it: four thousand kids under one 32 KiB `/T`.
+    let kids = "<< /T (a) /V (v) >> ".repeat(4000);
+    let beneath = fdf_of(&format!("<< /T ({name}) /Kids [ {kids} ] >>"), "");
+    assert!(beneath.len() < 120 * 1024);
+    assert_eq!(read_fdf(&beneath), Err(FormDataError::TooLarge));
+
+    // And one shared indirect `/V`, the same string as every field's value.
+    let fields: String = (0..5_000)
+        .map(|i| format!("<< /T (f{i}) /V 2 0 R >> "))
+        .collect();
+    let values = fdf_of(
+        &fields,
+        &format!("2 0 obj\n({})\nendobj\n", "v".repeat(16 * 1024)),
+    );
+    assert!(values.len() < 150 * 1024);
+    assert_eq!(read_fdf(&values), Err(FormDataError::TooLarge));
+
+    // XFDF: a 32 KiB `name` and four thousand elements it does not read.
+    let xfdf = format!(
+        "<xfdf><fields><field name=\"{name}\">{}<value>v</value></field></fields></xfdf>",
+        "<x/>".repeat(4000)
+    );
+    assert_eq!(read_xfdf(xfdf.as_bytes()), Err(FormDataError::TooLarge));
+    // And with no warning at all: four thousand fields beneath one 32 KiB
+    // name, each of whose qualified names repeats it.
+    let nested = format!(
+        "<xfdf><fields><field name=\"{name}\">{}</field></fields></xfdf>",
+        "<field name=\"a\"><value>v</value></field>".repeat(4000),
+    );
+    assert_eq!(read_xfdf(nested.as_bytes()), Err(FormDataError::TooLarge));
+
+    // The other direction: an honest form of ten thousand fields, 46-byte
+    // names and a 312-byte value each, spends 4 140 000 bytes and reads whole.
+    let honest = FormData {
+        fields: (0..10_000)
+            .map(|i| {
+                entry(
+                    &format!("applicant.section{:03}.question{i:05}.answer.text", i % 100),
+                    text(&"an answer of some length. ".repeat(12)),
+                )
+            })
+            .collect(),
+        ..FormData::default()
+    };
+    let back = read_fdf(&honest.to_fdf()).expect("an honest form reads");
+    assert_eq!(back.fields.len(), 10_000);
+    let xfdf = honest.to_xfdf().expect("writes");
+    let back = read_xfdf(xfdf.as_bytes()).expect("an honest form reads");
+    assert_eq!(back.fields.len(), 10_000);
+}
+
+/// A `/Kids` array is walked once, however many fields name it — the visited
+/// set holds every object the walk descends through, not only the fields.
+///
+/// An array two fields share is the same fields twice, and the second parent
+/// is cut and says so. An array whose own entries name it as their `/Kids`
+/// was walked `2^256` times: a 150-byte FDF that did not come back. And a
+/// chain of references is marked link by link, so two references to a third
+/// do not reach the same array twice either.
+#[test]
+fn a_kids_array_is_walked_once_however_many_fields_name_it() {
+    let shared = fdf_of(
+        "<< /T (a) /Kids 5 0 R >> << /T (b) /Kids 5 0 R >>",
+        "5 0 obj\n[ << /T (x) /V (1) >> ]\nendobj\n",
+    );
+    let data = read_fdf(&shared).expect("reads");
+    assert_eq!(data.fields, vec![entry("a.x", text("1"))]);
+    assert_eq!(
+        data.warnings,
+        vec![FormDataWarning::TreeCut { field: "b".into() }]
+    );
+
+    let doubling = fdf_of(
+        "<< /T (r) /Kids 5 0 R >>",
+        "5 0 obj\n[ << /T (a) /Kids 5 0 R >> << /T (b) /Kids 5 0 R >> ]\nendobj\n",
+    );
+    let data = read_fdf(&doubling).expect("reads, and returns");
+    assert!(data.fields.is_empty());
+    assert_eq!(
+        data.warnings,
+        vec![
+            FormDataWarning::TreeCut {
+                field: "r.a".into()
+            },
+            FormDataWarning::TreeCut {
+                field: "r.b".into()
+            },
+        ]
+    );
+
+    let aliased = fdf_of(
+        "<< /T (a) /Kids 6 0 R >> << /T (b) /Kids 7 0 R >>",
+        "5 0 obj\n[ << /T (x) /V (1) >> ]\nendobj\n\
+         6 0 obj\n5 0 R\nendobj\n7 0 obj\n5 0 R\nendobj\n",
+    );
+    let data = read_fdf(&aliased).expect("reads");
+    assert_eq!(data.fields, vec![entry("a.x", text("1"))]);
+    assert_eq!(
+        data.warnings,
+        vec![FormDataWarning::TreeCut { field: "b".into() }]
+    );
+}
+
+/// A field whose qualified name is empty is not read, and not imported.
+///
+/// The field-tree walk names every field with no `/T` up its tree `""`, so an
+/// entry read as `""` and handed to the import landed in whichever of the
+/// document's fields has no name — the review's probe put `INJECTED` into one
+/// that way, from both formats. Both readers now name it
+/// `FormDataWarning::Unnamed` instead, and `apply` refuses the empty name in
+/// data built by hand.
+#[test]
+fn a_field_with_no_name_is_neither_read_nor_imported() {
+    let xfdf = read_xfdf(b"<xfdf><fields><field><value>INJECTED</value></field></fields></xfdf>")
+        .expect("reads");
+    assert!(xfdf.fields.is_empty());
+    assert_eq!(xfdf.warnings, vec![FormDataWarning::Unnamed]);
+    let xfdf =
+        read_xfdf(b"<xfdf><fields><field name=\"\"><value>x</value></field></fields></xfdf>")
+            .expect("reads");
+    assert!(xfdf.fields.is_empty());
+    assert_eq!(xfdf.warnings, vec![FormDataWarning::Unnamed]);
+
+    for fields in ["<< /T () /V (FDFINJ) >>", "<< /V (FDFINJ) >>"] {
+        let fdf = read_fdf(&fdf_of(fields, "")).expect("reads");
+        assert!(fdf.fields.is_empty(), "{fields}");
+        assert_eq!(fdf.warnings, vec![FormDataWarning::Unnamed], "{fields}");
+    }
+    // A nameless node under a named one is that field, as 12.7.3.2 has it:
+    // it contributes nothing to the name, and the name is not empty.
+    let under = read_fdf(&fdf_of("<< /T (a) /Kids [ << /V (x) >> ] >>", "")).expect("reads");
+    assert_eq!(under.fields, vec![entry("a", text("x"))]);
+
+    // A form with a named field and one with no /T at all.
+    let form = b"%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R 20 0 R] >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R 20 0 R] >>
+endobj
+10 0 obj
+<< /FT /Tx /T (named) /V (kept) /Rect [10 150 190 170] /Subtype /Widget /Type /Annot >>
+endobj
+20 0 obj
+<< /FT /Tx /V (orig) /Rect [10 120 190 140] /Subtype /Widget /Type /Annot >>
+endobj
+trailer
+<< /Size 21 /Root 1 0 R >>
+%%EOF
+";
+    let document = Document::open(form.to_vec()).expect("opens");
+    let mut editor = document.editor();
+    let all = |editor: &tinker_pdf::DocumentEditor| -> Vec<(String, FieldValue)> {
+        editor
+            .fields()
+            .into_iter()
+            .map(|f| (f.name, f.value))
+            .collect()
+    };
+    let before = all(&editor);
+    assert_eq!(
+        before,
+        vec![
+            ("named".to_string(), text("kept")),
+            (String::new(), text("orig"))
+        ],
+        "the premise: a field whose name is empty"
+    );
+    let skipped = apply(&mut editor, &xfdf).expect("nothing to import");
+    assert!(skipped.is_empty());
+    assert!(!editor.is_dirty(), "the unnamed entry was not imported");
+
+    let by_hand = FormData {
+        fields: vec![entry("named", text("changed")), entry("", text("INJECTED"))],
+        ..FormData::default()
+    };
+    let refusal = apply(&mut editor, &by_hand).expect_err("the empty name is refused");
+    assert_eq!(refusal.field, "");
+    assert_eq!(refusal.reason, FillError::NoSuchField);
+    assert!(!editor.is_dirty(), "and nothing before it was written");
+    assert_eq!(all(&editor), before);
+}
+
 /// Each reader refuses what is not its format, by name.
 #[test]
 fn the_wrong_format_is_refused_by_name() {

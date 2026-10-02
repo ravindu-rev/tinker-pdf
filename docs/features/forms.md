@@ -173,7 +173,22 @@ the name of its state, as the filling paragraph above says. FDF (12.7.8) is
 read by the same object reader every PDF is: the `/FDF` dictionary's
 `/Fields` tree, `/T` partial names joined as 12.7.3.2 joins them, `/V` as a
 text string, a name or an array of either, and `/F`; `/Kids` is walked with
-a visited set and the field tree's own depth bound. Written, the qualified
+a visited set holding every field, every `/Kids` array and every link of a
+reference chain to either — so a `/Kids` array two fields share, or one
+whose entries name it as their own `/Kids`, is walked once and the second
+parent named as a `TreeCut` — and the field tree's own depth bound. What
+both readers hand back is held to one budget, `MAX_FORM_DATA_BYTES` (64 MiB
+of names, values and warnings), charged before each copy is made, because a
+copy is where a small file became a large allocation: a field's name was
+copied into every warning met inside it, and one indirect `/T` or `/V` into
+every field beneath or beside it, so 67 KiB of FDF asked for 184 MB and
+22 KiB for a gigabyte. A file that asks for more is refused whole,
+`FormDataError::TooLarge`, since part of a form's data imports as a
+different form. An entry whose qualified name is empty — no `/T` or `name`,
+or an empty one, and no named ancestor — is not read but named
+(`FormDataWarning::Unnamed`), and `apply` refuses the empty name in data
+built by hand: the field-tree walk gives `""` to every field with no `/T`
+up its tree, so it would land in whichever of those came first. Written, the qualified
 names go back into a tree — `/T` is a *partial* name — a state is a name,
 and a cross-reference table is included although 12.7.8 makes it optional.
 XFDF is the XML form, read by `tinker-pdf-xml` under its default bounds,
@@ -431,8 +446,9 @@ font size — and answers the terminal field's `ObjRef` or an
 
 Form data lives in the facade module `tinker_pdf::form_data`:
 `read_fdf(bytes)`, `read_xfdf(bytes)`, `FormData::{from_fields, to_fdf,
-to_xfdf}`, `apply(editor, &data)`, and the types `FormData`, `FieldData`,
-`FormDataWarning` and `FormDataError`. It is not yet projected through the C
+to_xfdf}`, `apply(editor, &data)`, the types `FormData`, `FieldData`,
+`FormDataWarning` and `FormDataError`, and the readers' budget
+`MAX_FORM_DATA_BYTES`. It is not yet projected through the C
 ABI or the bindings.
 
 ```rust
@@ -504,6 +520,8 @@ let bytes = editor.save(&WriteOptions::default());
 | A button export value that is empty, `Off`, repeated, or not a name | `AddFieldError::ExportUnusable` | 12.7.4.2.3 reserves `Off`, and two buttons answering to one state are one button | — |
 | XFDF beyond the commonly documented core, and FDF beyond `/Fields` and `/F` — annotations, page templates, JavaScript, appearances, flags, rich text | `FormDataWarning::NotRead`, naming the key or element and the field | ISO 19444-1 was not available to this build, and a skipped construct would read as one that was not there | — |
 | An encrypted FDF | `FormDataError::Encrypted` | reading one needs a key, and this reader takes none | — |
+| An FDF or XFDF that asks for more than 64 MiB of names, values and warnings | `FormDataError::TooLarge` (`MAX_FORM_DATA_BYTES`) | each copy repeats something the file says once, so a small file can ask for terabytes; part of a form's data imports as a different form | [ruling 1](../rulings.md) |
+| An entry with no name, read or imported — no `/T` or `name` anywhere up its tree | `FormDataWarning::Unnamed` when read; `FillError::NoSuchField` from `apply` | `""` addresses whichever of the document's nameless fields comes first, not the one the data meant | — |
 | A multiple selection imported into a field | `FillError::ValueRefused` through `FillRejection` | this build fills one value per field; half a selection is a different answer | — |
 | A value XML 1.0 cannot carry, written as XFDF | `FormDataError::NotRepresentable`, naming the field | written any other way it would come back different; FDF carries it | — |
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
@@ -557,7 +575,7 @@ once; the `/DR` font joined or added exactly once; the auto-size that proves
 the `/DA` font is read through the editor; and every `AddFieldError` leaving
 the editor clean. Its header carries six reintroduced defects, each firing.
 
-`crates/tinker-pdf/tests/form_data.rs` (14 tests) is the exchange row's
+`crates/tinker-pdf/tests/form_data.rs` (17 tests) is the exchange row's
 exit criterion: export then import reproduces every terminal field's value,
 in both formats, on `testdata/form-fields.pdf` before and after a fill, and
 on a form `add_field` builds with names three deep, a list box, a combo box,
@@ -572,7 +590,17 @@ partial names deep are asserted; `hostile_input.rs`'s
 a crash hunt. That property, run once as a stable-toolchain sweep of 360 000
 mutations before the target was committed, found two writer defects — a
 valueless field beneath which other fields sat was lost, and `.x` came back
-as `x` — and both are pinned. Seven reintroduced defects each fire.
+as `x` — and both are pinned. Seven reintroduced defects each fire. The
+review of the row found what the sweep could not reach: the copy budget is
+fired on every shape it named and the ones beside them (one field's name in
+four thousand warnings, one indirect `/T` down 127 inline and 256 indirect
+levels, one `/V` in five thousand fields, four thousand kids under one long
+name, the XFDF equivalents) and swept from small to past it by
+`hostile_input.rs`'s `form_data_hands_back_no_more_than_its_budget`; a
+self-naming `/Kids` array returns; a nameless entry is neither read nor
+imported; and a unit test beside the writer counts that writing names back
+into a tree compares each partial name with one sibling at most, where a
+scan of every sibling took seven seconds over forty thousand flat names.
 
 `crates/tinker-pdf/tests/shaped_forms.rs` (12 tests, and the same 12 in a
 `--no-default-features` build — the registry pair swap places) holds up the

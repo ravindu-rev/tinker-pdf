@@ -9,8 +9,25 @@
 //! # What this target checks
 //!
 //! **That neither reader panics, hangs or exhausts memory** (ruling 1) — the
-//! FDF reader's `/Kids` walk with its visited set and the field tree's depth
-//! cap, and the XFDF reader's element stack under `tinker-pdf-xml`'s bounds.
+//! FDF reader's `/Kids` walk with its visited set (every field, every `/Kids`
+//! array and every link of a reference chain to either) and the field tree's
+//! depth cap, the XFDF reader's element stack under `tinker-pdf-xml`'s bounds,
+//! and both readers' copy budget, `MAX_FORM_DATA_BYTES`.
+//!
+//! That last one this target can only approach, not reach. The review of the
+//! exchange row found the readers handing back far more than they read — a
+//! name copied into every warning met inside its field, one indirect `/T`
+//! into every name beneath it, one `/V` into every field — and none of it was
+//! within this target's reach: the seeds were under a kilobyte and
+//! libFuzzer's default `-max_len` is 4 096, while the shapes needed tens of
+//! kilobytes to ask for hundreds of megabytes. The seeds `unread-keys.fdf`,
+//! `shared-title.fdf`, `shared-value.fdf` and `unread-elements.xfdf` are those
+//! shapes at seed size, so mutation starts where the multiplication is; the
+//! budget itself is fired at full size by `tests/form_data.rs` and swept by
+//! `hostile_input.rs`'s `form_data_hands_back_no_more_than_its_budget`. The
+//! seed `shared-kids.fdf` is a `/Kids` array whose entries name it as their
+//! own `/Kids`, which the walk once took `2^256` times: a hang this target
+//! would have reported from its first execution.
 //!
 //! And one property beyond that, which is what makes the target worth more
 //! than a crash hunt: **what a reader read, the matching writer writes and

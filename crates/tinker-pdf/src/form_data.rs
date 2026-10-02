@@ -42,23 +42,87 @@
 //! # Bounds
 //!
 //! An FDF is parsed by the same object reader every PDF is (ruling 1 is that
-//! reader's, and its fuzzers'), and its `/Kids` walk carries a visited set and
-//! the field tree's own depth cap, `tinker_pdf_cos::limits::MAX_NEST_DEPTH` —
-//! the same bound [`crate::Document::form_fields`] walks a document's tree
-//! under, so nothing that tree could hold is refused here. An XFDF is parsed
-//! by `tinker-pdf-xml` under its default limits, which bound nesting and the
+//! reader's, and its fuzzers'), and its `/Kids` walk carries the field tree's
+//! own depth cap, `tinker_pdf_cos::limits::MAX_NEST_DEPTH` — the same bound
+//! [`crate::Document::form_fields`] walks a document's tree under, so nothing
+//! that tree could hold is refused here — and a visited set holding **every
+//! object the walk descends through**: a field, a `/Kids` array, and each link
+//! of a reference chain to either. A `/Kids` array two fields share would
+//! otherwise be walked once per parent, and an array whose own entries name it
+//! as their `/Kids` is walked `2^256` times. An XFDF is parsed by
+//! `tinker-pdf-xml` under its default limits, which bound nesting and the
 //! event total, and refuse a document type declaration outright.
+//!
+//! Neither bound says anything about what the reader **hands back**, and that
+//! is where a small file becomes a large allocation: a qualified name repeats
+//! every ancestor's partial name, a warning names the field it was met in, and
+//! an FDF's `/T` or `/V` may be one indirect object every field shares. So
+//! both readers spend one budget, [`MAX_FORM_DATA_BYTES`], charged before each
+//! copy is made, and a file that asks for more is refused whole
+//! ([`FormDataError::TooLarge`]). The qualified name being built is one buffer
+//! the walk extends and truncates, not a string per level, so the walk itself
+//! holds one name however deep it goes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::mem::size_of;
+use std::sync::Arc;
 
 use tinker_pdf_cos::{
     decode_text_string, encode_text_string, limits, CosDocument, DocumentEditor, Field, FieldValue,
-    FillError, FillRejection, Name, ObjRef, Object, PdfString, SkippedWidget,
+    FillError, FillRejection, Name, Object, PdfString, SkippedWidget,
 };
 use tinker_pdf_xml::{Event, Limits, Source};
 
 /// The XFDF namespace, which an `<xfdf>` element normally declares.
 pub const XFDF_NAMESPACE: &str = "http://ns.adobe.com/xfdf/";
+
+/// How many bytes reading one FDF or XFDF file may hand back.
+///
+/// Everything a [`FormData`] holds is a copy, and a copy is where a small
+/// file becomes a large allocation. A qualified name repeats every ancestor's
+/// partial name; a [`FormDataWarning`] names the field it was met in; and an
+/// FDF's `/T` or `/V` may be one indirect object that every field names. The
+/// review of the exchange row found the readers had no answer for that, and
+/// the shapes it named, measured with a counting allocator over the read
+/// before this cap existed: a 66 KiB FDF of one field with a 32 KiB name and
+/// four thousand keys this reader does not read peaked at 184 MB, each
+/// warning holding the name; a 12 KiB FDF whose 127 inline nested fields
+/// share one 8 KiB `/T` at 252 MB, and a 22 KiB one whose 256 nested fields
+/// are indirect objects at 1.05 GB, the name growing a copy of it per level;
+/// a 142 KiB FDF of five thousand fields sharing one 16 KiB `/V` at 394 MB;
+/// and a 48 KiB XFDF of the first shape at 148 MB. Each is linear in both of
+/// its factors — the shared `/T` quadratic in its depth — so megabytes of
+/// input ask for terabytes.
+///
+/// So each read spends one budget, charged before each copy is made. A field
+/// costs its [`FieldData`], its name and its value's text; a warning its own
+/// size and the text it carries; the source's name its text; and an FDF `/T`
+/// that is an indirect reference its decoded text **each time it is read**,
+/// because any number of fields may share it and the name is built from it
+/// whether or not a field ends up carrying that name. A `/T` written inline is
+/// not charged: the walk reads each object once, so its bytes are the file's.
+/// A file that asks for more is **refused whole**, [`FormDataError::TooLarge`],
+/// rather than read in part: an import is every field of the file or none of
+/// them, and the part of a file that fitted imports as a different form.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 64 MiB |
+/// | The honest form beside it: ten thousand fields, 46-byte names, 312-byte values | 4 140 000 |
+/// | The most any other file `tests/form_data.rs` reads spends: a name ten thousand partial names deep | 20 125 |
+/// | The most a hand-written fixture in `tests/form_data/` spends | 933 |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **64 MiB** |
+///
+/// Measured on 2 October 2026 over every read `tests/form_data.rs` makes. The
+/// three zeros are facts about those paths: none of them reads form data. A
+/// form is the yardstick that matters, and at 64 MiB a form of ten thousand
+/// fields could give each a sixty-byte name and a six-kilobyte value and
+/// still be read. `a_file_that_asks_for_more_than_the_budget_is_refused` in
+/// `tests/form_data.rs` builds each of the shapes above and is what fires it.
+pub const MAX_FORM_DATA_BYTES: usize = 64 << 20;
 
 /// One field's value, by fully qualified name (12.7.3.2).
 #[derive(Clone, Debug, PartialEq)]
@@ -103,13 +167,18 @@ pub enum FormDataWarning {
         /// The field it belongs to.
         field: String,
     },
-    /// A `/Kids` entry already walked, or one past the depth cap: the tree is
-    /// not a tree, and the walk stopped there.
+    /// A `/Kids` entry already walked — or a `/Kids` array another field
+    /// already has — or one past the depth cap: the tree is not a tree, and
+    /// the walk stopped there.
     TreeCut {
         /// The field whose kids were cut.
         field: String,
     },
-    /// A field entry with no name and no kids, which nothing can address.
+    /// A field whose fully qualified name is empty — an FDF entry with no
+    /// `/T` or an empty one and no named ancestor, an XFDF `<field>` with no
+    /// `name` or an empty one and no named ancestor — which nothing can
+    /// address. It is not read: handed to [`apply`] as `""`, it would land
+    /// in whichever of the document's fields has no name.
     Unnamed,
 }
 
@@ -132,6 +201,10 @@ pub enum FormDataError {
     /// tab, line feed and carriage return — so no XFDF can hold it. The field
     /// is named.
     NotRepresentable(String),
+    /// Reading the file would hand back more than [`MAX_FORM_DATA_BYTES`] of
+    /// names, values and warnings. Refused whole, because part of a form's
+    /// data imports as a different form.
+    TooLarge,
 }
 
 impl core::fmt::Display for FormDataError {
@@ -145,6 +218,10 @@ impl core::fmt::Display for FormDataError {
             FormDataError::NotRepresentable(field) => {
                 write!(f, "{field:?} holds a character XML cannot carry")
             }
+            FormDataError::TooLarge => write!(
+                f,
+                "the file asks for more than {MAX_FORM_DATA_BYTES} bytes of form data"
+            ),
         }
     }
 }
@@ -186,7 +263,7 @@ impl FormData {
         let tree = Tree::of(&self.fields);
         let mut body = Vec::new();
         body.extend_from_slice(b"<< /FDF << /Fields [");
-        for node in &tree.roots {
+        for node in &tree.roots.nodes {
             body.push(b' ');
             write_fdf_node(&mut body, node);
         }
@@ -259,7 +336,7 @@ impl FormData {
             out.push_str("\"/>\n");
         }
         out.push_str("<fields>\n");
-        for node in &tree.roots {
+        for node in &tree.roots.nodes {
             write_xfdf_node(&mut out, node);
         }
         out.push_str("</fields>\n</xfdf>\n");
@@ -272,8 +349,9 @@ impl FormData {
 /// # Errors
 ///
 /// [`FormDataError::NotFdf`] for bytes the object reader cannot open,
-/// [`FormDataError::Encrypted`], and [`FormDataError::NoFdfDictionary`] for a
-/// root with no `/FDF`.
+/// [`FormDataError::Encrypted`], [`FormDataError::NoFdfDictionary`] for a
+/// root with no `/FDF`, and [`FormDataError::TooLarge`] for a file that asks
+/// for more than [`MAX_FORM_DATA_BYTES`].
 pub fn read_fdf(bytes: &[u8]) -> Result<FormData, FormDataError> {
     let doc = CosDocument::open(bytes.to_vec()).map_err(|_| FormDataError::NotFdf)?;
     if doc.is_encrypted() {
@@ -283,44 +361,55 @@ pub fn read_fdf(bytes: &[u8]) -> Result<FormData, FormDataError> {
     let fdf = doc.resolve_key(&root, doc.intern(b"FDF"));
     let fdf = fdf.as_dict().ok_or(FormDataError::NoFdfDictionary)?;
 
-    let mut data = FormData::default();
+    let mut answer = Answer::new();
     let fields_key = doc.intern(b"Fields");
     let source_key = doc.intern(b"F");
     for (key, _) in fdf.iter() {
         if *key != fields_key && *key != source_key {
-            data.warnings.push(FormDataWarning::NotRead {
-                what: name_text(&doc, *key),
-                field: String::new(),
-            });
+            answer.not_read(name_text(&doc, *key), "")?;
         }
     }
-    data.source = file_name(&doc, &doc.resolve_key(fdf, source_key));
+    if let Some(source) = file_name(&doc, &doc.resolve_key(fdf, source_key)) {
+        answer.charge(source.len())?;
+        answer.data.source = Some(source);
+    }
 
-    let fields = doc.resolve_key(fdf, fields_key);
     let mut visited = HashSet::new();
-    if let Some(roots) = fields.as_array() {
-        for entry in roots {
-            read_fdf_field(&doc, entry, "", 0, &mut visited, &mut data);
+    let mut name = String::new();
+    if let Some(fields) = fdf.get(fields_key) {
+        match walked(&doc, fields, &mut visited) {
+            Some(roots) => {
+                for entry in roots.as_array().unwrap_or_default() {
+                    read_fdf_field(&doc, entry, &mut name, 0, &mut visited, &mut answer)?;
+                }
+            }
+            None => answer.tree_cut("")?,
         }
     }
-    Ok(data)
+    Ok(answer.data)
 }
 
 /// Reads an XFDF file: the core named in the module comment.
 ///
 /// # Errors
 ///
-/// [`FormDataError::Xml`] for markup the XML reader refuses, and
-/// [`FormDataError::NotXfdf`] for a root element that is not `<xfdf>`.
+/// [`FormDataError::Xml`] for markup the XML reader refuses,
+/// [`FormDataError::NotXfdf`] for a root element that is not `<xfdf>`, and
+/// [`FormDataError::TooLarge`] for a file that asks for more than
+/// [`MAX_FORM_DATA_BYTES`].
 pub fn read_xfdf(bytes: &[u8]) -> Result<FormData, FormDataError> {
     let source = Source::new(bytes).map_err(|e| FormDataError::Xml(e.to_string()))?;
-    let mut data = FormData::default();
+    let mut answer = Answer::new();
 
     // The element names from the root down; an element this reader does not
     // read is on the path as `None`, and so is everything inside it.
     let mut path: Vec<Option<String>> = Vec::new();
-    // One entry per open `<field>`: its qualified name, the `<value>`s
-    // gathered so far, and whether a `<field>` has opened inside it.
+    // The qualified name of the innermost open `<field>`: one buffer, each
+    // field appending its partial name and truncating it again on the way
+    // out, so a field nested two hundred deep holds one name rather than two
+    // hundred growing copies of it.
+    let mut name = String::new();
+    // One entry per open `<field>`.
     let mut open: Vec<OpenField> = Vec::new();
     // The text of the `<value>` being read.
     let mut value: Option<String> = None;
@@ -351,27 +440,27 @@ pub fn read_xfdf(bytes: &[u8]) -> Result<FormData, FormDataError> {
                 };
                 let read = match (parent, local) {
                     ("xfdf", "f") => {
-                        data.source = element.attribute(None, "href").map(str::to_string);
+                        if let Some(href) = element.attribute(None, "href") {
+                            answer.charge(href.len())?;
+                            answer.data.source = Some(href.to_string());
+                        }
                         true
                     }
                     ("xfdf", "fields") => true,
                     ("fields" | "field", "field") => {
-                        let prefix = open.last().map_or("", |f| f.name.as_str());
-                        // 12.7.3.2's rule, as the field-tree reader applies
-                        // it: a node with no name contributes nothing.
-                        let name = match (element.attribute(None, "name"), prefix.is_empty()) {
-                            (Some(own), true) => own.to_string(),
-                            (Some(own), false) => format!("{prefix}.{own}"),
-                            (None, _) => prefix.to_string(),
-                        };
                         if let Some(parent) = open.last_mut() {
                             parent.has_kids = true;
                         }
                         open.push(OpenField {
-                            name,
+                            mark: name.len(),
                             values: None,
                             has_kids: false,
                         });
+                        // 12.7.3.2's rule, as the field-tree reader applies
+                        // it: a node with no name contributes nothing.
+                        if let Some(own) = element.attribute(None, "name") {
+                            extend(&mut name, own);
+                        }
                         true
                     }
                     ("field", "value") => {
@@ -383,10 +472,7 @@ pub fn read_xfdf(bytes: &[u8]) -> Result<FormData, FormDataError> {
                 if read {
                     path.push(Some(local.to_string()));
                 } else {
-                    data.warnings.push(FormDataWarning::NotRead {
-                        what: local.to_string(),
-                        field: open.last().map(|f| f.name.clone()).unwrap_or_default(),
-                    });
+                    answer.not_read(local.to_string(), &name)?;
                     path.push(None);
                 }
             }
@@ -402,18 +488,19 @@ pub fn read_xfdf(bytes: &[u8]) -> Result<FormData, FormDataError> {
                     };
                     let value = match field.values {
                         Some(mut list) if list.len() == 1 => {
-                            FieldValue::Text(list.pop().unwrap_or_default())
+                            Some(FieldValue::Text(list.pop().unwrap_or_default()))
                         }
-                        Some(list) => FieldValue::Many(list),
+                        Some(list) => Some(FieldValue::Many(list)),
                         // A field with fields beneath it and no value of its
                         // own is a group, and says nothing about itself.
-                        None if field.has_kids => continue,
-                        None => FieldValue::None,
+                        None if field.has_kids => None,
+                        None => Some(FieldValue::None),
                     };
-                    data.fields.push(FieldData {
-                        name: field.name,
-                        value,
-                    });
+                    if let Some(value) = value {
+                        answer.charge(value_cost(&value))?;
+                        answer.field(&name, value)?;
+                    }
+                    name.truncate(field.mark);
                 }
                 _ => {}
             },
@@ -430,14 +517,110 @@ pub fn read_xfdf(bytes: &[u8]) -> Result<FormData, FormDataError> {
     if !root_seen {
         return Err(FormDataError::NotXfdf);
     }
-    Ok(data)
+    Ok(answer.data)
 }
 
 /// A `<field>` element being read.
 struct OpenField {
-    name: String,
+    /// The length of the qualified name before this field's partial name
+    /// was appended, which is where it is truncated back to.
+    mark: usize,
     values: Option<Vec<String>>,
     has_kids: bool,
+}
+
+/// Appends a partial name to a qualified one, as 12.7.3.2 joins them: with a
+/// period, unless nothing named comes before it.
+fn extend(name: &mut String, partial: &str) {
+    if !name.is_empty() {
+        name.push('.');
+    }
+    name.push_str(partial);
+}
+
+/// What one read has built, and what it has left to spend of
+/// [`MAX_FORM_DATA_BYTES`].
+struct Answer {
+    data: FormData,
+    left: usize,
+}
+
+impl Answer {
+    fn new() -> Answer {
+        Answer {
+            data: FormData::default(),
+            left: MAX_FORM_DATA_BYTES,
+        }
+    }
+
+    /// Takes `bytes` from the budget, or refuses the file.
+    fn charge(&mut self, bytes: usize) -> Result<(), FormDataError> {
+        self.left = self
+            .left
+            .checked_sub(bytes)
+            .ok_or(FormDataError::TooLarge)?;
+        Ok(())
+    }
+
+    /// A field, its value already paid for. A field nothing can address — an
+    /// empty qualified name — is named in the warnings instead.
+    fn field(&mut self, name: &str, value: FieldValue) -> Result<(), FormDataError> {
+        if name.is_empty() {
+            return self.warn(0, || FormDataWarning::Unnamed);
+        }
+        self.charge(size_of::<FieldData>().saturating_add(name.len()))?;
+        self.data.fields.push(FieldData {
+            name: name.to_string(),
+            value,
+        });
+        Ok(())
+    }
+
+    /// A warning costing its own size and `text` bytes, built only once it
+    /// has been paid for.
+    fn warn(
+        &mut self,
+        text: usize,
+        warning: impl FnOnce() -> FormDataWarning,
+    ) -> Result<(), FormDataError> {
+        self.charge(size_of::<FormDataWarning>().saturating_add(text))?;
+        self.data.warnings.push(warning());
+        Ok(())
+    }
+
+    fn not_read(&mut self, what: String, field: &str) -> Result<(), FormDataError> {
+        self.warn(what.len().saturating_add(field.len()), || {
+            FormDataWarning::NotRead {
+                what,
+                field: field.to_string(),
+            }
+        })
+    }
+
+    fn tree_cut(&mut self, field: &str) -> Result<(), FormDataError> {
+        self.warn(field.len(), || FormDataWarning::TreeCut {
+            field: field.to_string(),
+        })
+    }
+
+    fn value_unreadable(&mut self, field: &str) -> Result<(), FormDataError> {
+        self.warn(field.len(), || FormDataWarning::ValueUnreadable {
+            field: field.to_string(),
+        })
+    }
+}
+
+/// What a value costs against the budget: its text, and for a selection
+/// each entry's `String` as well. The same for both readers, so a value read
+/// from one format costs what it costs read back from the other.
+fn value_cost(value: &FieldValue) -> usize {
+    match value {
+        FieldValue::Text(text) | FieldValue::State(text) => text.len(),
+        FieldValue::Many(values) => values.iter().fold(0usize, |sum, value| {
+            sum.saturating_add(size_of::<String>().saturating_add(value.len()))
+        }),
+        _ => 0,
+    }
 }
 
 /// Imports form data into an editor: every field with a value, all of them
@@ -454,8 +637,13 @@ struct OpenField {
 ///
 /// [`FillRejection`] naming the first field that would not take its value,
 /// with nothing written. A field the document does not have is
-/// [`FillError::NoSuchField`]; a selection of more than one value is
-/// [`FillError::ValueRefused`], because this build fills one value per field.
+/// [`FillError::NoSuchField`], and so is the empty name: the field-tree
+/// walk gives `""` to every field with no `/T` up its tree, so it addresses
+/// whichever of them comes first rather than a field the data meant — the
+/// readers never produce one ([`FormDataWarning::Unnamed`]), and a
+/// [`FormData`] built by hand is held to the same rule. A selection of more
+/// than one value is [`FillError::ValueRefused`], because this build fills
+/// one value per field.
 pub fn apply(
     editor: &mut DocumentEditor,
     data: &FormData,
@@ -475,6 +663,12 @@ pub fn apply(
             },
             _ => continue,
         };
+        if field.name.is_empty() {
+            return Err(FillRejection {
+                field: String::new(),
+                reason: FillError::NoSuchField,
+            });
+        }
         pairs.push((field.name.as_str(), value));
     }
     editor.set_field_values(&pairs)
@@ -486,11 +680,44 @@ pub fn apply(
 struct Node<'a> {
     partial: &'a str,
     value: Option<&'a FieldValue>,
-    kids: Vec<Node<'a>>,
+    kids: Level<'a>,
+}
+
+/// The nodes of one level, in first-seen order, and an index into them.
+#[derive(Default)]
+struct Level<'a> {
+    nodes: Vec<Node<'a>>,
+    /// For each partial name, the first node carrying it that can be a
+    /// parent ([`can_parent`]). Once there is one it stays the answer: nodes
+    /// are only ever appended, and a node's value only ever goes from none
+    /// to a value that can parent. So finding where a name descends is one
+    /// probe of this map, where it was a scan of every sibling before it —
+    /// forty thousand flat names took seven seconds to write that way, and
+    /// ten times as many would have taken a hundred times as long.
+    parents: HashMap<&'a str, usize>,
+}
+
+impl<'a> Level<'a> {
+    /// Appends a node, recorded as its name's parent if it is the first
+    /// that can be one, and answers its index.
+    fn push(&mut self, node: Node<'a>) -> usize {
+        let index = self.nodes.len();
+        if can_parent(&node) {
+            self.parents.entry(node.partial).or_insert(index);
+        }
+        self.nodes.push(node);
+        index
+    }
 }
 
 struct Tree<'a> {
-    roots: Vec<Node<'a>>,
+    roots: Level<'a>,
+    /// How many existing nodes the inserts compared a partial name with: at
+    /// most one per partial name, the node its level's index names, which is
+    /// what makes writing linear in the names. A scan of the level compares
+    /// it with every sibling before it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    compared: usize,
 }
 
 /// How deep the written tree goes before the rest of a name stays whole.
@@ -514,7 +741,8 @@ impl<'a> Tree<'a> {
     /// beside the first rather than overwriting it, so what is written is
     /// everything that was given.
     fn of(fields: &'a [FieldData]) -> Tree<'a> {
-        let mut roots: Vec<Node<'a>> = Vec::new();
+        let mut roots = Level::default();
+        let mut compared = 0;
         for field in fields {
             // A name with an empty partial name in it — a leading, trailing
             // or doubled period — is written whole. Split, the empty `/T`
@@ -526,9 +754,9 @@ impl<'a> Tree<'a> {
             } else {
                 field.name.splitn(WRITTEN_DEPTH, '.').collect()
             };
-            insert(&mut roots, &parts, &field.value);
+            insert(&mut roots, &parts, &field.value, &mut compared);
         }
-        Tree { roots }
+        Tree { roots, compared }
     }
 }
 
@@ -542,45 +770,50 @@ fn can_parent(node: &Node<'_>) -> bool {
     !matches!(node.value, Some(FieldValue::None))
 }
 
-fn insert<'a>(level: &mut Vec<Node<'a>>, parts: &[&'a str], value: &'a FieldValue) {
+fn insert<'a>(
+    level: &mut Level<'a>,
+    parts: &[&'a str],
+    value: &'a FieldValue,
+    compared: &mut usize,
+) {
     let Some((first, rest)) = parts.split_first() else {
         return;
     };
+    let parent = level.parents.get(first).copied();
+    if parent.is_some() {
+        *compared += 1;
+    }
     if rest.is_empty() {
         // A leaf: joins a group of that name that has no value yet — unless
         // it has none to give, see `can_parent` — or stands beside whatever
-        // else carries the name.
-        let joins = !matches!(value, FieldValue::None);
-        if let Some(node) = level
-            .iter_mut()
-            .find(|n| joins && n.partial == *first && n.value.is_none() && !n.kids.is_empty())
-        {
-            node.value = Some(value);
-        } else {
-            level.push(Node {
-                partial: first,
-                value: Some(value),
-                kids: Vec::new(),
-            });
+        // else carries the name. A group with no value is always its name's
+        // parent, because one is only made where nothing else could be.
+        if !matches!(value, FieldValue::None) {
+            if let Some(node) = parent
+                .and_then(|index| level.nodes.get_mut(index))
+                .filter(|node| node.value.is_none())
+            {
+                node.value = Some(value);
+                return;
+            }
         }
+        level.push(Node {
+            partial: first,
+            value: Some(value),
+            kids: Level::default(),
+        });
         return;
     }
-    let index = match level
-        .iter()
-        .position(|n| n.partial == *first && can_parent(n))
-    {
+    let index = match parent {
         Some(index) => index,
-        None => {
-            level.push(Node {
-                partial: first,
-                value: None,
-                kids: Vec::new(),
-            });
-            level.len() - 1
-        }
+        None => level.push(Node {
+            partial: first,
+            value: None,
+            kids: Level::default(),
+        }),
     };
-    if let Some(node) = level.get_mut(index) {
-        insert(&mut node.kids, rest, value);
+    if let Some(node) = level.nodes.get_mut(index) {
+        insert(&mut node.kids, rest, value, compared);
     }
 }
 
@@ -608,9 +841,9 @@ fn write_fdf_node(out: &mut Vec<u8>, node: &Node<'_>) {
         }
         _ => {}
     }
-    if !node.kids.is_empty() {
+    if !node.kids.nodes.is_empty() {
         out.extend_from_slice(b" /Kids [");
-        for kid in &node.kids {
+        for kid in &node.kids.nodes {
             out.push(b' ');
             write_fdf_node(out, kid);
         }
@@ -684,97 +917,187 @@ fn file_name(doc: &CosDocument, spec: &Object) -> Option<String> {
 /// 246): the rest are named in the warnings.
 const FIELD_KEYS_READ: [&[u8]; 3] = [b"T", b"V", b"Kids"];
 
+/// An object as the walk holds it: borrowed where it was written inline,
+/// shared where it was loaded, and never deep-copied — a direct `/Kids` array
+/// copied at every level is the whole subtree beneath it copied once per
+/// ancestor, held all at once down the recursion.
+enum Held<'o> {
+    Inline(&'o Object),
+    Loaded(Arc<Object>),
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = Object;
+
+    fn deref(&self) -> &Object {
+        match self {
+            Held::Inline(object) => object,
+            Held::Loaded(object) => object,
+        }
+    }
+}
+
+/// `object`, for the walk to descend through: resolved one reference at a
+/// time, every object number on the way marked as walked, and `None` when
+/// one of them already was. Marking only the first reference would let two
+/// references to a third reach the same array twice. A chain past
+/// `limits::MAX_RESOLVE_DEPTH` is null, as [`CosDocument::resolve`] makes it.
+fn walked<'o>(
+    doc: &CosDocument,
+    object: &'o Object,
+    visited: &mut HashSet<u32>,
+) -> Option<Held<'o>> {
+    let Some(mut reference) = object.as_objref() else {
+        return Some(Held::Inline(object));
+    };
+    for _ in 0..limits::MAX_RESOLVE_DEPTH {
+        if !visited.insert(reference.num) {
+            return None;
+        }
+        let Ok(loaded) = doc.get(reference) else {
+            break;
+        };
+        match loaded.as_objref() {
+            Some(next) => reference = next,
+            None => return Some(Held::Loaded(loaded)),
+        }
+    }
+    Some(Held::Loaded(Arc::new(Object::Null)))
+}
+
+/// `object` resolved, for an entry the walk reads rather than descends
+/// through — a `/T`, a `/V` — which any number of fields may share, so it is
+/// not marked; what it costs is charged where it is copied instead.
+fn held<'o>(doc: &CosDocument, object: &'o Object) -> Held<'o> {
+    match object.as_objref() {
+        Some(_) => Held::Loaded(doc.resolve(object)),
+        None => Held::Inline(object),
+    }
+}
+
+/// One entry of a `/Fields` or `/Kids` array. `name` is the qualified name of
+/// its parent on the way in, and is again on the way out.
 fn read_fdf_field(
     doc: &CosDocument,
     entry: &Object,
-    prefix: &str,
+    name: &mut String,
     depth: u32,
-    visited: &mut HashSet<ObjRef>,
-    data: &mut FormData,
-) {
-    if let Some(r) = entry.as_objref() {
-        if !visited.insert(r) {
-            data.warnings.push(FormDataWarning::TreeCut {
-                field: prefix.to_string(),
-            });
-            return;
+    visited: &mut HashSet<u32>,
+    answer: &mut Answer,
+) -> Result<(), FormDataError> {
+    let Some(resolved) = walked(doc, entry, visited) else {
+        return answer.tree_cut(name);
+    };
+    let Some(dict) = resolved.as_dict() else {
+        return Ok(());
+    };
+
+    let mark = name.len();
+    if let Some(title) = dict.get(doc.intern(b"T")) {
+        let own = held(doc, title)
+            .as_string()
+            .map(|s| decode_text_string(&s.bytes));
+        if let Some(own) = own {
+            // An inline /T is read once, because the walk reads its field
+            // once; an indirect one may be every field's /T, and is paid for
+            // each time it is read.
+            if title.as_objref().is_some() {
+                answer.charge(own.len())?;
+            }
+            extend(name, &own);
         }
     }
-    let resolved = doc.resolve(entry);
-    let Some(dict) = resolved.as_dict() else {
-        return;
-    };
+    let read = read_fdf_entries(doc, dict, name, depth, visited, answer);
+    name.truncate(mark);
+    read
+}
 
-    let own = doc
-        .resolve_key(dict, doc.intern(b"T"))
-        .as_string()
-        .map(|s| decode_text_string(&s.bytes));
-    let name = match (&own, prefix.is_empty()) {
-        (Some(own), true) => own.clone(),
-        (Some(own), false) => format!("{prefix}.{own}"),
-        (None, _) => prefix.to_string(),
-    };
-
+/// The rest of a field dictionary, once its name is known.
+fn read_fdf_entries(
+    doc: &CosDocument,
+    dict: &tinker_pdf_cos::Dict,
+    name: &mut String,
+    depth: u32,
+    visited: &mut HashSet<u32>,
+    answer: &mut Answer,
+) -> Result<(), FormDataError> {
     for (key, _) in dict.iter() {
         let bytes = doc.name_bytes(*key).unwrap_or_default();
         if !FIELD_KEYS_READ.contains(&bytes.as_ref()) {
-            data.warnings.push(FormDataWarning::NotRead {
-                what: name_text(doc, *key),
-                field: name.clone(),
-            });
+            answer.not_read(String::from_utf8_lossy(&bytes).into_owned(), name)?;
         }
     }
 
-    let kids = doc.resolve_key(dict, Name::KIDS);
-    let kids = kids.as_array().filter(|k| !k.is_empty());
-    let value_key = doc.intern(b"V");
-    if dict.get(value_key).is_some() || kids.is_none() {
-        let value = read_value(doc, dict.get(value_key));
-        if matches!(value, FieldValue::None) && dict.get(value_key).is_some() {
-            data.warnings.push(FormDataWarning::ValueUnreadable {
-                field: name.clone(),
-            });
+    // A /Kids array another field already has is cut rather than walked
+    // again: it is the same fields a second time, and an array whose own
+    // entries name it as their /Kids is the same fields 2^256 times.
+    let (kids, cut) = match dict.get(Name::KIDS).map(|kids| walked(doc, kids, visited)) {
+        None => (None, false),
+        Some(None) => (None, true),
+        Some(Some(kids)) => (Some(kids), false),
+    };
+    let kids = kids
+        .as_deref()
+        .and_then(Object::as_array)
+        .filter(|k| !k.is_empty());
+    let value = dict.get(doc.intern(b"V"));
+    if value.is_some() || (kids.is_none() && !cut) {
+        let read = read_value(doc, value, answer)?;
+        if matches!(read, FieldValue::None) && value.is_some() {
+            answer.value_unreadable(name)?;
         }
-        if name.is_empty() && own.is_none() {
-            data.warnings.push(FormDataWarning::Unnamed);
-        } else {
-            data.fields.push(FieldData {
-                name: name.clone(),
-                value,
-            });
-        }
+        answer.field(name, read)?;
+    }
+    if cut {
+        return answer.tree_cut(name);
     }
     if let Some(kids) = kids {
         // The field tree's own bound: nothing a document's tree could hold is
         // refused here, and nothing deeper is followed.
         if depth >= limits::MAX_NEST_DEPTH {
-            data.warnings.push(FormDataWarning::TreeCut { field: name });
-            return;
+            return answer.tree_cut(name);
         }
         for kid in kids {
-            read_fdf_field(doc, kid, &name, depth + 1, visited, data);
+            read_fdf_field(doc, kid, name, depth + 1, visited, answer)?;
         }
     }
+    Ok(())
 }
 
 /// A `/V` as the field-tree reader types one (12.7.8.3.2): a text string, a
-/// name, or an array of either.
-fn read_value(doc: &CosDocument, value: Option<&Object>) -> FieldValue {
+/// name, or an array of either — each copy paid for before the next is made,
+/// so an array naming one shared string a million times stops at the budget
+/// rather than after the millionth copy.
+fn read_value(
+    doc: &CosDocument,
+    value: Option<&Object>,
+    answer: &mut Answer,
+) -> Result<FieldValue, FormDataError> {
     let Some(value) = value else {
-        return FieldValue::None;
+        return Ok(FieldValue::None);
     };
-    match doc.resolve(value).as_ref() {
-        Object::String(text) => FieldValue::Text(decode_text_string(&text.bytes)),
-        Object::Name(name) => FieldValue::State(name_text(doc, *name)),
+    Ok(match &*held(doc, value) {
+        Object::String(text) => {
+            let text = decode_text_string(&text.bytes);
+            answer.charge(text.len())?;
+            FieldValue::Text(text)
+        }
+        Object::Name(name) => {
+            let state = name_text(doc, *name);
+            answer.charge(state.len())?;
+            FieldValue::State(state)
+        }
         Object::Array(items) => {
-            let values: Vec<String> = items
-                .iter()
-                .filter_map(|item| match doc.resolve(item).as_ref() {
-                    Object::String(text) => Some(decode_text_string(&text.bytes)),
-                    Object::Name(name) => Some(name_text(doc, *name)),
-                    _ => None,
-                })
-                .collect();
+            let mut values = Vec::new();
+            for item in items {
+                let text = match &*held(doc, item) {
+                    Object::String(text) => decode_text_string(&text.bytes),
+                    Object::Name(name) => name_text(doc, *name),
+                    _ => continue,
+                };
+                answer.charge(size_of::<String>().saturating_add(text.len()))?;
+                values.push(text);
+            }
             if values.is_empty() {
                 FieldValue::None
             } else {
@@ -782,7 +1105,7 @@ fn read_value(doc: &CosDocument, value: Option<&Object>) -> FieldValue {
             }
         }
         _ => FieldValue::None,
-    }
+    })
 }
 
 // ---- XFDF ---------------------------------------------------------------
@@ -829,8 +1152,55 @@ fn write_xfdf_node(out: &mut String, node: &Node<'_>) {
         }
         _ => {}
     }
-    for kid in &node.kids {
+    for kid in &node.kids.nodes {
         write_xfdf_node(out, kid);
     }
     out.push_str("</field>\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writing names back into a tree compares each partial name with one
+    /// sibling at most, however many siblings there are.
+    ///
+    /// The review of the exchange row found the insert scanning its whole
+    /// level for every name: forty thousand flat fields took seven seconds to
+    /// write, ten times as many would take a hundred times as long, and a file
+    /// of them reads back in a fraction of a second — so reading a large file
+    /// and writing it out again took minutes. Counted rather than timed,
+    /// because a clock passes on a fast machine with the scan put back.
+    #[test]
+    fn writing_names_compares_each_partial_name_once() {
+        let field = |name: String| FieldData {
+            name,
+            value: FieldValue::Text("v".into()),
+        };
+        let mut fields: Vec<FieldData> = (0..5_000).map(|i| field(format!("f{i}"))).collect();
+        for group in 0..50 {
+            fields.extend((0..100).map(|kid| field(format!("g{group}.k{kid}"))));
+        }
+        // And every flat name again: a second leaf beside the first.
+        fields.extend((0..5_000).map(|i| field(format!("f{i}"))));
+
+        let tree = Tree::of(&fields);
+        let partials: usize = fields.iter().map(|f| f.name.split('.').count()).sum();
+        assert!(
+            tree.compared <= partials,
+            "{} comparisons for {partials} partial names",
+            tree.compared
+        );
+        // The same tree a scan built: each repeat a leaf of its own, each
+        // group's kids under the one group.
+        assert_eq!(tree.roots.nodes.len(), 5_000 + 50 + 5_000);
+        let groups: Vec<&Node<'_>> = tree
+            .roots
+            .nodes
+            .iter()
+            .filter(|node| node.partial.starts_with('g'))
+            .collect();
+        assert_eq!(groups.len(), 50);
+        assert!(groups.iter().all(|group| group.kids.nodes.len() == 100));
+    }
 }
