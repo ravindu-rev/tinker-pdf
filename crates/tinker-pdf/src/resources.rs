@@ -518,6 +518,40 @@ impl PageResources {
         Some((entry.as_dict()?.clone(), reference))
     }
 
+    /// The stream of the tiling pattern `name` selects in this scope, whose
+    /// bytes are its cell (8.7.3.2) — the stream [`GlyphSource::tile`]
+    /// paints. `None` for a shading pattern, which has no cell, and for a
+    /// name this scope does not have.
+    ///
+    /// For [`crate::subset`], whose walk has to enter a cell the interpreter
+    /// never runs: the renderer paints it itself.
+    pub(crate) fn tiling_cell(&self, name: &[u8]) -> Option<ObjRef> {
+        let (dict, reference) = self.pattern_entry(name)?;
+        let kind = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"PatternType"))
+            .as_int();
+        (kind == Some(1)).then_some(reference).flatten()
+    }
+
+    /// The scope a stream's own `/Resources` makes: a tiling pattern's, a
+    /// mask group's or a form's, built as [`PageResources::from_dict`]
+    /// builds any. `None` when the stream has none, and its names resolve
+    /// where it was painted (8.7.3.2, 8.10.1).
+    pub(crate) fn own_scope(&self, stream: ObjRef) -> Option<PageResources> {
+        let object = self.doc.get(stream).ok()?;
+        let own = self
+            .doc
+            .resolve_key(object.as_dict()?, Name::RESOURCES)
+            .as_dict()?
+            .clone();
+        Some(PageResources::from_dict(
+            &self.doc,
+            own,
+            self.provider.as_ref(),
+        ))
+    }
+
     /// A pattern's `/Matrix`, which maps pattern space to the parent content
     /// stream's default space (8.7.3.1).
     fn pattern_matrix(&self, dict: &Dict) -> Matrix {

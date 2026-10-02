@@ -479,11 +479,16 @@ caveat redaction carries.
 is a blank or a wrong glyph on the page, with nothing in the file saying so.
 Counted are a page's own content stream; a form XObject it draws, at any depth
 (8.10); a Type 3 glyph procedure entered because its own glyph was shown
-(9.6.5); and **every** appearance stream under an annotation's `/AP` — `/N`,
+(9.6.5); **every** appearance stream under an annotation's `/AP` — `/N`,
 `/D` and `/R`, and every state of each, whatever `/AS` currently selects, since
 12.5.5 lets a viewer switch states with no edit to the file and a subset cut to
-today's state loses tomorrow's tick. A hidden annotation's appearance counts
-too: the flag is a viewer's instruction, and clearing it is one bit.
+today's state loses tomorrow's tick; and a tiling pattern's cell or a soft
+mask's group anything of those paints with (8.7.3.2, 11.6.5.2), each in its
+own `/Resources` or the scope that painted, which the interpreter runs
+neither of — until October 2026 neither was walked, and a glyph shown only in
+a cell was dropped from its program and drew a blank. A hidden annotation's
+appearance counts too: the flag is a viewer's instruction, and clearing it is
+one bit.
 
 **Type 3 fonts** have no program to cut: a glyph is a procedure in
 `/CharProcs`, and the procedures are the face's outlines — and can show text
@@ -492,10 +497,14 @@ use rather than rewriting the procedure every use shares. So the same pass
 empties every procedure nothing the document shows still runs, writing
 `0 0 d0` over the stream in place and leaving the font dictionary as it was.
 Which procedures run is learned where the interpreter asks for one, since a
-Type 3 glyph is run rather than shown and no device hears of it. Kept: a
+Type 3 glyph is run rather than shown and no device hears of it — and,
+for a code whose procedure this engine could not run (no `/FontMatrix`, a
+procedure that does not decode), where it shows the glyph instead, because
+a reader that defaults the matrix runs it. Kept: a
 procedure under **any** name `/Differences` gives a shown code, not only the
 first, which is the one this engine draws; and a stream another font keeps
-or leaves whole. A Type 3 font is left whole, and listed, for the reasons a
+or leaves whole. A shown code `/Differences` gives no name leaves the font
+whole, as a code mapped only by guess leaves a program whole. A Type 3 font is left whole, and listed, for the reasons a
 program is — no walked scope names it, the AcroForm `/DR` does, a Type 3
 font's own `/Resources` does, or it has no object — and one left whole makes
 `SubsetOutcome::removed` false, as a program does. Until October 2026 Type 3
