@@ -81,6 +81,18 @@ regardless, because that is what gets digested.
 
 All 71 X.509 certificates in the corpus parse.
 
+**`GeneralNames` are decoded** (RFC 5280 §4.2.1.6), wherever a certificate or
+an attribute names something other than by distinguished name: the
+`subjectAltName` and `issuerAltName` extensions, `authorityKeyIdentifier`'s
+`authorityCertIssuer`, and an ESS `signingCertificateV2`'s `issuerSerial`,
+which `IssuerSerial::identifies` holds to the certificate it names. Six of
+the nine alternatives decode — mailbox, DNS name and URI held to ASCII, the
+address held to four or sixteen octets, the registered OID, and the directory
+name, whose `[4]` is explicit because `Name` is a `CHOICE` — and `otherName`
+decodes as far as its type and its value's encoding; `x400Address` and
+`ediPartyName` are carried. Each is read on request, so a name this build
+cannot read refuses that accessor rather than the certificate.
+
 **The verdict.** `Document::verify_signatures(&anchors, at)` returns one
 `Verdict` per signature: the coverage, whether the CMS could be read, whether
 the `messageDigest` equals a digest recomputed over the covered bytes, whether
@@ -323,6 +335,15 @@ encapsulated digest replaced together. The corpus's one such file,
 `poppler-395-0-fuzzed.pdf`, is a fuzzer's mutation whose `/ByteRange` does not
 bracket its `/Contents`, so it reaches no CMS parser and its verdict does not
 move.
+
+**`GeneralNames`** are held to RFC 5280 Appendix C.2's own `subjectAltName`,
+octet for octet, and to a CAdES signature OpenSSL 3.0.13 made
+(`tests/signature_support/cades-general-names.pdf`, `cms -sign -cades`): its
+signer's certificate carries eight of the nine alternatives, an
+`issuerAltName` and an `authorityCertIssuer`, and its `signingCertificateV2`
+names that certificate by issuer and serial. `tests/signature_shapes.rs`
+reads every one back and checks the `issuerSerial` names the signer and not
+the root.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest

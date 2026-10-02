@@ -36,7 +36,7 @@ use tinker_pdf::{
     SubFilter, TrustAnchors, Unchecked, Verdict, Weakness,
 };
 use tinker_pdf_crypto::{DigestAlgorithm as CryptoDigest, PssParameters};
-use tinker_pdf_pki::{oid, pss, Certificate, ContentInfo, SignatureAlgorithm};
+use tinker_pdf_pki::{oid, pss, Certificate, ContentInfo, GeneralName, SignatureAlgorithm};
 
 const PSS_PDF: &[u8] = include_bytes!("signature_support/rsa-pss.pdf");
 const PSS_ROOT: &[u8] = include_bytes!("signature_support/rsa-pss-root.der");
@@ -46,6 +46,8 @@ const SHA1_PDF: &[u8] = include_bytes!("signature_support/pkcs7-sha1.pdf");
 const SHA1_ROOT: &[u8] = include_bytes!("signature_support/pkcs7-sha1-root.der");
 const SHA1_BARE_PDF: &[u8] = include_bytes!("signature_support/pkcs7-sha1-no-attributes.pdf");
 const SHA1_BARE_ROOT: &[u8] = include_bytes!("signature_support/pkcs7-sha1-no-attributes-root.der");
+const NAMES_PDF: &[u8] = include_bytes!("signature_support/cades-general-names.pdf");
+const NAMES_ROOT: &[u8] = include_bytes!("signature_support/cades-general-names-root.der");
 
 /// Inside every fixture certificate's validity window and nothing to do with
 /// now: 1 January 2027. Ruling 4 keeps the clock out of the engine.
@@ -445,6 +447,131 @@ fn a_detached_message_under_the_sha1_subfilter_has_no_digest_to_compare() {
         SignatureCheck::Failed,
         "the renaming is inside the covered bytes, so the signature over them fails too"
     );
+}
+
+// ---- GeneralNames ------------------------------------------------------------
+
+/// The leaf certificate of the `GeneralNames` fixture, and the root.
+fn names_certificates(der: &[u8]) -> (Certificate<'_>, Certificate<'_>) {
+    let mut certificates = ContentInfo::parse(der)
+        .expect("the CMS parses")
+        .signed_data()
+        .x509_certificates()
+        .map(|der| Certificate::parse(der).expect("each certificate parses"))
+        .collect::<Vec<_>>();
+    assert_eq!(certificates.len(), 2);
+    // A `CertificateSet` is a SET OF, so DER sorts it by encoding and the
+    // order says nothing about which is which; the root is the self-issued
+    // one.
+    certificates.sort_by_key(Certificate::is_self_issued);
+    let root = certificates.pop().expect("two");
+    let leaf = certificates.pop().expect("two");
+    assert!(root.is_self_issued() && !leaf.is_self_issued());
+    (leaf, root)
+}
+
+/// Eight of the nine alternatives, as OpenSSL 3.0.13 wrote them into the
+/// signer's certificate from `signature-fixtures.py`'s extension file — so
+/// what is asserted here is what OpenSSL was asked for, read back by this
+/// crate rather than by OpenSSL.
+#[test]
+fn a_certificates_alternative_names_read_as_openssl_wrote_them() {
+    let der = cms_of(NAMES_PDF);
+    let (leaf, root) = names_certificates(&der);
+    let names = leaf
+        .extensions()
+        .subject_alt_names()
+        .expect("subjectAltName is present")
+        .expect("and decodes");
+    let rendered: Vec<String> = names.names().iter().map(ToString::to_string).collect();
+    assert_eq!(
+        rendered,
+        [
+            "email:signer@example.com",
+            "DNS:signer.example.com",
+            "URI:https://example.com/signer",
+            "IP:192.0.2.7",
+            "IP:2001:db8:0:0:0:0:0:7",
+            "RID:1.2.3.4",
+            "othername:1.3.6.1.4.1.311.20.2.3",
+            "DirName:O=tinker-pdf test fixture,CN=Tinker PDF Directory Name",
+        ]
+    );
+    match &names.names()[6] {
+        GeneralName::Other { value, .. } => {
+            // `UTF8:signer@example.com`: a UTF8String, carried whole.
+            assert_eq!(value.first(), Some(&0x0C));
+            assert_eq!(&value[2..], b"signer@example.com");
+        }
+        other => panic!("expected the otherName, got {other:?}"),
+    }
+
+    let issuer_names = leaf
+        .extensions()
+        .issuer_alt_names()
+        .expect("issuerAltName is present")
+        .expect("and decodes");
+    assert_eq!(
+        issuer_names.names(),
+        [GeneralName::Uri("https://example.com/root".into())]
+    );
+
+    // `authorityKeyIdentifier = keyid:always, issuer:always`: the issuer's own
+    // issuer and serial, which for a self-signed root are its subject and its
+    // serial.
+    let authority = leaf
+        .extensions()
+        .authority_key_identifier()
+        .expect("authorityKeyIdentifier is present");
+    let issuer = authority
+        .issuer()
+        .expect("authorityCertIssuer is present")
+        .expect("and decodes");
+    assert!(issuer
+        .directory_name()
+        .expect("a directory name")
+        .matches(root.issuer()));
+    assert_eq!(
+        authority.serial().map(|serial| serial.as_bytes().to_vec()),
+        Some(root.serial().as_bytes().to_vec())
+    );
+}
+
+/// RFC 5035's `issuerSerial`, as OpenSSL's `-cades` writes it: a directory
+/// name inside `[4]`, which is explicit because `Name` is a CHOICE.
+#[test]
+fn an_ess_issuer_serial_names_the_signers_certificate_and_no_other() {
+    let der = cms_of(NAMES_PDF);
+    let (leaf, root) = names_certificates(&der);
+    let content = ContentInfo::parse(&der).expect("the CMS parses");
+    let signer = content
+        .signed_data()
+        .signer_infos()
+        .first()
+        .expect("one signer")
+        .clone();
+    let ess = signer
+        .signing_certificate_v2()
+        .expect("-cades writes signingCertificateV2");
+    let first = ess.certs().first().expect("one ESSCertIDv2");
+    let issuer_serial = first
+        .issuer_serial_decoded()
+        .expect("OpenSSL writes issuerSerial")
+        .expect("and it decodes");
+    assert_eq!(issuer_serial.issuer().names().len(), 1);
+    assert!(issuer_serial.identifies(&leaf));
+    assert!(
+        !issuer_serial.identifies(&root),
+        "the root has the same issuer name and a different serial"
+    );
+}
+
+#[test]
+fn the_cades_fixture_verifies_like_any_other() {
+    let verdict = verdict_for(NAMES_PDF, NAMES_ROOT);
+    assert_eq!(verdict.document_digest, DocumentDigest::Matches);
+    assert_eq!(verdict.signature, SignatureCheck::Verified);
+    assert!(verdict.is_trusted());
 }
 
 // ---- reading and rewriting the fixtures -----------------------------------

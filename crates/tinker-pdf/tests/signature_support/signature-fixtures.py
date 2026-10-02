@@ -231,11 +231,49 @@ def no_signed_attributes():
     save("no-signed-attributes-root.der", der_of(w(tag + "-root.pem")))
 
 
+GENERAL_NAMES_EXTENSIONS = """\
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, nonRepudiation
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always, issuer:always
+subjectAltName = email:signer@example.com, DNS:signer.example.com, URI:https://example.com/signer, IP:192.0.2.7, IP:2001:db8::7, RID:1.2.3.4, otherName:1.3.6.1.4.1.311.20.2.3;UTF8:signer@example.com, dirName:directory
+issuerAltName = URI:https://example.com/root
+
+[directory]
+CN = Tinker PDF Directory Name
+O = tinker-pdf test fixture
+"""
+
+
+def cades_general_names():
+    """`GeneralNames` in a real signature: a CAdES signer (`-cades`, so the
+    signed attributes carry RFC 5035's `signingCertificateV2` with an
+    `issuerSerial` naming the signer's issuer as a directory name) under a leaf
+    whose `subjectAltName` uses eight of the nine alternatives, whose
+    `issuerAltName` is a URI, and whose `authorityKeyIdentifier` names the
+    issuer's issuer and serial (`issuer:always`)."""
+    tag = "names"
+    rsa_root(tag, "/CN=Tinker PDF GeneralNames Test Root/O=tinker-pdf test fixture")
+    with open(w(tag + "-ext.cnf"), "w") as f:
+        f.write(GENERAL_NAMES_EXTENSIONS)
+    leaf(tag, "/CN=Tinker PDF GeneralNames Test Signer/O=tinker-pdf test fixture",
+         ("-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"),
+         extfile=w(tag + "-ext.cnf"))
+    reserve = 5000
+    out, contents_at, covered = build_pdf(
+        reserve, "ETSI.CAdES.detached", "A CAdES signature naming its certificate",
+        "Tinker PDF GeneralNames Test Signer")
+    der = cms_sign(tag, covered, "-md", "sha256", "-cades", "-nosmimecap")
+    save("cades-general-names.pdf", splice(out, contents_at, reserve, der))
+    save("cades-general-names-root.der", der_of(w(tag + "-root.pem")))
+
+
 BUILDERS = {
     "rsa-pss": rsa_pss,
     "pkcs7-sha1": lambda: pkcs7_sha1(True),
     "pkcs7-sha1-no-attributes": lambda: pkcs7_sha1(False),
     "no-signed-attributes": no_signed_attributes,
+    "cades-general-names": cades_general_names,
 }
 
 for wanted in WANTED:

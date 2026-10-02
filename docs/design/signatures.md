@@ -340,6 +340,18 @@ ignored when there are no signed attributes fires 2; the old by-name refusal res
 fires 3. `Unchecked::LegacySha1SubFilter` is gone and `ContentNotEncapsulated` names the
 one refusal left, a message under the subfilter that is detached.
 
+**`GeneralNames`**, the same day: `tinker_pdf_pki::general_name` reads RFC 5280 §4.2.1.6's
+choice, decoded on request in the alternative-name extensions, `authorityCertIssuer` and an
+ESS `issuerSerial`, against RFC 5280 C.2's mailbox and an OpenSSL CAdES fixture carrying
+eight of the nine alternatives. The one thing easy to get wrong is that `[4]` is explicit —
+`Name` is a `CHOICE`, and X.680 §31.2.7 makes a tag on one explicit whatever the module
+says — and reading it implicitly is the injection that fires most: 6. The others: a
+mailbox read as UTF-8 rather than IA5 fires 1; an empty `GeneralNames` accepted fires 1;
+an address of any length accepted fires 1; `IssuerSerial::identifies` ignoring the serial
+fires 1; `authorityCertIssuer` read as a SEQUENCE rather than an implicit one's content
+fires 1. `subjectAltName` stays out of what `unrecognised_critical` counts as recognised:
+decoding a name is not identifying a subject by it, and nothing here does the latter.
+
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,

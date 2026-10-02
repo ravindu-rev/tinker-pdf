@@ -140,6 +140,7 @@
 pub use tinker_pdf_crypto::DigestAlgorithm;
 
 use crate::der::{Budget, Class, Cursor, DerError, Int, Limits, Oid, Tag, Tlv};
+use crate::general_name::{GeneralNameError, GeneralNames};
 use crate::name::Name;
 use crate::oid;
 use crate::x509::AlgorithmIdentifier;
@@ -694,12 +695,74 @@ impl<'a> EssCertId<'a> {
         self.hash
     }
 
-    /// `issuerSerial`, undecoded. A `GeneralNames` and a serial; nothing in
-    /// this milestone reads one, and the bytes are here so a later one need
-    /// not re-walk the attribute.
+    /// `issuerSerial`, as its complete encoding.
     #[must_use]
     pub const fn issuer_serial(&self) -> Option<&'a [u8]> {
         self.issuer_serial
+    }
+
+    /// `issuerSerial`, decoded: `IssuerSerial ::= SEQUENCE { issuer
+    /// GeneralNames, serialNumber CertificateSerialNumber }` (RFC 5035 §4,
+    /// after RFC 5755 §4.1, without the `issuerUID` RFC 5035 leaves out).
+    ///
+    /// Decoded on request, as `authorityCertIssuer` is: the attribute is the
+    /// signer's statement of which certificate it meant, and a name this
+    /// crate cannot read is a refusal about that statement rather than about
+    /// the message.
+    ///
+    /// # Errors
+    ///
+    /// [`GeneralNameError`].
+    pub fn issuer_serial_decoded(&self) -> Option<Result<IssuerSerial<'a>, GeneralNameError>> {
+        self.issuer_serial.map(IssuerSerial::parse)
+    }
+}
+
+/// An ESS `IssuerSerial` (RFC 5035 §4): the certificate an `ESSCertIDv2`
+/// names, by its issuer and serial number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuerSerial<'a> {
+    issuer: GeneralNames<'a>,
+    serial: Int<'a>,
+}
+
+impl<'a> IssuerSerial<'a> {
+    fn parse(der: &'a [u8]) -> Result<Self, GeneralNameError> {
+        let budget = Budget::new(Limits::new(16, 4096));
+        let mut cursor = Cursor::new(der, &budget);
+        let sequence = cursor.expect(Tag::Sequence)?;
+        cursor.finish()?;
+        let mut fields = sequence.children(&budget)?;
+        let issuer = GeneralNames::from_node(&fields.expect(Tag::Sequence)?, &budget)?;
+        let serial = fields.expect(Tag::Integer)?.as_integer()?;
+        fields.finish()?;
+        Ok(Self { issuer, serial })
+    }
+
+    /// The issuer, as `GeneralNames` — in practice one directory name.
+    #[must_use]
+    pub fn issuer(&self) -> &GeneralNames<'a> {
+        &self.issuer
+    }
+
+    /// The serial number, as its encoding's octets.
+    #[must_use]
+    pub const fn serial(&self) -> Int<'a> {
+        self.serial
+    }
+
+    /// Whether this names `certificate`: a directory name among the issuer's
+    /// names that matches the certificate's issuer, and the same serial
+    /// octets.
+    #[must_use]
+    pub fn identifies(&self, certificate: &crate::x509::Certificate<'_>) -> bool {
+        self.serial.as_bytes() == certificate.serial().as_bytes()
+            && self.issuer.names().iter().any(|name| match name {
+                crate::general_name::GeneralName::Directory(directory) => {
+                    directory.matches(certificate.issuer())
+                }
+                _ => false,
+            })
     }
 }
 

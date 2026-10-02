@@ -147,6 +147,29 @@ The corpus's only `adbe.pkcs7.sha1` file is a fuzzer's mutation whose
 `/ByteRange` does not bracket its `/Contents`, so it has never reached a CMS
 parser; these two are the only ones that do.
 
+### `cades-general-names.pdf` and its root — 2 October 2026
+
+`python3 signature-fixtures.py <out> <work> cades-general-names`. A 2048-bit
+RSA root and a leaf issued with the extension file `GENERAL_NAMES_EXTENSIONS`
+in the script — a `subjectAltName` using eight of RFC 5280's nine
+alternatives (mailbox, DNS name, URI, an IPv4 and an IPv6 address, a
+registered OID, a UPN `otherName` and a directory name), an `issuerAltName`
+URI, and `authorityKeyIdentifier = keyid:always, issuer:always` — and `openssl
+cms -sign -binary -md sha256 -cades -nosmimecap` over the covered bytes, under
+`/SubFilter /ETSI.CAdES.detached`. `-cades` adds RFC 5035's
+`signingCertificateV2`, whose `issuerSerial` is a `GeneralNames` holding the
+signer's issuer as a directory name.
+
+SHA-256: `e689cf36eacea32773f2939373c181fb0fa2b9c295df4fe4294fae2d3a550bae`
+(`cades-general-names.pdf`) and
+`324c97ae5e27076e98a9b5d5678ecd7bf31a0c186321c54504a4c197edc0d343`
+(`cades-general-names-root.der`).
+
+What it is worth: every name in it was *requested* of OpenSSL by the extension
+file, so `signature_shapes.rs` asserts the request read back, encoded by a
+second implementation; it is not this crate's own encoding of a name agreeing
+with its own decoding.
+
 ## The visible-signature signer
 
 `visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA

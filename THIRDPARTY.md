@@ -798,6 +798,9 @@ before the third arrived:
   day the same way: ISO 32000-1 12.8.3.3.1's `adbe.pkcs7.sha1`, whose CMS
   encapsulates the document's SHA-1 (`cms -sign -nodetach`), with and without
   signed attributes, because the corpus's one such file never reaches a parser.
+- `cades-general-names.pdf` and its root, the same day the same way: a CAdES
+  signature (`cms -sign -cades`) whose signer certificate and
+  `signingCertificateV2` carry RFC 5280 `GeneralNames` of eight kinds.
 
 The keys and certificates are generated for the fixtures and belong to nobody;
 there is no licence on any of it. Nothing re-runs OpenSSL — `cargo xtask

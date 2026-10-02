@@ -228,6 +228,11 @@ fn read_every_way(data: &[u8], limits: Limits) {
             for id in attribute.certs() {
                 assert!(inside(data, id.hash()));
                 let _ = id.digest();
+                if let Some(Ok(issuer_serial)) = id.issuer_serial_decoded() {
+                    for name in issuer_serial.issuer().names() {
+                        let _ = name.to_string();
+                    }
+                }
             }
         }
         // RFC 5652 §5.4: whatever the envelope was encoded as, what a

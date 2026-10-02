@@ -54,6 +54,7 @@ use std::ops::Range;
 use tinker_pdf_crypto::sha1::sha1;
 
 use crate::der::{BitString, Budget, Cursor, DerError, Int, Limits, Oid, Tag, Tlv};
+use crate::general_name::{GeneralNameError, GeneralNames};
 use crate::name::{self, Name};
 use crate::oid;
 
@@ -445,14 +446,25 @@ impl<'a> AuthorityKeyIdentifier<'a> {
         self.key_identifier
     }
 
-    /// `authorityCertIssuer`, as the raw `GeneralNames` encoding.
-    ///
-    /// Undecoded: a `GeneralName` is a nine-way choice and nothing in this
-    /// milestone reads one. The bytes are here so a later one need not
-    /// re-walk the certificate to find them.
+    /// `authorityCertIssuer`, as the content of its `[1] IMPLICIT
+    /// GeneralNames` — the names with no SEQUENCE header of their own.
     #[must_use]
     pub const fn issuer_der(&self) -> Option<&'a [u8]> {
         self.issuer
+    }
+
+    /// `authorityCertIssuer`, decoded ([`crate::general_name`]).
+    ///
+    /// Decoded on request rather than when the certificate is parsed, so a
+    /// name this crate cannot read refuses here and not the certificate: the
+    /// field is the issuer's issuer, a hint for path building, and nothing a
+    /// signature verifies depends on it.
+    ///
+    /// # Errors
+    ///
+    /// [`GeneralNameError`].
+    pub fn issuer(&self) -> Option<Result<GeneralNames<'a>, GeneralNameError>> {
+        self.issuer.map(GeneralNames::from_content)
     }
 
     /// `authorityCertSerialNumber`.
@@ -565,6 +577,26 @@ impl<'a> Extensions<'a> {
         self.authority_key_identifier
     }
 
+    /// `subjectAltName` (§4.2.1.6), decoded, where present.
+    ///
+    /// # Errors
+    ///
+    /// [`GeneralNameError`] for an `extnValue` that is not one.
+    pub fn subject_alt_names(&self) -> Option<Result<GeneralNames<'a>, GeneralNameError>> {
+        self.find(oid::CE_SUBJECT_ALT_NAME)
+            .map(|extension| GeneralNames::parse(extension.value))
+    }
+
+    /// `issuerAltName` (§4.2.1.7), decoded, where present.
+    ///
+    /// # Errors
+    ///
+    /// [`GeneralNameError`] for an `extnValue` that is not one.
+    pub fn issuer_alt_names(&self) -> Option<Result<GeneralNames<'a>, GeneralNameError>> {
+        self.find(oid::CE_ISSUER_ALT_NAME)
+            .map(|extension| GeneralNames::parse(extension.value))
+    }
+
     /// The critical extensions this crate does not decode.
     ///
     /// RFC 5280 §4.2 makes an unrecognised critical extension a reason to
@@ -572,6 +604,12 @@ impl<'a> Extensions<'a> {
     /// parser, so the list is handed over rather than acted on — and
     /// "recognised" is defined here as *decoded*, so an extension whose bytes
     /// are merely carried through does not count as understood.
+    ///
+    /// `subjectAltName` and `issuerAltName` stay on this list although
+    /// [`Extensions::subject_alt_names`] reads them. A critical alternative
+    /// name asks a validator to identify the subject by it (§4.2.1.6), and
+    /// decoding a name is not identifying anybody: nothing in this crate
+    /// matches a name against a host, a mailbox or a URI.
     pub fn unrecognised_critical<'s>(&'s self) -> impl Iterator<Item = &'s Extension<'a>> + 's {
         self.all.iter().filter(|extension| {
             extension.critical
@@ -1440,6 +1478,7 @@ pub(crate) mod tests {
             issuer.extensions().subject_key_identifier()
         );
         assert!(authority.issuer_der().is_none());
+        assert!(authority.issuer().is_none());
         assert!(authority.serial().is_none());
         // C.2's own subjectKeyIdentifier turns out to be method (1) as well —
         // the appendix says so only about C.1 — so the same SHA-1 that pins
@@ -1459,8 +1498,8 @@ pub(crate) mod tests {
             .find(oid::CE_SUBJECT_ALT_NAME)
             .expect("subjectAltName is present");
         assert!(!san.is_critical());
-        // Carried, not decoded: `GeneralNames` is a later milestone's job, so
-        // the bytes are handed over exactly as they arrived.
+        // The bytes exactly as they arrived, and decoded: RFC 5280's own
+        // example is the published vector `GeneralNames` is held to.
         assert_eq!(
             san.value(),
             &unhex(
@@ -1468,6 +1507,18 @@ pub(crate) mod tests {
                  65 78 61 6D 70 6C 65 2E 63 6F 6D"
             )[..]
         );
+        let names = certificate
+            .extensions()
+            .subject_alt_names()
+            .expect("present")
+            .expect("decodes");
+        assert_eq!(
+            names.names(),
+            [crate::general_name::GeneralName::Rfc822(
+                "end.entity@example.com".into()
+            )]
+        );
+        assert!(certificate.extensions().issuer_alt_names().is_none());
         // And it is critical-but-unknown territory if it ever became
         // critical, which is exactly what this reports.
         assert_eq!(certificate.extensions().unrecognised_critical().count(), 0);

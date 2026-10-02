@@ -75,6 +75,7 @@
 pub mod cms;
 pub mod der;
 pub mod enveloped;
+pub mod general_name;
 pub mod name;
 pub mod oid;
 pub mod pss;
@@ -82,11 +83,12 @@ pub mod x509;
 
 pub use cms::{
     Attributes, CertificateChoice, CmsError, ContentInfo, DigestAlgorithm, EncapsulatedContent,
-    EssCertId, RevocationChoice, SignatureAlgorithm, SignedData, SignerIdentifier, SignerInfo,
-    SigningCertificateV2,
+    EssCertId, IssuerSerial, RevocationChoice, SignatureAlgorithm, SignedData, SignerIdentifier,
+    SignerInfo, SigningCertificateV2,
 };
 pub use der::{BitString, Budget, Class, Cursor, DerError, Int, Limits, Oid, Tag, TimeFault, Tlv};
 pub use enveloped::{EnvelopedData, EnvelopedError, KeyTransRecipient, RecipientIdentifier};
+pub use general_name::{GeneralName, GeneralNameError, GeneralNames};
 pub use name::{Attribute, AttributeText, Name, Rdn};
 pub use pss::PssError;
 
