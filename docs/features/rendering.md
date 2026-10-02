@@ -313,7 +313,10 @@ same bytes from a list already held. The decisions, each stated in the
 module header: coordinates are the page's displayed points (crop box and
 `/Rotate` applied, `y` down), with the root sized in `pt` so the picture keeps
 the page's physical size; numbers are rounded to four places, never `-0`,
-`inf` or `NaN`; every path carries its transform already applied, so only an
+`inf` or `NaN`, and a path segment with a point that is not finite is
+dropped as the rasterizer drops it — so a clip whose every point overflows
+installs no clip, as on a render, rather than one of no area that hides the
+page; every path carries its transform already applied, so only an
 image and a gradient carry a `transform`; fills and strokes carry colour,
 opacity, the fill rule and the whole pen — width and dashes scaled by the
 transform's expansion as the renderer scales them, caps, joins, miter limit;

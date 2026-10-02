@@ -842,6 +842,63 @@ fn the_output_is_deterministic_and_the_list_writes_the_same() {
         .contains("width=\"200pt\" height=\"100pt\" viewBox=\"0 0 200 100\""));
 }
 
+/// **A point that is not finite is dropped, as the renderer drops it** — the
+/// rasterizer's path builder discards a verb with a non-finite point and
+/// keeps the rest — rather than written as `0`, which made it a spurious
+/// corner at the origin. So a clip whose every point overflows installs no
+/// clip, as on a render, instead of a clip of no area that hides everything;
+/// and a fill with one overflowing vertex is the fill without it.
+#[test]
+fn a_point_that_is_not_finite_is_dropped_as_the_renderer_drops_it() {
+    let content = "q 10 0 0 10 0 0 cm 1e308 1e308 m 1e308 0 l 0 1e308 l W n \
+                   1 0 0 rg 0 0 5 5 re f Q\n\
+                   q 10 0 0 10 0 0 cm 0 0 1 rg 6 1 m 1e308 1 l 8 1 l 8 3 l h f Q";
+    let bytes = pdf(content, 100, 100, "<< >>", &[]);
+    let document = Document::open(bytes).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let bitmap = page.render(&tinker_pdf::RenderOptions::default());
+    let red = bitmap
+        .data
+        .chunks_exact(3)
+        .filter(|p| *p == [255, 0, 0])
+        .count();
+    assert_eq!(
+        red, 2_500,
+        "the renderer installs no clip: the square paints"
+    );
+
+    let svg = page.to_svg(&SvgOptions::default());
+    assert!(
+        !svg.markup.contains("<clipPath"),
+        "no clip, as on the render: {}",
+        svg.markup
+    );
+    let (scene, k) = read_back(&svg);
+    let nodes = paths(&scene);
+    assert_eq!(nodes.len(), 2);
+    let Node::Path { clip, fill, .. } = nodes[0] else {
+        unreachable!()
+    };
+    assert!(clip.is_none(), "the red square is unclipped");
+    assert_eq!(solid(fill), [1.0, 0.0, 0.0]);
+    let Node::Path { outline, .. } = nodes[1] else {
+        unreachable!()
+    };
+    // (60, 10), then the overflowing vertex dropped, then (80, 10), (80, 30)
+    // and back: y' = 100 - y.
+    assert_eq!(kinds(&outline.segments), "MLLZ");
+    close(
+        &points(&outline.segments, k),
+        &[
+            vec![[60.0, 90.0]],
+            vec![[80.0, 90.0]],
+            vec![[80.0, 70.0]],
+            vec![],
+        ],
+        "the blue triangle, without a corner at the origin",
+    );
+}
+
 /// Deterministic noise, `count` bytes of it, as the hex an `ASCIIHexDecode`
 /// stream carries — samples no PNG filter can predict, so a picture of them
 /// is as large as its pixels.

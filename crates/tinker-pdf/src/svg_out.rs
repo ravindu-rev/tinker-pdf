@@ -61,8 +61,10 @@
 //!   save less than it costs, and so is every picture past the
 //!   [`tinker_pdf_svg::Limits::DEFAULT`] number of expansions, so a file this
 //!   writes is never one its reader refuses for having too many.
-//! - **A number is never `inf` or `NaN`.** A non-finite value is written as
-//!   0 and one past 10^11 as a whole number, so a hostile page's coordinates
+//! - **A number is never `inf` or `NaN`.** A path segment with a point that
+//!   is not finite is dropped, as the rasterizer's path builder drops it, so
+//!   the outline is the render's; any other non-finite value is written as 0,
+//!   and one past 10^11 as a whole number, so a hostile page's coordinates
 //!   still make a document a reader parses.
 //! - **An axial or radial shading is a gradient where that is exact**: the
 //!   colour space is DeviceRGB or DeviceGray, the function is piecewise
@@ -1134,11 +1136,15 @@ impl Device for Writer<'_> {
     }
 
     fn clip_path(&mut self, path: &[PathSegment], _state: &GraphicsState, even_odd: bool) {
-        // As the renderer answers: `W n` with no path at all installs no
-        // clip. A path of moves alone is a clip of no area, which clips
-        // everything, and so is a text object that clips and shows no glyph
-        // (`end_text`) — both written as a `<clipPath>` with nothing in it.
-        if path.is_empty() {
+        // As the renderer answers: `W n` with no path its rasterizer would
+        // build — none at all, or one whose every point is not finite —
+        // installs no clip. A path of moves alone is a clip of no area, which
+        // clips everything, and so is a text object that clips and shows no
+        // glyph (`end_text`) — both written as a `<clipPath>` with nothing in
+        // it. The finiteness is judged at this writer's scale, one point to a
+        // unit; a render at a larger one can overflow a point this keeps,
+        // within a factor of the scale of `f64::MAX`.
+        if !survives(path, &self.base) {
             return;
         }
         self.add_clip(path.to_vec(), even_odd);
@@ -1404,19 +1410,38 @@ fn push_opacity(element: &mut String, attribute: &str, alpha: f64) {
 }
 
 /// Path data for `path` through `m`, or empty when it draws nothing.
+///
+/// **A segment with a point that is not finite is dropped**, which is what
+/// the rasterizer's path builder does with the verb, so the picture is the
+/// render's: a fill keeps the rest of its outline, and the next segment
+/// carries on from the last point kept. Writing such a point as `0`, which
+/// [`num`] would, made it a spurious corner at the origin. A path whose first
+/// drawing segment has no move before it starts at the origin, where the
+/// rasterizer's pen starts, because SVG path data must begin with one.
 fn path_data(path: &[PathSegment], m: &Matrix) -> String {
     let mut out = String::new();
     let mut drew = false;
+    let finite = |points: &[(f64, f64)]| points.iter().all(|(x, y)| x.is_finite() && y.is_finite());
+    let start = |out: &mut String| {
+        if out.is_empty() {
+            out.push_str("M0 0");
+        }
+    };
     for segment in path {
         match *segment {
             PathSegment::MoveTo { x, y } => {
                 let (x, y) = m.apply(x, y);
-                let _ = write!(out, "M{} {}", num(x), num(y));
+                if finite(&[(x, y)]) {
+                    let _ = write!(out, "M{} {}", num(x), num(y));
+                }
             }
             PathSegment::LineTo { x, y } => {
                 let (x, y) = m.apply(x, y);
-                let _ = write!(out, "L{} {}", num(x), num(y));
-                drew = true;
+                if finite(&[(x, y)]) {
+                    start(&mut out);
+                    let _ = write!(out, "L{} {}", num(x), num(y));
+                    drew = true;
+                }
             }
             PathSegment::CurveTo {
                 x1,
@@ -1429,19 +1454,25 @@ fn path_data(path: &[PathSegment], m: &Matrix) -> String {
                 let (x1, y1) = m.apply(x1, y1);
                 let (x2, y2) = m.apply(x2, y2);
                 let (x3, y3) = m.apply(x3, y3);
-                let _ = write!(
-                    out,
-                    "C{} {} {} {} {} {}",
-                    num(x1),
-                    num(y1),
-                    num(x2),
-                    num(y2),
-                    num(x3),
-                    num(y3)
-                );
-                drew = true;
+                if finite(&[(x1, y1), (x2, y2), (x3, y3)]) {
+                    start(&mut out);
+                    let _ = write!(
+                        out,
+                        "C{} {} {} {} {} {}",
+                        num(x1),
+                        num(y1),
+                        num(x2),
+                        num(y2),
+                        num(x3),
+                        num(y3)
+                    );
+                    drew = true;
+                }
             }
-            PathSegment::Close => out.push('Z'),
+            // A close with nothing open closes nothing, and SVG path data may
+            // not begin with one.
+            PathSegment::Close if !out.is_empty() => out.push('Z'),
+            PathSegment::Close => {}
         }
     }
     if drew {
@@ -1449,6 +1480,28 @@ fn path_data(path: &[PathSegment], m: &Matrix) -> String {
     } else {
         String::new()
     }
+}
+
+/// Whether the rasterizer would build anything of `path` through `m`: a
+/// segment whose points are all finite, or a close, which its path builder
+/// keeps whatever came before it.
+fn survives(path: &[PathSegment], m: &Matrix) -> bool {
+    let finite = |x: f64, y: f64| {
+        let (x, y) = m.apply(x, y);
+        x.is_finite() && y.is_finite()
+    };
+    path.iter().any(|segment| match *segment {
+        PathSegment::MoveTo { x, y } | PathSegment::LineTo { x, y } => finite(x, y),
+        PathSegment::CurveTo {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+        } => finite(x1, y1) && finite(x2, y2) && finite(x3, y3),
+        PathSegment::Close => true,
+    })
 }
 
 /// The bounding box of `path` through `m`, as `[x0, y0, x1, y1]`; empty (the
