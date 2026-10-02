@@ -234,6 +234,57 @@ impl Signer for Stamp<'_> {
     }
 }
 
+/// Long-term validation material for a document's security store (ISO
+/// 32000-2 12.8.4.3, the `/DSS`): the certificates, CRLs and OCSP responses a
+/// host gathered, as DER, and the signatures they validate.
+///
+/// **Gathered by the host.** The engine performs no I/O, so it fetches no CRL
+/// and asks no responder; it writes what it is handed, and nothing here is
+/// parsed or judged — whether a response is fresh is a question with a clock
+/// in it. [`crate::DocumentEditor::add_validation_data`] writes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ValidationData {
+    /// Certificates, each a DER `Certificate`: `/Certs`.
+    pub certificates: Vec<Vec<u8>>,
+    /// Certificate revocation lists, each a DER `CertificateList`: `/CRLs`.
+    pub crls: Vec<Vec<u8>>,
+    /// OCSP responses, each a DER `OCSPResponse`: `/OCSPs`.
+    pub ocsp_responses: Vec<Vec<u8>>,
+    /// The signatures this material validates, each by its `/Contents`
+    /// bytes as read. Each gets a `/VRI` entry, keyed by
+    /// [`validation_key`], naming exactly this material.
+    pub signatures: Vec<Vec<u8>>,
+    /// `/TU` on those entries: when the host gathered the material.
+    /// Supplied, never read from a clock.
+    pub gathered_at: Option<Date>,
+}
+
+impl ValidationData {
+    /// Nothing yet.
+    #[must_use]
+    pub fn new() -> ValidationData {
+        ValidationData::default()
+    }
+}
+
+/// The `/VRI` key a signature's validation material is filed under: the
+/// SHA-1 of its `/Contents` bytes as uppercase hexadecimal (ETSI EN 319 142-1
+/// §5.4.2.2).
+///
+/// Over the string exactly as stored, the reservation's zero fill included,
+/// which is what iText and PDFBox hash for a signature; iText re-encodes a
+/// document timestamp's token first and so files one under a different key.
+/// One function, used by the writer and by the reader's
+/// `Signature::validation_key`, so the two cannot disagree.
+#[must_use]
+pub fn validation_key(contents: &[u8]) -> String {
+    sha1::sha1(contents)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect()
+}
+
 /// What a certifying signature permits afterwards (12.8.2.2, `/DocMDP` `/P`).
 ///
 /// A named enum rather than the integer the file carries, because `/P 0` and

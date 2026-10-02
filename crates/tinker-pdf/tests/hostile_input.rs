@@ -205,6 +205,12 @@ fn exercise(bytes: Vec<u8>) {
         let _ = signature.digest(&doc, tinker_pdf::DigestAlgorithm::Sha256);
         let _ = signature.digest(&doc, tinker_pdf::DigestAlgorithm::Sha1);
         let _ = signature.covers_whole_file();
+        let _ = signature.validation_key();
+    }
+    // The security store's arrays and `/VRI` are shaped by the file.
+    if let Some(store) = doc.security_store() {
+        let _ = store.entries.len();
+        let _ = store.warnings.len();
     }
     let _ = doc.permissions();
     let _ = doc.is_encrypted();

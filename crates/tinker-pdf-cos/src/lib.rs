@@ -151,7 +151,7 @@ pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{
     digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused,
     SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget, TimestampRequest,
-    Timestamper,
+    Timestamper, ValidationData,
 };
 pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
 pub use text_string::{decode_text_string, encode_text_string, parse_date, Date};

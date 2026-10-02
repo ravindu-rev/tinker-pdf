@@ -455,6 +455,52 @@ def engine_timestamp(digest_hex):
     save("engine-timestamp-tsa-root.der", der_of(w(tag + "-tsa-root.pem")))
 
 
+def validation_data():
+    """A CRL and an OCSP response for `no-signed-attributes.pdf`'s signer,
+    from the CA that issued it: the host-supplied revocation material a
+    document security store is written from. Run in the same work directory
+    as `no-signed-attributes`, straight after it, because only that run has
+    the root's key; neither file is otherwise reproducible."""
+    tag = "noattr"
+    subject = run("openssl", "x509", "-in", w(tag + "-leaf.pem"), "-noout", "-subject",
+                  "-nameopt", "compat").decode().strip().split("=", 1)[1].strip()
+    end = run("openssl", "x509", "-in", w(tag + "-leaf.pem"), "-noout", "-enddate"
+              ).decode().strip().split("=", 1)[1]
+    # `notAfter=Sep  8 ...` as the index's GeneralizedTime-or-UTCTime column;
+    # the responder reads the status column, and this one only says valid.
+    expiry = "21260908000000Z"
+    with open(w(tag + "-index.txt"), "w") as f:
+        f.write("V\t" + expiry + "\t\t02\tunknown\t" + subject + "\n")
+    with open(w(tag + "-crlnumber"), "w") as f:
+        f.write("1000\n")
+    with open(w(tag + "-ca.cnf"), "w") as f:
+        f.write("\n".join([
+            "[ ca ]",
+            "default_ca = authority",
+            "[ authority ]",
+            "database = " + w(tag + "-index.txt"),
+            "crlnumber = " + w(tag + "-crlnumber"),
+            "default_md = sha256",
+            "default_crl_days = 36500",
+            "",
+        ]))
+    run("openssl", "ca", "-gencrl", "-config", w(tag + "-ca.cnf"),
+        "-keyfile", w(tag + "-root.key"), "-cert", w(tag + "-root.pem"),
+        "-out", w(tag + "-crl.pem"))
+    crl = run("openssl", "crl", "-in", w(tag + "-crl.pem"), "-outform", "DER")
+    run("openssl", "ocsp", "-issuer", w(tag + "-root.pem"), "-cert", w(tag + "-leaf.pem"),
+        "-no_nonce", "-reqout", w(tag + "-ocsp-request.der"))
+    run("openssl", "ocsp", "-index", w(tag + "-index.txt"), "-rsigner", w(tag + "-root.pem"),
+        "-rkey", w(tag + "-root.key"), "-CA", w(tag + "-root.pem"),
+        "-reqin", w(tag + "-ocsp-request.der"), "-respout", w(tag + "-ocsp.der"),
+        "-ndays", "36500")
+    with open(w(tag + "-ocsp.der"), "rb") as f:
+        response = f.read()
+    print("leaf notAfter", end)
+    save("no-signed-attributes-crl.der", crl)
+    save("no-signed-attributes-ocsp.der", response)
+
+
 BUILDERS = {
     "rsa-pss": rsa_pss,
     "pkcs7-sha1": lambda: pkcs7_sha1(True),
@@ -463,6 +509,7 @@ BUILDERS = {
     "cades-general-names": cades_general_names,
     "signature-timestamp": signature_timestamp,
     "document-timestamp": document_timestamp,
+    "validation-data": validation_data,
 }
 
 for wanted in WANTED:

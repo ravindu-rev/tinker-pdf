@@ -379,6 +379,19 @@ token rather than the covered bytes fires 3; `is_trusted` ignoring the document 
 fires 1; the dictionary typed `/Sig` fires 2; a visible target drawn as an invisible one
 fires 1; the adapter's digest ignored fires 1.
 
+**The document security store**, the same day. `add_validation_data` writes the catalog's
+`/DSS` — `/Certs`, `/CRLs` and `/OCSPs` as arrays of streams, one `/VRI` entry per named
+signature keyed by the SHA-1 of its `/Contents` (ETSI EN 319 142-1 §5.4.2.2) through one
+`validation_key` the reader shares — extending a store already there rather than replacing
+it, never writing a stream twice, and declaring `/ESIC` on a document below 2.0. The
+reader hands back references, not bytes, by the attachments precedent: a store may name
+thousands of streams and listing them should not cost decoding them. The evidence is a CRL
+and an OCSP response OpenSSL issued for a fixture's signer, held to coming back byte for
+byte, filed under the right key, with the signature still verifying over its revision.
+Injections: the `/VRI` key taken over the trimmed CMS rather than the stored `/Contents`
+fires 2; the duplicate check removed fires 1; a store already there replaced rather than
+extended fires 1; a non-stream member kept fires 1; `/ESIC` never declared fires 1.
+
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,
@@ -421,8 +434,15 @@ fires 1; the adapter's digest ignored fires 1.
 - **Signing keys in the engine.** No key parsing (PKCS#8, PKCS#12), no key generation, no
   RSA/ECDSA *signing* arithmetic. The `Signer` callback returns finished CMS bytes.
 - **Revocation fetching.** No CRL or OCSP network traffic — the engine performs no I/O.
-  Embedded revocation data (PAdES DSS/VRI, ISO 32000-2 12.8.4.3) is parsed and surfaced;
-  evaluating freshness is the host's call.
+  Embedded revocation data is surfaced, and evaluating freshness is the host's call.
+  *Corrected 2 October 2026*: this bullet used to say the document security store (PAdES
+  DSS/VRI, ISO 32000-2 12.8.4.3) "is parsed and surfaced", and **nothing in the tree read
+  `/DSS` at all** — the only revocation data surfaced was a CMS blob's own `crls` field,
+  through `SignedData::crls`. It is true from that date: `Document::security_store` reads
+  the store back as references to its streams, with its `/VRI` entries keyed to
+  signatures, and `DocumentEditor::add_validation_data` writes one from host-supplied
+  certificates, CRLs and OCSP responses. Still surfaced, never evaluated: nothing parses a
+  CRL or an OCSP response, and the verdict does not consult the store.
 - ~~**Timestamp validation.** RFC 3161 tokens inside CMS are parsed and reported (present,
   TSA name, time); validating the TSA's own chain is a later tier, not this design.~~ *No
   longer a non-goal, 2 October 2026*: `Verdict::timestamps` validates each token's imprint,

@@ -37,8 +37,10 @@
 //! clock.
 //!
 //! **Revocation.** No CRL is fetched and no OCSP responder is asked, because
-//! the engine performs no I/O. Embedded revocation data is surfaced by
-//! `tinker-pdf-pki` and evaluating its freshness is the host's.
+//! the engine performs no I/O. Embedded revocation data is surfaced — a CMS
+//! blob's own by `tinker-pdf-pki`, a document security store's by
+//! `Document::security_store` — and evaluating its freshness is the host's.
+//! Nothing here consults either.
 //!
 //! # The limit ruling 13 imposes, stated once
 //!

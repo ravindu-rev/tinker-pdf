@@ -170,6 +170,24 @@ authority's signature over its `TSTInfo`, its chain at `genTime` — and the
 token's own `TimestampVerdict`, with its time and its certificate's fitness,
 rides in `timestamps`; `Verdict::is_trusted` requires that one too.
 
+**Long-term validation material.** `DocumentEditor::add_validation_data`
+writes ISO 32000-2 12.8.4.3's document security store from bytes the host
+gathered — certificates, CRLs and OCSP responses, as DER — into the catalog's
+`/DSS`: `/Certs`, `/CRLs` and `/OCSPs` arrays of streams, and a `/VRI` entry
+for each signature named, keyed by `Signature::validation_key` (the SHA-1 of
+its `/Contents` as uppercase hexadecimal, ETSI EN 319 142-1 §5.4.2.2) and
+listing exactly that material, with `/TU` where the host says when it gathered
+it. It is an ordinary edit saved incrementally, so it lands after every
+signature's `/ByteRange` and breaks none of them, and a later document
+timestamp covers it. A store already there is extended rather than replaced,
+and a stream whose bytes are already listed is not written twice. A document
+below 2.0 gains the `/ESIC` developer extension a 1.7 file declares the store
+with. `Document::security_store` reads one back — as references to its
+streams, by the attachments precedent, so listing a store costs nothing like
+decoding it — and names what it skipped. Nothing parses a CRL or an OCSP
+response, and the verdict does not consult the store: whether revocation data
+is fresh is a question with a clock in it.
+
 **A visible seal.** `SigningTarget::NewVisibleField { name, page, rect,
 appearance }` adds a signature field whose widget draws: a normal appearance
 built by `appearance::signature`, beside the synthesis every other annotation
@@ -258,6 +276,24 @@ let request = TimestampRequest::new(
     &authority, // the host's: it posts a TimeStampReq, the engine does not
 );
 let stamped = Document::open(signed)?.editor().save_timestamped(&options, &request)?;
+```
+
+Long-term validation material is a `ValidationData` (`#[non_exhaustive]`,
+built with `new`) of DER the host fetched, and comes back as a
+`SecurityStore` of stream references:
+
+```rust
+let mut data = ValidationData::new();
+data.crls = vec![crl_der];                    // fetched by the host
+data.ocsp_responses = vec![ocsp_der];
+data.signatures = vec![signature.contents.clone()];
+let mut editor = document.editor();
+editor.add_validation_data(&data);            // false only without a catalog
+let saved = editor.save(&incremental);
+
+let store = Document::open(saved)?.security_store().expect("a /DSS");
+let entry = store.entry_for(&signature);      // its /VRI entry
+let crl = document.cos().stream_decoded(store.crls[0]);
 ```
 
 ## Refused by name
@@ -418,6 +454,18 @@ first, in as many words, if a writer change ever moves it. Over the engine's
 output the earlier signature reads `Revision` and still verifies, and the
 timestamp reads `WholeFile`, `Matches`, `Verified`, anchored and `Fit`; the
 strict validator finds nothing the update added. Nine tests.
+
+**The document security store** is held to a CRL and an OCSP response
+OpenSSL 3.0.13 issued for the `no-signed-attributes.pdf` signer from the CA
+that issued it (`openssl ca -gencrl`, `openssl ocsp -index`). Eight tests in
+`tests/security_store.rs`: the four kinds of material come back byte for byte;
+they are filed under the key SHA-1 of the stored `/Contents` gives, written
+out a second way; the signature still verifies, now over a revision; the
+`/ESIC` extension is declared; a second round extends the store and writes
+nothing twice; a store built malformed by hand is read leniently with each
+skip named; and the strict validator finds nothing the update added. No
+corpus measurement: a census of `/DSS` across the fetched corpora is not
+taken here.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest

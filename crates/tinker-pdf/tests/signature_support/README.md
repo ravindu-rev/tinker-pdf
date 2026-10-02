@@ -240,6 +240,24 @@ the_committed_token_stamps` fails first and prints both digests; if the
 change was meant, run the command above with the new one and commit the two
 files it writes.
 
+### `no-signed-attributes-crl.der` and `-ocsp.der` — 2 October 2026
+
+`python3 signature-fixtures.py <out> <work> validation-data`, in the work
+directory `no-signed-attributes` was built in and straight after it, because
+only that run has the root's private key. An `openssl ca -gencrl` CRL from that
+fixture's root (CRL number 4096, nothing revoked, a century to its next
+update), and an OCSP response for its signer from `openssl ocsp -index` over an
+index file listing the signer as valid, signed by the root itself as the
+responder (`-rsigner`), no nonce. `tests/security_store.rs` writes both into a
+document security store and reads them back; nothing in the engine parses
+either, so what they are worth is being real material of the right shape
+rather than placeholder bytes.
+
+SHA-256: `989a9e2b23081fe35c3d524c0c4968bf6600bc40a1a257f1a45f356e066f1d76`
+(the CRL) and
+`df1af7fe803ce8a8cd12692411b9c59f64ef3efaa80539bacd84436b450df318`
+(the OCSP response).
+
 ## The visible-signature signer
 
 `visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA

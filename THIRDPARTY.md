@@ -807,6 +807,9 @@ before the third arrived:
 - `document-timestamp.pdf`, `engine-timestamp-token.der` and their two
   authorities' roots, the same day: ISO 32000-2 12.8.5 document timestamps,
   the second a token over the digest of a file this engine wrote.
+- `no-signed-attributes-crl.der` and `-ocsp.der`, the same day: a CRL and an
+  OCSP response OpenSSL issued for that fixture's signer, the host-supplied
+  material a document security store is written from.
 
 The keys and certificates are generated for the fixtures and belong to nobody;
 there is no licence on any of it. Nothing re-runs OpenSSL — `cargo xtask

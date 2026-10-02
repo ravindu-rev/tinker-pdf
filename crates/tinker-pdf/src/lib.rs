@@ -77,7 +77,10 @@ pub use pdfa::{
     Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,
     RuleGroup as PdfARuleGroup, StagedRule, Verdict as PdfAVerdict, STAGED as PDFA_STAGED,
 };
-pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
+pub use signature::{
+    Anchor, Coverage, CoverageDefect, SecurityStore, SecurityStoreWarning, Signature,
+    SignatureWarning, SubFilter, ValidationEntry,
+};
 /// Tagged PDF: the logical structure tree, and the reading-order view over it
 /// (14.7, 14.8).
 pub use structure::{
@@ -289,7 +292,7 @@ pub use tinker_pdf_cos::{CalculatorOp, DeviceNAttributes, LayerId, StampPlacemen
 /// signed and what is checked cannot drift apart.
 pub use tinker_pdf_cos::{
     Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer, SigningRequest,
-    SigningTarget, TimestampRequest, Timestamper,
+    SigningTarget, TimestampRequest, Timestamper, ValidationData,
 };
 /// The bytes-already-encoded image road: everything [`ImageData::Compressed`]
 /// is built out of.
@@ -1740,6 +1743,18 @@ impl Document {
             .iter()
             .map(|signature| verdict::verdict(self, signature, anchors, at))
             .collect()
+    }
+
+    /// The document security store (ISO 32000-2 12.8.4.3): the long-term
+    /// validation material the catalog's `/DSS` carries, as references to its
+    /// streams, and the `/VRI` entries filing some of it under particular
+    /// signatures ([`SecurityStore::entry_for`]). `None` when there is none.
+    ///
+    /// Surfaced and never evaluated: nothing here reads a CRL or an OCSP
+    /// response, and the verdict does not consult the store.
+    #[must_use]
+    pub fn security_store(&self) -> Option<SecurityStore> {
+        signature::security_store(self)
     }
 
     /// What this build makes of the document's PDF/A claim (ISO 19005).
