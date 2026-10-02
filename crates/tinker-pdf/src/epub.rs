@@ -1136,7 +1136,7 @@ pub fn synthesise(
     }
     // Ruling 10 for the `<img>` this build could not put on a page, and the
     // reason it is counted per item and per defect rather than per element is
-    // `UnimplementedProperty`'s: a comic whose forty pictures are all WebP is
+    // `UnimplementedProperty`'s: a comic whose forty pictures are all AVIF is
     // one sentence a host can act on and forty identical warnings is not.
     for chapter in &chapters {
         let Some(reading) = &chapter.reading else {

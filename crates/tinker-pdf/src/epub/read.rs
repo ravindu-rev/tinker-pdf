@@ -46,7 +46,7 @@ use tinker_pdf_css::selector::PseudoElement;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
 };
-use tinker_pdf_filters::{Limits as FilterLimits, WebpError};
+use tinker_pdf_filters::Limits as FilterLimits;
 use tinker_pdf_layout::{BoxNode, CellSpan, Content, Intrinsic};
 use tinker_pdf_zip::limits as zip_limits;
 
@@ -478,7 +478,7 @@ pub struct Picture {
 /// verbatim because re-encoding is generational loss the caller cannot undo,
 /// a PNG goes through the reader that decides between passing its `IDAT`
 /// through and decoding it, a GIF — which no `/Filter` reads — is decoded
-/// and kept `/Indexed`, and a lossless WebP is decoded to RGB or RGBA.
+/// and kept `/Indexed`, and a WebP is decoded to RGB or RGBA.
 pub enum PictureData {
     /// A JPEG, placed as its own bytes.
     Jpeg(Vec<u8>),
@@ -629,15 +629,10 @@ fn picture(
                 PictureData::Raster(Box::new(gif)),
             ))
         }
-        // The fourth core media type, the same way. A lossy WebP is a format
-        // this build does not read, which is not the same sentence as a file
-        // that would not decode.
+        // The fourth core media type, the same way, lossless or lossy.
         ImageFormat::WebP => {
             let webp = webp_image(bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
-                .map_err(|e| match e {
-                    WebpError::LossyNotRead => ImageDefect::UnsupportedFormat(ImageFormat::WebP),
-                    _ => ImageDefect::Undecodable,
-                })?;
+                .map_err(|_| ImageDefect::Undecodable)?;
             Ok((
                 (f64::from(webp.width()), f64::from(webp.height())),
                 PictureData::Raster(Box::new(webp)),

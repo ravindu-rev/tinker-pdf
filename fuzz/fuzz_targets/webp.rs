@@ -1,5 +1,6 @@
 //! WebP: the RIFF chunk walk, the `VP8X` canvas and its first `ANMF` frame,
-//! and VP8L's transforms, prefix codes, back-references and colour cache.
+//! VP8L's transforms, prefix codes, back-references and colour cache, and
+//! VP8's key frame with the `ALPH` chunk beside it.
 //!
 //! A lossless WebP is **a chain of images, each sized by the one before it**:
 //! the header's dimensions, a colour-indexing transform that narrows the width
@@ -9,7 +10,11 @@
 //! keeps every one of those consistent; an input where a group number outruns
 //! the groups read, a back-reference reaches before the first pixel, or a
 //! packed width rounds differently from the unpacked one is where an index
-//! runs off a buffer.
+//! runs off a buffer. A lossy WebP is the other shape of the same risk: a
+//! frame whose size is not a whole number of macroblocks, partitions whose
+//! stated lengths overrun the chunk, segment and mode trees steering the
+//! dequantizer and the subblock predictors, and an `ALPH` plane decoded at
+//! the frame's size by a second bitstream entirely.
 //!
 //! The control byte picks the caller's ceiling, `png`'s and `gif`'s shape.
 //!
@@ -27,8 +32,10 @@
 //!
 //! Every assertion is structural; a decode that is well-formed and *wrong*
 //! passes. Correctness is `crates/tinker-pdf-filters/tests/image_fixtures.rs`,
-//! which holds the decoder to pixels libwebp was handed through Pillow and
-//! through imagecodecs.
+//! which holds the lossless decoder to pixels libwebp was handed through
+//! Pillow and imagecodecs and the lossy one to the pictures libwebp makes of
+//! its own files, and `src/webp/vp8/tests.rs`, which holds VP8 to the WebM
+//! project's test vectors when they are on disk.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 

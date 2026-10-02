@@ -2,9 +2,12 @@
 //! bitstreams built bit by bit from §3, with the decoder held to them.
 //!
 //! The Pillow and imagecodecs files in `tests/images/webp/` carry the exit
-//! criterion — authored pixels a real encoder compressed. These build what an
-//! encoder was not asked for: a back-reference before the first pixel, a
-//! frame offset on its canvas, a padded chunk, and one file per [`WebpError`].
+//! criterion — authored pixels a real encoder compressed, and for a lossy
+//! file the picture libwebp makes of it. These build what an encoder was not
+//! asked for: a back-reference before the first pixel, a frame offset on its
+//! canvas, a padded chunk, every `ALPH` filter and coding, an `ALPH` that
+//! will not decode, and one file per [`WebpError`]. The VP8 bitstream itself
+//! is `webp/vp8/tests.rs`'s.
 
 use super::*;
 
@@ -284,7 +287,11 @@ fn every_webp_error_is_reached() {
     refused(&riff(&[vp8x(0, 2, 2)]), WebpError::NoImage);
     refused(&riff(&[chunk(b"VP8X", &[0; 5])]), WebpError::Truncated);
     refused(&riff(&[chunk(b"VP8L", &[0x2f, 0])]), WebpError::Truncated);
-    refused(&riff(&[chunk(b"VP8 ", &[0; 10])]), WebpError::LossyNotRead);
+    // A frame tag of zeros is a key frame its encoder said not to show.
+    refused(
+        &riff(&[chunk(b"VP8 ", &[0; 10])]),
+        WebpError::Lossy("a key frame marked not to be shown"),
+    );
 
     let mut stream = two_greens(1, 255, &[true]);
     stream[0] = 0x2e;
@@ -441,14 +448,169 @@ fn every_error_and_warning_names_itself() {
         WebpError::Truncated,
         WebpError::NoImage,
         WebpError::Lossless("x"),
-        WebpError::LossyNotRead,
+        WebpError::Lossy("x"),
+        WebpError::BadDimensions {
+            width: 0,
+            height: 1,
+        },
         WebpError::TooManySamples { samples: 1, max: 0 },
         WebpError::ExceedsOutputLimit { bytes: 1, limit: 0 },
     ] {
         assert!(!e.to_string().is_empty());
     }
-    for warning in [Warning::WebpCorruptData, Warning::WebpFramesIgnored] {
+    for warning in [
+        Warning::WebpCorruptData,
+        Warning::WebpFramesIgnored,
+        Warning::WebpAlphaDropped,
+    ] {
         assert!(warning.as_str().starts_with("webp-"));
         assert!(warning.to_string().starts_with("WebP"));
     }
+}
+
+// ---- ALPH beside a lossy frame ----------------------------------------------------
+
+/// The `VP8 ` payload of Pillow's 61 x 45 lossy file, to put an `ALPH`
+/// beside.
+fn lossy_frame() -> Vec<u8> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/images/webp/pillow-lossy-rgb-61x45.webp"
+    );
+    let file = std::fs::read(path).expect("the committed lossy fixture");
+    assert_eq!(&file[12..16], b"VP8 ");
+    let size = u32::from_le_bytes([file[16], file[17], file[18], file[19]]) as usize;
+    file[20..20 + size].to_vec()
+}
+
+const LW: usize = 61;
+const LH: usize = 45;
+
+/// The alpha the tests below encode: every value, in a pattern no filter
+/// predicts exactly.
+fn alpha_at(x: usize, y: usize) -> u8 {
+    ((x * 37 + y * 11 + x * y) % 256) as u8
+}
+
+/// §2.7.1.2's forward filters, applied to `alpha_at` — the encoder's half,
+/// so that the decoder's half is held to the generator's input.
+fn filtered(method: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(LW * LH);
+    for y in 0..LH {
+        for x in 0..LW {
+            let predictor = if x == 0 && y == 0 {
+                0
+            } else if y == 0 {
+                i32::from(alpha_at(x - 1, 0))
+            } else if x == 0 {
+                i32::from(alpha_at(0, y - 1))
+            } else {
+                let (a, b, c) = (
+                    i32::from(alpha_at(x - 1, y)),
+                    i32::from(alpha_at(x, y - 1)),
+                    i32::from(alpha_at(x - 1, y - 1)),
+                );
+                match method {
+                    1 => a,
+                    2 => b,
+                    _ => (a + b - c).clamp(0, 255),
+                }
+            };
+            let predictor = if method == 0 { 0 } else { predictor };
+            out.push((i32::from(alpha_at(x, y)) - predictor) as u8);
+        }
+    }
+    out
+}
+
+fn with_alpha(alph: &[u8]) -> Vec<u8> {
+    riff(&[
+        vp8x(0x10, LW as u32, LH as u32),
+        chunk(b"ALPH", alph),
+        chunk(b"VP8 ", &lossy_frame()),
+    ])
+}
+
+#[test]
+fn every_alpha_filter_is_undone() {
+    let opaque = webp_decode(&riff(&[chunk(b"VP8 ", &lossy_frame())]), &CAP).expect("decodes");
+    let colour = rgb(&opaque.pixels).to_vec();
+    for method in 0..4u8 {
+        let mut alph = vec![method << 2];
+        alph.extend_from_slice(&filtered(method));
+        let img = webp_decode(&with_alpha(&alph), &CAP).expect("decodes");
+        assert!(
+            img.warnings.is_empty(),
+            "method {method}: {:?}",
+            img.warnings
+        );
+        let px = rgba(&img.pixels);
+        for y in 0..LH {
+            for x in 0..LW {
+                let at = (y * LW + x) * 4;
+                assert_eq!(px[at + 3], alpha_at(x, y), "method {method} ({x}, {y})");
+                // The colour is the frame's, whatever its alpha.
+                assert_eq!(&px[at..at + 3], &colour[(y * LW + x) * 3..][..3]);
+            }
+        }
+    }
+}
+
+/// Compression 1: a VP8L image stream with no header, its alpha the green
+/// of each pixel.
+#[test]
+fn a_lossless_alpha_stream_is_its_green_channel() {
+    let mut bits = BitWriter::default();
+    bits.put(0, 3); // no transform, no cache, no meta codes
+    bits.simple(&[7]); // green: the alpha
+    bits.simple(&[200]);
+    bits.simple(&[201]);
+    bits.simple(&[202]);
+    bits.simple(&[0]);
+    let mut alph = vec![1u8];
+    alph.extend_from_slice(&bits.out);
+    let img = webp_decode(&with_alpha(&alph), &CAP).expect("decodes");
+    assert!(rgba(&img.pixels).chunks_exact(4).all(|p| p[3] == 7));
+}
+
+/// An `ALPH` that will not decode leaves the colour, opaque, and says so —
+/// libwebp refuses the whole file instead.
+#[test]
+fn an_alpha_that_will_not_decode_leaves_the_picture_opaque() {
+    let short = vec![0u8; 10];
+    let mut bad_stream = vec![1u8];
+    bad_stream.extend_from_slice(&[0xff; 4]);
+    for (label, alph) in [
+        ("compression 2", vec![2u8]),
+        ("pre-processing 2", vec![2 << 4]),
+        ("a reserved bit", vec![1 << 6]),
+        ("a raw plane cut short", short),
+        ("a lossless stream refused", bad_stream),
+        ("no header at all", Vec::new()),
+    ] {
+        let img = webp_decode(&with_alpha(&alph), &CAP).expect("still a picture");
+        assert!(matches!(img.pixels, ImagePixels::Rgb(_)), "{label}");
+        assert!(img.warnings.contains(&Warning::WebpAlphaDropped), "{label}");
+    }
+}
+
+/// A VP8 header can say zero, which the other headers cannot.
+#[test]
+fn a_lossy_frame_of_no_width_is_refused_by_name() {
+    let mut frame = lossy_frame();
+    frame[6] = 0;
+    frame[7] = 0;
+    assert_eq!(
+        webp_decode(&riff(&[chunk(b"VP8 ", &frame)]), &CAP),
+        Err(WebpError::BadDimensions {
+            width: 0,
+            height: LH as u32,
+        })
+    );
+    // And fourteen bits of each is past the cap, asked before allocating.
+    frame[6..10].copy_from_slice(&[0xff, 0x3f, 0xff, 0x3f]);
+    assert!(matches!(
+        webp_decode(&riff(&[chunk(b"VP8 ", &frame)]), &Limits::new(usize::MAX)),
+        Err(WebpError::TooManySamples { .. })
+    ));
 }

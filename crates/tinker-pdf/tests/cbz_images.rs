@@ -274,13 +274,13 @@ fn gif_pages_are_the_pictures_they_were_made_from() {
     assert_eq!(alpha, want);
 }
 
-/// Lossless WebP pages: the opaque one rendered to the recipe pixel for
+/// WebP pages: the opaque lossless one rendered to the recipe pixel for
 /// pixel, the one with alpha the recipe's colour over an `/SMask` of exactly
-/// the recipe's alpha, and an animation's first frame. A lossy WebP keeps its
-/// page number and names its format.
+/// the recipe's alpha, an animation's first frame — and a lossy one with
+/// alpha, whose colour is the picture libwebp makes of the file and whose
+/// `/SMask` is the recipe's alpha again.
 #[test]
-fn lossless_webp_pages_are_the_pictures_they_were_made_from() {
-    let lossy = b"RIFF\x12\x00\x00\x00WEBPVP8 \x06\x00\x00\x00\x10\x02\x00\x9d\x01\x2a".to_vec();
+fn webp_pages_are_the_pictures_they_were_made_from() {
     let document = open(&[
         ("p1.webp", fixture("webp/pillow-lossless-rgb-13x7.webp")),
         ("p2.webp", fixture("webp/pillow-lossless-rgba-13x7.webp")),
@@ -288,17 +288,10 @@ fn lossless_webp_pages_are_the_pictures_they_were_made_from() {
             "p3.webp",
             fixture("webp/pillow-animated-lossless-13x7.webp"),
         ),
-        ("p4.webp", lossy),
+        ("p4.webp", fixture("webp/pillow-lossy-rgba-61x45.webp")),
     ]);
     assert_eq!(document.page_count(), 4);
-    let report = document.archive().expect("a report");
-    for page in 0..3 {
-        assert_eq!(report.pages()[page].defect, None, "page {page}");
-    }
-    assert_eq!(
-        report.pages()[3].defect,
-        Some(PageDefect::UnsupportedFormat(cbz::ImageFormat::WebP))
-    );
+    assert_no_placeholders(&document);
     let cos = document.cos();
     for page in [0u32, 2] {
         let bitmap = render(&document, page);
@@ -331,6 +324,33 @@ fn lossless_webp_pages_are_the_pictures_they_were_made_from() {
         .flat_map(|y| (0..13).map(move |x| recipe::alpha(x, y)))
         .collect();
     assert_eq!(alpha, want);
+
+    // The lossy page: libwebp's picture of the file, read from the PNG
+    // committed beside it, and the recipe's alpha, which `alpha_quality=100`
+    // kept lossless.
+    let reference = tinker_pdf_filters::png_decode(
+        &fixture("webp/pillow-lossy-rgba-61x45.libwebp.png"),
+        &tinker_pdf_filters::Limits::new(1 << 20),
+    )
+    .expect("the reference PNG");
+    let colour: Vec<u8> = reference
+        .data
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    assert_eq!(
+        cos.stream_decoded(page_image(&document, 3))
+            .expect("decodes"),
+        colour
+    );
+    let dict = image_dict(&document, 3);
+    let Some(Object::Ref(mask)) = dict.get(cos.intern(b"SMask")) else {
+        panic!("an /SMask reference");
+    };
+    let want: Vec<u8> = (0..45)
+        .flat_map(|y| (0..61).map(move |x| recipe::alpha(x, y)))
+        .collect();
+    assert_eq!(cos.stream_decoded(*mask).expect("decodes"), want);
 }
 
 /// The name a page's image XObject gives its `/Filter`.

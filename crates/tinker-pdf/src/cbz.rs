@@ -91,9 +91,7 @@ use tinker_pdf_cos::{
     DocumentBuilder, ImageColorSpace, ImageData, ImageFilter, PngImageData, RasterImageData,
     TiffImageData,
 };
-use tinker_pdf_filters::{
-    tiff_scan_directory, JpxHeader, Limits as FilterLimits, TiffError, WebpError,
-};
+use tinker_pdf_filters::{tiff_scan_directory, JpxHeader, Limits as FilterLimits, TiffError};
 use tinker_pdf_zip::{Archive, ArchiveError};
 
 pub use tinker_pdf_archive::tar::{
@@ -542,9 +540,9 @@ pub enum ImageFormat {
     /// image, decoded, because a GIF's LZW is not `/LZWDecode`'s, and kept
     /// `/Indexed` with its transparent index as a colour-key mask.
     Gif,
-    /// WebP. Read when lossless — see `tinker_pdf_cos::webp_image`: RFC
-    /// 9649's VP8L, decoded, and the first frame of an animation. A lossy
-    /// (VP8) WebP is recognised and not read.
+    /// WebP. Read — see `tinker_pdf_cos::webp_image`: RFC 9649's lossless
+    /// bitstream or RFC 6386's lossy one with its `ALPH`, decoded, and the
+    /// first frame of an animation.
     WebP,
     /// Windows bitmap. Read — see [`bmp_image`]: decoded, because no
     /// `/Filter` reads a bottom-up, four-byte-padded pixel array or either of
@@ -581,12 +579,11 @@ pub enum ImageDefect {
     /// than collapsed.
     ///
     /// An EPUB `<img>` reaches the page through **JPEG, PNG, GIF and WebP**,
-    /// EPUB 3.3 §3.2's four core raster media types — WebP when it is
-    /// lossless: a lossy one is named here, a core media type with no decoder
-    /// for its bitstream. The rest — BMP, TIFF, JPEG 2000 — are foreign
-    /// resources a §3.2-conforming book may only use behind a manifest
-    /// fallback this build does not follow, so they are named rather than
-    /// decoded even where the comic path would read them.
+    /// EPUB 3.3 §3.2's four core raster media types, so no core raster type
+    /// lands here any more. What does — BMP, TIFF, JPEG 2000, AVIF — are
+    /// foreign resources a §3.2-conforming book may only use behind a
+    /// manifest fallback this build does not follow, so they are named
+    /// rather than decoded even where the comic path would read them.
     UnsupportedFormat(ImageFormat),
     /// Bytes whose leading magic matches no format [`image_format`] knows.
     ///
@@ -2263,16 +2260,10 @@ fn plan_image<'a>(
             name,
             gif_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)).ok(),
         )),
-        // A lossy WebP is a format this build does not read rather than a
-        // file that failed to decode, and the page says which.
-        ImageFormat::WebP => {
-            match webp_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)) {
-                Err(WebpError::LossyNotRead) => Some(placeholder(PageDefect::UnsupportedFormat(
-                    ImageFormat::WebP,
-                ))),
-                decoded => Some(raster_plan(name, decoded.ok())),
-            }
-        }
+        ImageFormat::WebP => Some(raster_plan(
+            name,
+            webp_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)).ok(),
+        )),
         // Recognised, named, and refused at the page level rather than the
         // archive's: an archive of a hundred JPEGs and one AVIF keeps its
         // hundred readable pages, and the AVIF keeps its page number.

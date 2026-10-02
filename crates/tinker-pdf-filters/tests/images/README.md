@@ -25,8 +25,9 @@ the committed files are the record.
 | `bmpsuite/*.bmp` | **bmpsuite 2.8**, Jason Summers' generator, at [`jsummers/bmpsuite`](https://github.com/jsummers/bmpsuite) `555e43a` (2023-11-28) | `make` with gcc 13.3.0, then `make check`, which verified every generated file against upstream's own `checksums` | 26 September 2026 |
 | `gif/pillow-*.gif` | **Pillow 12.3.0** (`PIL.GifImagePlugin`) | `python3 make-images.py` | 26 September 2026 |
 | `gif/omggif-*.gif` | **omggif 1.0.10** (Dean McNamee, MIT, from npm), Node v22.22.2 | `npm install omggif@1.0.10`, then `node make-gif.js` | 26 September 2026 |
-| `webp/pillow-*.webp` | **Pillow 12.3.0** (`PIL.WebPImagePlugin`) over its bundled libwebp 1.6.0 | `python3 make-images.py` | 26 September 2026 |
-| `webp/imagecodecs-*.webp` | **imagecodecs 2026.3.6** (`imagecodecs.webp_encode`) over libwebp 1.6.0 | the same script | 26 September 2026 |
+| `webp/pillow-*.webp` | **Pillow 12.3.0** (`PIL.WebPImagePlugin`) over its bundled libwebp 1.6.0 | `python3 make-images.py` | 26 September 2026 (lossless), 2 October 2026 (lossy) |
+| `webp/imagecodecs-*.webp` | **imagecodecs 2026.3.6** (`imagecodecs.webp_encode`) over libwebp 1.6.0 | the same script | the same two days |
+| `webp/*.libwebp.png` | **libwebp 1.6.0's decode** of the lossy file beside it, through Pillow 12.3.0, written as PNG by Pillow | the same script | 2 October 2026 |
 | `tiff/tifffile-*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib; JPEG 2000 through OpenJPEG 2.5.4, `level=0`, lossless) | `python3 make-images.py` | 26 September 2026 |
 
 Pillow's BMP writer produces `BITMAPINFOHEADER`, `BI_RGB`, bottom-up files at
@@ -64,8 +65,8 @@ float sample's expected intensity is the recipe through the mapping
 2000 files the expected answer is the generator's input, as for every other
 file here.
 
-Every WebP here is **lossless**, so the expected answer is the recipe,
-exactly. Pillow writes RGB; RGBA with `exact=True`, which keeps the colour
+Every lossless WebP here — `*-lossless-*` and the imagecodecs RGBA file — has
+the recipe as its expected answer, exactly. Pillow writes RGB; RGBA with `exact=True`, which keeps the colour
 under a fully transparent pixel where libwebp would otherwise rewrite it;
 method 6 at quality 100, libwebp's exhaustive search, at 96 x 64 so the
 transforms have blocks to differ across; two, four and sixteen colours, the
@@ -78,6 +79,22 @@ neighbour the first pixel of the row being predicted; and a two-frame
 animation.
 imagecodecs writes RGBA through a second binding. The tests that claim a
 transform read the VP8L header bits that say the fixture has one.
+
+**A lossy WebP has no exact answer of its own**, so its answer is the
+reference decoder's: `make-images.py` decodes each lossy file once through the
+same Pillow, over libwebp 1.6.0, and commits that picture beside it as
+`<name>.libwebp.png`; `image_fixtures.rs` reads the PNG with this crate's own
+PNG decoder and holds every pixel to it. That is the standing the WebM
+project's MD5s have for VP8 itself — `src/webp/vp8/tests.rs` — and it is what
+makes the chroma upsampling and colour conversion checkable at all, since
+RFC 6386 ends at the Y, U and V planes. The files: quality 80 over the `rgb`
+recipe, quality 10 at method 6, 55 and 100 over `smooth` (gradients the
+encoder spends few bits on; at 55 one segment's loop-filter level is exactly
+15, where the high-edge-variance threshold steps), RGBA at `alpha_quality=100` — lossless alpha, so
+the alpha is also held to the recipe — once unfiltered and once at method 0,
+where libwebp chose the horizontal filter, a two-frame animation, and
+imagecodecs' `webp_encode(lossless=False)` over `rgb`. Sizes of 61 x 45 crop
+inside a macroblock and inside a chroma sample.
 
 ## bmpsuite, and what it can prove
 

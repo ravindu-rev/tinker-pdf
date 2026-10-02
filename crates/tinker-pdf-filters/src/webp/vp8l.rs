@@ -528,6 +528,18 @@ pub(crate) fn decode(
     Ok((width, height, pixels, complete))
 }
 
+/// A whole VP8L image stream of `width x height` with no header — which is
+/// how an `ALPH` chunk carries one (§2.7.1.2), its size being the frame's.
+pub(crate) fn image_stream(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    w: &mut Warnings,
+) -> Result<(Vec<u32>, bool), WebpError> {
+    let mut bits = Bits::new(data);
+    stream(&mut bits, width, height, w)
+}
+
 /// A whole image stream of `width x height`, after the header: the
 /// transforms, the entropy-coded image, and the transforms undone.
 fn stream(

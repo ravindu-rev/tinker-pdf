@@ -2101,7 +2101,7 @@ fn ledger() -> Vec<Bound> {
             // at four components, `MAX_PNG_SAMPLES`'s book figure.
             book: 2_550 * 3_300 * 4,
             // Two 24-bit `VP8X` canvas dimensions, each stored less one,
-            // charged at four; a VP8L header's 14-bit pair reaches 2^30.
+            // charged at four; a VP8L or VP8 header's 14-bit pair reaches 2^30.
             reachable: (1u128 << 24) * (1 << 24) * 4,
             reachable_because: "two 24-bit VP8X canvas dimensions, times four samples",
             declared_in: WEBP,

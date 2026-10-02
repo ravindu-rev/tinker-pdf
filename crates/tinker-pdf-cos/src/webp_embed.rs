@@ -3,7 +3,8 @@
 //! [`crate::gif_embed`]'s sibling and as short, for the same reason: **a WebP
 //! has no pass-through route.** Neither of its bitstreams is a `/Filter` in
 //! ISO 32000-2 Table 6 — the lossless one is prefix codes over transformed
-//! ARGB, not DEFLATE — so every WebP is decoded.
+//! ARGB, not DEFLATE, and the lossy one is a VP8 key frame, not a DCT any
+//! `/DCTDecode` reads — so every WebP is decoded.
 //!
 //! What comes back is RGB, or RGBA when any pixel is less than opaque, and
 //! [`crate::raster_embed::RasterImageData`] places the alpha as an 8-bit

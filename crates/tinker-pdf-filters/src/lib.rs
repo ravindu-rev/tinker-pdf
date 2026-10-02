@@ -421,13 +421,15 @@ pub enum Warning {
 
     // ---- WebP (RFC 9649) -------------------------------------------------
     //
-    // Two leniencies; a cut-off stream reuses [`Warning::TruncatedInput`].
+    // Three leniencies; a cut-off stream reuses [`Warning::TruncatedInput`].
     /// WebP: a back-reference reached before the image or past its end, or a
     /// colour-cache index past the cache — data that is well formed and
     /// impossible. The image stops there and the rest is transparent black.
     WebpCorruptData,
     /// WebP: an animation's frames after the first are not decoded.
     WebpFramesIgnored,
+    /// WebP: an `ALPH` chunk would not decode, so the picture is opaque.
+    WebpAlphaDropped,
 }
 
 impl Warning {
@@ -491,6 +493,7 @@ impl Warning {
             Self::GifFrameOutsideScreen => "gif-frame-outside-screen",
             Self::WebpCorruptData => "webp-corrupt-data",
             Self::WebpFramesIgnored => "webp-frames-ignored",
+            Self::WebpAlphaDropped => "webp-alpha-dropped",
         }
     }
 }
@@ -552,6 +555,7 @@ impl fmt::Display for Warning {
             Self::GifFrameOutsideScreen => "GIF image reaches past its logical screen, clipped",
             Self::WebpCorruptData => "WebP pixel data refers outside the image; decode stopped",
             Self::WebpFramesIgnored => "WebP animation frames after the first are not decoded",
+            Self::WebpAlphaDropped => "WebP alpha chunk undecodable; picture drawn opaque",
         };
         f.write_str(s)
     }

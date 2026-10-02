@@ -492,22 +492,30 @@ fn an_img_with_no_src_at_all_is_unresolved() {
     assert_eq!(not_drawn(&doc), [(ImageDefect::Unresolved, 1)]);
 }
 
-/// A **core media type** this build has no decoder for is named by its format,
-/// not collapsed into "unresolved".
+/// A **lossy** WebP is drawn too, which leaves no EPUB 3.3 §3.2 core raster
+/// type without a decoder.
 ///
-/// EPUB 3.3 §3.2 makes WebP a core image media type a conforming book may use
-/// with no fallback, so a reader meeting one has met a legal book it cannot
-/// draw — a different sentence from a broken reference, and a host acts on the
-/// two differently. This was a GIF until GIF had a decoder, and is a *lossy*
-/// WebP since the lossless bitstream got one.
+/// This test was `a_core_media_type_with_no_decoder_here_is_named_by_its_format`:
+/// a GIF until GIF had a decoder, then a WebP, then a lossy WebP once the
+/// lossless bitstream had one. What it asserted — that such a picture is
+/// named by its format rather than collapsed into "unresolved" — still holds
+/// for the foreign resources, and
+/// `a_misnamed_unsupported_picture_is_named_by_the_format_it_really_is` holds
+/// it with a BMP.
 #[test]
-fn a_core_media_type_with_no_decoder_here_is_named_by_its_format() {
-    let webp = b"RIFF\x0c\x00\x00\x00WEBPVP8 \x00\x00\x00\x00".to_vec();
-    let doc = open(r#"<p>a<img src="pic.webp"/>b</p>"#, &[("pic.webp", webp)]);
-    assert_eq!(
-        not_drawn(&doc),
-        [(ImageDefect::UnsupportedFormat(ImageFormat::WebP), 1)]
+fn a_lossy_webp_img_is_drawn_at_its_own_size() {
+    let webp = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tinker-pdf-filters/tests/images/webp/pillow-lossy-rgba-61x45.webp"),
+    )
+    .expect("the committed WebP");
+    let doc = open(
+        r#"<img src="pic.webp" style="display: block"/>"#,
+        &[("pic.webp", webp)],
     );
+    assert_eq!(not_drawn(&doc), []);
+    let (matrix, _) = only_placement(&doc, 0);
+    assert_eq!((matrix[0], matrix[3]), points((61, 45)));
 }
 
 /// A lossless WebP is drawn, at its own pixel size — Pillow's file, which
@@ -528,14 +536,22 @@ fn a_lossless_webp_img_is_drawn_at_its_own_size() {
     assert_eq!((matrix[0], matrix[3]), points((13, 7)));
 }
 
-/// A lossless WebP whose bitstream breaks RFC 9649's rules is `Undecodable`
-/// — not the lossy file's "unsupported": the format is read, this file is not.
+/// A WebP whose bitstream breaks its RFC's rules is `Undecodable`: the
+/// format is read, the file is not. A lossless one with the wrong signature
+/// byte, and a lossy one whose frame tag says it is not a key frame.
 #[test]
-fn a_lossless_webp_that_will_not_decode_is_undecodable() {
+fn a_webp_that_will_not_decode_is_undecodable() {
     // The VP8L signature byte is 0x2f; this one says 0x2e.
-    let webp = b"RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2e\x00\x00\x00\x00\x00".to_vec();
-    let doc = open(r#"<p>a<img src="pic.webp"/>b</p>"#, &[("pic.webp", webp)]);
-    assert_eq!(not_drawn(&doc), [(ImageDefect::Undecodable, 1)]);
+    let lossless = b"RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2e\x00\x00\x00\x00\x00".to_vec();
+    // A frame tag with bit 0 set: an inter frame.
+    let lossy =
+        b"RIFF\x16\x00\x00\x00WEBPVP8 \x0a\x00\x00\x00\x11\x00\x00\x9d\x01\x2a\x01\x00\x01\x00"
+            .to_vec();
+    let doc = open(
+        r#"<p>a<img src="a.webp"/>b<img src="b.webp"/></p>"#,
+        &[("a.webp", lossless), ("b.webp", lossy)],
+    );
+    assert_eq!(not_drawn(&doc), [(ImageDefect::Undecodable, 2)]);
 }
 
 /// And a GIF whose bytes do not make an image is `Undecodable`, which is the

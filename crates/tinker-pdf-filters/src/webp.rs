@@ -9,11 +9,9 @@
 //!
 //! RFC 9649 §2's RIFF container in all three layouts — simple lossy (`VP8 `),
 //! simple lossless (`VP8L`), and extended (`VP8X`) with its `ALPH`, `ANIM`
-//! and `ANMF` chunks — and §3's lossless bitstream, in `webp/vp8l.rs`.
-//!
-//! The lossy bitstream is recognised and refused by name,
-//! [`WebpError::LossyNotRead`]: it is RFC 6386's VP8 key frame, a second
-//! decoder with nothing in common with the first but the container.
+//! and `ANMF` chunks — §3's lossless bitstream, in `webp/vp8l.rs`, and the
+//! lossy one, RFC 6386's VP8 key frame, in `webp/vp8.rs`, with the `ALPH`
+//! chunk beside it.
 //!
 //! # The decisions a WebP forces, each taken once
 //!
@@ -26,15 +24,26 @@
 //!   carries an alpha channel always and its `alpha_is_used` bit "SHOULD NOT
 //!   impact decoding" (§3.4), so opacity is read from the samples rather than
 //!   the flag — and an opaque picture needs no soft mask.
-//! - **Damage inside the pixel data leaves a partial image** — the rest
-//!   transparent black, which is what an ARGB word of zero is — with [`Warning::TruncatedInput`] or [`Warning::WebpCorruptData`];
-//!   damage in anything that says how to read the pixels (a header, a
+//! - **A lossy picture is libwebp's picture.** RFC 6386 ends at the Y, U and
+//!   V planes; how they become RGB is a choice, and the choice taken is the
+//!   one every browser's WebP decoder makes: libwebp's "fancy" chroma
+//!   upsampling and its fixed-point BT.601 conversion, both integer
+//!   arithmetic, in `vp8::to_argb`.
+//! - **An `ALPH` chunk that will not decode leaves the picture opaque**, with
+//!   [`Warning::WebpAlphaDropped`]: the colour is intact and is still the
+//!   picture, which is ruling 2's trade. libwebp refuses the whole file.
+//! - **Damage inside the pixel data leaves a partial image**, with
+//!   [`Warning::TruncatedInput`] or [`Warning::WebpCorruptData`]: the rest of
+//!   a lossless picture is transparent black, which is what an ARGB word of
+//!   zero is, and the macroblocks a lossy one never reached are opaque black.
+//!   Damage in anything that says how to read the pixels (a header, a
 //!   transform, a prefix code) is a [`WebpError`], because nothing after it
 //!   can be read.
 
 use crate::raster::ImagePixels;
 use crate::{Limits, Warning, Warnings};
 
+mod vp8;
 mod vp8l;
 
 // --- the budget ---------------------------------------------------------
@@ -49,11 +58,12 @@ mod vp8l;
 /// | A comic page: 2000 x 3000 | 24 000 000 |
 /// | **This cap** | **67 108 864** |
 ///
-/// `MAX_PNG_SAMPLES`'s `1 << 26`, for its arithmetic. A VP8L header's 14-bit
-/// dimensions can ask for 16 384 x 16 384 x 4 — 2^30 samples from five bytes —
-/// and a `VP8X` canvas's 24-bit ones for 2^50, so the cap is what stands
-/// between either and an allocation; the decoder's own working buffer is one
-/// `u32` a pixel, the same bytes.
+/// `MAX_PNG_SAMPLES`'s `1 << 26`, for its arithmetic. A VP8L or VP8 header's
+/// 14-bit dimensions can ask for 16 384 x 16 384 x 4 — 2^30 samples from five
+/// bytes — and a `VP8X` canvas's 24-bit ones for 2^50, so the cap is what
+/// stands between any of them and an allocation. The decoders' working
+/// buffers are one `u32` a pixel, the same bytes, and a lossy frame's planes
+/// half as much again over its macroblock grid.
 ///
 /// **Reachable**: `an_image_past_the_sample_cap_is_refused_before_it_allocates`
 /// builds both headers.
@@ -72,8 +82,12 @@ pub enum WebpError {
     NoImage,
     /// A lossless bitstream that breaks a rule of RFC 9649 §3, named.
     Lossless(&'static str),
-    /// A lossy (`VP8 `) bitstream, which this build does not decode.
-    LossyNotRead,
+    /// A lossy bitstream that breaks a rule of RFC 6386, or is a frame a
+    /// still image is not (an inter frame, a hidden one), named.
+    Lossy(&'static str),
+    /// A zero dimension in a VP8 header (the other headers store a
+    /// dimension less one, and cannot say zero).
+    BadDimensions { width: u32, height: u32 },
     /// [`MAX_WEBP_SAMPLES`] would be spent. Refused before any buffer exists.
     TooManySamples { samples: u64, max: u64 },
     /// The raster would be larger than the caller's own
@@ -88,7 +102,10 @@ impl core::fmt::Display for WebpError {
             Self::Truncated => f.write_str("the WebP is cut off"),
             Self::NoImage => f.write_str("a WebP with no image chunk"),
             Self::Lossless(why) => write!(f, "WebP lossless bitstream: {why}"),
-            Self::LossyNotRead => f.write_str("a lossy WebP, which this build does not decode"),
+            Self::Lossy(why) => write!(f, "WebP lossy bitstream: {why}"),
+            Self::BadDimensions { width, height } => {
+                write!(f, "WebP dimensions {width} x {height}")
+            }
             Self::TooManySamples { samples, max } => {
                 write!(f, "{samples} samples, ceiling is {max}")
             }
@@ -152,8 +169,6 @@ fn u24(b: &[u8], at: usize) -> Option<u32> {
 }
 
 /// The cap and the caller's ceiling, charged on a picture about to be made.
-///
-/// Neither header can say zero: both store a dimension minus one.
 fn charge(width: u64, height: u64, limits: &Limits) -> Result<(), WebpError> {
     let samples = width.saturating_mul(height).saturating_mul(4);
     if samples > MAX_WEBP_SAMPLES {
@@ -206,7 +221,7 @@ pub fn webp_decode(bytes: &[u8], limits: &Limits) -> Result<WebpImage, WebpError
         argb,
         complete,
     } = match &first.kind {
-        b"VP8L" | b"VP8 " => decode_frame(*first, limits, &mut w)?,
+        b"VP8L" | b"VP8 " => decode_frame(None, *first, limits, &mut w)?,
         b"VP8X" => extended(first.data, &list[1..], limits, &mut w)?,
         _ => return Err(WebpError::NoImage),
     };
@@ -256,7 +271,8 @@ fn extended(
         let x = u24(d, 0).ok_or(WebpError::Truncated)? as usize * 2;
         let y = u24(d, 3).ok_or(WebpError::Truncated)? as usize * 2;
         let inner = chunks(d.get(16..).unwrap_or(&[]), w);
-        let frame = decode_frame(frame_chunk(&inner)?, limits, w)?;
+        let (alpha, bitstream) = frame_chunks(&inner)?;
+        let frame = decode_frame(alpha, bitstream, limits, w)?;
         // §2.7.2: the first frame over a cleared canvas — which blending or
         // not leaves as the frame's own pixels — clipped to the canvas.
         let mut canvas = vec![0u32; cw * ch];
@@ -280,37 +296,127 @@ fn extended(
             complete: frame.complete,
         });
     }
-    decode_frame(frame_chunk(rest)?, limits, w)
+    let (alpha, bitstream) = frame_chunks(rest)?;
+    decode_frame(alpha, bitstream, limits, w)
 }
 
-/// The bitstream chunk of one frame. An `ALPH` beside a `VP8L` is ignored:
-/// §2.7.1.2 says a frame holding a `VP8L` "SHOULD NOT contain" one, since
-/// its alpha is its own.
-fn frame_chunk<'a>(list: &[Chunk<'a>]) -> Result<Chunk<'a>, WebpError> {
-    list.iter()
+/// The optional `ALPH` chunk and the bitstream chunk of one frame.
+fn frame_chunks<'a>(list: &[Chunk<'a>]) -> Result<(Option<&'a [u8]>, Chunk<'a>), WebpError> {
+    let alpha = list.iter().find(|c| &c.kind == b"ALPH").map(|c| c.data);
+    let bitstream = list
+        .iter()
         .find(|c| &c.kind == b"VP8 " || &c.kind == b"VP8L")
         .copied()
-        .ok_or(WebpError::NoImage)
+        .ok_or(WebpError::NoImage)?;
+    Ok((alpha, bitstream))
 }
 
-/// One frame's bitstream.
+/// One frame's bitstream, and its `ALPH` when it is lossy.
 fn decode_frame(
+    alpha: Option<&[u8]>,
     bitstream: Chunk<'_>,
     limits: &Limits,
     w: &mut Warnings,
 ) -> Result<Frame, WebpError> {
-    if &bitstream.kind != b"VP8L" {
-        return Err(WebpError::LossyNotRead);
+    let charge = |wd: usize, ht: usize| charge(wd as u64, ht as u64, limits);
+    if &bitstream.kind == b"VP8L" {
+        // §2.7.1.2: "A frame containing a 'VP8L' Chunk SHOULD NOT contain"
+        // an `ALPH` — its alpha is its own — so one that does is ignored.
+        let (width, height, argb, complete) = vp8l::decode(bitstream.data, w, charge)?;
+        return Ok(Frame {
+            width,
+            height,
+            argb,
+            complete,
+        });
     }
-    let (width, height, argb, complete) = vp8l::decode(bitstream.data, w, |wd, ht| {
-        charge(wd as u64, ht as u64, limits)
-    })?;
+    let picture = vp8::decode(bitstream.data, w, charge)?;
+    let plane = alpha.and_then(|data| {
+        let plane = alpha_plane(data, picture.width, picture.height, w);
+        if plane.is_none() {
+            w.push(Warning::WebpAlphaDropped);
+        }
+        plane
+    });
     Ok(Frame {
-        width,
-        height,
-        argb,
-        complete,
+        width: picture.width,
+        height: picture.height,
+        argb: vp8::to_argb(&picture, plane.as_deref()),
+        complete: picture.complete,
     })
+}
+
+/// §2.7.1.2: an `ALPH` chunk's alpha plane, `width x height` bytes.
+///
+/// `None` when it will not decode — a compression or pre-processing method
+/// past those §2.7.1.2 defines, reserved bits set, a raw plane that is short,
+/// or a lossless stream refused — which the caller turns into an opaque
+/// picture and [`Warning::WebpAlphaDropped`]. libwebp refuses the same
+/// headers.
+fn alpha_plane(data: &[u8], width: usize, height: usize, w: &mut Warnings) -> Option<Vec<u8>> {
+    let header = *data.first()?;
+    let compression = header & 0x03;
+    let filtering = (header >> 2) & 0x03;
+    let preprocessing = (header >> 4) & 0x03;
+    // Pre-processing 1 says the encoder reduced the levels; it changes
+    // nothing a decoder does, but a value past it is not one §2.7.1.2 has.
+    if preprocessing > 1 || header >> 6 != 0 {
+        return None;
+    }
+    let stream = data.get(1..)?;
+    let mut plane = match compression {
+        0 => {
+            let raw = stream.get(..width * height)?;
+            raw.to_vec()
+        }
+        1 => {
+            let mut inner = Warnings::default();
+            let (argb, complete) = vp8l::image_stream(stream, width, height, &mut inner).ok()?;
+            if !complete {
+                w.push(Warning::TruncatedInput);
+            }
+            // The alpha values are the green channel (§2.7.1.2).
+            argb.iter().map(|&p| (p >> 8) as u8).collect()
+        }
+        _ => return None,
+    };
+    unfilter(&mut plane, width, height, filtering);
+    Some(plane)
+}
+
+/// §2.7.1.2's three alpha filters, undone in place.
+fn unfilter(plane: &mut [u8], width: usize, height: usize, method: u8) {
+    if method == 0 {
+        return;
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let i = y * width + x;
+            let predictor = if x == 0 && y == 0 {
+                0
+            } else if y == 0 {
+                // The top row is predicted from the left, whatever the method.
+                i32::from(plane[i - 1])
+            } else if x == 0 {
+                // The left column from above, whatever the method.
+                i32::from(plane[i - width])
+            } else {
+                let (a, b, c) = (
+                    i32::from(plane[i - 1]),
+                    i32::from(plane[i - width]),
+                    i32::from(plane[i - width - 1]),
+                );
+                match method {
+                    1 => a,
+                    2 => b,
+                    _ => (a + b - c).clamp(0, 255),
+                }
+            };
+            if let Some(v) = plane.get_mut(i) {
+                *v = (i32::from(*v) + predictor) as u8;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

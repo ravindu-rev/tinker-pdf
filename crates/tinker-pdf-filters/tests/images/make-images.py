@@ -5,7 +5,9 @@
 # is a formula, the same formula `tests/image_fixtures.rs` carries as
 # `recipe::*`, and a third-party encoder turns it into bytes once. The test
 # recomputes the pixels from the formula and compares them with what this
-# repository's decoder makes of the bytes; nothing here ever decodes anything.
+# repository's decoder makes of the bytes; nothing here ever decodes anything
+# — except the lossy WebP block at the end, whose answer has to be a
+# decoder's, and which says so.
 #
 #   cd crates/tinker-pdf-filters/tests/images && python3 make-images.py
 #
@@ -273,3 +275,52 @@ first.save("webp/pillow-animated-lossless-13x7.webp", lossless=True, save_all=Tr
            append_images=[first.transpose(Image.Transpose.FLIP_LEFT_RIGHT)], duration=100)
 open("webp/imagecodecs-lossless-rgba-13x7.webp", "wb").write(
     imagecodecs.webp_encode(rgba_array(W, H), lossless=True))
+
+
+# ---- WebP, lossy ---------------------------------------------------------------
+#
+# Run 2 October 2026, the same Pillow and imagecodecs.
+#
+# A lossy picture has no exact answer of its own, so the answer is libwebp's:
+# each file is decoded once by the same Pillow, over libwebp 1.6.0, and the
+# picture that decode makes is committed beside it as `<name>.libwebp.png`.
+# The alpha of a lossy WebP is lossless at `alpha_quality=100`, so where a
+# file has alpha the test holds it to the recipe as well. `smooth` gives the
+# encoder gradients to spend few bits on; `rgb`'s wrap-arounds give it edges.
+
+
+def smooth(x, y):
+    return ((x * 3 + y * 2) % 256, (200 - x - y) % 256, (x * y // 16 + 40) % 256)
+
+
+def smooth_image(w, h):
+    im = Image.new("RGB", (w, h))
+    im.putdata([smooth(x, y) for y in range(h) for x in range(w)])
+    return im
+
+
+def lossy(im, name, **options):
+    path = f"webp/{name}.webp"
+    im.save(path, **options)
+    with Image.open(path) as decoded:
+        decoded.save(f"webp/{name}.libwebp.png")
+
+
+lossy(rgb_image(61, 45), "pillow-lossy-rgb-61x45", quality=80)
+lossy(smooth_image(96, 64), "pillow-lossy-smooth-q10-m6-96x64", quality=10, method=6)
+lossy(smooth_image(61, 45), "pillow-lossy-smooth-q100-61x45", quality=100)
+# Quality 55 puts a segment's loop-filter level at exactly 15, where §15's
+# high-edge-variance threshold steps from 0 to 1.
+lossy(smooth_image(61, 45), "pillow-lossy-smooth-q55-61x45", quality=55)
+lossy(webp_rgba(61, 45), "pillow-lossy-rgba-61x45", quality=80, alpha_quality=100, exact=True)
+lossy(webp_rgba(61, 45), "pillow-lossy-rgba-m0-61x45", quality=80, alpha_quality=100, exact=True,
+      method=0)
+first = smooth_image(61, 45)
+first.save("webp/pillow-animated-lossy-61x45.webp", quality=80, save_all=True,
+           append_images=[first.transpose(Image.Transpose.FLIP_LEFT_RIGHT)], duration=100)
+with Image.open("webp/pillow-animated-lossy-61x45.webp") as decoded:
+    decoded.save("webp/pillow-animated-lossy-61x45.libwebp.png")
+open("webp/imagecodecs-lossy-rgb-61x45.webp", "wb").write(
+    imagecodecs.webp_encode(np.asarray(rgb_image(61, 45)), level=75, lossless=False))
+with Image.open("webp/imagecodecs-lossy-rgb-61x45.webp") as decoded:
+    decoded.save("webp/imagecodecs-lossy-rgb-61x45.libwebp.png")

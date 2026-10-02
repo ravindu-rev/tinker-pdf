@@ -628,8 +628,7 @@ colour-key `/Mask` expresses exactly — except in one shape: a first image
 that brings its own local table and does not cover its screen puts two index
 spaces on one canvas, and that picture is expanded to RGBA.
 
-**WebP** is the fifth, and so far half of it: RFC 9649's RIFF container in all
-three layouts — simple lossy, simple lossless, and extended (`VP8X`) with its
+**WebP** is the fifth: RFC 9649's RIFF container in all three layouts — simple lossy, simple lossless, and extended (`VP8X`) with its
 `ALPH`, `ANIM` and `ANMF` chunks — and §3's **lossless** bitstream (VP8L):
 the four transforms (predictor, colour, subtract-green, colour-indexing with
 its pixel bundling), canonical prefix codes under both code-length codes,
@@ -649,9 +648,33 @@ background colour "a hint" viewers "are not required to use" — and
 `Warning::WebpFramesIgnored` when there are more. The picture comes back RGB
 when every alpha is 255 and RGBA otherwise: VP8L always carries alpha, and
 its `alpha_is_used` bit "SHOULD NOT impact decoding" (§3.4), so opacity is
-read from the samples and an opaque picture needs no soft mask. **The lossy
-bitstream** — RFC 6386's VP8 key frame — is recognised and refused by name,
-`WebpError::LossyNotRead`.
+read from the samples and an opaque picture needs no soft mask.
+
+**The lossy bitstream** is RFC 6386's VP8 key frame, in `webp/vp8.rs`: the
+boolean entropy decoder (§7), the frame header with its segmentation, loop
+filter, quantizer and probability updates (§9), the key frame's mode trees
+with their above and left contexts (§11), the DCT tokens over up to eight
+partitions (§13), per-segment dequantization (§14.1), the inverse WHT and DCT
+(§14.3, §14.4), the four whole-block and ten subblock predictors with the
+out-of-frame 127s and 129s (§12), and the normal and simple loop filters
+(§15). Where the prose and the reference decoder of §20 ("dixie") say a thing
+differently, `vp8.rs` follows dixie — it is what the test vectors were checked
+against — and marks where: a segment's filter level is clamped before the
+deltas are added, and a segment's quantizer index is not clamped until each
+of its deltas has been. An inter frame, a key frame marked not to be shown
+(libwebp refuses one too), a version past 3 and a missing start code are
+refused by name; a zero dimension is `WebpError::BadDimensions`, the one
+header that can say zero; a partition that ends before the macroblocks it
+codes leaves those macroblocks black, with `Warning::TruncatedInput`. **How
+Y, U and V become a picture is a decision, and the one taken is libwebp's**:
+its "fancy" upsampling, which weights the four nearest chroma samples 9:3:3:1,
+and its 14-bit fixed-point BT.601 conversion — integer arithmetic both, so the
+picture is the same on every machine, and the picture every browser shows. An
+`ALPH` chunk beside a lossy frame is decoded raw or as a headerless VP8L
+stream (its alpha the green channel) and §2.7.1.2's horizontal, vertical or
+gradient filter undone; one that will not decode leaves the picture opaque
+with `Warning::WebpAlphaDropped`, where libwebp refuses the whole file — the
+colour is still the picture, which is ruling 2's trade.
 
 ## API
 
@@ -774,10 +797,11 @@ make both enums wrong.
 | A GIF LZW minimum code size outside 1 to 8 | `GifError::BadCodeSize` | The roots are the indices, and an index is a byte | — |
 | A GIF with no image before its trailer | `GifError::NoImage` | There is no picture, as distinct from a damaged one | — |
 | GIF past `MAX_GIF_SAMPLES` or the caller's ceiling | `GifError::TooManySamples`, `ExceedsOutputLimit` | Thirteen bytes can declare a 65 535-square logical screen; charged at four components, before allocation (ruling 1) | [rulings](../rulings.md) |
-| A lossy WebP (`VP8 ` bitstream) | `WebpError::LossyNotRead` | RFC 6386's VP8 key frame is a second decoder with nothing in common with the lossless one but the container — owed on the ROADMAP | [ROADMAP](../ROADMAP.md) |
+| A VP8 frame that is not a shown key frame — an inter frame, a hidden key frame — a version past 3, or no start code | `WebpError::Lossy(&str)`, named | A still WebP is one key frame; an inter frame predicts from a picture the file does not have | — |
+| A VP8 header with a zero dimension | `WebpError::BadDimensions` | The only WebP header that stores a dimension as itself rather than less one, so the only one that can say zero | — |
 | A VP8L stream that breaks a rule of RFC 9649 §3: no `0x2f` signature, a version other than 0, a transform used twice, a colour cache outside 1 to 11 bits, a prefix code that is empty, over-subscribed or incomplete, a `max_symbol` or a repeated length past the alphabet | `WebpError::Lossless(&str)`, the rule named | §3.7.2.1: "The described tree must be a complete binary tree"; a stream that says how to read its pixels wrongly has no pixels to read | — |
 | A WebP with no `VP8 `, `VP8L` or `ANMF` chunk, or a `VP8X` or `VP8L` header cut off | `WebpError::NoImage`, `Truncated` | There is no picture, as distinct from a damaged one | — |
-| WebP past `MAX_WEBP_SAMPLES` or the caller's ceiling | `WebpError::TooManySamples`, `ExceedsOutputLimit` | Five bytes of VP8L header ask for 16 384 x 16 384 and a `VP8X` canvas for 2^24 on a side; charged at four samples, before allocation (ruling 1) | [rulings](../rulings.md) |
+| WebP past `MAX_WEBP_SAMPLES` or the caller's ceiling | `WebpError::TooManySamples`, `ExceedsOutputLimit` | Five bytes of VP8L header or seven of VP8 ask for 16 384 x 16 384, and a `VP8X` canvas for 2^24 on a side; charged at four samples, before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPEG XR fixed-point, half-float and 32-bit float pixel formats (Table A.6's SINT and Float rows) | `JxrRefusal::FloatOrFixedPointFormat` | 9.10.7's postscaling makes those numbers mean something `JxrImage`'s 8- and 16-bit unsigned samples cannot say; reinterpreting them returns a picture whose values are a different quantity | [design](../design/jpeg-xr.md) |
 | JPEG XR CMYK, CMYKDIRECT, NCOMPONENT and RGBE output formats | `JxrRefusal::UnsupportedColourFormat` | A colour pipeline with no consumer in this engine; a CMYK image read as RGB is a different picture, not a degraded one | [design](../design/jpeg-xr.md) |
 | A Table A.6 GUID this build has no row for | `JxrRefusal::UnknownPixelFormat` | The GUID is what names the channel order, so an unknown one cannot be guessed at | [design](../design/jpeg-xr.md) |
@@ -959,10 +983,26 @@ wants the reason to survive it.
   neighbour is the first pixel of the same row) and a two-frame animation;
   imagecodecs for RGBA. Every pixel is the
   recipe, and the tests that claim a transform read the fixture's header bits
-  to show it is there. `src/webp/tests.rs` builds VP8L streams bit by bit —
-  literals, a back-reference, one before the first pixel, subtract-green, an
-  `ANMF` frame at an offset on its canvas, a padded chunk — and one file per
-  `WebpError`.
+  to show it is there. **Lossy WebP** has no generator input to be held to,
+  so its answer is its reference decoder's: each Pillow and imagecodecs file
+  — quality 10 at method 6, 55 (a filter level of exactly 15), 80 and 100,
+  sizes that crop inside a macroblock
+  and a chroma sample, alpha unfiltered and horizontally filtered, a two-frame
+  animation — was decoded once by libwebp 1.6.0 and the picture committed
+  beside it as a PNG, and every pixel here is that picture; the alpha,
+  lossless at `alpha_quality=100`, is the recipe's as well. `src/webp/tests.rs`
+  builds VP8L streams bit by bit — literals, a back-reference, one before the
+  first pixel, subtract-green, an `ANMF` frame at an offset on its canvas, a
+  padded chunk — every `ALPH` filter and both codings, six `ALPH`s that will
+  not decode, and one file per `WebpError`. **VP8 itself is held to the WebM
+  project's test vectors**: `src/webp/vp8/tests.rs` decodes every key frame of
+  `webmproject/vp8-test-vectors` and compares the MD5 of its I420 planes with
+  the one libvpx published — run 2 October 2026 against `8afcf057`, **182 key
+  frames from 61 files, 0 failed**. The vectors carry no licence, so they are
+  not committed: the test reads them from `TINKER_VP8_VECTORS` and prints
+  `SKIPPED` without it, `png_suite.rs`'s arrangement. Beside that, frames
+  built with §7.3's own boolean encoder: prediction alone, a token partition
+  that ends early, and every lossy refusal.
 - In-crate: `jbig2.rs` decodes T.88 Annex H.1's published datastream example
   byte for byte; `mq.rs` holds Annex H.2's test sequence as a permanent
   fixture, because the coder serves two codecs; **`qm.rs` holds T.81 K.4.1's,
