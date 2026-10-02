@@ -31,7 +31,10 @@
 //! about determinism: "expired" is a claim about now, and a library that
 //! invents a now gives a different answer on a different day for the same
 //! bytes. A caller that wants validity judged passes the instant to judge it
-//! at; one that does not gets the window reported and decides for itself.
+//! at; one that does not gets the window reported and decides for itself. An
+//! RFC 3161 token's authority is judged at the token's own `genTime`, which
+//! is the token's claim about when it stamped rather than a reading of any
+//! clock.
 //!
 //! **Revocation.** No CRL is fetched and no OCSP responder is asked, because
 //! the engine performs no I/O. Embedded revocation data is surfaced by
@@ -57,7 +60,7 @@
 use tinker_pdf_crypto::{Curve, DigestAlgorithm as CryptoDigest, EcPublicKey, RsaPublicKey};
 use tinker_pdf_pki::{
     oid, pss, Certificate, ContentInfo, DigestAlgorithm as CmsDigest, PublicKey,
-    SignatureAlgorithm, SignerInfo,
+    SignatureAlgorithm, SignerInfo, TimeStampToken,
 };
 
 use crate::signature::{Coverage, Signature, SubFilter};
@@ -228,9 +231,8 @@ pub struct SignerDescription {
     /// The signing time the signer *claims*, from the `signingTime` signed
     /// attribute. Nothing countersigned it; it is a number the signer wrote.
     pub claimed_signing_time: Option<i64>,
-    /// Whether the blob carries an RFC 3161 timestamp token. Surfaced, never
-    /// evaluated — validating a token means validating the authority's own
-    /// chain, which is a later tier.
+    /// Whether the blob carries an RFC 3161 timestamp token.
+    /// [`Verdict::timestamps`] says what each one proves.
     pub timestamped: bool,
 }
 
@@ -251,6 +253,9 @@ pub struct Verdict {
     pub weaknesses: Vec<Weakness>,
     /// Who the signer's certificate says they are.
     pub signer: Option<SignerDescription>,
+    /// What each RFC 3161 timestamp token reached proves, in the order the
+    /// signer's unsigned attributes carry them.
+    pub timestamps: Vec<TimestampVerdict>,
 }
 
 impl Verdict {
@@ -265,6 +270,83 @@ impl Verdict {
         self.coverage == Coverage::WholeFile
             && self.document_digest == DocumentDigest::Matches
             && self.signature == SignatureCheck::Verified
+            && matches!(self.chain, Chain::AnchoredTo { .. })
+    }
+}
+
+/// What an RFC 3161 timestamp token stamps: what its `messageImprint` must
+/// be the digest of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Stamped {
+    /// A signature's `signature` octets, the token being an unsigned
+    /// attribute of that signer (RFC 3161 Appendix A): it says the signature
+    /// existed by `time`.
+    Signature,
+}
+
+/// RFC 3161 §2.3 and §2.4.1's two requirements on the certificate a token
+/// was signed with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthorityCertificate {
+    /// Its only extended key usage is `id-kp-timeStamping`, marked critical,
+    /// and the token's ESS `signingCertificate` or `signingCertificateV2`
+    /// attribute names it by digest.
+    Fit,
+    /// The certificate's extended key usage is absent, not critical, or names
+    /// a purpose besides `id-kp-timeStamping` — not a certificate §2.3 lets
+    /// an authority stamp with.
+    NotForTimestamping,
+    /// No ESS signing-certificate attribute names the certificate the token
+    /// was signed with: the token does not bind itself to the key that signed
+    /// it, which §2.4.1 requires so a certificate cannot be substituted.
+    NotBound,
+    /// The token's certificate set does not carry the signer's certificate.
+    Missing,
+}
+
+/// What one RFC 3161 timestamp token turned out to prove.
+///
+/// The same refusal to collapse as [`Verdict`]: the imprint, the signature,
+/// the certificate's fitness and the chain are asked separately, because a
+/// token correctly signed over a different digest and a token over the right
+/// digest signed by a stranger are different findings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TimestampVerdict {
+    /// What the token stamps.
+    pub stamps: Stamped,
+    /// Whether the token read as a `TimeStampToken`.
+    pub token: CmsState,
+    /// `genTime`, Unix seconds: the instant the authority asserts.
+    pub time: Option<i64>,
+    /// The authority as the token names it: the `TSTInfo`'s `tsa` hint where
+    /// there is one, otherwise the signing certificate's subject.
+    pub authority: Option<String>,
+    /// Whether `messageImprint` is the digest of what the token stamps.
+    pub imprint: DocumentDigest,
+    /// Whether the authority's key signed this `TSTInfo`: the signature
+    /// verifies, and the `messageDigest` it covers is the `TSTInfo`'s own.
+    pub signature: SignatureCheck,
+    /// RFC 3161's requirements on the authority's certificate.
+    pub authority_certificate: AuthorityCertificate,
+    /// How far the authority's chain reached, its validity judged at `time`.
+    pub chain: Chain,
+    /// What was accepted and is worth saying.
+    pub weaknesses: Vec<Weakness>,
+}
+
+impl TimestampVerdict {
+    /// Whether every answer came back the way "a trusted authority vouches
+    /// for this time" needs. The same convenience, with the same caveat, as
+    /// [`Verdict::is_trusted`].
+    #[must_use]
+    pub fn is_trusted(&self) -> bool {
+        matches!(self.token, CmsState::Read { .. })
+            && self.imprint == DocumentDigest::Matches
+            && self.signature == SignatureCheck::Verified
+            && self.authority_certificate == AuthorityCertificate::Fit
             && matches!(self.chain, Chain::AnchoredTo { .. })
     }
 }
@@ -334,6 +416,7 @@ pub(crate) fn verdict(
         chain: Chain::NoSignerCertificate,
         weaknesses,
         signer: None,
+        timestamps: Vec::new(),
     };
     let blob = signature.cms();
     if blob.is_empty() {
@@ -407,7 +490,178 @@ pub(crate) fn verdict(
         ),
         None => Chain::NoSignerCertificate,
     };
+    // RFC 3161 Appendix A: a token in the signer's unsigned attributes stamps
+    // the `signature` octets, so its imprint is their digest.
+    verdict.timestamps = signer
+        .timestamp_tokens()
+        .iter()
+        .map(|token| {
+            timestamp(
+                token,
+                Stamped::Signature,
+                &|algorithm| Some(algorithm.digest(signer.signature()).as_bytes().to_vec()),
+                anchors,
+            )
+        })
+        .collect();
     verdict
+}
+
+/// The verdict for one RFC 3161 token, whose imprint must be `imprinted`
+/// under the token's own hash.
+///
+/// The authority's chain is judged at the token's own `genTime` rather than
+/// at the caller's instant: §2.3 asks whether the certificate was valid when
+/// it stamped, and the token says when that was. That is the token's claim,
+/// not a clock, so ruling 4 is not touched by it.
+fn timestamp(
+    der: &[u8],
+    stamps: Stamped,
+    imprinted: &dyn Fn(CryptoDigest) -> Option<Vec<u8>>,
+    anchors: &TrustAnchors,
+) -> TimestampVerdict {
+    let mut verdict = TimestampVerdict {
+        stamps,
+        token: CmsState::Absent,
+        time: None,
+        authority: None,
+        imprint: DocumentDigest::NotChecked(Unchecked::NoCms),
+        signature: SignatureCheck::NotChecked(Unchecked::NoCms),
+        authority_certificate: AuthorityCertificate::Missing,
+        chain: Chain::NoSignerCertificate,
+        weaknesses: Vec::new(),
+    };
+    let token = match TimeStampToken::parse(der) {
+        Ok(token) => token,
+        Err(error) => {
+            verdict.token = CmsState::Unreadable(format!("{error}"));
+            let why = Unchecked::UnsupportedAlgorithm(format!("{error}"));
+            verdict.imprint = DocumentDigest::NotChecked(why.clone());
+            verdict.signature = SignatureCheck::NotChecked(why);
+            return verdict;
+        }
+    };
+    let info = token.info();
+    let signed = token.content_info().signed_data();
+    verdict.token = CmsState::Read {
+        signers: signed.signer_infos().len(),
+    };
+    verdict.time = Some(info.time());
+    verdict.imprint = match info.imprint_digest() {
+        Ok(algorithm) => {
+            if algorithm == CmsDigest::Sha1 {
+                verdict.weaknesses.push(Weakness::Sha1Digest);
+            }
+            match imprinted(crypto_digest(algorithm)) {
+                Some(expected) if expected == info.imprint() => DocumentDigest::Matches,
+                Some(_) => DocumentDigest::Differs,
+                None => DocumentDigest::NotChecked(Unchecked::CoverageUnusable),
+            }
+        }
+        Err(error) => {
+            DocumentDigest::NotChecked(Unchecked::UnsupportedAlgorithm(format!("{error:?}")))
+        }
+    };
+
+    let Some(signer) = signed.signer_infos().first() else {
+        verdict.signature = SignatureCheck::NotChecked(Unchecked::NoSigner);
+        return verdict;
+    };
+    let certificates: Vec<Certificate<'_>> = signed
+        .x509_certificates()
+        .filter_map(|der| Certificate::parse(der).ok())
+        .collect();
+    let certificate = find_signer(signer, &certificates);
+    verdict.authority = info
+        .tsa()
+        .map(ToString::to_string)
+        .or_else(|| certificate.map(|certificate| certificate.subject().to_rfc4514()));
+    let Some(certificate) = certificate else {
+        verdict.signature = SignatureCheck::NotChecked(Unchecked::SignerCertificateMissing);
+        return verdict;
+    };
+
+    // The token's `messageDigest` must be the digest of this `TSTInfo`, or
+    // the signature is over some other one; with no signed attributes the
+    // signature is over the `TSTInfo` octets themselves.
+    let message = match signer.signed_attrs_to_digest() {
+        Some(attributes) => Signed::Attributes(attributes),
+        None => Signed::Content(info.der()),
+    };
+    let content_matches = match (signer.message_digest(), signer.effective_digest()) {
+        (None, _) => true,
+        (Some(expected), Ok(algorithm)) => {
+            crypto_digest(algorithm).digest(info.der()).as_bytes() == expected
+        }
+        (Some(_), Err(_)) => false,
+    };
+    verdict.signature =
+        match check_signature(signer, certificate, &message, &mut verdict.weaknesses) {
+            SignatureCheck::Verified if !content_matches => SignatureCheck::Failed,
+            other => other,
+        };
+    verdict.authority_certificate = authority_certificate(signer, certificate);
+    verdict.chain = walk(
+        certificate,
+        &certificates,
+        anchors,
+        Some(info.time()),
+        &mut verdict.weaknesses,
+    );
+    if !certificate.validity().contains(info.time()) {
+        verdict.weaknesses.push(Weakness::OutsideValidity {
+            subject: certificate.subject().to_rfc4514(),
+        });
+    }
+    verdict
+}
+
+/// RFC 3161 §2.3 and §2.4.1, asked of the certificate a token was signed
+/// with.
+fn authority_certificate(
+    signer: &SignerInfo<'_>,
+    certificate: &Certificate<'_>,
+) -> AuthorityCertificate {
+    // §2.3: "The corresponding certificate MUST contain only one instance of
+    // the extended key usage field extension ... with KeyPurposeID having
+    // value id-kp-timeStamping. This extension MUST be critical."
+    let extensions = certificate.extensions();
+    let critical = extensions
+        .find(oid::CE_EXT_KEY_USAGE)
+        .is_some_and(|extension| extension.is_critical());
+    let only_timestamping = extensions
+        .extended_key_usage()
+        .is_some_and(|usage| usage.purposes().len() == 1 && usage.has(oid::KP_TIME_STAMPING));
+    if !critical || !only_timestamping {
+        return AuthorityCertificate::NotForTimestamping;
+    }
+    // §2.4.1 (and RFC 5816 for the second version): the signed attributes
+    // name the signing certificate by digest, and the first `ESSCertID` is
+    // the one that signed. Where an `issuerSerial` is given it must name the
+    // same certificate too.
+    let ess = signer
+        .signing_certificate_v2()
+        .or_else(|| signer.signing_certificate());
+    let Some(first) = ess.and_then(|ess| ess.certs().first()) else {
+        return AuthorityCertificate::NotBound;
+    };
+    let Ok(algorithm) = first.digest() else {
+        return AuthorityCertificate::NotBound;
+    };
+    if crypto_digest(algorithm)
+        .digest(certificate.der())
+        .as_bytes()
+        != first.hash()
+    {
+        return AuthorityCertificate::NotBound;
+    }
+    match first.issuer_serial_decoded() {
+        None => AuthorityCertificate::Fit,
+        Some(Ok(issuer_serial)) if issuer_serial.identifies(certificate) => {
+            AuthorityCertificate::Fit
+        }
+        Some(_) => AuthorityCertificate::NotBound,
+    }
 }
 
 /// What a signer's signature value was computed over (RFC 5652 §5.4).
@@ -1036,6 +1290,7 @@ mod tests {
             },
             weaknesses: Vec::new(),
             signer: None,
+            timestamps: Vec::new(),
         };
         assert!(good.is_trusted());
 

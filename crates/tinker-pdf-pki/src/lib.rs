@@ -79,6 +79,7 @@ pub mod general_name;
 pub mod name;
 pub mod oid;
 pub mod pss;
+pub mod tsp;
 pub mod x509;
 
 pub use cms::{
@@ -91,6 +92,7 @@ pub use enveloped::{EnvelopedData, EnvelopedError, KeyTransRecipient, RecipientI
 pub use general_name::{GeneralName, GeneralNameError, GeneralNames};
 pub use name::{Attribute, AttributeText, Name, Rdn};
 pub use pss::PssError;
+pub use tsp::{Accuracy, TimeStampToken, TstError, TstInfo};
 
 /// RFC 5652 §5.3's `Attribute`, re-exported under a distinguishing name.
 ///

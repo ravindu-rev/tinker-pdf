@@ -268,12 +268,168 @@ def cades_general_names():
     save("cades-general-names-root.der", der_of(w(tag + "-root.pem")))
 
 
+# ---- RFC 3161: a timestamping authority, and DER surgery to carry its token --
+
+TSA_EXTENSIONS = """\
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, nonRepudiation
+extendedKeyUsage = critical, timeStamping
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+"""
+
+
+def tsa(tag, ess_algorithm):
+    """A timestamping authority: its own RSA root, and a leaf whose only
+    extended key usage is `timeStamping`, critical (RFC 3161 §2.3).
+    `ess_algorithm` picks the ESS attribute the token carries: `sha1` is RFC
+    2634's `signingCertificate`, anything else RFC 5816's
+    `signingCertificateV2` under that digest."""
+    rsa_root(tag + "-tsa", "/CN=Tinker PDF Timestamp Root/O=tinker-pdf test fixture")
+    with open(w(tag + "-tsa-ext.cnf"), "w") as f:
+        f.write(TSA_EXTENSIONS)
+    leaf(tag + "-tsa", "/CN=Tinker PDF Timestamping Authority/O=tinker-pdf test fixture",
+         ("-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"),
+         extfile=w(tag + "-tsa-ext.cnf"))
+    with open(w(tag + "-tsa-serial"), "w") as f:
+        f.write("2026100201\n")
+    with open(w(tag + "-tsa.cnf"), "w") as f:
+        f.write("\n".join([
+            "[ tsa_config ]",
+            "serial = " + w(tag + "-tsa-serial"),
+            "signer_cert = " + w(tag + "-tsa-leaf.pem"),
+            "signer_key = " + w(tag + "-tsa-leaf.key"),
+            "certs = " + w(tag + "-tsa-root.pem"),
+            "signer_digest = sha256",
+            "default_policy = 1.3.6.1.4.1.55555.1.1",
+            "digests = sha1, sha256, sha384, sha512",
+            "accuracy = secs:1, millisecs:500, microsecs:100",
+            "clock_precision_digits = 0",
+            "ordering = yes",
+            "tsa_name = yes",
+            "ess_cert_id_chain = no",
+            "ess_cert_id_alg = " + ess_algorithm,
+            "",
+        ]))
+
+
+def timestamp(tag, digest):
+    """An RFC 3161 `TimeStampToken` over the SHA-256 `digest`, from `tsa(tag)`:
+    a query asking for the certificate, and a reply written as the bare token."""
+    run("openssl", "ts", "-query", "-digest", digest.hex(), "-sha256", "-cert",
+        "-out", w(tag + "-query.tsq"))
+    run("openssl", "ts", "-reply", "-config", w(tag + "-tsa.cnf"), "-section", "tsa_config",
+        "-queryfile", w(tag + "-query.tsq"), "-token_out", "-out", w(tag + "-token.der"))
+    with open(w(tag + "-token.der"), "rb") as f:
+        return f.read()
+
+
+def header(data, at):
+    """A DER node's tag, content length and header length at `at`."""
+    tag = data[at]
+    first = data[at + 1]
+    if first < 0x80:
+        return tag, first, 2
+    count = first & 0x7F
+    return tag, int.from_bytes(data[at + 2:at + 2 + count], "big"), 2 + count
+
+
+def length_octets(n):
+    if n < 0x80:
+        return bytes([n])
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(body)]) + body
+
+
+def children(data):
+    """The (start, end) of each node directly inside `data`, a content."""
+    at, out = 0, []
+    while at < len(data):
+        _, length, size = header(data, at)
+        out.append((at, at + size + length))
+        at += size + length
+    return out
+
+
+def append_to_last(node, depth, extra):
+    """`node` with `extra` appended to the content of its last child `depth`
+    levels down, every length on the way re-encoded. Works because the
+    `SignerInfo` is the last node of every container that holds it, and its
+    `unsignedAttrs` the last field of the `SignerInfo` -- so nothing after the
+    insertion point moves."""
+    tag, length, size = header(node, 0)
+    content = node[size:size + length]
+    if depth == 0:
+        content = content + extra
+    else:
+        start, end = children(content)[-1]
+        content = content[:start] + append_to_last(content[start:end], depth - 1, extra)
+    return bytes([tag]) + length_octets(len(content)) + content
+
+
+def last_signer(cms):
+    """The `SignerInfo` of a `ContentInfo`: four last-child steps down."""
+    node = cms
+    for _ in range(4):
+        tag, length, size = header(node, 0)
+        content = node[size:size + length]
+        start, end = children(content)[-1]
+        node = content[start:end]
+    return node
+
+
+def signature_value(cms):
+    """The `signature` OCTET STRING's content inside the `SignerInfo`."""
+    signer = last_signer(cms)
+    _, length, size = header(signer, 0)
+    content = signer[size:size + length]
+    for start, end in children(content):
+        tag, inner, inner_size = header(content, start)
+        if tag == 0x04:
+            return content[start + inner_size:end]
+    raise SystemExit("no signature value")
+
+
+TIMESTAMP_TOKEN_OID = bytes.fromhex("060B2A864886F70D010910020E")
+
+
+def with_timestamp(cms, token):
+    """`cms` with `token` as its signer's `id-aa-timeStampToken` unsigned
+    attribute (RFC 3161 Appendix A)."""
+    values = bytes([0x31]) + length_octets(len(token)) + token
+    attribute = TIMESTAMP_TOKEN_OID + values
+    attribute = bytes([0x30]) + length_octets(len(attribute)) + attribute
+    unsigned = bytes([0xA1]) + length_octets(len(attribute)) + attribute
+    return append_to_last(cms, 4, unsigned)
+
+
+def signature_timestamp():
+    """A detached `adbe.pkcs7.detached` signature countersigned by an RFC 3161
+    token in its unsigned attributes: the token's imprint is SHA-256 of the
+    signer's `signature` octets (RFC 3161 Appendix A), and the authority writes
+    RFC 2634's first-version `signingCertificate`."""
+    tag = "sigts"
+    rsa_chain(tag, "Timestamped Signature")
+    tsa(tag, "sha1")
+    reserve = 9000
+    out, contents_at, covered = build_pdf(
+        reserve, "adbe.pkcs7.detached", "A signature with an RFC 3161 timestamp",
+        "Tinker PDF Timestamped Signature Test Signer")
+    der = cms_sign(tag, covered, "-md", "sha256", "-nosmimecap")
+    token = timestamp(tag, hashlib.sha256(signature_value(der)).digest())
+    der = with_timestamp(der, token)
+    save("signature-timestamp.pdf", splice(out, contents_at, reserve, der))
+    save("signature-timestamp-root.der", der_of(w(tag + "-root.pem")))
+    save("signature-timestamp-tsa-root.der", der_of(w(tag + "-tsa-root.pem")))
+
+
 BUILDERS = {
     "rsa-pss": rsa_pss,
     "pkcs7-sha1": lambda: pkcs7_sha1(True),
     "pkcs7-sha1-no-attributes": lambda: pkcs7_sha1(False),
     "no-signed-attributes": no_signed_attributes,
     "cades-general-names": cades_general_names,
+    "signature-timestamp": signature_timestamp,
 }
 
 for wanted in WANTED:

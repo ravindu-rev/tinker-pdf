@@ -32,11 +32,13 @@
 use std::ops::Range;
 
 use tinker_pdf::{
-    Chain, CmsState, Coverage, DigestAlgorithm, Document, DocumentDigest, SignatureCheck,
-    SubFilter, TrustAnchors, Unchecked, Verdict, Weakness,
+    AuthorityCertificate, Chain, CmsState, Coverage, DigestAlgorithm, Document, DocumentDigest,
+    SignatureCheck, Stamped, SubFilter, TrustAnchors, Unchecked, Verdict, Weakness,
 };
 use tinker_pdf_crypto::{DigestAlgorithm as CryptoDigest, PssParameters};
-use tinker_pdf_pki::{oid, pss, Certificate, ContentInfo, GeneralName, SignatureAlgorithm};
+use tinker_pdf_pki::{
+    oid, pss, Certificate, ContentInfo, GeneralName, SignatureAlgorithm, TimeStampToken,
+};
 
 const PSS_PDF: &[u8] = include_bytes!("signature_support/rsa-pss.pdf");
 const PSS_ROOT: &[u8] = include_bytes!("signature_support/rsa-pss-root.der");
@@ -48,6 +50,14 @@ const SHA1_BARE_PDF: &[u8] = include_bytes!("signature_support/pkcs7-sha1-no-att
 const SHA1_BARE_ROOT: &[u8] = include_bytes!("signature_support/pkcs7-sha1-no-attributes-root.der");
 const NAMES_PDF: &[u8] = include_bytes!("signature_support/cades-general-names.pdf");
 const NAMES_ROOT: &[u8] = include_bytes!("signature_support/cades-general-names-root.der");
+const STAMPED_PDF: &[u8] = include_bytes!("signature_support/signature-timestamp.pdf");
+const STAMPED_ROOT: &[u8] = include_bytes!("signature_support/signature-timestamp-root.der");
+const STAMPED_TSA_ROOT: &[u8] =
+    include_bytes!("signature_support/signature-timestamp-tsa-root.der");
+
+/// The fixture token's `genTime`, as OpenSSL printed it when it made the
+/// token: `Oct  2 09:47:30 2026 GMT`.
+const STAMPED_AT: i64 = 1_790_934_450;
 
 /// Inside every fixture certificate's validity window and nothing to do with
 /// now: 1 January 2027. Ruling 4 keeps the clock out of the engine.
@@ -574,7 +584,248 @@ fn the_cades_fixture_verifies_like_any_other() {
     assert!(verdict.is_trusted());
 }
 
+// ---- RFC 3161 signature timestamps ------------------------------------------
+
+/// The token, located inside the outer blob.
+fn token_at(der: &[u8]) -> Range<usize> {
+    let content = ContentInfo::parse(der).expect("the CMS parses");
+    let signer = content
+        .signed_data()
+        .signer_infos()
+        .first()
+        .expect("one signer")
+        .clone();
+    let token = *signer.timestamp_tokens().first().expect("one token");
+    offset_in(der, token)
+}
+
+#[test]
+fn a_signature_timestamp_is_validated_against_its_authority() {
+    let verdict = verdict_with(STAMPED_PDF, &[STAMPED_ROOT, STAMPED_TSA_ROOT]);
+    assert!(verdict.is_trusted(), "the signature itself: {verdict:?}");
+    assert!(verdict.signer.as_ref().is_some_and(|s| s.timestamped));
+    assert_eq!(verdict.timestamps.len(), 1);
+    let stamp = &verdict.timestamps[0];
+    assert_eq!(stamp.stamps, Stamped::Signature);
+    assert_eq!(stamp.token, CmsState::Read { signers: 1 });
+    assert_eq!(stamp.time, Some(STAMPED_AT));
+    assert_eq!(
+        stamp.authority.as_deref(),
+        Some("DirName:O=tinker-pdf test fixture,CN=Tinker PDF Timestamping Authority"),
+        "the TSTInfo's own `tsa` hint, as OpenSSL's `tsa_name = yes` wrote it"
+    );
+    assert_eq!(
+        stamp.imprint,
+        DocumentDigest::Matches,
+        "SHA-256 of the signer's signature octets"
+    );
+    assert_eq!(stamp.signature, SignatureCheck::Verified);
+    assert_eq!(
+        stamp.authority_certificate,
+        AuthorityCertificate::Fit,
+        "a critical timeStamping-only EKU, named by RFC 2634's first-version ESS attribute"
+    );
+    match &stamp.chain {
+        Chain::AnchoredTo { anchor, links } => {
+            assert!(anchor.contains("Timestamp Root"), "{anchor}");
+            assert_eq!(*links, 0);
+        }
+        other => panic!("expected the authority's chain to reach its root, got {other:?}"),
+    }
+    assert!(stamp.weaknesses.is_empty(), "{:?}", stamp.weaknesses);
+    assert!(stamp.is_trusted());
+}
+
+#[test]
+fn an_authority_the_caller_does_not_trust_is_not_anchored() {
+    let verdict = verdict_with(STAMPED_PDF, &[STAMPED_ROOT]);
+    let stamp = &verdict.timestamps[0];
+    assert_eq!(stamp.signature, SignatureCheck::Verified);
+    assert!(
+        matches!(stamp.chain, Chain::SelfSigned { .. }),
+        "the token carries the authority's root, which is not an anchor: {:?}",
+        stamp.chain
+    );
+    assert!(!stamp.is_trusted());
+    assert!(
+        verdict.is_trusted(),
+        "and the signature it stamps is untouched"
+    );
+}
+
+#[test]
+fn a_token_over_a_different_signature_does_not_match_its_imprint() {
+    // The signer's signature octets changed, the token did not: the token
+    // still verifies, and it is a timestamp of some other signature.
+    let mut der = cms_of(STAMPED_PDF);
+    let at = signature_value_at(&der);
+    der[at.end - 1] ^= 0x01;
+    let verdict = verdict_with(
+        &replace_cms(STAMPED_PDF, &der),
+        &[STAMPED_ROOT, STAMPED_TSA_ROOT],
+    );
+    assert_eq!(verdict.signature, SignatureCheck::Failed);
+    let stamp = &verdict.timestamps[0];
+    assert_eq!(stamp.imprint, DocumentDigest::Differs);
+    assert_eq!(stamp.signature, SignatureCheck::Verified);
+    assert!(!stamp.is_trusted());
+}
+
+#[test]
+fn a_flipped_bit_in_the_tokens_signature_fails_it() {
+    let mut der = cms_of(STAMPED_PDF);
+    let token = token_at(&der);
+    let signature = {
+        let parsed = TimeStampToken::parse(&der[token.clone()]).expect("the token parses");
+        let signer = parsed
+            .content_info()
+            .signed_data()
+            .signer_infos()
+            .first()
+            .expect("one signer")
+            .clone();
+        let inner = offset_in(&der[token.clone()], signer.signature());
+        token.start + inner.start..token.start + inner.end
+    };
+    der[signature.end - 1] ^= 0x01;
+    let verdict = verdict_with(
+        &replace_cms(STAMPED_PDF, &der),
+        &[STAMPED_ROOT, STAMPED_TSA_ROOT],
+    );
+    let stamp = &verdict.timestamps[0];
+    assert_eq!(stamp.imprint, DocumentDigest::Matches);
+    assert_eq!(stamp.signature, SignatureCheck::Failed);
+    assert!(
+        verdict.is_trusted(),
+        "an unsigned attribute is outside the signature"
+    );
+}
+
+#[test]
+fn a_changed_tstinfo_is_not_what_the_authority_signed() {
+    // One digit of `genTime` moved. The signed attributes are untouched, so
+    // the arithmetic over them still verifies — and their `messageDigest` is
+    // no longer this `TSTInfo`'s, which is the one check that catches a time
+    // rewritten after stamping.
+    let mut der = cms_of(STAMPED_PDF);
+    let token = token_at(&der);
+    let at = token.start
+        + find(&der[token.clone()], b"20261002094730Z").expect("genTime, as OpenSSL wrote it");
+    der[at + 3] = b'7';
+    let verdict = verdict_with(
+        &replace_cms(STAMPED_PDF, &der),
+        &[STAMPED_ROOT, STAMPED_TSA_ROOT],
+    );
+    let stamp = &verdict.timestamps[0];
+    assert_ne!(
+        stamp.time,
+        Some(STAMPED_AT),
+        "the time read is the changed one"
+    );
+    assert_eq!(stamp.signature, SignatureCheck::Failed);
+    assert!(!stamp.is_trusted());
+}
+
+#[test]
+fn an_authority_certificate_without_a_critical_timestamping_purpose_is_not_fit() {
+    // The authority's certificate inside the token, its extended key usage
+    // made non-critical. Its own signature no longer covers it, so the
+    // chain breaks too; what is asserted is the first requirement RFC 3161
+    // §2.3 puts on it, which a reader that skipped it would have passed to
+    // the ESS check and called `NotBound`.
+    let mut der = cms_of(STAMPED_PDF);
+    let token = token_at(&der);
+    let eku = [0x06, 0x03, 0x55, 0x1D, 0x25, 0x01, 0x01, 0xFF];
+    let at = token.start + find(&der[token.clone()], &eku).expect("a critical EKU");
+    der[at + 7] = 0x00;
+    let verdict = verdict_with(
+        &replace_cms(STAMPED_PDF, &der),
+        &[STAMPED_ROOT, STAMPED_TSA_ROOT],
+    );
+    let stamp = &verdict.timestamps[0];
+    assert_eq!(stamp.signature, SignatureCheck::Verified);
+    assert_eq!(
+        stamp.authority_certificate,
+        AuthorityCertificate::NotForTimestamping
+    );
+    assert!(!stamp.is_trusted());
+}
+
+#[test]
+fn a_token_whose_ess_attribute_names_another_certificate_is_not_bound() {
+    // The first `ESSCertID`'s hash, one bit changed. That is inside the
+    // signed attributes, so the token's signature fails as well; the binding
+    // is asked separately, and a reader that never looked at it would still
+    // call the certificate fit.
+    let mut der = cms_of(STAMPED_PDF);
+    let token = token_at(&der);
+    let hash = {
+        let parsed = TimeStampToken::parse(&der[token.clone()]).expect("the token parses");
+        let signer = parsed
+            .content_info()
+            .signed_data()
+            .signer_infos()
+            .first()
+            .expect("one signer")
+            .clone();
+        let ess = signer
+            .signing_certificate()
+            .expect("OpenSSL's default ESS attribute");
+        let id = ess.certs().first().expect("one ESSCertID");
+        assert_eq!(id.digest(), Ok(tinker_pdf_pki::DigestAlgorithm::Sha1));
+        let inner = offset_in(&der[token.clone()], id.hash());
+        token.start + inner.start..token.start + inner.end
+    };
+    der[hash.start] ^= 0x01;
+    let verdict = verdict_with(
+        &replace_cms(STAMPED_PDF, &der),
+        &[STAMPED_ROOT, STAMPED_TSA_ROOT],
+    );
+    let stamp = &verdict.timestamps[0];
+    assert_eq!(stamp.authority_certificate, AuthorityCertificate::NotBound);
+    assert_eq!(stamp.signature, SignatureCheck::Failed);
+}
+
+#[test]
+fn the_token_reads_as_openssl_printed_it() {
+    // `openssl ts -reply -text` over the committed token, on the day it was
+    // made: policy 1.3.6.1.4.1.55555.1.1, SHA-256, serial 0x2026100202,
+    // accuracy 1 s 500 ms 100 µs, ordering yes, a nonce, the TSA's name.
+    let der = cms_of(STAMPED_PDF);
+    let token = token_at(&der);
+    let parsed = TimeStampToken::parse(&der[token]).expect("the token parses");
+    let info = parsed.info();
+    assert_eq!(info.policy().to_dotted(), "1.3.6.1.4.1.55555.1.1");
+    assert_eq!(
+        info.imprint_digest(),
+        Ok(tinker_pdf_pki::DigestAlgorithm::Sha256)
+    );
+    assert_eq!(info.serial().as_bytes(), &[0x20, 0x26, 0x10, 0x02, 0x02]);
+    assert_eq!(info.time(), STAMPED_AT);
+    assert_eq!(
+        info.accuracy(),
+        Some(tinker_pdf_pki::Accuracy {
+            seconds: 1,
+            millis: 500,
+            micros: 100
+        })
+    );
+    assert!(info.ordering());
+    assert!(info.nonce().is_some());
+}
+
 // ---- reading and rewriting the fixtures -----------------------------------
+
+fn verdict_with(pdf: &[u8], roots: &[&[u8]]) -> Verdict {
+    let document = Document::open(pdf.to_vec()).expect("the fixture opens");
+    let mut anchors = TrustAnchors::new();
+    for root in roots {
+        anchors.add(root.to_vec()).expect("the root parses");
+    }
+    let mut verdicts = document.verify_signatures(&anchors, Some(AT));
+    assert_eq!(verdicts.len(), 1);
+    verdicts.remove(0)
+}
 
 /// The fixture with one byte of its page content changed, inside the first
 /// covered span.

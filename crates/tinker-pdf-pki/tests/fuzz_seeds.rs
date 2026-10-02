@@ -1,10 +1,12 @@
 //! The committed `pki_der` and `pki_cms` fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/pki_der/` and `fuzz/corpus/pki_cms/` are twenty-four inputs —
+//! `fuzz/corpus/pki_der/` and `fuzz/corpus/pki_cms/` are twenty-five inputs —
 //! twenty-two written from the fixtures in this crate, one the first
-//! `pki_der` session found, and one RSASSA-PSS `SignedData` OpenSSL 3.0.13
-//! wrote (`rsa-pss-signer`, the blob inside
-//! `crates/tinker-pdf/tests/signature_support/rsa-pss.pdf`) — and the targets that consume them
+//! `pki_der` session found, and two `SignedData` blobs OpenSSL 3.0.13 wrote:
+//! an RSASSA-PSS signer (`rsa-pss-signer`, the blob inside
+//! `crates/tinker-pdf/tests/signature_support/rsa-pss.pdf`) and a signer
+//! carrying a real RFC 3161 token (`rfc3161-signature-timestamp`, the blob
+//! inside `signature-timestamp.pdf`) — and the targets that consume them
 //! need nightly and a sanitizer runtime. So the seeds were only ever exercised
 //! when somebody ran `cargo fuzz`, which is not on every commit — and a seed
 //! corpus nothing reads is a corpus that stops describing the parser without
@@ -293,6 +295,7 @@ fn the_cms_seeds_parse_or_refuse_and_never_digest_ber() {
     println!("RAN over {} pki_cms seeds", seeds.len());
     let mut ber_seeds = 0usize;
     let mut pss_seeds = 0usize;
+    let mut tsp_seeds = 0usize;
 
     for (name, data) in &seeds {
         for limits in [
@@ -380,8 +383,19 @@ fn the_cms_seeds_parse_or_refuse_and_never_digest_ber() {
                 "{name}"
             );
         }
+        // The token seed is OpenSSL's TSA's: its one token must read as a
+        // `TSTInfo` with the time OpenSSL printed when it made it.
+        if name == "rfc3161-signature-timestamp" {
+            tsp_seeds += 1;
+            let info = ContentInfo::parse_with(data, CMS_WALK).expect("it parses");
+            let signer = info.signed_data().signer_infos().first().expect("a signer");
+            let token = signer.timestamp_tokens().first().expect("a token");
+            let stamp = tinker_pdf_pki::TimeStampToken::parse(token).expect("{name}");
+            assert_eq!(stamp.info().time(), 1_790_934_450, "{name}");
+        }
         println!("  {name}");
     }
     assert_eq!(ber_seeds, 2, "both BER seeds are present and checked");
     assert_eq!(pss_seeds, 1, "the RSASSA-PSS seed is present and checked");
+    assert_eq!(tsp_seeds, 1, "the RFC 3161 seed is present and checked");
 }

@@ -220,6 +220,21 @@ fn every_corpus_signature_gets_a_verdict() {
             if let Some(signer) = &verdict.signer {
                 println!("    signer {:?}", signer.subject);
             }
+            // Printed, not yet pinned: the first run with RFC 3161 validation
+            // is owed its numbers (the roadmap's Signatures row).
+            for stamp in &verdict.timestamps {
+                println!(
+                    "    timestamp {:?} at {:?}: token {}, imprint {}, signature {}, \
+                     certificate {:?}, chain {}",
+                    stamp.authority,
+                    stamp.time,
+                    short(&stamp.token),
+                    short(&stamp.imprint),
+                    short(&stamp.signature),
+                    stamp.authority_certificate,
+                    short(&stamp.chain)
+                );
+            }
         }
     }
 

@@ -801,6 +801,9 @@ before the third arrived:
 - `cades-general-names.pdf` and its root, the same day the same way: a CAdES
   signature (`cms -sign -cades`) whose signer certificate and
   `signingCertificateV2` carry RFC 5280 `GeneralNames` of eight kinds.
+- `signature-timestamp.pdf` and its two roots, the same day: a signature
+  countersigned by an RFC 3161 token from OpenSSL's own timestamping
+  authority (`openssl ts -reply`), spliced into its unsigned attributes.
 
 The keys and certificates are generated for the fixtures and belong to nobody;
 there is no licence on any of it. Nothing re-runs OpenSSL — `cargo xtask

@@ -396,8 +396,8 @@ pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, PixelRegion, RenderWarning};
 /// Signature verdicts (12.8), behind [`Document::verify_signatures`].
 pub use verdict::{
-    Chain, CmsState, DocumentDigest, SignatureCheck, SignerDescription, TrustAnchors, Unchecked,
-    Verdict, Weakness,
+    AuthorityCertificate, Chain, CmsState, DocumentDigest, SignatureCheck, SignerDescription,
+    Stamped, TimestampVerdict, TrustAnchors, Unchecked, Verdict, Weakness,
 };
 /// Saving, with the font policy attached to the save rather than left to the
 /// caller's memory.

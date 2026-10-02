@@ -170,6 +170,37 @@ file, so `signature_shapes.rs` asserts the request read back, encoded by a
 second implementation; it is not this crate's own encoding of a name agreeing
 with its own decoding.
 
+### `signature-timestamp.pdf` and its two roots — 2 October 2026
+
+`python3 signature-fixtures.py <out> <work> signature-timestamp`. A signer
+chain as `rsa_chain` makes it and `openssl cms -sign -binary -md sha256
+-nosmimecap` over the covered bytes; then a timestamping authority — its own
+root, and a leaf whose extensions are `TSA_EXTENSIONS` in the script, the
+only extended key usage `timeStamping`, critical — configured for `openssl ts
+-reply` with `ess_cert_id_alg = sha1` (RFC 2634's first-version ESS
+attribute), `tsa_name = yes`, `ordering = yes` and a stated accuracy. The
+query is `openssl ts -query -digest <SHA-256 of the signer's signature
+octets> -sha256 -cert`, and the reply is taken as the bare token
+(`-token_out`). The script then splices the token into the signer's unsigned
+attributes as `id-aa-timeStampToken` (RFC 3161 Appendix A), re-encoding the
+four lengths around it — the `SignerInfo` is the last node of every container
+that holds it, so nothing after the insertion point moves.
+
+SHA-256: `f494d76140328d6daa6242886772e630480da312753ebb3cd736f30a7b81ae06`
+(`signature-timestamp.pdf`),
+`9f68b0b708e2abe0fea4ec965fb41ff34362e897f25227ba94283ced78993c6d`
+(`signature-timestamp-root.der`, the signer's root) and
+`d9b49457a0937c0ef21520f348a62eda764cb48c005baaff4a0ccee2627121d1`
+(`signature-timestamp-tsa-root.der`, the authority's). The token's `genTime`
+is the moment OpenSSL made it, `Oct  2 09:47:30 2026 GMT` by its own
+`ts -reply -text`, and `signature_shapes.rs` pins it. The outer CMS blob is
+also the `pki_cms` seed `rfc3161-signature-timestamp`.
+
+What it is worth: the token — its `TSTInfo`, its ESS attribute, its signature
+and its certificates — is a second implementation's; the splice is this
+script's, and is checked by the outer signature still verifying, since an
+unsigned attribute is outside what that signature covers.
+
 ## The visible-signature signer
 
 `visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA

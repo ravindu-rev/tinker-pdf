@@ -114,6 +114,7 @@ use libfuzzer_sys::fuzz_target;
 use tinker_pdf_pki::cms::{CertificateChoice, ContentInfo, RevocationChoice, SignerIdentifier};
 use tinker_pdf_pki::der::{Budget, Cursor, Limits, Tag};
 use tinker_pdf_pki::pss;
+use tinker_pdf_pki::tsp::{TimeStampToken, TstInfo};
 use tinker_pdf_pki::x509::Certificate;
 
 /// Deep enough for a timestamp token, shallow enough to run fast.
@@ -338,6 +339,16 @@ fn read_every_way(data: &[u8], limits: Limits) {
                     let _ = nested.effective_digest();
                 }
             }
+            // And as RFC 3161 reads it: the `TSTInfo` inside, whose bytes
+            // are what the authority's `messageDigest` is the digest of.
+            if let Ok(stamp) = TimeStampToken::parse(token) {
+                let info = stamp.info();
+                assert!(inside(data, info.der()));
+                assert!(inside(data, info.imprint()));
+                let _ = info.imprint_digest();
+                let _ = (info.time(), info.nanoseconds(), info.accuracy());
+                let _ = info.tsa().map(ToString::to_string);
+            }
         }
     }
 }
@@ -357,4 +368,8 @@ fuzz_target!(|data: &[u8]| {
     // And a node budget too small for anything real, so the other ceiling is
     // reached as well — including by the scan, which spends against it.
     read_every_way(data, Limits::new(40, 8).allowing_indefinite_lengths());
+    // A token's two readers straight over the input, so a `TSTInfo` is
+    // reachable without first being a well-formed unsigned attribute.
+    let _ = TstInfo::parse(data);
+    let _ = TimeStampToken::parse(data);
 });

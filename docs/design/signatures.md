@@ -352,6 +352,21 @@ fires 1; `authorityCertIssuer` read as a SEQUENCE rather than an implicit one's 
 fires 1. `subjectAltName` stays out of what `unrecognised_critical` counts as recognised:
 decoding a name is not identifying a subject by it, and nothing here does the latter.
 
+**RFC 3161 signature timestamps**, the same day. `tinker_pdf_pki::tsp` reads a
+`TimeStampToken` — the envelope through `cms`, the `TSTInfo` with RFC 3161 §2.4.2's
+fractional `genTime` and its explicitly tagged `tsa` `GeneralName` — and `cms` gained RFC
+2634's first-version `signingCertificate`, whose `ESSCertID`s are SHA-1 with no algorithm
+field, because that is what RFC 3161 §2.4.1 names and what OpenSSL's TSA writes by
+default. The verdict asks five things of each token: the imprint against the signature
+octets, the token's signature, its `messageDigest` against the `TSTInfo` (a time rewritten
+under an intact signature fails here and nowhere else), §2.3's critical
+`timeStamping`-only extended key usage with §2.4.1's ESS binding, and the chain, judged at
+`genTime`. The evidence is one token OpenSSL 3.0.13's TSA made. Injections: the imprint
+taken over the whole `SignerInfo` fires 2; the `TSTInfo` digest unchecked fires 1; the
+EKU's criticality unchecked fires 1; the ESS binding unchecked fires 1; `tsa` read
+implicitly fires 9; a fraction with a trailing zero accepted fires 1. No corpus token has
+been validated by this code: the seven `cms_census.rs` counts are unread here.
+
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,
@@ -396,8 +411,11 @@ decoding a name is not identifying a subject by it, and nothing here does the la
 - **Revocation fetching.** No CRL or OCSP network traffic — the engine performs no I/O.
   Embedded revocation data (PAdES DSS/VRI, ISO 32000-2 12.8.4.3) is parsed and surfaced;
   evaluating freshness is the host's call.
-- **Timestamp validation.** RFC 3161 tokens inside CMS are parsed and reported (present,
-  TSA name, time); validating the TSA's own chain is a later tier, not this design.
+- ~~**Timestamp validation.** RFC 3161 tokens inside CMS are parsed and reported (present,
+  TSA name, time); validating the TSA's own chain is a later tier, not this design.~~ *No
+  longer a non-goal, 2 October 2026*: `Verdict::timestamps` validates each token's imprint,
+  signature, `TSTInfo` digest, authority certificate and chain (see the section on RFC 3161
+  above).
 - **Long-term validation profiles.** PAdES-LTA conformance levels are out; the verdict
   reports what is embedded, nothing more.
 - **The public-key security handler** (`/Filter /Adobe.PPKLite` encryption, 7.6.5) — related

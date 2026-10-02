@@ -63,9 +63,10 @@ where a signature covers the bytes as stored.
 
 **CMS and certificates.** `tinker-pdf-pki` reads RFC 5652 `SignedData`: both
 `SignerIdentifier` shapes, signed and unsigned attributes, `contentType`,
-`messageDigest`, `signingTime`, ESS `signingCertificateV2`, and RFC 3161
-timestamp tokens — surfaced, never evaluated — and, for an RSASSA-PSS signer
-or certificate, the `RSASSA-PSS-params` that say how to verify it. RFC 5652
+`messageDigest`, `signingTime`, ESS `signingCertificate` and
+`signingCertificateV2`, and RFC 3161 timestamp tokens — whose `TSTInfo`
+`tinker_pdf_pki::tsp` reads — and, for an RSASSA-PSS signer or certificate,
+the `RSASSA-PSS-params` that say how to verify it. RFC 5652
 §5.4's re-encoding (the stored `[0] IMPLICIT` tag replaced by `SET OF` before
 digesting) lives in one function and is **adjudicated by data**: 19 real
 signatures from six producers verify with the substitution and not one
@@ -100,6 +101,21 @@ the signature verifies against the signer's key, how far the chain reached,
 and the weaknesses accepted along the way. Every check that did not run says
 *why* rather than reporting a failure — "we did not look" and "we looked and
 it was wrong" are the two answers a caller must never confuse.
+
+**Timestamps are validated.** Every RFC 3161 token in a signer's unsigned
+attributes gets a `TimestampVerdict` in `Verdict::timestamps`, asking the same
+separate questions a signature gets and two of its own: whether the
+`messageImprint` is the digest of the signature octets it countersigns (RFC
+3161 Appendix A); whether the authority's key signed this `TSTInfo` — the
+signature verifies *and* its `messageDigest` is the `TSTInfo`'s own, which is
+what catches a time rewritten after stamping; whether the authority's
+certificate is `Fit` — `id-kp-timeStamping` as its only extended key usage,
+critical (§2.3), and named by the token's ESS `signingCertificate` or
+`signingCertificateV2` (§2.4.1, RFC 5816); and how far its chain reaches,
+judged at the token's own `genTime`, which is the token's claim rather than a
+clock. `genTime` is read with RFC 3161's fractional seconds; the `tsa` hint is
+a `GeneralName`. A timestamp's verdict never changes its signature's — a bad
+token is a token that proves nothing, not a signature that does.
 
 A signer with **no signed attributes** is checked rather than refused. RFC
 5652 §5.4 then puts the signature over the content's own digest — for a
@@ -181,6 +197,12 @@ for verdict in document.verify_signatures(&anchors, Some(now)) {
     verdict.signature;                  // Verified | Failed | NotChecked(why)
     verdict.chain;                      // AnchoredTo | SelfSigned | Incomplete | …
     verdict.weaknesses;                 // SHA-1, short keys, coverage
+    for stamp in &verdict.timestamps {  // RFC 3161 tokens, each its own verdict
+        stamp.time;                     // genTime, the authority's claim
+        stamp.imprint;                  // over what it stamps
+        stamp.authority_certificate;    // Fit | NotForTimestamping | NotBound | …
+        stamp.is_trusted();
+    }
 }
 ```
 
@@ -218,7 +240,6 @@ let signed = document.editor().save_signed(&options, &request)?;
 | A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them | this page |
 | Deciding whether a certificate is expired, unasked | validity reported; judged only against a caller-supplied instant | ruling 4 bans a clock, and "expired" is a claim about *now* — a library that invents one answers differently on different days | [rulings](../rulings.md) ruling 4 |
 | CRL and OCSP fetching | embedded revocation data surfaced, never evaluated | the engine performs no I/O; freshness is the host's call | [design](../design/signatures.md) |
-| Validating an RFC 3161 timestamp | `SignerDescription::timestamped` says one is there | validating a token means validating the authority's own chain, which is a later tier | [design](../design/signatures.md) |
 | An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; a curve nobody has produced a PDF signature on is a liability rather than a feature | RFC 5480 §2.1.1 |
 | A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
@@ -344,6 +365,19 @@ signer's certificate carries eight of the nine alternatives, an
 names that certificate by issuer and serial. `tests/signature_shapes.rs`
 reads every one back and checks the `issuerSerial` names the signer and not
 the root.
+
+**Timestamps** are held to a real RFC 3161 token. OpenSSL 3.0.13's own TSA
+(`openssl ts -reply`) stamped the signature of
+`tests/signature_support/signature-timestamp.pdf` on 2 October 2026, with a
+certificate whose only purpose is `timeStamping`, critical, under a root of
+its own, and the token was spliced into the signer's unsigned attributes.
+Eight tests in `tests/signature_shapes.rs` read it as OpenSSL printed it and
+validate it end to end, and refuse it six ways: an authority nobody anchored,
+a token over a different signature, a flipped bit in the token's signature, a
+`genTime` rewritten under an intact signature, an extended key usage made
+non-critical, and an ESS hash naming another certificate. The corpus carries
+seven tokens (`cms_census.rs`); what this code makes of them has not been
+measured, because the corpora could not be fetched where it was written.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest
