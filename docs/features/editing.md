@@ -347,7 +347,12 @@ warnings are raised only when there is at least one rectangle to fall under.
 Form XObjects are rewritten recursively, each
 resolving names against its own `/Resources` (8.10.1), because forms are how
 most producers place repeated content and a redaction driven straight
-through one would leave the secret in the form. A rewritten form is written
+through one would leave the secret in the form — to at least the sixteen
+levels of nesting the interpreter draws (until October 2026 the walk
+stopped at thirteen, and text fourteen to sixteen forms down was drawn and
+never measured: `text_as_deep_in_forms_as_the_renderer_draws_is_redacted`,
+and `the_renderer_draws_no_deeper_than_the_walk_measures`, which pins the
+two limits together). A rewritten form is written
 back as plain operators with the encoding keys of its dictionary dropped
 (`/Filter`, `/DecodeParms`, `/DL` and the external-file keys): until
 September 2026 a compressed form kept `/Filter /FlateDecode` over bytes that

@@ -352,6 +352,13 @@
 //! | another page's annotations not read | **1** |
 //! | a Type 3 face's procedures not read | **1** |
 //! | a procedure's `Do` resolved only in its face's own `/Resources` | **1** |
+//!
+//! And [`MAX_FORM_DEPTH`]'s, over 346:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the walk stopping at thirteen levels of forms, which is how it used to be | 2 |
+//! | the walk's depth test as strict as the interpreter's | 2 |
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -1194,7 +1201,19 @@ fn carries(content: &[u8]) -> bool {
 }
 
 /// How deep form XObjects may nest before recursion is refused (8.10).
-const MAX_FORM_DEPTH: u32 = 12;
+///
+/// **At least as deep as this engine draws.** The interpreter enters a form
+/// whose `Do` is made at a depth below its own `MAX_FORM_DEPTH`, 16
+/// (`interpret.rs`): sixteen levels of forms under a page. This was 12 until
+/// October 2026, and a form nested thirteen to sixteen deep was drawn by the
+/// renderer and never measured by a redaction — its text left under the
+/// rectangle with nothing in the report. The walk's test is `depth >` this,
+/// one level looser than the interpreter's `>=`, so a chain under an
+/// annotation's appearance, which the renderer runs as content rather than
+/// through a `Do`, is measured as deep as it is drawn too; a page's chain is
+/// measured one level deeper than it is drawn, which removes nothing the
+/// renderer would have shown.
+const MAX_FORM_DEPTH: u32 = 16;
 
 /// One placement of an XObject: the six entries of the transform in force,
 /// bit for bit.
@@ -4549,6 +4568,92 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
         let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
         let (_, report) = redact_to_streams(doc, &[second_word()]);
         assert_eq!(report.glyphs, 0, "there is no text, and it terminated");
+    }
+
+    /// A page drawing `/Fm1`, which draws `/Fm2`, and so on down to
+    /// `/Fm{levels}`, which draws `PUBLIC SECRET` in Helvetica at 12 points
+    /// from (10, 50) — the line [`document`] draws, at the bottom of a chain.
+    fn nested(levels: u32) -> Arc<CosDocument> {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 100]\n\
+             /Resources << /XObject << /Fm1 10 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str("4 0 obj\n<< /Length 8 >>\nstream\n/Fm1 Do\nendstream\nendobj\n");
+        out.push_str("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        for level in 1..=levels {
+            let body = if level == levels {
+                "BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET".to_string()
+            } else {
+                format!("/Fm{} Do", level + 1)
+            };
+            out.push_str(&format!(
+                "{} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 100]\n\
+                 /Resources << /XObject << /Fm{} {} 0 R >> /Font << /F0 5 0 R >> >>\n\
+                 /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+                9 + level,
+                level + 1,
+                10 + level,
+                body.len() + 1
+            ));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+            10 + levels
+        ));
+        Arc::new(CosDocument::open(out.into_bytes()).expect("it opens"))
+    }
+
+    fn plain_text(bytes: Vec<u8>) -> String {
+        crate::Document::open(bytes)
+            .expect("it opens")
+            .page(0)
+            .expect("the page")
+            .text()
+            .plain_text()
+    }
+
+    /// Text sixteen forms down — as deep as this engine's interpreter draws
+    /// — is redacted. Until October 2026 the walk stopped at thirteen, and
+    /// this line stayed on the page, extracted and drawn, with `glyphs: 0`
+    /// and no warning.
+    #[test]
+    fn text_as_deep_in_forms_as_the_renderer_draws_is_redacted() {
+        let doc = nested(16);
+        let before = plain_text(doc.bytes().to_vec());
+        assert!(
+            before.contains("PUBLIC SECRET"),
+            "the renderer draws all sixteen levels: {before:?}"
+        );
+        let (bytes, report) = redact(doc, &[second_word()]);
+        assert_eq!(report.glyphs, 6, "SECRET, sixteen forms down");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let text = plain_text(bytes.clone());
+        assert!(
+            text.contains("PUBLIC") && !text.contains("SECRET"),
+            "{text:?}"
+        );
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(!streams.contains("SECRET"), "{streams}");
+    }
+
+    /// The other side of the same line, pinned so that the two limits cannot
+    /// drift apart unseen: seventeen levels down the interpreter draws
+    /// nothing, and the walk still measures — the one level it goes past the
+    /// renderer, toward removal — so a renderer that one day draws deeper
+    /// fails this before it leaves a redaction behind.
+    #[test]
+    fn the_renderer_draws_no_deeper_than_the_walk_measures() {
+        let doc = nested(17);
+        let before = plain_text(doc.bytes().to_vec());
+        assert!(
+            !before.contains("SECRET"),
+            "the interpreter stops at sixteen: {before:?}"
+        );
+        let (_, report) = redact(doc, &[second_word()]);
+        assert_eq!(report.glyphs, 6, "the walk measured the seventeenth level");
     }
 
     /// A form that invokes itself under a transform that **moves each round**
