@@ -136,9 +136,15 @@ pub enum Unchecked {
     /// them is true.
     MalformedSignatureValue(String),
     /// There are no signed attributes, so there is no `messageDigest` to
-    /// compare and the signature is over the content directly. Reported
-    /// rather than approximated: one corpus signature is this shape, and
-    /// guessing at what it covers would be a verdict about the wrong bytes.
+    /// compare: the signature is over the content's digest directly (RFC 5652
+    /// §5.4), and questions 2 and 3 are one question.
+    ///
+    /// Only ever the document digest's reason, and only when the signature
+    /// did not verify. A detached signature with no signed attributes that
+    /// verifies is a signature over these covered bytes, and the digest then
+    /// reads [`DocumentDigest::Matches`]; one that does not verify cannot say
+    /// whether the bytes changed or the signature was never theirs, so the
+    /// digest is left unanswered rather than given the signature's answer.
     NoSignedAttributes,
     /// The blob is an `adbe.pkcs7.sha1` (12.8.3.3.1), whose encapsulated
     /// content is the document digest rather than a detached signature over
@@ -378,10 +384,21 @@ pub(crate) fn verdict(
         }
     }
 
+    let message = Signed::of(signer, signed, document, signature);
     verdict.signature = match signer_certificate {
-        Some(certificate) => check_signature(signer, certificate, &mut verdict.weaknesses),
+        Some(certificate) => {
+            check_signature(signer, certificate, &message, &mut verdict.weaknesses)
+        }
         None => SignatureCheck::NotChecked(Unchecked::SignerCertificateMissing),
     };
+    // RFC 5652 §5.4's other case: with no signed attributes on a detached
+    // signature, the signature *is* over the document's digest, so questions
+    // 2 and 3 are one question. A signature that verifies answers both; one
+    // that does not cannot say which half failed, and the digest stays
+    // unchecked rather than borrowing the signature's answer.
+    if matches!(message, Signed::Covered { .. }) && verdict.signature == SignatureCheck::Verified {
+        verdict.document_digest = DocumentDigest::Matches;
+    }
     verdict.chain = match signer_certificate {
         Some(certificate) => walk(
             certificate,
@@ -395,6 +412,63 @@ pub(crate) fn verdict(
     verdict
 }
 
+/// What a signer's signature value was computed over (RFC 5652 §5.4).
+///
+/// Three shapes, and the subfilter does not decide between them — the
+/// `SignerInfo` does. A verifier that assumed signed attributes, which every
+/// corpus signer but one carries, refused the other two by name; one that
+/// guessed would have verified a signature over the wrong bytes.
+enum Signed<'a> {
+    /// The signed attributes, as §5.4 re-encodes them for digesting: the
+    /// stored `[0] IMPLICIT` tag replaced by `SET OF`.
+    Attributes(Vec<u8>),
+    /// No signed attributes, and the message carries its content: the
+    /// signature is over the digest of the `eContent` octets.
+    Content(&'a [u8]),
+    /// No signed attributes, and the message is detached: the signature is
+    /// over the digest of the content itself, which for a PDF is the bytes
+    /// the `/ByteRange` covers.
+    Covered {
+        document: &'a Document,
+        signature: &'a Signature,
+    },
+}
+
+impl<'a> Signed<'a> {
+    fn of(
+        signer: &SignerInfo<'a>,
+        signed: &tinker_pdf_pki::SignedData<'a>,
+        document: &'a Document,
+        signature: &'a Signature,
+    ) -> Signed<'a> {
+        if let Some(attributes) = signer.signed_attrs_to_digest() {
+            return Signed::Attributes(attributes);
+        }
+        match signed.encap_content_info().content() {
+            Some(content) => Signed::Content(content),
+            None => Signed::Covered {
+                document,
+                signature,
+            },
+        }
+    }
+
+    /// The digest the signature value is over, under `algorithm`.
+    ///
+    /// `None` only for [`Signed::Covered`] whose spans do not fit the file —
+    /// a digest over less than the signature covers is not one.
+    fn digest(&self, algorithm: CryptoDigest) -> Option<Vec<u8>> {
+        match self {
+            Signed::Attributes(bytes) => Some(algorithm.digest(bytes).as_bytes().to_vec()),
+            Signed::Content(bytes) => Some(algorithm.digest(bytes).as_bytes().to_vec()),
+            Signed::Covered {
+                document,
+                signature,
+            } => signature.digest(document, cos_digest(cms_digest(algorithm))),
+        }
+    }
+}
+
 /// Question 2: do the covered bytes still hash to what was signed?
 fn check_document_digest(
     document: &Document,
@@ -406,6 +480,13 @@ fn check_document_digest(
         return DocumentDigest::NotChecked(Unchecked::LegacySha1SubFilter);
     }
     let Some(expected) = signer.message_digest() else {
+        // No `messageDigest` to compare: the signature is over the content
+        // directly and question 3 answers this one too (see `verdict`). The
+        // digest it is over is still a document digest, and still worth
+        // calling weak.
+        if signer.signed_attrs().is_none() && signer.effective_digest() == Ok(CmsDigest::Sha1) {
+            weaknesses.push(Weakness::Sha1Digest);
+        }
         return DocumentDigest::NotChecked(Unchecked::NoSignedAttributes);
     };
     let algorithm = match signer.effective_digest() {
@@ -436,15 +517,14 @@ fn check_document_digest(
 fn check_signature(
     signer: &SignerInfo<'_>,
     certificate: &Certificate<'_>,
+    message: &Signed<'_>,
     weaknesses: &mut Vec<Weakness>,
 ) -> SignatureCheck {
     // RFC 5652 §5.4: with signed attributes present the signature is over the
     // DER of a `SET OF Attribute`, which is the stored `[0] IMPLICIT` bytes
     // with the tag replaced. `signed_attrs_to_digest` is the one place that
     // substitution happens, and fifteen real signatures say it is required.
-    let Some(message) = signer.signed_attrs_to_digest() else {
-        return SignatureCheck::NotChecked(Unchecked::NoSignedAttributes);
-    };
+    // Without them it is over the content's own digest; `Signed` says which.
     let algorithm = match signer.signature_algorithm() {
         Ok(algorithm) => algorithm,
         Err(error) => {
@@ -481,8 +561,10 @@ fn check_signature(
                     bits: key.modulus_bits(),
                 });
             }
-            match key.verify_pkcs1_v15_message(crypto_digest(digest), &message, signer.signature())
-            {
+            let Some(digest_value) = message.digest(crypto_digest(digest)) else {
+                return SignatureCheck::NotChecked(Unchecked::CoverageUnusable);
+            };
+            match key.verify_pkcs1_v15(crypto_digest(digest), &digest_value, signer.signature()) {
                 Ok(()) => SignatureCheck::Verified,
                 Err(_) => SignatureCheck::Failed,
             }
@@ -507,7 +589,10 @@ fn check_signature(
                     )))
                 }
             };
-            match key.verify_message(crypto_digest(digest), &message, r, s) {
+            let Some(digest_value) = message.digest(crypto_digest(digest)) else {
+                return SignatureCheck::NotChecked(Unchecked::CoverageUnusable);
+            };
+            match key.verify(&digest_value, r, s) {
                 Ok(()) => SignatureCheck::Verified,
                 Err(_) => SignatureCheck::Failed,
             }
@@ -547,7 +632,10 @@ fn check_signature(
                 // this signature, whatever the arithmetic would say.
                 return SignatureCheck::Failed;
             }
-            match key.verify_pss_message(parameters, &message, signer.signature()) {
+            let Some(digest_value) = message.digest(parameters.hash) else {
+                return SignatureCheck::NotChecked(Unchecked::CoverageUnusable);
+            };
+            match key.verify_pss(parameters, &digest_value, signer.signature()) {
                 Ok(()) => SignatureCheck::Verified,
                 Err(_) => SignatureCheck::Failed,
             }
@@ -806,6 +894,17 @@ fn crypto_digest(digest: CmsDigest) -> CryptoDigest {
         CmsDigest::Sha256 => CryptoDigest::Sha256,
         CmsDigest::Sha384 => CryptoDigest::Sha384,
         CmsDigest::Sha512 => CryptoDigest::Sha512,
+    }
+}
+
+/// The other direction, for the one place a digest the arithmetic chose —
+/// RSASSA-PSS's, from its parameters — has to be taken over the covered bytes.
+fn cms_digest(digest: CryptoDigest) -> CmsDigest {
+    match digest {
+        CryptoDigest::Sha1 => CmsDigest::Sha1,
+        CryptoDigest::Sha256 => CmsDigest::Sha256,
+        CryptoDigest::Sha384 => CmsDigest::Sha384,
+        CryptoDigest::Sha512 => CmsDigest::Sha512,
     }
 }
 

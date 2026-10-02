@@ -175,8 +175,45 @@ def rsa_pss():
     save("rsa-pss-root.der", der_of(w(tag + "-root.pem")))
 
 
+def rsa_chain(tag, what):
+    """A root and a leaf it issues, both on 2048-bit `rsaEncryption` keys and
+    both signed with PKCS#1 v1.5 and SHA-256: the ordinary chain, so that the
+    shape under test is the signature's and nothing else's."""
+    rsa_root(tag, "/CN=Tinker PDF " + what + " Test Root/O=tinker-pdf test fixture")
+    leaf(tag, "/CN=Tinker PDF " + what + " Test Signer/O=tinker-pdf test fixture",
+         ("-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"))
+
+
+def cms_sign(tag, content, *options):
+    """`openssl cms -sign` over the bytes in `content`, the root included, as DER."""
+    with open(w(tag + "-content.bin"), "wb") as f:
+        f.write(content)
+    run("openssl", "cms", "-sign", "-binary", "-in", w(tag + "-content.bin"),
+        "-signer", w(tag + "-leaf.pem"), "-inkey", w(tag + "-leaf.key"),
+        "-certfile", w(tag + "-root.pem"), "-outform", "DER", *options,
+        "-out", w(tag + "-cms.der"))
+    with open(w(tag + "-cms.der"), "rb") as f:
+        return f.read()
+
+
+def no_signed_attributes():
+    """A detached `adbe.pkcs7.detached` signature with no signed attributes
+    (`-noattr`): RFC 5652 §5.4's other case, where the signature is over the
+    digest of the content itself -- here, the covered bytes."""
+    tag = "noattr"
+    rsa_chain(tag, "No Signed Attributes")
+    reserve = 4000
+    out, contents_at, covered = build_pdf(
+        reserve, "adbe.pkcs7.detached", "A signature with no signed attributes",
+        "Tinker PDF No Signed Attributes Test Signer")
+    der = cms_sign(tag, covered, "-md", "sha256", "-noattr")
+    save("no-signed-attributes.pdf", splice(out, contents_at, reserve, der))
+    save("no-signed-attributes-root.der", der_of(w(tag + "-root.pem")))
+
+
 BUILDERS = {
     "rsa-pss": rsa_pss,
+    "no-signed-attributes": no_signed_attributes,
 }
 
 for wanted in WANTED:

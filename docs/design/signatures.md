@@ -322,6 +322,14 @@ salt as 31 was meant to prove the salt length is read from the parameters; it wa
 by the key's salt minimum before the arithmetic ran, so the injection that skipped the
 arithmetic left it passing. It declares 33 now, a salt the key permits.
 
+**RFC 5652 §5.4's other case**, wired the same day: a signer with no signed attributes is
+verified over the content's own digest — the covered bytes, for a detached signature — and
+the verdict says the two questions are then one (`Unchecked::NoSignedAttributes` is the
+digest's reason only when the signature failed). Injections over the facade's signature
+suites: the covered bytes always digested with SHA-1 fires 1, the digest never upgraded to
+`Matches` fires 1, upgraded even when the signature failed fires 2, and the old by-name
+refusal restored fires 4.
+
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,

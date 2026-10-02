@@ -32,14 +32,16 @@
 use std::ops::Range;
 
 use tinker_pdf::{
-    Chain, CmsState, Coverage, Document, DocumentDigest, SignatureCheck, TrustAnchors, Verdict,
-    Weakness,
+    Chain, CmsState, Coverage, Document, DocumentDigest, SignatureCheck, TrustAnchors, Unchecked,
+    Verdict, Weakness,
 };
 use tinker_pdf_crypto::{DigestAlgorithm as CryptoDigest, PssParameters};
 use tinker_pdf_pki::{oid, pss, Certificate, ContentInfo, SignatureAlgorithm};
 
 const PSS_PDF: &[u8] = include_bytes!("signature_support/rsa-pss.pdf");
 const PSS_ROOT: &[u8] = include_bytes!("signature_support/rsa-pss-root.der");
+const NO_ATTRS_PDF: &[u8] = include_bytes!("signature_support/no-signed-attributes.pdf");
+const NO_ATTRS_ROOT: &[u8] = include_bytes!("signature_support/no-signed-attributes-root.der");
 
 /// Inside every fixture certificate's validity window and nothing to do with
 /// now: 1 January 2027. Ruling 4 keeps the clock out of the engine.
@@ -212,6 +214,106 @@ fn without_anchors_the_pss_chain_is_not_walked() {
     let verdicts = document.verify_signatures(&TrustAnchors::new(), Some(AT));
     assert_eq!(verdicts[0].signature, SignatureCheck::Verified);
     assert_eq!(verdicts[0].chain, Chain::NoAnchors);
+}
+
+// ---- no signed attributes --------------------------------------------------
+
+/// OpenSSL's `-noattr`: a detached signer with no `signedAttrs`, so RFC 5652
+/// §5.4's signature is over the digest of the content itself.
+#[test]
+fn the_unattributed_fixture_is_the_shape_it_claims_to_be() {
+    let der = cms_of(NO_ATTRS_PDF);
+    let content = ContentInfo::parse(&der).expect("the CMS parses");
+    let signed = content.signed_data();
+    assert!(signed.encap_content_info().is_detached());
+    let signer = signed.signer_infos().first().expect("one signer");
+    assert!(signer.signed_attrs().is_none());
+    assert!(signer.message_digest().is_none());
+    assert_eq!(
+        signer.signature_algorithm(),
+        Ok(SignatureAlgorithm::RsaPkcs1v15 { digest: None }),
+        "bare rsaEncryption, so the digest is the `digestAlgorithm` field's"
+    );
+}
+
+#[test]
+fn a_signature_with_no_signed_attributes_is_over_the_covered_bytes_and_verifies() {
+    let verdict = verdict_for(NO_ATTRS_PDF, NO_ATTRS_ROOT);
+    assert_eq!(verdict.coverage, Coverage::WholeFile);
+    assert_eq!(verdict.cms, CmsState::Read { signers: 1 });
+    assert_eq!(
+        verdict.signature,
+        SignatureCheck::Verified,
+        "the signature is over SHA-256 of the covered bytes, and nothing else"
+    );
+    assert_eq!(
+        verdict.document_digest,
+        DocumentDigest::Matches,
+        "a signature over the document's digest that verifies answers question 2 too"
+    );
+    assert!(matches!(verdict.chain, Chain::AnchoredTo { links: 0, .. }));
+    assert!(verdict.weaknesses.is_empty(), "{:?}", verdict.weaknesses);
+    assert!(verdict.is_trusted());
+}
+
+#[test]
+fn a_changed_document_fails_an_unattributed_signature_and_leaves_the_digest_unanswered() {
+    // With no `messageDigest` the two questions cannot be told apart: the
+    // signature is over the digest of the bytes that changed. So the
+    // signature fails — it is not over these bytes — and the digest is not
+    // given the signature's answer, because "the document changed" and "the
+    // signature was never this document's" are indistinguishable here.
+    let mut tampered = NO_ATTRS_PDF.to_vec();
+    let at = find(&tampered, b"0.2 0.6 0.3 rg").expect("the content stream");
+    tampered[at + 2] = b'9';
+    let verdict = verdict_for(&tampered, NO_ATTRS_ROOT);
+    assert_eq!(verdict.signature, SignatureCheck::Failed);
+    assert_eq!(
+        verdict.document_digest,
+        DocumentDigest::NotChecked(Unchecked::NoSignedAttributes)
+    );
+    assert!(!verdict.is_trusted());
+}
+
+#[test]
+fn a_flipped_bit_in_an_unattributed_signature_fails_rather_than_going_unchecked() {
+    let mut der = cms_of(NO_ATTRS_PDF);
+    let at = signature_value_at(&der);
+    der[at.end - 1] ^= 0x01;
+    let verdict = verdict_for(&replace_cms(NO_ATTRS_PDF, &der), NO_ATTRS_ROOT);
+    assert_eq!(verdict.signature, SignatureCheck::Failed);
+    assert_eq!(
+        verdict.document_digest,
+        DocumentDigest::NotChecked(Unchecked::NoSignedAttributes)
+    );
+}
+
+#[test]
+fn an_unattributed_signature_is_read_under_the_digest_its_signer_names() {
+    // `digestAlgorithm` is outside anything signed, so naming SHA-384 there
+    // moves no covered byte and changes which digest the verifier must take.
+    // A verifier that assumed SHA-256, or took the digest from anywhere but
+    // the signer, would still say `Verified`.
+    let mut der = cms_of(NO_ATTRS_PDF);
+    let content = ContentInfo::parse(&der).expect("the CMS parses");
+    let signer = content
+        .signed_data()
+        .signer_infos()
+        .first()
+        .expect("one signer");
+    let range = offset_in(&der, signer.digest_algorithm_id().der());
+    let oid_at = range.start
+        + find(
+            &der[range.clone()],
+            &[
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+            ],
+        )
+        .expect("id-sha256");
+    drop(content);
+    der[oid_at + 10] = 0x02; // id-sha384
+    let verdict = verdict_for(&replace_cms(NO_ATTRS_PDF, &der), NO_ATTRS_ROOT);
+    assert_eq!(verdict.signature, SignatureCheck::Failed);
 }
 
 // ---- reading and rewriting the fixtures -----------------------------------

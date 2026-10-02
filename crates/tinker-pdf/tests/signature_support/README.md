@@ -105,6 +105,23 @@ and RSA Laboratories' published vectors in `tinker-pdf-crypto`; this file is
 what carries a PSS signature, a PSS-restricted key and a PSS certificate
 signature that a second implementation produced into a whole document.
 
+### `no-signed-attributes.pdf` and `no-signed-attributes-root.der` — 2 October 2026
+
+`python3 signature-fixtures.py <out> <work> no-signed-attributes`. A 2048-bit
+RSA root and a leaf it issues, both PKCS#1 v1.5 with SHA-256, and `openssl cms
+-sign -binary -md sha256 -noattr` over the covered bytes: a detached signer
+with no `signedAttrs`, so RFC 5652 §5.4's signature is over SHA-256 of the
+covered bytes themselves and its `signatureAlgorithm` is bare `rsaEncryption`.
+
+SHA-256: `87800983dc430112cefa5060974a7172f51f37c1d9d07b2e5f04840f00b05f5d`
+(`no-signed-attributes.pdf`) and
+`d3df219c37f19604fe97cc19e80895f49a5fe9ae3b99cb641ca17934895359af`
+(`no-signed-attributes-root.der`).
+
+The corpus has exactly one signer of this shape — `bug854315.pdf`'s, per
+`cms_census.rs` — and one is not enough to say the arm is right in both
+directions; this file is the second, and the one whose negatives can be made.
+
 ## The visible-signature signer
 
 `visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA

@@ -89,6 +89,15 @@ and the weaknesses accepted along the way. Every check that did not run says
 *why* rather than reporting a failure — "we did not look" and "we looked and
 it was wrong" are the two answers a caller must never confuse.
 
+A signer with **no signed attributes** is checked rather than refused. RFC
+5652 §5.4 then puts the signature over the content's own digest — for a
+detached signature, the digest of the covered bytes — so there is no
+`messageDigest` to compare and questions 2 and 3 are one question: a signature
+that verifies answers both, and the digest reads `Matches`; one that does not
+cannot say whether the bytes changed or the signature was never theirs, and
+the digest stays `NotChecked(NoSignedAttributes)` rather than borrowing the
+signature's answer.
+
 **Modification detection.** `Signature::modifications()` lists every object a
 revision after the signed bytes wrote, classifies it, and marks it against the
 signature's `/DocMDP` level (12.8.2.2) and `/FieldMDP` field lock (12.8.2.4).
@@ -190,7 +199,6 @@ let signed = document.editor().save_signed(&options, &request)?;
 | A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3 |
 | `adbe.pkcs7.sha1` (12.8.3.3.1) | `Unchecked::LegacySha1SubFilter` | deprecated in ISO 32000-2; one corpus file has it and that file is a fuzzer's output, so it is named rather than implemented on a sample of one | 12.8.3.3.1 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
-| A signature with no signed attributes | `Unchecked::NoSignedAttributes` | the signature is then over the content directly, and guessing at what that content is would be a verdict about the wrong bytes | RFC 5652 §5.4 |
 
 ## Verified
 
@@ -284,6 +292,16 @@ greys, because a missing image draws ruling 2's placeholder and the first
 version counted ink. Both halves of the arithmetic are this repository's, so
 the evidence is the vectors that already gate `bignum` and the OpenSSL-made
 key and certificate, not a second verifier.
+
+**A signature with no signed attributes** is held to one OpenSSL 3.0.13
+fixture (`tests/signature_support/no-signed-attributes.pdf`, `cms -sign
+-noattr`), and to five tests in `tests/signature_shapes.rs`: it verifies and
+anchors; a changed byte or a flipped signature bit fails it and leaves the
+digest unanswered; and naming SHA-384 in the signer's unsigned
+`digestAlgorithm` fails it, because the digest is the signer's to name. The
+corpus has exactly one such signer, `bug854315.pdf`'s, and its first verdict
+under this code has not been measured: `tests/verdicts.rs` tallies it apart
+and prints it, and asserts only that it is no longer unchecked.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest

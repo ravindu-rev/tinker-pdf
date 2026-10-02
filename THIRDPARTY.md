@@ -791,6 +791,9 @@ before the third arrived:
   OpenSSL from the three above, because it is the one on the machine that
   built them: an RSASSA-PSS-signed CMS under a PSS-restricted key and a root
   that signs certificates with PSS, because no corpus signature uses PSS.
+- `no-signed-attributes.pdf` and its root, built the same day the same way:
+  a detached signer with no signed attributes (`cms -sign -noattr`), the
+  shape the corpus has one of.
 
 The keys and certificates are generated for the fixtures and belong to nobody;
 there is no licence on any of it. Nothing re-runs OpenSSL — `cargo xtask
