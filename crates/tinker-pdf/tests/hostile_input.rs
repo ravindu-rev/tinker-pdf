@@ -797,6 +797,19 @@ fn mutated_standalone_documents_never_panic() {
             let label = format!("{name} case {case}");
             let _guard = Guard(&label);
             exercise(mutated.clone());
+            // The creation call reads the same markup through the same reader
+            // with a stylesheet of the caller's in front, and what it builds is
+            // finished and opened like anything else.
+            if matches!(*name, "xhtml" | "soup") {
+                use tinker_pdf::{DocumentBuilder, FromHtml, PageBox};
+                if let Ok((builder, _)) = DocumentBuilder::from_html(
+                    &mutated,
+                    "p { margin: 1em } h1 { font-size: 2em } @import url(x.css);",
+                    PageBox::new(300.0, 200.0),
+                ) {
+                    exercise(builder.finish());
+                }
+            }
             if case % 4 == 0 {
                 exercise_streamed(mutated);
             }

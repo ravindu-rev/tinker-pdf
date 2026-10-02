@@ -173,6 +173,20 @@ pub trait Resources {
     ) -> Result<(String, Vec<u8>), Unavailable>;
 }
 
+/// A provider borrowed is a provider, so a caller can lend one to a reader
+/// that wraps it — [`crate::standalone::DataUrls`] in front of a creation
+/// call's — and still hold it afterwards.
+impl<R: Resources + ?Sized> Resources for &mut R {
+    fn fetch(
+        &mut self,
+        referring: &str,
+        reference: &str,
+        limits: &Limits,
+    ) -> Result<(String, Vec<u8>), Unavailable> {
+        (**self).fetch(referring, reference, limits)
+    }
+}
+
 /// An OCF container resolves a reference as §4.2.5 says: against the referring
 /// document, by [`resolve_reference`], to an entry compared case-sensitively.
 impl Resources for Ocf<'_> {

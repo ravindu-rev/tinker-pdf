@@ -10,6 +10,30 @@ ExtGStates, patterns, links, outlines) and nothing speculative.
 
 ## What it does
 
+**From HTML and CSS** (tier 5's formats row). The builder itself still
+places only what a caller positioned; `tinker_pdf::FromHtml`, implemented for
+it in the facade, is the one constructor that composes. With the trait in
+scope, `DocumentBuilder::from_html(markup, stylesheet, PageBox)` reads the
+markup as XML into the EPUB reader's tree, applies `stylesheet` as an author
+sheet **ahead of** every sheet the markup links (so the markup's own `<style>`
+wins a tie, as after a `<link>` at the top of `<head>`), lays it out into
+pages of the `PageBox` — a size, a margin inside it (default half an inch)
+and a base font size — and hands back a builder holding the pages, every face
+the layout used registered and the `<title>` as `/Title`, so a caller can add
+information or pages and `finish` as usual. It is the EPUB path with the book
+taken away: `epub::lay_out_one`, the same cascade, layout and painter, which
+is why `tests/html_creation.rs` holds a document made this way **pixel for
+pixel** to the same markup as the one chapter of an EPUB at the same box. The
+`HtmlReport` beside the builder speaks a book's `ArchiveWarning` vocabulary —
+unimplemented properties counted by element, pictures not drawn, sheets that
+did not resolve, characters no face covers, and an `UnusableOption` for a box,
+margin or size the caller passed that could not be used and was replaced. A
+document the cascade or the layout refuses at one of its caps is
+`HtmlError::{StyleRefused, LayoutRefused}` rather than a placeholder page,
+because a creation call has no page count to keep. References: a `data:` URL
+carries its own bytes; anything else is missing and named under `from_html`,
+and asked of the caller's `epub::read::Resources` under `from_html_with`.
+
 **Pages.** `add_page(width, height, |page| ...)` hands a `PageBuilder` to a
 closure; the page's `/MediaBox` is the given size, and `set_crop_box` /
 `set_bleed_box` add the two 14.11.2 boxes a fixed-layout source may state.
@@ -203,6 +227,22 @@ let pdf: Vec<u8> = b.finish();
 `TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`,
 `StateMask`,
 `Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade.
+The HTML half is `FromHtml` (`from_html`, `from_html_with`), `PageBox`
+(`new`, `with_margin`, `with_font_size`; `#[non_exhaustive]`), `HtmlReport`
+(`warnings`, `pages`, `layout`, `margin`, `cost`) and `HtmlError`, all on the
+facade:
+
+```rust
+use tinker_pdf::{DocumentBuilder, FromHtml, PageBox};
+
+let (mut b, report) = DocumentBuilder::from_html(
+    "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><h1>Invoice</h1></body></html>",
+    "h1 { font-size: 20pt }",
+    PageBox::new(612.0, 792.0).with_margin(54.0),
+)?;
+b.set_info(b"Author", "Accounts");
+let pdf = b.finish();
+```
 `ImageData` and `Target` are `#[non_exhaustive]`: the next shape is an
 addition, not a break.
 
@@ -245,7 +285,9 @@ byte-deterministic XMP packet and the header version its part requires.
 | Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS and neither will: `glyph_run` is the shaped entry point, through `tinker-pdf-shape` | [fonts](fonts.md), [design/shaping.md](../design/shaping.md) |
 | CIE-based spaces on write: `/CalGray`, `/CalRGB`, `/Lab` | `DeviceSpace`, `/ICCBased` and the two tint spaces on the fill, stroke and image setters; nothing registers, sets or places a CIE-based array | not built: `/ICCBased` is this writer's only device-independent colour today. Whether the CIE-based arrays are owed beside it is open on the roadmap, not decided here. `/Separation` and `/DeviceN` left this row in September 2026 | [ROADMAP](../ROADMAP.md) |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
-| Layout | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API | — |
+| Layout on the builder's own methods | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API, and `FromHtml` is where a caller reaches it: a constructor in the facade, because ruling 8 keeps the layout engine out of `tinker-pdf-cos` | — |
+| Markup that is not well-formed XML, handed to `from_html` | `ArchiveWarning::Markup(MarkupDefect::Truncated)` in the report, on a document of what parsed | the markup is read by the XML reader; an HTML5 tree builder is the open half of tier 5's loose-HTML row | [opening](opening.md), [ROADMAP](../ROADMAP.md) |
+| A cascade or layout cap spent | `HtmlError::{StyleRefused, LayoutRefused}` | a book keeps the page as a placeholder; a creation call has no page count to keep, so it is refused by which half refused it | [epub](epub.md) |
 | Everything an `ArchivalProfile` forbids | the call returns `false` and pushes a typed `ArchivalRefusal` naming its clause; `finish_archival` returns `Err` for what only a finished document can be judged on | a builder that emitted what the validator rejects would make the validator the last line of defence rather than the second | [pdfa](pdfa.md) |
 
 ## Verified
@@ -276,6 +318,19 @@ byte-deterministic XMP packet and the header version its part requires.
   to one awkward name — a space, a `#`, a `/` and a byte past 0x7F: the
   stream carries the escaped token, the resource dictionary the name's own
   bytes, and the page draws what the same document draws under a plain name.
+- `crates/tinker-pdf/tests/html_creation.rs` holds `from_html` **by the EPUB
+  reftests**, two ways: a document made from markup and a stylesheet renders
+  pixel for pixel to the EPUB whose chapter is the same markup with the sheet
+  linked first, at two page boxes and over two pages; and nine of
+  `epub_reftest.rs`'s pairs — the `margin`, `padding` and `border` shorthands
+  against their longhands, `1.5em` against `24px`, `50%` against `120px`, an
+  implied row group, `display: block`, a collapsed margin pair and padding
+  against border — are laid out through `from_html` and read back out of the
+  finished PDF line by line, each with the mismatch reference that must not
+  agree. Beside them: the caller's sheet ahead of the document's and
+  `!important` beating it, the page box and margin, an unusable box and margin
+  named, a cascade cap refused as `StyleRefused`, and a provider answering a
+  `<link>`. `hostile_input.rs` runs `from_html` over its damaged markup.
 - `crates/tinker-pdf/tests/png_passthrough.rs` asserts a PNG's IDAT reaches
   the page untouched and decodes identically.
 - `crates/tinker-pdf-cos/tests/page_operations.rs` covers embedded and

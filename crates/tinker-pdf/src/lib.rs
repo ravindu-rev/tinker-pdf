@@ -30,6 +30,7 @@ pub mod epub;
 pub mod fontlist;
 pub mod fonts;
 pub mod form_data;
+pub mod html;
 mod images;
 pub mod layers;
 pub mod mdp;
@@ -70,6 +71,10 @@ pub use cbz::{
 };
 pub use fontlist::{DocumentFont, FontProgram};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
+/// HTML and CSS to PDF as a creation API (tier 5): with [`FromHtml`] in scope,
+/// `DocumentBuilder::from_html(markup, stylesheet, page)` lays markup out
+/// through the EPUB reader's cascade, layout and painter.
+pub use html::{FromHtml, HtmlError, HtmlReport, PageBox};
 pub use layers::OptionalGroup;
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};

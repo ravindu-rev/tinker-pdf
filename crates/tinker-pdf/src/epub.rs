@@ -488,6 +488,11 @@ pub enum BookOptionDefect {
     /// The base font size is not finite, is not positive, or is larger than the
     /// page it would be set on.
     FontSize,
+    /// The margin a creation call asked for is not finite, is negative, or
+    /// leaves the page no content area (tier 5's formats row,
+    /// [`crate::FromHtml`]). A book's margin is [`PAGE_MARGIN`] and is never
+    /// the caller's, so no book reports this.
+    Margin,
 }
 
 impl BookLayout {
@@ -1152,6 +1157,8 @@ pub(crate) struct Laid {
     pub pages: Vec<PageOrigin>,
     /// What the document spent against the caps that bound it.
     pub cost: BookCost,
+    /// Why the document is a placeholder page rather than itself, if it is.
+    pub defect: Option<SpineDefect>,
 }
 
 /// One content document, read and laid out as a book whose spine is one item
@@ -1306,6 +1313,7 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
         warnings,
         pages,
         cost,
+        defect: chapters.first().and_then(|chapter| chapter.defect),
     }
 }
 
