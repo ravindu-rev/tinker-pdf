@@ -41,6 +41,31 @@
 //!
 //! A modulus wider than 4096 bits is refused rather than truncated, and so is
 //! a signature whose length is not exactly the modulus's.
+//!
+//! # RSASSA-PSS
+//!
+//! [`RsaPublicKey::verify_pss`] is RFC 8017 §8.1.2 with EMSA-PSS-VERIFY
+//! (§9.1.2) and MGF1 (B.2.1). PSS cannot be checked the way PKCS#1 v1.5 is —
+//! the salt is random, so there is no expected encoding to build and compare —
+//! and the encoding is instead *unmasked and read*. That is the part that has
+//! to be exact, so every step that reads a length or an offset reads it from
+//! the parameters the caller declared and never from the recovered block: the
+//! salt length is the declared one, not whatever a run of zeros happens to
+//! imply, and a block whose padding does not end exactly where that length
+//! says is refused.
+//!
+//! Two inputs move the arithmetic in ways a quick reading misses, and both
+//! are gated on published data rather than on this module's opinion:
+//!
+//! * **`emBits` is `modBits - 1`, not `8k`.** For a modulus whose bit length
+//!   is one more than a multiple of eight the encoded message is a whole
+//!   octet shorter than the signature, and the leading octet of `s^e mod n`
+//!   must then be zero. RSA Laboratories' `pss-vect.txt` carries 1 025- to
+//!   1 031-bit keys for exactly this reason, and NIST's file has none.
+//! * **The leftmost `8·emLen − emBits` bits are cleared after unmasking and
+//!   must be zero before it.** Forgetting the first rejects every signature
+//!   under such a key; forgetting the second accepts a block with garbage in
+//!   bits the encoding does not have.
 
 use crate::bignum::{Modulus, Uint, MAX_LIMBS};
 use crate::handler::constant_time_eq;
@@ -193,6 +218,25 @@ pub enum RsaRefusal {
     EncodingMismatch,
 }
 
+/// RSASSA-PSS's three choices (RFC 8017 §8.1 and A.2.3): the digest that
+/// reduced the message, the digest MGF1 is built on, and the salt length.
+///
+/// All three are the signer's and come from the signature's own algorithm
+/// identifier; `tinker-pdf-pki` reads them out of an `RSASSA-PSS-params`. The
+/// verifier takes them as given rather than inferring any of them from the
+/// recovered block, because a block cannot be trusted to say how it should be
+/// read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PssParameters {
+    /// The digest of the message, and of `M'` in EMSA-PSS step 13.
+    pub hash: DigestAlgorithm,
+    /// The digest MGF1 is computed with. Equal to `hash` in every signature
+    /// either published vector set carries, and not required to be.
+    pub mask_hash: DigestAlgorithm,
+    /// The salt length in octets.
+    pub salt_length: usize,
+}
+
 /// An RSA public key: a modulus and a public exponent, nothing else.
 #[derive(Clone, Copy, Debug)]
 pub struct RsaPublicKey {
@@ -319,6 +363,207 @@ impl RsaPublicKey {
     ) -> Result<(), RsaRefusal> {
         let digest = algorithm.digest(message);
         self.verify_pkcs1_v15(algorithm, digest.as_bytes(), signature)
+    }
+
+    /// Verifies an RSASSA-PSS signature over an already-computed digest
+    /// (RFC 8017 §8.1.2).
+    ///
+    /// # Errors
+    ///
+    /// [`RsaRefusal::EncodingMismatch`] when the signature is simply not
+    /// valid — including a recovered integer too wide for `emLen` octets,
+    /// which step 2c calls "invalid signature" rather than an error.
+    /// [`RsaRefusal::ModulusTooShort`] when the key cannot hold a digest and
+    /// a salt of the declared lengths at all, which is a property of the key
+    /// and the parameters rather than of the signature.
+    pub fn verify_pss(
+        &self,
+        parameters: PssParameters,
+        digest: &[u8],
+        signature: &[u8],
+    ) -> Result<(), RsaRefusal> {
+        if digest.len() != parameters.hash.output_len() {
+            return Err(RsaRefusal::DigestLength {
+                expected: parameters.hash.output_len(),
+                found: digest.len(),
+            });
+        }
+
+        // Step 1: exactly k octets, for the same reason as PKCS#1 v1.5.
+        let k = self.modulus.byte_len();
+        if signature.len() != k {
+            return Err(RsaRefusal::SignatureLength {
+                expected: k,
+                found: signature.len(),
+            });
+        }
+
+        // Step 2a and 2b: 0 <= s < n, m = s^e mod n.
+        let s = Uint::<RSA_LIMBS>::from_be_bytes(signature).ok_or(RsaRefusal::ModulusTooWide)?;
+        if s >= *self.modulus.value() {
+            return Err(RsaRefusal::SignatureOutOfRange);
+        }
+        let m = self.modulus.pow(&s, &self.exponent);
+
+        // Step 2c: EM = I2OSP(m, emLen) with emLen = ceil((modBits - 1) / 8).
+        // `m < n` fits k octets; when emLen is k - 1 the octet in front must
+        // be zero, or I2OSP reports "integer too large" and the signature is
+        // invalid.
+        let em_bits = self.modulus.bits().saturating_sub(1);
+        let em_len = em_bits.div_ceil(8);
+        let mut whole = [0u8; MAX_RSA_BYTES];
+        let Some(whole) = whole.get_mut(..k) else {
+            return Err(RsaRefusal::ModulusTooWide);
+        };
+        if !m.to_be_bytes(whole) {
+            // Unreachable: m < n and k is n's own length.
+            return Err(RsaRefusal::EncodingMismatch);
+        }
+        let Some((lead, em)) = k.checked_sub(em_len).map(|at| whole.split_at(at)) else {
+            return Err(RsaRefusal::EncodingMismatch);
+        };
+        if lead.iter().any(|&byte| byte != 0) {
+            return Err(RsaRefusal::EncodingMismatch);
+        }
+
+        // Step 3.
+        emsa_pss_verify(parameters, digest, em, em_bits)
+    }
+
+    /// Digests `message` with `parameters.hash` and verifies the RSASSA-PSS
+    /// signature over it.
+    ///
+    /// # Errors
+    ///
+    /// As [`RsaPublicKey::verify_pss`].
+    pub fn verify_pss_message(
+        &self,
+        parameters: PssParameters,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), RsaRefusal> {
+        let digest = parameters.hash.digest(message);
+        self.verify_pss(parameters, digest.as_bytes(), signature)
+    }
+}
+
+/// The longest seed MGF1 is handed here: a digest (at most 64 octets) and the
+/// four-octet counter.
+const MGF_SEED_MAX: usize = 64 + 4;
+
+/// MGF1 (RFC 8017 B.2.1), XORed into `out` in place.
+///
+/// `T = Hash(seed || C(0)) || Hash(seed || C(1)) || …`, cut to `out.len()`
+/// octets, where `C(i)` is the counter as four big-endian octets. XORed rather
+/// than returned, because the one caller wants `maskedDB ⊕ dbMask` and
+/// building the mask separately would be a second 512-octet buffer.
+fn mgf1_xor(hash: DigestAlgorithm, seed: &[u8], out: &mut [u8]) {
+    let mut input = [0u8; MGF_SEED_MAX];
+    let Some(prefix) = input.get_mut(..seed.len()) else {
+        return;
+    };
+    prefix.copy_from_slice(seed);
+    let block = hash.output_len();
+    let mut counter: u32 = 0;
+    for chunk in out.chunks_mut(block) {
+        if let Some(slot) = input.get_mut(seed.len()..seed.len() + 4) {
+            slot.copy_from_slice(&counter.to_be_bytes());
+        }
+        let digest = hash.digest(input.get(..seed.len() + 4).unwrap_or(&[]));
+        for (byte, mask) in chunk.iter_mut().zip(digest.as_bytes()) {
+            *byte ^= mask;
+        }
+        counter = counter.wrapping_add(1);
+    }
+}
+
+/// EMSA-PSS-VERIFY (RFC 8017 §9.1.2), over a digest already taken.
+///
+/// Step numbers are the RFC's. Every offset below is computed from `em.len()`,
+/// the digest length and the declared salt length — none is read out of the
+/// block — which is what makes a forged block unable to choose where its own
+/// salt starts.
+fn emsa_pss_verify(
+    parameters: PssParameters,
+    m_hash: &[u8],
+    em: &[u8],
+    em_bits: usize,
+) -> Result<(), RsaRefusal> {
+    let h_len = parameters.hash.output_len();
+    let s_len = parameters.salt_length;
+    let em_len = em.len();
+
+    // Step 3: emLen >= hLen + sLen + 2.
+    let needed = h_len
+        .checked_add(s_len)
+        .and_then(|sum| sum.checked_add(2))
+        .ok_or(RsaRefusal::ModulusTooShort)?;
+    if em_len < needed {
+        return Err(RsaRefusal::ModulusTooShort);
+    }
+
+    // Step 4: the trailer field, 0xbc.
+    if em.last() != Some(&0xbc) {
+        return Err(RsaRefusal::EncodingMismatch);
+    }
+
+    // Step 5: maskedDB is the first emLen - hLen - 1 octets, H the next hLen.
+    let db_len = em_len - h_len - 1;
+    let (masked_db, rest) = em.split_at(db_len);
+    let Some(h) = rest.get(..h_len) else {
+        return Err(RsaRefusal::EncodingMismatch);
+    };
+
+    // Step 6: the leftmost 8·emLen − emBits bits of maskedDB must be zero.
+    // `em_len` is ceil(emBits / 8), so this is between 0 and 7.
+    let unused = 8 * em_len - em_bits;
+    let keep = 0xffu8.checked_shr(unused as u32).unwrap_or(0);
+    if masked_db.first().is_some_and(|&lead| lead & !keep != 0) {
+        return Err(RsaRefusal::EncodingMismatch);
+    }
+
+    // Steps 7 to 9: DB = maskedDB ⊕ MGF(H, emLen − hLen − 1), with the same
+    // leftmost bits cleared.
+    let mut db = [0u8; MAX_RSA_BYTES];
+    let Some(db) = db.get_mut(..db_len) else {
+        return Err(RsaRefusal::ModulusTooWide);
+    };
+    db.copy_from_slice(masked_db);
+    mgf1_xor(parameters.mask_hash, h, db);
+    if let Some(lead) = db.first_mut() {
+        *lead &= keep;
+    }
+
+    // Step 10: emLen − hLen − sLen − 2 zero octets, then 0x01. `needed` above
+    // makes this subtraction safe.
+    let ps_len = em_len - h_len - s_len - 2;
+    let (padding, tail) = db.split_at(ps_len);
+    if padding.iter().any(|&byte| byte != 0) || tail.first() != Some(&0x01) {
+        return Err(RsaRefusal::EncodingMismatch);
+    }
+
+    // Step 11: the salt is the last sLen octets of DB.
+    let salt = tail.get(1..).unwrap_or(&[]);
+    if salt.len() != s_len {
+        // Unreachable by the arithmetic above; refused rather than asserted.
+        return Err(RsaRefusal::EncodingMismatch);
+    }
+
+    // Steps 12 and 13: H' = Hash(0x00 × 8 || mHash || salt).
+    let mut prime = [0u8; 8 + 64 + MAX_RSA_BYTES];
+    let prime_len = 8 + h_len + s_len;
+    if !put(&mut prime, 8, m_hash) || !put(&mut prime, 8 + h_len, salt) {
+        return Err(RsaRefusal::ModulusTooWide);
+    }
+    let h_prime = parameters
+        .hash
+        .digest(prime.get(..prime_len).unwrap_or(&[]));
+
+    // Step 14.
+    if constant_time_eq(h, h_prime.as_bytes()) {
+        Ok(())
+    } else {
+        Err(RsaRefusal::EncodingMismatch)
     }
 }
 
@@ -823,5 +1068,363 @@ mod tests {
         assert_eq!(skipped, 90, "SHA-224 vectors, which this crate cannot hash");
         assert_eq!(accepted, 60, "Result = P");
         assert_eq!(rejected, 300, "Result = F");
+    }
+
+    // ---- RSASSA-PSS ------------------------------------------------------
+
+    /// NIST CAVP `SigVerPSS_186-3.rsp`, from the same archive as the PKCS#1
+    /// v1.5 file: every vector for a digest this crate implements.
+    ///
+    /// The salt length is read from each vector's `SaltVal`, which is ten
+    /// octets throughout, and handed to the verifier as the declared length —
+    /// the same thing a CMS `RSASSA-PSS-params` does. The negatives are NIST's
+    /// own five kinds, 60 of each across the four digests run: the message
+    /// changed, `e` changed, the signature changed, the hash moved left in
+    /// the encoded message, and the `0x01` that ends the padding removed. The
+    /// last two are forgeries against the unmasking, which is the part of PSS
+    /// that can be read wrongly.
+    #[test]
+    fn cavp_sigver_pss_vectors() {
+        const VECTORS: &str = include_str!("../tests/data/cavp/rsa_sigver_pss.rsp");
+
+        let mut base: Option<RsaPublicKey> = None;
+        let mut algorithm: Option<DigestAlgorithm> = None;
+        let mut exponent = Vec::new();
+        let mut message = Vec::new();
+        let mut signature = Vec::new();
+        let mut salt = Vec::new();
+
+        let mut ran = 0usize;
+        let mut skipped = 0usize;
+        let mut accepted = 0usize;
+        let mut rejected = 0usize;
+        let mut by_reason = std::collections::BTreeMap::<String, usize>::new();
+
+        for line in VECTORS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+                continue;
+            }
+            let Some((name, value)) = line.split_once(" = ") else {
+                continue;
+            };
+            match name {
+                "n" => {
+                    base = Some(
+                        RsaPublicKey::new(&unhex(value), &[3]).expect("a CAVP modulus is usable"),
+                    );
+                }
+                "SHAAlg" => algorithm = algorithm_named(value.trim()),
+                "e" => exponent = unhex(value),
+                "Msg" => message = unhex(value),
+                "S" => signature = unhex(value),
+                "SaltVal" => salt = unhex(value),
+                "Result" => {
+                    let Some(algorithm) = algorithm else {
+                        skipped += 1;
+                        continue;
+                    };
+                    let expected_valid = value.starts_with('P');
+                    let base = base.as_ref().expect("a modulus precedes every vector");
+                    let parameters = PssParameters {
+                        hash: algorithm,
+                        mask_hash: algorithm,
+                        salt_length: salt.len(),
+                    };
+                    let outcome = base
+                        .with_exponent(&exponent)
+                        .and_then(|key| key.verify_pss_message(parameters, &message, &signature));
+                    assert_eq!(
+                        outcome.is_ok(),
+                        expected_valid,
+                        "vector {ran}: expected {value}, got {outcome:?}"
+                    );
+                    ran += 1;
+                    if expected_valid {
+                        accepted += 1;
+                    } else {
+                        rejected += 1;
+                        *by_reason
+                            .entry(value.chars().take(5).collect())
+                            .or_default() += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(ran, 360, "vectors run");
+        assert_eq!(skipped, 90, "SHA-224 vectors, which this crate cannot hash");
+        assert_eq!(accepted, 60, "Result = P");
+        assert_eq!(rejected, 300, "Result = F");
+        // Sixty of each of NIST's five reasons, so a parser that matched only
+        // some of them cannot reach the right total another way.
+        assert_eq!(by_reason.len(), 5, "{by_reason:?}");
+        assert!(
+            by_reason.values().all(|&count| count == 60),
+            "{by_reason:?}"
+        );
+    }
+
+    /// One `pss-vect.txt` example: a key, and the signatures made with it.
+    struct PssExample {
+        modulus: Vec<u8>,
+        exponent: Vec<u8>,
+        /// (message, salt, signature)
+        signatures: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    }
+
+    /// Reads RSA Laboratories' `pss-vect.txt`: labelled blocks of hex octets.
+    ///
+    /// The public key is read from each example's "Public key" section,
+    /// where the exponent is labelled `Exponent`; the private-key section
+    /// reuses that label for `d`, which is why only the first `Modulus` and
+    /// `Exponent` of each example are taken.
+    fn pss_examples() -> Vec<PssExample> {
+        const VECTORS: &str = include_str!("../tests/data/pkcs1/pss-vect.txt");
+        let mut examples: Vec<PssExample> = Vec::new();
+        let mut label = String::new();
+        let mut current = Vec::<u8>::new();
+        let mut message = Vec::new();
+        let mut salt = Vec::new();
+
+        let mut flush = |label: &str, value: Vec<u8>, examples: &mut Vec<PssExample>| {
+            let Some(example) = examples.last_mut() else {
+                return;
+            };
+            match label {
+                "Modulus" if example.modulus.is_empty() => example.modulus = value,
+                "Exponent" if example.exponent.is_empty() => example.exponent = value,
+                "Message to be signed" => message = value,
+                "Salt" => salt = value,
+                "Signature" => {
+                    example
+                        .signatures
+                        .push((message.clone(), salt.clone(), value));
+                }
+                _ => {}
+            }
+        };
+
+        for line in VECTORS.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix('#') {
+                let rest = rest.trim();
+                if !label.is_empty() {
+                    flush(&label, std::mem::take(&mut current), &mut examples);
+                }
+                label.clear();
+                current.clear();
+                if rest.starts_with("Example ") && rest.contains("RSA key pair") {
+                    examples.push(PssExample {
+                        modulus: Vec::new(),
+                        exponent: Vec::new(),
+                        signatures: Vec::new(),
+                    });
+                } else if let Some(name) = rest.strip_suffix(':') {
+                    label = name.trim().to_string();
+                }
+                continue;
+            }
+            if label.is_empty() || line.is_empty() {
+                continue;
+            }
+            current.extend(unhex(&line.replace(' ', "")));
+        }
+        if !label.is_empty() {
+            flush(&label, current, &mut examples);
+        }
+        examples
+    }
+
+    /// RSA Laboratories' `pss-vect.txt`: sixty valid signatures under ten
+    /// keys, and each one spoiled four ways that must all be refused.
+    ///
+    /// The file's reason to be here beside NIST's is the key sizes. Seven of
+    /// its ten moduli are 1 025 to 1 031 bits, so `emBits = modBits − 1` is
+    /// not one less than a multiple of eight: at 1 025 bits the encoded
+    /// message is 128 octets under a 129-octet signature, and at 1 026 to
+    /// 1 031 the leftmost octet of `maskedDB` has bits that must be zero.
+    /// NIST's moduli are all whole octets, so a verifier that took `emLen` to
+    /// be `k` passes every CAVP vector and fails here.
+    #[test]
+    fn rsa_laboratories_pss_vectors() {
+        let examples = pss_examples();
+        assert_eq!(examples.len(), 10, "ten keys");
+
+        let mut bits = Vec::new();
+        let mut verified = 0usize;
+        let mut refused = 0usize;
+        for (index, example) in examples.iter().enumerate() {
+            let key = RsaPublicKey::new(&example.modulus, &example.exponent)
+                .expect("an RSA Laboratories key is usable");
+            bits.push(key.modulus_bits());
+            assert_eq!(example.signatures.len(), 6, "example {}", index + 1);
+            for (number, (message, salt, signature)) in example.signatures.iter().enumerate() {
+                let parameters = PssParameters {
+                    hash: DigestAlgorithm::Sha1,
+                    mask_hash: DigestAlgorithm::Sha1,
+                    salt_length: salt.len(),
+                };
+                assert_eq!(salt.len(), 20);
+                assert_eq!(
+                    key.verify_pss_message(parameters, message, signature),
+                    Ok(()),
+                    "example {}.{}",
+                    index + 1,
+                    number + 1
+                );
+                verified += 1;
+
+                // A different message.
+                let mut other = message.clone();
+                if let Some(byte) = other.first_mut() {
+                    *byte ^= 0x01;
+                }
+                assert!(key
+                    .verify_pss_message(parameters, &other, signature)
+                    .is_err());
+                // One bit of the signature.
+                let mut spoiled = signature.clone();
+                if let Some(byte) = spoiled.last_mut() {
+                    *byte ^= 0x01;
+                }
+                assert!(key
+                    .verify_pss_message(parameters, message, &spoiled)
+                    .is_err());
+                // The right signature read with a salt one octet longer or
+                // shorter than it was made with: the declared length is what
+                // decides where the padding ends.
+                for wrong in [salt.len() - 1, salt.len() + 1] {
+                    let wrong = PssParameters {
+                        salt_length: wrong,
+                        ..parameters
+                    };
+                    assert_eq!(
+                        key.verify_pss_message(wrong, message, signature),
+                        Err(RsaRefusal::EncodingMismatch),
+                        "example {}.{} with a {}-octet salt",
+                        index + 1,
+                        number + 1,
+                        wrong.salt_length
+                    );
+                }
+                refused += 4;
+            }
+        }
+        assert_eq!(verified, 60);
+        assert_eq!(refused, 240);
+        assert_eq!(
+            bits,
+            [1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1536, 2048],
+            "the key sizes the file is here for"
+        );
+    }
+
+    /// MGF1 against its definition written out a second way: block `i` is
+    /// `Hash(seed || i as four big-endian octets)`, and the mask is their
+    /// concatenation cut to length.
+    #[test]
+    fn mgf1_is_the_counter_mode_hash_b_2_1_describes() {
+        let seed = b"tinker-pdf";
+        let mut mask = [0u8; 50];
+        mgf1_xor(DigestAlgorithm::Sha1, seed, &mut mask);
+        let mut expected = Vec::new();
+        for counter in 0u8..3 {
+            let mut block = seed.to_vec();
+            block.extend_from_slice(&[0, 0, 0, counter]);
+            expected.extend_from_slice(&sha1(&block));
+        }
+        assert_eq!(&mask[..], &expected[..50]);
+    }
+
+    /// Two checks of RFC 8017 §9.1.2 that no published vector reaches: step 6,
+    /// the bits of `EM` above `emBits` must be zero *before* unmasking rather
+    /// than merely cleared after it; and step 4, the trailer octet.
+    ///
+    /// A signer following EMSA-PSS-ENCODE cannot produce a block that breaks
+    /// either while keeping `H` right, so a verifier that skipped both passed
+    /// all 420 vectors — a counted injection measured each at zero. This takes RSA Laboratories'
+    /// example 3, a 1 026-bit key whose `emBits` of 1 025 leaves seven bits of
+    /// `EM`'s first octet outside the encoding, recovers the real `EM` with
+    /// the public key, and sets each of the seven in turn. Step 9 would clear
+    /// every one of them again before the padding is read, which is exactly
+    /// why the check has to come first.
+    #[test]
+    fn a_block_a_signer_could_not_have_written_is_refused_even_where_h_matches() {
+        let examples = pss_examples();
+        let example = examples.get(2).expect("example 3");
+        let key = RsaPublicKey::new(&example.modulus, &example.exponent).expect("usable");
+        assert_eq!(key.modulus_bits(), 1026);
+        let (message, salt, signature) = example.signatures.first().expect("a signature");
+        let parameters = PssParameters {
+            hash: DigestAlgorithm::Sha1,
+            mask_hash: DigestAlgorithm::Sha1,
+            salt_length: salt.len(),
+        };
+        let digest = DigestAlgorithm::Sha1.digest(message);
+
+        let s = Uint::<RSA_LIMBS>::from_be_bytes(signature).expect("fits");
+        let m = key.modulus.pow(&s, &key.exponent);
+        let mut whole = vec![0u8; key.modulus.byte_len()];
+        assert!(m.to_be_bytes(&mut whole));
+        let em = &whole[whole.len() - 129..];
+        assert_eq!(em[0] & 0xfe, 0, "the encoding leaves the seven bits clear");
+        assert_eq!(
+            emsa_pss_verify(parameters, digest.as_bytes(), em, 1025),
+            Ok(()),
+            "the recovered block verifies as it stands"
+        );
+
+        for bit in 1..8u32 {
+            let mut spoiled = em.to_vec();
+            spoiled[0] |= 1 << bit;
+            assert_eq!(
+                emsa_pss_verify(parameters, digest.as_bytes(), &spoiled, 1025),
+                Err(RsaRefusal::EncodingMismatch),
+                "bit {bit} of the first octet"
+            );
+        }
+
+        // Step 4, on the same block: the trailer is not part of `H` or of the
+        // salt, so a block whose last octet is anything but `0xbc` and whose
+        // other octets are a real encoding still reaches a matching `H'`. No
+        // published negative is that shape either — NIST's "signature
+        // changed" vectors fail at `H` long before the trailer matters.
+        for trailer in [0x00u8, 0xbd, 0xcc, 0xff] {
+            let mut spoiled = em.to_vec();
+            if let Some(last) = spoiled.last_mut() {
+                *last = trailer;
+            }
+            assert_eq!(
+                emsa_pss_verify(parameters, digest.as_bytes(), &spoiled, 1025),
+                Err(RsaRefusal::EncodingMismatch),
+                "trailer 0x{trailer:02x}"
+            );
+        }
+    }
+
+    /// A salt length no modulus of this size could carry is a refusal about
+    /// the key and the parameters — not a panic, and not "invalid signature".
+    #[test]
+    fn an_impossible_salt_length_is_refused_by_name() {
+        let examples = pss_examples();
+        let example = examples.first().expect("the file has examples");
+        let key = RsaPublicKey::new(&example.modulus, &example.exponent).expect("usable");
+        let (message, _, signature) = example.signatures.first().expect("a signature");
+        // A 1024-bit key's emLen is 128, so a 20-octet digest leaves room for
+        // a salt of at most 106.
+        for salt_length in [107, 1000, usize::MAX] {
+            let parameters = PssParameters {
+                hash: DigestAlgorithm::Sha1,
+                mask_hash: DigestAlgorithm::Sha1,
+                salt_length,
+            };
+            assert_eq!(
+                key.verify_pss_message(parameters, message, signature),
+                Err(RsaRefusal::ModulusTooShort),
+                "salt {salt_length} under a 1024-bit key"
+            );
+        }
     }
 }

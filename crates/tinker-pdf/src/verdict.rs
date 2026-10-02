@@ -9,8 +9,9 @@
 //!    cryptography, and the answer a whole class of attacks lives in.
 //! 2. **Do those bytes still hash to what the signature says?** The CMS's
 //!    `messageDigest` signed attribute against a digest recomputed here.
-//! 3. **Was the signature made by the key in the certificate?** RSASSA-PKCS1
-//!    or ECDSA over the re-encoded signed attributes (RFC 5652 §5.4).
+//! 3. **Was the signature made by the key in the certificate?** RSASSA-PKCS1,
+//!    RSASSA-PSS or ECDSA over the re-encoded signed attributes (RFC 5652
+//!    §5.4).
 //! 4. **Whose key is it?** How far the certificate chain reaches toward an
 //!    anchor the *caller* supplied.
 //!
@@ -44,17 +45,19 @@
 //! fifteen real signatures from six producers — but the assembly below is this
 //! engine agreeing with itself.
 //!
-//! The ECDSA arm is the one place where that sentence needs a second clause,
-//! because no corpus signature uses ECDSA and none of the four questions could
-//! be asked of a real one. Its evidence is split three ways and
+//! The ECDSA and RSASSA-PSS arms are where that sentence needs a second
+//! clause, because no corpus signature uses either and none of the four
+//! questions could be asked of a real one. Its evidence is split three ways and
 //! `crates/tinker-pdf/tests/ecdsa_verdict.rs` states the split in full: the
 //! curve arithmetic is NIST CAVP's, the CMS and the certificates are OpenSSL's,
 //! and the `/ByteRange` spans are this repository's own on both sides.
+//! `crates/tinker-pdf/tests/signature_shapes.rs` makes the same split for PSS,
+//! whose arithmetic is CAVP's and RSA Laboratories'.
 
 use tinker_pdf_crypto::{Curve, DigestAlgorithm as CryptoDigest, EcPublicKey, RsaPublicKey};
 use tinker_pdf_pki::{
-    oid, Certificate, ContentInfo, DigestAlgorithm as CmsDigest, PublicKey, SignatureAlgorithm,
-    SignerInfo,
+    oid, pss, Certificate, ContentInfo, DigestAlgorithm as CmsDigest, PublicKey,
+    SignatureAlgorithm, SignerInfo,
 };
 
 use crate::signature::{Coverage, Signature, SubFilter};
@@ -509,13 +512,73 @@ fn check_signature(
                 Err(_) => SignatureCheck::Failed,
             }
         }
-        // RSASSA-PSS's parameters live in a structure `tinker-pdf-pki` does
-        // not read, so there is no salt length and no mask generation function
-        // to verify under. Its own roadmap row.
+        // RFC 4056 §3: the parameters are the signer's and come with the
+        // signature; the hash in them is what digests the signed attributes.
+        // That hash and the `digestAlgorithm` that reduced the document are
+        // only a SHOULD apart, so a signer may use two — the document digest
+        // above used the one `effective_digest` names and the signature below
+        // uses the parameters', each where RFC 4056 puts it.
         SignatureAlgorithm::RsaPss => {
-            SignatureCheck::NotChecked(Unchecked::UnsupportedAlgorithm(format!("{algorithm:?}")))
+            let parameters = match pss::parameters(&signer.signature_algorithm_id()) {
+                Ok(parameters) => parameters,
+                Err(error) => {
+                    return SignatureCheck::NotChecked(Unchecked::UnsupportedAlgorithm(format!(
+                        "{error}"
+                    )))
+                }
+            };
+            if parameters.hash == CryptoDigest::Sha1 {
+                weaknesses.push(Weakness::Sha1Signature);
+            }
+            let Some(key) = rsa_key(certificate) else {
+                return SignatureCheck::NotChecked(Unchecked::UnsupportedKey(
+                    "the subject public key is not RSA".to_string(),
+                ));
+            };
+            if key.modulus_bits() < 2048 {
+                weaknesses.push(Weakness::ShortRsaKey {
+                    bits: key.modulus_bits(),
+                });
+            }
+            if !key_permits_pss(certificate, parameters) {
+                // RFC 4056 §3: "If any of the above four steps is not true,
+                // the signature checking algorithm MUST fail validation." A
+                // key that restricted itself to other parameters did not make
+                // this signature, whatever the arithmetic would say.
+                return SignatureCheck::Failed;
+            }
+            match key.verify_pss_message(parameters, &message, signer.signature()) {
+                Ok(()) => SignatureCheck::Verified,
+                Err(_) => SignatureCheck::Failed,
+            }
         }
     }
+}
+
+/// RFC 4056 §3's four checks, where the key's own `SubjectPublicKeyInfo` is
+/// `id-RSASSA-PSS` with parameters: the same hash, the same mask generation,
+/// a salt at least as long as the key's, and the same trailer.
+///
+/// A key under `rsaEncryption`, or under `id-RSASSA-PSS` with no parameters,
+/// restricts nothing (RFC 4055 §3.3, cases 1 and 2). Parameters the key
+/// carries and this build cannot read are a refusal, not a pass — a
+/// restriction nobody read is not one anybody honoured.
+fn key_permits_pss(
+    certificate: &Certificate<'_>,
+    signature: tinker_pdf_crypto::PssParameters,
+) -> bool {
+    let algorithm = certificate.subject_public_key_info().algorithm();
+    if algorithm.oid() != oid::RSASSA_PSS || algorithm.parameters().is_none() {
+        return true;
+    }
+    let Ok(key) = pss::parameters(&algorithm) else {
+        return false;
+    };
+    // Step 4, the trailer field, is `trailerFieldBC(1)` on both sides by
+    // construction: `pss::parameters` refuses any other value.
+    key.hash == signature.hash
+        && key.mask_hash == signature.mask_hash
+        && signature.salt_length >= key.salt_length
 }
 
 /// Question 4: how far up does the chain go?
@@ -644,13 +707,26 @@ fn verifies(child: &Certificate<'_>, issuer: &Certificate<'_>) -> bool {
             key.verify_message(crypto_digest(digest), child.tbs(), r, s)
                 .is_ok()
         }
+        // RFC 4055 §3.2: a certificate's PSS signature is the same octet
+        // string a CMS one is, carried in a BIT STRING; its parameters are the
+        // child's `signatureAlgorithm`, and the issuer's key may restrict them.
+        Some(SignatureAlgorithm::RsaPss) => {
+            let Ok(parameters) = pss::parameters(&child.signature_algorithm()) else {
+                return false;
+            };
+            let Some(key) = rsa_key(issuer) else {
+                return false;
+            };
+            key_permits_pss(issuer, parameters)
+                && key
+                    .verify_pss_message(parameters, child.tbs(), signature)
+                    .is_ok()
+        }
         // Bare `rsaEncryption` names no digest and is not a legal certificate
-        // `signatureAlgorithm`; PSS's parameters are not read; anything else
-        // this build cannot name. The walk reports the path as broken rather
-        // than pretending to have checked it.
-        Some(SignatureAlgorithm::RsaPkcs1v15 { digest: None })
-        | Some(SignatureAlgorithm::RsaPss)
-        | None => false,
+        // `signatureAlgorithm`; anything else this build cannot name. The walk
+        // reports the path as broken rather than pretending to have checked
+        // it.
+        Some(SignatureAlgorithm::RsaPkcs1v15 { digest: None }) | None => false,
     }
 }
 

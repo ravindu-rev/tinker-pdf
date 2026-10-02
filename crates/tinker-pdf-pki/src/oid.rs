@@ -50,8 +50,13 @@ oids! {
     /// say which weak algorithm it was.
     SHA1_WITH_RSA = "1.2.840.113549.1.1.5",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
-    /// RSASSA-PSS. Named, not decoded: its parameters are a structure of
-    /// their own and reading them is CMS work.
+    /// MGF1 (RFC 8017 B.2.1), the one mask generation function an
+    /// `RSASSA-PSS-params` may name ([`crate::pss`]).
+    MGF1 = "1.2.840.113549.1.1.8",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x08];
+    /// RSASSA-PSS, whose parameters [`crate::pss::parameters`] reads. Also a
+    /// SubjectPublicKeyInfo algorithm, whose key is an `RSAPublicKey` exactly
+    /// as under `rsaEncryption` (RFC 4055 §1.2).
     RSASSA_PSS = "1.2.840.113549.1.1.10",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A];
     SHA256_WITH_RSA = "1.2.840.113549.1.1.11",

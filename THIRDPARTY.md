@@ -749,6 +749,19 @@ groups were dropped and why; for the seven Triple DES files, that nothing was
 dropped at all. They are `cargo test` inputs, compiled in only under
 `#[cfg(test)]`, and are not in any built artefact.
 
+`crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt` is RSA Laboratories'
+PKCS #1 v2.1 RSASSA-PSS test vectors (`pkcs-1v2-1d2-vec.zip`), which RSA no
+longer serves; it was fetched on 2 October 2026 from the verbatim mirror
+pyca/cryptography keeps at
+`https://raw.githubusercontent.com/pyca/cryptography/main/vectors/cryptography_vectors/asymmetric/RSA/pkcs-1v2-1d2-vec/pss-vect.txt`,
+SHA-256 `20a90aa5d8506b3251b5790c860df0673329cf9f4fc3e36c11a6cfcdc7258299` as
+served (CRLF line endings, which `.gitattributes` normalises here). The file
+carries no licence of its own; pyca/cryptography distributes its vector
+collection under `Apache-2.0 OR BSD-3-Clause`. Its header comment records the
+same facts, and like the CAVP files it is a `cargo test` input compiled in
+only under `#[cfg(test)]`. `rsa_sigver_pss.rsp` beside the other CAVP files
+came from the same `186-2rsatestvectors.zip` as `rsa_sigver15.rsp`.
+
 These sit under `tests/data/` rather than `crates/<crate>/data/` because they
 are neither vendored *into* the engine nor redistributed by it; `cargo xtask
 vendor`'s allowlist governs the latter, and this is the former.
@@ -773,6 +786,11 @@ before the third arrived:
   any fetched corpus uses ECDSA**, so the verdict path's P-256 and P-384 arms
   had nothing real to be held to; see
   [`crates/tinker-pdf/tests/signature_support/README.md`](crates/tinker-pdf/tests/signature_support/README.md).
+- `rsa-pss.pdf` and `rsa-pss-root.der`, built 2 October 2026 by
+  `signature-fixtures.py` and **OpenSSL 3.0.13 (30 Jan 2024)** — a different
+  OpenSSL from the three above, because it is the one on the machine that
+  built them: an RSASSA-PSS-signed CMS under a PSS-restricted key and a root
+  that signs certificates with PSS, because no corpus signature uses PSS.
 
 The keys and certificates are generated for the fixtures and belong to nobody;
 there is no licence on any of it. Nothing re-runs OpenSSL — `cargo xtask

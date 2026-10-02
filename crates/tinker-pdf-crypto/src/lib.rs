@@ -45,7 +45,7 @@ pub mod sha2;
 
 pub use ecdsa::{Curve, EcPublicKey, EcdsaRefusal};
 pub use handler::{authenticate, AuthOutcome, CryptMethod, FileKey, HandlerNote, HandlerParams};
-pub use rsa::{DigestAlgorithm, RsaPublicKey, RsaRefusal};
+pub use rsa::{DigestAlgorithm, PssParameters, RsaPublicKey, RsaRefusal};
 
 /// A document's permission flags (7.6.4.2, Table 22).
 ///

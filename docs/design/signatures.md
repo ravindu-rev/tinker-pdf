@@ -9,7 +9,8 @@ private key held by a caller-supplied signer callback so key material never ente
 **All of that now happens.** Milestones 1 and 3 through 8 have landed, with milestone 2's
 crate under them. `Document::signatures()` finds every signature and classifies what its
 `/ByteRange` covers; `tinker-pdf-pki` reads DER, X.509 and CMS `SignedData`;
-`tinker-pdf-crypto` verifies RSA and ECDSA against 520 published vectors;
+`tinker-pdf-crypto` verifies RSA — PKCS#1 v1.5 and PSS — and ECDSA against 940 published
+vectors;
 `Document::verify_signatures()` assembles the four answers, reaching both algorithms; `Signature::modifications()`
 measures later revisions against `/DocMDP`; and `DocumentEditor::save_signed` produces
 signatures of its own, certifying and locking fields, with the key held by the caller. What
@@ -279,6 +280,48 @@ one returning a *positive* verdict is a forgery accepted. Both tests that catch 
 "verified" from "reached the arm", and neither can a fixture that only ever expects
 `NotChecked`.
 
+### RSASSA-PSS, and the two checks no vector reaches
+
+Wired 2 October 2026. `tinker_pdf_pki::pss` reads RFC 4055 §3.1's `RSASSA-PSS-params` out
+of a signer's `signatureAlgorithm`, a certificate's, or an `id-RSASSA-PSS` key's own
+restrictions; `RsaPublicKey::verify_pss` is RFC 8017 §8.1.2 with EMSA-PSS-VERIFY and MGF1;
+the verdict's PSS arm and the chain walk's PSS link take every length from the parameters
+and enforce RFC 4056 §3's key restrictions. The evidence is the same three-way split the
+ECDSA arm has: 360 CAVP `SigVerPSS` vectors and RSA Laboratories' 60 for the arithmetic —
+the second set is there for its 1 025- to 1 031-bit keys, where `emLen` is one octet short
+of the signature and NIST's whole-octet moduli never go — OpenSSL 3.0.13's CMS and
+certificates in `tests/signature_support/rsa-pss.pdf`, and this repository's `/ByteRange`
+on both sides.
+
+Counted injections, `cargo test --no-fail-fast` over `tinker-pdf-crypto`'s `rsa` tests for
+the first five and over `tinker-pdf-pki` plus the facade's four signature suites for the
+rest:
+
+| # | Defect reintroduced | Caught by |
+|---|---------------------|-----------|
+| 1 | `emLen` taken as `k`, the signature's length, rather than `ceil((modBits − 1) / 8)` | 1 |
+| 2 | step 6 skipped: bits above `emBits` not checked before unmasking | **0 → 1** |
+| 3 | step 4 skipped: the `0xbc` trailer not checked | **0 → 1** |
+| 4 | the salt length inferred from where the padding ends, not the parameters | 1 |
+| 5 | MGF1's counter starting at 1 | 4 |
+| 6 | `saltLength` read and discarded, so every signature is read at the default 20 | 7 |
+| 7 | an `id-RSASSA-PSS` key reported as unrecognised, not as `RSAPublicKey` | 8 |
+| 8 | RFC 4056 §3's salt minimum not enforced | 1 |
+| 9 | the PSS arm answering `Verified` without calling the arithmetic | **1 → 2** |
+| 10 | the chain walk's PSS link never verified | 2 |
+
+**Rows 2 and 3 are the finding.** A signer following EMSA-PSS-ENCODE cannot produce a
+block that breaks either check while keeping `H` right, so no published vector — not one
+of 420 — reaches them, and a verifier without them passed everything. Neither is a
+forgery on its own; both are a verifier accepting an encoding the standard does not have.
+`a_block_a_signer_could_not_have_written_is_refused_even_where_h_matches` recovers RSA
+Laboratories' example 3 `EM` with the public key and spoils it seven ways and four ways.
+
+**Row 9 found a test that was not testing what it said.** Declaring the fixture's 32-octet
+salt as 31 was meant to prove the salt length is read from the parameters; it was refused
+by the key's salt minimum before the arithmetic ran, so the injection that skipped the
+arithmetic left it passing. It declares 33 now, a salt the key permits.
+
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,
@@ -293,8 +336,8 @@ one returning a *positive* verdict is a forgery accepted. Both tests that catch 
   `adbe.pkcs7.detached` and `adbe.pkcs7.sha1` (ISO 32000-1 12.8.3.3) plus
   `ETSI.CAdES.detached` (ISO 32000-2, CAdES subfilter clause); `adbe.x509.rsa_sha1` parsed
   and reported, verified only if the corpus says it still matters (ruling 3).
-- **Read: signature verification, hand-rolled, verify-only.** RSASSA-PKCS1-v1_5 (RFC 8017)
-  and ECDSA over P-256/P-384 (FIPS 186-4) verification in `tinker-pdf-crypto`, gated on
+- **Read: signature verification, hand-rolled, verify-only.** RSASSA-PKCS1-v1_5 and
+  RSASSA-PSS (RFC 8017) and ECDSA over P-256/P-384 (FIPS 186-4) verification in `tinker-pdf-crypto`, gated on
   published vectors exactly as the existing AES/SHA code is. Digests are the crate's existing
   `sha256`/`sha384`/`sha512` (RFC 5754 names them for CMS); SHA-1 accepted for legacy
   signatures and flagged as weak in the verdict.

@@ -207,9 +207,11 @@ pub enum KeyFault {
 /// A public key, as far as the algorithm OID lets this crate read one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PublicKey<'a> {
-    /// `rsaEncryption` (RFC 8017 A.1.1), split into its two integers as
-    /// unsigned magnitudes — the sign octet a positive DER INTEGER carries is
-    /// already gone.
+    /// `rsaEncryption` (RFC 8017 A.1.1), or `id-RSASSA-PSS` (RFC 4055 §1.2),
+    /// whose key is the same `RSAPublicKey` — split into its two integers as
+    /// unsigned magnitudes, the sign octet a positive DER INTEGER carries
+    /// already gone. Which of the two it was is
+    /// [`SubjectPublicKeyInfo::algorithm`]'s to say.
     Rsa {
         modulus: &'a [u8],
         exponent: &'a [u8],
@@ -253,7 +255,12 @@ impl<'a> SubjectPublicKeyInfo<'a> {
         let bytes = key
             .whole_bytes()
             .map_err(|_| X509Error::BadPublicKey(KeyFault::NotWholeOctets))?;
-        let parsed = if algorithm.oid == oid::RSA_ENCRYPTION {
+        // RFC 4055 §1.2: under `id-RSASSA-PSS` the key is the same
+        // `RSAPublicKey`, and the parameters, where present, only restrict how
+        // it may sign — which the verifier reads from `algorithm()` and
+        // enforces (RFC 4056 §3). Reporting the key as unrecognised instead
+        // would leave every signature such a key made unverifiable.
+        let parsed = if algorithm.oid == oid::RSA_ENCRYPTION || algorithm.oid == oid::RSASSA_PSS {
             parse_rsa(bytes, budget)?
         } else if algorithm.oid == oid::EC_PUBLIC_KEY {
             if bytes.is_empty() {

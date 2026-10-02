@@ -252,10 +252,11 @@ pub enum SignatureAlgorithm {
     RsaPkcs1v15 { digest: Option<DigestAlgorithm> },
     /// ECDSA with the digest the OID names (RFC 5758 §3.2).
     Ecdsa { digest: DigestAlgorithm },
-    /// RSASSA-PSS. **Named, not decoded**: the salt length, the mask
-    /// generation function and the digest all live in an
-    /// `RSASSA-PSS-params` structure this crate does not read, so a caller
-    /// meeting one knows what it is and knows nothing here can check it.
+    /// RSASSA-PSS. The salt length, the mask generation function and the
+    /// digest live in an `RSASSA-PSS-params` structure rather than in the
+    /// OID, and [`crate::pss::parameters`] reads them out of the algorithm
+    /// identifier — [`SignerInfo::signature_algorithm_id`] for a signer,
+    /// [`crate::x509::Certificate::signature_algorithm`] for a certificate.
     RsaPss,
 }
 

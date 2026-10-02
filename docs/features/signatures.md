@@ -11,8 +11,9 @@ the private key held by a caller-supplied callback so key material never
 enters the engine.
 
 Every primitive is the project's own: DER, X.509 and CMS in the
-`tinker-pdf-pki` leaf crate, and big-integer arithmetic, RSASSA-PKCS1-v1_5 and
-ECDSA in `tinker-pdf-crypto` beside the ciphers ([encryption](encryption.md)).
+`tinker-pdf-pki` leaf crate, and big-integer arithmetic, RSASSA-PKCS1-v1_5,
+RSASSA-PSS and ECDSA in `tinker-pdf-crypto` beside the ciphers
+([encryption](encryption.md)).
 
 **There is no boolean.** A verdict answers four questions separately, because
 they come apart in practice: four documents in the fetched corpora carry a
@@ -63,10 +64,12 @@ where a signature covers the bytes as stored.
 **CMS and certificates.** `tinker-pdf-pki` reads RFC 5652 `SignedData`: both
 `SignerIdentifier` shapes, signed and unsigned attributes, `contentType`,
 `messageDigest`, `signingTime`, ESS `signingCertificateV2`, and RFC 3161
-timestamp tokens — surfaced, never evaluated. RFC 5652 §5.4's re-encoding (the
-stored `[0] IMPLICIT` tag replaced by `SET OF` before digesting) lives in one
-function and is **adjudicated by data**: 19 real signatures from six producers
-verify with the substitution and not one verifies without it.
+timestamp tokens — surfaced, never evaluated — and, for an RSASSA-PSS signer
+or certificate, the `RSASSA-PSS-params` that say how to verify it. RFC 5652
+§5.4's re-encoding (the stored `[0] IMPLICIT` tag replaced by `SET OF` before
+digesting) lives in one function and is **adjudicated by data**: 19 real
+signatures from six producers verify with the substitution and not one
+verifies without it.
 
 `SignedData` is read as BER, which RFC 5652 §5.1 permits and a fifth of the
 corpus's signed documents need — Acrobat Distiller, Adobe LiveCycle and
@@ -185,7 +188,6 @@ let signed = document.editor().save_signed(&options, &request)?;
 | Validating an RFC 3161 timestamp | `SignerDescription::timestamped` says one is there | validating a token means validating the authority's own chain, which is a later tier | [design](../design/signatures.md) |
 | An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; a curve nobody has produced a PDF signature on is a liability rather than a feature | RFC 5480 §2.1.1 |
 | A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3 |
-| RSASSA-PSS | `SignatureAlgorithm::RsaPss`, named and not decoded | its parameters live in a structure this build does not read, so a caller meeting one knows what it is and knows nothing here has checked it | RFC 8017 |
 | `adbe.pkcs7.sha1` (12.8.3.3.1) | `Unchecked::LegacySha1SubFilter` | deprecated in ISO 32000-2; one corpus file has it and that file is a fuzzer's output, so it is named rather than implemented on a sample of one | 12.8.3.3.1 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
 | A signature with no signed attributes | `Unchecked::NoSignedAttributes` | the signature is then over the content directly, and guessing at what that content is would be a verdict about the wrong bytes | RFC 5652 §5.4 |
@@ -193,11 +195,13 @@ let signed = document.editor().save_signed(&options, &request)?;
 ## Verified
 
 **Published vectors gate the arithmetic**, as they gate every other primitive
-in this tree ([encryption](encryption.md)). **520 of them ran**: 360 NIST CAVP
+in this tree ([encryption](encryption.md)). **940 of them ran**: 360 NIST CAVP
 `SigVer15` for RSA (60 valid and 300 that must be refused, moduli of 1 024 to
 4 096 bits crossed with SHA-1/256/384/512, of which 150 are forged paddings),
-120 CAVP ECDSA `SigVer` and 24 `PKV` for P-256 and P-384, and 16 from RFC
-6979. CAVP's exponents are all large, so it never tests the low-exponent
+360 CAVP `SigVerPSS` for RSASSA-PSS (60 valid and 300 refused, NIST's five
+negative kinds sixty apiece), RSA Laboratories' 60 PSS signatures from
+`pss-vect.txt` with four spoilings each, 120 CAVP ECDSA `SigVer` and 24 `PKV`
+for P-256 and P-384, and 16 from RFC 6979. CAVP's exponents are all large, so it never tests the low-exponent
 forgery; hand-built negatives cover it by choosing a modulus that makes the
 verifier recover any chosen block without a private key.
 
@@ -244,6 +248,25 @@ spoiling the file, insist the answer is not `Verified`. The one link only this
 repository vouches for is the `/ByteRange` spans, because the generator and
 the reader are the same reading of 12.8.1 — the fixtures' own README says so,
 and `tests/ecdsa_verdict.rs` says it again at the top.
+
+**RSASSA-PSS is verified, on the same terms.** The corpus has no PSS signer
+either, so the arm is wired against the two published vector sets above and
+one fixture OpenSSL 3.0.13 built on 2 October 2026
+(`tests/signature_support/rsa-pss.pdf`): a PSS-signed CMS whose signer key is
+an `id-RSASSA-PSS` key restricted to SHA-256 and a salt of at least 32, under
+a root that signs certificates with PSS too. `tinker_pdf_pki::pss::parameters`
+reads RFC 4055 §3.1's `RSASSA-PSS-params` — every field defaulted, explicit
+tags, MGF1 the only mask generator, `trailerFieldBC` the only trailer — and the
+verifier takes the hash, the mask hash and the salt length from them and never
+from the recovered block. RFC 4056 §3's key restrictions are enforced: a
+signature with a salt shorter than its key permits is `Failed` even where the
+arithmetic would accept it. Eight tests in `tests/signature_shapes.rs` take the
+fixture to an anchored chain over a PSS link and refuse it five ways. Two of
+EMSA-PSS-VERIFY's checks — the bits above `emBits` and the `0xbc` trailer —
+are reached by no published vector at all, because a signer cannot produce a
+block that breaks either while keeping `H` right; a counted injection measured
+both at zero, and a block recovered from RSA Laboratories' own 1 026-bit
+example and then spoiled now holds them up.
 
 **The first signature this engine wrote that it also verifies.** Every
 signing test before September 2026 used a stub that returned bytes, so the

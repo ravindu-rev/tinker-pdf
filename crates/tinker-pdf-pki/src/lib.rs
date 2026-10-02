@@ -77,6 +77,7 @@ pub mod der;
 pub mod enveloped;
 pub mod name;
 pub mod oid;
+pub mod pss;
 pub mod x509;
 
 pub use cms::{
@@ -87,6 +88,7 @@ pub use cms::{
 pub use der::{BitString, Budget, Class, Cursor, DerError, Int, Limits, Oid, Tag, TimeFault, Tlv};
 pub use enveloped::{EnvelopedData, EnvelopedError, KeyTransRecipient, RecipientIdentifier};
 pub use name::{Attribute, AttributeText, Name, Rdn};
+pub use pss::PssError;
 
 /// RFC 5652 §5.3's `Attribute`, re-exported under a distinguishing name.
 ///

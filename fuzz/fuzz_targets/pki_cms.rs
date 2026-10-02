@@ -113,6 +113,7 @@ use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_pki::cms::{CertificateChoice, ContentInfo, RevocationChoice, SignerIdentifier};
 use tinker_pdf_pki::der::{Budget, Cursor, Limits, Tag};
+use tinker_pdf_pki::pss;
 use tinker_pdf_pki::x509::Certificate;
 
 /// Deep enough for a timestamp token, shallow enough to run fast.
@@ -173,6 +174,11 @@ fn read_every_way(data: &[u8], limits: Limits) {
                     assert_eq!(&der[certificate.tbs_range()], certificate.tbs());
                     let _ = certificate.key_identifier_sha1();
                     let _ = certificate.subject_public_key_info().public_key();
+                    // RSASSA-PSS parameters live in two places on a
+                    // certificate: its own signature algorithm and, for an
+                    // `id-RSASSA-PSS` key, the key's restrictions.
+                    let _ = pss::parameters(&certificate.signature_algorithm());
+                    let _ = pss::parameters(&certificate.subject_public_key_info().algorithm());
                 }
             }
             CertificateChoice::Other { der, .. } => assert!(inside(data, der)),
@@ -199,6 +205,10 @@ fn read_every_way(data: &[u8], limits: Limits) {
         let _ = signer.digest_algorithm();
         let _ = signer.signature_algorithm();
         let _ = signer.effective_digest();
+        // A parameter block nested at whatever depth the walker reached it,
+        // which is what made the first version of this reader refuse every
+        // real one: its ceiling was counted from the top of the message.
+        let _ = pss::parameters(&signer.signature_algorithm_id());
         let _ = signed.content_type_matches(signer);
         match signer.sid() {
             SignerIdentifier::IssuerAndSerialNumber { issuer, serial, der } => {

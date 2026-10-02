@@ -64,6 +64,47 @@ place without moving a length), and a regeneration has roughly a one-in-four
 chance of needing that test adjusted. Nothing re-runs the script, and
 `cargo xtask oracles` would refuse a test that tried.
 
+## Signature shapes the corpus lacks: `signature-fixtures.py`
+
+`signature-fixtures.py` builds the signed documents `tests/signature_shapes.rs`
+holds the verdict to, one per shape the fetched corpora have too few of. It
+was run once per fixture with **OpenSSL 3.0.13 (30 Jan 2024)**, on the date
+given for each, and nothing re-runs it — `cargo xtask oracles` would refuse a
+test that tried. It lays out the same one-page, one-field document
+`ecdsa-fixtures.py` does, computes the `/ByteRange`, and splices OpenSSL's CMS
+into the reservation; what each half of the result is worth is the same split
+the ECDSA section above makes, and `signature_shapes.rs` states it again at the
+top. A regeneration produces different bytes, because the keys are fresh each
+time.
+
+```sh
+python3 crates/tinker-pdf/tests/signature_support/signature-fixtures.py \
+    crates/tinker-pdf/tests/signature_support /tmp/sig-work <fixture>...
+```
+
+### `rsa-pss.pdf` and `rsa-pss-root.der` — 2 October 2026
+
+`python3 signature-fixtures.py <out> <work> rsa-pss`. A 2048-bit
+`rsaEncryption` root, self-signed with RSASSA-PSS (`-sigopt
+rsa_padding_mode:pss -sigopt rsa_pss_saltlen:32`); a leaf whose key is an
+`id-RSASSA-PSS` key restricted to SHA-256, MGF1-SHA-256 and a salt of at least
+32 (`genpkey -algorithm RSA-PSS` with the three `rsa_pss_keygen_*` options),
+issued by the root with the same PSS options; and `openssl cms -sign -binary
+-md sha256 -keyopt rsa_padding_mode:pss -keyopt rsa_pss_saltlen:32
+-nosmimecap` over the covered bytes, the root included with `-certfile`.
+
+SHA-256: `12bcac5f6ea4f3b005a6d5988d250f4527cd35b08cc5ff577ff4fe86cfd265a7`
+(`rsa-pss.pdf`) and
+`14f165359b23208b1f609f4de15692848a4e9ffbd7bd22d8fe1c06e815e13e7e`
+(`rsa-pss-root.der`). The CMS blob inside the PDF, without its zero fill, is
+also committed as the fuzz seed `fuzz/corpus/pki_cms/rsa-pss-signer`.
+
+It exists because **no signature in the fetched corpora uses RSASSA-PSS**:
+every `SignerInfo` is PKCS#1 v1.5. The PSS arithmetic is held to NIST CAVP's
+and RSA Laboratories' published vectors in `tinker-pdf-crypto`; this file is
+what carries a PSS signature, a PSS-restricted key and a PSS certificate
+signature that a second implementation produced into a whole document.
+
 ## The visible-signature signer
 
 `visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA
