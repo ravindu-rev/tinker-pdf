@@ -311,8 +311,12 @@ fresh `Tm` at its own origin is the answer that looks plausible on screen
 and is wrong four ways, which `emit_array`'s doc comment sets out. A
 **vertical** run (9.7.4.3) is cut down its own column by the same test: the
 pen walks text-space y by `/W2`'s `w1` (signed, and with no horizontal scale
-in it), the glyph box is the horizontal one stood on end about the pen —
-`-v_x` to `w0 - v_x` across, where the interpreter draws it — and a `TJ`
+in it), the glyph box is the horizontal one stood on end where the
+position vector puts the glyph — `-v_x` to `w0 - v_x` across, and along the
+column the glyph's cell joined with the default cell measured from its
+horizontal origin `v_y` below the pen, where the interpreter draws it (until
+October 2026 `v_y` was not read, and a glyph whose `/W2` moved it off the
+cell below the pen was measured where it was not drawn) — and a `TJ`
 number or a removed glyph's gap displaces along y in thousandths of `Tfs`
 alone. Until September 2026 a vertical run was left whole as `VerticalRun`,
 and before that it was cut as if it were horizontal (`redact.rs`'s
@@ -788,8 +792,8 @@ if report.untouched.is_empty() {
   the run's own units (`rotated_runs`); a vertical column cut exactly at the
   covered glyphs with every kept glyph extracted where it was, the gap
   emitted down the column in the vertical thousandth, a `TJ` number keeping
-  its axis, the box centred on the pen, and a column turned a quarter turn
-  (`vertical_runs`); a Type 3 glyph space in hundredths, skewed, rotated
+  its axis, the box centred on the pen and placed by `v_y`, and a column
+  turned a quarter turn (`vertical_runs`); a Type 3 glyph space in hundredths, skewed, rotated
   and translated, each cut at the glyph the arithmetic says the rectangle
   covers with every other pixel of the page rendered as before, a malformed
   `/FontMatrix` read as the renderer reads it, and a `/FontBBox` that

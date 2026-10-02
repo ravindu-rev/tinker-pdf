@@ -127,8 +127,9 @@
 //! horizontal origin at minus the position vector `v`, and a `TJ` number
 //! displaces along y in thousandths of `Tfs` alone — so [`Pen`] carries one
 //! position along the run's own axis and asks the font's writing mode which
-//! axis that is. The box is the horizontal one stood on end
-//! ([`Pen::glyph_box`]), the replacement gap is emitted in the vertical
+//! axis that is. The box is the horizontal one stood on end, placed by the
+//! position vector whole — `v_x` across and `v_y` along, which until
+//! October 2026 was not read ([`Pen::glyph_box`]) — the replacement gap is emitted in the vertical
 //! thousandth ([`Pen::thousandth`]), and nothing else changes: a vertical run
 //! is cut by the same separating-axis test, under the same rotated, skewed
 //! or scaled matrices, as a horizontal one.
@@ -3180,13 +3181,19 @@ impl Pen {
     /// the advance and the font size rather than from an outline, which errs
     /// toward removal ([`redact_string`] says why that is right).
     ///
-    /// Vertical, the same box stood on end (9.7.4.3): along y it runs from
-    /// the pen to the pen plus the (negative) advance, shifted by the rise,
-    /// which 9.4.4 puts in text-space y in both modes; across it, the glyph is
-    /// drawn with its horizontal origin at *minus* the position vector `v`,
-    /// so it spans `-v_x` to `w0 - v_x` — centred on the pen for the default
-    /// `v_x = w0 / 2`. That is where this engine's interpreter puts a
-    /// vertical glyph, and the ideographic em cell a CJK face fills.
+    /// Vertical, the same box stood on end (9.7.4.3). The glyph is drawn with
+    /// its horizontal origin at *minus* the position vector `v`, so across
+    /// the column it spans `-v_x` to `w0 - v_x` — centred on the pen for the
+    /// default `v_x = w0 / 2`. Along it the box is the glyph's cell, from the
+    /// pen to the pen plus the (negative) advance, joined with the cell a
+    /// vertical glyph's outline fills measured from that horizontal origin,
+    /// `v_y` below the pen ([`DEFAULT_V_Y`]); both are shifted by the rise,
+    /// which 9.4.4 puts in text-space y in both modes. For the default
+    /// metrics the two are one cell. That is where this engine's interpreter
+    /// puts a vertical glyph (`translate(-v_x, -v_y)` inside the size), and
+    /// the ideographic em cell a CJK face fills. Until October 2026 `v_y` was
+    /// not read, and a glyph whose position vector put it anywhere but one
+    /// advance below the pen was measured where it was not drawn.
     ///
     /// Type 3, a rectangle in the font's own glyph space carried through its
     /// `/FontMatrix` and then scaled as any text-space point is (9.4.4):
@@ -3213,10 +3220,29 @@ impl Pen {
         }
         let advance = self.advance(code);
         if let Some(selected) = self.font.as_ref().filter(|f| f.font.is_vertical()) {
-            let (v_x, _, _) = selected.font.vertical_metrics(code.cid);
+            let (v_x, v_y, _) = selected.font.vertical_metrics(code.cid);
             let unit = self.size / 1000.0 * self.horizontal_scale;
             let (x0, x1) = (-v_x * unit, (code.width - v_x) * unit);
-            let (y0, y1) = (along + self.rise, along + self.rise + advance);
+            // Along the column: the glyph's own cell, one advance from the
+            // pen, joined with the cell a glyph drawn for vertical writing
+            // fills measured from its **horizontal origin** — `v_y` below
+            // the pen (9.4.4 sends `v` through the size, and not through
+            // `Th`) — which is where its outline is. Table 115's default
+            // `/DW2 [880 -1000]` places that cell `-120..880` from the
+            // origin, so for the default metrics the two coincide and the
+            // box is the cell; a `v_y` that is not 880 moves the glyph, and
+            // the box follows it rather than staying under the pen.
+            let pen = along + self.rise;
+            let em = self.size / 1000.0;
+            let origin = pen - v_y * em;
+            let ends = [
+                pen,
+                pen + advance,
+                origin + (DEFAULT_V_Y - 1000.0) * em,
+                origin + DEFAULT_V_Y * em,
+            ];
+            let y0 = ends.iter().copied().fold(f64::INFINITY, f64::min);
+            let y1 = ends.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
         }
         let (y0, y1) = (self.rise, self.rise + self.size);
@@ -3255,6 +3281,13 @@ impl Pen {
         }
     }
 }
+
+/// The vertical component of 9.7.4.3's default position vector, Table 115's
+/// `/DW2 [880 -1000]`: how far above a glyph's horizontal baseline its
+/// vertical origin sits when nothing says otherwise, in thousandths of an
+/// em — and so where the top of the cell a vertical glyph fills is,
+/// measured from the origin its outline is drawn at.
+const DEFAULT_V_Y: f64 = 880.0;
 
 /// The Type 3 glyphs one pass over a stream showed through a procedure that
 /// can draw text or an image, and those a second pass is to remove.
@@ -6405,6 +6438,67 @@ mod vertical_runs {
             after.iter().map(|(t, _)| t.as_str()).collect::<String>(),
             "PUBLICECRET"
         );
+    }
+
+    /// A vertical glyph is drawn with its horizontal origin at the pen minus
+    /// the position vector **`v` whole** (9.7.4.3), and its box goes with
+    /// it: `v_y` moves the glyph along the column as `v_x` moves it across.
+    ///
+    /// CID 80, `P`, is given its own `/W2` entry. At `v_y = 0` its
+    /// horizontal origin is the pen, (95, 100) at ten point, so the glyph
+    /// stands *above* the pen; at `v_y = 1500` its origin is fifteen points
+    /// below it. Until October 2026 the box was one advance below the pen
+    /// whatever `v_y` said — right for the default 880 — so a band over
+    /// either glyph cut nothing and reported nothing. And the cell under the
+    /// pen still counts: a two-em glyph (`w1 = -2000`, a long dash) at the
+    /// default `v_y` fills twenty points of column, ten more than the cell
+    /// measured from its origin.
+    #[test]
+    fn a_vertical_glyph_is_measured_where_its_position_vector_puts_it() {
+        // At `50 Tz` the glyph narrows about the pen and `v_y` does not
+        // shrink with it: 9.4.4 scales `v` by `Tfs`, and `Th` only across.
+        for (w1, v_y, scale, area, at) in [
+            (
+                -1000,
+                0,
+                100,
+                band(96.0, 101.0, 104.0, 109.0),
+                (95.0, 100.0),
+            ),
+            (
+                -1000,
+                1500,
+                100,
+                band(96.0, 80.0, 104.0, 89.0),
+                (95.0, 85.0),
+            ),
+            (-1000, 1500, 50, band(98.0, 80.0, 102.0, 89.0), (97.5, 85.0)),
+            (-2000, 880, 100, band(96.0, 82.0, 104.0, 88.0), (95.0, 91.2)),
+        ] {
+            let what = format!("w1 {w1}, v_y {v_y} at {scale} Tz");
+            let bytes = String::from_utf8(cid_vertical_document(&format!(
+                "BT /F0 10 Tf {scale} Tz 100 100 Td {} Tj ET",
+                cid_hex("P")
+            )))
+            .expect("ASCII")
+            .replacen(
+                "74 90 -1000 500 880]",
+                &format!("74 79 -1000 500 880 80 80 {w1} 500 {v_y} 81 90 -1000 500 880]"),
+                1,
+            )
+            .into_bytes();
+            let before = extracted(bytes.clone());
+            assert_eq!(before.len(), 1, "{what}");
+            let (text, origin) = &before[0];
+            assert!(
+                text == "P" && (origin.0 - at.0).abs() < 1e-9 && (origin.1 - at.1).abs() < 1e-9,
+                "{what}: drawn at {origin:?}"
+            );
+
+            let (after, report) = redact(open(bytes), &[area]);
+            assert_eq!(report.glyphs, 1, "{what}: the P");
+            assert!(extracted(after).is_empty(), "{what}");
+        }
     }
 
     /// A column turned a quarter turn runs **left to right** across the
