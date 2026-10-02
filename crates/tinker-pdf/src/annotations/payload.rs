@@ -77,6 +77,8 @@ pub enum AnnotationPayload {
         /// `Help`, `NewParagraph`, `Paragraph`, `Insert`, or the producer's.
         icon: String,
         /// `/State` (12.5.6.3), for a note that is a state change of another.
+        /// Absent, it defaults by `/StateModel`: `Unmarked` in the `Marked`
+        /// model, `None` in the `Review` one; with neither, it is `None`.
         state: Option<String>,
         /// `/StateModel`: `Marked` or `Review`.
         state_model: Option<String>,
@@ -129,7 +131,8 @@ pub enum AnnotationPayload {
         caption: bool,
         /// `/CP`: `Inline` (the default) or `Top`.
         caption_position: String,
-        /// `/CO`: the caption's offset from its default place.
+        /// `/CO`: the caption's offset from its default place. Defaults to
+        /// `(0, 0)`; `None` only for a `/CO` that is not two numbers.
         caption_offset: Option<Point>,
     },
     /// `/Square` and `/Circle`, 12.5.6.8 Table 177.
@@ -612,12 +615,24 @@ impl<'d> Read<'d> {
     /// The family payload of an annotation of subtype `subtype`.
     pub(super) fn payload(&mut self, subtype: &[u8], dict: &Dict) -> AnnotationPayload {
         match subtype {
-            b"Text" => AnnotationPayload::Text {
-                open: self.bool(dict, b"Open", false),
-                icon: self.name_or(dict, b"Name", "Note"),
-                state: self.text(dict, b"State"),
-                state_model: self.text(dict, b"StateModel"),
-            },
+            b"Text" => {
+                let open = self.bool(dict, b"Open", false);
+                let icon = self.name_or(dict, b"Name", "Note");
+                let state = self.text(dict, b"State");
+                let state_model = self.text(dict, b"StateModel");
+                // Table 172: an absent /State defaults by its model.
+                let state = state.or_else(|| match state_model.as_deref() {
+                    Some("Marked") => Some("Unmarked".to_string()),
+                    Some("Review") => Some("None".to_string()),
+                    _ => None,
+                });
+                AnnotationPayload::Text {
+                    open,
+                    icon,
+                    state,
+                    state_model,
+                }
+            }
             b"Link" => AnnotationPayload::Link {
                 highlight: self.name_or(dict, b"H", "I"),
                 quads: self.quads(dict),
@@ -643,9 +658,15 @@ impl<'d> Read<'d> {
                 leader_offset: self.number(dict, b"LLO", 0.0),
                 caption: self.bool(dict, b"Cap", false),
                 caption_position: self.name_or(dict, b"CP", "Inline"),
-                caption_offset: match self.numbers(dict, b"CO").as_deref() {
-                    Some([h, v]) => Some((*h, *v)),
-                    _ => None,
+                // Table 175: no /CO is no offset; one that is not two
+                // numbers is not half read.
+                caption_offset: if self.has(dict, b"CO") {
+                    match self.numbers(dict, b"CO").as_deref() {
+                        Some([h, v]) => Some((*h, *v)),
+                        _ => None,
+                    }
+                } else {
+                    Some((0.0, 0.0))
                 },
             },
             b"Square" | b"Circle" => AnnotationPayload::Shape {

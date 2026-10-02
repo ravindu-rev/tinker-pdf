@@ -405,7 +405,10 @@ pub struct Border {
     /// `U` underline. `/Border` has no style and reads as `S`, or `D` with a
     /// dash array.
     pub style: String,
-    /// The dash array: `/BS /D`, or `/Border`'s optional fourth element.
+    /// The dash array: `/BS /D`, `[3]` where a `/BS` has none (Table 166),
+    /// which only the `D` style draws; or `/Border`'s optional fourth
+    /// element, empty where it has none, for which Table 164 states no
+    /// default.
     pub dash: Vec<f64>,
     /// `/Border`'s horizontal and vertical corner radii. `/BS` has none.
     pub corner_radii: Option<(f64, f64)>,
@@ -714,7 +717,7 @@ fn border_of(read: &mut Read<'_>, dict: &Dict) -> Option<Border> {
                 .filter(|w| w.is_finite())
                 .unwrap_or(1.0),
             style: read.name(bs, b"S").unwrap_or_else(|| "S".to_string()),
-            dash: read.numbers(bs, b"D").unwrap_or_default(),
+            dash: read.numbers(bs, b"D").unwrap_or_else(|| vec![3.0]),
             corner_radii: None,
         });
     }
@@ -1586,6 +1589,16 @@ mod tests {
                 if endings.0 == "None" && endings.1 == "None" && caption_position == "Inline"
         ));
         assert!(
+            matches!(
+                by("Line"),
+                AnnotationPayload::Line {
+                    caption_offset: Some((0.0, 0.0)),
+                    ..
+                }
+            ),
+            "Table 175: no /CO is [0 0]"
+        );
+        assert!(
             matches!(by("Caret"), AnnotationPayload::Caret { ref symbol, .. } if symbol == "None")
         );
         assert!(matches!(by("Stamp"), AnnotationPayload::Stamp { ref icon } if icon == "Draft"));
@@ -1632,6 +1645,42 @@ mod tests {
             ],
             "the families whose tables require an entry, and only those"
         );
+
+        // The defaults that hang on another entry: Table 172's `/State` by
+        // its `/StateModel`, Table 166's `/D` wherever a `/BS` leaves it out,
+        // and a `/CO` that is there but not two numbers, which is not read
+        // as the default either.
+        let doc = page_with(
+            "/Annots [\
+             << /Subtype /Text /Rect [0 0 1 1] /StateModel (Marked) >> \
+             << /Subtype /Text /Rect [0 0 1 1] /StateModel (Review) >> \
+             << /Subtype /Square /Rect [0 0 1 1] /BS << /W 2 /S /D >> >> \
+             << /Subtype /Line /Rect [0 0 1 1] /L [0 0 1 1] /CO [1] >> ]",
+            "",
+        );
+        let annots = doc.page(0).expect("a page").annotations();
+        let state = |a: &Annotation| match &a.payload {
+            AnnotationPayload::Text { state, .. } => state.clone(),
+            other => panic!("{}", other.family()),
+        };
+        assert_eq!(state(&annots[0]).as_deref(), Some("Unmarked"));
+        assert_eq!(state(&annots[1]).as_deref(), Some("None"));
+        assert_eq!(
+            annots[2].border,
+            Some(Border {
+                width: 2.0,
+                style: "D".into(),
+                dash: vec![3.0],
+                corner_radii: None,
+            })
+        );
+        assert!(matches!(
+            annots[3].payload,
+            AnnotationPayload::Line {
+                caption_offset: None,
+                ..
+            }
+        ));
     }
 
     /// Geometry that is not what its table says is not half read: a partial
