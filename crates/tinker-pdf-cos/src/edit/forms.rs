@@ -192,9 +192,16 @@ impl DocumentEditor {
 
     /// The one implementation behind every field write.
     ///
-    /// The only thing [`Writer`] changes is whether ReadOnly applies; every
-    /// other rule about the value is [`fill::accepts_value`], shared, so the
-    /// two doors cannot drift apart.
+    /// For a text or choice field the only thing [`Writer`] changes is whether
+    /// ReadOnly applies; every other rule about the value is
+    /// [`fill::accepts_value`], shared, so the two doors cannot drift apart.
+    ///
+    /// A check box or radio group is the **user's** door only: it takes a
+    /// state through `write_button`, ReadOnly and all. A calculation is
+    /// refused one, as it was before buttons could be filled at all, because
+    /// [`fill::accepts_value`] accepts no button — so
+    /// [`DocumentEditor::set_calculated_values`] cannot tick a ReadOnly check
+    /// box, and the calculation path is what it was.
     fn write_field(
         &mut self,
         name: &str,
@@ -204,11 +211,13 @@ impl DocumentEditor {
         let Some(field) = self.fields().into_iter().find(|f| f.name == name) else {
             return Err(FillError::NoSuchField);
         };
-        if matches!(
-            field.kind,
-            form::FieldKind::Checkbox | form::FieldKind::Radio
-        ) {
-            return self.write_button(&field, value, writer);
+        if writer == Writer::User
+            && matches!(
+                field.kind,
+                form::FieldKind::Checkbox | form::FieldKind::Radio
+            )
+        {
+            return self.write_button(&field, value);
         }
         let allowed = match writer {
             Writer::User => fill::accepts(&field, value),
@@ -244,9 +253,8 @@ impl DocumentEditor {
         &mut self,
         field: &form::Field,
         value: &str,
-        writer: Writer,
     ) -> Result<Vec<SkippedWidget>, FillError> {
-        if writer == Writer::User && field.is_read_only() {
+        if field.is_read_only() {
             return Err(FillError::ValueRefused);
         }
         // 7.3.5: a name is one to 127 bytes, and an empty one names nothing a

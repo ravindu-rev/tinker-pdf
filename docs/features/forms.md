@@ -153,7 +153,10 @@ widget's `/AS` together, all widgets or none — through `set_checkbox` and
 *name* of the state to show (`On`, `blue`, `Off`), which is what an FDF or
 XFDF file carries for a button. A state no widget's `/AP /N` offers is
 refused rather than written, because a `/V` naming a state nothing can draw
-is a box that reads as ticked and displays as empty. `reset_form` restores `/DV`
+is a box that reads as ticked and displays as empty. That door is the
+user's: `set_calculated_values` refuses a check box or radio group, as it
+always has, since no calculation in this build computes a button state and
+a ReadOnly box is not one to tick on a script's word. `reset_form` restores `/DV`
 into `/V` and removes `/V` where there is no `/DV` (12.7.5.3) — "never
 filled" and "filled with nothing" are different states.
 
