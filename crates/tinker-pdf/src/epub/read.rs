@@ -479,6 +479,11 @@ pub struct Picture {
 /// a PNG goes through the reader that decides between passing its `IDAT`
 /// through and decoding it, a GIF — which no `/Filter` reads — is decoded
 /// and kept `/Indexed`, and a WebP is decoded to RGB or RGBA.
+///
+/// `#[non_exhaustive]` like every other facade enum here: it grew `Raster`
+/// when GIF and WebP gained decoders, which broke any match outside this
+/// crate, and the next route a picture can take would grow it again.
+#[non_exhaustive]
 pub enum PictureData {
     /// A JPEG, placed as its own bytes.
     Jpeg(Vec<u8>),

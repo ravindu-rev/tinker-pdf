@@ -240,7 +240,9 @@ pub enum TiffError {
     /// A zero width or height, or a product past `u32`.
     BadDimensions { width: u32, height: u32 },
     /// A `Compression` value this build does not decode — 6 (old-style JPEG,
-    /// which TIFF Technical Note 2 withdrew, a permanent refusal) and the rest.
+    /// which TIFF Technical Note 2 replaced with 7, and which is owed on the
+    /// ROADMAP for the files whose `JPEGInterchangeFormat` points at a whole
+    /// JPEG stream) and the rest.
     UnsupportedCompression(u16),
     /// A `PhotometricInterpretation` outside {0, 1, 2, 3, 5} — and 6, which is
     /// read only when `Compression` is 7 and the JPEG has already undone it.
