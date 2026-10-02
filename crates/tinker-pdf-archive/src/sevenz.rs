@@ -739,8 +739,8 @@ fn decode_coder(
 ///
 /// A compressor has no such bound — its input may be any length — so a coder
 /// feeding one is held to the folder cap alone, as the folder's output is.
-/// No writer emits that shape: in every folder 7-Zip and py7zr write, what a
-/// coder feeds is a filter.
+/// No folder this build reads is written that way: 7-Zip and py7zr feed a
+/// compressor from a pack stream, or from AES, which is refused at open.
 fn feeders_fit(
     folder: &Folder,
     coder: usize,
@@ -749,7 +749,8 @@ fn feeders_fit(
 ) -> Result<(), FolderError> {
     let first = folder.first_in(coder);
     // The declared length of in-stream `first + k` when another coder's
-    // output feeds it; a size the header does not have is no bound at all.
+    // output feeds it. A feeder the header gives no size is taken as the
+    // largest there is, so it fails every bound rather than passing one.
     let decoded = |k: usize| {
         let &(_, feeder) = folder.bind_pairs.iter().find(|(i, _)| *i == first + k)?;
         Some(folder.unpack_sizes.get(feeder).copied().unwrap_or(u64::MAX))
