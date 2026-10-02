@@ -367,6 +367,106 @@ fn the_synthesis_cap_has_room_for_a_two_hundred_page_comic() {
     assert!(MAX_SYNTHESISED_PDF < comic * 2);
 }
 
+/// A little-endian TIFF of `directories` one-pixel bilevel directories, each
+/// over the same one-byte uncompressed strip, chained by `NextIFD`.
+fn tiff_of(directories: usize) -> Vec<u8> {
+    // Tag, SHORT (3) or LONG (4), value. TIFF 6.0 §2: a count-1 SHORT sits
+    // left-justified in the four-byte value field.
+    let entries: [(u16, u16, u32); 7] = [
+        (256, 3, 1), // ImageWidth
+        (257, 3, 1), // ImageLength
+        (259, 3, 1), // Compression: none
+        (262, 3, 1), // PhotometricInterpretation: BlackIsZero
+        (273, 4, 8), // StripOffsets: the byte after the header
+        (278, 3, 1), // RowsPerStrip
+        (279, 4, 1), // StripByteCounts
+    ];
+    let mut out = b"II\x2a\x00".to_vec();
+    out.extend_from_slice(&12u32.to_le_bytes());
+    out.extend_from_slice(&[0xff, 0, 0, 0]); // the strip, and padding to 12
+    for i in 0..directories {
+        let at = out.len();
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, value) in entries {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&1u32.to_le_bytes());
+            if kind == 3 {
+                out.extend_from_slice(&(value as u16).to_le_bytes());
+                out.extend_from_slice(&[0, 0]);
+            } else {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let next = if i + 1 < directories {
+            at + 2 + 12 * entries.len() + 4
+        } else {
+            0
+        };
+        out.extend_from_slice(&(next as u32).to_le_bytes());
+    }
+    out
+}
+
+/// A TIFF's directories are charged one at a time, each before the next is
+/// built, so the caps stop the **work** at the directory that spends them and
+/// not only the answer.
+///
+/// Found by review: `tiff_plans` used to build every directory into a `Vec`
+/// and the caller charged them after, so a stored CBZ holding one TIFF of 64
+/// directories over a single 16 MiB strip peaked at 1 024 MiB before the
+/// 512 MiB cap refused it — every copied strip alive at once. The order is
+/// what this holds: the `admit` that refuses the third directory is the last
+/// thing that happens, and directories four and five are never built.
+#[test]
+fn a_tiffs_directories_are_charged_before_the_next_is_built() {
+    let data = tiff_of(5);
+    assert_eq!(
+        tiff_scan_directory(&data, 0).map(|scan| scan.pages),
+        Ok(5),
+        "the fixture is five directories"
+    );
+    let built = std::cell::RefCell::new(Vec::new());
+    let mut admitted = 0usize;
+    let result = tiff_plans(
+        &data,
+        |directory| {
+            built.borrow_mut().push(directory);
+            placeholder_plan("a.tif", PageDefect::Undecodable)
+        },
+        &mut |_plan| {
+            admitted += 1;
+            // Every directory is built and then admitted, never two built
+            // ahead of the one being charged.
+            assert_eq!(built.borrow().len(), admitted, "built ahead of the charge");
+            if admitted == 3 {
+                Err(ArchiveRefusal::TooLarge)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(result, Err(ArchiveRefusal::TooLarge));
+    assert_eq!(*built.borrow(), [0, 1, 2], "nothing built past the refusal");
+
+    // And an entry the caps admit is every directory, in chain order.
+    built.borrow_mut().clear();
+    let mut pages = 0usize;
+    let result = tiff_plans(
+        &data,
+        |directory| {
+            built.borrow_mut().push(directory);
+            placeholder_plan("a.tif", PageDefect::Undecodable)
+        },
+        &mut |_plan| {
+            pages += 1;
+            Ok(())
+        },
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!((pages, built.borrow().clone()), (5, vec![0, 1, 2, 3, 4]));
+}
+
 // ---- ComicInfo.xml -----------------------------------------------------
 
 /// The six elements this build maps, and the `/Info` keys they become.

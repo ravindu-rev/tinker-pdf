@@ -1963,8 +1963,12 @@ fn pages_from_reader(
         }
         // Usually one plan, none for an entry that is not an image, and one
         // per directory for a multi-page TIFF — each of which is a page, and
-        // each of which the page cap and the byte cap count as one.
-        for plan in plan_entry(&mut archive, position, &entry.name, limits) {
+        // each of which the page cap and the byte cap count as one **the
+        // moment it is planned**, before the next is decoded. A TIFF's
+        // directories are handed over one at a time for that reason: planned
+        // all at once and charged after, sixty-four directories over one
+        // 16 MiB strip held a gigabyte before the 512 MiB cap was asked.
+        plan_entry(&mut archive, position, &entry.name, limits, &mut |plan| {
             if plans.len() >= limits.max_pages {
                 return Err(ArchiveRefusal::TooLarge);
             }
@@ -1973,7 +1977,8 @@ fn pages_from_reader(
                 .filter(|&total| total <= limits.max_synthesised)
                 .ok_or(ArchiveRefusal::TooLarge)?;
             plans.push(plan);
-        }
+            Ok(())
+        })?;
     }
 
     if plans.is_empty() {
@@ -2117,30 +2122,46 @@ fn read_comic_info(
 /// holds exactly one `/XObject`, and they are different objects.
 const IMAGE_RESOURCE: &[u8] = b"Im";
 
-/// Decides what one entry becomes: no page (it is not an image), one page, or
-/// — for a TIFF of several directories — one page per directory that is one.
+/// What a planned page is handed to: the page cap and the byte cap, charged
+/// on it before anything else is planned, and a refusal when either is spent.
+type Admit<'p, 'a> = dyn FnMut(Plan<'a>) -> Result<(), ArchiveRefusal> + 'p;
+
+/// Decides what one entry becomes — no page (it is not an image), one page, or
+/// for a TIFF of several directories one page per directory that is one — and
+/// hands each to `admit` as it is made.
+///
+/// # Errors
+/// Whatever `admit` refuses, at the first page it refuses.
 fn plan_entry<'a>(
     archive: &mut Reader<'a>,
     index: usize,
     name: &str,
     limits: &Limits,
-) -> Vec<Plan<'a>> {
+    admit: &mut Admit<'_, 'a>,
+) -> Result<(), ArchiveRefusal> {
     let data = match archive.read(index) {
         Ok(data) => data,
         Err(defect) => {
             // No bytes, so no magic. See `extension_claims_image` for why the
             // name is allowed to decide this one case and nothing else.
             return if extension_claims_image(name) {
-                vec![placeholder_plan(name, defect)]
+                admit(placeholder_plan(name, defect))
             } else {
-                Vec::new()
+                Ok(())
             };
         }
     };
     match image_format(&data) {
-        None => Vec::new(),
-        Some(ImageFormat::Tiff) => tiff_plans(name, &data, limits),
-        Some(format) => plan_image(format, data, name, limits).into_iter().collect(),
+        None => Ok(()),
+        Some(ImageFormat::Tiff) => tiff_plans(
+            &data,
+            |directory| tiff_page(name, &data, directory, limits),
+            admit,
+        ),
+        Some(format) => match plan_image(format, data, name, limits) {
+            Some(plan) => admit(plan),
+            None => Ok(()),
+        },
     }
 }
 
@@ -2283,20 +2304,36 @@ fn plan_image<'a>(
 /// shows, and an entry that became no page would renumber the book.
 ///
 /// The chain is walked under `tiff.rs`'s cycle guard and its 64-directory
-/// bound, and every page it yields is charged against [`MAX_CBZ_PAGES`] and
-/// [`MAX_SYNTHESISED_PDF`] like any other — so one entry cannot page past
-/// either cap.
-fn tiff_plans<'a>(name: &str, data: &[u8], limits: &Limits) -> Vec<Plan<'a>> {
+/// bound, and each directory is built by `page` and handed to `admit` —
+/// which charges it against [`MAX_CBZ_PAGES`] and [`MAX_SYNTHESISED_PDF`] —
+/// **before the next is decoded**. That is what makes a directory cost what
+/// an entry of its own costs: an entry is charged before the next entry is
+/// read, and a directory before the next directory is built. Collecting them
+/// first and charging after kept every decoded raster and every copied
+/// strip alive at once, so sixty-four directories over one 16 MiB strip
+/// peaked at a gigabyte before the 512 MiB cap was asked.
+///
+/// `page` is a parameter rather than a call so that the order is what a test
+/// holds, not only the outcome.
+///
+/// # Errors
+/// Whatever `admit` refuses, at the first directory it refuses; nothing after
+/// that directory is built.
+fn tiff_plans<'a>(
+    data: &[u8],
+    mut page: impl FnMut(usize) -> Plan<'a>,
+    admit: &mut Admit<'_, 'a>,
+) -> Result<(), ArchiveRefusal> {
     let directories = tiff_scan_directory(data, 0).map_or(1, |scan| scan.pages as usize);
-    let mut plans = vec![tiff_page(name, data, 0, limits)];
+    admit(page(0))?;
     for index in 1..directories {
         match tiff_scan_directory(data, index) {
             Ok(scan) if scan.subfile & 0b101 != 0 => continue,
             Err(TiffError::UnsupportedPhotometric(4)) => continue,
-            _ => plans.push(tiff_page(name, data, index, limits)),
+            _ => admit(page(index))?,
         }
     }
-    plans
+    Ok(())
 }
 
 /// One directory of a TIFF as a page, or its placeholder.

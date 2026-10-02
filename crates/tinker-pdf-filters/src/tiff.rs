@@ -140,7 +140,19 @@ pub const MAX_TIFF_SAMPLES: u64 = 1 << 26;
 /// files: the guard catches an IFD that points at itself or at an earlier one,
 /// and this catches a long descending chain that never repeats. Sixteen would
 /// cover every multi-page fax anyone has sent; 64 is the round number above
-/// it, and both are far below the point where the walk costs anything.
+/// it, and both are far below the point where the *walk* costs anything.
+///
+/// *Corrected 2 October 2026, on review.* That last clause is true of the walk
+/// and was not true of what a caller does with it. Since a comic page is one
+/// per directory (`tinker_pdf::cbz`), this is also the most pages one TIFF
+/// entry becomes, and so a multiplier on the work and the memory of a single
+/// entry: sixty-four directories over one 16 MiB strip are sixty-four
+/// decodes or copies of it. What bounds that is the caller's caps, not this
+/// one — `cbz` charges each directory against `MAX_CBZ_PAGES` and
+/// `MAX_SYNTHESISED_PDF` as it is built, before the next is decoded, so the
+/// most a TIFF entry holds is what those caps admit plus the one directory in
+/// hand. It is not a `bounds_ledger.rs` row for that reason: a page count
+/// those two caps already bound, under a second name.
 const MAX_TIFF_IFDS: usize = 64;
 
 /// Strips or tiles in one image.

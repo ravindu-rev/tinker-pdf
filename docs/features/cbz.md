@@ -232,8 +232,15 @@ several pages**: every directory on the `NextIFD` chain that is a page — not a
 reduced-resolution copy (`NewSubfileType` bit 0), not a transparency mask
 (bit 2, or `PhotometricInterpretation` 4) — becomes a page of its own, in
 chain order, each carrying the entry's own name, and each counted against
-`MAX_CBZ_PAGES` and `MAX_SYNTHESISED_PDF` exactly like an entry of its own.
-`tiff.rs`'s 64-directory bound and cycle guard stand in front of the walk.
+`MAX_CBZ_PAGES` and `MAX_SYNTHESISED_PDF` exactly like an entry of its own —
+**charged as it is built, before the next directory is decoded**, which is
+what makes that sentence true of the work and the memory and not only of the
+answer. *Corrected 2 October 2026, on review*: the directories used to be
+built into a list and charged after, so a stored CBZ of one TIFF with
+sixty-four directories over a single 16 MiB strip held 1 024 MiB, measured,
+before the 512 MiB cap refused it; charged one at a time, the same file
+peaks at the cap. `tiff.rs`'s 64-directory bound and cycle guard stand in
+front of the walk.
 
 One thing the TIFF pass-through gives up is written down rather than absorbed.
 A PNG carries a CRC-32 on every chunk, so the pass-through can check the bytes
