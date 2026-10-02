@@ -422,6 +422,38 @@
 //! | named with no rectangle | **1** |
 //! | a procedure that paints with a pattern not measured | **1** |
 //! | a procedure that sets a state not measured | **1** |
+//!
+//! And what the review of lane 3B fixed (2 October 2026), each defect put
+//! back over the suite as it stood when its fix landed, 375 to 387 tests.
+//! None reports zero; the three that did at first — the cell under a
+//! vertical pen, a copy budget one cut loose, a cut in place named whatever
+//! draws it — were answered with the test that now catches each:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a form's cut a change only when it removed a glyph, which is how it used to be | **1** |
+//! | [`union`] writing only for a glyph | **1** |
+//! | a blank inline image counted again | **1** |
+//! | a written cut's images not reported | **1** |
+//! | a vertical box one advance below the pen whatever `v_y` says, which is how it used to be | **1** |
+//! | the horizontal origin above the pen | 4 |
+//! | `v_y` carrying `Th` | 2 |
+//! | the origin's cell a horizontal em | 3 |
+//! | the cell under the pen dropped | **1** |
+//! | a glyph procedure measured in the enclosing scope alone, which is how it used to be | **1** |
+//! | the font's-own-first pass dropped | **1** |
+//! | the enclosing-first pass without the font's own fonts | **1** |
+//! | the second pass's warnings counted again | **1** |
+//! | a spent budget not named, which is how it used to be | **1** |
+//! | every removed procedure use named as unbounded | 5 |
+//! | the spent flag never set | **1** |
+//! | no copy budget, which is how it used to be | 2 |
+//! | a form over budget not refunded | **1** |
+//! | a form over budget not sent the old way | 2 |
+//! | the copy budget one cut looser | **1** |
+//! | a form cut in place never asking what else draws it, which is how it used to be | **1** |
+//! | a form met shallower not read again, which is how it used to be | **1** |
+//! | a form cut in place named whatever draws it | **1** |
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
