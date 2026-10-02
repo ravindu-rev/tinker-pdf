@@ -278,6 +278,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "webp"
+path = "fuzz_targets/webp.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "brotli"
 path = "fuzz_targets/brotli.rs"
 test = false

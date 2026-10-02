@@ -47,6 +47,12 @@
 //! sentence: GIF *is* an EPUB core media type, so its `book` column is a
 //! picture rather than a zero.
 //!
+//! *Amended the same day, the archive row's WebP decoder.* **The
+//! fiftieth, `MAX_WEBP_SAMPLES`**, GIF's row again — WebP is a core
+//! media type too, so its `book` column is a picture — with its own
+//! arithmetic: of the two headers that can ask, a `VP8X` canvas's two 24-bit
+//! dimensions reach further than a lossless header's two 14-bit ones.
+//!
 //! *Amended, 26 September 2026, the `jbig2` fuzz row.* **One more row, the
 //! forty-fourth, and it is the first here whose cap is a *ratio* rather than a
 //! quantity.**
@@ -471,7 +477,7 @@ use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
     MAX_BMP_SAMPLES, MAX_GIF_SAMPLES, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
-    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES,
+    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES, MAX_WEBP_SAMPLES,
 };
 use tinker_pdf_layout::limits as layout_limits;
 use tinker_pdf_xml::limits as xml_limits;
@@ -519,6 +525,8 @@ const BMP: &str = include_str!("../../tinker-pdf-filters/src/bmp.rs");
 const BMP_TESTS: &str = include_str!("../../tinker-pdf-filters/src/bmp/tests.rs");
 const GIF: &str = include_str!("../../tinker-pdf-filters/src/gif.rs");
 const GIF_TESTS: &str = include_str!("../../tinker-pdf-filters/src/gif/tests.rs");
+const WEBP: &str = include_str!("../../tinker-pdf-filters/src/webp.rs");
+const WEBP_TESTS: &str = include_str!("../../tinker-pdf-filters/src/webp/tests.rs");
 const INLINE_IMAGE_TESTS: &str = include_str!("inline_images.rs");
 /// The annotation payloads' copy budget: declared beside the payload readers
 /// that spend it, and fired by a test beside the listing that owns the budget.
@@ -570,7 +578,7 @@ struct Bound {
     /// The most gap 31's yardstick spends: **a 300-page reflowable book**.
     ///
     /// The third yardstick, and unlike the first two it is not an estimate.
-    /// Sixteen of these forty-six rows are figures a real book can be
+    /// Sixteen of these forty-seven rows are figures a real book can be
     /// *measured* against, and
     /// [`the_book_yardstick_is_not_below_a_real_book`] measures every book in
     /// both corpora against them on every run — the committed six always, the
@@ -2076,6 +2084,32 @@ fn ledger() -> Vec<Bound> {
                 GIF_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_WEBP_SAMPLES",
+            cap: MAX_WEBP_SAMPLES as u128,
+            published: "67 108 864",
+            // Pillow's mixed 160 x 96, charged at four samples a pixel like
+            // every WebP.
+            fixtures: 160 * 96 * 4,
+            // A 2000 x 3000 page at four samples: a WebP is charged as the
+            // RGBA it decodes to, whether or not it is narrowed to RGB after.
+            comic: 24_000_000,
+            // Zero: ECMA-388 admits no WebP image part.
+            document: 0,
+            // GIF's figure for GIF's reason: WebP is an EPUB 3.3 §3.2 core
+            // media type and an `<img>` draws one. A full-page 300 dpi plate
+            // at four components, `MAX_PNG_SAMPLES`'s book figure.
+            book: 2_550 * 3_300 * 4,
+            // Two 24-bit `VP8X` canvas dimensions, each stored less one,
+            // charged at four; a VP8L header's 14-bit pair reaches 2^30.
+            reachable: (1u128 << 24) * (1 << 24) * 4,
+            reachable_because: "two 24-bit VP8X canvas dimensions, times four samples",
+            declared_in: WEBP,
+            fires_in: (
+                "an_image_past_the_sample_cap_is_refused_before_it_allocates",
+                WEBP_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2095,7 +2129,8 @@ fn ledger() -> Vec<Bound> {
 /// `MAX_FORM_DATA_BYTES`; and the review of the redaction row adds
 /// `MAX_FORM_COPY_BYTES`; and the tier-4 archive row's BMP decoder adds
 /// `MAX_BMP_SAMPLES`; and the archive row's GIF decoder adds
-/// `MAX_GIF_SAMPLES`. All **forty-nine** are here, and
+/// `MAX_GIF_SAMPLES`; and the archive row's WebP decoder adds
+/// `MAX_WEBP_SAMPLES`. All **fifty** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2152,6 +2187,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_FORM_COPY_BYTES",
             "MAX_BMP_SAMPLES",
             "MAX_GIF_SAMPLES",
+            "MAX_WEBP_SAMPLES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2257,7 +2293,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 49, "the ledger is forty-nine rows");
+    assert_eq!(measured, 50, "the ledger is fifty rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2289,7 +2325,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 49, "the ledger is forty-nine rows");
+    assert_eq!(ledger().len(), 50, "the ledger is fifty rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

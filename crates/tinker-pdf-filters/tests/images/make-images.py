@@ -52,6 +52,23 @@ def bit(x, y):
     return 1 if (x + y) % 3 == 0 else 0
 
 
+def noise(x, y, k):
+    return (((x * 73856093) ^ (y * 19349663) ^ (k * 83492791)) % 4294967296) >> 13 & 255
+
+
+def mixed(x, y):
+    """Tiles of the recipe repeated (back-references) beside noise (literals)."""
+    if (x // 8 + y // 8) % 2 == 0:
+        return rgb(x % 8, y % 8)
+    return (noise(x, y, 1), noise(x, y, 2), noise(x, y, 3))
+
+
+def diagonal(x, y):
+    """Noise constant along each anti-diagonal: every pixel is its top-right
+    neighbour, so VP8L's top-right predictor wins in every block."""
+    return (noise(x + y, 0, 1), noise(x + y, 0, 2), noise(x + y, 0, 3))
+
+
 def rgb_image(w, h):
     im = Image.new("RGB", (w, h))
     im.putdata([rgb(x, y) for y in range(h) for x in range(w)])
@@ -207,3 +224,52 @@ with tifffile.TiffWriter("tiff/tifffile-multipage.tif") as tw:
     tw.write(rgb_array, photometric="rgb")
     tw.write(plane(grey, np.uint8)[::2, ::2], photometric="minisblack", subfiletype=1)
     tw.write(plane(lambda x, y: 255 - grey(x, y), np.uint8), photometric="minisblack")
+
+
+# ---- WebP --------------------------------------------------------------------
+#
+# Pillow 12.3.0's WebP plugin over its bundled libwebp, and imagecodecs'
+# `webp_encode` over libwebp 1.6.0. Lossless throughout this block: the
+# expected answer is the recipe, exactly. `exact=True` keeps the colour under a
+# fully transparent pixel, which libwebp otherwise rewrites.
+
+
+def webp_rgba(w, h):
+    return Image.fromarray(rgba_array(w, h), "RGBA")
+
+
+def few_colours(w, h, n):
+    im = Image.new("RGB", (w, h))
+    im.putdata([palette(index(x, y, n)) for y in range(h) for x in range(w)])
+    return im
+
+
+rgb_image(W, H).save("webp/pillow-lossless-rgb-13x7.webp", lossless=True)
+webp_rgba(W, H).save("webp/pillow-lossless-rgba-13x7.webp", lossless=True, exact=True)
+# Method 6 at quality 100 is libwebp's slowest and tries every transform; a
+# larger picture gives the meta prefix codes blocks to differ across.
+rgb_image(96, 64).save("webp/pillow-lossless-m6-96x64.webp", lossless=True, method=6, quality=100)
+webp_rgba(96, 64).save("webp/pillow-lossless-rgba-m6-96x64.webp", lossless=True, method=6,
+                       quality=100, exact=True)
+# Repeated tiles beside noise, at a size where LZ77 distances, the colour
+# cache and more than one prefix code group all earn their place.
+mixed_image = Image.new("RGBA", (160, 96))
+mixed_image.putdata([mixed(x, y) + (alpha(x, y) | 1,) for y in range(96) for x in range(160)])
+mixed_image.save("webp/pillow-lossless-mixed-160x96.webp", lossless=True, method=6, quality=100,
+                 exact=True)
+# The top-right predictor chosen in the last column too, where §3.5.1 makes
+# the top-right pixel the first of the row being predicted.
+diagonal_image = Image.new("RGB", (64, 32))
+diagonal_image.putdata([diagonal(x, y) for y in range(32) for x in range(64)])
+diagonal_image.save("webp/pillow-lossless-diagonal-64x32.webp", lossless=True, method=6,
+                    quality=100)
+# Two, four and sixteen colours: the colour-indexing transform at each of its
+# three bundling widths.
+for n, w, h in ((2, 21, 5), (4, 13, 7), (16, 21, 9)):
+    few_colours(w, h, n).save(f"webp/pillow-lossless-{n}colour-{w}x{h}.webp", lossless=True)
+# Two frames, the second the first mirrored.
+first = rgb_image(W, H)
+first.save("webp/pillow-animated-lossless-13x7.webp", lossless=True, save_all=True,
+           append_images=[first.transpose(Image.Transpose.FLIP_LEFT_RIGHT)], duration=100)
+open("webp/imagecodecs-lossless-rgba-13x7.webp", "wb").write(
+    imagecodecs.webp_encode(rgba_array(W, H), lossless=True))

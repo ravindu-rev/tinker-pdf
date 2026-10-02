@@ -498,7 +498,8 @@ fn an_img_with_no_src_at_all_is_unresolved() {
 /// EPUB 3.3 §3.2 makes WebP a core image media type a conforming book may use
 /// with no fallback, so a reader meeting one has met a legal book it cannot
 /// draw — a different sentence from a broken reference, and a host acts on the
-/// two differently. This was a GIF until GIF had a decoder.
+/// two differently. This was a GIF until GIF had a decoder, and is a *lossy*
+/// WebP since the lossless bitstream got one.
 #[test]
 fn a_core_media_type_with_no_decoder_here_is_named_by_its_format() {
     let webp = b"RIFF\x0c\x00\x00\x00WEBPVP8 \x00\x00\x00\x00".to_vec();
@@ -507,6 +508,34 @@ fn a_core_media_type_with_no_decoder_here_is_named_by_its_format() {
         not_drawn(&doc),
         [(ImageDefect::UnsupportedFormat(ImageFormat::WebP), 1)]
     );
+}
+
+/// A lossless WebP is drawn, at its own pixel size — Pillow's file, which
+/// `tinker-pdf-filters/tests/images/` holds the decoder to pixel for pixel.
+#[test]
+fn a_lossless_webp_img_is_drawn_at_its_own_size() {
+    let webp = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tinker-pdf-filters/tests/images/webp/pillow-lossless-rgba-13x7.webp"),
+    )
+    .expect("the committed WebP");
+    let doc = open(
+        r#"<img src="pic.webp" style="display: block"/>"#,
+        &[("pic.webp", webp)],
+    );
+    assert_eq!(not_drawn(&doc), []);
+    let (matrix, _) = only_placement(&doc, 0);
+    assert_eq!((matrix[0], matrix[3]), points((13, 7)));
+}
+
+/// A lossless WebP whose bitstream breaks RFC 9649's rules is `Undecodable`
+/// — not the lossy file's "unsupported": the format is read, this file is not.
+#[test]
+fn a_lossless_webp_that_will_not_decode_is_undecodable() {
+    // The VP8L signature byte is 0x2f; this one says 0x2e.
+    let webp = b"RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2e\x00\x00\x00\x00\x00".to_vec();
+    let doc = open(r#"<p>a<img src="pic.webp"/>b</p>"#, &[("pic.webp", webp)]);
+    assert_eq!(not_drawn(&doc), [(ImageDefect::Undecodable, 1)]);
 }
 
 /// And a GIF whose bytes do not make an image is `Undecodable`, which is the

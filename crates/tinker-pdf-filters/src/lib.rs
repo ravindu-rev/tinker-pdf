@@ -61,6 +61,7 @@ mod qm;
 mod raster;
 mod runlength;
 mod tiff;
+mod webp;
 
 use core::fmt;
 
@@ -106,6 +107,7 @@ pub use tiff::{
     TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffSampleFormat,
     TiffSampleRange, TiffScan, MAX_TIFF_SAMPLES,
 };
+pub use webp::{webp_decode, WebpError, WebpImage, MAX_WEBP_SAMPLES};
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
 /// gigabytes, and a lenient decoder without a ceiling is a denial-of-service
@@ -416,6 +418,16 @@ pub enum Warning {
     /// GIF: the first image reaches past its logical screen, and the part
     /// outside it was clipped.
     GifFrameOutsideScreen,
+
+    // ---- WebP (RFC 9649) -------------------------------------------------
+    //
+    // Two leniencies; a cut-off stream reuses [`Warning::TruncatedInput`].
+    /// WebP: a back-reference reached before the image or past its end, or a
+    /// colour-cache index past the cache — data that is well formed and
+    /// impossible. The image stops there and the rest is transparent black.
+    WebpCorruptData,
+    /// WebP: an animation's frames after the first are not decoded.
+    WebpFramesIgnored,
 }
 
 impl Warning {
@@ -477,6 +489,8 @@ impl Warning {
             Self::GifPaletteIndexOutOfRange => "gif-palette-index-out-of-range",
             Self::GifFramesIgnored => "gif-frames-ignored",
             Self::GifFrameOutsideScreen => "gif-frame-outside-screen",
+            Self::WebpCorruptData => "webp-corrupt-data",
+            Self::WebpFramesIgnored => "webp-frames-ignored",
         }
     }
 }
@@ -536,6 +550,8 @@ impl fmt::Display for Warning {
             Self::GifPaletteIndexOutOfRange => "GIF pixel indexed past the end of its colour table",
             Self::GifFramesIgnored => "GIF images after the first are not decoded",
             Self::GifFrameOutsideScreen => "GIF image reaches past its logical screen, clipped",
+            Self::WebpCorruptData => "WebP pixel data refers outside the image; decode stopped",
+            Self::WebpFramesIgnored => "WebP animation frames after the first are not decoded",
         };
         f.write_str(s)
     }

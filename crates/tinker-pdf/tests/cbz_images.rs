@@ -1,5 +1,5 @@
-//! Comic pages in the formats that have no pass-through route — BMP and GIF —
-//! and the TIFF shapes the archive row added: CMYK, signed and floating-point
+//! Comic pages in the formats that have no pass-through route — BMP, GIF and
+//! WebP — and the TIFF shapes the archive row added: CMYK, signed and floating-point
 //! samples, JPEG 2000 strips and directories after the first.
 //!
 //! `tinker-pdf-filters/tests/image_fixtures.rs` holds each decoder to the
@@ -270,6 +270,65 @@ fn gif_pages_are_the_pictures_they_were_made_from() {
                 }
             })
         })
+        .collect();
+    assert_eq!(alpha, want);
+}
+
+/// Lossless WebP pages: the opaque one rendered to the recipe pixel for
+/// pixel, the one with alpha the recipe's colour over an `/SMask` of exactly
+/// the recipe's alpha, and an animation's first frame. A lossy WebP keeps its
+/// page number and names its format.
+#[test]
+fn lossless_webp_pages_are_the_pictures_they_were_made_from() {
+    let lossy = b"RIFF\x12\x00\x00\x00WEBPVP8 \x06\x00\x00\x00\x10\x02\x00\x9d\x01\x2a".to_vec();
+    let document = open(&[
+        ("p1.webp", fixture("webp/pillow-lossless-rgb-13x7.webp")),
+        ("p2.webp", fixture("webp/pillow-lossless-rgba-13x7.webp")),
+        (
+            "p3.webp",
+            fixture("webp/pillow-animated-lossless-13x7.webp"),
+        ),
+        ("p4.webp", lossy),
+    ]);
+    assert_eq!(document.page_count(), 4);
+    let report = document.archive().expect("a report");
+    for page in 0..3 {
+        assert_eq!(report.pages()[page].defect, None, "page {page}");
+    }
+    assert_eq!(
+        report.pages()[3].defect,
+        Some(PageDefect::UnsupportedFormat(cbz::ImageFormat::WebP))
+    );
+    let cos = document.cos();
+    for page in [0u32, 2] {
+        let bitmap = render(&document, page);
+        assert_eq!((bitmap.width, bitmap.height), (13, 7));
+        for y in 0..7 {
+            for x in 0..13 {
+                assert_eq!(
+                    rendered_rgb(&bitmap, x, y),
+                    recipe::rgb(x, y),
+                    "page {page} ({x}, {y})"
+                );
+            }
+        }
+        assert!(image_dict(&document, page as usize)
+            .get(cos.intern(b"SMask"))
+            .is_none());
+    }
+    let image = page_image(&document, 1);
+    let colour = cos.stream_decoded(image).expect("decodes");
+    let want: Vec<u8> = (0..7)
+        .flat_map(|y| (0..13).flat_map(move |x| recipe::rgb(x, y)))
+        .collect();
+    assert_eq!(colour, want);
+    let dict = image_dict(&document, 1);
+    let Some(Object::Ref(mask)) = dict.get(cos.intern(b"SMask")) else {
+        panic!("an /SMask reference");
+    };
+    let alpha = cos.stream_decoded(*mask).expect("decodes");
+    let want: Vec<u8> = (0..7)
+        .flat_map(|y| (0..13).map(move |x| recipe::alpha(x, y)))
         .collect();
     assert_eq!(alpha, want);
 }

@@ -78,6 +78,7 @@ pub mod trees;
 pub mod validate;
 pub mod viewer;
 pub mod warn;
+pub mod webp_embed;
 pub mod write;
 pub mod xref;
 
@@ -163,5 +164,6 @@ pub use viewer::{
     ReadingDirection, ViewerPreferences,
 };
 pub use warn::{Warning, WarningKind, WarningSink};
+pub use webp_embed::webp_image;
 pub use write::{Encryption, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 pub use xref::{Revision, XrefEntry, XrefTable};

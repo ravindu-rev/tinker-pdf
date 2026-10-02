@@ -1,6 +1,6 @@
 # Container images somebody else encoded
 
-The decoders the tier-4 archive row added — BMP and GIF — and the TIFF
+The decoders the tier-4 archive row added — BMP, GIF and WebP — and the TIFF
 decoder's additions from its TIFF row are held here to
 pictures this repository **authored** and a **third-party encoder** wrote.
 Ruling 13's rule for a lossless codec is that the expected output is the
@@ -25,6 +25,8 @@ the committed files are the record.
 | `bmpsuite/*.bmp` | **bmpsuite 2.8**, Jason Summers' generator, at [`jsummers/bmpsuite`](https://github.com/jsummers/bmpsuite) `555e43a` (2023-11-28) | `make` with gcc 13.3.0, then `make check`, which verified every generated file against upstream's own `checksums` | 26 September 2026 |
 | `gif/pillow-*.gif` | **Pillow 12.3.0** (`PIL.GifImagePlugin`) | `python3 make-images.py` | 26 September 2026 |
 | `gif/omggif-*.gif` | **omggif 1.0.10** (Dean McNamee, MIT, from npm), Node v22.22.2 | `npm install omggif@1.0.10`, then `node make-gif.js` | 26 September 2026 |
+| `webp/pillow-*.webp` | **Pillow 12.3.0** (`PIL.WebPImagePlugin`) over its bundled libwebp 1.6.0 | `python3 make-images.py` | 26 September 2026 |
+| `webp/imagecodecs-*.webp` | **imagecodecs 2026.3.6** (`imagecodecs.webp_encode`) over libwebp 1.6.0 | the same script | 26 September 2026 |
 | `tiff/tifffile-*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib; JPEG 2000 through OpenJPEG 2.5.4, `level=0`, lossless) | `python3 make-images.py` | 26 September 2026 |
 
 Pillow's BMP writer produces `BITMAPINFOHEADER`, `BI_RGB`, bottom-up files at
@@ -61,6 +63,21 @@ float sample's expected intensity is the recipe through the mapping
 `tiff.rs`'s module note states, recomputed in the test. For the lossless JPEG
 2000 files the expected answer is the generator's input, as for every other
 file here.
+
+Every WebP here is **lossless**, so the expected answer is the recipe,
+exactly. Pillow writes RGB; RGBA with `exact=True`, which keeps the colour
+under a fully transparent pixel where libwebp would otherwise rewrite it;
+method 6 at quality 100, libwebp's exhaustive search, at 96 x 64 so the
+transforms have blocks to differ across; two, four and sixteen colours, the
+colour-indexing transform at each of its three bundling widths; a 160 x 96
+picture of repeated tiles beside hash noise (`mixed`), so back-references,
+the colour cache and literals all carry pixels; a 64 x 32 picture whose
+every pixel is its top-right neighbour (`diagonal`), so libwebp picks the
+top-right predictor in the last column too, where §3.5.1 makes that
+neighbour the first pixel of the row being predicted; and a two-frame
+animation.
+imagecodecs writes RGBA through a second binding. The tests that claim a
+transform read the VP8L header bits that say the fixture has one.
 
 ## bmpsuite, and what it can prove
 

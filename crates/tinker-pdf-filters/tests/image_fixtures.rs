@@ -19,9 +19,9 @@
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
-    bmp_decode, gif_decode, tiff_decode, tiff_scan, tiff_scan_directory, BmpError, BmpImage,
-    GifError, GifImage, ImagePixels, Limits, TiffColour, TiffCompression, TiffImage, TiffLayout,
-    TiffSampleFormat, Warning,
+    bmp_decode, gif_decode, tiff_decode, tiff_scan, tiff_scan_directory, webp_decode, BmpError,
+    BmpImage, GifError, GifImage, ImagePixels, Limits, TiffColour, TiffCompression, TiffImage,
+    TiffLayout, TiffSampleFormat, Warning, WebpError, WebpImage,
 };
 
 const CAP: Limits = Limits::new(1 << 24);
@@ -58,6 +58,27 @@ mod recipe {
 
     pub fn bit(x: u32, y: u32) -> bool {
         (x + y) % 3 == 0
+    }
+
+    pub fn noise(x: u32, y: u32, k: u32) -> u8 {
+        let h =
+            (u64::from(x) * 73_856_093) ^ (u64::from(y) * 19_349_663) ^ (u64::from(k) * 83_492_791);
+        ((h % (1 << 32)) >> 13 & 255) as u8
+    }
+
+    /// Tiles of the recipe repeated (back-references) beside noise (literals).
+    pub fn mixed(x: u32, y: u32) -> [u8; 3] {
+        if (x / 8 + y / 8) % 2 == 0 {
+            rgb(x % 8, y % 8)
+        } else {
+            [noise(x, y, 1), noise(x, y, 2), noise(x, y, 3)]
+        }
+    }
+
+    /// Noise constant along each anti-diagonal: every pixel is its top-right
+    /// neighbour.
+    pub fn diagonal(x: u32, y: u32) -> [u8; 3] {
+        [noise(x + y, 0, 1), noise(x + y, 0, 2), noise(x + y, 0, 3)]
     }
 }
 
@@ -703,4 +724,173 @@ fn every_directory_of_a_multipage_tiff_is_its_own_picture() {
         each(7, 4, |x, y| vec![recipe::grey(x * 2, y * 2)])
     );
     assert_eq!(scans[3].decode(&CAP).expect("decodes").data, inverted);
+}
+
+// ---- WebP lossless: authored pixels, libwebp through two bindings -------------
+
+fn webp(name: &str) -> WebpImage {
+    let img = webp_decode(&read("webp", name), &CAP).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert!(
+        img.complete,
+        "{name} decoded incomplete: {:?}",
+        img.warnings
+    );
+    img
+}
+
+/// The leading VP8L transforms a file uses, read from its own header bits —
+/// RFC 9649 §3.5 — so a test can say what its fixture exercises.
+fn vp8l_transforms(bytes: &[u8]) -> Vec<u32> {
+    let at = bytes
+        .windows(4)
+        .position(|w| w == b"VP8L")
+        .expect("a VP8L chunk");
+    let stream = &bytes[at + 8..];
+    assert_eq!(stream[0], 0x2f);
+    let mut bit = 8u32 + 14 + 14 + 1 + 3;
+    let read = |bit: &mut u32, n: u32| {
+        let mut v = 0u32;
+        for i in 0..n {
+            let b = *bit + i;
+            v |= u32::from((stream[(b / 8) as usize] >> (b % 8)) & 1) << i;
+        }
+        *bit += n;
+        v
+    };
+    let mut kinds = Vec::new();
+    // A transform's type is readable without decoding anything until the
+    // first one that carries data; subtract-green (2) carries none, so the
+    // walk goes on past it and stops at any other.
+    while read(&mut bit, 1) == 1 {
+        let kind = read(&mut bit, 2);
+        kinds.push(kind);
+        if kind != 2 {
+            break;
+        }
+    }
+    kinds
+}
+
+#[test]
+fn lossless_webps_decode_to_the_pixels_they_were_made_from() {
+    let img = webp("pillow-lossless-rgb-13x7.webp");
+    assert!(
+        matches!(img.pixels, ImagePixels::Rgb(_)),
+        "opaque comes back RGB"
+    );
+    assert_picture("RGB", 13, 7, &img.pixels, |x, y| {
+        let [r, g, b] = recipe::rgb(x, y);
+        [r, g, b, 255]
+    });
+    for name in [
+        "pillow-lossless-rgba-13x7.webp",
+        "imagecodecs-lossless-rgba-13x7.webp",
+    ] {
+        let img = webp(name);
+        assert!(matches!(img.pixels, ImagePixels::Rgba(_)), "{name}");
+        assert_picture(name, 13, 7, &img.pixels, |x, y| {
+            let [r, g, b] = recipe::rgb(x, y);
+            [r, g, b, recipe::alpha(x, y)]
+        });
+    }
+}
+
+/// libwebp's method 6 at quality 100 tries every transform; the header says
+/// the fixture carries at least one, and the picture is still the recipe.
+#[test]
+fn every_transform_libwebp_chose_is_undone_exactly() {
+    for (name, alpha) in [
+        ("pillow-lossless-m6-96x64.webp", false),
+        ("pillow-lossless-rgba-m6-96x64.webp", true),
+    ] {
+        let bytes = read("webp", name);
+        assert!(
+            !vp8l_transforms(&bytes).is_empty(),
+            "{name} uses a transform"
+        );
+        let img = webp(name);
+        assert_eq!((img.width, img.height), (96, 64));
+        assert_picture(name, 96, 64, &img.pixels, |x, y| {
+            let [r, g, b] = recipe::rgb(x, y);
+            [r, g, b, if alpha { recipe::alpha(x, y) } else { 255 }]
+        });
+    }
+}
+
+/// Repeated tiles beside noise: back-references, the colour cache and
+/// literals all carry pixels here, and every one lands. Counted when the file
+/// was committed, by a decoder instrumented for the purpose: a 10-bit colour
+/// cache, three prefix-code groups chosen block by block by a meta prefix
+/// image, and 2 416 literals, 1 371 back-references and 4 304 cache hits.
+#[test]
+fn back_references_and_the_colour_cache_reproduce_the_picture() {
+    let img = webp("pillow-lossless-mixed-160x96.webp");
+    assert_picture("mixed", 160, 96, &img.pixels, |x, y| {
+        let [r, g, b] = recipe::mixed(x, y);
+        [r, g, b, recipe::alpha(x, y) | 1]
+    });
+}
+
+/// Every pixel is its top-right neighbour, so libwebp chooses the top-right
+/// predictor (mode 3) — and, counted when the file was committed, chooses it
+/// in the last column on all 31 rows that are predicted, where §3.5.1 makes
+/// the top-right pixel "the leftmost pixel on the current row" rather than
+/// anything above. A decoder that reached up there instead is wrong on every
+/// row of the right edge.
+#[test]
+fn the_top_right_of_the_last_column_is_the_first_pixel_of_its_own_row() {
+    let name = "pillow-lossless-diagonal-64x32.webp";
+    assert!(
+        vp8l_transforms(&read("webp", name)).contains(&0),
+        "{name} predicts"
+    );
+    let img = webp(name);
+    assert_picture(name, 64, 32, &img.pixels, |x, y| {
+        let [r, g, b] = recipe::diagonal(x, y);
+        [r, g, b, 255]
+    });
+}
+
+/// Two, four and sixteen colours: the colour-indexing transform at each of
+/// its bundling widths — the header says transform 3 is there.
+#[test]
+fn the_colour_indexing_transform_unbundles_at_every_width() {
+    for (n, w, h) in [(2u32, 21u32, 5u32), (4, 13, 7), (16, 21, 9)] {
+        let name = format!("pillow-lossless-{n}colour-{w}x{h}.webp");
+        let bytes = read("webp", &name);
+        assert_eq!(
+            vp8l_transforms(&bytes).first(),
+            Some(&3),
+            "{name} indexes colours"
+        );
+        let img = webp(&name);
+        assert_picture(&name, w, h, &img.pixels, |x, y| {
+            let [r, g, b] = recipe::palette(recipe::index(x, y, n));
+            [r, g, b, 255]
+        });
+    }
+}
+
+/// An animation is its first frame on the `VP8X` canvas, and says so.
+#[test]
+fn an_animated_webp_is_its_first_frame() {
+    let bytes = read("webp", "pillow-animated-lossless-13x7.webp");
+    assert!(
+        bytes.windows(4).any(|w| w == b"ANMF"),
+        "the fixture animates"
+    );
+    let img = webp("pillow-animated-lossless-13x7.webp");
+    assert!(img.warnings.contains(&Warning::WebpFramesIgnored));
+    assert_picture("first frame", 13, 7, &img.pixels, |x, y| {
+        let [r, g, b] = recipe::rgb(x, y);
+        [r, g, b, 255]
+    });
+}
+
+#[test]
+fn a_file_that_is_not_a_webp_is_refused_by_name() {
+    assert_eq!(
+        webp_decode(&read("gif", "pillow-palette-13x7.gif"), &CAP),
+        Err(WebpError::NotWebp)
+    );
 }

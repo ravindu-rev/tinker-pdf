@@ -36,7 +36,7 @@
 
 use std::cell::RefCell;
 
-use tinker_pdf_cos::{gif_image, png_image};
+use tinker_pdf_cos::{gif_image, png_image, webp_image};
 use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, StyleTree};
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
@@ -46,7 +46,7 @@ use tinker_pdf_css::selector::PseudoElement;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
 };
-use tinker_pdf_filters::Limits as FilterLimits;
+use tinker_pdf_filters::{Limits as FilterLimits, WebpError};
 use tinker_pdf_layout::{BoxNode, CellSpan, Content, Intrinsic};
 use tinker_pdf_zip::limits as zip_limits;
 
@@ -477,14 +477,15 @@ pub struct Picture {
 /// The same routes `cbz.rs` takes and for its reasons: a JPEG is placed
 /// verbatim because re-encoding is generational loss the caller cannot undo,
 /// a PNG goes through the reader that decides between passing its `IDAT`
-/// through and decoding it, and a GIF — which no `/Filter` reads — is decoded
-/// and kept `/Indexed`.
+/// through and decoding it, a GIF — which no `/Filter` reads — is decoded
+/// and kept `/Indexed`, and a lossless WebP is decoded to RGB or RGBA.
 pub enum PictureData {
     /// A JPEG, placed as its own bytes.
     Jpeg(Vec<u8>),
     /// A PNG, read into whatever `tinker-pdf-cos` decided to write.
     Png(Box<tinker_pdf_cos::PngImageData>),
-    /// A GIF's first image, decoded and arranged by `tinker-pdf-cos`.
+    /// A GIF's first image or a WebP's picture, decoded and arranged by
+    /// `tinker-pdf-cos`.
     Raster(Box<tinker_pdf_cos::RasterImageData>),
 }
 
@@ -626,6 +627,20 @@ fn picture(
             Ok((
                 (f64::from(gif.width()), f64::from(gif.height())),
                 PictureData::Raster(Box::new(gif)),
+            ))
+        }
+        // The fourth core media type, the same way. A lossy WebP is a format
+        // this build does not read, which is not the same sentence as a file
+        // that would not decode.
+        ImageFormat::WebP => {
+            let webp = webp_image(bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+                .map_err(|e| match e {
+                    WebpError::LossyNotRead => ImageDefect::UnsupportedFormat(ImageFormat::WebP),
+                    _ => ImageDefect::Undecodable,
+                })?;
+            Ok((
+                (f64::from(webp.width()), f64::from(webp.height())),
+                PictureData::Raster(Box::new(webp)),
             ))
         }
         other => Err(ImageDefect::UnsupportedFormat(other)),
