@@ -193,13 +193,18 @@
 //! [`view`](tinker_pdf_cos::DocumentEditor::view), where the copies resolve,
 //! so a glyph drawn only in a copy stays in the program.
 //!
-//! Two kinds of form still go the old way — every placement's cut in the one
-//! stream, named by [`RedactionWarning::RepeatedForm`] when that was wider
-//! than a placement asked for — and everything they draw goes with them
-//! ([`settle`] says why): a form that draws itself, directly or through
+//! Three kinds of form still go the old way — every placement's cut in the
+//! one stream, named by [`RedactionWarning::RepeatedForm`] when that was
+//! wider than a placement asked for — and everything they draw goes with
+//! them ([`settle`] says why): a form that draws itself, directly or through
 //! another, where a copy per placement would be a copy per round of a
-//! recursion; and a form with a placement past [`MAX_PLACEMENTS`], which was
-//! never measured, so no copy could say what it should hold.
+//! recursion; a form with a placement past [`MAX_PLACEMENTS`], which was
+//! never measured, so no copy could say what it should hold; and a form
+//! whose next distinct cut would take what the walk holds past
+//! [`MAX_FORM_COPY_BYTES`], which bounds the copies (ruling 1) — until
+//! October 2026 every distinct cut of every form was held to the end of the
+//! walk and cloned into the editor, up to [`MAX_PLACEMENTS`] copies of a
+//! stream as long as the decoder allows.
 //!
 //! The same guard covered images, with the same hole: an image drawn twice
 //! and covered only at its second placement was left whole and reported
@@ -517,9 +522,10 @@ pub enum RedactionWarning {
     ///
     /// A form is ordinarily cut exactly: each placement that cuts differently
     /// draws a copy of the form cut in its own frame, and this is not raised
-    /// (the module's "A form drawn twice"). Two kinds go the old way instead,
-    /// with everything they draw: a form that draws itself, directly or
-    /// through another, and one with a placement past [`MAX_PLACEMENTS`].
+    /// (the module's "A form drawn twice"). Three kinds go the old way
+    /// instead, with everything they draw: a form that draws itself, directly
+    /// or through another, one with a placement past [`MAX_PLACEMENTS`], and
+    /// one whose copies would take the walk past [`MAX_FORM_COPY_BYTES`].
     /// Every placement of such a form is still measured against the
     /// rectangles — a glyph under a rectangle at any of them is removed,
     /// which is what keeps a second placement from leaking — but the removal
@@ -738,6 +744,47 @@ const MAX_WARNINGS: usize = 64;
 /// use is removed as covered ([`draws_under`]) and named
 /// ([`RedactionWarning::UnboundedProcedure`]).
 pub const MAX_PLACEMENTS: usize = 64;
+
+/// How many bytes of cut form content one redaction holds before it writes
+/// any.
+///
+/// [`Walk`] measures every placement of a form against the form as it was,
+/// and keeps each distinct outcome until [`settle`] has decided which
+/// placements share a stream; [`decide`] then writes each — a copy of the
+/// form for every placement cut differently. That is up to
+/// [`MAX_PLACEMENTS`] copies of a stream that may be
+/// `MAX_DECODED_STREAM` (128 MiB) long, held in the walk and again in the
+/// editor, for every form on the page: a deflate-bombed 128 MiB form placed
+/// at 64 offsets under one rectangle asked for about 8 GiB of each from a
+/// file of a few hundred kilobytes (the review of lane 3B, October 2026).
+/// So the walk spends one budget on every cut it holds, and a form whose
+/// next distinct cut the budget cannot pay for lets its cuts go and is cut
+/// the old way ([`union`]) — every placement's cut in its one stream, in
+/// place, a transient buffer at a time — with
+/// [`RedactionWarning::RepeatedForm`] naming the widened cut when it has
+/// two placements or more. Nothing a rectangle covers survives either way;
+/// what the cap costs is exactness, and it is said.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 32 MiB |
+/// | The most any other fixture spends — the firing test's exact half included — measured over every redaction test on 2 October 2026 | 92 920 |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **32 MiB** |
+///
+/// The three zeros are facts about the paths: none of the container formats
+/// redacts. A page's forms are kilobytes in the ordinary case, and one that
+/// is not — a page imported as a form, a map — goes over the budget only
+/// when it is placed several times and cut differently at each, and is then
+/// cut in place, which is what happened to every form drawn twice until
+/// September 2026. `a_walk_past_its_copy_budget_cuts_the_form_in_place`
+/// builds a form of a mebibyte placed forty times, each placement cut at a
+/// different glyph, and is what fires it; `the_copy_budget_is_held_to_the_cut`
+/// holds forty cuts of the budget's fortieth and refuses forty of a byte
+/// more, at the fortieth.
+pub const MAX_FORM_COPY_BYTES: usize = 32 << 20;
 
 /// Records a warning, merging it into one with the same cause and resource.
 fn note(warnings: &mut Vec<RedactionWarning>, warning: RedactionWarning) {
@@ -1549,6 +1596,10 @@ struct FormEntry {
     /// A placement was refused because [`MAX_PLACEMENTS`] was reached, so at
     /// least one `Do` of it was measured against nothing.
     refused: bool,
+    /// A distinct cut of it would have taken what the walk holds past
+    /// [`MAX_FORM_COPY_BYTES`], so its cuts were let go and it is cut the
+    /// old way ([`union`]), from `content`.
+    over_budget: bool,
 }
 
 /// One outcome of cutting a form's content.
@@ -1613,6 +1664,9 @@ struct Walk {
     /// Images already scrubbed, so one image is reported once however many
     /// placements asked for it.
     scrubbed: HashSet<u32>,
+    /// The bytes of every cut held in [`FormEntry::cuts`], against
+    /// [`MAX_FORM_COPY_BYTES`].
+    held: usize,
 }
 
 impl Walk {
@@ -1714,6 +1768,7 @@ impl Walk {
                     cuts: Vec::new(),
                     nodes: Vec::new(),
                     refused: false,
+                    over_budget: false,
                 });
                 self.by_number.insert(reference.num, index);
                 index
@@ -1763,9 +1818,21 @@ impl Walk {
             areas,
             &mut report.warnings,
         );
+        // A form over budget holds no cuts: it is cut the old way, from its
+        // content, once every placement is known, and no placement of it
+        // reads a cut.
         let cut = match entry.cuts.iter().position(|c| c.data == data) {
             Some(index) => index,
+            None if entry.over_budget => 0,
+            None if self.held.saturating_add(data.len()) > MAX_FORM_COPY_BYTES => {
+                let freed: usize = entry.cuts.iter().map(|c| c.data.len()).sum();
+                self.held = self.held.saturating_sub(freed);
+                entry.cuts = Vec::new();
+                entry.over_budget = true;
+                0
+            }
             None => {
+                self.held = self.held.saturating_add(data.len());
                 entry.cuts.push(FormCut {
                     data,
                     names: inner_uses.iter().map(|u| u.at.clone()).collect(),
@@ -1856,7 +1923,8 @@ type Outcome = (usize, Vec<(usize, ObjRef)>);
 /// whose `Do` must point at a child's copy is itself a different outcome. A
 /// form this cannot order that way — one that draws itself, directly or
 /// through another, or draws one that does — or one with a placement past
-/// [`MAX_PLACEMENTS`] is cut the old way instead, and so is everything it
+/// [`MAX_PLACEMENTS`], or one whose cuts went over [`MAX_FORM_COPY_BYTES`],
+/// is cut the old way instead, and so is everything it
 /// draws: every placement's cut in the one stream, and
 /// [`RedactionWarning::RepeatedForm`] naming it when that was wider than a
 /// placement asked for or when a placement went unmeasured ([`union`]). A
@@ -1886,7 +1954,11 @@ fn settle(
         }
     }
 
-    let mut old_way: Vec<bool> = walk.forms.iter().map(|f| f.refused).collect();
+    let mut old_way: Vec<bool> = walk
+        .forms
+        .iter()
+        .map(|f| f.refused || f.over_budget)
+        .collect();
     close_downward(&mut old_way, &kids);
 
     // Children first (Kahn's algorithm over the forms still cut exactly).
@@ -2285,8 +2357,10 @@ impl Scan<'_> {
 
 /// Cuts a form the old way: every placement's cut in its one stream.
 ///
-/// For a form that draws itself, and for one with a placement past
-/// [`MAX_PLACEMENTS`] — and everything either draws ([`settle`] says why).
+/// For a form that draws itself, for one with a placement past
+/// [`MAX_PLACEMENTS`], and for one whose cuts went over
+/// [`MAX_FORM_COPY_BYTES`] — and everything any of them draws ([`settle`]
+/// says why).
 /// Overwritten in place, for the same reason the page's content is: a freshly
 /// allocated object would leave the original text in the file, unreferenced
 /// and perfectly readable.
@@ -5266,6 +5340,166 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             }],
             "the count saturates at the cap rather than reporting {placements}"
         );
+    }
+
+    /// A form, as object `number`, showing `glyphs` boxed glyphs one point
+    /// wide along y 50 — glyph `j` at x `j` — and then an inline image of
+    /// `filler` samples well clear of any rectangle near the origin, which
+    /// every cut carries back whole: so each cut is as large as `filler`
+    /// says.
+    fn wide_form(number: u32, glyphs: usize, filler: usize) -> Vec<u8> {
+        let mut form = Vec::new();
+        for j in 0..glyphs {
+            form.extend_from_slice(format!("BT /F0 1 Tf {j} 50 Td (A) Tj ET\n").as_bytes());
+        }
+        form.extend_from_slice(
+            format!("q 1 0 0 1 190 190 cm BI /W {filler} /H 1 /CS /G /BPC 8 ID ").as_bytes(),
+        );
+        form.extend(std::iter::repeat_n(0u8, filler));
+        form.extend_from_slice(b" EI Q");
+        let mut out = format!(
+            "{number} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [-50 0 250 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Length {} >>\nstream\n",
+            form.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(&form);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out
+    }
+
+    /// A page drawing `/Fm0` `placements` times, placement `i` moved `i`
+    /// points left, so a rectangle over x 0.25..0.75 covers the form's glyph
+    /// `i` at placement `i` and no other: as many distinct cuts as
+    /// placements, of `filler` bytes or so each ([`wide_form`]), and every
+    /// one the same length. With `second`, the page then draws `/Fm1` — two
+    /// glyphs and that many samples — twice, cut at a different glyph at
+    /// each.
+    fn forty_cuts(placements: usize, filler: usize, second: Option<usize>) -> (Vec<u8>, Redaction) {
+        let mut page: String = (0..placements)
+            .map(|i| format!("q 1 0 0 1 -{i} 0 cm /Fm0 Do Q\n"))
+            .collect();
+        if second.is_some() {
+            page.push_str("/Fm1 Do q 1 0 0 1 -1 0 cm /Fm1 Do Q\n");
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+              /Resources << /Font << /F0 4 0 R >> /XObject << /Fm0 8 0 R /Fm1 9 0 R >> >>\n\
+              /Contents 7 0 R >>\nendobj\n",
+        );
+        out.extend_from_slice(
+            super::tests_support::boxed_font(4, super::tests_support::DEFAULT_FONT_MATRIX)
+                .as_bytes(),
+        );
+        out.extend_from_slice(
+            super::tests_support::stream_object(5, super::tests_support::BOX_PROCEDURE).as_bytes(),
+        );
+        out.extend_from_slice(super::tests_support::stream_object(7, &page).as_bytes());
+        out.extend_from_slice(&wide_form(8, 40, filler));
+        if let Some(filler) = second {
+            out.extend_from_slice(&wide_form(9, 2, filler));
+        }
+        out.extend_from_slice(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n");
+
+        let over = Redaction {
+            area: Rect {
+                x0: 0.25,
+                y0: 49.5,
+                x1: 0.75,
+                y1: 51.5,
+            },
+            mark: false,
+        };
+        (out, over)
+    }
+
+    /// [`MAX_FORM_COPY_BYTES`] fires: forty cuts of a mebibyte each are more
+    /// than a redaction holds, so the form lets its cuts go and is cut in
+    /// place, every placement's glyph gone from the one stream and the
+    /// widened cut named. What it let go is given back: `/Fm1`, drawn after
+    /// it with two cuts of three quarters of a mebibyte, is still cut
+    /// exactly, a copy for its second placement. Below the budget the first
+    /// page is cut exactly too, a copy per placement, and nothing is named.
+    ///
+    /// Until October 2026 there was no budget: every distinct cut of every
+    /// form was held to the end of the walk and cloned into the editor, up
+    /// to [`MAX_PLACEMENTS`] copies of a stream as long as the decoder
+    /// allows.
+    #[test]
+    fn a_walk_past_its_copy_budget_cuts_the_form_in_place() {
+        let (bytes, over) = forty_cuts(40, 1 << 20, Some(768 << 10));
+        let (after, report) = redact(open_arc(bytes), &[over]);
+        assert_eq!(report.glyphs, 42, "glyph i at placement i, forty-two times");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"Fm0".to_vec(),
+                placements: 40,
+            }]
+        );
+        let doc = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            super::tests_support::forms_in(&doc),
+            3,
+            "/Fm0 cut in place, /Fm1 and its copy"
+        );
+
+        let (bytes, over) = forty_cuts(40, 1 << 10, None);
+        let (after, report) = redact(open_arc(bytes), &[over]);
+        assert_eq!(report.glyphs, 40);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let doc = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            super::tests_support::forms_in(&doc),
+            40,
+            "a copy per placement"
+        );
+    }
+
+    /// The budget is held to the cut: forty cuts that fit in
+    /// [`MAX_FORM_COPY_BYTES`] are cut exactly, and forty that pass it by
+    /// less than one cut are not — the fortieth is the one it cannot pay
+    /// for, and is refused before it is held rather than after.
+    ///
+    /// Every cut of [`forty_cuts`] is the same length, `filler` plus what
+    /// the forty glyph runs rewrite to, and that overhead is measured here
+    /// rather than assumed: one placement's cut, written back in place, is
+    /// one cut. The probe's filler has as many digits as the two below, so
+    /// `/W` writes the same width in all three.
+    #[test]
+    fn the_copy_budget_is_held_to_the_cut() {
+        let probe = 500_000;
+        let (bytes, over) = forty_cuts(1, probe, None);
+        let (after, _) = redact(open_arc(bytes), &[over]);
+        let doc = CosDocument::open(after).expect("it reopens");
+        let cut = doc
+            .stream_decoded(ObjRef::new(8, 0))
+            .expect("the form decodes")
+            .len();
+        let overhead = cut - probe;
+
+        // Forty cuts of exactly the budget's fortieth, and forty of one byte
+        // more than its fortieth: the first fits, the second passes it in
+        // its fortieth cut and in nothing before.
+        let fits = MAX_FORM_COPY_BYTES / 40;
+        let passes = MAX_FORM_COPY_BYTES / 40 + 1;
+        assert!(39 * passes <= MAX_FORM_COPY_BYTES && 40 * passes > MAX_FORM_COPY_BYTES);
+        for (each, named) in [(fits, false), (passes, true)] {
+            let (bytes, over) = forty_cuts(40, each - overhead, None);
+            let (_, report) = redact(open_arc(bytes), &[over]);
+            assert_eq!(report.glyphs, 40);
+            assert_eq!(
+                !report.warnings.is_empty(),
+                named,
+                "cuts of {each} bytes: {:?}",
+                report.warnings
+            );
+        }
     }
 
     /// An image under a redaction is scrubbed, not covered. A rectangle

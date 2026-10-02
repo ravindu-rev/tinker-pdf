@@ -1,5 +1,16 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 2 October 2026, the review of the redaction row.* **One more
+//! row, `MAX_FORM_COPY_BYTES`, the third cap on copies.** A redaction
+//! measures every placement of a form before it writes any, and kept every
+//! distinct cut of every form — a whole copy of the form's content each, up
+//! to `MAX_PLACEMENTS` of them — until the walk ended, then cloned each into
+//! the editor. A deflate-bombed 128 MiB form placed at 64 offsets under one
+//! rectangle asked for about 8 GiB twice over, from a file of a few hundred
+//! kilobytes. Its `fixtures` is the cap, for `MAX_ANNOTATION_BYTES`'s
+//! reason, and its three yardsticks are zeros, because none of the
+//! container paths redacts.
+//!
 //! *Amended, 2 October 2026, the review of the form data exchange row.* **One
 //! more row, `MAX_FORM_DATA_BYTES`, the second cap on copies.** The FDF and
 //! XFDF readers hand back qualified names, values and warnings, and each of
@@ -435,6 +446,7 @@ use tinker_pdf::epub::{
     MAX_EPUB_FALLBACK_DEPTH, MAX_EPUB_MANIFEST_ITEMS, MAX_EPUB_SPINE_ITEMS, MAX_OCF_PATH_LEN,
 };
 use tinker_pdf::form_data::MAX_FORM_DATA_BYTES;
+use tinker_pdf::redact::MAX_FORM_COPY_BYTES;
 use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
@@ -490,6 +502,7 @@ const INLINE_IMAGE_TESTS: &str = include_str!("inline_images.rs");
 /// The annotation payloads' copy budget: declared beside the payload readers
 /// that spend it, and fired by a test beside the listing that owns the budget.
 const ANNOTATION_PAYLOADS: &str = include_str!("../src/annotations/payload.rs");
+const REDACT: &str = include_str!("../src/redact.rs");
 const ANNOTATION_TESTS: &str = include_str!("../src/annotations.rs");
 /// The form data readers' copy budget, declared beside the two readers that
 /// spend it, and fired by the exchange row's own suite.
@@ -1965,6 +1978,28 @@ fn ledger() -> Vec<Bound> {
                 FORM_DATA_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_FORM_COPY_BYTES",
+            cap: MAX_FORM_COPY_BYTES as u128,
+            published: "32 MiB",
+            // The cap, for `MAX_ANNOTATION_BYTES`'s reason: the test that
+            // fires it holds forty cuts of a mebibyte each and lets them go
+            // at the one that would pass it. Every other redaction fixture,
+            // measured over all of them on 2 October 2026, holds at most
+            // 92 920 bytes of cuts — the firing test's own exact half.
+            fixtures: MAX_FORM_COPY_BYTES as u128,
+            // None of the three container paths redacts.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // One form may be placed `MAX_PLACEMENTS` times, each cut
+            // differently, and each cut is as long as the form's content,
+            // which one decode may make `MAX_DECODED_STREAM` long.
+            reachable: 64 * (128u128 << 20),
+            reachable_because: "64 placements of one form cut differently, each cut 128 MiB",
+            declared_in: REDACT,
+            fires_in: ("a_walk_past_its_copy_budget_cuts_the_form_in_place", REDACT),
+        },
     ]
 }
 
@@ -1981,7 +2016,8 @@ fn ledger() -> Vec<Bound> {
 /// code tables add `MAX_JBIG2_TABLE_LINES`; and the `jbig2` fuzz row adds
 /// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`; and the annotation payloads row adds
 /// `MAX_ANNOTATION_BYTES`; and the review of the form data exchange row adds
-/// `MAX_FORM_DATA_BYTES`. All **forty-six** are here, and
+/// `MAX_FORM_DATA_BYTES`; and the review of the redaction row adds
+/// `MAX_FORM_COPY_BYTES`. All **forty-seven** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2035,6 +2071,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_DECODED_STREAM",
             "MAX_ANNOTATION_BYTES",
             "MAX_FORM_DATA_BYTES",
+            "MAX_FORM_COPY_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2140,7 +2177,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 46, "the ledger is forty-six rows");
+    assert_eq!(measured, 47, "the ledger is forty-seven rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2172,7 +2209,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 46, "the ledger is forty-six rows");
+    assert_eq!(ledger().len(), 47, "the ledger is forty-seven rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
