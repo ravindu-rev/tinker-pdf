@@ -24,7 +24,10 @@
 
 use crate::build::{archive, Damage, File};
 use crate::limits::{MAX_ZIP_ENTRIES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_NAME_LEN};
-use crate::{Archive, ArchiveError, Coded, EntryError, Limits, Method, Route, Warning};
+use crate::{
+    Archive, ArchiveError, Coded, EntryError, Limits, Method, MethodFeature, Route, Warning, BZIP2,
+    ZSTANDARD,
+};
 
 /// A shorthand: open with the shipped bounds.
 fn open(bytes: &[u8]) -> Result<Archive<'_>, ArchiveError> {
@@ -1068,6 +1071,33 @@ fn what_the_decoder_returns_is_held_to_the_archive_s_own_checks() {
         Err(EntryError::Corrupt)
     );
     assert_eq!(a.inflated(), 14, "a decode that failed was still permitted");
+}
+
+/// **A feature a decoder refuses by name is not damage, and does not say it
+/// is** (review of lane 5A): it travels through as itself, and its sentence
+/// names the feature, where [`EntryError::Corrupt`]'s is about a deflate
+/// stream.
+#[test]
+fn a_feature_refused_by_name_says_which_and_not_that_the_entry_is_broken() {
+    let zip = lzma_archive(b"the right page", lzma_payload(b"\0"));
+    let mut a = open(&zip).unwrap();
+    let refused = EntryError::UnsupportedFeature(MethodFeature::ZstandardDictionary);
+    assert_eq!(a.read_with(0, |_| Err(refused)), Err(refused));
+    assert_eq!(
+        refused.to_string(),
+        "a Zstandard frame that names a dictionary, which is not read here"
+    );
+    assert_eq!(
+        EntryError::UnsupportedFeature(MethodFeature::Bzip2Randomised).to_string(),
+        "a randomised bzip2 block, which is not read here"
+    );
+    assert_eq!(
+        (
+            MethodFeature::ZstandardDictionary.method(),
+            MethodFeature::Bzip2Randomised.method()
+        ),
+        (ZSTANDARD, BZIP2)
+    );
 }
 
 #[test]

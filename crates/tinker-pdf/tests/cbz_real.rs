@@ -777,6 +777,89 @@ fn a_damaged_lzma_header_is_a_placeholder_page_naming_it() {
     );
 }
 
+/// Where `name`'s data begins in a ZIP: its local header, read the way
+/// APPNOTE 4.3.7 lays it out, past the name and the extra field.
+fn entry_data_at(bytes: &[u8], name: &str) -> usize {
+    let archive = Archive::open(bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+    let entry = archive
+        .entries()
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("{name}"))
+        .clone();
+    let header = entry.header_offset as usize;
+    let name_len = u16::from_le_bytes([bytes[header + 26], bytes[header + 27]]) as usize;
+    let extra_len = u16::from_le_bytes([bytes[header + 28], bytes[header + 29]]) as usize;
+    header + 30 + name_len + extra_len
+}
+
+/// **A feature refused by name is a placeholder naming it, not a broken
+/// stream** (review of lane 5A).
+///
+/// The committed archives with one bit changed in `page3.jpg`'s stream: in
+/// `python-zstd.cbz` the frame header's `Dictionary_ID_flag` (RFC 8878
+/// §3.1.1.1.1.6) goes from 0 to 1, so the byte after it — the content size,
+/// 169 — names dictionary 169; in `python-bzip2.cbz` the first block's
+/// randomised bit, the bit after its CRC, is set. Each page is refused naming
+/// the feature, where before both were `ZipEntryError::Corrupt`, whose
+/// sentence is "the deflate stream is structurally invalid" — a host told an
+/// entry that may be well formed that it is broken, and broken as the wrong
+/// format.
+#[test]
+fn a_feature_refused_by_name_is_a_placeholder_naming_it() {
+    let cases = [
+        (
+            "python-zstd.cbz",
+            4,
+            (0x24, 0x25),
+            cbz::ZipMethodFeature::ZstandardDictionary,
+        ),
+        (
+            "python-bzip2.cbz",
+            14,
+            (0x00, 0x80),
+            cbz::ZipMethodFeature::Bzip2Randomised,
+        ),
+    ];
+    for (name, offset, (was, now), feature) in cases {
+        let mut bytes = read(name);
+        let at = entry_data_at(&bytes, "page3.jpg") + offset;
+        assert_eq!(bytes[at], was, "{name}: the byte its writer wrote");
+        bytes[at] = now;
+
+        let document = Document::open(bytes).expect("four pages are still a comic");
+        let report = document.archive().expect("a synthesised document");
+        let refused =
+            cbz::PageDefect::EntryRefused(cbz::ZipEntryError::UnsupportedFeature(feature));
+        let defects: Vec<(&str, Option<cbz::PageDefect>)> = report
+            .pages()
+            .iter()
+            .map(|p| (p.name.as_str(), p.defect))
+            .collect();
+        assert_eq!(
+            defects,
+            [
+                ("page1.png", None),
+                ("page2.png", None),
+                ("page3.jpg", Some(refused)),
+                ("page10.png", None),
+                ("page11.png", None),
+            ],
+            "{name}: the entry is a placeholder naming the feature"
+        );
+        assert!(
+            report
+                .warnings()
+                .contains(&ArchiveWarning::PlaceholderPage {
+                    page: 2,
+                    defect: refused,
+                }),
+            "{name}: and the report says so: {:?}",
+            report.warnings()
+        );
+    }
+}
+
 /// T.800 J.10.5: "After the inverse 5-3 reversible filter and level shifting,
 /// the component samples in decimal are: 101, 103, 104, 105, 96, 97, 96, 102,
 /// 109". The same nine numbers `tinker-pdf-filters`' `jpx_annex_j.rs` holds

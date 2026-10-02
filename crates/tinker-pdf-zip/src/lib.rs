@@ -475,6 +475,15 @@ pub enum EntryError {
     Truncated,
     /// The deflate stream was structurally invalid.
     Corrupt,
+    /// A method-12 or method-93 stream asking for a feature of its own format
+    /// that the decoder handed to [`Archive::read_coded`] refuses by name —
+    /// see [`MethodFeature`].
+    ///
+    /// Its own variant rather than [`EntryError::Corrupt`], for
+    /// [`EntryError::LzmaHeader`]'s reason and a stronger one: the stream may
+    /// be perfectly well formed, and "corrupt" would tell a host the entry is
+    /// broken when it is only something this build does not read.
+    UnsupportedFeature(MethodFeature),
     /// The stream had more to give than the entry's declared uncompressed
     /// size. The declaration is what bounded the decode, so the excess is
     /// evidence the declaration was a lie rather than a size to allocate for.
@@ -505,6 +514,7 @@ impl fmt::Display for EntryError {
             Self::LocalHeaderLost => f.write_str("no local file header where the directory said"),
             Self::Truncated => f.write_str("the entry's data ends before the entry does"),
             Self::Corrupt => f.write_str("the deflate stream is structurally invalid"),
+            Self::UnsupportedFeature(feature) => write!(f, "{feature}, which is not read here"),
             Self::OversizedStream { declared } => {
                 write!(
                     f,
@@ -527,6 +537,45 @@ impl fmt::Display for EntryError {
 }
 
 impl std::error::Error for EntryError {}
+
+/// A feature of a compression method's own format that a decoder refuses by
+/// name: the entry asks for something this build does not read, rather than
+/// being damaged. Carried by [`EntryError::UnsupportedFeature`].
+///
+/// This crate frames methods 12 and 93 and decodes neither, so the names are
+/// the caller's decoder's to give; they live here because a ZIP entry's
+/// refusal is spoken in this crate's vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MethodFeature {
+    /// A Zstandard frame (method 93) whose header names a dictionary — RFC
+    /// 8878 §3.1.1.1.3's `Dictionary_ID`. APPNOTE gives a ZIP nowhere to
+    /// carry one, so no reader of the archive alone can decode the entry.
+    ZstandardDictionary,
+    /// A bzip2 block (method 12) with its randomised bit set, which bzip2
+    /// 0.9.0 alone wrote and nothing has written since 0.9.5.
+    Bzip2Randomised,
+}
+
+impl MethodFeature {
+    /// The APPNOTE 4.4.5 method the feature belongs to.
+    #[must_use]
+    pub fn method(self) -> u16 {
+        match self {
+            MethodFeature::ZstandardDictionary => ZSTANDARD,
+            MethodFeature::Bzip2Randomised => BZIP2,
+        }
+    }
+}
+
+impl fmt::Display for MethodFeature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            MethodFeature::ZstandardDictionary => "a Zstandard frame that names a dictionary",
+            MethodFeature::Bzip2Randomised => "a randomised bzip2 block",
+        })
+    }
+}
 
 /// The total, spent and never refunded.
 ///

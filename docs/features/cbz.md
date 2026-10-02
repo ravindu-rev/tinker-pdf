@@ -52,8 +52,10 @@ RFC 8878 frames, decoded by `tinker-pdf-archive`'s own Zstandard decoder —
 FSE and Huffman tables, sequences and their repeat offsets, a window it never
 allocates because the output is the window — which checks each frame's
 declared content size and XXH64 content checksum before ZIP's CRC-32 checks
-the entry. A frame that names a dictionary is refused by name: a ZIP has
-nowhere to carry one. An XPS or an EPUB
+the entry. A frame that names a dictionary is refused by name —
+`ZipEntryError::UnsupportedFeature(ZipMethodFeature::ZstandardDictionary)`,
+not `Corrupt`: a ZIP has nowhere to carry one, and the frame may be well
+formed — and so is a randomised bzip2 block (`Bzip2Randomised`). An XPS or an EPUB
 item is still refused by method number: OPC and OCF allow stored and deflated
 and nothing else. Names decode as UTF-8 under
 bit 11 and as CP437 otherwise (APPNOTE D.1). **Every entry is CRC-32 checked
@@ -338,7 +340,9 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   alone), `route()`, `warnings()` and `inflated()`.
 - `cbz::read_entry(&mut archive, index)` — `read_coded` with this engine's
   LZMA, bzip2 and Zstandard decoders, which is what the comic path reads every
-  ZIP entry through.
+  ZIP entry through. A feature a decoder refuses by name comes back as
+  `ZipEntryError::UnsupportedFeature(ZipMethodFeature)` — `cbz` re-exports
+  `tinker_pdf_zip::MethodFeature` under that name — rather than as `Corrupt`.
 - `tinker_pdf_archive::bzip2::decode(bytes, &Limits)` — one or more bzip2
   streams to bytes, bounded by `Limits::max_unpacked`, every block CRC and the
   stream CRC checked.
@@ -379,8 +383,8 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | Past a bound | `ArchiveRefusal::TooLarge` | `MAX_CBZ_PAGES`, `MAX_SYNTHESISED_PDF`, or one of the archive reader's own | — |
 | One encrypted or checksum-failed entry | `PageDefect::EntryRefused(ZipEntryError)` | placeholder page; the page count and every number after it are unchanged | — |
 | Compression method other than stored, deflated, LZMA, bzip2 or Zstandard | `ZipEntryError::UnsupportedMethod(u16)` | shrink, implode, XZ, PPMd, and Zstandard under its deprecated number 20 — named by code so a refusal says which | — |
-| A Zstandard frame that names a dictionary | `ZipEntryError::Corrupt` (leaf: `zstd::Error::NeedsDictionary`) | placeholder page; a ZIP has nowhere to carry a dictionary, so no reader of the archive alone can decode the entry | — |
-| A randomised bzip2 block | `ZipEntryError::Corrupt` (leaf: `bzip2::Error::Randomised`); in a 7z, `SevenZipEntryError::Bzip2Failed` | written by bzip2 0.9.0 alone, unwritten since 0.9.5 (1999); decoding one needs a 512-entry table this repository has no first-party source for, and no writer on hand can make a fixture | — |
+| A Zstandard frame that names a dictionary | `ZipEntryError::UnsupportedFeature(ZipMethodFeature::ZstandardDictionary)` (leaf: `zstd::Error::NeedsDictionary`) | placeholder page; a ZIP has nowhere to carry a dictionary, so no reader of the archive alone can decode the entry | — |
+| A randomised bzip2 block | `ZipEntryError::UnsupportedFeature(ZipMethodFeature::Bzip2Randomised)` (leaf: `bzip2::Error::Randomised`); in a 7z, `SevenZipEntryError::Bzip2Failed(bzip2::Error::Randomised)` | written by bzip2 0.9.0 alone, unwritten since 0.9.5 (1999); decoding one needs a 512-entry table this repository has no first-party source for, and no writer on hand can make a fixture | — |
 | A method-14 entry whose APPNOTE 5.8.8 header is damaged | `ZipEntryError::LzmaHeader` | placeholder page; fewer than nine bytes, a properties size other than five, or a property byte outside what LZMA encodes — a wrong offset or a different coder shows here first | — |
 | GIF, WebP, BMP, AVIF entries | `PageDefect::UnsupportedFormat(ImageFormat)` | recognised and named; a placeholder page rather than a dropped one | — |
 | A JPEG, PNG, TIFF or JPEG 2000 file that will not decode | `PageDefect::Undecodable` | an unreadable header, a colour type outside the table, a `Compression` or `PhotometricInterpretation` refused by name, a JPEG 2000 header the decoder refuses or a channel count other than 1, 3 or 4, a raster past the ceiling | [filters](filters.md) |
@@ -437,7 +441,10 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
   the archive joins the cross-producer identity. It is not in `INVENTORY.tsv`,
   whose second reader is .NET's and would infer `deflate` from the lengths;
   `a_damaged_lzma_header_is_a_placeholder_page_naming_it` changes one header
-  byte and asserts the placeholder names `LzmaHeader`. `python-jpx.cbz` is
+  byte and asserts the placeholder names `LzmaHeader`, and
+  `a_feature_refused_by_name_is_a_placeholder_naming_it` sets one bit in
+  `python-zstd.cbz` (a dictionary id) and one in `python-bzip2.cbz` (the
+  randomised bit) and asserts each placeholder names its feature. `python-jpx.cbz` is
   T.800 Annex J.10's 100-byte codestream as a bare `.j2k` page and inside
   Annex I's JP2 boxes as a `.jp2` one (`tests/cbz/make-jpx.py`);
   `a_jpeg_2000_page_is_placed_as_jpxdecode_and_draws_the_samples_t800_publishes`

@@ -100,7 +100,7 @@ pub use tinker_pdf_archive::rar::{
 
 pub use tinker_pdf_zip::{
     limits as zip_limits, EntryError as ZipEntryError, InflateWarning, Limits as ZipLimits,
-    Warning as ZipWarning,
+    MethodFeature as ZipMethodFeature, Warning as ZipWarning,
 };
 
 pub mod comic_info;
@@ -1796,8 +1796,10 @@ pub fn open_archive<'a>(
 /// is past 4 is [`ZipEntryError::LzmaHeader`] — it is one of the five header
 /// bytes — a stream that runs out or ends before its declared length is
 /// [`ZipEntryError::Truncated`], a bzip2 or Zstandard stream that would decode
-/// past it is [`ZipEntryError::OversizedStream`], and anything else is
-/// [`ZipEntryError::Corrupt`].
+/// past it is [`ZipEntryError::OversizedStream`], a feature the decoder
+/// refuses by name — a Zstandard frame naming a dictionary, a randomised
+/// bzip2 block — is [`ZipEntryError::UnsupportedFeature`] naming it, and
+/// anything else is [`ZipEntryError::Corrupt`].
 pub fn read_entry<'a>(
     archive: &mut Archive<'a>,
     index: usize,
@@ -1825,9 +1827,14 @@ fn decode_bzip2(stream: &[u8], unpacked: usize) -> Result<Vec<u8>, ZipEntryError
         bzip2::Error::TooLarge => ZipEntryError::OversizedStream {
             declared: unpacked as u64,
         },
+        // Refused by name, and not damage: a well-formed block of a kind
+        // nothing has written since 1999.
+        bzip2::Error::Randomised => {
+            ZipEntryError::UnsupportedFeature(ZipMethodFeature::Bzip2Randomised)
+        }
         // `bzip2::Error` is `#[non_exhaustive]`: a bad table, a failed block
-        // or stream CRC, a refused randomised block and whatever is added
-        // later are all a stream that is not the one the entry claims.
+        // or stream CRC and whatever is added later are all a stream that is
+        // not the one the entry claims.
         _ => ZipEntryError::Corrupt,
     })
 }
@@ -1845,11 +1852,15 @@ fn decode_zstd(stream: &[u8], unpacked: usize) -> Result<Vec<u8>, ZipEntryError>
         zstd::Error::TooLarge => ZipEntryError::OversizedStream {
             declared: unpacked as u64,
         },
+        // Refused by name, and not damage: a ZIP has nowhere to carry a
+        // dictionary, so no reader of the archive alone can decode the frame,
+        // however well formed it is.
+        zstd::Error::NeedsDictionary => {
+            ZipEntryError::UnsupportedFeature(ZipMethodFeature::ZstandardDictionary)
+        }
         // `zstd::Error` is `#[non_exhaustive]`: a damaged section, a failed
         // content checksum or size, and whatever is added later are all a
-        // stream that is not the one the entry claims. So is a frame that
-        // names a dictionary: a ZIP has nowhere to carry one, so no reader of
-        // the archive alone can decode it.
+        // stream that is not the one the entry claims.
         _ => ZipEntryError::Corrupt,
     })
 }
