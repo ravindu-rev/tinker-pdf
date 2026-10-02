@@ -781,4 +781,99 @@ mod tests {
             "no tokenizer accepts those, got: {text}"
         );
     }
+
+    /// A stream as the writer would emit it: the dictionary, then the
+    /// content, so a change to either is a change to the pinned text.
+    fn written(doc: &CosDocument, stream: Option<StreamData>) -> String {
+        let Some(stream) = stream else {
+            return "none".to_owned();
+        };
+        let mut out = Vec::new();
+        crate::write::write_object(&mut out, &Object::Dict(stream.dict), doc.names_table());
+        out.extend_from_slice(b"\n--\n");
+        out.extend_from_slice(&stream.data);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn with_subtype(doc: &CosDocument, mut dict: Dict, subtype: &[u8]) -> Dict {
+        dict.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(subtype)));
+        dict
+    }
+
+    /// The seven subtypes this module drew before it drew any other, byte
+    /// for byte, as the editor's own constructors (and those constructors
+    /// with the subtype changed, for the three that have none) ask for them.
+    ///
+    /// Every subtype added since is added beside these, and none of them may
+    /// move a byte here: an annotation a caller wrote yesterday must get the
+    /// same appearance today. A key one of these seven did not read — `/CA`,
+    /// a dash, `/RD` — may change what it draws *when it is present*, and
+    /// none of these dictionaries carries one.
+    #[test]
+    fn the_seven_first_subtypes_are_drawn_exactly_as_they_were() {
+        let doc = doc();
+        let quad = [10.0, 60.0, 110.0, 60.0, 10.0, 20.0, 110.0, 20.0];
+        let page = crate::pages::collect(&doc)[0].reference;
+        let mut circle = with_subtype(&doc, annot::square(&doc, rect(), RED, 2.0), b"Circle");
+        circle.insert(
+            doc.intern(b"IC"),
+            Object::Array(vec![
+                Object::Real(0.0),
+                Object::Real(0.0),
+                Object::Real(1.0),
+            ]),
+        );
+        let no_resources = "<</Type /XObject/Subtype /Form/BBox [10 20 110 60]\
+/Matrix [1 0 0 1 0 0]/Resources <<>>>>\n--\n";
+        let cases: [(&str, Dict, String); 7] = [
+            (
+                "Highlight",
+                annot::highlight(&doc, &[quad], RED),
+                "<</Type /XObject/Subtype /Form/BBox [10 20 110 60]/Matrix [1 0 0 1 0 0]\
+/Resources <</ExtGState <</GS0 <</Type /ExtGState/BM /Multiply>>>>>>>>\n--\n\
+/GS0 gs\n1 0 0 rg\n10 60 m\n110 60 l\n110 20 l\n10 20 l\nh\nf\n"
+                    .to_owned(),
+            ),
+            (
+                "Underline",
+                with_subtype(&doc, annot::highlight(&doc, &[quad], RED), b"Underline"),
+                format!("{no_resources}1 0 0 RG\n2.8 w\n10 22.4 m\n110 22.4 l\nS\n"),
+            ),
+            (
+                "StrikeOut",
+                with_subtype(&doc, annot::highlight(&doc, &[quad], RED), b"StrikeOut"),
+                format!("{no_resources}1 0 0 RG\n2.8 w\n10 36.8 m\n110 36.8 l\nS\n"),
+            ),
+            (
+                "Square",
+                annot::square(&doc, rect(), RED, 2.0),
+                format!("{no_resources}1 0 0 RG\n2 w\n11 21 98 38 re\nS\n"),
+            ),
+            (
+                "Circle",
+                circle,
+                format!(
+                    "{no_resources}0 0 1 rg\n1 0 0 RG\n2 w\n11 40 m\n\
+11 50.4934 32.938 59 60 59 c\n87.062 59 109 50.4934 109 40 c\n\
+109 29.5066 87.062 21 60 21 c\n32.938 21 11 29.5066 11 40 c\nh\nB\n"
+                ),
+            ),
+            (
+                "Text",
+                annot::text_note(&doc, rect(), "hello", true),
+                format!(
+                    "{no_resources}1 0.82 0 rg\n0 0 0 RG\n1.5 w\n11 21 98 38 re\nB\n\
+30.6 34.3 m\n89.4 34.3 l\n30.6 43.8 m\n89.4 43.8 l\nS\n"
+                ),
+            ),
+            ("Link", annot::link(&doc, rect(), page), "none".to_owned()),
+        ];
+        for (subtype, dict, expected) in cases {
+            assert_eq!(
+                written(&doc, synthesize(&doc, &dict)),
+                expected,
+                "/{subtype}'s appearance moved"
+            );
+        }
+    }
 }
