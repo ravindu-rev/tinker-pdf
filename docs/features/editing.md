@@ -388,7 +388,14 @@ was not made at all, and a page sharing the form lost what the redacted
 page's rectangles covered (`redact.rs`'s `forms_elsewhere`, a page two that
 draws the form directly, through a form of its own, as an annotation's
 appearance and from a glyph procedure, and one whose resources only name
-it). The
+it). The read follows a form again when it meets it shallower than before,
+since one met past the depth the read stops at was read for nothing — until
+October 2026 the first meeting was the only one, and a form page two drew
+both deep and shallow was not followed into (`a_form_met_deep_and_then_shallow_on_another_page_is_read`).
+A form cut the old way (below) is cut in place for everything that draws
+it, so when something else does, the widened cut is named `RepeatedForm`
+even at one placement here (`a_form_cut_in_place_that_another_page_draws_is_named`;
+until October 2026 it was named only for a form placed twice here). The
 guard that stops a self-referential form recursing is keyed by the transform
 as well as by the object — bitwise and not by tolerance, because two
 transforms an ulp apart are two placements and calling them one is a
@@ -819,7 +826,8 @@ if report.untouched.is_empty() {
   draws it directly, through a form of its own, as an annotation's
   appearance or from a glyph procedure — page two extracting and rendering
   exactly as before — and cut in place when page two's resources only name
-  it. `appearance_streams`:
+  it; a form page two meets deep and then shallow followed into; and a form
+  cut the old way that page two draws named. `appearance_streams`:
   an annotation's appearance cut where 12.5.5 fits it onto `/Rect`, a
   quarter-turned one where its `/Matrix` turns it, both states of `/N` and of
   `/D`, the `/R` and a hidden annotation's appearance all cut, one appearance

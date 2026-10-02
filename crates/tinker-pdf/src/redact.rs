@@ -516,9 +516,11 @@ pub enum RedactionWarning {
         /// How many bytes of showing operand were left in place.
         bytes: usize,
     },
-    /// One form XObject is drawn at more than one placement, it could not be
-    /// given a copy per placement, and the redaction cut it — so the cut is
-    /// **wider** than the rectangles asked for.
+    /// One form XObject is drawn at more than one placement — two or more on
+    /// the redacted page, or one there and another wherever else something
+    /// draws it — it could not be given a copy per placement, and the
+    /// redaction cut it — so the cut is **wider** than the rectangles asked
+    /// for. `placements` counts the redacted page's.
     ///
     /// A form is ordinarily cut exactly: each placement that cuts differently
     /// draws a copy of the form cut in its own frame, and this is not raised
@@ -2022,7 +2024,7 @@ fn settle(
     let mut rest: Vec<usize> = (0..count).filter(|&f| !exact(&old_way, f)).collect();
     rest.sort_by_key(|&f| walk.forms.get(f).map_or(0, |e| e.reference.num));
     for form in rest {
-        union(editor, walk, form, areas, report);
+        union(editor, walk, form, areas, report, &mut elsewhere);
     }
     targets
 }
@@ -2145,10 +2147,12 @@ fn decide(
 /// It is asked only about a form every placement of which on this page cut
 /// something — the one case where the form's own object would otherwise take
 /// a cut, and a drawer elsewhere would lose what this page's rectangles
-/// covered. Read lazily for that reason, and for the reason it is safe to:
-/// until the first such form, [`decide`] has written only copies, so the
-/// forms the read follows are the objects as they were before this
-/// redaction.
+/// covered — and about a form [`union`] cuts in place at one placement, to
+/// name that loss when it cannot be avoided. Read lazily for that reason, and
+/// for the reason it is safe to: until the first such form, [`decide`] has
+/// written only copies, and [`union`] writes only cuts, which remove text and
+/// keep every `Do` and `Tf` the read follows, so the forms the read follows
+/// are, for it, the objects as they were before this redaction.
 struct Elsewhere {
     page: ObjRef,
     drawn: Option<HashSet<u32>>,
@@ -2201,7 +2205,7 @@ fn drawn_elsewhere(editor: &DocumentEditor, page: ObjRef) -> HashSet<u32> {
     let mut scan = Scan {
         editor,
         drawn: HashSet::new(),
-        entered: HashSet::new(),
+        entered: HashMap::new(),
         faces: HashSet::new(),
     };
     for other in editor.page_refs() {
@@ -2230,9 +2234,14 @@ fn drawn_elsewhere(editor: &DocumentEditor, page: ObjRef) -> HashSet<u32> {
 struct Scan<'a> {
     editor: &'a DocumentEditor,
     drawn: HashSet<u32>,
-    /// Forms read, and whether their `Do`s counted: one drawn on this page
-    /// is read for its procedures, and again if a procedure draws it.
-    entered: HashSet<(u32, bool)>,
+    /// Forms read, and whether their `Do`s counted — one drawn on this page
+    /// is read for its procedures, and again if a procedure draws it — with
+    /// the shallowest depth each was read at. A form met again shallower is
+    /// read again, since a read at a depth past [`MAX_FORM_DEPTH`] reads
+    /// nothing and one nearer it reads less; until October 2026 the first
+    /// visit was the only one, however deep. Each form is read at most once
+    /// per depth, so the work stays bounded.
+    entered: HashMap<(u32, bool), u32>,
     /// Type 3 faces whose procedures were read: by object, or by resource
     /// name for a face written directly into a resource dictionary.
     faces: HashSet<Vec<u8>>,
@@ -2297,9 +2306,11 @@ impl Scan<'_> {
     /// Reads a form's content in its own resources, or the scope that drew
     /// it (8.10.1).
     fn form(&mut self, reference: ObjRef, dict: &Dict, scope: &Dict, counting: bool, depth: u32) {
-        if !self.entered.insert((reference.num, counting)) {
+        let key = (reference.num, counting);
+        if self.entered.get(&key).is_some_and(|&read| read <= depth) {
             return;
         }
+        self.entered.insert(key, depth);
         let Some(content) = self.editor.stream_bytes(reference) else {
             return;
         };
@@ -2369,14 +2380,16 @@ impl Scan<'_> {
 /// named rather than absorbed. A glyph removed because a rectangle covered
 /// it at one placement is gone at all of them, and
 /// [`RedactionWarning::RepeatedForm`] says so — raised only when a cut was
-/// actually made, or when a placement went unmeasured, since a form drawn
-/// twice that nothing was cut from is exact.
+/// actually made and something else draws the form too, another placement
+/// here or a drawer elsewhere ([`Elsewhere`]), or when a placement went
+/// unmeasured, since a form drawn twice that nothing was cut from is exact.
 fn union(
     editor: &mut DocumentEditor,
     walk: &Walk,
     form: usize,
     areas: &[Redaction],
     report: &mut RedactionReport,
+    elsewhere: &mut Elsewhere,
 ) {
     let Some(entry) = walk.forms.get(form) else {
         return;
@@ -2409,6 +2422,14 @@ fn union(
     // October 2026 only a glyph wrote the stream, and an image this cut
     // scrubbed stayed in the file.
     let removed = glyphs > 0 || images > 0;
+    // A cut in place is a cut for everything that draws the form: with two
+    // placements here it is wider than either asked for, and with one it is
+    // wider for a page, a form or a glyph procedure elsewhere that draws it
+    // ([`Elsewhere`]) — asked before the write, and only then. Until October
+    // 2026 only the first was named, and a page sharing a form this page
+    // cut the old way lost what these rectangles covered with nothing said.
+    let placements = entry.nodes.len();
+    let widened = removed && (placements >= 2 || elsewhere.draws(editor, entry.reference));
     if removed {
         let dict = plain_stream_dict(editor, &entry.dict);
         editor.put_stream(entry.reference, StreamData { dict, data });
@@ -2417,8 +2438,7 @@ fn union(
     // Only when there is a rectangle to fall under, which is the rule every
     // other warning in this module follows: with no rectangles nothing was
     // cut and nothing was widened.
-    let placements = entry.nodes.len();
-    if !areas.is_empty() && placements >= 2 && (removed || entry.refused) {
+    if !areas.is_empty() && (widened || (placements >= 2 && entry.refused)) {
         note(
             &mut report.warnings,
             RedactionWarning::RepeatedForm {
@@ -9124,9 +9144,8 @@ mod glyph_procedures {
     }
 
     /// The procedure's measurement composes with every transform above it: a
-    /// use of `A` inside a form placed twice, and in an annotation's
-    /// appearance, is measured where each draws it — the walk's placements,
-    /// with a procedure under each.
+    /// use of `A` inside a form placed twice is measured where each placement
+    /// draws it — the walk's placements, with a procedure under each.
     #[test]
     fn a_glyph_in_a_form_drawn_twice_is_measured_at_each_placement() {
         let mut editor = DocumentEditor::new(open(document("")));
@@ -9473,6 +9492,152 @@ mod forms_elsewhere {
         assert_eq!(
             lines_on(after, 1),
             vec![(50.0, "PUBLIC SECRET".to_string())]
+        );
+    }
+
+    /// [`two_pages`] with page one drawing `/Fs` instead, a form that draws
+    /// `/Fm0` and then itself — so `/Fs` and everything it draws go the old
+    /// way, each with a single placement.
+    fn drawn_by_a_form_that_draws_itself(page_two: &[u8]) -> Vec<u8> {
+        let mut editor = DocumentEditor::new(open(two_pages(page_two)));
+        let page_one = editor.page_refs()[0];
+        let Some(Object::Dict(mut page)) = editor.get(page_one) else {
+            panic!("page one is a dictionary");
+        };
+        let mut resources = inherited_resources(&editor, &page);
+        let (fm0, _) = resolve_xobject(&editor, &resources, b"Fm0").expect("Fm0 is in scope");
+        let fs = editor.allocate();
+        let mut xobjects = Dict::new();
+        xobjects.insert(editor.intern(b"Fm0"), Object::Ref(fm0));
+        xobjects.insert(editor.intern(b"Fs"), Object::Ref(fs));
+        let mut own = Dict::new();
+        own.insert(editor.intern(b"XObject"), Object::Dict(xobjects.clone()));
+        let mut dict = Dict::new();
+        dict.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Form")),
+        );
+        dict.insert(
+            editor.intern(b"BBox"),
+            Object::Array([0, 0, 400, 300].iter().map(|v| Object::Int(*v)).collect()),
+        );
+        dict.insert(Name::RESOURCES, Object::Dict(own));
+        editor.put_stream(
+            fs,
+            StreamData {
+                dict,
+                data: b"/Fm0 Do /Fs Do".to_vec(),
+            },
+        );
+        resources.insert(editor.intern(b"XObject"), Object::Dict(xobjects));
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        let content = editor.allocate();
+        editor.put_stream(
+            content,
+            StreamData {
+                dict: Dict::new(),
+                data: b"/Fs Do".to_vec(),
+            },
+        );
+        page.insert(Name::CONTENTS, Object::Ref(content));
+        editor.put(page_one, Object::Dict(page));
+        saved(&editor)
+    }
+
+    /// A form cut the old way is cut in place, so a page that shares it
+    /// loses there what this page's rectangles covered — a widened cut, and
+    /// it is named. Page two draws `/Fm0`, which page one draws through a
+    /// form that draws itself. Until October 2026 `union` named a widened
+    /// cut only for a form placed twice on the redacted page, and page two
+    /// lost `SECRET` with nothing said. When page two draws nothing, the cut
+    /// in place is exact, and nothing is named.
+    #[test]
+    fn a_form_cut_in_place_that_another_page_draws_is_named() {
+        let bytes = drawn_by_a_form_that_draws_itself(b"/Fm0 Do");
+        assert_eq!(
+            lines_on(bytes.clone(), 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())]
+        );
+        let secret = band(56.0, 45.0, 400.0, 70.0);
+        let (after, report) = redact(open(bytes), &[secret]);
+        assert_eq!(report.glyphs, 6, "SECRET");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"Fm0".to_vec(),
+                placements: 1,
+            }],
+            "the cut reaches page two, and is named"
+        );
+        assert_eq!(lines_on(after, 1), vec![(50.0, "PUBLIC".to_string())]);
+
+        let (_, report) = redact(open(drawn_by_a_form_that_draws_itself(b"")), &[secret]);
+        assert_eq!(report.glyphs, 6, "SECRET");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    /// A form first met deep in another page's forms and then shallow is
+    /// read the second time. Page two draws a chain of sixteen forms whose
+    /// last draws `/Fm1`, one level past where the read stops, and then
+    /// draws `/Fm1` itself, which draws `/Fm0`. Until October 2026 the read
+    /// remembered `/Fm1` from the deep visit it did not read and skipped the
+    /// shallow one, so `/Fm0` counted as drawn by nothing else, took page
+    /// one's cut, and page two lost `SECRET` unreported.
+    #[test]
+    fn a_form_met_deep_and_then_shallow_on_another_page_is_read() {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        let mut forms: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (
+                b"Fm0".to_vec(),
+                b"BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET".to_vec(),
+            ),
+            (b"Fm1".to_vec(), b"/Fm0 Do".to_vec()),
+        ];
+        for level in (1..=16).rev() {
+            let next = if level == 16 {
+                "Fm1".to_string()
+            } else {
+                format!("C{}", level + 1)
+            };
+            forms.push((
+                format!("C{level}").into_bytes(),
+                format!("/{next} Do").into_bytes(),
+            ));
+        }
+        for (name, content) in &forms {
+            assert!(builder.add_form(
+                name,
+                &tinker_pdf_cos::FormXObject {
+                    bbox: [0.0, 0.0, 400.0, 300.0],
+                    matrix: None,
+                    group: None,
+                    content,
+                }
+            ));
+        }
+        builder.add_page(400.0, 300.0, |p| p.raw(PAGE_ONE));
+        builder.add_page(400.0, 300.0, |p| p.raw(b"/C1 Do /Fm1 Do"));
+        let bytes = builder.finish();
+        assert!(
+            lines_on(bytes.clone(), 1)
+                .iter()
+                .any(|(_, text)| text.contains("SECRET")),
+            "page two draws SECRET"
+        );
+
+        let (after, report) = redact(open(bytes), &bands());
+        page_one_is_cut_exactly(&after, &report);
+        assert!(
+            lines_on(after, 1)
+                .iter()
+                .any(|(_, text)| text.contains("PUBLIC SECRET")),
+            "page two still draws all of /Fm0"
         );
     }
 
