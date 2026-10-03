@@ -295,7 +295,11 @@ lines from `/LL`, `/LLE` and `/LLO`. Table 176 names each ending's shape and
 not its size; each is drawn three line widths (at least three points) from
 its point, so a square ending is six widths across and an arrowhead six
 widths long. An absent `/C` strokes a line-like annotation black, as
-`Underline` always has; an empty one is 12.5.2's "transparent". Every
+`Underline` always has; an empty one is 12.5.2's "transparent". A
+**`Square`** or **`Circle`** (12.5.6.8) is drawn inside Table 177's `/RD`
+when it has one — the left, top, right and bottom differences between
+`/Rect` and the shape, read only when each is at least zero and they leave
+the shape a width and a height — and its border is dashed as a line's is. Every
 synthesised appearance carries 12.5.6.2's `/CA` (and ISO 32000-2's `/ca` for
 what is filled) as the `ExtGState` it selects, since a renderer reads
 opacity from the content and not from the annotation. Constructors for the common
@@ -708,6 +712,7 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
 | Following more than 4 096 `Do`s of one content stream | the ones past the bound are written back as they were and never resolved — an image they draw is tested against no rectangle, a form not entered — and `RedactionWarning::TooManyXObjects` counts them (`a_stream_of_more_xobjects_than_the_walk_follows_is_reported`); until October 2026 the bound was there and the warning was not | the walk holds a use per `Do`, and a content stream may be 128 MiB of six-byte `/a Do`s; a page of more than four thousand XObject placements — a map, a tiled scan — has to be told it was not measured whole | ruling 1 |
 | Appearance synthesis for `Polygon`, `PolyLine`, `Ink`, `Squiggly`, `Caret` and `FreeText` | `add_annotation` inserts the dictionary; no `/AP` is generated, and the annotation renders only if it carries its own | **not permanent**: each one's geometry is in its dictionary, and drawing it is owed in the ROADMAP's Editing row | 12.5.6 |
 | A line's caption (`/Cap`, `/CP`, `/CO`) | the line is drawn, its caption is not | a caption is text, and a line annotation names no font to draw it in | 12.5.6.7 |
+| A synthesised border's **effect** (`/BE /S /C`, cloudy) and the **beveled, inset and underline** border styles (`/BS /S /B`, `/I`, `/U`) | the border is drawn solid, at its width and in its colour, as though `/BE` were absent and `/S` were `/S` | 12.5.4 says a cloudy border "shall appear cloudy" at an intensity from 0 to 2 and gives no geometry for a cloud; Table 166's beveled and inset styles are "simulated" embossing in shades nothing names, and the underline style draws a widget's bottom edge, which is not what a shape is. A producer that wants one of them writes its own `/AP`, and one it wrote is kept | 12.5.4 |
 | Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`) | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. This is a substitute for the ROADMAP Editing row's "glyph-procedure streams rewritten", chosen here and not yet ruled on: the row stays open until the owner accepts it or it is replaced | 9.6.5 |
 | Redacting a run in a font **the editor allocated** — through `import_page`, or a form or resources a caller wrote with new font objects | left whole, `UnknownFont`, like any font not in scope | fonts and glyph procedures are read through the file (`cos_font::from_resources` and `stream_decoded` over `DocumentEditor::document`) while pages, resources and XObjects are read through the editor, so a font object only the editor holds does not resolve. Named rather than silent; reading fonts through the editor is a change to `tinker-pdf-cos`'s font loader, owed in the ROADMAP's Editing row | — |
 | Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and `RedactionWarning::UnboundedProcedure` names the font and counts the uses (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`); until October 2026 nothing reported it | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
@@ -766,7 +771,10 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
   endings filled with `/IC` and bordered with `/C`; a dash from its first
   point; leader lines that lift the line proper off its points by `/LLO`
   and `/LL` and run `/LLE` past it; and half opacity reaching the page as
-  half the colour. `appearance.rs`'s own tests pin the seven first subtypes
+  half the colour. A square bordered inside its `/Rect` and filled, moved
+  inside it by `/RD`, and dashed from its lower-left corner; a circle
+  inscribed in its `/Rect`, its corners left white, and its fill at half
+  opacity. `appearance.rs`'s own tests pin the seven first subtypes
   byte for byte and each ending's path.
 - `crates/tinker-pdf/tests/editor_docops.rs` — the document operations, from
   outside the crate: each setter's output saved **incrementally and as a

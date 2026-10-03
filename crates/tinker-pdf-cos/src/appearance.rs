@@ -23,9 +23,11 @@
 //!   (`the_seven_first_subtypes_are_drawn_exactly_as_they_were`); `Link`, the
 //!   seventh, draws nothing.
 //! - `Line` (12.5.6.7): `/L`, Table 176's endings, Figure 60's leader lines.
+//! - `Square` and `Circle` (12.5.6.8) read `/RD` too, and draw their border
+//!   dashed when `/BS` says so.
 //!
-//! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and a line
-//! its `/BS` (or `/Border`) dash.
+//! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
+//! stroked border or line its `/BS` (or `/Border`) dash.
 
 use crate::doc::CosDocument;
 use crate::name::Name;
@@ -155,6 +157,36 @@ fn number_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<f64> {
     doc.resolve_key(dict, doc.intern(key))
         .as_number()
         .filter(|v| v.is_finite())
+}
+
+/// The rectangle a shape is drawn in: `/Rect` less `/RD` (12.5.6.8
+/// Table 177, and the caret's and free text's tables), whose four numbers
+/// are the differences at the left, top, right and bottom.
+///
+/// Table 177 asks each to be at least zero and each pair to leave the shape
+/// some width and height. A `/RD` that breaks either — a negative or
+/// non-finite difference, or two that meet across the rectangle — is not
+/// read, and the shape is drawn in the whole of `/Rect`: a border effect is
+/// what makes a producer write `/RD`, and a shape drawn a little large is a
+/// better guess than one drawn inside out.
+fn drawn_rect(doc: &CosDocument, dict: &Dict, rect: Rect) -> Rect {
+    let rd = numbers_of(doc, dict, b"RD");
+    let [left, top, right, bottom] = match rd.get(..4) {
+        Some(&[l, t, r, b]) => [l, t, r, b],
+        _ => return rect,
+    };
+    let valid = [left, top, right, bottom].iter().all(|v| *v >= 0.0)
+        && left + right < rect.x1 - rect.x0
+        && top + bottom < rect.y1 - rect.y0;
+    if !valid {
+        return rect;
+    }
+    Rect {
+        x0: rect.x0 + left,
+        y0: rect.y0 + bottom,
+        x1: rect.x1 - right,
+        y1: rect.y1 - top,
+    }
 }
 
 /// The colour a line-like annotation strokes with: `/C`, or black when the
@@ -568,13 +600,16 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
                 return None;
             }
 
-            let box_ = inset(rect, width / 2.0);
+            let box_ = inset(drawn_rect(doc, annotation, rect), width / 2.0);
             if let Some(fill) = fill {
                 op(&mut content, &fill, b"rg");
             }
             if let Some(stroke) = stroke {
                 op(&mut content, &stroke, b"RG");
                 op(&mut content, &[width], b"w");
+                if let Some(pattern) = dash_of(doc, annotation) {
+                    dash(&mut content, &pattern, 0.0);
+                }
             }
             op(
                 &mut content,
@@ -595,7 +630,7 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
                 return None;
             }
 
-            let box_ = inset(rect, width / 2.0);
+            let box_ = inset(drawn_rect(doc, annotation, rect), width / 2.0);
             let (cx, cy) = ((box_.x0 + box_.x1) / 2.0, (box_.y0 + box_.y1) / 2.0);
             let (rx, ry) = ((box_.x1 - box_.x0) / 2.0, (box_.y1 - box_.y0) / 2.0);
             // The constant that makes four cubics approximate an ellipse to
@@ -609,6 +644,9 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
             if let Some(stroke) = stroke {
                 op(&mut content, &stroke, b"RG");
                 op(&mut content, &[width], b"w");
+                if let Some(pattern) = dash_of(doc, annotation) {
+                    dash(&mut content, &pattern, 0.0);
+                }
             }
             op(&mut content, &[cx - rx, cy], b"m");
             op(
@@ -1483,5 +1521,74 @@ mod tests {
         )
         .expect("an appearance");
         assert!(!text_of(&opaque).contains(" gs"), "opaque needs no state");
+    }
+
+    /// 12.5.6.8's `/RD` insets the drawn shape within `/Rect` — left, top,
+    /// right, bottom — before the border is inset by half its width; one
+    /// Table 177 forbids is not read.
+    #[test]
+    fn a_shape_is_drawn_inside_its_rect_differences() {
+        let doc = doc();
+        let square = |rd: &str| {
+            content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /Square /Rect [10 20 110 60] /C [1 0 0] /BS << /W 2 >> {rd} >>"
+                ),
+            )
+            .expect("a square")
+        };
+        assert_eq!(
+            square("/RD [5 4 3 2]"),
+            "1 0 0 RG\n2 w\n16 23 90 32 re\nS\n"
+        );
+        for ignored in [
+            "/RD [60 0 50 0]",
+            "/RD [0 20 0 20]",
+            "/RD [-1 0 0 0]",
+            "/RD [1 2 3]",
+        ] {
+            assert_eq!(
+                square(ignored),
+                "1 0 0 RG\n2 w\n11 21 98 38 re\nS\n",
+                "{ignored} is not read"
+            );
+        }
+
+        let circle = content_of(
+            &doc,
+            "<< /Subtype /Circle /Rect [10 20 110 60] /C [1 0 0] /BS << /W 2 >> \
+             /RD [10 0 10 0] >>",
+        )
+        .expect("a circle");
+        assert!(circle.contains("\n21 40 m\n"), "{circle}");
+    }
+
+    /// A square's and a circle's border is dashed as a line's is.
+    #[test]
+    fn a_shapes_border_is_dashed() {
+        let doc = doc();
+        let square = content_of(
+            &doc,
+            "<< /Subtype /Square /Rect [10 20 110 60] /C [1 0 0] \
+             /BS << /W 2 /S /D /D [4 2] >> >>",
+        )
+        .expect("a square");
+        assert_eq!(square, "1 0 0 RG\n2 w\n[4 2] 0 d\n11 21 98 38 re\nS\n");
+        let circle = content_of(
+            &doc,
+            "<< /Subtype /Circle /Rect [10 20 110 60] /C [1 0 0] /BS << /W 2 /S /D >> >>",
+        )
+        .expect("a circle");
+        assert!(circle.starts_with("1 0 0 RG\n2 w\n[3] 0 d\n"), "{circle}");
+        let unstroked = content_of(
+            &doc,
+            "<< /Subtype /Square /Rect [10 20 110 60] /IC [0 0 1] /BS << /W 2 /S /D >> >>",
+        )
+        .expect("a filled square");
+        assert!(
+            !unstroked.contains(" d\n"),
+            "nothing is stroked: {unstroked}"
+        );
     }
 }

@@ -295,3 +295,126 @@ fn a_lines_opacity_reaches_the_page() {
     );
     assert!(page.content.starts_with("/GS0 gs\n"), "{}", page.content);
 }
+
+// ------------------------------------------------------- Square, Circle
+
+/// 12.5.6.8: the rectangle is inscribed in `/Rect`, its border `/BS /W`
+/// wide in `/C` and its inside filled with `/IC`. The border is inset by
+/// half its width so all of it is inside the rectangle: four wide in
+/// `[20 20 80 60]` covers x 20 to 24 and 76 to 80, y 20 to 24 and 56 to 60.
+#[test]
+fn a_square_is_bordered_inside_its_rect_and_filled() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Square /Rect [20 20 80 60] /C [1 0 0] /IC [0 0 1] \
+         /BS << /W 4 >> >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "blue, inside",
+        &[(50.5, 40.5), (25.5, 25.5), (74.5, 54.5)],
+        is_blue,
+    );
+    assert_points(
+        &page.bitmap,
+        "red, on the border",
+        &[(21.5, 40.5), (78.5, 40.5), (50.5, 21.5), (50.5, 58.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, outside the rectangle",
+        &[(18.5, 40.5), (81.5, 40.5), (50.5, 18.5), (50.5, 61.5)],
+        is_white,
+    );
+}
+
+/// Table 177's `/RD` — left, top, right, bottom — moves the shape inside
+/// `/Rect`: `[10 5 10 5]` in `[20 20 80 60]` is x 30 to 70, y 25 to 55,
+/// less half the default border of one, which with no `/C` is not stroked.
+#[test]
+fn a_squares_rect_differences_move_it_inside_its_rect() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Square /Rect [20 20 80 60] /IC [0 0 1] /RD [10 5 10 5] >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "blue, inside the differences",
+        &[(31.5, 40.5), (68.5, 53.5), (50.5, 26.5)],
+        is_blue,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, between /Rect and the shape",
+        &[
+            (29.5, 40.5),
+            (70.5, 40.5),
+            (50.5, 55.5),
+            (50.5, 24.5),
+            (21.5, 21.5),
+        ],
+        is_white,
+    );
+}
+
+/// A dashed border starts where `re` starts, the lower-left corner, and
+/// runs along the bottom: on from x 21 to 25, off to 29, on to 33.
+#[test]
+fn a_squares_border_is_dashed_from_its_lower_left_corner() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Square /Rect [20 20 80 60] /C [1 0 0] \
+         /BS << /W 2 /S /D /D [4 4] >> >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "red, a dash",
+        &[(23.5, 20.5), (31.5, 21.5), (39.5, 20.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, a gap",
+        &[(27.5, 20.5), (35.5, 21.5), (43.5, 20.5)],
+        is_white,
+    );
+}
+
+/// The ellipse is inscribed in `/Rect`, so the corners of the rectangle are
+/// outside it: a circle in `[20 20 80 80]` at width 2 has its stroke
+/// between radius 28 and 30 of (50, 50).
+#[test]
+fn a_circle_is_inscribed_in_its_rect() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Circle /Rect [20 20 80 80] /C [1 0 0] /IC [0 0 1] \
+         /BS << /W 2 >> >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "blue, inside",
+        &[(50.5, 50.5), (30.5, 50.5), (50.5, 75.5)],
+        is_blue,
+    );
+    assert_points(
+        &page.bitmap,
+        "red, on the ellipse",
+        &[(50.5, 20.5), (79.5, 50.5), (20.5, 50.5), (50.5, 79.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, the rectangle's corners",
+        &[(22.5, 22.5), (77.5, 77.5), (22.5, 77.5), (77.5, 22.5)],
+        is_white,
+    );
+}
+
+/// `/CA` alone governs the fill too, as ISO 32000-1 has it: half blue.
+#[test]
+fn a_circles_opacity_reaches_its_fill() {
+    let page =
+        synthesized("<< /Type /Annot /Subtype /Circle /Rect [20 20 80 80] /IC [0 0 1] /CA 0.5 >>");
+    let pixel = at(&page.bitmap, 50.5, 50.5);
+    assert!(
+        pixel[2] > 245 && (118..=138).contains(&pixel[0]) && (118..=138).contains(&pixel[1]),
+        "half blue over white, got {pixel:?}"
+    );
+}
