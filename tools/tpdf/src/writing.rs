@@ -119,6 +119,7 @@ pub(crate) fn print(options: &Options, report: Result<Vec<String>, String>) -> R
 /// their pages and what those pages reach, which is what
 /// [`DocumentEditor::import_page`] copies.
 pub(crate) fn merge(options: &Options) -> Result<Vec<String>, String> {
+    takes(options, "merge", &[])?;
     let out = needs_out(options, "merge", "FILE")?;
     let Some((first, rest)) = options.files.split_first() else {
         return Err("no input file".to_string());
@@ -161,6 +162,7 @@ pub(crate) fn merge(options: &Options) -> Result<Vec<String>, String> {
 /// (`a_page_the_outline_names_stays_in_a_piece_that_dropped_it`). A split is
 /// not a redaction.
 pub(crate) fn split(options: &Options) -> Result<Vec<String>, String> {
+    takes(options, "split", &["--page", "--pages"])?;
     let dir = needs_out(options, "split", "DIR")?;
     let path = only_input(options, "split")?;
     let doc = open_clear(path, options)?;
@@ -170,6 +172,19 @@ pub(crate) fn split(options: &Options) -> Result<Vec<String>, String> {
         None => (0..count).map(|page| (page, page)).collect(),
     };
     within(&pieces, count, path)?;
+    // Two pieces may overlap — `1-3,3-5` is two files sharing a page — but
+    // the same piece twice is one file written over itself.
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some((first, last)) = pieces.iter().find(|piece| !seen.insert(**piece)) {
+        let piece = match first == last {
+            true => format!("{}", first + 1),
+            false => format!("{}-{}", first + 1, last + 1),
+        };
+        return Err(format!(
+            "{path}: the piece {piece} is named twice in --pages, and would be written twice \
+             to one file"
+        ));
+    }
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {dir}: {e}"))?;
 
     let stem = stem(path);
@@ -205,6 +220,7 @@ pub(crate) fn split(options: &Options) -> Result<Vec<String>, String> {
 /// each page named, or every page, turned clockwise by a quarter-turn
 /// multiple on top of the turn it already has (7.7.3.3).
 pub(crate) fn rotate(options: &Options) -> Result<Vec<String>, String> {
+    takes(options, "rotate", &["--by", "--page", "--pages"])?;
     let by = options
         .by
         .ok_or_else(|| "rotate needs --by DEGREES".to_string())?;
@@ -242,9 +258,19 @@ pub(crate) fn rotate(options: &Options) -> Result<Vec<String>, String> {
 /// there is one; a file of predictable bytes makes a predictable key, which
 /// is the caller's decision and is only for reproducing output.
 pub(crate) fn encrypt(options: &Options) -> Result<Vec<String>, String> {
+    takes(
+        options,
+        "encrypt",
+        &[
+            "--user-password",
+            "--owner-password",
+            "--permissions",
+            "--entropy",
+        ],
+    )?;
     let out = needs_out(options, "encrypt", "FILE")?;
     let path = only_input(options, "encrypt")?;
-    let doc = open(path, options.password.as_deref(), None)?;
+    let doc = open_input(path, options)?;
     if doc.is_encrypted() {
         owner_authority(path, &doc, "encrypting it again")?;
     }
@@ -268,9 +294,10 @@ pub(crate) fn encrypt(options: &Options) -> Result<Vec<String>, String> {
 /// Needs the owner password unless the owner withheld nothing from the user
 /// (this module's documentation).
 pub(crate) fn decrypt(options: &Options) -> Result<Vec<String>, String> {
+    takes(options, "decrypt", &[])?;
     let out = needs_out(options, "decrypt", "FILE")?;
     let path = only_input(options, "decrypt")?;
-    let doc = open(path, options.password.as_deref(), None)?;
+    let doc = open_input(path, options)?;
     if !doc.is_encrypted() {
         return Err(format!("{path} is not encrypted"));
     }
@@ -287,6 +314,11 @@ pub(crate) fn decrypt(options: &Options) -> Result<Vec<String>, String> {
 /// already filed is the facade's refusal, `AttachError::NameTaken`, and
 /// nothing is written.
 pub(crate) fn attach(options: &Options) -> Result<Vec<String>, String> {
+    takes(
+        options,
+        "attach",
+        &["--attach", "--name", "--mime", "--description"],
+    )?;
     let file = options
         .attach
         .as_deref()
@@ -330,6 +362,11 @@ pub(crate) fn attach(options: &Options) -> Result<Vec<String>, String> {
 /// `/Rotate` is not applied, since a form has none, and this states no
 /// matrix of its own to make up for it.
 pub(crate) fn stamp(options: &Options) -> Result<Vec<String>, String> {
+    takes(
+        options,
+        "stamp",
+        &["--stamp", "--stamp-page", "--under", "--page", "--pages"],
+    )?;
     let source = options
         .stamp
         .as_deref()
@@ -374,6 +411,16 @@ pub(crate) fn stamp(options: &Options) -> Result<Vec<String>, String> {
 /// them all four ([`Sanitise::ALL`]), and every entry removed and object
 /// deleted listed.
 pub(crate) fn sanitise(options: &Options) -> Result<Vec<String>, String> {
+    takes(
+        options,
+        "sanitise",
+        &[
+            "--javascript",
+            "--actions",
+            "--embedded-files",
+            "--metadata",
+        ],
+    )?;
     let out = needs_out(options, "sanitise", "FILE")?;
     let path = only_input(options, "sanitise")?;
     let doc = open_clear(path, options)?;
@@ -629,11 +676,70 @@ fn only_input<'a>(options: &'a Options, command: &str) -> Result<&'a str, String
 /// Opens an input that will be written out unencrypted, refusing one that is
 /// encrypted (this module's documentation).
 fn open_clear(path: &str, options: &Options) -> Result<Document, String> {
-    let doc = open(path, options.password.as_deref(), None)?;
+    let doc = open_input(path, options)?;
     if doc.is_encrypted() {
         return Err(format!(
             "{path} is encrypted, and a rewrite would write it decrypted; \
              `tpdf decrypt` it first, and `tpdf encrypt` the result if it should stay encrypted"
+        ));
+    }
+    Ok(doc)
+}
+
+/// The flags every writing command takes: where it writes, how quietly, the
+/// password that opens an encrypted input, and the save door's two policies.
+const SAVE_FLAGS: [&str; 9] = [
+    "--out",
+    "--quiet",
+    "--password",
+    "--font-policy",
+    "--images",
+    "--bilevel",
+    "--max-ppi",
+    "--jpeg-tables",
+    "--jpeg-subsampled",
+];
+
+/// Refuses a flag `command` would ignore: one outside [`SAVE_FLAGS`] and its
+/// own.
+///
+/// Every flag parses globally, so without this a writing command took a
+/// flag meant for another and did nothing with it: `rotate --fonts keep`
+/// subset a face somebody asked to keep — `--fonts` names faces to draw with
+/// and `--font-policy` is the one that keeps them — and `merge --pages 1-2`
+/// merged every page. A command that writes a file does not get to guess
+/// that a flag did not matter.
+fn takes(options: &Options, command: &str, own: &[&str]) -> Result<(), String> {
+    let Some(flag) = options
+        .given
+        .iter()
+        .find(|flag| !SAVE_FLAGS.contains(&flag.as_str()) && !own.contains(&flag.as_str()))
+    else {
+        return Ok(());
+    };
+    let hint = match flag.as_str() {
+        "--fonts" => {
+            "; it names faces to draw with, and what happens to the embedded programs \
+             is --font-policy subset|keep"
+        }
+        _ => "",
+    };
+    Err(format!("{command} takes no {flag}{hint}"))
+}
+
+/// Opens an input a writing command reads, refusing a `--password` it would
+/// ignore.
+///
+/// `--password` opens an encrypted input. On one that is not encrypted it
+/// opens nothing, and the likeliest reading of `encrypt clear.pdf --password
+/// P` is a person who took it for the new file's password and would get a
+/// file anybody opens.
+fn open_input(path: &str, options: &Options) -> Result<Document, String> {
+    let doc = open(path, options.password.as_deref(), None)?;
+    if options.password.is_some() && !doc.is_encrypted() {
+        return Err(format!(
+            "{path} is not encrypted, so --password opens nothing; the passwords a new \
+             file is locked with are encrypt's --user-password and --owner-password"
         ));
     }
     Ok(doc)
@@ -691,17 +797,26 @@ fn within(ranges: &[(u32, u32)], count: u32, path: &str) -> Result<(), String> {
 /// `--pages`, or every page.
 ///
 /// Counted out only after [`within`] has held every range to the document,
-/// so a list costs at most what the document has a range.
+/// so a list costs at most what the document has a range. A page the list
+/// names twice — `1-2,2` — is refused: `rotate` would turn it twice and
+/// `stamp` stamp it twice, and the report would count the list rather than
+/// the pages. Which of the two a person meant is theirs to say.
 fn write_pages(options: &Options, count: u32, path: &str) -> Result<Vec<u32>, String> {
-    match options.ranges() {
-        None => Ok((0..count).collect()),
-        Some(ranges) => {
-            within(&ranges, count, path)?;
-            Ok(ranges
-                .into_iter()
-                .flat_map(|(first, last)| first..=last)
-                .collect())
-        }
+    let Some(ranges) = options.ranges() else {
+        return Ok((0..count).collect());
+    };
+    within(&ranges, count, path)?;
+    let pages: Vec<u32> = ranges
+        .into_iter()
+        .flat_map(|(first, last)| first..=last)
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    match pages.iter().find(|page| !seen.insert(**page)) {
+        Some(page) => Err(format!(
+            "{path}: page {} is named twice in --pages",
+            page + 1
+        )),
+        None => Ok(pages),
     }
 }
 
@@ -1342,25 +1457,22 @@ mod tests {
         let out = format!("{dir}/out.pdf");
         let locked = fixture("encrypted-aes256.pdf");
         let (plain, readme) = (fixture("simple-text.pdf"), fixture("README.md"));
-        let options = parse(&[
-            &locked,
-            "--password",
-            "owner-secret",
-            "--by",
-            "90",
-            "--stamp",
-            &plain,
-            "--attach",
-            &readme,
-            "--out",
-            &out,
-        ]);
+        // Each command with the flags it takes, so what refuses is the input.
+        let with = |own: &[&str]| {
+            let mut args = vec![locked.as_str(), "--password", "owner-secret", "--out", &out];
+            args.extend(own);
+            parse(&args)
+        };
+        let pieces = format!("{dir}/pieces");
+        let mut split_options = with(&[]);
+        split_options.out = Some(pieces.clone());
         for (command, refused) in [
-            ("merge", merge(&options)),
-            ("rotate", rotate(&options)),
-            ("attach", attach(&options)),
-            ("stamp", stamp(&options)),
-            ("sanitise", sanitise(&options)),
+            ("merge", merge(&with(&[]))),
+            ("split", split(&split_options)),
+            ("rotate", rotate(&with(&["--by", "90"]))),
+            ("attach", attach(&with(&["--attach", &readme]))),
+            ("stamp", stamp(&with(&["--stamp", &plain]))),
+            ("sanitise", sanitise(&with(&["--javascript"]))),
         ] {
             assert!(
                 refused
@@ -1370,13 +1482,153 @@ mod tests {
                 "{command}: {refused:?}"
             );
         }
-        let pieces = format!("{dir}/pieces");
-        let mut split_options = options;
-        split_options.out = Some(pieces.clone());
-        assert!(split(&split_options)
-            .err()
-            .is_some_and(|e| e.starts_with(&format!("{locked} is encrypted"))));
         assert!(!Path::new(&out).exists() && !Path::new(&pieces).exists());
+    }
+
+    /// **A flag a command would ignore is refused.** Every flag parses
+    /// globally, so `rotate --fonts keep` used to succeed and subset the face
+    /// it was asked to keep — `--fonts` names faces to draw with — and
+    /// `merge --pages 1` merged every page. `--password` on an input that is
+    /// not encrypted opens nothing, and `encrypt` given one would otherwise
+    /// write a file anybody opens for a person who took it for the new
+    /// password.
+    #[test]
+    fn a_writing_command_refuses_a_flag_it_would_ignore() {
+        let dir = scratch("ignored-flags");
+        let source = write(&dir, "face.pdf", &whole_face_document());
+        let out = format!("{dir}/out.pdf");
+        let refused = |result: Result<Vec<String>, String>| result.err().unwrap_or_default();
+
+        let fonts = refused(rotate(&parse(&[
+            &source, "--by", "90", "--fonts", "keep", "--out", &out,
+        ])));
+        assert_eq!(
+            fonts,
+            "rotate takes no --fonts; it names faces to draw with, and what happens to the \
+             embedded programs is --font-policy subset|keep"
+        );
+        for (got, want) in [
+            (
+                refused(merge(&parse(&[&source, "--pages", "1", "--out", &out]))),
+                "merge takes no --pages",
+            ),
+            (
+                refused(stamp(&parse(&[
+                    &source, "--stamp", &source, "--by", "90", "--out", &out,
+                ]))),
+                "stamp takes no --by",
+            ),
+            (
+                refused(decrypt(&parse(&[
+                    &source,
+                    "--owner-password",
+                    "o",
+                    "--out",
+                    &out,
+                ]))),
+                "decrypt takes no --owner-password",
+            ),
+            (
+                refused(sanitise(&parse(&[
+                    &source,
+                    "--metadata",
+                    "--dpi",
+                    "300",
+                    "--out",
+                    &out,
+                ]))),
+                "sanitise takes no --dpi",
+            ),
+        ] {
+            assert_eq!(got, want);
+        }
+        for (command, result) in [
+            (
+                "encrypt",
+                encrypt(&parse(&[&source, "--password", "secret", "--out", &out])),
+            ),
+            (
+                "rotate",
+                rotate(&parse(&[
+                    &source,
+                    "--by",
+                    "90",
+                    "--password",
+                    "secret",
+                    "--out",
+                    &out,
+                ])),
+            ),
+        ] {
+            assert_eq!(
+                refused(result),
+                format!(
+                    "{source} is not encrypted, so --password opens nothing; the passwords a \
+                     new file is locked with are encrypt's --user-password and \
+                     --owner-password"
+                ),
+                "{command}"
+            );
+        }
+        assert!(!Path::new(&out).exists(), "nothing was written");
+    }
+
+    /// **A page named twice is refused rather than acted on twice.** `rotate
+    /// --pages 1-2,2 --by 90` used to turn page 2 by 180 and report three
+    /// pages of a document whose third it never touched; `stamp` stamped
+    /// twice; `split --pages 1,1` wrote one file twice over itself and counted
+    /// two pieces. Pieces that only overlap are two files and still split.
+    #[test]
+    fn a_page_or_a_piece_named_twice_is_refused() {
+        let dir = scratch("named-twice");
+        let source = fixture("simple-text.pdf");
+        let out = format!("{dir}/out.pdf");
+        assert_eq!(
+            rotate(&parse(&[
+                &source, "--by", "90", "--pages", "1-2,2", "--out", &out,
+            ]))
+            .err()
+            .as_deref(),
+            Some(format!("{source}: page 2 is named twice in --pages").as_str())
+        );
+        assert_eq!(
+            stamp(&parse(&[
+                &source, "--stamp", &source, "--pages", "3,1-3", "--out", &out,
+            ]))
+            .err()
+            .as_deref(),
+            Some(format!("{source}: page 3 is named twice in --pages").as_str())
+        );
+        assert!(!Path::new(&out).exists());
+
+        let pieces = format!("{dir}/pieces");
+        for (list, piece) in [("1,1", "1"), ("2-3,1,2-3", "2-3")] {
+            assert_eq!(
+                split(&parse(&[&source, "--pages", list, "--out", &pieces]))
+                    .err()
+                    .as_deref(),
+                Some(
+                    format!(
+                        "{source}: the piece {piece} is named twice in --pages, and would be \
+                         written twice to one file"
+                    )
+                    .as_str()
+                )
+            );
+        }
+        assert!(!Path::new(&pieces).exists());
+
+        let lines = split(&parse(&[&source, "--pages", "1-2,2-3", "--out", &pieces]))
+            .expect("overlapping pieces split");
+        assert_eq!(lines[0], format!("  {source}: 3 pages, 2 pieces"));
+        let names = std::fs::read_dir(&pieces).expect("the directory").count();
+        assert_eq!(names, 2, "two pieces, two files");
+
+        let lines = rotate(&parse(&[
+            &source, "--by", "90", "--pages", "2,1", "--out", &out,
+        ]))
+        .expect("rotates");
+        assert_eq!(lines[0], format!("  {source}: 2 pages turned by 90"));
     }
 
     #[test]

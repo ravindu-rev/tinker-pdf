@@ -212,6 +212,13 @@ the old bytes: an update keeps the original as its prefix, so the pages a
 split left out or the scripts a sanitise removed would still be in the file.
 A signature over the original bytes does not cover the new ones.
 
+A writing command refuses a flag it would ignore rather than writing the file
+without it — `--fonts` (faces to draw with; the font policy is
+`--font-policy`), another command's flags, or `--password` on an input that is
+not encrypted — and refuses a page `--pages` names twice, which `rotate` would
+turn twice and `stamp` stamp twice. `split` pieces may overlap; the same piece
+twice is refused.
+
 `merge` keeps the first file's catalog — outline, form, labels — and appends
 the pages of each later one, writing a resource those pages share once.
 `split` writes one file per item of `--pages`, or one per page, and each piece
@@ -356,6 +363,10 @@ struct Options {
     jpeg_tables: Option<String>,
     /// `--jpeg-subsampled`, with `--images jpeg`: 4:2:0 chrominance.
     jpeg_subsampled: bool,
+    /// Every flag given, as spelt, in order: what a writing command checks
+    /// against the flags it takes, so one it would ignore is refused instead
+    /// (`writing::takes`).
+    given: Vec<String>,
 }
 
 /// `--pages 1-3,5` as inclusive 0-based ranges, in the order given.
@@ -423,11 +434,15 @@ impl Options {
             max_ppi: None,
             jpeg_tables: None,
             jpeg_subsampled: false,
+            given: Vec::new(),
         };
 
         let mut index = 0;
         while index < args.len() {
             let arg = args[index].as_str();
+            if arg.starts_with("--") {
+                options.given.push(arg.to_string());
+            }
             // A flag that takes a value consumes the next argument, and
             // running off the end is an error rather than a default.
             let mut value = || -> Result<String, String> {

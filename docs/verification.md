@@ -1576,7 +1576,11 @@ fix was to sharpen the injection rather than to shrug at the number.
   stored, `--images flate --bilevel g4` gives back exactly the samples
   written, `--max-ppi 36` halves a 72 ppi image and names the one-bit image
   it would not box-filter, and `--images jpeg` writes `DCTDecode` with the
-  tables named; five defects put back fire one each.
+  tables named; five defects put back fire one each. What a writer would
+  have ignored is refused with nothing written — a flag it does not take
+  (`rotate --fonts keep` subset the face it was asked to keep until it was),
+  `--password` on an input that is not encrypted, and a page or a split
+  piece the list names twice — and four defects put back fire one each.
 - **`pdfcmp`** (`tools/pdfcmp`): the canonical perceptual comparator. Gates
   on the fraction of pixels where any channel moves more than a threshold —
   a glyph moving one pixel barely moves a mean, so the metric is changed
