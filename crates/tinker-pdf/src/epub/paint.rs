@@ -64,12 +64,14 @@
 
 use tinker_pdf_cos::build::{DocumentBuilder, ExtGState, Glyph, PageBuilder, Target};
 use tinker_pdf_css::cascade::StyleTree;
-use tinker_pdf_css::property::{BorderStyle, Color, FontFamily, FontStyle, Side, TextDecoration};
+use tinker_pdf_css::property::{
+    BorderStyle, Color, FontFamily, FontStyle, Position, Side, TextDecoration,
+};
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_layout::metrics::{FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, Vertical};
-use tinker_pdf_layout::{BoxFragment, Page as LayoutPage, ReplacedFragment, TextRun};
+use tinker_pdf_layout::{BoxFragment, ClipFragment, Page as LayoutPage, ReplacedFragment, TextRun};
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::itemize;
 
@@ -895,12 +897,33 @@ pub fn request(run: &TextRun) -> FontRequest<'_> {
 /// is `begin_page`'s snapshot rule (see [`super::svg::Registry`]): one
 /// `/ExtGState` per distinct alpha the chapter needs, named for the alpha so
 /// that the same alpha on two chapters is one resource.
+///
+/// # And every overflow clip, by the element tree
+///
+/// `css-overflow-3` §3.1 clips an element's **descendants** to its padding
+/// box, and CSS 2.2 §11.1.1 says which: *"all descendants except those whose
+/// containing block is the viewport or an ancestor of the element"*. The
+/// layout reports each clipping box's padding box per page
+/// ([`tinker_pdf_layout::Page::clips`]) and nothing about who is inside it,
+/// because a float, a positioned box and a table cell inside it are drawn from
+/// lists of their own; the element tree knows. So every fragment drawn here is
+/// clipped by the chain of clipping elements above it — a box by its parent's
+/// chain, its own text by its own — and an absolutely positioned element by
+/// its **containing block's** chain, which is how a figure positioned against
+/// the page escapes a clipping section it sits in.
 #[derive(Clone, Debug, Default)]
 pub struct Effects {
     /// Per element, the product of every `opacity` from the root down,
     /// quantised to ten-thousandths, which is the resource's name and its
     /// value: a `/ca` closer than that to another is not a different page.
     alpha: Vec<u16>,
+    /// Per element, whether some page of the chapter carries a clip for it.
+    /// A box whose content fitted has none and clips nothing, which is the
+    /// layout's decision and not repeated here.
+    clips: Vec<bool>,
+    /// Per element, the nearest element whose clip cuts **this element's own
+    /// box**; following it from there gives the whole chain.
+    clipped_by: Vec<Option<u32>>,
 }
 
 /// The quantum of [`Effects`]' alphas: ten thousand steps between clear and
@@ -908,10 +931,10 @@ pub struct Effects {
 const ALPHA_STEPS: f64 = 10_000.0;
 
 impl Effects {
-    /// Every element's composed opacity, from the cascade's tree and the
-    /// document's.
+    /// Every element's composed opacity and clip chain, from the cascade's
+    /// tree, the document's, and the chapter's laid-out pages.
     #[must_use]
-    pub fn of(dom: &Dom, styles: &StyleTree) -> Effects {
+    pub fn of(dom: &Dom, styles: &StyleTree, pages: &[LayoutPage]) -> Effects {
         let mut composed: Vec<f64> = Vec::with_capacity(dom.nodes.len());
         for (at, node) in dom.nodes.iter().enumerate() {
             let own = styles.styles.get(at).map_or(1.0, |style| style.opacity);
@@ -924,11 +947,67 @@ impl Effects {
                 .unwrap_or(1.0);
             composed.push((above * own).clamp(0.0, 1.0));
         }
+        let mut clips = vec![false; dom.nodes.len()];
+        for page in pages {
+            for clip in &page.clips {
+                if let Some(slot) = clips.get_mut(clip.anchor as usize) {
+                    *slot = true;
+                }
+            }
+        }
+        // Two values per element, parents first: whose clip cuts its own box,
+        // and whose cuts an absolutely positioned descendant that has it — or
+        // an ancestor of it — as containing block (§10.1's nearest positioned
+        // ancestor, the page where there is none).
+        let mut clipped_by: Vec<Option<u32>> = Vec::with_capacity(dom.nodes.len());
+        let mut for_absolute: Vec<Option<u32>> = Vec::with_capacity(dom.nodes.len());
+        for (at, node) in dom.nodes.iter().enumerate() {
+            let position = styles
+                .styles
+                .get(at)
+                .map_or(Position::Static, |style| style.position);
+            let inner = |of: usize| match clips.get(of) {
+                Some(true) => u32::try_from(of).ok(),
+                _ => clipped_by.get(of).copied().flatten(),
+            };
+            let by = match position {
+                Position::Fixed => None,
+                Position::Absolute => node
+                    .parent
+                    .and_then(|parent| for_absolute.get(parent).copied().flatten()),
+                _ => node.parent.and_then(inner),
+            };
+            let own = if clips[at] {
+                u32::try_from(at).ok()
+            } else {
+                by
+            };
+            let absolute = match position {
+                Position::Static => node
+                    .parent
+                    .and_then(|parent| for_absolute.get(parent).copied().flatten()),
+                _ => own,
+            };
+            clipped_by.push(by);
+            for_absolute.push(absolute);
+        }
         Effects {
             alpha: composed
                 .into_iter()
                 .map(|alpha| (alpha * ALPHA_STEPS).round() as u16)
                 .collect(),
+            clips,
+            clipped_by,
+        }
+    }
+
+    /// This chapter's effects on one laid-out page.
+    #[must_use]
+    pub fn on<'a>(&'a self, laid: &'a LayoutPage, frame: &'a Frame) -> OnPage<'a> {
+        OnPage {
+            effects: self,
+            clips: &laid.clips,
+            frame,
         }
     }
 
@@ -969,29 +1048,132 @@ impl Effects {
         refused
     }
 
+    fn close(page: &mut PageBuilder, opened: bool) {
+        if opened {
+            page.raw(b"Q");
+        }
+    }
+}
+
+/// What a fragment drawn on one page is wrapped in: its element's composed
+/// alpha, and the clips of the elements above it. See [`Effects`].
+#[derive(Clone, Copy, Debug)]
+pub struct OnPage<'a> {
+    effects: &'a Effects,
+    clips: &'a [ClipFragment],
+    frame: &'a Frame,
+}
+
+impl OnPage<'_> {
     /// Opens what a fragment anchored here needs, returning whether anything
     /// was opened and so has to be closed with [`Effects::close`].
-    fn open(&self, page: &mut PageBuilder, anchor: Option<u32>) -> bool {
-        let steps = self.steps(anchor);
-        if f64::from(steps) >= ALPHA_STEPS {
+    ///
+    /// `inside` is whether the fragment is the element's **content** — its
+    /// text — rather than its own box, which an element's own clip does not
+    /// cut: `css-overflow-3` clips the content to the padding box and leaves
+    /// the background and border where they are.
+    fn open(&self, page: &mut PageBuilder, anchor: Option<u32>, inside: bool) -> bool {
+        let chain = self.chain(anchor, inside);
+        let steps = self.effects.steps(anchor);
+        let translucent = f64::from(steps) < ALPHA_STEPS;
+        if chain.is_empty() && !translucent {
             return false;
         }
         page.raw(b"q");
+        for element in &chain {
+            self.clip_to(page, *element);
+        }
         // False when the resource was refused at registration — an archival
         // profile's — and then the fragment is drawn opaque rather than the
         // page naming a resource it does not carry.
-        if page.set_ext_gstate(&alpha_name(steps)) {
+        if !translucent || page.set_ext_gstate(&alpha_name(steps)) || !chain.is_empty() {
             return true;
         }
         page.raw(b"Q");
         false
     }
 
-    fn close(page: &mut PageBuilder, opened: bool) {
-        if opened {
-            page.raw(b"Q");
+    /// The clipping elements above a fragment, nearest first.
+    fn chain(&self, anchor: Option<u32>, inside: bool) -> Vec<u32> {
+        let effects = self.effects;
+        let Some(at) = anchor
+            .map(|at| at as usize)
+            .filter(|at| *at < effects.clipped_by.len())
+        else {
+            return Vec::new();
+        };
+        let mut next = if inside && effects.clips[at] {
+            u32::try_from(at).ok()
+        } else {
+            effects.clipped_by[at]
+        };
+        let mut chain = Vec::new();
+        // Each step is to a strict ancestor, whose index is lower, so the walk
+        // ends within the tree's depth.
+        while let Some(element) = next {
+            chain.push(element);
+            next = effects
+                .clipped_by
+                .get(element as usize)
+                .copied()
+                .flatten()
+                .filter(|above| *above < element);
         }
+        chain
     }
+
+    /// Intersects the clip with one element's padding boxes on this page —
+    /// the union of them, for a box this page holds more than one fragment of
+    /// — or with nothing at all where this page holds none: the element's
+    /// content is then wholly outside its box, which is what clipping it to
+    /// its box removes.
+    fn clip_to(&self, page: &mut PageBuilder, element: u32) {
+        let mut path = String::new();
+        for clip in self.clips.iter().filter(|clip| clip.anchor == element) {
+            if !path.is_empty() {
+                path.push(' ');
+            }
+            path.push_str(&clip_path(clip, self.frame));
+        }
+        if path.is_empty() {
+            path.push_str("0 0 0 0 re");
+        }
+        path.push_str(" W n");
+        page.raw(path.as_bytes());
+    }
+}
+
+/// One clip's padding box as a path in page points: a rectangle, or the
+/// rounded shape where it has curved corners. An axis it does not clip is the
+/// page's whole extent in that axis.
+fn clip_path(clip: &ClipFragment, frame: &Frame) -> String {
+    let (page_width, page_height) = frame.page;
+    let (left, right) = if clip.x.is_finite() && clip.width.is_finite() {
+        (frame.x(clip.x), frame.x(clip.x + clip.width))
+    } else {
+        (0.0, page_width)
+    };
+    let (top, bottom) = if clip.y.is_finite() && clip.height.is_finite() {
+        (frame.y(clip.y), frame.y(clip.y + clip.height))
+    } else {
+        (page_height, 0.0)
+    };
+    let rect = (
+        left,
+        bottom,
+        (right - left).max(0.0),
+        (top - bottom).max(0.0),
+    );
+    let radii = clip
+        .radius
+        .map(|(horizontal, vertical)| (horizontal * PX_TO_PT, vertical * PX_TO_PT));
+    if radii
+        .iter()
+        .any(|(horizontal, vertical)| *horizontal > 0.0 && *vertical > 0.0)
+    {
+        return rounded_path(rect, radii);
+    }
+    format!("{} {} {} {} re", rect.0, rect.1, rect.2, rect.3)
 }
 
 /// An alpha's resource name: `EA` and its ten-thousandths, so `EA5000` is
@@ -1059,9 +1241,10 @@ pub fn draw_page(
     chapter: u64,
     effects: &Effects,
 ) -> usize {
+    let effects = &effects.on(laid, frame);
     let mut refused = 0usize;
     for fragment in &laid.boxes {
-        let opened = effects.open(page, fragment.anchor);
+        let opened = effects.open(page, fragment.anchor, false);
         draw_box(page, fragment, frame);
         Effects::close(page, opened);
     }
@@ -1078,7 +1261,7 @@ pub fn draw_page(
         let Some((_, name)) = pictures.iter().find(|(at, _)| *at == anchor) else {
             continue;
         };
-        let opened = effects.open(page, fragment.anchor);
+        let opened = effects.open(page, fragment.anchor, false);
         draw_replaced(page, fragment, frame, name);
         Effects::close(page, opened);
     }
@@ -1127,12 +1310,12 @@ pub fn draw_page(
 
 /// Every outline on the page, after the text: CSS 2.2 Appendix E's tenth and
 /// last step, so an outline is drawn over what is beside it rather than under.
-fn draw_outlines(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, effects: &Effects) {
+fn draw_outlines(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, effects: &OnPage<'_>) {
     for fragment in &laid.boxes {
         if fragment.outline.is_none() {
             continue;
         }
-        let opened = effects.open(page, fragment.anchor);
+        let opened = effects.open(page, fragment.anchor, false);
         draw_outline(page, fragment, frame);
         Effects::close(page, opened);
     }
@@ -1145,7 +1328,7 @@ fn artifact_or_run(
     run: &TextRun,
     frame: &Frame,
     fonts: &Fonts<'_>,
-    effects: &Effects,
+    effects: &OnPage<'_>,
 ) -> usize {
     // 14.8.2.2: a list marker is *"a graphics object that is not part of
     // the author's original content"*, which is what 14.8.2 calls an
@@ -1159,7 +1342,9 @@ fn artifact_or_run(
     }
     // Inside the marked-content sequence, so a `q`/`Q` pair never straddles
     // a `BDC`/`EMC` one: the two nest.
-    let opened = effects.open(page, run.anchor);
+    // The run's characters are its element's content, so its own clip cuts
+    // them — a marker hung outside an `overflow: hidden` list item included.
+    let opened = effects.open(page, run.anchor, true);
     let refused = draw_run(builder, page, run, frame, fonts);
     Effects::close(page, opened);
     if run.generated {
@@ -1223,7 +1408,7 @@ fn tag_runs(
     chains: &[Vec<usize>],
     level: usize,
     refused: &mut usize,
-    effects: &Effects,
+    effects: &OnPage<'_>,
 ) {
     let mut at = 0usize;
     while at < runs.len() {

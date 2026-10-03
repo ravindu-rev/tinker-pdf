@@ -61,7 +61,8 @@ use libfuzzer_sys::fuzz_target;
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     BorderStyle, BoxSizing, Clear, Display, Float, LengthPercentage, LineBreakStrictness,
-    LineHeight, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Sides, Size,
+    LineHeight, ListStyleType, MarginValue, Overflow, OverflowWrap, PageBreak, PageBreakInside,
+    Sides, Size,
     TextAlign, TextTransform, Visibility, WhiteSpace, WordBreak,
 };
 use tinker_pdf_layout::metrics::FixedPitch;
@@ -231,6 +232,17 @@ fn style(bytes: &mut Bytes<'_>, block: bool) -> ComputedStyle {
         2 => TextTransform::Lowercase,
         _ => TextTransform::Capitalize,
     };
+    // `overflow` takes what a block-axis clip cuts out of the column and keeps
+    // it as runs laid out and not painted, and makes every `hidden` box a
+    // formatting context of its own: the conservation equality below is the
+    // assertion that the clip hides the text and loses none of it.
+    let overflow = match (c ^ d) & 3 {
+        0 => Overflow::Hidden,
+        1 => Overflow::Clip,
+        _ => Overflow::Visible,
+    };
+    style.overflow_x = overflow;
+    style.overflow_y = overflow;
     style.float = match (d >> 4) & 3 {
         1 => Float::Left,
         2 => Float::Right,

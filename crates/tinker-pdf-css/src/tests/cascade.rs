@@ -1154,3 +1154,42 @@ fn text_transform_inherits_and_is_counted_where_its_language_conditions_it() {
         Some(3)
     );
 }
+
+/// **`overflow-x: auto` alone makes a box that clips in both axes**
+/// (`css-overflow-3` §3.1's computed value): `visible` beside a scrolling axis
+/// computes to `auto` and `clip` to `hidden`, while two non-scrolling values
+/// are left as written. Neither longhand is inherited.
+#[test]
+fn a_scrolling_axis_turns_the_other_one_from_visible_to_auto() {
+    use crate::property::Overflow;
+    let nodes = tree(&[
+        ("table", None),
+        ("div", None),
+        ("p", Some(1)),
+        ("pre", None),
+    ]);
+    let styled = styles(
+        "table { overflow-x: auto }
+         div { overflow-x: clip; overflow-y: scroll }
+         pre { overflow: clip visible }",
+        &nodes,
+    );
+    assert_eq!(
+        (styled[0].overflow_x, styled[0].overflow_y),
+        (Overflow::Auto, Overflow::Auto)
+    );
+    assert_eq!(
+        (styled[1].overflow_x, styled[1].overflow_y),
+        (Overflow::Hidden, Overflow::Scroll)
+    );
+    assert_eq!(
+        (styled[2].overflow_x, styled[2].overflow_y),
+        (Overflow::Visible, Overflow::Visible),
+        "not inherited"
+    );
+    assert_eq!(
+        (styled[3].overflow_x, styled[3].overflow_y),
+        (Overflow::Clip, Overflow::Visible),
+        "clip beside visible is left alone: neither axis scrolls"
+    );
+}

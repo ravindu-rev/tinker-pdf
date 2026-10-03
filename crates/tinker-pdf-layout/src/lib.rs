@@ -468,6 +468,19 @@ pub struct Page {
     /// Text, in **reading order**, which is what makes text conservation a
     /// comparison rather than a search.
     pub runs: Vec<TextRun>,
+    /// The overflow clips on this page, `css-overflow-3` §3.1: one per
+    /// fragment of a box whose `overflow` clips **and whose content reached
+    /// past its padding box** — a clip that would remove nothing is not
+    /// written, so a book's `pre { overflow: auto }` around code that fits
+    /// costs its page nothing.
+    ///
+    /// A fourth list rather than a field on what it clips, for
+    /// [`Page::replaced`]'s reason: what a clip applies to is every fragment
+    /// **descended** from its element, which is an element-tree question —
+    /// a float, a positioned box and a table cell inside it are all clipped
+    /// by it and none of them is beside it here. The caller has the tree;
+    /// [`ClipFragment::anchor`] says whose clip this is.
+    pub clips: Vec<ClipFragment>,
 }
 
 /// A block box's decoration on one page.
@@ -513,6 +526,35 @@ pub struct BoxFragment {
     /// background this is to apply it to the right one. `None` for a box
     /// nobody anchored: an anonymous one, or a column rule.
     pub anchor: Option<u32>,
+}
+
+/// One box's overflow clip on one page: its **padding box** there, which
+/// `css-overflow-3` §3.1 clips to, with `css-backgrounds-3` §5.3's padding-edge
+/// curves where the box has rounded corners.
+///
+/// An axis the box does not clip — `overflow-x: clip` beside `overflow-y:
+/// visible` — is unbounded: `x` is negative infinity and `width` infinity, or
+/// `y` and `height` likewise, and the caller cuts that to its page. A fragment
+/// cut by a page boundary is unbounded on the cut edge too, as its border is
+/// absent there: the page is that edge's clip.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipFragment {
+    /// The [`BoxNode::anchor`] of the clipping box. Never `None`: a box no
+    /// caller anchored has no descendants the caller could find, so its clip
+    /// is not reported.
+    pub anchor: u32,
+    /// Padding-box left edge.
+    pub x: f64,
+    /// Padding-box top edge on this page.
+    pub y: f64,
+    /// Padding-box width.
+    pub width: f64,
+    /// Padding-box height on this page.
+    pub height: f64,
+    /// The padding edge's corner radii, `(horizontal, vertical)` in
+    /// `Corner::ALL`'s order: the border edge's less the border widths, never
+    /// below zero (§5.3). Square on a cut edge, as [`BoxFragment::radius`] is.
+    pub radius: [(f64, f64); 4],
 }
 
 /// A replaced element's content box on one page.

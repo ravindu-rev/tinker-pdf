@@ -1595,7 +1595,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
         let effects = chapter
             .reading
             .as_ref()
-            .map(|reading| paint::Effects::of(&reading.dom, &reading.styles))
+            .map(|reading| paint::Effects::of(&reading.dom, &reading.styles, &chapter.pages))
             .unwrap_or_default();
         refused_effects += effects.register(builder);
         for (offset, laid) in chapter.pages.iter().enumerate() {

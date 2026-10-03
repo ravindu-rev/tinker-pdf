@@ -43,7 +43,9 @@
 //! says where the rules had to be given up.
 
 use crate::flow::{Abreast, BlockRecord, FloatRecord, Flow, Item, ItemKind};
-use crate::{BoxFragment, Layout, Limits, Options, Page, Refusal, ReplacedFragment, Warning};
+use crate::{
+    BoxFragment, ClipFragment, Layout, Limits, Options, Page, Refusal, ReplacedFragment, Warning,
+};
 use tinker_pdf_css::property::LengthPercentage;
 
 /// Slack for a comparison against a page height, in points.
@@ -715,7 +717,7 @@ fn emit(
     // Decorations first and in tree order, so an ancestor's background is
     // under its descendants'.
     for block in blocks {
-        if !block.painted && block.replaced.is_none() {
+        if !block.painted && block.replaced.is_none() && !block.clip.any() {
             continue;
         }
         let Some(head) = block.first else {
@@ -738,13 +740,22 @@ fn emit(
         if box_bottom < box_top {
             continue;
         }
+        // `box-decoration-break: slice`'s cut edges: the box began on an
+        // earlier page, or was cut inside its first item; it ends on a later
+        // one, or is cut inside its last.
+        let cut_top = from > head || box_top > head_y;
+        let cut_bottom = to < block.last || box_bottom < tail.y + tail.height;
+        if block.clip.any() {
+            clip(
+                block,
+                box_top + offset + block.dy,
+                (box_bottom - box_top).max(0.0),
+                (cut_top, cut_bottom),
+                out,
+            );
+        }
         if block.painted {
             let height = (box_bottom - box_top).max(0.0);
-            // `box-decoration-break: slice`'s cut edges: the box began on an
-            // earlier page, or was cut inside its first item; it ends on a
-            // later one, or is cut inside its last.
-            let cut_top = from > head || box_top > head_y;
-            let cut_bottom = to < block.last || box_bottom < tail.y + tail.height;
             out.boxes.push(BoxFragment {
                 x: block.x,
                 // CSS 2.2 §9.4.3's offset, which the flow deliberately does not
@@ -821,6 +832,68 @@ fn emit(
     }
 }
 
+/// One clipping box's fragment on this page, as its padding box.
+///
+/// `top` and `height` are the **border box's** on this page; the border is
+/// taken off each edge the fragment really has, and an edge a page boundary
+/// cut is left where the cut put it, since the page clips that edge already.
+/// An axis the box does not clip is unbounded, for [`crate::ClipFragment`]'s
+/// reason.
+fn clip(
+    block: &BlockRecord,
+    top: f64,
+    height: f64,
+    (cut_top, cut_bottom): (bool, bool),
+    out: &mut Page,
+) {
+    let Some(anchor) = block.anchor else {
+        return;
+    };
+    let border = &block.border_width;
+    let inset_top = if cut_top { 0.0 } else { border.top };
+    let inset_bottom = if cut_bottom { 0.0 } else { border.bottom };
+    let (x, width) = if block.clip.x {
+        (
+            block.x + border.left,
+            (block.width - border.left - border.right).max(0.0),
+        )
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
+    let (y, tall) = if block.clip.y {
+        (
+            top + inset_top,
+            (height - inset_top - inset_bottom).max(0.0),
+        )
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
+    // §5.3: the padding edge's curve is the border edge's less the border
+    // width on each axis. A clip unbounded in one axis has no corners.
+    let radius = if block.clip.x && block.clip.y {
+        let outer = corner_radii(block, block.width, height, cut_top, cut_bottom);
+        let less = |(h, v): (f64, f64), across: f64, down: f64| {
+            ((h - across).max(0.0), (v - down).max(0.0))
+        };
+        [
+            less(outer[0], border.left, inset_top),
+            less(outer[1], border.right, inset_top),
+            less(outer[2], border.right, inset_bottom),
+            less(outer[3], border.left, inset_bottom),
+        ]
+    } else {
+        [(0.0, 0.0); 4]
+    };
+    out.clips.push(ClipFragment {
+        anchor,
+        x,
+        y,
+        width,
+        height: tall,
+        radius,
+    });
+}
+
 /// A fragment's four corner radii, `css-backgrounds-3` §5, in CSS pixels.
 ///
 /// §5.1 resolves a horizontal percentage against the border box's width and a
@@ -886,7 +959,7 @@ fn corner_radii(
 /// the item at band-local `window.from` on this page's top edge.
 fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
     for block in &band.blocks {
-        if !block.painted && block.replaced.is_none() {
+        if !block.painted && block.replaced.is_none() && !block.clip.any() {
             continue;
         }
         let Some(head) = block.first else {
@@ -901,10 +974,19 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
         if box_bottom < box_top {
             continue;
         }
+        let cut_top = box_top > band.items[head].y;
+        let cut_bottom = box_bottom < tail.y + tail.height;
+        if block.clip.any() {
+            clip(
+                block,
+                box_top + offset + block.dy,
+                (box_bottom - box_top).max(0.0),
+                (cut_top, cut_bottom),
+                out,
+            );
+        }
         if block.painted {
             let height = (box_bottom - box_top).max(0.0);
-            let cut_top = box_top > band.items[head].y;
-            let cut_bottom = box_bottom < tail.y + tail.height;
             out.boxes.push(BoxFragment {
                 x: block.x,
                 y: box_top + offset + block.dy,

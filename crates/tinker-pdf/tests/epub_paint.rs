@@ -436,3 +436,199 @@ fn a_rounded_box_cut_across_pages_rounds_only_its_real_ends() {
         assert_eq!(count(&on(middle)), 0, "a middle page is a square slice");
     }
 }
+
+// ---- overflow ---------------------------------------------------------------------
+
+/// The grey level at one point of the first page, in PDF points from its bottom
+/// left: 0 is black ink, 255 none.
+fn ink_at(doc: &Document, x: f64, y: f64) -> u8 {
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let scale = f64::from(bitmap.height) / PAGE_HEIGHT;
+    let column = (x * scale) as usize;
+    let row = ((PAGE_HEIGHT - y) * scale) as usize;
+    let components = bitmap.components();
+    let start = row * bitmap.stride + column * components;
+    bitmap
+        .data
+        .get(start..start + components)
+        .map_or(u8::MAX, |pixel| {
+            pixel.iter().take(3).copied().min().unwrap_or(u8::MAX)
+        })
+}
+
+/// A CSS pixel position in the content area, as page points.
+fn at(x: f64, y: f64) -> (f64, f64) {
+    (MARGIN + x * PX, PAGE_HEIGHT - MARGIN - y * PX)
+}
+
+/// A box that clips and a black box three times wider and five times taller
+/// inside it.
+const CLIPPING: &str = ".c { width: 100px; height: 40px; overflow: hidden } \
+                        .ink { width: 300px; height: 200px; background-color: #000000 }";
+
+/// **Content past an `overflow: hidden` box's padding box is not drawn**
+/// (`css-overflow-3` §3.1), and the clip is that padding box: `re W n` at its
+/// four edges, computed here from the content area's corner.
+///
+/// The render says the operator does what it claims: black inside the box,
+/// white beside it and below it, where the same book with `overflow: visible`
+/// draws the black box whole.
+#[test]
+fn an_overflowing_box_clips_its_content_to_its_padding_box() {
+    let body = r#"<div class="c"><div class="ink"></div></div>"#;
+    let clipped = open(CLIPPING, body);
+    let words = tokens(&clipped);
+    let w = words.iter().position(|word| word == "W").expect("a clip");
+    let (left, top) = at(0.0, 0.0);
+    let expected = [
+        left.to_string(),
+        (top - 40.0 * PX).to_string(),
+        (100.0 * PX).to_string(),
+        (40.0 * PX).to_string(),
+        "re".to_owned(),
+    ];
+    assert_eq!(words[w - 5..w], expected, "the padding box: {words:?}");
+    assert_eq!(words[w + 1], "n");
+
+    let inside = at(50.0, 20.0);
+    let beside = at(200.0, 20.0);
+    let below = at(50.0, 100.0);
+    assert_eq!(ink_at(&clipped, inside.0, inside.1), 0, "inside the box");
+    assert_eq!(ink_at(&clipped, beside.0, beside.1), 255, "beside it");
+    assert_eq!(ink_at(&clipped, below.0, below.1), 255, "below it");
+
+    let spilled = open(
+        &CLIPPING.replace("overflow: hidden", "overflow: visible"),
+        body,
+    );
+    assert!(!tokens(&spilled).contains(&"W".to_owned()), "nothing clips");
+    assert_eq!(ink_at(&spilled, beside.0, beside.1), 0, "drawn beside it");
+}
+
+/// **An element's own clip cuts its own text**, which its box does not: the
+/// glyphs of a line too long for an `overflow: hidden` box are drawn inside
+/// the clip, where the box's background is drawn outside it.
+#[test]
+fn an_elements_clip_cuts_its_own_text() {
+    let doc = open(
+        ".c { width: 40px; overflow: hidden; white-space: nowrap }",
+        r#"<div class="c">a line much wider than its box</div>"#,
+    );
+    let words = tokens(&doc);
+    let bt = words
+        .iter()
+        .position(|word| word == "BT")
+        .expect("the text");
+    let w = words[..bt]
+        .iter()
+        .rposition(|word| word == "W")
+        .expect("a clip before the text");
+    assert!(
+        !words[w..bt].contains(&"Q".to_owned()),
+        "and still in force when the text is drawn: {words:?}"
+    );
+}
+
+/// **A box whose content fits writes no clip at all** — not a clip that
+/// removes nothing — so `pre { overflow: auto }` round code that fits costs a
+/// book nothing, and nothing about `overflow` is counted as unimplemented.
+#[test]
+fn a_box_whose_content_fits_writes_no_clip() {
+    let doc = open(
+        "div { width: 200px; overflow: hidden } pre { overflow: auto }",
+        "<div><p>short</p></div><pre>code</pre>",
+    );
+    assert!(
+        !tokens(&doc).contains(&"W".to_owned()),
+        "{:?}",
+        tokens(&doc)
+    );
+    assert_eq!(counted(&doc, "overflow"), None);
+}
+
+/// **A rounded box clips to its padding edge's curve** (`css-backgrounds-3`
+/// §5.3): each radius less the border width, so a 10-pixel corner inside a
+/// 2-pixel border clips on an 8-pixel quarter arc.
+#[test]
+fn a_rounded_box_clips_to_its_padding_edges_curve() {
+    let doc = open(
+        &format!("{CLIPPING} .c {{ border: 2px solid #ff0000; border-radius: 10px }}"),
+        r#"<div class="c"><div class="ink"></div></div>"#,
+    );
+    // The border's own sides are drawn inside polygon clips of their own
+    // (`a_rounded_border_is_a_ring_per_side`); the overflow clip is the one
+    // whose path is curved.
+    let words = tokens(&doc);
+    let mut found = Vec::new();
+    for (w, word) in words.iter().enumerate() {
+        if word != "W" {
+            continue;
+        }
+        let q = words[..w]
+            .iter()
+            .rposition(|word| word == "q")
+            .expect("a q");
+        found.clear();
+        for (at, word) in words[..w].iter().enumerate().skip(q) {
+            if word == "c" {
+                let operands: Vec<f64> = words[at - 6..at]
+                    .iter()
+                    .map(|text| text.parse().expect("a `c` operand"))
+                    .collect();
+                found.push([
+                    operands[0],
+                    operands[1],
+                    operands[2],
+                    operands[3],
+                    operands[4],
+                    operands[5],
+                ]);
+            }
+        }
+        if !found.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(found.len(), 4, "four curved corners: {words:?}");
+    let right = MARGIN + 102.0 * PX;
+    let top = PAGE_HEIGHT - MARGIN - 2.0 * PX;
+    let r = 8.0 * PX;
+    let k = quarter_arc();
+    close(
+        found[0],
+        [
+            right - r + k * r,
+            top,
+            right,
+            top - r + k * r,
+            right,
+            top - r,
+        ],
+    );
+}
+
+/// **An absolutely positioned box escapes the clip of a box that is not its
+/// containing block** (CSS 2.2 §11.1.1: clipping applies to *"all descendants
+/// except those whose containing block is the viewport or an ancestor of the
+/// element"*), and is clipped by one that is.
+#[test]
+fn a_positioned_box_is_clipped_only_through_its_containing_block() {
+    let body = r#"<div class="c"><div class="ink"></div><div class="abs"></div></div>"#;
+    let positioned = ".abs { position: absolute; top: 100px; left: 200px; width: 50px; \
+                      height: 50px; background-color: #000000 }";
+    let (x, y) = at(225.0, 125.0);
+    let escaped = open(&format!("{CLIPPING} {positioned}"), body);
+    assert_eq!(
+        ink_at(&escaped, x, y),
+        0,
+        "its containing block is the page"
+    );
+    let held = open(
+        &format!("{CLIPPING} {positioned} .c {{ position: relative }}"),
+        body,
+    );
+    assert_eq!(ink_at(&held, x, y), 255, "its containing block clips it");
+}

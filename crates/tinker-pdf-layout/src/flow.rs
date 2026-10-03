@@ -140,6 +140,48 @@ pub(crate) struct BlockRecord {
     /// because almost no box has either and a record is in the frame of every
     /// recursion of [`Builder::block`].
     pub paint: Option<Box<crate::style::BoxPaint>>,
+    /// The axes its overflow clip cuts, `css-overflow-3` §3.1 — **set only
+    /// once its content is found to reach past its padding box**, by
+    /// [`Builder::note_overflow`] or [`Builder::clip_tail`]. A box whose
+    /// `overflow` clips and whose content fits keeps [`Clip::NONE`], and the
+    /// page it is on carries no clip for it: a clip that removes nothing is
+    /// not written.
+    pub clip: Clip,
+}
+
+/// Which axes a box's overflow clips, `css-overflow-3` §3.1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Clip {
+    /// `overflow-x` is not `visible`.
+    pub x: bool,
+    /// `overflow-y` is not `visible`.
+    pub y: bool,
+}
+
+impl Clip {
+    /// No clip.
+    pub const NONE: Clip = Clip { x: false, y: false };
+
+    /// The axes a box clips, from its computed style.
+    ///
+    /// **`overflow` applies to block containers** (§3.1's *"Applies to"*), so
+    /// a table box — whose content is a grid and not a flow — and a replaced
+    /// box — whose content is a picture sized to it — clip nothing whatever
+    /// they declare. A table **cell** is a block container and does clip.
+    fn of(style: &Consumed, replaced: bool) -> Clip {
+        if replaced || style.is_table() {
+            return Clip::NONE;
+        }
+        Clip {
+            x: style.overflow_x.clips(),
+            y: style.overflow_y.clips(),
+        }
+    }
+
+    /// Either axis.
+    pub fn any(self) -> bool {
+        self.x || self.y
+    }
 }
 
 /// A replaced box's picture, as an inset from the box's own border-box corner.
@@ -484,6 +526,53 @@ struct Builder<'a, M: Metrics> {
     /// a sub-flow — a float's, a column's — saves and clears it, because a float
     /// that leads a list item is not where its marker goes.
     inside_marker: Option<Piece>,
+    /// The float contexts of the formatting contexts a scroll container
+    /// interrupted, innermost last: CSS 2.2 §9.4.1 makes one a block
+    /// formatting context of its own, so its children are placed against a
+    /// fresh [`FloatContext`] and the outer one is put back when it closes.
+    ///
+    /// A stack on the builder rather than a local in [`Builder::block`], for
+    /// [`Builder::fill_height`]'s reason: a `FloatContext` in `block`'s frame
+    /// is twenty-four bytes at every level of the depth cap.
+    outer_floats: Vec<FloatContext>,
+    /// How many boxes that clip are open, **across** sub-flows — a float's, a
+    /// cell's, an `inline-block`'s — which [`Builder::subflow`] does not swap.
+    ///
+    /// [`Builder::note_overflow`] reads a box's whole subtree to decide whether
+    /// it overflowed, so a clipping box inside a clipping box reads its subtree
+    /// twice, and a nest of them reads the innermost content once per level.
+    /// That multiplication is the work a book chooses, so the reads are charged
+    /// to [`Budget::spend_layout`] — **the nested ones only**: the outermost
+    /// clipping box's read is linear in what it contains, the same order as
+    /// laying the content out at all, and charging it would be counting the
+    /// book's text a second time.
+    clipping: usize,
+    /// A refusal [`Builder::note_overflow`] met, kept until the next box asks
+    /// for its budget or the walk ends.
+    ///
+    /// **Deferred and not returned**, which is a stack measurement: a fallible
+    /// call holds a `Result` in the caller's frame, `note_overflow`'s caller
+    /// is [`Builder::block`], and a fourth one there overflowed
+    /// `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`'s stack. The
+    /// bound is no weaker for it: every box spends from the budget before it
+    /// is laid out, so the walk stops at the very next box, having done at
+    /// most the one subtree the charge was for.
+    deferred: Option<Refusal>,
+    /// How far into its own bottom padding a clipped box's kept content
+    /// reaches, which [`Builder::clip_tail`] sets and [`Builder::block`]
+    /// takes off the bottom edge it emits next, so the border box still ends
+    /// at the padding box's used bottom.
+    overhang: f64,
+}
+
+/// What [`Builder::horizontal`] decided about one block box.
+struct Horizontal {
+    /// Border-box left edge, never left of the page.
+    left: f64,
+    /// The used `width`, as a content-box width.
+    content_width: f64,
+    /// The picture's used size, for a replaced box.
+    replaced: Option<(f64, f64)>,
 }
 
 /// What laying a subtree out in its own formatting context came to.
@@ -816,8 +905,15 @@ pub(crate) fn build<M: Metrics>(
         flex_pass: None,
         sequence: 0,
         inside_marker: None,
+        outer_floats: Vec::new(),
+        clipping: 0,
+        deferred: None,
+        overhang: 0.0,
     };
     builder.block(root, options.width, 0.0, 0, false, 0)?;
+    if let Some(refusal) = builder.deferred.take() {
+        return Err(refusal);
+    }
     // The last pending margin is committed so the flow's height includes it,
     // which matters for a book whose last block has a bottom margin: without
     // it the final page is short by that margin and the page count can differ.
@@ -947,13 +1043,11 @@ impl<M: Metrics> Builder<'_, M> {
         {
             return self.positioned_box(node, &style, x, depth, avoid);
         }
-        self.budget.spend_box()?;
+        self.spend_box()?;
         let avoid = avoid || style.page_break_inside == PageBreakInside::Avoid;
 
         let margin_top = style.margin_px(Side::Top, containing);
         let margin_bottom = style.margin_px(Side::Bottom, containing);
-        let margin_left = style.margin_px(Side::Left, containing);
-        let margin_right = style.margin_px(Side::Right, containing);
         let padding = Sides {
             top: style.padding_px(Side::Top, containing),
             right: style.padding_px(Side::Right, containing),
@@ -961,80 +1055,19 @@ impl<M: Metrics> Builder<'_, M> {
             left: style.padding_px(Side::Left, containing),
         };
         let border = style.border_width;
-
-        // `css-box-3` §4: `content-box` measures `width` as the content, and
-        // `border-box` measures it as content plus padding plus border. The
-        // difference is invisible on a box with neither, which is why a fixture
-        // for it must have both.
-        //
-        // **`css-ui-3` §5.1 puts `min-width` and `max-width` inside the same
-        // sentence**: `border-box` measures *"the width and height ... and the
-        // respective min/max properties"* from the border box, so the
-        // conversion is one closure over all three rather than a special case
-        // for `width`. A build that converted `width` and not `max-width` gets
-        // every `box-sizing: border-box; max-width: 40em` figure wrong by the
-        // padding and the page looks entirely reasonable.
+        // `css-box-3` §4's `box-sizing` and the whole of §10.3's horizontal
+        // half. See [`Builder::horizontal`].
         let extra = padding.left + padding.right + border.left + border.right;
-        let to_content = |specified: f64| {
-            match style.box_sizing {
-                tinker_pdf_css::property::BoxSizing::ContentBox => specified,
-                tinker_pdf_css::property::BoxSizing::BorderBox => specified - extra,
-            }
-            .max(0.0)
-        };
-        let auto_width = (containing - margin_left - margin_right - extra).max(0.0);
-        let stated_width = match style.width {
-            Size::Auto => None,
-            Size::Length(length) => Some(to_content(resolve_length(length, containing))),
-        };
-        // CSS 2.2 §3.1's replaced element, sized here rather than by everything
-        // below it. §10.3.4 says so in one sentence — *"the used value of
-        // `width` is determined as for inline replaced elements"* — and
-        // §10.6.2's title lists block-level replaced boxes beside inline ones,
-        // so one call answers both axes for every `display` a picture can have.
-        //
-        // **Before `is_table`, `is_flex` and `is_multicol` below**, which is
-        // `css-display-3` §2.2: *"replaced elements ... ignore the inner
-        // display type"*. `img { display: flex }` is a block-level picture and
-        // not an empty flex container, and a build that asked `is_flex` first
-        // would produce the second.
-        let replaced = replaced_box(node, &style, containing);
-        // §10.4: the tentative used width comes from §10.3, and then the whole
-        // of §10.3 is *"applied again"* with `max-width` as the width, and
-        // again with `min-width`. `style::clamp_size` is that order, which is
-        // not `f64::clamp`: a `min-width` larger than the `max-width` wins.
-        let tentative = stated_width.unwrap_or(auto_width);
-        let content_width = match replaced {
-            Some((width, _)) => width,
-            None => crate::style::clamp_size(
-                tentative,
-                crate::style::min_length(style.min_width, Some(containing)).map(to_content),
-                crate::style::max_length(style.max_width, Some(containing)).map(to_content),
-            ),
-        };
-        // §10.3.3: with a used width that is not `auto`, two `auto` margins
-        // centre the box and the leftover is otherwise put on the right. An
-        // `auto` width that §10.4's clamp has narrowed reaches this too, and
-        // that is §10.4's own instruction rather than an extra rule: the second
-        // pass runs *"as if `width` were the clamped value"*, and by then it is
-        // not `auto`.
-        let both_auto =
-            style.margin.left == MarginValue::Auto && style.margin.right == MarginValue::Auto;
-        // §10.3.4 sends a block-level replaced box through §10.3.3's margin
-        // rules with the width §10.3.2 gave it, which is never `auto` — so two
-        // `auto` margins centre a picture exactly as they centre a `<div>` with
-        // a stated width.
-        let definite = replaced.is_some() || stated_width.is_some() || content_width < tentative;
-        let mut left = if both_auto && definite {
-            x + ((containing - (content_width + extra)) / 2.0).max(0.0)
-        } else {
-            x + margin_left
-        };
-        if content_width + extra > containing + 0.001 {
-            self.warn(Warning::ContentOverflowedPage);
-        }
-        left = left.max(0.0);
+        let Horizontal {
+            left,
+            content_width,
+            replaced,
+        } = self.horizontal(node, &style, containing, x, extra);
         let border_box_width = content_width + extra;
+        // `css-overflow-3` §3.1. The axes it clips, and whether it is a scroll
+        // container and so a formatting context of its own (CSS 2.2 §9.4.1).
+        let clip = Clip::of(&style, replaced.is_some());
+        let contained = clip.any() && style.is_scroll_container();
 
         let painted = style.background_color.a != 0
             || border.top > 0.0
@@ -1057,6 +1090,7 @@ impl<M: Metrics> Builder<'_, M> {
             dy: 0.0,
             anchor: node.anchor,
             paint: style.paint.clone(),
+            clip: Clip::NONE,
         };
         let block = self.flow.blocks.len();
         self.flow.blocks.push(record);
@@ -1065,7 +1099,7 @@ impl<M: Metrics> Builder<'_, M> {
         // adjoining here and this box's own top margin — so it is introduced
         // before the top margin joins them, and introducing it is what stops
         // the two from collapsing through each other.
-        self.clear(&style, margin_top)?;
+        self.clear(&style, margin_top, contained, left, border_box_width)?;
 
         // The top margin joins whatever is adjoining, and the box's
         // `page-break-before` joins the break position that margin is. The
@@ -1099,7 +1133,13 @@ impl<M: Metrics> Builder<'_, M> {
         }
         let floats_before = self.flow.floats.len();
         let top_edge = border.top + padding.top;
-        if top_edge > 0.0 {
+        // **And so does a formatting context of its own**, with nothing
+        // between the two at all: §8.3.1 says *"margins of elements that
+        // establish new block formatting contexts ... do not collapse with
+        // their in-flow children"*. An edge of no height is what opens the
+        // box's border box here, so the first child's margin is committed
+        // **inside** it rather than beside it.
+        if top_edge > 0.0 || contained {
             // A border or a padding between the parent and its first child is
             // exactly what stops case 2 from happening, so the margin is
             // committed here and the two do not meet.
@@ -1114,6 +1154,7 @@ impl<M: Metrics> Builder<'_, M> {
         // for the reason above: an uncommitted margin has not moved `self.y`
         // yet and it will.
         let outer_top = std::mem::replace(&mut self.content_top, before + self.pending.value());
+        self.open_clip(clip, contained);
         self.arm_marker(node, &style, ordinal);
         if let Some(size) = replaced {
             self.replaced_content(
@@ -1147,12 +1188,22 @@ impl<M: Metrics> Builder<'_, M> {
         }
         self.disarm_marker();
         self.content_top = outer_top;
+        if contained {
+            self.leave_context(&style);
+        }
         let content_height = self.y - before;
 
         // §10.6.3's height and §10.7's clamp. See [`Builder::fill_height`].
-        self.fill_height(&style, content_height);
+        self.fill_height(
+            &style,
+            content_height,
+            block,
+            floats_before,
+            clip,
+            padding.bottom,
+        );
 
-        let bottom_edge = border.bottom + padding.bottom;
+        let bottom_edge = border.bottom + padding.bottom - std::mem::take(&mut self.overhang);
         if bottom_edge > 0.0 {
             self.commit_margin();
             self.emit(bottom_edge, ItemKind::Edge, true);
@@ -1165,6 +1216,9 @@ impl<M: Metrics> Builder<'_, M> {
             self.open_avoid.pop();
         }
         self.offset_relative(&style, block, floats_before, content_x, before, containing);
+        if clip.any() {
+            self.note_overflow(block, clip, floats_before, &border);
+        }
 
         // The bottom margin joins the next adjoining position. When the box had
         // no border, no padding, no content and no height, its top margin is
@@ -1183,6 +1237,106 @@ impl<M: Metrics> Builder<'_, M> {
             self.marker(node, &style, block, content_x, ordinal);
         }
         Ok(())
+    }
+
+    /// A block box's used width and left edge: CSS 2.2 §10.3.3, §10.3.4 and
+    /// §10.4, with `css-box-3`'s `box-sizing`, and the picture's size where
+    /// the box is replaced.
+    ///
+    /// **A method and not sixty lines inside [`Builder::block`]**, and the
+    /// reason is [`Builder::offset_relative`]'s: `block` recurses once per
+    /// level of the document and its frame is what the depth cap is measured
+    /// in stack against. These locals — two margins, a closure, a stated, a
+    /// tentative and a used width, the picture — were `block`'s own until the
+    /// overflow milestone needed room in that frame, and
+    /// `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name` overflowed
+    /// until they moved here.
+    #[inline(never)]
+    fn horizontal(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        containing: f64,
+        x: f64,
+        extra: f64,
+    ) -> Horizontal {
+        let margin_left = style.margin_px(Side::Left, containing);
+        let margin_right = style.margin_px(Side::Right, containing);
+        // `css-box-3` §4: `content-box` measures `width` as the content, and
+        // `border-box` measures it as content plus padding plus border. The
+        // difference is invisible on a box with neither, which is why a fixture
+        // for it must have both.
+        //
+        // **`css-ui-3` §5.1 puts `min-width` and `max-width` inside the same
+        // sentence**: `border-box` measures *"the width and height ... and the
+        // respective min/max properties"* from the border box, so the
+        // conversion is one closure over all three rather than a special case
+        // for `width`. A build that converted `width` and not `max-width` gets
+        // every `box-sizing: border-box; max-width: 40em` figure wrong by the
+        // padding and the page looks entirely reasonable.
+        let to_content = |specified: f64| {
+            match style.box_sizing {
+                tinker_pdf_css::property::BoxSizing::ContentBox => specified,
+                tinker_pdf_css::property::BoxSizing::BorderBox => specified - extra,
+            }
+            .max(0.0)
+        };
+        let auto_width = (containing - margin_left - margin_right - extra).max(0.0);
+        let stated_width = match style.width {
+            Size::Auto => None,
+            Size::Length(length) => Some(to_content(resolve_length(length, containing))),
+        };
+        // CSS 2.2 §3.1's replaced element, sized here rather than by everything
+        // below it. §10.3.4 says so in one sentence — *"the used value of
+        // `width` is determined as for inline replaced elements"* — and
+        // §10.6.2's title lists block-level replaced boxes beside inline ones,
+        // so one call answers both axes for every `display` a picture can have.
+        //
+        // **Before `is_table`, `is_flex` and `is_multicol` below**, which is
+        // `css-display-3` §2.2: *"replaced elements ... ignore the inner
+        // display type"*. `img { display: flex }` is a block-level picture and
+        // not an empty flex container, and a build that asked `is_flex` first
+        // would produce the second.
+        let replaced = replaced_box(node, style, containing);
+        // §10.4: the tentative used width comes from §10.3, and then the whole
+        // of §10.3 is *"applied again"* with `max-width` as the width, and
+        // again with `min-width`. `style::clamp_size` is that order, which is
+        // not `f64::clamp`: a `min-width` larger than the `max-width` wins.
+        let tentative = stated_width.unwrap_or(auto_width);
+        let content_width = match replaced {
+            Some((width, _)) => width,
+            None => crate::style::clamp_size(
+                tentative,
+                crate::style::min_length(style.min_width, Some(containing)).map(to_content),
+                crate::style::max_length(style.max_width, Some(containing)).map(to_content),
+            ),
+        };
+        // §10.3.3: with a used width that is not `auto`, two `auto` margins
+        // centre the box and the leftover is otherwise put on the right. An
+        // `auto` width that §10.4's clamp has narrowed reaches this too, and
+        // that is §10.4's own instruction rather than an extra rule: the second
+        // pass runs *"as if `width` were the clamped value"*, and by then it is
+        // not `auto`.
+        let both_auto =
+            style.margin.left == MarginValue::Auto && style.margin.right == MarginValue::Auto;
+        // §10.3.4 sends a block-level replaced box through §10.3.3's margin
+        // rules with the width §10.3.2 gave it, which is never `auto` — so two
+        // `auto` margins centre a picture exactly as they centre a `<div>` with
+        // a stated width.
+        let definite = replaced.is_some() || stated_width.is_some() || content_width < tentative;
+        let left = if both_auto && definite {
+            x + ((containing - (content_width + extra)) / 2.0).max(0.0)
+        } else {
+            x + margin_left
+        };
+        if content_width + extra > containing + 0.001 {
+            self.warn(Warning::ContentOverflowedPage);
+        }
+        Horizontal {
+            left: left.max(0.0),
+            content_width,
+            replaced,
+        }
     }
 
     /// §10.6.3's `height`, §10.7's clamp, and the padding that makes the flow
@@ -1214,11 +1368,23 @@ impl<M: Metrics> Builder<'_, M> {
     /// The percentages resolve against `None` for §10.5's reason: this box's
     /// containing block has an `auto` height at this point in the pass, so a
     /// percentage `min-height` or `max-height` behaves as `auto` and `none`.
-    fn fill_height(&mut self, style: &Consumed, content_height: f64) {
-        let stated_height = match style.height {
-            Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
-            Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
-        };
+    ///
+    /// **A box that clips its block axis is the exception, and makes both
+    /// halves implementable.** `css-overflow-3` §3.1 clips its content to its
+    /// padding box, so the content past the used height is not drawn and the
+    /// box that follows is placed after the used height and not after the
+    /// content: [`Builder::clip_tail`] takes it back out of the flow, and a
+    /// `max-height: 4em; overflow: hidden` box is exactly four ems tall.
+    fn fill_height(
+        &mut self,
+        style: &Consumed,
+        content_height: f64,
+        block: usize,
+        floats_before: usize,
+        clip: Clip,
+        padding_bottom: f64,
+    ) {
+        let stated_height = definite_height(style);
         let min_height = crate::style::min_length(style.min_height, None);
         let max_height = crate::style::max_length(style.max_height, None);
         let wanted = crate::style::clamp_size(
@@ -1229,9 +1395,280 @@ impl<M: Metrics> Builder<'_, M> {
         if wanted > content_height {
             self.commit_margin();
             self.emit(wanted - content_height, ItemKind::Edge, true);
+        } else if clip.y && content_height > wanted + EPSILON {
+            let cut = self.y - content_height + wanted;
+            self.clip_tail(block, floats_before, (cut, cut + padding_bottom), clip);
         } else if max_height.is_some_and(|max| content_height > max + EPSILON) {
             self.warn(Warning::MaxHeightAsAuto);
         }
+    }
+
+    /// A box that clips, opened: a scroll container's fresh float context
+    /// (see [`Builder::outer_floats`]) and the count of open clipping boxes
+    /// (see [`Builder::clipping`]).
+    ///
+    /// Never inlined, for [`Builder::disarm_marker`]'s reason: the context it
+    /// moves is a value in its own frame rather than in `block`'s.
+    #[inline(never)]
+    fn open_clip(&mut self, clip: Clip, contained: bool) {
+        if contained {
+            let outer = std::mem::take(&mut self.floats);
+            self.outer_floats.push(outer);
+        }
+        if clip.any() {
+            self.clipping += 1;
+        }
+    }
+
+    /// A scroll container's own block formatting context, closed: CSS 2.2
+    /// §9.4.1's three consequences that are not the clip.
+    ///
+    /// 1. The last child's bottom margin is committed **inside** the box, which
+    ///    is §8.3.1's *"do not collapse with their in-flow children"* at the
+    ///    bottom as the zero-height edge [`Builder::block`] emits is at the
+    ///    top.
+    /// 2. §10.6.7: with an `auto` height, *"if the element has any floating
+    ///    descendants whose bottom margin edge is below the element's bottom
+    ///    content edge, then the height is increased to include those
+    ///    edges"* — which is what `overflow: hidden` round a floated picture is
+    ///    written for, and the reason a book writes it.
+    /// 3. The float context the box interrupted is put back, so the floats it
+    ///    placed are nobody else's to flow round.
+    #[inline(never)]
+    fn leave_context(&mut self, style: &Consumed) {
+        self.commit_margin();
+        let inner = std::mem::replace(
+            &mut self.floats,
+            self.outer_floats.pop().unwrap_or_default(),
+        );
+        if definite_height(style).is_some() {
+            return;
+        }
+        if let Some(bottom) = inner.clearance_bottom(Clear::Both) {
+            if bottom > self.y + EPSILON {
+                self.emit(bottom - self.y, ItemKind::Edge, true);
+            }
+        }
+    }
+
+    /// CSS 2.2 §9.5: *"The border box of ... an element in the normal flow that
+    /// establishes a new block formatting context (such as an element with
+    /// `overflow` other than `visible`) must not overlap the margin box of any
+    /// floats in the same block formatting context"*, and *"if necessary,
+    /// implementations should clear the said element by placing it below any
+    /// preceding floats"*.
+    ///
+    /// **The *should*, and not the *may* that follows it.** §9.5 also permits
+    /// placing the box beside the floats, narrowed, *"if there is sufficient
+    /// space"*, and leaves *sufficient* undefined; a browser narrows. This
+    /// build clears, which is the sentence's own first answer: the box keeps
+    /// the width its containing block gives it and starts below the floats it
+    /// would have overlapped. A float that only begins below the box's top
+    /// edge is not looked for, since this box's height is not known yet.
+    #[inline(never)]
+    fn clear_beside_floats(
+        &mut self,
+        left: f64,
+        width: f64,
+        margin_top: f64,
+    ) -> Result<(), Refusal> {
+        if self.floats.is_empty() {
+            return Ok(());
+        }
+        self.budget.spend_layout(self.floats.len())?;
+        let top = self.cursor() + margin_top;
+        let (lo, hi) = self.floats.band(top, top + 1.0, left, left + width);
+        if lo <= left + EPSILON && hi >= left + width - EPSILON {
+            return Ok(());
+        }
+        let Some(bottom) = self.floats.clearance_bottom(Clear::Both) else {
+            return Ok(());
+        };
+        let clearance = bottom - top;
+        if clearance <= 0.0 {
+            return Ok(());
+        }
+        let inside = self.inside_open();
+        self.commit_margin();
+        self.emit(clearance, ItemKind::Edge, inside);
+        Ok(())
+    }
+
+    /// **The content past a clipping box's used height, taken back out of the
+    /// flow**, `css-overflow-3` §3.1.
+    ///
+    /// The flow is one column whose `y` never goes backwards, so a box shorter
+    /// than its content cannot be drawn with the content running on under the
+    /// next box: everything is placed in order. What a block-axis clip makes
+    /// possible is to take out what the clip would hide. `edges` is the
+    /// content box's bottom edge and the padding box's: every item that begins
+    /// at or below the second leaves the column, the one that straddles it is
+    /// kept and shortened to end there (its ink is cut at the same edge by the
+    /// page's clip, not here), and the cursor goes back to wherever the kept
+    /// content ends — the content edge at the least. What the kept content
+    /// reaches into the bottom padding is [`Builder::overhang`], taken off the
+    /// bottom edge, so the box's bottom padding, border and margin, and the
+    /// next box, follow the used height whatever was kept.
+    ///
+    /// **Out of the column, and not out of the book.** The items that left are
+    /// kept as an out-of-flow record of no height at the padding edge, with
+    /// every run in them **laid out and not painted** — CSS 2.2 §11.2's
+    /// `visibility: hidden`, which is what a clip that hides all of a run makes
+    /// it — so the text is still the layout's, in its reading order, and text
+    /// conservation stays an equality rather than learning an exception. The
+    /// floats this box's content placed below the padding edge are hidden the
+    /// same way where they stand, and the margins still adjoining, which
+    /// belonged to the last child, are dropped: a margin is not content.
+    ///
+    /// Its work is charged by [`Builder::note_overflow`], which runs over the
+    /// same subtree once the box is closed and is the one fallible call of the
+    /// two: `block`'s frame holds one `Result` for both.
+    #[inline(never)]
+    fn clip_tail(&mut self, block: usize, floats_before: usize, edges: (f64, f64), clip: Clip) {
+        let (cut, line) = edges;
+        let Some(first) = self.flow.blocks[block].first else {
+            return;
+        };
+        // The box's own first item is always kept: it is its top edge, or
+        // the zero-height one a scroll container opens with, or its first
+        // line, and a box with no first item has no border box to draw.
+        let from = (first + 1).min(self.flow.items.len());
+        let keep = from
+            + self.flow.items[from..]
+                .iter()
+                .position(|item| item.y >= line - EPSILON)
+                .unwrap_or(self.flow.items.len() - from);
+        let mut tail = self.flow.items.split_off(keep);
+        if !tail.is_empty() {
+            hide(&mut tail, &mut [], Some(line));
+            // The current flow's own list of records beside the column, so a
+            // sub-flow — a float's, a cell's, a measuring trial's — carries
+            // its hidden tail with it and translates it where it goes.
+            self.flow.floats.push(FloatRecord {
+                items: tail,
+                blocks: Vec::new(),
+                top: line,
+                bottom: line,
+                pushable: false,
+                z: 0,
+            });
+        }
+        let mut end = cut;
+        if let Some(last) = self.flow.items.last_mut() {
+            if last.y + last.height > line {
+                last.height = (line - last.y).max(0.0);
+            }
+            end = last.y + last.height;
+        }
+        for record in &mut self.flow.blocks[block..] {
+            match record.first {
+                Some(head) if head >= keep => {
+                    record.first = None;
+                    record.last = 0;
+                }
+                _ => record.last = record.last.min(keep),
+            }
+        }
+        for open in &self.open {
+            let record = &mut self.flow.blocks[*open];
+            record.last = record.last.min(keep);
+        }
+        for float in &mut self.flow.floats[floats_before..] {
+            if float.top >= line - EPSILON {
+                hide(&mut float.items, &mut float.blocks, Some(line));
+                float.top = line;
+                float.bottom = line;
+            }
+        }
+        self.pending = Pending::default();
+        self.ceiling_box = self.ceiling_box.min(line);
+        self.ceiling_line = self.ceiling_line.min(line);
+        self.y = end.min(line);
+        if self.y < cut {
+            self.emit(cut - self.y, ItemKind::Edge, true);
+        }
+        self.overhang = (self.y - cut).max(0.0);
+        self.flow.blocks[block].clip = clip;
+    }
+
+    /// Whether a clipping box's content reached past its padding box, and so
+    /// whether its clip removes anything at all.
+    ///
+    /// Horizontally: every run, every atomic inline, every descendant box and
+    /// every float its content placed, against the padding box's two sides —
+    /// a word longer than the measure, a table wider than its container, a
+    /// list marker hung outside it. Vertically: the floats, which §10.6.7
+    /// contains only under an `auto` height; the in-flow content past a
+    /// stated one is [`Builder::clip_tail`]'s, which marks the box itself.
+    ///
+    /// **Extents, not ink**, which is `css-overflow-3` §2.2's scrollable
+    /// overflow rather than §2.1's ink overflow: an italic's overhang past
+    /// the last advance is not measured, so a box whose text fits exactly
+    /// writes no clip and the overhang is drawn.
+    ///
+    /// It also closes the count [`Builder::open_clip`] opened, and charges the
+    /// subtree's size where the box is nested in another clipping box —
+    /// for this read and for [`Builder::clip_tail`]'s, which covered the same
+    /// items.
+    #[inline(never)]
+    fn note_overflow(
+        &mut self,
+        block: usize,
+        clip: Clip,
+        floats_before: usize,
+        border: &Sides<f64>,
+    ) {
+        self.clipping = self.clipping.saturating_sub(1);
+        let record = &self.flow.blocks[block];
+        let first = record.first.unwrap_or(self.flow.items.len());
+        let last = record.last.min(self.flow.items.len());
+        if self.clipping > 0 {
+            let spent = self.budget.spend_layout(
+                last.saturating_sub(first)
+                    + (self.flow.blocks.len() - block)
+                    + (self.flow.floats.len() - floats_before),
+            );
+            if let Err(refusal) = spent {
+                self.deferred.get_or_insert(refusal);
+                return;
+            }
+        }
+        let record = &self.flow.blocks[block];
+        if record.clip.any() || first >= last {
+            return;
+        }
+        let left = record.x + border.left - EPSILON;
+        let right = record.x + record.width - border.right + EPSILON;
+        let tail = &self.flow.items[last - 1];
+        let bottom = tail.y + tail.height - border.bottom + EPSILON;
+        let mut reach = Reach::default();
+        reach.items(&self.flow.items[first..last]);
+        for descendant in &self.flow.blocks[block + 1..] {
+            if descendant.first.is_some() {
+                reach.span(descendant.x, descendant.x + descendant.width);
+            }
+        }
+        let mut below = false;
+        for float in &self.flow.floats[floats_before..] {
+            reach.items(&float.items);
+            for record in &float.blocks {
+                reach.span(record.x, record.x + record.width);
+            }
+            below |= float.bottom > bottom;
+        }
+        let across = reach.lo < left || reach.hi > right;
+        if (clip.x && across) || (clip.y && below) {
+            self.flow.blocks[block].clip = clip;
+        }
+    }
+
+    /// [`Budget::spend_box`], after any refusal [`Builder::note_overflow`]
+    /// deferred.
+    fn spend_box(&mut self) -> Result<(), Refusal> {
+        if let Some(refusal) = self.deferred.take() {
+            return Err(refusal);
+        }
+        self.budget.spend_box()
     }
 
     /// A replaced box's one flow item and the picture recorded against it.
@@ -1625,7 +2062,21 @@ impl<M: Metrics> Builder<'_, M> {
     /// margins above it, so the cleared box moves down and stays down. Adding
     /// the distance to the margin instead would let the next box's margin
     /// collapse it away again.
-    fn clear(&mut self, style: &Consumed, margin_top: f64) -> Result<(), Refusal> {
+    ///
+    /// A scroll container is cleared a second time, past the floats its border
+    /// box would overlap: see [`Builder::clear_beside_floats`]. The two are
+    /// one call from [`Builder::block`] for that function's frame.
+    fn clear(
+        &mut self,
+        style: &Consumed,
+        margin_top: f64,
+        contained: bool,
+        left: f64,
+        width: f64,
+    ) -> Result<(), Refusal> {
+        if contained {
+            self.clear_beside_floats(left, width, margin_top)?;
+        }
         if style.clear == Clear::None {
             return Ok(());
         }
@@ -2731,6 +3182,7 @@ impl<M: Metrics> Builder<'_, M> {
                     // fades its rules with its text.
                     anchor: node.anchor,
                     paint: None,
+                    clip: Clip::NONE,
                 });
             }
             for (at, &(from, to, top)) in chunk.iter().enumerate() {
@@ -2984,6 +3436,12 @@ impl<M: Metrics> Builder<'_, M> {
             // declaration says.
             let min = match stated_min_main {
                 Some(stated) => stated,
+                // §4.5 again: the content-based minimum is for an item *"that
+                // is not a scroll container"*; *"for scroll containers the
+                // automatic minimum size is zero, as usual"*. So a `pre {
+                // overflow: auto }` in a row shrinks below its longest line
+                // and clips it, which is what the declaration is for.
+                None if consumed.is_scroll_container() => 0.0,
                 None => match specified_main {
                     Some(specified) => min_main.min(specified),
                     None => min_main,
@@ -4506,6 +4964,103 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         dy: 0.0,
         anchor: node.anchor,
         paint: style.paint.clone(),
+        clip: Clip::NONE,
+    }
+}
+
+/// Content a block-axis clip hid, kept as `visibility: hidden` content is: laid
+/// out, carrying its reading-order stamps, and painting nothing — no run, no
+/// background, no border, no picture. See [`Builder::clip_tail`].
+///
+/// `at` moves the outermost items to one height and gives them none, so a
+/// hidden tail of any length occupies the single point where it was cut and
+/// can never be what makes a page; the items inside a band or an atomic inline
+/// keep their own coordinates, which nothing reads once nothing paints.
+fn hide(items: &mut [Item], blocks: &mut [BlockRecord], at: Option<f64>) {
+    for record in blocks.iter_mut() {
+        record.painted = false;
+        record.replaced = None;
+        record.clip = Clip::NONE;
+    }
+    for item in items {
+        if let Some(y) = at {
+            item.y = y;
+            item.height = 0.0;
+        }
+        match &mut item.kind {
+            ItemKind::Line(line) => {
+                for run in &mut line.runs {
+                    run.painted = false;
+                }
+                for placed in &mut line.boxes {
+                    hide(&mut placed.items, &mut placed.blocks, None);
+                }
+            }
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                let Abreast { items, blocks } = &mut **band;
+                hide(items, blocks, None);
+            }
+            ItemKind::Margin(_) | ItemKind::Edge => {}
+        }
+    }
+}
+
+/// A `height` that is a length: §10.5 makes a percentage of an `auto`-height
+/// containing block `auto`, and at this point in the pass every containing
+/// block's height is `auto`.
+fn definite_height(style: &Consumed) -> Option<f64> {
+    match style.height {
+        Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+        Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
+    }
+}
+
+/// The horizontal extent some content reached, for [`Builder::note_overflow`].
+struct Reach {
+    lo: f64,
+    hi: f64,
+}
+
+impl Default for Reach {
+    fn default() -> Self {
+        Reach {
+            lo: f64::INFINITY,
+            hi: f64::NEG_INFINITY,
+        }
+    }
+}
+
+impl Reach {
+    fn span(&mut self, from: f64, to: f64) {
+        self.lo = self.lo.min(from);
+        self.hi = self.hi.max(to);
+    }
+
+    /// Every run and box in some items, into bands and atomic inlines — the
+    /// same walk `measure_content` makes, on both sides.
+    fn items(&mut self, items: &[Item]) {
+        for item in items {
+            match &item.kind {
+                ItemKind::Line(line) => {
+                    for run in &line.runs {
+                        self.span(run.x, run.x + run.width);
+                    }
+                    for placed in &line.boxes {
+                        self.items(&placed.items);
+                        for record in &placed.blocks {
+                            self.span(record.x, record.x + record.width);
+                        }
+                    }
+                }
+                ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                    self.items(&band.items);
+                    for record in &band.blocks {
+                        self.span(record.x, record.x + record.width);
+                    }
+                }
+                ItemKind::Margin(_) | ItemKind::Edge => {}
+            }
+        }
     }
 }
 

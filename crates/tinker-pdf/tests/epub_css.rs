@@ -266,8 +266,12 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // way `display` left one milestone earlier: pandoc's whole count
             // over this corpus was `img { max-width: 100% }`, and CSS 2.2
             // §10.4's clamp is now applied rather than reported.
-            "overflow",
-            "overflow-x",
+            // **`overflow` and `overflow-x` used to be here and left on 3
+            // October 2026** with `css-overflow-3` §3.1: pandoc's `pre {
+            // overflow: auto }` and `table { overflow-x: auto }`, on two
+            // elements and one of each pandoc book, are scroll containers now —
+            // formatting contexts of their own, clipped where their content
+            // reaches past them, which in these books it never does.
             // **`quotes` used to be here and left on 3 October 2026** with
             // `css-content-3`'s quote keywords: pandoc's `q { quotes: "“" "”"
             // "‘" "’" }`, four times, is read now — and still reaches no

@@ -1654,6 +1654,34 @@ fn the_border_radius_shorthand_expands_two_lists_clockwise() {
     assert!(known("div { border-radius: 1px / }").is_empty());
 }
 
+/// **`overflow` is `overflow-x` and then `overflow-y`**, one value standing
+/// for both (`css-overflow-3` §3.1), and `overlay` is §3.1's legacy alias of
+/// `auto`.
+#[test]
+fn the_overflow_shorthand_is_x_then_y() {
+    use crate::property::Overflow;
+    assert_eq!(
+        known("div { overflow: hidden }"),
+        vec![
+            Property::OverflowX(Overflow::Hidden),
+            Property::OverflowY(Overflow::Hidden),
+        ]
+    );
+    assert_eq!(
+        known("div { overflow: clip auto }"),
+        vec![
+            Property::OverflowX(Overflow::Clip),
+            Property::OverflowY(Overflow::Auto),
+        ]
+    );
+    assert_eq!(
+        known("div { overflow-y: overlay }"),
+        vec![Property::OverflowY(Overflow::Auto)]
+    );
+    assert!(known("div { overflow: hidden hidden hidden }").is_empty());
+    assert!(known("div { overflow: 2px }").is_empty());
+}
+
 /// **`outline` is its three longhands**, the omitted ones at their initial
 /// values; `hidden` is not an outline style and `invert` is refused by value.
 #[test]

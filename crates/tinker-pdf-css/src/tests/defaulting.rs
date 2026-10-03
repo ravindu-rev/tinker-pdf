@@ -170,7 +170,7 @@ fn unset_is_inherit_for_an_inherited_property_and_initial_for_the_rest() {
 /// build implements.
 ///
 /// §7.1's definition and [`ComputedStyle::inherit_from`]'s behaviour are the
-/// same rule written twice, so this asserts they agree — over all ninety-eight
+/// same rule written twice, so this asserts they agree — over all one hundred
 /// longhands rather than a sample, because the two are only the same rule if
 /// they are the same rule everywhere.
 #[test]
@@ -192,7 +192,7 @@ fn unset_is_the_same_as_never_declaring_it_for_every_longhand() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 98, "every longhand, not a sample");
+    assert_eq!(checked, 100, "every longhand, not a sample");
 }
 
 /// **`inherit` takes the parent's computed value, not its specified one.**
@@ -421,10 +421,10 @@ fn every_implemented_name_is_defaultable() {
             panic!("`{name}: inherit` names a property nothing here can default");
         }
     }
-    assert_eq!(longhands, 98, "ninety-eight longhands");
+    assert_eq!(longhands, 100, "a hundred longhands");
     assert_eq!(
-        shorthands, 22,
-        "nineteen shorthands and `css-break-3` §3.4's three aliases"
+        shorthands, 23,
+        "twenty shorthands and `css-break-3` §3.4's three aliases"
     );
     assert_eq!(exceptions, 1, "`content`, and nothing else");
     assert_eq!(longhands + shorthands + exceptions, IMPLEMENTED_NAMES.len());
@@ -463,7 +463,7 @@ fn every_implemented_name_is_defaultable() {
 /// would say so rather than passing on two empty sets.
 #[test]
 fn every_shorthand_expands_the_same_way_for_a_value_and_a_keyword() {
-    let samples: [(&str, &str); 22] = [
+    let samples: [(&str, &str); 23] = [
         ("background", "#ff0000"),
         ("border", "1px solid #ff0000"),
         ("border-bottom", "1px solid #ff0000"),
@@ -483,6 +483,7 @@ fn every_shorthand_expands_the_same_way_for_a_value_and_a_keyword() {
         ("list-style", "square inside"),
         ("border-radius", "4px 2px / 3px"),
         ("outline", "1px solid red"),
+        ("overflow", "hidden auto"),
         ("gap", "10px"),
         ("margin", "0"),
         ("padding", "0"),

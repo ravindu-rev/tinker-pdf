@@ -41,7 +41,7 @@ use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, St
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::parser::Stylesheet;
-use tinker_pdf_css::property::Display;
+use tinker_pdf_css::property::{Display, Overflow};
 use tinker_pdf_css::selector::PseudoElement;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
@@ -847,7 +847,57 @@ pub fn box_tree(dom: &Dom, styles: &StyleTree, pictures: &Pictures) -> BoxNode {
     let Some(root) = dom.root else {
         return BoxNode::element(ComputedStyle::initial(), Vec::new());
     };
-    build(dom, styles, pictures, root)
+    let mut tree = build(dom, styles, pictures, root);
+    propagate_overflow(dom, root, &mut tree);
+    tree
+}
+
+/// `css-overflow-3` §3.3: the root element's `overflow` — or, where that is
+/// `visible` and the root is HTML's `<html>`, its `<body>`'s — **belongs to
+/// the viewport**, and *"the element from which the value is propagated must
+/// then have a used overflow value of `visible`"*.
+///
+/// Here the viewport is the page, which clips already, so the value lands
+/// nowhere; what matters is the second sentence. Without it a book's `body {
+/// overflow-x: hidden }` — a web habit, written against horizontal scrolling —
+/// would make `<body>` a scroll container: its margin would stop collapsing
+/// with its first child's, and every chapter would start lower by the
+/// smaller of the two.
+fn propagate_overflow(dom: &Dom, root: usize, tree: &mut BoxNode) {
+    let open = |style: &ComputedStyle| {
+        style.overflow_x == Overflow::Visible && style.overflow_y == Overflow::Visible
+    };
+    if tree.style.display == Display::None {
+        return;
+    }
+    let make_visible = |style: &mut ComputedStyle| {
+        style.overflow_x = Overflow::Visible;
+        style.overflow_y = Overflow::Visible;
+    };
+    if !open(&tree.style) {
+        make_visible(&mut tree.style);
+        return;
+    }
+    let node = &dom.nodes[root];
+    if !(node.is_html() && node.name == "html") {
+        return;
+    }
+    let Content::Children(children) = &mut tree.content else {
+        return;
+    };
+    // *"The first such child element"*: a `<body>` whose `display` is not
+    // `none`.
+    let body = children.iter_mut().find(|child| {
+        child.style.display != Display::None
+            && child.anchor.is_some_and(|at| {
+                dom.nodes
+                    .get(at as usize)
+                    .is_some_and(|node| node.is_html() && node.name == "body")
+            })
+    });
+    if let Some(body) = body {
+        make_visible(&mut body.style);
+    }
 }
 
 fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNode {

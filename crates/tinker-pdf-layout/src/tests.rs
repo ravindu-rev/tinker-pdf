@@ -6682,3 +6682,273 @@ fn punctuation_or_symbol_is_every_p_and_s_category() {
         assert!(is_punctuation_or_symbol(c));
     }
 }
+
+// ---- `css-overflow-3` ---------------------------------------------------------
+
+/// The text a page **paints**: what [`page_text`] reads, less the runs laid
+/// out and not painted.
+fn painted_text(laid: &Layout, page: usize) -> String {
+    laid.pages[page]
+        .runs
+        .iter()
+        .filter(|run| run.painted && !run.generated)
+        .map(|run| run.text.as_str())
+        .collect()
+}
+
+/// A block box with `overflow` set on both axes.
+fn overflowing(value: tinker_pdf_css::property::Overflow) -> ComputedStyle {
+    let mut style = block();
+    style.overflow_x = value;
+    style.overflow_y = value;
+    style
+}
+
+/// **A scroll container does not collapse its margin with its first child's**
+/// (CSS 2.2 §8.3.1, *"margins of elements that establish new block formatting
+/// contexts ... do not collapse with their in-flow children"*), and
+/// `overflow: clip`, which §3.1 says establishes no formatting context, still
+/// does.
+#[test]
+fn a_scroll_container_keeps_its_first_childs_margin_inside_it() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |value: Overflow| {
+        let mut parent = overflowing(value);
+        parent.margin.top = px(20.0);
+        let mut child = block();
+        child.margin.top = px(30.0);
+        BoxNode::element(
+            block(),
+            vec![BoxNode::element(
+                parent,
+                vec![BoxNode::element(child, vec![text("a")])],
+            )],
+        )
+    };
+    // 20 of the container's margin, then 30 of the child's inside it.
+    assert_eq!(
+        baselines(&run(&tree(Overflow::Hidden), 200.0, 400.0), 0),
+        vec![59.0]
+    );
+    assert_eq!(
+        baselines(&run(&tree(Overflow::Auto), 200.0, 400.0), 0),
+        vec![59.0]
+    );
+    // max(20, 30), as `margins_collapse_between_a_parent_and_its_first_child`.
+    assert_eq!(
+        baselines(&run(&tree(Overflow::Clip), 200.0, 400.0), 0),
+        vec![39.0]
+    );
+    assert_eq!(
+        baselines(&run(&tree(Overflow::Visible), 200.0, 400.0), 0),
+        vec![39.0]
+    );
+}
+
+/// **A scroll container grows to contain its floats** (§10.6.7), which is what
+/// a book's `overflow: hidden` round a floated picture is for: the paragraph
+/// after it starts below the picture and not beside it.
+#[test]
+fn a_scroll_container_grows_to_contain_its_floats() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |value: Overflow| {
+        BoxNode::element(
+            block(),
+            vec![
+                BoxNode::element(
+                    overflowing(value),
+                    vec![float_box(Float::Left, 40.0, "aaaa bbbb cccc"), text("x")],
+                ),
+                para("after"),
+            ],
+        )
+    };
+    let laid = run(&tree(Overflow::Hidden), 100.0, 400.0);
+    // Three lines of float, thirty-six points, and the next block below them.
+    assert_eq!(placed(&laid, "after"), (0.0, 36.0));
+    conserved(&tree(Overflow::Hidden), &laid);
+    // The control: an ordinary block is one line tall and the next one flows
+    // round the float it did not contain.
+    assert_eq!(
+        placed(&run(&tree(Overflow::Visible), 100.0, 400.0), "after"),
+        (40.0, 12.0)
+    );
+
+    // **Its own floats and nobody else's**: a right float beside a narrow
+    // scroll container — not overlapping it, so not cleared — is in the
+    // formatting context outside it, and the container is one line tall.
+    let mut narrow = overflowing(Overflow::Hidden);
+    narrow.width = Size::Length(LengthPercentage::Px(50.0));
+    let beside = BoxNode::element(
+        block(),
+        vec![
+            float_box(Float::Right, 40.0, "aaaa bbbb cccc"),
+            BoxNode::element(narrow, vec![text("x")]),
+            para("after"),
+        ],
+    );
+    assert_eq!(placed(&run(&beside, 100.0, 400.0), "after"), (0.0, 12.0));
+}
+
+/// **A scroll container beside a float is cleared below it** — §9.5's *"should
+/// clear the said element by placing it below any preceding floats"* — where an
+/// ordinary block's lines would be shortened beside it.
+#[test]
+fn a_scroll_container_beside_a_float_is_cleared_below_it() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |value: Overflow| {
+        BoxNode::element(
+            block(),
+            vec![
+                float_box(Float::Left, 40.0, "aaaa bbbb cccc"),
+                BoxNode::element(overflowing(value), vec![text("x")]),
+            ],
+        )
+    };
+    assert_eq!(
+        placed(&run(&tree(Overflow::Hidden), 100.0, 400.0), "x"),
+        (0.0, 36.0)
+    );
+    assert_eq!(
+        placed(&run(&tree(Overflow::Visible), 100.0, 400.0), "x"),
+        (40.0, 0.0)
+    );
+}
+
+/// **A block-axis clip drops what is past the used height, and the next box
+/// follows the height** — `height` and `max-height` alike, which is what makes
+/// `max-height` implementable on a clipping box and lets
+/// `Warning::MaxHeightAsAuto` stay silent for it.
+#[test]
+fn a_block_axis_clip_drops_the_content_past_the_used_height() {
+    use tinker_pdf_css::property::Overflow;
+    for max in [false, true] {
+        let mut style = overflowing(Overflow::Hidden);
+        style.width = Size::Length(LengthPercentage::Px(40.0));
+        if max {
+            style.max_height = MaxSize::Length(LengthPercentage::Px(24.0));
+        } else {
+            style.height = Size::Length(LengthPercentage::Px(24.0));
+        }
+        let tree = BoxNode::element(
+            block(),
+            vec![
+                BoxNode::element(style, vec![text("aaaa bbbb cccc dddd")]).with_anchor(7),
+                para("after"),
+            ],
+        );
+        let laid = run(&tree, 100.0, 400.0);
+        assert_eq!(painted_text(&laid, 0), "aaaabbbbafter", "max-height: {max}");
+        // Hidden, not lost: the two lines past the clip are laid out and not
+        // painted, so the book's text is all still the layout's.
+        conserved(&tree, &laid);
+        assert_eq!(placed(&laid, "after"), (0.0, 24.0), "max-height: {max}");
+        assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+        let clips = &laid.pages[0].clips;
+        assert_eq!(clips.len(), 1, "{clips:?}");
+        assert_eq!(
+            (clips[0].x, clips[0].y, clips[0].width, clips[0].height),
+            (0.0, 0.0, 40.0, 24.0)
+        );
+    }
+
+    // **The clip is the padding box, so a bottom padding shows what reaches
+    // into it**: the third line begins at the content edge, inside the six
+    // points of padding, and is kept and cut there; the fourth begins below
+    // the padding edge and is not. The box is still thirty points tall.
+    let mut padded = overflowing(Overflow::Hidden);
+    padded.width = Size::Length(LengthPercentage::Px(40.0));
+    padded.height = Size::Length(LengthPercentage::Px(24.0));
+    padded.padding.bottom = LengthPercentage::Px(6.0);
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            BoxNode::element(padded, vec![text("aaaa bbbb cccc dddd")]).with_anchor(7),
+            para("after"),
+        ],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    assert_eq!(painted_text(&laid, 0), "aaaabbbbccccafter");
+    conserved(&tree, &laid);
+    assert_eq!(placed(&laid, "after"), (0.0, 30.0));
+    let clips = &laid.pages[0].clips;
+    assert_eq!((clips[0].y, clips[0].height), (0.0, 30.0), "{clips:?}");
+}
+
+/// **A clip is written only where the content reaches past the padding box**,
+/// and an axis the box does not clip is unbounded.
+#[test]
+fn a_clip_is_written_only_where_the_content_overflows() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |style: ComputedStyle, body: &str| {
+        // Anchored: a clip is reported against the element whose descendants it
+        // cuts, and a box nobody anchored has none a caller could find.
+        BoxNode::element(
+            block(),
+            vec![BoxNode::element(style, vec![text(body)]).with_anchor(7)],
+        )
+    };
+    let mut narrow = overflowing(Overflow::Hidden);
+    narrow.width = Size::Length(LengthPercentage::Px(40.0));
+    narrow.padding.left = LengthPercentage::Px(5.0);
+    narrow.border_width.left = 2.0;
+    narrow.border_style.left = BorderStyle::Solid;
+    // Four characters fit the forty points; eight do not, and an unbreakable
+    // word under `overflow-wrap: normal` overflows rather than breaking.
+    assert!(run(&tree(narrow.clone(), "aaaa"), 200.0, 400.0).pages[0]
+        .clips
+        .is_empty());
+    let laid = run(&tree(narrow, "aaaaaaaa"), 200.0, 400.0);
+    let clips = &laid.pages[0].clips;
+    assert_eq!(clips.len(), 1, "{clips:?}");
+    // The padding box: the border box less the two-point border on the left.
+    assert_eq!((clips[0].x, clips[0].width), (2.0, 45.0));
+
+    let mut sideways = narrow_clip();
+    sideways.overflow_y = Overflow::Visible;
+    let laid = run(&tree(sideways, "aaaaaaaa"), 200.0, 400.0);
+    let clips = &laid.pages[0].clips;
+    assert_eq!(clips.len(), 1, "{clips:?}");
+    assert_eq!((clips[0].x, clips[0].width), (0.0, 40.0));
+    assert_eq!(
+        (clips[0].y, clips[0].height),
+        (f64::NEG_INFINITY, f64::INFINITY)
+    );
+}
+
+/// A forty-point box that clips both axes and establishes no formatting
+/// context.
+fn narrow_clip() -> ComputedStyle {
+    let mut style = overflowing(tinker_pdf_css::property::Overflow::Clip);
+    style.width = Size::Length(LengthPercentage::Px(40.0));
+    style
+}
+
+/// **A flex item that is a scroll container has no content-based minimum**,
+/// `css-flexbox-1` §4.5: *"for scroll containers the automatic minimum size is
+/// zero"*, so it shrinks below its longest word and clips it.
+#[test]
+fn a_scroll_container_flex_item_shrinks_below_its_content() {
+    use tinker_pdf_css::property::Overflow;
+    let width_of = |value: Overflow| {
+        let mut container = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+        container.width = Size::Length(LengthPercentage::Px(50.0));
+        let mut item = overflowing(value);
+        item.background_color = Color {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 255,
+        };
+        let tree = BoxNode::element(
+            block(),
+            vec![BoxNode::element(
+                container,
+                vec![BoxNode::element(item, vec![text("aaaaaaaa")])],
+            )],
+        );
+        run(&tree, 200.0, 400.0).pages[0].boxes[0].width
+    };
+    assert_eq!(width_of(Overflow::Hidden), 50.0);
+    assert_eq!(width_of(Overflow::Visible), 80.0);
+}

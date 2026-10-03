@@ -780,3 +780,73 @@ fn an_inline_box_around_a_whole_arabic_paragraph_changes_nothing() {
         "the mismatch reference agrees too, so the pair proves nothing"
     );
 }
+
+// ---- css-overflow-3 ---------------------------------------------------------------
+
+/// **A scroll container contains its floats as a clearing block inside it
+/// would** (CSS 2.2 §10.6.7): `overflow: hidden` round a float and a clearing
+/// `<div>` after it are two spellings of a box as tall as the float, and the
+/// paragraph after either starts below it.
+#[test]
+fn a_scroll_container_contains_its_floats_as_a_clearing_block_does() {
+    let float = ".f { float: left; width: 50px; height: 60px }";
+    let contained = lay(
+        &format!("{float} .c {{ overflow: hidden }}"),
+        r#"<div class="c"><div class="f">fl</div>x</div><p>after</p>"#,
+    );
+    let cleared = lay(
+        &format!("{float} .k {{ clear: both }}"),
+        r#"<div class="c"><div class="f">fl</div>x<div class="k"></div></div><p>after</p>"#,
+    );
+    // The mismatch: neither, so the paragraph after it flows beside the float.
+    let broken = lay(
+        float,
+        r#"<div class="c"><div class="f">fl</div>x</div><p>after</p>"#,
+    );
+    same("float containment", contained, cleared, broken);
+}
+
+/// **A scroll container's margin does not collapse with its first child's**
+/// (§8.3.1): `overflow: auto` round a paragraph is the same box as a wrapper
+/// whose padding holds the paragraph's margin — and `overflow-x: auto` alone is
+/// `overflow: auto`, by `css-overflow-3` §3.1's computed value.
+#[test]
+fn a_scroll_containers_first_childs_margin_stays_inside_it() {
+    let body = r#"<div class="c"><p>one</p><p>two</p></div>"#;
+    let scrolling = lay(
+        ".c { margin-top: 10px; overflow-x: auto } p { margin-top: 20px }",
+        body,
+    );
+    let padded = lay(
+        ".c { margin-top: 10px; padding-top: 20px } p { margin-top: 20px } \
+         .c p:first-child { margin-top: 0 }",
+        body,
+    );
+    // The mismatch: `clip`, which §3.1 says is no formatting context, so the
+    // two margins collapse to the larger.
+    let broken = lay(
+        ".c { margin-top: 10px; overflow-x: clip } p { margin-top: 20px }",
+        body,
+    );
+    same("overflow-x: auto", scrolling, padded, broken);
+}
+
+/// **`overflow` on `<body>` belongs to the page** (`css-overflow-3` §3.3), so
+/// `<body>` keeps a used value of `visible` and collapses its margin with its
+/// first child's exactly as it does with no `overflow` at all.
+#[test]
+fn overflow_on_body_is_the_pages_and_not_the_bodys() {
+    let body = "<p>one</p><p>two</p>";
+    let propagated = lay(
+        "body { margin: 8px; overflow-x: hidden } p { margin-top: 30px }",
+        body,
+    );
+    let plain = lay("body { margin: 8px } p { margin-top: 30px }", body);
+    // The mismatch: the same declaration one element down, on a `<div>` that
+    // does not propagate, which is a scroll container and keeps both margins.
+    let broken = lay(
+        "body { margin: 0 } div { margin: 8px; overflow-x: hidden } p { margin-top: 30px }",
+        &format!("<div>{body}</div>"),
+    );
+    same("body overflow", propagated, plain, broken);
+}

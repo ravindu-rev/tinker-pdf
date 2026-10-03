@@ -144,8 +144,30 @@ the fragment, the whole box's height being unknown on the page that draws its
 top. **`outline`** (`css-ui-4` §5, its four longhands and the shorthand) is
 four bands `outline-offset` out from the border edge, drawn after the text,
 moving nothing; it is rectangular around a rounded box, which §5 leaves to
-the user agent, and `outline-color: invert` is refused by value. Borders,
-backgrounds, list markers and links are drawn;
+the user agent, and `outline-color: invert` is refused by value.
+**`overflow`** (`css-overflow-3` §3.1: `overflow-x`, `overflow-y` and the
+shorthand, `overlay` read as §3.1's alias of `auto`) clips a box's content to
+its padding box — on §5.3's padding-edge curve where the box has rounded
+corners — and a box whose content fits writes no clip at all, so a book's
+`pre { overflow: auto }` round code that fits costs its page nothing.
+`visible` beside a scrolling axis computes to `auto` and `clip` to `hidden`,
+so a table's `overflow-x: auto` clips both ways. `hidden`, `scroll` and `auto`
+make the box a scroll container and so a block formatting context of its own
+(CSS 2.2 §9.4.1): its first and last children's margins stay inside it, it
+grows to contain its floats (§10.6.7), the floats outside it do not reach in,
+and one beside a float is cleared below it (§9.5's *should*); `clip` cuts and
+does nothing else. A box that clips its block axis is as tall as its `height`
+or `max-height` says, and the content past its padding box leaves the column
+— kept as text laid out and not painted, as `visibility: hidden` text is, so
+conservation loses nothing — and the box after it follows the used height. Who is clipped is the
+element tree's question (`paint::Effects`): every fragment is cut by the
+clipping elements above it, an element's own text by its own clip, and an
+absolutely positioned box only through its containing block (CSS 2.2
+§11.1.1). The root's `overflow` — or `<body>`'s, under an `<html>` that has
+none — belongs to the page (§3.3) and leaves the element `visible`; and a
+scroll container in a flex line has no content-based minimum
+(`css-flexbox-1` §4.5). Borders, backgrounds, list markers and links are
+drawn;
 **list markers are counters** (`css-lists-3` §4): `counter-reset`,
 `counter-increment` and `counter-set` are walked over the element tree in
 document order once the cascade is done (`tinker_pdf_css::counter`), with
@@ -290,7 +312,10 @@ order, at nine page boxes.
 | `position: sticky` — **also a stated answer** | — | `css-position-3` §3.4: a sticky box is offset by how far its nearest scrollport has scrolled, clamped to its containing block. A paginated document has no scrollport, so that distance is zero on every page and §3.4's own words are that it is then *"the same as `relative`"*. The value of a parameter this medium does not have, rather than a gap | — |
 | `column-span: all` | `tinker_pdf_layout::Warning::ColumnSpanAsNone` | `css-multicol-1` §6: a spanning box interrupts the columns and resumes them below itself, which is three column sets where this build has one. The box is laid out in the column it fell in, counted per box | [ROADMAP.md](../ROADMAP.md) |
 | A single box taller than a page inside a multi-column container | `tinker_pdf_layout::Warning::ColumnTallerThanPage` | the third of the three `Abreast` shapes and the same sentence as the other two: the container is cut across pages, and what is left is one atomic box no cut can halve | [ROADMAP.md](../ROADMAP.md) |
-| A `max-height` shorter than the content | `tinker_pdf_layout::Warning::MaxHeightAsAuto` | CSS 2.2 §10.7's clamp, and its two halves land differently here: `min-height` pads the flow out and `max-height` would have to shorten it, which a column whose `y` never goes backwards cannot do once the items are emitted. So the box is its content's height and the declaration is named rather than half honoured, which is this build shape for a value it honours in one direction only | [ROADMAP.md](../ROADMAP.md) |
+| A `max-height` shorter than the content, on a box whose `overflow-y` is `visible` | `tinker_pdf_layout::Warning::MaxHeightAsAuto` | CSS 2.2 §10.7's clamp, and its two halves land differently here: `min-height` pads the flow out and `max-height` would have to shorten it, which a column whose `y` never goes backwards cannot do once the items are emitted. So the box is its content's height and the declaration is named rather than half honoured, which is this build shape for a value it honours in one direction only. **A box that clips its block axis left this row**: the content past its padding box is clipped and leaves the column, kept as text laid out and not painted, so its `max-height` is its height (`a_block_axis_clip_drops_the_content_past_the_used_height`) | [ROADMAP.md](../ROADMAP.md) |
+| `overflow: scroll` and `overflow: auto` — **a stated answer** | — | a page has no scrolling mechanism, so a scroll container is printed at its initial scroll position — its padding box from the top left — which CSS 2.2 §11.1.1 permits for print and a browser's own print does. What is past it is clipped, and along the block axis out of the column, laid out and not painted | `crates/tinker-pdf/tests/epub_paint.rs` |
+| A scroll container beside a float — **a stated answer** | — | CSS 2.2 §9.5: its border box must not overlap the float, and *"implementations should clear the said element by placing it below any preceding floats, but may place it adjacent to such floats if there is sufficient space"*. This build takes the *should*, and a browser the *may*: a picture floated beside an `overflow: hidden` box of text sets the text below the picture here and beside it there. Only the floats crossing the box's top edge are looked for, the box's height being unknown when it is placed | `crates/tinker-pdf-layout/src/tests.rs` |
+| Ink past a clipping box's padding box that no advance reaches — **a stated answer** | — | whether a box overflowed is decided on its content's extents, `css-overflow-3` §2.2's scrollable overflow, and not on its ink (§2.1): an italic's overhang past the last advance of a box whose advances fit is drawn rather than cut, since the box writes no clip | — |
 | Other at-rules (`@supports`, `@page`, …) | `tinker_pdf_css::Warning::AtRuleUnsupported(name)` | skipped by the spec's own recovery, named | — |
 | `:hover`, `:focus`, `:focus-within`, `:focus-visible`, `:active`, `:target`, `:visited` — **seven, and the whole of what never matches** | `tinker_pdf_css::Warning::PseudoClassUnsupported(name)` | each names a state of a reading *session*: a pointer, a focus ring, a press, a fragment the reader navigated to, a history. A paginated document has none of them, for any element, ever — so never matching is `selectors-4`'s **answer** here and not this build's gap. Still counted, because a rule that had no effect is something the book said (ruling 10), and the count is asserted by number so a shrinking list cannot read as a passing one | — |
 | `:nth-child(An+B of S)` | `parser::Report::discarded_rules` | the only pseudo-class syntax refused outright. Reading it as the `An+B` without the `of` would style every second row instead of every second `.a`, which is a book that renders beautifully and is wrong; §3.1 drops the rule instead, counted | [ROADMAP.md](../ROADMAP.md) |
@@ -366,7 +391,7 @@ postdate the tool's removal under ruling 13, so
   against `inherit` and `initial`, asserted on an inherited and a
   non-inherited property in the same fixture because either one alone agrees
   with two of the three keywords; and `unset` asserted to be exactly *not
-  declaring the property* over **all ninety-eight longhands**, not a sample,
+  declaring the property* over **all one hundred longhands**, not a sample,
   because §7.1's definition and `ComputedStyle::inherit_from`'s behaviour are
   the same rule written twice. `revert` against `revert-layer` in one fixture
   with a user-agent rule and two author layers, where the two keywords have

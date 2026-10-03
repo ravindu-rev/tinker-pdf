@@ -62,14 +62,19 @@ table.
 - **A second layout pass.** `::first-line` and `::first-letter` select part of
   an already laid-out box; honouring either means laying the box out twice.
   Parsed, no box, named.
-- **`max-height` shorter than its content.** The flow is one column whose `y`
-  never goes backwards, so a box already emitted cannot be shortened.
-  `MaxHeightAsAuto` says so.
+- **`max-height` shorter than its content, on a box that does not clip.** The
+  flow is one column whose `y` never goes backwards, so a box already emitted
+  cannot be shortened while what it held is still drawn. `MaxHeightAsAuto`
+  says so. A box that clips its block axis is the exception: what is past its
+  padding box is not drawn, so it leaves the column — laid out and not
+  painted, its text still conserved — and the box is the height it says.
 - **A tree whose depth is unbounded.** `Builder::block` recurses once per level
   of the document, so the frame of that one function is what the depth cap is
-  measured in stack against — which is why three of its steps are methods
-  rather than inline code, each saying so, each having overflowed the stack
-  when it was inlined.
+  measured in stack against — which is why its steps are methods rather than
+  inline code, each saying so, each having overflowed the stack when it was
+  inlined; the overflow milestone moved the whole horizontal half of §10.3 out
+  and made `note_overflow` defer its refusal rather than return it, to find
+  the room.
 
 ## Design
 
@@ -211,13 +216,13 @@ a picture reaching paper in this area is measured in pixels.
 | 2 | **The `background-*` image family.** `background-image`, `background-repeat`, `background-position`, `background-size` | A tiling `/Pattern` from the same `ImageData` path a replaced box takes; `UnimplementedProperty` stops naming the four; a reftest pair where the only difference is the background | M |
 | 3 | **`list-style-*`, `counter-reset`, `counter-increment`, `counters()`** | A scoped counter tree; `content: counter()` generates the marker's text; an ordered list numbers from its own `start`; `quotes` and the four quote keywords with it | M. **Counters and quotes done, 3 October 2026** (`tinker_pdf_css::counter`); `list-style-image`, `reversed()` and `quotes: auto`'s per-language marks left |
 | 4 | **`transform` and `opacity`** | A `cm` composed at paint from the transform list; group opacity as an `/ExtGState`; the two names leave `UNSUPPORTED_PROPERTIES` | M. **`opacity` done, 3 October 2026**, per fragment; the group over overlapping content is owed to the structure writer |
-| 5 | **`overflow`, `clip-path`, `border-radius`, `box-shadow`, `text-shadow`** | Each a clip or an ink the painter writes; the geometry asserted arithmetically, never against a recorded bitmap | L. **`border-radius` (and `outline`) done, 3 October 2026** |
+| 5 | **`overflow`, `clip-path`, `border-radius`, `box-shadow`, `text-shadow`** | Each a clip or an ink the painter writes; the geometry asserted arithmetically, never against a recorded bitmap | L. **`border-radius` (and `outline`) done, 3 October 2026; `overflow` done the same day**, as a clip to the padding box written only where content reaches past it, scroll containers as formatting contexts of their own, and the content past a block-axis clip taken out of the column as hidden text |
 | 6 | **`writing-mode`, `direction`, `unicode-bidi` below the run** | Bidi whose unit is the visual line rather than the `TextRun`; a right-to-left line of two styled spans is one reordered line; the reading-order pin in `epub_shaped.rs` flipped to an assertion | L |
 | 7 | **`DocumentBuilder::from_html`** | The cascade, the layout engine and the painter reachable without an OCF container; held by the EPUB reftests, so the two callers cannot drift | M |
 
 Milestones 2 to 6 are scheduled by the fetched corpus's `UnimplementedProperty`
-counts, highest first — ruling 3, and not by interest. Fifty-four names are
-known and unimplemented against the 121 in `IMPLEMENTED_NAMES`; each landing deletes
+counts, highest first — ruling 3, and not by interest. Fifty-one names are
+known and unimplemented against the 124 in `IMPLEMENTED_NAMES`; each landing deletes
 its names from that table.
 
 ## Risks
@@ -227,7 +232,7 @@ its names from that table.
 | **A wrong layout looks like a page.** Unlike a codec, where a misread bit is visible noise, a dropped constraint or a misresolved percentage sets clean text in the wrong place | Every expected number in the tests is arithmetic written beside the assertion or a number the clause fixes. The counted-injection table is the second half: a defect reintroduced and the tests that catch it counted, **including the zeros** |
 | **A blank page satisfies every count.** Text conservation, page counts and warning sets are all satisfied by a book that laid everything out and painted nothing — which is exactly what this build did to every comic until this commit | Colour counts on rendered pages, asserted `> 1` per page, on a real producer's book. The number is the renderer's; the claim is the painter's |
 | **No oracle, by ruling 13** | Accepted and named. Arithmetic fixtures, reftest pairs between two spellings of one document, and nine real producers' books. What it cannot reach is whether the whole page is what the author saw. **Not closed** |
-| `Builder::block`'s frame is the depth cap's unit, so any edit that inlines work into it can overflow a stack the cap was sized against | Three helpers already carry that reason in their own doc comments, each having caused the overflow once. `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name` is the fixture that finds it every time |
+| `Builder::block`'s frame is the depth cap's unit, so any edit that inlines work into it can overflow a stack the cap was sized against | The helpers that carry that reason in their own doc comments each caused the overflow once. `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name` is the fixture that finds it every time |
 | A picture's bytes are read at parse time to size its box, so a book of large plates costs its pictures in memory before a page exists | The pass-through path: a JPEG is held as its own bytes and a PNG through the reader that decides between passing its `IDAT` through and decoding it. `epub_memory.rs` bounds a synthesised document against the **picture** rather than against the ZIP, which is the stronger claim and the one that caught the old bound being satisfied by a book with no picture in it at all |
 | Scope is large enough that a partial landing is likely | Milestones are commit boundaries, each ending at a testable claim. A build that lays a property out and refuses the rest by name is a legitimate stopping point; one that draws what nothing checks is not |
 

@@ -921,6 +921,49 @@ pub enum TextTransform {
     Lowercase,
 }
 
+/// `overflow-x` and `overflow-y`, `css-overflow-3` §3.1.
+///
+/// **Five values and two questions**, and the two are not the same split:
+///
+/// - *does the box clip its content?* — every value but `visible`;
+/// - *is the box a scroll container?* — `hidden`, `scroll` and `auto`, which
+///   establish an independent formatting context (CSS 2.2 §9.4.1's *"elements
+///   with `overflow` other than `visible`"*), and not `clip`, which §3.1 says
+///   *"does not cause the element to establish a new formatting context"*.
+///
+/// `scroll` and `auto` clip exactly as `hidden` does here: a page has no
+/// scrolling mechanism, so a scroll container is printed at its initial scroll
+/// position, which is its padding box from the top left — what CSS 2.2
+/// §11.1.1 permits for print and what a browser's own print does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overflow {
+    /// `visible`, the initial value.
+    Visible,
+    /// `hidden`
+    Hidden,
+    /// `clip`
+    Clip,
+    /// `scroll`
+    Scroll,
+    /// `auto`, and `overlay`, which §3.1 makes *"a legacy value alias of
+    /// `auto`"*.
+    Auto,
+}
+
+impl Overflow {
+    /// Whether content outside the padding box is clipped in this axis.
+    #[must_use]
+    pub fn clips(self) -> bool {
+        self != Overflow::Visible
+    }
+
+    /// Whether this value makes the box a scroll container.
+    #[must_use]
+    pub fn scrolls(self) -> bool {
+        matches!(self, Overflow::Hidden | Overflow::Scroll | Overflow::Auto)
+    }
+}
+
 /// `text-decoration`, as the line it draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextDecoration {
@@ -1274,6 +1317,10 @@ pub enum Property {
     OutlineColor(Option<Color>),
     /// `outline-offset`, §5.5. May be negative.
     OutlineOffset(Len),
+    /// `overflow-x`, `css-overflow-3` §3.1.
+    OverflowX(Overflow),
+    /// `overflow-y`, §3.1.
+    OverflowY(Overflow),
     /// `visibility`
     Visibility(Visibility),
     /// `display`
@@ -1420,6 +1467,8 @@ impl Property {
             Property::OutlineStyle(_) => "outline-style",
             Property::OutlineColor(_) => "outline-color",
             Property::OutlineOffset(_) => "outline-offset",
+            Property::OverflowX(_) => "overflow-x",
+            Property::OverflowY(_) => "overflow-y",
             Property::Visibility(_) => "visibility",
             Property::Display(_) => "display",
             Property::Float(_) => "float",
@@ -1570,6 +1619,11 @@ impl Property {
             | Property::OutlineStyle(_)
             | Property::OutlineColor(_)
             | Property::OutlineOffset(_)
+            // `css-overflow-3` §3.1: *inherited: no*. A clip is the box's own
+            // padding edge, and an inherited one would clip every descendant
+            // to its own box as well.
+            | Property::OverflowX(_)
+            | Property::OverflowY(_)
             | Property::Display(_)
             | Property::Float(_)
             | Property::Clear(_)
@@ -1802,9 +1856,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "justify-self",
     "list-style-image",
     "mix-blend-mode",
-    "overflow",
-    "overflow-x",
-    "overflow-y",
     "page",
     "resize",
     "speak",
@@ -2075,6 +2126,7 @@ pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
         "outline",
         &["outline-width", "outline-style", "outline-color"],
     ),
+    ("overflow", &["overflow-x", "overflow-y"]),
     ("flex-flow", &["flex-direction", "flex-wrap"]),
     ("gap", &["row-gap", "column-gap"]),
     (
@@ -2771,7 +2823,10 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "outline-offset",
     "outline-style",
     "outline-width",
+    "overflow",
     "overflow-wrap",
+    "overflow-x",
+    "overflow-y",
     "padding",
     "padding-bottom",
     "padding-left",
@@ -3157,6 +3212,34 @@ fn implemented(
             _ => Implemented::Malformed,
         },
         "outline" => outline_shorthand(significant),
+        "overflow-x" => keyword(one, single, |word| {
+            overflow_named(word).map(Property::OverflowX)
+        }),
+        "overflow-y" => keyword(one, single, |word| {
+            overflow_named(word).map(Property::OverflowY)
+        }),
+        // §3.1: `<'overflow-x'>{1,2}`, the first value `overflow-x` and the
+        // second `overflow-y`; one value is both.
+        "overflow" => {
+            let named = |value: &ComponentValue| match value {
+                ComponentValue::Token(Token::Ident(word)) => {
+                    overflow_named(&word.to_ascii_lowercase())
+                }
+                _ => None,
+            };
+            match significant {
+                [x] | [x, _] => {
+                    let y = significant.get(1).copied().unwrap_or(x);
+                    match (named(x), named(y)) {
+                        (Some(x), Some(y)) => {
+                            Implemented::Known(vec![Property::OverflowX(x), Property::OverflowY(y)])
+                        }
+                        _ => Implemented::Malformed,
+                    }
+                }
+                _ => Implemented::Malformed,
+            }
+        }
         // `css-color-4` §15.1: `<alpha-value>`, a number or a percentage.
         "opacity" => match (single, one) {
             (true, Some(ComponentValue::Token(Token::Number { value, .. }))) => {
@@ -3763,6 +3846,18 @@ fn border_radius_shorthand(significant: &[&ComponentValue]) -> Implemented {
             })
             .collect(),
     )
+}
+
+/// `css-overflow-3` §3.1's five keywords and its one legacy alias.
+fn overflow_named(word: &str) -> Option<Overflow> {
+    Some(match word {
+        "visible" => Overflow::Visible,
+        "hidden" => Overflow::Hidden,
+        "clip" => Overflow::Clip,
+        "scroll" => Overflow::Scroll,
+        "auto" | "overlay" => Overflow::Auto,
+        _ => return None,
+    })
 }
 
 fn outline_style_named(word: &str) -> Option<OutlineStyle> {

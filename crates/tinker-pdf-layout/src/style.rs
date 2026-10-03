@@ -40,9 +40,9 @@ use tinker_pdf_css::property::{
     Clear, Color, ColumnCount, ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection,
     FlexWrap, Float, FontFamily, FontStyle, FontVariant, Gap, Inset, JustifyContent,
     LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
-    OutlineStyle, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Side, Sides, Size,
-    Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign, Visibility,
-    WhiteSpace, ZIndex,
+    OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Side,
+    Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign,
+    Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -126,6 +126,11 @@ pub struct Consumed {
     /// bytes a level, and `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
     /// overflowed its stack the first time they were written that way.
     pub paint: Option<Box<BoxPaint>>,
+    /// `overflow-x`, `css-overflow-3` §3.1, computed — so `visible` here means
+    /// the other axis does not scroll either.
+    pub overflow_x: Overflow,
+    /// `overflow-y`.
+    pub overflow_y: Overflow,
     /// `page-break-before`, CSS 2.2 §13.3.1.
     pub page_break_before: PageBreak,
     /// `page-break-after`.
@@ -299,6 +304,8 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         outline_style,
         outline_color,
         outline_offset,
+        overflow_x,
+        overflow_y,
         page_break_before,
         page_break_after,
         page_break_inside,
@@ -415,6 +422,8 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
             outline_offset,
             color,
         ),
+        overflow_x: *overflow_x,
+        overflow_y: *overflow_y,
         page_break_before: *page_break_before,
         page_break_after: *page_break_after,
         page_break_inside: *page_break_inside,
@@ -536,6 +545,20 @@ impl Consumed {
     #[must_use]
     pub fn is_internal_table(&self) -> bool {
         self.display.is_internal_table()
+    }
+
+    /// Whether this box is a **scroll container**, `css-overflow-3` §3: one
+    /// whose `overflow` is `hidden`, `scroll` or `auto` in either axis, and
+    /// which therefore establishes a block formatting context of its own (CSS
+    /// 2.2 §9.4.1) — its margins do not collapse with its children's, it
+    /// contains its floats, and the floats outside it do not reach in.
+    ///
+    /// Not `clip`, which §3.1 says *"does not cause the element to establish a
+    /// new formatting context"*: `overflow: clip` cuts the ink and nothing
+    /// else.
+    #[must_use]
+    pub fn is_scroll_container(&self) -> bool {
+        self.overflow_x.scrolls() || self.overflow_y.scrolls()
     }
 
     /// Whether this element generates no box at all.

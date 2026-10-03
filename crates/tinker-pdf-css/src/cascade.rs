@@ -169,6 +169,12 @@ pub struct ComputedStyle {
     pub outline_color: Option<Color>,
     /// `outline-offset`, §5.5, in CSS pixels.
     pub outline_offset: f64,
+    /// `overflow-x`, `css-overflow-3` §3.1, **computed**: §3.1's rule that
+    /// `visible` and `clip` become `auto` and `hidden` beside a scrolling
+    /// axis has been applied (see [`computed_overflow`]).
+    pub overflow_x: Overflow,
+    /// `overflow-y`, likewise.
+    pub overflow_y: Overflow,
     /// `visibility`
     pub visibility: Visibility,
     /// `text-decoration`
@@ -316,6 +322,8 @@ impl ComputedStyle {
             outline_style: OutlineStyle::Border(BorderStyle::None),
             outline_color: None,
             outline_offset: 0.0,
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Visible,
             visibility: Visibility::Visible,
             text_decoration: TextDecoration::None,
             text_transform: TextTransform::None,
@@ -515,6 +523,8 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::OutlineOffset(value) => {
             style.outline_offset = px(*value, font_size, root_font_size);
         }
+        Property::OverflowX(value) => style.overflow_x = *value,
+        Property::OverflowY(value) => style.overflow_y = *value,
         Property::Visibility(value) => style.visibility = *value,
         Property::Display(value) => style.display = *value,
         Property::Float(value) => style.float = *value,
@@ -1125,6 +1135,29 @@ fn apply_winners(
             apply_winner(winner, style, parent, initial, root_font_size);
         }
     }
+    computed_overflow(style);
+}
+
+/// `css-overflow-3` §3.1's computed value: *"as specified, except with
+/// `visible`/`clip` computing to `auto`/`hidden` (respectively) if one of
+/// `overflow-x` or `overflow-y` is neither `visible` nor `clip`"*.
+///
+/// So `overflow-x: auto` alone makes a box that clips in **both** axes — the
+/// one a book writes on a wide table — because a scroll container cannot
+/// scroll one axis and spill the other. Applied once per element, after every
+/// winner, so the order the two longhands were declared in cannot matter.
+fn computed_overflow(style: &mut ComputedStyle) {
+    let open = |value: Overflow| matches!(value, Overflow::Visible | Overflow::Clip);
+    if open(style.overflow_x) && open(style.overflow_y) {
+        return;
+    }
+    let scrolling = |value: Overflow| match value {
+        Overflow::Visible => Overflow::Auto,
+        Overflow::Clip => Overflow::Hidden,
+        other => other,
+    };
+    style.overflow_x = scrolling(style.overflow_x);
+    style.overflow_y = scrolling(style.overflow_y);
 }
 
 /// One winner, written into the style.
@@ -1907,6 +1940,8 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::OutlineStyle => into.outline_style = from.outline_style,
         Longhand::OutlineColor => into.outline_color = from.outline_color,
         Longhand::OutlineOffset => into.outline_offset = from.outline_offset,
+        Longhand::OverflowX => into.overflow_x = from.overflow_x,
+        Longhand::OverflowY => into.overflow_y = from.overflow_y,
         Longhand::Visibility => into.visibility = from.visibility,
         Longhand::Display => into.display = from.display,
         Longhand::Float => into.float = from.float,
