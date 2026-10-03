@@ -38,6 +38,10 @@
 //!
 //! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
 //! stroked border or line its `/BS` (or `/Border`) dash.
+//!
+//! Every other subtype is declined: by name when 12.5.6 gives it an
+//! appearance its dictionary does not determine ([`UNDETERMINED_SUBTYPES`]),
+//! and as unknown otherwise.
 
 use crate::doc::CosDocument;
 use crate::name::Name;
@@ -1185,9 +1189,49 @@ fn callout(doc: &CosDocument, annotation: &Dict, paint: &Paint, dashed: bool, ou
     ending(out, kind, first, (-start.0, -start.1), start, &ending_paint);
 }
 
+/// The subtypes whose appearance their dictionary does not determine
+/// (12.5.6, and ISO 32000-2's additions), which [`synthesize`] declines by
+/// name: what each would show is a picture, a medium, a viewer's window or
+/// a computation, and none of it is in the dictionary.
+///
+/// - `Stamp` (12.5.6.12), `FileAttachment` (12.5.6.15) and `Sound`
+///   (12.5.6.16): `/Name` names an icon — `Approved`, `PushPin`, `Speaker` —
+///   and 12.5.6 gives none of them an outline.
+/// - `Movie` (12.5.6.17), `Screen` (12.5.6.18), `3D` (13.6.2) and
+///   `RichMedia` (ISO 32000-2 13.7.2): the medium's own frame, poster or
+///   view.
+/// - `Popup` (12.5.6.14): the viewer's window for its parent's text.
+/// - `Widget` (12.5.6.19): a field's, which the form filler builds from its
+///   value (`fill.rs`), not from the annotation.
+/// - `PrinterMark` (12.5.6.20), `TrapNet` (12.5.6.21) and `Watermark`
+///   (12.5.6.22): a mark, a trapping result and a placement that exist only
+///   as the `/AP` their producer wrote.
+/// - `Redact` (12.5.6.23): its entries say what replaces the content once
+///   the redaction is applied — `/IC`, `/RO`, `/OverlayText` — and not what
+///   the mark looks like before.
+/// - `Projection` (ISO 32000-2 12.5.6.24), which adds no entry at all.
+pub const UNDETERMINED_SUBTYPES: &[&str] = &[
+    "Stamp",
+    "FileAttachment",
+    "Sound",
+    "Movie",
+    "Screen",
+    "3D",
+    "RichMedia",
+    "Popup",
+    "Widget",
+    "PrinterMark",
+    "TrapNet",
+    "Watermark",
+    "Redact",
+    "Projection",
+];
+
 /// Builds the appearance for an annotation, or `None` when its type needs
 /// none — a link with no border draws nothing, and inventing something for it
-/// would be worse than leaving it alone.
+/// would be worse than leaving it alone — or when its dictionary does not say
+/// what it looks like: [`UNDETERMINED_SUBTYPES`], and a subtype 12.5.6 does
+/// not name.
 ///
 /// The returned stream is a complete Form XObject, ready to be written as the
 /// annotation's `/AP` `/N`.
@@ -1374,6 +1418,9 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
         b"Caret" => caret(doc, annotation, rect, &mut content)?,
         b"Ink" => ink(doc, annotation, &mut content)?,
         b"FreeText" => font = Some(free_text(doc, annotation, rect, &mut content)?),
+        // Declined by name: what these look like is not in their dictionary.
+        named if UNDETERMINED_SUBTYPES.iter().any(|s| s.as_bytes() == named) => return None,
+        // And a subtype 12.5.6 does not name, declined as unknown.
         _ => return None,
     }
 
@@ -2759,5 +2806,210 @@ mod tests {
             .is_none(),
             "a file with no form has no /DR"
         );
+    }
+
+    /// One dictionary carrying every geometric entry 12.5.6 reads, for the
+    /// subtype given: whatever a subtype could draw from, it has.
+    fn everything(subtype: &str) -> String {
+        format!(
+            "<< /Subtype /{subtype} /Rect [10 10 90 90] /C [1 0 0] /IC [0 0 1] \
+             /BS << /W 2 >> /QuadPoints [10 60 90 60 10 40 90 40] /L [10 50 90 50] \
+             /Vertices [20 20 80 20 50 80] /InkList [[10 20 50 60]] /RD [1 1 1 1] \
+             /DA (/Helv 10 Tf 0 g) /Contents (text) /Name /Draft >>"
+        )
+    }
+
+    /// 12.5.6's subtypes whose appearance no dictionary determines are
+    /// declined by name, even handed every entry the others draw from.
+    #[test]
+    fn the_subtypes_no_dictionary_determines_are_declined_by_name() {
+        let doc = helvetica_form();
+        for subtype in UNDETERMINED_SUBTYPES {
+            assert_eq!(
+                content_of(&doc, &everything(subtype)),
+                None,
+                "/{subtype} is declined"
+            );
+        }
+    }
+
+    /// Every subtype ISO 32000-1 12.5.6 and ISO 32000-2 name is either drawn
+    /// from the dictionary above, declined by name, or `Link`, which draws
+    /// no border by 12.5.6.5's convention — so a subtype added to neither
+    /// list is a test failure rather than a silent `None`.
+    #[test]
+    fn every_subtype_of_12_5_6_is_drawn_or_declined_by_name() {
+        let doc = helvetica_form();
+        const ALL: &[&str] = &[
+            "Text",
+            "Link",
+            "FreeText",
+            "Line",
+            "Square",
+            "Circle",
+            "Polygon",
+            "PolyLine",
+            "Highlight",
+            "Underline",
+            "Squiggly",
+            "StrikeOut",
+            "Caret",
+            "Stamp",
+            "Ink",
+            "Popup",
+            "FileAttachment",
+            "Sound",
+            "Movie",
+            "Screen",
+            "Widget",
+            "PrinterMark",
+            "TrapNet",
+            "Watermark",
+            "3D",
+            "Redact",
+            "Projection",
+            "RichMedia",
+        ];
+        let mut drawn = 0;
+        for subtype in ALL {
+            let declined = UNDETERMINED_SUBTYPES.contains(subtype) || *subtype == "Link";
+            let content = content_of(&doc, &everything(subtype));
+            assert_eq!(
+                content.is_none(),
+                declined,
+                "/{subtype} is {}",
+                if declined { "declined" } else { "drawn" }
+            );
+            drawn += usize::from(!declined);
+        }
+        assert_eq!(
+            drawn, 13,
+            "thirteen subtypes are drawn, and Link draws none"
+        );
+        assert_eq!(ALL.len(), drawn + 1 + UNDETERMINED_SUBTYPES.len());
+    }
+
+    /// Ruling 1, over every subtype this draws and a few it does not: no
+    /// numbers a dictionary can hold — none, too few, too many, negative,
+    /// enormous, infinite, not a number — make synthesis panic, and what it
+    /// writes holds no number a tokenizer would refuse and stays small when
+    /// the dictionary is.
+    #[test]
+    fn synthesis_never_panics_whatever_the_numbers() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+
+        let docs = [doc(), helvetica_form()];
+        const SUBTYPES: &[&[u8]] = &[
+            b"Highlight",
+            b"Underline",
+            b"StrikeOut",
+            b"Squiggly",
+            b"Square",
+            b"Circle",
+            b"Text",
+            b"Link",
+            b"Line",
+            b"Polygon",
+            b"PolyLine",
+            b"Caret",
+            b"Ink",
+            b"FreeText",
+            b"Stamp",
+            b"Trapezium",
+        ];
+        let number = prop_oneof![
+            4 => -200.0..200.0f64,
+            1 => Just(0.0),
+            1 => Just(-0.0),
+            1 => Just(1e300),
+            1 => Just(-1e300),
+            1 => Just(1e-300),
+            1 => Just(f64::NAN),
+            1 => Just(f64::INFINITY),
+            1 => Just(f64::NEG_INFINITY),
+        ];
+        let strategy = (
+            0..SUBTYPES.len(),
+            proptest::collection::vec(number, 0..24),
+            0usize..10,
+            any::<bool>(),
+        );
+        let mut runner = TestRunner::new(Config {
+            cases: 768,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        let result = runner.run(&strategy, |(which, values, take, form)| {
+            let doc = &docs[usize::from(form)];
+            let name = |n: &[u8]| Object::Name(doc.intern(n));
+            let real = |i: usize| Object::Real(values.get(i).copied().unwrap_or(1.0));
+            let array = |from: usize, len: usize| {
+                Object::Array(
+                    values
+                        .iter()
+                        .skip(from)
+                        .take(len)
+                        .map(|v| Object::Real(*v))
+                        .collect(),
+                )
+            };
+            let mut style = Dict::new();
+            style.insert(doc.intern(b"W"), real(5));
+            style.insert(doc.intern(b"S"), name(b"D"));
+            style.insert(doc.intern(b"D"), array(6, take));
+            let mut dict = Dict::new();
+            dict.insert(doc.intern(b"Subtype"), name(SUBTYPES[which]));
+            dict.insert(doc.intern(b"Rect"), array(0, 4));
+            dict.insert(doc.intern(b"QuadPoints"), array(0, values.len()));
+            dict.insert(doc.intern(b"Vertices"), array(1, values.len()));
+            dict.insert(doc.intern(b"L"), array(2, 4));
+            dict.insert(doc.intern(b"CL"), array(0, take));
+            dict.insert(doc.intern(b"RD"), array(3, 4));
+            dict.insert(doc.intern(b"C"), array(0, take.min(5)));
+            dict.insert(doc.intern(b"IC"), array(1, take.min(5)));
+            dict.insert(
+                doc.intern(b"InkList"),
+                Object::Array(vec![array(0, take), array(take, values.len())]),
+            );
+            dict.insert(doc.intern(b"BS"), Object::Dict(style));
+            for (key, index) in [
+                (&b"LL"[..], 7),
+                (b"LLE", 8),
+                (b"LLO", 9),
+                (b"CA", 10),
+                (b"ca", 11),
+            ] {
+                dict.insert(doc.intern(key), real(index));
+            }
+            dict.insert(
+                doc.intern(b"LE"),
+                Object::Array(vec![name(b"ClosedArrow"), name(b"Slash")]),
+            );
+            dict.insert(doc.intern(b"IT"), name(b"FreeTextCallout"));
+            dict.insert(doc.intern(b"Q"), Object::Int(take as i64 - 3));
+            let size = values.get(12).copied().unwrap_or(10.0);
+            let da = format!("/Helv {size:?} Tf {size:?} {size:?} 0 rg");
+            dict.insert(
+                doc.intern(b"DA"),
+                Object::String(crate::object::PdfString::literal(da.into_bytes())),
+            );
+            dict.insert(
+                doc.intern(b"Contents"),
+                Object::String(crate::object::PdfString::literal(
+                    b"MMM MMM\nMM M MMMMMMMMMMMM".to_vec(),
+                )),
+            );
+
+            if let Some(stream) = synthesize(doc, &dict) {
+                let text = String::from_utf8_lossy(&stream.data);
+                prop_assert!(!text.contains("NaN") && !text.contains("inf"), "{text}");
+                prop_assert!(stream.data.len() < 64 << 10, "{} bytes", stream.data.len());
+            }
+            Ok(())
+        });
+        if let Err(failure) = result {
+            panic!("{failure}");
+        }
     }
 }
