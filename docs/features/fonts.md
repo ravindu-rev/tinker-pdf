@@ -544,7 +544,8 @@ Landed so far:
   **vertical** CMap, written as a column at each CID's own `/W2`
   displacement with `vert`/`vrt2` applied; a **bare CFF** under a
   `CIDFontType0`, wrapped per line in a synthesised sfnt whose `cmap` is the
-  font's `/ToUnicode` read backwards (`CMap::code_for_unicode`) and whose
+  font's `/ToUnicode` read backwards and checked forwards
+  (`CMap::code_for_unicode`) and whose
   `hmtx` is `/W`; and a **simple TrueType** font, each glyph written as the
   lowest byte its encoding reaches it by, so `GPOS` reaches the field. Everywhere else the single-byte path stands and
   every character it could not write is named by

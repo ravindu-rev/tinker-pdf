@@ -554,8 +554,9 @@ impl Font {
         self.to_unicode.is_some()
     }
 
-    /// The code whose `/ToUnicode` entry is exactly `c`, the lowest where
-    /// several are.
+    /// The lowest code that the font's `/ToUnicode` reads as exactly `c`
+    /// ([`CMap::code_for_unicode`]: read backwards,
+    /// checked forwards).
     ///
     /// The writer's direction, for a font whose program cannot answer it: a
     /// bare CFF carries no `cmap`, so the only statement in a document of

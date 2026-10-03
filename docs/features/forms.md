@@ -134,8 +134,10 @@ refusals left, and each now has a fixture whose operators the test computes:
   `CIDFontType0`) has no `cmap`, no `hmtx` and no `GSUB`, and the shaper
   takes an sfnt, so the program is **wrapped** per line in the smallest
   sfnt that answers the shaper's questions: a `cmap` from each character to
-  the code the font's own `/ToUnicode` gives it read backwards
-  (`Font::code_for_char`, the lowest such code), that code to a CID through
+  the code the font's own `/ToUnicode` gives it read backwards and checked
+  forwards (`Font::code_for_char`, the lowest code that reads as the
+  character, so a `bfchar` that took over a code inside a `bfrange` is not
+  written for the range's character), that code to a CID through
   the encoding, kept only where the program's charset carries the CID, and an
   `hmtx` from `/W`. The value is drawn at the advances a reader will use, in
   UAX #9's visual order; nothing joins, because a CFF carries nothing to
@@ -554,7 +556,7 @@ let bytes = editor.save(&WriteOptions::default());
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
 | Shaping a value against a symbolic or non-TrueType simple `/DA` font, a vertical CMap over a CFF, a CFF with no `/ToUnicode`, or in a vertical comb field | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a symbolic font's codes name glyphs rather than characters; the wrapper reads codes from `/ToUnicode` and a column from an sfnt; 12.7.4.3 lays comb cells across the box | [design/shaping.md](../design/shaping.md) |
 | Shaping a value under a **registry CMap** in a build without `cmap-predefined` | `WarningKind::PredefinedCMapApproximate(name)` against the field, then the per-character warnings | the code-to-CID tables that would be inverted were never compiled in — a capability that depends on a feature has to say so | [fonts.md](fonts.md) |
-| A CID no code means any more — a `cidchar` took the code its `cidrange` would have given | `WarningKind::FieldCharacterUnrepresentable { character }`; nothing is written for that glyph | the inverse of a CMap is not a function, and an unverified inverse draws a *different* wrong glyph | [rulings](../rulings.md) ruling 10 |
+| A CID no code means any more — a `cidchar` took the code its `cidrange` would have given — or, for a bare CFF, a character no code means any more because a `bfchar` took the code its `bfrange` would have given | `WarningKind::FieldCharacterUnrepresentable { character }`; nothing is written for that glyph | the inverse of a CMap is not a function, and an unverified inverse draws a *different* wrong glyph | [rulings](../rulings.md) ruling 10 |
 | A trigger class the policy denies — keystroke, validate and document-level by default | `CalcError::Refused { trigger, subject }` | a pass that quietly ran nothing reads exactly like a form with no scripts (ruling 10) | — |
 | A computed value a field's own `/AA /V` refuses | `CalcError::Invalid { field, value }`, and the whole pass writes nothing | one total rejected and nine written anyway is a document that disagrees with itself | — |
 | A validate action the policy would not run, over a value the pass wrote anyway | `Recalculation::refused` names the field | a skipped check reads exactly like a form that has none, and the difference is whether the numbers were looked at (ruling 10) | — |

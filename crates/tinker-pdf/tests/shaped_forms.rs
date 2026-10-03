@@ -969,6 +969,41 @@ fn a_bare_cff_names_what_it_cannot_draw() {
     );
 }
 
+/// A `/ToUnicode` whose `bfrange` says `<000B>` is `B` and whose `bfchar`
+/// says it is `X`: the `bfchar` wins when the code is read (9.10.3), so
+/// `<000B>` means `X`.
+const OVERRIDDEN_TO_UNICODE: &[u8] = b"/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 beginbfchar
+<000B> <0058>
+endbfchar
+1 beginbfrange
+<000A> <000C> <0041>
+endbfrange
+endcmap
+end end";
+
+/// **A code another entry took over is not written for the character it no
+/// longer means** (review of lane 6C).
+///
+/// Read backwards, the range alone answers `B` with `<000B>`; read forwards,
+/// `<000B>` is `X`, so the field would have drawn and extracted `AX` for a
+/// value of `AB` and said nothing. `B` has no code in this font and is named;
+/// `X` is written with `<000B>`, because that is what it means.
+#[test]
+fn a_bare_cff_code_another_entry_took_over_is_not_written() {
+    let program = cid_keyed_cff();
+    let doc = form_document(&Fixture {
+        to_unicode: Some(OVERRIDDEN_TO_UNICODE),
+        ..cff_fixture(&program)
+    });
+    let (_, content) = filled(&doc, "ABX");
+    assert_draws(&content, &[(0x000A, 2), (0x000B, 2)]);
+    assert_eq!(unrepresentable(&doc), vec!['B']);
+}
+
 /// A bare CFF with **no** `/ToUnicode` keeps the single-byte path: nothing in
 /// the document says which code means which character.
 #[test]
