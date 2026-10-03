@@ -236,6 +236,16 @@ writes, family by family:
   standard type (ISO 14289-1 7.1), an identity, a second target and a loop.
   The standard list moved from the PDF/A validator into the writer's crate so
   the two cannot disagree about what "standard" means.
+- **`/Link` with its `/OBJR`.** A `link` call made while an element is open
+  makes the annotation a content item of it; `link_for(key, …)` does so by
+  `tagged_keyed`'s key, for links measured after drawing. `finish` folds the
+  document tree *before* writing the pages — merging allocates nothing, so
+  documents without such a link are numbered exactly as before — because an
+  annotation in the tree needs its own `/StructParent` key, after every
+  page's, whose `/ParentTree` value is a reference to its element rather than
+  an array. Writing it found that `close_marked`'s take-back of an empty
+  sequence removed the element's *last* kid, which after a `link` call is the
+  annotation's; it now removes the kid that named the id.
 
 ## Dependencies
 

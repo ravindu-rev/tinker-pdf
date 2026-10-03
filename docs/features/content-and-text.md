@@ -489,6 +489,17 @@ reader could not use — remapping a standard type (ISO 14289-1 7.1: *standard
 tags shall not be remapped*; the list is `STANDARD_STRUCTURE_TYPES`, shared
 with the PDF/A validator's level A rule), an empty or identity entry, a
 second target for one name, and a loop.
+A link annotation added with `PageBuilder::link` **while an element is
+open** is a content item of that element: its `/K` gains an `/OBJR`
+(14.7.4.3) naming the annotation and its page, and the annotation a
+`/StructParent` whose `/ParentTree` value is a reference to the element
+(14.7.4.4) — so `tagged(b"Link", …)` around the text and the `link` call is
+14.8.4.4.2's `/Link` element. `link_for(key, …)` does the same for an
+element named by `tagged_keyed`'s key, on any page and whether it is open
+or not, for a layout that measures link rectangles after drawing. A link
+outside every element is written in no structure, as before; one `finish`
+does not write — a dangling named destination — leaves no `/OBJR` and takes
+no key.
 Nesting stops one level short of the reader's `MAX_NEST_DEPTH`, because
 `finish` puts every page's elements under one `/Document`; it used to stop
 at the cap itself, and an element nested exactly that deep came back
@@ -518,6 +529,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | `/ActualText` on a property list carrying no `/MCID` | — | the map is keyed by `(stream, /MCID)`, so a list with no identifier reaches no consumer | 14.9.4 |
 | Images inside a tiling pattern's cell, a soft-mask group or an annotation appearance | `Page::images()` does not list them | none is a drawing of the page's content: the renderer reaches a pattern cell and a mask group through its own device, not through the interpreter's `Do`, and an appearance belongs to the annotation | 8.7.3, 11.6.5, 12.5.5 |
 | A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |
+| A written link that wraps across lines as **one** annotation with `/QuadPoints` | — | `PageBuilder::link` takes one rectangle, so a wrapped link is one annotation per rectangle, each an `/OBJR` of the one `/Link` element — which ISO 32000-1 14.8.4.4.2 permits ("one or more link annotations") and which the PDF Association's approved erratum 133 to ISO 32000-2 replaces, for a 2.0 document, with a single `/OBJR` to one annotation whose `/QuadPoints` mark each line | 14.8.4.4.2; ISO 32000-2 14.8.4.7.3 |
 
 The rendering side of a hidden layer is reported too —
 `RenderWarning::HiddenOptionalContent { layer }` names which layer was not

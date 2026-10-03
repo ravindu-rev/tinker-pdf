@@ -2050,12 +2050,13 @@ struct CarriedTag {
     keep: bool,
 }
 
-/// What a structure element holds: marked content on its own page, or a
-/// nested element.
+/// What a structure element holds: marked content on its own page, a nested
+/// element, or a whole annotation.
 ///
-/// Two variants and never one, for the reason the reader's `StructKid` keeps
-/// them apart: a marked-content id is a span of this page's content stream and
-/// a child element is a subtree, and a writer that flattened them would have
+/// Three variants and never one, for the reason the reader's `StructKid` keeps
+/// them apart: a marked-content id is a span of this page's content stream, a
+/// child element is a subtree, and an object reference is an annotation with
+/// no glyphs in any content stream — a writer that flattened them would have
 /// to guess which it meant on the way back.
 enum TaggedKid {
     /// A marked-content sequence on the page that opened it, and where it
@@ -2071,12 +2072,19 @@ enum TaggedKid {
         order: u64,
     },
     Element(TaggedNode),
+    /// A link annotation of this page, by its index in the page's links —
+    /// written as an `/OBJR` (14.7.4.3), with the annotation's
+    /// `/StructParent` naming this element back (14.7.4.4).
+    Object {
+        link: usize,
+        order: u64,
+    },
 }
 
 impl TaggedKid {
     fn order(&self) -> u64 {
         match self {
-            TaggedKid::Content { order, .. } => *order,
+            TaggedKid::Content { order, .. } | TaggedKid::Object { order, .. } => *order,
             TaggedKid::Element(child) => child.order,
         }
     }
@@ -2750,8 +2758,19 @@ impl PageBuilder {
         }
         self.content.truncate(at);
         self.next_mcid -= 1;
+        // The kid that named this id, which is not always the last one: a
+        // link annotation associated while the sequence was open sits after
+        // it, and popping that instead would leave the element claiming an id
+        // this page no longer has and dropping the annotation's `/OBJR`.
+        let mcid = self.next_mcid;
         if let Some(node) = self.tag_stack.last_mut() {
-            node.kids.pop();
+            if let Some(at) = node
+                .kids
+                .iter()
+                .rposition(|kid| matches!(kid, TaggedKid::Content { mcid: m, .. } if *m == mcid))
+            {
+                node.kids.remove(at);
+            }
         }
     }
 
@@ -3159,7 +3178,61 @@ impl PageBuilder {
     /// - a page already carrying [`crate::limits::MAX_ARRAY_LEN`] links, which
     ///   is where this repository's own reader stops walking an `/Annots`
     ///   array.
+    ///
+    /// # Inside a structure element
+    ///
+    /// Called while an element is open — inside [`PageBuilder::tagged_with`]
+    /// or between [`PageBuilder::open_tag`] and its close — the annotation
+    /// becomes a **content item of that element**: the element's `/K` gains an
+    /// `/OBJR` naming it (14.7.4.3) and the annotation a `/StructParent` whose
+    /// `/ParentTree` entry names the element back (14.7.4.4). That is the
+    /// shape 14.8.4.4.2 gives a `/Link` element — the text it encloses and an
+    /// object reference to the annotation that makes it go somewhere — and
+    /// what ISO 14289-1 asks of every annotation in a tagged file. Outside any
+    /// element the annotation is written as it always was, in no structure.
     pub fn link(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, target: &Target) -> bool {
+        if !self.push_link(x0, y0, x1, y1, target, None) {
+            return false;
+        }
+        let link = self.links.len() - 1;
+        if let Some(node) = self.tag_stack.last_mut() {
+            let order = node.next_order();
+            node.kids.push(TaggedKid::Object { link, order });
+        }
+        true
+    }
+
+    /// A link annotation that belongs to the structure element named `key`
+    /// — one opened with [`PageBuilder::tagged_keyed`] or [`Tag::keyed`] —
+    /// on this page or any other, whether or not it is open now.
+    ///
+    /// For a caller that knows which element a link is for and draws the two
+    /// apart: a layout whose link rectangles are measured after the text is
+    /// drawn, as an EPUB's are. `finish` finds the element by its key and
+    /// writes the association [`PageBuilder::link`] describes; an annotation
+    /// whose key names no element is written in no structure, as an
+    /// untagged one is. Refused for the same reasons `link` refuses.
+    pub fn link_for(
+        &mut self,
+        key: u64,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        target: &Target,
+    ) -> bool {
+        self.push_link(x0, y0, x1, y1, target, Some(key))
+    }
+
+    fn push_link(
+        &mut self,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        target: &Target,
+        owner: Option<u64>,
+    ) -> bool {
         if !all_finite(&[x0, y0, x1, y1]) {
             return false;
         }
@@ -3176,6 +3249,7 @@ impl PageBuilder {
         self.links.push(LinkAnnotation {
             rect,
             target: target.clone(),
+            owner,
         });
         true
     }
@@ -3360,6 +3434,9 @@ struct LinkAnnotation {
     rect: [f64; 4],
     /// Where it goes.
     target: Target,
+    /// The key of the structure element it belongs to, for one added by
+    /// [`PageBuilder::link_for`].
+    owner: Option<u64>,
 }
 
 /// One outline entry to write (12.3.3).
@@ -6158,13 +6235,16 @@ impl DocumentBuilder {
     /// kid — and a kid on any other page is written as an `/MCR` dictionary
     /// carrying its own `/Pg`. An element with no content of its own inherits
     /// nothing and states no `/Pg`, because it has no default to give.
+    ///
+    /// A link annotation the element holds is an `/OBJR` (14.7.4.3) naming
+    /// the annotation and its page, and `walk.objects` records which element
+    /// holds it so the annotation's `/ParentTree` entry can name it back.
     fn write_struct_elements(
         &mut self,
         arena: &[Merged],
         kids_of: &[MergedKid],
         parent: ObjRef,
-        pages: &[ObjRef],
-        claims: &mut [Vec<Option<ObjRef>>],
+        walk: &mut StructWalk<'_>,
     ) -> Vec<Object> {
         let mut out = Vec::new();
         for kid in kids_of {
@@ -6180,7 +6260,7 @@ impl DocumentBuilder {
             for kid in &node.kids {
                 match kid {
                     MergedKid::Content { page, mcid, .. } => {
-                        if let Some(slots) = claims.get_mut(*page) {
+                        if let Some(slots) = walk.claims.get_mut(*page) {
                             if let Some(slot) = slots.get_mut(*mcid as usize) {
                                 *slot = Some(reference);
                             }
@@ -6190,18 +6270,39 @@ impl DocumentBuilder {
                         } else {
                             let mut mcr = Dict::new();
                             mcr.insert(Name::TYPE, Object::Name(self.names.intern(b"MCR")));
-                            mcr.insert(self.names.intern(b"Pg"), Object::Ref(pages[*page]));
+                            mcr.insert(self.names.intern(b"Pg"), Object::Ref(walk.pages[*page]));
                             mcr.insert(self.names.intern(b"MCID"), Object::Int(i64::from(*mcid)));
                             written.push(Object::Dict(mcr));
                         }
+                    }
+                    MergedKid::Object { page, link, .. } => {
+                        // An annotation `finish` did not write — a link naming
+                        // a dangling destination — has nothing to refer to.
+                        let Some(annotation) = walk
+                            .annotations
+                            .get(*page)
+                            .and_then(|links| links.get(*link))
+                            .copied()
+                            .flatten()
+                        else {
+                            continue;
+                        };
+                        walk.objects.insert((*page, *link), reference);
+                        // `/Pg` always: Table 325 makes it the page the object
+                        // is rendered on, and an element holding nothing but
+                        // the annotation has no default page to lend it.
+                        let mut objr = Dict::new();
+                        objr.insert(Name::TYPE, Object::Name(self.names.intern(b"OBJR")));
+                        objr.insert(self.names.intern(b"Pg"), Object::Ref(walk.pages[*page]));
+                        objr.insert(self.names.intern(b"Obj"), Object::Ref(annotation));
+                        written.push(Object::Dict(objr));
                     }
                     MergedKid::Element(_) => {
                         written.extend(self.write_struct_elements(
                             arena,
                             std::slice::from_ref(kid),
                             reference,
-                            pages,
-                            claims,
+                            walk,
                         ));
                     }
                 }
@@ -6215,7 +6316,7 @@ impl DocumentBuilder {
             );
             element.insert(self.names.intern(b"P"), Object::Ref(parent));
             if let Some(page) = default {
-                element.insert(self.names.intern(b"Pg"), Object::Ref(pages[page]));
+                element.insert(self.names.intern(b"Pg"), Object::Ref(walk.pages[page]));
             }
             // `/K` is optional (Table 323) and an element kept empty states
             // none, rather than an empty array that says the same thing in
@@ -6334,6 +6435,52 @@ impl DocumentBuilder {
         // here is their `/StructParents` key.
         let mut tagged_pages: Vec<usize> = Vec::new();
 
+        // A link whose named destination dangles is not written (see
+        // `Target`), and nothing may refer to it.
+        let writable = |at: usize, link: usize| {
+            pages
+                .get(at)
+                .and_then(|page| page.links.get(link))
+                .is_some_and(|link| {
+                    link.target
+                        .name()
+                        .is_none_or(|name| live.contains_key(name))
+                })
+        };
+        // **The document's tree, folded before any page is written**, because
+        // a link annotation that is a content item of an element carries a
+        // `/StructParent` key of its own (14.7.4.4), and which annotations those
+        // are is a fact about the merged tree. Merging allocates nothing, so
+        // a document with no annotation in its tree is numbered as before.
+        let (arena, roots) = match struct_root {
+            Some(_) => merge_tree(&pages, &writable),
+            None => (Vec::new(), Vec::new()),
+        };
+        // The annotations' keys come after every page's: a page with marked
+        // content takes the next key in page order, so their count is known
+        // here, and an annotation's key is that count plus its place in page
+        // and link order.
+        let page_keys = pages.iter().filter(|page| page.next_mcid > 0).count();
+        let mut held: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for merged in &arena {
+            for kid in &merged.kids {
+                if let MergedKid::Object { page, link, .. } = kid {
+                    if writable(*page, *link) {
+                        held.insert((*page, *link));
+                    }
+                }
+            }
+        }
+        let annotation_keys: BTreeMap<(usize, usize), i64> = held
+            .iter()
+            .enumerate()
+            .map(|(at, held)| (*held, (page_keys + at) as i64))
+            .collect();
+        let mut annotations: Vec<Vec<Option<ObjRef>>> = pages
+            .iter()
+            .map(|page| vec![None; page.links.len()])
+            .collect();
+
         for (at, (page, reference)) in pages.iter().zip(page_refs.iter()).enumerate() {
             let content_ref = self.allocate();
             self.objects.insert_stream(
@@ -6382,13 +6529,9 @@ impl DocumentBuilder {
             // statement where its absence is not, the same rule `/CropBox`
             // above follows.
             let mut annots = Vec::with_capacity(page.links.len());
-            for link in &page.links {
+            for (index, link) in page.links.iter().enumerate() {
                 // A dangling name is refused whole: see `Target`.
-                if link
-                    .target
-                    .name()
-                    .is_some_and(|name| !live.contains_key(name))
-                {
+                if !writable(at, index) {
                     continue;
                 }
                 let mut annot = Dict::new();
@@ -6408,10 +6551,21 @@ impl DocumentBuilder {
                 annot.insert(self.names.intern(b"F"), Object::Int(4));
                 link.target
                     .write(&self.names, &page_refs, &live, &mut annot);
+                // 14.7.4.4: an annotation that is a content item in its own
+                // right finds its element through its own key.
+                if let Some(key) = annotation_keys.get(&(at, index)) {
+                    annot.insert(self.names.intern(b"StructParent"), Object::Int(*key));
+                }
 
                 let annot_ref = self.allocate();
                 self.objects.insert(annot_ref.num, Object::Dict(annot));
                 annots.push(Object::Ref(annot_ref));
+                if let Some(slot) = annotations
+                    .get_mut(at)
+                    .and_then(|links| links.get_mut(index))
+                {
+                    *slot = Some(annot_ref);
+                }
             }
             if !annots.is_empty() {
                 dict.insert(self.names.intern(b"Annots"), Object::Array(annots));
@@ -6546,47 +6700,59 @@ impl DocumentBuilder {
         if let Some(root) = struct_root {
             let document = self.allocate();
 
-            // **One tree for the document, folded out of the pages' nodes.**
-            // Elements the caller named are merged across every page they were
-            // opened on, then every kid list is put into the caller's order —
-            // which is the source document's, and is not page order the moment
-            // anything was drawn on a page other than the one it reads on.
-            let mut arena: Vec<Merged> = Vec::new();
-            let mut roots: Vec<MergedKid> = Vec::new();
-            for (at, page) in pages.iter().enumerate() {
-                for node in &page.tag_roots {
-                    absorb(&mut arena, &mut roots, node, at);
-                }
-            }
-            order_kids(&mut arena);
-            roots.sort_by_key(|kid| kid.order(&arena));
-
+            // **One tree for the document, folded out of the pages' nodes**
+            // above. Elements the caller named are merged across every page
+            // they were opened on, then every kid list is put into the
+            // caller's order — which is the source document's, and is not page
+            // order the moment anything was drawn on a page other than the one
+            // it reads on.
+            //
             // One claims array per **page**, not per element: `/ParentTree` is
             // indexed by the page's `/StructParents` key and then by the id,
             // and an id now belongs to an element that may be owned anywhere.
-            let mut claims: Vec<Vec<Option<ObjRef>>> = pages
-                .iter()
-                .map(|page| vec![None; page.next_mcid as usize])
-                .collect();
-            let struct_kids =
-                self.write_struct_elements(&arena, &roots, document, &page_refs, &mut claims);
-            let parent_tree: Vec<Vec<Object>> = tagged_pages
+            let mut walk = StructWalk {
+                pages: &page_refs,
+                annotations: &annotations,
+                claims: pages
+                    .iter()
+                    .map(|page| vec![None; page.next_mcid as usize])
+                    .collect(),
+                objects: BTreeMap::new(),
+            };
+            let struct_kids = self.write_struct_elements(&arena, &roots, document, &mut walk);
+            let mut parent_tree: Vec<Object> = tagged_pages
                 .iter()
                 .map(|at| {
-                    claims[*at]
-                        .iter()
-                        .map(|claim| match claim {
-                            Some(reference) => Object::Ref(*reference),
-                            // An id no element claims cannot happen from this
-                            // builder — `tagged` opens both together — so a
-                            // null here is a defect in this writer rather than
-                            // in the caller's document. It is written rather
-                            // than skipped so the array stays indexed by id.
-                            None => Object::Null,
-                        })
-                        .collect()
+                    Object::Array(
+                        walk.claims[*at]
+                            .iter()
+                            .map(|claim| match claim {
+                                Some(reference) => Object::Ref(*reference),
+                                // An id no element claims cannot happen from
+                                // this builder — `tagged` opens both together —
+                                // so a null here is a defect in this writer
+                                // rather than in the caller's document. It is
+                                // written rather than skipped so the array
+                                // stays indexed by id.
+                                None => Object::Null,
+                            })
+                            .collect(),
+                    )
                 })
                 .collect();
+            // Then each annotation's entry, in key order: for an object that
+            // is a content item in its own right the value is a reference to
+            // its parent element, not an array (14.7.4.4).
+            for held in annotation_keys.keys() {
+                // Every held annotation was written and is reached by the walk,
+                // so the lookup answers; were it not to, the entry is null
+                // rather than absent, keeping the keys contiguous.
+                parent_tree.push(
+                    walk.objects
+                        .get(held)
+                        .map_or(Object::Null, |element| Object::Ref(*element)),
+                );
+            }
 
             let mut element = Dict::new();
             element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
@@ -6608,9 +6774,9 @@ impl DocumentBuilder {
             // document this builder produced has one entry per tagged page —
             // splitting into `/Kids` would buy a lookup nothing here performs.
             let mut nums = Vec::with_capacity(parent_tree.len() * 2);
-            for (key, claims) in parent_tree.iter().enumerate() {
+            for (key, value) in parent_tree.iter().enumerate() {
                 nums.push(Object::Int(key as i64));
-                nums.push(Object::Array(claims.clone()));
+                nums.push(value.clone());
             }
             let tree_ref = self.allocate();
             let mut tree = Dict::new();
@@ -7196,20 +7362,99 @@ struct Merged {
     kids: Vec<MergedKid>,
 }
 
-/// A merged element's kid: a sequence on a **named** page, or a child.
+/// What the walk writing the structure elements reads and fills.
+struct StructWalk<'a> {
+    /// Every page's object.
+    pages: &'a [ObjRef],
+    /// Every page's link annotations as written, by index; `None` for one
+    /// `finish` did not write.
+    annotations: &'a [Vec<Option<ObjRef>>],
+    /// Per page, per marked-content id: the element that claims it.
+    claims: Vec<Vec<Option<ObjRef>>>,
+    /// Per `(page, link)`: the element that holds the annotation.
+    objects: BTreeMap<(usize, usize), ObjRef>,
+}
+
+/// A merged element's kid: a sequence on a **named** page, a child, or a link
+/// annotation of a named page by its index in that page's links.
 enum MergedKid {
-    Content { page: usize, mcid: u32, order: u64 },
+    Content {
+        page: usize,
+        mcid: u32,
+        order: u64,
+    },
     Element(usize),
+    Object {
+        page: usize,
+        link: usize,
+        order: u64,
+    },
 }
 
 impl MergedKid {
     /// Where this kid reads, which is what the sort below orders by.
     fn order(&self, arena: &[Merged]) -> u64 {
         match self {
-            MergedKid::Content { order, .. } => *order,
+            MergedKid::Content { order, .. } | MergedKid::Object { order, .. } => *order,
             MergedKid::Element(at) => arena[*at].order,
         }
     }
+}
+
+/// The document-level tree folded out of every page's elements, in the
+/// caller's order, with each [`PageBuilder::link_for`] annotation appended to
+/// the element its key names.
+///
+/// `writable` says whether a page's link at an index will be written at all —
+/// a link naming a dangling destination is not, and an `/OBJR` to it would be
+/// a reference into nothing.
+fn merge_tree(
+    pages: &[PageBuilder],
+    writable: &dyn Fn(usize, usize) -> bool,
+) -> (Vec<Merged>, Vec<MergedKid>) {
+    let mut arena: Vec<Merged> = Vec::new();
+    let mut roots: Vec<MergedKid> = Vec::new();
+    for (at, page) in pages.iter().enumerate() {
+        for node in &page.tag_roots {
+            absorb(&mut arena, &mut roots, node, at);
+        }
+    }
+    order_kids(&mut arena);
+    roots.sort_by_key(|kid| kid.order(&arena));
+
+    for (at, page) in pages.iter().enumerate() {
+        for (link, annotation) in page.links.iter().enumerate() {
+            let Some(key) = annotation.owner else {
+                continue;
+            };
+            if !writable(at, link) {
+                continue;
+            }
+            // The first element in the arena's order carrying the key, which
+            // is the one a caller naming each element once means.
+            let Some(element) = arena
+                .iter()
+                .position(|merged| merged.key == Some(NodeKey::Caller(key)))
+            else {
+                continue;
+            };
+            // After everything already there: an annotation is not a piece
+            // of the text the element reads, and putting it last keeps every
+            // sequence where the sort left it.
+            let order = arena[element]
+                .kids
+                .iter()
+                .map(|kid| kid.order(&arena))
+                .max()
+                .unwrap_or(arena[element].order);
+            arena[element].kids.push(MergedKid::Object {
+                page: at,
+                link,
+                order,
+            });
+        }
+    }
+    (arena, roots)
 }
 
 /// Folds one page's nodes into the document tree.
@@ -7268,6 +7513,13 @@ fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedN
                 absorb(arena, &mut kids, child, page);
                 arena[at].kids = kids;
             }
+            TaggedKid::Object { link, order } => {
+                arena[at].kids.push(MergedKid::Object {
+                    page,
+                    link: *link,
+                    order: *order,
+                });
+            }
         }
     }
 }
@@ -7283,6 +7535,9 @@ fn default_page(arena: &[Merged], at: usize) -> Option<usize> {
     for kid in &arena[at].kids {
         match kid {
             MergedKid::Content { page, .. } => return Some(*page),
+            // An annotation is not marked content: an `/OBJR` carries its own
+            // `/Pg`, and the default is for the integer kids that do not.
+            MergedKid::Object { .. } => {}
             MergedKid::Element(child) => {
                 if let Some(page) = default_page(arena, *child) {
                     return Some(page);

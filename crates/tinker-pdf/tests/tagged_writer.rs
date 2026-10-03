@@ -511,6 +511,242 @@ fn the_documents_language_is_written_on_the_catalog() {
     assert_eq!(text.as_deref(), Some("en-GB"));
 }
 
+// ---- `/Link` with its `/OBJR` (14.7.4.3, 14.8.4.4.2) -----------------------
+
+use tinker_pdf::{ObjRef, Target};
+
+/// The structure tree root's `/ParentTree`, as key to value.
+fn parent_tree(doc: &Document) -> Vec<(i64, tinker_pdf::Object)> {
+    let cos = doc.cos();
+    let catalog = cos.catalog().expect("a catalog");
+    let root = cos.resolve_key(&catalog, cos.intern(b"StructTreeRoot"));
+    let root = root.as_dict().expect("a structure tree root");
+    let tree = root
+        .get_ref(cos.intern(b"ParentTree"))
+        .expect("an indirect parent tree");
+    tinker_pdf_cos::number_tree(cos, tree)
+}
+
+/// A page's annotations, by reference, each with its `/StructParent`.
+fn annotations(doc: &Document, page: u32) -> Vec<(ObjRef, Option<i64>)> {
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let page = pages
+        .iter()
+        .find(|candidate| candidate.index == page)
+        .expect("the page");
+    let object = cos.get(page.reference).expect("the page object");
+    let dict = object.as_dict().expect("a dictionary");
+    let annots = cos.resolve_key(dict, cos.intern(b"Annots"));
+    let Some(annots) = annots.as_array() else {
+        return Vec::new();
+    };
+    annots
+        .iter()
+        .map(|entry| {
+            let reference = entry.as_objref().expect("an indirect annotation");
+            let annotation = cos.resolve(entry);
+            let key = annotation
+                .as_dict()
+                .and_then(|dict| cos.resolve_key(dict, cos.intern(b"StructParent")).as_int());
+            (reference, key)
+        })
+        .collect()
+}
+
+/// The object references among an element's kids.
+fn objects(element: &StructElement) -> Vec<ObjRef> {
+    element
+        .kids
+        .iter()
+        .filter_map(|kid| match kid {
+            StructKid::Object(reference) => Some(*reference),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A `/Link` element holds its annotation, and the annotation names the
+/// element back.** 14.8.4.4.2's shape: the text the link encloses, and an
+/// `/OBJR` to the annotation that makes it go somewhere; 14.7.4.4's other
+/// half: the annotation's `/StructParent` is a `/ParentTree` key whose value
+/// is that element — a reference, not an array, because an annotation is a
+/// content item in its own right.
+#[test]
+fn a_link_element_holds_its_annotation_and_the_annotation_names_it_back() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"P", |page| {
+            page.text(b"F1", 12.0, 20.0, 150.0, "See ");
+            page.tagged(b"Link", |page| {
+                page.text(b"F1", 12.0, 50.0, 150.0, "the site");
+                assert!(page.link(
+                    50.0,
+                    145.0,
+                    100.0,
+                    160.0,
+                    &Target::Uri("https://example.org/".into())
+                ));
+            });
+        });
+        // Outside every element: written as it always was, in no structure.
+        assert!(page.link(
+            0.0,
+            0.0,
+            10.0,
+            10.0,
+            &Target::Uri("https://example.org/b".into())
+        ));
+    });
+
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+
+    let link = only(&doc, "Link");
+    let held = objects(&link);
+    let annots = annotations(&doc, 0);
+    assert_eq!(annots.len(), 2, "both annotations are written");
+    assert_eq!(held, [annots[0].0], "the Link holds the first and only it");
+    assert_eq!(annots[1].1, None, "the untagged one has no /StructParent");
+    let key = annots[0].1.expect("the held one has a /StructParent");
+    assert_eq!(key, 1, "after the one page's key");
+
+    let entry = parent_tree(&doc)
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .expect("a /ParentTree entry under the annotation's key");
+    assert_eq!(
+        entry.1.as_objref(),
+        link.reference,
+        "the entry is a reference to the Link element itself"
+    );
+
+    // The join is untouched by the annotation: the text still reads in order.
+    let structured = tree.text_for_page(0, &doc.page(0).expect("a page").text());
+    assert_eq!(structured.orphans, 0);
+    assert_eq!(structured.plain_text().trim(), "See \nthe site");
+    assert!(structured.warnings.is_empty(), "{:?}", structured.warnings);
+}
+
+/// `link_for` attaches an annotation to the element its key names, drawn
+/// before or after, on any page — and a link broken across a page break is
+/// one `/Link` holding both annotations, each `/OBJR` naming its own page.
+#[test]
+fn a_keyed_link_holds_its_annotations_on_both_pages() {
+    let uri = Target::Uri("https://example.org/".into());
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for (at, word) in ["across", "pages"].iter().enumerate() {
+        let uri = uri.clone();
+        builder.add_page(300.0, 200.0, move |page| {
+            // Before the element is drawn on the first page, after on the
+            // second: the key, not the call order, decides.
+            if at == 0 {
+                assert!(page.link_for(7, 20.0, 145.0, 80.0, 160.0, &uri));
+            }
+            page.tagged_keyed(b"Link", 7, at as u64, |page| {
+                page.text(b"F1", 12.0, 20.0, 150.0, word);
+            });
+            if at == 1 {
+                assert!(page.link_for(7, 20.0, 145.0, 80.0, 160.0, &uri));
+                assert!(page.link_for(99, 0.0, 0.0, 5.0, 5.0, &uri), "no element");
+            }
+        });
+    }
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    let link = only(&doc, "Link");
+    let first = annotations(&doc, 0);
+    let second = annotations(&doc, 1);
+    assert_eq!(objects(&link), [first[0].0, second[0].0]);
+    assert_eq!(second[1].1, None, "a key naming no element: no structure");
+    for (key, _) in [first[0], second[0]].map(|(_, key)| (key.expect("a key"), ())) {
+        let (_, value) = parent_tree(&doc)
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .expect("an entry");
+        assert_eq!(value.as_objref(), link.reference);
+    }
+}
+
+/// A `/Link` with no text of its own — a link over a picture drawn
+/// elsewhere — is an element holding only its `/OBJR`: kept, with no
+/// marked-content id claimed, and its `/OBJR` carrying the `/Pg` the element
+/// has no content to lend it.
+///
+/// This is the case that found `close_marked` taking back the wrong kid: the
+/// element's opening sequence was empty when it closed, and the take-back
+/// removed the last kid — which was the annotation's — leaving the element
+/// claiming an id the page no longer had.
+#[test]
+fn a_link_with_no_text_still_holds_its_annotation() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"P", |page| page.text(b"F1", 12.0, 20.0, 150.0, "text"));
+        page.tagged(b"Link", |page| {
+            assert!(page.link(
+                0.0,
+                0.0,
+                10.0,
+                10.0,
+                &Target::Uri("https://example.org/".into())
+            ));
+        });
+    });
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    let link = only(&doc, "Link");
+    assert_eq!(objects(&link), [annotations(&doc, 0)[0].0]);
+    assert_eq!(link.kids.len(), 1, "the annotation and nothing else");
+    assert_eq!(tree.content_count(), 1, "only the paragraph's sequence");
+    let structured = tree.text_for_page(0, &doc.page(0).expect("a page").text());
+    assert_eq!(structured.orphans, 0);
+    assert!(structured.warnings.is_empty(), "{:?}", structured.warnings);
+}
+
+/// An annotation `finish` does not write — a link naming a destination that
+/// never arrives — leaves no `/OBJR`, takes no key, and the element that held
+/// it keeps its text.
+#[test]
+fn a_link_that_is_not_written_leaves_no_object_reference() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"Link", |page| {
+            page.text(b"F1", 12.0, 20.0, 150.0, "nowhere");
+            assert!(page.link(
+                20.0,
+                145.0,
+                80.0,
+                160.0,
+                &Target::Named(b"never-registered".to_vec())
+            ));
+        });
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    assert_eq!(tree.object_count(), 0);
+    assert!(annotations(&doc, 0).is_empty());
+    assert_eq!(
+        parent_tree(&doc).len(),
+        1,
+        "the page's key and nothing else"
+    );
+    assert_eq!(only(&doc, "Link").kids.len(), 1, "its text");
+}
+
 // ---- `/RoleMap` (14.7.3) ---------------------------------------------------
 
 /// A custom type is written as itself and read as the type it maps to — both
