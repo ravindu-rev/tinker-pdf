@@ -1062,6 +1062,51 @@ fn a_word_split_by_a_span_is_drawn_joined() {
     }
 }
 
+/// **A text shadow of a span inside a word is the word's joined glyphs again.**
+///
+/// `css-text-decor-3` §4 makes a shadow the run drawn again, offset and in the
+/// shadow's colour, so a letter its word joins is joined in its shadow too.
+/// The painter draws a shadow as a copy of the run moved by the offset, and
+/// finds the text a run is shaped against (`Fonts::set_contexts`) by where the
+/// run is drawn — so the copy, drawn somewhere else, found none and was shaped
+/// alone: under a joined beh, hah and meem the shadow was three isolated
+/// letters. Each letter is asserted twice in its joined form, once for the
+/// text and once for its shadow, and no isolated form is drawn at all.
+#[test]
+fn a_text_shadow_is_shaped_in_the_word_its_run_is() {
+    let face = arabic_face();
+    let body = "<span style=\"text-shadow: 2px 2px #0000c0\">\u{628}\
+                <span style=\"color: #c00000\">\u{62D}</span>\u{645}</span>";
+    let doc = Document::open(arabic_book(body)).expect("a book");
+    let content = page_content(&doc);
+    let drawn: Vec<String> = text_objects(&content)
+        .iter()
+        .map(|(_, object)| shown_glyphs(object))
+        .collect();
+    for (ch, form) in [
+        ('\u{628}', Form::Initial),
+        ('\u{62D}', Form::Medial),
+        ('\u{645}', Form::Final),
+    ] {
+        let joined = format!(
+            "{:04X}",
+            face.form_glyph(ch, form)
+                .unwrap_or_else(|| panic!("{ch:?} has no {form:?} form"))
+        );
+        assert_eq!(
+            drawn.iter().filter(|shown| **shown == joined).count(),
+            2,
+            "{ch:?} is not drawn in its {form:?} form both as text and as its \
+             shadow: {drawn:?}\n{content}"
+        );
+        let isolated = format!("{:04X}", face.glyph_of(ch).expect("covered"));
+        assert!(
+            !drawn.contains(&isolated),
+            "{ch:?} is drawn isolated somewhere on the page: {drawn:?}\n{content}"
+        );
+    }
+}
+
 /// The pair the context fixture positions: `A` then `B`.
 const PAIR_COVERS: &str = "ABC";
 

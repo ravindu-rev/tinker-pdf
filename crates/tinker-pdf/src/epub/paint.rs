@@ -2221,7 +2221,10 @@ pub(crate) fn draw_page_tagged(
                 }
                 effects.shadow_alpha(page, run.anchor, *colour);
             }
-            refused += draw_run(builder, page, &shadow, frame, fonts);
+            // Shaped against the run's own neighbours, not the shadow's
+            // place: the same glyphs again ([`draw_run_against`]).
+            refused +=
+                draw_run_against(builder, page, &shadow, frame, fonts, fonts.context_of(run));
             if colour.a < u8::MAX && !opened {
                 page.raw(b"Q");
             }
@@ -3060,6 +3063,27 @@ fn draw_run(
     frame: &Frame,
     fonts: &Fonts<'_>,
 ) -> usize {
+    draw_run_against(builder, page, run, frame, fonts, fonts.context_of(run))
+}
+
+/// [`draw_run`], shaped against `context` — the text of a run's neighbours
+/// ([`Fonts::set_contexts`]) — rather than against the context recorded for
+/// the place `run` is drawn at.
+///
+/// **For a text shadow**, which is its run drawn again somewhere else: the
+/// context is found by where a run is drawn, so the shadow, a copy moved by
+/// its offset, found none and was shaped alone — under a word whose middle
+/// letter is a span of its own, the text joined and its shadow did not.
+/// `css-text-decor-3` §4 makes the shadow the run's own glyphs again, so it is
+/// shaped against the run's own neighbours.
+fn draw_run_against(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    run: &TextRun,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+    (before, after): (String, String),
+) -> usize {
     let font = request(run);
     let size = run.font_size * PX_TO_PT;
     let baseline = frame.y(run.y);
@@ -3075,7 +3099,6 @@ fn draw_run(
     // The neighbours' text belongs to the logically first and last segments,
     // which [`Fonts::continues`] has already checked are in the neighbours'
     // face; worked out before the drawing order reverses them.
-    let (before, after) = fonts.context_of(run);
     let first = segments.first().map(|(range, _)| range.start);
     let last = segments.last().map(|(range, _)| range.end);
     if right_to_left(&run.text) {
