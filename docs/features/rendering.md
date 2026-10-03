@@ -73,6 +73,15 @@ reaches a stream through its reference saw it — so it painted its parameter
 as a ramp in the first component, with no warning; every shading in the suite
 stated its function inline or in an array, which never had the defect.
 `tests/shading_functions.rs` holds both stream types to their own colours.
+*Corrected the same day*: a sampled function of **more than one input** —
+a `/DeviceN` tint transform, a type 1 shading's — was read along its first
+input alone, whatever the others said, though its own note called that a
+nearest-sample read; a two-colorant tint painted every tint of the second
+colorant as none of it. It is 7.10.2's multilinear interpolation now, the
+first input varying fastest, across up to eight inputs and at the nearest
+sample past that, where 2^m corners a lookup stops being a cost worth paying
+(`a_two_input_sampled_function_shades_across_both_inputs`). One input is the
+arithmetic it always was. A type 1 shading's `/Matrix` is still not read.
 
 **Shadings** (8.7.4.5). Type 1 (function-based), type 2 (axial) and type 3
 (radial) are evaluated per pixel through `Shading::color_at`; the radial

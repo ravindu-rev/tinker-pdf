@@ -208,12 +208,22 @@ fn interpolate(x: f64, x0: f64, x1: f64, y0: f64, y1: f64) -> f64 {
     }
 }
 
-/// Type 0, restricted to one input dimension with linear interpolation.
+/// How many inputs a type 0 table is interpolated across in full.
 ///
-/// Multi-input sampled functions exist but are vanishingly rare outside
-/// DeviceN transforms; a nearest-sample read is used for those rather than
-/// full multilinear interpolation, which is a visible difference only on a
-/// gradient nobody has yet produced.
+/// 7.10.2's multilinear interpolation reads the 2^m corners of the cell an
+/// input falls in, so eight inputs are 256 reads and PDF's own ceiling of 32
+/// colorants would be four thousand million. Past eight the nearest sample
+/// is read instead — one read, and exact at every grid point.
+const MULTILINEAR_INPUTS: usize = 8;
+
+/// Type 0 (7.10.2): linear interpolation along one input, and multilinear
+/// across several.
+///
+/// *Corrected 3 October 2026.* This used to read a table **along its first
+/// input only**, whatever the others said — its own note called that a
+/// nearest-sample read, and it was not one: a two-colorant `/DeviceN` tint
+/// transform painted every tint of the second colorant as none of it. The
+/// one-input path is the same arithmetic it always was.
 #[allow(clippy::too_many_arguments)]
 fn sampled(
     domain: &[(f64, f64)],
@@ -229,8 +239,15 @@ fn sampled(
     let max = ((1u64 << bits.min(32)) - 1) as f64;
 
     let read = |index: usize, component: usize| -> f64 {
-        let sample = index * outputs + component;
-        let bit = (sample as u64) * u64::from(bits);
+        // Checked, because a multi-input table's index is the file's `/Size`
+        // multiplied out, and a sample past the data reads as zero either way.
+        let Some(bit) = index
+            .checked_mul(outputs)
+            .and_then(|sample| sample.checked_add(component))
+            .and_then(|sample| (sample as u64).checked_mul(u64::from(bits)))
+        else {
+            return 0.0;
+        };
         let mut value = 0u64;
         for i in 0..bits.min(32) {
             let at = bit + u64::from(i);
@@ -240,6 +257,10 @@ fn sampled(
         }
         value as f64
     };
+
+    if size.len() > 1 {
+        return sampled_across(domain, range, size, max, encode, decode, &read, inputs);
+    }
 
     let first_domain = domain.first().copied().unwrap_or((0.0, 1.0));
     let first_size = size.first().copied().unwrap_or(2).max(1);
@@ -253,7 +274,7 @@ fn sampled(
         interpolate(x, first_domain.0, first_domain.1, e0, e1).clamp(0.0, (first_size - 1) as f64);
 
     let low = position.floor() as usize;
-    let high = (low + 1).min(first_size - 1);
+    let high = low.saturating_add(1).min(first_size - 1);
     let fraction = position - position.floor();
 
     (0..outputs)
@@ -268,6 +289,86 @@ fn sampled(
                 .or_else(|| range.get(component).copied())
                 .unwrap_or((0.0, 1.0));
             let value = interpolate(raw, 0.0, max, d0, d1);
+            clamp(value, range.get(component).copied().unwrap_or((0.0, 1.0)))
+        })
+        .collect()
+}
+
+/// [`sampled`] across more than one input: 7.10.2's table, the first input
+/// varying fastest, interpolated multilinearly up to [`MULTILINEAR_INPUTS`]
+/// inputs and read at the nearest sample past that.
+#[allow(clippy::too_many_arguments)]
+fn sampled_across(
+    domain: &[(f64, f64)],
+    range: &[(f64, f64)],
+    size: &[usize],
+    max: f64,
+    encode: &[(f64, f64)],
+    decode: &[(f64, f64)],
+    read: &dyn Fn(usize, usize) -> f64,
+    inputs: &[f64],
+) -> Vec<f64> {
+    let outputs = range.len().max(1);
+    // Per axis: the cell's low corner, its high one, the fraction between,
+    // and the axis's stride through the table. Saturating, because `/Size`
+    // is the file's and a product that overflows is a table no file holds —
+    // `read` answers zero past the samples there are.
+    let mut axes: Vec<(usize, usize, f64, usize)> = Vec::with_capacity(size.len());
+    let mut stride = 1usize;
+    for (axis, &points) in size.iter().enumerate() {
+        let points = points.max(1);
+        let span = domain.get(axis).copied().unwrap_or((0.0, 1.0));
+        let x = clamp(inputs.get(axis).copied().unwrap_or(0.0), span);
+        let (e0, e1) = encode
+            .get(axis)
+            .copied()
+            .unwrap_or((0.0, (points - 1) as f64));
+        let position = interpolate(x, span.0, span.1, e0, e1).clamp(0.0, (points - 1) as f64);
+        let low = position.floor() as usize;
+        let high = low.saturating_add(1).min(points - 1);
+        axes.push((low, high, position - position.floor(), stride));
+        stride = stride.saturating_mul(points);
+    }
+
+    let mut raw = vec![0.0f64; outputs];
+    if axes.len() <= MULTILINEAR_INPUTS {
+        for corner in 0..(1usize << axes.len()) {
+            let mut weight = 1.0f64;
+            let mut index = 0usize;
+            for (axis, &(low, high, fraction, stride)) in axes.iter().enumerate() {
+                let upper = corner & (1 << axis) != 0;
+                weight *= if upper { fraction } else { 1.0 - fraction };
+                index =
+                    index.saturating_add((if upper { high } else { low }).saturating_mul(stride));
+            }
+            if weight == 0.0 {
+                continue;
+            }
+            for (component, slot) in raw.iter_mut().enumerate() {
+                *slot += weight * read(index, component);
+            }
+        }
+    } else {
+        let index = axes
+            .iter()
+            .fold(0usize, |index, &(low, high, fraction, stride)| {
+                let nearest = if fraction < 0.5 { low } else { high };
+                index.saturating_add(nearest.saturating_mul(stride))
+            });
+        for (component, slot) in raw.iter_mut().enumerate() {
+            *slot = read(index, component);
+        }
+    }
+
+    raw.iter()
+        .enumerate()
+        .map(|(component, raw)| {
+            let (d0, d1) = decode
+                .get(component)
+                .copied()
+                .or_else(|| range.get(component).copied())
+                .unwrap_or((0.0, 1.0));
+            let value = interpolate(*raw, 0.0, max, d0, d1);
             clamp(value, range.get(component).copied().unwrap_or((0.0, 1.0)))
         })
         .collect()
@@ -627,6 +728,73 @@ mod tests {
             (mid.first().copied().unwrap_or(0.0) - 0.5).abs() < 0.01,
             "got {mid:?}"
         );
+    }
+
+    /// Two inputs, 2 x 2 samples: 7.10.2's table varies the **first input
+    /// fastest**, and a point between the four is their bilinear blend. The
+    /// samples 0, 85, 170, 255 at (0,0), (1,0), (0,1), (1,1).
+    #[test]
+    fn a_two_input_sampled_function_is_read_across_both_inputs() {
+        let f = Function::Sampled {
+            domain: vec![(0.0, 1.0); 2],
+            range: vec![(0.0, 1.0)],
+            size: vec![2, 2],
+            bits: 8,
+            encode: Vec::new(),
+            decode: Vec::new(),
+            samples: vec![0, 85, 170, 255],
+        };
+        let at = |x: f64, y: f64| f.eval(&[x, y])[0];
+        assert!(
+            (at(1.0, 0.0) - 85.0 / 255.0).abs() < 1e-9,
+            "the first input moves one sample"
+        );
+        assert!(
+            (at(0.0, 1.0) - 170.0 / 255.0).abs() < 1e-9,
+            "the second moves two"
+        );
+        assert!((at(1.0, 1.0) - 1.0).abs() < 1e-9);
+        assert!((at(0.5, 0.5) - 0.5).abs() < 1e-9, "the four corners' mean");
+        assert!(
+            (at(0.0, 0.5) - 85.0 / 255.0).abs() < 1e-9,
+            "halfway up the second"
+        );
+    }
+
+    /// Past [`MULTILINEAR_INPUTS`] the nearest sample is read, and a table
+    /// whose `/Size` multiplies past the address space reads zero rather than
+    /// panicking.
+    #[test]
+    fn a_wide_or_absurd_sampled_function_is_still_read() {
+        let inputs = MULTILINEAR_INPUTS + 1;
+        let mut samples = vec![0u8; 1 << inputs];
+        samples[(1 << inputs) - 1] = 255;
+        let f = Function::Sampled {
+            domain: vec![(0.0, 1.0); inputs],
+            range: vec![(0.0, 1.0)],
+            size: vec![2; inputs],
+            bits: 8,
+            encode: Vec::new(),
+            decode: Vec::new(),
+            samples,
+        };
+        assert_eq!(
+            f.eval(&vec![0.9; inputs]),
+            vec![1.0],
+            "the nearest is the last corner"
+        );
+        assert_eq!(f.eval(&vec![0.1; inputs]), vec![0.0]);
+
+        let absurd = Function::Sampled {
+            domain: vec![(0.0, 1.0); 4],
+            range: vec![(0.0, 1.0)],
+            size: vec![usize::MAX; 4],
+            bits: 32,
+            encode: Vec::new(),
+            decode: Vec::new(),
+            samples: vec![255; 8],
+        };
+        assert_eq!(absurd.eval(&[1.0; 4]).len(), 1);
     }
 
     #[test]

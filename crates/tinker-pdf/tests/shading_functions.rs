@@ -17,6 +17,8 @@
 //! | Defect injected | Tests that failed |
 //! | --- | ---: |
 //! | the single `/Function` is resolved before it is parsed (the old reader) | 2 |
+//! | a two-input sampled table is read along its first input alone (the old reader) | 1 |
+//! | the table's last input varies fastest | 1 |
 
 use tinker_pdf::{Document, RenderOptions};
 
@@ -111,6 +113,29 @@ fn a_calculator_function_shades_its_own_colours() {
         colour_at(pdf(AXIAL, &function), 0.25),
         [64, 0, 191],
         "a quarter across",
+    );
+}
+
+/// **A two-input sampled function is read across both inputs.** A type 1
+/// shading hands its function `(x, y)`, and 2 x 2 samples — red at (0, 0),
+/// green at (1, 0), blue at (0, 1), white at (1, 1), the first input varying
+/// fastest as 7.10.2 lays a table out — blend bilinearly: on the middle row a
+/// quarter across is `(128, 64, 128)`. A reader that read along `x` alone
+/// paints the bottom edge's `(191, 64, 0)` at every height.
+#[test]
+fn a_two_input_sampled_function_shades_across_both_inputs() {
+    let function = stream(
+        "/FunctionType 0 /Domain [0 100 0 100] /Range [0 1 0 1 0 1] /Size [2 2] /BitsPerSample 8",
+        &[0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF],
+    );
+    // Over the page's own 100 x 100 rather than through a `/Matrix`, which
+    // this reader's type 1 shading does not read.
+    let shading = "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 100 0 100] \
+                   /Function 6 0 R >>";
+    near(
+        colour_at(pdf(shading, &function), 0.25),
+        [128, 64, 128],
+        "a quarter across, halfway up",
     );
 }
 
