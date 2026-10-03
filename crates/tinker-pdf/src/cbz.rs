@@ -203,7 +203,7 @@ pub(crate) const PLACEHOLDER_GREY: f64 = 191.0 / 255.0;
 /// ordinary archive takes the size of the first real page instead, because a
 /// comic's pages are one size and a placeholder that matches its neighbours is
 /// the one a reader can page through.
-pub(crate) const FALLBACK_PAGE: (f64, f64) = (612.0, 792.0);
+const FALLBACK_PAGE: (f64, f64) = (612.0, 792.0);
 
 /// Resource ceilings for synthesising a document from an archive.
 ///
@@ -1401,6 +1401,10 @@ enum Reader<'a> {
     Tar(tar::Archive<'a>),
     SevenZip(sevenz::Archive<'a>),
     Rar(rar::Archive<'a>),
+    /// One picture with no archive around it (tier 5's formats row): a bare
+    /// image opened by [`crate::standalone`] is the comic of its one entry,
+    /// paged by this module's own body rather than by a copy of it.
+    Picture(&'a [u8]),
 }
 
 impl<'a> Reader<'a> {
@@ -1445,6 +1449,13 @@ impl<'a> Reader<'a> {
                     directory: entry.is_directory(),
                 })
                 .collect(),
+            // No stored path: a file opened from its bytes has no name, which
+            // is also what the page's `PageOrigin` reports.
+            Reader::Picture(_) => vec![Listing {
+                name: String::new(),
+                index: 0,
+                directory: false,
+            }],
         }
     }
 
@@ -1473,6 +1484,9 @@ impl<'a> Reader<'a> {
             // stored entry comes back borrowed, which is every entry this
             // build reads.
             Reader::Rar(archive) => archive.read(index).map_err(PageDefect::RarEntryRefused),
+            // `listing` names one entry, at index 0, and `pages_from_reader`
+            // asks only for indices `listing` handed it.
+            Reader::Picture(bytes) => Ok(Cow::Borrowed(*bytes)),
         }
     }
 
@@ -1500,6 +1514,7 @@ impl<'a> Reader<'a> {
                 .iter()
                 .map(|w| ArchiveWarning::Rar(*w))
                 .collect(),
+            Reader::Picture(_) => Vec::new(),
         }
     }
 }
@@ -1953,6 +1968,24 @@ pub fn pages_from_archive(
     limits: &Limits,
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
     pages_from_reader(Reader::Zip(archive), limits)
+}
+
+/// Pages one picture with no archive around it, as the comic of that one
+/// entry (tier 5's formats row): what [`crate::Document::open`] does with a
+/// bare image.
+///
+/// The same body as every container's, so a bare GIF, WebP or multi-page TIFF
+/// is exactly the document a one-entry CBZ holding it is — the same pages,
+/// sizes, pixels and warnings — and the two cannot drift apart.
+///
+/// # Errors
+/// [`ArchiveRefusal::NoImages`] for bytes [`image_format`] does not
+/// recognise, and [`ArchiveRefusal::TooLarge`] past a bound.
+pub(crate) fn pages_from_picture(
+    bytes: &[u8],
+    limits: &Limits,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    pages_from_reader(Reader::Picture(bytes), limits)
 }
 
 /// Pages whichever container was opened.
@@ -2428,7 +2461,7 @@ fn raster_plan<'a>(name: &str, raster: Option<RasterImageData>) -> Plan<'a> {
 
 /// The device space a JPEG 2000 file's decode lands in, by its channel count
 /// — the three counts the renderer draws — or `None` for any other.
-pub(crate) fn jpx_space(header: &JpxHeader) -> Option<ImageColorSpace<'static>> {
+fn jpx_space(header: &JpxHeader) -> Option<ImageColorSpace<'static>> {
     match header.components {
         1 => Some(ImageColorSpace::DeviceGray),
         3 => Some(ImageColorSpace::DeviceRgb),
@@ -2443,7 +2476,7 @@ pub(crate) fn jpx_space(header: &JpxHeader) -> Option<ImageColorSpace<'static>> 
 /// the header, and [`ImageFilter::Jpx`] is why neither reaches the dictionary:
 /// the codestream states both, and a `/ColorSpace` would override a JP2's own
 /// `colr` box.
-pub(crate) fn jpx_image<'b>(data: &'b [u8], header: &JpxHeader) -> CompressedImage<'b> {
+fn jpx_image<'b>(data: &'b [u8], header: &JpxHeader) -> CompressedImage<'b> {
     CompressedImage {
         width: header.width,
         height: header.height,

@@ -2,14 +2,17 @@
 //! image, a loose XHTML file (tier 5's formats row).
 //!
 //! Every reader these need was already in the tree — `tinker-pdf-svg` and
-//! `epub::svg` for a picture, the PNG, TIFF and JPEG embedders the comic path
-//! places its pages with, the EPUB cascade, layout and painter for a content
-//! document — and each of the three was refused as not-a-PDF because nothing
+//! `epub::svg` for an SVG, the comic path for a picture, the EPUB cascade,
+//! layout and painter for a content document — and each of the three was
+//! refused as not-a-PDF because nothing
 //! asked whether the bytes were one of them. This module is that question and
 //! the routing behind it. It adds no reader of its own: an SVG is a book of one
 //! pre-paginated chapter, a loose XHTML file is a book of one reflowable
-//! chapter, and a bare image is a comic of one page, each built by the code that
-//! builds the larger document so the two cannot disagree.
+//! chapter, and a bare image is the comic of its one picture, each built by the
+//! code that builds the larger document so the two cannot disagree. For a bare
+//! image that is literal: it is paged by `cbz`'s own body, with no archive
+//! around its one entry, and `tests/standalone.rs` holds it equal to a
+//! one-entry CBZ in every format the comic path reads.
 //!
 //! # The sniff, and why a PDF always wins it
 //!
@@ -46,11 +49,13 @@
 //!   `/Title`. **HTML that does not parse as XML is read as far as it parses**
 //!   and [`crate::ArchiveWarning::Markup`] says it stopped: this build has no
 //!   HTML5 tree builder, so tag soup is the narrowed half of the roadmap row.
-//! - **A bare image** is one page, one image pixel to one point (8.9.5.2),
-//!   built with the embedders the comic path uses. A format recognised and not
-//!   decoded here — GIF, WebP, AVIF — or bytes that will not decode are one
-//!   placeholder page naming why, which is what a comic archive holding that
-//!   one picture has always produced.
+//! - **A bare image** is the comic of that one picture, paged by
+//!   [`crate::cbz`]'s own body (`cbz::pages_from_picture`) and not by a copy of
+//!   it: one image pixel to one point (8.9.5.2), a JPEG, PNG, TIFF, JPEG 2000,
+//!   GIF or WebP drawn, a multi-page TIFF one page per directory that is a page,
+//!   and a format recognised and not decoded — AVIF — or bytes that will not
+//!   decode one placeholder page naming why, exactly as a one-entry comic
+//!   archive holding it.
 //! - **An FB2** — a root named `FictionBook`, since tier 5's FB2 row — is
 //!   translated by [`crate::fb2`] into an XHTML document and laid out as a
 //!   loose XHTML file is, with [`crate::fb2::STYLESHEET`] ahead of the book's
@@ -67,13 +72,9 @@
 //! a self-contained HTML file embeds a picture: [`DataUrls`] answers those,
 //! and hands everything else to whatever stands behind it.
 
-use tinker_pdf_cos::{png_image, tiff_image, DocumentBuilder, ImageData};
-use tinker_pdf_filters::Limits as FilterLimits;
+use tinker_pdf_cos::DocumentBuilder;
 
-use crate::cbz::{
-    image_format, jpx_image, jpx_space, ArchiveRefusal, ArchiveReport, ArchiveWarning, ImageFormat,
-    PageDefect, PageOrigin, PLACEHOLDER_GREY,
-};
+use crate::cbz::{image_format, ArchiveRefusal, ArchiveReport, ArchiveWarning, ImageFormat};
 use crate::epub::read::{Resources, Unavailable};
 use crate::epub::{self, BookLayout, Loose};
 
@@ -291,7 +292,10 @@ pub(crate) fn synthesise(
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
     let limits = epub::Limits::DEFAULT;
     match kind {
-        Standalone::Image(format) => image(bytes, format, &limits),
+        // The comic path's own body, with no archive around its one entry. Its
+        // one refusal that is not a bound, `NoImages`, is for bytes
+        // `image_format` does not recognise, and the sniff said it did.
+        Standalone::Image(_) => crate::cbz::pages_from_picture(bytes, &crate::cbz::Limits::DEFAULT),
         Standalone::Svg => laid_out(
             Loose::Svg(bytes),
             Vec::new(),
@@ -479,120 +483,6 @@ fn laid_out<R: Resources>(
     Ok((
         pdf,
         ArchiveReport::book(warnings, laid.pages, synthesised_bytes, *layout, laid.cost),
-    ))
-}
-
-/// The resource name the one image is drawn under, as the comic path's is.
-const IMAGE_RESOURCE: &[u8] = b"Im";
-
-/// A bare image as a document of one page.
-///
-/// The comic path's per-entry decisions, made with the comic path's own
-/// helpers — `png_image`, `tiff_image`, `jpeg_shape` and the JPEG 2000 header
-/// — for an entry that has no archive around it. The ceiling on a decoded
-/// raster is the comic path's too: the largest entry an archive may hand over,
-/// which is the most a page's picture may be.
-fn image(
-    bytes: &[u8],
-    format: ImageFormat,
-    limits: &epub::Limits,
-) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
-    let ceiling = FilterLimits::new(crate::cbz::zip_limits::MAX_ZIP_ENTRY_BYTES);
-    let mut builder = DocumentBuilder::new();
-    // `Some((size, degraded))` when the picture was registered, and the
-    // defect when it was not.
-    let placed: Result<((f64, f64), bool), PageDefect> = match format {
-        ImageFormat::Jpeg => match tinker_pdf_cos::jpeg_shape(bytes) {
-            Some((width, height, _)) if width > 0 && height > 0 => {
-                if builder.add_image(IMAGE_RESOURCE, &ImageData::Jpeg(bytes)) {
-                    Ok(((f64::from(width), f64::from(height)), false))
-                } else {
-                    Err(PageDefect::Undecodable)
-                }
-            }
-            _ => Err(PageDefect::Undecodable),
-        },
-        ImageFormat::Png => match png_image(bytes, &ceiling) {
-            Ok(png) if png.width() > 0 && png.height() > 0 => {
-                if builder.add_image(IMAGE_RESOURCE, &png.image()) {
-                    Ok((
-                        (f64::from(png.width()), f64::from(png.height())),
-                        !png.complete(),
-                    ))
-                } else {
-                    Err(PageDefect::Undecodable)
-                }
-            }
-            _ => Err(PageDefect::Undecodable),
-        },
-        ImageFormat::Tiff => match tiff_image(bytes, &ceiling) {
-            Ok(tiff) if tiff.width() > 0 && tiff.height() > 0 => {
-                if builder.add_image(IMAGE_RESOURCE, &tiff.image()) {
-                    Ok((
-                        (f64::from(tiff.width()), f64::from(tiff.height())),
-                        !tiff.complete(),
-                    ))
-                } else {
-                    Err(PageDefect::Undecodable)
-                }
-            }
-            _ => Err(PageDefect::Undecodable),
-        },
-        ImageFormat::Jpeg2000 => match tinker_pdf_filters::jpx_header(bytes, &ceiling) {
-            Ok(header) if header.width > 0 && header.height > 0 && jpx_space(&header).is_some() => {
-                let image = ImageData::Compressed(jpx_image(bytes, &header));
-                if builder.add_image(IMAGE_RESOURCE, &image) {
-                    Ok((
-                        (f64::from(header.width), f64::from(header.height)),
-                        header.opacity,
-                    ))
-                } else {
-                    Err(PageDefect::Undecodable)
-                }
-            }
-            _ => Err(PageDefect::Undecodable),
-        },
-        other => Err(PageDefect::UnsupportedFormat(other)),
-    };
-
-    let mut warnings = Vec::new();
-    let defect = match placed {
-        Ok(((width, height), degraded)) => {
-            builder.add_page(width, height, |page| {
-                // 8.9.5.2: an image occupies the unit square, so one image
-                // pixel is one point exactly when the transform is the
-                // page's own size.
-                page.image(IMAGE_RESOURCE, 0.0, 0.0, width, height);
-            });
-            if degraded {
-                warnings.push(ArchiveWarning::DegradedImage { page: 0 });
-            }
-            None
-        }
-        Err(defect) => {
-            // A placeholder has no size of its own and there is no neighbour
-            // to borrow one from, so it is the comic path's answer for an
-            // archive that never states one: US Letter.
-            let (width, height) = crate::cbz::FALLBACK_PAGE;
-            builder.add_page(width, height, |page| {
-                page.fill_rect(0.0, 0.0, width, height, PLACEHOLDER_GREY);
-            });
-            warnings.push(ArchiveWarning::PlaceholderPage { page: 0, defect });
-            Some(defect)
-        }
-    };
-    let pdf = builder.finish();
-    if pdf.len() > limits.max_synthesised {
-        return Err(ArchiveRefusal::TooLarge);
-    }
-    let synthesised_bytes = pdf.len();
-    let pages = vec![PageOrigin {
-        name: String::new(),
-        defect,
-    }];
-    Ok((
-        pdf,
-        ArchiveReport::synthesised(warnings, pages, synthesised_bytes, None, 0),
     ))
 }
 

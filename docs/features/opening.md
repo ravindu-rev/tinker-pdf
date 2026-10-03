@@ -48,10 +48,13 @@ the larger document it would be one part of**: an SVG is a book of one
 pre-paginated chapter — one page, the size its root states, the caller's
 `OpenOptions::page` as the viewport a root with no size fills; an XHTML file is
 a book of one reflowable chapter at the caller's box with the book's 36-point
-margin, its `<title>` the document's `/Title`; a bare image is a comic of one
-page, one pixel to one point. `tests/standalone.rs` holds that as two
-equalities — the same XHTML bytes render to the same pixels alone and as an
-EPUB's one chapter, and a bare PNG to the same pixels as a one-page CBZ.
+margin, its `<title>` the document's `/Title`; a bare image is the comic of
+its one picture, paged by the comic path's own body with no archive around it,
+one pixel to one point — a GIF and a WebP drawn, a multi-page TIFF one page per
+directory. `tests/standalone.rs` holds that as equalities — the same XHTML
+bytes render to the same pixels alone and as an EPUB's one chapter, and a bare
+PNG, JPEG, TIFF, GIF, WebP and three-page TIFF to the same pages, pixels and
+warnings as a one-entry CBZ.
 Nothing on these paths refuses a document the sniff recognised: an SVG the
 reader will not take, tag soup and an undecodable picture are each a page
 saying so in the report (ruling 2). A file opened from its bytes has nothing
@@ -257,7 +260,7 @@ exceed it routinely — declared in one place,
 | An FB2 element the schema does not define; a `<binary>` that is not base64 | `TranslationDefect::{UnknownElement, BinaryUnreadable}`, and `ImageNotDrawn` for the picture | the unknown element's text is kept and its structure is not; the picture has nothing to draw | `crates/tinker-pdf/src/fb2.rs` |
 | A bare BMP | `OpenError::NotAPdf` | `BM` is two bytes, and also how a text file about a car begins; the comic path can afford it because an archive's entries are already pictures, and a sniff over every input cannot | `crates/tinker-pdf/src/standalone.rs` |
 | An SVG or HTML whose root element is past byte 4 096 | `OpenError::NotAPdf` | the prolog is walked inside `SNIFF_WINDOW` and not searched past it, because a sniff that scans is one that finds `<svg` inside a PDF's stream | `crates/tinker-pdf/src/standalone.rs` |
-| A bare GIF, WebP or AVIF | `ArchiveWarning::PlaceholderPage { defect: PageDefect::UnsupportedFormat(f), .. }` | recognised by magic and not decoded here; one placeholder page naming the format, which is what a comic archive holding that one picture has always produced | [cbz](cbz.md) |
+| A bare AVIF | `ArchiveWarning::PlaceholderPage { defect: PageDefect::UnsupportedFormat(Avif), .. }` | recognised by magic and not decoded here; one placeholder page naming the format, which is what a one-entry comic archive holding it produces, because a bare picture is paged by the comic path itself | [cbz](cbz.md) |
 | What a loose file names beside itself | `StylesheetUnresolved`, `ImageNotDrawn { defect: Unresolved }`, `SvgImageUnresolved`, `FontFace { defect: ResourceMissing }` | bytes arrive with no directory, so a relative reference has nothing to resolve against; each is named by the warning that already exists for it. RFC 2397's `data:` URL is the exception and resolves | `crates/tinker-pdf/src/standalone.rs` |
 | Encrypted, nothing authenticated | `DocumentError::PasswordRequired` | The document opened; reading it is the thing that waits | [encryption](encryption.md) |
 | Encryption handler not implemented | `DocumentError::UnsupportedEncryption` | A handler outside R2–R6 cannot be pretended at | [encryption](encryption.md) |
@@ -320,8 +323,9 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   and a loose XHTML file through `Document::open`: an SVG's page at the size
   its root states with its pixels and its text, a loose XHTML file **pixel for
   pixel** the one chapter of an EPUB holding the same bytes, a bare PNG pixel
-  for pixel the one page of a CBZ, a JPEG, a G4 TIFF, the placeholders for a
-  GIF and an undecodable PNG, the `data:` URL resolved and the missing
+  for pixel the one page of a CBZ, a JPEG, a G4 TIFF, a GIF, two WebPs and a
+  three-page TIFF each the same pages, pixels and warnings as a one-entry CBZ,
+  the placeholders for an AVIF, an undecodable PNG and a GIF with no image, the `data:` URL resolved and the missing
   references named, tag soup read as far as it parses and said so, and a
   streamed open the same document. It also holds the defect the row found in
   the streaming sniff: the container window was one `read`, a source that

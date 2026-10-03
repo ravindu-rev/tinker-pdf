@@ -503,18 +503,89 @@ fn a_bare_tiff_is_a_page_of_its_picture() {
     assert_eq!(pixel(&bitmap, 12, 0), (0, 0, 0));
 }
 
+/// One of the pictures `tinker-pdf-filters/tests/images/` holds its decoders
+/// to, pixel for pixel; provenance is that directory's README.
+fn image_fixture(path: &str) -> Vec<u8> {
+    let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tinker-pdf-filters/tests/images")
+        .join(path);
+    std::fs::read(&full).unwrap_or_else(|e| panic!("{}: {e}", full.display()))
+}
+
+/// **A bare picture is the comic of that one picture**, in every format the
+/// comic path pages: the same page count, each page the same size and the same
+/// pixels, the same warnings and the same per-page defects.
+///
+/// The module comment's claim is that a bare image is "built by the code that
+/// builds the larger document", and an equality over every format is what
+/// holds it: a copy of the comic path's per-format plan had already drifted
+/// from it, so a GIF and a WebP that a one-entry CBZ decoded and drew were
+/// placeholders bare, and a multi-page TIFF the CBZ paged was one page.
+#[test]
+fn a_bare_picture_is_the_comic_of_that_one_picture() {
+    let png = rgb_png(12, 9, &distinct_pixels(12, 9));
+    for (what, bytes, pages) in [
+        ("a PNG", png, 1),
+        ("a JPEG", grey_jpeg(16, 8), 1),
+        ("a G4 TIFF", G4_ONE_STRIP.to_vec(), 1),
+        ("a GIF", image_fixture("gif/pillow-palette-13x7.gif"), 1),
+        (
+            "a lossless WebP",
+            image_fixture("webp/pillow-lossless-4colour-13x7.webp"),
+            1,
+        ),
+        (
+            "a lossy WebP",
+            image_fixture("webp/pillow-lossy-rgb-61x45.webp"),
+            1,
+        ),
+        (
+            "a TIFF of three pages",
+            image_fixture("tiff/tifffile-multipage.tif"),
+            3,
+        ),
+    ] {
+        let bare = open(&bytes);
+        let comic = open(&zip(&[ZipFile::stored("picture", &bytes)], Damage::None));
+        assert_eq!(bare.page_count(), pages, "{what}");
+        assert_eq!(comic.page_count(), pages, "{what}, as a comic");
+        for page in 0..pages {
+            let size = bare.page(page).expect("a page").size();
+            assert_eq!(size, comic.page(page).expect("a page").size(), "{what}");
+            let (a, b) = (render(&bare, page), render(&comic, page));
+            assert!(
+                a.data == b.data,
+                "{what}: page {page} differs from the comic's"
+            );
+            assert!(ink(&a) > 0, "{what}: page {page} is blank");
+        }
+        assert_eq!(warnings(&bare), warnings(&comic), "{what}");
+        assert!(warnings(&bare).is_empty(), "{what}: {:?}", warnings(&bare));
+        let defects = |document: &Document| -> Vec<Option<PageDefect>> {
+            let report = document.archive().expect("a report");
+            report.pages().iter().map(|page| page.defect).collect()
+        };
+        assert_eq!(defects(&bare), defects(&comic), "{what}");
+    }
+}
+
 /// **A picture this build does not decode is a placeholder naming why**, the
-/// page a comic archive holding it alone has always produced: a format
-/// recognised and not read is named by its format, and bytes that will not
-/// decode are `Undecodable`.
+/// page a comic archive holding it alone produces: a format recognised and not
+/// read is named by its format, and bytes that will not decode are
+/// `Undecodable`.
 #[test]
 fn an_image_this_build_does_not_read_is_a_placeholder_naming_why() {
     for (bytes, defect) in [
         (
-            b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec(),
-            PageDefect::UnsupportedFormat(ImageFormat::Gif),
+            b"\x00\x00\x00\x14ftypavif\x00\x00\x00\x00".to_vec(),
+            PageDefect::UnsupportedFormat(ImageFormat::Avif),
         ),
         (broken_png(), PageDefect::Undecodable),
+        // A GIF header with no image in it: read, and nothing to draw.
+        (
+            b"GIF89a\x01\x00\x01\x00\x00\x00\x00;".to_vec(),
+            PageDefect::Undecodable,
+        ),
     ] {
         let document = open(&bytes);
         assert_eq!(document.page_count(), 1);
@@ -526,6 +597,8 @@ fn an_image_this_build_does_not_read_is_a_placeholder_naming_why() {
             document.archive().expect("a report").pages()[0].defect,
             Some(defect)
         );
+        let comic = open(&zip(&[ZipFile::stored("picture", &bytes)], Damage::None));
+        assert_eq!(warnings(&comic), warnings(&document));
     }
 }
 
