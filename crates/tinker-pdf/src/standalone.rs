@@ -28,7 +28,8 @@
 //! [`cbz::image_format`] tells a page, and a markup document by the name of its
 //! root element once the prolog is skipped: the byte-order mark, white space,
 //! the XML declaration and any processing instruction, comments, and the
-//! document type declaration with its internal subset. The window is
+//! document type declaration with its internal subset — in UTF-8, or in the
+//! UTF-16 `tinker-pdf-xml` decodes (see `narrowed`). The window is
 //! [`SNIFF_WINDOW`] bytes and nothing past it is read, so an SVG whose licence
 //! comment runs longer than that is not recognised — named in
 //! `docs/features/opening.md` rather than searched for, because a sniff that
@@ -72,6 +73,8 @@
 //! a self-contained HTML file embeds a picture: [`DataUrls`] answers those,
 //! and hands everything else to whatever stands behind it.
 
+use std::borrow::Cow;
+
 use tinker_pdf_cos::DocumentBuilder;
 
 use crate::cbz::{image_format, ArchiveRefusal, ArchiveReport, ArchiveWarning, ImageFormat};
@@ -83,9 +86,11 @@ use crate::epub::{self, BookLayout, Loose};
 /// Four kilobytes — the chunk a streamed open reads anyway
 /// ([`crate::CHUNK_SIZE`]) — because the root element of a markup document
 /// comes after its prolog, and an XML declaration, a generator's comment and a
-/// doctype with a small internal subset fit in it. It is never less than
-/// [`PDF_HEADER_WINDOW`], which a streamed open relies on: the window it reads
-/// for this sniff is the one the PDF header is looked for in.
+/// doctype with a small internal subset fit in it. It is never less than the
+/// window a PDF header is looked for in, the COS parser's
+/// [`tinker_pdf_cos::limits::MAX_HEADER_SCAN`], which a streamed open relies
+/// on: the window it reads for this sniff is the one that header is looked for
+/// in.
 pub const SNIFF_WINDOW: usize = 4_096;
 
 /// Where a PDF header is looked for before anything else is: the COS parser's
@@ -172,7 +177,8 @@ pub fn sniff(bytes: &[u8]) -> Option<Standalone> {
         Some(format) => return Some(Standalone::Image(format)),
         None => {}
     }
-    let (doctype, root) = prolog(head);
+    let narrowed = narrowed(head);
+    let (doctype, root) = prolog(&narrowed);
     let root = root.map(|name| match name.iter().rposition(|&b| b == b':') {
         Some(colon) => name.get(colon + 1..).unwrap_or_default(),
         None => name,
@@ -191,13 +197,55 @@ pub fn sniff(bytes: &[u8]) -> Option<Standalone> {
     }
 }
 
+/// The window as the bytes [`prolog`] walks: UTF-8 as it is, and UTF-16 one
+/// byte per code unit.
+///
+/// UTF-16 is recognised exactly as `tinker-pdf-xml` recognises it — either byte
+/// order mark, or Appendix F's unmarked `3C 00` / `00 3C` shape — because
+/// every reader behind this sniff is built on that crate and decodes it; a
+/// sniff that walked only UTF-8 sent a UTF-16 SVG, XHTML file or FB2 to the
+/// PDF parser and `NotAPdf`. A unit past ASCII becomes `0x80`, a byte no name
+/// this sniff compares against contains, which is where a UTF-8 walk stops a
+/// name too. A UTF-32 mark is left alone: that crate refuses UTF-32 by name, so
+/// nothing behind this sniff could read one.
+fn narrowed(head: &[u8]) -> Cow<'_, [u8]> {
+    if head.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) || head.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) {
+        return Cow::Borrowed(head);
+    }
+    let (units, big_endian) = if let Some(rest) = head.strip_prefix(&[0xFF, 0xFE]) {
+        (rest, false)
+    } else if let Some(rest) = head.strip_prefix(&[0xFE, 0xFF]) {
+        (rest, true)
+    } else {
+        match head.get(..2) {
+            Some([0x3C, 0x00]) => (head, false),
+            Some([0x00, 0x3C]) => (head, true),
+            _ => return Cow::Borrowed(head),
+        }
+    };
+    Cow::Owned(
+        units
+            .chunks_exact(2)
+            .map(|pair| {
+                let unit = match pair {
+                    [a, b] if big_endian => u16::from_be_bytes([*a, *b]),
+                    [a, b] => u16::from_le_bytes([*a, *b]),
+                    _ => 0x80,
+                };
+                u8::try_from(unit).ok().filter(u8::is_ascii).unwrap_or(0x80)
+            })
+            .collect(),
+    )
+}
+
 /// The document type declaration's name and the root element's qualified
 /// name, as far as the window shows them.
 ///
 /// XML 1.0 §2.8's prolog: an optional declaration, then any number of
 /// comments, processing instructions and white space, with at most one
-/// document type declaration among them. Nothing is decoded and nothing is
-/// validated — a construct that does not end inside the window ends the walk.
+/// document type declaration among them. Nothing is validated — a construct
+/// that does not end inside the window ends the walk — and nothing is decoded
+/// here: [`narrowed`] has already made UTF-16 the bytes this reads.
 fn prolog(head: &[u8]) -> (Option<&[u8]>, Option<&[u8]>) {
     let mut at = if head.starts_with(&[0xEF, 0xBB, 0xBF]) {
         3
@@ -766,5 +814,21 @@ mod tests {
         );
         assert_eq!(sniff(b"GIF89a"), Some(Standalone::Image(ImageFormat::Gif)));
         assert_eq!(sniff(b"BMW reports a record year, and so on"), None);
+    }
+
+    #[test]
+    fn utf_16_is_walked_and_utf_32_is_not() {
+        let wide = |mark: &[u8], width: usize| -> Vec<u8> {
+            let mut out = mark.to_vec();
+            for b in "<!-- é --><svg/>".bytes() {
+                out.push(b);
+                out.extend(std::iter::repeat_n(0, width - 1));
+            }
+            out
+        };
+        assert_eq!(sniff(&wide(&[0xFF, 0xFE], 2)), Some(Standalone::Svg));
+        assert_eq!(sniff(&wide(&[], 2)), Some(Standalone::Svg), "unmarked");
+        // Not decoded by `tinker-pdf-xml`, so not a document anything here reads.
+        assert_eq!(sniff(&wide(&[0xFF, 0xFE, 0, 0], 4)), None);
     }
 }

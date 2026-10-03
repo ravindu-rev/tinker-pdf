@@ -220,6 +220,73 @@ fn a_pdf_behind_junk_is_the_pdf_wherever_the_parser_finds_its_header() {
     }
 }
 
+/// `text` as UTF-16, in the byte order asked, with or without its byte order
+/// mark.
+fn utf16(text: &str, big_endian: bool, mark: bool) -> Vec<u8> {
+    let units = mark.then_some('\u{FEFF}').into_iter().chain(text.chars());
+    let mut out = Vec::new();
+    for c in units {
+        let mut pair = [0u16; 2];
+        for unit in c.encode_utf16(&mut pair) {
+            out.extend_from_slice(&if big_endian {
+                unit.to_be_bytes()
+            } else {
+                unit.to_le_bytes()
+            });
+        }
+    }
+    out
+}
+
+/// **A UTF-16 SVG, XHTML file or FB2 is sniffed as what it is**, and opens as
+/// the same document its UTF-8 bytes do.
+///
+/// `tinker-pdf-xml` decodes UTF-16 in both byte orders, marked and in Appendix
+/// F's unmarked `3C 00` / `00 3C` shape, and every reader behind the sniff is
+/// built on it; a sniff that walked the prolog only as UTF-8 sent all three to
+/// the PDF parser and `NotAPdf`, while `fb2::to_xhtml` translated the same
+/// bytes.
+#[test]
+fn a_utf_16_document_is_sniffed_as_what_it_is() {
+    let fb2 = concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>",
+        "<FictionBook xmlns=\"http://www.gribuser.ru/xml/fictionbook/2.0\">",
+        "<description><title-info><book-title>Т</book-title></title-info></description>",
+        "<body><section><p>hello from a book</p></section></body></FictionBook>"
+    );
+    let page = xhtml("<title>t</title>", "<p>hello from a page</p>")
+        .replace("encoding=\"utf-8\"", "encoding=\"UTF-16\"");
+    let svg = format!("<?xml version=\"1.0\" encoding=\"UTF-16\"?>{RED_SQUARE}");
+    for (kind, source) in [
+        (Standalone::Fb2, fb2.to_owned()),
+        (Standalone::Html, page),
+        (Standalone::Svg, svg),
+    ] {
+        let utf8 = open(source.as_bytes());
+        for (big_endian, mark) in [(false, true), (true, true), (false, false), (true, false)] {
+            let what = format!("{kind:?}, big-endian {big_endian}, marked {mark}");
+            let bytes = utf16(&source, big_endian, mark);
+            assert_eq!(tinker_pdf::standalone::sniff(&bytes), Some(kind), "{what}");
+            let document = open(&bytes);
+            assert_eq!(document.page_count(), utf8.page_count(), "{what}");
+            assert_eq!(
+                document.page(0).expect("a page").size(),
+                utf8.page(0).expect("a page").size(),
+                "{what}"
+            );
+            assert_eq!(page_text(&document, 0), page_text(&utf8, 0), "{what}");
+            assert!(!page_text(&document, 0).is_empty(), "{what}");
+            assert!(
+                !warnings(&document)
+                    .iter()
+                    .any(|w| matches!(w, ArchiveWarning::Markup { .. })),
+                "{what}: {:?}",
+                warnings(&document)
+            );
+        }
+    }
+}
+
 // ---- a standalone SVG --------------------------------------------------------
 
 const RED_SQUARE: &str = concat!(

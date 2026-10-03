@@ -41,8 +41,9 @@ by its magic at offset zero (JPEG, PNG, TIFF, JPEG 2000, GIF, WebP, AVIF — the
 comic path's own classifier, less BMP's two-byte signature) and a markup
 document by its root element once the prolog is walked: byte-order mark, white
 space, the XML declaration, processing instructions, comments and a doctype
-with its internal subset, all inside the first 4 096 bytes (`SNIFF_WINDOW`).
-A root named `svg` is an SVG; one named `html`, in any case, or a doctype
+with its internal subset, all inside the first 4 096 bytes (`SNIFF_WINDOW`),
+in UTF-8 or in UTF-16 of either byte order, marked or in XML Appendix F's
+unmarked shape, which is what `tinker-pdf-xml` decodes. A root named `svg` is an SVG; one named `html`, in any case, or a doctype
 naming `html`, is an HTML document. **Each is built by the code that builds
 the larger document it would be one part of**: an SVG is a book of one
 pre-paginated chapter — one page, the size its root states, the caller's
