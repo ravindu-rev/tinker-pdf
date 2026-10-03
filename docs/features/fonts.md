@@ -208,7 +208,7 @@ embed one, and the corpus census
 (`crates/tinker-pdf/tests/cff_subset_census.rs`) is what found it: nothing in
 this repository writes a collection, so no fixture here could have.
 
-**WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2018]). `woff.rs` unpacks
+**WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2024]). `woff.rs` unpacks
 both to the sfnt inside them; nothing else in the crate knows they exist, and
 `Sfnt::parse` is what reads what comes out. The two are not variations on each
 other and the code does not pretend they are.
@@ -240,8 +240,8 @@ collections. §5 says the result "may produce binary results that are different
 from the original data", so byte identity is not the property claimed for it.
 
 **Every transform the Recommendation defines is reversed.** Checked on 3
-October 2026 against the text of the Recommendation of 8 August 2024, the
-current one at the [W3C REC 2018] address. Clause 5 defines three
+October 2026 against the text of the Recommendation of 8 August 2024
+([W3C REC 2024]), which replaced 2018's at the same address. Clause 5 defines three
 transforms: `glyf` version 0 (§5.1, the `overlapSimpleBitmap` included),
 `loca` version 0 (§5.3) and `hmtx` version 1 (§5.4). §4.1 makes version 3 the
 null transform for `glyf` and `loca` and version 0 the null transform for
@@ -267,7 +267,7 @@ and reading it would give this crate an opinion about markup that ruling 8 says
 it may not have.
 
 [W3C REC 2012]: https://www.w3.org/TR/WOFF/
-[W3C REC 2018]: https://www.w3.org/TR/WOFF2/
+[W3C REC 2024]: https://www.w3.org/TR/WOFF2/
 
 ## API
 
@@ -823,13 +823,14 @@ could show was right.
   `checkSumAdjustment` this build recomputed correctly. For WOFF 1.0 from the
   producer that preserved the table order it is **byte identity** with the
   source face. Nine counted injections.
-- `crates/tinker-pdf-font/src/woff/tests.rs` — 18 tests over the parts no
+- `crates/tinker-pdf-font/src/woff/tests.rs` — 19 tests over the parts no
   committed file reaches: §3.1's three legal spellings of 506, `UIntBase128`'s
   two forbidden ones, the known-tag table, an unknown tag carried through, the
   three tables whose legal transform versions differ, a transformed `glyf`
   refused without its transformed `loca` (fontTools' file taken apart and
   rebuilt three ways), and the ceiling refused before a byte is
-  decompressed. 22 counted injections, and one deliberate
+  decompressed. 22 assertions fire in the module's counted campaign and 5
+  in the `loca` pairing test's own four injections, and one deliberate
   **non**-refusal — WOFF 2.0 §3.2 says a decoder "MUST NOT reject" a file for
   a non-zero reserved field or a `totalSfntSize` that disagrees, where WOFF 1.0
   §3 and §4 say it MUST reject both.

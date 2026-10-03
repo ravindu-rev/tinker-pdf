@@ -556,16 +556,17 @@ pub struct FormXObject<'a> {
     pub content: &'a [u8],
 }
 
-/// A PDF function (7.10): the two types a gradient is built from, and the
-/// calculator a `/DeviceN` tint transform needs.
+/// A PDF function (7.10): the two types a gradient is built from, the
+/// calculator a hand-written `/DeviceN` tint transform needs, and the sampled
+/// table one taken from a profile is.
 ///
-/// **`#[non_exhaustive]`**: 7.10 defines four types and this writer emits
-/// three. A sampled (type 0) function is an addition a later change can make
-/// without breaking a caller that matched with a wildcard — and it is not
-/// here yet for a reason worth stating: this repository's reader evaluates a
-/// sampled function along its **first** input only, so a multi-input one, the
-/// only kind a `/DeviceN` would want, would be written and then read back
-/// wrong. The calculator is evaluated in full.
+/// **`#[non_exhaustive]`**, though 7.10 defines four types and this writer now
+/// emits all four: a variant a later change adds — a sampled table of another
+/// sample width, say — breaks no caller that matched with a wildcard. The
+/// sampled type arrived last, once this repository's reader interpolated a
+/// table across **every** input rather than its first alone (3 October 2026),
+/// since a multi-input table is the kind a `/DeviceN` wants and would have
+/// been written and then read back wrong.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Function {
@@ -602,9 +603,10 @@ pub enum Function {
     /// Type 4, a PostScript calculator (7.10.5): any number of inputs, any
     /// number of outputs, and a program over Table 42's operators.
     ///
-    /// This is what a `/DeviceN` tint transform is made of, because it is the
-    /// one type that takes more than one input and that this repository's
-    /// reader evaluates in full. The program is a **value**, not text: there
+    /// This is what a hand-written `/DeviceN` tint transform is made of: one of
+    /// the two types that take more than one input — [`Function::Sampled`] is
+    /// the other, for a transform known only at grid points — and the one
+    /// that states a formula exactly. The program is a **value**, not text: there
     /// is nothing to parse, and [`DocumentBuilder`] checks before writing it
     /// that every operator is one Table 42 names, that no operator is reached
     /// with too few operands, that both arms of an `ifelse` leave the stack

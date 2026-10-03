@@ -193,13 +193,18 @@ pub fn vertices(outline: &Outline, ends: Option<&[usize]>) -> Vec<Vertex> {
                 {
                     last += 1;
                 }
-                let leaves = start_direction(segments[index], current);
+                // `index` is in range because `segments.get(index)` answered,
+                // and `last` only moved on while `segments.get(last + 1)` did,
+                // so both reads below would succeed indexed — they are made
+                // with `get` anyway, falling back to the run's first segment.
+                let leaves = start_direction(*segment, current);
                 let mut before = current;
-                for piece in &segments[index..last] {
+                for piece in segments.get(index..last).unwrap_or_default() {
                     before = end_point(*piece).unwrap_or(before);
                 }
-                let end = end_point(segments[last]).unwrap_or(before);
-                let arrives = end_direction(segments[last], before);
+                let closing = segments.get(last).copied().unwrap_or(*segment);
+                let end = end_point(closing).unwrap_or(before);
+                let arrives = end_direction(closing, before);
                 if let Some(previous) = out.last_mut() {
                     previous.outward = previous.outward.or(leaves);
                 } else {

@@ -17,7 +17,9 @@
 //! [`a_woff1_header_is_checked_before_it_is_believed`] (5),
 //! [`a_woff2_header_is_checked_before_it_is_believed`] (4),
 //! [`a_transform_this_build_cannot_reverse_is_named`] (3),
-//! [`the_output_ceiling_is_not_advisory`] (3).
+//! [`the_output_ceiling_is_not_advisory`] (3). The four injections beside
+//! [`a_transformed_glyf_needs_its_loca_transformed_with_it`], which arrived
+//! after this campaign, are counted in that test's own table (5 fire).
 //!
 //! The one that is *not* an injection is
 //! [`the_two_fields_a_woff2_reads_and_ignores`], which asserts a
