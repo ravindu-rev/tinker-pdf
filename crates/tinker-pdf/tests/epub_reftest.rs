@@ -968,3 +968,27 @@ fn nth_child_of_a_selector_is_the_position_among_its_matches() {
     let broken = lay("p:nth-child(2) { margin-left: 30px }", body);
     same(":nth-child(of S)", of, marked, broken);
 }
+
+/// **`inline-flex` is an atomic inline whose inside is a flex layout**
+/// (`css-flexbox-1` §3): in a line of text its two items sit where two
+/// inline-blocks inside an inline-block sit, and the words either side stay on
+/// the line. The mismatch is a block-level flex container — what this build
+/// drew before, warning `InlineFlexAsBlock` — which breaks the line round it.
+#[test]
+fn inline_flex_is_an_atomic_inline_holding_a_flex_layout() {
+    let style = ".f { display: inline-flex } .b, .b span { display: inline-block } \
+                 .x { display: flex }";
+    let flex = lay(
+        style,
+        r#"<p>aa <span class="f"><span>bb</span><span>cc</span></span> dd</p>"#,
+    );
+    let blocks = lay(
+        style,
+        r#"<p>aa <span class="b"><span>bb</span><span>cc</span></span> dd</p>"#,
+    );
+    let broken = lay(
+        style,
+        r#"<p>aa <span class="x"><span>bb</span><span>cc</span></span> dd</p>"#,
+    );
+    same("inline-flex", flex, blocks, broken);
+}

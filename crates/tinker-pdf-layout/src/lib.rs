@@ -952,20 +952,6 @@ pub enum Warning {
     /// clamped to it. CSS 2.2 §17.5: *"the cell is clamped so that it does not
     /// extend beyond the last row"*.
     RowspanPastTheRowGroup,
-    /// `display: inline-flex`, laid out as a **block-level** flex container.
-    ///
-    /// `css-flexbox-1` §3 makes it inline-level, and this build has no
-    /// inline-level box that is not text. The two available answers are to set
-    /// it as inline text, which throws the flex layout away entirely, or to lay
-    /// it out as a block-level flex container, which gets the box's *outside*
-    /// wrong and everything inside it right. It takes the second.
-    ///
-    /// **Distinct from an approximation, which takes the other
-    /// answer**, and the two disagree for a reason rather than by accident: an
-    /// `inline-block` holding a sentence set as inline text is very nearly
-    /// right, and a flex container set as inline text is a column of words with
-    /// no layout in it at all.
-    InlineFlexAsBlock,
     /// A flex line taller than a whole page, drawn past the page bottom.
     ///
     /// **The same staged half as [`Warning::TableRowTallerThanPage`] and for
@@ -1046,9 +1032,6 @@ impl fmt::Display for Warning {
             }
             Warning::MaxHeightAsAuto => {
                 f.write_str("a max-height shorter than the content did not shorten the box")
-            }
-            Warning::InlineFlexAsBlock => {
-                f.write_str("display: inline-flex is laid out as a block-level flex container")
             }
             Warning::FlexLineTallerThanPage => {
                 f.write_str("a flex line is taller than a page and overflows it")

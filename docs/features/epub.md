@@ -88,7 +88,9 @@ straight into a table or a row group are one anonymous row of those cells —
 §17.5.2.2's
 two-pass automatic width and §17.6.2.1's five-rule border conflict
 resolution, `rowspan` clamped; `css-flexbox-1`'s line algorithm with
-grow/shrink freeze-and-redistribute and `order`; §13.3 fragmentation rules
+grow/shrink freeze-and-redistribute and `order`, and `inline-flex` as an
+atomic inline-level box whose inside is that layout and whose baseline is its
+first (§8.5); §13.3 fragmentation rules
 A–D with the spec's own escape; `page-break-*`, `orphans`, `widows`, and
 `css-break-3`'s `break-before`, `break-after` and `break-inside`, which §3.4
 makes the same three properties under their modern names — `break-before:

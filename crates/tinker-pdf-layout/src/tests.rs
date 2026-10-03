@@ -5310,28 +5310,75 @@ fn a_flex_container_puts_its_items_on_one_line() {
     assert_eq!(laid.text(), "aabb");
 }
 
-/// `display: inline-flex` is the same layout inside and a **warning** about the
-/// outside, `css-flexbox-1` §3.
-///
-/// Two assertions and not one: the layout is a flex layout, *and* the fact that
-/// this build makes the box block-level is said out loud. A build that laid it
-/// out as a flex container and said nothing would be a silent partial
-/// implementation of the kind this whole plan exists to prevent.
+/// `display: inline-flex` is a flex layout inside and an **atomic inline** on
+/// the outside, `css-flexbox-1` §3: in a paragraph, the text before it, its
+/// two items and the text after it are on one line, the items side by side,
+/// and nothing is warned about. As the root it is blockified (CSS 2.2 §9.7)
+/// and is the flex container it says it is.
 #[test]
-fn inline_flex_lays_out_as_flex_and_says_it_is_block_level() {
+fn inline_flex_is_a_flex_container_set_on_the_line() {
     let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
     style.display = Display::InlineFlex;
-    let tree = BoxNode::element(
+    let flex = BoxNode::element(
+        style.clone(),
+        vec![
+            flex_item("aa", 0.0, 1.0, Size::Auto),
+            flex_item("bb", 0.0, 1.0, Size::Auto),
+        ],
+    );
+    let tree = BoxNode::element(block(), vec![text("x "), flex, text(" y")]);
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    let y = baselines(&laid, 0);
+    assert_eq!(laid.text().replace(' ', ""), "xaabby");
+    assert_eq!(x.len(), 4, "{x:?}");
+    assert!(
+        x.windows(2).all(|pair| pair[1] > pair[0]),
+        "left to right on one line: {x:?}"
+    );
+    assert!(
+        y.iter().all(|baseline| close(*baseline, y[0])),
+        "one baseline: {y:?}"
+    );
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+    let root = BoxNode::element(
         style,
         vec![
             flex_item("aa", 0.0, 1.0, Size::Auto),
             flex_item("bb", 0.0, 1.0, Size::Auto),
         ],
     );
-    let laid = run(&tree, 200.0, 400.0);
+    let laid = run(&root, 200.0, 400.0);
     let x = lefts(&laid);
-    assert!(x[1] > x[0], "it is still a flex layout: {x:?}");
-    assert_eq!(laid.warnings, vec![(Warning::InlineFlexAsBlock, 1)]);
+    assert!(x[1] > x[0], "a flex layout: {x:?}");
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+    // §8.5: a flex container's baseline is its **first** baseline set, where
+    // an inline-block's is its last line's — so the text beside a column of
+    // two items sits on the first item's baseline.
+    let mut column = flex_container(FlexDirection::Column, FlexWrap::NoWrap);
+    column.display = Display::InlineFlex;
+    let stacked = BoxNode::element(
+        column,
+        vec![
+            flex_item("aa", 0.0, 1.0, Size::Auto),
+            flex_item("bb", 0.0, 1.0, Size::Auto),
+        ],
+    );
+    let laid = run(
+        &BoxNode::element(block(), vec![text("x "), stacked]),
+        200.0,
+        400.0,
+    );
+    let at = |word: &str| {
+        laid.pages[0]
+            .runs
+            .iter()
+            .find(|run| run.text.trim() == word)
+            .map(|run| run.y)
+            .unwrap_or_else(|| panic!("no run {word}"))
+    };
+    assert!(close(at("x"), at("aa")), "{} {}", at("x"), at("aa"));
+    assert!(at("bb") > at("aa"), "the second item is below the first");
 }
 
 /// `flex-direction: column` stacks the items and `row` sets them side by side,

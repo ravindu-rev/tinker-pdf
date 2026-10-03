@@ -524,26 +524,17 @@ impl Consumed {
     /// two halves are separate predicates for that reason — a build that folded
     /// the internal values in here would put a stray `<td>` on a line of its
     /// own as a block, which is a page that looks entirely reasonable.
-    /// **`inline-flex` is here and it is not block-level**, which is the one
-    /// disagreement with the specification in this predicate and is deliberate.
-    /// `css-flexbox-1` §3 makes it inline-level, and this build has no
-    /// inline-level box that is not text — so the two available answers are to
-    /// set it as inline text, which throws the whole flex layout away, or to
-    /// lay it out as a block-level flex container, which gets the *outside*
-    /// wrong and the inside right. It takes the second and says so by name:
-    /// [`crate::Warning::InlineFlexAsBlock`]. `inline-table` took the first
-    /// answer one milestone earlier for the opposite reason — a table's
-    /// contents are nothing like a line of text either way, so there was
-    /// nothing to keep.
+    /// **`inline-flex` is not here**: `css-flexbox-1` §3 makes it
+    /// inline-level, and since October 2026 it is an atomic inline-level box
+    /// as `inline-block` is — a flex container on the outside of which the
+    /// line is set. It was block-level here before, laid out as a flex
+    /// container on a line of its own and named `InlineFlexAsBlock`, because
+    /// this build had no inline-level box that was not text.
     #[must_use]
     pub fn is_block_level(&self) -> bool {
         matches!(
             self.display,
-            Display::Block
-                | Display::ListItem
-                | Display::Table
-                | Display::Flex
-                | Display::InlineFlex
+            Display::Block | Display::ListItem | Display::Table | Display::Flex
         )
     }
 

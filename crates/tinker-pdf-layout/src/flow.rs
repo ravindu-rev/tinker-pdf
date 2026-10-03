@@ -689,9 +689,9 @@ impl FlexPass {
     /// `inline-flex` arm changes anything: [`Builder::block`] reads `display`
     /// to ask whether the box is `none`, a `list-item`, a table or a flex
     /// container, and an `inline` or `inline-block` item answers all four the
-    /// same way a `block` one does. The `inline-flex` arm is what stops a
-    /// nested inline-flex item raising [`crate::Warning::InlineFlexAsBlock`]
-    /// about a box whose outside §4 has already made block-level, and
+    /// same way a `block` one does. The `inline-flex` arm is what makes an
+    /// inline-flex **item** a block-level flex container rather than an atomic
+    /// inline in a line of its own, and
     /// `an_inline_flex_item_is_blockified_and_does_not_warn` is its fixture.
     /// The other two arms are kept because they are what §4 says, and recorded
     /// here as unobservable so a later reader does not go looking for the test.
@@ -1175,10 +1175,11 @@ impl<M: Metrics> Builder<'_, M> {
             self.table(node, &style, content_x, content_width, depth, avoid, block)?;
         } else if style.is_flex() {
             // `css-flexbox-1` §9, and the same sentence as the table above it:
-            // a flex container is an ordinary block box on the outside.
-            if style.display == Display::InlineFlex {
-                self.warn(Warning::InlineFlexAsBlock);
-            }
+            // a flex container is an ordinary block box on the outside. An
+            // `inline-flex` arrives here only as an atomic inline's inside
+            // ([`Builder::atomic_inline`]) or blockified — floated, positioned,
+            // the root, a flex item — and in every one of those a flex
+            // container is what it is.
             self.flex(node, &style, content_x, content_width, depth, avoid)?;
         } else if style.is_multicol() {
             // `css-multicol-1`, and the same sentence a third time: a
@@ -2039,7 +2040,9 @@ impl<M: Metrics> Builder<'_, M> {
         // picture is the first of the three and takes the same path as the
         // second — one box on the line, placed rather than set, with nothing
         // inside it a line breaker may split.
-        if style.display == Display::InlineBlock || matches!(node.content, Content::Replaced(_)) {
+        if matches!(style.display, Display::InlineBlock | Display::InlineFlex)
+            || matches!(node.content, Content::Replaced(_))
+        {
             // Here rather than beside the block builder for the reason the
             // warning that used to stand here gave: an `inline-block` is not
             // block-level, so it arrives in an inline formatting context — and
@@ -2369,8 +2372,15 @@ impl<M: Metrics> Builder<'_, M> {
         // §10.8.1: *"the baseline of the last line box in the normal flow"*,
         // and the bottom margin edge where there is none. The **last** and not
         // the first, which is the difference between a two-line inline-block
-        // sitting on the line and hanging from it.
-        let baseline = last_baseline(&sub).unwrap_or(sub.height);
+        // sitting on the line and hanging from it. An `inline-flex` is the
+        // other way round: `css-flexbox-1` §8.5 gives a flex container its
+        // items' **first** baseline set.
+        let baseline = if style.display == Display::InlineFlex {
+            first_baseline(&sub)
+        } else {
+            last_baseline(&sub)
+        }
+        .unwrap_or(sub.height);
         // A float inside an inline-block belongs to the inline-block's own
         // formatting context — §9.4.2 makes it one — so it is folded into the
         // box rather than escaping to the paragraph's.
