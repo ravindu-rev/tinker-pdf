@@ -997,3 +997,53 @@ fn the_container_limits_apply_to_part_one_and_not_to_part_two() {
     two.packet = packet("2", Some("B"));
     assert_eq!(two.findings(), Vec::<FindingKind>::new());
 }
+
+// ---- 6.7.2, part 1: a metadata stream carries no /Filter ---------------------
+
+/// ISO 19005-1 6.7.2: "Metadata object stream dictionaries shall not contain
+/// the Filter key" — every metadata stream, as veraPDF's published rule
+/// 6.7.2-2 reads it, not the catalog's alone. A second metadata stream,
+/// ASCII-hex encoded, is a finding under part 1; the same bytes claiming part
+/// 2, whose published rules carry no such sentence, are the twin, and the
+/// baseline's unfiltered packet is the other.
+#[test]
+fn a_filtered_metadata_stream_is_a_part_one_finding() {
+    let second = |part: &str| {
+        let mut fixture = Fixture::new(part, Some("B"));
+        let data: String = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>"
+            .bytes()
+            .map(|b| format!("{b:02X}"))
+            .chain(std::iter::once(">".to_string()))
+            .collect();
+        fixture.extra.push((
+            5,
+            format!(
+                "<< /Type /Metadata /Subtype /XML /Filter /ASCIIHexDecode /Length {} >>\n\
+                 stream\n{data}\nendstream",
+                data.len()
+            ),
+        ));
+        fixture
+    };
+    assert_eq!(
+        second("1").one_finding(),
+        FindingKind::MetadataStreamFiltered
+    );
+    assert_eq!(second("2").findings(), Vec::<FindingKind>::new());
+
+    let findings = Document::open(second("1").build())
+        .expect("opens")
+        .validate_pdfa()
+        .findings;
+    assert_eq!(findings[0].clause.0, "6.7.2");
+    assert_eq!(findings[0].object.map(|r| r.num), Some(5));
+
+    // The clause is about metadata streams: any other stream may be
+    // filtered under part 1, and one that is, is the second twin.
+    let mut other = Fixture::new("1", Some("B"));
+    other.extra.push((
+        5,
+        "<< /Filter /ASCIIHexDecode /Length 6 >>\nstream\n41424>\nendstream".to_string(),
+    ));
+    assert_eq!(other.findings(), Vec::<FindingKind>::new());
+}

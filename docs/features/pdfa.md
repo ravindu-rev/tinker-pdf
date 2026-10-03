@@ -30,7 +30,8 @@ never happens.
 
 - **Syntax** needs only the opened `CosDocument`: the header and its binary
   comment, the trailer's `/ID`, encryption, external streams, forbidden
-  filters and actions, embedded files, `/Perms`, optional content, XFA,
+  filters and actions, part 1's prohibition on a `/Filter` on any metadata
+  stream (6.7.2), embedded files, `/Perms`, optional content, XFA,
   part 4's constraints on `/Info` and the catalog's `/Version`, and **every
   annotation** — the subtypes each part admits, the `/F` flag word, `/CA`, and
   the presence and shape of an appearance dictionary.

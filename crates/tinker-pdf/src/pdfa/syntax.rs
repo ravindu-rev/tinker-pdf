@@ -669,6 +669,7 @@ fn dictionary(
         // part 4 file for carrying a signature, which is what this branch
         // exists to stop.
         filters(doc, part, dict, at, out);
+        unfiltered_metadata(doc, part, dict, at, out);
     }
     action_rules(doc, flavour, dict, at, out);
     trigger_rules(doc, flavour, dict, at, out);
@@ -676,6 +677,40 @@ fn dictionary(
     // The annotation group rides this walk rather than reaching for machinery
     // of its own; `pdfa/annotations.rs` says why at length.
     super::annotations::rules(doc, flavour, dict, at, out);
+}
+
+/// ISO 19005-1 6.7.2, part 1 only: "Metadata object stream dictionaries
+/// shall not contain the Filter key", as veraPDF's published rule 6.7.2-2
+/// quotes it. Its note gives the reason — the prohibition "has the implicit
+/// effect of preserving the contents of XMP metadata streams as plain text
+/// that is visible to non-PDF aware tools" — and its scope: every metadata
+/// stream, not the catalog's alone. Parts 2 to 4 state no such rule (their
+/// published rules have none), which is why the part is checked first.
+///
+/// A metadata stream is a stream whose `/Type` is `/Metadata` (ISO 32000-1
+/// 14.3.2 Table 315 requires the entry).
+fn unfiltered_metadata(
+    doc: &CosDocument,
+    part: Option<Part>,
+    dict: &Dict,
+    at: ObjRef,
+    out: &mut Vec<Raw>,
+) {
+    if part != Some(Part::One) {
+        return;
+    }
+    let is_metadata = doc
+        .resolve_key(dict, Name::TYPE)
+        .as_name()
+        .and_then(|name| doc.name_bytes(name))
+        .is_some_and(|name| name.as_ref() == b"Metadata");
+    if is_metadata && dict.contains_key(Name::FILTER) {
+        out.push(Raw {
+            rule: clauses::METADATA,
+            object: Some(at),
+            kind: FindingKind::MetadataStreamFiltered,
+        });
+    }
 }
 
 /// ISO 19005-1 6.1.7 (parts 2 and 3: 6.1.7.1; part 4: 6.1.6).

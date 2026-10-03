@@ -1608,6 +1608,10 @@ pub enum FindingKind {
         /// role map does not mention it.
         mapped: String,
     },
+    /// Part 1: a metadata stream whose dictionary carries `/Filter` (6.7.2:
+    /// "Metadata object stream dictionaries shall not contain the Filter
+    /// key"), which keeps a packet readable by a tool that reads no PDF.
+    MetadataStreamFiltered,
     /// An XMP packet header (`<?xpacket begin=…?>`) carrying the `bytes` or
     /// the `encoding` attribute, which every part forbids (6.7.5 / 6.6.2.1 /
     /// 6.7.2.1).
