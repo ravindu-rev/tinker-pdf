@@ -25,9 +25,10 @@ tpdf — inspect and convert PDFs with the tinker-pdf engine
 
 usage:
   tpdf info    <file.pdf> [--password P]
-  tpdf text    <file.pdf> [--page N] [--password P] [--json | --xml | --html]
-  tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--jobs N]
-                                    [--no-annotations]
+  tpdf text    <file.pdf> [--page N | --pages LIST] [--password P]
+                          [--json | --xml | --html]
+  tpdf render  <file.pdf> --out DIR [--page N | --pages LIST] [--dpi D]
+                                    [--jobs N] [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
   tpdf fonts   <file.pdf> [--out DIR] [--password P]
   tpdf outline <file.pdf> [--password P]
@@ -37,6 +38,7 @@ usage:
 
 options:
   --page N     one page, 1-based; the default is every page
+  --pages LIST pages and ranges, 1-based: `1-3,5`, acted on in that order
   --object N   one object, by number; the default is a summary of all
   --stream     with --object, write that object's stream data to stdout
   --raw        with --stream, before the filters rather than after
@@ -190,6 +192,34 @@ struct Options {
     /// rendering rather than as a binary that needs rebuilding. Asking costs
     /// one process at the start of a run that spawns thousands.
     record_version: bool,
+    /// `--pages LIST`: inclusive ranges, 0-based. Exclusive with `--page`.
+    page_ranges: Option<Vec<(u32, u32)>>,
+}
+
+/// `--pages 1-3,5` as inclusive 0-based ranges, in the order given.
+///
+/// A range that runs backwards is refused rather than reversed: `5-3` is more
+/// often a typo than a request for three pages in reverse, and the pages are
+/// acted on in the order given, so guessing would produce a different answer.
+fn page_ranges(raw: &str) -> Result<Vec<(u32, u32)>, String> {
+    let mut ranges = Vec::new();
+    for item in raw.split(',') {
+        let (first, last) = item.split_once('-').unwrap_or((item, item));
+        let number = |text: &str| -> Result<u32, String> {
+            let n: u32 = text
+                .trim()
+                .parse()
+                .map_err(|_| format!("`--pages {raw}`: `{item}` is not a page or a range"))?;
+            n.checked_sub(1)
+                .ok_or_else(|| "pages are numbered from 1".to_string())
+        };
+        let (first, last) = (number(first)?, number(last)?);
+        if first > last {
+            return Err(format!("`--pages {raw}`: `{item}` runs backwards"));
+        }
+        ranges.push((first, last));
+    }
+    Ok(ranges)
 }
 
 impl Options {
@@ -211,6 +241,7 @@ impl Options {
             pdfa: false,
             format: None,
             record_version: false,
+            page_ranges: None,
         };
 
         let mut index = 0;
@@ -286,6 +317,7 @@ impl Options {
                     }
                     options.format = Some(format);
                 }
+                "--pages" => options.page_ranges = Some(page_ranges(&value()?)?),
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }
@@ -297,14 +329,37 @@ impl Options {
         if options.files.is_empty() && !options.record_version {
             return Err("no input file".to_string());
         }
+        if options.page.is_some() && options.page_ranges.is_some() {
+            return Err("choose one of --page and --pages".to_string());
+        }
         Ok(options)
     }
 
-    /// The pages to act on: the one asked for, or all of them.
+    /// `--page` or `--pages` as inclusive 0-based ranges, or `None` when
+    /// neither was given and every page is meant.
+    fn ranges(&self) -> Option<Vec<(u32, u32)>> {
+        match (&self.page_ranges, self.page) {
+            (Some(ranges), _) => Some(ranges.clone()),
+            (None, Some(page)) => Some(vec![(page, page)]),
+            (None, None) => None,
+        }
+    }
+
+    /// The pages a reading command acts on: the ones asked for, or all of
+    /// them.
+    ///
+    /// A page past the end is skipped rather than refused, as `--page` always
+    /// was here — a reading command over a directory of files is the normal
+    /// case — and a range is cut at the last page before it is counted out, so
+    /// `--pages 1-4000000000` costs what the document has.
     fn pages(&self, doc: &Document) -> Vec<u32> {
-        match self.page {
-            Some(n) => vec![n],
-            None => (0..doc.page_count()).collect(),
+        let count = doc.page_count();
+        match self.ranges() {
+            Some(ranges) => ranges
+                .into_iter()
+                .flat_map(|(first, last)| first..=last.min(count.saturating_sub(1)))
+                .collect(),
+            None => (0..count).collect(),
         }
     }
 
@@ -2517,6 +2572,62 @@ mod tests {
                 .err()
                 .as_deref(),
             Some("choose one of --json, --xml and --html")
+        );
+    }
+
+    /// `--pages` is pages and ranges, 1-based, in the order given; what it
+    /// cannot mean is refused rather than guessed at, and it does not combine
+    /// with `--page`.
+    #[test]
+    fn page_lists_parse_in_order_and_refuse_what_they_cannot_mean() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let asked = Options::parse(&args(&["--pages", "5-6,1,2-4", "a.pdf"])).expect("parses");
+        assert_eq!(asked.ranges(), Some(vec![(4, 5), (0, 0), (1, 3)]));
+        let one = Options::parse(&args(&["--page", "3", "a.pdf"])).expect("parses");
+        assert_eq!(
+            one.ranges(),
+            Some(vec![(2, 2)]),
+            "--page N is the range N-N"
+        );
+        let neither = Options::parse(&args(&["a.pdf"])).expect("parses");
+        assert_eq!(neither.ranges(), None, "every page");
+
+        for (raw, why) in [
+            ("3-1", "`--pages 3-1`: `3-1` runs backwards"),
+            ("0-2", "pages are numbered from 1"),
+            ("1,,2", "`--pages 1,,2`: `` is not a page or a range"),
+            ("one", "`--pages one`: `one` is not a page or a range"),
+            ("1-2-3", "`--pages 1-2-3`: `1-2-3` is not a page or a range"),
+        ] {
+            assert_eq!(
+                Options::parse(&args(&["--pages", raw, "a.pdf"]))
+                    .err()
+                    .as_deref(),
+                Some(why),
+                "--pages {raw}"
+            );
+        }
+        assert_eq!(
+            Options::parse(&args(&["--page", "1", "--pages", "2", "a.pdf"]))
+                .err()
+                .as_deref(),
+            Some("choose one of --page and --pages")
+        );
+    }
+
+    /// A reading command cuts a range at the last page rather than counting
+    /// out pages the document does not have.
+    #[test]
+    fn a_reading_command_cuts_a_range_at_the_last_page() {
+        let doc = many_pages(3);
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let huge = Options::parse(&args(&["--pages", "2-4000000000", "a.pdf"])).expect("parses");
+        assert_eq!(huge.pages(&doc), vec![1, 2]);
+        let past = Options::parse(&args(&["--pages", "7-9,1", "a.pdf"])).expect("parses");
+        assert_eq!(
+            past.pages(&doc),
+            vec![0],
+            "a range wholly past the end is empty"
         );
     }
 
