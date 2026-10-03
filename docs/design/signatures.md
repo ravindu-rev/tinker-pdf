@@ -309,6 +309,7 @@ rest:
 | 8 | RFC 4056 §3's salt minimum not enforced | 1 |
 | 9 | the PSS arm answering `Verified` without calling the arithmetic | **1 → 2** |
 | 10 | the chain walk's PSS link never verified | 2 |
+| 11 | `maskedDB` unmasked with the message hash rather than MGF1's own | **0 → 1** |
 
 **Rows 2 and 3 are the finding.** A signer following EMSA-PSS-ENCODE cannot produce a
 block that breaks either check while keeping `H` right, so no published vector — not one
@@ -316,6 +317,13 @@ of 420 — reaches them, and a verifier without them passed everything. Neither 
 forgery on its own; both are a verifier accepting an encoding the standard does not have.
 `a_block_a_signer_could_not_have_written_is_refused_even_where_h_matches` recovers RSA
 Laboratories' example 3 `EM` with the public key and spoils it seven ways and four ways.
+
+**Row 11 was found in review**, and for the same reason as rows 2 and 3: NIST's and RSA
+Laboratories' vectors, and the OpenSSL fixture, all mask with the message hash, so step 8's
+choice of hash was never exercised. `pss-mgf1.txt` in `tinker-pdf-crypto`'s test data is four
+signatures OpenSSL 3.0.13 made on 3 October 2026 with the two hashes apart, in both
+directions of output length; each must verify under its own parameters and be refused under
+the message hash as the mask hash.
 
 **Row 9 found a test that was not testing what it said.** Declaring the fixture's 32-octet
 salt as 31 was meant to prove the salt length is read from the parameters; it was refused

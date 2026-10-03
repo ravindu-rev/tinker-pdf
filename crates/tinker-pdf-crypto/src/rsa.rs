@@ -1406,6 +1406,86 @@ mod tests {
         );
     }
 
+    /// Four signatures whose MGF1 hash is not their message hash — SHA-256
+    /// under MGF1-SHA-1, SHA-1 under MGF1-SHA-256, SHA-512 under MGF1-SHA-256
+    /// and SHA-384 under MGF1-SHA-512 — made once by OpenSSL 3.0.13
+    /// (`tests/data/openssl/pss-mgf1.txt`, its header and the script beside it
+    /// say how).
+    ///
+    /// They are here because neither published set has one: NIST's
+    /// `SigVerPSS` and RSA Laboratories' `pss-vect.txt` both mask with the
+    /// message hash, so a verifier that unmasked `maskedDB` with the wrong one
+    /// of RFC 8017 §9.1.2 step 8's two hashes passed all 420 of their vectors —
+    /// a counted injection measured it at zero. Each signature is read under
+    /// its own parameters, and then under the message hash as the mask hash,
+    /// which must refuse it: the same octets unmasked with another hash are
+    /// not a block.
+    #[test]
+    fn the_mask_is_generated_with_the_mask_hash_and_not_the_message_hash() {
+        const VECTORS: &str = include_str!("../tests/data/openssl/pss-mgf1.txt");
+
+        let mut modulus = Vec::new();
+        let mut exponent = Vec::new();
+        let mut message = Vec::new();
+        let mut hash = None;
+        let mut mask_hash = None;
+        let mut salt_length = 0usize;
+        let mut cases = Vec::new();
+        for line in VECTORS.lines() {
+            let Some((name, value)) = line.split_once(" = ") else {
+                continue;
+            };
+            match name {
+                "n" => modulus = unhex(value),
+                "e" => exponent = unhex(value),
+                "Msg" => message = unhex(value),
+                "Hash" => hash = algorithm_named(value),
+                "MGF1" => mask_hash = algorithm_named(value),
+                "SaltLength" => salt_length = value.parse().expect("a salt length"),
+                "S" => cases.push((
+                    PssParameters {
+                        hash: hash.expect("a hash precedes every signature"),
+                        mask_hash: mask_hash.expect("an MGF1 hash precedes every signature"),
+                        salt_length,
+                    },
+                    unhex(value),
+                )),
+                _ => {}
+            }
+        }
+        assert_eq!(cases.len(), 4, "signatures read");
+        let key = RsaPublicKey::new(&modulus, &exponent).expect("OpenSSL's key is usable");
+        assert_eq!(key.modulus_bits(), 2048);
+
+        for (parameters, signature) in &cases {
+            assert_ne!(
+                parameters.hash, parameters.mask_hash,
+                "every case is here for the two hashes differing"
+            );
+            assert_eq!(
+                key.verify_pss_message(*parameters, &message, signature),
+                Ok(()),
+                "{parameters:?}"
+            );
+            let one_hash = PssParameters {
+                mask_hash: parameters.hash,
+                ..*parameters
+            };
+            assert_eq!(
+                key.verify_pss_message(one_hash, &message, signature),
+                Err(RsaRefusal::EncodingMismatch),
+                "{parameters:?} unmasked with the message hash"
+            );
+            let mut spoiled = signature.clone();
+            if let Some(byte) = spoiled.last_mut() {
+                *byte ^= 0x01;
+            }
+            assert!(key
+                .verify_pss_message(*parameters, &message, &spoiled)
+                .is_err());
+        }
+    }
+
     /// MGF1 against its definition written out a second way: block `i` is
     /// `Hash(seed || i as four big-endian octets)`, and the mask is their
     /// concatenation cut to length.

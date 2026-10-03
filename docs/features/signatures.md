@@ -319,7 +319,11 @@ negative kinds sixty apiece), RSA Laboratories' 60 PSS signatures from
 `pss-vect.txt` with four spoilings each, 120 CAVP ECDSA `SigVer` and 24 `PKV`
 for P-256 and P-384, and 16 from RFC 6979. CAVP's exponents are all large, so it never tests the low-exponent
 forgery; hand-built negatives cover it by choosing a modulus that makes the
-verifier recover any chosen block without a private key.
+verifier recover any chosen block without a private key. Four more PSS signatures, which no
+published set has, are OpenSSL's: an MGF1 hash other than the message hash —
+SHA-256 under MGF1-SHA-1 among them — each verified under its own parameters
+and refused when unmasked with the message hash
+(`tinker-pdf-crypto/tests/data/openssl/pss-mgf1.txt`).
 
 **One bug those vectors did not catch**, recorded because of how it hid:
 Montgomery multiplication's conditional subtraction borrowed against the full

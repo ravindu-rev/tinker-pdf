@@ -771,6 +771,14 @@ SHA-256 `56489d946ad17b0b043812a06294e282d2b7ce095fd3f5899a7e8b60eaea7cba` as
 served (CRLF, normalised here), under the same licence terms and with the same
 header comment; a `cargo test` input only.
 
+`crates/tinker-pdf-crypto/tests/data/openssl/pss-mgf1.txt` is the output of
+**OpenSSL 3.0.13**, run once on 3 October 2026 through `pss-mgf1.py` beside it
+and committed: one fresh 2048-bit public key and four RSASSA-PSS signatures
+whose MGF1 hash differs from the message hash, which neither published set
+above carries. The private key was not kept. Its header records the command;
+like the rest it is a `cargo test` input only, and OpenSSL supplied the bytes
+and adjudicates nothing (ruling 13).
+
 These sit under `tests/data/` rather than `crates/<crate>/data/` because they
 are neither vendored *into* the engine nor redistributed by it; `cargo xtask
 vendor`'s allowlist governs the latter, and this is the former.
