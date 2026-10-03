@@ -1187,7 +1187,16 @@ impl<M: Metrics> Builder<'_, M> {
             // and everything above this line is that box.
             self.columns(node, &style, content_x, content_width, depth, avoid)?;
         } else {
-            self.children(node, &style, content_x, content_width, depth, avoid, block)?;
+            self.children(
+                node,
+                None,
+                &style,
+                content_x,
+                content_width,
+                depth,
+                avoid,
+                block,
+            )?;
         }
         self.disarm_marker();
         self.content_top = outer_top;
@@ -1789,10 +1798,16 @@ impl<M: Metrics> Builder<'_, M> {
 
     /// A block container's children: block-level ones recursed into, runs of
     /// inline-level ones wrapped in an anonymous block box.
+    ///
+    /// `run`, where it is given, stands in for `node`'s own children: a run of
+    /// a multi-column container's children between two spanners, laid out in
+    /// the container's box **without a copy of the container** — see
+    /// [`Builder::column_run`].
     #[allow(clippy::too_many_arguments)]
     fn children(
         &mut self,
         node: &BoxNode,
+        run: Option<&[BoxNode]>,
         style: &Consumed,
         content_x: f64,
         content_width: f64,
@@ -1800,17 +1815,25 @@ impl<M: Metrics> Builder<'_, M> {
         avoid: bool,
         block: usize,
     ) -> Result<(), Refusal> {
-        match &node.content {
+        let content = match run {
+            Some(run) => Written::Children(run),
+            None => match &node.content {
+                Content::Replaced(_) => Written::Replaced,
+                Content::Text(source) => Written::Text(source),
+                Content::Children(written) => Written::Children(written),
+            },
+        };
+        match content {
             // Unreachable: [`Builder::block`] sizes a replaced box and emits
             // its one item before the dispatch that calls this, for
             // `css-display-3` §2.2's reason. An arm rather than a `_`, so that
             // a fourth kind of content cannot be added without this file
             // deciding what a block container does with it.
-            Content::Replaced(_) => Ok(()),
-            Content::Text(source) => {
+            Written::Replaced => Ok(()),
+            Written::Text(source) => {
                 self.text_block(node, source, style, block, content_x, content_width)
             }
-            Content::Children(written) => {
+            Written::Children(written) => {
                 // §9.2.1.1: an inline box holding a block-level box is split
                 // round it, which is this container's child list with that
                 // inline box's children standing in its place.
@@ -2628,7 +2651,7 @@ impl<M: Metrics> Builder<'_, M> {
         depth: usize,
         avoid: bool,
     ) -> Result<Sublayout, Refusal> {
-        self.subflow(node, None, measure, depth, avoid)
+        self.subflow(node, None, None, measure, depth, avoid)
     }
 
     /// The same, for a box whose **own** box model has already been paid.
@@ -2636,11 +2659,14 @@ impl<M: Metrics> Builder<'_, M> {
     /// `inside` lays out only the node's children at the stated width, which is
     /// what a multi-column container needs: [`Builder::block`] has already
     /// applied its margins, border, padding and width, and laying the box out
-    /// again would pay for every one of them twice.
+    /// again would pay for every one of them twice. `run`, with `inside`, is
+    /// the children to lay out in place of the node's own — see
+    /// [`Builder::children`].
     fn subflow(
         &mut self,
         node: &BoxNode,
         inside: Option<&Consumed>,
+        run: Option<&[BoxNode]>,
         measure: f64,
         depth: usize,
         avoid: bool,
@@ -2670,7 +2696,7 @@ impl<M: Metrics> Builder<'_, M> {
                 record.painted = false;
                 self.flow.blocks.push(record);
                 self.open.push(0);
-                self.children(node, style, 0.0, measure, depth, avoid, 0)
+                self.children(node, run, style, 0.0, measure, depth, avoid, 0)
             }
         };
         if result.is_ok() {
@@ -3204,7 +3230,15 @@ impl<M: Metrics> Builder<'_, M> {
         // A spanner is an in-flow block-level **child** here; one deeper in
         // the tree is laid out in its column and counted.
         let Content::Children(children) = &node.content else {
-            return self.column_set(node, style, content_x, depth, avoid, (count, width, gap));
+            return self.column_set(
+                node,
+                None,
+                style,
+                content_x,
+                depth,
+                avoid,
+                (count, width, gap),
+            );
         };
         self.note_deep_spanners(children, depth)?;
         let spans = |child: &BoxNode| {
@@ -3215,7 +3249,15 @@ impl<M: Metrics> Builder<'_, M> {
                 && !matches!(inner.position, Position::Absolute | Position::Fixed)
         };
         if !children.iter().any(spans) {
-            return self.column_set(node, style, content_x, depth, avoid, (count, width, gap));
+            return self.column_set(
+                node,
+                None,
+                style,
+                content_x,
+                depth,
+                avoid,
+                (count, width, gap),
+            );
         }
         let mut from = 0;
         for (at, child) in children.iter().enumerate() {
@@ -3249,9 +3291,15 @@ impl<M: Metrics> Builder<'_, M> {
 
     /// One run of a multi-column container's children between two spanners,
     /// as a column set of its own: the container's box with only these
-    /// children in it, so [`Builder::column_set`] lays them out and balances
-    /// them as it does a whole container's. A run of nothing is no set.
-    #[inline(never)]
+    /// children laid out in it, so [`Builder::column_set`] lays them out and
+    /// balances them as it does a whole container's. A run of nothing is no
+    /// set.
+    ///
+    /// **The run is borrowed, not copied.** A copy of the container holding a
+    /// copy of the run was the first way of saying this, and it is a copy of
+    /// the whole subtree, alive while that subtree is laid out — so nested
+    /// multi-column containers each with a spanner held one copy per level at
+    /// once, a few hundred kilobytes of markup becoming gigabytes.
     #[allow(clippy::too_many_arguments)]
     fn column_run(
         &mut self,
@@ -3266,14 +3314,7 @@ impl<M: Metrics> Builder<'_, M> {
         if run.iter().all(|child| child.style.display == Display::None) {
             return Ok(());
         }
-        let part = BoxNode {
-            style: node.style.clone(),
-            content: Content::Children(run.to_vec()),
-            anchor: node.anchor,
-            span: node.span,
-            marker: None,
-        };
-        self.column_set(&part, style, content_x, depth, avoid, geometry)
+        self.column_set(node, Some(run), style, content_x, depth, avoid, geometry)
     }
 
     /// `column-span: all` below a multi-column container's own children,
@@ -3306,20 +3347,21 @@ impl<M: Metrics> Builder<'_, M> {
         Ok(())
     }
 
-    /// One column set: `node`'s children laid out once at one column's
-    /// width, balanced, sliced and placed side by side. See
-    /// [`Builder::columns`].
+    /// One column set: `node`'s children — or `run`, a run of them — laid out
+    /// once at one column's width, balanced, sliced and placed side by side.
+    /// See [`Builder::columns`].
     #[allow(clippy::too_many_arguments)]
     fn column_set(
         &mut self,
         node: &BoxNode,
+        run: Option<&[BoxNode]>,
         style: &Consumed,
         content_x: f64,
         depth: usize,
         avoid: bool,
         (count, width, gap): (usize, f64, f64),
     ) -> Result<(), Refusal> {
-        let sub = self.subflow(node, Some(style), width, depth, avoid)?;
+        let sub = self.subflow(node, Some(style), run, width, depth, avoid)?;
         if sub.items.is_empty() {
             return Ok(());
         }
@@ -5289,6 +5331,15 @@ fn resolve_length(length: LengthPercentage, containing: f64) -> f64 {
 }
 
 /// One box's decorations, as a record with no items in it yet.
+/// What a block container holds, as [`Builder::children`] lays it out: the
+/// node's own [`Content`], or a run of its children in their place.
+#[derive(Clone, Copy)]
+enum Written<'n> {
+    Replaced,
+    Text(&'n str),
+    Children(&'n [BoxNode]),
+}
+
 fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
     let style = consume(&node.style);
     let painted = style.background_color.a != 0
