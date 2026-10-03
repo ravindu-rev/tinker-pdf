@@ -1071,3 +1071,99 @@ fn a_prohibited_entry_on_an_xobject_nothing_draws_is_not_reported() {
     unused.content = "0.5 g 10 10 50 50 re f".to_string();
     assert_eq!(unused.findings(), Vec::<FindingKind>::new());
 }
+
+// ---- 6.2.10 / 6.2.2: the operators a content stream may use -----------------
+
+/// Every finding as `(clause, object number, kind)`.
+fn located(fixture: &Fixture) -> Vec<(String, Option<u32>, FindingKind)> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| {
+            (
+                finding.clause.0,
+                finding.object.map(|r| r.num),
+                finding.kind,
+            )
+        })
+        .collect()
+}
+
+/// ISO 19005-2 6.2.2, in veraPDF's statement of rule 6.2.2-1: "Content
+/// streams shall not contain any operators not defined in ISO 32000-1 even if
+/// such operators are bracketed by the BX/EX compatibility operators". Part 1
+/// numbers it 6.2.10 and says "PDF Reference". One finding per distinct
+/// operator, naming the page whose content used it.
+#[test]
+fn an_operator_iso_32000_does_not_define_is_a_finding_inside_bx_ex_too() {
+    for (part, clause) in [("1", "6.2.10"), ("2", "6.2.2")] {
+        let mut bracketed = Fixture::new(part, Some("B"));
+        bracketed.content = "1 0 0 rg BX 5 xyz xyz EX 10 10 50 50 re f".to_string();
+        assert_eq!(
+            located(&bracketed),
+            [(
+                clause.to_string(),
+                Some(3),
+                FindingKind::OperatorUndefined {
+                    operator: "xyz".to_string()
+                }
+            )],
+            "part {part}"
+        );
+    }
+    // `PS`, which earlier PDF defined and ISO 32000 does not: veraPDF's note
+    // reads its prohibition out of this same rule.
+    let mut postscript = conforming();
+    postscript.content = "1 0 0 rg (showpage) PS 10 10 50 50 re f".to_string();
+    assert_eq!(
+        postscript.one_finding(),
+        FindingKind::OperatorUndefined {
+            operator: "PS".to_string()
+        }
+    );
+}
+
+/// The twin: Table A.1's less common operators — the compatibility pair,
+/// the four marked-content ones, the graphics-state and text-state setters,
+/// `T*` — are admitted, and so is an inline image, whose data is not
+/// operators at all.
+#[test]
+fn the_operators_table_a1_defines_are_admitted() {
+    let mut rare = conforming();
+    rare.content = "BX EX /Span BMC EMC /P << /MCID 0 >> BDC EMC /X MP /X << >> DP \
+                    q 1 0 0 1 0 0 cm 0 i 1 j 1 J 4 M [] 0 d 1 w Q \
+                    BT /F1 1 Tf 0 Tc 0 Tw 100 Tz 0 TL 0 Ts 0 Tr 1 0 0 1 0 0 Tm \
+                    0 0 Td 0 0 TD T* ET \
+                    BI /W 1 /H 1 /BPC 8 /CS /G ID \u{1} EI \
+                    1 0 0 rg 10 10 50 50 re f"
+        .to_string();
+    assert_eq!(located(&rare), []);
+}
+
+/// A form XObject's content is a content stream too, and the finding names the
+/// form rather than the page that invoked it (ruling 10).
+#[test]
+fn an_undefined_operator_in_a_form_names_the_form() {
+    let mut fixture = conforming();
+    fixture.resources = "<< /XObject << /X1 7 0 R >> >>".to_string();
+    fixture.content = "/X1 Do".to_string();
+    fixture.extra.push((
+        7,
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 10 10]",
+            b"1 0 0 rg 0 0 5 5 re f zzz",
+        ),
+    ));
+    assert_eq!(
+        located(&fixture),
+        [(
+            "6.2.2".to_string(),
+            Some(7),
+            FindingKind::OperatorUndefined {
+                operator: "zzz".to_string()
+            }
+        )]
+    );
+}

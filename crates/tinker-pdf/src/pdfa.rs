@@ -439,6 +439,14 @@ pub(crate) mod clauses {
 
     // ---- the colour group (milestone 5) ----------------------------------
 
+    /// Content streams: the operators they may use (6.2.10 in part 1, 6.2.2
+    /// in parts 2 to 4, as veraPDF's published rules number them).
+    pub(crate) const CONTENT_STREAMS: ClauseTable = ClauseTable {
+        one: "6.2.10",
+        two_three: "6.2.2",
+        four: "6.2.2",
+    };
+
     /// The output intent (6.2.2 in part 1, 6.2.3 in parts 2 to 4).
     pub(crate) const OUTPUT_INTENT: ClauseTable = ClauseTable {
         one: "6.2.2",
@@ -702,12 +710,16 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.2.10",
-        rule: "content streams: the operators a conforming stream may use, \
-               and the resources every name in it must resolve to",
-        because: "the walk this group runs over content streams is a \
-                  tokenizer with a text state, not an interpreter, and \
-                  deciding that an operator is forbidden means knowing the \
-                  operand stack it was given. That is a renderer's job",
+        rule: "content streams: a stream that names a resource has an \
+               explicitly associated /Resources dictionary (parts 2 to 4, \
+               6.2.2)",
+        because: "the operator half runs: an operator outside ISO 32000's \
+                  Table A.1 is a finding whatever its operands, which a \
+                  tokenizer decides. Whether a form or an appearance stream \
+                  that names a font or an image is relying on resources it \
+                  inherited is a question about which dictionary was in scope \
+                  where, and the walk resolves an inherited dictionary without \
+                  recording that it did",
     },
     StagedRule {
         clause: "6.4",
@@ -1607,6 +1619,12 @@ pub enum FindingKind {
         /// What the `/RoleMap` made of it, which equals `declared` when the
         /// role map does not mention it.
         mapped: String,
+    },
+    /// A content stream using an operator ISO 32000 does not define, inside
+    /// `BX`/`EX` or not (6.2.10 / 6.2.2).
+    OperatorUndefined {
+        /// The operator, as written.
+        operator: String,
     },
     /// Part 1: a metadata stream whose dictionary carries `/Filter` (6.7.2:
     /// "Metadata object stream dictionaries shall not contain the Filter

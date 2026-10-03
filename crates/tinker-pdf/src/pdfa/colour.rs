@@ -122,6 +122,31 @@ pub(super) fn rules(
     if part == Some(Part::One) {
         transparency(doc, &used, out);
     }
+    undefined_operators(&used, out);
+}
+
+/// ISO 19005-1 6.2.10, ISO 19005-2/3/4 6.2.2: "Content streams shall not
+/// contain any operators not defined in ISO 32000-1 even if such operators are
+/// bracketed by the BX/EX compatibility operators" (part 1: "in PDF
+/// Reference"; part 4: "in ISO 32000-2:2020"), as veraPDF's published rules
+/// 6.2.10-1 and 6.2.2-1 quote them.
+///
+/// **No operand stack is needed for this.** `PDFA_STAGED` held the rule back
+/// on the reading that deciding an operator is forbidden needs the operands it
+/// was given; an operator outside Table A.1 is forbidden whatever it was given,
+/// and the tokenizer that already walks every page, form and appearance names
+/// each one. One finding per distinct operator, naming the first object whose
+/// content used it.
+fn undefined_operators(used: &Used, out: &mut Vec<Raw>) {
+    for (operator, container) in &used.undefined {
+        out.push(Raw {
+            rule: clauses::CONTENT_STREAMS,
+            object: Some(*container),
+            kind: FindingKind::OperatorUndefined {
+                operator: String::from_utf8_lossy(operator).into_owned(),
+            },
+        });
+    }
 }
 
 // ---- 6.2.2 / 6.2.3 The output intent --------------------------------------
@@ -330,7 +355,28 @@ struct Used {
     /// Device-independent blending colour spaces a transparency group named,
     /// by the device family each stands in for (11.6.6).
     group_spaces: BTreeSet<&'static str>,
+    /// Operators no table of ISO 32000 defines, each with the first object
+    /// whose content used it.
+    undefined: BTreeMap<Vec<u8>, ObjRef>,
 }
+
+/// Every operator ISO 32000-1 Annex A Table A.1 lists — seventy-three, the
+/// same set PDF Reference 1.4 (ISO 19005-1's reference) and ISO 32000-2
+/// (ISO 19005-4's) define. `PS` is not among them, which is how veraPDF's
+/// statement of the rule reads its prohibition: "In earlier versions of the
+/// PDF format a PostScript operator "PS" was defined. As this operator is not
+/// defined in PDF Reference its use is implicitly prohibited".
+const DEFINED_OPERATORS: &[&[u8]] = &[
+    b"b", b"B", b"b*", b"B*", b"BDC", b"BI", b"BMC", b"BT", b"BX", b"c", b"cm", b"CS", b"cs", b"d",
+    b"d0", b"d1", b"Do", b"DP", b"EI", b"EMC", b"ET", b"EX", b"f", b"F", b"f*", b"G", b"g", b"gs",
+    b"h", b"i", b"ID", b"j", b"J", b"K", b"k", b"l", b"m", b"M", b"MP", b"n", b"q", b"Q", b"re",
+    b"RG", b"rg", b"ri", b"s", b"S", b"SC", b"sc", b"SCN", b"scn", b"sh", b"T*", b"Tc", b"Td",
+    b"TD", b"Tf", b"Tj", b"TJ", b"TL", b"Tm", b"Tr", b"Ts", b"Tw", b"Tz", b"v", b"w", b"W", b"W*",
+    b"y", b"'", b"\"",
+];
+
+/// How many distinct undefined operators one document contributes.
+const MAX_UNDEFINED_OPERATORS: usize = 64;
 
 /// The three uncalibrated spaces, spelled as the operators and the names spell
 /// them.
@@ -341,6 +387,14 @@ const DEVICE_CMYK: &str = "DeviceCMYK";
 /// One walk, filling [`Used`].
 fn scan(doc: &CosDocument, used: &mut Used) {
     content::walk(doc, &mut |op| {
+        if !DEFINED_OPERATORS.contains(&op.operator)
+            && (used.undefined.len() < MAX_UNDEFINED_OPERATORS
+                || used.undefined.contains_key(op.operator))
+        {
+            used.undefined
+                .entry(op.operator.to_vec())
+                .or_insert(op.container);
+        }
         match op.operator {
             // 8.6.8: the colour operators that select a device space and a
             // value in it, in one operator.

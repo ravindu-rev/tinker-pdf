@@ -75,8 +75,11 @@ never happens.
 - **Colour** needs `tinker-pdf-color`'s ICC reader and the same walk: the
   output intent's shape, device colour spaces against the destination
   profile's own colour space, an `ICCBased` stream's `/N` against its
-  profile's channel count, the four rendering intents, and part 1's outright
-  prohibition on transparency.
+  profile's channel count, the four rendering intents, part 1's outright
+  prohibition on transparency, and the graphics clause's operator list
+  (6.2.10 / 6.2.2): an operator outside ISO 32000-1 Table A.1's seventy-three
+  — `PS` among them — is a finding inside `BX`/`EX` or not, naming the page,
+  form or appearance stream that used it.
 
 **Machinery is built lazily, and it is counted rather than asserted.** Every
 reach past the COS document goes through one counter, so a syntax-only sweep
