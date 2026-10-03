@@ -12,6 +12,15 @@
 //! self-authored PDFs and none of them embeds a CFF, and "the subset draws the
 //! same glyph" is only checkable against a fixture whose every glyph is a box
 //! of a size chosen here.
+//!
+//! The composite font's descendant over a `CFF ` table, injected against this
+//! file, `validated_output.rs` and the crate's own tests:
+//!
+//! | Injection | Caught by |
+//! | --- | --- |
+//! | an `OpenType/CFF` descendant is a CIDFontType2 again | 1 |
+//! | a CID-keyed CFF in an OpenType wrapper is let through | 1 |
+//! | `/CIDToGIDMap` is written on every descendant | 1 |
 
 use tinker_pdf_cos::{
     CosDocument, Dict, DocumentBuilder, EmbeddedWhole, Glyph, Object, SubsetRefusal,
@@ -720,8 +729,16 @@ fn a_face_that_claims_none_of_the_text_is_embedded_whole_and_says_so() {
 }
 
 /// A composite font over an `OpenType/CFF` face: the glyphs are addressed by
-/// index, so `/W`, `/CIDToGIDMap` and `/ToUnicode` all rest on the subset
-/// leaving those indices where they were.
+/// index, so `/W` and `/ToUnicode` both rest on the subset leaving those
+/// indices where they were.
+///
+/// The descendant is a **CIDFontType0**, with no `/CIDToGIDMap`. 9.9 Table
+/// 126 lets a `/FontFile3 /Subtype /OpenType` program sit under a CIDFontType2
+/// only when it carries `glyf`, and under a CIDFontType0 when it carries
+/// `CFF `; 9.7.4.2 then reads a CID as the glyph index because this program
+/// is not CID-keyed. *Since October 2026*: this test used to assert a
+/// CIDFontType2 with `/CIDToGIDMap /Identity`, which is the pairing Table 126
+/// rules out.
 #[test]
 fn a_composite_font_over_a_cff_face_is_subsetted() {
     let cff = cff_program(None);
@@ -753,12 +770,12 @@ fn a_composite_font_over_a_cff_face_is_subsetted() {
     let cid = descendant(&doc, &font);
     assert_eq!(
         name_of(&doc, &cid, b"Subtype").as_deref(),
-        Some(&b"CIDFontType2"[..])
+        Some(&b"CIDFontType0"[..]),
+        "Table 126: a `CFF ` table under an OpenType wrapper is a CIDFontType0"
     );
-    assert_eq!(
-        name_of(&doc, &cid, b"CIDToGIDMap").as_deref(),
-        Some(&b"Identity"[..]),
-        "which is only true because the subset left the indices alone"
+    assert!(
+        !cid.contains_key(doc.intern(b"CIDToGIDMap")),
+        "Table 117 puts /CIDToGIDMap on a CIDFontType2 and nowhere else"
     );
 
     let (embedded_program, key, subtype) = embedded(&doc, b"C0");
@@ -779,15 +796,13 @@ fn a_composite_font_over_a_cff_face_is_subsetted() {
     );
 }
 
-/// A **CID-keyed** CFF cannot go down the composite path: its charset maps a
-/// CID onto a glyph and the two are different numbers, while
-/// `PageBuilder::glyphs` addresses glyphs and `/Identity-H` would make every
-/// one of those numbers a CID.
-#[test]
-fn a_cid_keyed_bare_cff_is_refused_by_the_composite_path() {
-    // The same program with `ROS` spliced into its Top DICT. `entry(16, &[0])`
-    // — the `Encoding` this fixture does not use — is six bytes, and `ROS`
-    // with three one-byte operands and a two-byte operator is six as well.
+/// The fixture with `ROS` spliced into its Top DICT, which makes it
+/// CID-keyed: its charset — SIDs 34 to 59 as written — becomes CIDs 34 to 59,
+/// so glyph `g` answers to CID `33 + g`.
+fn cid_keyed_program() -> Vec<u8> {
+    // `entry(16, &[0])` — the `Encoding` this fixture does not use — is six
+    // bytes, and `ROS` with three one-byte operands and a two-byte operator is
+    // six as well.
     let mut program = cff_program(None);
     let target = entry(16, &[0]);
     let at = program
@@ -805,6 +820,16 @@ fn a_cid_keyed_bare_cff_is_refused_by_the_composite_path() {
 
     let parsed = tinker_pdf_font::Cff::parse(&program).expect("it parses");
     assert!(parsed.is_cid(), "the fixture really is CID-keyed now");
+    program
+}
+
+/// A **CID-keyed** CFF cannot go down the composite path: its charset maps a
+/// CID onto a glyph and the two are different numbers, while
+/// `PageBuilder::glyphs` addresses glyphs and `/Identity-H` would make every
+/// one of those numbers a CID.
+#[test]
+fn a_cid_keyed_bare_cff_is_refused_by_the_composite_path() {
+    let program = cid_keyed_program();
 
     let mut builder = DocumentBuilder::new();
     assert!(
@@ -814,6 +839,23 @@ fn a_cid_keyed_bare_cff_is_refused_by_the_composite_path() {
     // And the simple path still takes it, so the refusal is about the
     // composite semantics and not about the bytes.
     assert!(builder.add_embedded_font(b"F0", b"Fixture", &program));
+}
+
+/// The same CID-keyed program inside an `OTTO` wrapper is refused too.
+///
+/// *Since October 2026*: it used to be let through as a CIDFontType2 with
+/// `/CIDToGIDMap /Identity`, which Table 126 does not allow over a `CFF `
+/// table, and under the CIDFontType0 it does allow the index a page writes is
+/// read as a CID through the charset — glyph 4 drew CID 4, which this font
+/// does not carry — exactly as the bare program's would be.
+#[test]
+fn a_cid_keyed_cff_in_an_opentype_wrapper_is_refused_by_the_composite_path() {
+    let program = otto(&cid_keyed_program());
+    let mut builder = DocumentBuilder::new();
+    assert!(
+        !builder.add_cid_font(b"C0", b"Fixture", &program),
+        "9.7.4.2: the CID is not the glyph index for a CID-keyed CFF"
+    );
 }
 
 /// Turning subsetting off is the caller's stated intent, not a capability this

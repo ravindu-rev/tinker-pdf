@@ -1622,10 +1622,21 @@ impl<'a> FontProgram<'a> {
 
     /// The `/Subtype` of a **descendant** CIDFont built on this program
     /// (9.7.4.1). `/CIDToGIDMap` belongs only to the first of the two.
+    ///
+    /// Decided by the **outlines**, not the wrapper. 9.7.4.1 makes a
+    /// CIDFontType2 the one "based on TrueType font technology" and a
+    /// CIDFontType0 the one "based on the Compact Font Format", and 9.9
+    /// Table 126's note on `/FontFile3 /Subtype /OpenType` says the same thing
+    /// from the other side: such a program may sit under a CIDFontType2 only
+    /// "if the embedded font program contains a `glyf` table", and under a
+    /// CIDFontType0 when it contains a `CFF ` table. Until October 2026 an
+    /// `OpenType/CFF` face went out as a CIDFontType2 with `/CIDToGIDMap
+    /// /Identity` — the pairing Table 126 rules out, and one whose `glyf`
+    /// a reader goes looking for and does not find.
     fn descendant_subtype(&self) -> &'static [u8] {
         match self {
-            FontProgram::TrueType(_) | FontProgram::OpenType(_, _) => b"CIDFontType2",
-            FontProgram::Bare(_) => b"CIDFontType0",
+            FontProgram::TrueType(_) => b"CIDFontType2",
+            FontProgram::OpenType(_, _) | FontProgram::Bare(_) => b"CIDFontType0",
         }
     }
 }
@@ -2534,9 +2545,11 @@ impl PageBuilder {
     /// [`DocumentBuilder::add_cid_font`].
     ///
     /// The string is two bytes a glyph, big-endian, because `/Identity-H`
-    /// makes the code the CID and `/CIDToGIDMap /Identity` makes the CID the
-    /// glyph index. Written as a hex string rather than a literal: a glyph
-    /// index is arbitrary bytes and hex needs no escaping decisions at all.
+    /// makes the code the CID and the descendant makes the CID the glyph
+    /// index — `/CIDToGIDMap /Identity` under a TrueType program, 9.7.4.2's
+    /// own rule under a CFF that is not CID-keyed. Written as a hex string
+    /// rather than a literal: a glyph index is arbitrary bytes and hex needs
+    /// no escaping decisions at all.
     ///
     /// Returns false when `resource` is not a registered **composite** font,
     /// rather than writing two-byte codes into a font whose codes are one byte
@@ -3472,9 +3485,12 @@ impl DocumentBuilder {
 
     /// Registers a **composite** font, embedding its program (9.7).
     ///
-    /// A Type0 font over a CIDFontType2 descendant, with `/Encoding
-    /// /Identity-H` and `/CIDToGIDMap /Identity` — which together make the
-    /// two-byte code in a string the CID and the CID the glyph index, so
+    /// A Type0 font with `/Encoding /Identity-H`, which makes the two-byte code
+    /// in a string the CID. Over a TrueType program the descendant is a
+    /// CIDFontType2 with `/CIDToGIDMap /Identity`, which makes the CID the
+    /// glyph index; over a CFF — bare, or the `CFF ` table of an OpenType
+    /// face — it is a CIDFontType0, which reads a CID as the glyph index
+    /// because the program is not CID-keyed (9.7.4.2). Either way
     /// [`PageBuilder::glyphs`] can address a glyph directly. That is the whole
     /// difference from [`DocumentBuilder::add_embedded_font`], and it is not a
     /// convenience: a simple font with `/WinAnsiEncoding` has no way to name a
@@ -3489,17 +3505,20 @@ impl DocumentBuilder {
     /// Returns false when the bytes are not a font this can read, for
     /// [`DocumentBuilder::add_embedded_font`]'s reason.
     pub fn add_cid_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        // A **CID-keyed** bare CFF is refused rather than embedded. Its
-        // charset maps a CID onto a glyph, and the two are different numbers;
-        // `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make
-        // every one of those numbers a CID. Accepting it would silently draw
-        // whichever glyph the charset happened to put at that CID — the
-        // failure this whole path exists to prevent (9.7.4.2).
+        // A **CID-keyed** CFF is refused rather than embedded, bare or in an
+        // OpenType wrapper. Its charset maps a CID onto a glyph, and the two
+        // are different numbers; `PageBuilder::glyphs` addresses glyphs, and
+        // `/Identity-H` would make every one of those numbers a CID.
+        // Accepting it would silently draw whichever glyph the charset
+        // happened to put at that CID — the failure this whole path exists to
+        // prevent (9.7.4.2). The wrapped one used to be let through, as a
+        // CIDFontType2 whose `/CIDToGIDMap /Identity` made the index the
+        // glyph; Table 126 does not allow that descendant over a `CFF `
+        // table, and under the CIDFontType0 it does allow the index is read
+        // as a CID like the bare one's.
         match FontProgram::parse(program) {
             None => return false,
-            Some(kind) if kind.is_cid_keyed() && !matches!(kind, FontProgram::OpenType(_, _)) => {
-                return false
-            }
+            Some(kind) if kind.is_cid_keyed() => return false,
             Some(_) => {}
         }
 

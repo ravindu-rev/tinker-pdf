@@ -115,6 +115,21 @@ descriptor entry 9.9 Table 126 gives it: `/FontFile2`, `/FontFile3
 /Subtype /OpenType`, or `/FontFile3 /Subtype /Type1C` (`/CIDFontType0C` under a
 composite font).
 
+Under a composite font the **descendant** is chosen by the outlines, not by
+the wrapper: a TrueType program is a CIDFontType2 with `/CIDToGIDMap
+/Identity`, and a CFF — bare, or the `CFF ` table of an `OpenType/CFF` face —
+is a CIDFontType0, with no `/CIDToGIDMap`, because 9.7.4.1 makes a
+CIDFontType0 the CFF-based one and Table 126's note on `/Subtype /OpenType`
+admits that wrapper under a CIDFontType2 only when it carries `glyf`. Until
+October 2026 an `OpenType/CFF` face went out as a CIDFontType2 with
+`/CIDToGIDMap /Identity` — the pairing Table 126 rules out
+(`a_composite_font_over_a_cff_face_is_subsetted` pins the correction). That
+same pairing had let a **CID-keyed** CFF in an OpenType wrapper through, where
+the bare one was refused: under the CIDFontType0 Table 126 does allow, a page's
+glyph index is read as a CID through the charset, so the wrapped program is
+refused now for the bare one's reason
+(`a_cid_keyed_cff_in_an_opentype_wrapper_is_refused_by_the_composite_path`).
+
 `set_subset_fonts` (on by default) cuts each program down to the glyphs the
 pages drew, and **glyph identifiers are never renumbered** — which is what
 lets `/Widths`, `/W`, `cmap`, `/CIDToGIDMap` and `/ToUnicode` stay as written.
@@ -715,7 +730,7 @@ could show was right.
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
 | A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
-| A **CID-keyed** CFF under `add_cid_font` | `add_cid_font` returns false | Its charset maps a CID onto a glyph and the two are different numbers; `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make every one of them a CID (9.7.4.2) | this page |
+| A **CID-keyed** CFF under `add_cid_font`, bare or in an `OpenType` wrapper | `add_cid_font` returns false | Its charset maps a CID onto a glyph and the two are different numbers; `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make every one of them a CID (9.7.4.2) | this page |
 | Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | Liberation has no equivalent, and a text face drawn for a symbolic font puts letters where the document meant arrows | this page |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
 | A predefined CMap name outside Adobe's registry | `WarningKind::PredefinedCMapUnknown` | A guessed codespace mis-splits the string, so glyphs *and* advances go wrong silently | [rulings](../rulings.md) ruling 10 |
@@ -790,8 +805,9 @@ could show was right.
   rewritten charstring against a byte string derived from the renumbering rule
   rather than read back from the subsetter.
 - `crates/tinker-pdf-cos/tests/cff_subsetting.rs` — the writer end: the 9.6.4
-  tag, the Table 126 descriptor entry for each of the three shapes, `/W` from
-  the original program, and each `SubsetRefusal` reported by name.
+  tag, the Table 126 descriptor entry for each of the three shapes, the
+  CIDFontType0 descendant over a `CFF ` table, `/W` from the original
+  program, and each `SubsetRefusal` reported by name.
 - `crates/tinker-pdf/tests/cff_subset_census.rs` — every CFF face in the
   fetched corpora cut to nine glyphs: 480 files, 3 313 faces (551 CID-keyed,
   2 735 bare simple, 27 `OpenType/CFF`), 3 311 rebuilt and 2 refused, 25.3 MB
