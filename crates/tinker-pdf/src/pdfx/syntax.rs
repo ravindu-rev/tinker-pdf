@@ -33,6 +33,20 @@ const MAX_INFO_ENTRIES: usize = 4096;
 /// How far up the page tree an inherited box is looked for.
 const MAX_PARENT_DEPTH: u32 = 64;
 
+/// How many findings one rule contributes: the PDF/UA group's figure, for
+/// its reason. A file with a thousand pages without a trim box has one
+/// defect, and a verdict carrying a thousand copies of it is not provenance
+/// (ruling 10) — and one annotation named 4 096 times from an `/Annots` array
+/// every page shares was 67 million of them at the page cap (ruling 1).
+const MAX_FINDINGS_PER_RULE: usize = 64;
+
+/// How many `/Annots` entries the annotation rule reads across the whole
+/// document, duplicates included. An annotation is judged once and a shared
+/// array read once, which makes the walk's work what the file holds; this
+/// bounds what it may hold, as `MAX_ANNOTATION_OBJECTS` bounds the PDF/A
+/// colour group's annotation sweep.
+const MAX_ANNOTATION_ENTRIES: usize = 1 << 18;
+
 /// Runs every syntax rule. The level is not an argument: every rule here
 /// runs under both 2003 levels, and the clause table numbers it.
 pub(super) fn rules(doc: &CosDocument, out: &mut Vec<XRaw>) {
@@ -48,6 +62,8 @@ pub(super) fn rules(doc: &CosDocument, out: &mut Vec<XRaw>) {
     }
     information(doc, out);
     filters(doc, out);
+    let mut boxes_reported = 0;
+    let mut annotations = AnnotationWalk::default();
     for page in pages::collect_upto(doc, MAX_PAGES) {
         let Ok(object) = doc.get(page.reference) else {
             continue;
@@ -56,8 +72,14 @@ pub(super) fn rules(doc: &CosDocument, out: &mut Vec<XRaw>) {
             continue;
         };
         let boxes = Boxes::of(doc, dict);
-        boxes.judge(page.reference, out);
-        annotations(doc, dict, &boxes, page.reference, out);
+        if boxes_reported < MAX_FINDINGS_PER_RULE {
+            let mut found = Vec::new();
+            boxes.judge(page.reference, &mut found);
+            let room = MAX_FINDINGS_PER_RULE - boxes_reported;
+            boxes_reported += found.len().min(room);
+            out.extend(found.into_iter().take(room));
+        }
+        annotations.page(doc, dict, &boxes, page.reference, out);
     }
 }
 
@@ -155,7 +177,11 @@ fn information(doc: &CosDocument, out: &mut Vec<XRaw>) {
 /// content walk steps over it — and `super::STAGED` says so.
 fn filters(doc: &CosDocument, out: &mut Vec<XRaw>) {
     let mut seen: BTreeSet<u32> = BTreeSet::new();
+    let mut reported = 0;
     for (num, entry) in doc.xref().iter().take(MAX_OBJECTS) {
+        if reported >= MAX_FINDINGS_PER_RULE {
+            return;
+        }
         let gen = match entry {
             XrefEntry::Free { .. } => continue,
             XrefEntry::Offset { gen, .. } => gen,
@@ -173,7 +199,10 @@ fn filters(doc: &CosDocument, out: &mut Vec<XRaw>) {
             continue;
         };
         for name in filter_names(doc, &stream.dict) {
-            if matches!(name.as_slice(), b"LZWDecode" | b"LZW" | b"JBIG2Decode") {
+            if matches!(name.as_slice(), b"LZWDecode" | b"LZW" | b"JBIG2Decode")
+                && reported < MAX_FINDINGS_PER_RULE
+            {
+                reported += 1;
                 out.push(XRaw {
                     rule: clauses::COMPRESSION,
                     object: Some(reference),
@@ -357,54 +386,109 @@ fn inherited(doc: &CosDocument, page: &Dict, key: &[u8]) -> Option<Rect> {
 ///
 /// A `TrapNet` annotation is held to neither rule: the design names a rule of
 /// its own for it and quotes none of it, and `super::UNREAD` says so.
-fn annotations(doc: &CosDocument, page: &Dict, boxes: &Boxes, at: ObjRef, out: &mut Vec<XRaw>) {
-    let annots = doc.resolve_key(page, doc.intern(b"Annots"));
-    let Some(annots) = annots.as_array() else {
-        return;
-    };
-    for entry in annots.iter().take(MAX_ANNOTATIONS) {
-        let object = entry.as_objref().or(Some(at));
-        let resolved = doc.resolve(entry);
-        let Some(annot) = resolved.as_dict() else {
-            continue;
+///
+/// **An annotation is judged once, on the first page that names it**, and an
+/// indirect `/Annots` array is read once, on the first page that holds it:
+/// ISO 32000-1 12.5.2's `/P` gives an annotation one page, and a file that
+/// names one from many has not drawn it many times. Without that, one
+/// annotation named 4 096 times from an array every page shared was one
+/// finding per page per entry. The walk reads at most
+/// [`MAX_ANNOTATION_ENTRIES`] entries and reports at most
+/// [`MAX_FINDINGS_PER_RULE`] findings, and stops at whichever comes first.
+#[derive(Default)]
+struct AnnotationWalk {
+    /// Indirect `/Annots` arrays already read.
+    arrays: BTreeSet<ObjRef>,
+    /// Indirect annotations already judged.
+    judged: BTreeSet<ObjRef>,
+    /// Entries read so far, duplicates included.
+    entries: usize,
+    /// Findings reported so far.
+    reported: usize,
+}
+
+impl AnnotationWalk {
+    /// Whether the walk has spent its budget or its findings.
+    fn done(&self) -> bool {
+        self.entries >= MAX_ANNOTATION_ENTRIES || self.reported >= MAX_FINDINGS_PER_RULE
+    }
+
+    /// Judges the annotations `page` names against its `boxes`.
+    fn page(
+        &mut self,
+        doc: &CosDocument,
+        page: &Dict,
+        boxes: &Boxes,
+        at: ObjRef,
+        out: &mut Vec<XRaw>,
+    ) {
+        if self.done() {
+            return;
+        }
+        let key = doc.intern(b"Annots");
+        if let Some(array) = page.get(key).and_then(Object::as_objref) {
+            if !self.arrays.insert(array) {
+                return;
+            }
+        }
+        let annots = doc.resolve_key(page, key);
+        let Some(annots) = annots.as_array() else {
+            return;
         };
-        let subtype = doc
-            .resolve_key(annot, doc.intern(b"Subtype"))
-            .as_name()
-            .and_then(|name| doc.name_bytes(name))
-            .map(|name| name.to_vec())
-            .unwrap_or_default();
-        let rect = doc.resolve_key(annot, doc.intern(b"Rect"));
-        let Some(rect) = rect.as_array().and_then(|values| {
-            let resolved: Vec<Object> = values
-                .iter()
-                .take(4)
-                .map(|v| doc.resolve(v).as_ref().clone())
-                .collect();
-            Rect::from_array(&resolved)
-        }) else {
-            continue;
-        };
-        let boundary = match subtype.as_slice() {
-            b"TrapNet" => continue,
-            b"PrinterMark" => trim_or_art(boxes),
-            _ => boxes
-                .bleed
-                .map(|bleed| ("BleedBox", bleed))
-                .or_else(|| trim_or_art(boxes)),
-        };
-        let Some((name, boundary)) = boundary else {
-            continue;
-        };
-        if rect.intersect(&boundary).is_some() {
-            out.push(XRaw {
-                rule: clauses::ANNOTATIONS,
-                object,
-                kind: FindingKind::AnnotationInsideBox {
-                    subtype: String::from_utf8_lossy(&subtype).into_owned(),
-                    boundary: name.to_string(),
-                },
-            });
+        for entry in annots.iter().take(MAX_ANNOTATIONS) {
+            if self.done() {
+                return;
+            }
+            self.entries += 1;
+            if let Some(reference) = entry.as_objref() {
+                if !self.judged.insert(reference) {
+                    continue;
+                }
+            }
+            let object = entry.as_objref().or(Some(at));
+            let resolved = doc.resolve(entry);
+            let Some(annot) = resolved.as_dict() else {
+                continue;
+            };
+            let subtype = doc
+                .resolve_key(annot, doc.intern(b"Subtype"))
+                .as_name()
+                .and_then(|name| doc.name_bytes(name))
+                .map(|name| name.to_vec())
+                .unwrap_or_default();
+            let rect = doc.resolve_key(annot, doc.intern(b"Rect"));
+            let Some(rect) = rect.as_array().and_then(|values| {
+                let resolved: Vec<Object> = values
+                    .iter()
+                    .take(4)
+                    .map(|v| doc.resolve(v).as_ref().clone())
+                    .collect();
+                Rect::from_array(&resolved)
+            }) else {
+                continue;
+            };
+            let boundary = match subtype.as_slice() {
+                b"TrapNet" => continue,
+                b"PrinterMark" => trim_or_art(boxes),
+                _ => boxes
+                    .bleed
+                    .map(|bleed| ("BleedBox", bleed))
+                    .or_else(|| trim_or_art(boxes)),
+            };
+            let Some((name, boundary)) = boundary else {
+                continue;
+            };
+            if rect.intersect(&boundary).is_some() {
+                self.reported += 1;
+                out.push(XRaw {
+                    rule: clauses::ANNOTATIONS,
+                    object,
+                    kind: FindingKind::AnnotationInsideBox {
+                        subtype: String::from_utf8_lossy(&subtype).into_owned(),
+                        boundary: name.to_string(),
+                    },
+                });
+            }
         }
     }
 }

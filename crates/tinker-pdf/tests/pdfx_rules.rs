@@ -64,6 +64,9 @@ struct X {
     art: Option<String>,
     /// Entries in the `/Pages` node.
     pages: String,
+    /// Pages after object 3, by object number; a test writes their bodies
+    /// into [`X::extra`].
+    kids: Vec<u32>,
     /// Entries in the page dictionary.
     page: String,
     /// The page's `/Resources`.
@@ -94,6 +97,7 @@ impl X {
             trim: Some("[10 10 190 190]".to_string()),
             art: None,
             pages: String::new(),
+            kids: Vec::new(),
             page: String::new(),
             resources: "<< >>".to_string(),
             content: "0 0 0 1 k 20 20 100 100 re f".to_string(),
@@ -139,7 +143,16 @@ impl X {
             (1, format!("<< {catalog} >>").into_bytes()),
             (
                 2,
-                format!("<< /Type /Pages /Kids [3 0 R] /Count 1 {} >>", self.pages).into_bytes(),
+                format!(
+                    "<< /Type /Pages /Kids [3 0 R {}] /Count {} {} >>",
+                    self.kids
+                        .iter()
+                        .map(|num| format!("{num} 0 R "))
+                        .collect::<String>(),
+                    1 + self.kids.len(),
+                    self.pages
+                )
+                .into_bytes(),
             ),
             (3, format!("<< {page} >>").into_bytes()),
             (4, format!("<< {info} >>").into_bytes()),
@@ -618,6 +631,157 @@ fn a_printers_mark_stays_outside_the_trim_box_and_trapnet_is_not_judged() {
         annotated("Link", "[6 6 9 9]")(fixture);
     });
     clean_under_both(annotated("TrapNet", "[0 0 200 200]"));
+}
+
+// ---- what one rule may cost and report ------------------------------------
+
+/// `count` more pages like object 3 — its boxes, and `entries` besides —
+/// numbered from `first`.
+fn more_pages(fixture: &mut X, first: u32, count: u32, entries: &str) {
+    for num in first..first + count {
+        fixture.kids.push(num);
+        fixture.extra.push((
+            num,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+                 /BleedBox [5 5 195 195] /TrimBox [10 10 190 190] {entries} >>"
+            )
+            .into_bytes(),
+        ));
+    }
+}
+
+/// An annotation of `subtype` at `rect`, as an object body.
+fn annotation(subtype: &str, rect: &str) -> Vec<u8> {
+    format!("<< /Type /Annot /Subtype /{subtype} /Rect {rect} >>").into_bytes()
+}
+
+/// Ruling 1, from the review of lane 7A: one annotation inside the bleed,
+/// named 4 096 times from one `/Annots` array that sixty-four pages share,
+/// was 262 144 findings — a million from a 60 KB file at 256 pages, and
+/// about 67 million at the page cap. An annotation is judged once, on the
+/// first page that names it, and an array once, on the first page that holds
+/// it: a page names its annotations, and ISO 32000-1 12.5.2's `/P` gives an
+/// annotation one page. The twin: the same array once more under a second
+/// annotation inside the bleed, which is a second finding.
+#[test]
+fn an_annotation_named_from_many_pages_is_judged_once() {
+    let mut fixture = X::x1a();
+    fixture.page = "/Annots 21 0 R".to_string();
+    fixture
+        .extra
+        .push((20, annotation("Text", "[50 50 60 60]")));
+    fixture
+        .extra
+        .push((21, format!("[{}]", "20 0 R ".repeat(4096)).into_bytes()));
+    more_pages(&mut fixture, 100, 63, "/Annots 21 0 R");
+    let inside = FindingKind::AnnotationInsideBox {
+        subtype: "Text".to_string(),
+        boundary: "BleedBox".to_string(),
+    };
+    let findings = fixture.findings();
+    assert_eq!(findings.len(), 1, "one annotation, one finding");
+    assert_eq!(
+        (findings[0].object.map(|r| r.num), &findings[0].kind),
+        (Some(20), &inside)
+    );
+
+    if let Some(array) = fixture.extra.iter_mut().find(|(num, _)| *num == 21) {
+        array.1 = format!("[22 0 R {}]", "20 0 R ".repeat(4095)).into_bytes();
+    }
+    fixture
+        .extra
+        .push((22, annotation("Text", "[70 70 80 80]")));
+    assert_eq!(fixture.findings().len(), 2);
+}
+
+/// A rule reports at most sixty-four findings, the PDF/UA group's figure for
+/// its reason: a file with a thousand pages without a trim box has one
+/// defect, and a verdict carrying a thousand copies of it is not provenance.
+/// Each rule is capped on its own, so the box rule's copies do not hide a
+/// filter. The twins: sixty-three of each are all reported.
+#[test]
+fn a_rule_reports_at_most_sixty_four_findings() {
+    let crowded = |count: u32| {
+        let mut fixture = X::x1a();
+        // The box rule: pages with no trim box.
+        more_pages(&mut fixture, 100, count, "");
+        for page in &mut fixture.extra {
+            page.1 = String::from_utf8_lossy(&page.1)
+                .replace("/TrimBox [10 10 190 190] ", "")
+                .into_bytes();
+        }
+        // The annotation rule: distinct annotations inside the bleed.
+        fixture.page = format!(
+            "/Annots [{}]",
+            (0..count)
+                .map(|i| format!("{} 0 R ", 1000 + i))
+                .collect::<String>()
+        );
+        for i in 0..count {
+            fixture
+                .extra
+                .push((1000 + i, annotation("Text", "[50 50 60 60]")));
+        }
+        // The filter rule: LZW streams.
+        for i in 0..count {
+            fixture
+                .extra
+                .push((2000 + i, stream("/Filter /LZWDecode", b"x")));
+        }
+        let mut counts = std::collections::BTreeMap::new();
+        for finding in fixture.findings() {
+            let rule = match finding.kind {
+                FindingKind::TrimOrArtBoxMissing => "boxes",
+                FindingKind::AnnotationInsideBox { .. } => "annotations",
+                FindingKind::FilterForbidden { .. } => "filters",
+                other => panic!("an unexpected finding: {other:?}"),
+            };
+            *counts.entry(rule).or_insert(0usize) += 1;
+        }
+        counts
+    };
+    let expected = |n: usize| {
+        [("annotations", n), ("boxes", n), ("filters", n)]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(crowded(63), expected(63));
+    assert_eq!(crowded(200), expected(64));
+}
+
+/// The walk's own budget, for the files the two rules above do not reach:
+/// distinct `/Annots` arrays, each naming one annotation outside every box
+/// 4 096 times, reported nothing and cost a resolution each. The rule reads
+/// at most 2^18 entries across the document — sixty-four such pages — and a
+/// page past them is not looked at; the twin is the same page with one array
+/// fewer before it.
+#[test]
+fn the_annotation_walk_stops_at_its_budget() {
+    let walk = |arrays: u32| {
+        let mut fixture = X::x1a();
+        fixture.extra.push((20, annotation("Text", "[0 0 2 2]")));
+        for array in 0..arrays {
+            fixture.extra.push((
+                3000 + array,
+                format!("[{}]", "20 0 R ".repeat(4096)).into_bytes(),
+            ));
+            more_pages(
+                &mut fixture,
+                100 + array,
+                1,
+                &format!("/Annots {} 0 R", 3000 + array),
+            );
+        }
+        // The last page holds an annotation inside the bleed.
+        fixture
+            .extra
+            .push((21, annotation("Text", "[50 50 60 60]")));
+        more_pages(&mut fixture, 2000, 1, "/Annots [21 0 R]");
+        fixture.findings().len()
+    };
+    assert_eq!(walk(63), 1);
+    assert_eq!(walk(64), 0);
 }
 
 // ---- AN 2.29 private keys -------------------------------------------------

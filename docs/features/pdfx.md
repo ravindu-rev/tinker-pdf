@@ -36,7 +36,12 @@ secondary source as the design quotes it, and cites its section:
   `/ArtBox`, and that box inside the `/BleedBox` and the `/CropBox` where they
   are present (AN 2.10); every annotation's `/Rect` sharing no area with the
   bleed box, a `PrinterMark`'s with the trim or art box (AN 2.28); every
-  private `/Info` entry a text string (AN 2.29).
+  private `/Info` entry a text string (AN 2.29). An annotation is judged
+  once, on the first page that names it, and an indirect `/Annots` array
+  read once; the walk reads at most 2^18 entries across the document, and
+  the box, filter and annotation rules report at most sixty-four findings
+  each, so a file naming one defect from every page is one finding's worth
+  of provenance rather than millions.
 - **Print**, the content walk and the output intent: a `GTS_PDFX` output
   intent, embedding a destination profile or naming a registered
   characterization by `/OutputConditionIdentifier` and `/RegistryName`
