@@ -178,6 +178,20 @@ pub enum Warning {
     /// (*"indirect references are an error"*) — which adds nothing to the
     /// clip. The rest of the clip applies.
     ClipChildIgnored,
+    /// A `mask`, a `clip-path`, a `fill` or a `stroke` whose
+    /// `objectBoundingBox` units needed the box of **text** — a `<text>`, or a
+    /// group that holds one.
+    ///
+    /// §7.11's box of a run is its glyph cells, and a glyph's extent is a font
+    /// metric this crate does not have (ruling 8). Where the text is all there
+    /// is to measure there is no box at all, and a fraction of nothing would
+    /// take the ink away: the element is drawn **unmasked** or **unclipped**,
+    /// and a paint server's own fallback stands — `none` where the value
+    /// stated none — which is ruling 2's answer and the one this crate gave
+    /// before masks and patterns were drawn. Where shapes or pictures sit
+    /// beside the text, theirs is the box used, smaller than §7.11's by
+    /// whatever the text reaches past it.
+    TextBoxUnmeasured,
     /// Something whose coordinates, once every transform above it was
     /// composed, are past a double's range — `scale(1e300)` inside
     /// `scale(1e300)`, or a `markerWidth` of `1e308` under a view box.

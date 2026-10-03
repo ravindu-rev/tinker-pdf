@@ -75,6 +75,16 @@ A picture that quietly drops one of these looks finished.
 - ~~**`<pattern>` as a paint** (§13.3)~~ — **drawn since the milestones**;
   see *As built*. A tiling paint server is 8.7.3's tiling pattern, cell for
   cell.
+- **A bounding-box effect on text.** A `mask`, a `clip-path`, a gradient or a
+  pattern in `objectBoundingBox` units — the initial units of all but the
+  clip — is a fraction of §7.11's box, and a run's box is its glyph cells,
+  which are a font's (ruling 8). On a `<text>`, or a group of only text, there
+  is no box: the element is drawn unmasked or unclipped and a paint takes its
+  own fallback, `none` where it stated none. Beside shapes or pictures, theirs
+  is the box. Either way `Warning::TextBoxUnmeasured`
+  (`text_under_a_bounding_box_mask_draws_unmasked_and_is_named` and its
+  three siblings). It closes when the caller, which has the metrics, measures
+  a run's box.
 - ~~**`<marker>`** (§11.6)~~ — **drawn since the milestones**; see *As built*.
   Arrowheads on a path's vertices, thirty-two of them in the fetched corpus,
   all on paths that also fill.
@@ -326,7 +336,17 @@ picture inside a mask, which keeps 11.6.5.3's weights. Writing masks found a
 renderer defect a long way from SVG — a group under a soft mask was masked
 twice, through the form's `/BBox` clip and again at its composite
 (`soft_mask_clips.rs`) — and that an `<image>`'s `clip-path`, like a `<g>`'s
-before groups, was dropped without a word.
+before groups, was dropped without a word. *Corrected on review, 3 October
+2026*: two boxes were wrong. A shape's mask was measured over everything its
+group drew, so a marked path's region grew around its markers, which §7.11
+leaves out; it is the shape's own geometry now
+(`a_marked_shapes_mask_region_is_its_own_box`). A container's box still
+measures the markers its paths drew, because its nodes do not say which
+those were. And text under a bounding-box mask, which has no box this crate
+can take, was masked away to nothing without a word — where before masks it
+had been drawn and named; it is drawn unmasked and named again
+(`Warning::TextBoxUnmeasured`, under *Non-goals*), as is a bounding-box clip
+on it.
 
 **After the milestones: §13.3's patterns.** `Paint::Pattern` is a `Tile`: a
 cell, a matrix and a node list, so a pattern is the display list again, one
@@ -343,7 +363,13 @@ cell's stream has no page mapping of its own, the pattern's `/Matrix` carrying
 pattern space into the default space as a gradient's does. A tile with no
 area paints nothing — not the fallback, because the server was found — and a
 pattern that paints itself, directly or along its chain, is
-`Refusal::TooManyUses`, the `<use>` bomb's fourth spelling. Each tile's nodes
+`Refusal::TooManyUses`, the `<use>` bomb's fourth spelling. Text is the
+exception to the first rule (*corrected on review, 3 October 2026*): a run
+has no box this crate can measure, so a bounding-box tile on text is not a
+tile of no area but a paint that cannot be resolved, and the fallback stands,
+named `TextBoxUnmeasured` — it had painted `none` without a word, where
+before patterns it drew in the fallback and was named. A gradient on text
+takes the same answer, which it had never had. Each tile's nodes
 are charged against `max_nodes` once per shape it fills, so a pattern painted
 on a thousand shapes is a thousand tiles' worth of the budget, as the same
 `<use>` a thousand times is. Text a tile or a mask draws had its face left

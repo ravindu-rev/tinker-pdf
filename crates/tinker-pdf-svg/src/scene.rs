@@ -71,6 +71,56 @@ struct Frame {
     depth: usize,
 }
 
+/// §7.11's object bounding box of one element, as far as this crate can take
+/// it — which is everything but text.
+///
+/// Two facts rather than one box, because "the box is empty" and "the box is
+/// text's" are different answers: the first is §13.2.3's zero-area rule, which
+/// disables a bounding-box effect, and the second is a font metric this crate
+/// does not have (ruling 8), which a `mask`, a `clip-path` or a paint server
+/// must not read as a box of nothing and take the ink away with.
+#[derive(Clone, Copy, Debug)]
+struct Extent {
+    /// `[min_x, min_y, max_x, max_y]` of the element's shapes and pictures,
+    /// in its own user space.
+    measured: [f64; 4],
+    /// Whether text was left out of `measured`.
+    text: bool,
+}
+
+impl Extent {
+    /// A run of text, of which nothing is measured.
+    const TEXT: Self = Self {
+        measured: [0.0; 4],
+        text: true,
+    };
+
+    /// A shape's own geometry, which has no text in it.
+    fn shape(measured: [f64; 4]) -> Self {
+        Self {
+            measured,
+            text: false,
+        }
+    }
+
+    /// Whether the measured box has an area to take a fraction of.
+    fn has_area(self) -> bool {
+        let [min_x, min_y, max_x, max_y] = self.measured;
+        max_x - min_x > 0.0 && max_y - min_y > 0.0
+    }
+}
+
+/// What a `<pattern>` comes to for one element.
+enum Tiling {
+    /// Its tiles.
+    Paint(Paint),
+    /// Nothing: a tile with no area, which §13.3 says disables the paint.
+    Disabled,
+    /// No box to take a fraction of — text's, which this crate cannot
+    /// measure — so the paint's own fallback stands.
+    Unmeasured,
+}
+
 /// The walk's own state: what it has spent and what it has to say.
 struct Walk<'a> {
     tree: &'a Tree,
@@ -185,11 +235,28 @@ impl Walk<'_> {
     /// box is measured in. Where neither property is set, `body` draws inline
     /// and no group exists — a group that changes nothing is a transparency
     /// group a reader composites for no reason.
+    ///
+    /// The box is measured from what `body` drew, which for a container is
+    /// §7.11's union of its children's.
     fn group(
         &mut self,
         style: &Style,
         matrix: [f64; 6],
         frame: &Frame,
+        body: impl FnOnce(&mut Self) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        self.group_in(style, matrix, frame, None, body)
+    }
+
+    /// [`Walk::group`], with the box given where the caller has it: a shape's
+    /// own geometry, which is §7.11's box and leaves out the markers `body`
+    /// draws with it.
+    fn group_in(
+        &mut self,
+        style: &Style,
+        matrix: [f64; 6],
+        frame: &Frame,
+        own: Option<[f64; 4]>,
         body: impl FnOnce(&mut Self) -> Result<(), Refusal>,
     ) -> Result<(), Refusal> {
         let opacity = style.opacity;
@@ -202,11 +269,17 @@ impl Walk<'_> {
         if nodes.is_empty() || opacity <= 0.0 {
             return Ok(());
         }
-        let bounds = transform::invert(matrix)
-            .map_or([0.0; 4], |inverse| gradient::nodes_bounds(&nodes, inverse));
+        let extent = match own {
+            Some(measured) => Extent::shape(measured),
+            None => Extent {
+                measured: transform::invert(matrix)
+                    .map_or([0.0; 4], |inverse| gradient::nodes_bounds(&nodes, inverse)),
+                text: gradient::nodes_hold_text(&nodes),
+            },
+        };
         let source = match &style.clip_path {
             None => None,
-            Some(name) => self.clip_of(name, matrix, bounds, style)?,
+            Some(name) => self.clip_of(name, matrix, extent, style)?,
         };
         let (clip, silhouette) = match source {
             Some(source) if !source.text.is_empty() => {
@@ -217,7 +290,7 @@ impl Walk<'_> {
         };
         let mask = match &style.mask {
             None => None,
-            Some(name) => self.mask_of(name, matrix, bounds, frame)?.map(Box::new),
+            Some(name) => self.mask_of(name, matrix, extent, frame)?.map(Box::new),
         };
         if let Some(silhouette) = silhouette {
             // A clip that holds text is a mask of its silhouettes, and an
@@ -272,18 +345,20 @@ impl Walk<'_> {
     /// §14.4's `<mask>`, read for one element: its region, and its content
     /// walked into nodes of its own.
     ///
-    /// `matrix` and `bounds` are the referencing element's, as for a clip:
+    /// `matrix` and `extent` are the referencing element's, as for a clip:
     /// `maskUnits` (initially `objectBoundingBox`, with the region
     /// −10%/−10%/120%/120%) and `maskContentUnits` (initially
     /// `userSpaceOnUse`) are each a fraction of that box or a length in that
     /// space. `None` is a reference naming no `<mask>`, which ruling 2 draws
-    /// unmasked and names; a mask whose region has no area masks everything
-    /// away, which is §14.4's answer and an empty [`crate::Mask`] here.
+    /// unmasked and names — and so is a box that is text's alone, which this
+    /// crate cannot measure ([`Walk::measurable`]). A mask whose region has no
+    /// area masks everything away, which is §14.4's answer and an empty
+    /// [`crate::Mask`] here.
     fn mask_of(
         &mut self,
         name: &str,
         matrix: [f64; 6],
-        bounds: [f64; 4],
+        extent: Extent,
         frame: &Frame,
     ) -> Result<Option<crate::Mask>, Refusal> {
         let tree = self.tree;
@@ -300,17 +375,25 @@ impl Walk<'_> {
             return Err(Refusal::TooManyUses);
         }
         let element = &tree.nodes[at];
+        let user_region = matches!(
+            element.attr("maskUnits").map(str::trim),
+            Some("userSpaceOnUse")
+        );
+        let box_content = matches!(
+            element.attr("maskContentUnits").map(str::trim),
+            Some("objectBoundingBox")
+        );
+        if (!user_region || box_content) && !self.measurable(extent) {
+            return Ok(None);
+        }
         let nothing = crate::Mask {
             nodes: Vec::new(),
             region: Some(Outline::default()),
         };
-        let [min_x, min_y, max_x, max_y] = bounds;
+        let [min_x, min_y, max_x, max_y] = extent.measured;
         let (width, height) = (max_x - min_x, max_y - min_y);
-        let has_area = width > 0.0 && height > 0.0;
-        let region = if matches!(
-            element.attr("maskUnits").map(str::trim),
-            Some("userSpaceOnUse")
-        ) {
+        let has_area = extent.has_area();
+        let region = if user_region {
             let (vw, vh) = frame.viewport;
             [
                 self.length_of(element, "x", Some(vw), -0.1 * vw),
@@ -333,10 +416,7 @@ impl Walk<'_> {
         if !(w > 0.0 && h > 0.0) {
             return Ok(Some(nothing));
         }
-        let content = if matches!(
-            element.attr("maskContentUnits").map(str::trim),
-            Some("objectBoundingBox")
-        ) {
+        let content = if box_content {
             if !has_area {
                 return Ok(Some(nothing));
             }
@@ -379,20 +459,50 @@ impl Walk<'_> {
 
     /// §14.3's `<clipPath>`, read for one element: [`gradient::clip`] with the
     /// walk's segment budget, and its two warnings named.
+    ///
+    /// `None` draws the element unclipped: a reference naming no `<clipPath>`,
+    /// or one in `objectBoundingBox` units on a box that is text's alone
+    /// ([`Walk::measurable`]), which would otherwise clip the text away to
+    /// nothing.
     fn clip_of(
         &mut self,
         name: &str,
         matrix: [f64; 6],
-        bounds: [f64; 4],
+        extent: Extent,
         style: &Style,
     ) -> Result<Option<gradient::ClipSource>, Refusal> {
-        let source = gradient::clip(self.tree, name, matrix, bounds, style, &mut self.segments)?;
+        if gradient::clip_measures_box(self.tree, name) && !self.measurable(extent) {
+            return Ok(None);
+        }
+        let source = gradient::clip(
+            self.tree,
+            name,
+            matrix,
+            extent.measured,
+            style,
+            &mut self.segments,
+        )?;
         match &source {
             None => self.warn(Warning::ClipPathUnsupported),
             Some(source) if source.ignored => self.warn(Warning::ClipChildIgnored),
             Some(_) => {}
         }
         Ok(source)
+    }
+
+    /// Whether a bounding-box effect can be resolved against `extent`, naming
+    /// the text left out of it where there is some.
+    ///
+    /// `false` is a box that is text's alone: the caller draws the element
+    /// without the effect, or takes the paint's fallback — ruling 2's answer —
+    /// rather than reading the empty box as §13.2.3's zero-area rule. Shapes or
+    /// pictures beside the text give the box they span, and that is used.
+    fn measurable(&mut self, extent: Extent) -> bool {
+        if !extent.text {
+            return true;
+        }
+        self.warn(Warning::TextBoxUnmeasured);
+        extent.has_area()
     }
 
     /// A `<clipPath>` that holds text, as the mask of its silhouettes.
@@ -729,8 +839,9 @@ impl Walk<'_> {
         if !style.visible {
             return Ok(());
         }
-        let fill = self.paint(&style.fill, style, matrix, bounds, frame)?;
-        let stroke_paint = self.paint(&style.stroke, style, matrix, bounds, frame)?;
+        let extent = Extent::shape(bounds);
+        let fill = self.paint(&style.fill, style, matrix, extent, frame)?;
+        let stroke_paint = self.paint(&style.stroke, style, matrix, extent, frame)?;
         // §14.3's clip, resolved against the same two numbers a gradient uses.
         // A `clip-path` naming nothing is **not** a clip: §14.3.1 makes a
         // reference to a non-existent element an error, and ruling 2 draws the
@@ -744,7 +855,7 @@ impl Walk<'_> {
             .is_some_and(|name| gradient::clip_holds_text(self.tree, name));
         let clip = match &style.clip_path {
             Some(name) if !text_clip => self
-                .clip_of(name, matrix, bounds, style)?
+                .clip_of(name, matrix, extent, style)?
                 .map(|source| source.clip),
             _ => None,
         };
@@ -768,6 +879,8 @@ impl Walk<'_> {
         // §14.4's mask on a shape is of its whole rendering — fill, stroke and
         // markers — so it is a group around what follows, with the opacity
         // and the clip left to the shape itself, which handles both already.
+        // Its box is the shape's own, though: §7.11's object bounding box is
+        // the geometry, and the markers drawn inside the group are not in it.
         if style.mask.is_some() || text_clip {
             let masking = Style {
                 opacity: 1.0,
@@ -782,7 +895,7 @@ impl Walk<'_> {
                 mask: None,
                 ..style.clone()
             };
-            return self.group(&masking, matrix, frame, |walk| {
+            return self.group_in(&masking, matrix, frame, Some(bounds), |walk| {
                 walk.paint_shape(node, &unmasked, matrix, outline, fill, stroke, clip, frame)
             });
         }
@@ -1122,12 +1235,16 @@ impl Walk<'_> {
     /// invention: a file that wrote `fill="url(#g) red"` said what to do when
     /// the server is missing, and a build that drew nothing would be ignoring
     /// the half of the value that was for exactly this.
+    ///
+    /// The fallback stands for one more reason, and it is named: a server in
+    /// `objectBoundingBox` units painting text, whose box this crate cannot
+    /// measure ([`Walk::measurable`]).
     fn paint(
         &mut self,
         spec: &PaintSpec,
         style: &Style,
         matrix: [f64; 6],
-        bounds: [f64; 4],
+        extent: Extent,
         frame: &Frame,
     ) -> Result<Paint, Refusal> {
         Ok(match spec {
@@ -1138,7 +1255,11 @@ impl Walk<'_> {
                 let target = self.tree.by_id(name);
                 let kind = target.map(|at| self.tree.nodes[at].name.as_str());
                 if let (Some(at), Some("linearGradient" | "radialGradient")) = (target, kind) {
-                    if let Some(resolved) = gradient::resolve(self.tree, at, matrix, bounds, style)
+                    if gradient::measures_box(self.tree, at) && !self.measurable(extent) {
+                        return self.paint(fallback, style, matrix, extent, frame);
+                    }
+                    if let Some(resolved) =
+                        gradient::resolve(self.tree, at, matrix, extent.measured, style)
                     {
                         return Ok(resolved.paint);
                     }
@@ -1151,12 +1272,14 @@ impl Walk<'_> {
                     // §13.3: a pattern whose tile has no area paints nothing,
                     // which — the server having been found — is `none` and not
                     // the fallback, the gradient's rule.
-                    return Ok(self
-                        .pattern_of(at, matrix, bounds, frame)?
-                        .unwrap_or(Paint::None));
+                    return match self.pattern_of(at, matrix, extent, frame)? {
+                        Tiling::Paint(paint) => Ok(paint),
+                        Tiling::Disabled => Ok(Paint::None),
+                        Tiling::Unmeasured => self.paint(fallback, style, matrix, extent, frame),
+                    };
                 }
                 self.warn(Warning::PaintServerUnresolved);
-                return self.paint(fallback, style, matrix, bounds, frame);
+                return self.paint(fallback, style, matrix, extent, frame);
             }
         })
     }
@@ -1174,14 +1297,16 @@ impl Walk<'_> {
     /// inherited by this element"*, and the children likewise when this one
     /// has none).
     ///
-    /// `None` for a tile with no area, which §13.3 says disables the paint.
+    /// [`Tiling::Disabled`] for a tile with no area, which §13.3 says disables
+    /// the paint, and [`Tiling::Unmeasured`] for a tile or content in
+    /// `objectBoundingBox` units on a box that is text's alone.
     fn pattern_of(
         &mut self,
         at: usize,
         matrix: [f64; 6],
-        bounds: [f64; 4],
+        extent: Extent,
         frame: &Frame,
-    ) -> Result<Option<Paint>, Refusal> {
+    ) -> Result<Tiling, Refusal> {
         let tree = self.tree;
         let mut chain = vec![at];
         while chain.len() < 10 {
@@ -1208,12 +1333,22 @@ impl Walk<'_> {
                 .and_then(|text| document::length(text, Some(basis)))
                 .unwrap_or(default)
         };
-        let [min_x, min_y, max_x, max_y] = bounds;
-        let (box_width, box_height) = (max_x - min_x, max_y - min_y);
-        let box_area = box_width > 0.0 && box_height > 0.0;
         // §13.3's initial `patternUnits` is `objectBoundingBox`, and its
-        // initial `patternContentUnits` is `userSpaceOnUse`.
-        let cell = if along("patternUnits") == Some("userSpaceOnUse") {
+        // initial `patternContentUnits` is `userSpaceOnUse` — which a
+        // `viewBox` makes moot.
+        let user_cell = along("patternUnits") == Some("userSpaceOnUse");
+        let view = along("viewBox")
+            .and_then(transform::numbers)
+            .filter(|numbers| numbers.len() == 4);
+        let box_content =
+            view.is_none() && along("patternContentUnits") == Some("objectBoundingBox");
+        if (!user_cell || box_content) && !self.measurable(extent) {
+            return Ok(Tiling::Unmeasured);
+        }
+        let [min_x, min_y, max_x, max_y] = extent.measured;
+        let (box_width, box_height) = (max_x - min_x, max_y - min_y);
+        let box_area = extent.has_area();
+        let cell = if user_cell {
             let (vw, vh) = frame.viewport;
             [
                 length("x", vw, 0.0),
@@ -1223,7 +1358,7 @@ impl Walk<'_> {
             ]
         } else {
             if !box_area {
-                return Ok(None);
+                return Ok(Tiling::Disabled);
             }
             [
                 min_x + length("x", 1.0, 0.0) * box_width,
@@ -1234,15 +1369,12 @@ impl Walk<'_> {
         };
         let [x, y, width, height] = cell;
         if !(width > 0.0 && height > 0.0 && cell.iter().all(|v| v.is_finite())) {
-            return Ok(None);
+            return Ok(Tiling::Disabled);
         }
         // The content's own space, into pattern space: a `viewBox` fitted into
         // the tile (which makes `patternContentUnits` moot, §13.3 says), or
         // the tile's corner as the origin, scaled by the box under
         // `objectBoundingBox`.
-        let view = along("viewBox")
-            .and_then(transform::numbers)
-            .filter(|numbers| numbers.len() == 4);
         let content = match view {
             Some(numbers) => {
                 let Some(fit) = transform::view_box(
@@ -1251,13 +1383,13 @@ impl Walk<'_> {
                     height,
                     along("preserveAspectRatio"),
                 ) else {
-                    return Ok(None);
+                    return Ok(Tiling::Disabled);
                 };
                 transform::concat(fit, [1.0, 0.0, 0.0, 1.0, x, y])
             }
-            None if along("patternContentUnits") == Some("objectBoundingBox") => {
+            None if box_content => {
                 if !box_area {
-                    return Ok(None);
+                    return Ok(Tiling::Disabled);
                 }
                 [box_width, 0.0, 0.0, box_height, x, y]
             }
@@ -1293,7 +1425,7 @@ impl Walk<'_> {
         self.expanding.pop();
         self.text = text;
         let nodes = drawn?;
-        Ok(Some(Paint::Pattern(Box::new(crate::Tile {
+        Ok(Tiling::Paint(Paint::Pattern(Box::new(crate::Tile {
             nodes,
             cell,
             matrix: transform::concat(own, matrix),
@@ -1674,8 +1806,10 @@ impl Walk<'_> {
         } else {
             frame.matrix
         };
-        let fill = self.paint(&style.fill, style, matrix, [0.0, 0.0, 0.0, 0.0], frame)?;
-        let stroke_paint = self.paint(&style.stroke, style, matrix, [0.0, 0.0, 0.0, 0.0], frame)?;
+        // A run's box is its glyph cells, which are a font's: a paint server
+        // in `objectBoundingBox` units has nothing here to take a fraction of.
+        let fill = self.paint(&style.fill, style, matrix, Extent::TEXT, frame)?;
+        let stroke_paint = self.paint(&style.stroke, style, matrix, Extent::TEXT, frame)?;
         let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
             None
         } else {

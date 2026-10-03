@@ -18,9 +18,20 @@
 //! | the pattern cycle guard is removed | 1 |
 //! | the tile's content inherits from the painted element | 6 |
 //! | the writer's tile does not repeat at its own size | 1 |
+//!
+//! And for text, whose box this crate cannot measure (the review of lane 5C),
+//! counted over every suite of this crate — `masks.rs` holds the two campaigns
+//! that reach all four kinds of effect:
+//!
+//! | Defect injected | Tests that failed |
+//! | --- | ---: |
+//! | `patternContentUnits` is not asked whether it needs the box | 1 |
+//! | an unmeasured pattern paints `none` rather than its fallback | 1 |
+//! | a gradient is not asked whether it needs the box | 1 |
+//! | a clip path is not asked whether it needs the box | 1 |
 
 use tinker_pdf_svg::path::Segment;
-use tinker_pdf_svg::{Colour, Limits, Node, Paint, Refusal, Scene, Tile};
+use tinker_pdf_svg::{Colour, Limits, Node, Paint, Refusal, Scene, Tile, Warning};
 
 fn scene(markup: &str) -> Scene {
     tinker_pdf_svg::read(
@@ -185,4 +196,64 @@ fn a_tiles_content_inherits_from_its_own_ancestry() {
         })
     );
     assert!(stroke.is_none(), "and no stroke from the painted element");
+}
+
+// ---- text, whose box is a font's ---------------------------------------------
+
+/// The fill and stroke of the one run a scene holds.
+fn run_paints(scene: &Scene) -> (Paint, Option<Paint>) {
+    match &scene.nodes[..] {
+        [Node::Text { fill, stroke, .. }] => (
+            fill.clone(),
+            stroke.as_ref().map(|stroke| stroke.paint.clone()),
+        ),
+        other => panic!("one run: {other:?}"),
+    }
+}
+
+/// Text painted with a pattern in the initial `objectBoundingBox` units has no
+/// box this crate can measure — a run's extent is a font metric (ruling 8) — so
+/// the paint's **own fallback** stands and the fact is named. It used to paint
+/// `none`, fallback and all, without a word.
+#[test]
+fn text_painted_with_a_bounding_box_pattern_takes_its_fallback_and_is_named() {
+    let blue = Paint::Solid(Colour {
+        rgb: [0.0, 0.0, 1.0],
+    });
+    let fallen = scene(
+        "<pattern id=\"p\" width=\"0.5\" height=\"0.5\"><rect width=\"5\" height=\"5\" \
+         fill=\"red\"/></pattern>\
+         <text x=\"10\" y=\"50\" fill=\"url(#p) blue\" stroke=\"url(#p) blue\">Hi</text>",
+    );
+    assert_eq!(run_paints(&fallen), (blue.clone(), Some(blue)));
+    assert_eq!(fallen.warnings, [Warning::TextBoxUnmeasured]);
+
+    // With no fallback stated, the fallback is `none` — named all the same.
+    // And content in the box's units needs the box as much as the tile does.
+    for pattern in [
+        "<pattern id=\"p\" width=\"0.5\" height=\"0.5\"><rect width=\"5\" height=\"5\"/></pattern>",
+        "<pattern id=\"p\" patternUnits=\"userSpaceOnUse\" width=\"10\" height=\"10\" \
+         patternContentUnits=\"objectBoundingBox\"><rect width=\"0.5\" height=\"0.5\"/></pattern>",
+    ] {
+        let scene = scene(&format!(
+            "{pattern}<text x=\"10\" y=\"50\" fill=\"url(#p)\">Hi</text>"
+        ));
+        assert_eq!(run_paints(&scene), (Paint::None, None), "{pattern}");
+        assert_eq!(scene.warnings, [Warning::TextBoxUnmeasured], "{pattern}");
+    }
+}
+
+/// A pattern in user space needs no box: text is painted with its tiles.
+#[test]
+fn text_painted_with_a_user_space_pattern_is_tiled() {
+    let scene = scene(
+        "<pattern id=\"p\" patternUnits=\"userSpaceOnUse\" width=\"10\" height=\"10\">\
+         <rect width=\"5\" height=\"5\"/></pattern>\
+         <text x=\"10\" y=\"50\" fill=\"url(#p) blue\">Hi</text>",
+    );
+    let (Paint::Pattern(tile), None) = run_paints(&scene) else {
+        panic!("a tiled run: {:?}", scene.nodes);
+    };
+    assert_eq!(tile.cell, [0.0, 0.0, 10.0, 10.0]);
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
 }

@@ -519,6 +519,70 @@ fn a_bounding_box_clip_on_a_group_is_a_fraction_of_its_children() {
     near(box_[3], 20.0, "the whole height");
 }
 
+// ---- text, whose box is a font's ---------------------------------------------
+
+/// A document of 100 by 100 holding `body`.
+fn page(body: &str) -> Scene {
+    scene(
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">{body}</svg>"
+        )
+        .as_bytes(),
+    )
+}
+
+/// A `<text>`, or a group of only text, clipped in `objectBoundingBox` units
+/// has no box this crate can measure — a run's extent is a font metric
+/// (ruling 8). It is drawn unclipped and named, which is what a `clip-path`
+/// that cannot be read gets; it used to be clipped away to nothing, without a
+/// word.
+#[test]
+fn text_under_a_bounding_box_clip_draws_unclipped_and_is_named() {
+    for body in [
+        "<text x=\"10\" y=\"50\" clip-path=\"url(#half)\">Hi</text>",
+        "<g clip-path=\"url(#half)\"><text x=\"10\" y=\"50\">Hi</text></g>",
+    ] {
+        let scene = page(&format!(
+            "<clipPath id=\"half\" clipPathUnits=\"objectBoundingBox\">\
+             <rect width=\"0.5\" height=\"1\"/></clipPath>{body}"
+        ));
+        assert!(
+            matches!(&scene.nodes[..], [Node::Text { .. }]),
+            "{body}: the run, unclipped: {:?}",
+            scene.nodes
+        );
+        assert_eq!(scene.warnings, [Warning::TextBoxUnmeasured], "{body}");
+    }
+}
+
+/// Text filled or stroked with a gradient in the initial `objectBoundingBox`
+/// units takes the paint's own fallback, named, for the same reason; it used
+/// to paint `none` without a word. In user space the gradient needs no box and
+/// is the run's paint.
+#[test]
+fn text_painted_with_a_bounding_box_gradient_takes_its_fallback_and_is_named() {
+    let stops = "<stop offset=\"0\" stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/>";
+    let scene = page(&format!(
+        "<linearGradient id=\"g\">{stops}</linearGradient>\
+         <text x=\"10\" y=\"50\" fill=\"url(#g) #00ff00\">Hi</text>"
+    ));
+    let [Node::Text { fill, .. }] = &scene.nodes[..] else {
+        panic!("one run: {:?}", scene.nodes);
+    };
+    assert_eq!(*fill, Paint::Solid(rgb(0, 255, 0)), "the fallback");
+    assert_eq!(scene.warnings, [Warning::TextBoxUnmeasured]);
+
+    let scene = page(&format!(
+        "<linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x2=\"100\">{stops}\
+         </linearGradient><text x=\"10\" y=\"50\" fill=\"url(#g) #00ff00\">Hi</text>"
+    ));
+    let [Node::Text { fill, .. }] = &scene.nodes[..] else {
+        panic!("one run: {:?}", scene.nodes);
+    };
+    assert!(matches!(fill, Paint::Linear { .. }), "{fill:?}");
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
+}
+
 /// Every point an outline visits.
 fn bounds(outline: &tinker_pdf_svg::path::Outline) -> [f64; 4] {
     use tinker_pdf_svg::path::Segment;

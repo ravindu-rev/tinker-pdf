@@ -105,6 +105,14 @@ pub struct Resolved {
     pub paint: Paint,
 }
 
+/// Whether resolving the gradient at `at` needs the painted element's box:
+/// its `gradientUnits`, along the `xlink:href` chain, are §13.2.3's initial
+/// `objectBoundingBox`.
+#[must_use]
+pub fn measures_box(tree: &Tree, at: usize) -> bool {
+    along(tree, &chain(tree, at), "gradientUnits") != Some("userSpaceOnUse")
+}
+
 /// Resolves a `<linearGradient>` or `<radialGradient>` into a [`Paint`].
 ///
 /// `matrix` is the referencing element's own matrix into the scene, and
@@ -328,6 +336,17 @@ pub fn clip_holds_text(tree: &Tree, name: &str) -> bool {
     })
 }
 
+/// Whether the `<clipPath>` a reference names is in `objectBoundingBox` units,
+/// so that resolving it needs the clipped element's box.
+#[must_use]
+pub fn clip_measures_box(tree: &Tree, name: &str) -> bool {
+    tree.by_id(name)
+        .map(|at| &tree.nodes[at])
+        .filter(|node| node.is_svg() && node.name == "clipPath")
+        .and_then(|node| node.attr("clipPathUnits"))
+        .is_some_and(|units| units.trim() == "objectBoundingBox")
+}
+
 /// The SVG element a `<use>` names, if any.
 fn use_target(tree: &Tree, node: &Node) -> Option<usize> {
     node.href()
@@ -480,8 +499,16 @@ pub fn clip(
 /// the container's own matrix — brings every point back into the container's
 /// user space, which is what `objectBoundingBox` on a `<g>` is a fraction of.
 /// Text is not measured: its extent is a font metric this crate does not have
-/// (ruling 8), so a group of text alone has the empty box and a bounding-box
-/// clip or mask on it is the zero-area answer §13.2.3 gives one.
+/// (ruling 8), so a group of text alone has the empty box. That is **not**
+/// §13.2.3's zero-area answer — the text has an extent, this crate cannot
+/// take it — so a caller asks [`nodes_hold_text`] as well, and a
+/// bounding-box mask, clip or paint on text is not resolved against nothing
+/// but named (`Warning::TextBoxUnmeasured`).
+///
+/// Markers are not in §7.11's box either, and a container's nodes do not say
+/// which of them a marker drew: a group holding a marked path measures the
+/// markers with it. A shape's own `mask` or text-holding `clip-path` is
+/// measured from the shape's geometry alone, where the walk has it.
 #[must_use]
 pub fn nodes_bounds(nodes: &[crate::Node], inverse: [f64; 6]) -> [f64; 4] {
     let mut points: Vec<[f64; 2]> = Vec::new();
@@ -504,6 +531,17 @@ pub fn nodes_bounds(nodes: &[crate::Node], inverse: [f64; 6]) -> [f64; 4] {
     } else {
         [0.0, 0.0, 0.0, 0.0]
     }
+}
+
+/// Whether a list of nodes draws text that [`nodes_bounds`] left out of its
+/// box — at any depth of group, as the box itself is gathered.
+#[must_use]
+pub fn nodes_hold_text(nodes: &[crate::Node]) -> bool {
+    nodes.iter().any(|node| match node {
+        crate::Node::Text { .. } => true,
+        crate::Node::Group { nodes, .. } => nodes_hold_text(nodes),
+        crate::Node::Path { .. } | crate::Node::Image { .. } => false,
+    })
 }
 
 /// Every point a list of nodes visits, in the scene's space.
