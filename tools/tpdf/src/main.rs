@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tinker_pdf::{
-    Bitmap, CosDocument, Dict, Document, FontPolicy, LadderLevel, ObjRef, Object, Page,
-    RenderOptions, Sanitise, SimpleFontProvider, StreamObj, StructureTree, TextFormat, TextWriter,
-    Tier, WriteMode, WriteOptions, XrefEntry,
+    BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, LadderLevel, ObjRef, Object,
+    Page, RenderOptions, Sanitise, SimpleFontProvider, StreamObj, StructureTree, TextFormat,
+    TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -43,7 +43,7 @@ usage:
   tpdf check   <file.pdf>... [--strict] [--pdfa]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
 
-writing (each takes --font-policy subset|keep, and writes a new file):
+writing (each writes a new file, and takes --font-policy and the image flags):
   tpdf merge    <a.pdf> <b.pdf>... --out FILE
   tpdf split    <file.pdf> --out DIR [--pages LIST]
   tpdf rotate   <file.pdf> --by DEGREES --out FILE [--page N | --pages LIST]
@@ -84,6 +84,18 @@ writing options:
   --font-policy subset|keep
                what happens to embedded font programs on the way out: cut to
                the glyphs the document still draws (the default), or kept
+  --images keep|flate|jpeg
+               how images of more than one bit are coded on the way out; with
+               none of --images, --bilevel and --max-ppi every image is
+               written as the file stored it (the default)
+  --jpeg-tables FILE
+               with --images jpeg, the quantisation tables: 128 bytes, the
+               luminance table then the chrominance one, natural order
+  --jpeg-subsampled
+               with --images jpeg, 4:2:0 chrominance rather than 4:4:4
+  --bilevel keep|flate|g4|jbig2
+               how one-bit images are coded on the way out
+  --max-ppi N  no placement of an image finer than N pixels an inch
   --by DEGREES with rotate, a multiple of 90, clockwise, on top of the turn
                each page already has
   --owner-password O
@@ -183,7 +195,11 @@ subsets the embedded fonts by default as the library does: a program cut down
 to the glyphs the document still draws no longer carries the outlines of the
 ones it does not. What the pass did is printed with every file written, and a
 program it left whole is named with the reason, because that program still
-carries every outline it had.
+carries every outline it had. The image flags are the library's image policy
+on the same door, off unless one is given: a coding per kind of image and a
+resolution, each image recoded or named with why it was left as stored. JPEG
+codes with the tables `--jpeg-tables` names, because the library takes the
+caller's and this tool chooses none.
 
 Every one of them writes the whole file afresh, never an update appended to
 the old bytes: an update keeps the original as its prefix, so the pages a
@@ -320,6 +336,20 @@ struct Options {
     /// `--javascript`, `--actions`, `--embedded-files` and `--metadata`, for
     /// `sanitise`; none of them means all four.
     sanitise: Sanitise,
+    /// `--images`, for every writing command: how a continuous-tone image is
+    /// coded on the way out. With `--bilevel` and `--max-ppi`, the image
+    /// policy; none of the three is the facade's default, keep every image.
+    images: Option<writing::Continuous>,
+    /// `--bilevel`: how a one-bit image is coded on the way out.
+    bilevel: Option<BilevelCodec>,
+    /// `--max-ppi N`: the finest resolution any placement of an image is left
+    /// at.
+    max_ppi: Option<f64>,
+    /// `--jpeg-tables FILE`, with `--images jpeg`: the caller's quantisation
+    /// tables, 64 luminance bytes and then 64 chrominance, natural order.
+    jpeg_tables: Option<String>,
+    /// `--jpeg-subsampled`, with `--images jpeg`: 4:2:0 chrominance.
+    jpeg_subsampled: bool,
 }
 
 /// `--pages 1-3,5` as inclusive 0-based ranges, in the order given.
@@ -382,6 +412,11 @@ impl Options {
             stamp_page: 0,
             under: false,
             sanitise: Sanitise::default(),
+            images: None,
+            bilevel: None,
+            max_ppi: None,
+            jpeg_tables: None,
+            jpeg_subsampled: false,
         };
 
         let mut index = 0;
@@ -516,6 +551,51 @@ impl Options {
                 "--actions" => options.sanitise.actions = true,
                 "--embedded-files" => options.sanitise.embedded_files = true,
                 "--metadata" => options.sanitise.metadata = true,
+                // The codings `ContinuousCodec` and `BilevelCodec` have, by
+                // their names, and refused otherwise for `--font-policy`'s
+                // reason.
+                "--images" => {
+                    let raw = value()?;
+                    options.images = Some(match raw.as_str() {
+                        "keep" => writing::Continuous::Keep,
+                        "flate" => writing::Continuous::Flate,
+                        "jpeg" => writing::Continuous::Jpeg,
+                        _ => {
+                            return Err(format!(
+                                "`--images {raw}`: the codings are `keep`, `flate` and `jpeg`"
+                            ))
+                        }
+                    });
+                }
+                "--bilevel" => {
+                    let raw = value()?;
+                    options.bilevel = Some(match raw.as_str() {
+                        "keep" => BilevelCodec::Keep,
+                        "flate" => BilevelCodec::Flate,
+                        "g4" => BilevelCodec::CcittG4,
+                        "jbig2" => BilevelCodec::Jbig2Generic,
+                        _ => {
+                            return Err(format!(
+                            "`--bilevel {raw}`: the codings are `keep`, `flate`, `g4` and `jbig2`"
+                        ))
+                        }
+                    });
+                }
+                // The facade resamples nothing for a value that is not a
+                // finite positive number; a person who typed one asked for
+                // something, so it is refused here rather than ignored there.
+                "--max-ppi" => {
+                    let raw = value()?;
+                    let ppi: f64 = raw
+                        .parse()
+                        .map_err(|_| format!("`--max-ppi {raw}` is not a number"))?;
+                    if !ppi.is_finite() || ppi <= 0.0 {
+                        return Err(format!("`--max-ppi {raw}` is not a resolution"));
+                    }
+                    options.max_ppi = Some(ppi);
+                }
+                "--jpeg-tables" => options.jpeg_tables = Some(value()?),
+                "--jpeg-subsampled" => options.jpeg_subsampled = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }

@@ -17,6 +17,10 @@
 //! named with its reason, because a subsetting pass that left one face whole
 //! left every outline in it in the file (ruling 10).
 //!
+//! The same door carries the image policy, and so every command takes that
+//! too — `--images`, `--bilevel` and `--max-ppi`, [`image_policy`] — off
+//! unless one is given, as the facade's [`ImagePolicy::Keep`] is.
+//!
 //! What each command prints is built rather than printed, so a test can hold
 //! it; and each test reopens what was written through the facade and asks it,
 //! rather than spawning this binary (ruling 13, `cargo xtask oracles`).
@@ -64,7 +68,8 @@ use std::path::Path;
 
 use tinker_pdf::write::{save, SaveOptions};
 use tinker_pdf::{
-    Document, DocumentEditor, EmbeddedFile, Encryption, EntryHolder, PathStep, Removal, Sanitise,
+    BilevelCodec, ContinuousCodec, Document, DocumentEditor, EmbeddedFile, Encryption, EntryHolder,
+    ImageOutcome, ImagePolicy, ImageRecoding, JpegTables, PathStep, Removal, Sanitise,
     StampPlacement, SubsetOutcome, WriteMode, WriteOptions,
 };
 
@@ -81,6 +86,18 @@ use crate::{open, Options};
 const SYSTEM_ENTROPY: Option<&str> = Some("/dev/urandom");
 #[cfg(not(unix))]
 const SYSTEM_ENTROPY: Option<&str> = None;
+
+/// `--images`: [`ContinuousCodec`]'s three codings by name, before
+/// `--jpeg-tables` has been read for the third.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Continuous {
+    /// [`ContinuousCodec::Keep`].
+    Keep,
+    /// [`ContinuousCodec::Flate`].
+    Flate,
+    /// [`ContinuousCodec::Jpeg`], with the tables `--jpeg-tables` names.
+    Jpeg,
+}
 
 /// Prints what a writing command reports, unless `--quiet` asked for
 /// failures only.
@@ -431,8 +448,8 @@ fn rewrite() -> WriteOptions {
     }
 }
 
-/// Saves through the facade's door with the font policy asked for, writes
-/// the file, and says what was written and what happened to the fonts.
+/// Saves through the facade's door with the font and image policies asked
+/// for, writes the file, and says what was written and what each pass did.
 fn save_to(
     options: &Options,
     editor: &mut DocumentEditor,
@@ -444,7 +461,7 @@ fn save_to(
         &SaveOptions {
             write,
             fonts: options.font_policy,
-            ..SaveOptions::default()
+            images: image_policy(options)?,
         },
     );
     std::fs::write(out, &saved.bytes).map_err(|e| format!("writing {out}: {e}"))?;
@@ -454,7 +471,107 @@ fn save_to(
         saved.bytes.len()
     )];
     lines.extend(font_lines(&saved.fonts));
+    lines.extend(image_lines(&saved.images));
     Ok(lines)
+}
+
+/// `--images`, `--bilevel` and `--max-ppi` as the facade's [`ImagePolicy`]:
+/// [`ImagePolicy::Keep`], its default, when none of the three is given, and
+/// otherwise a recoding whose unnamed kind is kept as stored.
+///
+/// `--images jpeg` needs `--jpeg-tables`: the facade codes with the caller's
+/// quantisation tables and has no quality setting, and a table this command
+/// chose would be a default of its own (ruling 11). A table the encoder will
+/// not take — a zero entry — is the facade's to refuse, image by image, in
+/// the report.
+fn image_policy(options: &Options) -> Result<ImagePolicy, String> {
+    let jpeg = options.images == Some(Continuous::Jpeg);
+    if !jpeg && (options.jpeg_tables.is_some() || options.jpeg_subsampled) {
+        return Err("--jpeg-tables and --jpeg-subsampled are for --images jpeg".to_string());
+    }
+    if options.images.is_none() && options.bilevel.is_none() && options.max_ppi.is_none() {
+        return Ok(ImagePolicy::Keep);
+    }
+    let continuous = match options.images {
+        None | Some(Continuous::Keep) => ContinuousCodec::Keep,
+        Some(Continuous::Flate) => ContinuousCodec::Flate,
+        Some(Continuous::Jpeg) => ContinuousCodec::Jpeg(jpeg_tables(options)?),
+    };
+    let recoding = ImageRecoding::new(continuous, options.bilevel.unwrap_or(BilevelCodec::Keep));
+    Ok(ImagePolicy::Recode(match options.max_ppi {
+        Some(ppi) => recoding.with_max_ppi(ppi),
+        None => recoding,
+    }))
+}
+
+/// `--jpeg-tables FILE`: exactly 128 bytes, the luminance table and then the
+/// chrominance one, each in natural row-major order as [`JpegTables`] takes
+/// them.
+fn jpeg_tables(options: &Options) -> Result<JpegTables, String> {
+    let path = options.jpeg_tables.as_deref().ok_or_else(|| {
+        "--images jpeg needs --jpeg-tables FILE: the facade codes with the caller's \
+         quantisation tables, and this command chooses none"
+            .to_string()
+    })?;
+    let bytes = std::fs::read(path).map_err(|e| format!("--jpeg-tables {path}: {e}"))?;
+    let (Some(luminance), Some(chrominance), 128) = (
+        bytes.get(..64).and_then(|t| <[u8; 64]>::try_from(t).ok()),
+        bytes
+            .get(64..128)
+            .and_then(|t| <[u8; 64]>::try_from(t).ok()),
+        bytes.len(),
+    ) else {
+        return Err(format!(
+            "--jpeg-tables {path}: {} bytes, where two tables of 64 are 128",
+            bytes.len()
+        ));
+    };
+    Ok(JpegTables {
+        luminance,
+        chrominance,
+        subsampled: options.jpeg_subsampled,
+    })
+}
+
+/// What the image pass did: nothing to say when it did not run, and
+/// otherwise a line for the totals and one for each image, recoded or left
+/// as stored with the facade's reason (ruling 10).
+fn image_lines(outcome: &ImageOutcome) -> Vec<String> {
+    let Some(report) = outcome.report() else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "  images: {} recoded, {} left as stored; {} bytes of image before, {} after",
+        report.recoded.len(),
+        report.untouched.len(),
+        report.bytes_before(),
+        report.bytes_after()
+    )];
+    for done in &report.recoded {
+        let mut line = format!(
+            "  images: image {} {} R recoded as {:?}, {}x{} to {}x{}, {} bytes to {}",
+            done.image.num,
+            done.image.gen,
+            done.coding,
+            done.size.0,
+            done.size.1,
+            done.resized.0,
+            done.resized.1,
+            done.before,
+            done.after
+        );
+        if let Some(why) = &done.resolution_kept {
+            line.push_str(&format!("; its resolution kept: {why}"));
+        }
+        lines.push(line);
+    }
+    for whole in &report.untouched {
+        lines.push(format!("  images: {whole}"));
+    }
+    if matches!(outcome, ImageOutcome::RecodedButTheOriginalsRemain(_)) {
+        lines.push("  images: the original streams are still in the file".to_string());
+    }
+    lines
 }
 
 /// What the font pass did, a line for the totals and one for each program it
@@ -1511,6 +1628,200 @@ mod tests {
             (sanitise(&bare), "sanitise needs --out FILE"),
         ] {
             assert_eq!(refused.err().as_deref(), Some(why));
+        }
+    }
+
+    /// A 64 by 64 RGB image of 8 by 8 flat blocks and a 64 by 64 one-bit
+    /// image, half black, each stored unfiltered and drawn at 64 points
+    /// square — 72 pixels an inch — so every coding and a halving of the
+    /// resolution has something to make smaller.
+    fn two_images() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let rgb: Vec<u8> = (0..64u32 * 64)
+            .flat_map(|i| {
+                let (x, y) = ((i % 64 / 8) as u8, (i / 64 / 8) as u8);
+                [x * 32, y * 32, 128]
+            })
+            .collect();
+        let bits: Vec<u8> = (0..64 * 8)
+            .map(|i| if i % 8 < 4 { 0x00 } else { 0xFF })
+            .collect();
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_image(
+            b"Im0",
+            &ImageData::Rgb8 {
+                width: 64,
+                height: 64,
+                data: &rgb,
+            }
+        ));
+        assert!(builder.add_image(
+            b"Im1",
+            &ImageData::Compressed(tinker_pdf::CompressedImage {
+                width: 64,
+                height: 64,
+                bits_per_component: 1,
+                color_space: tinker_pdf::ImageColorSpace::DeviceGray,
+                filter: None,
+                data: &bits,
+                color_key_mask: None,
+                soft_mask: None,
+            })
+        ));
+        builder.add_page(200.0, 100.0, |page| {
+            page.image(b"Im0", 0.0, 0.0, 64.0, 64.0);
+            page.image(b"Im1", 100.0, 0.0, 64.0, 64.0);
+        });
+        (builder.finish(), rgb, bits)
+    }
+
+    /// Each image XObject's `/Filter` name, in object order, empty for none.
+    fn image_filters(doc: &Document) -> Vec<String> {
+        let cos = doc.cos();
+        let (subtype, image, filter) = (
+            cos.intern(b"Subtype"),
+            cos.intern(b"Image"),
+            cos.intern(b"Filter"),
+        );
+        objects(doc)
+            .iter()
+            .filter_map(|(_, object)| match object.as_ref() {
+                Object::Stream(stream) if stream.dict.get_name(subtype) == Some(image) => Some(
+                    stream
+                        .dict
+                        .get_name(filter)
+                        .map_or_else(String::new, |name| {
+                            String::from_utf8_lossy(&cos.name_bytes(name).unwrap_or_default())
+                                .into_owned()
+                        }),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The image policy is on the shared save path, so every writer takes it;
+    /// none of its flags is the facade's default, every image as stored.
+    #[test]
+    fn the_image_policy_recodes_and_resamples_when_asked_and_keeps_otherwise() {
+        let dir = scratch("images");
+        let (bytes, rgb, bits) = two_images();
+        let source = write(&dir, "images.pdf", &bytes);
+        assert_eq!(image_filters(&reopen(&source, None)), vec!["", ""]);
+
+        let kept = format!("{dir}/kept.pdf");
+        let lines = merge(&parse(&[&source, "--out", &kept])).expect("merges");
+        assert!(lines.iter().all(|l| !l.contains("images:")), "{lines:?}");
+        assert_eq!(image_filters(&reopen(&kept, None)), vec!["", ""]);
+
+        let coded = format!("{dir}/coded.pdf");
+        let lines = merge(&parse(&[
+            &source,
+            "--images",
+            "flate",
+            "--bilevel",
+            "g4",
+            "--out",
+            &coded,
+        ]))
+        .expect("merges");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("  images: 2 recoded, 0 left")),
+            "{lines:?}"
+        );
+        let doc = reopen(&coded, None);
+        assert_eq!(image_filters(&doc), vec!["FlateDecode", "CCITTFaxDecode"]);
+        let drawn = doc.page(0).expect("page").images();
+        assert_eq!(drawn[0].samples, rgb, "deflate is lossless");
+        assert_eq!(drawn[1].samples, bits, "and so is G4");
+        assert_clean(&doc, "the recoded file");
+
+        let halved = format!("{dir}/halved.pdf");
+        let lines = rotate(&parse(&[
+            &source,
+            "--by",
+            "0",
+            "--max-ppi",
+            "36",
+            "--out",
+            &halved,
+        ]))
+        .expect("rotates");
+        let drawn = reopen(&halved, None).page(0).expect("page").images();
+        assert_eq!((drawn[0].width, drawn[0].height), (32, 32), "72 ppi to 36");
+        assert_eq!(
+            (drawn[1].width, drawn[1].height),
+            (64, 64),
+            "one bit is not box-filtered: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(
+                |l| l.ends_with("left as stored (512 bytes): one bit: a box filter makes grey")
+            ),
+            "{lines:?}"
+        );
+
+        let ones = write(&dir, "ones", &[1u8; 128]);
+        let jpeg = format!("{dir}/jpeg.pdf");
+        merge(&parse(&[
+            &source,
+            "--images",
+            "jpeg",
+            "--jpeg-tables",
+            &ones,
+            "--out",
+            &jpeg,
+        ]))
+        .expect("merges");
+        assert_eq!(image_filters(&reopen(&jpeg, None)), vec!["DCTDecode", ""]);
+
+        let short = write(&dir, "short", &[1u8; 100]);
+        for (args, why) in [
+            (
+                vec![source.as_str(), "--images", "jpeg", "--out", &jpeg],
+                "--images jpeg needs --jpeg-tables FILE",
+            ),
+            (
+                vec![source.as_str(), "--jpeg-tables", &ones, "--out", &jpeg],
+                "--jpeg-tables and --jpeg-subsampled are for --images jpeg",
+            ),
+            (
+                vec![
+                    source.as_str(),
+                    "--images",
+                    "jpeg",
+                    "--jpeg-tables",
+                    &short,
+                    "--out",
+                    &jpeg,
+                ],
+                "--jpeg-tables",
+            ),
+        ] {
+            assert!(
+                merge(&parse(&args))
+                    .err()
+                    .is_some_and(|e| e.starts_with(why)),
+                "{args:?}"
+            );
+        }
+        for (flag, raw, why) in [
+            ("--max-ppi", "0", "`--max-ppi 0` is not a resolution"),
+            ("--max-ppi", "fine", "`--max-ppi fine` is not a number"),
+            (
+                "--images",
+                "png",
+                "`--images png`: the codings are `keep`, `flate` and `jpeg`",
+            ),
+            (
+                "--bilevel",
+                "g3",
+                "`--bilevel g3`: the codings are `keep`, `flate`, `g4` and `jbig2`",
+            ),
+        ] {
+            let args = strings(&[&source, flag, raw]);
+            assert_eq!(Options::parse(&args).err().as_deref(), Some(why));
         }
     }
 }

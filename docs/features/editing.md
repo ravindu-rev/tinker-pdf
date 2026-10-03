@@ -665,7 +665,8 @@ and then `stamp` per page, `sanitise` is `sanitise` with the flags as the
 `decrypt` change only `WriteOptions::encryption`. Every one saves through
 `write::save` as a rewrite and takes `--font-policy subset|keep`, defaulting
 to the facade's subset and printing the report above, a program left whole
-named with its reason. `split` sets `garbage_collect` and `merge`
+named with its reason; the image policy is there too, off unless asked
+([writing](writing.md)). `split` sets `garbage_collect` and `merge`
 `deduplicate_streams`, the options `keep_pages`' and `import_page`'s own
 documentation pair them with.
 

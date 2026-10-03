@@ -326,6 +326,14 @@ decode to and a quantiser's error is scaled by `(Dmax - Dmin) / 255`, never
 amplified. Inline images (8.9.7) live in content streams and are not
 touched.
 
+From the command line, every `tpdf` command that writes takes the policy:
+`--images keep|flate|jpeg` for the continuous kind, `--bilevel
+keep|flate|g4|jbig2` for the one-bit kind, and `--max-ppi N`, none of them
+meaning `ImagePolicy::Keep`. `--images jpeg` needs `--jpeg-tables FILE`, the
+two tables as 128 bytes in natural order, because this door takes the
+caller's tables and the CLI chooses none (ruling 11); the report is printed an
+image a line.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
