@@ -842,15 +842,25 @@ fn every_staged_colour_rule_is_named_with_its_clause_and_its_reason() {
 /// that need it do not fire — in **either** direction.
 ///
 /// The document below paints in `DeviceCMYK` under an intent whose profile is
-/// twelve bytes of rubbish. A build that guessed would report it; a build that
-/// treated an unreadable profile as absent would report it too, under the
-/// other kind. Neither happens, and that is what "staged, not guessed" means
-/// when you can see it.
+/// a well-formed ICC header — an output-class CMYK profile, version 2.1 —
+/// with no tags behind it, which the transform builder cannot read. A build
+/// that guessed would report it; a build that treated an unreadable profile
+/// as absent would report it too, under the other kind. Neither happens, and
+/// that is what "staged, not guessed" means when you can see it.
+///
+/// The profile was thirteen bytes of rubbish until the header rule landed,
+/// and thirteen bytes are a finding now in their own right
+/// (`a_destination_profile_header_the_clause_does_not_admit_is_a_finding`);
+/// a header with nothing behind it keeps this test about what it was about.
 #[test]
 fn an_unreadable_destination_profile_makes_the_intents_space_unknown() {
     let mut fixture = conforming();
     fixture.content = "0 0 0 1 k 10 10 50 50 re f".to_string();
-    fixture.profile = Some(b"not a profile".to_vec());
+    fixture.profile = Some(header_only(2, b"prtr", b"CMYK"));
+    assert!(
+        tinker_pdf_color::icc::Profile::parse(&header_only(2, b"prtr", b"CMYK")).is_err(),
+        "the fixture is only about an unreadable profile if it is one"
+    );
     assert_eq!(
         fixture.findings(),
         Vec::<FindingKind>::new(),
@@ -1165,5 +1175,102 @@ fn an_undefined_operator_in_a_form_names_the_form() {
                 operator: "zzz".to_string()
             }
         )]
+    );
+}
+
+// ---- 6.2.2 / 6.2.3 and 6.2.3.2 / 6.2.4.2: a profile's own header ------------
+
+/// An ICC profile that is a 128-byte header and an empty tag table: version
+/// `major.1`, device class `class`, data colour space `space`, PCS `Lab `,
+/// and the `acsp` signature where ICC.1 puts it.
+fn header_only(major: u8, class: &[u8; 4], space: &[u8; 4]) -> Vec<u8> {
+    let mut profile = vec![0u8; 132];
+    profile[0..4].copy_from_slice(&132u32.to_be_bytes());
+    profile[8] = major;
+    profile[9] = 0x10;
+    profile[12..16].copy_from_slice(class);
+    profile[16..20].copy_from_slice(space);
+    profile[20..24].copy_from_slice(b"Lab ");
+    profile[36..40].copy_from_slice(b"acsp");
+    profile
+}
+
+/// Every finding as `(clause, kind)`.
+fn by_clause(fixture: &Fixture) -> Vec<(String, FindingKind)> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| (finding.clause.0, finding.kind))
+        .collect()
+}
+
+fn header(field: &str, found: &str) -> FindingKind {
+    FindingKind::IccProfileHeader {
+        field: field.to_string(),
+        found: found.to_string(),
+    }
+}
+
+/// ISO 19005-2 6.2.3, in veraPDF's statement of rule 6.2.3-1: "The profile
+/// stream that is the value of the DestOutputProfile key shall either be an
+/// output profile (Device Class = "prtr") or a monitor profile (Device Class
+/// = "mntr"). The profiles shall have a colour space of either "GRAY", "RGB",
+/// or "CMYK"" — and its test condition bounds the version below 5.0, and part
+/// 1's (6.2.2-1) below 3.0. Each of the three is read from the header and
+/// nothing else, so a profile the transform builder refuses is judged all
+/// the same.
+#[test]
+fn a_destination_profile_header_the_clause_does_not_admit_is_a_finding() {
+    let with = |part: &str, profile: Vec<u8>| {
+        let mut fixture = Fixture::new(part, Some("B"));
+        fixture.content = "0 g 10 10 50 50 re f".to_string();
+        fixture.profile = Some(profile);
+        by_clause(&fixture)
+    };
+    assert_eq!(
+        with("2", header_only(2, b"scnr", b"GRAY")),
+        [("6.2.3".to_string(), header("device class", "scnr"))]
+    );
+    assert_eq!(
+        with("2", header_only(2, b"prtr", b"Lab ")),
+        [("6.2.3".to_string(), header("colour space", "Lab "))]
+    );
+    assert_eq!(
+        with("2", header_only(5, b"mntr", b"GRAY")),
+        [("6.2.3".to_string(), header("version", "5.1"))]
+    );
+    // Version 4 is below part 2's bound and above part 1's.
+    assert_eq!(with("2", header_only(4, b"mntr", b"GRAY")), []);
+    assert_eq!(
+        with("1", header_only(4, b"mntr", b"GRAY")),
+        [("6.2.2".to_string(), header("version", "4.1"))]
+    );
+    // Thirteen bytes say nothing a header must, which is a finding by itself.
+    assert_eq!(
+        with("2", b"not a profile".to_vec()),
+        [("6.2.3".to_string(), header("header", "13 bytes"))]
+    );
+}
+
+/// ISO 19005-2 6.2.4.2 for an `ICCBased` colour space's profile: the input
+/// and colour-space classes are admitted too (`scnr`, `spac`), and `Lab ` is
+/// a colour space it may have, which the destination profile may not — the
+/// test conditions of veraPDF's 6.2.3.2-1 and 6.2.4.2-1. An abstract profile
+/// (`abst`) is not.
+#[test]
+fn an_icc_based_profile_header_is_judged_against_its_own_list() {
+    let with = |profile: Vec<u8>| {
+        let mut fixture = conforming();
+        fixture.resources = "<< /ColorSpace << /Cs [/ICCBased 7 0 R] >> >>".to_string();
+        fixture.content = "/Cs cs 0.5 sc 10 10 50 50 re f".to_string();
+        fixture.extra.push((7, stream("/N 1", &profile)));
+        by_clause(&fixture)
+    };
+    assert_eq!(with(header_only(2, b"scnr", b"GRAY")), []);
+    assert_eq!(
+        with(header_only(2, b"abst", b"GRAY")),
+        [("6.2.4.2".to_string(), header("device class", "abst"))]
     );
 }

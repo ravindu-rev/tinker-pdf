@@ -73,9 +73,13 @@ never happens.
   The PDF/UA validator runs this group for a PDF/UA claim
   ([features/pdfua.md](pdfua.md)).
 - **Colour** needs `tinker-pdf-color`'s ICC reader and the same walk: the
-  output intent's shape, device colour spaces against the destination
-  profile's own colour space, an `ICCBased` stream's `/N` against its
-  profile's channel count, the four rendering intents, part 1's outright
+  output intent's shape, the destination profile's header (version below
+  3.0 under part 1 and 5.0 after, an output or monitor class, a grey, RGB or
+  CMYK space — read at its fixed offsets, so a profile the transform builder
+  refuses is still judged), device colour spaces against that profile's own
+  colour space, an `ICCBased` stream's `/N` against its profile's channel
+  count and its header against the wider list `ICCBased` admits, the four
+  rendering intents, part 1's outright
   prohibition on transparency, and the graphics clause's operator list
   (6.2.10 / 6.2.2): an operator outside ISO 32000-1 Table A.1's seventy-three
   — `PS` among them — is a finding inside `BX`/`EX` or not, naming the page,

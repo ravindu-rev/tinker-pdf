@@ -659,9 +659,11 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.2.2",
-        rule: "the destination profile's own conformance: its ICC version, \
-               its device class, and whether it is a well-formed profile at \
-               all",
+        rule: "the destination profile's own conformance past its header: \
+               whether its tag table, its required tags and their types are \
+               a well-formed profile of the ICC revision its version names \
+               (the version, the device class and the data colour space are \
+               read from the header and run)",
         because: "tinker-pdf-color's icc::Profile::parse is a transform \
                   builder, not a validator. It refuses a profile it cannot \
                   build a transform from - a v4 profile whose only route to \
@@ -1619,6 +1621,17 @@ pub enum FindingKind {
         /// What the `/RoleMap` made of it, which equals `declared` when the
         /// role map does not mention it.
         mapped: String,
+    },
+    /// An ICC profile whose header says it is not a profile the clause
+    /// admits: its version, its device class or its data colour space (the
+    /// output intent's 6.2.2 / 6.2.3; an `ICCBased` space's 6.2.3.2 /
+    /// 6.2.4.2), or a header too short to say.
+    IccProfileHeader {
+        /// `version`, `device class`, `colour space`, or `header` when the
+        /// profile is shorter than the twenty bytes those three occupy.
+        field: String,
+        /// What the header says, as text: `4.2`, `scnr`, `Lab `.
+        found: String,
     },
     /// A content stream using an operator ISO 32000 does not define, inside
     /// `BX`/`EX` or not (6.2.10 / 6.2.2).

@@ -115,7 +115,7 @@ pub(super) fn rules(
     if part == Some(Part::One) {
         annotation_colours(doc, &destination, out);
     }
-    icc_spaces(doc, &used, out);
+    icc_spaces(doc, &used, part, out);
     rendering_intents(&used, out);
     xobject_entries(doc, &used, out);
     transfer_functions(doc, &used, out);
@@ -253,6 +253,15 @@ fn output_intents(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) -> 
             continue;
         };
         profiles.insert(profile_ref);
+        if let Ok(bytes) = doc.stream_decoded(profile_ref) {
+            for (field, found) in header_defects(&bytes, OUTPUT_CLASSES, OUTPUT_SPACES, part) {
+                out.push(Raw {
+                    rule: clauses::OUTPUT_INTENT,
+                    object: Some(profile_ref),
+                    kind: FindingKind::IccProfileHeader { field, found },
+                });
+            }
+        }
         destination = profile_space(doc, profile_ref);
     }
 
@@ -281,6 +290,67 @@ fn output_intents(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) -> 
     }
 
     destination
+}
+
+/// The device classes a destination profile may declare: output and monitor.
+const OUTPUT_CLASSES: &[&[u8; 4]] = &[b"prtr", b"mntr"];
+
+/// The data colour spaces a destination profile may declare.
+const OUTPUT_SPACES: &[&[u8; 4]] = &[b"RGB ", b"CMYK", b"GRAY"];
+
+/// The device classes an `ICCBased` colour space's profile may declare: input
+/// and colour-space conversion as well.
+const ICC_BASED_CLASSES: &[&[u8; 4]] = &[b"prtr", b"mntr", b"scnr", b"spac"];
+
+/// The data colour spaces an `ICCBased` colour space's profile may declare.
+const ICC_BASED_SPACES: &[&[u8; 4]] = &[b"RGB ", b"CMYK", b"GRAY", b"Lab "];
+
+/// What a profile's header says that the clause does not admit, as
+/// `(field, found)`.
+///
+/// **The header, and only the header.** `PDFA_STAGED` held this rule back
+/// because `icc::Profile::parse` is a transform builder that refuses profiles
+/// which conform perfectly well — a v4 profile whose only route to the
+/// connection space is an `mAB ` tag — so "cannot be parsed" was never "does
+/// not conform". The three things the clause names sit at fixed offsets of
+/// ICC.1's 128-byte header — the version at byte 8, the device class at 12,
+/// the data colour space at 16 — and reading them needs no transform. The
+/// sentences are veraPDF's statements of rules 6.2.2-1 (part 1), 6.2.3-1
+/// (parts 2 to 4) and 6.2.3.2-1 / 6.2.4.2-1 (`ICCBased`), and their test
+/// conditions give the version bound: below 3.0 under part 1, whose
+/// reference is ICC.1:1998-09, and below 5.0 under the later parts.
+fn header_defects(
+    bytes: &[u8],
+    classes: &[&[u8; 4]],
+    spaces: &[&[u8; 4]],
+    part: Option<Part>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let (Some(version), Some(class), Some(space)) =
+        (bytes.get(8..10), bytes.get(12..16), bytes.get(16..20))
+    else {
+        out.push(("header".to_string(), format!("{} bytes", bytes.len())));
+        return out;
+    };
+    let major = version.first().copied().unwrap_or_default();
+    let minor = version.get(1).copied().unwrap_or_default() >> 4;
+    let below = if part == Some(Part::One) { 3 } else { 5 };
+    if major >= below {
+        out.push(("version".to_string(), format!("{major}.{minor}")));
+    }
+    if !classes.iter().any(|admitted| admitted.as_slice() == class) {
+        out.push((
+            "device class".to_string(),
+            String::from_utf8_lossy(class).into_owned(),
+        ));
+    }
+    if !spaces.iter().any(|admitted| admitted.as_slice() == space) {
+        out.push((
+            "colour space".to_string(),
+            String::from_utf8_lossy(space).into_owned(),
+        ));
+    }
+    out
 }
 
 /// The destination profile of a part 4 page-level output intent, if there is
@@ -864,7 +934,7 @@ fn annotation_colours(doc: &CosDocument, destination: &Destination, out: &mut Ve
 /// profile this build cannot read leaves the second half unasked; the first —
 /// `/N` present and one of the three values ISO 32000-1 8.6.5.5 admits — is
 /// asked either way.
-fn icc_spaces(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+fn icc_spaces(doc: &CosDocument, used: &Used, part: Option<Part>, out: &mut Vec<Raw>) {
     for reference in &used.icc_streams {
         let Ok(object) = doc.get(*reference) else {
             continue;
@@ -886,6 +956,13 @@ fn icc_spaces(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
         let Ok(bytes) = doc.stream_decoded(*reference) else {
             continue;
         };
+        for (field, found) in header_defects(&bytes, ICC_BASED_CLASSES, ICC_BASED_SPACES, part) {
+            out.push(Raw {
+                rule: clauses::ICC_SPACES,
+                object: Some(*reference),
+                kind: FindingKind::IccProfileHeader { field, found },
+            });
+        }
         let Ok(profile) = icc::Profile::parse(&bytes) else {
             continue;
         };
