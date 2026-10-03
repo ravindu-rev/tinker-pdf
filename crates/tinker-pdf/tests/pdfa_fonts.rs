@@ -686,7 +686,10 @@ fn composite() -> Fixture {
 /// clean verdict claims.
 #[test]
 fn every_staged_font_rule_is_named_with_its_clause_and_its_reason() {
-    for clause in ["6.3.2", "6.3.3.3", "6.3.6", "6.3.9"] {
+    // `6.3.3` was `6.3.3.3` until the CMap rules ran: what is left of the
+    // composite-font clauses is 6.3.3.1's relationship for a predefined CMap,
+    // and the entry is filed under the clause both sit in.
+    for clause in ["6.3.2", "6.3.3", "6.3.6", "6.3.9"] {
         let found = tinker_pdf::PDFA_STAGED
             .iter()
             .find(|rule| rule.clause == clause)
@@ -713,4 +716,174 @@ impl Fixture {
             extra: self.extra.clone(),
         }
     }
+}
+
+// ---- 6.3.3.1 / 6.3.3.3: the encoding CMap of a composite font ----------------
+//
+// Each sentence is veraPDF's published statement of the rule (wiki at
+// `109b482`): part 1's 6.3.3.1-1, 6.3.3.3-1 and -2, parts 2 and 3's
+// 6.2.11.3.1-1 and 6.2.11.3.3-1 to -3. **Part 1 is stricter in one direction
+// and laxer in two**, and every test below that crosses the parts asserts
+// which.
+
+/// Every finding a full validation reports, as `(clause, kind)`.
+fn clauses_of(fixture: &Fixture) -> Vec<(String, FindingKind)> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| (finding.clause.0, finding.kind))
+        .collect()
+}
+
+/// [`composite`] under `part`, with its `/Encoding` replaced by `encoding`.
+fn composite_in(part: &str, encoding: &str) -> Fixture {
+    let mut fixture = composite();
+    fixture.part = part.to_string();
+    fixture.font = fixture.font.replace("/Identity-H", encoding);
+    fixture
+}
+
+/// A CMap stream, object 11: `dict` in its dictionary, an identity mapping,
+/// and `program_extra` in its program.
+fn embedded_cmap(fixture: &mut Fixture, dict: &str, program_extra: &str) {
+    let program = format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         {program_extra}\n/CMapName /Acme-H def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+         1 begincidrange <0000> <FFFF> 0 endcidrange\n\
+         endcmap CMapName currentdict /CMap defineresource pop end end"
+    );
+    fixture.font = fixture.font.replace("/Identity-H", "11 0 R");
+    fixture.extra.push((
+        11,
+        stream(
+            &format!("/Type /CMap /CMapName /Acme-H {dict}"),
+            program.as_bytes(),
+        ),
+    ));
+}
+
+const IDENTITY: &str = "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>";
+
+/// 6.3.3.3-1, part 1: "All CMaps used within a conforming file, except
+/// Identity-H and Identity-V, shall be embedded" — a predefined CMap of
+/// Table 118 too. Parts 2 and 3 admit Table 118 (6.2.11.3.3-1), so the same
+/// bytes claiming part 2 are the twin; a name nobody predefines is a finding
+/// under both.
+#[test]
+fn a_predefined_cmap_must_be_embedded_under_part_one_only() {
+    let predefined = |part: &str| composite_in(part, "/UniJIS-UCS2-H");
+    assert_eq!(
+        clauses_of(&predefined("1")),
+        [(
+            "6.3.3.3".to_string(),
+            FindingKind::CMapNotEmbedded {
+                name: "UniJIS-UCS2-H".to_string()
+            }
+        )]
+    );
+    assert_eq!(clauses_of(&predefined("2")), []);
+    assert_eq!(
+        clauses_of(&composite_in("2", "/Acme-H")),
+        [(
+            "6.2.11.3.3".to_string(),
+            FindingKind::CMapNotEmbedded {
+                name: "Acme-H".to_string()
+            }
+        )]
+    );
+    // `Identity-H`, the baseline's, is admitted under every part.
+    assert_eq!(clauses_of(&composite_in("1", "/Identity-H")), []);
+}
+
+/// 6.3.3.3-2 / 6.2.11.3.3-2: an embedded CMap's dictionary `/WMode` is
+/// identical to its program's. The twin writes 1 in both.
+#[test]
+fn an_embedded_cmaps_writing_modes_agree() {
+    let mut disagreeing = composite_in("1", "/Identity-H");
+    embedded_cmap(&mut disagreeing, &format!("{IDENTITY} /WMode 1"), "");
+    assert_eq!(
+        clauses_of(&disagreeing),
+        [(
+            "6.3.3.3".to_string(),
+            FindingKind::CMapWritingModeMismatch {
+                dictionary: 1,
+                program: 0
+            }
+        )]
+    );
+    let mut agreeing = composite_in("1", "/Identity-H");
+    embedded_cmap(
+        &mut agreeing,
+        &format!("{IDENTITY} /WMode 1"),
+        "/WMode 1 def",
+    );
+    assert_eq!(clauses_of(&agreeing), []);
+}
+
+/// 6.2.11.3.3-3: "A CMap shall not reference any other CMap except those
+/// listed in … Table 118". Part 1 states no such rule, so the same bytes
+/// claiming part 1 are the twin.
+#[test]
+fn a_cmap_referencing_one_off_the_list_is_a_part_two_finding() {
+    let using = |part: &str| {
+        let mut fixture = composite_in(part, "/Identity-H");
+        embedded_cmap(&mut fixture, &format!("{IDENTITY} /UseCMap /Acme-Base"), "");
+        fixture
+    };
+    assert_eq!(
+        clauses_of(&using("2")),
+        [(
+            "6.2.11.3.3".to_string(),
+            FindingKind::CMapReferenceNotStandard {
+                name: "Acme-Base".to_string()
+            }
+        )]
+    );
+    assert_eq!(clauses_of(&using("1")), []);
+}
+
+/// 6.3.3.1-1 / 6.2.11.3.1-1: the CIDFont's collection is the CMap's.
+/// `/Registry` and `/Ordering` under both readings; `/Supplement` not
+/// exceeding the CMap's only under parts 2 to 4, part 1's sentence having no
+/// word on it — so a newer CIDFont supplement is a part 2 finding and the
+/// part 1 twin.
+#[test]
+fn an_embedded_cmaps_collection_is_the_cidfonts() {
+    let mut other = composite_in("1", "/Identity-H");
+    embedded_cmap(
+        &mut other,
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >>",
+        "",
+    );
+    assert_eq!(
+        clauses_of(&other),
+        [(
+            "6.3.3.1".to_string(),
+            FindingKind::CidSystemInfoMismatch {
+                key: "Ordering".to_string()
+            }
+        )]
+    );
+    let older_cmap = |part: &str| {
+        let mut fixture = composite_in(part, "/Identity-H");
+        // Object 8, the descendant, one supplement ahead of the CMap.
+        fixture.extra[0].1 = String::from_utf8_lossy(&fixture.extra[0].1)
+            .replace("/Supplement 0", "/Supplement 3")
+            .into_bytes();
+        embedded_cmap(&mut fixture, IDENTITY, "");
+        fixture
+    };
+    assert_eq!(
+        clauses_of(&older_cmap("2")),
+        [(
+            "6.2.11.3.1".to_string(),
+            FindingKind::CidSystemInfoMismatch {
+                key: "Supplement".to_string()
+            }
+        )]
+    );
+    assert_eq!(clauses_of(&older_cmap("1")), []);
 }

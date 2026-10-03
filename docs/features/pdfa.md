@@ -60,8 +60,15 @@ never happens.
 - **Fonts** needs `tinker-pdf-font` and the content walk: every font embedded
   including the standard 14, the program's format against the key that names
   it, the subset tag's shape, symbolic and non-symbolic `/Encoding`,
-  `/CIDSystemInfo` and `/CIDToGIDMap`, and the determinable half of the
-  Unicode rule.
+  `/CIDSystemInfo` and `/CIDToGIDMap`, the determinable half of the Unicode
+  rule, and a composite font's **encoding CMap** — embedded unless the part
+  admits its name (part 1 admits only `Identity-H` and `Identity-V`; parts 2
+  to 4 admit Table 118's sixty-one, carried as names and needing none of the
+  `cmap-predefined` tables), its `/WMode` agreeing with its program, no
+  reference to a CMap off that list (parts 2 to 4), and an embedded CMap's
+  character collection the CIDFont's, `/Supplement` included from part 2 on.
+  The PDF/UA validator runs this group for a PDF/UA claim
+  ([features/pdfua.md](pdfua.md)).
 - **Colour** needs `tinker-pdf-color`'s ICC reader and the same walk: the
   output intent's shape, device colour spaces against the destination
   profile's own colour space, an `ICCBased` stream's `/N` against its

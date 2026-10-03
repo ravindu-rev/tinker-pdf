@@ -410,6 +410,23 @@ pub(crate) mod clauses {
         four: "6.2.10.3.2",
     };
 
+    /// Composite fonts: the CIDFont's character collection against its
+    /// CMap's (6.3.3.1 / 6.2.11.3.1 / 6.2.10.3.1, as veraPDF's published
+    /// rules number them).
+    pub(crate) const CID_SYSTEM_INFO: ClauseTable = ClauseTable {
+        one: "6.3.3.1",
+        two_three: "6.2.11.3.1",
+        four: "6.2.10.3.1",
+    };
+
+    /// Composite fonts: the CMap embedded, its `/WMode`, its references
+    /// (6.3.3.3 / 6.2.11.3.3 / 6.2.10.3.3).
+    pub(crate) const CMAPS: ClauseTable = ClauseTable {
+        one: "6.3.3.3",
+        two_three: "6.2.11.3.3",
+        four: "6.2.10.3.3",
+    };
+
     // ---- the colour group (milestone 5) ----------------------------------
 
     /// The output intent (6.2.2 in part 1, 6.2.3 in parts 2 to 4).
@@ -700,16 +717,20 @@ pub const STAGED: &[StagedRule] = &[
                   report conforming files by the hundred",
     },
     StagedRule {
-        clause: "6.3.3.3",
-        rule: "composite fonts: the CMap, its agreement with the CIDFont's \
-               /CIDSystemInfo, and the predefined-CMap list a /Encoding name \
-               must come from",
-        because: "the predefined CMaps are a published table this build \
-                  carries behind the cmap-predefined feature rather than as \
-                  validation data, so a default build and a --no-default-\
-                  features build would disagree about whether a file \
-                  conforms. A conformance verdict that depends on a cargo \
-                  feature is not a verdict",
+        clause: "6.3.3",
+        rule: "composite fonts: a predefined CMap's character collection \
+               against the CIDFont's /CIDSystemInfo, in the parts that let a \
+               file use one unembedded",
+        because: "the rest of the CMap clauses run: a CMap embedded unless the \
+                  part admits its name (only Identity-H and Identity-V under \
+                  part 1, Table 118's sixty-one under parts 2 to 4, the names \
+                  carried as validation data independent of any feature), an \
+                  embedded CMap's /WMode against its program, a reference off \
+                  the list, and an embedded CMap's collection against the \
+                  CIDFont's. A predefined CMap's own collection is in its \
+                  table, which this build carries behind the cmap-predefined \
+                  feature, and a conformance verdict that depended on a cargo \
+                  feature would not be a verdict",
     },
     StagedRule {
         clause: "6.3.2",

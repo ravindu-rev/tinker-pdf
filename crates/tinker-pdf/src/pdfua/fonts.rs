@@ -23,11 +23,12 @@
 //!
 //! # What is new here
 //!
-//! Three rules no ISO 19005 group runs: a composite font's encoding CMap
-//! (embedded unless predefined, its `/WMode` agreeing with its program, no
-//! reference outside Table 118, its collection the CIDFont's —
-//! `crate::pdfa::fonts::cmap_findings`), and the values a drawn code's
-//! `/ToUnicode` maps to.
+//! One rule no ISO 19005 group runs: the values a drawn code's `/ToUnicode`
+//! maps to. The encoding-CMap rules (embedded unless predefined, `/WMode`
+//! agreeing with the program, no reference outside Table 118, the collection
+//! the CIDFont's) arrived here first and are the PDF/A group's now, under
+//! the reading ISO 19005-2 and ISO 14289 share
+//! (`crate::pdfa::fonts::CMapReading::TABLE_118`).
 //!
 //! # Which clause numbers
 //!
@@ -38,7 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tinker_pdf_content::Token;
-use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object};
+use tinker_pdf_cos::{CosDocument, ObjRef, Object};
 
 use super::{clauses, UaClauses, UaPart, UaRaw};
 use crate::pdfa::FindingKind;
@@ -84,25 +85,6 @@ pub(super) fn rules(doc: &CosDocument, machinery: &Machinery, _part: UaPart, out
     }
 
     let drawn = drawn_strings(doc);
-    for reference in crate::pdfa::fonts::usage(doc) {
-        let Ok(object) = doc.get(reference) else {
-            continue;
-        };
-        let Some(font) = object.as_dict() else {
-            continue;
-        };
-        if is_type0(doc, font) {
-            for (object, kind) in crate::pdfa::fonts::cmap_findings(doc, font, reference) {
-                if let Some(rule) = ua_clause_of(&kind) {
-                    out.push(UaRaw {
-                        rule,
-                        object: Some(object),
-                        kind,
-                    });
-                }
-            }
-        }
-    }
     for (reference, strings) in drawn.iter().take(MAX_FONTS) {
         unicode_values(doc, *reference, strings, out);
     }
@@ -126,13 +108,6 @@ pub(super) fn ua_clause_of(kind: &FindingKind) -> Option<UaClauses> {
         FindingKind::CidSystemInfoMismatch { .. } => clauses::CID_SYSTEM_INFO,
         _ => return None,
     })
-}
-
-fn is_type0(doc: &CosDocument, font: &Dict) -> bool {
-    doc.resolve_key(font, doc.intern(b"Subtype"))
-        .as_name()
-        .and_then(|name| doc.name_bytes(name))
-        .is_some_and(|name| name.as_ref() == b"Type0")
 }
 
 /// Every string a text-showing operator drew, by the font it drew with.

@@ -161,7 +161,7 @@ fn font(
     unicode(doc, flavour, dict, &subtype, at, out);
 
     match subtype.as_slice() {
-        b"Type0" => composite(doc, dict, at, budget, out),
+        b"Type0" => composite(doc, flavour, dict, at, budget, out),
         // 9.6.5: a Type 3 font's glyphs *are* content streams, so there is no
         // program to embed and no descriptor to embed it in. The embedding
         // clause has nothing to say about one, and a rule that reported every
@@ -609,7 +609,29 @@ fn published_collection(doc: &CosDocument, dict: &Dict) -> bool {
 /// rule below is about that element rather than about the Type 0 dictionary
 /// that names it — which is why the findings carry the *descendant's* object
 /// number where there is one.
-fn composite(doc: &CosDocument, dict: &Dict, at: ObjRef, budget: &mut usize, out: &mut Vec<Raw>) {
+fn composite(
+    doc: &CosDocument,
+    flavour: Option<Flavour>,
+    dict: &Dict,
+    at: ObjRef,
+    budget: &mut usize,
+    out: &mut Vec<Raw>,
+) {
+    let reading = match flavour.map(|f| f.part) {
+        Some(Part::One) | None => CMapReading::PDF_A_1,
+        Some(_) => CMapReading::TABLE_118,
+    };
+    for (object, kind) in cmap_findings(doc, dict, at, reading) {
+        let rule = match kind {
+            FindingKind::CidSystemInfoMismatch { .. } => clauses::CID_SYSTEM_INFO,
+            _ => clauses::CMAPS,
+        };
+        out.push(Raw {
+            rule,
+            object: Some(object),
+            kind,
+        });
+    }
     let descendants = doc.resolve_key(dict, doc.intern(b"DescendantFonts"));
     let Some(values) = descendants.as_array() else {
         return;
@@ -802,6 +824,48 @@ pub(crate) const PREDEFINED_CMAPS: &[&[u8]] = &[
 /// and its `usecmap`.
 const MAX_CMAP_TOKENS: usize = 1 << 16;
 
+/// The two CMaps ISO 19005-1 lets a file leave unembedded.
+const IDENTITY_CMAPS: &[&[u8]] = &[b"Identity-H", b"Identity-V"];
+
+/// Which reading of the encoding-CMap clauses a standard takes.
+///
+/// **ISO 19005-1 is the strict one, and in two directions.** Its 6.3.3.3
+/// says "All CMaps used within a conforming file, except Identity-H and
+/// Identity-V, shall be embedded" — every predefined CMap of Table 118
+/// included — and its 6.3.3.1 makes the collections' `/Registry` and
+/// `/Ordering` identical with no word on `/Supplement`, and it states no rule
+/// about one CMap referencing another. ISO 19005-2 to -4 and both parts of
+/// ISO 14289 admit Table 118, add the `/Supplement` ordering and forbid a
+/// reference outside the table. Each sentence is veraPDF's published
+/// statement of the rule (6.3.3.1-1, 6.3.3.3-1 and -2 for part 1; 6.2.11.3.1-1
+/// and 6.2.11.3.3-1 to -3 for parts 2 and 3; 6.2.10.3.x for part 4; 7.21.3.x
+/// and 8.4.5.x for PDF/UA).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CMapReading {
+    /// The CMaps a file may name without embedding.
+    unembedded: &'static [&'static [u8]],
+    /// Whether the CIDFont's `/Supplement` may not exceed the CMap's.
+    supplement: bool,
+    /// Whether a CMap's reference to another is judged.
+    references: bool,
+}
+
+impl CMapReading {
+    /// ISO 19005-1's reading.
+    pub(crate) const PDF_A_1: CMapReading = CMapReading {
+        unembedded: IDENTITY_CMAPS,
+        supplement: false,
+        references: false,
+    };
+
+    /// Every later standard's: Table 118, `/Supplement`, references.
+    pub(crate) const TABLE_118: CMapReading = CMapReading {
+        unembedded: PREDEFINED_CMAPS,
+        supplement: true,
+        references: true,
+    };
+}
+
 /// What is wrong with a composite font's encoding CMap, as `(object, kind)`.
 ///
 /// Four requirements ISO 14289-1 states at 7.21.3.1 and 7.21.3.3, and ISO
@@ -826,6 +890,7 @@ pub(crate) fn cmap_findings(
     doc: &CosDocument,
     font: &Dict,
     at: ObjRef,
+    reading: CMapReading,
 ) -> Vec<(ObjRef, FindingKind)> {
     let mut out = Vec::new();
     let key = doc.intern(b"Encoding");
@@ -836,7 +901,7 @@ pub(crate) fn cmap_findings(
                 .name_bytes(*name)
                 .map(|n| n.to_vec())
                 .unwrap_or_default();
-            if !PREDEFINED_CMAPS.contains(&name.as_slice()) {
+            if !reading.unembedded.contains(&name.as_slice()) {
                 out.push((
                     at,
                     FindingKind::CMapNotEmbedded {
@@ -876,7 +941,7 @@ pub(crate) fn cmap_findings(
                 }
                 _ => {}
             }
-            for name in referenced {
+            for name in referenced.into_iter().filter(|_| reading.references) {
                 if !PREDEFINED_CMAPS.contains(&name.as_slice()) {
                     out.push((
                         reference,
@@ -900,7 +965,7 @@ pub(crate) fn cmap_findings(
                 descendant_info.as_deref().and_then(Object::as_dict),
                 cmap_info.as_dict(),
             ) {
-                for key in collection_disagreements(doc, font_info, cmap_info) {
+                for key in collection_disagreements(doc, font_info, cmap_info, reading.supplement) {
                     out.push((
                         at,
                         FindingKind::CidSystemInfoMismatch {
@@ -955,7 +1020,12 @@ fn cmap_program(program: &[u8]) -> (i64, BTreeSet<Vec<u8>>) {
 
 /// Which of `/Registry`, `/Ordering` and `/Supplement` break 7.21.3.1's
 /// relationship between a CIDFont's collection and its CMap's.
-fn collection_disagreements(doc: &CosDocument, font: &Dict, cmap: &Dict) -> Vec<&'static str> {
+fn collection_disagreements(
+    doc: &CosDocument,
+    font: &Dict,
+    cmap: &Dict,
+    supplement: bool,
+) -> Vec<&'static str> {
     let mut out = Vec::new();
     for key in ["Registry", "Ordering"] {
         let a = doc.resolve_key(font, doc.intern(key.as_bytes()));
@@ -967,6 +1037,9 @@ fn collection_disagreements(doc: &CosDocument, font: &Dict, cmap: &Dict) -> Vec<
         if !same {
             out.push(key);
         }
+    }
+    if !supplement {
+        return out;
     }
     let font_supplement = doc.resolve_key(font, doc.intern(b"Supplement")).as_int();
     let cmap_supplement = doc.resolve_key(cmap, doc.intern(b"Supplement")).as_int();
