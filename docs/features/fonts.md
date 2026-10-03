@@ -907,8 +907,8 @@ could show was right.
   under `/FontMatrix`; `vertical_metrics.rs` — `/W2` both forms, the `/DW2`
   default, and the position vector; `substitute_fonts.rs` — the
   `FontProvider` seam, including declining symbolic fonts.
-- Fuzzing: five of the 24 fuzz targets exercise this feature — `cff`,
-  `cmap`, `sfnt`, `truetype`, `type1` (ruling 1).
+- Fuzzing: seven of the 50 fuzz targets exercise this feature — `cff`,
+  `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`, `woff` (ruling 1).
 - Determinism: the `text` fixture among the 15 render fingerprints in
   `crates/tinker-pdf/tests/determinism.rs` embeds a synthetic six-glyph face
   built in the test itself and pins glyph rasterisation bit-for-bit across

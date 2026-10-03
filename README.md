@@ -13,7 +13,7 @@ with nothing but `rustup`, on Windows, macOS, Linux and
 ## The guarantees
 
 - **It never panics on untrusted input.** Fuzz-enforced, release-gating:
-  24 fuzz targets, 186 million recorded executions, and a 5 525-file
+  50 fuzz targets, 186 million recorded executions, and a 5 525-file
   corpus of real-world documents opened without one crash.
   [docs/verification.md](docs/verification.md).
 - **It is deterministic.** The same bytes render to bit-identical output

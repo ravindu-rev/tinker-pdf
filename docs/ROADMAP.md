@@ -32,8 +32,8 @@ its two font-bearing siblings:
 | `crop` held of asked | 4 929 of 5 075 |
 | `dpi` held of asked | 5 342 of 5 457 |
 
-The suite stands at 5 720 passed, 0 failed, 60 ignored across 269 suites as
-[verification.md](verification.md) records it, measured 2 October 2026 on
+The suite stands at 6 084 passed, 0 failed, 60 ignored across 266 suites as
+[verification.md](verification.md) records it, measured 3 October 2026 on
 `x86_64-unknown-linux-gnu`.
 
 ## What "best" means here
@@ -50,7 +50,7 @@ what a reader of PDFs is entitled to expect.
 | --- | --- | --- |
 | Correctness on documents nobody here wrote | 5 525 files: three readers' test suites, one association's examples, and **1 000 documents a crawler found on the open web** spanning 462 distinct `/Producer` strings | **ratcheted**; `corpus/corpora.lock`'s fifth entry, run nightly, every failure attributed by producer |
 | Speed | seven criterion operations, weekly; `crates/tinker-pdf/benches/baseline.json` records each one's fastest figure on `ubuntu-latest` over **fifteen dispatches of one revision**, and each one's own band above its own measured swing — 22.61 % for the text extractor, 88.36 % for the text renderer | **ratcheted**; `cargo xtask bench-check --machine ubuntu-latest` in `bench.yml`, which fails where criterion's own comparison exits 0 |
-| Memory | 52 caps in `bounds_ledger.rs`, two of them the runtime bounds a *process* spends and one of them a relation between a symbol and its page rather than a quantity; every corpus child measures its own peak resident set, `report.json` carries it per file and `ratchet.json` bands the per-corpus maximum within a **measured 2 % tolerance** — a high-water mark swings 0.06 % to 0.76 % between two runs of one binary, and an exact band failed on that within a day of being recorded | ratcheted, over five corpora |
+| Memory | 54 caps in `bounds_ledger.rs`, two of them the runtime bounds a *process* spends and one of them a relation between a symbol and its page rather than a quantity; every corpus child measures its own peak resident set, `report.json` carries it per file and `ratchet.json` bands the per-corpus maximum within a **measured 2 % tolerance** — a high-water mark swings 0.06 % to 0.76 % between two runs of one binary, and an exact band failed on that within a day of being recorded | ratcheted, over five corpora |
 | Fidelity | arithmetic fixtures, metamorphic relations, committed fingerprints | tier 1's differential pairs and reviewed goldens; ruling 13's amendment of 5 September 2026 on dated outside measurements |
 | Capability coverage | tiers 2 to 5 of this file | each row's exit criterion |
 | Footprint | 2.03 MB of wasm, 1.40 MB gzipped, gated at 2.5 MB in `release.yml` | already ratcheted |

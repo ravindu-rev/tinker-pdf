@@ -654,7 +654,7 @@ with the `DisplayString` handed straight over, each asserted to fail with
 whether this repository's own type refuses a state, and adjudicates nothing
 about a document (ruling 13).
 
-`form_script` is one of the 31 fuzz targets, with a committed seed corpus.
+`form_script` is one of the 50 fuzz targets, with a committed seed corpus.
 It drives every entry point the policy gates from one input, split at the
 first NUL byte: the prefix is offered to `ScriptScope::define` as document
 scope, and the suffix is run as a field script with whatever that produced

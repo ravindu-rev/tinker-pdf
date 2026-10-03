@@ -272,7 +272,7 @@ holding a candidate document could hash it and check the `/ID`, which is in
 the clear, with no password. For the same reason an encrypted write derives
 *both* halves instead of inheriting 14.4's permanent one from its source.
 
-Two of the 24 fuzz targets are this feature's: `crypt` drives
+Two of the 50 fuzz targets are this feature's: `crypt` drives
 authentication with input-chosen field widths and both decrypt paths over
 a handler the crate built itself, and `crypt_ciphers` drives the raw
 primitives; their committed seeds are written by a test inside
