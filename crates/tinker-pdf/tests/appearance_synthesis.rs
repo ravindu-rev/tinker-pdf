@@ -418,3 +418,74 @@ fn a_circles_opacity_reaches_its_fill() {
         "half blue over white, got {pixel:?}"
     );
 }
+
+// ---------------------------------------------------- Polygon, PolyLine
+
+/// 12.5.6.9: a polygon's vertices are joined and closed — the edge from the
+/// last vertex back to the first is drawn — and its inside is filled with
+/// `/IC`. The triangle (20, 20), (80, 20), (50, 80), at width 2.
+#[test]
+fn a_polygon_is_closed_and_filled() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Polygon /Rect [0 0 100 100] \
+         /Vertices [20 20 80 20 50 80] /C [1 0 0] /IC [0 0 1] /BS << /W 2 >> >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "blue, inside",
+        &[(50.5, 40.5), (35.5, 25.5), (50.5, 70.5)],
+        is_blue,
+    );
+    // The base, the right edge, and the closing edge from (50, 80) back to
+    // (20, 20), which crosses y 50.5 at x 35.25.
+    assert_points(
+        &page.bitmap,
+        "red, on the edges",
+        &[(50.5, 20.5), (64.5, 50.5), (35.5, 50.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, outside the triangle",
+        &[(25.5, 70.5), (75.5, 70.5), (50.5, 17.5), (50.5, 84.5)],
+        is_white,
+    );
+}
+
+/// A polyline is not closed and not filled — its `/IC` fills only its
+/// endings. (20, 20) east to (80, 20), then north to (80, 70); a square
+/// ending at the first vertex and a closed arrow at the last, each six
+/// points from its vertex at width 2, the arrow pointing on along the last
+/// segment and drawn over it.
+#[test]
+fn a_polyline_is_open_and_its_endings_face_along_its_end_segments() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /PolyLine /Rect [0 0 100 100] \
+         /Vertices [20 20 80 20 80 70] /C [1 0 0] /IC [0 0 1] /BS << /W 2 >> \
+         /LE [/Square /ClosedArrow] >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "red, along the path and the square's border",
+        &[(50.5, 20.5), (79.5, 40.5), (14.5, 20.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, where a closing edge or a fill would be",
+        &[(50.5, 45.5), (60.5, 30.5), (8.5, 20.5), (80.5, 73.5)],
+        is_white,
+    );
+    assert_points(
+        &page.bitmap,
+        "blue, inside the square and the arrowhead",
+        &[
+            (16.5, 23.5),
+            (23.5, 16.5),
+            (77.5, 61.5),
+            (82.5, 61.5),
+            (80.5, 62.5),
+        ],
+        is_blue,
+    );
+}

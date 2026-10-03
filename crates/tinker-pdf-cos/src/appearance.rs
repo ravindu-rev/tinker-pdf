@@ -25,6 +25,8 @@
 //! - `Line` (12.5.6.7): `/L`, Table 176's endings, Figure 60's leader lines.
 //! - `Square` and `Circle` (12.5.6.8) read `/RD` too, and draw their border
 //!   dashed when `/BS` says so.
+//! - `Polygon` and `PolyLine` (12.5.6.9): `/Vertices`, closed and filled for
+//!   a polygon, open with a line's endings for a polyline.
 //!
 //! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
 //! stroked border or line its `/BS` (or `/Border`) dash.
@@ -495,18 +497,8 @@ fn line(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
         (x2 + cx * reach, y2 + cy * reach),
     );
 
-    if let Some(stroke) = paint.stroke {
-        op(out, &stroke, b"RG");
-    }
-    if let Some(fill) = paint.fill {
-        op(out, &fill, b"rg");
-    }
+    let dashed = set_up(doc, annotation, &paint, out);
     if paint.strokes() {
-        op(out, &[paint.width], b"w");
-        let pattern = dash_of(doc, annotation);
-        if let Some(pattern) = &pattern {
-            dash(out, pattern, 0.0);
-        }
         if leader != 0.0 {
             let far = reach + extension;
             for (x, y) in [(x1, y1), (x2, y2)] {
@@ -517,14 +509,112 @@ fn line(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
         op(out, &[p1.0, p1.1], b"m");
         op(out, &[p2.0, p2.1], b"l");
         out.extend_from_slice(b"S\n");
-        // The endings are drawn solid whatever the line is: a dashed
-        // arrowhead is a broken one.
-        if pattern.is_some() {
-            out.extend_from_slice(b"[] 0 d\n");
-        }
+    }
+    // The endings are drawn solid whatever the line is: a dashed arrowhead
+    // is a broken one.
+    if dashed {
+        out.extend_from_slice(b"[] 0 d\n");
     }
     ending(out, first, p1, (-along.0, -along.1), along, &paint);
     ending(out, last, p2, along, along, &paint);
+    Some(())
+}
+
+/// Sets up a line-like annotation's paint: the stroke colour, the fill
+/// colour, and, when it strokes at all, the width and the dash. Returns
+/// whether a dash was set, so that what is drawn after the path — an
+/// ending — can be drawn solid.
+fn set_up(doc: &CosDocument, annotation: &Dict, paint: &Paint, out: &mut Vec<u8>) -> bool {
+    if let Some(stroke) = paint.stroke {
+        op(out, &stroke, b"RG");
+    }
+    if let Some(fill) = paint.fill {
+        op(out, &fill, b"rg");
+    }
+    if !paint.strokes() {
+        return false;
+    }
+    op(out, &[paint.width], b"w");
+    match dash_of(doc, annotation) {
+        Some(pattern) => {
+            dash(out, &pattern, 0.0);
+            true
+        }
+        None => false,
+    }
+}
+
+/// An array of alternating x and y coordinates, as points (12.5.6.9's
+/// `/Vertices`, and each path of 12.5.6.13's `/InkList`). A last number
+/// with no partner names no point and is dropped.
+fn points_of(numbers: &[f64]) -> Vec<Point> {
+    numbers.chunks_exact(2).map(|c| (c[0], c[1])).collect()
+}
+
+/// The direction a path leaves `from` by: towards the first of `rest` that
+/// is not `from` itself, so a vertex written twice does not turn an ending
+/// to face nowhere. `None` when every point is `from`.
+fn leaving(from: Point, rest: impl Iterator<Item = Point>) -> Option<Point> {
+    rest.filter_map(|(x, y)| unit(x - from.0, y - from.1))
+        .next()
+}
+
+/// A polygon or a polyline (12.5.6.9): `/Vertices` joined by straight
+/// lines in `/C` at the `/BS` width and dash — closed and filled with
+/// `/IC` for a polygon; open for a polyline, with `/LE`'s endings at its
+/// first and last vertex and `/IC` filling only the closed ones (Table 178:
+/// "the polygon's (or polyline's line endings)").
+///
+/// An absent `/C` strokes black, as a line's does — the outline is what a
+/// polygon is, where a square's border is optional. Fewer than two
+/// distinct vertices join nothing, and draw nothing.
+fn polygon(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>, closed: bool) -> Option<()> {
+    let points = points_of(&numbers_of(doc, annotation, b"Vertices"));
+    let (&first, &last) = (points.first()?, points.last()?);
+    let start = leaving(first, points.iter().copied())?;
+    let paint = Paint {
+        stroke: stroke_color_of(doc, annotation),
+        fill: color_of(doc, annotation, b"IC"),
+        width: border_width(doc, annotation),
+    };
+    let (first_end, last_end) = if closed {
+        (Ending::None, Ending::None)
+    } else {
+        endings_of(doc, annotation)
+    };
+    let painter: &[u8] = if closed {
+        paint.closed()?
+    } else {
+        let fills_an_end = paint.fill.is_some() && (first_end.is_closed() || last_end.is_closed());
+        if !paint.strokes() && !fills_an_end {
+            return None;
+        }
+        b"S\n"
+    };
+
+    let dashed = set_up(doc, annotation, &paint, out);
+    if closed || paint.strokes() {
+        op(out, &[first.0, first.1], b"m");
+        for (x, y) in points.iter().skip(1) {
+            op(out, &[*x, *y], b"l");
+        }
+        if closed {
+            out.extend_from_slice(b"h\n");
+        }
+        out.extend_from_slice(painter);
+    }
+    if closed {
+        return Some(());
+    }
+    if dashed {
+        out.extend_from_slice(b"[] 0 d\n");
+    }
+    // The last segment's direction, from the last distinct vertex before
+    // the end to the end.
+    let (bx, by) = leaving(last, points.iter().rev().copied())?;
+    let end = (-bx, -by);
+    ending(out, first_end, first, (-start.0, -start.1), start, &paint);
+    ending(out, last_end, last, end, end, &paint);
     Some(())
 }
 
@@ -708,6 +798,8 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
             return None;
         }
         b"Line" => line(doc, annotation, &mut content)?,
+        b"Polygon" => polygon(doc, annotation, &mut content, true)?,
+        b"PolyLine" => polygon(doc, annotation, &mut content, false)?,
         _ => return None,
     }
 
@@ -1175,7 +1267,11 @@ mod tests {
     fn an_unknown_subtype_is_left_alone() {
         let doc = doc();
         let mut dict = annot::square(&doc, rect(), RED, 1.0);
-        dict.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(b"Polygon")));
+        // This used to be `/Polygon`, until a polygon was drawn.
+        dict.insert(
+            doc.intern(b"Subtype"),
+            Object::Name(doc.intern(b"Trapezium")),
+        );
         assert!(
             synthesize(&doc, &dict).is_none(),
             "better no appearance than a wrong one"
@@ -1589,6 +1685,110 @@ mod tests {
         assert!(
             !unstroked.contains(" d\n"),
             "nothing is stroked: {unstroked}"
+        );
+    }
+
+    /// 12.5.6.9: a polygon is its vertices joined and closed, filled with
+    /// `/IC`; a polyline is the same path left open, with no fill.
+    #[test]
+    fn a_polygon_is_closed_and_a_polyline_is_not() {
+        let doc = doc();
+        let drawn = |subtype: &str, rest: &str| {
+            content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /{subtype} /Rect [0 0 100 100] \
+                     /Vertices [20 20 80 20 50 80] {rest} >>"
+                ),
+            )
+        };
+        assert_eq!(
+            drawn("Polygon", "/C [1 0 0] /IC [0 0 1] /BS << /W 2 >>").as_deref(),
+            Some("1 0 0 RG\n0 0 1 rg\n2 w\n20 20 m\n80 20 l\n50 80 l\nh\nB\n")
+        );
+        assert_eq!(
+            drawn("PolyLine", "/C [1 0 0] /BS << /W 2 >>").as_deref(),
+            Some("1 0 0 RG\n2 w\n20 20 m\n80 20 l\n50 80 l\nS\n")
+        );
+        assert_eq!(
+            drawn("Polygon", "").as_deref(),
+            Some("0 0 0 RG\n1 w\n20 20 m\n80 20 l\n50 80 l\nh\nS\n"),
+            "an absent /C strokes black at the default width"
+        );
+        assert_eq!(
+            drawn("Polygon", "/C [] /IC [0 0 1]").as_deref(),
+            Some("0 0 1 rg\n20 20 m\n80 20 l\n50 80 l\nh\nf\n"),
+            "a transparent /C fills only"
+        );
+        assert_eq!(drawn("Polygon", "/C []"), None, "nothing to paint");
+        assert_eq!(
+            drawn("PolyLine", "/C [] /IC [0 0 1]"),
+            None,
+            "a polyline's /IC is for its endings, and it has none"
+        );
+        let dashed = drawn("Polygon", "/BS << /W 2 /S /D >>").expect("a polygon");
+        assert!(dashed.contains("2 w\n[3] 0 d\n20 20 m\n"), "{dashed}");
+    }
+
+    #[test]
+    fn a_polygon_needs_two_distinct_vertices() {
+        let doc = doc();
+        for subtype in ["Polygon", "PolyLine"] {
+            for vertices in [
+                "",
+                "/Vertices []",
+                "/Vertices [10 10]",
+                "/Vertices [10 10 10 10 10 10]",
+                "/Vertices [10 10 20]",
+                "/Vertices 4",
+            ] {
+                assert_eq!(
+                    content_of(
+                        &doc,
+                        &format!("<< /Subtype /{subtype} /Rect [0 0 100 100] {vertices} >>")
+                    ),
+                    None,
+                    "/{subtype} with {vertices:?} joins nothing"
+                );
+            }
+        }
+        assert_eq!(
+            content_of(
+                &doc,
+                "<< /Subtype /PolyLine /Rect [0 0 100 100] /Vertices [10 10 20 20 30] >>"
+            )
+            .as_deref(),
+            Some("0 0 0 RG\n1 w\n10 10 m\n20 20 l\nS\n"),
+            "a last number with no partner is dropped"
+        );
+    }
+
+    /// A polyline's endings face away along its first and last segments,
+    /// past a vertex written twice: an open arrow pointing west from the
+    /// first vertex, and a butt across the last segment, which runs north.
+    #[test]
+    fn a_polylines_endings_face_along_its_end_segments() {
+        let doc = doc();
+        let content = content_of(
+            &doc,
+            "<< /Subtype /PolyLine /Rect [0 0 100 100] /C [1 0 0] /LE [/OpenArrow /Butt] \
+             /Vertices [20 20 20 20 80 20 80 70 80 70] >>",
+        )
+        .expect("a polyline");
+        assert_eq!(
+            content,
+            "1 0 0 RG\n1 w\n20 20 m\n20 20 l\n80 20 l\n80 70 l\n80 70 l\nS\n\
+             26 16.5359 m\n20 20 l\n26 23.4641 l\nS\n77 70 m\n83 70 l\nS\n"
+        );
+        let filled_only = content_of(
+            &doc,
+            "<< /Subtype /PolyLine /Rect [0 0 100 100] /C [] /IC [0 0 1] \
+             /LE [/None /Diamond] /Vertices [20 20 80 20] >>",
+        )
+        .expect("the diamond is filled");
+        assert_eq!(
+            filled_only, "0 0 1 rg\n83 20 m\n80 23 l\n77 20 l\n80 17 l\nh\nf\n",
+            "a polyline with no stroke draws only its closed endings"
         );
     }
 }
