@@ -7,10 +7,16 @@ world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
 Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 3 October 2026. `cargo test --workspace`
-is **6 296 passed, 0 failed, 60 ignored** across 271 suites on
-`x86_64-unknown-linux-gnu` — 227 integration-test files, 24 unit-test
+is **6 561 passed, 0 failed, 63 ignored** across 281 suites on
+`x86_64-unknown-linux-gnu` — 237 integration-test files, 24 unit-test
 binaries and 20 doc-test runs, every file accounted for — measured on
-`develop` with the sixth wave merged after its review: EPUB paint effects,
+`develop` with the seventh wave merged after its review: PDF/UA validation
+through the facade with every undecided clause named, eight more PDF/A rule
+classes, PDF/X 2003 from the CGATS notes; reading order and tables inferred
+on request and labelled as inferred; and the owed binding projections with
+Go, Ruby and Java over the C ABI. The three new corpus censuses are ignored
+here and run nightly. Before that it was 6 296 across 271, with the sixth
+wave merged after its review: EPUB paint effects,
 counters, `text-transform` and the layout refusals; tagged writing, PDF 2.0
 namespaces, page output intents and associated files; and ruling 14's
 logical-order extraction, shaped form fields and CID-keyed fallback text.
@@ -1516,8 +1522,8 @@ been.**
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in
-`crates/tinker-pdf/tests/bounds_ledger.rs` — **59 rows**, each carrying a
-figure for a real book, comic and document rather than a guess. Fifty-six of
+`crates/tinker-pdf/tests/bounds_ledger.rs` — **60 rows**, each carrying a
+figure for a real book, comic and document rather than a guess. Fifty-seven of
 those figures are measurements or arithmetic about a plausible file; the
 three JBIG2 count-and-total rows publish the word **estimate** in the number
 itself, because their caps were derived as arithmetic about a plausible scan
