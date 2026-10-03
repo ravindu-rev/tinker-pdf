@@ -434,6 +434,17 @@ cannot avoid; HTML with markup as references and every control character but
 tab and line feed, and every noncharacter, as U+FFFD. `tpdf text --json`
 (`--xml`, `--html`) writes the same through the same writer and adds nothing.
 
+**Reading order is named, and an inferred one is a type of its own.**
+`Page::text_in(ReadingOrder)` answers with an `OrderedText` labelled by the
+order it is: `Stream` is `Page::text()`, `Stated` is the structure tree's
+(`None` for an untagged document), and `Inferred` is
+`Page::inferred_order(&InferenceOptions)` — an `InferredOrder` carrying the
+permutation back to stream order, never a `TextPage` and never the default
+([design/reading-order.md](../design/reading-order.md)). A request for
+`Inferred` on a tagged page comes back `Stated`, because a guess is never
+preferred to a statement; `InferenceOptions::hide_structure` reads past the
+tree only so the inference can be measured against it.
+
 ### The structured view (14.7, 14.8)
 
 A tagged document says its own reading order, and that order is often not
@@ -600,7 +611,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not in this row any more: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
 | L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page | ruling 14 |
 | Telling apart two texts UAX #9 draws alike | — | the algorithm is not one-to-one, so no reader can: `logical_order` returns the first order its search reaches that draws the line, and says which (`שלום now 2026`, not `שלום 2026 now`). Of `BidiCharacterTest.txt`'s 91 616 drawn lines, 669 read back as another text the same picture could be, each holding a bracket pair (N0 pairs brackets in logical order, and they are drawn mirrored) | ruling 14 |
-| Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order and always has — geometry decides only whether two glyphs are one line and two lines one block, and within a line only where it holds a right-to-left character (ruling 14); a structure tree is read when the document carries one, and never invented when it does not ([design/reading-order.md](../design/reading-order.md) is the opt-in inference, labelled as such) | 14.8 |
+| Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order and always has — geometry decides only whether two glyphs are one line and two lines one block, and within a line only where it holds a right-to-left character (ruling 14); a structure tree is read when the document carries one, and never invented when it does not. `Page::text_in(ReadingOrder::Inferred)` is the opt-in request, answered by a type of its own; until the inference lands it declines (`DeclineReason::NotImplemented`) with the stream's blocks unmoved ([design/reading-order.md](../design/reading-order.md)) | 14.8 |
 | An `/MCR` whose `/Stm` does not name a content stream | `StructureWarning::ContentStreamNotAStream { element, stream }` | a stream is always indirect (7.3.8), so the value names nothing that could hold a sequence; read as though `/Stm` were absent rather than keyed on an object with no content, which would make the sequence findable nowhere | 14.7.4.2 |
 | An `/MCR` carrying `/StmOwn` without the `/Stm` it qualifies | `StructureWarning::StreamOwnerWithoutStream { element, owner }` | Table 324 permits the owner only beside a stream; an owner alone names the owner of a stream nobody named, so it is dropped | 14.7.4.2 |
 | An `/MCR` with no `/Stm` whose `/MCID` is in no page-stream sequence but in exactly one other stream on the page | `StructureWarning::ContentStreamAssumed { page, mcid }` | a producer that tags content inside a form and omits `/Stm` writes something 14.7.4.2 does not define; where one reading exists it is taken and named, and where two streams share the identifier it is refused, because that is the collision `/Stm` exists to resolve | 14.7.4.2 |

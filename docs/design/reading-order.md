@@ -305,8 +305,47 @@ the column-crossings score is computed over the rest.
 
 ## As built
 
-*Filled in as milestones land.* Nothing has landed; the roadmap row is not
-scheduled. What the commit that added this document changed is the roadmap
-row's evidence sentence and its tagged-file count, and the one sentence in
-[features/content-and-text.md](../features/content-and-text.md) that called
-today's order geometric.
+**Milestones 1 and 2 (3 October 2026): the names and the instrument, before
+the guess.** `crates/tinker-pdf/src/reading_order.rs` holds `ReadingOrder`
+(`Stream`, `Stated`, `Inferred`), `OrderedText` — the answer labelled by the
+order it *is*, so a request for `Inferred` on a tagged page comes back
+`Stated` — `Page::text_in(ReadingOrder)`, and `InferredOrder` with its
+permutation from stream order, its `InferredBlock`s and their `Role`s.
+`Page::inferred_order` and `Document::inferred_order` decline:
+`DeclineReason::TreePresent` on a tagged document unless
+`InferenceOptions::hide_structure` is set, and `DeclineReason::NotImplemented`
+everywhere else, with the stream's blocks unmoved and every one `Unplaced`.
+`Page::text()`, `plain_text()` and `search()` are not touched: the new
+surface is a sibling of `text_with`, never a field on it.
+
+The inference reads the page through **one interpretation into a tee**
+(`crates/tinker-pdf/src/observe.rs`): a device that hands
+`TextDevice` exactly the four calls it implements and answers the
+interpreter's three questions with `TextDevice`'s own answers, so the page it
+builds is `Page::text()`'s character for character — held over every
+committed untagged document by `the_inference_reads_the_same_page_text_reads`
+rather than argued. With the tree hidden it reads `/Artifact` scopes as
+content, because an inference measured against a tree has to find a running
+head without the producer's artifact mark telling it to.
+
+The harness is `crates/tinker-pdf/tests/reading_order_support/mod.rs`: pair
+agreement counted as inversions by a merge sort (held to arithmetic by
+`the_pair_score_counts_inversions`), column crossings, and a role score for
+milestones 4 and 5; characters are matched across the two extractions by
+origin and text, the k-th repeat to the k-th. `reading_order_census.rs` is
+the corpus census, `#[ignore]`d, in `corpus.yml`'s census step, printing
+`RAN`/`SKIPPED`; it splits the population by corpus name (pdfjs and SafeDocs
+the ratchet population, veraPDF where nothing may move) and asserts only what
+holds whatever the corpus holds. **The corpus baseline is owed:** the fetched
+corpora were not reachable where this landed, so `INFERRED_FLOORS` is empty
+and no `ratchet.json` axis was added; the first nightly run's figures are
+the floors.
+
+What was measured, first-party: the content stream agrees with the tree on
+every pair of every committed EPUB book (11 439 397 pairs over nine books —
+the EPUB writer draws in the order it tags), so the books are in the set
+where nothing may move; the headline two-column fixture, drawn line by line
+across both columns and tagged column by column, scores 0.7603 for the
+stream (2 036 440 of 2 678 455 pairs); and a seeded shuffle of a one-column
+page drops the stream from 1 to 0.4139, which is the instrument seeing
+disorder (`the_score_sees_a_shuffled_page`).

@@ -38,10 +38,12 @@ mod images;
 pub mod layers;
 pub mod markdown;
 pub mod mdp;
+mod observe;
 mod optional;
 mod output_intents;
 pub mod pdfa;
 mod png_read;
+pub mod reading_order;
 mod recode;
 pub mod redact;
 mod render_part;
@@ -94,6 +96,13 @@ pub use output_intents::{OutputIntent, MAX_OUTPUT_INTENT_BYTES};
 pub use pdfa::{
     Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,
     RuleGroup as PdfARuleGroup, StagedRule, Verdict as PdfAVerdict, STAGED as PDFA_STAGED,
+};
+/// Reading order, named — the stream's, the tree's, and one inferred from
+/// geometry and labelled as such: [`Page::text_in`], [`Page::inferred_order`]
+/// (`docs/design/reading-order.md`).
+pub use reading_order::{
+    DeclineReason, InferenceOptions, InferenceWarning, InferredBlock, InferredOrder, OrderedText,
+    ReadingOrder, Role,
 };
 pub use signature::{
     Anchor, Coverage, CoverageDefect, SecurityStore, SecurityStoreWarning, Signature,

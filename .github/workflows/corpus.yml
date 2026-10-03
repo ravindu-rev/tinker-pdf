@@ -107,6 +107,7 @@ jobs:
             --test pdfa_flavour \
             --test pdfa_ledger \
             --test pdfua \
+            --test reading_order_census \
             --test signatures \
             --test streaming_open \
             --test tagged_corpus \
