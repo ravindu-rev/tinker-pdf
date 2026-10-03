@@ -422,7 +422,10 @@ fn every_implemented_name_is_defaultable() {
         }
     }
     assert_eq!(longhands, 83, "eighty-three longhands");
-    assert_eq!(shorthands, 16, "sixteen shorthands");
+    assert_eq!(
+        shorthands, 19,
+        "sixteen shorthands and `css-break-3` §3.4's three aliases"
+    );
     assert_eq!(exceptions, 1, "`content`, and nothing else");
     assert_eq!(longhands + shorthands + exceptions, IMPLEMENTED_NAMES.len());
 
@@ -460,7 +463,7 @@ fn every_implemented_name_is_defaultable() {
 /// would say so rather than passing on two empty sets.
 #[test]
 fn every_shorthand_expands_the_same_way_for_a_value_and_a_keyword() {
-    let samples: [(&str, &str); 16] = [
+    let samples: [(&str, &str); 19] = [
         ("background", "#ff0000"),
         ("border", "1px solid #ff0000"),
         ("border-bottom", "1px solid #ff0000"),
@@ -470,6 +473,9 @@ fn every_shorthand_expands_the_same_way_for_a_value_and_a_keyword() {
         ("border-style", "solid"),
         ("border-top", "1px solid #ff0000"),
         ("border-width", "1px"),
+        ("break-after", "page"),
+        ("break-before", "avoid-page"),
+        ("break-inside", "avoid"),
         ("column-rule", "1px solid #ff0000"),
         ("columns", "2 auto"),
         ("flex", "1 1 auto"),

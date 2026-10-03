@@ -216,8 +216,8 @@ a picture reaching paper in this area is measured in pixels.
 | 7 | **`DocumentBuilder::from_html`** | The cascade, the layout engine and the painter reachable without an OCF container; held by the EPUB reftests, so the two callers cannot drift | M |
 
 Milestones 2 to 6 are scheduled by the fetched corpus's `UnimplementedProperty`
-counts, highest first — ruling 3, and not by interest. Seventy names are known
-and unimplemented against the 100 in `IMPLEMENTED_NAMES`; each landing deletes
+counts, highest first — ruling 3, and not by interest. Sixty-seven names are
+known and unimplemented against the 103 in `IMPLEMENTED_NAMES`; each landing deletes
 its names from that table.
 
 ## Risks

@@ -311,6 +311,119 @@ fn the_unsupported_census_over_the_committed_corpus() {
     );
 }
 
+/// Every property name a declaration block in a sheet writes, as written.
+///
+/// Read off the token stream rather than off `parse`'s declarations, because a
+/// [`Declaration::Known`] carries the **longhand** it set and not the name the
+/// author wrote — `margin` arrives as four `margin-*`, and a census of written
+/// names counted through the parser would be a census of this build's own
+/// expansion. A block whose prelude starts with an at-keyword other than
+/// `@font-face` and `@page` holds rules and is walked again; every other block
+/// holds declarations, `@font-face`'s descriptors among them.
+fn written_names(css: &[u8], into: &mut std::collections::BTreeSet<String>) {
+    use tinker_pdf_css::parser::{component_values, BlockKind, ComponentValue};
+    use tinker_pdf_css::tokenizer::{tokenize, Token};
+
+    fn declarations(values: &[ComponentValue], into: &mut std::collections::BTreeSet<String>) {
+        for piece in values.split(|v| matches!(v, ComponentValue::Token(Token::Semicolon))) {
+            let mut significant = piece.iter().filter(|v| !v.is_whitespace());
+            if let (
+                Some(ComponentValue::Token(Token::Ident(name))),
+                Some(ComponentValue::Token(Token::Colon)),
+            ) = (significant.next(), significant.next())
+            {
+                into.insert(name.to_ascii_lowercase());
+            }
+        }
+    }
+
+    fn rules(values: &[ComponentValue], into: &mut std::collections::BTreeSet<String>) {
+        let mut prelude: Vec<&ComponentValue> = Vec::new();
+        for value in values {
+            match value {
+                ComponentValue::Block {
+                    kind: BlockKind::Curly,
+                    values: inner,
+                } => {
+                    let at = prelude.iter().find_map(|v| match v {
+                        ComponentValue::Token(Token::AtKeyword(name)) => {
+                            Some(name.to_ascii_lowercase())
+                        }
+                        _ => None,
+                    });
+                    match at.as_deref() {
+                        Some("font-face") | Some("page") | None => declarations(inner, into),
+                        Some(_) => rules(inner, into),
+                    }
+                    prelude.clear();
+                }
+                ComponentValue::Token(Token::Semicolon) => prelude.clear(),
+                other => prelude.push(other),
+            }
+        }
+    }
+
+    let text = String::from_utf8_lossy(css);
+    rules(&component_values(tokenize(&text)), into);
+}
+
+/// **How many distinct property names the committed stylesheets write.**
+///
+/// The roadmap's CSS row quoted milestone 1's census — *"84 distinct names
+/// across the fetched corpus's 53 stylesheets and 42 across the committed 8"*
+/// — and a number quoted from a census nobody can re-run is a number that
+/// cannot be checked. This re-runs the committed half, as written names over
+/// every `.css` entry, `@font-face` descriptors included, and pins it: over the
+/// eight stylesheets of the six books milestone 1 had, and over every `.css`
+/// entry of all nine committed books. The fetched half cannot be re-run in a
+/// tree that does not hold the fetched corpus, and is left to
+/// `epub_fetched.rs`'s nightly job rather than restated here.
+#[test]
+fn the_committed_stylesheets_write_this_many_distinct_property_names() {
+    const ALL: &[&str] = &[
+        "calibre-book-cover.epub",
+        "calibre-book-nocover.epub",
+        "calibre-embedded-font.epub",
+        "kcc-fixed-layout.epub",
+        "pandoc-book-cover.epub",
+        "pandoc-book-epub2.epub",
+        "pandoc-book-nocover.epub",
+        "pandoc-embedded-font.epub",
+        "pandoc-plates.epub",
+    ];
+    let mut first_six = std::collections::BTreeSet::new();
+    let mut every = std::collections::BTreeSet::new();
+    let mut sheets = 0usize;
+    for name in ALL {
+        let bytes = book(name);
+        for (_, data) in stylesheets(&bytes) {
+            sheets += 1;
+            if BOOKS.contains(name) {
+                written_names(&data, &mut first_six);
+            }
+            written_names(&data, &mut every);
+        }
+    }
+    println!("  {} names across the first six books", first_six.len());
+    println!(
+        "  {} names across {sheets} sheets of nine books",
+        every.len()
+    );
+    println!("  {every:?}");
+    assert_eq!(sheets, 12, "nine books, twelve stylesheets");
+    assert_eq!(
+        first_six.len(),
+        FIRST_SIX_NAMES,
+        "the first six books' names"
+    );
+    assert_eq!(every.len(), ALL_NINE_NAMES, "all nine books' names");
+}
+
+/// Measured by the test above; see its comment.
+const FIRST_SIX_NAMES: usize = 42;
+/// Measured by the test above; see its comment.
+const ALL_NINE_NAMES: usize = 44;
+
 /// The pseudo-classes whose meaning is XHTML's, matched through the real
 /// element tree.
 ///

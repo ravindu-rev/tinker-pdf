@@ -79,7 +79,15 @@ margin-collapsing cases of §8.3.1; block and inline formatting contexts
 two-pass automatic width and §17.6.2.1's five-rule border conflict
 resolution, `rowspan` clamped; `css-flexbox-1`'s line algorithm with
 grow/shrink freeze-and-redistribute and `order`; §13.3 fragmentation rules
-A–D with the spec's own escape; `page-break-*`, `orphans`, `widows`.
+A–D with the spec's own escape; `page-break-*`, `orphans`, `widows`, and
+`css-break-3`'s `break-before`, `break-after` and `break-inside`, which §3.4
+makes the same three properties under their modern names — `break-before:
+page` is `page-break-before: always` and `avoid-page` is `avoid`, since the
+page is the one fragmentation context this build breaks across. `column`,
+`avoid-column`, `region`, `avoid-region`, `recto` and `verso` are refused by
+value (`UnimplementedProperty`): the first four name contexts this build has
+none of, and the last two resolve through a page progression direction it
+does not read.
 §3.1's **replaced elements**, sized by §10.3.2 and §10.6.2 with §10.4's
 eleven-row constraint table — which is the algorithm `img { max-width: 100% }`
 takes, and the one that keeps a narrowed picture from being squashed rather

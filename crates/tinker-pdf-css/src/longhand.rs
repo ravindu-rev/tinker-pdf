@@ -8,9 +8,10 @@
 //! variants stand for four names each, carrying a [`Side`].
 //!
 //! Hence eighty-three unit variants, one per name this build implements as a
-//! longhand. The sixteen shorthands are not here, because a shorthand is not a
-//! property: `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the
-//! longhands it sets, which is what `margin: inherit` means.
+//! longhand. The sixteen shorthands and `css-break-3`'s three aliases are not
+//! here, because a shorthand is not a property:
+//! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
+//! it sets, which is what `margin: inherit` means.
 //!
 //! # This file is generated, and it is checked in to be read
 //!

@@ -1078,3 +1078,34 @@ fn a_vertical_align_percentage_survives_and_an_em_does_not() {
         VerticalAlign::Length(LengthPercentage::Px(10.0))
     );
 }
+
+/// **Two names, one property**: a `break-*` declaration and a `page-break-*`
+/// one compete for the same longhand, and the later of two equal ones wins
+/// whichever name each was written under (`css-break-3` §3.4,
+/// `css-cascade-5` §6.1 criterion 6).
+///
+/// The shape that two separate properties would get wrong: an author sheet that
+/// sets the legacy name and then overrides it with the modern one. Read as two
+/// properties, both would be set and the layout would have to pick.
+#[test]
+fn a_break_alias_and_its_legacy_name_are_one_property_in_the_cascade() {
+    use crate::property::{PageBreak, PageBreakInside};
+    let nodes = one("p");
+    let modern_last = &styles(
+        "p { page-break-before: always; break-before: avoid; \
+             page-break-inside: avoid; break-inside: auto }",
+        &nodes,
+    )[0];
+    assert_eq!(modern_last.page_break_before, PageBreak::Avoid);
+    assert_eq!(modern_last.page_break_inside, PageBreakInside::Auto);
+    let legacy_last = &styles("p { break-after: page; page-break-after: avoid }", &nodes)[0];
+    assert_eq!(legacy_last.page_break_after, PageBreak::Avoid);
+    // And the alias defaults the legacy longhand, which is the same claim
+    // through §7.1's door.
+    let parent_child = tree(&[("div", None), ("p", Some(0))]);
+    let inherited = &styles(
+        "div { page-break-after: always } p { break-after: inherit }",
+        &parent_child,
+    )[1];
+    assert_eq!(inherited.page_break_after, PageBreak::Always);
+}

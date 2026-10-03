@@ -1511,3 +1511,67 @@ fn the_multi_column_longhands_and_the_three_shorthands() {
     );
     assert!(known("div { gap: -1px }").is_empty());
 }
+
+/// **`break-before`, `break-after` and `break-inside` are the `page-break-*`
+/// longhands under their modern names** (`css-break-3` §3.4).
+///
+/// §3.4's mapping table, row by row, and the refusals by value beside it: a
+/// `column` break or a `verso` page read as its nearest neighbour would be a
+/// break this build put somewhere the author did not ask for.
+#[test]
+fn the_break_properties_are_the_page_break_longhands_under_their_modern_names() {
+    use crate::property::{PageBreak, PageBreakInside};
+    for (value, expected) in [
+        ("auto", PageBreak::Auto),
+        ("page", PageBreak::Always),
+        ("avoid", PageBreak::Avoid),
+        ("avoid-page", PageBreak::Avoid),
+        ("left", PageBreak::Left),
+        ("right", PageBreak::Right),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ break-before: {value} }}")),
+            vec![Property::PageBreakBefore(expected)],
+            "break-before: {value}"
+        );
+        assert_eq!(
+            known(&format!("p {{ break-after: {value} }}")),
+            vec![Property::PageBreakAfter(expected)],
+            "break-after: {value}"
+        );
+    }
+    for (value, expected) in [
+        ("auto", PageBreakInside::Auto),
+        ("avoid", PageBreakInside::Avoid),
+        ("avoid-page", PageBreakInside::Avoid),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ break-inside: {value} }}")),
+            vec![Property::PageBreakInside(expected)],
+            "break-inside: {value}"
+        );
+    }
+    // **The legacy name keeps its legacy grammar.** `page` is the modern
+    // spelling of `always` and is not a `page-break-before` value at all.
+    assert!(known("p { page-break-before: page }").is_empty());
+
+    for (name, value) in [
+        ("break-before", "column"),
+        ("break-before", "avoid-column"),
+        ("break-before", "region"),
+        ("break-before", "avoid-region"),
+        ("break-before", "recto"),
+        ("break-after", "verso"),
+        ("break-inside", "avoid-column"),
+        ("break-inside", "avoid-region"),
+    ] {
+        assert_eq!(
+            declarations(&format!("p {{ {name}: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: name,
+                value: value.to_owned(),
+            },
+            "{name}: {value} is this build's gap, by value"
+        );
+    }
+}

@@ -995,10 +995,13 @@ pub enum PageBreak {
     Right,
 }
 
-/// `page-break-inside`, CSS 2.2 §13.3.1.
+/// `page-break-inside`, CSS 2.2 §13.3.1, and `css-break-3` §3.2's
+/// `break-inside`, which it is a legacy alias of.
 ///
-/// Two values and not three: `avoid-page` and the `break-inside` longhand's
-/// `avoid-column` are about fragmentation contexts this build has none of.
+/// Two values: `break-inside: avoid-page` is [`PageBreakInside::Avoid`],
+/// because the page is the one fragmentation context this build breaks
+/// across, and `avoid-column` and `avoid-region` are about two it has none of
+/// and are refused by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageBreakInside {
     /// `auto`
@@ -1575,9 +1578,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "border-image",
     "border-radius",
     "box-shadow",
-    "break-after",
-    "break-before",
-    "break-inside",
     "caption-side",
     "clip",
     "clip-path",
@@ -1856,6 +1856,14 @@ pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
             "border-left-width",
         ],
     ),
+    // `css-break-3` §3.4's aliases, and in the other direction from every
+    // other row here: the name a book writes today is the modern one and the
+    // longhand this build keeps is named for the legacy one. One property with
+    // two names, so `break-before: inherit` defaults exactly what
+    // `page-break-before: inherit` does.
+    ("break-after", &["page-break-after"]),
+    ("break-before", &["page-break-before"]),
+    ("break-inside", &["page-break-inside"]),
     (
         "column-rule",
         &[
@@ -2380,6 +2388,9 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-width",
     "bottom",
     "box-sizing",
+    "break-after",
+    "break-before",
+    "break-inside",
     "clear",
     "color",
     "column-count",
@@ -2758,6 +2769,54 @@ fn implemented(
             Some(Property::PageBreakInside(match word {
                 "auto" => PageBreakInside::Auto,
                 "avoid" => PageBreakInside::Avoid,
+                _ => return None,
+            }))
+        }),
+        // `css-break-3` §3.1's modern spelling, and **one property with two
+        // names rather than two properties**: §3.4 makes `page-break-before`,
+        // `-after` and `-inside` legacy shorthands that alias these three, so
+        // both spellings write the one longhand and a later declaration of
+        // either beats an earlier one of the other, which is what cascading a
+        // single property means. The table §3.4 states is the mapping:
+        // `page-break-before: always` is `break-before: page`, and `auto`,
+        // `avoid`, `left` and `right` are themselves.
+        //
+        // `avoid-page` is `avoid` here and not an approximation of it: §3.1
+        // makes `avoid` avoid a break in *every* fragmentation context and
+        // `avoid-page` in the page one, and the page is the only context this
+        // build fragments across — a multi-column container is laid out as
+        // one item and never broken between its columns.
+        //
+        // **Refused by value**, each `BadValue` and so each counted against the
+        // property rather than mapped onto a neighbour: `column` and
+        // `avoid-column` (a column break, which this build's balanced columns
+        // have no position for), `region` and `avoid-region` (no regions), and
+        // `recto` and `verso`, which §3.1 resolves through the page
+        // progression direction — this build sets every book left to right,
+        // and a `verso` read as `left` would be wrong in exactly the
+        // right-to-left books that write it.
+        "break-before" | "break-after" => {
+            let before = name == "break-before";
+            keyword(one, single, move |word| {
+                let value = match word {
+                    "auto" => PageBreak::Auto,
+                    "page" => PageBreak::Always,
+                    "avoid" | "avoid-page" => PageBreak::Avoid,
+                    "left" => PageBreak::Left,
+                    "right" => PageBreak::Right,
+                    _ => return None,
+                };
+                Some(if before {
+                    Property::PageBreakBefore(value)
+                } else {
+                    Property::PageBreakAfter(value)
+                })
+            })
+        }
+        "break-inside" => keyword(one, single, |word| {
+            Some(Property::PageBreakInside(match word {
+                "auto" => PageBreakInside::Auto,
+                "avoid" | "avoid-page" => PageBreakInside::Avoid,
                 _ => return None,
             }))
         }),

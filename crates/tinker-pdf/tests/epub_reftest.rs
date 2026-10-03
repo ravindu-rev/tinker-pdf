@@ -36,7 +36,7 @@
 mod epub_support;
 
 use epub_support::book::one_face_book;
-use epub_support::layout::{column, document, Line};
+use epub_support::layout::{column, document, lay_out, lines, Line};
 use epub_support::typeface::{shown_glyphs, text_objects, Face, Joining};
 use tinker_pdf::Document;
 
@@ -384,6 +384,115 @@ fn an_inset_block_on_a_wide_page_is_a_full_block_on_a_narrow_one() {
     // have agreed.
     let narrower = lay_at(style, &format!("<p>{text}</p>"), 100.0);
     assert_ne!(strip(&plain), strip(&narrower));
+}
+
+// ---- fragmentation ------------------------------------------------------------
+
+/// Where every line landed **and on which page**, at a page box short enough
+/// to fragment.
+///
+/// The pairs above lay out into one hundred-thousand-point column, which is
+/// the right instrument for a cascade question and blind to this one: a forced
+/// break and an ignored one put every line at the same `y` of one endless
+/// column. So the page index is part of the compared value here.
+fn paged(style: &str, body: &str, height: f64) -> Vec<(usize, String, f64, f64)> {
+    let (_, _, laid) = lay_out(
+        &document(body),
+        &format!("{RESET} {style}"),
+        MEASURE,
+        height,
+    );
+    lines(&laid)
+        .into_iter()
+        .map(|line| (line.page, line.text, line.x, line.y))
+        .collect()
+}
+
+/// A pair agrees on its pages, and its mismatch reference does not.
+#[track_caller]
+fn same_pages(
+    what: &str,
+    left: Vec<(usize, String, f64, f64)>,
+    right: Vec<(usize, String, f64, f64)>,
+    broken: Vec<(usize, String, f64, f64)>,
+) {
+    assert!(
+        left.iter().any(|line| line.0 > 0),
+        "{what}: the reference never reached a second page, so it cannot tell a break \
+         from none: {left:?}"
+    );
+    assert_eq!(left, right, "{what}: the two spellings disagree");
+    assert_ne!(
+        left, broken,
+        "{what}: the mismatch reference agrees too, so the pair proves nothing"
+    );
+}
+
+/// **`break-before: page` is `page-break-before: always`** (`css-break-3`
+/// §3.4's table, first row).
+///
+/// The page box holds the whole document, so the only thing that can put the
+/// second paragraph on a page of its own is the declaration — which is what the
+/// mismatch reference, `auto`, says the comparison can see.
+#[test]
+fn break_before_page_is_page_break_before_always() {
+    let style = "p { font-size: 20px; line-height: 30px }";
+    let body = r#"<p>one</p><p class="b">two</p><p>three</p>"#;
+    let modern = paged(&format!("{style} .b {{ break-before: page }}"), body, 300.0);
+    let legacy = paged(
+        &format!("{style} .b {{ page-break-before: always }}"),
+        body,
+        300.0,
+    );
+    let broken = paged(&format!("{style} .b {{ break-before: auto }}"), body, 300.0);
+    same_pages("break-before", modern, legacy, broken);
+}
+
+/// **`break-after: page` is `page-break-after: always`**, the same row of
+/// §3.4's table on the other edge of the box.
+#[test]
+fn break_after_page_is_page_break_after_always() {
+    let style = "p { font-size: 20px; line-height: 30px }";
+    let body = r#"<p class="a">one</p><p>two</p>"#;
+    let modern = paged(&format!("{style} .a {{ break-after: page }}"), body, 300.0);
+    let legacy = paged(
+        &format!("{style} .a {{ page-break-after: always }}"),
+        body,
+        300.0,
+    );
+    let broken = paged(&format!("{style} .a {{ break-after: avoid }}"), body, 300.0);
+    same_pages("break-after", modern, legacy, broken);
+}
+
+/// **`break-inside: avoid` and `avoid-page` are `page-break-inside: avoid`**
+/// (§3.4's last row, and §3.2's `avoid-page` in a document whose only
+/// fragmentation context is the page).
+///
+/// The page holds three lines; one paragraph of one line comes first and one of
+/// four lines follows, so an unavoided break leaves two of the four behind.
+/// `orphans` and `widows` are set to one on all three sides so that §13.3.2 has
+/// no say: the only thing that can move the paragraph whole is the property.
+#[test]
+fn break_inside_avoid_is_page_break_inside_avoid() {
+    let style = "p { font-size: 20px; line-height: 30px; orphans: 1; widows: 1 }";
+    // Twelve-point advances against a 240-point measure is twenty characters a
+    // line, so each fifteen-letter word is a line of its own.
+    let body = "<p>one</p><p class=\"k\">aaaaaaaaaaaaaaa bbbbbbbbbbbbbbb \
+                ccccccccccccccc ddddddddddddddd</p>";
+    let modern = paged(&format!("{style} .k {{ break-inside: avoid }}"), body, 90.0);
+    let modern_page = paged(
+        &format!("{style} .k {{ break-inside: avoid-page }}"),
+        body,
+        90.0,
+    );
+    let legacy = paged(
+        &format!("{style} .k {{ page-break-inside: avoid }}"),
+        body,
+        90.0,
+    );
+    let broken = paged(&format!("{style} .k {{ break-inside: auto }}"), body, 90.0);
+    assert_eq!(modern, modern_page, "avoid-page is avoid on paper");
+    same_pages("break-inside", modern, legacy, broken);
 }
 
 // ---- the right-to-left pair -------------------------------------------------
