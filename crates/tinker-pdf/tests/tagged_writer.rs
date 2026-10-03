@@ -511,6 +511,81 @@ fn the_documents_language_is_written_on_the_catalog() {
     assert_eq!(text.as_deref(), Some("en-GB"));
 }
 
+// ---- `/RoleMap` (14.7.3) ---------------------------------------------------
+
+/// A custom type is written as itself and read as the type it maps to — both
+/// names kept, which is the reader's `raw_type`/`standard_type` pair — and a
+/// mapping may go through another custom type (ISO 14289-1 7.1).
+#[test]
+fn a_custom_type_is_written_as_itself_and_read_through_the_role_map() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    assert!(builder.map_role(b"Chapitre", b"Sect"));
+    assert!(builder.map_role(b"aside", b"sidebar"));
+    assert!(builder.map_role(b"sidebar", b"Note"));
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"Chapitre", |page| {
+            page.tagged(b"aside", |page| page.text(b"F1", 12.0, 20.0, 150.0, "x"));
+        });
+    });
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    let chapter = only(&doc, "Sect");
+    assert_eq!(chapter.raw_type, "Chapitre");
+    let aside = only(&doc, "Note");
+    assert_eq!(aside.raw_type, "aside", "two hops, both followed");
+}
+
+/// What `map_role` refuses, each for the reason a reader could not use it.
+#[test]
+fn a_role_map_entry_a_reader_could_not_use_is_refused() {
+    let mut builder = DocumentBuilder::new();
+    // ISO 14289-1 7.1: standard tags shall not be remapped.
+    assert!(!builder.map_role(b"P", b"Div"));
+    assert!(!builder.map_role(b"Figure", b"Span"));
+    assert!(!builder.map_role(b"", b"P"), "an empty name");
+    assert!(!builder.map_role(b"x", b""), "an empty target");
+    assert!(!builder.map_role(b"x", b"x"), "a name mapped to itself");
+    assert!(builder.map_role(b"a", b"b"));
+    assert!(builder.map_role(b"b", b"c"));
+    assert!(!builder.map_role(b"c", b"a"), "a loop through two entries");
+    assert!(
+        !builder.map_role(b"a", b"Span"),
+        "the first statement stands"
+    );
+    assert!(builder.map_role(b"a", b"b"), "and restating it is accepted");
+    assert!(
+        builder.map_role(b"c", b"P"),
+        "the chain ends at a standard type"
+    );
+
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"a", |page| page.text(b"F1", 12.0, 20.0, 150.0, "x"));
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "no loop reached the file");
+    assert_eq!(only(&doc, "P").raw_type, "a");
+}
+
+/// A role map is part of a structure tree, and a document without one gains
+/// no `/RoleMap` however many mappings were registered.
+#[test]
+fn a_role_map_without_a_tree_is_not_written() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    assert!(builder.map_role(b"Chapitre", b"Sect"));
+    builder.add_page(300.0, 200.0, |page| {
+        page.text(b"F1", 12.0, 20.0, 150.0, "plain");
+    });
+    let bytes = builder.finish();
+    assert!(!bytes.windows(7).any(|window| window == b"RoleMap"));
+}
+
 /// The shape check the `lang` documentation sends a caller to.
 #[test]
 fn a_language_tag_has_the_shape_bcp_47_gives_one() {

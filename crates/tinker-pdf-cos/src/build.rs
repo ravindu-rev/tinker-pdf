@@ -2097,6 +2097,84 @@ impl TaggedKid {
 /// with `open_tag` found it.
 const MAX_TAG_DEPTH: usize = crate::limits::MAX_NEST_DEPTH as usize - 1;
 
+/// The standard structure types of ISO 32000-1 (14.8.4).
+///
+/// **One list for the writer's role map and the PDF/A validator's level A
+/// rule**, which is why it lives here rather than in either: a type the writer
+/// refuses to remap and a type the validator accepts as standard are one
+/// question, and two lists would be two answers the day one was edited. It
+/// used to be the validator's alone.
+///
+/// `H1` to `H6` and no further. The open-ended `Hn`, and the types PDF 2.0
+/// added (`Strong` among them, ISO 32000-2 Table 368), belong to 2.0's own
+/// namespace (14.8.6), and in a document that names no namespace they are
+/// custom types like any other.
+pub const STANDARD_STRUCTURE_TYPES: &[&str] = &[
+    // 14.8.4.2, grouping elements.
+    "Document",
+    "Part",
+    "Art",
+    "Sect",
+    "Div",
+    "BlockQuote",
+    "Caption",
+    "TOC",
+    "TOCI",
+    "Index",
+    "NonStruct",
+    "Private",
+    // 14.8.4.3, block-level: paragraphlike.
+    "P",
+    "H",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    // 14.8.4.3, block-level: lists.
+    "L",
+    "LI",
+    "Lbl",
+    "LBody",
+    // 14.8.4.3, block-level: tables.
+    "Table",
+    "TR",
+    "TH",
+    "TD",
+    "THead",
+    "TBody",
+    "TFoot",
+    // 14.8.4.4, inline-level.
+    "Span",
+    "Quote",
+    "Note",
+    "Reference",
+    "BibEntry",
+    "Code",
+    "Link",
+    "Annot",
+    "Ruby",
+    "RB",
+    "RT",
+    "RP",
+    "Warichu",
+    "WT",
+    "WP",
+    // 14.8.4.5, illustrations.
+    "Figure",
+    "Formula",
+    "Form",
+];
+
+/// Whether `kind` is one of [`STANDARD_STRUCTURE_TYPES`].
+#[must_use]
+pub fn is_standard_structure_type(kind: &[u8]) -> bool {
+    STANDARD_STRUCTURE_TYPES
+        .iter()
+        .any(|standard| standard.as_bytes() == kind)
+}
+
 /// A structure element to open: its type, and what it says about itself
 /// (14.7.2 Table 323, 14.9, 14.8.5).
 ///
@@ -3710,6 +3788,9 @@ pub struct DocumentBuilder {
     next_carry: u64,
     /// The catalog's `/Lang`. See [`DocumentBuilder::set_language`].
     language: Option<String>,
+    /// The structure tree root's `/RoleMap` (14.7.3), custom type to the type
+    /// it stands for. See [`DocumentBuilder::map_role`].
+    role_map: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 impl Default for DocumentBuilder {
@@ -3750,7 +3831,59 @@ impl DocumentBuilder {
             carried_refused: 0,
             next_carry: 0,
             language: None,
+            role_map: BTreeMap::new(),
         }
+    }
+
+    /// Maps a structure type of the caller's own to the type it stands for,
+    /// in the structure tree root's `/RoleMap` (14.7.3).
+    ///
+    /// This is what lets a producer keep its own vocabulary — an EPUB's
+    /// `section` or `em` — and still say what each name *is* to a reader that
+    /// knows only the standard set: the element is written as `/S /section`
+    /// and read as a `/Sect`. A mapping may go through another custom type,
+    /// and ISO 14289-1 7.1 asks only that it end at a standard one.
+    ///
+    /// Returns false, mapping nothing, when the mapping would be one a reader
+    /// cannot use:
+    ///
+    /// - `custom` is itself one of [`STANDARD_STRUCTURE_TYPES`] — ISO 14289-1
+    ///   7.1: *"Standard tags defined in ISO 32000-1:2008, 14.8.4, shall not
+    ///   be remapped"*, and a `/P` that means something else is a paragraph
+    ///   to every reader that skips the map;
+    /// - either name is empty, or the two are the same name;
+    /// - `custom` is already mapped to something else — the first statement
+    ///   stands, and mapping it again to the same type is accepted;
+    /// - the mapping would close a loop, which a reader can only cut
+    ///   somewhere arbitrary (this crate's reports `RoleMapLoop`).
+    ///
+    /// Written only when the document has a structure tree to hold it.
+    pub fn map_role(&mut self, custom: &[u8], standard: &[u8]) -> bool {
+        if custom.is_empty()
+            || standard.is_empty()
+            || custom == standard
+            || is_standard_structure_type(custom)
+        {
+            return false;
+        }
+        if let Some(existing) = self.role_map.get(custom) {
+            return existing == standard;
+        }
+        // Follow the target's own mappings: a chain that comes back to
+        // `custom` is a loop. Bounded by the map's size, since an acyclic
+        // chain visits each entry once.
+        let mut at = standard;
+        for _ in 0..=self.role_map.len() {
+            if at == custom {
+                return false;
+            }
+            match self.role_map.get(at) {
+                Some(next) => at = next,
+                None => break,
+            }
+        }
+        self.role_map.insert(custom.to_vec(), standard.to_vec());
+        true
     }
 
     /// The document's natural language, written as the catalog's `/Lang`
@@ -6501,6 +6634,19 @@ impl DocumentBuilder {
                 self.names.intern(b"ParentTreeNextKey"),
                 Object::Int(parent_tree.len() as i64),
             );
+            // 14.7.3: a name to a name, for every custom type the caller
+            // mapped. A `BTreeMap`, so the entries are in one order however
+            // they were registered.
+            if !self.role_map.is_empty() {
+                let mut role_map = Dict::new();
+                for (custom, standard) in &self.role_map {
+                    role_map.insert(
+                        self.names.intern(custom),
+                        Object::Name(self.names.intern(standard)),
+                    );
+                }
+                dict.insert(self.names.intern(b"RoleMap"), Object::Dict(role_map));
+            }
             self.objects.insert(root.num, Object::Dict(dict));
             catalog.insert(self.names.intern(b"StructTreeRoot"), Object::Ref(root));
 

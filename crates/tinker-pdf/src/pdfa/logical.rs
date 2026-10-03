@@ -60,76 +60,23 @@ use super::{clauses, FindingKind, Flavour, Level, Machinery, Part, Raw, RuleGrou
 use crate::structure::StructureTree;
 use crate::Document;
 
-/// The standard structure types (ISO 32000-1 14.8.4, Tables 334 to 337).
-///
-/// **One list for parts 1 to 3, and that is the safe direction.** Part 1's
-/// reference specification is PDF 1.4, which did not define `Annot`, `THead`,
-/// `TBody` or `TFoot`; parts 2 and 3's is ISO 32000-1, which does. Modelling
-/// that as two lists would make a part 1 file carrying `/TBody` a finding, and
-/// the cost of being wrong about it is a conforming file reported — so the
-/// wider list is used for every part and the narrower reading is not taken on
-/// four names no corpus fixture tests.
-///
-/// `H1` to `H6` and no further: ISO 32000-1 stops there, and the open-ended
-/// `Hn` arrived with ISO 32000-2, which no part that has a level A is defined
-/// on.
-const STANDARD_STRUCTURE_TYPES: &[&str] = &[
-    // 14.8.4.2, grouping elements.
-    "Document",
-    "Part",
-    "Art",
-    "Sect",
-    "Div",
-    "BlockQuote",
-    "Caption",
-    "TOC",
-    "TOCI",
-    "Index",
-    "NonStruct",
-    "Private",
-    // 14.8.4.3, block-level: paragraphlike.
-    "P",
-    "H",
-    "H1",
-    "H2",
-    "H3",
-    "H4",
-    "H5",
-    "H6",
-    // 14.8.4.3, block-level: lists.
-    "L",
-    "LI",
-    "Lbl",
-    "LBody",
-    // 14.8.4.3, block-level: tables.
-    "Table",
-    "TR",
-    "TH",
-    "TD",
-    "THead",
-    "TBody",
-    "TFoot",
-    // 14.8.4.4, inline-level.
-    "Span",
-    "Quote",
-    "Note",
-    "Reference",
-    "BibEntry",
-    "Code",
-    "Link",
-    "Annot",
-    "Ruby",
-    "RB",
-    "RT",
-    "RP",
-    "Warichu",
-    "WT",
-    "WP",
-    // 14.8.4.5, illustrations.
-    "Figure",
-    "Formula",
-    "Form",
-];
+// The standard structure types (ISO 32000-1 14.8.4), from the writer's crate
+// since the tagged-writing row: `DocumentBuilder::map_role` refuses to remap
+// exactly the types this rule accepts, and one list is what keeps those the
+// same question.
+//
+// **One list for parts 1 to 3, and that is the safe direction.** Part 1's
+// reference specification is PDF 1.4, which did not define `Annot`, `THead`,
+// `TBody` or `TFoot`; parts 2 and 3's is ISO 32000-1, which does. Modelling
+// that as two lists would make a part 1 file carrying `/TBody` a finding, and
+// the cost of being wrong about it is a conforming file reported — so the
+// wider list is used for every part and the narrower reading is not taken on
+// four names no corpus fixture tests.
+//
+// `H1` to `H6` and no further: ISO 32000-1 stops there, and the open-ended
+// `Hn` arrived with ISO 32000-2, which no part that has a level A is defined
+// on.
+use tinker_pdf_cos::STANDARD_STRUCTURE_TYPES;
 
 /// How many structure elements one document is judged over.
 ///

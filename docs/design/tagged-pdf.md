@@ -231,6 +231,11 @@ writes, family by family:
   writes the catalog's `/Lang`. The page-level nesting cap is one below the
   reader's, because `/Document` is a level of its own; it used to equal the
   reader's, and the deepest element's text came back orphaned.
+- **`/RoleMap`.** `DocumentBuilder::map_role` maps a custom type to a
+  standard one, possibly through another custom type, and refuses to remap a
+  standard type (ISO 14289-1 7.1), an identity, a second target and a loop.
+  The standard list moved from the PDF/A validator into the writer's crate so
+  the two cannot disagree about what "standard" means.
 
 ## Dependencies
 

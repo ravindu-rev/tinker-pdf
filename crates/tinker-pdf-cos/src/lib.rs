@@ -93,12 +93,12 @@ mod streams;
 pub use appearance::synthesize as synthesize_appearance;
 pub use bmp_embed::bmp_image;
 pub use build::{
-    is_language_tag, jpeg_shape, subset_tag, ArchivalLevel, ArchivalPart, ArchivalProfile,
-    ArchivalRefusal, BlendMode, CalculatorOp, CompressedImage, DeviceNAttributes, DeviceSpace,
-    DocumentBuilder, EmbeddedWhole, ExtGState, FormXObject, Function, Glyph, ImageColorSpace,
-    ImageData, ImageFilter, LayerId, MaskKind, OutlineEntry, PageBuilder, PlacedGlyph, Shading,
-    ShadingPattern, SoftMask, StateMask, SubsetRefusal, Tag, Target, TilingPattern, TilingType,
-    TransparencyGroup,
+    is_language_tag, is_standard_structure_type, jpeg_shape, subset_tag, ArchivalLevel,
+    ArchivalPart, ArchivalProfile, ArchivalRefusal, BlendMode, CalculatorOp, CompressedImage,
+    DeviceNAttributes, DeviceSpace, DocumentBuilder, EmbeddedWhole, ExtGState, FormXObject,
+    Function, Glyph, ImageColorSpace, ImageData, ImageFilter, LayerId, MaskKind, OutlineEntry,
+    PageBuilder, PlacedGlyph, Shading, ShadingPattern, SoftMask, StateMask, SubsetRefusal, Tag,
+    Target, TilingPattern, TilingType, TransparencyGroup, STANDARD_STRUCTURE_TYPES,
 };
 // `calc::keystroke` and `calc::validate` are deliberately *not* re-exported
 // here: this root already has a `validate`, which is the strict structural

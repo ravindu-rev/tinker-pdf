@@ -987,7 +987,11 @@ rule and under the structure-type rule never being called — so the *other*
 writer fixture's zero findings at 2A are a verdict rather than a silence. It
 does not fail when the `/RoleMap` is ignored or when the four ISO 32000-1
 types are dropped, because `/Chapitre` and `/P` are on neither side of those
-readings; those two rows are held by `pdfa_logical.rs` alone.
+readings; those two rows are held by `pdfa_logical.rs` alone. *(October 2026,
+the tagged-writing row: the fixture gained a third twin, `/Chapitre` with
+`DocumentBuilder::map_role` mapping it to `/Sect`, which nothing reports — and
+a reader ignoring the `/RoleMap` now fails it, so the first of those two rows
+has a writer fixture too.)*
 
 **Five injections move the census by nothing, and each has a fixture rather
 than an excuse.** Four of the five share one cause, and it is worth naming

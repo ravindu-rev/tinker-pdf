@@ -481,6 +481,14 @@ a `/Lang`, or `Tag::keep_empty()` for an empty table cell — and dropped
 when it says nothing, as before. `DocumentBuilder::set_language` writes the
 catalog's `/Lang`, and `is_language_tag` is the shape check (14.9.2's
 RFC 3066, BCP 47 in 2.0) a caller holding someone else's text makes first.
+`DocumentBuilder::map_role(custom, standard)` writes the structure tree
+root's `/RoleMap` (14.7.3), so a producer can keep its own type names and
+still say what each one is: the element is written `/S /Chapitre` and read
+with `raw_type` `Chapitre` and `standard_type` `Sect`. It refuses what a
+reader could not use — remapping a standard type (ISO 14289-1 7.1: *standard
+tags shall not be remapped*; the list is `STANDARD_STRUCTURE_TYPES`, shared
+with the PDF/A validator's level A rule), an empty or identity entry, a
+second target for one name, and a loop.
 Nesting stops one level short of the reader's `MAX_NEST_DEPTH`, because
 `finish` puts every page's elements under one `/Document`; it used to stop
 at the cap itself, and an element nested exactly that deep came back
