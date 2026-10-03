@@ -230,6 +230,31 @@ function documentOps(outlineFixture) {
   return bytes;
 }
 
+// The options a save takes, every one the C ABI carries but encryption away
+// from its default, after two edits that give them something to act on: the
+// deleted page is what garbage collection drops, and the appended operators
+// are the one stream nobody has encoded, which is what compression
+// compresses. save-linearized is the same save linearized; the linearizer
+// sets object streams and compression aside, so it is a second script.
+function saveOptions(operated, linearize) {
+  const document_ = new PdfDocument(operated);
+  const editor = document_.editor();
+  editor.deletePage(1);
+  editor.appendContent(0, encoder.encode('0 0 m 100 100 l S'));
+  const options = new PdfWriteOptions();
+  options.setMode('rewrite');
+  options.setLinearize(linearize);
+  options.setVersion(2, 0);
+  options.setObjectStreams(true);
+  options.setCompress(true);
+  options.setGarbageCollect(true);
+  const bytes = editor.save(options);
+  options.free();
+  editor.free();
+  document_.free();
+  return bytes;
+}
+
 // Everything Sanitise::ALL names, taken out, with the report as text.
 function sanitiseScript(operated) {
   const document_ = new PdfDocument(operated);
@@ -429,17 +454,31 @@ function readSurface(outlineFixture, operated) {
   return lines.map((line) => `${line}\n`).join('');
 }
 
+// The name written down, the fixture it is made from, and its root. The
+// altered one is ecdsa-p256.pdf with its first `verdict path` changed to
+// `verdict PATH`: only its digest moves, which is what tells the digest and
+// the signature check apart.
 const SIGNED = [
-  ['ecdsa-p256', 'ecdsa-p256-root'],
-  ['pkcs7-sha1', 'pkcs7-sha1-root'],
-  ['document-timestamp', null],
+  ['ecdsa-p256', 'ecdsa-p256', 'ecdsa-p256-root'],
+  ['pkcs7-sha1', 'pkcs7-sha1', 'pkcs7-sha1-root'],
+  ['document-timestamp', 'document-timestamp', null],
+  ['ecdsa-p256-altered', 'ecdsa-p256', 'ecdsa-p256-root'],
 ];
+
+function altered(bytes) {
+  const at = Buffer.from(bytes).indexOf('verdict path');
+  if (at < 0) throw new Error('ecdsa-p256.pdf carries the reason the alteration changes');
+  const copy = new Uint8Array(bytes);
+  copy.set(Buffer.from('PATH'), at + 'verdict '.length);
+  return copy;
+}
 
 // Script four: every signature and both verdicts, in the contract's text.
 function signaturesDump(support) {
   const lines = [];
-  for (const [label, root] of SIGNED) {
-    const document_ = new PdfDocument(readFileSync(path.join(support, `${label}.pdf`)));
+  for (const [label, file, root] of SIGNED) {
+    const bytes = readFileSync(path.join(support, `${file}.pdf`));
+    const document_ = new PdfDocument(label === file ? bytes : altered(bytes));
     const anchors = new PdfTrustAnchors();
     if (root !== null) anchors.add(readFileSync(path.join(support, `${root}.der`)));
     lines.push(`document ${label}`);
@@ -543,6 +582,8 @@ const operated = documentOps(outlineFixture);
 report('document-ops', operated);
 const [sanitised, removedText] = sanitiseScript(operated);
 report('sanitise', sanitised);
+report('save-options', saveOptions(operated, false));
+report('save-linearized', saveOptions(operated, true));
 const removed = encoder.encode(removedText);
 if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(removed));
 console.log(`READ sha256=${sha256(removed)} surface=js script=sanitise-report bytes=${removed.length}`);

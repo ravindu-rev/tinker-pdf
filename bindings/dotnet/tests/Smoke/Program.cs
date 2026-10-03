@@ -479,6 +479,29 @@ static string RemovalName(Removal removal) => removal switch
     _ => "metadata",
 };
 
+// The options a save takes, every one the C ABI carries but encryption away
+// from its default, after two edits that give them something to act on: the
+// deleted page is what garbage collection drops, and the appended operators
+// are the one stream nobody has encoded, which is what compression
+// compresses. save-linearized is the same save linearized; the linearizer
+// sets object streams and compression aside, so it is a second script.
+static byte[] SaveOptions(byte[] operated, bool linearize)
+{
+    using var source = Document.Open(operated);
+    using var editor = source.CreateEditor();
+    editor.DeletePage(1);
+    editor.AppendContent(0, System.Text.Encoding.ASCII.GetBytes("0 0 m 100 100 l S"));
+    return editor.Save(new WriteOptions
+    {
+        Mode = WriteMode.Rewrite,
+        Linearize = linearize,
+        Version = (2, 0),
+        ObjectStreams = true,
+        Compress = true,
+        GarbageCollect = true,
+    });
+}
+
 static (byte[] Saved, string Report) SanitiseScript(byte[] operated)
 {
     using var source = Document.Open(operated);
@@ -512,6 +535,8 @@ var operatedBytes = DocumentOps(outlineBytes);
 Report("document-ops", operatedBytes);
 var (sanitisedBytes, removedText) = SanitiseScript(operatedBytes);
 Report("sanitise", sanitisedBytes);
+Report("save-options", SaveOptions(operatedBytes, false));
+Report("save-linearized", SaveOptions(operatedBytes, true));
 var removedBytes = System.Text.Encoding.UTF8.GetBytes(removedText);
 if (Environment.GetEnvironmentVariable("TINKER_PARITY_DUMP") is not null)
 {
@@ -579,9 +604,28 @@ static string ChainName(Chain chain) => chain switch
     _ => "no-signer-certificate",
 };
 
-static void SignaturesDump(string support, string name, string? root, List<string> lines)
+// The altered document is ecdsa-p256.pdf with its first `verdict path` changed
+// to `verdict PATH`: only its digest moves, which is what tells the digest and
+// the signature check apart.
+static byte[] Altered(byte[] bytes)
 {
-    using var document = Document.Open(File.ReadAllBytes(Path.Combine(support, name + ".pdf")));
+    var needle = System.Text.Encoding.ASCII.GetBytes("verdict path");
+    for (var at = 0; at + needle.Length <= bytes.Length; at++)
+    {
+        if (bytes.AsSpan(at, needle.Length).SequenceEqual(needle))
+        {
+            var copy = (byte[])bytes.Clone();
+            System.Text.Encoding.ASCII.GetBytes("PATH").CopyTo(copy, at + "verdict ".Length);
+            return copy;
+        }
+    }
+    throw new InvalidOperationException("ecdsa-p256.pdf carries the reason the alteration changes");
+}
+
+static void SignaturesDump(string support, string name, string? root, List<string> lines, string? file = null)
+{
+    var bytes = File.ReadAllBytes(Path.Combine(support, (file ?? name) + ".pdf"));
+    using var document = Document.Open(file is null ? bytes : Altered(bytes));
     using var anchors = new TrustAnchors();
     if (root is not null)
     {
@@ -656,6 +700,7 @@ var signedLines = new List<string>();
 SignaturesDump(support, "ecdsa-p256", "ecdsa-p256-root", signedLines);
 SignaturesDump(support, "pkcs7-sha1", "pkcs7-sha1-root", signedLines);
 SignaturesDump(support, "document-timestamp", null, signedLines);
+SignaturesDump(support, "ecdsa-p256-altered", "ecdsa-p256-root", signedLines, "ecdsa-p256");
 var signed = new System.Text.StringBuilder();
 foreach (var line in signedLines)
 {

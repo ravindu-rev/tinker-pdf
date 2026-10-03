@@ -57,13 +57,17 @@ renderer does nothing at all. That is PRE-A's failure, one ecosystem out.
 python bindings/python/tests/write_parity.py testdata/form-fields.pdf
 ```
 
-Two scripts with every input pinned — fill a form and save incrementally, and
-build a document from pages, a font and an image — printing one
-`WROTE sha256=<hex>` line each. The same two run against the facade in Rust,
-through the npm package and through the NuGet package, and
-`cargo xtask bindings-parity` requires all four to be byte-identical. Ruling 11
-is what makes that the right test: a binding projects the facade 1:1 and adds
-no logic of its own, so four surfaces disagreeing means one of them added
+Nine scripts with every input pinned — six that write a document (fill a form
+and save incrementally; build a document from pages, a font and an image; the
+document operations; a sanitise; two saves with every write option set) and
+three that write down what the read surface and the signature verdicts say,
+all listed in [docs/features/bindings.md](../../docs/features/bindings.md) —
+printing one
+`WROTE sha256=<hex>` or `READ sha256=<hex>` line each. The same nine run against the facade in Rust,
+through the npm package, the NuGet package and the Go, Ruby and Java bindings,
+and `cargo xtask bindings-parity` requires every one to be byte-identical.
+Ruling 11 is what makes that the right test: a binding projects the facade 1:1
+and adds no logic of its own, so surfaces disagreeing means one of them added
 something.
 
 The API is the facade's, closure-free where a closure could not cross:

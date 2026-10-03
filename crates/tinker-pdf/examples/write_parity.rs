@@ -26,8 +26,8 @@
 //!   through `begin_page`/`push_page`, sets `/Info` and an outline, and
 //!   finishes.
 //!
-//! The image is computed from a formula rather than read from a file, so four
-//! languages produce the same 64 bytes with no fixture between them -- a
+//! The image is computed from a formula rather than read from a file, so every
+//! language produces the same 64 bytes with no fixture between them -- a
 //! parity suite whose surfaces read the same *file* proves they can read a
 //! file.
 //!
@@ -43,6 +43,28 @@
 //!   `Sanitise::ALL` names, saving again; its report is written down as
 //!   **sanitise-report** (below), so the four lists of what went are compared
 //!   as well as the bytes that are left.
+//!
+//! And two more, for the options a save takes:
+//!
+//! - **save-options** opens the document-ops artefact, deletes page 1 and
+//!   appends `0 0 m 100 100 l S` to page 0, then saves with every write
+//!   option the C ABI carries but two away from its default: a rewrite
+//!   declaring PDF 2.0, with object streams, compression and garbage
+//!   collection. The edits give the options something to act on -- the
+//!   deleted page is what garbage collection drops, and the appended
+//!   operators are the one content stream nobody has encoded yet, which is
+//!   what compression compresses;
+//! - **save-linearized** is the same edits and the same save with
+//!   linearization asked for as well. It is a second script rather than the
+//!   first one's options because the linearizer sets object streams and
+//!   compression aside -- a linearized save with either turned off is the
+//!   same bytes -- so one save with everything on would not see two of them.
+//!
+//! Every other script saves with the defaults but the mode, so without these
+//! a surface that dropped any other option on the way to the engine would
+//! agree with every surface that did not. Encryption is the option left out:
+//! the artefact would need a password to reopen and validate, and the
+//! bindings' smoke tests round-trip it instead.
 //!
 //! A third script reads rather than writes:
 //!
@@ -104,12 +126,19 @@
 //!
 //! - **signatures** opens three documents the signature tests commit under
 //!   `crates/tinker-pdf/tests/signature_support/` -- an ECDSA P-256 signature,
-//!   an `adbe.pkcs7.sha1` one and an RFC 3161 document timestamp -- and for
-//!   each writes down every signature as read, then every verdict twice: with
-//!   the document's own root as the one trust anchor (none for the timestamp,
-//!   which is what reaches `no-anchors`), judged at no instant, and judged at
-//!   the epoch, where every certificate is outside its validity. It prints
-//!   `READ sha256=` of that text.
+//!   an `adbe.pkcs7.sha1` one and an RFC 3161 document timestamp -- and a
+//!   fourth made from the first, and for each writes down every signature as
+//!   read, then every verdict twice: with the document's own root as the one
+//!   trust anchor (none for the timestamp, which is what reaches
+//!   `no-anchors`), judged at no instant, and judged at the epoch, where every
+//!   certificate is outside its validity. It prints `READ sha256=` of that
+//!   text. The fourth, `ecdsa-p256-altered`, is `ecdsa-p256.pdf` with the first
+//!   `verdict path` in its bytes changed to `verdict PATH`: inside the signed
+//!   range and the same length, so the file still parses, the signature over
+//!   the signed attributes still verifies and only the document digest moves.
+//!   It is the one verdict whose digest and signature check disagree, and
+//!   without it a surface that read those two answers from each other's
+//!   accessor would agree with every other surface.
 //!
 //! Only what the C ABI carries is written down, so every surface can produce
 //! it; the payloads a Python or JavaScript object also carries are theirs to
@@ -521,12 +550,25 @@ fn read_surface(outline_fixture: &[u8], operated: &[u8]) -> String {
     text
 }
 
-/// The documents script four reads, and the root each is anchored to.
-const SIGNED: [(&str, Option<&str>); 3] = [
-    ("ecdsa-p256", Some("ecdsa-p256-root")),
-    ("pkcs7-sha1", Some("pkcs7-sha1-root")),
-    ("document-timestamp", None),
+/// The documents script four reads: the name it writes down, the fixture it
+/// is made from, and the root it is anchored to.
+const SIGNED: [(&str, &str, Option<&str>); 4] = [
+    ("ecdsa-p256", "ecdsa-p256", Some("ecdsa-p256-root")),
+    ("pkcs7-sha1", "pkcs7-sha1", Some("pkcs7-sha1-root")),
+    ("document-timestamp", "document-timestamp", None),
+    ("ecdsa-p256-altered", "ecdsa-p256", Some("ecdsa-p256-root")),
 ];
+
+/// The one alteration the altered document carries: the first `verdict path`
+/// becomes `verdict PATH`, inside the signed range and the same length.
+fn altered(mut bytes: Vec<u8>) -> Vec<u8> {
+    let at = bytes
+        .windows(b"verdict path".len())
+        .position(|window| window == b"verdict path")
+        .expect("ecdsa-p256.pdf carries the reason the alteration changes");
+    bytes[at + b"verdict ".len()..at + b"verdict path".len()].copy_from_slice(b"PATH");
+    bytes
+}
 
 /// Script four: every signature and both verdicts, in the contract's text.
 fn signatures(support: &std::path::Path) -> String {
@@ -534,9 +576,12 @@ fn signatures(support: &std::path::Path) -> String {
     use tinker_pdf::{Chain, CmsState, Coverage, DocumentDigest, SignatureCheck, TrustAnchors};
 
     let mut lines = Vec::new();
-    for (name, root) in SIGNED {
-        let bytes = std::fs::read(support.join(format!("{name}.pdf")))
-            .unwrap_or_else(|e| panic!("reading {name}.pdf: {e}"));
+    for (name, file, root) in SIGNED {
+        let mut bytes = std::fs::read(support.join(format!("{file}.pdf")))
+            .unwrap_or_else(|e| panic!("reading {file}.pdf: {e}"));
+        if name != file {
+            bytes = altered(bytes);
+        }
         let document = Document::open(bytes).expect("the signed fixture opens");
         let mut anchors = TrustAnchors::new();
         if let Some(root) = root {
@@ -765,6 +810,28 @@ fn sanitise(operated: &[u8]) -> (Vec<u8>, String) {
     (editor.save(&WriteOptions::default()), text)
 }
 
+/// Scripts: one save with the options the C ABI carries away from their
+/// defaults, after the two edits that give those options something to do;
+/// `linearize` is the one that tells save-options from save-linearized.
+fn save_options(operated: &[u8], linearize: bool) -> Vec<u8> {
+    let document = Document::open(operated.to_vec()).expect("the artefact opens");
+    let mut editor = document.editor();
+    assert!(editor.delete_page(1), "the artefact has a page 1 to delete");
+    assert!(
+        editor.append_content(0, b"0 0 m 100 100 l S"),
+        "page 0 takes appended content"
+    );
+    editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize,
+        version: (2, 0),
+        object_streams: true,
+        compress: true,
+        garbage_collect: true,
+        ..WriteOptions::default()
+    })
+}
+
 /// Validates, then prints the line `cargo xtask bindings-parity` reads.
 ///
 /// The validation is not decoration and not optional. A surface that printed a
@@ -806,6 +873,8 @@ fn main() {
     report("document-ops", &operated);
     let (sanitised, removed) = sanitise(&operated);
     report("sanitise", &sanitised);
+    report("save-options", &save_options(&operated, false));
+    report("save-linearized", &save_options(&operated, true));
     if std::env::var_os("TINKER_PARITY_DUMP").is_some() {
         print!("{removed}");
     }

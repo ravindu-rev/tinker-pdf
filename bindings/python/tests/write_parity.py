@@ -155,6 +155,26 @@ def document_ops(outline_fixture: bytes) -> bytes:
     return editor.save()
 
 
+# The options a save takes, every one the C ABI carries but encryption away
+# from its default, after two edits that give them something to act on: the
+# deleted page is what garbage collection drops, and the appended operators
+# are the one stream nobody has encoded, which is what compression
+# compresses. save-linearized is the same save linearized; the linearizer sets
+# object streams and compression aside, so it is a second script.
+def save_options(operated: bytes, linearize: bool) -> bytes:
+    editor = tinker_pdf.Document(operated).editor()
+    editor.delete_page(1)
+    editor.append_content(0, b"0 0 m 100 100 l S")
+    return editor.save(
+        mode="rewrite",
+        linearize=linearize,
+        version=(2, 0),
+        object_streams=True,
+        compress=True,
+        garbage_collect=True,
+    )
+
+
 def sanitise(operated: bytes):
     """Everything Sanitise::ALL names, taken out, with the report as text."""
     editor = tinker_pdf.Document(operated).editor()
@@ -325,18 +345,27 @@ def read_surface(outline_fixture: bytes, operated: bytes) -> str:
     return "".join(line + "\n" for line in lines)
 
 
+# The name written down, the fixture it is made from, and its root. The
+# altered one is ecdsa-p256.pdf with its first `verdict path` changed to
+# `verdict PATH`: only its digest moves, which is what tells the digest and
+# the signature check apart.
 SIGNED = [
-    ("ecdsa-p256", "ecdsa-p256-root"),
-    ("pkcs7-sha1", "pkcs7-sha1-root"),
-    ("document-timestamp", None),
+    ("ecdsa-p256", "ecdsa-p256", "ecdsa-p256-root"),
+    ("pkcs7-sha1", "pkcs7-sha1", "pkcs7-sha1-root"),
+    ("document-timestamp", "document-timestamp", None),
+    ("ecdsa-p256-altered", "ecdsa-p256", "ecdsa-p256-root"),
 ]
 
 
 def signatures_dump(support: pathlib.Path) -> str:
     """Script four: every signature and both verdicts, in the contract's text."""
     lines = []
-    for name, root in SIGNED:
-        document = tinker_pdf.Document((support / f"{name}.pdf").read_bytes())
+    for name, file, root in SIGNED:
+        data = (support / f"{file}.pdf").read_bytes()
+        if name != file:
+            assert b"verdict path" in data
+            data = data.replace(b"verdict path", b"verdict PATH", 1)
+        document = tinker_pdf.Document(data)
         anchors = tinker_pdf.TrustAnchors()
         if root is not None:
             anchors.add((support / f"{root}.der").read_bytes())
@@ -423,6 +452,8 @@ def main(fixture_path: str) -> None:
     report("document-ops", operated)
     sanitised, removed = sanitise(operated)
     report("sanitise", sanitised)
+    report("save-options", save_options(operated, False))
+    report("save-linearized", save_options(operated, True))
     removed = removed.encode("utf-8")
     if os.environ.get("TINKER_PARITY_DUMP"):
         sys.stdout.write(removed.decode("utf-8"))

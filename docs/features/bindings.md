@@ -1,7 +1,8 @@
 # Bindings
 
-Four surfaces over one facade: a C ABI, Python, JavaScript/WebAssembly and
-.NET. Ruling 11 ([rulings.md](../rulings.md)) is the whole design — **the
+Seven surfaces over one facade: a C ABI; Python and JavaScript/WebAssembly
+directly over the facade; and .NET, Go, Ruby and Java over the C ABI — with
+Swift beside them as source nobody has compiled yet. Ruling 11 ([rulings.md](../rulings.md)) is the whole design — **the
 facade is the only public surface**; a binding projects it 1:1 and adds no
 logic, caching or defaults of its own. If a binding needs behaviour, the
 facade grows it first, and then every binding has it.
@@ -39,8 +40,14 @@ in one handle is the same data race it would be in Rust, and no C ABI can
 stop it. One handle per thread, or the caller's own lock; freeing stays safe
 from any thread.
 
-**One hundred and ten functions**, of which fifty-five are the write surface
-below and five are the strict validator it leans on
+**One hundred and seventy-three functions**, counted from the committed
+header, October 2026 — eighteen open and render, two streaming, five
+validating, fifty-five writing, thirteen running form scripts
+(`tpdf_editor_recalculate` and the ten calls of its report,
+`tpdf_editor_formatted_value`, `_keystroke` and `_validate`), thirty reading
+signatures, thirty-four on the read surface and sixteen document operations.
+The fifty-five are the write surface below and the five are the strict
+validator it leans on
 (`tpdf_document_validate`, `tpdf_defects_count`, `tpdf_defect_rule`,
 `tpdf_defect_message`, `tpdf_defects_free` — an owned `TpdfDefects` on the
 `TpdfSignatures` pattern, so it outlives the document). Eighteen open and
@@ -336,10 +343,70 @@ a package built with the wrong RID restores, compiles and throws
 `DllNotFoundException` on first use, and `dotnet pack` on an empty
 `runtimes/` produces a perfectly valid managed-only package.
 
+**Go, Ruby and Java over the C ABI** (`bindings/go`, `bindings/ruby`,
+`bindings/java`). Three thin wrappers, each nothing but the header in its
+language's spelling: one method per C call, or a loop of calls over a list
+the engine hands back, every enum transcribed with the C numbers, every
+handle closed by its owner's `Close`/`close` (safe twice), and every string
+and byte array handed back a copy that outlives its handle. None decides a
+default: a save takes the options `tpdf_write_options_init` filled in, a
+view the engine's own `tpdf_destination_init_fit`, and an encrypted save the
+caller's 48 bytes of entropy. Go and Java call **all 173 functions**; Ruby
+calls 172. Each has the parity program (below) and a smoke program that
+renders blank-then-inked and then calls, once each, every declaration the
+parity program does not reach — authentication against the two encrypted
+fixtures, the editor's page operations, fields, checkpoint and restore, the
+form-script calls, an encrypted save reopened with its password, an embedded
+and subset face, the page builder's colours, crop box and raw operators —
+so a declaration transcribed wrongly fails there rather than in a caller.
+
+- **Go** is cgo, and the only one of the three that compiles against the
+  header rather than transcribing it, so cgo lays out every struct.
+  `bindings/go/tinkerpdf.go` links `target/release` with that directory as
+  its run path; `go run ./cmd/smoke testdata/simple-text.pdf FACE.ttf` and
+  `go run ./cmd/parity testdata/form-fields.pdf` from `bindings/go`. Every
+  C call runs with its goroutine's OS thread locked until the error message
+  has been read, because `tpdf_last_error_message` is per thread and a
+  goroutine may otherwise move between the call and the read. Streaming is
+  `OpenStreaming(Source)`: the vtable is built in C (it crosses by value and
+  its members are C function pointers), its three callbacks are exported Go
+  functions, and the context is a `cgo.Handle`, deleted by the `free`
+  callback.
+- **Ruby** is Fiddle, from the standard library, so there is no gem and no
+  compiler: `ruby -Ilib test/smoke.rb …` and `ruby -Ilib test/write_parity.rb
+  …` from `bindings/ruby`, loading `TINKER_PDF_LIB` or the release library in
+  this checkout. Structs cross as packed strings; their layouts are the C
+  crate's, pinned by `crates/tinker-pdf-ffi/tests/layout.rs` with
+  `offset_of!`, so a field moved there fails there. The one function it does
+  not call is `tpdf_document_open_streaming` (below).
+- **Java** is the Foreign Function and Memory API (`java.lang.foreign`),
+  written to the part of it that is the same in JDK 21 — where it is a
+  preview API, compiled with `--enable-preview --release 21` and run with
+  `--enable-preview` — and JDK 22, where it is final and **Java 22 and later
+  drop the flag**. Only 21 was available to verify on, so the 22 claim rests
+  on the API's documented equivalence, not on a run; `cargo xtask
+  bindings-parity` reads `javac -version` and picks the flags. Every downcall
+  in `Native.java` is generated from the header, one line each; structs are
+  written field by field at the offsets `layout.rs` pins; streaming is three
+  upcall stubs in an arena the document owns, released after it.
+  `--enable-native-access=ALL-UNNAMED` silences the restricted-method
+  warning, and the library is `-Dtinkerpdf.library=` or `TINKER_PDF_LIB`.
+
+**Swift** (`bindings/swift`) is **unverified source**: no Swift toolchain was
+available, so it has never been compiled. It is a SwiftPM package whose
+`CTinkerPdf` module imports the committed header through a shim (not a
+copy, which would be a second transcription to drift), a `TinkerPdf` target
+covering the core — open, text, render, validate, authenticate, the form
+fill and save, the builder, 49 of the 173 functions — and a `Smoke`
+executable written to the same blank-then-inked pattern. It has no parity
+program, is not in `bindings-parity` and has no CI job; the read surface,
+document operations, signatures and streaming are owed, and so is the first
+build.
+
 **`set_fonts` everywhere.** The engine bundles no faces and reads no font
 directories ([fonts](fonts.md)), so a document that embeds none extracts its
 text perfectly and draws none of it. The `FontProvider` seam is projected
-across all four surfaces, and every smoke test renders *twice* — blank
+across every surface, and every smoke test renders *twice* — blank
 without a face, inked with one — because "a bitmap of the right size came
 back" passes on a build whose renderer does nothing at all.
 
@@ -357,9 +424,9 @@ build-a-document 1dbb7ace2a5787016efa257ab8c3efdb6ceae1b339f8597266ad47c5828dac6
 ```
 
 That is the write-side analogue of the read side's 1 190 inked pixels, and it
-is the evidence for ruling 11: four surfaces disagreeing would mean one of them
+is the evidence for ruling 11: surfaces disagreeing would mean one of them
 added something. The image both scripts draw is computed from a formula rather
-than read from a file, so the four languages produce the same 64 bytes with no
+than read from a file, so every language produces the same 64 bytes with no
 fixture between them — a parity suite whose surfaces read the same *file*
 proves only that they can read a file.
 
@@ -398,7 +465,7 @@ facade, the wheel and the npm package printed
 
 ```text
 read-surface     c02151fc924133fe2864d1b05bc57e5eaafaddab86f0be2b2088549fd91af5c0
-signatures       e2f5e33cb3c9826ad27076f065ed2baf4f8a665f1eb90041e1c906f1868135ef
+signatures       c3490eb5f9a5c893893494bf0c51269ef718f915051053d6b30ff7ae7c1ad2ff
 ```
 
 and the .NET leg is written to print every one of them too (its build is
@@ -408,12 +475,45 @@ document-ops artefact and the boundaries, which is the one recorded update a
 legitimate change costs. *signatures* is the fourth script:
 it opens three documents the signature tests commit — an ECDSA P-256
 signature, an `adbe.pkcs7.sha1` one and an RFC 3161 document timestamp —
-and writes down every signature as read and every verdict twice, anchored to
-the document's own root (or to nothing, for the timestamp, which is what
-reaches `no-anchors`), judged at no instant and at the epoch. Only what the C
-ABI carries goes into the text, so every surface can produce it; the payloads
-Python and JavaScript carry besides are asserted in their own scripts against
-what the fixtures are known to be.
+and a fourth made from the first, and writes down every signature as read
+and every verdict twice, anchored to the document's own root (or to nothing,
+for the timestamp, which is what reaches `no-anchors`), judged at no instant
+and at the epoch. The fourth, `ecdsa-p256-altered`, is `ecdsa-p256.pdf` with
+the first `verdict path` in its bytes changed to `verdict PATH` — inside the
+signed range and the same length — so it is the one verdict whose document
+digest (`differs`) and signature check (`verified`) disagree. *signatures*
+first read `e2f5e33c…` without it, and every surface agreed with it while a
+Ruby binding that read those two answers from each other's accessor agreed
+too: the Ruby injection campaign found that, and the altered document is
+what closes it. Only what the C ABI carries goes into the text, so every
+surface can produce it; the payloads Python and JavaScript carry besides are
+asserted in their own scripts against what the fixtures are known to be.
+
+**And the options a save takes.** Every script above saves with the defaults
+but the mode, so a surface that dropped linearization, the version, object
+streams, compression or garbage collection on the way to the engine agreed
+with every surface that did not — which the Go binding's injection campaign
+showed by inverting garbage collection and changing nothing. Two more scripts
+close it: *save-options* opens the document-ops artefact, deletes page 1 and
+appends `0 0 m 100 100 l S` to page 0 (something for garbage collection to
+drop and an unencoded stream for compression to compress), then saves a
+rewrite declaring PDF 2.0 with object streams, compression and garbage
+collection; *save-linearized* is the same save linearized. It is a second
+script rather than one save with everything on because the linearizer sets
+object streams and compression aside — a linearized save with either turned
+off is the same bytes — so a single save would not see two of the options.
+Encryption is the one left to the smoke programs, which reopen an encrypted
+save with its password, because the artefact would need the password to be
+validated here.
+
+```text
+save-options     652c7cd32149a0f6fd06e921fa9762e2c8411aa09fbfc732ea6a2c991e369704
+save-linearized  e64bffa59ffbc7a4b7335abdc634bc567a615d9f29e23ef1673c51e07f3ac7fc
+```
+
+On linux/x86_64, October 2026, the facade, the wheel, the npm package and the
+Go, Ruby and Java bindings printed all nine recorded hashes; the .NET leg
+prints them too and was not run.
 
 `cargo xtask bindings-parity` is the gate, and it is built around two different
 failures. A **mismatch** is the one everybody thinks of. An **absent line** —
@@ -425,15 +525,23 @@ run says how many ran and how many did not: retired ruling 9 left that
 discipline behind it and ruling 13 restates it, so a job that quietly found no
 interpreter cannot pass. `--require-all` turns every skip into a failure, and
 that is what `ci.yml`'s `bindings-parity` job passes after building and
-installing all four artefacts.
+installing every artefact and setting up Go, Ruby and JDK 21. The three
+bindings over the C ABI are skipped, by name, when the release library is not
+built or their toolchain is not on `PATH`; Java's compile is a step that must
+succeed first, so a binding that does not compile fails rather than skips.
+The Go surface runs with the library search path set to `target/release`
+alone, because under `cargo run` it otherwise holds `target/debug/deps`, where
+a test build had left an older `libtinker_pdf_ffi` — the loader prefers the
+search path to the program's run path, and the parity program died with exit
+status 127 on the first symbol the stale library lacked.
 
-**Agreement is not enough, and this is what makes it enough.** Four
-byte-identical outputs tell you nothing if all four are wrong. So every surface
+**Agreement is not enough, and this is what makes it enough.** Seven
+byte-identical outputs tell you nothing if all seven are wrong. So every surface
 re-opens its own artefact through this engine's strict structural validator and
 refuses to print a hash for a file that is not clean — which is why `validate()`
-is now projected on all four surfaces (`tpdf_document_validate` and the
-`TpdfDefects` handle on the C ABI, `Document.validate()` in Python and
-JavaScript, `Document.Validate()` in .NET). Under ruling 13 that validator is
+is projected on every surface (`tpdf_document_validate` and the `TpdfDefects`
+handle on the C ABI, `Document.validate()` in Python and JavaScript,
+`Document.Validate()` in .NET, and the same call in Go, Ruby and Java). Under ruling 13 that validator is
 first-party, and that is precisely why it can be a gate here rather than an
 external step somebody might not have installed.
 
@@ -442,8 +550,8 @@ synthesised-document hashes in `crates/tinker-pdf/tests/determinism.rs`. Those
 are a *rendering* claim's fingerprints, moved only by the renderer or the
 synthesiser, and interleaving a bindings hash among them would make a writer
 change read as a determinism regression to whoever opened that file next. One
-place, and the four surfaces compared to *it* rather than to each other, so a
-legitimate writer change is one recorded update instead of four flaky suites.
+place, and every surface compared to *it* rather than to each other, so a
+legitimate writer change is one recorded update instead of seven flaky suites.
 
 **Packaging, built and dry-run, nothing published.** `cargo run -p xtask --
 release` walks wheel, npm package, NuGet package and crates in an order
@@ -680,13 +788,19 @@ committed generated file from drifting: `tests/header.rs` reads both as text
 and fails when an export is missing from the header or a declaration names
 nothing — it spawns nothing (ruling 13) — and CI's `bindings` job regenerates
 the header and fails on any difference, which is what catches a signature that
-moved under an unchanged name. The .NET binding's P/Invoke declarations are a
-worked transcription of it.
+moved under an unchanged name. The .NET binding's P/Invoke declarations and
+the Ruby binding's `extern` lines are worked transcriptions of it, the Java
+binding's downcalls were generated from it, Go compiles against it and Swift
+imports it as a module. What a transcription cannot see from the header is a
+struct's padding, so `tests/layout.rs` pins the size and every field offset of
+the eleven structs a binding packs by hand.
 
-Each binding's README ([js](../../bindings/js/README.md),
+Each of the first three bindings' READMEs ([js](../../bindings/js/README.md),
 [python](../../bindings/python/README.md),
 [dotnet](../../bindings/dotnet/README.md)) carries its build, smoke-test and
-packaging commands.
+packaging commands; the Go, Ruby, Java and Swift bindings carry theirs in
+their sources' opening comments and in the section above. None of the four is
+packaged.
 
 ## Refused by name
 
@@ -704,7 +818,9 @@ packaging commands.
 | CommonJS build | none; ESM only | two builds of the engine can diverge | — |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
-| Published packages | `pip install` / `npm install` / `dotnet add package` do not work yet | the facade is unstable until 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
+| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 172 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
+| Swift beyond its core | 49 of 173 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
+| Published packages | `pip install` / `npm install` / `dotnet add package` do not work yet, and Go, Ruby, Java and Swift have no package at all | the facade is unstable until 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
 
 ## Verified
 
@@ -834,6 +950,32 @@ packaging commands.
   interpreter and a missing `node_modules` reports both by name with the
   command that would fix each, exits 0 without them, and exits non-zero under
   `--require-all`.
+- **Go, Ruby and Java** are held by the parity programs — all nine hashes,
+  equal to the facade's, on linux/x86_64 with Go 1.24, Ruby 3.3 (Fiddle 1.1)
+  and OpenJDK 21, October 2026 — and by smoke programs that render
+  blank-then-inked and then call every declaration the parity programs do
+  not: Go and Java all 173 functions, Ruby 172. Counted injections, each one
+  defect in a binding's own code and never in its script, each failing
+  `bindings-parity` on that surface and no other — **12 of 12 caught**: Go's
+  null view number crossing as 0 rather than NaN (*read-surface*), an
+  attachment size read as absent (*read-surface*), garbage collection
+  crossing inverted (*save-options*, *save-linearized*) and the minor version
+  crossing as 7 (both save scripts); Ruby's URI target packed as a page
+  (*read-surface*), a removed entry losing its holder (*sanitise-report*),
+  the digest and signature-check accessors swapped (*signatures*), and
+  object streams and linearization crossing in each other's place
+  (*save-options*, which then printed exactly *save-linearized*'s hash);
+  Java's destination dropping its page reference (*read-surface*), the trim
+  box written as the bleed box (*document-ops* and everything downstream of
+  it), compression dropped (*save-options*) and the incremental mode saved as
+  a rewrite (*fill-and-save*). The first run of the campaign caught 7 of 9:
+  the digest/check swap and garbage collection were invisible to every
+  script, which is what the altered signed document and the two save scripts
+  were added for. `crates/tinker-pdf-ffi/tests/layout.rs` pins the eleven
+  hand-packed structs; counted injections: `TpdfDate`'s hour declared before
+  its day, `TpdfWriteOptions`' compression before its object streams, and
+  `TpdfPageLabelRange` aligned to 16 each fail **1** test. The Swift package
+  has never been compiled.
 - `bindings/js/demo/verify.mjs` drives the browser demo in headless
   Chromium and checks the ink's bounding box is the shape of a line of
   text rather than a smear or a stray pixel.
