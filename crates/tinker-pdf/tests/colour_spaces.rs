@@ -134,6 +134,35 @@ fn a_separation_runs_its_tint_transform() {
     );
 }
 
+/// Every pixel of a `/DeviceN` image is its own tint transform's colour,
+/// however often its samples repeat and in whatever order — the decoder
+/// remembers conversions by their samples, and a colour it has seen must never
+/// answer for one it has not. The transform is `{ 0 }`, so the two colorants
+/// are red and green: four columns of full A, full B, full A again, and both —
+/// which shares its first sample with A and must not be taken for it.
+#[test]
+fn a_device_n_images_pixels_are_each_their_own_tint() {
+    let program = "{ 0 }";
+    let bitmap = page_with_objects(
+        "/XObject << /Im 5 0 R >>",
+        "q 40 0 0 40 0 0 cm /Im Do Q",
+        &format!(
+            "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 1 \
+               /BitsPerComponent 8 /ColorSpace [/DeviceN [/A /B] /DeviceRGB 6 0 R] \
+               /Filter /ASCIIHexDecode /Length 17 >>\nstream\nFF0000FFFF00FFFF>\nendstream\nendobj\n\
+             6 0 obj\n<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] \
+               /Length {} >>\nstream\n{program}\nendstream\nendobj\n",
+            program.len()
+        ),
+    );
+    let columns = [5, 15, 25, 35].map(|x| pixel(&bitmap, x, 20));
+    assert_eq!(
+        columns,
+        [(255, 0, 0), (0, 255, 0), (255, 0, 0), (255, 255, 0)],
+        "red, green, red again, and yellow"
+    );
+}
+
 /// The same space at zero tint is white, which proves the transform is being
 /// evaluated rather than the answer being black regardless.
 #[test]

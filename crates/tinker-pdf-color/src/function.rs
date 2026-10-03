@@ -216,6 +216,19 @@ fn interpolate(x: f64, x0: f64, x1: f64, y0: f64, y1: f64) -> f64 {
 /// is read instead — one read, and exact at every grid point.
 const MULTILINEAR_INPUTS: usize = 8;
 
+/// How many samples one multilinear evaluation may read: its corners times its
+/// outputs.
+///
+/// Eight inputs of a four-output tint transform are 1 024 reads. A colour
+/// space never asks a table for more outputs than PDF's 32 colorants, which at
+/// eight inputs is this figure; a table that states more — a `/Range` of a
+/// thousand pairs is a file's to write, and each pair is an output read at
+/// every corner — is read at its nearest sample, as a table past
+/// [`MULTILINEAR_INPUTS`] is. So an evaluation costs what the clause costs for
+/// a table a colour space can use, and an image that evaluates one a pixel
+/// pays no more for an absurd one.
+const MULTILINEAR_READS: usize = 8192;
+
 /// Type 0 (7.10.2): linear interpolation along one input, and multilinear
 /// across several.
 ///
@@ -241,21 +254,13 @@ fn sampled(
     let read = |index: usize, component: usize| -> f64 {
         // Checked, because a multi-input table's index is the file's `/Size`
         // multiplied out, and a sample past the data reads as zero either way.
-        let Some(bit) = index
+        let Some(sample) = index
             .checked_mul(outputs)
             .and_then(|sample| sample.checked_add(component))
-            .and_then(|sample| (sample as u64).checked_mul(u64::from(bits)))
         else {
             return 0.0;
         };
-        let mut value = 0u64;
-        for i in 0..bits.min(32) {
-            let at = bit + u64::from(i);
-            let byte = samples.get((at / 8) as usize).copied().unwrap_or(0);
-            let shifted = (byte >> (7 - (at % 8))) & 1;
-            value = (value << 1) | u64::from(shifted);
-        }
-        value as f64
+        read_sample(samples, sample, bits)
     };
 
     if size.len() > 1 {
@@ -294,9 +299,72 @@ fn sampled(
         .collect()
 }
 
+/// One sample of a 7.10.2 table: the `sample`th value of `bits` bits, packed
+/// big-endian from the first byte, or zero where the data or the address runs
+/// out.
+///
+/// The widths that start on a byte — 8, 16, 24 and 32, which is what every
+/// producer writes and what `tinker_pdf_cos` writes — are read a byte at a
+/// time; the rest a bit at a time. The two agree on every width they share,
+/// which `the_byte_read_is_the_bit_read` holds them to. Only the first 32 bits
+/// of a wider sample are read, as 7.10.2 allows no wider one.
+fn read_sample(samples: &[u8], sample: usize, bits: u32) -> f64 {
+    let width = bits.min(32);
+    if bits == width && bits % 8 == 0 && bits > 0 {
+        let bytes = (bits / 8) as usize;
+        let Some(start) = sample.checked_mul(bytes) else {
+            return 0.0;
+        };
+        let tail = samples.get(start..).unwrap_or(&[]);
+        let value = (0..bytes).fold(0u64, |value, at| {
+            (value << 8) | u64::from(tail.get(at).copied().unwrap_or(0))
+        });
+        return value as f64;
+    }
+    read_sample_bits(samples, sample, bits)
+}
+
+/// [`read_sample`] a bit at a time, for any width.
+fn read_sample_bits(samples: &[u8], sample: usize, bits: u32) -> f64 {
+    let Some(bit) = (sample as u64).checked_mul(u64::from(bits)) else {
+        return 0.0;
+    };
+    let mut value = 0u64;
+    for i in 0..bits.min(32) {
+        let Some(at) = bit.checked_add(u64::from(i)) else {
+            return 0.0;
+        };
+        let byte = usize::try_from(at / 8)
+            .ok()
+            .and_then(|index| samples.get(index))
+            .copied()
+            .unwrap_or(0);
+        let shifted = (byte >> (7 - (at % 8))) & 1;
+        value = (value << 1) | u64::from(shifted);
+    }
+    value as f64
+}
+
 /// [`sampled`] across more than one input: 7.10.2's table, the first input
 /// varying fastest, interpolated multilinearly up to [`MULTILINEAR_INPUTS`]
 /// inputs and read at the nearest sample past that.
+///
+/// # What one evaluation costs
+///
+/// A point is inside a cell of the table, and 7.10.2's interpolation is a
+/// weighted sum of that cell's corners — 2^m of them across m inputs, which
+/// is the cost of the clause and not of this code. What this code does not
+/// add is work beyond it: no allocation per call, a byte-aligned sample read
+/// in a few instructions ([`read_sample`]), and only the axes the point is
+/// strictly *inside* enumerated. A point on a grid line along an axis weighs
+/// nothing on that axis's upper corners, so a tint that is 0 or 1 in a
+/// colorant — the common case for a spot ink an image leaves untouched —
+/// halves the corners for each. *Corrected on review, 3 October 2026*: an
+/// eight-input table of sixteen-bit samples took about 300 µs an evaluation
+/// in a debug build, enumerating and weighing every corner and reading every
+/// sample a bit at a time, and an image is evaluated once a pixel. The sums
+/// are taken in the same order as before, so every answer is the same to the
+/// bit.
 #[allow(clippy::too_many_arguments)]
 fn sampled_across(
     domain: &[(f64, f64)],
@@ -309,11 +377,17 @@ fn sampled_across(
     inputs: &[f64],
 ) -> Vec<f64> {
     let outputs = range.len().max(1);
-    // Per axis: the cell's low corner, its high one, the fraction between,
-    // and the axis's stride through the table. Saturating, because `/Size`
-    // is the file's and a product that overflows is a table no file holds —
-    // `read` answers zero past the samples there are.
-    let mut axes: Vec<(usize, usize, f64, usize)> = Vec::with_capacity(size.len());
+    // The cell's low corner as one index into the table, the nearest sample
+    // as another, and for each axis the point is strictly inside, the step to
+    // the cell's upper corner on it and the fraction of the way there.
+    // Saturating, because `/Size` is the file's and a product that overflows
+    // is a table no file holds: `read` answers zero past the samples there
+    // are, and a saturated sum is the same whichever order its terms are
+    // added in.
+    let mut base = 0usize;
+    let mut closest = 0usize;
+    let mut inside = [(0usize, 0.0f64); MULTILINEAR_INPUTS];
+    let mut live = 0usize;
     let mut stride = 1usize;
     for (axis, &points) in size.iter().enumerate() {
         let points = points.max(1);
@@ -326,37 +400,51 @@ fn sampled_across(
         let position = interpolate(x, span.0, span.1, e0, e1).clamp(0.0, (points - 1) as f64);
         let low = position.floor() as usize;
         let high = low.saturating_add(1).min(points - 1);
-        axes.push((low, high, position - position.floor(), stride));
+        let fraction = position - position.floor();
+        base = base.saturating_add(low.saturating_mul(stride));
+        let at = if fraction < 0.5 { low } else { high };
+        closest = closest.saturating_add(at.saturating_mul(stride));
+        // `high` is `low + 1` wherever `fraction` is not zero: a position
+        // clamped to the last sample has no fraction left.
+        if fraction > 0.0 && high > low {
+            if let Some(slot) = inside.get_mut(live) {
+                *slot = (stride, fraction);
+            }
+            live += 1;
+        }
         stride = stride.saturating_mul(points);
     }
+    let multilinear = size.len() <= MULTILINEAR_INPUTS
+        && live <= MULTILINEAR_INPUTS
+        && (1usize << live).saturating_mul(outputs) <= MULTILINEAR_READS;
 
     let mut raw = vec![0.0f64; outputs];
-    if axes.len() <= MULTILINEAR_INPUTS {
-        for corner in 0..(1usize << axes.len()) {
+    if !multilinear {
+        for (component, slot) in raw.iter_mut().enumerate() {
+            *slot = read(closest, component);
+        }
+    } else {
+        // `inside` has `MULTILINEAR_INPUTS` slots, filled in order, and
+        // `multilinear` holds `live` to at most that many: the slice is in
+        // range and the shift is at most eight.
+        let inside = &inside[..live];
+        for corner in 0..(1usize << live) {
             let mut weight = 1.0f64;
-            let mut index = 0usize;
-            for (axis, &(low, high, fraction, stride)) in axes.iter().enumerate() {
-                let upper = corner & (1 << axis) != 0;
-                weight *= if upper { fraction } else { 1.0 - fraction };
-                index =
-                    index.saturating_add((if upper { high } else { low }).saturating_mul(stride));
+            let mut index = base;
+            for (axis, &(step, fraction)) in inside.iter().enumerate() {
+                if corner & (1 << axis) != 0 {
+                    weight *= fraction;
+                    index = index.saturating_add(step);
+                } else {
+                    weight *= 1.0 - fraction;
+                }
             }
-            if weight == 0.0 {
-                continue;
-            }
+            // Every corner enumerated is read, so the reads are 2^live times
+            // the outputs: a corner of no weight is one the axes above left
+            // out, not one skipped here.
             for (component, slot) in raw.iter_mut().enumerate() {
                 *slot += weight * read(index, component);
             }
-        }
-    } else {
-        let index = axes
-            .iter()
-            .fold(0usize, |index, &(low, high, fraction, stride)| {
-                let nearest = if fraction < 0.5 { low } else { high };
-                index.saturating_add(nearest.saturating_mul(stride))
-            });
-        for (component, slot) in raw.iter_mut().enumerate() {
-            *slot = read(index, component);
         }
     }
 
@@ -795,6 +883,81 @@ mod tests {
             samples: vec![255; 8],
         };
         assert_eq!(absurd.eval(&[1.0; 4]).len(), 1);
+    }
+
+    /// Every byte-aligned width reads the value the bit-at-a-time walk reads,
+    /// at every sample of a table and past its end, where both read zero.
+    #[test]
+    fn the_byte_read_is_the_bit_read() {
+        let samples: Vec<u8> = (0..61u32).map(|i| (i * 97 % 256) as u8).collect();
+        for bits in [8, 16, 24, 32] {
+            for sample in 0..(samples.len() * 8 / bits as usize + 3) {
+                assert_eq!(
+                    read_sample(&samples, sample, bits),
+                    read_sample_bits(&samples, sample, bits),
+                    "{bits} bits, sample {sample}"
+                );
+            }
+            assert_eq!(read_sample(&samples, usize::MAX, bits), 0.0);
+        }
+        // A width past 32 is read as its first 32 bits on its own stride.
+        assert_eq!(
+            read_sample(&samples, 1, 40),
+            read_sample_bits(&samples, 1, 40)
+        );
+    }
+
+    /// The reads one evaluation of `f` makes at `inputs`, counted.
+    fn reads(size: &[usize], outputs: usize, inputs: &[f64]) -> (usize, Vec<f64>) {
+        let count = std::cell::Cell::new(0usize);
+        let read = |index: usize, component: usize| {
+            count.set(count.get() + 1);
+            ((index * 7 + component) % 256) as f64
+        };
+        let domain = vec![(0.0, 1.0); size.len()];
+        let range = vec![(0.0, 1.0); outputs];
+        let values = sampled_across(&domain, &range, size, 255.0, &[], &[], &read, inputs);
+        (count.get(), values)
+    }
+
+    /// One evaluation reads no more than [`MULTILINEAR_READS`] samples,
+    /// whatever the table's `/Range` asks for: eight inputs strictly inside
+    /// their cells are 256 corners, and a sixty-four-output table there is
+    /// read at its nearest sample — 64 reads, not 16 384.
+    #[test]
+    fn one_evaluation_reads_no_more_than_its_budget() {
+        let size = [3; MULTILINEAR_INPUTS];
+        let inside = [0.3; MULTILINEAR_INPUTS];
+        let (four, _) = reads(&size, 4, &inside);
+        assert_eq!(four, 256 * 4, "a tint transform's own cost");
+        let (wide, _) = reads(&size, 64, &inside);
+        assert!(wide <= MULTILINEAR_READS, "{wide} reads");
+        assert_eq!(wide, 64, "the nearest sample");
+    }
+
+    /// An axis the point sits on a grid line of weighs nothing on its upper
+    /// corners, so it is not enumerated: a tint of 0 or 1 in seven of eight
+    /// colorants is two corners, and the answer is the one-input table's.
+    #[test]
+    fn an_axis_on_a_grid_line_adds_no_corners() {
+        let size = [3; MULTILINEAR_INPUTS];
+        let mut at = [0.0; MULTILINEAR_INPUTS];
+        at[3] = 0.25;
+        at[5] = 1.0;
+        let (count, values) = reads(&size, 4, &at);
+        assert_eq!(count, 2 * 4);
+        // The cell's low corner is 2 x 3^5 along the sixth axis; the fourth
+        // axis moves 0.5 of the way to the next sample, 3^3 further on.
+        let low = 2 * 243;
+        let high = low + 27;
+        for (component, value) in values.iter().enumerate() {
+            let sample = |index: usize| ((index * 7 + component) % 256) as f64;
+            let want = (sample(low) * 0.5 + sample(high) * 0.5) / 255.0;
+            assert!(
+                (value - want).abs() < 1e-12,
+                "{component}: {value} vs {want}"
+            );
+        }
     }
 
     #[test]

@@ -82,6 +82,22 @@ first input varying fastest, across up to eight inputs and at the nearest
 sample past that, where 2^m corners a lookup stops being a cost worth paying
 (`a_two_input_sampled_function_shades_across_both_inputs`). One input is the
 arithmetic it always was. A type 1 shading's `/Matrix` is still not read.
+*Corrected on review the same day*: an eight-input table of sixteen-bit
+samples cost about 300 µs an evaluation in a debug build (23 µs optimised),
+and an image in a `/DeviceN` space evaluates its tint transform once a pixel —
+a 256 by 256 picture of 64 colours took 15 s to decode. An evaluation now
+enumerates only the axes the point is strictly inside, reads a byte-aligned
+sample in a few instructions and allocates nothing per call (90 µs debug,
+5 µs optimised, every answer the same to the bit), reads no more than 8 192
+samples whatever `/Range` asks for — past that, the nearest sample, as past
+eight inputs (`one_evaluation_reads_no_more_than_its_budget`) — and an image
+in any space other than the device spaces converts each colour once,
+remembered by its samples in a table of 4 096 slots that never answers one
+colour for another (`an_images_repeated_colour_is_converted_once`,
+`a_device_n_images_pixels_are_each_their_own_tint`): the same picture decodes
+in 0.13 s. A picture of a million distinct colours still costs a million
+evaluations, which is the clause's price, as a calculator's 65 536 tokens a
+pixel has always been.
 
 **Shadings** (8.7.4.5). Type 1 (function-based), type 2 (axial) and type 3
 (radial) are evaluated per pixel through `Shading::color_at`; the radial

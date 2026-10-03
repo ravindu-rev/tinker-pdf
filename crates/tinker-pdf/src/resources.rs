@@ -2952,10 +2952,16 @@ impl PageResources {
         let row_bits = (width as usize) * n * (bpc as usize);
         let row_bytes = row_bits.div_ceil(8);
         let max = ((1u32 << bpc.min(16)) - 1) as f64;
+        let mut remembered = if is_mask {
+            None
+        } else {
+            Remembered::for_image(&space, n, bpc)
+        };
 
         for y in 0..height as usize {
             for x in 0..width as usize {
                 let mut components = Vec::with_capacity(n);
+                let mut samples = 0u128;
                 // "Shall be masked ... if min_i <= sample_i <= max_i for *all*
                 // i" — one component outside its range paints the pixel, which
                 // is why this starts true and is narrowed rather than widened.
@@ -2963,6 +2969,7 @@ impl PageResources {
                 for c in 0..n {
                     let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
                     let value = read_bits(&data, bit, bpc);
+                    samples = Remembered::key(samples, c, value);
                     if let Some(ranges) = &color_key {
                         // An absent range can never match, so a short array
                         // masks nothing rather than everything.
@@ -2991,7 +2998,10 @@ impl PageResources {
                     rgb.extend_from_slice(&[0, 0, 0]);
                     alpha.push(if paints { 255 } else { 0 });
                 } else {
-                    let (r, g, b) = space.to_rgb(&components);
+                    let (r, g, b) = match remembered.as_mut() {
+                        Some(table) => table.convert(samples, || space.to_rgb(&components)),
+                        None => space.to_rgb(&components),
+                    };
                     rgb.extend_from_slice(&[r, g, b]);
                     if color_key.is_some() {
                         alpha.push(if keyed { 0 } else { 255 });
@@ -3278,13 +3288,20 @@ impl PageResources {
         let max = ((1u32 << bpc.min(16)) - 1) as f64;
         let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
         let mut alpha = Vec::new();
+        let mut remembered = if is_mask {
+            None
+        } else {
+            Remembered::for_image(&space, n, bpc)
+        };
 
         for y in 0..height as usize {
             for x in 0..width as usize {
                 let mut components = Vec::with_capacity(n);
+                let mut samples = 0u128;
                 for c in 0..n {
                     let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
                     let value = read_bits(&bytes, bit, bpc);
+                    samples = Remembered::key(samples, c, value);
                     let raw = match &space {
                         ColorSpace::Indexed { .. } => f64::from(value),
                         _ => f64::from(value) / max,
@@ -3303,7 +3320,10 @@ impl PageResources {
                     rgb.extend_from_slice(&[0, 0, 0]);
                     alpha.push(if paints { 255 } else { 0 });
                 } else {
-                    let (r, g, b) = space.to_rgb(&components);
+                    let (r, g, b) = match remembered.as_mut() {
+                        Some(table) => table.convert(samples, || space.to_rgb(&components)),
+                        None => space.to_rgb(&components),
+                    };
                     rgb.extend_from_slice(&[r, g, b]);
                 }
             }
@@ -3884,6 +3904,93 @@ fn read_bits(data: &[u8], at: usize, bits: u32) -> u32 {
     value
 }
 
+/// How many conversions one image remembers at once.
+///
+/// A fixed table rather than a cap on anything a document states: it bounds
+/// what [`Remembered`] holds, 4 096 slots of a key and a colour each, and a
+/// picture with more colours than that converts some of them more than once.
+const REMEMBERED_COLOURS: usize = 4096;
+
+/// One image's colour conversions, remembered by the raw samples that asked
+/// for them.
+///
+/// An image reaches [`ColorSpace::to_rgb`] once a pixel, and for a space other
+/// than the device spaces that runs a tint transform, a profile or a power —
+/// a `/DeviceN` tint transform sampled across eight colorants weighs 256
+/// corners of its table (7.10.2), and an `/ICCBased` profile interpolates a
+/// lookup table of its own. A picture repeats its colours, so a conversion is
+/// remembered by the samples it was asked for, in a slot those samples choose.
+/// The slot keeps the samples beside the answer, so two colours that share a
+/// slot convert again rather than answer for each other: every pixel is the
+/// one `to_rgb` gives, and only the work is shared.
+///
+/// *Added on review of lane 5C, 3 October 2026*, when a sampled function of
+/// several inputs began to be read across all of them: one evaluation of an
+/// eight-input table costs what 7.10.2 makes it cost, and this is what keeps
+/// an image from paying it at every pixel of a colour it has already drawn.
+struct Remembered {
+    slots: Vec<Option<Conversion>>,
+}
+
+/// One remembered conversion: the samples, packed by [`Remembered::key`], and
+/// the colour `to_rgb` gave them.
+type Conversion = (u128, (u8, u8, u8));
+
+impl Remembered {
+    /// A table for an image of `n` components of `bpc` bits each in `space`,
+    /// or `None` where it would not pay or the samples do not fit one key —
+    /// a device space converts in a few operations, and a key holds eight
+    /// samples of sixteen bits.
+    fn for_image(space: &ColorSpace, n: usize, bpc: u32) -> Option<Self> {
+        let cheap = matches!(
+            space,
+            ColorSpace::DeviceGray
+                | ColorSpace::DeviceRgb
+                | ColorSpace::DeviceCmyk
+                | ColorSpace::Approximated { .. }
+                | ColorSpace::Pattern { .. }
+        );
+        (!cheap && n <= 8 && bpc <= 16).then(|| Self {
+            slots: vec![None; REMEMBERED_COLOURS],
+        })
+    }
+
+    /// Adds the `index`th sample of a pixel to its key. A sample is at most
+    /// sixteen bits — [`read_bits`] reads no more — and a table exists only
+    /// for at most eight of them, so nothing is shifted out.
+    fn key(key: u128, index: usize, sample: u32) -> u128 {
+        if index >= 8 {
+            return key;
+        }
+        key | (u128::from(sample & 0xFFFF) << (16 * index))
+    }
+
+    /// The colour the samples `key` stand for, converted by `convert` unless
+    /// this table holds it already.
+    fn convert(&mut self, key: u128, convert: impl FnOnce() -> (u8, u8, u8)) -> (u8, u8, u8) {
+        let at = Self::slot(key);
+        if let Some(Some((held, colour))) = self.slots.get(at) {
+            if *held == key {
+                return *colour;
+            }
+        }
+        let colour = convert();
+        if let Some(slot) = self.slots.get_mut(at) {
+            *slot = Some((key, colour));
+        }
+        colour
+    }
+
+    /// The slot a key's colour is kept in: Fibonacci hashing of the key's two
+    /// halves folded together, shifted to leave as many bits as the table is
+    /// a power of two.
+    fn slot(key: u128) -> usize {
+        let folded = (key as u64) ^ ((key >> 64) as u64);
+        let shift = 64 - REMEMBERED_COLOURS.trailing_zeros();
+        (folded.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> shift) as usize
+    }
+}
+
 /// Components read as a colour by how many of them there are.
 ///
 /// 11.6.5.2 puts `/BC` in the mask group's own colour space, which a file may
@@ -4038,8 +4145,55 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_inline_abbreviations, PageResources};
+    use super::{expand_inline_abbreviations, PageResources, Remembered};
+    use tinker_pdf_color::ColorSpace;
     use tinker_pdf_content::FontSource;
+
+    /// An image's colour is converted once however many pixels repeat it, and
+    /// two colours whose samples share a slot each get their own answer — the
+    /// table shares work, never a colour. A device space, and a pixel of more
+    /// samples than a key holds, are converted directly.
+    #[test]
+    fn an_images_repeated_colour_is_converted_once() {
+        let lab = ColorSpace::Lab {
+            range: [-100.0, 100.0, -100.0, 100.0],
+        };
+        let mut table = Remembered::for_image(&lab, 3, 8).expect("a Lab image is remembered");
+        let key = |samples: [u32; 3]| {
+            samples
+                .iter()
+                .enumerate()
+                .fold(0u128, |key, (index, sample)| {
+                    Remembered::key(key, index, *sample)
+                })
+        };
+        let first = key([10, 20, 30]);
+        let mut calls = 0;
+        for _ in 0..1000 {
+            let colour = table.convert(first, || {
+                calls += 1;
+                (1, 2, 3)
+            });
+            assert_eq!(colour, (1, 2, 3));
+        }
+        assert_eq!(calls, 1, "a thousand pixels of one colour, converted once");
+
+        let slot = Remembered::slot(first);
+        let neighbour = (0..=255u32)
+            .flat_map(|a| (0..=255u32).map(move |b| [a, b, 7]))
+            .map(key)
+            .find(|other| *other != first && Remembered::slot(*other) == slot)
+            .expect("some colour shares the slot");
+        assert_eq!(table.convert(neighbour, || (4, 5, 6)), (4, 5, 6));
+        assert_eq!(
+            table.convert(first, || (1, 2, 3)),
+            (1, 2, 3),
+            "the first colour converts again rather than answering as its neighbour"
+        );
+
+        assert!(Remembered::for_image(&ColorSpace::DeviceCmyk, 4, 8).is_none());
+        assert!(Remembered::for_image(&lab, 9, 8).is_none());
+    }
 
     fn expand(dict: &str) -> String {
         String::from_utf8(expand_inline_abbreviations(dict.as_bytes()))
