@@ -889,16 +889,19 @@ impl StyleTree {
     /// call: the style, already inherited from the originating element, and the
     /// text, with `attr()` and `counter()` already resolved.
     ///
-    /// Returns `None` for `::first-line` and `::first-letter`, which generate
-    /// nothing here and are counted by
-    /// [`crate::Warning::PseudoElementUnsupported`].
+    /// Returns `None` for `::first-line`, which generates nothing here and is
+    /// counted by [`crate::Warning::PseudoElementUnsupported`].
+    /// `::first-letter`'s box has a style and no text of its own: the text is
+    /// the originating element's first letter, which `epub::read` finds in the
+    /// box tree it builds.
     #[must_use]
     pub fn pseudo(&self, element: usize, which: PseudoElement) -> Option<&PseudoBox> {
         let generated = self.generated.get(element)?;
         match which {
             PseudoElement::Before => generated.before.as_ref(),
             PseudoElement::After => generated.after.as_ref(),
-            PseudoElement::FirstLine | PseudoElement::FirstLetter => None,
+            PseudoElement::FirstLetter => generated.first_letter.as_ref(),
+            PseudoElement::FirstLine => None,
         }
     }
 }
@@ -948,6 +951,11 @@ pub struct Generated {
     pub before: Option<PseudoBox>,
     /// `::after`, laid out behind them.
     pub after: Option<PseudoBox>,
+    /// `::first-letter`, `css-pseudo-4` §2.2: a style for the element's first
+    /// typographic letter unit, where any rule names one. Its `text` and
+    /// `content` are empty: the letter is the document's, and it is found in
+    /// the box tree rather than generated.
+    pub first_letter: Option<PseudoBox>,
     /// A `display: list-item`'s marker text, `css-lists-3` §3: its
     /// `list-item` counter in its `list-style-type`, with the style's `.`
     /// suffix and without its space. `None` on anything that is not a list
@@ -1063,6 +1071,14 @@ pub fn cascade_from<E: Element>(
                 elements,
                 index,
                 PseudoElement::After,
+                &generating,
+                &mut report,
+                budget,
+            )?,
+            first_letter: matcher.pseudo_winners(
+                elements,
+                index,
+                PseudoElement::FirstLetter,
                 &generating,
                 &mut report,
                 budget,
@@ -1670,15 +1686,20 @@ impl<'a> Matcher<'a> {
                 content = Some(value);
             }
         }
-        let items = match content {
-            Some(ContentValue::Items(items)) => items,
-            // No `content` at all, or `content: none`. §12.2: no box.
-            _ => return Ok(None),
+        // `::first-letter` takes no `content`: its box exists wherever a rule
+        // matches, around a letter the document wrote.
+        let content = if which == PseudoElement::FirstLetter {
+            Vec::new()
+        } else {
+            match content {
+                // The text is written by `crate::counter::resolve`, once the
+                // walk has reached this box: a `counter()` in it has no value
+                // before then.
+                Some(ContentValue::Items(items)) => items.clone(),
+                // No `content` at all, or `content: none`. §12.2: no box.
+                _ => return Ok(None),
+            }
         };
-
-        // The text is written by `crate::counter::resolve`, once the walk
-        // has reached this box: a `counter()` in it has no value before then.
-        let content = items.clone();
 
         let mut winners: Vec<(Longhand, usize)> = Vec::new();
         for (index, (_, _, declared)) in matched.iter().enumerate() {

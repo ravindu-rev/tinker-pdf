@@ -1092,3 +1092,46 @@ fn a_block_inside_an_inline_splits_it_into_anonymous_blocks() {
     let broken = lay(style, r#"<p>aa <span>bb<span>cc</span>dd</span> ee</p>"#);
     same("block-in-inline", split, written, broken);
 }
+
+/// **`::first-letter` is the first typographic letter unit in a box of its
+/// own** (`css-pseudo-4` §2.2), and no longer a selector parsed with no box:
+/// a 30-pixel first letter is the paragraph with its first letter wrapped in a
+/// 30-pixel `<span>`; the quotation mark before it and the punctuation after
+/// it go into the box with it; a floated one is a drop cap; and a container's
+/// first letter is found inside its first child block. Each mismatch is the
+/// paragraph without the rule.
+#[test]
+fn first_letter_is_the_first_letter_in_a_box_of_its_own() {
+    let big = ".big { font-size: 30px } .cap { float: left; font-size: 40px }";
+    for (what, rule, body, written) in [
+        (
+            "a first letter",
+            "p::first-letter { font-size: 30px }",
+            "<p>Hello there</p>",
+            r#"<p><span class="big">H</span>ello there</p>"#,
+        ),
+        (
+            "punctuation either side",
+            "p::first-letter { font-size: 30px }",
+            "<p>\u{201c}A.\u{201d} said he</p>",
+            "<p><span class=\"big\">\u{201c}A.\u{201d}</span> said he</p>",
+        ),
+        (
+            "a drop cap",
+            "p::first-letter { float: left; font-size: 40px }",
+            "<p>Once upon a time there was a story long enough to wrap</p>",
+            r#"<p><span class="cap">O</span>nce upon a time there was a story long enough to wrap</p>"#,
+        ),
+        (
+            "inside the first child block",
+            "div::first-letter { font-size: 30px }",
+            "<div><p> <em>Hello</em> there</p><p>Next</p></div>",
+            r#"<div><p> <em><span class="big">H</span>ello</em> there</p><p>Next</p></div>"#,
+        ),
+    ] {
+        let styled = lay(&format!("{big} {rule}"), body);
+        let wrapped = lay(big, written);
+        let broken = lay(big, body);
+        same(what, styled, wrapped, broken);
+    }
+}

@@ -1092,16 +1092,19 @@ pub fn warnings(selectors: &[Selector]) -> Vec<Warning> {
             // `epub::read::build`. A rule naming one is honoured, so there is
             // nothing to report.
             Some(PseudoElement::Before | PseudoElement::After) => {}
-            // Still no box. `::first-line` and `::first-letter` are not
-            // generated content at all: they select a *part of* an already laid
-            // out box, so honouring either means laying the box out, finding
-            // where the first line broke or where the first typographic letter
-            // unit ended, and restyling that range — which is a second layout
-            // pass this engine does not have. Named rather than approximated:
-            // applying `::first-letter` to the first `char` would be wrong on
-            // every quotation mark, every combining mark and every `fi`.
-            Some(other @ (PseudoElement::FirstLine | PseudoElement::FirstLetter)) => {
-                out.push(Warning::PseudoElementUnsupported(other.name()));
+            // `::first-letter` has a box since October 2026: the first
+            // typographic letter unit is found in the box tree, which is
+            // before line breaking, so it needs no second layout pass.
+            Some(PseudoElement::FirstLetter) => {}
+            // Still no box. `::first-line` is not generated content at all: it
+            // selects the part of a box that landed on its first line, so
+            // honouring it means laying the box out, finding where the line
+            // broke, and restyling that range — a second layout pass this
+            // engine does not have.
+            Some(PseudoElement::FirstLine) => {
+                out.push(Warning::PseudoElementUnsupported(
+                    PseudoElement::FirstLine.name(),
+                ));
             }
             None => {}
         }

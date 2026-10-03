@@ -41,7 +41,7 @@ use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, St
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::parser::Stylesheet;
-use tinker_pdf_css::property::{Display, Overflow};
+use tinker_pdf_css::property::{Display, Float, Overflow, Position};
 use tinker_pdf_css::selector::PseudoElement;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
@@ -953,6 +953,22 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
     if let Some(generated) = styles.pseudo(at, PseudoElement::After) {
         children.push(pseudo_box(generated, anchor));
     }
+    // `css-pseudo-4` §2.2: a block container's `::first-letter` is the first
+    // typographic letter unit of its first formatted line — which, in a box
+    // tree built before line breaking, is the first letter of its first
+    // in-flow text, through inline boxes and into a first child block.
+    if let Some(letter) = styles.pseudo(at, PseudoElement::FirstLetter) {
+        if matches!(
+            style.display,
+            Display::Block
+                | Display::ListItem
+                | Display::InlineBlock
+                | Display::TableCell
+                | Display::TableCaption
+        ) {
+            let _ = first_letter(&mut children, &letter.style, 0);
+        }
+    }
     // An element with no children at all still has to be a `Children(vec![])`
     // rather than a `Text("")`: an empty `<p>` generates a block box with its
     // own margins, and one carrying an empty string would be an inline box
@@ -970,6 +986,147 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
         // between are in this number, and the layout crate sees one box.
         marker: styles.marker(at).map(str::to_owned),
     }
+}
+
+/// Where the search for a `::first-letter` stands after a list of boxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LetterSearch {
+    /// The letter was found and wrapped.
+    Found,
+    /// The first formatted line begins with something that has no first
+    /// letter — a picture, an inline-block, a table, punctuation and then
+    /// nothing — so there is none, and the search ends.
+    Stop,
+    /// Nothing in these boxes yet: the line has not begun.
+    Continue,
+}
+
+/// Wraps the first typographic letter unit in `children` in a box carrying
+/// `letter`, `css-pseudo-4` §2.2: the text's own leading white space stays
+/// outside it, the punctuation before and after the letter goes inside it
+/// with the letter's combining marks, and the box anchors to the text's
+/// element, so extraction and the structure tree read the same characters in
+/// the same order. Inline boxes are searched through, a first in-flow block
+/// child is searched into (its first line is the container's), and floats and
+/// absolutely positioned boxes are passed over as out of the line.
+///
+/// **What is approximated, and stated.** The box inherits from the
+/// originating block and not from the inline box the letter is inside, so an
+/// `<em>` round the first word does not italicise the drop cap; a letter that
+/// a leading quotation mark and an element boundary separate (`“<em>T`) is
+/// not found; `display` other than `inline` is read as `inline` unless the
+/// box floats, as §2.2 says.
+fn first_letter(children: &mut Vec<BoxNode>, letter: &ComputedStyle, depth: usize) -> LetterSearch {
+    if depth > tinker_pdf_layout::limits::MAX_BOX_DEPTH {
+        return LetterSearch::Stop;
+    }
+    let mut at = 0;
+    while at < children.len() {
+        let child = &mut children[at];
+        let style = &child.style;
+        if style.display == Display::None
+            || style.float != Float::None
+            || matches!(style.position, Position::Absolute | Position::Fixed)
+        {
+            at += 1;
+            continue;
+        }
+        let display = style.display;
+        match &mut child.content {
+            Content::Replaced(_) => return LetterSearch::Stop,
+            Content::Text(text) => {
+                let Some((start, end)) = letter_unit(text) else {
+                    if text.chars().all(char::is_whitespace) {
+                        at += 1;
+                        continue;
+                    }
+                    return LetterSearch::Stop;
+                };
+                let anchor = child.anchor;
+                let text_style = child.style.clone();
+                let whole = std::mem::take(text);
+                let mut style = letter.clone();
+                if style.float == Float::None {
+                    style.display = Display::Inline;
+                }
+                let mut replacement = Vec::with_capacity(3);
+                if start > 0 {
+                    replacement.push(text_node(text_style.clone(), &whole[..start], anchor));
+                }
+                replacement.push(BoxNode {
+                    style: style.clone(),
+                    content: Content::Children(vec![text_node(
+                        inline_box(&style),
+                        &whole[start..end],
+                        anchor,
+                    )]),
+                    anchor,
+                    span: CellSpan::ONE,
+                    marker: None,
+                });
+                if end < whole.len() {
+                    replacement.push(text_node(text_style, &whole[end..], anchor));
+                }
+                children.splice(at..=at, replacement);
+                return LetterSearch::Found;
+            }
+            Content::Children(inner) => match display {
+                Display::Inline => match first_letter(inner, letter, depth + 1) {
+                    LetterSearch::Continue => at += 1,
+                    done => return done,
+                },
+                Display::Block | Display::ListItem => {
+                    match first_letter(inner, letter, depth + 1) {
+                        // An empty block has no line; the first line is the next
+                        // box's.
+                        LetterSearch::Continue => at += 1,
+                        done => return done,
+                    }
+                }
+                _ => return LetterSearch::Stop,
+            },
+        }
+    }
+    LetterSearch::Continue
+}
+
+/// A text box anchored where the text it was cut from was.
+fn text_node(style: ComputedStyle, text: &str, anchor: Option<u32>) -> BoxNode {
+    let node = BoxNode::text(style, text);
+    match anchor {
+        Some(anchor) => node.with_anchor(anchor),
+        None => node,
+    }
+}
+
+/// The byte range of a text's first typographic letter unit, `css-pseudo-4`
+/// §2.2: any punctuation before the first letter or number, the letter, its
+/// combining marks, and any punctuation after it — `“A”` whole, `A.` with its
+/// full stop. Leading white space is before the range. `None` where the text
+/// holds no letter or number before a space or its end.
+fn letter_unit(text: &str) -> Option<(usize, usize)> {
+    use tinker_pdf_layout::unicode::{is_combining, is_letter_or_number, is_punctuation_or_symbol};
+    let punctuation = |c: char| is_punctuation_or_symbol(c) && !is_letter_or_number(c);
+    let mut chars = text
+        .char_indices()
+        .skip_while(|(_, c)| c.is_whitespace())
+        .peekable();
+    let start = chars.peek()?.0;
+    while chars.peek().is_some_and(|(_, c)| punctuation(*c)) {
+        chars.next();
+    }
+    let (_, first) = chars.next()?;
+    if !is_letter_or_number(first) {
+        return None;
+    }
+    while chars.peek().is_some_and(|(_, c)| is_combining(*c)) {
+        chars.next();
+    }
+    while chars.peek().is_some_and(|(_, c)| punctuation(*c)) {
+        chars.next();
+    }
+    let end = chars.peek().map_or(text.len(), |(at, _)| *at);
+    Some((start, end))
 }
 
 /// One `::before` or `::after` box, as `epub::read` builds every other box.

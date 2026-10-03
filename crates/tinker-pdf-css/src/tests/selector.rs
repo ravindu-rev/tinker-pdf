@@ -406,8 +406,9 @@ fn the_structural_pseudo_classes() {
 ///
 /// This asserted that all four matched nothing and all four warned. Two of them
 /// now do something, and the shape of what is left is the point: a `::before`
-/// rule is honoured and reports nothing, while `::first-line` and
-/// `::first-letter` still report by name.
+/// rule is honoured and reports nothing, while `::first-line` still reports by
+/// name. (`::first-letter` has its box since October 2026 and reports nothing
+/// either.)
 ///
 /// The originating element is still **not** styled by any of the four, and that
 /// is the assertion worth keeping from the old test: `p::before { color: red }`
@@ -430,22 +431,20 @@ fn two_pseudo_elements_generate_a_box_and_two_are_named() {
         assert_eq!(parsed.rules.len(), 1, "{source} parses");
     }
 
-    for (source, name) in [
-        ("p::first-line", "::first-line"),
-        ("p::first-letter", "::first-letter"),
-    ] {
-        let parsed = sheet(&format!("{source} {{ color: red }}"));
-        assert_eq!(
-            parsed.report.warnings,
-            vec![(Warning::PseudoElementUnsupported(name), 1)],
-            "{source}"
-        );
-        assert_eq!(
-            parsed.rules.len(),
-            1,
-            "the rule parses; it just does nothing"
-        );
-    }
+    // `::first-letter` has its box since October 2026 and is not named.
+    let parsed = sheet("p::first-letter { color: red }");
+    assert_eq!(parsed.report.warnings, vec![], "p::first-letter");
+    let parsed = sheet("p::first-line { color: red }");
+    assert_eq!(
+        parsed.report.warnings,
+        vec![(Warning::PseudoElementUnsupported("::first-line"), 1)],
+        "p::first-line"
+    );
+    assert_eq!(
+        parsed.rules.len(),
+        1,
+        "the rule parses; it just does nothing"
+    );
 
     // None of the four styles the element it is attached to.
     let mut budget = Budget::new(&Limits::DEFAULT);
