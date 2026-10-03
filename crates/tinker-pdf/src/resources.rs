@@ -1905,7 +1905,8 @@ impl PageResources {
     /// Reads a `/Function` entry, which is one function or an array of them,
     /// one per output component (7.10).
     fn function(&self, dict: &Dict) -> Option<Function> {
-        let value = self.doc.resolve_key(dict, self.doc.intern(b"Function"));
+        let key = self.doc.intern(b"Function");
+        let value = self.doc.resolve_key(dict, key);
         if let Some(items) = value.as_array() {
             // 7.10.1: every member supplies one output component. Reading only
             // the first turns an RGB gradient into a red ramp on black, and
@@ -1921,7 +1922,14 @@ impl PageResources {
                 _ => Some(Function::Array(parsed)),
             };
         }
-        self.parse_function(&value, 0)
+        // The entry **as written**, not resolved: a type 0 or type 4 function
+        // is a stream (7.10.2, 7.10.5), which `parse_function` reaches through
+        // its reference — and handed the resolved object it found no reference
+        // and read nothing, so every shading whose one function was sampled or
+        // a calculator painted as `Function::Identity`'s grey ramp, silently.
+        // The array arm above never had the defect: its members are read
+        // unresolved.
+        dict.get(key).and_then(|raw| self.parse_function(raw, 0))
     }
 
     fn parse_function(&self, object: &Object, depth: u32) -> Option<Function> {

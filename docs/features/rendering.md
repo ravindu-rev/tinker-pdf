@@ -66,7 +66,13 @@ exponential (`Function::Exponential`, 7.10.3), stitching
 (`Function::PostScript`, 7.10.5, bounded on every axis: a 100-entry stack, 32
 levels of `if`/`ifelse`, 65 536 tokens, no loop operator), plus
 `Function::Array` for the arrays a `/Function` entry may hold — an array no
-longer truncates to its first element.
+longer truncates to its first element. *Corrected 3 October 2026*: a
+shading whose **one** `/Function` was a sampled or calculator stream used to
+read as `Function::Identity` — the entry was resolved before the parser that
+reaches a stream through its reference saw it — so it painted its parameter
+as a ramp in the first component, with no warning; every shading in the suite
+stated its function inline or in an array, which never had the defect.
+`tests/shading_functions.rs` holds both stream types to their own colours.
 
 **Shadings** (8.7.4.5). Type 1 (function-based), type 2 (axial) and type 3
 (radial) are evaluated per pixel through `Shading::color_at`; the radial
