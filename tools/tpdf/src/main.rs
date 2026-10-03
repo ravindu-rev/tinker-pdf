@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex};
 
 use tinker_pdf::{
     BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, LadderLevel, ObjRef, Object,
-    Page, RenderOptions, Sanitise, SimpleFontProvider, StreamObj, StructureTree, TextFormat,
-    TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
+    OrderedText, Page, ReadingOrder, RenderOptions, Sanitise, SimpleFontProvider, StreamObj,
+    StructureTree, TextFormat, TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -33,7 +33,7 @@ tpdf — inspect and convert PDFs with the tinker-pdf engine
 usage:
   tpdf info    <file.pdf> [--password P]
   tpdf text    <file.pdf> [--page N | --pages LIST] [--password P]
-                          [--json | --xml | --html]
+                          [--json | --xml | --html | --order ORDER]
   tpdf render  <file.pdf> --out DIR [--page N | --pages LIST] [--dpi D]
                                     [--jobs N] [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
@@ -79,6 +79,14 @@ options:
   --xml        the same model as XML
   --html       the same model as an HTML page that shows each line where the
                page puts it
+  --order stream|stated|inferred
+               with text, the order the text is read in: the content
+               stream's (the default); the structure tree's, refused for a
+               document that carries none; or one inferred from the page's
+               geometry (columns, running heads and feet, page numbers,
+               footnotes, ruled tables), which is the tree's wherever the
+               document carries one. Standard error says which each page
+               got, and what an inference had to tolerate
 
 writing options:
   --out FILE   the file a writing command writes; for split, a directory
@@ -316,6 +324,9 @@ struct Options {
     /// `text` in a structured format rather than as plain text: one of
     /// `--json`, `--xml` and `--html`, and at most one.
     format: Option<TextFormat>,
+    /// `--order`, for `text`: which order plain text is read in. The
+    /// content stream's unless asked, so no existing invocation changes.
+    order: ReadingOrder,
     /// Print the record format version and stop, naming no file.
     ///
     /// The corpus runner asks before it spawns anything, because a child one
@@ -420,6 +431,7 @@ impl Options {
             strict: false,
             pdfa: false,
             format: None,
+            order: ReadingOrder::Stream,
             record_version: false,
             page_ranges: None,
             font_policy: FontPolicy::default(),
@@ -521,6 +533,22 @@ impl Options {
                     options.format = Some(format);
                 }
                 "--pages" => options.page_ranges = Some(page_ranges(&value()?)?),
+                // The three orders `ReadingOrder` names. Anything else is
+                // refused: a typo that fell back to the stream would print a
+                // page in the one order the caller asked to be spared.
+                "--order" => {
+                    let raw = value()?;
+                    options.order = match raw.as_str() {
+                        "stream" => ReadingOrder::Stream,
+                        "stated" => ReadingOrder::Stated,
+                        "inferred" => ReadingOrder::Inferred,
+                        _ => {
+                            return Err(format!(
+                                "`--order {raw}`: the orders are `stream`, `stated` and `inferred`"
+                            ))
+                        }
+                    };
+                }
                 // The two values `FontPolicy` has, by the names it gives them.
                 // Anything else is refused: a typo that fell back to the
                 // default would subset a document somebody asked to keep
@@ -634,6 +662,15 @@ impl Options {
         }
         if options.page.is_some() && options.page_ranges.is_some() {
             return Err("choose one of --page and --pages".to_string());
+        }
+        // The structured formats write the text device's model, which is the
+        // stream's order.
+        if options.format.is_some() && options.order != ReadingOrder::Stream {
+            return Err(
+                "--json, --xml and --html write the page in its stream order: \
+                 --order is for plain text"
+                    .to_string(),
+            );
         }
         Ok(options)
     }
@@ -899,7 +936,11 @@ fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
         let Some(page) = doc.page(index) else {
             continue;
         };
-        print!("{}", page.text().plain_text());
+        let (text, label) = page_text(&page, index, options.order)?;
+        if let (Some(label), false) = (label, options.quiet) {
+            eprintln!("{label}");
+        }
+        print!("{text}");
         // A form feed between pages, which is what every other text extractor
         // emits and what makes the output splittable again.
         if options.page.is_none() {
@@ -907,6 +948,44 @@ fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Page `index`'s plain text in `order`, and, for any order but the stream's,
+/// the line that labels it: which order the page got — the tree's, for an
+/// inference asked of a tagged page — and what an inference had to tolerate.
+/// An error for the stated order of a document that states none.
+fn page_text(
+    page: &Page,
+    index: u32,
+    order: ReadingOrder,
+) -> Result<(String, Option<String>), String> {
+    if order == ReadingOrder::Stream {
+        return Ok((page.text().plain_text(), None));
+    }
+    let number = index + 1;
+    let Some(text) = page.text_in(order) else {
+        return Err(format!(
+            "page {number}: no order is stated: the document carries no structure tree"
+        ));
+    };
+    let label = match &text {
+        OrderedText::Stream(_) => format!("page {number}: the content stream's order"),
+        OrderedText::Stated(_) => format!("page {number}: the structure tree's order"),
+        OrderedText::Inferred(inferred) => {
+            let mut label = format!(
+                "page {number}: an inferred order, {} column{}",
+                inferred.columns,
+                if inferred.columns == 1 { "" } else { "s" }
+            );
+            if !inferred.warnings.is_empty() {
+                let warnings: Vec<String> =
+                    inferred.warnings.iter().map(|w| format!("{w:?}")).collect();
+                label.push_str(&format!("; {}", warnings.join(", ")));
+            }
+            label
+        }
+    };
+    Ok((text.plain_text(), Some(label)))
 }
 
 fn render(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
@@ -2875,6 +2954,107 @@ mod tests {
                 .err()
                 .as_deref(),
             Some("choose one of --json, --xml and --html")
+        );
+    }
+
+    /// The stream's order unless another is asked for, by the names
+    /// `ReadingOrder` gives them; no other order combines with a structured
+    /// format, which writes the stream's model.
+    #[test]
+    fn text_takes_an_order_for_plain_text_only() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let plain = Options::parse(&args(&["a.pdf"])).expect("parses");
+        assert_eq!(plain.order, ReadingOrder::Stream);
+        for (raw, order) in [
+            ("stream", ReadingOrder::Stream),
+            ("stated", ReadingOrder::Stated),
+            ("inferred", ReadingOrder::Inferred),
+        ] {
+            let asked = Options::parse(&args(&["--order", raw, "a.pdf"])).expect("parses");
+            assert_eq!(asked.order, order, "{raw}");
+        }
+        assert_eq!(
+            Options::parse(&args(&["--order", "geometric", "a.pdf"]))
+                .err()
+                .as_deref(),
+            Some("`--order geometric`: the orders are `stream`, `stated` and `inferred`")
+        );
+        assert!(
+            Options::parse(&args(&["--json", "--order", "inferred", "a.pdf"]))
+                .err()
+                .is_some_and(|e| e.contains("is for plain text"))
+        );
+        // The stream's order named is the default, and combines with anything.
+        assert!(Options::parse(&args(&["--json", "--order", "stream", "a.pdf"])).is_ok());
+    }
+
+    /// Two columns of twelve lines drawn across the page, line by line, and a
+    /// ruled table of two rows by two columns under them: untagged.
+    fn columns_and_a_table() -> Document {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(612.0, 792.0, |page| {
+            for row in 0..12 {
+                let y = 680.0 - f64::from(row) * 12.0;
+                page.text(
+                    b"F0",
+                    10.0,
+                    72.0,
+                    y,
+                    &format!("left column line {row} of the page"),
+                );
+                page.text(
+                    b"F0",
+                    10.0,
+                    324.0,
+                    y,
+                    &format!("right column line {row} of the page"),
+                );
+            }
+            page.raw(
+                b"0.5 w 72 500 m 272 500 l S 72 470 m 272 470 l S 72 440 m 272 440 l S\n\
+                  72 440 m 72 500 l S 172 440 m 172 500 l S 272 440 m 272 500 l S\n",
+            );
+            for (x, y, text) in [(76.0, 482.0, "a"), (176.0, 482.0, "b"), (76.0, 452.0, "c")] {
+                page.text(b"F0", 10.0, x, y, text);
+            }
+            page.text(b"F0", 10.0, 176.0, 452.0, "d");
+        });
+        Document::open(builder.finish()).expect("it opens")
+    }
+
+    /// **`--order inferred` reads down each column and says so**; the stream
+    /// order is the one `text` always printed; and `--order stated` of an
+    /// untagged document is refused.
+    #[test]
+    fn text_prints_the_order_asked_for() {
+        let doc = columns_and_a_table();
+        let page = doc.page(0).expect("a page");
+        let (stream, label) = page_text(&page, 0, ReadingOrder::Stream).expect("the stream");
+        assert_eq!(stream, page.text().plain_text());
+        assert_eq!(label, None);
+
+        let (inferred, label) = page_text(&page, 0, ReadingOrder::Inferred).expect("an inference");
+        let lines: Vec<&str> = inferred.lines().collect();
+        let left = lines
+            .iter()
+            .position(|l| *l == "left column line 11 of the page")
+            .expect("the left column's last line");
+        let right = lines
+            .iter()
+            .position(|l| *l == "right column line 0 of the page")
+            .expect("the right column's first line");
+        assert!(left < right, "{inferred}");
+        let label = label.expect("a label");
+        assert!(
+            label.starts_with("page 1: an inferred order, 2 columns"),
+            "{label}"
+        );
+        assert!(label.contains("TableSuspected"), "{label}");
+
+        assert_eq!(
+            page_text(&page, 0, ReadingOrder::Stated).err().as_deref(),
+            Some("page 1: no order is stated: the document carries no structure tree")
         );
     }
 

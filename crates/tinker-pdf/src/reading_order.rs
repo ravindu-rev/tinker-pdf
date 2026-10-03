@@ -13,9 +13,14 @@
 //! blocks ordered top to bottom inside a column, a block that crosses a column
 //! boundary placed before the columns under it; running heads, running feet
 //! and page numbers found by their recurring on the pages around this one,
-//! set aside first and last with their roles; and footnotes — small text at
+//! set aside first and last with their roles; footnotes — small text at
 //! the foot of a column, under a separator rule or opening with a raised
-//! marker — read after the body in the order of their reference marks.
+//! marker — read after the body in the order of their reference marks; and
+//! ruled tables, found first by [`crate::Page::inferred_tables`]'s inference
+//! and each read as one [`Role::Table`] block where it stands
+//! ([`InferenceWarning::TableSuspected`]), so its cells are read whole and its
+//! own columns are never taken for the page's. A page that is mostly table, or
+//! mostly vertical or rotated lines, is declined rather than guessed at.
 //! Design: `docs/design/reading-order.md`.
 //!
 //! # The label is a type
@@ -233,8 +238,12 @@ pub enum Role {
     PageNumber,
     /// A note set below the body it annotates.
     Footnote,
-    /// A caption under a figure.
-    Caption,
+    /// A ruled table — one of [`crate::Page::inferred_tables`]'s, built from
+    /// the page's rules — read as one block where it stands among the
+    /// columns: its lines row by row, each row's cells in the table's
+    /// direction, each cell's lines top first. Its grid is
+    /// [`crate::InferredTable`]'s; see [`InferenceWarning::TableSuspected`].
+    Table,
     /// Text the inference could not place: rotated or vertical lines, and the
     /// margin blocks of a page read with no other page to compare it with.
     Unplaced,
@@ -251,6 +260,9 @@ pub enum DeclineReason {
     VerticalWriting,
     /// Most of the page's lines run at an angle, which nothing here orders.
     RotatedText,
+    /// Most of the page's characters are in ruled tables, whose order is the
+    /// tables' — [`crate::Page::inferred_tables`] — and not a reading order's.
+    Table,
 }
 
 /// What an inference had to tolerate, or would not do (ruling 10).
@@ -283,6 +295,17 @@ pub enum InferenceWarning {
     VerticalWriting {
         /// How many.
         lines: usize,
+    },
+    /// Ruled tables were found on the page — [`crate::Page::inferred_tables`]'s,
+    /// built from its rules — and each was read as one [`Role::Table`] block:
+    /// the sibling inference claimed its characters, and none of them was
+    /// looked at for columns, running heads or footnotes. A table found from
+    /// aligned text alone ([`crate::TableEvidence::Aligned`]) is not handed
+    /// off: nothing the page drew bounds it, and its lines are read as any
+    /// other lines are.
+    TableSuspected {
+        /// How many tables.
+        tables: usize,
     },
     /// The page has no text at all.
     NoBodyText,
@@ -485,8 +508,14 @@ fn infer_page(page: &Page, options: &InferenceOptions, margins: &mut MarginCache
     }
     let observed = Observed::read(page, options.hide_structure);
     let frame = page.crop_box();
+    // Tables first, then order: the ruled tables' characters, by the same
+    // one interpretation, in each table's order.
+    let tables: Vec<Held> = crate::tables::ruled_tables(&observed, frame)
+        .iter()
+        .map(Held::of)
+        .collect();
     let neighbours = margins.around(page.index());
-    let mut order = infer(&observed.text, frame, &neighbours, &observed.rules);
+    let mut order = infer(&observed.text, frame, &neighbours, &observed.rules, &tables);
     if tagged {
         order.warnings.insert(0, InferenceWarning::TreePresent);
     }
@@ -526,6 +555,34 @@ struct Piece {
     size: f64,
     wmode: WritingMode,
     rtl: bool,
+    /// The held table it is a line of, whose order it keeps.
+    table: Option<usize>,
+}
+
+/// A ruled table handed off by the table inference: each cell's characters'
+/// stream positions, in the table's order, and the frame its rules bound.
+struct Held {
+    cells: Vec<Vec<usize>>,
+    frame: (f64, f64, f64, f64),
+}
+
+impl Held {
+    /// The table's cells, cut from its permutation: the cells' characters
+    /// one after the other, as [`crate::InferredTable::permutation`] holds
+    /// them.
+    fn of(table: &crate::InferredTable) -> Held {
+        let mut rest = table.permutation.as_slice();
+        let mut cells = Vec::with_capacity(table.cells.len());
+        for cell in &table.cells {
+            let (here, after) = rest.split_at(cell.chars.len().min(rest.len()));
+            cells.push(here.to_vec());
+            rest = after;
+        }
+        Held {
+            cells,
+            frame: table.bounds.bounds(),
+        }
+    }
 }
 
 impl Piece {
@@ -630,6 +687,7 @@ fn piece_of(block: usize, chars: Vec<usize>, line: &TextLine, flat: &[&TextChar]
         size,
         wmode: line.wmode,
         rtl: line.rtl,
+        table: None,
     }
 }
 
@@ -671,12 +729,13 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 }
 
 /// Infers an order for `page`, whose crop box is `frame`, beside the margin
-/// lines of the pages around it.
+/// lines of the pages around it, the ruled `tables` on it read as units.
 fn infer(
     page: &TextPage,
     frame: (f64, f64, f64, f64),
     neighbours: &[(i64, &Margins)],
     rules: &[TableRule],
+    tables: &[Held],
 ) -> InferredOrder {
     let flat = flatten(page);
     let mut warnings = Vec::new();
@@ -689,13 +748,54 @@ fn infer(
         };
     }
 
-    // The page's lines, with the stream index of every character.
+    // Tables first: the characters each held table claims, each claimed once.
+    let mut claimed: Vec<Option<usize>> = vec![None; flat.len()];
+    let mut held_cells: Vec<Vec<Vec<usize>>> = Vec::with_capacity(tables.len());
+    for (t, table) in tables.iter().enumerate() {
+        let mut cells = Vec::with_capacity(table.cells.len());
+        for cell in &table.cells {
+            let mut kept = Vec::with_capacity(cell.len());
+            for at in cell {
+                if let Some(slot @ None) = claimed.get_mut(*at) {
+                    *slot = Some(t);
+                    kept.push(*at);
+                }
+            }
+            cells.push(kept);
+        }
+        held_cells.push(cells);
+    }
+    let held = claimed.iter().filter(|c| c.is_some()).count();
+    let found = held_cells
+        .iter()
+        .filter(|cells| cells.iter().any(|c| !c.is_empty()))
+        .count();
+    if found > 0 {
+        warnings.push(InferenceWarning::TableSuspected { tables: found });
+    }
+    if held * 2 > flat.len() {
+        return declined(page, DeclineReason::Table, warnings);
+    }
+
+    // The page's lines outside the tables, with the stream index of every
+    // character; and, for every character, the line of the page it is on.
     let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut sources: Vec<(usize, &TextLine)> = Vec::new();
+    let mut line_at: Vec<usize> = Vec::with_capacity(flat.len());
     let mut next = 0usize;
     for (block, b) in page.blocks.iter().enumerate() {
         for source in &b.lines {
-            let chars: Vec<usize> = (next..next + source.chars.len()).collect();
+            let all = next..next + source.chars.len();
             next += source.chars.len();
+            line_at.extend(all.clone().map(|_| sources.len()));
+            sources.push((block, source));
+            let chars: Vec<usize> = all
+                .clone()
+                .filter(|at| claimed.get(*at).is_none_or(Option::is_none))
+                .collect();
+            if chars.is_empty() && !all.is_empty() {
+                continue;
+            }
             let bounds = bounds_of(&chars, &flat, &source.quad);
             lines.push(Line {
                 block,
@@ -768,12 +868,51 @@ fn infer(
         .filter_map(|at| lines.get(*at))
         .collect();
 
-    // Columns.
+    // Each held table's lines: a cell's characters cut where the page's line
+    // changes, in the table's order.
+    let mut held_pieces: Vec<Vec<Piece>> = Vec::with_capacity(held_cells.len());
+    for (t, cells) in held_cells.iter().enumerate() {
+        let mut pieces = Vec::new();
+        for cell in cells {
+            let mut run: Vec<usize> = Vec::new();
+            for at in cell {
+                let same = run
+                    .last()
+                    .is_some_and(|prev| line_at.get(*prev) == line_at.get(*at));
+                if !same && !run.is_empty() {
+                    pieces.extend(table_piece(
+                        t,
+                        std::mem::take(&mut run),
+                        &line_at,
+                        &sources,
+                        &flat,
+                    ));
+                }
+                run.push(*at);
+            }
+            pieces.extend(table_piece(t, run, &line_at, &sources, &flat));
+        }
+        held_pieces.push(pieces);
+    }
+
+    // Columns. A held table occupies its whole frame — its rules and the
+    // white of its cells are the table's, not a gap — so the column it is
+    // set in is not taken for open space, and the gaps between its own
+    // columns are not taken for the page's.
+    let frames: Vec<(f64, f64, f64, f64)> = held_pieces
+        .iter()
+        .zip(tables)
+        .filter(|(pieces, _)| !pieces.is_empty())
+        .map(|(_, table)| {
+            let (x0, y0, x1, y1) = table.frame;
+            (x0, x1, y0, y1)
+        })
+        .collect();
     let columns = if body.len() < MIN_COLUMN_LINES {
         warnings.push(InferenceWarning::PageTooSparse { lines: body.len() });
         Columns::default()
     } else {
-        find_columns(&body, &flat, em)
+        find_columns(&body, &flat, em, &frames)
     };
     if let Some(gap) = columns.near_miss {
         warnings.push(InferenceWarning::ColumnsAmbiguous { gap });
@@ -790,11 +929,27 @@ fn infer(
         }
     }
 
+    // Each held table as one unit, in its column — or across the columns,
+    // where its frame crosses a gap — its lines in its own order.
+    for (pieces, table) in held_pieces.into_iter().zip(tables) {
+        let (x0, _, x1, _) = table.frame;
+        let column = columns
+            .holding(x0, x1)
+            .map(|c| if rtl_page { count - 1 - c } else { c });
+        placed.extend(pieces.into_iter().map(|piece| (column, piece)));
+    }
+
     let drafts = order_body(placed, count, em);
 
     // Footnotes leave the body before anything else is decided about it, so
-    // a note in the foot band is a note and not an unplaced margin block.
-    let (mut drafts, notes) = footnotes(drafts, &flat, rules, em);
+    // a note in the foot band is a note and not an unplaced margin block. A
+    // held table's own rules are no footnote separator.
+    let rules: Vec<TableRule> = rules
+        .iter()
+        .filter(|r| !tables.iter().any(|t| rules_table(r, t.frame, em)))
+        .copied()
+        .collect();
+    let (mut drafts, notes) = footnotes(drafts, &flat, &rules, em);
 
     // With nothing to compare, a block lying wholly in a margin band is
     // neither body nor furniture by any evidence there is.
@@ -893,11 +1048,12 @@ fn order_body(placed: Vec<(Option<usize>, Piece)>, columns: usize, em: f64) -> V
     let tolerance = ROW_TOLERANCE_EMS * em;
     let (spanners, pieces): (Vec<_>, Vec<_>) =
         placed.into_iter().partition(|(column, _)| column.is_none());
-    let mut spanners: Vec<Piece> = spanners.into_iter().map(|(_, p)| p).collect();
-    order_rows(&mut spanners, tolerance);
+    // Each spanner is a unit of its own, and a held table across the columns
+    // is one unit.
+    let spanners = spanner_units(spanners.into_iter().map(|(_, p)| p).collect(), tolerance);
 
     // A piece's section is how many spanners stand above it.
-    let mut mids: Vec<f64> = spanners.iter().map(Piece::middle).collect();
+    let mut mids: Vec<f64> = spanners.iter().map(|unit| unit_middle(unit)).collect();
     mids.sort_by(f64::total_cmp);
     let section_of = |piece: &Piece| -> usize {
         let mid = piece.middle();
@@ -923,21 +1079,21 @@ fn order_body(placed: Vec<(Option<usize>, Piece)>, columns: usize, em: f64) -> V
     let mut band = 0usize;
     for ((section, column), cell) in cells {
         if emitted < section {
-            let run: Vec<Piece> = spanners.by_ref().take(section - emitted).collect();
+            let run: Vec<Vec<Piece>> = spanners.by_ref().take(section - emitted).collect();
             emitted = section;
             if !run.is_empty() {
                 band += 1;
-                push_blocks(&mut drafts, run, Role::Body, band, None);
+                push_units(&mut drafts, run, band, None);
             }
         }
         for unit in units(cell, tolerance) {
-            push_blocks(&mut drafts, unit, Role::Body, band, Some(column));
+            push_units(&mut drafts, vec![unit], band, Some(column));
         }
     }
-    let rest: Vec<Piece> = spanners.collect();
+    let rest: Vec<Vec<Piece>> = spanners.collect();
     if !rest.is_empty() {
         let band = if drafts.is_empty() { band } else { band + 1 };
-        push_blocks(&mut drafts, rest, Role::Body, band, None);
+        push_units(&mut drafts, rest, band, None);
     }
     // Bands are counted from 0 at the top of the page.
     if let Some(first) = drafts.first().map(|d| d.section) {
@@ -948,36 +1104,179 @@ fn order_body(placed: Vec<(Option<usize>, Piece)>, columns: usize, em: f64) -> V
     drafts
 }
 
-/// `pieces` grouped by the stream block they came from, each group ordered
-/// down the page, and the groups ordered by their tops — the row tolerance
-/// leaving the stream's order wherever two stand level.
+/// `pieces` grouped by the stream block they came from — a held table's by
+/// its table — each group ordered down the page, a table's left in its own
+/// order, and the groups ordered by their tops: the row tolerance leaving
+/// the stream's order wherever two stand level.
 fn units(pieces: Vec<Piece>, tolerance: f64) -> Vec<Vec<Piece>> {
     let mut groups: Vec<Vec<Piece>> = Vec::new();
-    let mut by_block: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut by_block: BTreeMap<(bool, usize), usize> = BTreeMap::new();
     for piece in pieces {
-        match by_block
-            .get(&piece.block)
-            .and_then(|at| groups.get_mut(*at))
-        {
+        let key = match piece.table {
+            Some(table) => (true, table),
+            None => (false, piece.block),
+        };
+        match by_block.get(&key).and_then(|at| groups.get_mut(*at)) {
             Some(group) => group.push(piece),
             None => {
-                by_block.insert(piece.block, groups.len());
+                by_block.insert(key, groups.len());
                 groups.push(vec![piece]);
             }
         }
     }
     for group in &mut groups {
-        order_rows(group, tolerance);
+        if !is_table(group) {
+            order_rows(group, tolerance);
+        }
     }
+    // A stream block the text device ran through a table — a line set close
+    // above it and one close below — is two units, cut where the table
+    // stands, so the table is read between them.
+    let mut mids: Vec<f64> = groups
+        .iter()
+        .filter(|g| is_table(g))
+        .map(|g| unit_middle(g))
+        .collect();
+    if !mids.is_empty() {
+        mids.sort_by(f64::total_cmp);
+        let between = |above: f64, below: f64| {
+            let from = mids.partition_point(|m| *m <= below);
+            mids.get(from).is_some_and(|m| *m < above)
+        };
+        let mut cut = Vec::with_capacity(groups.len());
+        for group in groups {
+            if is_table(&group) {
+                cut.push(group);
+                continue;
+            }
+            let mut current: Vec<Piece> = Vec::new();
+            for piece in group {
+                if current
+                    .last()
+                    .is_some_and(|prev| between(prev.middle(), piece.middle()))
+                {
+                    cut.push(std::mem::take(&mut current));
+                }
+                current.push(piece);
+            }
+            cut.push(current);
+        }
+        groups = cut;
+    }
+    sort_units(groups, tolerance)
+}
+
+/// Spanners, each a unit of its own except a held table's lines, which are
+/// one unit in the table's order; ordered down the page.
+fn spanner_units(spanners: Vec<Piece>, tolerance: f64) -> Vec<Vec<Piece>> {
+    let mut units: Vec<Vec<Piece>> = Vec::new();
+    let mut tables: BTreeMap<usize, usize> = BTreeMap::new();
+    for piece in spanners {
+        let Some(table) = piece.table else {
+            units.push(vec![piece]);
+            continue;
+        };
+        match tables.get(&table).and_then(|at| units.get_mut(*at)) {
+            Some(unit) => unit.push(piece),
+            None => {
+                tables.insert(table, units.len());
+                units.push(vec![piece]);
+            }
+        }
+    }
+    sort_units(units, tolerance)
+}
+
+/// Units ordered by their tops, descending, with the units whose tops lie
+/// within `tolerance` of a row's first kept in stream order.
+fn sort_units(units: Vec<Vec<Piece>>, tolerance: f64) -> Vec<Vec<Piece>> {
     let top = |g: &Vec<Piece>| g.iter().map(Piece::top).fold(f64::NEG_INFINITY, f64::max);
     let first = |g: &Vec<Piece>| g.iter().map(Piece::first).min().unwrap_or(usize::MAX);
-    let mut keyed: Vec<(f64, usize, Vec<Piece>)> = groups
-        .into_iter()
-        .map(|g| (top(&g), first(&g), g))
-        .collect();
+    let mut keyed: Vec<(f64, usize, Vec<Piece>)> =
+        units.into_iter().map(|g| (top(&g), first(&g), g)).collect();
     keyed.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
     cluster_rows(&mut keyed, tolerance, |k| k.0, |k| k.1);
     keyed.into_iter().map(|(_, _, g)| g).collect()
+}
+
+/// Whether a unit is a held table's.
+fn is_table(unit: &[Piece]) -> bool {
+    unit.first().is_some_and(|p| p.table.is_some())
+}
+
+/// The middle of a unit's extent down the page.
+fn unit_middle(unit: &[Piece]) -> f64 {
+    let low = unit
+        .iter()
+        .map(|p| p.bounds.1)
+        .fold(f64::INFINITY, f64::min);
+    let high = unit
+        .iter()
+        .map(|p| p.bounds.3)
+        .fold(f64::NEG_INFINITY, f64::max);
+    (low + high) / 2.0
+}
+
+/// Appends a run of units: a held table as one [`Role::Table`] block, and the
+/// pieces between tables cut into body blocks.
+fn push_units(
+    drafts: &mut Vec<Draft>,
+    units: Vec<Vec<Piece>>,
+    section: usize,
+    column: Option<usize>,
+) {
+    let mut loose: Vec<Piece> = Vec::new();
+    for unit in units {
+        if is_table(&unit) {
+            push_blocks(
+                drafts,
+                std::mem::take(&mut loose),
+                Role::Body,
+                section,
+                column,
+            );
+            drafts.push(Draft {
+                role: Role::Table,
+                section,
+                column,
+                pieces: unit,
+            });
+        } else {
+            loose.extend(unit);
+        }
+    }
+    push_blocks(drafts, loose, Role::Body, section, column);
+}
+
+/// One line of a held table's cell: the run `chars`, all on one line of the
+/// page.
+fn table_piece(
+    table: usize,
+    chars: Vec<usize>,
+    line_at: &[usize],
+    sources: &[(usize, &TextLine)],
+    flat: &[&TextChar],
+) -> Option<Piece> {
+    let (block, source) = sources.get(*line_at.get(*chars.first()?)?)?;
+    let mut piece = piece_of(*block, chars, source, flat);
+    piece.table = Some(table);
+    Some(piece)
+}
+
+/// Whether `rule` is one of the rules of the table whose frame is `frame`:
+/// within half an em of it ([`crate::tables::LATTICE_MERGE_EMS`]).
+fn rules_table(rule: &TableRule, frame: (f64, f64, f64, f64), em: f64) -> bool {
+    let reach = crate::tables::LATTICE_MERGE_EMS * em;
+    let (x0, y0, x1, y1) = frame;
+    let (along, across) = if rule.horizontal {
+        ((x0, x1), (y0, y1))
+    } else {
+        ((y0, y1), (x0, x1))
+    };
+    rule.at >= across.0 - reach
+        && rule.at <= across.1 + reach
+        && rule.from >= along.0 - reach
+        && rule.to <= along.1 + reach
 }
 
 /// Orders pieces down the page: by top, descending, with pieces whose tops
@@ -1245,9 +1544,11 @@ fn footnotes(
                 .iter()
                 .all(|p| p.size > 0.0 && p.size <= limit + 1e-9)
     };
+    // A held table is read as the body is, and is never small.
+    let read = |d: &Draft| matches!(d.role, Role::Body | Role::Table);
     let last_section = drafts
         .iter()
-        .filter(|d| d.role == Role::Body)
+        .filter(|d| read(d))
         .map(|d| d.section)
         .max()
         .unwrap_or(0);
@@ -1255,7 +1556,7 @@ fn footnotes(
     // columns), each as the indices of its drafts in order.
     let mut groups: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
     for (at, draft) in drafts.iter().enumerate() {
-        if draft.section == last_section && draft.role == Role::Body {
+        if draft.section == last_section && read(draft) {
             groups.entry(draft.column).or_default().push(at);
         }
     }
@@ -1662,6 +1963,17 @@ struct Columns {
 }
 
 impl Columns {
+    /// The column, counted left to right, that holds the span `x0..x1`
+    /// along `x`, or `None` when a cut falls inside it.
+    fn holding(&self, x0: f64, x1: f64) -> Option<usize> {
+        let next = self.cuts.partition_point(|cut| *cut <= x0);
+        if self.cuts.get(next).is_some_and(|cut| *cut < x1) {
+            None
+        } else {
+            Some(next)
+        }
+    }
+
     /// `line` as one piece per column it has characters in, counted left to
     /// right, or as one spanner (`None`) when a character's box holds a cut —
     /// a heading set across the gap, as opposed to a line a producer drew
@@ -1711,8 +2023,14 @@ impl Columns {
 /// intervals at least [`COLUMN_GAP_EMS`] wide, with text at least
 /// [`COLUMN_MIN_WIDTH_EMS`] wide on both sides, is a gap. Every gap is found
 /// in one pass, so three columns are two gaps rather than a cut that
-/// recurses.
-fn find_columns(body: &[&Line<'_>], flat: &[&TextChar], em: f64) -> Columns {
+/// recurses. `tables` are the frames of the held tables, as fragments
+/// `(x0, x1, y0, y1)`.
+fn find_columns(
+    body: &[&Line<'_>],
+    flat: &[&TextChar],
+    em: f64,
+    tables: &[(f64, f64, f64, f64)],
+) -> Columns {
     let gap_min = COLUMN_GAP_EMS * em;
     // (x0, x1, y0, y1)
     let mut fragments: Vec<(f64, f64, f64, f64)> = Vec::new();
@@ -1744,6 +2062,7 @@ fn find_columns(body: &[&Line<'_>], flat: &[&TextChar], em: f64) -> Columns {
             fragments.push((a, b, y0, y1));
         }
     }
+    fragments.extend_from_slice(tables);
     fragments.retain(|f| f.0.is_finite() && f.1.is_finite() && f.1 >= f.0);
     if fragments.len() < MIN_COLUMN_LINES {
         return Columns::default();

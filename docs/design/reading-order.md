@@ -467,3 +467,52 @@ everywhere changes nothing** — the same page with nothing raised and no rule
 calls nothing a footnote and reads its foot where the columns put it. The
 census scores footnote precision against `/Note` per corpus; **that figure is
 owed**.
+
+**Milestone 6 (3 October 2026): the surface, and the table handoff.** Tables
+first, then order: the page's ruled tables — the sibling design's
+`Page::inferred_tables`, over the same one interpretation — claim their
+characters before anything else is decided, and each is read as one block
+of a role the design did not list, `Role::Table`: its lines a cell at a time,
+row by row in the table's direction, in exactly the order of the table's own
+permutation. The page says so (`InferenceWarning::TableSuspected { tables }`).
+A table's lines are not looked at for columns, running heads or footnotes:
+its frame stands over the column finder's coverage as a block of text would
+— the whole frame, rules and the white of its cells, because a column holding
+a paragraph and a table is not open space — and it is placed in the column
+that holds its frame, or across the columns as a spanner where its frame
+crosses a gap, heading the band under it. Its own rules are no footnote
+separator, and a block of the text device's that runs from a line just above
+a table to one just below is cut where the table stands. **Only ruled tables
+are handed off**: an aligned table is weaker evidence — nothing the page drew
+bounds it — and its lines are read as lines (the labels-beside-values fixture
+finds one and keeps its `ColumnsAmbiguous` reading). A page more than half of
+whose characters are in tables is declined (`DeclineReason::Table`), as a
+page mostly of vertical or rotated lines is: its order is the tables', not a
+reading order's. `Role::Caption`, which the design listed and nothing
+produced — a caption needs the figure the observer does not record — was
+taken out rather than left as a promise; the enum is non-exhaustive, so it
+can come back with the inference that produces it. `tpdf text --order
+stream|stated|inferred` prints the order asked for, and on standard error
+which order each page got and what an inference tolerated; `--order stated`
+of an untagged document is refused.
+
+Measured, first-party (`crates/tinker-pdf/tests/reading_order.rs`): a page of
+two paragraphs around a ruled table whose first-column cells hold two lines,
+drawn baseline by baseline across the page and tagged cell by cell, reads
+every pair the tree's way where the stream does not (0.9971 over 96 580
+pairs — the paragraphs' pairs dominate; the table is where it is wrong),
+with the table one `Table` block equal to the table inference's permutation
+and nothing outside it moved, whether the paragraphs stand two lines off the
+table or one; the same set in the left column of two reads 1.0000 where the
+stream reads 0.8512, the table in column 0; a table across two column sets
+reads between them (0.8899 streamed, 1.0000 inferred), a spanner heading the
+second band; a page mostly table is declined with nothing moved; a small
+source line under a table's bottom rule is body, not a footnote; and a book's
+bordered table, which the EPUB writer draws in the order it tags, moves
+nothing and is one `Table` block. Every `InferenceWarning` variant is reached
+by a fixture — `VerticalWriting` and `Declined { VerticalWriting }` by a
+hand-assembled `/Identity-V` page, since the document builder writes no
+vertical font. **The roadmap row stays, narrowed**: its exit is the corpus
+census, which has not run where this was written; the corpus agreement,
+column crossings, veraPDF moved count and running-head and footnote
+precision are owed, and no ratchet axis was added for a figure not measured.

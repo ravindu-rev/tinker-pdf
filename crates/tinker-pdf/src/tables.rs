@@ -687,8 +687,19 @@ pub(crate) fn enclosing<'a>(chars: impl Iterator<Item = &'a TextChar>) -> Option
 // Inferred tables: the lattice
 // ---------------------------------------------------------------------------
 
-/// Infers the ruled tables of an observed page, whose crop box is `frame`.
+/// Infers the tables of an observed page, whose crop box is `frame`: ruled,
+/// then aligned where no ruled table stands.
 pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> InferredTables {
+    tables_of(observed, frame, true)
+}
+
+/// The ruled tables of an observed page alone — what the reading-order
+/// inference hands off (`crate::reading_order`).
+pub(crate) fn ruled_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> Vec<InferredTable> {
+    tables_of(observed, frame, false).tables
+}
+
+fn tables_of(observed: &Observed, frame: (f64, f64, f64, f64), aligned: bool) -> InferredTables {
     let read = rules_of(observed);
     let mut warnings = read.warnings.clone();
     let page = &observed.text;
@@ -775,13 +786,15 @@ pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> 
         tables.push(table);
     }
     // Aligned text where no ruled table stands.
-    let ruled: Vec<(f64, f64, f64, f64)> = tables.iter().map(|t| t.bounds.bounds()).collect();
-    tables.extend(infer_aligned(
-        fragments(page, &flat, em, &ruled),
-        &flat,
-        &line_of,
-        em,
-    ));
+    if aligned {
+        let ruled: Vec<(f64, f64, f64, f64)> = tables.iter().map(|t| t.bounds.bounds()).collect();
+        tables.extend(infer_aligned(
+            fragments(page, &flat, em, &ruled),
+            &flat,
+            &line_of,
+            em,
+        ));
+    }
     // Top to bottom, then left to right, as a page is read.
     tables.sort_by(|a, b| {
         let (ab, bb) = (a.bounds.bounds(), b.bounds.bounds());

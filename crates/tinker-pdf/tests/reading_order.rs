@@ -32,6 +32,7 @@ use reading_order_support::{pair_agreement, Agreement, Key, Scored};
 use tinker_pdf::reading_order::{COLUMN_GAP_EMS, MIN_COLUMN_LINES};
 use tinker_pdf::{
     DeclineReason, Document, InferenceOptions, InferenceWarning, OrderedText, ReadingOrder, Role,
+    TableEvidence, TableOptions,
 };
 use tinker_pdf_cos::build::DocumentBuilder;
 
@@ -613,6 +614,18 @@ fn labels_beside_their_values_are_one_column() {
         .warnings
         .iter()
         .any(|w| matches!(w, InferenceWarning::ColumnsAmbiguous { .. })));
+    // The table inference finds an aligned table here; nothing the page drew
+    // bounds it, so it is not handed off, and the lines are read as lines.
+    let tables = doc
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(tables.tables.len(), 1);
+    assert_eq!(tables.tables[0].evidence, TableEvidence::Aligned);
+    assert!(!order
+        .warnings
+        .iter()
+        .any(|w| matches!(w, InferenceWarning::TableSuspected { .. })));
 }
 
 /// **Right-to-left columns read right to left.** Two columns of Hebrew,
@@ -1461,6 +1474,553 @@ fn rotated_lines_are_unplaced_and_a_rotated_page_is_declined() {
         .expect("page two");
     assert_eq!(order.declined(), Some(DeclineReason::RotatedText));
     assert_eq!(order.moved(), 0);
+}
+
+/// Two pages drawn with a vertical composite font (`/Identity-V`, 9.7.4.3)
+/// beside Helvetica: on the first, five lines across and one down; on the
+/// second, four down and one across. Assembled by hand, because the
+/// document builder writes no vertical font; text extraction needs no font
+/// program, so none is embedded.
+fn vertical_pages() -> Document {
+    let down = |x: f64, text: &str| {
+        let codes: String = text.bytes().map(|b| format!("{b:04X}")).collect();
+        format!("BT /F0 12 Tf {x} 700 Td <{codes}> Tj ET\n")
+    };
+    let across = |y: f64, text: &str| format!("BT /F1 10 Tf 72 {y} Td ({text}) Tj ET\n");
+    let mut first = down(540.0, "VERTICAL");
+    for row in 0..5 {
+        first.push_str(&across(600.0 - row as f64 * 12.0, &prose(row, 40)));
+    }
+    let mut second = across(100.0, "across");
+    for column in 0..4 {
+        second.push_str(&down(500.0 - column as f64 * 30.0, "COLUMNS"));
+    }
+    let to_unicode = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+        /CMapName /Fixture-UCS def\n\
+        1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+        1 beginbfrange <0041> <005A> <0041> endbfrange\n\
+        endcmap CMapName currentdict /CMap defineresource pop end end";
+    let objects: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+         /Resources << /Font << /F0 5 0 R /F1 6 0 R >> >> /Contents 9 0 R >>"
+            .into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+         /Resources << /Font << /F0 5 0 R /F1 6 0 R >> >> /Contents 10 0 R >>"
+            .into(),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding /Identity-V \
+         /DescendantFonts [7 0 R] /ToUnicode 8 0 R >>"
+            .into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fixture \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+         /DW 1000 /CIDToGIDMap /Identity >>"
+            .into(),
+        format!(
+            "<< /Length {} >>\nstream\n{to_unicode}\nendstream",
+            to_unicode.len()
+        ),
+        format!("<< /Length {} >>\nstream\n{first}\nendstream", first.len()),
+        format!(
+            "<< /Length {} >>\nstream\n{second}\nendstream",
+            second.len()
+        ),
+    ];
+    let mut out = String::from("%PDF-1.7\n");
+    for (at, object) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", at + 1));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        objects.len() + 1
+    ));
+    open(out.into_bytes())
+}
+
+/// **A vertical line is placed last, as `Unplaced`, and named; a page that is
+/// mostly vertical is declined** — the order of vertical lines is not a
+/// question this inference answers.
+#[test]
+fn vertical_lines_are_unplaced_and_a_vertical_page_is_declined() {
+    let doc = vertical_pages();
+    let page = doc.page(0).expect("page one");
+    let vertical: Vec<String> = page
+        .text()
+        .lines()
+        .iter()
+        .filter(|l| l.wmode == tinker_pdf::WritingMode::Vertical)
+        .map(|l| l.text.clone())
+        .collect();
+    assert_eq!(
+        vertical,
+        ["VERTICAL"],
+        "the fixture draws one vertical line"
+    );
+    let order = page.inferred_order(&InferenceOptions::default());
+    assert!(
+        order
+            .warnings
+            .contains(&InferenceWarning::VerticalWriting { lines: 1 }),
+        "{:?}",
+        order.warnings
+    );
+    let last = order.blocks.last().expect("blocks");
+    assert_eq!(last.role, Role::Unplaced);
+    assert_eq!(last.lines.len(), 1);
+    assert_eq!(last.lines[0].text, "VERTICAL");
+    assert!(order
+        .blocks
+        .iter()
+        .rev()
+        .skip(1)
+        .all(|b| b.role == Role::Body));
+
+    let order = doc
+        .inferred_order(1, &InferenceOptions::default())
+        .expect("page two");
+    assert_eq!(order.declined(), Some(DeclineReason::VerticalWriting));
+    assert_eq!(order.moved(), 0);
+    assert!(order.blocks.iter().all(|b| b.role == Role::Unplaced));
+}
+
+// ---- tables, handed off ---------------------------------------------------------
+
+/// A cell of [`table_page`]'s table: its row, its column, its lines.
+const CELLS: [(usize, usize, &[&str]); 6] = [
+    (0, 0, &["alpha first", "alpha second"]),
+    (0, 1, &["bravo"]),
+    (0, 2, &["charlie"]),
+    (1, 0, &["delta first", "delta second"]),
+    (1, 1, &["echo"]),
+    (1, 2, &["foxtrot"]),
+];
+
+/// A page holding three lines of a paragraph, a ruled table of two rows by
+/// three columns, 72 to 432 across (to 282 in a column) and 600 to 540 down, whose first column's
+/// cells each hold two lines, and three lines of a second paragraph. Every
+/// paragraph line and every cell is one element of the tree, read in that
+/// order, a cell's two lines one element; the text is drawn **baseline by
+/// baseline across the page**, as a producer writing lines draws it, so the
+/// stream reads a first-column cell's second line after the rest of its row.
+///
+/// `close` sets the paragraphs one ordinary line from the table's rules,
+/// where the text device may run one block through it; otherwise they stand
+/// two lines off. With `columns`, the whole is set in the left column of a
+/// two-column page, beside a right column of twenty lines drawn
+/// interleaved with it.
+fn table_page(close: bool, columns: bool, tag: bool) -> Vec<u8> {
+    let (above, below) = if close {
+        (606.0, 528.0)
+    } else {
+        (630.0, 510.0)
+    };
+    let (width, length) = if columns { (210.0, 30) } else { (360.0, 60) };
+    let mut lines: Vec<(f64, f64, String, u64)> = Vec::new(); // (x, y, text, element)
+    for row in 0..3 {
+        lines.push((
+            72.0,
+            above + (2 - row) as f64 * 12.0,
+            prose(row, length),
+            row as u64,
+        ));
+    }
+    for (at, (row, column, texts)) in CELLS.iter().enumerate() {
+        for (line, text) in texts.iter().enumerate() {
+            lines.push((
+                76.0 + *column as f64 * width / 3.0,
+                588.0 - *row as f64 * 30.0 - line as f64 * 12.0,
+                (*text).to_string(),
+                3 + at as u64,
+            ));
+        }
+    }
+    for row in 0..3 {
+        lines.push((
+            72.0,
+            below - row as f64 * 12.0,
+            prose(10 + row, length),
+            9 + row as u64,
+        ));
+    }
+    if columns {
+        for row in 0..20 {
+            lines.push((
+                340.0,
+                654.0 - row as f64 * 12.0,
+                prose(20 + row, 30),
+                12 + row as u64,
+            ));
+        }
+    }
+    // Baseline by baseline down the page, left to right along each.
+    let mut draw: Vec<usize> = (0..lines.len()).collect();
+    draw.sort_by(|a, b| {
+        let (la, lb) = (&lines[*a], &lines[*b]);
+        lb.1.total_cmp(&la.1).then(la.0.total_cmp(&lb.0))
+    });
+    let mut rules = String::from("0.5 w\n");
+    for y in [600.0, 570.0, 540.0] {
+        rules.push_str(&format!("72 {y} m {} {y} l S\n", 72.0 + width));
+    }
+    for column in 0..4 {
+        let x = 72.0 + column as f64 * width / 3.0;
+        rules.push_str(&format!("{x} 540 m {x} 600 l S\n"));
+    }
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        page.raw(rules.as_bytes());
+        for at in draw {
+            let (x, y, text, element) = &lines[at];
+            if tag {
+                page.tagged_keyed(b"P", element + 1, *element, |p| {
+                    p.text(b"F1", 10.0, *x, *y, text)
+                });
+            } else {
+                page.text(b"F1", 10.0, *x, *y, text);
+            }
+        }
+    });
+    builder.finish()
+}
+
+/// The table's text in its own order: each cell's lines, cell by cell, row
+/// by row.
+fn table_text() -> Vec<String> {
+    CELLS
+        .iter()
+        .flat_map(|(_, _, texts)| texts.iter().map(|t| (*t).to_string()))
+        .collect()
+}
+
+/// **A ruled table is read as one block, in its own order, where it
+/// stands** — the sibling design's `TableSuspected` handoff, on a ruled-table
+/// page. The tree reads each cell whole; the stream reads a first-column
+/// cell's second line after the rest of its row, and the inference, which
+/// reads lines, would do the same or worse. Handed the table the table
+/// inference found, the order agrees with the tree on every pair, the table
+/// is one `Table` block whose lines are the table's permutation, and nothing
+/// outside it moves — whether the paragraphs stand off the table or one line
+/// from its rules.
+#[test]
+fn a_ruled_table_is_read_as_one_block_in_its_own_order() {
+    for close in [false, true] {
+        let doc = open(table_page(close, false, true));
+        let scored = Scored::read(&doc, 0).expect("a tagged page");
+        let stream = scored.stream_agreement();
+        let inferred = scored.inferred_agreement();
+        println!(
+            "ruled table, close {close}: stream {:.4} ({} of {} pairs), inferred {:.4}",
+            stream.score(),
+            stream.agreeing,
+            stream.pairs,
+            inferred.score()
+        );
+        assert!(stream.pairs > 0 && !stream.at_least(1, 1));
+        assert!(inferred.at_least(1, 1), "inferred {}", inferred.score());
+        assert_eq!(
+            scored.inferred.warnings,
+            [
+                InferenceWarning::TreePresent,
+                InferenceWarning::TableSuspected { tables: 1 }
+            ]
+        );
+
+        let untagged = open(table_page(close, false, false));
+        let page = untagged.page(0).expect("a page");
+        let order = page.inferred_order(&InferenceOptions::default());
+        assert_eq!(
+            order.warnings,
+            [InferenceWarning::TableSuspected { tables: 1 }]
+        );
+        let tables: Vec<_> = order
+            .blocks
+            .iter()
+            .filter(|b| b.role == Role::Table)
+            .collect();
+        assert_eq!(tables.len(), 1);
+        let table = tables[0];
+        let read: Vec<String> = table.lines.iter().map(|l| l.text.clone()).collect();
+        assert_eq!(read, table_text());
+        assert_eq!(table.column, Some(0));
+        // Its characters are the table inference's, in its order.
+        let found = page.inferred_tables(&TableOptions::default());
+        assert_eq!(found.tables.len(), 1);
+        let held = &found.tables[0].permutation;
+        assert_eq!(
+            order.permutation.get(table.start..table.start + held.len()),
+            Some(held.as_slice())
+        );
+        // Nothing outside the table moved.
+        let span = table.start..table.start + held.len();
+        assert!(order
+            .permutation
+            .iter()
+            .enumerate()
+            .all(|(at, from)| span.contains(&at) || at == *from));
+        assert!(order.moved() > 0);
+    }
+}
+
+/// **A table in a column is read in that column.** The same page set in the
+/// left column of two, its lines drawn interleaved with the right column's:
+/// two columns found from the lines outside the table, the table read whole
+/// between the left column's paragraphs, and every pair the tree's way —
+/// where the stream reads across both columns.
+#[test]
+fn a_table_in_a_column_is_read_in_that_column() {
+    let doc = open(table_page(false, true, true));
+    let scored = Scored::read(&doc, 0).expect("a tagged page");
+    let stream = scored.stream_agreement();
+    let inferred = scored.inferred_agreement();
+    println!(
+        "ruled table in a column: stream {:.4} ({} of {} pairs), inferred {:.4}",
+        stream.score(),
+        stream.agreeing,
+        stream.pairs,
+        inferred.score()
+    );
+    assert!(stream.score() < 0.9, "stream {}", stream.score());
+    assert!(inferred.at_least(1, 1), "inferred {}", inferred.score());
+    assert_eq!(scored.inferred.columns, 2);
+    let table = scored
+        .inferred
+        .blocks
+        .iter()
+        .find(|b| b.role == Role::Table)
+        .expect("the table");
+    assert_eq!(table.column, Some(0));
+    assert_eq!(scored.crossings(), 0);
+}
+
+/// **A table across the columns is read between the column sets it
+/// divides**, as a heading across them is: two columns of ten lines, a ruled
+/// table the width of both, and two more columns of ten lines, drawn line by
+/// line across the page and tagged column by column with the table between.
+#[test]
+fn a_table_across_the_columns_is_read_between_them() {
+    // (x, y, text, element)
+    let mut lines: Vec<(f64, f64, String, u64)> = Vec::new();
+    let mut element = 0u64;
+    let mut columns = |top: f64, lines: &mut Vec<(f64, f64, String, u64)>| {
+        for x in [72.0, 324.0] {
+            for row in 0..10 {
+                lines.push((
+                    x,
+                    top - row as f64 * 12.0,
+                    prose(element as usize, 40),
+                    element,
+                ));
+                element += 1;
+            }
+        }
+    };
+    columns(690.0, &mut lines);
+    let cells = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+    let table_first = 20u64;
+    for (at, text) in cells.iter().enumerate() {
+        let (row, column) = (at / 3, at % 3);
+        lines.push((
+            76.0 + column as f64 * 156.0,
+            548.0 - row as f64 * 30.0,
+            (*text).to_string(),
+            table_first + at as u64,
+        ));
+    }
+    let mut element = 26u64;
+    for x in [72.0, 324.0] {
+        for row in 0..10 {
+            lines.push((
+                x,
+                480.0 - row as f64 * 12.0,
+                prose(element as usize, 40),
+                element,
+            ));
+            element += 1;
+        }
+    }
+    let mut draw: Vec<usize> = (0..lines.len()).collect();
+    draw.sort_by(|a, b| {
+        let (la, lb) = (&lines[*a], &lines[*b]);
+        lb.1.total_cmp(&la.1).then(la.0.total_cmp(&lb.0))
+    });
+    let mut rules = String::from("0.5 w\n");
+    for y in [560.0, 530.0, 500.0] {
+        rules.push_str(&format!("72 {y} m 540 {y} l S\n"));
+    }
+    for x in [72.0, 228.0, 384.0, 540.0] {
+        rules.push_str(&format!("{x} 500 m {x} 560 l S\n"));
+    }
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        page.raw(rules.as_bytes());
+        for at in draw {
+            let (x, y, text, element) = &lines[at];
+            page.tagged_keyed(b"P", element + 1, *element, |p| {
+                p.text(b"F1", 10.0, *x, *y, text)
+            });
+        }
+    });
+    let doc = open(builder.finish());
+    let scored = Scored::read(&doc, 0).expect("a tagged page");
+    let stream = scored.stream_agreement();
+    let inferred = scored.inferred_agreement();
+    println!(
+        "a table across the columns: stream {:.4}, inferred {:.4}",
+        stream.score(),
+        inferred.score()
+    );
+    assert!(stream.score() < 0.9, "stream {}", stream.score());
+    assert!(inferred.at_least(1, 1), "inferred {}", inferred.score());
+    assert_eq!(scored.inferred.columns, 2);
+    let table = scored
+        .inferred
+        .blocks
+        .iter()
+        .find(|b| b.role == Role::Table)
+        .expect("the table");
+    assert_eq!(table.column, None);
+    assert_eq!(table.section, 1);
+    let read: Vec<&str> = table.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(read, cells);
+}
+
+/// **A page that is mostly a ruled table is declined**: its order is the
+/// table's, which [`tinker_pdf::Page::inferred_tables`] gives, and not a
+/// reading order's. The blocks are the stream's, unplaced, and nothing moves.
+#[test]
+fn a_page_that_is_mostly_a_table_is_declined() {
+    let mut content = String::from("0.5 w\n");
+    for row in 0..=6 {
+        let y = 700.0 - row as f64 * 20.0;
+        content.push_str(&format!("72 {y} m 472 {y} l S\n"));
+    }
+    for column in 0..=4 {
+        let x = 72.0 + column as f64 * 100.0;
+        content.push_str(&format!("{x} 580 m {x} 700 l S\n"));
+    }
+    for column in 0..4 {
+        for row in 0..6 {
+            let (x, y) = (76.0 + column as f64 * 100.0, 686.0 - row as f64 * 20.0);
+            content.push_str(&format!(
+                "BT /F1 10 Tf {x} {y} Td ({}) Tj ET\n",
+                prose(row * 4 + column, 8)
+            ));
+        }
+    }
+    content.push_str("BT /F1 10 Tf 72 540 Td (Notes) Tj ET\n");
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| page.raw(content.as_bytes()));
+    let doc = open(builder.finish());
+    let order = doc
+        .inferred_order(0, &InferenceOptions::default())
+        .expect("a page");
+    assert_eq!(order.declined(), Some(DeclineReason::Table));
+    assert_eq!(
+        order.warnings,
+        [
+            InferenceWarning::TableSuspected { tables: 1 },
+            InferenceWarning::Declined {
+                reason: DeclineReason::Table
+            }
+        ]
+    );
+    assert_eq!(order.moved(), 0);
+    assert!(order.blocks.iter().all(|b| b.role == Role::Unplaced));
+}
+
+/// **A held table's own rules are no footnote separator.** A paragraph, a
+/// ruled table, and under the table's bottom rule a line set small — a
+/// table's source line, the last thing in the column. Small text under a
+/// rule is how a footnote looks; the rule is the table's, so the line is
+/// body.
+#[test]
+fn a_tables_rules_do_not_make_a_footnote() {
+    let mut content = String::from("0.5 w\n");
+    for y in [600.0, 570.0, 540.0] {
+        content.push_str(&format!("72 {y} m 432 {y} l S\n"));
+    }
+    for x in [72.0, 252.0, 432.0] {
+        content.push_str(&format!("{x} 540 m {x} 600 l S\n"));
+    }
+    for (x, y, text) in [
+        (76.0, 588.0, "alpha"),
+        (256.0, 588.0, "bravo"),
+        (76.0, 558.0, "charlie"),
+        (256.0, 558.0, "delta"),
+    ] {
+        content.push_str(&format!("BT /F1 10 Tf {x} {y} Td ({text}) Tj ET\n"));
+    }
+    for row in 0..3 {
+        content.push_str(&format!(
+            "BT /F1 10 Tf 72 {} Td ({}) Tj ET\n",
+            650.0 - row as f64 * 12.0,
+            prose(row, 60)
+        ));
+    }
+    content.push_str("BT /F1 7 Tf 72 528 Td (Source: the fixture itself) Tj ET\n");
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| page.raw(content.as_bytes()));
+    let doc = open(builder.finish());
+    let order = doc
+        .inferred_order(0, &InferenceOptions::default())
+        .expect("a page");
+    assert!(order
+        .warnings
+        .contains(&InferenceWarning::TableSuspected { tables: 1 }));
+    let last = order.blocks.last().expect("blocks");
+    assert_eq!(last.lines[0].text, "Source: the fixture itself");
+    assert_eq!(
+        last.role,
+        Role::Body,
+        "{:?}",
+        order.blocks.iter().map(|b| b.role).collect::<Vec<_>>()
+    );
+    assert!(order.blocks.iter().all(|b| b.role != Role::Footnote));
+}
+
+/// **A book's bordered table is one block, and nothing moves.** The EPUB
+/// writer draws a page in the order it tags it, so a table it borders is in
+/// the set where nothing may move: with the tree hidden, every page reads
+/// every pair the tree's way, no character moves, and the table is handed
+/// off as one `Table` block.
+#[test]
+fn a_books_bordered_table_is_one_block_and_nothing_moves() {
+    let mut body = String::from("<p>Before the table, a paragraph of its own.</p><table>");
+    for (name, weight, price) in [
+        ("Apple", "150", "1.20"),
+        ("Banana", "120", "0.80"),
+        ("Cherry", "5", "0.10"),
+    ] {
+        body.push_str(&format!(
+            "<tr><td>{name}</td><td>{weight}</td><td>{price}</td></tr>"
+        ));
+    }
+    body.push_str("</table><p>After the table, another.</p>");
+    let doc = open(styled_book(
+        "en",
+        "table { border-collapse: collapse } td { border: 1px solid black; padding: 4px }",
+        &body,
+    ));
+    let mut tables = 0;
+    for index in 0..doc.page_count() {
+        let Some(scored) = Scored::read(&doc, index) else {
+            continue;
+        };
+        assert!(scored.inferred_agreement().at_least(1, 1));
+        assert_eq!(scored.inferred.moved(), 0);
+        tables += scored
+            .inferred
+            .blocks
+            .iter()
+            .filter(|b| b.role == Role::Table)
+            .count();
+    }
+    assert_eq!(tables, 1);
 }
 
 // ---- the EPUB books ------------------------------------------------------------
