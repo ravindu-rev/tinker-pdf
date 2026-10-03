@@ -306,7 +306,7 @@ DEALINGS IN THE FONT SOFTWARE.
 ### `crates/tinker-pdf-layout/data/ucd`
 
 The Unicode Character Database, at the five files [UAX #14](https://www.unicode.org/reports/tr14/)'s
-line breaking algorithm needs. Gap 31's plan calls the alternative by name — an
+line breaking algorithm needs, and three more for `text-transform`. Gap 31's plan calls the alternative by name — an
 ASCII heuristic that breaks at spaces *"works on Project Gutenberg's entire
 catalogue, and is catastrophically wrong on CJK"* — and CONTRIBUTING rule 1 has
 no exception for a line breaker, so the third route is the one taken: published
@@ -320,6 +320,21 @@ facts about text, vendored verbatim and compiled into static tables by
 | `extracted/DerivedGeneralCategory.txt`, here as `DerivedGeneralCategory.txt` | `Mn`/`Mc` for LB1's `SA` resolution, `Cn` for LB30b's unassigned pictographs, and `Pi`/`Pf` for LB15a and LB15b |
 | `emoji/emoji-data.txt`, here as `emoji-data.txt` | `Extended_Pictographic`, LB30b's other half |
 | `auxiliary/LineBreakTest.txt`, here as `LineBreakTest.txt` | **The conformance oracle.** 19 338 cases, run by `tests/uax14_conformance.rs` against the same entry point a book goes through |
+| `UnicodeData.txt` | Fields 12 to 14, the simple case mappings, for `css-text-3` §2.1's `text-transform`. Byte for byte the copy the shaping and content trees carry (SHA-256 `2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c`), which `tinker-pdf-shape/tests/ucd_version.rs` asserts |
+| `SpecialCasing.txt` | The full case mappings longer than one character — `ß` to `SS` — and the one language-independent conditional, Final_Sigma. SHA-256 `efc25faf19de21b92c1194c111c932e03d2a5eaf18194e33f1156e96de4c9588` |
+| `DerivedCoreProperties.txt` | `Cased` and `Case_Ignorable`, which are Final_Sigma's definition in Unicode §3.13, and `Lowercase`, which is `capitalize`'s *"if lowercase"*. SHA-256 `24c7fed1195c482faaefd5c1e7eb821c5ee1fb6de07ecdbaa64b56a99da22c08` |
+
+The last three arrived on 3 October 2026 with `text-transform`, fetched from
+the Unicode Consortium's own tools repository at the commit the content tree
+below is pinned to, since unicode.org was not reachable from where they were
+vendored:
+`https://raw.githubusercontent.com/unicode-org/unicodetools/0509b4b256ff75c65300c8aaecb9e6ec816d9520/unicodetools/data/ucd/17.0.0/<file>`.
+`SpecialCasing.txt` and `DerivedCoreProperties.txt` state `17.0.0` on their
+first lines, which `ucd_version.rs` reads. The standard library's
+`char::to_uppercase` is the same algorithm over the compiler's own Unicode
+version, and is not used for exactly that reason: three trees in this
+repository pin one version, and a casing table a version apart from the line
+breaker measuring its output is the skew that test exists to stop.
 
 The fifth is not compiled into anything and is the one worth defending. A line
 breaker's own author can only write the tests that author thought of, and gap

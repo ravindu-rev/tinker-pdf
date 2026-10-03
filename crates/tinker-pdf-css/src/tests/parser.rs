@@ -1575,3 +1575,48 @@ fn the_break_properties_are_the_page_break_longhands_under_their_modern_names() 
         );
     }
 }
+
+/// **`text-transform` at its four casing values, and its two others refused by
+/// value** (`css-text-3` §2.1).
+///
+/// `full-width` and `full-size-kana` are inside the grammar and this build's
+/// gap, so they are `Unsupported` whether alone or beside a casing keyword;
+/// two casing keywords, or `none` beside anything, are outside it and the
+/// author's, so they are discarded.
+#[test]
+fn text_transform_reads_its_casing_values_and_refuses_the_rest_by_value() {
+    use crate::property::TextTransform;
+    for (value, expected) in [
+        ("none", TextTransform::None),
+        ("uppercase", TextTransform::Uppercase),
+        ("LOWERCASE", TextTransform::Lowercase),
+        ("capitalize", TextTransform::Capitalize),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ text-transform: {value} }}")),
+            vec![Property::TextTransform(expected)],
+            "text-transform: {value}"
+        );
+    }
+    for value in [
+        "full-width",
+        "uppercase full-width",
+        "full-size-kana capitalize",
+    ] {
+        assert_eq!(
+            declarations(&format!("p {{ text-transform: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "text-transform",
+                value: value.to_owned(),
+            },
+            "text-transform: {value}"
+        );
+    }
+    for value in ["uppercase lowercase", "none uppercase", "bold", "3"] {
+        let parsed = sheet(&format!("p {{ text-transform: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "text-transform: {value} is not CSS and is discarded"
+        );
+    }
+}

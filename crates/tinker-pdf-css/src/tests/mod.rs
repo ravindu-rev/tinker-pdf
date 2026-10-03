@@ -53,6 +53,10 @@ impl Element for Node {
     fn inline_style(&self) -> Option<&str> {
         self.style.as_deref()
     }
+    /// `lang`, which is enough document language for a fixture.
+    fn language(&self) -> Option<&str> {
+        self.attribute("lang")
+    }
 }
 
 /// Builds a tree from `(name, parent)` pairs, filling the sibling links in.

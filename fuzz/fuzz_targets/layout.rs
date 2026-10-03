@@ -62,7 +62,7 @@ use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     BorderStyle, BoxSizing, Clear, Display, Float, LengthPercentage, LineBreakStrictness,
     LineHeight, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Sides, Size,
-    TextAlign, Visibility, WhiteSpace, WordBreak,
+    TextAlign, TextTransform, Visibility, WhiteSpace, WordBreak,
 };
 use tinker_pdf_layout::metrics::FixedPitch;
 use tinker_pdf_layout::uax14::{opportunities, Tailoring};
@@ -221,6 +221,15 @@ fn style(bytes: &mut Bytes<'_>, block: bool) -> ComputedStyle {
         Visibility::Hidden
     } else {
         Visibility::Visible
+    };
+    // `text-transform` changes how many characters a run has, so every length
+    // a line breaker holds about its text can be wrong after it — the reason it
+    // is in the generator.
+    style.text_transform = match (a >> 6) & 3 {
+        0 => TextTransform::None,
+        1 => TextTransform::Uppercase,
+        2 => TextTransform::Lowercase,
+        _ => TextTransform::Capitalize,
     };
     style.float = match (d >> 4) & 3 {
         1 => Float::Left,
@@ -410,7 +419,16 @@ fuzz_target!(|data: &[u8]| {
     // Gap 31's fourth honesty device, on trees nobody wrote.
     let mut wanted = String::new();
     expected(&tree, &mut wanted);
-    let got: String = laid.text().chars().filter(|c| !c.is_whitespace()).collect();
+    // ASCII-lowercased because `text-transform` is in the generator, and it is
+    // the one legitimate way for a character to change: `a` and `b` are the
+    // only cased letters in `ALPHABET`, so their capitals are the only thing a
+    // transform can produce, and folding them back keeps this an equality.
+    let got: String = laid
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
     assert!(
         got == wanted,
         "text conservation failed: {} characters in, {} out",

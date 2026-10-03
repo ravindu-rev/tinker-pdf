@@ -386,6 +386,69 @@ fn an_inset_block_on_a_wide_page_is_a_full_block_on_a_narrow_one() {
     assert_ne!(strip(&plain), strip(&narrower));
 }
 
+// ---- text-transform ---------------------------------------------------------------
+
+/// **`text-transform: uppercase` is the text written in capitals**
+/// (`css-text-3` §2.1), with Unicode's *full* mapping, measured as what it
+/// becomes.
+///
+/// Ten `ß` are ten characters in the source and twenty once uppercased, and at
+/// a twenty-character measure that is the difference between one line and
+/// two: the pair agrees only if the transform runs **before** line breaking,
+/// which is §1.3's order, and only if `ß` is `SS` rather than the one-to-one
+/// `ẞ` a simple mapping would give.
+#[test]
+fn uppercase_is_the_text_written_in_capitals_and_is_measured_so() {
+    let style = "p { font-size: 20px; line-height: 30px }";
+    let source =
+        "<p class=\"u\">\u{df}\u{df}\u{df}\u{df}\u{df}\u{df}\u{df}\u{df}\u{df}\u{df} end</p>";
+    let transformed = lay(
+        &format!("{style} .u {{ text-transform: uppercase }}"),
+        source,
+    );
+    let written = lay(style, "<p class=\"u\">SSSSSSSSSSSSSSSSSSSS END</p>");
+    let broken = lay(&format!("{style} .u {{ text-transform: none }}"), source);
+    assert_eq!(
+        transformed.len(),
+        2,
+        "twenty capitals fill the line: {transformed:?}"
+    );
+    same("uppercase", transformed, written, broken);
+}
+
+/// **`lowercase` is the text written small, Final_Sigma included**, and
+/// **`capitalize` titlecases the first letter of each word across element
+/// boundaries** — a word's second half in its own `<span>` is still the middle
+/// of the word.
+#[test]
+fn lowercase_and_capitalize_are_the_text_written_that_way() {
+    let style = "p { font-size: 20px; line-height: 30px }";
+    let lowered = lay(
+        &format!("{style} .t {{ text-transform: lowercase }}"),
+        "<p class=\"t\">\u{39f}\u{394}\u{39f}\u{3a3} \u{3a3}\u{391}\u{3a3}</p>",
+    );
+    let written_low = lay(
+        style,
+        "<p>\u{3bf}\u{3b4}\u{3bf}\u{3c2} \u{3c3}\u{3b1}\u{3c2}</p>",
+    );
+    let broken_low = lay(
+        &format!("{style} .t {{ text-transform: uppercase }}"),
+        "<p class=\"t\">\u{39f}\u{394}\u{39f}\u{3a3} \u{3a3}\u{391}\u{3a3}</p>",
+    );
+    same("lowercase", lowered, written_low, broken_low);
+
+    let capitalized = lay(
+        &format!("{style} .t {{ text-transform: capitalize }}"),
+        "<p class=\"t\">the s<span>ea</span>, <span>the</span> sea</p>",
+    );
+    let written_cap = lay(style, "<p>The S<span>ea</span>, <span>The</span> Sea</p>");
+    let broken_cap = lay(
+        &format!("{style} .t {{ text-transform: none }}"),
+        "<p class=\"t\">the s<span>ea</span>, <span>the</span> sea</p>",
+    );
+    same("capitalize", capitalized, written_cap, broken_cap);
+}
+
 // ---- fragmentation ------------------------------------------------------------
 
 /// Where every line landed **and on which page**, at a page box short enough

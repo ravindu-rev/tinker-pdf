@@ -902,6 +902,25 @@ pub enum TextAlign {
     Justify,
 }
 
+/// `text-transform`, `css-text-3` §2.1, at the four values this build sets.
+///
+/// `full-width` and `full-size-kana` are refused by value rather than
+/// approximated: both are mappings to *other characters* (U+FF01 to U+FF5E, and
+/// the small kana to their full-size forms), not casing, and a build that read
+/// `uppercase full-width` as `uppercase` would set a heading half-width that
+/// the author asked to be full-width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextTransform {
+    /// `none`
+    None,
+    /// `capitalize`: the first letter unit of each word in titlecase.
+    Capitalize,
+    /// `uppercase`
+    Uppercase,
+    /// `lowercase`
+    Lowercase,
+}
+
 /// `text-decoration`, as the line it draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextDecoration {
@@ -1117,6 +1136,8 @@ pub enum Property {
     TextIndent(Len),
     /// `text-decoration`
     TextDecoration(TextDecoration),
+    /// `text-transform`, `css-text-3` §2.1.
+    TextTransform(TextTransform),
     /// `white-space`
     WhiteSpace(WhiteSpace),
     /// `list-style-type`
@@ -1248,6 +1269,7 @@ impl Property {
             Property::TextAlign(_) => "text-align",
             Property::TextIndent(_) => "text-indent",
             Property::TextDecoration(_) => "text-decoration",
+            Property::TextTransform(_) => "text-transform",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
             Property::Visibility(_) => "visibility",
@@ -1353,6 +1375,10 @@ impl Property {
             | Property::WordSpacing(_)
             | Property::TextAlign(_)
             | Property::TextIndent(_)
+            // `css-text-3` §2.1's table says *inherited: yes*, which is what
+            // lets `h1 { text-transform: uppercase }` reach the text inside an
+            // `<em>` in the heading.
+            | Property::TextTransform(_)
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
             | Property::Visibility(_)
@@ -1628,7 +1654,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "text-emphasis-style",
     "text-overflow",
     "text-shadow",
-    "text-transform",
     "transform",
     "transform-origin",
     "transition",
@@ -2453,6 +2478,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "text-align",
     "text-decoration",
     "text-indent",
+    "text-transform",
     "top",
     "vertical-align",
     "visibility",
@@ -2723,6 +2749,14 @@ fn implemented(
                 _ => return None,
             }))
         }),
+        // `css-text-3` §2.1's grammar is `none | [capitalize | uppercase |
+        // lowercase] || full-width || full-size-kana`. A value inside that
+        // grammar that this build does not set — either of the last two, alone
+        // or beside a casing keyword — is `BadValue` and counted; a value
+        // outside it is the author's and `Malformed`. Read here rather than
+        // through `keyword`, because that helper would call
+        // `uppercase full-width` malformed for having two words.
+        "text-transform" => text_transform(significant),
         "white-space" => keyword(one, single, |word| {
             Some(Property::WhiteSpace(match word {
                 "normal" => WhiteSpace::Normal,
@@ -3233,6 +3267,37 @@ fn keyword(
         }
         Some(_) if single => Implemented::BadValue,
         _ => Implemented::Malformed,
+    }
+}
+
+/// `text-transform`'s value, `css-text-3` §2.1.
+fn text_transform(significant: &[&ComponentValue]) -> Implemented {
+    let mut casing: Option<TextTransform> = None;
+    let mut other = 0usize;
+    let mut none = false;
+    for value in significant {
+        let Some(Token::Ident(word)) = value.token() else {
+            return Implemented::Malformed;
+        };
+        match word.to_ascii_lowercase().as_str() {
+            "none" => none = true,
+            "capitalize" | "uppercase" | "lowercase" if casing.is_some() => {
+                return Implemented::Malformed
+            }
+            "capitalize" => casing = Some(TextTransform::Capitalize),
+            "uppercase" => casing = Some(TextTransform::Uppercase),
+            "lowercase" => casing = Some(TextTransform::Lowercase),
+            "full-width" | "full-size-kana" => other += 1,
+            _ => return Implemented::Malformed,
+        }
+    }
+    match (none, casing, other) {
+        (true, None, 0) if significant.len() == 1 => {
+            Implemented::Known(vec![Property::TextTransform(TextTransform::None)])
+        }
+        (true, _, _) => Implemented::Malformed,
+        (false, Some(casing), 0) => Implemented::Known(vec![Property::TextTransform(casing)]),
+        _ => Implemented::BadValue,
     }
 }
 

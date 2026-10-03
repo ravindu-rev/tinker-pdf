@@ -99,6 +99,20 @@ breaking is **UAX #14** over vendored Unicode 17.0.0 data, passing
 come from the face (embedded, host-provided, or the standard-14 metrics for
 an unembedded family), one per character.
 
+**`text-transform`** (`css-text-3` §2.1) runs between white-space collapsing
+and line breaking, which is §1.3's order, so a transformed run is measured as
+the characters it becomes. The mapping is Unicode §3.13's **full** case
+mapping from the same vendored UCD 17.0.0 (`UnicodeData.txt`,
+`SpecialCasing.txt`, `DerivedCoreProperties.txt`) — `ß` uppercases to `SS`,
+`ﬁ` to `FI`, and Σ lowercases to ς at the end of a word (Final_Sigma, the one
+language-independent condition). `capitalize` titlecases the first letter or
+number of each white-space-delimited word if it is lowercase, so `ǆ` becomes
+`ǅ`, and a word continues across elements: the second half of a word set in a
+`<span>` is not capitalised. The transformed characters are what is drawn and
+what text extraction returns, as in a browser's own PDF; so a book that uses
+the property is one the conservation harness would count a transformed
+letter in as one missing and one extra. No committed book declares it.
+
 **Painting** (`paint`, `typeface`). An embedded face's run is shaped whole and
 written through `DocumentBuilder::glyph_run`, which states **every glyph's own
 position** — so `GPOS`'s offsets reach the page and a mark sits at its anchor
@@ -225,6 +239,7 @@ order, at nine page boxes.
 | An XHTML `<img>` that did not become a box on the page | `ArchiveWarning::ImageNotDrawn { item, defect, images }` | four defects, because each is a different party's fault: `Unresolved` (no `src`, or one the container has no entry for), `UnsupportedFormat(f)` (BMP, TIFF, JPEG 2000 and AVIF are foreign resources an `<img>` does not place even where the comic path reads them — each named by format; every EPUB 3.3 §3.2 core raster type now has a decoder, so none lands here), `Unknown` (bytes matching no magic number — **an SVG lands here**, having none, and is a spine item in this build rather than a replaced box) and `Undecodable` (a JPEG, PNG, GIF or WebP whose bytes would not make an image; a GIF is drawn as its first image, an animated WebP as its first frame). Counted per content document and per defect, so a comic whose forty pictures are all WebP is one sentence a host can act on. The ruling 10 companion to `SvgImageUnresolved`, which is an SVG `<image>` and could never say this | [design/epub-layout.md](../design/epub-layout.md) |
 | A `<link rel="stylesheet">` whose `href` produced no sheet | `ArchiveWarning::StylesheetUnresolved { item, sheets }` | the document is set without rules its author wrote and the page looks finished, which is `ImageNotDrawn`'s hole for the other reference a content document makes. Counted per content document. Silent until tier 5's formats row, where a loose XHTML file — which has nothing beside it — made every linked sheet one of these | [opening](opening.md) |
 | A refused `<img>` — **not a refusal, a stated answer** | — | HTML §4.8.4.4 makes an element *"expected to be treated as a replaced element"* **only when the image is available**, so an unavailable one is an ordinary empty inline and generates **no box**. §10.3.2's 300 by 150 default would put a blank postcard into a paragraph for a reference that was merely misspelled, and carrying `alt` into it would put characters on the page the spine's markup does not contain — one per refused image, with no source character to answer it. Asserted as a byte-for-byte identity against the same book with an empty `<span>` in the `<img>`'s place | [design/epub-layout.md](../design/epub-layout.md) |
+| `text-transform` in Lithuanian, Turkish or Azeri, and its `full-width` and `full-size-kana` values | `ArchiveWarning::UnimplementedProperty { property: "text-transform", .. }` | §2.1 requires `SpecialCasing.txt`'s language-conditional mappings when the element's language is known, and the layout crate that applies the transform is handed computed styles and never a language — so the cascade counts every element in one of the three languages (by `xml:lang`/`lang`, inherited) that has a casing transform, rather than letting a Turkish heading set with an English `I` read as honoured. `full-width` and `full-size-kana` map to *other characters*, not cases, and are refused by value alone or beside a casing keyword | `crates/tinker-pdf-layout/src/case.rs` |
 | `object-fit`, `object-position` | `ArchiveWarning::UnimplementedProperty` | a replaced box's content fills its content box exactly, which is what CSS says happens when the property that would say otherwise is absent. An author who states a `width` and a `height` that disagree with the picture's proportions gets a stretched picture, asserted rather than assumed | [ROADMAP.md](../ROADMAP.md) |
 | An SVG content document that produced no picture at all | `SpineDefect::SvgUnreadable(tinker_pdf_svg::Refusal)` | six named causes — not XML, not an `<svg>` root, a `<use>` that reaches its own ancestor, or one of four ceilings — and the refusal travels, so a caller can tell a bomb from a truncated file | [design/svg.md](../design/svg.md) |
 | `position: fixed` — **not a refusal, a stated answer** | — | CSS 2.2 §9.6.1: *"in the case of paged media, fixed boxes are repeated on every page, and are fixed with respect to the page box"*. So a fixed box is positioned against the page box and drawn on every page of the document. That is the specification's own paged answer, not a degradation of the screen behaviour, and it is what a stylesheet asking for a running header meant | — |
@@ -305,7 +320,7 @@ postdate the tool's removal under ruling 13, so
   against `inherit` and `initial`, asserted on an inherited and a
   non-inherited property in the same fixture because either one alone agrees
   with two of the three keywords; and `unset` asserted to be exactly *not
-  declaring the property* over **all eighty-three longhands**, not a sample,
+  declaring the property* over **all eighty-four longhands**, not a sample,
   because §7.1's definition and `ComputedStyle::inherit_from`'s behaviour are
   the same rule written twice. `revert` against `revert-layer` in one fixture
   with a user-agent rule and two author layers, where the two keywords have

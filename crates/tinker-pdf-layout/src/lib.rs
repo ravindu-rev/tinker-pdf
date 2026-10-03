@@ -107,6 +107,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod case;
 pub mod flex;
 pub mod floats;
 pub mod flow;

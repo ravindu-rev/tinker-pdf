@@ -84,11 +84,11 @@ const LONGHAND_VARIANT_ANCHOR: &str =
     "// <<< the compile-time proof injects a longhand directly above this line >>>";
 
 /// The `Longhand` the injected property sets, and its own three arms.
-const LONGHAND_VARIANT: &str = "    TextTransform,";
-const LONGHAND_ARM: &str = "            Property::TextTransform(_) => Longhand::TextTransform,";
-const LONGHAND_NAME_ARM: &str = "            Longhand::TextTransform => \"text-transform\",";
-const LONGHAND_INHERITED_ARM: &str = "            Longhand::TextTransform => true,";
-const COPY_ARM: &str = "        Longhand::TextTransform => into.color = from.color.clone(),";
+const LONGHAND_VARIANT: &str = "    TabSize,";
+const LONGHAND_ARM: &str = "            Property::TabSize(_) => Longhand::TabSize,";
+const LONGHAND_NAME_ARM: &str = "            Longhand::TabSize => \"tab-size\",";
+const LONGHAND_INHERITED_ARM: &str = "            Longhand::TabSize => true,";
+const COPY_ARM: &str = "        Longhand::TabSize => into.color = from.color.clone(),";
 
 /// The property injected, and it is not an arbitrary one.
 ///
@@ -110,36 +110,37 @@ const COPY_ARM: &str = "        Longhand::TextTransform => into.color = from.col
 /// implement, and a proof injecting one would be asserting something about a
 /// property this build had decided never to have.
 ///
-/// `text-transform` is the successor and it is chosen the same way, on the
-/// three tests the moves above have settled between them.
+/// `text-transform` was the fourth and it moved on 3 October 2026, when
+/// `SpecialCasing.txt` arrived in `crates/tinker-pdf-layout/data/ucd` and the
+/// property was implemented over Unicode's full case mappings — the paragraph
+/// that stood here said that file was what it waited on, and it was.
 ///
-/// **It is in `UNSUPPORTED_PROPERTIES` and stays there.** Tier 4 consumes
-/// `content` and `gap`, so neither could have been picked without this constant
-/// moving again inside the same tier.
+/// `tab-size` is the successor and it is chosen the same way, on the three
+/// tests the moves above have settled between them.
+///
+/// **It is in `UNSUPPORTED_PROPERTIES` and stays there** through the tier that
+/// moved `text-transform`: that tier's other landings are lists, counters,
+/// quotes and paint, none of which is `tab-size`.
 ///
 /// **It is genuinely unimplemented, for a reason that can be stated.**
-/// `css-text-4` §2.1's `uppercase` and `lowercase` are not a `char::to_uppercase`
-/// away: the mapping is locale-dependent (Turkish `i` uppercases to `İ` and
-/// dotless `ı` lowercases from `I`), context-dependent (a Greek final sigma is
-/// `ς` at the end of a word and `σ` inside it), and not length-preserving (`ß`
-/// uppercases to `SS`, so a transformed run measures differently from the one
-/// the source wrote). All three need Unicode's `SpecialCasing.txt`, which is
-/// **not** among the files vendored at `crates/tinker-pdf-layout/data/ucd` —
-/// that directory holds `DerivedGeneralCategory.txt`, `EastAsianWidth.txt`,
-/// `LineBreak.txt`, `LineBreakTest.txt` and `emoji-data.txt`, all of them
-/// UAX #14's. A build that reached for the ASCII answer would set a Turkish
-/// book's headings wrong and nothing would look broken.
+/// `css-text-3` §7.1 makes a preserved tab advance to the next multiple of
+/// `tab-size` measured from the start of the **line box**, so the width of a
+/// tab depends on where the line breaker put the line's start and what came
+/// before it on the line — a measurement the line breaker would have to make
+/// about its own output. `tinker-pdf-layout/src/text.rs` records that it
+/// measures a preserved tab as one character of the element's font instead,
+/// which is right for a reflowable book's prose and wrong for a table set in a
+/// `<pre>`.
 ///
 /// **And it is a name somebody will implement one day**, which is the test the
-/// three moves above have made the important one. `writing-mode` would have
-/// been the easy wrong answer here: it is unimplemented, it is in the same
-/// list, and it is refused *permanently* by the vertical-text non-goal in
-/// `docs/design/shaping.md` — so it would never move, and a constant that never
-/// moves is one nobody ever re-reads.
-const VARIANT: &str = "    TextTransform(bool),";
-const APPLY_ARM: &str = "        Property::TextTransform(_) => {}";
-const NAME_ARM: &str = "            Property::TextTransform(_) => \"text-transform\",";
-const INHERITED_ARM: &str = "            Property::TextTransform(_) => true,";
+/// four moves above have made the important one. `writing-mode` would still be
+/// the easy wrong answer: it is refused *permanently* by the vertical-text
+/// non-goal in `docs/design/shaping.md`, so it would never move, and a
+/// constant that never moves is one nobody ever re-reads.
+const VARIANT: &str = "    TabSize(bool),";
+const APPLY_ARM: &str = "        Property::TabSize(_) => {}";
+const NAME_ARM: &str = "            Property::TabSize(_) => \"tab-size\",";
+const INHERITED_ARM: &str = "            Property::TabSize(_) => true,";
 
 struct Source {
     lib: String,
@@ -390,7 +391,7 @@ fn the_pristine_crate_builds_and_a_property_with_no_consumer_does_not() {
         "the build failed for some other reason than a non-exhaustive match:\n{stderr}"
     );
     assert!(
-        stderr.contains("TextTransform"),
+        stderr.contains("TabSize"),
         "the error does not name the variant that was added:\n{stderr}"
     );
 }

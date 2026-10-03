@@ -1528,7 +1528,8 @@ impl<M: Metrics> Builder<'_, M> {
             // block dispatch did not claim first.
             Content::Replaced(_) => {}
             Content::Text(source) => {
-                let text = collapser.push(source, style.white_space);
+                let text =
+                    collapser.push_transformed(source, style.white_space, style.text_transform);
                 if !text.is_empty() {
                     out.push(Piece {
                         text,

@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence eighty-three unit variants, one per name this build implements as a
+//! Hence eighty-four unit variants, one per name this build implements as a
 //! longhand. The sixteen shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! Eighty-three variants across four consumers is not hand-written code, and a
+//! Eighty-four variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -65,6 +65,8 @@ pub enum Longhand {
     TextIndent,
     /// `text-decoration`
     TextDecoration,
+    /// `text-transform`
+    TextTransform,
     /// `white-space`
     WhiteSpace,
     /// `list-style-type`
@@ -228,6 +230,7 @@ impl Longhand {
         Longhand::TextAlign,
         Longhand::TextIndent,
         Longhand::TextDecoration,
+        Longhand::TextTransform,
         Longhand::WhiteSpace,
         Longhand::ListStyleType,
         Longhand::Visibility,
@@ -317,6 +320,7 @@ impl Longhand {
             Longhand::TextAlign => "text-align",
             Longhand::TextIndent => "text-indent",
             Longhand::TextDecoration => "text-decoration",
+            Longhand::TextTransform => "text-transform",
             Longhand::WhiteSpace => "white-space",
             Longhand::ListStyleType => "list-style-type",
             Longhand::Visibility => "visibility",
@@ -412,6 +416,7 @@ impl Longhand {
             | Longhand::WordSpacing
             | Longhand::TextAlign
             | Longhand::TextIndent
+            | Longhand::TextTransform
             | Longhand::WhiteSpace
             | Longhand::ListStyleType
             | Longhand::Visibility
@@ -491,7 +496,7 @@ impl Longhand {
     /// The longhand a name refers to, or `None` when this build does not
     /// implement that name as one.
     ///
-    /// Linear over eighty-three entries, which a declaration pays once and
+    /// Linear over eighty-four entries, which a declaration pays once and
     /// only when it carries a defaulting keyword.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Longhand> {
@@ -520,6 +525,7 @@ impl Property {
             Property::TextAlign(..) => Longhand::TextAlign,
             Property::TextIndent(..) => Longhand::TextIndent,
             Property::TextDecoration(..) => Longhand::TextDecoration,
+            Property::TextTransform(..) => Longhand::TextTransform,
             Property::WhiteSpace(..) => Longhand::WhiteSpace,
             Property::ListStyleType(..) => Longhand::ListStyleType,
             Property::Visibility(..) => Longhand::Visibility,

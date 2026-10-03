@@ -147,6 +147,8 @@ pub struct ComputedStyle {
     pub visibility: Visibility,
     /// `text-decoration`
     pub text_decoration: TextDecoration,
+    /// `text-transform`, `css-text-3` §2.1.
+    pub text_transform: TextTransform,
     /// `display`
     pub display: Display,
     /// `float`
@@ -278,6 +280,7 @@ impl ComputedStyle {
             list_style_type: ListStyleType::Disc,
             visibility: Visibility::Visible,
             text_decoration: TextDecoration::None,
+            text_transform: TextTransform::None,
             display: Display::Inline,
             float: Float::None,
             clear: Clear::None,
@@ -371,6 +374,7 @@ impl ComputedStyle {
         style.text_align = parent.text_align;
         style.text_indent = parent.text_indent;
         style.white_space = parent.white_space;
+        style.text_transform = parent.text_transform;
         style.list_style_type = parent.list_style_type;
         style.visibility = parent.visibility;
         style.orphans = parent.orphans;
@@ -446,6 +450,7 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::TextAlign(value) => style.text_align = *value,
         Property::TextIndent(value) => style.text_indent = value.compute(font_size, root_font_size),
         Property::TextDecoration(value) => style.text_decoration = *value,
+        Property::TextTransform(value) => style.text_transform = *value,
         Property::WhiteSpace(value) => style.white_space = *value,
         Property::ListStyleType(value) => style.list_style_type = *value,
         Property::Visibility(value) => style.visibility = *value,
@@ -834,6 +839,7 @@ pub fn cascade_from<E: Element>(
     let mut styles: Vec<ComputedStyle> = Vec::with_capacity(elements.len());
     let mut generated: Vec<Generated> = Vec::with_capacity(elements.len());
     let mut root_font_size = initial.font_size;
+    let mut language_of: Vec<Option<usize>> = Vec::with_capacity(elements.len());
 
     for index in 0..elements.len() {
         let mut style = match elements[index].parent() {
@@ -879,6 +885,22 @@ pub fn cascade_from<E: Element>(
                 budget,
             )?,
         });
+        // `selectors-4` §6.5.1's inheritance of a language, kept as the index
+        // of the nearest element that declares one so that it is one word per
+        // element rather than a walk per element.
+        let declares = elements[index].language().map(|_| index);
+        let speaks = declares.or_else(|| {
+            elements[index]
+                .parent()
+                .and_then(|parent| language_of.get(parent).copied().flatten())
+        });
+        language_of.push(speaks);
+        if style.text_transform != TextTransform::None {
+            let language = speaks.and_then(|at| elements[at].language()).unwrap_or("");
+            if casing_needs_language(language) {
+                note(&mut report.unsupported, "text-transform");
+            }
+        }
         styles.push(style);
     }
 
@@ -887,6 +909,24 @@ pub fn cascade_from<E: Element>(
         report,
         generated,
     })
+}
+
+/// Whether a language is one whose casing `SpecialCasing.txt` conditions on
+/// it: Lithuanian, Turkish and Azeri, by primary subtag.
+///
+/// **`text-transform` is honoured everywhere else and not here**, and this is
+/// what makes the difference a number rather than a silence. `css-text-3` §2.1
+/// requires the language-specific mappings *"if (and only if) the content
+/// language of the element is ... known"*; the layout crate that applies the
+/// transform is handed computed styles and never a language, so an element in
+/// one of these three with a casing transform is counted as `text-transform`
+/// unimplemented — a Turkish heading set in capitals with an English `I` is
+/// the plausible wrong page this exists to name.
+fn casing_needs_language(language: &str) -> bool {
+    let primary = language.split('-').next().unwrap_or("");
+    ["lt", "tr", "az"]
+        .iter()
+        .any(|named| primary.eq_ignore_ascii_case(named))
 }
 
 /// What the cascade decided for one property, before it is written down.
@@ -1688,6 +1728,7 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::TextAlign => into.text_align = from.text_align,
         Longhand::TextIndent => into.text_indent = from.text_indent,
         Longhand::TextDecoration => into.text_decoration = from.text_decoration,
+        Longhand::TextTransform => into.text_transform = from.text_transform,
         Longhand::WhiteSpace => into.white_space = from.white_space,
         Longhand::ListStyleType => into.list_style_type = from.list_style_type,
         Longhand::Visibility => into.visibility = from.visibility,

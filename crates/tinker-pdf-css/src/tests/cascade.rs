@@ -1109,3 +1109,48 @@ fn a_break_alias_and_its_legacy_name_are_one_property_in_the_cascade() {
     )[1];
     assert_eq!(inherited.page_break_after, PageBreak::Always);
 }
+
+/// **`text-transform` inherits, and in Lithuanian, Turkish and Azeri it is
+/// counted as unimplemented** (`css-text-3` §2.1).
+///
+/// §2.1 makes the language-specific mappings mandatory when the element's
+/// language is known, and the layout crate that applies the transform is never
+/// told a language. So an element in one of the three with a casing transform
+/// is a `text-transform` gap, by element; one in any other language, or with
+/// no transform, is not.
+#[test]
+fn text_transform_inherits_and_is_counted_where_its_language_conditions_it() {
+    use crate::property::TextTransform;
+    let mut nodes = tree(&[
+        ("html", None),
+        ("body", Some(0)),
+        ("h1", Some(1)),
+        ("em", Some(2)),
+        ("p", Some(1)),
+        ("q", Some(4)),
+    ]);
+    nodes[0].attributes.push(("lang".into(), "tr".into()));
+    nodes[5].attributes.push(("lang".into(), "en-GB".into()));
+    let parsed = sheet("h1 { text-transform: uppercase } p { text-transform: lowercase }");
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let styled = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    assert_eq!(
+        styled.styles[3].text_transform,
+        TextTransform::Uppercase,
+        "inherited"
+    );
+    assert_eq!(styled.styles[1].text_transform, TextTransform::None);
+    // `h1`, its `em`, and `p` are Turkish with a transform; `q` is English and
+    // `html` and `body` have none.
+    assert_eq!(
+        styled
+            .report
+            .unsupported
+            .iter()
+            .find(|(name, _)| *name == "text-transform")
+            .map(|(_, count)| *count),
+        Some(3)
+    );
+}

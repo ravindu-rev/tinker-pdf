@@ -41,7 +41,7 @@ use tinker_pdf_css::property::{
     FlexWrap, Float, FontFamily, FontStyle, FontVariant, Gap, Inset, JustifyContent,
     LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize, OverflowWrap,
     PageBreak, PageBreakInside, Position, Side, Sides, Size, Spacing, TableLayout, TextAlign,
-    TextDecoration, VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    TextDecoration, TextTransform, VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -86,6 +86,11 @@ pub struct Consumed {
     pub text_indent: LengthPercentage,
     /// `white-space`.
     pub white_space: WhiteSpace,
+    /// `text-transform`, `css-text-3` §2.1. Read by [`crate::case`], after
+    /// white-space collapsing and before line breaking, which is §1.3's order
+    /// of operations: a transformed run is **measured** as the characters it
+    /// becomes, so `ß` set in capitals is two advances wide.
+    pub text_transform: TextTransform,
     /// `list-style-type`, for a `display: list-item` marker.
     pub list_style_type: ListStyleType,
     /// `box-sizing`.
@@ -243,6 +248,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         list_style_type,
         visibility,
         text_decoration,
+        text_transform,
         display,
         float,
         clear,
@@ -351,6 +357,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         text_align: *text_align,
         text_indent: *text_indent,
         white_space: *white_space,
+        text_transform: *text_transform,
         list_style_type: *list_style_type,
         box_sizing: *box_sizing,
         width: *width,

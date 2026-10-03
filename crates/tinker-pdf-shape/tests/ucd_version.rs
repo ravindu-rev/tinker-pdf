@@ -223,11 +223,14 @@ fn each_tree_holds_the_files_its_algorithms_need() {
     assert_eq!(
         names("crates/tinker-pdf-layout/data/ucd"),
         vec![
+            "DerivedCoreProperties.txt",
             "DerivedGeneralCategory.txt",
             "EastAsianWidth.txt",
             "LICENSE.txt",
             "LineBreak.txt",
             "LineBreakTest.txt",
+            "SpecialCasing.txt",
+            "UnicodeData.txt",
             "emoji-data.txt",
         ],
         "the layout crate's vendored UCD changed shape"
