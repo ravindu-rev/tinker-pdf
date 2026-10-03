@@ -1520,7 +1520,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
 
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
     let mut unwritable_runs = 0usize;
-    let mut refused_effects = 0usize;
+    let mut refused_effects = paint::Refused::default();
     for (spine_at, chapter) in chapters.iter().enumerate() {
         if let Some(defect) = chapter.defect {
             let page = u32::try_from(chapter.first_page).unwrap_or(u32::MAX);
@@ -1609,7 +1609,10 @@ fn write_chapters<R: read::Resources + ?Sized>(
             |image| backgrounds.find(image.base.as_deref().unwrap_or(document), &image.href),
             &mut patterns,
         );
-        refused_effects += effects.register(builder);
+        let refused = effects.register(builder);
+        refused_effects.opacity += refused.opacity;
+        refused_effects.box_shadow += refused.box_shadow;
+        refused_effects.text_shadow += refused.text_shadow;
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
             let on_page = links.get(index).map_or(&[][..], Vec::as_slice);
@@ -1667,13 +1670,16 @@ fn write_chapters<R: read::Resources + ?Sized>(
         });
     }
     // An alpha the writer refused — a profile that forbids transparency — is an
-    // `opacity` this document does not honour, counted by element as the
-    // cascade counts every other one.
-    if refused_effects > 0 {
-        warnings.push(ArchiveWarning::UnimplementedProperty {
-            property: "opacity",
-            elements: refused_effects,
-        });
+    // `opacity`, or a translucent shadow colour, this document does not
+    // honour, counted by element as the cascade counts every other one.
+    for (property, elements) in [
+        ("opacity", refused_effects.opacity),
+        ("box-shadow", refused_effects.box_shadow),
+        ("text-shadow", refused_effects.text_shadow),
+    ] {
+        if elements > 0 {
+            warnings.push(ArchiveWarning::UnimplementedProperty { property, elements });
+        }
     }
 
     (pages, total_pages)

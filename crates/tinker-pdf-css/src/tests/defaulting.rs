@@ -170,7 +170,7 @@ fn unset_is_inherit_for_an_inherited_property_and_initial_for_the_rest() {
 /// build implements.
 ///
 /// §7.1's definition and [`ComputedStyle::inherit_from`]'s behaviour are the
-/// same rule written twice, so this asserts they agree — over all one hundred and four
+/// same rule written twice, so this asserts they agree — over all one hundred and six
 /// longhands rather than a sample, because the two are only the same rule if
 /// they are the same rule everywhere.
 #[test]
@@ -192,7 +192,7 @@ fn unset_is_the_same_as_never_declaring_it_for_every_longhand() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 104, "every longhand, not a sample");
+    assert_eq!(checked, 106, "every longhand, not a sample");
 }
 
 /// **`inherit` takes the parent's computed value, not its specified one.**
@@ -421,7 +421,7 @@ fn every_implemented_name_is_defaultable() {
             panic!("`{name}: inherit` names a property nothing here can default");
         }
     }
-    assert_eq!(longhands, 104, "a hundred and four longhands");
+    assert_eq!(longhands, 106, "a hundred and six longhands");
     assert_eq!(
         shorthands, 23,
         "twenty shorthands and `css-break-3` §3.4's three aliases"

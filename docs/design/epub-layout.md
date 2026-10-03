@@ -216,13 +216,13 @@ a picture reaching paper in this area is measured in pixels.
 | 2 | **The `background-*` image family.** `background-image`, `background-repeat`, `background-position`, `background-size` | A tiling `/Pattern` from the same `ImageData` path a replaced box takes; `UnimplementedProperty` stops naming the four; a reftest pair where the only difference is the background | M. **Done, 3 October 2026**, held on the operators and a render rather than a reftest pair: a background has no second spelling that is not itself a background, and the pattern's `/XStep`, `/Matrix` and `/BBox` are the closed form |
 | 3 | **`list-style-*`, `counter-reset`, `counter-increment`, `counters()`** | A scoped counter tree; `content: counter()` generates the marker's text; an ordered list numbers from its own `start`; `quotes` and the four quote keywords with it | M. **Counters and quotes done, 3 October 2026** (`tinker_pdf_css::counter`); `list-style-image`, `reversed()` and `quotes: auto`'s per-language marks left |
 | 4 | **`transform` and `opacity`** | A `cm` composed at paint from the transform list; group opacity as an `/ExtGState`; the two names leave `UNSUPPORTED_PROPERTIES` | M. **`opacity` done, 3 October 2026**, per fragment; the group over overlapping content is owed to the structure writer |
-| 5 | **`overflow`, `clip-path`, `border-radius`, `box-shadow`, `text-shadow`** | Each a clip or an ink the painter writes; the geometry asserted arithmetically, never against a recorded bitmap | L. **`border-radius` (and `outline`) done, 3 October 2026; `overflow` done the same day**, as a clip to the padding box written only where content reaches past it, scroll containers as formatting contexts of their own, and the content past a block-axis clip taken out of the column as hidden text |
+| 5 | **`overflow`, `clip-path`, `border-radius`, `box-shadow`, `text-shadow`** | Each a clip or an ink the painter writes; the geometry asserted arithmetically, never against a recorded bitmap | L. **`border-radius` (and `outline`) done, 3 October 2026; `overflow` done the same day**, as a clip to the padding box written only where content reaches past it, scroll containers as formatting contexts of their own, and the content past a block-axis clip taken out of the column as hidden text; **`box-shadow` and `text-shadow` done the same day**, without blur, which is still counted |
 | 6 | **`writing-mode`, `direction`, `unicode-bidi` below the run** | Bidi whose unit is the visual line rather than the `TextRun`; a right-to-left line of two styled spans is one reordered line; the reading-order pin in `epub_shaped.rs` flipped to an assertion | L |
 | 7 | **`DocumentBuilder::from_html`** | The cascade, the layout engine and the painter reachable without an OCF container; held by the EPUB reftests, so the two callers cannot drift | M |
 
 Milestones 2 to 6 are scheduled by the fetched corpus's `UnimplementedProperty`
-counts, highest first — ruling 3, and not by interest. Forty-seven names are
-known and unimplemented against the 128 in `IMPLEMENTED_NAMES`; each landing deletes
+counts, highest first — ruling 3, and not by interest. Forty-five names are
+known and unimplemented against the 130 in `IMPLEMENTED_NAMES`; each landing deletes
 its names from that table.
 
 ## Risks

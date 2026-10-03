@@ -1,5 +1,14 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 3 October 2026, the EPUB CSS row's shadows.* **One more row,
+//! `MAX_CSS_SHADOWS`, output again.** A text shadow is its run drawn again, so
+//! a shadow list is a multiplier on every glyph its element's subtree draws,
+//! and `text-shadow` inherits: four bytes of `0 0,` per shadow asked for a copy
+//! of a whole book's text each. Its `fixtures` is the cap — the list built at
+//! it parses — its comic and fixed-document yardsticks are zeros, since
+//! neither has a stylesheet, and its book yardstick is the two of an embossed
+//! heading, since no committed book declares a shadow.
+//!
 //! *Amended, 2 October 2026, the review of the redaction row.* **One more
 //! row, `MAX_FORM_COPY_BYTES`, the third cap on copies.** A redaction
 //! measures every placement of a form before it writes any, and kept every
@@ -2256,6 +2265,28 @@ fn ledger() -> Vec<Bound> {
                 MARKDOWN_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_CSS_SHADOWS",
+            cap: css_limits::MAX_CSS_SHADOWS as u128,
+            published: "32",
+            // The list built exactly at the cap parses; the one past it is
+            // refused by value.
+            fixtures: css_limits::MAX_CSS_SHADOWS as u128,
+            comic: 0,
+            document: 0,
+            // No committed book declares `box-shadow` or `text-shadow`
+            // (`CENSUS.tsv`, and a search of their sheets); a heading's
+            // embossed pair is the ordinary use, at two.
+            book: 2,
+            // `0 0,` is four bytes.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 4,
+            reachable_because: "a shadow is four bytes, in a sheet of MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_shadow_list_past_the_cap_is_refused_by_value",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2296,8 +2327,8 @@ fn segment_size() -> u128 {
 /// `MAX_WEBP_SAMPLES`; and the review of the SVG writer adds
 /// `MAX_SVG_BYTES`; and the review of the retained page adds
 /// `MAX_DISPLAY_LIST_BYTES`; and tier 5's Markdown row adds
-/// `MAX_MARKDOWN_NESTING` and `MAX_MARKDOWN_REFERENCE_BYTES`. All
-/// **fifty-four** are here, and
+/// `MAX_MARKDOWN_NESTING` and `MAX_MARKDOWN_REFERENCE_BYTES`; and the EPUB
+/// CSS row's shadows add `MAX_CSS_SHADOWS`. All **fifty-five** are here, and
 /// a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
@@ -2359,6 +2390,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_DISPLAY_LIST_BYTES",
             "MAX_MARKDOWN_NESTING",
             "MAX_MARKDOWN_REFERENCE_BYTES",
+            "MAX_CSS_SHADOWS",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2464,7 +2496,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 54, "the ledger is fifty-four rows");
+    assert_eq!(measured, 55, "the ledger is fifty-five rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2496,7 +2528,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 54, "the ledger is fifty-four rows");
+    assert_eq!(ledger().len(), 55, "the ledger is fifty-five rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

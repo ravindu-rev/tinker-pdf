@@ -5064,13 +5064,12 @@ impl Reach {
     }
 }
 
-/// Whether a box draws an outline or a background image, either of which makes
-/// it painted with no background colour or border at all.
+/// Whether a box draws an outline, a background image or a shadow, any of
+/// which makes it painted with no background colour or border at all.
 fn draws_beyond_its_border(style: &Consumed) -> bool {
-    style
-        .paint
-        .as_ref()
-        .is_some_and(|paint| paint.outline.is_some() || paint.image.is_some())
+    style.paint.as_ref().is_some_and(|paint| {
+        paint.outline.is_some() || paint.image.is_some() || !paint.shadows.is_empty()
+    })
 }
 
 /// One box's **specified** border on one side, for §17.6.2.1.

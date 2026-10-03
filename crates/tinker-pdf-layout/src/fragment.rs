@@ -771,6 +771,10 @@ fn emit(
                 radius: corner_radii(block, block.width, height, cut_top, cut_bottom),
                 outline: block.paint.as_ref().and_then(|paint| paint.outline),
                 image: block.paint.as_ref().and_then(|paint| paint.image.clone()),
+                shadows: block
+                    .paint
+                    .as_ref()
+                    .map_or_else(Vec::new, |paint| paint.shadows.clone()),
                 anchor: block.anchor,
             });
         }
@@ -1000,6 +1004,10 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
                 radius: corner_radii(block, block.width, height, cut_top, cut_bottom),
                 outline: block.paint.as_ref().and_then(|paint| paint.outline),
                 image: block.paint.as_ref().and_then(|paint| paint.image.clone()),
+                shadows: block
+                    .paint
+                    .as_ref()
+                    .map_or_else(Vec::new, |paint| paint.shadows.clone()),
                 anchor: block.anchor,
             });
         }

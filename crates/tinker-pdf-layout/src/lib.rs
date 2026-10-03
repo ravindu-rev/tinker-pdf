@@ -523,6 +523,10 @@ pub struct BoxFragment {
     /// [`BoxFragment::background`] and under the border, positioned against
     /// **this fragment's** padding box for [`BoxFragment::radius`]'s reason.
     pub image: Option<BackgroundLayer>,
+    /// `box-shadow`, first on top, each colour resolved: the outer ones are
+    /// drawn under the background and outside the border box, the `inset`
+    /// ones over the background and inside the padding box (§7.1).
+    pub shadows: Vec<tinker_pdf_css::property::Shadow>,
     /// The [`BoxNode::anchor`] of the box this decorates, carried unchanged.
     ///
     /// For the painter, which applies what belongs to an **element** rather

@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence a hundred and four unit variants, one per name this build implements as a
+//! Hence a hundred and six unit variants, one per name this build implements as a
 //! longhand. The twenty shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! A hundred and four variants across four consumers is not hand-written code, and a
+//! A hundred and six variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -65,6 +65,10 @@ pub enum Longhand {
     TextIndent,
     /// `text-decoration`
     TextDecoration,
+    /// `text-shadow`
+    TextShadow,
+    /// `box-shadow`
+    BoxShadow,
     /// `text-transform`
     TextTransform,
     /// `white-space`
@@ -270,6 +274,8 @@ impl Longhand {
         Longhand::TextAlign,
         Longhand::TextIndent,
         Longhand::TextDecoration,
+        Longhand::TextShadow,
+        Longhand::BoxShadow,
         Longhand::TextTransform,
         Longhand::WhiteSpace,
         Longhand::ListStyleType,
@@ -380,6 +386,8 @@ impl Longhand {
             Longhand::TextAlign => "text-align",
             Longhand::TextIndent => "text-indent",
             Longhand::TextDecoration => "text-decoration",
+            Longhand::TextShadow => "text-shadow",
+            Longhand::BoxShadow => "box-shadow",
             Longhand::TextTransform => "text-transform",
             Longhand::WhiteSpace => "white-space",
             Longhand::ListStyleType => "list-style-type",
@@ -508,8 +516,10 @@ impl Longhand {
             | Longhand::LineBreak
             | Longhand::WordBreak
             | Longhand::BorderCollapse
-            | Longhand::BorderSpacing => true,
+            | Longhand::BorderSpacing
+            | Longhand::TextShadow => true,
             Longhand::TextDecoration
+            | Longhand::BoxShadow
             | Longhand::CounterReset
             | Longhand::CounterIncrement
             | Longhand::CounterSet
@@ -625,6 +635,8 @@ impl Property {
             Property::TextAlign(..) => Longhand::TextAlign,
             Property::TextIndent(..) => Longhand::TextIndent,
             Property::TextDecoration(..) => Longhand::TextDecoration,
+            Property::TextShadow(..) => Longhand::TextShadow,
+            Property::BoxShadow(..) => Longhand::BoxShadow,
             Property::TextTransform(..) => Longhand::TextTransform,
             Property::WhiteSpace(..) => Longhand::WhiteSpace,
             Property::ListStyleType(..) => Longhand::ListStyleType,

@@ -933,6 +933,26 @@ pub struct Effects {
     /// will be drawn, by the fragment's index in [`LayoutPage::boxes`]. See
     /// [`Effects::plan_backgrounds`].
     backgrounds: Vec<Vec<(usize, Plan)>>,
+    /// Per element, its `text-shadow` list with each colour resolved and the
+    /// offsets in CSS pixels, first on top; empty for nearly every element.
+    text_shadows: Vec<Vec<(Color, f64, f64)>>,
+    /// The alphas a translucent shadow colour needs — the colour's own alpha
+    /// times its element's composed opacity, since an `/ExtGState`'s `/ca`
+    /// replaces the one in force rather than multiplying it — with the
+    /// property and the element each is for, so a refusal can be counted.
+    shadow_alphas: Vec<(u16, &'static str, u32)>,
+}
+
+/// What [`Effects::register`] could not register, by the property it was for,
+/// counted by element.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Refused {
+    /// Elements drawn opaque that asked for `opacity`.
+    pub opacity: usize,
+    /// Elements whose translucent `box-shadow` is drawn opaque.
+    pub box_shadow: usize,
+    /// Elements whose translucent `text-shadow` is drawn opaque.
+    pub text_shadow: usize,
 }
 
 /// A background image as one page draws it, in page points.
@@ -1182,14 +1202,44 @@ impl Effects {
             clipped_by.push(by);
             for_absolute.push(absolute);
         }
+        let alpha: Vec<u16> = composed
+            .into_iter()
+            .map(|alpha| (alpha * ALPHA_STEPS).round() as u16)
+            .collect();
+        let mut text_shadows: Vec<Vec<(Color, f64, f64)>> = Vec::with_capacity(alpha.len());
+        let mut shadow_alphas = Vec::new();
+        for (at, steps) in alpha.iter().enumerate() {
+            let Some(style) = styles.styles.get(at) else {
+                text_shadows.push(Vec::new());
+                continue;
+            };
+            let element = u32::try_from(at).unwrap_or(u32::MAX);
+            for (property, list) in [
+                ("box-shadow", &style.box_shadow),
+                ("text-shadow", &style.text_shadow),
+            ] {
+                for shadow in list {
+                    let colour = shadow.color.unwrap_or(style.color);
+                    if colour.a < u8::MAX {
+                        shadow_alphas.push((translucent(*steps, colour), property, element));
+                    }
+                }
+            }
+            text_shadows.push(
+                style
+                    .text_shadow
+                    .iter()
+                    .map(|shadow| (shadow.color.unwrap_or(style.color), shadow.x, shadow.y))
+                    .collect(),
+            );
+        }
         Effects {
-            alpha: composed
-                .into_iter()
-                .map(|alpha| (alpha * ALPHA_STEPS).round() as u16)
-                .collect(),
+            alpha,
             clips,
             clipped_by,
             backgrounds: Vec::new(),
+            text_shadows,
+            shadow_alphas,
         }
     }
 
@@ -1307,16 +1357,22 @@ impl Effects {
     /// alpha — an archival profile that forbids transparency refuses every
     /// one — so the caller can say so, by element, as it says every other
     /// property it did not honour.
-    pub fn register(&self, builder: &mut DocumentBuilder) -> usize {
+    pub fn register(&self, builder: &mut DocumentBuilder) -> Refused {
         let mut wanted: Vec<u16> = self
             .alpha
             .iter()
             .copied()
+            .chain(self.shadow_alphas.iter().map(|(steps, _, _)| *steps))
             .filter(|steps| f64::from(*steps) < ALPHA_STEPS)
             .collect();
         wanted.sort_unstable();
         wanted.dedup();
-        let mut refused = 0;
+        let mut refused = Refused::default();
+        // A set and not a list: a refused alpha is every element of an
+        // archival book whose inherited shadow is translucent, and a `contains`
+        // per element would be quadratic in the elements.
+        let mut shadowed: std::collections::BTreeSet<(&'static str, u32)> =
+            std::collections::BTreeSet::new();
         for steps in wanted {
             let alpha = f64::from(steps) / ALPHA_STEPS;
             let state = ExtGState {
@@ -1325,9 +1381,18 @@ impl Effects {
                 ..ExtGState::default()
             };
             if !builder.add_ext_gstate(&alpha_name(steps), &state) {
-                refused += self.alpha.iter().filter(|at| **at == steps).count();
+                refused.opacity += self.alpha.iter().filter(|at| **at == steps).count();
+                for (_, property, element) in self
+                    .shadow_alphas
+                    .iter()
+                    .filter(|(wanted, _, _)| *wanted == steps)
+                {
+                    shadowed.insert((property, *element));
+                }
             }
         }
+        refused.box_shadow = shadowed.iter().filter(|(p, _)| *p == "box-shadow").count();
+        refused.text_shadow = shadowed.iter().filter(|(p, _)| *p == "text-shadow").count();
         refused
     }
 
@@ -1349,6 +1414,24 @@ pub struct OnPage<'a> {
 }
 
 impl OnPage<'_> {
+    /// Sets the alpha a translucent shadow colour needs, inside a `q` the
+    /// caller has opened; nothing for an opaque one. Where the writer refused
+    /// the resource nothing is set and the shadow is drawn opaque — counted by
+    /// [`Effects::register`].
+    fn shadow_alpha(&self, page: &mut PageBuilder, anchor: Option<u32>, colour: Color) {
+        if colour.a < u8::MAX {
+            let steps = translucent(self.effects.steps(anchor), colour);
+            page.set_ext_gstate(&alpha_name(steps));
+        }
+    }
+
+    /// The `text-shadow` of the element a run's characters came from.
+    fn text_shadows(&self, anchor: Option<u32>) -> &[(Color, f64, f64)] {
+        anchor
+            .and_then(|at| self.effects.text_shadows.get(at as usize))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// The background image the `index`-th box fragment of the page draws.
     fn background(&self, index: usize) -> Option<&Plan> {
         self.backgrounds
@@ -1468,6 +1551,11 @@ fn clip_path(clip: &ClipFragment, frame: &Frame) -> String {
     format!("{} {} {} {} re", rect.0, rect.1, rect.2, rect.3)
 }
 
+/// A translucent colour's alpha over an element's composed opacity, in steps.
+fn translucent(steps: u16, colour: Color) -> u16 {
+    (f64::from(steps) * f64::from(colour.a) / f64::from(u8::MAX)).round() as u16
+}
+
 /// An alpha's resource name: `EA` and its ten-thousandths, so `EA5000` is
 /// half.
 fn alpha_name(steps: u16) -> Vec<u8> {
@@ -1536,7 +1624,7 @@ pub fn draw_page(
     let mut refused = 0usize;
     for (index, fragment) in laid.boxes.iter().enumerate() {
         let opened = effects.open(page, fragment.anchor, false);
-        draw_box(page, fragment, frame, effects.background(index));
+        draw_box(page, fragment, frame, effects.background(index), effects);
         Effects::close(page, opened);
     }
     // After the backgrounds and before the text, which is CSS 2.2 §E.2's
@@ -1555,6 +1643,40 @@ pub fn draw_page(
         let opened = effects.open(page, fragment.anchor, false);
         draw_replaced(page, fragment, frame, name);
         Effects::close(page, opened);
+    }
+    // `css-text-decor-3` §4: each shadow is the run drawn again, offset and
+    // in the shadow's colour, **under** the text — and an artifact (14.8.2.2),
+    // since it is not the author's content a second time: extraction reads the
+    // run once. Every shadow on the page is drawn before any of its text,
+    // which is the order §4 gives within an element and an approximation
+    // between two elements whose shadows reach each other's text.
+    for run in &laid.runs {
+        if !run.painted {
+            continue;
+        }
+        for (colour, dx, dy) in effects.text_shadows(run.anchor).iter().rev() {
+            let mut shadow = run.clone();
+            shadow.x += dx;
+            shadow.y += dy;
+            shadow.color = Color {
+                a: u8::MAX,
+                ..*colour
+            };
+            page.raw(b"/Artifact BMC");
+            let opened = effects.open(page, run.anchor, true);
+            if colour.a < u8::MAX {
+                if !opened {
+                    page.raw(b"q");
+                }
+                effects.shadow_alpha(page, run.anchor, *colour);
+            }
+            refused += draw_run(builder, page, &shadow, frame, fonts);
+            if colour.a < u8::MAX && !opened {
+                page.raw(b"Q");
+            }
+            Effects::close(page, opened);
+            page.raw(b"EMC");
+        }
     }
     // 14.7's structure tree, when the caller has the element tree the runs
     // came from. Every run carries the index of the element that wrote it, so
@@ -1814,7 +1936,13 @@ fn fill(page: &mut PageBuilder, x: f64, y: f64, width: f64, height: f64) {
     page.raw(format!("{x} {y} {width} {height} re f").as_bytes());
 }
 
-fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame, image: Option<&Plan>) {
+fn draw_box(
+    page: &mut PageBuilder,
+    fragment: &BoxFragment,
+    frame: &Frame,
+    image: Option<&Plan>,
+    effects: &OnPage<'_>,
+) {
     let x = frame.x(fragment.x);
     let top = frame.y(fragment.y);
     let width = fragment.width * PX_TO_PT;
@@ -1824,9 +1952,17 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame, image
         .iter()
         .any(|(horizontal, vertical)| *horizontal > 0.0 && *vertical > 0.0)
     {
-        draw_rounded_box(page, fragment, (x, top - height, width, height), image);
+        draw_rounded_box(
+            page,
+            fragment,
+            (x, top - height, width, height),
+            image,
+            effects,
+        );
         return;
     }
+    let rect = (x, top - height, width, height);
+    draw_shadows(page, fragment, rect, [(0.0, 0.0); 4], false, effects);
     if fragment.background.a != 0 {
         set_fill(page, fragment.background);
         fill(page, x, top - height, width, height);
@@ -1835,6 +1971,7 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame, image
         let area = format!("{x} {} {width} {height} re", top - height);
         draw_background_image(page, plan, &area);
     }
+    draw_shadows(page, fragment, rect, [(0.0, 0.0); 4], true, effects);
     // A border is drawn as four filled rectangles rather than as a stroked
     // path, because CSS's border box is defined by its **edges** and a stroke
     // is centred on a path: a one-pixel stroke round the border box would put
@@ -1855,6 +1992,123 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame, image
             Side::Right => (x + width - thickness, top - height, thickness, height),
         };
         fill(page, bx, by, bw, bh);
+    }
+}
+
+/// `css-backgrounds-3` §7.1.1's spread applied to one corner semi-axis: grown
+/// by the spread, except that a radius smaller than a positive spread grows
+/// by less — `r + s(1 + (r/s − 1)³)` — so a nearly square corner does not
+/// suddenly round; a square one stays square, and a negative spread shrinks
+/// it to no less than zero.
+fn spread_radius(radius: f64, spread: f64) -> f64 {
+    if radius <= 0.0 {
+        return 0.0;
+    }
+    if spread < 0.0 {
+        return (radius + spread).max(0.0);
+    }
+    if radius >= spread {
+        return radius + spread;
+    }
+    let ratio = radius / spread;
+    radius + spread * (1.0 + (ratio - 1.0).powi(3))
+}
+
+/// `box-shadow`, `css-backgrounds-3` §7.1, without blur: the outer shadows
+/// (`inset` false) under the background and **only outside the border box**
+/// — §7.1.1 clips them there, so a box with no background does not show its
+/// own shadow through itself — and the `inset` ones over the background and
+/// image and inside the padding box. The first in the list is on top, so the
+/// list is drawn backwards.
+///
+/// An outer shadow's shape is the border box offset and grown by the spread,
+/// its corners by [`spread_radius`]; an inset one fills the padding box less
+/// that box offset and shrunk by the spread.
+fn draw_shadows(
+    page: &mut PageBuilder,
+    fragment: &BoxFragment,
+    rect: (f64, f64, f64, f64),
+    outer: [(f64, f64); 4],
+    inset: bool,
+    effects: &OnPage<'_>,
+) {
+    let (left, bottom, width, height) = rect;
+    let widths = &fragment.border_width;
+    let (bt, br, bb, bl) = (
+        widths.top * PX_TO_PT,
+        widths.right * PX_TO_PT,
+        widths.bottom * PX_TO_PT,
+        widths.left * PX_TO_PT,
+    );
+    let padding = (
+        left + bl,
+        bottom + bb,
+        (width - bl - br).max(0.0),
+        (height - bt - bb).max(0.0),
+    );
+    let inner = [
+        ((outer[0].0 - bl).max(0.0), (outer[0].1 - bt).max(0.0)),
+        ((outer[1].0 - br).max(0.0), (outer[1].1 - bt).max(0.0)),
+        ((outer[2].0 - br).max(0.0), (outer[2].1 - bb).max(0.0)),
+        ((outer[3].0 - bl).max(0.0), (outer[3].1 - bb).max(0.0)),
+    ];
+    for shadow in fragment
+        .shadows
+        .iter()
+        .rev()
+        .filter(|shadow| shadow.inset == inset)
+    {
+        let Some(colour) = shadow.color else {
+            continue;
+        };
+        let (dx, dy, spread) = (
+            shadow.x * PX_TO_PT,
+            -shadow.y * PX_TO_PT,
+            shadow.spread * PX_TO_PT,
+        );
+        if inset {
+            let hole = (
+                padding.0 + dx + spread,
+                padding.1 + dy + spread,
+                padding.2 - 2.0 * spread,
+                padding.3 - 2.0 * spread,
+            );
+            let hole_radii =
+                inner.map(|(h, v)| (spread_radius(h, -spread), spread_radius(v, -spread)));
+            let area = rounded_path(padding, inner);
+            page.raw(format!("q {area} W n").as_bytes());
+            effects.shadow_alpha(page, fragment.anchor, colour);
+            set_fill(page, colour);
+            if hole.2 > 0.0 && hole.3 > 0.0 {
+                page.raw(format!("{area} {} f*", rounded_path(hole, hole_radii)).as_bytes());
+            } else {
+                page.raw(format!("{area} f").as_bytes());
+            }
+            page.raw(b"Q");
+        } else {
+            let shape = (
+                left + dx - spread,
+                bottom + dy - spread,
+                width + 2.0 * spread,
+                height + 2.0 * spread,
+            );
+            if shape.2 <= 0.0 || shape.3 <= 0.0 {
+                continue;
+            }
+            let radii = outer.map(|(h, v)| (spread_radius(h, spread), spread_radius(v, spread)));
+            let (page_width, page_height) = effects.frame.page;
+            page.raw(
+                format!(
+                    "q 0 0 {page_width} {page_height} re {} W* n",
+                    rounded_path(rect, outer)
+                )
+                .as_bytes(),
+            );
+            effects.shadow_alpha(page, fragment.anchor, colour);
+            set_fill(page, colour);
+            page.raw(format!("{} f", rounded_path(shape, radii)).as_bytes());
+            page.raw(b"Q");
+        }
     }
 }
 
@@ -1961,12 +2215,14 @@ fn draw_rounded_box(
     fragment: &BoxFragment,
     rect: (f64, f64, f64, f64),
     image: Option<&Plan>,
+    effects: &OnPage<'_>,
 ) {
     let (left, bottom, width, height) = rect;
     let (right, top) = (left + width, bottom + height);
     let outer: [(f64, f64); 4] = fragment
         .radius
         .map(|(horizontal, vertical)| (horizontal * PX_TO_PT, vertical * PX_TO_PT));
+    draw_shadows(page, fragment, rect, outer, false, effects);
     if fragment.background.a != 0 {
         set_fill(page, fragment.background);
         page.raw(format!("{} f", rounded_path(rect, outer)).as_bytes());
@@ -1975,6 +2231,7 @@ fn draw_rounded_box(
     if let Some(plan) = image {
         draw_background_image(page, plan, &rounded_path(rect, outer));
     }
+    draw_shadows(page, fragment, rect, outer, true, effects);
     let widths = &fragment.border_width;
     let (bt, br, bb, bl) = (
         widths.top * PX_TO_PT,

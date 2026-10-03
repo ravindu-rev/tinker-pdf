@@ -1051,6 +1051,42 @@ impl BackgroundSize {
     pub const AUTO: BackgroundSize = BackgroundSize::Explicit(None, None);
 }
 
+/// One shadow as written, `css-backgrounds-3` §7.1 and `css-text-decor-3`
+/// §4: two offsets, a blur, a spread, a colour, and whether it is `inset`.
+/// `text-shadow` has no spread and no `inset`, and its parse refuses both.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecifiedShadow {
+    /// `None` is `currentColor`, the colour a shadow with none takes.
+    pub color: Option<Color>,
+    /// Horizontal offset, positive to the right.
+    pub x: Len,
+    /// Vertical offset, positive downwards.
+    pub y: Len,
+    /// Blur radius, never negative.
+    pub blur: Len,
+    /// Spread distance, which may be negative.
+    pub spread: Len,
+    /// An `inset` box shadow, drawn inside the padding box.
+    pub inset: bool,
+}
+
+/// One shadow, computed: lengths in CSS pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shadow {
+    /// `None` is `currentColor`.
+    pub color: Option<Color>,
+    /// Horizontal offset.
+    pub x: f64,
+    /// Vertical offset.
+    pub y: f64,
+    /// Blur radius: zero, since a blurred shadow is refused by value.
+    pub blur: f64,
+    /// Spread distance.
+    pub spread: f64,
+    /// Drawn inside the padding box.
+    pub inset: bool,
+}
+
 /// `overflow-x` and `overflow-y`, `css-overflow-3` §3.1.
 ///
 /// **Five values and two questions**, and the two are not the same split:
@@ -1420,6 +1456,11 @@ pub enum Property {
     TextDecoration(TextDecoration),
     /// `text-transform`, `css-text-3` §2.1.
     TextTransform(TextTransform),
+    /// `text-shadow`, `css-text-decor-3` §4: the list, first on top. Empty
+    /// for `none`.
+    TextShadow(Vec<SpecifiedShadow>),
+    /// `box-shadow`, `css-backgrounds-3` §7.1, likewise.
+    BoxShadow(Vec<SpecifiedShadow>),
     /// `white-space`
     WhiteSpace(WhiteSpace),
     /// `list-style-type`
@@ -1587,6 +1628,8 @@ impl Property {
             Property::TextAlign(_) => "text-align",
             Property::TextIndent(_) => "text-indent",
             Property::TextDecoration(_) => "text-decoration",
+            Property::TextShadow(_) => "text-shadow",
+            Property::BoxShadow(_) => "box-shadow",
             Property::TextTransform(_) => "text-transform",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
@@ -1741,8 +1784,14 @@ impl Property {
             // collapse }` to the table and separate borders to every cell under
             // it, which draws a plausible table with two border models in it.
             | Property::BorderCollapse(_)
-            | Property::BorderSpacing(_, _) => true,
+            | Property::BorderSpacing(_, _)
+            // `css-text-decor-3` §4: *inherited: yes* — a heading's shadow is
+            // its text's, through every `<em>` in it.
+            | Property::TextShadow(_) => true,
             Property::TextDecoration(_)
+            // `css-backgrounds-3` §7.1: *inherited: no*; a box's shadow is its
+            // own box's.
+            | Property::BoxShadow(_)
             // `css-lists-3` §4.2 to §4.4: all three *inherited: no*. A
             // counter is inherited through the **counter tree** (§4.5), which
             // is a different walk from the property's; an inherited
@@ -1974,7 +2023,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "animation",
     "background-attachment",
     "border-image",
-    "box-shadow",
     "caption-side",
     "clip",
     "clip-path",
@@ -2010,7 +2058,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "text-emphasis",
     "text-emphasis-style",
     "text-overflow",
-    "text-shadow",
     "transform",
     "transform-origin",
     "transition",
@@ -2921,6 +2968,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-top-width",
     "border-width",
     "bottom",
+    "box-shadow",
     "box-sizing",
     "break-after",
     "break-before",
@@ -3002,6 +3050,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "text-align",
     "text-decoration",
     "text-indent",
+    "text-shadow",
     "text-transform",
     "top",
     "vertical-align",
@@ -3371,6 +3420,14 @@ fn implemented(
             _ => Implemented::Malformed,
         },
         "outline" => outline_shorthand(significant),
+        "box-shadow" => match shadows(values, true) {
+            Ok(list) => Implemented::Known(vec![Property::BoxShadow(list)]),
+            Err(outcome) => outcome,
+        },
+        "text-shadow" => match shadows(values, false) {
+            Ok(list) => Implemented::Known(vec![Property::TextShadow(list)]),
+            Err(outcome) => outcome,
+        },
         "overflow-x" => keyword(one, single, |word| {
             overflow_named(word).map(Property::OverflowX)
         }),
@@ -4005,6 +4062,97 @@ fn border_radius_shorthand(significant: &[&ComponentValue]) -> Implemented {
             })
             .collect(),
     )
+}
+
+/// `box-shadow` (`boxed` true) or `text-shadow`: `none`, or a comma-separated
+/// list of shadows, each an optional colour, two to four lengths in a row for
+/// a box (two or three for text) and, for a box, an optional `inset`, the
+/// three in any order (`css-backgrounds-3` §7.1, `css-text-decor-3` §4).
+/// `currentColor` is accepted here, and is what an omitted colour is.
+///
+/// **A blur is refused by value**, and the whole declaration with it: a
+/// blurred shadow is a soft edge this build does not draw, and drawing it hard
+/// would be a different picture from the one written — a counted gap is the
+/// honest answer. A zero blur is a hard shadow and is drawn. So is a list
+/// longer than [`crate::limits::MAX_CSS_SHADOWS`], which bounds how many
+/// times a page draws its text.
+fn shadows(values: &[ComponentValue], boxed: bool) -> Result<Vec<SpecifiedShadow>, Implemented> {
+    let significant: Vec<&ComponentValue> = values.iter().filter(|v| !v.is_whitespace()).collect();
+    if let [ComponentValue::Token(Token::Ident(word))] = significant[..] {
+        if word.eq_ignore_ascii_case("none") {
+            return Ok(Vec::new());
+        }
+    }
+    let mut out = Vec::new();
+    let mut blurred = false;
+    for group in values.split(|v| matches!(v, ComponentValue::Token(Token::Comma))) {
+        // `Some(None)` is `currentColor` written; `None` is no colour written.
+        let mut colour: Option<Option<Color>> = None;
+        let mut inset = false;
+        let mut lengths: Vec<Len> = Vec::new();
+        // The lengths are one component: once something else follows them,
+        // another length is a second run of them, which the grammar refuses.
+        let mut lengths_done = false;
+        for value in group.iter().filter(|v| !v.is_whitespace()) {
+            match length_outcome(value) {
+                LenOutcome::Ok(Len::Percent(_)) => return Err(Implemented::Malformed),
+                LenOutcome::Ok(_) if lengths_done => return Err(Implemented::Malformed),
+                LenOutcome::Ok(len) => {
+                    lengths.push(len);
+                    continue;
+                }
+                LenOutcome::Unsupported => return Err(Implemented::BadValue),
+                LenOutcome::Invalid => {}
+            }
+            lengths_done |= !lengths.is_empty();
+            if let ComponentValue::Token(Token::Ident(word)) = value {
+                if boxed && word.eq_ignore_ascii_case("inset") {
+                    if inset {
+                        return Err(Implemented::Malformed);
+                    }
+                    inset = true;
+                    continue;
+                }
+                if word.eq_ignore_ascii_case("currentcolor") {
+                    if colour.is_some() {
+                        return Err(Implemented::Malformed);
+                    }
+                    colour = Some(None);
+                    continue;
+                }
+            }
+            if colour.is_some() {
+                return Err(Implemented::Malformed);
+            }
+            match colour_outcome(value) {
+                ColourOutcome::Ok(found) => colour = Some(Some(found)),
+                ColourOutcome::Unsupported => return Err(Implemented::BadValue),
+                ColourOutcome::Invalid => return Err(Implemented::Malformed),
+            }
+        }
+        let most = if boxed { 4 } else { 3 };
+        let (x, y, rest) = match lengths[..] {
+            [x, y, ref rest @ ..] if rest.len() <= most - 2 => (x, y, rest),
+            _ => return Err(Implemented::Malformed),
+        };
+        let blur = rest.first().copied().unwrap_or(Len::Px(0.0));
+        if len_is_negative(blur) {
+            return Err(Implemented::Malformed);
+        }
+        blurred |= !matches!(blur, Len::Px(px) | Len::Em(px) | Len::Rem(px) if px == 0.0);
+        out.push(SpecifiedShadow {
+            color: colour.flatten(),
+            x,
+            y,
+            blur,
+            spread: rest.get(1).copied().unwrap_or(Len::Px(0.0)),
+            inset,
+        });
+    }
+    if blurred || out.len() > crate::limits::MAX_CSS_SHADOWS {
+        return Err(Implemented::BadValue);
+    }
+    Ok(out)
 }
 
 /// Whether a value is the comma that separates `css-backgrounds-3` §2's layers.

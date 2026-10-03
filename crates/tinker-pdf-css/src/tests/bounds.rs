@@ -10,7 +10,7 @@ use super::{sheet, tree, Node};
 use crate::cascade::{cascade, Origin};
 use crate::limits::{
     MAX_CSS_BYTES, MAX_CSS_DECLARATIONS, MAX_CSS_IMPORT_DEPTH, MAX_CSS_RULES,
-    MAX_CSS_SELECTOR_PARTS, MAX_CSS_TOKENS, MAX_DOM_NODES, MAX_SELECTOR_MATCHES,
+    MAX_CSS_SELECTOR_PARTS, MAX_CSS_SHADOWS, MAX_CSS_TOKENS, MAX_DOM_NODES, MAX_SELECTOR_MATCHES,
 };
 use crate::media::MediaContext;
 use crate::parser::{parse, MAX_AT_RULE_DEPTH};
@@ -365,4 +365,44 @@ fn an_ordinary_book_is_far_under_the_match_budget() {
         "a thousand-element document spent {} of {MAX_SELECTOR_MATCHES}",
         budget.matches()
     );
+}
+
+/// `MAX_CSS_SHADOWS`, which refuses the **declaration** by value — counted
+/// against its property, as a blurred shadow is — and leaves the rest of the
+/// rule and the sheet as they were.
+#[test]
+fn a_shadow_list_past_the_cap_is_refused_by_value() {
+    use crate::property::{Declaration, Property};
+    let list = |count: usize| vec!["1px 1px red"; count].join(",");
+    for (property, boxed) in [("box-shadow", true), ("text-shadow", false)] {
+        let at =
+            parse_at_defaults(format!("p {{ {property}: {} }}", list(MAX_CSS_SHADOWS)).as_bytes())
+                .expect("the sheet is read");
+        let declaration = &at.rules[0].declarations[0].declaration;
+        let drawn = match declaration {
+            Declaration::Known(Property::BoxShadow(shadows)) if boxed => shadows.len(),
+            Declaration::Known(Property::TextShadow(shadows)) if !boxed => shadows.len(),
+            other => panic!("{property} at the cap was not read: {other:?}"),
+        };
+        assert_eq!(drawn, MAX_CSS_SHADOWS);
+
+        let past = parse_at_defaults(
+            format!(
+                "p {{ {property}: {}; float: left }}",
+                list(MAX_CSS_SHADOWS + 1)
+            )
+            .as_bytes(),
+        )
+        .expect("the sheet is still read");
+        let declarations = &past.rules[0].declarations;
+        assert!(
+            matches!(
+                &declarations[0].declaration,
+                Declaration::Unsupported { property: name, .. } if *name == property
+            ),
+            "{property} past the cap: {:?}",
+            declarations[0].declaration
+        );
+        assert_eq!(declarations.len(), 2, "the declaration after it survives");
+    }
 }

@@ -41,7 +41,7 @@ use tinker_pdf_css::property::{
     ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, FontFamily, FontStyle,
     FontVariant, Gap, ImageRef, Inset, JustifyContent, LengthPercentage, LineHeight,
     ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize, OutlineStyle, Overflow,
-    OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Side, Sides, Size, Spacing,
+    OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow, Side, Sides, Size, Spacing,
     TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign, Visibility, WhiteSpace,
     ZIndex,
 };
@@ -287,6 +287,11 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         opacity: _,
         visibility,
         text_decoration,
+        // `css-text-decor-3`'s `text-shadow` is paint, inherited, and drawn
+        // per run: the painter reads it from the cascade's tree by each run's
+        // element (`tinker_pdf::epub::paint::Effects`), as it reads `opacity`.
+        text_shadow: _,
+        box_shadow,
         text_transform,
         display,
         float,
@@ -429,6 +434,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
                 position: *background_position,
                 size: *background_size,
             }),
+            box_shadow,
         ),
         overflow_x: *overflow_x,
         overflow_y: *overflow_y,
@@ -680,6 +686,9 @@ pub struct BoxPaint {
     pub outline: Option<Outline>,
     /// The background image, where there is one.
     pub image: Option<BackgroundLayer>,
+    /// `box-shadow`, `css-backgrounds-3` §7.1, first on top, each colour
+    /// resolved — `currentColor` is the element's `color` by now.
+    pub shadows: Vec<Shadow>,
 }
 
 /// [`Consumed::paint`], resolved at the one door.
@@ -688,6 +697,7 @@ fn box_paint(
     (width, style, colour, offset): (&f64, &OutlineStyle, &Option<Color>, &f64),
     current: &Color,
     image: Option<BackgroundLayer>,
+    shadows: &[Shadow],
 ) -> Option<Box<BoxPaint>> {
     // §5.3: `auto` is the user agent's to draw, and a solid line is that
     // drawing here; `none` draws nothing whatever the width says, which is
@@ -707,13 +717,20 @@ fn box_paint(
         }),
     };
     let square = radius.iter().all(|corner| *corner == Radius::ZERO);
-    if square && outline.is_none() && image.is_none() {
+    if square && outline.is_none() && image.is_none() && shadows.is_empty() {
         return None;
     }
     Some(Box::new(BoxPaint {
         radius: *radius,
         outline,
         image,
+        shadows: shadows
+            .iter()
+            .map(|shadow| Shadow {
+                color: Some(shadow.color.unwrap_or(*current)),
+                ..*shadow
+            })
+            .collect(),
     }))
 }
 

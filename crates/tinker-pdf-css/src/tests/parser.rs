@@ -1974,3 +1974,84 @@ fn the_outline_shorthand_is_its_three_longhands() {
         }
     );
 }
+
+/// **A shadow is two to four lengths in a row, a colour and `inset`, in any
+/// order**, a list of them comma-separated (`css-backgrounds-3` §7.1); a text
+/// shadow has no spread and no `inset` (`css-text-decor-3` §4). An omitted
+/// colour and `currentColor` are the same value.
+#[test]
+fn a_shadow_is_its_lengths_a_colour_and_inset_in_any_order() {
+    use crate::property::SpecifiedShadow;
+    let red = Color {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    let hard = |x: f64, y: f64, spread: f64, color: Option<Color>, inset: bool| SpecifiedShadow {
+        color,
+        x: Len::Px(x),
+        y: Len::Px(y),
+        blur: Len::Px(0.0),
+        spread: Len::Px(spread),
+        inset,
+    };
+    assert_eq!(
+        known("p { box-shadow: 2px 3px 0 4px red, inset red -1px 0 }"),
+        vec![Property::BoxShadow(vec![
+            hard(2.0, 3.0, 4.0, Some(red), false),
+            hard(-1.0, 0.0, 0.0, Some(red), true),
+        ])]
+    );
+    assert_eq!(
+        known("p { box-shadow: currentColor 1px 1px inset }"),
+        vec![Property::BoxShadow(vec![hard(1.0, 1.0, 0.0, None, true)])]
+    );
+    assert_eq!(
+        known("p { text-shadow: 1px 2px; box-shadow: none }"),
+        vec![
+            Property::TextShadow(vec![hard(1.0, 2.0, 0.0, None, false)]),
+            Property::BoxShadow(Vec::new()),
+        ]
+    );
+    // Grammar: lengths broken by a colour, a second colour, `inset` twice, a
+    // percentage, one length, a fourth length or `inset` on text, a trailing
+    // comma, a negative blur — each is invalid, and dropped as invalid rather
+    // than counted as a gap.
+    for malformed in [
+        "box-shadow: 1px red 2px",
+        "box-shadow: 1px 2px red blue",
+        "box-shadow: inset 1px 2px inset",
+        "box-shadow: 10% 2px",
+        "box-shadow: 1px",
+        "box-shadow: 1px 1px 0 1px 1px",
+        "text-shadow: 1px 1px 0 1px",
+        "text-shadow: 1px 1px,",
+        "box-shadow: 1px 1px -2px",
+    ] {
+        assert!(
+            known(&format!("p {{ {malformed} }}")).is_empty(),
+            "{malformed}"
+        );
+        assert!(
+            !declarations(&format!("p {{ {malformed} }}"))
+                .iter()
+                .any(|declared| matches!(declared.declaration, Declaration::Unsupported { .. })),
+            "{malformed} is malformed, not a gap"
+        );
+    }
+    // **A blur is refused by value**, in any list position and in any unit, and
+    // the whole declaration with it — named, not drawn hard.
+    for blurred in [
+        ("box-shadow", "1px 1px 2px"),
+        ("text-shadow", "0 0 0 red, 1px 1px 0.5em"),
+    ] {
+        assert!(
+            matches!(
+                &declarations(&format!("p {{ {}: {} }}", blurred.0, blurred.1))[0].declaration,
+                Declaration::Unsupported { property, .. } if *property == blurred.0
+            ),
+            "{blurred:?}"
+        );
+    }
+}

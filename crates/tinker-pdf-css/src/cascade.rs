@@ -179,6 +179,10 @@ pub struct ComputedStyle {
     pub visibility: Visibility,
     /// `text-decoration`
     pub text_decoration: TextDecoration,
+    /// `text-shadow`, `css-text-decor-3` §4, first on top.
+    pub text_shadow: Vec<Shadow>,
+    /// `box-shadow`, `css-backgrounds-3` §7.1, first on top.
+    pub box_shadow: Vec<Shadow>,
     /// `text-transform`, `css-text-3` §2.1.
     pub text_transform: TextTransform,
     /// `display`
@@ -335,6 +339,8 @@ impl ComputedStyle {
             overflow_y: Overflow::Visible,
             visibility: Visibility::Visible,
             text_decoration: TextDecoration::None,
+            text_shadow: Vec::new(),
+            box_shadow: Vec::new(),
             text_transform: TextTransform::None,
             display: Display::Inline,
             float: Float::None,
@@ -511,6 +517,12 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::TextAlign(value) => style.text_align = *value,
         Property::TextIndent(value) => style.text_indent = value.compute(font_size, root_font_size),
         Property::TextDecoration(value) => style.text_decoration = *value,
+        Property::TextShadow(list) => {
+            style.text_shadow = computed_shadows(list, font_size, root_font_size);
+        }
+        Property::BoxShadow(list) => {
+            style.box_shadow = computed_shadows(list, font_size, root_font_size);
+        }
         Property::TextTransform(value) => style.text_transform = *value,
         Property::WhiteSpace(value) => style.white_space = *value,
         Property::ListStyleType(value) => style.list_style_type = *value,
@@ -734,6 +746,20 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
 /// in it at all, so the `Len::Percent` arm is unreachable from the parser and
 /// resolves to zero rather than panicking: a computed style is not the place to
 /// discover that a grammar changed.
+/// A shadow list with its lengths in CSS pixels.
+fn computed_shadows(list: &[SpecifiedShadow], font_size: f64, root_font_size: f64) -> Vec<Shadow> {
+    list.iter()
+        .map(|shadow| Shadow {
+            color: shadow.color,
+            x: px(shadow.x, font_size, root_font_size),
+            y: px(shadow.y, font_size, root_font_size),
+            blur: px(shadow.blur, font_size, root_font_size),
+            spread: px(shadow.spread, font_size, root_font_size),
+            inset: shadow.inset,
+        })
+        .collect()
+}
+
 fn px(len: Len, font_size: f64, root_font_size: f64) -> f64 {
     match len.compute(font_size, root_font_size) {
         LengthPercentage::Px(value) => value,
@@ -1958,6 +1984,8 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::TextAlign => into.text_align = from.text_align,
         Longhand::TextIndent => into.text_indent = from.text_indent,
         Longhand::TextDecoration => into.text_decoration = from.text_decoration,
+        Longhand::TextShadow => into.text_shadow = from.text_shadow.clone(),
+        Longhand::BoxShadow => into.box_shadow = from.box_shadow.clone(),
         Longhand::TextTransform => into.text_transform = from.text_transform,
         Longhand::WhiteSpace => into.white_space = from.white_space,
         Longhand::ListStyleType => into.list_style_type = from.list_style_type,

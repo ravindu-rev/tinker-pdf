@@ -222,6 +222,33 @@ pub const MAX_DOM_NODES: usize = 65_536;
 /// `the_match_budget_refuses_a_stylesheet_that_defeats_the_index` builds.
 pub const MAX_SELECTOR_MATCHES: usize = 4_000_000;
 
+/// Shadows in one `box-shadow` or `text-shadow` list.
+///
+/// | | Shadows |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 32 (the list built exactly *at* this cap, which parses; the one past it has 33 and is refused by value. No book in the committed corpus declares either property) |
+/// | A 400-page novel | 2, a heading's embossed pair: a hard shadow one way and a highlight the other |
+/// | A 200-page comic | 0 |
+/// | A 200-page fixed document | 0 |
+/// | **This cap** | **32** |
+///
+/// **A cap on output rather than on work**, for `MAX_SVG_BYTES`'s reason: a
+/// text shadow is the run drawn again, so every shadow in an inherited list is
+/// one more copy of every glyph the element's subtree draws, and a box shadow
+/// one more fill per fragment. Without it a `* { text-shadow: … }` of a
+/// hundred thousand shadows — four bytes each, `0 0,` — would write each line
+/// of a book a hundred thousand times over from a sheet well under
+/// [`MAX_CSS_BYTES`]. With it a page holds at most thirty-three copies of its
+/// text.
+///
+/// A list past it is **refused by value**, the whole declaration, and counted
+/// against its property by element (`UnimplementedProperty`) like a blurred
+/// one: the first thirty-two of a longer list would be a picture nobody wrote.
+///
+/// `0 0,` is four bytes, so one sheet at [`MAX_CSS_BYTES`] can write a list of
+/// 2 097 152 shadows.
+pub const MAX_CSS_SHADOWS: usize = 32;
+
 /// The relations, checked at compile time so a bad one **does not build**.
 ///
 /// Gap 29's device. The one that matters is written the opposite way round

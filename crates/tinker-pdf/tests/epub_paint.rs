@@ -632,3 +632,258 @@ fn a_positioned_box_is_clipped_only_through_its_containing_block() {
     );
     assert_eq!(ink_at(&held, x, y), 255, "its containing block clips it");
 }
+
+// ---- shadows ----------------------------------------------------------------------
+
+/// The colour at one point of the first page, in CSS pixels from the content
+/// area's top left.
+fn rgb_at(doc: &Document, x: f64, y: f64) -> [u8; 3] {
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let (x, y) = at(x, y);
+    let scale = f64::from(bitmap.height) / PAGE_HEIGHT;
+    let column = (x * scale) as usize;
+    let row = ((PAGE_HEIGHT - y) * scale) as usize;
+    let start = row * bitmap.stride + column * bitmap.components();
+    let pixel = bitmap
+        .data
+        .get(start..start + 3)
+        .expect("the point is on the page");
+    [pixel[0], pixel[1], pixel[2]]
+}
+
+/// The index of the first `rg` naming `colour`, and the operands of the first
+/// `m` after it — where a filled shape in that colour starts: its top-left
+/// corner, less the corner's radius along the top edge.
+fn first_move_after(words: &[String], colour: [&str; 3]) -> (usize, [f64; 2]) {
+    let set = words
+        .windows(4)
+        .position(|w| w[..3] == colour && w[3] == "rg")
+        .unwrap_or_else(|| panic!("no fill in {colour:?}"));
+    let at = set + words[set..].iter().position(|w| w == "m").expect("a path");
+    let read = |i: usize| words[i].parse::<f64>().expect("a number");
+    (set, [read(at - 2), read(at - 1)])
+}
+
+/// **An outer box shadow is the border box offset and grown by the spread,
+/// drawn under the background and only outside the border box**
+/// (`css-backgrounds-3` §7.1.1): the clip is the page less the border box,
+/// even-odd, and the shape's corner is the box's moved by the offset and out
+/// by the spread.
+///
+/// The render says the knockout is real: a box with no background does not
+/// show its own shadow through itself, where the shadow covers the page just
+/// past the box's bottom right.
+#[test]
+fn a_box_shadow_is_the_border_box_offset_and_spread_outside_the_box() {
+    let doc = open(
+        "div { width: 100px; height: 40px; box-shadow: 4px 6px 0 2px #00ff00 }",
+        "<div></div>",
+    );
+    let words = tokens(&doc);
+    let (set, corner) = first_move_after(&words, ["0", "1", "0"]);
+    // Offset (4, 6) less the spread on the left, and on top: the shape's top
+    // edge is six pixels down, less two.
+    let expected = at(4.0 - 2.0, 6.0 - 2.0);
+    assert!(
+        (corner[0] - expected.0).abs() < 1e-9 && (corner[1] - expected.1).abs() < 1e-9,
+        "{corner:?} against {expected:?}"
+    );
+    let clip = words[..set]
+        .iter()
+        .rposition(|w| w == "W*")
+        .expect("an even-odd clip before the fill");
+    let page = words[..clip]
+        .windows(5)
+        .rposition(|w| w == ["0", "0", "432", "648", "re"])
+        .expect("the page's rectangle in the clip");
+    assert!(
+        words[page..clip].iter().any(|w| w == "m"),
+        "the page, less the border box's path after it"
+    );
+    assert_eq!(rgb_at(&doc, 103.0, 44.0), [0, 255, 0], "past the box");
+    assert_eq!(rgb_at(&doc, 50.0, 46.0), [0, 255, 0], "below it");
+    assert_eq!(
+        rgb_at(&doc, 50.0, 20.0),
+        [255, 255, 255],
+        "not through the box itself"
+    );
+    let plain = open("div { width: 100px; height: 40px }", "<div></div>");
+    assert_eq!(rgb_at(&plain, 103.0, 44.0), [255, 255, 255]);
+}
+
+/// **A shadow's corner grows by the spread, and a small radius by less**
+/// (`css-backgrounds-3` §7.1.1): `r + s` where the radius is at least the
+/// spread, and `r + s(1 + (r/s − 1)³)` where it is not — so a 2-pixel corner
+/// under an 8-pixel spread is 6.625 pixels and not 10, and a square corner
+/// stays square.
+#[test]
+fn a_shadows_corners_grow_by_the_spread_and_a_small_one_by_less() {
+    let doc = open(
+        "div { width: 100px; height: 40px; border-radius: 10px 2px 0 2px; \
+         box-shadow: 0 0 0 8px #00ff00 }",
+        "<div></div>",
+    );
+    let found = curves(&doc);
+    // The clip's three curves, then the shape's three: top right, bottom left,
+    // top left, in the order the path is written.
+    assert_eq!(found.len(), 6, "{found:?}");
+    let ratio: f64 = 2.0 / 8.0;
+    let small = 2.0 + 8.0 * (1.0 + (ratio - 1.0).powi(3));
+    assert!((small - 6.625).abs() < 1e-12);
+    // The shape is the border box grown by 8 on every side: 116 wide, its
+    // top 8 above the box's.
+    let right = MARGIN + 108.0 * PX;
+    let top = PAGE_HEIGHT - MARGIN + 8.0 * PX;
+    let r = small * PX;
+    let k = quarter_arc();
+    close(
+        found[3],
+        [
+            right - r + k * r,
+            top,
+            right,
+            top - r + k * r,
+            right,
+            top - r,
+        ],
+    );
+    let left = MARGIN - 8.0 * PX;
+    let big = 18.0 * PX;
+    close(
+        found[5],
+        [
+            left,
+            top - big + k * big,
+            left + big - k * big,
+            top,
+            left + big,
+            top,
+        ],
+    );
+}
+
+/// **An inset shadow is drawn over the background and inside the padding box**
+/// (§7.1.1): clipped to the padding box, filled even-odd between it and the
+/// padding box offset — so the shadow is the band the offset uncovers, along
+/// the top and left edges for a positive offset — and the border is drawn over
+/// it.
+#[test]
+fn an_inset_shadow_is_drawn_inside_the_padding_box_over_the_background() {
+    let doc = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000; \
+         border: 2px solid #000000; box-shadow: inset 5px 5px #0000ff }",
+        "<div></div>",
+    );
+    let words = tokens(&doc);
+    let background = words
+        .windows(4)
+        .position(|w| w == ["1", "0", "0", "rg"])
+        .expect("the background");
+    let (shadow, _) = first_move_after(&words, ["0", "0", "1"]);
+    let border = words
+        .windows(4)
+        .rposition(|w| w == ["0", "0", "0", "rg"])
+        .expect("the border");
+    assert!(
+        background < shadow && shadow < border,
+        "background, then the inset shadow, then the border"
+    );
+    assert!(
+        words[shadow..].iter().any(|w| w == "f*"),
+        "an even-odd fill"
+    );
+    // The padding box starts two pixels in; the band is five pixels deep.
+    assert_eq!(rgb_at(&doc, 4.0, 20.0), [0, 0, 255], "the left band");
+    assert_eq!(rgb_at(&doc, 50.0, 4.0), [0, 0, 255], "the top band");
+    assert_eq!(
+        rgb_at(&doc, 50.0, 20.0),
+        [255, 0, 0],
+        "the background inside it"
+    );
+    assert_eq!(rgb_at(&doc, 1.0, 20.0), [0, 0, 0], "the border over it");
+}
+
+/// **A text shadow is the run drawn again, offset, in the shadow's colour and
+/// under the text** (`css-text-decor-3` §4) — and an artifact, so the page's
+/// text is read once.
+#[test]
+fn a_text_shadow_is_the_run_again_under_the_text_and_is_not_read_twice() {
+    let doc = open("p { text-shadow: 2px 3px #ff0000 }", "<p>Shadowed</p>");
+    let words = tokens(&doc);
+    let plain = tokens(&open("", "<p>Shadowed</p>"));
+    let place = |words: &[String], from: usize| -> [f64; 2] {
+        let at = from + words[from..].iter().position(|w| w == "Td").expect("a run");
+        [at - 2, at - 1].map(|i| words[i].parse().expect("a number"))
+    };
+    let artifact = words
+        .windows(2)
+        .position(|w| w == ["/Artifact", "BMC"])
+        .expect("the shadow is an artifact");
+    let red = words[artifact..]
+        .windows(4)
+        .position(|w| w == ["1", "0", "0", "rg"])
+        .expect("in the shadow's colour")
+        + artifact;
+    let shadow = place(&words, red);
+    let text = place(&plain, 0);
+    assert!(
+        (shadow[0] - (text[0] + 2.0 * PX)).abs() < 1e-9,
+        "{shadow:?} {text:?}"
+    );
+    assert!(
+        (shadow[1] - (text[1] - 3.0 * PX)).abs() < 1e-9,
+        "{shadow:?} {text:?}"
+    );
+    let shadow_end = red
+        + words[red..]
+            .iter()
+            .position(|w| w == "EMC")
+            .expect("closed");
+    let real = shadow_end
+        + words[shadow_end..]
+            .iter()
+            .position(|w| w == "BT")
+            .expect("the text");
+    assert_eq!(place(&words, real), text, "the text itself has not moved");
+    let read = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(read.trim(), "Shadowed", "read once");
+}
+
+/// **A translucent shadow's alpha is its colour's times its element's
+/// opacity**, because an `/ExtGState`'s `/ca` replaces the one in force: a
+/// half-transparent shadow in a half-opaque box is a quarter.
+#[test]
+fn a_translucent_shadow_is_its_alpha_times_the_elements_opacity() {
+    let doc = open(
+        "div { width: 100px; height: 40px; opacity: 0.5; \
+         box-shadow: 4px 4px rgba(0, 0, 0, 0.5) }",
+        "<div></div>",
+    );
+    // `0.5` is the byte 128 (`css-color-4` rounds 127.5 up), so the colour's
+    // alpha is 128/255; the product is quantised to ten-thousandths.
+    let expected = 0.5 * 128.0 / 255.0;
+    let found = alphas(&doc);
+    assert_eq!(found.len(), 2, "the box's own alpha, then the shadow's");
+    assert!((found[0].0 - 0.5).abs() < 1e-9, "{found:?}");
+    assert!(
+        (found[1].0 - expected).abs() <= 0.5e-4 && found[1].0 == found[1].1,
+        "{found:?} against {expected}"
+    );
+}
+
+/// **A blurred shadow is counted and not drawn**: a hard shadow in its place
+/// would be a picture the author did not ask for.
+#[test]
+fn a_blurred_shadow_is_counted_and_not_drawn() {
+    let doc = open(
+        "div { width: 100px; height: 40px; box-shadow: 4px 4px 3px #00ff00 } \
+         p { text-shadow: 1px 1px 1px #00ff00 }",
+        "<div></div><p>a</p><p>b</p>",
+    );
+    assert_eq!(counted(&doc, "box-shadow"), Some(1));
+    assert_eq!(counted(&doc, "text-shadow"), Some(2));
+    assert!(!tokens(&doc).windows(4).any(|w| w == ["0", "1", "0", "rg"]));
+}
