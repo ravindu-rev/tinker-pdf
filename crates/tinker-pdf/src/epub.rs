@@ -1547,20 +1547,20 @@ fn write_chapters<R: read::Resources + ?Sized>(
             // invisible to the page that names it — the operator is written,
             // the reader cannot resolve the name, and the gradient, the
             // transparency or the photograph is silently gone while every solid
-            // stroke still draws. `svg::Registry` is that ordering as a type.
-            let registry = svg::register(builder, scene, placement, |href: &str| {
-                // §5.7's reference, resolved against the container the document
-                // was read from — the caller's job, and the reason the leaf
-                // crate carries the href unread.
-                resources
-                    .fetch(&source, href, limits)
-                    .ok()
-                    .map(|(_, bytes)| bytes)
-            });
+            // stroke still draws. `svg::Registry` is that ordering as a type,
+            // and since §14.5's groups it holds the page's operators whole.
+            let registry =
+                svg::register(builder, scene, placement, &fonts, &metrics, |href: &str| {
+                    // §5.7's reference, resolved against the container the
+                    // document was read from — the caller's job, and the reason
+                    // the leaf crate carries the href unread.
+                    resources
+                        .fetch(&source, href, limits)
+                        .ok()
+                        .map(|(_, bytes)| bytes)
+                });
             let mut page = builder.begin_page(page_width, page_height);
-            let drawn = svg::draw(
-                builder, &mut page, scene, &registry, placement, &fonts, &metrics,
-            );
+            let drawn = svg::draw(&mut page, &registry);
             unwritable_runs += drawn.refused;
             if drawn.images_unresolved > 0 {
                 warnings.push(ArchiveWarning::SvgImageUnresolved {

@@ -47,10 +47,9 @@
 //!   `clip-path` on the `<image>`: §14.3.5 reads a `userSpaceOnUse` clip in
 //!   the naming element's user space, which includes its own `transform`, so
 //!   the page-space clip would be carried through the unit square with the
-//!   picture. (`tinker-pdf-svg` carries no clip on an image node at all, and
-//!   reads a `<g>`'s clip on nothing under it, so the reader sees a clipped
-//!   image unclipped; the file is right and the reader is short, as with
-//!   nested clips below.)
+//!   picture. (`tinker-pdf-svg` carries no clip on an image node, and reads
+//!   the `<g>`'s clip as a group around it — so a clipped image reads back
+//!   clipped, in page space.)
 //! - **A picture drawn again is not embedded again.** An image's PNG, or a
 //!   rasterised paint's, of `REUSE_AT` (512 bytes) or more is written once, as
 //!   an `<image id>` on the unit square in `<defs>`, and every draw of the

@@ -99,6 +99,13 @@ struct Walk<'a> {
     expanding: Vec<usize>,
     /// `tinker-pdf-css`'s own budget, which bounds selector matching.
     css: CssBudget,
+    /// Nodes pushed so far, at every depth.
+    ///
+    /// Counted rather than read off [`Scene::nodes`], because a
+    /// [`crate::Node::Group`] is assembled in a list of its own and moved into
+    /// its parent whole — so the length of whichever list is open is not how
+    /// much of one picture the walk has built, and [`Limits::max_nodes`] is.
+    pushed: usize,
 }
 
 impl Walk<'_> {
@@ -112,13 +119,120 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// Adds one node to the scene, refusing by name when it is full.
+    /// Adds one node to the list being built, refusing by name when the
+    /// scene is full.
     fn push(&mut self, node: crate::Node) -> Result<(), Refusal> {
-        if self.scene.nodes.len() >= self.limits.max_nodes {
-            return Err(Refusal::TooManyNodes);
-        }
+        self.charge()?;
         self.scene.nodes.push(node);
         Ok(())
+    }
+
+    /// Spends one node of [`Limits::max_nodes`].
+    fn charge(&mut self) -> Result<(), Refusal> {
+        if self.pushed >= self.limits.max_nodes {
+            return Err(Refusal::TooManyNodes);
+        }
+        self.pushed += 1;
+        Ok(())
+    }
+
+    /// Runs `body` with a fresh list open, and hands back what it pushed.
+    ///
+    /// The list it replaces is put back whatever `body` returned, so a refusal
+    /// halfway through a group cannot leave the walk writing into the group's
+    /// list — the stack-that-can-be-unwound-wrong shape [`Frame`]'s own note
+    /// is about.
+    fn collect(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<(), Refusal>,
+    ) -> Result<Vec<crate::Node>, Refusal> {
+        let outer = std::mem::take(&mut self.scene.nodes);
+        let drawn = body(self);
+        let inner = std::mem::replace(&mut self.scene.nodes, outer);
+        drawn.map(|()| inner)
+    }
+
+    /// An element's rendering as §14.5 and §14.3.5 see it: whatever `body`
+    /// draws, faded by the element's own `opacity` and clipped by its own
+    /// `clip-path`, **as one**.
+    ///
+    /// `matrix` is the element's own matrix into the scene, which is the space
+    /// a `userSpaceOnUse` clip is in and the one an `objectBoundingBox` clip's
+    /// box is measured in. Where neither property is set, `body` draws inline
+    /// and no group exists — a group that changes nothing is a transparency
+    /// group a reader composites for no reason.
+    fn group(
+        &mut self,
+        style: &Style,
+        matrix: [f64; 6],
+        body: impl FnOnce(&mut Self) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let opacity = style.opacity;
+        if opacity >= 1.0 && style.clip_path.is_none() {
+            return body(self);
+        }
+        let mut nodes = self.collect(body)?;
+        // §14.5: an opacity of zero is an element that draws nothing at all.
+        // Walked anyway, so that what it would have asked for is still named.
+        if nodes.is_empty() || opacity <= 0.0 {
+            return Ok(());
+        }
+        let clip = match &style.clip_path {
+            None => None,
+            Some(name) => {
+                let bounds = transform::invert(matrix)
+                    .map_or([0.0; 4], |inverse| gradient::nodes_bounds(&nodes, inverse));
+                match gradient::clip(self.tree, name, matrix, bounds, style) {
+                    Some(clip) => Some(clip),
+                    None => {
+                        self.warn(Warning::ClipPathUnsupported);
+                        None
+                    }
+                }
+            }
+        };
+        if clip.is_none() {
+            // Every node here was charged when it was pushed into the group's
+            // own list, so moving them into the parent's spends nothing.
+            if opacity >= 1.0 {
+                // The clip named nothing usable, and ruling 2 draws the
+                // element unclipped rather than losing it.
+                self.scene.nodes.extend(nodes);
+                return Ok(());
+            }
+            if fold(&mut nodes, opacity) {
+                self.scene.nodes.extend(nodes);
+                return Ok(());
+            }
+        }
+        self.push(crate::Node::Group {
+            nodes,
+            opacity,
+            clip,
+        })
+    }
+
+    /// One node at an element's own `opacity`: pushed as it is, folded into
+    /// its alpha, or wrapped in a group of one — see [`crate::Node::Group`]
+    /// for which and why.
+    fn emit(&mut self, node: crate::Node, opacity: f64) -> Result<(), Refusal> {
+        if opacity >= 1.0 {
+            return self.push(node);
+        }
+        if opacity <= 0.0 {
+            return Ok(());
+        }
+        let mut nodes = vec![node];
+        self.charge()?;
+        if fold(&mut nodes, opacity) {
+            self.scene.nodes.extend(nodes);
+            return Ok(());
+        }
+        self.push(crate::Node::Group {
+            nodes,
+            opacity,
+            clip: None,
+        })
     }
 
     /// Records a warning once, whatever it names.
@@ -251,7 +365,9 @@ impl Walk<'_> {
                     matrix: self.matrix_of(node, frame.matrix),
                     ..frame.clone()
                 };
-                self.children(index, &inner)
+                self.group(&frame.style, inner.matrix, |walk| {
+                    walk.children(index, &inner)
+                })
             }
             // §5.5: `<defs>` is never rendered where it stands. Its contents
             // are reached by reference and nowhere else, so walking into it
@@ -395,25 +511,23 @@ impl Walk<'_> {
                 miter_limit: style.miter_limit,
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
-                opacity: (style.stroke_opacity * style.opacity).clamp(0.0, 1.0),
+                opacity: style.stroke_opacity.clamp(0.0, 1.0),
             }))
         };
-        // §14.5's group opacity, flattened into each descendant's own alpha.
-        // Named where it is observable: a shape painted **twice** — once
-        // filled and once stroked — composites the two against each other
-        // before the group is faded, so the overlap is darker here than §14.5
-        // asks for. A shape painted once is exact and says nothing.
-        if style.opacity < 1.0 && fill != Paint::None && stroke.is_some() {
-            self.warn(Warning::GroupOpacityFlattened);
-        }
-        self.push(crate::Node::Path {
-            outline: outline.transformed(matrix),
-            fill,
-            rule: style.fill_rule,
-            fill_opacity: (style.fill_opacity * style.opacity).clamp(0.0, 1.0),
-            stroke,
-            clip,
-        })
+        // §14.5's opacity is the shape's own and applies to its rendering as a
+        // whole: exact as an alpha where it paints once, and a group of one
+        // where a fill and a stroke would otherwise darken each other.
+        self.emit(
+            crate::Node::Path {
+                outline: outline.transformed(matrix),
+                fill,
+                rule: style.fill_rule,
+                fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
+                stroke,
+                clip,
+            },
+            style.opacity,
+        )
     }
 
     /// §13.2's `<paint>`, with a `url(#name)` resolved against the document.
@@ -542,8 +656,13 @@ impl Walk<'_> {
             style: frame.style.clone(),
             depth: frame.depth + 1,
         };
+        // §5.6: the `<use>` becomes a `<g>` carrying its own attributes, so its
+        // `opacity` and `clip-path` are a group around the instance — in the
+        // space that includes `x` and `y`, which the generated `<g>`'s
+        // transform ends with.
+        let style = frame.style.clone();
         self.expanding.push(target);
-        let drawn = self.instance(target, node, &inner);
+        let drawn = self.group(&style, matrix, |walk| walk.instance(target, node, &inner));
         self.expanding.pop();
         drawn
     }
@@ -588,7 +707,9 @@ impl Walk<'_> {
             matrix,
             ..frame.clone()
         };
-        self.text_runs(index, node, &inner, true)
+        self.group(&frame.style, matrix, |walk| {
+            walk.text_runs(index, node, &inner, true)
+        })
     }
 
     /// One `<text>` or `<tspan>`, and everything under it.
@@ -675,7 +796,10 @@ impl Walk<'_> {
                     if child_frame.depth >= self.limits.max_depth {
                         return Err(Refusal::TooDeep);
                     }
-                    self.text_runs(at, &element, &child_frame, false)?;
+                    let style = child_frame.style.clone();
+                    self.group(&style, child_frame.matrix, |walk| {
+                        walk.text_runs(at, &element, &child_frame, false)
+                    })?;
                     pending = None;
                     shift = [0.0, 0.0];
                 }
@@ -719,7 +843,7 @@ impl Walk<'_> {
                 miter_limit: style.miter_limit,
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
-                opacity: (style.stroke_opacity * style.opacity).clamp(0.0, 1.0),
+                opacity: style.stroke_opacity.clamp(0.0, 1.0),
             }))
         };
         self.push(crate::Node::Text {
@@ -734,7 +858,7 @@ impl Walk<'_> {
                 anchor: style.text_anchor,
             },
             fill,
-            fill_opacity: (style.fill_opacity * style.opacity).clamp(0.0, 1.0),
+            fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
             stroke,
         })
     }
@@ -769,12 +893,17 @@ impl Walk<'_> {
         if !(width > 0.0 && height > 0.0) {
             return Ok(());
         }
-        self.push(crate::Node::Image {
-            href: href.to_owned(),
-            rect: [x, y, width, height],
-            matrix,
-            preserve: node.attr("preserveAspectRatio").map(str::to_owned),
-        })
+        // An image is painted once, but its node has no alpha of its own to
+        // fold an opacity into, so a translucent picture is a group of one.
+        self.emit(
+            crate::Node::Image {
+                href: href.to_owned(),
+                rect: [x, y, width, height],
+                matrix,
+                preserve: node.attr("preserveAspectRatio").map(str::to_owned),
+            },
+            frame.style.opacity,
+        )
     }
 
     /// An `<svg>`, root or nested: §7.9's establishment of a new viewport.
@@ -821,7 +950,10 @@ impl Walk<'_> {
             style: frame.style.clone(),
             depth: frame.depth,
         };
-        self.children(index, &inner)
+        // A nested `<svg>`'s own `opacity` and `clip-path` are of its whole
+        // rendering, in the space its parent placed it in.
+        let style = frame.style.clone();
+        self.group(&style, frame.matrix, |walk| walk.children(index, &inner))
     }
 
     /// Every child element of `index`, in document order.
@@ -840,6 +972,54 @@ impl Walk<'_> {
 
 /// §7.7's "rendering of the element is disabled".
 struct Disabled;
+
+/// Folds a group's opacity into its one node, where that is the same picture.
+///
+/// Exactly one node, painting exactly once: a fill and no stroke, a stroke and
+/// no fill, a run of text with no outline, or a group with no clip of its own
+/// (two opacities composited one inside the other are their product). Returns
+/// whether it folded; a `false` leaves `nodes` untouched for the caller to
+/// wrap.
+fn fold(nodes: &mut [crate::Node], opacity: f64) -> bool {
+    let [only] = nodes else {
+        return false;
+    };
+    match only {
+        crate::Node::Path {
+            fill,
+            fill_opacity,
+            stroke,
+            ..
+        } => match (fill, stroke) {
+            (Paint::None, Some(stroke)) => {
+                stroke.opacity = (stroke.opacity * opacity).clamp(0.0, 1.0);
+                true
+            }
+            (_, None) => {
+                *fill_opacity = (*fill_opacity * opacity).clamp(0.0, 1.0);
+                true
+            }
+            _ => false,
+        },
+        crate::Node::Text {
+            fill_opacity,
+            stroke: None,
+            ..
+        } => {
+            *fill_opacity = (*fill_opacity * opacity).clamp(0.0, 1.0);
+            true
+        }
+        crate::Node::Group {
+            opacity: inner,
+            clip: None,
+            ..
+        } => {
+            *inner = (*inner * opacity).clamp(0.0, 1.0);
+            true
+        }
+        _ => false,
+    }
+}
 
 /// §10.15's `xml:space="default"`, which is what a document that says nothing
 /// means.
@@ -906,6 +1086,7 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         uses: 0,
         expanding: Vec::new(),
         pen: [0.0, 0.0],
+        pushed: 0,
     };
     if walk.sheet.at_rules > 0 {
         walk.warn(Warning::AtRuleIgnored);

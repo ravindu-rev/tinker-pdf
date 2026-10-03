@@ -14,8 +14,8 @@
 //! | an all-zero `stroke-dasharray` is kept rather than becoming `none` | 1 |
 //! | `visibility: hidden` still paints | 5 |
 //! | `display: none` in `style=""` is not read | 1 |
-//! | `opacity` is inherited instead of multiplied | 1 |
-//! | group opacity is flattened with no warning | 1 |
+//! | `opacity` is inherited instead of being the element's own | 4 |
+//! | a fill and a stroke at one opacity are folded rather than grouped | 2 |
 //! | a zero-width stroke still becomes a `Stroke` | 1 |
 //! | a `url(#…)` paint drops its fallback | 2 |
 //! | an at-rule in a `<style>` element is read as a qualified rule | 1 |
@@ -36,13 +36,24 @@ fn scene(bytes: &[u8]) -> Scene {
     tinker_pdf_svg::read(bytes, Some((100.0, 100.0)), &Limits::DEFAULT).expect("the fixture reads")
 }
 
-/// The `n`th path node of a scene.
+/// Every path of a scene in paint order, groups looked through.
+fn paths(nodes: &[Node]) -> Vec<&Node> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            Node::Path { .. } => out.push(node),
+            Node::Group { nodes, .. } => out.extend(paths(nodes)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The `n`th path node of a scene, in paint order.
 fn path(scene: &Scene, at: usize) -> &Node {
-    scene
-        .nodes
-        .iter()
-        .filter(|node| matches!(node, Node::Path { .. }))
-        .nth(at)
+    paths(&scene.nodes)
+        .get(at)
+        .copied()
         .unwrap_or_else(|| panic!("no path {at} in {:?}", scene.nodes.len()))
 }
 
@@ -229,65 +240,134 @@ fn display_none_is_read_from_the_style_attribute_too() {
     );
 }
 
-/// §14.5's group opacity, flattened into each descendant and **named where the
-/// flattening is observable**.
+/// §14.5's group opacity on a shape that fills **and** strokes is a group.
 ///
-/// The product is what reaches the node: a group at 0.5 over a fill at 0.5 is
-/// 0.25. That much is exact. What is not exact is the fill and the stroke
-/// compositing against each other before the group is faded, and that is the
-/// warning.
+/// The fill and the stroke composite against each other first and the result
+/// is faded once, so the node inside keeps its own alphas — the fill's 0.5 and
+/// the stroke's 1 — and the half belongs to the group. Multiplying it into
+/// both would draw the band where the stroke covers the fill at 0.5 over 0.25,
+/// which is too dark, and that is the picture this used to draw and name.
 #[test]
-fn group_opacity_multiplies_and_says_when_it_shows() {
+fn a_fill_and_a_stroke_under_one_opacity_are_a_group() {
     let scene = scene(PAINTING);
-    let Node::Path {
+    let Some(Node::Group {
+        nodes,
+        opacity,
+        clip,
+    }) = scene
+        .nodes
+        .iter()
+        .find(|node| matches!(node, Node::Group { .. }))
+    else {
+        panic!("a group: {:?}", scene.nodes);
+    };
+    assert!((opacity - 0.5).abs() < 1e-12, "the group's own: {opacity}");
+    assert!(clip.is_none());
+    let [Node::Path {
         fill_opacity,
         stroke,
         ..
-    } = path(&scene, 3)
+    }] = &nodes[..]
     else {
-        panic!("a path");
+        panic!("one path: {nodes:?}");
     };
     assert!(
-        (fill_opacity - 0.25).abs() < 1e-12,
-        "0.5 group times 0.5 fill: {fill_opacity}"
+        (fill_opacity - 0.5).abs() < 1e-12,
+        "the fill keeps its own: {fill_opacity}"
     );
     assert!(
-        (stroke.as_ref().expect("a stroke").opacity - 0.5).abs() < 1e-12,
-        "and the stroke takes the group's alone"
+        (stroke.as_ref().expect("a stroke").opacity - 1.0).abs() < 1e-12,
+        "and the stroke is opaque inside the group"
     );
-    assert!(
-        scene.warnings.contains(&Warning::GroupOpacityFlattened),
-        "{:?}",
-        scene.warnings
+    assert_eq!(
+        scene
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, Node::Group { .. }))
+            .count(),
+        1,
+        "and it is the only group in the file"
     );
 }
 
-/// A lone shape at a non-unit opacity is **exact**, and says nothing.
+/// A lone shape at a non-unit opacity is **exact as an alpha**, and is no
+/// group.
 ///
-/// The other half of the pair above. A build that warned on every `opacity`
-/// would be reporting a defect it does not have, which is as bad as reporting
-/// none: a warning that always fires is a warning nobody reads.
+/// The other half of the pair above: one paint composited at `a` is one paint
+/// at alpha `a`, and a transparency group around it would be a group a reader
+/// composites for nothing.
 #[test]
-fn a_single_painted_shape_at_an_opacity_is_not_a_warning() {
+fn a_single_painted_shape_at_an_opacity_is_its_alpha() {
     let markup = b"<svg xmlns=\"http://www.w3.org/2000/svg\">\
         <rect opacity=\"0.6\" fill=\"red\" width=\"1\" height=\"1\"/></svg>";
     let scene = scene(markup);
-    assert!(
-        !scene.warnings.contains(&Warning::GroupOpacityFlattened),
-        "{:?}",
-        scene.warnings
-    );
-    let Node::Path { fill_opacity, .. } = path(&scene, 0) else {
-        panic!("a path");
+    let [Node::Path { fill_opacity, .. }] = &scene.nodes[..] else {
+        panic!("one path and no group: {:?}", scene.nodes);
     };
     assert!((fill_opacity - 0.6).abs() < 1e-12);
 }
 
-/// `opacity` composes down the tree rather than inheriting.
+/// Two overlapping shapes under one `opacity` are one group, with neither
+/// shape faded on its own.
 ///
-/// Two nested groups at a half each is a quarter, and a build that *inherited*
-/// it would give the child a half — the same picture wherever nothing nests,
-/// and wrong in every file that does.
+/// The case §14.5 exists for: where the two overlap, the second covers the
+/// first **inside** the group and only then is the whole faded, so the
+/// overlap is the second shape's colour at the group's alpha. Faded one by
+/// one, the overlap would be both at once.
+#[test]
+fn overlapping_shapes_under_one_opacity_are_one_group() {
+    let markup = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><g opacity=\"0.25\">\
+        <rect fill=\"red\" width=\"2\" height=\"2\"/>\
+        <rect fill=\"blue\" x=\"1\" width=\"2\" height=\"2\"/></g></svg>";
+    let scene = scene(markup);
+    let [Node::Group { nodes, opacity, .. }] = &scene.nodes[..] else {
+        panic!("one group: {:?}", scene.nodes);
+    };
+    assert!((opacity - 0.25).abs() < 1e-12);
+    assert_eq!(nodes.len(), 2);
+    for node in nodes {
+        let Node::Path { fill_opacity, .. } = node else {
+            panic!("a path: {node:?}");
+        };
+        assert!(
+            (fill_opacity - 1.0).abs() < 1e-12,
+            "each shape is opaque inside the group: {fill_opacity}"
+        );
+    }
+}
+
+/// `opacity` is the element's own and is **not inherited**.
+///
+/// A `<g opacity="0.5">` around a `<g>` around a shape that fills and strokes
+/// is one group at a half; an inherited opacity would put a second half on
+/// the inner group and fade the picture to a quarter.
+#[test]
+fn opacity_is_not_inherited() {
+    let markup = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><g opacity=\"0.5\">\
+        <g><rect fill=\"red\" stroke=\"blue\" width=\"1\" height=\"1\"/></g></g></svg>";
+    let scene = scene(markup);
+    let [Node::Group { nodes, opacity, .. }] = &scene.nodes[..] else {
+        panic!("one group: {:?}", scene.nodes);
+    };
+    assert!((opacity - 0.5).abs() < 1e-12, "{opacity}");
+    let [Node::Path {
+        fill_opacity,
+        stroke,
+        ..
+    }] = &nodes[..]
+    else {
+        panic!("the shape, directly inside: {nodes:?}");
+    };
+    assert!((fill_opacity - 1.0).abs() < 1e-12);
+    assert!((stroke.as_ref().expect("a stroke").opacity - 1.0).abs() < 1e-12);
+}
+
+/// Nested opacities over a shape that paints once compose to their product.
+///
+/// Two groups at a half each, around one fill, are one fill at a quarter: each
+/// group holds one node that paints once, so each folds — and folding the
+/// outer into the inner is the product, which is §14.5's two composites of one
+/// paint written as one alpha.
 #[test]
 fn nested_opacities_multiply() {
     let markup = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><g opacity=\"0.5\">\

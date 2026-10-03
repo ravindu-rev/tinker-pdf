@@ -21,6 +21,8 @@
 //! | a `clip-path` naming nothing is silent | 1 |
 //! | `clip-rule` reads `fill-rule` | 1 |
 //! | a `<clipPath>` outside `<defs>` is drawn where it stands | 6 |
+//! | a container's `clip-path` is ignored, as it was until groups | 2 |
+//! | a group's box is measured in the scene rather than its own space | 1 |
 //!
 //! Seventeen injections and **no zeros — after three were found and fixed**,
 //! which is the whole reason the matrix is run rather than reasoned about:
@@ -420,18 +422,69 @@ fn a_clip_path_outside_defs_still_draws_nothing() {
     assert_eq!(scene.nodes.len(), 6, "{:?}", scene.nodes.len());
 }
 
-/// §14.3: `clip-path` is not inherited.
+/// §14.3: `clip-path` is not inherited — **and a group's own clip is not
+/// lost**.
 ///
-/// A child of a clipped group is clipped **by the group's own rendering**, not
-/// by the same path applied again — and applying it again is the same picture
-/// until the child moves, which is why only a test catches it.
+/// A child of a clipped group is clipped **by the group's rendering**, not by
+/// the same path applied again, so the clip belongs to a [`Node::Group`] and
+/// the child carries none. Both halves are asserted because each has been
+/// wrong: applying the path again is the same picture until the child moves,
+/// and until the group became a node this build dropped the group's clip
+/// altogether — the child was drawn whole, and this test asserted only the
+/// half that held.
 #[test]
 fn clip_path_does_not_inherit() {
     let scene = scene(CLIPPING);
+    let Node::Group {
+        nodes,
+        clip,
+        opacity,
+    } = &scene.nodes[5]
+    else {
+        panic!("a clipped group: {:?}", scene.nodes[5]);
+    };
+    let clip = clip.as_ref().expect("the group carries the clip");
+    assert_eq!(clip.outline.segments.len(), 10, "#crop's two rectangles");
+    assert!((opacity - 1.0).abs() < 1e-12, "and nothing fades it");
+    let [Node::Path { clip: inner, .. }] = &nodes[..] else {
+        panic!("one child: {nodes:?}");
+    };
     assert!(
-        clip(&scene, 5).is_none(),
+        inner.is_none(),
         "the child of a clipped group carries no clip of its own"
     );
+}
+
+/// §14.3.4's `objectBoundingBox` on a **container** is a fraction of what the
+/// container drew, in its own user space.
+///
+/// The box is the union of the children's, taken back through the group's own
+/// `transform` — so a group moved by `translate(50, 0)` around a ten-wide
+/// rectangle has a box ten wide starting at zero, and a clip of its left half
+/// lands at x = 50 to 55 in the scene.
+#[test]
+fn a_bounding_box_clip_on_a_group_is_a_fraction_of_its_children() {
+    let markup = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <clipPath id="half" clipPathUnits="objectBoundingBox">
+        <rect width="0.5" height="1"/>
+      </clipPath>
+      <g transform="translate(50, 0)" clip-path="url(#half)">
+        <rect width="4" height="20"/>
+        <rect x="6" width="4" height="20"/>
+      </g>
+    </svg>"#;
+    let scene = scene(markup);
+    let [Node::Group {
+        clip: Some(clip), ..
+    }] = &scene.nodes[..]
+    else {
+        panic!("one clipped group: {:?}", scene.nodes);
+    };
+    let box_ = bounds(&clip.outline);
+    near(box_[0], 50.0, "the clip's left, moved with the group");
+    near(box_[2], 55.0, "half of the children's ten");
+    near(box_[1], 0.0, "the top");
+    near(box_[3], 20.0, "the whole height");
 }
 
 /// Every point an outline visits.

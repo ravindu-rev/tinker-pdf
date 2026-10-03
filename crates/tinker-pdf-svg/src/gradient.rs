@@ -354,6 +354,69 @@ pub fn clip(
     })
 }
 
+/// §7.11's bounding box of a **container**, from what it drew.
+///
+/// The nodes are already in the scene's space, so `inverse` — the inverse of
+/// the container's own matrix — brings every point back into the container's
+/// user space, which is what `objectBoundingBox` on a `<g>` is a fraction of.
+/// Text is not measured: its extent is a font metric this crate does not have
+/// (ruling 8), so a group of text alone has the empty box and a bounding-box
+/// clip or mask on it is the zero-area answer §13.2.3 gives one.
+#[must_use]
+pub fn nodes_bounds(nodes: &[crate::Node], inverse: [f64; 6]) -> [f64; 4] {
+    let mut points: Vec<[f64; 2]> = Vec::new();
+    gather(nodes, &mut points);
+    let mut out = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    let mut seen = false;
+    for point in points {
+        let [x, y] = transform::apply(inverse, point);
+        if !(x.is_finite() && y.is_finite()) {
+            continue;
+        }
+        seen = true;
+        out[0] = out[0].min(x);
+        out[1] = out[1].min(y);
+        out[2] = out[2].max(x);
+        out[3] = out[3].max(y);
+    }
+    if seen {
+        out
+    } else {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+}
+
+/// Every point a list of nodes visits, in the scene's space.
+fn gather(nodes: &[crate::Node], points: &mut Vec<[f64; 2]>) {
+    use crate::path::Segment;
+    for node in nodes {
+        match node {
+            crate::Node::Path { outline, .. } => {
+                for segment in &outline.segments {
+                    match *segment {
+                        Segment::Move(p) | Segment::Line(p) => points.push(p),
+                        Segment::Cubic(a, b, c) => points.extend([a, b, c]),
+                        Segment::Close => {}
+                    }
+                }
+            }
+            crate::Node::Image { rect, matrix, .. } => {
+                let [x, y, width, height] = *rect;
+                for corner in [
+                    [x, y],
+                    [x + width, y],
+                    [x, y + height],
+                    [x + width, y + height],
+                ] {
+                    points.push(transform::apply(*matrix, corner));
+                }
+            }
+            crate::Node::Group { nodes, .. } => gather(nodes, points),
+            crate::Node::Text { .. } => {}
+        }
+    }
+}
+
 /// The bounding box of an outline in its own space, as `[min_x, min_y, max_x,
 /// max_y]`.
 ///

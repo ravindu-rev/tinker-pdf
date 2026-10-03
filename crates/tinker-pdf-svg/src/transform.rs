@@ -32,6 +32,29 @@ pub fn apply(matrix: [f64; 6], point: [f64; 2]) -> [f64; 2] {
     ]
 }
 
+/// The matrix that undoes `matrix`, or `None` for one that flattens the plane.
+///
+/// A degenerate matrix has no inverse, and §7.6 makes a `scale(0)` legal: the
+/// element draws nothing, and a bounding box of it in its own space has no
+/// answer. `None` says so rather than dividing by zero.
+#[must_use]
+pub fn invert(matrix: [f64; 6]) -> Option<[f64; 6]> {
+    let [a, b, c, d, e, f] = matrix;
+    let determinant = a * d - b * c;
+    if !determinant.is_finite() || determinant == 0.0 {
+        return None;
+    }
+    let out = [
+        d / determinant,
+        -b / determinant,
+        -c / determinant,
+        a / determinant,
+        (c * f - d * e) / determinant,
+        (b * e - a * f) / determinant,
+    ];
+    out.iter().all(|v| v.is_finite()).then_some(out)
+}
+
 /// Reads §7.6's transform list.
 ///
 /// Returns `None` for anything that is not the grammar — a caller turns that

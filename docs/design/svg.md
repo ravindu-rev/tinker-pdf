@@ -236,6 +236,25 @@ them are in the fetched corpus and `ElementUnknown` would have called a real
 SVG element a foreign vocabulary. The narrowed rows are in
 [features/epub.md](../features/epub.md).
 
+**After the milestones: §14.5's groups.** The scene was a flat list and
+`opacity` was a product multiplied into every descendant — exact for one
+shape painted once, too dark wherever two paints of one group overlapped,
+which a fill and its own stroke always do. `Node::Group` is a list inside the
+list: a container's `opacity` and `clip-path`, a `<use>`'s, a nested
+`<svg>`'s, a `<text>`'s or a `<tspan>`'s, and a shape's own opacity where it
+both fills and strokes. A group that changes nothing is not made, and a group
+of one node that paints once folds into that node's alpha. The facade writes a
+translucent group as an isolated transparency group form under a constant
+alpha (11.6.6), and paints the form with the stream's default space in force —
+the page mapping undone around the `Do` and put back as the form's first
+operator — so that a gradient inside a form is anchored by the same pattern
+matrix as one outside it under either reading of 8.7.3.1. The same change
+found that a `clip-path` on a `<g>` had been **dropped without a word** since
+milestone 4: `clip-path` does not inherit, and the container was not a shape,
+so the clip went nowhere and `clip_path_does_not_inherit` asserted only the
+half that held. The writer's own suite had recorded the symptom as a reader
+limit (`a_clipped_image_is_clipped_in_page_space`); it asserts the clip now.
+
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is
 arithmetic from a clause or an identity checkable without the code — an arc ends

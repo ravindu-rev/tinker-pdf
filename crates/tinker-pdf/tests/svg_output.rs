@@ -386,7 +386,8 @@ fn a_clip_inside_a_clip_names_its_parent() {
 /// **A clipped image** sits in a `<g>` that names the clip, because a clip
 /// named by the `<image>` would be read through the image's own `transform`
 /// (§14.3.5) and land wherever the unit square sends it. The image's
-/// placement still reads back exactly.
+/// placement still reads back exactly, and so — since the reader made a
+/// group's clip a node of its own — does the clip, in page space.
 #[test]
 fn a_clipped_image_is_clipped_in_page_space() {
     let image = stream(
@@ -413,8 +414,29 @@ fn a_clipped_image_is_clipped_in_page_space() {
         "on a group around it"
     );
     let (scene, k) = read_back(&svg);
-    let Some(Node::Image { matrix, .. }) = scene.nodes.first() else {
-        panic!("an image: {:?}", scene.nodes)
+    let Some(Node::Group {
+        nodes,
+        clip: Some(clip),
+        ..
+    }) = scene.nodes.first()
+    else {
+        panic!("a clipped group: {:?}", scene.nodes)
+    };
+    // `30 20 20 40 re` on a page 100 high is x 30 to 50 and, flipped, y 40 to
+    // 80 in the SVG's downward space.
+    let corners: Vec<[f64; 2]> = points(&clip.outline.segments, k)
+        .into_iter()
+        .flatten()
+        .collect();
+    let low = |axis: usize| corners.iter().map(|p| p[axis]).fold(f64::MAX, f64::min);
+    let high = |axis: usize| corners.iter().map(|p| p[axis]).fold(f64::MIN, f64::max);
+    close(
+        &[vec![[low(0), low(1)]], vec![[high(0), high(1)]]],
+        &[vec![[30.0, 40.0]], vec![[50.0, 80.0]]],
+        "the clip, in page space",
+    );
+    let Some(Node::Image { matrix, .. }) = nodes.first() else {
+        panic!("an image inside it: {nodes:?}")
     };
     let place = |x: f64, y: f64| {
         [

@@ -29,6 +29,16 @@
 //! | an `<image>` is not fitted by `preserveAspectRatio` | 1 |
 //! | an unresolved `<image>` is not counted | 1 |
 //! | `text-anchor`'s shift is not applied | 2 |
+//! | a translucent group is drawn inline, each node at full alpha | 1 |
+//! | a group's form is painted under the page mapping | 1 |
+//! | a group's clip is not written | 1 |
+//! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
+//!
+//! The form row fired **zero** the first time: its fixture's shapes covered
+//! the page top to bottom, and the page mapping composed twice is a flip
+//! composed twice — the identity, on a square page — so the shapes landed
+//! where they belonged. They cover the top half now, and the bottom half has
+//! to be white.
 //!
 //! The first row is the one this file exists for. **It was a real defect, not
 //! a hypothetical**: `begin_page` snapshots the document's resource set, so the
@@ -334,6 +344,132 @@ fn a_gradients_matrix_carries_the_page_mapping() {
     assert!(
         top > 0xC0 && bottom < 0x40,
         "and it reaches both stops: {top} to {bottom}"
+    );
+}
+
+// ---- §14.5's groups --------------------------------------------------------------
+
+/// A page's colour at a fraction of its width and height, as `[r, g, b]`.
+fn rgb_at(doc: &Document, x: f64, y: f64) -> [u8; 3] {
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let components = bitmap.components();
+    let width = bitmap.width as usize;
+    let height = bitmap.height as usize;
+    let column = ((width as f64 * x) as usize).min(width - 1);
+    let row = ((height as f64 * y) as usize).min(height - 1);
+    let at = (row * width + column) * components;
+    if components >= 3 {
+        [bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2]]
+    } else {
+        [bitmap.data[at]; 3]
+    }
+}
+
+fn square(svg: &str) -> Document {
+    Document::open_with(book(svg, &[]), &OpenOptions::at_page(200.0, 200.0))
+        .expect("the book opens")
+}
+
+/// **A group's opacity is composited once**, which is the whole of §14.5.
+///
+/// A red and a blue rectangle overlap inside one `<g opacity="0.5">`. Inside
+/// the group the blue covers the red, so where they overlap the group is
+/// *blue*, and faded once over white that is `(128, 128, 255)`. Faded one
+/// shape at a time — which is what this build drew until the group became a
+/// node — the blue is laid at a half over a red already laid at a half, and
+/// the overlap is a purple `(128, 64, 191)` the file never described.
+#[test]
+fn a_groups_opacity_is_composited_once() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <g opacity="0.5">
+                <rect x="0" y="0" width="120" height="200" fill="#ff0000"/>
+                <rect x="80" y="0" width="120" height="200" fill="#0000ff"/>
+              </g>
+            </svg>"##,
+    );
+    let red = rgb_at(&doc, 0.2, 0.5);
+    let overlap = rgb_at(&doc, 0.5, 0.5);
+    let blue = rgb_at(&doc, 0.8, 0.5);
+    let near = |got: [u8; 3], want: [u8; 3]| {
+        got.iter()
+            .zip(want)
+            .all(|(g, w)| (i32::from(*g) - i32::from(w)).abs() <= 3)
+    };
+    assert!(
+        near(red, [255, 128, 128]),
+        "red at a half over white: {red:?}"
+    );
+    assert!(
+        near(blue, [128, 128, 255]),
+        "blue at a half over white: {blue:?}"
+    );
+    assert!(
+        near(overlap, [128, 128, 255]),
+        "and where they overlap, the group is blue before it is faded: {overlap:?}"
+    );
+}
+
+/// A shape and its gradient **inside a group's form** land where they would
+/// outside it.
+///
+/// 8.7.3.1 reads a pattern used in a form against the form's default space at
+/// the moment it is painted, and this writer paints every form with the page's
+/// own default space in force so that the two are one. The shapes cover only
+/// the **top** half of the drawing, so a form painted under the page mapping —
+/// which composes the flip twice — puts them in the bottom half, where the
+/// page must be white; and the axis is vertical, for
+/// `a_gradients_matrix_carries_the_page_mapping`'s reason.
+#[test]
+fn a_gradient_inside_a_group_keeps_the_page_mapping() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs>
+                <linearGradient id="down" gradientUnits="userSpaceOnUse"
+                                x1="0" y1="0" x2="0" y2="200">
+                  <stop offset="0" stop-color="#ffffff"/>
+                  <stop offset="1" stop-color="#000000"/>
+                </linearGradient>
+              </defs>
+              <g opacity="0.999">
+                <rect x="0" y="0" width="100" height="100" fill="url(#down)"/>
+                <rect x="100" y="0" width="100" height="100" fill="url(#down)"/>
+              </g>
+            </svg>"##,
+    );
+    let head = rgb_at(&doc, 0.25, 0.05)[0];
+    let middle = rgb_at(&doc, 0.25, 0.45)[0];
+    let foot = rgb_at(&doc, 0.25, 0.9)[0];
+    assert!(
+        head > 0xD8 && middle < 0xA0 && head > middle,
+        "the ramp runs light to dark down the top half, inside the group as \
+         outside: {head} at the head, {middle} at the middle"
+    );
+    assert!(foot > 0xF0, "and the bottom half is the page: {foot}");
+}
+
+/// §14.3.5: a `clip-path` on a `<g>` clips the group's rendering.
+///
+/// It used to clip nothing: the property does not inherit, so the children
+/// were drawn whole and the clip — on an element that is not a shape — went
+/// nowhere. The left half of a black square is kept and the right is white.
+#[test]
+fn a_groups_clip_path_reaches_the_page() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <clipPath id="left"><rect width="100" height="200"/></clipPath>
+              <g clip-path="url(#left)">
+                <rect width="200" height="200" fill="#000000"/>
+              </g>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.25, 0.5)[0] < 0x40, "the left half is kept");
+    assert!(
+        rgb_at(&doc, 0.75, 0.5)[0] > 0xC0,
+        "and the right half is clipped away"
     );
 }
 

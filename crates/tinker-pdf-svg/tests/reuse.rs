@@ -15,6 +15,7 @@
 //! | a `<use>` into another document is silent | 1 |
 //! | the depth cap reads `Node::depth` again instead of the walk's | 1 |
 //! | the scene-node cap never fires | 1 |
+//! | a `<use>`'s `opacity` and `clip-path` are not a group around the instance | 1 |
 //!
 //! Eleven injections, no zeros — after three were found and fixed. The two
 //! `UseUnresolved` arms were asserted together, so either could go silent with
@@ -304,4 +305,62 @@ fn a_chain_of_uses_nests_the_walk_and_the_depth_cap_sees_it() {
     let scene =
         tinker_pdf_svg::read(markup.as_bytes(), None, &limits).expect("sixty-four is enough");
     assert_eq!(scene.nodes.len(), 1, "and it drew the rectangle at the end");
+}
+
+/// §5.6: a `<use>` becomes a `<g>` carrying its own attributes, so its
+/// `opacity` and `clip-path` are **a group around the instance**.
+///
+/// The instance fills and strokes, so its opacity cannot fold into one alpha;
+/// and the clip is in the space the generated `<g>` has, which ends with the
+/// `<use>`'s `x` — so a clip of the first five units lands at 20 to 25.
+#[test]
+fn a_uses_opacity_and_clip_are_a_group_around_the_instance() {
+    let markup = br##"<svg xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <rect id="shape" width="10" height="10" fill="red" stroke="blue"/>
+        <clipPath id="left"><rect width="5" height="10"/></clipPath>
+      </defs>
+      <use href="#shape" x="20" opacity="0.5" clip-path="url(#left)"/>
+    </svg>"##;
+    let scene = scene(markup);
+    let [Node::Group {
+        nodes,
+        opacity,
+        clip: Some(clip),
+    }] = &scene.nodes[..]
+    else {
+        panic!("one group: {:?}", scene.nodes);
+    };
+    near(*opacity, 0.5, "the use's own opacity");
+    let xs: Vec<f64> = clip
+        .outline
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            Segment::Move(p) | Segment::Line(p) => Some(p[0]),
+            _ => None,
+        })
+        .collect();
+    let low = xs.iter().copied().fold(f64::MAX, f64::min);
+    let high = xs.iter().copied().fold(f64::MIN, f64::max);
+    near(low, 20.0, "the clip moves with the use's x");
+    near(high, 25.0, "and is five wide");
+    let [Node::Path {
+        fill_opacity,
+        stroke,
+        ..
+    }] = &nodes[..]
+    else {
+        panic!("the instance: {nodes:?}");
+    };
+    near(
+        *fill_opacity,
+        1.0,
+        "the instance is opaque inside the group",
+    );
+    near(
+        stroke.as_ref().expect("a stroke").opacity,
+        1.0,
+        "and so is its stroke",
+    );
 }

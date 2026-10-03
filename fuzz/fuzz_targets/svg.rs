@@ -149,7 +149,24 @@ fn sweep_paint(paint: &Paint, out: &mut Vec<f64>) {
 /// that looked ordinary.
 fn numbers(scene: &Scene) -> Vec<f64> {
     let mut out = vec![scene.size.0, scene.size.1];
-    for node in &scene.nodes {
+    sweep_nodes(&scene.nodes, &mut out);
+    out
+}
+
+/// Every node a list holds, at every depth of `Node::Group`.
+fn count(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| match node {
+            Node::Group { nodes, .. } => 1 + count(nodes),
+            _ => 1,
+        })
+        .sum()
+}
+
+/// [`numbers`] over one list, groups looked through.
+fn sweep_nodes(nodes: &[Node], out: &mut Vec<f64>) {
+    for node in nodes {
         match node {
             Node::Path {
                 outline,
@@ -159,14 +176,14 @@ fn numbers(scene: &Scene) -> Vec<f64> {
                 clip,
                 ..
             } => {
-                sweep(outline, &mut out);
+                sweep(outline, out);
                 if let Some(clip) = clip {
-                    sweep(&clip.outline, &mut out);
+                    sweep(&clip.outline, out);
                 }
-                sweep_paint(fill, &mut out);
+                sweep_paint(fill, out);
                 out.push(*fill_opacity);
                 if let Some(stroke) = stroke {
-                    sweep_paint(&stroke.paint, &mut out);
+                    sweep_paint(&stroke.paint, out);
                     out.extend_from_slice(&[
                         stroke.width,
                         stroke.miter_limit,
@@ -197,17 +214,29 @@ fn numbers(scene: &Scene) -> Vec<f64> {
                 // content stream a reader refuses rather than a page that
                 // looks wrong — which is worse, not better.
                 out.push(font.size);
-                sweep_paint(fill, &mut out);
+                sweep_paint(fill, out);
                 out.push(*fill_opacity);
                 if let Some(stroke) = stroke {
-                    sweep_paint(&stroke.paint, &mut out);
+                    sweep_paint(&stroke.paint, out);
                     out.push(stroke.width);
                 }
+            }
+            // A group's opacity reaches an `/ExtGState` and its clip a `W`,
+            // exactly as a shape's do.
+            Node::Group {
+                nodes,
+                opacity,
+                clip,
+            } => {
+                out.push(*opacity);
+                if let Some(clip) = clip {
+                    sweep(&clip.outline, out);
+                }
+                sweep_nodes(nodes, out);
             }
             _ => {}
         }
     }
-    out
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -250,10 +279,12 @@ fuzz_target!(|data: &[u8]| {
                 "a scene carries something that is not a number: {number}"
             );
         }
+        // At every depth: a group is assembled in a list of its own, so the
+        // top-level length is not the number the cap is about.
         assert!(
-            scene.nodes.len() <= limits.max_nodes,
+            count(&scene.nodes) <= limits.max_nodes,
             "{} nodes came out of a cap of {}",
-            scene.nodes.len(),
+            count(&scene.nodes),
             limits.max_nodes
         );
         assert!(

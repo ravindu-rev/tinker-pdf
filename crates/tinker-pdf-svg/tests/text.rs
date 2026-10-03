@@ -28,6 +28,8 @@
 //! | a hidden run is still drawn | 1 |
 //! | a continuing run's `dx`/`dy` is dropped | 1 |
 //! | a `<tspan>` does not compose its own `transform` | 1 |
+//! | a `<text>`'s own `opacity` is dropped | 1 |
+//! | a `<tspan>`'s own `opacity` is dropped | 1 |
 //!
 //! Fifteen injections, no zeros — after two were found. The fixture's only
 //! multi-word family was a **quoted** one, which is a single token, so the
@@ -312,4 +314,58 @@ fn a_shift_on_a_continuing_run_travels_in_the_matrix() {
     let shifted = tinker_pdf_svg::transform::apply(*matrix, [0.0, 0.0]);
     near(shifted[0], 3.0, "the dx");
     near(shifted[1], 4.0, "and the dy");
+}
+
+/// A `<text>`'s own `opacity` is of its whole rendering: one filled run takes
+/// it as an alpha, and two runs are a group.
+///
+/// One run painted once at `a` is that run at alpha `a`, so the first `<text>`
+/// is a run and no group. The second has two runs, which a reader composites
+/// against each other wherever their glyphs meet, so it is a group of two
+/// opaque runs at the text's half — and the continuation still continues,
+/// because a chunk is a property of the runs and not of where they are kept.
+#[test]
+fn a_texts_opacity_is_an_alpha_for_one_run_and_a_group_for_two() {
+    let markup = "<svg xmlns=\"http://www.w3.org/2000/svg\">\
+        <text x=\"0\" y=\"10\" opacity=\"0.5\">alone</text>\
+        <text x=\"0\" y=\"30\" opacity=\"0.5\">a<tspan>b</tspan></text>\
+        <text x=\"0\" y=\"50\">c<tspan opacity=\"0.25\">d</tspan></text></svg>";
+    let scene = scene(markup.as_bytes());
+    let Some(Node::Text { fill_opacity, .. }) = scene.nodes.first() else {
+        panic!("the first text is a run: {:?}", scene.nodes);
+    };
+    near(*fill_opacity, 0.5, "folded into its alpha");
+    let Some(Node::Group { nodes, opacity, .. }) = scene.nodes.get(1) else {
+        panic!("the second text is a group: {:?}", scene.nodes);
+    };
+    near(*opacity, 0.5, "the text's own");
+    let runs: Vec<(&str, Option<[f64; 2]>, f64)> = nodes
+        .iter()
+        .filter_map(|node| match node {
+            Node::Text {
+                text,
+                anchor,
+                fill_opacity,
+                ..
+            } => Some((text.as_str(), *anchor, *fill_opacity)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        [("a", Some([0.0, 30.0]), 1.0), ("b", None, 1.0)],
+        "two opaque runs, the second continuing the first"
+    );
+    // A `<tspan>`'s own opacity is its run's, and the run still continues.
+    let Some(Node::Text {
+        text,
+        anchor,
+        fill_opacity,
+        ..
+    }) = scene.nodes.get(3)
+    else {
+        panic!("the faded span: {:?}", scene.nodes);
+    };
+    assert_eq!((text.as_str(), *anchor), ("d", None));
+    near(*fill_opacity, 0.25, "the span's own opacity, folded");
 }

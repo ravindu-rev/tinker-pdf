@@ -371,10 +371,12 @@ pub struct Style {
     /// `visibility`. §11.5 lays the element out and does not paint it, which
     /// is why it is not `display`.
     pub visible: bool,
-    /// The product of every `opacity` from the root down to this element.
+    /// This element's **own** `opacity`, which §14.5 does not inherit.
     ///
-    /// **A product rather than a group**, and the flattening is named where it
-    /// is observable — see [`crate::Warning::GroupOpacityFlattened`].
+    /// It applies to the element's rendering as a whole, so the walk turns it
+    /// into a [`crate::Node::Group`] around what the element drew rather than
+    /// into a number its descendants multiply in — see that variant for why
+    /// the product is the wrong picture.
     pub opacity: f64,
     /// §13.2.4's `stop-color`, which only a `<stop>` reads.
     pub stop_colour: Colour,
@@ -496,10 +498,9 @@ impl Style {
     /// - `clip-path` clips **the element that states it**; inherited, every
     ///   descendant would be clipped again by the same path, which is the same
     ///   picture until a descendant moves.
-    ///
-    /// `opacity` is the fourth exception and it is not reset either: it is held
-    /// here as the *product* from the root down, because §14.5 composes a
-    /// group's opacity with everything under it.
+    /// - `opacity` fades **the element's rendering as a whole** (§14.5), which
+    ///   the walk makes a [`crate::Node::Group`]. Inherited, a child would be
+    ///   faded a second time inside a group already faded once.
     #[must_use]
     pub fn inherit(&self) -> Style {
         let initial = Style::default();
@@ -507,6 +508,7 @@ impl Style {
             stop_colour: initial.stop_colour,
             stop_opacity: initial.stop_opacity,
             clip_path: None,
+            opacity: initial.opacity,
             ..self.clone()
         }
     }
@@ -610,10 +612,10 @@ impl Style {
                     match name {
                         "fill-opacity" => self.fill_opacity = value,
                         "stroke-opacity" => self.stroke_opacity = value,
-                        // §14.5's group opacity **multiplies** down the tree;
-                        // it is the one property that is neither inherited nor
-                        // reset, because it composes.
-                        _ => self.opacity *= value,
+                        // §14.5's group opacity: the element's own, never
+                        // inherited — `inherit` resets it, and the walk makes
+                        // the group that applies it.
+                        _ => self.opacity = value,
                     }
                     true
                 }

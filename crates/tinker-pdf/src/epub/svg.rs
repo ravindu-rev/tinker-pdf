@@ -1,9 +1,9 @@
 //! An SVG spine item, drawn onto a page (gap 31's SVG lane, milestone 7).
 //!
 //! `tinker-pdf-svg` reads a document into a [`Scene`] — filled and stroked
-//! outlines, gradients, clips, images and text runs, all in one coordinate
-//! space, with everything it declined named in [`Scene::warnings`]. This file
-//! is the other half: it turns that display list into content-stream
+//! outlines, gradients, clips, groups, images and text runs, all in one
+//! coordinate space, with everything it declined named in [`Scene::warnings`].
+//! This file is the other half: it turns that display list into content-stream
 //! operators, and it is the **only** place in this repository that knows both
 //! what an SVG node is and what a PDF operator is.
 //!
@@ -22,19 +22,28 @@
 //! renderer in the tree, produce a page whose text does not extract, and make
 //! the output resolution-dependent.
 //!
-//! # Three things this file decides, and one it does not
+//! # Four things this file decides, and one it does not
 //!
 //! **The page mapping.** SVG's user space has `y` growing downward from the
 //! top left and a PDF page has it growing upward from the bottom left, so one
-//! `cm` at the top of the stream carries the flip, the scale and the centring
-//! for the whole scene. Every coordinate written after it is the scene's own,
-//! which is what makes the operators readable beside the fixture.
+//! `cm` at the top of every content stream carries the flip, the scale and the
+//! centring for the whole scene. Every coordinate written after it is the
+//! scene's own, which is what makes the operators readable beside the fixture.
 //!
 //! **Where a gradient's matrix goes.** 8.7.3.1 makes pattern space *"the
-//! default coordinate system of the page"* — it ignores whatever `cm` is in
-//! force. So a shading pattern's `/Matrix` is composed with the page mapping
-//! here rather than inherited from it, and that is the one place the flip has
-//! to be written twice.
+//! default coordinate system"* of the pattern's parent content stream — it
+//! ignores whatever `cm` is in force. So a shading pattern's `/Matrix` is
+//! composed with the page mapping here rather than inherited from it, and that
+//! is the one place the flip has to be written twice.
+//!
+//! **Where a group's form is drawn.** §14.5's group is a transparency group
+//! form XObject, and 8.7.3.1 reads a pattern used *inside* a form against the
+//! form's default space at the moment it is painted. Every form here is
+//! therefore painted with the stream's own default space in force — the page
+//! mapping undone around the `Do`, and put back as the form's first operator —
+//! so that a form's default space **is** the page's, and a gradient inside a
+//! group is anchored by the same matrix as one outside it, whichever of the
+//! two readings of 8.7.3.1 a reader takes.
 //!
 //! **How text is set.** Through `paint::face_runs` and
 //! [`crate::shaping::write_run`], which is the same `css-fonts-4` §5.3 matcher
@@ -45,9 +54,11 @@
 //! What it does **not** decide is what the document said: every property, every
 //! transform and every refusal was settled in the leaf crate.
 
+use std::collections::HashMap;
+
 use tinker_pdf_cos::build::{
-    DeviceSpace, DocumentBuilder, ExtGState, Function, ImageData, PageBuilder, Shading,
-    ShadingPattern,
+    DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Function, ImageData, PageBuilder,
+    Shading, ShadingPattern, TransparencyGroup,
 };
 use tinker_pdf_css::property::{Color, FontFamily, FontStyle, FontVariant, TextDecoration};
 use tinker_pdf_filters::Limits as FilterLimits;
@@ -100,7 +111,8 @@ fn request_of<'a>(font: &tinker_pdf_svg::TextStyle, families: &'a [FontFamily]) 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Drawn {
     /// Nodes whose paint the writer refused — a shading a reader could not
-    /// evaluate, a glyph run the builder declined.
+    /// evaluate, a glyph run the builder declined, a group whose form or
+    /// alpha the builder would not register.
     pub refused: usize,
     /// `<image>` references this build did not resolve into a page.
     pub images_unresolved: usize,
@@ -108,7 +120,7 @@ pub struct Drawn {
     pub images_drawn: usize,
 }
 
-/// Every resource a scene needs, registered **before its page begins**.
+/// A scene's whole page, written **before its page begins**.
 ///
 /// # The bug this type exists to make impossible
 ///
@@ -123,34 +135,21 @@ pub struct Drawn {
 /// — the corpus test still passed, because `cover.svg` strokes its paths black
 /// and a page with strokes and no fills is a page with more than one colour.
 ///
-/// So registration is a pass of its own, run before `begin_page`, and drawing
-/// takes the names it produced rather than a builder it could add to. The type
-/// is the enforcement: [`draw`] cannot register anything, because it is handed
-/// a `&Registry`.
+/// Since §14.5's groups the rule reaches further: a group is a form XObject,
+/// and a form's operators have to exist before the form can be registered —
+/// so the content of every group, text included, is written in [`register`],
+/// and by the time a page is begun the whole of it is bytes. [`draw`] cannot
+/// register anything, because it is handed a `&Registry` and no builder.
 #[derive(Debug, Default)]
 pub struct Registry {
-    /// Per node: the `/ExtGState` carrying its fill and stroke alpha.
-    alpha: Vec<(usize, Vec<u8>)>,
-    /// Per node: the `/Pattern` its fill resolved to.
-    fill_pattern: Vec<(usize, Vec<u8>)>,
-    /// Per node: the `/Pattern` its stroke resolved to.
-    stroke_pattern: Vec<(usize, Vec<u8>)>,
-    /// Per node: the `/XObject` its `<image>` resolved to, and the picture's
-    /// own pixel dimensions.
-    images: Vec<(usize, Vec<u8>, (f64, f64))>,
-    /// `<image>` references that named nothing this build could draw.
-    images_unresolved: usize,
+    /// The page's operators, complete.
+    content: Vec<u8>,
+    /// What writing them cost.
+    drawn: Drawn,
 }
 
-impl Registry {
-    fn named(list: &[(usize, Vec<u8>)], at: usize) -> Option<&[u8]> {
-        list.iter()
-            .find(|(index, _)| *index == at)
-            .map(|(_, name)| name.as_slice())
-    }
-}
-
-/// Registers everything a scene will name, before its page is begun.
+/// Writes a scene's page, registering everything it names, before the page is
+/// begun.
 ///
 /// `resolve` answers an `<image>` href: a closure rather than a parameter
 /// because what an href resolves against is the *container*, and the container
@@ -160,97 +159,30 @@ pub fn register(
     builder: &mut DocumentBuilder,
     scene: &Scene,
     placement: Placement,
-    mut resolve: impl FnMut(&str) -> Option<Vec<u8>>,
+    fonts: &Fonts<'_>,
+    metrics: &BookMetrics<'_>,
+    resolve: impl FnMut(&str) -> Option<Vec<u8>>,
 ) -> Registry {
-    let base = placement.matrix(scene.size);
-    let mut out = Registry::default();
-    for (at, node) in scene.nodes.iter().enumerate() {
-        match node {
-            Node::Path {
-                fill,
-                fill_opacity,
-                stroke,
-                ..
-            } => {
-                let stroke_alpha = stroke.as_ref().map_or(1.0, |stroke| stroke.opacity);
-                if *fill_opacity < 1.0 || stroke_alpha < 1.0 {
-                    let name = format!("SvgA{at}").into_bytes();
-                    if builder.add_ext_gstate(
-                        &name,
-                        &ExtGState {
-                            fill_alpha: Some(*fill_opacity),
-                            stroke_alpha: Some(stroke_alpha),
-                            ..ExtGState::default()
-                        },
-                    ) {
-                        out.alpha.push((at, name));
-                    }
-                }
-                if let Some(name) = pattern(builder, fill, base, &format!("SvgF{at}")) {
-                    out.fill_pattern.push((at, name));
-                }
-                if let Some(stroke) = stroke {
-                    if let Some(name) = pattern(builder, &stroke.paint, base, &format!("SvgS{at}"))
-                    {
-                        out.stroke_pattern.push((at, name));
-                    }
-                }
-            }
-            Node::Text { fill_opacity, .. } => {
-                if *fill_opacity < 1.0 {
-                    let name = format!("SvgA{at}").into_bytes();
-                    if builder.add_ext_gstate(
-                        &name,
-                        &ExtGState {
-                            fill_alpha: Some(*fill_opacity),
-                            ..ExtGState::default()
-                        },
-                    ) {
-                        out.alpha.push((at, name));
-                    }
-                }
-            }
-            Node::Image { href, .. } => {
-                let name = format!("SvgI{at}").into_bytes();
-                match embed(builder, &name, href, placement.entry_limit, &mut resolve) {
-                    Some(natural) => out.images.push((at, name, natural)),
-                    None => out.images_unresolved += 1,
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Registers a gradient as a `/Pattern`, or `None` for a paint that is not one.
-fn pattern(
-    builder: &mut DocumentBuilder,
-    paint: &Paint,
-    base: [f64; 6],
-    name: &str,
-) -> Option<Vec<u8>> {
-    let shading = shading_of(paint)?;
-    // 8.7.3.1: pattern space is the page's **default** coordinate system, so
-    // the `cm` in force does not reach it and the page mapping has to be
-    // composed in here. This is the one place the flip is written twice, and
-    // it is the specification's rule rather than a shortcut.
-    let matrix = match paint {
-        Paint::Linear { matrix, .. } | Paint::Radial { matrix, .. } => {
-            transform::concat(*matrix, base)
-        }
-        _ => base,
+    let space = Space {
+        base: placement.matrix(scene.size),
+        extent: [0.0, 0.0, placement.page.0, placement.page.1],
     };
-    let name = name.as_bytes().to_vec();
-    builder
-        .add_shading_pattern(
-            &name,
-            &ShadingPattern {
-                shading,
-                matrix: Some(matrix),
-            },
-        )
-        .then_some(name)
+    let mut writer = Writer {
+        builder,
+        fonts,
+        metrics,
+        resolve,
+        entry_limit: placement.entry_limit,
+        next: 0,
+        alphas: HashMap::new(),
+        images: HashMap::new(),
+        drawn: Drawn::default(),
+    };
+    let content = writer.stream(&scene.nodes, space);
+    Registry {
+        content,
+        drawn: writer.drawn,
+    }
 }
 
 /// Where a scene goes on a page.
@@ -294,114 +226,367 @@ impl Placement {
     }
 }
 
-/// Draws a whole scene onto a page, naming what [`register`] already added.
-pub fn draw(
-    builder: &mut DocumentBuilder,
-    page: &mut PageBuilder,
-    scene: &Scene,
-    registry: &Registry,
-    placement: Placement,
-    fonts: &Fonts<'_>,
-    metrics: &BookMetrics<'_>,
-) -> Drawn {
-    let mut out = Drawn {
-        images_unresolved: registry.images_unresolved,
-        ..Drawn::default()
-    };
-    let base = placement.matrix(scene.size);
-    page.raw(
-        format!(
-            "q {} {} {} {} {} {} cm",
-            base[0], base[1], base[2], base[3], base[4], base[5]
-        )
-        .as_bytes(),
-    );
+/// Draws a scene's page, whose operators [`register`] already wrote.
+pub fn draw(page: &mut PageBuilder, registry: &Registry) -> Drawn {
+    page.raw(&registry.content);
+    registry.drawn.clone()
+}
 
-    // §10.9's chunks, resolved before anything is drawn: `text-anchor` needs a
-    // whole chunk's width, and a width needs the metrics — so the pen is
-    // walked once here and the drawing pass reads the answer.
-    let placed = place_text(scene, metrics);
+/// The space one content stream's nodes are drawn in.
+///
+/// `base` maps the nodes' coordinates — the scene's — into the stream's
+/// **default** space, which is the page's for the page and for every group's
+/// form (see this module's header for why those are one space), and
+/// `extent` is that default space's visible box, which a form's `/BBox` is.
+#[derive(Clone, Copy, Debug)]
+struct Space {
+    base: [f64; 6],
+    extent: [f64; 4],
+}
 
-    for (index, node) in scene.nodes.iter().enumerate() {
+/// Where each text run of one content stream starts, consumed in paint order.
+///
+/// §10.9's chunks cross group boundaries — a `<tspan opacity="0.5">` is a
+/// group around its run and still continues the pen of the run before it — so
+/// the origins are resolved once for the whole stream, groups looked through,
+/// and the drawing pass takes them in the order it meets the runs.
+struct Cursor {
+    origins: Vec<Option<Origin>>,
+    next: usize,
+}
+
+impl Cursor {
+    fn take(&mut self) -> Option<Origin> {
+        let origin = self.origins.get(self.next).copied().flatten();
+        self.next += 1;
+        origin
+    }
+}
+
+/// An embedded picture: its `/XObject` name and its natural size in pixels.
+type Embedded = (Vec<u8>, (f64, f64));
+
+/// The state of one [`register`] call.
+struct Writer<'b, 'f, 'm, R> {
+    builder: &'b mut DocumentBuilder,
+    fonts: &'b Fonts<'f>,
+    metrics: &'b BookMetrics<'m>,
+    resolve: R,
+    entry_limit: usize,
+    /// The next resource number this page hands out.
+    next: usize,
+    /// `(fill alpha, stroke alpha)` to the `/ExtGState` already registered
+    /// for it, so a page of a thousand translucent shapes writes one.
+    alphas: HashMap<(u64, u64), Vec<u8>>,
+    /// Each href to the `/XObject` it resolved to and the picture's natural
+    /// size, or `None` for one that did not resolve — so a `<use>` of a
+    /// photograph sixteen times embeds it once.
+    images: HashMap<String, Option<Embedded>>,
+    drawn: Drawn,
+}
+
+impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
+    /// A resource name no other resource on this page has.
+    fn name(&mut self, kind: &str) -> Vec<u8> {
+        let name = format!("Svg{kind}{}", self.next);
+        self.next += 1;
+        name.into_bytes()
+    }
+
+    /// One whole content stream: the space's mapping, the nodes, and the `Q`
+    /// that closes it.
+    fn stream(&mut self, nodes: &[Node], space: Space) -> Vec<u8> {
+        let mut cursor = Cursor {
+            origins: place_text(nodes, self.metrics),
+            next: 0,
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(b"q ");
+        matrix(&mut out, space.base);
+        out.extend_from_slice(b" cm\n");
+        self.nodes(&mut out, nodes, space, &mut cursor);
+        out.extend_from_slice(b"Q\n");
+        out
+    }
+
+    fn nodes(&mut self, out: &mut Vec<u8>, nodes: &[Node], space: Space, cursor: &mut Cursor) {
+        for node in nodes {
+            self.node(out, node, space, cursor);
+        }
+    }
+
+    fn node(&mut self, out: &mut Vec<u8>, node: &Node, space: Space, cursor: &mut Cursor) {
         match node {
             Node::Path {
                 outline,
                 fill,
                 rule,
+                fill_opacity,
                 stroke,
                 clip,
-                ..
             } => {
-                page.raw(b"q");
-                if let Some(name) = Registry::named(&registry.alpha, index) {
-                    page.set_ext_gstate(name);
+                let stroke_alpha = stroke.as_ref().map_or(1.0, |stroke| stroke.opacity);
+                let alpha = if *fill_opacity < 1.0 || stroke_alpha < 1.0 {
+                    self.alpha(*fill_opacity, stroke_alpha)
+                } else {
+                    None
+                };
+                let fill_pattern = self.pattern(fill, space);
+                let stroke_pattern = stroke
+                    .as_ref()
+                    .and_then(|stroke| self.pattern(&stroke.paint, space));
+                out.extend_from_slice(b"q\n");
+                if let Some(name) = &alpha {
+                    gs(out, name);
                 }
                 if let Some(clip) = clip {
-                    apply_clip(page, clip);
+                    apply_clip(out, clip);
                 }
-                let filled = set_paint(
-                    page,
-                    fill,
-                    Registry::named(&registry.fill_pattern, index),
-                    false,
-                );
+                let filled = set_paint(out, fill, fill_pattern.as_deref(), false);
                 let stroked = stroke.as_ref().is_some_and(|stroke| {
-                    let painted = set_paint(
-                        page,
-                        &stroke.paint,
-                        Registry::named(&registry.stroke_pattern, index),
-                        true,
-                    );
+                    let painted = set_paint(out, &stroke.paint, stroke_pattern.as_deref(), true);
                     if painted {
-                        set_stroke_state(page, stroke);
+                        set_stroke_state(out, stroke);
                     }
                     painted
                 });
                 if filled || stroked {
-                    write_outline(page, outline);
-                    page.raw(operator(filled, stroked, *rule));
+                    write_outline(out, outline);
+                    out.extend_from_slice(operator(filled, stroked, *rule));
+                    out.push(b'\n');
                 } else if clip.is_some() {
                     // A shape that paints nothing still had a clip pushed, and
                     // `Q` below is what pops it.
-                    out.refused += usize::from(!matches!(fill, Paint::None));
+                    self.drawn.refused += usize::from(!matches!(fill, Paint::None));
                 }
-                page.raw(b"Q");
+                out.extend_from_slice(b"Q\n");
             }
             Node::Image {
+                href,
                 rect,
                 matrix,
                 preserve,
-                ..
-            } => {
-                if let Some((_, name, natural)) =
-                    registry.images.iter().find(|(at, ..)| *at == index)
-                {
-                    place_image(page, name, *rect, *matrix, preserve.as_deref(), *natural);
-                    out.images_drawn += 1;
+            } => match self.image(href) {
+                Some((name, natural)) => {
+                    place_image(out, &name, *rect, *matrix, preserve.as_deref(), natural);
+                    self.drawn.images_drawn += 1;
                 }
-            }
-            Node::Text { .. } => {
-                let Some(run) = placed.get(index).copied().flatten() else {
-                    continue;
+                None => self.drawn.images_unresolved += 1,
+            },
+            Node::Text { fill_opacity, .. } => {
+                let Some(origin) = cursor.take() else {
+                    return;
                 };
-                out.refused += draw_text(
-                    builder,
-                    page,
+                let alpha = if *fill_opacity < 1.0 {
+                    self.alpha(*fill_opacity, 1.0)
+                } else {
+                    None
+                };
+                self.drawn.refused += draw_text(
+                    self.builder,
+                    out,
                     node,
-                    run,
-                    Registry::named(&registry.alpha, index),
-                    fonts,
-                    metrics,
+                    origin,
+                    alpha.as_deref(),
+                    self.fonts,
+                    self.metrics,
                 );
             }
+            Node::Group {
+                nodes,
+                opacity,
+                clip,
+            } => self.group(out, nodes, *opacity, clip.as_ref(), space, cursor),
             // `Node` is `#[non_exhaustive]`: a variant added to the leaf crate
             // reaches here as ink nobody drew, so it is counted rather than
             // skipped.
-            _ => out.refused += 1,
+            _ => self.drawn.refused += 1,
         }
     }
-    page.raw(b"Q");
-    out
+
+    /// §14.5's group, and §14.3.5's clip of one.
+    ///
+    /// A group at full opacity is only a clip, which a `q`/`Q` pair around
+    /// its nodes says exactly. Below full opacity it is 11.6.6's transparency
+    /// group: the nodes are composited in a form of their own, and that form
+    /// is painted once under 11.6.4.4's constant alpha — which 11.6.6 applies
+    /// to the group's result as a whole, and which is §14.5 word for word.
+    fn group(
+        &mut self,
+        out: &mut Vec<u8>,
+        nodes: &[Node],
+        opacity: f64,
+        clip: Option<&Clip>,
+        space: Space,
+        cursor: &mut Cursor,
+    ) {
+        if opacity >= 1.0 {
+            out.extend_from_slice(b"q\n");
+            if let Some(clip) = clip {
+                apply_clip(out, clip);
+            }
+            self.nodes(out, nodes, space, cursor);
+            out.extend_from_slice(b"Q\n");
+            return;
+        }
+        // The form's operators, in the scene's coordinates under the same
+        // mapping as the stream around it: see this module's header.
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"q ");
+        matrix(&mut inner, space.base);
+        inner.extend_from_slice(b" cm\n");
+        self.nodes(&mut inner, nodes, space, cursor);
+        inner.extend_from_slice(b"Q\n");
+
+        let Some(undo) = transform::invert(space.base) else {
+            self.drawn.refused += 1;
+            return;
+        };
+        let form = self.name("G");
+        let registered = self.builder.add_form(
+            &form,
+            &FormXObject {
+                bbox: space.extent,
+                matrix: None,
+                // Isolated, as XPS's canvas groups are: §14.5 composites the
+                // group's offscreen image *onto* what is behind it, which is an
+                // isolated group's definition, and for the normal blend mode
+                // it is the same picture as a non-isolated one.
+                group: Some(TransparencyGroup {
+                    color_space: DeviceSpace::Rgb,
+                    isolated: true,
+                    knockout: false,
+                }),
+                content: &inner,
+            },
+        );
+        let alpha = self.alpha(opacity, opacity);
+        let (true, Some(alpha)) = (registered, alpha) else {
+            self.drawn.refused += 1;
+            return;
+        };
+        out.extend_from_slice(b"q\n");
+        if let Some(clip) = clip {
+            apply_clip(out, clip);
+        }
+        gs(out, &alpha);
+        out.extend_from_slice(b"q ");
+        matrix(out, undo);
+        out.extend_from_slice(b" cm ");
+        name(out, &form);
+        out.extend_from_slice(b" Do Q\nQ\n");
+    }
+
+    /// The `/ExtGState` for one pair of alphas, registered once per page.
+    fn alpha(&mut self, fill: f64, stroke: f64) -> Option<Vec<u8>> {
+        let key = (fill.to_bits(), stroke.to_bits());
+        if let Some(name) = self.alphas.get(&key) {
+            return Some(name.clone());
+        }
+        let name = self.name("A");
+        let registered = self.builder.add_ext_gstate(
+            &name,
+            &ExtGState {
+                fill_alpha: Some(fill),
+                stroke_alpha: Some(stroke),
+                ..ExtGState::default()
+            },
+        );
+        if !registered {
+            return None;
+        }
+        self.alphas.insert(key, name.clone());
+        Some(name)
+    }
+
+    /// Registers a gradient as a `/Pattern`, or `None` for a paint that is not
+    /// one.
+    fn pattern(&mut self, paint: &Paint, space: Space) -> Option<Vec<u8>> {
+        let shading = shading_of(paint)?;
+        // 8.7.3.1: pattern space is the stream's **default** coordinate
+        // system, so the `cm` in force does not reach it and the space's
+        // mapping has to be composed in here. This is the one place the flip
+        // is written twice, and it is the specification's rule rather than a
+        // shortcut.
+        let matrix = match paint {
+            Paint::Linear { matrix, .. } | Paint::Radial { matrix, .. } => {
+                transform::concat(*matrix, space.base)
+            }
+            _ => space.base,
+        };
+        let name = self.name("P");
+        self.builder
+            .add_shading_pattern(
+                &name,
+                &ShadingPattern {
+                    shading,
+                    matrix: Some(matrix),
+                },
+            )
+            .then_some(name)
+    }
+
+    /// An `<image>`'s `/XObject` and natural size, embedded on first use.
+    fn image(&mut self, href: &str) -> Option<Embedded> {
+        if let Some(known) = self.images.get(href) {
+            return known.clone();
+        }
+        let name = self.name("I");
+        let embedded = embed(
+            self.builder,
+            &name,
+            href,
+            self.entry_limit,
+            &mut self.resolve,
+        )
+        .map(|natural| (name, natural));
+        self.images.insert(href.to_owned(), embedded.clone());
+        embedded
+    }
+}
+
+/// Six numbers, space-separated, as a content stream spells a matrix.
+fn matrix(out: &mut Vec<u8>, m: [f64; 6]) {
+    let text: Vec<String> = m.iter().map(|v| number(*v)).collect();
+    out.extend_from_slice(text.join(" ").as_bytes());
+}
+
+/// A number as a content stream may carry it.
+///
+/// A value that is not finite has no PDF spelling at all — `NaN` and `inf`
+/// are not tokens a reader can lex — so it is written as zero, which is what
+/// the leaf crate's own finite-number discipline already makes unreachable
+/// from a document.
+fn number(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value}")
+    } else {
+        "0".to_owned()
+    }
+}
+
+/// A resource name, escaped as 7.3.5 requires.
+fn name(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.push(b'/');
+    for &byte in bytes {
+        let escape = byte <= b' '
+            || byte >= 0x7F
+            || matches!(
+                byte,
+                b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%' | b'#'
+            );
+        if escape {
+            out.extend_from_slice(format!("#{byte:02X}").as_bytes());
+        } else {
+            out.push(byte);
+        }
+    }
+}
+
+/// 8.4.5's `gs`.
+fn gs(out: &mut Vec<u8>, resource: &[u8]) {
+    name(out, resource);
+    out.extend_from_slice(b" gs\n");
 }
 
 /// The painting operator for what was set: 8.5.3.3's four, by rule.
@@ -416,21 +601,31 @@ fn operator(filled: bool, stroked: bool, rule: FillRule) -> &'static [u8] {
 }
 
 /// One outline, as `m`/`l`/`c`/`h`.
-fn write_outline(page: &mut PageBuilder, outline: &tinker_pdf_svg::path::Outline) {
-    let mut stream = String::new();
+fn write_outline(out: &mut Vec<u8>, outline: &tinker_pdf_svg::path::Outline) {
     for segment in &outline.segments {
         match *segment {
-            Segment::Move(p) => stream.push_str(&format!("{} {} m\n", p[0], p[1])),
-            Segment::Line(p) => stream.push_str(&format!("{} {} l\n", p[0], p[1])),
-            Segment::Cubic(a, b, c) => stream.push_str(&format!(
-                "{} {} {} {} {} {} c\n",
-                a[0], a[1], b[0], b[1], c[0], c[1]
-            )),
-            Segment::Close => stream.push_str("h\n"),
+            Segment::Move(p) => {
+                out.extend_from_slice(format!("{} {} m\n", number(p[0]), number(p[1])).as_bytes());
+            }
+            Segment::Line(p) => {
+                out.extend_from_slice(format!("{} {} l\n", number(p[0]), number(p[1])).as_bytes());
+            }
+            Segment::Cubic(a, b, c) => out.extend_from_slice(
+                format!(
+                    "{} {} {} {} {} {} c\n",
+                    number(a[0]),
+                    number(a[1]),
+                    number(b[0]),
+                    number(b[1]),
+                    number(c[0]),
+                    number(c[1])
+                )
+                .as_bytes(),
+            ),
+            Segment::Close => out.extend_from_slice(b"h\n"),
             _ => {}
         }
     }
-    page.raw(stream.as_bytes());
 }
 
 /// §14.3's clip, as 8.5.4's `W`/`W*` followed by `n`.
@@ -439,37 +634,31 @@ fn write_outline(page: &mut PageBuilder, outline: &tinker_pdf_svg::path::Outline
 /// degenerate rectangle rather than skipped: §14.3.5 says so, and a build that
 /// wrote nothing would draw the element unclipped — which is the opposite
 /// answer and looks like a document that has no clip in it.
-fn apply_clip(page: &mut PageBuilder, clip: &Clip) {
+fn apply_clip(out: &mut Vec<u8>, clip: &Clip) {
     if clip.outline.segments.is_empty() {
-        page.raw(b"0 0 0 0 re W n");
+        out.extend_from_slice(b"0 0 0 0 re W n\n");
         return;
     }
-    write_outline(page, &clip.outline);
-    page.raw(match clip.rule {
-        FillRule::NonZero => b"W n".as_slice(),
-        FillRule::EvenOdd => b"W* n".as_slice(),
+    write_outline(out, &clip.outline);
+    out.extend_from_slice(match clip.rule {
+        FillRule::NonZero => b"W n\n".as_slice(),
+        FillRule::EvenOdd => b"W* n\n".as_slice(),
     });
 }
 
 /// Sets a fill or stroke colour, returning whether anything will paint.
 ///
-/// A gradient's pattern name comes from [`register`] rather than being added
-/// here: see [`Registry`]'s own note.
-fn set_paint(
-    page: &mut PageBuilder,
-    paint: &Paint,
-    pattern: Option<&[u8]>,
-    stroking: bool,
-) -> bool {
+/// A gradient's pattern name comes from [`Writer::pattern`] rather than being
+/// added here, which keeps this a function of what was already registered.
+fn set_paint(out: &mut Vec<u8>, paint: &Paint, pattern: Option<&[u8]>, stroking: bool) -> bool {
     match paint {
         Paint::None => false,
         Paint::Solid(colour) => {
+            let c = |v: f64| number(v.clamp(0.0, 1.0));
             let [r, g, b] = colour.rgb;
-            if stroking {
-                page.set_stroke_rgb(r, g, b)
-            } else {
-                page.set_fill_rgb(r, g, b)
-            }
+            let op = if stroking { "RG" } else { "rg" };
+            out.extend_from_slice(format!("{} {} {} {op}\n", c(r), c(g), c(b)).as_bytes());
+            true
         }
         Paint::Linear { .. } | Paint::Radial { .. } => match pattern {
             // A gradient whose pattern the builder refused paints **nothing**
@@ -478,12 +667,17 @@ fn set_paint(
             // would put a flat colour where a reader would see a ramp, and
             // nothing would say the ramp had been lost.
             None => false,
-            Some(name) => {
-                if stroking {
-                    page.set_stroke_pattern(name)
+            Some(resource) => {
+                // 8.7.3.2: the colour space becomes `/Pattern` before a
+                // pattern name can be an operand.
+                out.extend_from_slice(if stroking {
+                    b"/Pattern CS "
                 } else {
-                    page.set_fill_pattern(name)
-                }
+                    b"/Pattern cs "
+                });
+                name(out, resource);
+                out.extend_from_slice(if stroking { b" SCN\n" } else { b" scn\n" });
+                true
             }
         },
         _ => false,
@@ -588,21 +782,29 @@ fn next_after(value: f64) -> f64 {
 }
 
 /// §11.4's stroke parameters, as 8.4.3's operators.
-fn set_stroke_state(page: &mut PageBuilder, stroke: &tinker_pdf_svg::Stroke) {
-    let mut out = format!("{} w {} M", stroke.width, stroke.miter_limit.max(1.0));
-    out.push_str(match stroke.cap {
+fn set_stroke_state(out: &mut Vec<u8>, stroke: &tinker_pdf_svg::Stroke) {
+    let mut text = format!(
+        "{} w {} M",
+        number(stroke.width),
+        number(stroke.miter_limit.max(1.0))
+    );
+    text.push_str(match stroke.cap {
         LineCap::Butt => " 0 J",
         LineCap::Round => " 1 J",
         LineCap::Square => " 2 J",
     });
-    out.push_str(match stroke.join {
+    text.push_str(match stroke.join {
         LineJoin::Miter => " 0 j",
         LineJoin::Round => " 1 j",
         LineJoin::Bevel => " 2 j",
     });
-    let dashes: Vec<String> = stroke.dashes.iter().map(f64::to_string).collect();
-    out.push_str(&format!(" [{}] {} d", dashes.join(" "), stroke.dash_offset));
-    page.raw(out.as_bytes());
+    let dashes: Vec<String> = stroke.dashes.iter().map(|v| number(*v)).collect();
+    text.push_str(&format!(
+        " [{}] {} d\n",
+        dashes.join(" "),
+        number(stroke.dash_offset)
+    ));
+    out.extend_from_slice(text.as_bytes());
 }
 
 // ---- §5.7's images ------------------------------------------------------------
@@ -667,10 +869,10 @@ fn image_shape(image: &ImageData<'_>) -> Option<(f64, f64)> {
 /// natural box as the view box — which is exactly what §7.8 says the attribute
 /// means, read by the code that already reads it for `<svg>`.
 fn place_image(
-    page: &mut PageBuilder,
-    name: &[u8],
+    out: &mut Vec<u8>,
+    resource: &[u8],
     rect: [f64; 4],
-    matrix: [f64; 6],
+    element: [f64; 6],
     preserve: Option<&str>,
     natural: (f64, f64),
 ) {
@@ -692,16 +894,12 @@ fn place_image(
     // image is flipped inside its own box before anything else applies.
     let flip = [1.0, 0.0, 0.0, -1.0, 0.0, 1.0];
     let placed = transform::concat(flip, placed);
-    let placed = transform::concat(placed, matrix);
-    page.raw(
-        format!(
-            "q {} {} {} {} {} {} cm",
-            placed[0], placed[1], placed[2], placed[3], placed[4], placed[5]
-        )
-        .as_bytes(),
-    );
-    page.image(name, 0.0, 0.0, 1.0, 1.0);
-    page.raw(b"Q");
+    let placed = transform::concat(placed, element);
+    out.extend_from_slice(b"q ");
+    matrix(out, placed);
+    out.extend_from_slice(b" cm ");
+    name(out, resource);
+    out.extend_from_slice(b" Do Q\n");
 }
 
 // ---- §10's text ----------------------------------------------------------------
@@ -709,7 +907,8 @@ fn place_image(
 /// Where one run's baseline starts, in scene coordinates.
 type Origin = [f64; 2];
 
-/// Resolves §10.9's chunks into one origin per text node.
+/// Resolves §10.9's chunks into one origin per text node, in paint order,
+/// groups looked through.
 ///
 /// **Two passes, and the first one is why this is not done inline.** A chunk's
 /// `text-anchor` cannot be applied until the whole chunk's width is known, and
@@ -717,18 +916,20 @@ type Origin = [f64; 2];
 /// ended — so both need a measurement, and a measurement needs the same
 /// metrics the book was paginated with. Doing it here means SVG text and the
 /// book's own prose are measured by one `Metrics`.
-fn place_text(scene: &Scene, metrics: &BookMetrics<'_>) -> Vec<Option<Origin>> {
-    let mut out: Vec<Option<Origin>> = vec![None; scene.nodes.len()];
-    let mut chunk: Vec<(usize, f64)> = Vec::new();
-    let mut pen = [0.0f64, 0.0];
-    let mut anchor_kind = TextAnchor::Start;
+fn place_text(nodes: &[Node], metrics: &BookMetrics<'_>) -> Vec<Option<Origin>> {
+    struct Chunking {
+        out: Vec<Option<Origin>>,
+        chunk: Vec<(usize, f64)>,
+        pen: [f64; 2],
+        kind: TextAnchor,
+    }
 
-    let flush = |chunk: &mut Vec<(usize, f64)>, out: &mut Vec<Option<Origin>>, kind| {
-        let total: f64 = chunk.iter().map(|(_, width)| *width).sum();
+    fn flush(state: &mut Chunking) {
+        let total: f64 = state.chunk.iter().map(|(_, width)| *width).sum();
         // §10.9's shift, applied to the whole chunk rather than to each run:
         // `middle` centres what the chunk holds, and a build that centred each
         // run would pile them on top of one another.
-        let shift = match kind {
+        let shift = match state.kind {
             TextAnchor::Start => 0.0,
             TextAnchor::Middle => -total / 2.0,
             TextAnchor::End => -total,
@@ -737,43 +938,55 @@ fn place_text(scene: &Scene, metrics: &BookMetrics<'_>) -> Vec<Option<Origin>> {
         // the moment it was reached, so adding a running offset here as well
         // would advance every run twice -- which puts the second word of a
         // chunk two words along and is invisible in anything but a number.
-        for (index, _) in chunk.drain(..) {
-            if let Some(origin) = out[index].as_mut() {
+        for (index, _) in state.chunk.drain(..) {
+            if let Some(Some(origin)) = state.out.get_mut(index) {
                 origin[0] += shift;
             }
         }
-    };
-
-    for (index, node) in scene.nodes.iter().enumerate() {
-        let Node::Text {
-            text, anchor, font, ..
-        } = node
-        else {
-            continue;
-        };
-        let families = families_of(&font.families);
-        let width = metrics.measure(text, &request_of(font, &families));
-        if let Some(start) = anchor {
-            flush(&mut chunk, &mut out, anchor_kind);
-            pen = *start;
-            anchor_kind = font.anchor;
-        }
-        out[index] = Some(pen);
-        chunk.push((index, width));
-        pen[0] += width;
     }
-    flush(&mut chunk, &mut out, anchor_kind);
-    out
+
+    fn walk(nodes: &[Node], metrics: &BookMetrics<'_>, state: &mut Chunking) {
+        for node in nodes {
+            match node {
+                Node::Group { nodes, .. } => walk(nodes, metrics, state),
+                Node::Text {
+                    text, anchor, font, ..
+                } => {
+                    let families = families_of(&font.families);
+                    let width = metrics.measure(text, &request_of(font, &families));
+                    if let Some(start) = anchor {
+                        flush(state);
+                        state.pen = *start;
+                        state.kind = font.anchor;
+                    }
+                    let index = state.out.len();
+                    state.out.push(Some(state.pen));
+                    state.chunk.push((index, width));
+                    state.pen[0] += width;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut state = Chunking {
+        out: Vec::new(),
+        chunk: Vec::new(),
+        pen: [0.0, 0.0],
+        kind: TextAnchor::Start,
+    };
+    walk(nodes, metrics, &mut state);
+    flush(&mut state);
+    state.out
 }
 
 /// One text run, as a text object under the run's own matrix.
 ///
 /// Returns how many pieces the writer refused, which the caller turns into
 /// [`crate::ArchiveWarning::UnwritableTextRun`] (ruling 10).
-#[allow(clippy::too_many_arguments)]
 fn draw_text(
     builder: &mut DocumentBuilder,
-    page: &mut PageBuilder,
+    out: &mut Vec<u8>,
     node: &Node,
     origin: Origin,
     alpha: Option<&[u8]>,
@@ -782,7 +995,7 @@ fn draw_text(
 ) -> usize {
     let Node::Text {
         text,
-        matrix,
+        matrix: element,
         font,
         fill,
         ..
@@ -796,22 +1009,17 @@ fn draw_text(
     // matrix carries a flip at the baseline. Composed with the element's
     // matrix — and *not* with the page mapping, which the `cm` already in
     // force supplies.
-    let local = transform::concat([1.0, 0.0, 0.0, -1.0, origin[0], origin[1]], *matrix);
+    let local = transform::concat([1.0, 0.0, 0.0, -1.0, origin[0], origin[1]], *element);
 
-    page.raw(b"q");
-    if let Some(name) = alpha {
-        page.set_ext_gstate(name);
+    out.extend_from_slice(b"q\n");
+    if let Some(resource) = alpha {
+        gs(out, resource);
     }
     if let Paint::Solid(colour) = fill {
-        page.set_fill_rgb(colour.rgb[0], colour.rgb[1], colour.rgb[2]);
+        set_paint(out, &Paint::Solid(*colour), None, false);
     }
-    page.raw(
-        format!(
-            "{} {} {} {} {} {} cm",
-            local[0], local[1], local[2], local[3], local[4], local[5]
-        )
-        .as_bytes(),
-    );
+    matrix(out, local);
+    out.extend_from_slice(b" cm\n");
 
     let mut refused = 0usize;
     let mut pen = 0.0f64;
@@ -841,7 +1049,8 @@ fn draw_text(
                     },
                 );
                 if written {
-                    page.raw(&bytes);
+                    out.extend_from_slice(&bytes);
+                    out.push(b'\n');
                 } else {
                     refused += 1;
                 }
@@ -852,11 +1061,11 @@ fn draw_text(
                 pen += metrics.measure(slice, &request);
             }
             Chosen::Standard(_) => {
-                pen += draw_coded(page, fonts, metrics, &request, chosen, slice, pen);
+                pen += draw_coded(out, fonts, metrics, &request, chosen, slice, pen);
             }
         }
     }
-    page.raw(b"Q");
+    out.extend_from_slice(b"Q\n");
     refused
 }
 
@@ -867,9 +1076,13 @@ fn draw_text(
 /// `WinAnsiEncoding` lands in an overflow font with a resource of its own, and
 /// splitting only where the resource changes is what keeps a word one text
 /// object wherever it can be.
-#[allow(clippy::too_many_arguments)]
+///
+/// Written as `PageBuilder::encoded_text` writes it, byte for byte: the
+/// standard 14 are registered without a program, so there is no subset for the
+/// characters to be recorded against, and the operators are the same whether
+/// they land on a page or in a group's form.
 fn draw_coded(
-    page: &mut PageBuilder,
+    out: &mut Vec<u8>,
     fonts: &Fonts<'_>,
     metrics: &BookMetrics<'_>,
     request: &FontRequest<'_>,
@@ -879,20 +1092,36 @@ fn draw_coded(
 ) -> f64 {
     let size = request.size;
     let mut pen = 0.0f64;
-    let mut current: Option<(Vec<u8>, Vec<u8>, String)> = None;
+    let mut current: Option<(Vec<u8>, Vec<u8>)> = None;
     let mut at = 0.0f64;
-    let flush = |page: &mut PageBuilder, held: Option<(Vec<u8>, Vec<u8>, String)>, x: f64| {
-        if let Some((resource, codes, characters)) = held {
-            page.encoded_text(
-                &resource,
-                size,
-                start + x,
-                0.0,
-                (0.0, 0.0),
-                &codes,
-                &characters,
-            );
+    let flush = |out: &mut Vec<u8>, held: Option<(Vec<u8>, Vec<u8>)>, x: f64| {
+        let Some((resource, codes)) = held else {
+            return;
+        };
+        out.extend_from_slice(b"BT ");
+        name(out, &resource);
+        out.extend_from_slice(
+            format!(
+                " {} Tf 0 Tc 0 Tw {} 0 Td (",
+                number(size),
+                number(start + x)
+            )
+            .as_bytes(),
+        );
+        for byte in codes {
+            // 7.3.4.2's three, plus the two that a viewer would read as an
+            // end-of-line inside a literal string and fold away.
+            match byte {
+                b'(' | b')' | b'\\' => {
+                    out.push(b'\\');
+                    out.push(byte);
+                }
+                b'\r' => out.extend_from_slice(b"\\r"),
+                b'\n' => out.extend_from_slice(b"\\n"),
+                _ => out.push(byte),
+            }
         }
+        out.extend_from_slice(b") Tj ET\n");
     };
     for ch in text.chars() {
         let advance = metrics.advance(ch, request);
@@ -904,23 +1133,22 @@ fn draw_coded(
             continue;
         };
         match &mut current {
-            Some((resource, codes, characters)) if resource == coded.resource() => {
+            Some((resource, codes)) if resource == coded.resource() => {
                 if let Coded::Simple { code, .. } = coded {
                     codes.push(code);
-                    characters.push(ch);
                 }
             }
             _ => {
-                flush(page, current.take(), at);
+                flush(out, current.take(), at);
                 at = pen;
                 if let Coded::Simple { resource, code } = coded {
-                    current = Some((resource, vec![code], ch.to_string()));
+                    current = Some((resource, vec![code]));
                 }
             }
         }
         pen += advance;
     }
-    flush(page, current.take(), at);
+    flush(out, current.take(), at);
     pen
 }
 
@@ -932,9 +1160,18 @@ fn draw_coded(
 /// character land in two different overflow fonts in one document, and no page
 /// would say which was which.
 pub fn note(scene: &Scene, fonts: &mut Fonts<'_>) {
-    for node in &scene.nodes {
-        let Node::Text { text, font, .. } = node else {
-            continue;
+    note_nodes(&scene.nodes, fonts);
+}
+
+fn note_nodes(nodes: &[Node], fonts: &mut Fonts<'_>) {
+    for node in nodes {
+        let (text, font) = match node {
+            Node::Group { nodes, .. } => {
+                note_nodes(nodes, fonts);
+                continue;
+            }
+            Node::Text { text, font, .. } => (text, font),
+            _ => continue,
         };
         fonts.note(&TextRun {
             x: 0.0,

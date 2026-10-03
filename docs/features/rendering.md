@@ -365,12 +365,14 @@ empty text clip, a damaged image, and anything the renderer said while
 drawing a rasterised paint — comes through in the renderer's words as
 `SvgWarning::Render(RenderWarning)`.
 
-Two places the reader is short of the file, both pinned so that a reader
-which learns them fails a test and the paragraph can be updated:
-`tinker-pdf-svg` follows one `clip-path` per element, so it reads the inner
-clip of a nested pair and not their intersection; and it carries no clip on
-an image node and none from a `<g>` to what is under it, so it reads a
-clipped image unclipped. The file says both correctly.
+One place the reader is short of the file, pinned so that a reader which
+learns it fails a test and the paragraph can be updated: `tinker-pdf-svg`
+follows one `clip-path` per element, so it reads the inner clip of a nested
+pair and not their intersection. The file says it correctly. There were two
+until the reader made a `<g>`'s clip a group node of its own: a clipped image
+now reads back clipped, in page space, and
+`a_clipped_image_is_clipped_in_page_space` asserts the clip as well as the
+placement.
 
 **Anti-aliasing off.** `RenderOptions::antialias` is on by default; off, every
 pixel of every shape is wholly covered or not covered at all. It is one

@@ -198,15 +198,6 @@ pub enum Warning {
     /// paint with. The paint's own fallback stands, or `none` when it stated
     /// none — which is §13.2's answer and not an invention here.
     PaintServerUnresolved,
-    /// A non-unit `opacity` on something that draws more than once.
-    ///
-    /// §14.5 makes `opacity` a **group** operation: the subtree is composited
-    /// once and the result is faded. This build multiplies it into each
-    /// descendant's own fill and stroke alpha instead, which is *exact* for a
-    /// single shape painted one way and **too dark where two of them overlap**.
-    /// Reported only where it is observable — a lone filled shape at 60 % is
-    /// not a warning, because there is nothing wrong with it.
-    GroupOpacityFlattened,
     /// An at-rule in a `<style>` element — `@media`, `@import`, `@font-face`.
     /// Skipped by the CSS specification's own recovery, and named.
     AtRuleIgnored,
@@ -482,10 +473,43 @@ pub enum Node {
         font: TextStyle,
         /// How the glyphs are filled.
         fill: Paint,
-        /// `fill-opacity` times every `opacity` above it.
+        /// `fill-opacity`, and the run's own `opacity` where that was folded
+        /// in (see [`Node::Group`]).
         fill_opacity: f64,
         /// How the glyphs are outlined, if at all.
         stroke: Option<Box<Stroke>>,
+    },
+    /// §14.5's group: nodes composited **together**, and then faded and
+    /// clipped as one.
+    ///
+    /// # Why a node holds nodes, when nothing else here nests
+    ///
+    /// §14.5 makes `opacity` a property of a *rendering*: the subtree is drawn
+    /// into an offscreen image, and that image is composited once at the
+    /// stated alpha. Multiplying the alpha into every descendant is the same
+    /// picture only where nothing in the subtree overlaps anything else in it
+    /// — and a fill and its own stroke always overlap, so a flattened group is
+    /// too dark along every edge it has. A `clip-path` on a container is the
+    /// same shape of problem: §14.3.5 clips the *group's* rendering, and a
+    /// descendant with a clip of its own has no per-node spelling of the two.
+    ///
+    /// So paint order stays a list, and a group is a list inside it. Every
+    /// point under a group is still in the scene's own space — a group carries
+    /// no matrix, which is the rule `scene`'s header gives for the whole crate.
+    ///
+    /// A group is made only where it changes the picture. A subtree at full
+    /// opacity with no clip is its nodes, inline; and a group of **one** node
+    /// that paints once — a fill with no stroke, a stroke with no fill, a run
+    /// of text that is only filled — has its opacity folded into that node's
+    /// own alpha, because one paint composited at `a` is exactly one paint at
+    /// alpha `a`.
+    Group {
+        /// What the group holds, in paint order, in the scene's own space.
+        nodes: Vec<Node>,
+        /// §14.5's `opacity`, applied once to the composite, in `[0, 1]`.
+        opacity: f64,
+        /// §14.3's clip of the element that made the group, or `None`.
+        clip: Option<Clip>,
     },
     /// An `<image>`, carried **unresolved**.
     ///
