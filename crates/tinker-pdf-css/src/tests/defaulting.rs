@@ -195,6 +195,31 @@ fn unset_is_the_same_as_never_declaring_it_for_every_longhand() {
     assert_eq!(checked, 108, "every longhand, not a sample");
 }
 
+/// **`text-shadow` inherits without being asked to** (`css-text-decor-3` §4:
+/// *inherited: yes*), which `Property::inherited` and `Longhand::inherited`
+/// both say — a heading's shadow is its text's, through every `<em>` in it.
+/// `ComputedStyle::inherit_from` copied every other inherited property and not
+/// this one, so a child had its parent's shadow only when it said `inherit` or
+/// `unset`: the two statements of §7.2 disagreed, and the test above could not
+/// see it, since its parent declares no shadow. `box-shadow` is the control:
+/// *inherited: no*.
+#[test]
+fn text_shadow_inherits_and_box_shadow_does_not() {
+    let source = "div { text-shadow: 1px 2px red; box-shadow: 3px 4px blue }";
+    let style = child(source);
+    let unset = child(&format!("{source} p {{ text-shadow: unset }}"));
+    assert_eq!(
+        style.text_shadow.len(),
+        1,
+        "the parent's shadow is inherited"
+    );
+    assert_eq!(
+        style.text_shadow, unset.text_shadow,
+        "`text-shadow: unset` is the same as not declaring it"
+    );
+    assert!(style.box_shadow.is_empty(), "a box shadow is not inherited");
+}
+
 /// **`inherit` takes the parent's computed value, not its specified one.**
 ///
 /// The parent's `font-size` is `2em` against a `10px` root, so its specified

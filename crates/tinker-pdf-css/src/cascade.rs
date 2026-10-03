@@ -458,6 +458,7 @@ impl ComputedStyle {
         style.word_break = parent.word_break;
         style.border_collapse = parent.border_collapse;
         style.border_spacing = parent.border_spacing;
+        style.text_shadow = parent.text_shadow.clone();
         style
     }
 }
