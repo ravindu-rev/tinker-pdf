@@ -143,6 +143,8 @@ struct Totals {
     /// be sized from, and the pages past that cap.
     most_rules: usize,
     over_cap: usize,
+    /// Pages whose lattices' frames cross, so that none of those was read.
+    crossed: usize,
     /// The design's scores, the tree hidden: stated tables an inferred one
     /// was found over, of those the ones whose grid matched exactly, and the
     /// stated cells' characters placed in the same row and column, of all.
@@ -291,6 +293,13 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             if stated.is_empty() {
                 totals.extra += inferred.tables.len();
             }
+            if inferred
+                .warnings
+                .iter()
+                .any(|w| matches!(w, TableWarning::LatticesCross { .. }))
+            {
+                totals.crossed += 1;
+            }
             for table in &stated {
                 let (found, grid, placed, total, evidence) = score_by(table, &inferred.tables);
                 let class = usize::from(evidence == Some(TableEvidence::Aligned));
@@ -403,8 +412,8 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             t.ragged
         );
         println!(
-            "{:<14} most rules on one page {}, pages past MAX_TABLE_RULES {}",
-            "", t.most_rules, t.over_cap
+            "{:<14} most rules on one page {}, pages past MAX_TABLE_RULES {}, pages whose lattices cross {}",
+            "", t.most_rules, t.over_cap, t.crossed
         );
         println!(
             "{:<14} inferred, tree hidden: found {} of {} stated, grid {} of those, cells {}/{}; {} extra tables",

@@ -52,8 +52,12 @@
 //! **What is not a table.** A lattice of one cell is a box. One with text in
 //! fewer than two cells, or in fewer than one cell in [`LATTICE_TEXT_SHARE`],
 //! is a grid of empty boxes — a form — or a page of hatching. A lattice inside
-//! one cell of another is a nested table, refused by name
-//! ([`TableWarning::NestedLattice`]) with the outer one returned. A table whose
+//! the frame of another — in one of its cells, or in a cell merged from
+//! several — is a nested table, refused by name
+//! ([`TableWarning::NestedLattice`]) with the outer one returned; two whose
+//! frames overlap with neither inside the other have lines that pass each
+//! other without meeting, which no table draws, and neither is read
+//! ([`TableWarning::LatticesCross`]). So no character is in two tables. A table whose
 //! last rule lies in the page's foot band may continue overleaf
 //! ([`TableWarning::MayContinue`]); joining it to the next page is not done
 //! here. On a page whose structure tree states a table, the stated one is the
@@ -281,7 +285,8 @@ pub struct InferredTables {
     /// made of it.
     pub rules: Vec<TableRule>,
     /// Page-level warnings: the rules' ([`TableWarning::TooManyRules`],
-    /// [`TableWarning::ClipNotRectangular`]) and [`TableWarning::TreePresent`].
+    /// [`TableWarning::ClipNotRectangular`]), [`TableWarning::LatticesCross`]
+    /// and [`TableWarning::TreePresent`].
     pub warnings: Vec<TableWarning>,
 }
 
@@ -387,8 +392,8 @@ pub enum TableWarning {
     /// The table's last rule lies in the page's foot band, so it may continue
     /// on the next page, where it is a second table here.
     MayContinue,
-    /// A lattice inside one of this table's cells — a nested table — was not
-    /// read.
+    /// A lattice inside this table's frame — a nested table, in one of its
+    /// cells or in a cell merged from several — was not read.
     NestedLattice,
     /// The ruling of a lattice merges grid cells into a shape that is not a
     /// rectangle where a rule is missing, so no span can be read from it; the
@@ -407,6 +412,14 @@ pub enum TableWarning {
     /// answer and nothing was inferred — or, with
     /// [`TableOptions::hide_structure`], the inference is a measurement.
     TreePresent,
+    /// Lattices whose frames overlap with neither inside the other: their
+    /// lines pass each other without meeting, which no table draws, and which
+    /// of them owns the overlap is not a question the lines answer. None of
+    /// them was read.
+    LatticesCross {
+        /// How many.
+        lattices: usize,
+    },
 }
 
 impl Page {
@@ -677,7 +690,7 @@ pub(crate) fn enclosing<'a>(chars: impl Iterator<Item = &'a TextChar>) -> Option
 /// Infers the ruled tables of an observed page, whose crop box is `frame`.
 pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> InferredTables {
     let read = rules_of(observed);
-    let warnings = read.warnings.clone();
+    let mut warnings = read.warnings.clone();
     let page = &observed.text;
     let flat: Vec<&TextChar> = page
         .blocks
@@ -702,38 +715,55 @@ pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> 
         .collect();
     let lines = lattice_lines(&read.rules, em);
     let mut lattices = components(&lines, em);
-    // A lattice lying inside one cell of another is a table in a cell, which
-    // the first delivery does not read: the outer table is returned and
-    // says so.
+    // Two lattices are two components: no line of one meets a line of the
+    // other. So where their frames overlap, one lies in a cell of the other —
+    // a table in a cell, merged or not, which the first delivery does not
+    // read: the outer table is returned and says so — or their lines pass
+    // each other without meeting, which is hatching and no table. What is
+    // left has frames that do not overlap, so no character is in two tables.
+    // Every pair is one comparison of two rectangles: at the rule cap, a few
+    // million.
+    let frames: Vec<(f64, f64, f64, f64)> = lattices.iter().map(Lattice::bounds).collect();
     let mut nested = vec![false; lattices.len()];
-    for (inner, a) in lattices.iter().enumerate() {
-        for (outer, b) in lattices.iter().enumerate() {
-            if inner != outer && b.holds_in_a_cell(a) {
-                if let Some(flag) = nested.get_mut(inner) {
-                    *flag = true;
-                }
-            }
-        }
-    }
+    let mut crossed = vec![false; lattices.len()];
     let mut refused_inside: Vec<usize> = vec![0; lattices.len()];
-    for (inner, a) in lattices.iter().enumerate() {
-        if nested.get(inner).copied().unwrap_or(false) {
-            for (outer, b) in lattices.iter().enumerate() {
-                if inner != outer && b.holds_in_a_cell(a) {
-                    if let Some(count) = refused_inside.get_mut(outer) {
-                        *count += 1;
+    for (a, fa) in frames.iter().enumerate() {
+        for (b, fb) in frames.iter().enumerate().skip(a + 1) {
+            let (inner, outer) = if !overlaps(*fa, *fb) {
+                continue;
+            } else if contains(*fa, *fb) {
+                (b, a)
+            } else if contains(*fb, *fa) {
+                (a, b)
+            } else {
+                for at in [a, b] {
+                    if let Some(flag) = crossed.get_mut(at) {
+                        *flag = true;
                     }
                 }
+                continue;
+            };
+            if let Some(flag) = nested.get_mut(inner) {
+                *flag = true;
+            }
+            if let Some(count) = refused_inside.get_mut(outer) {
+                *count += 1;
             }
         }
     }
+    let crossing = crossed.iter().filter(|c| **c).count();
+    if crossing > 0 {
+        warnings.push(TableWarning::LatticesCross { lattices: crossing });
+    }
+    let centres = Centres::of(&flat);
     let mut tables = Vec::new();
     let bands = foot_band(frame);
     for (at, lattice) in lattices.drain(..).enumerate() {
-        if nested.get(at).copied().unwrap_or(false) {
+        if nested.get(at).copied().unwrap_or(false) || crossed.get(at).copied().unwrap_or(false) {
             continue;
         }
-        let Some(mut table) = lattice.table(&flat, &line_of, &observed.fills) else {
+        let within = centres.within(lattice.bounds());
+        let Some(mut table) = lattice.table(&within, &flat, &line_of, &observed.fills) else {
             continue;
         };
         if refused_inside.get(at).copied().unwrap_or(0) > 0 {
@@ -761,6 +791,65 @@ pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> 
         tables,
         rules: read.rules,
         warnings,
+    }
+}
+
+/// Whether two `(x0, y0, x1, y1)` rectangles share any interior.
+fn overlaps(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
+}
+
+/// Whether rectangle `outer` holds rectangle `inner`.
+fn contains(outer: (f64, f64, f64, f64), inner: (f64, f64, f64, f64)) -> bool {
+    inner.0 >= outer.0 && inner.2 <= outer.2 && inner.1 >= outer.1 && inner.3 <= outer.3
+}
+
+/// The page's characters by the centres of their boxes, along each axis, so a
+/// lattice reads only the characters within its frame: of the two runs a
+/// binary search finds — those within its columns' span, and those within
+/// its rows' — the shorter. The frames read do not overlap, so a page of a
+/// thousand small tables is not a thousand walks over every character.
+struct Centres {
+    by_x: Vec<(f64, usize)>,
+    by_y: Vec<(f64, usize)>,
+}
+
+impl Centres {
+    fn of(flat: &[&TextChar]) -> Centres {
+        let mut by_x = Vec::with_capacity(flat.len());
+        let mut by_y = Vec::with_capacity(flat.len());
+        for (at, c) in flat.iter().enumerate() {
+            if !c.quad.is_finite() {
+                continue;
+            }
+            let (x0, y0, x1, y1) = c.quad.bounds();
+            by_x.push(((x0 + x1) / 2.0, at));
+            by_y.push(((y0 + y1) / 2.0, at));
+        }
+        by_x.sort_by(|a, b| a.0.total_cmp(&b.0));
+        by_y.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Centres { by_x, by_y }
+    }
+
+    /// The characters whose centres lie strictly inside `(x0, y0, x1, y1)`
+    /// along one axis — the axis whose run is shorter; [`Lattice::slot`]
+    /// decides the other.
+    fn within(&self, (x0, y0, x1, y1): (f64, f64, f64, f64)) -> Vec<usize> {
+        let run = |axis: &[(f64, usize)], lo: f64, hi: f64| -> std::ops::Range<usize> {
+            let from = axis.partition_point(|(c, _)| *c <= lo);
+            from..axis.partition_point(|(c, _)| *c < hi).max(from)
+        };
+        let (across, down) = (run(&self.by_x, x0, x1), run(&self.by_y, y0, y1));
+        let (axis, range) = if across.len() <= down.len() {
+            (&self.by_x, across)
+        } else {
+            (&self.by_y, down)
+        };
+        axis.get(range)
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, at)| *at)
+            .collect()
     }
 }
 
@@ -988,20 +1077,6 @@ impl Lattice {
         )
     }
 
-    /// Whether `other` lies wholly inside one of this lattice's cells.
-    fn holds_in_a_cell(&self, other: &Lattice) -> bool {
-        let (x0, y0, x1, y1) = other.bounds();
-        let (ox0, oy0, ox1, oy1) = self.bounds();
-        if !(x0 > ox0 && x1 < ox1 && y0 > oy0 && y1 < oy1) {
-            return false;
-        }
-        let column = self.xs.partition_point(|x| *x <= x0);
-        let row = self.ys.partition_point(|y| *y >= y1);
-        let right = self.xs.get(column).copied().unwrap_or(f64::NEG_INFINITY);
-        let bottom = self.ys.get(row).copied().unwrap_or(f64::INFINITY);
-        x1 <= right && y0 >= bottom
-    }
-
     /// The row and column whose grid cell holds `(x, y)`, or `None` outside.
     fn slot(&self, x: f64, y: f64) -> Option<(usize, usize)> {
         let (x0, y0, x1, y1) = self.bounds();
@@ -1052,6 +1127,7 @@ impl Lattice {
     /// of the table's characters are on right-to-left lines.
     fn table(
         &self,
+        within: &[usize],
         flat: &[&TextChar],
         line_of: &[LineOf],
         fills: &[Fill],
@@ -1062,7 +1138,8 @@ impl Lattice {
         let mut crossing = 0usize;
         let mut rtl = 0usize;
         let interior = self.xs.get(1..columns).unwrap_or_default();
-        for (at, c) in flat.iter().enumerate() {
+        for &at in within {
+            let Some(c) = flat.get(at) else { continue };
             if !c.quad.is_finite() {
                 continue;
             }

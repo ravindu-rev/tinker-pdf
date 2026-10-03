@@ -842,6 +842,149 @@ fn nested_continued_and_crossed_tables_are_named() {
         .any(|w| matches!(w, TableWarning::TextCrossesRule { chars } if *chars > 0)));
 }
 
+/// Every stream position the page's tables hold, each once, or a panic
+/// naming the one held twice.
+fn held_once(tables: &[InferredTable]) -> usize {
+    let mut seen = std::collections::BTreeSet::new();
+    for table in tables {
+        for at in &table.permutation {
+            assert!(seen.insert(*at), "character {at} is in two tables");
+        }
+    }
+    seen.len()
+}
+
+/// **A table in a merged cell is nested too, and no character is in two
+/// tables.** A grid of two rows whose second row is one cell across both
+/// columns — no rule at x = 222 under y = 560 — holds a small grid of its own
+/// that straddles where that rule would be. It is in no one grid cell of the
+/// outer table, which is how nesting was first asked, and read that way both
+/// tables claimed its four letters; it lies inside the outer frame, which is
+/// how nesting is asked now.
+#[test]
+fn a_table_in_a_merged_cell_is_nested_and_held_once() {
+    let mut content = String::from("0.5 w\n");
+    for y in [600.0, 560.0, 480.0] {
+        content.push_str(&format!("72 {y} m 372 {y} l S\n"));
+    }
+    content.push_str("72 480 m 72 600 l S 372 480 m 372 600 l S 222 560 m 222 600 l S\n");
+    for y in [545.0, 525.0, 505.0] {
+        content.push_str(&format!("150 {y} m 300 {y} l S\n"));
+    }
+    for x in [150.0, 225.0, 300.0] {
+        content.push_str(&format!("{x} 505 m {x} 545 l S\n"));
+    }
+    for (x, y, text) in [
+        (80.0, 575.0, "a"),
+        (230.0, 575.0, "b"),
+        (155.0, 530.0, "c"),
+        (230.0, 530.0, "d"),
+        (155.0, 510.0, "e"),
+        (230.0, 510.0, "f"),
+    ] {
+        content.push_str(&format!("BT /F1 10 Tf {x} {y} Td ({text}) Tj ET\n"));
+    }
+    let found = drawn(&content)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    let shapes: Vec<(usize, usize)> = found.tables.iter().map(|t| (t.rows, t.columns)).collect();
+    assert_eq!(shapes, [(2, 2)]);
+    let table = &found.tables[0];
+    assert!(
+        table.warnings.contains(&TableWarning::NestedLattice),
+        "{:?}",
+        table.warnings
+    );
+    let merged = table
+        .cells
+        .iter()
+        .find(|c| c.row == 1)
+        .expect("the merged row");
+    assert_eq!(merged.col_span, 2);
+    let mut letters: Vec<char> = merged.text.chars().filter(|c| !c.is_whitespace()).collect();
+    letters.sort_unstable();
+    assert_eq!(letters, ['c', 'd', 'e', 'f']);
+    assert_eq!(held_once(&found.tables), 6);
+}
+
+/// **Lattices that pass each other are no table.** Two small grids, each
+/// connected, whose frames overlap with neither inside the other — one's
+/// verticals run past the other's corner without meeting a rule of it —
+/// would each claim what lies in the overlap; neither is read, and the page
+/// says so.
+#[test]
+fn lattices_whose_frames_cross_are_no_table() {
+    let content = concat!(
+        "0.5 w\n",
+        // One grid: a row of two cells, 72 to 272 across, 560 to 600 down.
+        "72 600 m 272 600 l S 72 560 m 272 560 l S\n",
+        "72 560 m 72 600 l S 172 560 m 172 600 l S 272 560 m 272 600 l S\n",
+        // The other: a row of two cells, 250 to 400 across, 540 to 580
+        // down — its leftmost vertical drawn under its frame, its top rule
+        // starting right of the first grid's.
+        "250 540 m 400 540 l S 300 580 m 400 580 l S\n",
+        "250 500 m 250 540 l S 300 520 m 300 590 l S 400 520 m 400 590 l S\n",
+        "BT /F1 10 Tf 80 575 Td (a) Tj ET BT /F1 10 Tf 180 575 Td (b) Tj ET\n",
+        "BT /F1 10 Tf 260 552 Td (c) Tj ET BT /F1 10 Tf 320 552 Td (d) Tj ET\n",
+    );
+    let found = drawn(content)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert!(found.tables.is_empty(), "{:?}", found.tables);
+    assert_eq!(
+        found.warnings,
+        [TableWarning::LatticesCross { lattices: 2 }]
+    );
+
+    // Either grid alone is a table.
+    let alone: String = content
+        .lines()
+        .filter(|l| !l.starts_with("250") && !l.contains("(c)"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let found = drawn(&alone)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(found.tables.len(), 1);
+    assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+}
+
+/// **Nine hundred small tables are read, each character once.** Thirty rows
+/// of thirty grids of two cells, a letter in each: every grid a table, and
+/// each reading only the characters within its own frame.
+#[test]
+fn a_page_of_small_tables_reads_each_one() {
+    let mut content = String::from("0.2 w\n");
+    for row in 0..30 {
+        for column in 0..30 {
+            let (x, y) = (8.0 + column as f64 * 20.0, 20.0 + row as f64 * 25.0);
+            let (right, top) = (x + 16.0, y + 8.0);
+            content.push_str(&format!(
+                "{x} {y} m {right} {y} l S {x} {top} m {right} {top} l S\n"
+            ));
+            for v in [x, x + 8.0, right] {
+                content.push_str(&format!("{v} {y} m {v} {top} l S\n"));
+            }
+            for cell in 0..2 {
+                content.push_str(&format!(
+                    "BT /F1 4 Tf {} {} Td (x) Tj ET\n",
+                    x + 2.0 + cell as f64 * 8.0,
+                    y + 2.5
+                ));
+            }
+        }
+    }
+    let doc = drawn(&content);
+    let page = doc.page(0).expect("a page");
+    let found = page.inferred_tables(&TableOptions::default());
+    assert_eq!(found.tables.len(), 900);
+    assert!(found.tables.iter().all(|t| t.cells.len() == 2));
+    assert_eq!(held_once(&found.tables), 1_800);
+}
+
 /// **A page of hatching is not a table, and is not a square's worth of
 /// cells.** Two hundred lines each way, one word in one cell: a lattice of
 /// nearly forty thousand cells that holds text in one, refused before a cell

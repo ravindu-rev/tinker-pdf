@@ -43,7 +43,7 @@ adjudicator.
   here, each named `TableWarning::MayContinue` when its last rule is the
   page's bottom margin. Joining them is a document-level question the sibling
   design's cross-page pass would own, and it is not designed here.
-- **Nested tables.** A lattice inside a cell is refused by name
+- **Nested tables.** A lattice inside another's frame is refused by name
   (`TableWarning::NestedLattice`) and the outer table is returned. Real
   documents have them; the first delivery does not guess at them.
 - **Writing a `/Table`.** No inferred grid enters a structure tree, a written
@@ -355,8 +355,11 @@ every character's stream position. Refused rather than guessed: a lattice of
 one cell (a box), one with text in fewer than two cells or fewer than one in
 `LATTICE_TEXT_SHARE` (four) — a form, or hatching, checked before any cell is
 made, so a lattice of forty thousand cells around one word costs nothing —
-and a lattice inside another's cell (`NestedLattice` on the outer). A table
-whose last rule lies in the foot band is `MayContinue`. On a page whose tree
+and a lattice inside another's frame, in one of its cells or in one merged
+from several (`NestedLattice` on the outer); two whose frames overlap with
+neither inside the other are both refused (`LatticesCross`), so no character
+is in two tables, and each lattice reads only the characters within its frame.
+A table whose last rule lies in the foot band is `MayContinue`. On a page whose tree
 states a table, the stated one is the answer (`TreePresent`), and
 `Page::tables(TableSource)` labels which it gave. **Two departures**:
 `RULE_MIN_EMS` is one em, not two, because a one-line row with CSS's ordinary
