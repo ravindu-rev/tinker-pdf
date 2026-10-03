@@ -130,6 +130,58 @@ fn the_list_style_shorthand_sets_both_longhands_and_refuses_an_image() {
     assert!(declared("ul { list-style: disc square }").is_empty());
 }
 
+/// **A type and a `none` in the shorthand are the type and no image**
+/// (`css-lists-3` §3.4: *"a value of `none` in the shorthand must be applied to
+/// whichever of the two properties aren't otherwise set by the shorthand"*),
+/// whichever comes first — `disc outside none` is a common reset. Two `none`s
+/// set both, so a type beside them is the grammar's second type and drops the
+/// declaration.
+#[test]
+fn a_type_and_none_in_the_list_style_shorthand_are_the_type_and_no_image() {
+    let both = |kind, position| {
+        vec![
+            Declaration::Known(Property::ListStyleType(kind)),
+            Declaration::Known(Property::ListStylePosition(position)),
+        ]
+    };
+    for (source, kind, position) in [
+        (
+            "ul { list-style: disc outside none }",
+            ListStyleType::Disc,
+            ListStylePosition::Outside,
+        ),
+        (
+            "ul { list-style: square outside none }",
+            ListStyleType::Square,
+            ListStylePosition::Outside,
+        ),
+        (
+            "ul { list-style: square none }",
+            ListStyleType::Square,
+            ListStylePosition::Outside,
+        ),
+        (
+            "ul { list-style: none square }",
+            ListStyleType::Square,
+            ListStylePosition::Outside,
+        ),
+        (
+            "ul { list-style: none inside lower-roman }",
+            ListStyleType::LowerRoman,
+            ListStylePosition::Inside,
+        ),
+        (
+            "ul { list-style: none none }",
+            ListStyleType::None,
+            ListStylePosition::Outside,
+        ),
+    ] {
+        assert_eq!(declared(source), both(kind, position), "{source}");
+    }
+    assert!(declared("ul { list-style: none square none }").is_empty());
+    assert!(declared("ul { list-style: none none none }").is_empty());
+}
+
 // ---- the walk --------------------------------------------------------------------
 
 /// **Sibling lists each start again**, a nested list nests, and an element

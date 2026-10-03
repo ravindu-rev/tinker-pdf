@@ -3489,6 +3489,10 @@ fn implemented(
             {
                 Implemented::BadValue
             }
+            // §5.4's initial value, which is what `None` is.
+            (true, Some(value)) if is_current_colour(value) => {
+                Implemented::Known(vec![Property::OutlineColor(None)])
+            }
             _ => colour_property(one, single, |c| Property::OutlineColor(Some(c))),
         },
         "outline-offset" => match (single, one.map(length_outcome)) {
@@ -4889,14 +4893,16 @@ fn outline_style_named(word: &str) -> Option<OutlineStyle> {
 
 /// `outline`, `css-ui-4` §5.1: `<'outline-color'> || <'outline-style'> ||
 /// <'outline-width'>`, the omitted ones reset to their initial values, as
-/// `border`'s are.
+/// `border`'s are. `currentColor` written is the initial colour, the same
+/// value as one omitted.
 fn outline_shorthand(significant: &[&ComponentValue]) -> Implemented {
     if significant.is_empty() || significant.len() > 3 {
         return Implemented::Malformed;
     }
     let mut width: Option<Len> = None;
     let mut style: Option<OutlineStyle> = None;
-    let mut paint: Option<Color> = None;
+    // `Some(None)` is `currentColor` written; `None` is no colour written.
+    let mut paint: Option<Option<Color>> = None;
     for value in significant {
         if style.is_none() {
             if let ComponentValue::Token(Token::Ident(word)) = value {
@@ -4913,8 +4919,12 @@ fn outline_shorthand(significant: &[&ComponentValue]) -> Implemented {
             }
         }
         if paint.is_none() {
+            if is_current_colour(value) {
+                paint = Some(None);
+                continue;
+            }
             if let Some(found) = color(value) {
-                paint = Some(found);
+                paint = Some(Some(found));
                 continue;
             }
         }
@@ -4923,7 +4933,7 @@ fn outline_shorthand(significant: &[&ComponentValue]) -> Implemented {
     Implemented::Known(vec![
         Property::OutlineWidth(width.unwrap_or(Len::Px(3.0))),
         Property::OutlineStyle(style.unwrap_or(OutlineStyle::Border(BorderStyle::None))),
-        Property::OutlineColor(paint),
+        Property::OutlineColor(paint.flatten()),
     ])
 }
 
@@ -5000,10 +5010,12 @@ fn list_style_shorthand(significant: &[&ComponentValue]) -> Implemented {
         return Implemented::BadValue;
     }
     // §3.4: one `none` sets whichever of the type and the image is not
-    // otherwise given — the image's initial value is `none` already, so it
-    // is the type. Two set both; three is not the grammar.
+    // otherwise given. Beside a type it is the image's, whose initial value is
+    // `none` already, so `disc outside none` is `disc` and no image; alone it
+    // is the type. Two set both, so a type beside them is a second type, and
+    // three is not the grammar.
     match (nones, kind) {
-        (0, _) => {}
+        (0, _) | (1, Some(_)) => {}
         (1, None) | (2, None) => kind = Some(ListStyleType::None),
         _ => return Implemented::Malformed,
     }
@@ -5684,6 +5696,12 @@ fn from_rgb(packed: u32) -> Color {
 }
 
 /// A `<color>`: a name, a hex, `rgb()`/`rgba()` or `hsl()`/`hsla()`.
+/// Whether `value` is the `currentColor` keyword, which [`color`] does not
+/// read because most colour properties here have no value for it.
+fn is_current_colour(value: &ComponentValue) -> bool {
+    matches!(value, ComponentValue::Token(Token::Ident(word)) if word.eq_ignore_ascii_case("currentcolor"))
+}
+
 fn color(value: &ComponentValue) -> Option<Color> {
     match value {
         ComponentValue::Token(Token::Ident(word)) => {

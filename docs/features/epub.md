@@ -156,7 +156,8 @@ the fragment, the whole box's height being unknown on the page that draws its
 top. **`outline`** (`css-ui-4` §5, its four longhands and the shorthand) is
 four bands `outline-offset` out from the border edge, drawn after the text,
 moving nothing; it is rectangular around a rounded box, which §5 leaves to
-the user agent, and `outline-color: invert` is refused by value.
+the user agent, `outline-color: invert` is refused by value, and
+`currentColor` is the initial colour whether written or omitted.
 **`overflow`** (`css-overflow-3` §3.1: `overflow-x`, `overflow-y` and the
 shorthand, `overlay` read as §3.1's alias of `auto`) clips a box's content to
 its padding box — on §5.3's padding-edge curve where the box has rounded

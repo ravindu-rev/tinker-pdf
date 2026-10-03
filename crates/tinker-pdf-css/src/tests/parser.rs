@@ -2053,6 +2053,32 @@ fn the_outline_shorthand_is_its_three_longhands() {
     );
 }
 
+/// **`currentColor` is `outline-color`'s initial value, written out**
+/// (`css-ui-4` §5.4), so it is the same value as a colour omitted from the
+/// shorthand, in the shorthand and in the longhand alike.
+#[test]
+fn current_color_in_an_outline_is_its_initial_colour() {
+    use crate::property::OutlineStyle;
+    let solid = |width: f64| {
+        vec![
+            Property::OutlineWidth(Len::Px(width)),
+            Property::OutlineStyle(OutlineStyle::Border(BorderStyle::Solid)),
+            Property::OutlineColor(None),
+        ]
+    };
+    assert_eq!(
+        known("p { outline: medium solid currentColor }"),
+        solid(3.0)
+    );
+    assert_eq!(known("p { outline: currentcolor 2px solid }"), solid(2.0));
+    assert_eq!(known("p { outline: medium solid }"), solid(3.0));
+    assert_eq!(
+        known("p { outline-color: currentColor }"),
+        vec![Property::OutlineColor(None)]
+    );
+    assert!(known("p { outline: solid currentColor currentColor }").is_empty());
+}
+
 /// **A shadow is two to four lengths in a row, a colour and `inset`, in any
 /// order**, a list of them comma-separated (`css-backgrounds-3` §7.1); a text
 /// shadow has no spread and no `inset` (`css-text-decor-3` §4). An omitted
