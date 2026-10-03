@@ -339,3 +339,41 @@ coordinates and weight drawn; the same grid drawn as twelve cells' CSS-style
 borders yields forty-eight rules, four a cell, centred on each border
 rectangle; a rectangular clip cuts a rule and `Q` lifts it; a triangular
 clip refuses the rule and names it; the cap plus one rules reads none.
+
+**Milestone 3 (3 October 2026): ruled tables.** `Page::inferred_tables`
+(opt-in, `TableEvidence::Ruled`, never a structure element) merges rules
+along one axis within `LATTICE_MERGE_EMS` (half an em) into one lattice line
+— the halves of a collapsed CSS border, or the two borders of cells with the
+default 2 px spacing between them — and collinear pieces whose gaps are no
+wider into one segment; joins lines that reach each other to within the same
+distance; and reads each maximal joined set as a lattice whose lines bound
+the cells. Each character goes to the cell holding its box's centre, so a
+text-device line across two cells is split at the rule, and a glyph a rule
+runs through the middle of is counted (`TextCrossesRule`). Rows read top to
+bottom, cells left to right, a cell's lines top first; the permutation gives
+every character's stream position. Refused rather than guessed: a lattice of
+one cell (a box), one with text in fewer than two cells or fewer than one in
+`LATTICE_TEXT_SHARE` (four) — a form, or hatching, checked before any cell is
+made, so a lattice of forty thousand cells around one word costs nothing —
+and a lattice inside another's cell (`NestedLattice` on the outer). A table
+whose last rule lies in the foot band is `MayContinue`. On a page whose tree
+states a table, the stated one is the answer (`TreePresent`), and
+`Page::tables(TableSource)` labels which it gave. **Two departures**:
+`RULE_MIN_EMS` is one em, not two, because a one-line row with CSS's ordinary
+padding is about 1.75 em tall; and the design's "at least a 2 × 2 lattice"
+is read as at least two cells, since one cell is a framed paragraph.
+
+Measured, first-party (`crates/tinker-pdf/tests/tables.rs`): an untagged
+ruled grid of three rows by four columns drawn a column at a time is read row
+by row, every cell its own text; tagged row by row, with the tree hidden, it
+is found over the stated table with the same grid and 48 of 48 characters in
+their stated cells; an EPUB table of five rows by three columns with every
+cell bordered is recovered exactly in both of CSS 2.2 §17.6's border models,
+63 of 63 characters each, against the tree the EPUB writer made from the
+XHTML; and **no table is inferred on any of the 53 committed pages** — every
+`testdata` page and every book page whose tree states none — nor in a framed
+paragraph, a form of sixteen boxes and two labels, or a page of hatching. The
+committed books' five stated tables are not ruled, so they wait for aligned
+tables. The census prints found, grid agreement, cell assignment and extra
+tables per corpus with the tree hidden; **those corpus scores, and the
+veraPDF zero, are owed**.

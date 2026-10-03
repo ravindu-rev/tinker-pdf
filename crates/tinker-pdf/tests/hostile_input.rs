@@ -297,6 +297,11 @@ fn exercise(bytes: Vec<u8>) {
             for table in page.stated_tables() {
                 let _ = (table.rows, table.columns, table.cells.len());
             }
+            // And the inferred ones: a lattice of rules the file drew.
+            let inferred = page.inferred_tables(&tinker_pdf::TableOptions {
+                hide_structure: true,
+            });
+            let _ = (inferred.tables.len(), inferred.rules.len());
         }
 
         // Image extraction describes every image dictionary the page reaches

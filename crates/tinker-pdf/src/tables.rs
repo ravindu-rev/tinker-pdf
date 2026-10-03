@@ -32,6 +32,34 @@
 //! ([`TableWarning::ClipNotRectangular`]); a page that draws more than
 //! [`MAX_TABLE_RULES`] has none read ([`TableWarning::TooManyRules`]).
 //!
+//! # Inferred tables
+//!
+//! [`crate::Page::inferred_tables`] — opt-in, never the default, and never a
+//! structure element — builds tables from the page's rules. Rules along one
+//! axis within [`LATTICE_MERGE_EMS`] of each other are one lattice line (the
+//! two halves of a collapsed CSS border, the two borders of cells with spacing
+//! between), and collinear pieces whose gaps are no wider are one segment; a
+//! segment shorter than [`RULE_MIN_EMS`] is not a rule. A horizontal and a
+//! vertical line meet when each reaches the other to within the same
+//! distance, and a lattice is a maximal set of lines joined by meetings. Its
+//! row lines and column lines bound the cells; every character goes to the
+//! cell holding the centre of its box, so a line the text device joined across
+//! two cells is split at the rule, and a glyph straddling a rule is counted
+//! ([`TableWarning::TextCrossesRule`]). Rows are read top to bottom and cells
+//! left to right, and [`InferredTable::permutation`] gives every character's
+//! stream position, so the caller can undo the table character for character.
+//!
+//! **What is not a table.** A lattice of one cell is a box. One with text in
+//! fewer than two cells, or in fewer than one cell in [`LATTICE_TEXT_SHARE`],
+//! is a grid of empty boxes — a form — or a page of hatching. A lattice inside
+//! one cell of another is a nested table, refused by name
+//! ([`TableWarning::NestedLattice`]) with the outer one returned. A table whose
+//! last rule lies in the page's foot band may continue overleaf
+//! ([`TableWarning::MayContinue`]); joining it to the next page is not done
+//! here. On a page whose structure tree states a table, the stated one is the
+//! answer ([`TableWarning::TreePresent`]): a guess is never preferred to a
+//! statement.
+//!
 //! # Every question is bounded
 //!
 //! The spans are the file's, so a cell may claim four billion columns. A
@@ -40,6 +68,8 @@
 //! clamp named. Placement asks of a column only where it is next free, which a
 //! segment tree over the columns answers in a logarithm, so a table whose
 //! every cell spans every row is a sort and not a square.
+
+use std::collections::BTreeMap;
 
 use tinker_pdf_content::{Quad, TextChar};
 use tinker_pdf_cos::{ObjRef, TableScope};
@@ -77,6 +107,31 @@ use crate::Page;
 /// and this number is owed a look against it.
 pub const MAX_TABLE_RULES: usize = 1 << 14;
 
+/// How close two rules along one axis may be, and how near a rule's end may
+/// come to another rule, and still be one lattice line or a meeting, in ems of
+/// the page's median text size.
+///
+/// The two borders of adjacent cells with CSS's default `border-spacing`
+/// stand 2.25 pt apart at twelve points, and a separated border stops that
+/// short of its neighbour; half an em takes both, and a cell is never
+/// narrower than half an em of text and its padding.
+pub const LATTICE_MERGE_EMS: f64 = 0.5;
+
+/// The shortest lattice segment, in ems, after collinear pieces are merged.
+///
+/// **One, not the design's two**: a single-line row with CSS's ordinary
+/// padding is about one and three quarter ems tall, so at two a one-row
+/// table's verticals — and every row's, before they are merged — were not
+/// rules. An underline is long and has no vertical to meet, so it is not a
+/// table at any length.
+pub const RULE_MIN_EMS: f64 = 1.0;
+
+/// A lattice whose cells hold text in fewer than one in this many is not a
+/// table: a form's empty boxes, or a page of hatching. It also bounds what is
+/// made: cells are made only for a lattice that passes, so at most this
+/// multiple of the page's characters.
+pub const LATTICE_TEXT_SHARE: usize = 4;
+
 /// A straight, axis-aligned stretch of ink a table could be ruled with.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TableRule {
@@ -92,6 +147,101 @@ pub struct TableRule {
     /// Its weight, in points: a stroke's width, or a filled rectangle's
     /// thinner dimension.
     pub width: f64,
+}
+
+/// Which tables a caller asks [`crate::Page::tables`] for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TableSource {
+    /// The tables the structure tree states: [`crate::Page::stated_tables`].
+    #[default]
+    Stated,
+    /// Tables inferred from what the page draws, labelled as such:
+    /// [`crate::Page::inferred_tables`].
+    Inferred,
+}
+
+/// A page's tables, labelled by where they came from.
+#[derive(Clone, Debug)]
+pub enum PageTables {
+    /// What the structure tree states.
+    Stated(Vec<StatedTable>),
+    /// What this engine inferred from the page's geometry.
+    Inferred(InferredTables),
+}
+
+/// How [`crate::Page::inferred_tables`] reads the page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TableOptions {
+    /// Infer even on a page whose structure tree states a table.
+    ///
+    /// For **measuring** the inference against the tables it hid; the answer
+    /// carries [`TableWarning::TreePresent`].
+    pub hide_structure: bool,
+}
+
+/// What a table was inferred from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TableEvidence {
+    /// A lattice of drawn rules.
+    Ruled,
+}
+
+/// One cell of an [`InferredTable`].
+#[derive(Clone, Debug)]
+pub struct InferredCell {
+    /// The row it starts in, from the top, from 0.
+    pub row: usize,
+    /// The column it starts in, in reading order, from 0.
+    pub column: usize,
+    /// How many rows it spans.
+    pub row_span: usize,
+    /// How many columns it spans.
+    pub col_span: usize,
+    /// Its text, in the order its characters are read.
+    pub text: String,
+    /// Its characters, taken unchanged from the page the table was inferred
+    /// over.
+    pub chars: Vec<TextChar>,
+    /// The cell's rectangle, between the lattice lines that bound it.
+    pub quad: Quad,
+}
+
+/// A table this engine **inferred** from what a page draws.
+///
+/// Not the file's statement of a table — see the module documentation — and
+/// carrying its evidence and its undo.
+#[derive(Clone, Debug)]
+pub struct InferredTable {
+    /// How many rows.
+    pub rows: usize,
+    /// How many columns.
+    pub columns: usize,
+    /// The cells, row by row in reading order.
+    pub cells: Vec<InferredCell>,
+    /// The rectangle the lattice's outer lines bound.
+    pub bounds: Quad,
+    /// What the table was built from.
+    pub evidence: TableEvidence,
+    /// For each character in the table's order, its position in the page's
+    /// characters in stream order — blocks, then lines, then characters.
+    pub permutation: Vec<usize>,
+    /// What building it had to tolerate.
+    pub warnings: Vec<TableWarning>,
+}
+
+/// A page's inferred tables, the rules they were built from, and what reading
+/// the page had to tolerate.
+#[derive(Clone, Debug, Default)]
+pub struct InferredTables {
+    /// The tables, top to bottom.
+    pub tables: Vec<InferredTable>,
+    /// Every rule the page draws: the evidence, whether or not a table was
+    /// made of it.
+    pub rules: Vec<TableRule>,
+    /// Page-level warnings: the rules' ([`TableWarning::TooManyRules`],
+    /// [`TableWarning::ClipNotRectangular`]) and [`TableWarning::TreePresent`].
+    pub warnings: Vec<TableWarning>,
 }
 
 /// A page's rules and what reading them had to tolerate.
@@ -187,6 +337,22 @@ pub enum TableWarning {
         /// How many.
         rules: usize,
     },
+    /// Glyphs whose boxes straddle an interior rule of the table: each was
+    /// put in the cell holding its centre.
+    TextCrossesRule {
+        /// How many.
+        chars: usize,
+    },
+    /// The table's last rule lies in the page's foot band, so it may continue
+    /// on the next page, where it is a second table here.
+    MayContinue,
+    /// A lattice inside one of this table's cells — a nested table — was not
+    /// read.
+    NestedLattice,
+    /// The page's structure tree states a table, so the stated one is the
+    /// answer and nothing was inferred — or, with
+    /// [`TableOptions::hide_structure`], the inference is a measurement.
+    TreePresent,
 }
 
 impl Page {
@@ -195,6 +361,46 @@ impl Page {
     #[must_use]
     pub fn table_rules(&self) -> TableRules {
         rules_of(&Observed::read(self, false))
+    }
+
+    /// The page's tables from `source`, labelled by where they came from.
+    ///
+    /// [`TableSource::Inferred`] on a page whose structure tree states a table
+    /// answers with the stated ones: a guess is never preferred to a
+    /// statement.
+    #[must_use]
+    pub fn tables(&self, source: TableSource) -> PageTables {
+        let stated = self.stated_tables();
+        match source {
+            TableSource::Stated => PageTables::Stated(stated),
+            TableSource::Inferred if !stated.is_empty() => PageTables::Stated(stated),
+            TableSource::Inferred => {
+                PageTables::Inferred(self.inferred_tables(&TableOptions::default()))
+            }
+        }
+    }
+
+    /// Tables inferred from what this page draws, labelled as such.
+    ///
+    /// Opt-in and never the default; see the module documentation. On a page
+    /// whose structure tree states a table it infers nothing and says so
+    /// ([`TableWarning::TreePresent`]) unless
+    /// [`TableOptions::hide_structure`] is set.
+    #[must_use]
+    pub fn inferred_tables(&self, options: &TableOptions) -> InferredTables {
+        let stated = !self.stated_tables().is_empty();
+        if stated && !options.hide_structure {
+            return InferredTables {
+                warnings: vec![TableWarning::TreePresent],
+                ..InferredTables::default()
+            };
+        }
+        let observed = Observed::read(self, options.hide_structure);
+        let mut tables = infer_tables(&observed, self.crop_box());
+        if stated {
+            tables.warnings.insert(0, TableWarning::TreePresent);
+        }
+        tables
     }
 
     /// The tables this page's structure tree states, in tree order: every
@@ -408,6 +614,406 @@ pub(crate) fn enclosing<'a>(chars: impl Iterator<Item = &'a TextChar>) -> Option
         ll: (x0, y0),
         lr: (x1, y0),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Inferred tables: the lattice
+// ---------------------------------------------------------------------------
+
+/// Infers the ruled tables of an observed page, whose crop box is `frame`.
+pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> InferredTables {
+    let read = rules_of(observed);
+    let warnings = read.warnings.clone();
+    let page = &observed.text;
+    let flat: Vec<&TextChar> = page
+        .blocks
+        .iter()
+        .flat_map(|b| b.lines.iter())
+        .flat_map(|l| l.chars.iter())
+        .collect();
+    let em = median_size(&flat).unwrap_or(10.0);
+    // Which of the text device's lines each character is on, by its place
+    // among the page's lines from the top.
+    let line_of: Vec<(usize, f64)> = page
+        .blocks
+        .iter()
+        .flat_map(|b| b.lines.iter())
+        .enumerate()
+        .flat_map(|(at, line)| {
+            let top = line.quad.bounds().3;
+            line.chars.iter().map(move |_| (at, top))
+        })
+        .collect();
+    let lines = lattice_lines(&read.rules, em);
+    let mut lattices = components(&lines, em);
+    // A lattice lying inside one cell of another is a table in a cell, which
+    // the first delivery does not read: the outer table is returned and
+    // says so.
+    let mut nested = vec![false; lattices.len()];
+    for (inner, a) in lattices.iter().enumerate() {
+        for (outer, b) in lattices.iter().enumerate() {
+            if inner != outer && b.holds_in_a_cell(a) {
+                if let Some(flag) = nested.get_mut(inner) {
+                    *flag = true;
+                }
+            }
+        }
+    }
+    let mut refused_inside: Vec<usize> = vec![0; lattices.len()];
+    for (inner, a) in lattices.iter().enumerate() {
+        if nested.get(inner).copied().unwrap_or(false) {
+            for (outer, b) in lattices.iter().enumerate() {
+                if inner != outer && b.holds_in_a_cell(a) {
+                    if let Some(count) = refused_inside.get_mut(outer) {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+    }
+    let mut tables = Vec::new();
+    let bands = foot_band(frame);
+    for (at, lattice) in lattices.drain(..).enumerate() {
+        if nested.get(at).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some(mut table) = lattice.table(&flat, &line_of) else {
+            continue;
+        };
+        if refused_inside.get(at).copied().unwrap_or(0) > 0 {
+            table.warnings.push(TableWarning::NestedLattice);
+        }
+        if lattice.ys.last().is_some_and(|bottom| *bottom <= bands) {
+            table.warnings.push(TableWarning::MayContinue);
+        }
+        tables.push(table);
+    }
+    // Top to bottom, then left to right, as a page is read.
+    tables.sort_by(|a, b| {
+        let (ab, bb) = (a.bounds.bounds(), b.bounds.bounds());
+        bb.3.total_cmp(&ab.3).then(ab.0.total_cmp(&bb.0))
+    });
+    InferredTables {
+        tables,
+        rules: read.rules,
+        warnings,
+    }
+}
+
+/// The `y` at or under which a table's last rule sits in the page's foot
+/// band, where a table continued overleaf ends.
+fn foot_band(frame: (f64, f64, f64, f64)) -> f64 {
+    let (_, y0, _, y1) = frame;
+    y0.min(y1) + (y1 - y0).abs() * crate::reading_order::MARGIN_BAND
+}
+
+/// The median size of `chars`, or `None` for none.
+fn median_size(chars: &[&TextChar]) -> Option<f64> {
+    let mut sizes: Vec<f64> = chars
+        .iter()
+        .map(|c| c.size)
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .collect();
+    sizes.sort_by(f64::total_cmp);
+    sizes.get(sizes.len() / 2).copied()
+}
+
+/// One line of a lattice: rules along one axis at one position, merged.
+#[derive(Clone, Copy, Debug)]
+struct Line {
+    horizontal: bool,
+    at: f64,
+    from: f64,
+    to: f64,
+}
+
+/// The page's rules as lattice lines: rules along one axis within
+/// [`LATTICE_MERGE_EMS`] of each other are one line — the two halves of a
+/// collapsed CSS border, or the two borders of adjacent cells with spacing
+/// between them — and collinear pieces whose gaps are no wider are one
+/// segment. A segment shorter than [`RULE_MIN_EMS`] is not a rule.
+fn lattice_lines(rules: &[TableRule], em: f64) -> Vec<Line> {
+    let merge = LATTICE_MERGE_EMS * em;
+    let mut out = Vec::new();
+    for horizontal in [true, false] {
+        let mut axis: Vec<&TableRule> = rules
+            .iter()
+            .filter(|r| r.horizontal == horizontal)
+            .collect();
+        axis.sort_by(|a, b| a.at.total_cmp(&b.at));
+        let mut start = 0usize;
+        while start < axis.len() {
+            let Some(first) = axis.get(start).map(|r| r.at) else {
+                break;
+            };
+            let mut end = start + 1;
+            while axis.get(end).is_some_and(|r| r.at - first <= merge) {
+                end += 1;
+            }
+            let cluster: Vec<&TableRule> = axis.get(start..end).unwrap_or_default().to_vec();
+            start = end;
+            // Where the line stands: midway between its outermost strokes.
+            let low = cluster.iter().map(|r| r.at).fold(f64::INFINITY, f64::min);
+            let high = cluster
+                .iter()
+                .map(|r| r.at)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let at = (low + high) / 2.0;
+            let mut pieces: Vec<(f64, f64)> = cluster.iter().map(|r| (r.from, r.to)).collect();
+            pieces.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut current: Option<(f64, f64)> = None;
+            let flush = |piece: (f64, f64), out: &mut Vec<Line>| {
+                if piece.1 - piece.0 >= RULE_MIN_EMS * em {
+                    out.push(Line {
+                        horizontal,
+                        at,
+                        from: piece.0,
+                        to: piece.1,
+                    });
+                }
+            };
+            for (from, to) in pieces {
+                current = match current {
+                    Some((a, b)) if from <= b + merge => Some((a, b.max(to))),
+                    Some(done) => {
+                        flush(done, &mut out);
+                        Some((from, to))
+                    }
+                    None => Some((from, to)),
+                };
+            }
+            if let Some(done) = current {
+                flush(done, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// A connected set of lines, as a lattice: its row lines from the top and
+/// its column lines from the left, and the segments themselves.
+#[derive(Clone, Debug)]
+struct Lattice {
+    /// `y` of every horizontal line, descending.
+    ys: Vec<f64>,
+    /// `x` of every vertical line, ascending.
+    xs: Vec<f64>,
+}
+
+/// The lines that meet, grouped: a horizontal and a vertical line meet when
+/// each reaches the other to within [`LATTICE_MERGE_EMS`], and a lattice is a
+/// maximal set of lines joined by meetings. A lattice of fewer than two cells
+/// is a box, not a table.
+fn components(lines: &[Line], em: f64) -> Vec<Lattice> {
+    let reach = LATTICE_MERGE_EMS * em;
+    let mut parent: Vec<usize> = (0..lines.len()).collect();
+    fn root(parent: &mut [usize], mut at: usize) -> usize {
+        while let Some(&up) = parent.get(at) {
+            if up == at {
+                break;
+            }
+            // Halve the path as it is walked, so every later find is short.
+            let grand = parent.get(up).copied().unwrap_or(up);
+            if let Some(slot) = parent.get_mut(at) {
+                *slot = grand;
+            }
+            at = grand;
+        }
+        at
+    }
+    // Verticals by `x`, so each horizontal asks only those within its reach.
+    let mut verticals: Vec<usize> = (0..lines.len())
+        .filter(|i| lines.get(*i).is_some_and(|l| !l.horizontal))
+        .collect();
+    verticals.sort_by(|a, b| {
+        let at = |i: &usize| lines.get(*i).map_or(0.0, |l| l.at);
+        at(a).total_cmp(&at(b))
+    });
+    let xs: Vec<f64> = verticals
+        .iter()
+        .map(|i| lines.get(*i).map_or(0.0, |l| l.at))
+        .collect();
+    for (h, line) in lines.iter().enumerate().filter(|(_, l)| l.horizontal) {
+        let from = xs.partition_point(|x| *x < line.from - reach);
+        let to = xs.partition_point(|x| *x <= line.to + reach);
+        for v in verticals.get(from..to).unwrap_or_default() {
+            let Some(vertical) = lines.get(*v) else {
+                continue;
+            };
+            if line.at >= vertical.from - reach && line.at <= vertical.to + reach {
+                let (a, b) = (root(&mut parent, h), root(&mut parent, *v));
+                if a != b {
+                    if let Some(slot) = parent.get_mut(a) {
+                        *slot = b;
+                    }
+                }
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<Line>> = BTreeMap::new();
+    for (at, line) in lines.iter().enumerate() {
+        let r = root(&mut parent, at);
+        groups.entry(r).or_default().push(*line);
+    }
+    let mut out = Vec::new();
+    for (_, group) in groups {
+        let mut ys: Vec<f64> = group
+            .iter()
+            .filter(|l| l.horizontal)
+            .map(|l| l.at)
+            .collect();
+        let mut xs: Vec<f64> = group
+            .iter()
+            .filter(|l| !l.horizontal)
+            .map(|l| l.at)
+            .collect();
+        ys.sort_by(|a, b| b.total_cmp(a));
+        ys.dedup();
+        xs.sort_by(f64::total_cmp);
+        xs.dedup();
+        if ys.len() < 2 || xs.len() < 2 || (ys.len() - 1) * (xs.len() - 1) < 2 {
+            continue;
+        }
+        out.push(Lattice { ys, xs });
+    }
+    out
+}
+
+impl Lattice {
+    /// `(x0, y0, x1, y1)`.
+    fn bounds(&self) -> (f64, f64, f64, f64) {
+        (
+            self.xs.first().copied().unwrap_or(0.0),
+            self.ys.last().copied().unwrap_or(0.0),
+            self.xs.last().copied().unwrap_or(0.0),
+            self.ys.first().copied().unwrap_or(0.0),
+        )
+    }
+
+    /// Whether `other` lies wholly inside one of this lattice's cells.
+    fn holds_in_a_cell(&self, other: &Lattice) -> bool {
+        let (x0, y0, x1, y1) = other.bounds();
+        let (ox0, oy0, ox1, oy1) = self.bounds();
+        if !(x0 > ox0 && x1 < ox1 && y0 > oy0 && y1 < oy1) {
+            return false;
+        }
+        let column = self.xs.partition_point(|x| *x <= x0);
+        let row = self.ys.partition_point(|y| *y >= y1);
+        let right = self.xs.get(column).copied().unwrap_or(f64::NEG_INFINITY);
+        let bottom = self.ys.get(row).copied().unwrap_or(f64::INFINITY);
+        x1 <= right && y0 >= bottom
+    }
+
+    /// The row and column whose grid cell holds `(x, y)`, or `None` outside.
+    fn slot(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        let (x0, y0, x1, y1) = self.bounds();
+        if !(x > x0 && x < x1 && y > y0 && y < y1) {
+            return None;
+        }
+        let column = self.xs.partition_point(|at| *at <= x).checked_sub(1)?;
+        let row = self.ys.partition_point(|at| *at >= y).checked_sub(1)?;
+        Some((row, column))
+    }
+
+    /// The table this lattice rules, its text assigned and ordered; `None`
+    /// when fewer than two of its cells hold any text, or fewer than one in
+    /// [`LATTICE_TEXT_SHARE`] — a grid of empty boxes, a form or a page of
+    /// hatching, and not a table. Checked before any cell is made, so the
+    /// cells made are at most that multiple of the page's characters.
+    fn table(&self, flat: &[&TextChar], line_of: &[(usize, f64)]) -> Option<InferredTable> {
+        let rows = self.ys.len().checked_sub(1)?;
+        let columns = self.xs.len().checked_sub(1)?;
+        let mut cells: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+        let mut crossing = 0usize;
+        let interior = self.xs.get(1..columns).unwrap_or_default();
+        for (at, c) in flat.iter().enumerate() {
+            if !c.quad.is_finite() {
+                continue;
+            }
+            let (x0, y0, x1, y1) = c.quad.bounds();
+            let Some(slot) = self.slot((x0 + x1) / 2.0, (y0 + y1) / 2.0) else {
+                continue;
+            };
+            // A glyph runs across a rule when an interior column line passes
+            // through the middle half of its box; a glyph merely touching a
+            // rule at its edge does not. A binary search over the lines.
+            let quarter = (x1 - x0) / 4.0;
+            let next = interior.partition_point(|x| *x <= x0 + quarter);
+            if interior.get(next).is_some_and(|x| *x < x1 - quarter) {
+                crossing += 1;
+            }
+            cells.entry(slot).or_default().push(at);
+        }
+        let slots = rows.checked_mul(columns)?;
+        if cells.len() < 2 || cells.len().saturating_mul(LATTICE_TEXT_SHARE) < slots {
+            return None;
+        }
+        let mut warnings = Vec::new();
+        if crossing > 0 {
+            warnings.push(TableWarning::TextCrossesRule { chars: crossing });
+        }
+        let mut permutation = Vec::new();
+        let mut out = Vec::with_capacity(rows * columns);
+        for row in 0..rows {
+            for column in 0..columns {
+                let mut chars = cells.remove(&(row, column)).unwrap_or_default();
+                order_cell(&mut chars, line_of);
+                permutation.extend(chars.iter().copied());
+                let held: Vec<TextChar> = chars
+                    .iter()
+                    .filter_map(|at| flat.get(*at).map(|c| (*c).clone()))
+                    .collect();
+                let (x0, x1) = (
+                    self.xs.get(column).copied().unwrap_or(0.0),
+                    self.xs.get(column + 1).copied().unwrap_or(0.0),
+                );
+                let (y1, y0) = (
+                    self.ys.get(row).copied().unwrap_or(0.0),
+                    self.ys.get(row + 1).copied().unwrap_or(0.0),
+                );
+                out.push(InferredCell {
+                    row,
+                    column,
+                    row_span: 1,
+                    col_span: 1,
+                    text: held.iter().map(|c| c.text.as_str()).collect(),
+                    chars: held,
+                    quad: rect(x0, y0, x1, y1),
+                });
+            }
+        }
+        let (x0, y0, x1, y1) = self.bounds();
+        Some(InferredTable {
+            rows,
+            columns,
+            cells: out,
+            bounds: rect(x0, y0, x1, y1),
+            evidence: TableEvidence::Ruled,
+            permutation,
+            warnings,
+        })
+    }
+}
+
+/// A cell's characters in the order they are read: the text device's lines
+/// that reach into the cell, top first, each line's characters in the page's
+/// own order, which is logical (ruling 14). A stable sort, so stream order
+/// decides between two lines level with each other.
+fn order_cell(chars: &mut [usize], line_of: &[(usize, f64)]) {
+    let key = |at: &usize| line_of.get(*at).copied().unwrap_or((usize::MAX, 0.0));
+    chars.sort_by(|a, b| {
+        let ((la, ta), (lb, tb)) = (key(a), key(b));
+        tb.total_cmp(&ta).then(la.cmp(&lb)).then(a.cmp(b))
+    });
+}
+
+fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Quad {
+    Quad {
+        ul: (x0, y1),
+        ur: (x1, y1),
+        ll: (x0, y0),
+        lr: (x1, y0),
+    }
 }
 
 /// For each column of a table, the first row at which it is free again — a

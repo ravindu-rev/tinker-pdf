@@ -17,7 +17,8 @@ mod epub_support;
 use epub_support::book::styled_book;
 use tinker_pdf::tables::MAX_TABLE_RULES;
 use tinker_pdf::{
-    Document, StatedTable, TableAttributes, TableRule, TableRules, TableScope, TableWarning, Tag,
+    Document, InferredTable, PageTables, StatedTable, TableAttributes, TableEvidence, TableOptions,
+    TableRule, TableRules, TableScope, TableSource, TableWarning, Tag,
 };
 use tinker_pdf_cos::build::DocumentBuilder;
 
@@ -440,4 +441,470 @@ fn curves_diagonals_bars_and_dots_are_not_rules() {
         "72 500 m 73 500 l S\n",
     )));
     assert!(read.rules.is_empty(), "{:?}", read.rules);
+}
+
+// ---- inferred tables: the lattice ----------------------------------------------------
+
+fn hidden() -> TableOptions {
+    TableOptions {
+        hide_structure: true,
+    }
+}
+
+/// A character's identity across two readings of one page: origin and text.
+type Key = (u64, u64, String);
+
+fn key(c: &tinker_pdf::TextChar) -> Key {
+    (c.origin.0.to_bits(), c.origin.1.to_bits(), c.text.clone())
+}
+
+/// The design's scores for one stated table against the inferred ones:
+/// whether one was found over it, whether its grid matches exactly, and how
+/// many of the stated cells' characters the inference put in the same row and
+/// column, of how many.
+fn score(stated: &StatedTable, inferred: &[InferredTable]) -> (bool, bool, usize, usize) {
+    let total: usize = stated.cells.iter().map(|c| c.chars.len()).sum();
+    let Some(quad) = stated.quad else {
+        return (false, false, 0, total);
+    };
+    let (sx0, sy0, sx1, sy1) = quad.bounds();
+    let found = inferred.iter().find(|t| {
+        let (x0, y0, x1, y1) = t.bounds.bounds();
+        let overlap = (sx1.min(x1) - sx0.max(x0)).max(0.0) * (sy1.min(y1) - sy0.max(y0)).max(0.0);
+        overlap * 2.0 >= (sx1 - sx0) * (sy1 - sy0)
+    });
+    let Some(table) = found else {
+        return (false, false, 0, total);
+    };
+    let grid = table.rows == stated.rows && table.columns == stated.columns;
+    let mut place = std::collections::BTreeMap::new();
+    for cell in &table.cells {
+        for c in &cell.chars {
+            place.insert(key(c), (cell.row, cell.column));
+        }
+    }
+    let agreeing = stated
+        .cells
+        .iter()
+        .flat_map(|cell| cell.chars.iter().map(move |c| (cell, c)))
+        .filter(|(cell, c)| place.get(&key(c)) == Some(&(cell.row, cell.column)))
+        .count();
+    (true, grid, agreeing, total)
+}
+
+/// Three rows of four cells, ruled with half-point strokes, each cell's text
+/// `r{row}c{column}` drawn at its top left; `tag` tags the table row by row
+/// in the tree, and the text is drawn **column by column**, as a producer
+/// that fills a table a column at a time would.
+fn ruled_grid(tag: bool) -> Document {
+    let (ys, xs) = grid_lines(3, 4);
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        let mut rules = String::from("0.5 w\n");
+        for y in &ys {
+            rules.push_str(&format!("72 {y} m 472 {y} l S\n"));
+        }
+        for x in &xs {
+            rules.push_str(&format!("{x} 540 m {x} 600 l S\n"));
+        }
+        page.raw(rules.as_bytes());
+        let draw = |page: &mut tinker_pdf_cos::build::PageBuilder, row: usize, column: usize| {
+            let (x, y) = (76.0 + column as f64 * 100.0, 586.0 - row as f64 * 20.0);
+            page.text(b"F1", 10.0, x, y, &format!("r{row}c{column}"));
+        };
+        if tag {
+            page.tagged_with(&Tag::new(b"Table"), |page| {
+                for row in 0..3 {
+                    page.tagged_with(&Tag::new(b"TR"), |page| {
+                        for column in 0..4 {
+                            let order = (row * 4 + column) as u64;
+                            page.tagged_with(&Tag::new(b"TD").keyed(order + 1, order), |page| {
+                                draw(page, row, column)
+                            });
+                        }
+                    });
+                }
+            });
+        } else {
+            for column in 0..4 {
+                for row in 0..3 {
+                    draw(page, row, column);
+                }
+            }
+        }
+    });
+    open(builder.finish())
+}
+
+/// **A ruled grid is read row by row however it was drawn.** Untagged, its
+/// text drawn a column at a time: one table, three rows, four columns, each
+/// cell's text the one drawn inside it, ruled evidence, and a permutation
+/// that is every character of the table once.
+#[test]
+fn a_ruled_grid_is_read_row_by_row_however_it_was_drawn() {
+    let doc = ruled_grid(false);
+    let page = doc.page(0).expect("a page");
+    let found = page.inferred_tables(&TableOptions::default());
+    assert!(found.warnings.is_empty(), "{:?}", found.warnings);
+    assert_eq!(found.tables.len(), 1);
+    let table = &found.tables[0];
+    assert_eq!((table.rows, table.columns), (3, 4));
+    assert_eq!(table.evidence, TableEvidence::Ruled);
+    for cell in &table.cells {
+        assert_eq!(cell.text, format!("r{}c{}", cell.row, cell.column));
+    }
+    let text: String = table.cells.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(text, "r0c0r0c1r0c2r0c3r1c0r1c1r1c2r1c3r2c0r2c1r2c2r2c3");
+    let mut seen = table.permutation.clone();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), table.permutation.len());
+    assert_eq!(table.permutation.len(), 12 * 4);
+    // The page's own text is not touched.
+    assert_eq!(
+        page.text().plain_text(),
+        ruled_grid(false)
+            .page(0)
+            .expect("a page")
+            .text()
+            .plain_text()
+    );
+}
+
+/// **Against the tree it hid.** The same grid tagged row by row in the tree
+/// and drawn column by column: with the tree hidden, the table is found over
+/// the stated one, its grid is the stated grid, and every stated cell's
+/// characters are in the same row and column — where the stream's order
+/// reads the table a column at a time.
+#[test]
+fn a_ruled_grid_matches_the_table_it_was_tagged_as() {
+    let doc = ruled_grid(true);
+    let page = doc.page(0).expect("a page");
+    let stated = page.stated_tables();
+    assert_eq!(stated.len(), 1);
+    let inferred = page.inferred_tables(&hidden());
+    assert_eq!(inferred.warnings, [TableWarning::TreePresent]);
+    let (found, grid, agreeing, total) = score(&stated[0], &inferred.tables);
+    println!("ruled grid: found {found} grid {grid} cells {agreeing}/{total}");
+    assert!(found && grid);
+    assert_eq!(agreeing, total);
+    assert_eq!(total, 48);
+    // Without hiding it, the tree's table is the answer and nothing is
+    // inferred.
+    let declined = page.inferred_tables(&TableOptions::default());
+    assert!(declined.tables.is_empty());
+    assert_eq!(declined.warnings, [TableWarning::TreePresent]);
+    assert!(matches!(
+        page.tables(TableSource::Inferred),
+        PageTables::Stated(_)
+    ));
+}
+
+/// A three-column table of five rows, every cell bordered, as an EPUB author
+/// sets one: `collapse` merges adjacent borders, `separate` leaves the CSS
+/// default spacing between them.
+fn bordered_book(model: &str) -> Document {
+    let mut body = String::from("<table><tr><th>Name</th><th>Weight</th><th>Price</th></tr>");
+    for (name, weight, price) in [
+        ("Apple", "150", "1.20"),
+        ("Banana", "120", "0.80"),
+        ("Cherry", "5", "0.10"),
+        ("Damson", "30", "0.45"),
+    ] {
+        body.push_str(&format!(
+            "<tr><td>{name}</td><td>{weight}</td><td>{price}</td></tr>"
+        ));
+    }
+    body.push_str("</table>");
+    open(styled_book(
+        "en",
+        &format!("table {{ border-collapse: {model} }} td, th {{ border: 1px solid black; padding: 4px }}"),
+        &body,
+    ))
+}
+
+/// **A book's bordered table is recovered exactly**, in both of CSS 2.2
+/// §17.6's border models: the answer key is the XHTML grid, through the tree
+/// this engine's EPUB writer made of it; the rules are the borders its layout
+/// drew. Found, the same grid, every character in its stated cell. What this
+/// cannot show is said in the module documentation: the layout that drew the
+/// rules and the inference that reads them share an author.
+#[test]
+fn a_books_bordered_table_is_recovered_exactly() {
+    for model in ["collapse", "separate"] {
+        let doc = bordered_book(model);
+        let mut scored = 0;
+        for index in 0..doc.page_count() {
+            let page = doc.page(index).expect("a page");
+            let stated = page.stated_tables();
+            if stated.is_empty() {
+                continue;
+            }
+            let inferred = page.inferred_tables(&hidden());
+            for table in &stated {
+                let (found, grid, agreeing, total) = score(table, &inferred.tables);
+                println!("{model}: found {found} grid {grid} cells {agreeing}/{total}");
+                assert!(found && grid, "{model}: {} tables", inferred.tables.len());
+                assert_eq!(agreeing, total, "{model}");
+                scored += 1;
+            }
+        }
+        assert_eq!(scored, 1, "{model}");
+    }
+}
+
+/// **Nothing that is not a table is one**: a framed paragraph is a box of
+/// one cell; a grid of empty boxes is a form; and no committed book's page
+/// whose tree states no table, nor any committed `testdata` page, yields one.
+#[test]
+fn boxes_forms_and_untabled_pages_are_not_tables() {
+    let boxed = drawn(concat!(
+        "0.5 w 72 500 400 100 re S\n",
+        "BT /F1 10 Tf 80 580 Td (A framed paragraph of prose, inside one box.) Tj ET\n",
+    ));
+    assert!(boxed
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default())
+        .tables
+        .is_empty());
+
+    let (ys, xs) = grid_lines(4, 4);
+    let mut form = String::from("0.5 w\n");
+    for y in &ys {
+        form.push_str(&format!("72 {y} m 472 {y} l S\n"));
+    }
+    for x in &xs {
+        form.push_str(&format!("{x} 520 m {x} 600 l S\n"));
+    }
+    // Two labels in sixteen boxes: text in fewer than one cell in four.
+    form.push_str("BT /F1 10 Tf 76 586 Td (Name:) Tj ET\n");
+    form.push_str("BT /F1 10 Tf 76 566 Td (Date:) Tj ET\n");
+    let form = drawn(&form);
+    assert!(form
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default())
+        .tables
+        .is_empty());
+
+    let mut extras = 0usize;
+    let mut pages = 0usize;
+    for dir in [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/epub"),
+    ] {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .expect("the committed fixtures")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("pdf" | "epub")))
+            .collect();
+        entries.sort();
+        for path in entries {
+            let Ok(doc) = Document::open(std::fs::read(&path).expect("readable")) else {
+                continue;
+            };
+            for index in 0..doc.page_count() {
+                let page = doc.page(index).expect("a page");
+                if !page.stated_tables().is_empty() {
+                    continue;
+                }
+                pages += 1;
+                let found = page.inferred_tables(&hidden()).tables.len();
+                if found > 0 {
+                    println!("{path:?} page {index}: {found} tables");
+                }
+                extras += found;
+            }
+        }
+    }
+    println!("{extras} tables inferred over {pages} committed pages that state none");
+    assert_eq!(extras, 0);
+}
+
+/// **A table in a cell is refused by name**, and the table around it
+/// returned; **a table ending in the foot band may continue**; **a glyph
+/// across a rule is counted**.
+#[test]
+fn nested_continued_and_crossed_tables_are_named() {
+    let (ys, xs) = grid_lines(3, 4);
+    let mut content = String::from("0.5 w\n");
+    for y in &ys {
+        content.push_str(&format!("72 {y} m 472 {y} l S\n"));
+    }
+    for x in &xs {
+        content.push_str(&format!("{x} 540 m {x} 600 l S\n"));
+    }
+    for row in 0..3 {
+        for column in 0..4 {
+            let (x, y) = (76.0 + column as f64 * 100.0, 586.0 - row as f64 * 20.0);
+            content.push_str(&format!(
+                "BT /F1 10 Tf {x} {y} Td (r{row}c{column}) Tj ET\n"
+            ));
+        }
+    }
+    // Beside it, a grid of its own whose bottom-right cell — 372 to 472
+    // across, 360 to 420 down — holds a two-by-two grid ruled small, every
+    // inner line well over half an em from the cell's.
+    let mut outer = String::from("0.5 w\n");
+    for y in [480.0, 420.0, 360.0] {
+        outer.push_str(&format!("272 {y} m 472 {y} l S\n"));
+    }
+    for x in [272.0, 372.0, 472.0] {
+        outer.push_str(&format!("{x} 360 m {x} 480 l S\n"));
+    }
+    for (x, y, text) in [
+        (276.0, 466.0, "a"),
+        (376.0, 466.0, "b"),
+        (276.0, 406.0, "c"),
+    ] {
+        outer.push_str(&format!("BT /F1 10 Tf {x} {y} Td ({text}) Tj ET\n"));
+    }
+    outer.push_str("0.2 w 385 370 m 460 370 l S 385 390 m 460 390 l S 385 410 m 460 410 l S\n");
+    outer.push_str("385 370 m 385 410 l S 420 370 m 420 410 l S 460 370 m 460 410 l S\n");
+    outer.push_str("BT /F1 10 Tf 390 395 Td (d) Tj ET BT /F1 10 Tf 425 375 Td (e) Tj ET\n");
+    let nested = drawn(&outer);
+    let found = nested
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    let shapes: Vec<(usize, usize)> = found.tables.iter().map(|t| (t.rows, t.columns)).collect();
+    assert_eq!(shapes, [(2, 2)]);
+    assert!(
+        found.tables[0]
+            .warnings
+            .contains(&TableWarning::NestedLattice),
+        "{:?}",
+        found.tables[0].warnings
+    );
+
+    let doc = drawn(&content);
+    let found = doc
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(found.tables.len(), 1);
+    assert!(
+        found.tables[0].warnings.is_empty(),
+        "{:?}",
+        found.tables[0].warnings
+    );
+
+    // The same grid at the foot of the page, its last rule at y = 40.
+    let shifted: String = content
+        .lines()
+        .take(1 + ys.len() + xs.len())
+        .map(|l| {
+            l.replace(" 600", " 100")
+                .replace(" 580", " 80")
+                .replace(" 560", " 60")
+                .replace(" 540", " 40")
+                + "\n"
+        })
+        .collect();
+    let mut low = shifted;
+    for row in 0..3 {
+        for column in 0..4 {
+            let (x, y) = (76.0 + column as f64 * 100.0, 86.0 - row as f64 * 20.0);
+            low.push_str(&format!(
+                "BT /F1 10 Tf {x} {y} Td (r{row}c{column}) Tj ET\n"
+            ));
+        }
+    }
+    let found = drawn(&low)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(found.tables.len(), 1);
+    assert!(found.tables[0]
+        .warnings
+        .contains(&TableWarning::MayContinue));
+
+    // A word drawn across the rule at x = 172: set from 148, its second `d`
+    // runs from 170.2 to 175.8, so the rule passes through its middle.
+    let mut crossed = content
+        .lines()
+        .take(1 + ys.len() + xs.len())
+        .map(|l| format!("{l}\n"))
+        .collect::<String>();
+    crossed.push_str("BT /F1 10 Tf 148 586 Td (straddling) Tj ET\n");
+    crossed.push_str("BT /F1 10 Tf 280 566 Td (inside) Tj ET\n");
+    let found = drawn(&crossed)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(found.tables.len(), 1);
+    assert!(found.tables[0]
+        .warnings
+        .iter()
+        .any(|w| matches!(w, TableWarning::TextCrossesRule { chars } if *chars > 0)));
+}
+
+/// **A page of hatching is not a table, and is not a square's worth of
+/// cells.** Two hundred lines each way, one word in one cell: a lattice of
+/// nearly forty thousand cells that holds text in one, refused before a cell
+/// is made.
+#[test]
+fn a_page_of_hatching_makes_no_cells() {
+    let mut content = String::from("0.2 w\n");
+    for at in 0..200 {
+        let v = 20.0 + at as f64 * 2.8;
+        content.push_str(&format!("20 {v} m 580 {v} l S {v} 20 m {v} 580 l S\n"));
+    }
+    content.push_str("BT /F1 1 Tf 21 21 Td (x) Tj ET\n");
+    let found = drawn(&content)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert!(found.tables.is_empty());
+    assert_eq!(found.rules.len(), 400);
+}
+
+/// **A cell of two lines reads top line first**, whichever the producer drew
+/// first.
+#[test]
+fn a_cell_of_two_lines_reads_from_its_top_line() {
+    let read = drawn(concat!(
+        "0.5 w 72 600 m 272 600 l S 72 560 m 272 560 l S 72 520 m 272 520 l S\n",
+        "72 520 m 72 600 l S 172 520 m 172 600 l S 272 520 m 272 600 l S\n",
+        "BT /F1 10 Tf 76 572 Td (second) Tj ET BT /F1 10 Tf 76 586 Td (first) Tj ET\n",
+        "BT /F1 10 Tf 176 586 Td (b) Tj ET BT /F1 10 Tf 76 546 Td (c) Tj ET\n",
+    ));
+    let found = read
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(found.tables.len(), 1);
+    assert_eq!(found.tables[0].cells[0].text, "firstsecond");
+}
+
+/// **Rules that stop short of each other still meet**: the verticals of a
+/// grid drawn two points short of the horizontals at both ends, as a
+/// producer that leaves the corners open draws them, rule one table.
+#[test]
+fn rules_that_stop_short_still_meet() {
+    let (ys, xs) = grid_lines(3, 4);
+    let mut content = String::from("0.5 w\n");
+    for y in &ys {
+        content.push_str(&format!("72 {y} m 472 {y} l S\n"));
+    }
+    for x in &xs {
+        content.push_str(&format!("{x} 542 m {x} 598 l S\n"));
+    }
+    for row in 0..3 {
+        for column in 0..4 {
+            let (x, y) = (76.0 + column as f64 * 100.0, 586.0 - row as f64 * 20.0);
+            content.push_str(&format!(
+                "BT /F1 10 Tf {x} {y} Td (r{row}c{column}) Tj ET\n"
+            ));
+        }
+    }
+    let found = drawn(&content)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    let shapes: Vec<(usize, usize)> = found.tables.iter().map(|t| (t.rows, t.columns)).collect();
+    assert_eq!(shapes, [(3, 4)]);
 }

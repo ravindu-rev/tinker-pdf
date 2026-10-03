@@ -7,7 +7,13 @@
 //! a `TH`, per corpus, by `standard_type` after the role map — and reads every
 //! stated table on the pages it scores, tallying the spans that do not add up.
 //! Milestone 2 adds the most rules any scored page draws, which is the figure
-//! `MAX_TABLE_RULES` was to be sized from, and the pages past it.
+//! `MAX_TABLE_RULES` was to be sized from, and the pages past it. Milestone 3
+//! adds the design's scores, the tree hidden: stated tables an inferred one
+//! was found over, grid agreement, cell assignment, and extra tables on pages
+//! that state none — printed for SafeDocs and pdfjs, where producers
+//! under-tag, and for veraPDF, where the design expects zero. **None of these
+//! is held**: no figure has been measured, and the floors are owed to the
+//! first nightly run.
 //!
 //! ```text
 //! cargo xtask corpus-fetch
@@ -37,7 +43,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tinker_pdf::{Document, TableWarning};
+use tinker_pdf::{Document, InferredTable, StatedTable, TableOptions, TableWarning};
 
 /// Printed once when the census read the corpora. CI greps it.
 const RAN: &str = "table-census: RAN";
@@ -135,6 +141,56 @@ struct Totals {
     /// be sized from, and the pages past that cap.
     most_rules: usize,
     over_cap: usize,
+    /// The design's scores, the tree hidden: stated tables an inferred one
+    /// was found over, of those the ones whose grid matched exactly, and the
+    /// stated cells' characters placed in the same row and column, of all.
+    found: usize,
+    grid: usize,
+    placed: usize,
+    placeable: usize,
+    /// Inferred tables on scored pages whose tree states none.
+    extra: usize,
+}
+
+/// A character's identity across two readings of one page.
+type Key = (u64, u64, String);
+
+fn key(c: &tinker_pdf::TextChar) -> Key {
+    (c.origin.0.to_bits(), c.origin.1.to_bits(), c.text.clone())
+}
+
+/// The design's scores for one stated table against the inferred ones —
+/// `tables.rs`'s, for the corpus: found (an inferred table covering at least
+/// half the stated one's characters' quad), the grid exact, and the stated
+/// cells' characters placed in the same row and column, of how many.
+fn score(stated: &StatedTable, inferred: &[InferredTable]) -> (bool, bool, usize, usize) {
+    let total: usize = stated.cells.iter().map(|c| c.chars.len()).sum();
+    let Some(quad) = stated.quad else {
+        return (false, false, 0, total);
+    };
+    let (sx0, sy0, sx1, sy1) = quad.bounds();
+    let found = inferred.iter().find(|t| {
+        let (x0, y0, x1, y1) = t.bounds.bounds();
+        let overlap = (sx1.min(x1) - sx0.max(x0)).max(0.0) * (sy1.min(y1) - sy0.max(y0)).max(0.0);
+        overlap * 2.0 >= (sx1 - sx0) * (sy1 - sy0)
+    });
+    let Some(table) = found else {
+        return (false, false, 0, total);
+    };
+    let grid = table.rows == stated.rows && table.columns == stated.columns;
+    let mut place = BTreeMap::new();
+    for cell in &table.cells {
+        for c in &cell.chars {
+            place.insert(key(c), (cell.row, cell.column));
+        }
+    }
+    let placed = stated
+        .cells
+        .iter()
+        .flat_map(|cell| cell.chars.iter().map(move |c| (cell, c)))
+        .filter(|(cell, c)| place.get(&key(c)) == Some(&(cell.row, cell.column)))
+        .count();
+    (true, grid, placed, total)
 }
 
 #[test]
@@ -212,7 +268,21 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             if drawn > tinker_pdf::tables::MAX_TABLE_RULES {
                 totals.over_cap += 1;
             }
-            for table in page.stated_tables() {
+            let stated = page.stated_tables();
+            let inferred = page.inferred_tables(&TableOptions {
+                hide_structure: true,
+            });
+            if stated.is_empty() {
+                totals.extra += inferred.tables.len();
+            }
+            for table in &stated {
+                let (found, grid, placed, total) = score(table, &inferred.tables);
+                totals.found += usize::from(found);
+                totals.grid += usize::from(grid);
+                totals.placed += placed;
+                totals.placeable += total;
+            }
+            for table in stated {
                 totals.stated += 1;
                 for warning in &table.warnings {
                     match warning {
@@ -281,6 +351,10 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
         println!(
             "{:<14} most rules on one page {}, pages past MAX_TABLE_RULES {}",
             "", t.most_rules, t.over_cap
+        );
+        println!(
+            "{:<14} inferred, tree hidden: found {} of {} stated, grid {} of those, cells {}/{}; {} extra tables",
+            "", t.found, t.stated, t.grid, t.placed, t.placeable, t.extra
         );
         if let Some((_, recorded)) = DESIGN_RECORDED.iter().find(|(c, _)| c == name) {
             println!("{:<14} design's 16 September walk: {recorded:?}", "");
