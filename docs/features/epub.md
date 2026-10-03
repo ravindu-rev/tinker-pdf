@@ -204,7 +204,10 @@ first in the list is on top. **`text-shadow`** (`css-text-decor-3` §4) is the
 run drawn again, offset and in the shadow's colour, before any of the page's
 text and marked `/Artifact`, so text extraction reads the words once. A
 translucent shadow colour is its alpha times the element's composed
-`opacity`, since an `/ExtGState`'s `/ca` replaces the one in force.
+`opacity`, since an `/ExtGState`'s `/ca` replaces the one in force. A shadow
+or an outline whose geometry is not finite — `1e400px` reads as infinite —
+draws nothing, as a transform with no inverse does, rather than writing `inf`
+or `NaN`, which are not PDF numbers (7.3.3).
 **`transform`** (`css-transforms-1`, the two-dimensional functions of
 §13.1, with **`transform-origin`**) is one `cm` per transformed element:
 translate to the origin, the list with its leftmost function outermost,

@@ -888,6 +888,77 @@ fn a_blurred_shadow_is_counted_and_not_drawn() {
     assert!(!tokens(&doc).windows(4).any(|w| w == ["0", "1", "0", "rg"]));
 }
 
+/// **An outline or shadow whose geometry is past what a number holds draws
+/// nothing** rather than writing `inf` or `NaN`, which are not PDF numbers
+/// (7.3.3): `1e400px` reads as infinite, and an offset, width or spread built
+/// from it is not finite. The text is still drawn, and the same properties at
+/// a finite size still draw — the mismatch, so the assertion is not met by a
+/// page on which nothing is painted at all.
+#[test]
+fn outline_and_shadow_geometry_past_a_numbers_range_draws_nothing() {
+    let non_finite = |words: &[String]| {
+        words
+            .iter()
+            .filter(|w| w.ends_with("inf") || w.contains("NaN"))
+            .count()
+    };
+    let green = ["0", "1", "0", "rg"];
+    for (huge, finite) in [
+        (
+            "outline: 1px solid #00ff00; outline-offset: 1e400px",
+            "outline: 1px solid #00ff00; outline-offset: 2px",
+        ),
+        (
+            "outline: 1e400px solid #00ff00",
+            "outline: 2px solid #00ff00",
+        ),
+        ("box-shadow: 1e400px 0 #00ff00", "box-shadow: 4px 0 #00ff00"),
+        (
+            "box-shadow: -1e400px 1e400px #00ff00",
+            "box-shadow: -4px 4px #00ff00",
+        ),
+        (
+            "box-shadow: 0 0 0 1e400px #00ff00",
+            "box-shadow: 0 0 0 4px #00ff00",
+        ),
+        (
+            "box-shadow: inset 1e400px 0 #00ff00",
+            "box-shadow: inset 4px 0 #00ff00",
+        ),
+        (
+            "box-shadow: inset 0 0 0 1e400px #00ff00",
+            "box-shadow: inset 0 0 0 4px #00ff00",
+        ),
+        (
+            "text-shadow: 1e400px 0 #00ff00",
+            "text-shadow: 2px 0 #00ff00",
+        ),
+        (
+            "text-shadow: 0 -1e400px #00ff00",
+            "text-shadow: 0 -2px #00ff00",
+        ),
+    ] {
+        let words = tokens(&open(
+            &format!("div {{ width: 100px; {huge} }}"),
+            "<div>hello world</div>",
+        ));
+        assert_eq!(non_finite(&words), 0, "{huge}: {}", words.join(" "));
+        assert!(words.iter().any(|w| w == "Tj"), "{huge}: the text is gone");
+        assert!(
+            !words.windows(4).any(|w| w == green),
+            "{huge}: something was drawn in its colour"
+        );
+        let drawn = tokens(&open(
+            &format!("div {{ width: 100px; {finite} }}"),
+            "<div>hello world</div>",
+        ));
+        assert!(
+            drawn.windows(4).any(|w| w == green),
+            "{finite}: the finite one draws nothing either"
+        );
+    }
+}
+
 // ---- transform --------------------------------------------------------------------
 
 /// Every `cm` on the first page, as its six operands, in stream order.

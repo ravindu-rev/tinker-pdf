@@ -1896,6 +1896,13 @@ pub fn draw_page(
             continue;
         }
         for (colour, dx, dy) in effects.text_shadows(run.anchor).iter().rev() {
+            // An offset past what a number holds (`1e400px` reads as
+            // infinite) has no place on the page: the shadow draws nothing,
+            // as a transform with no inverse does, rather than writing an
+            // operand that is not a PDF number.
+            if !finite(&[run.x + dx, run.y + dy]) {
+                continue;
+            }
             let mut shadow = run.clone();
             shadow.x += dx;
             shadow.y += dy;
@@ -2171,10 +2178,20 @@ fn set_fill(page: &mut PageBuilder, colour: Color) {
 /// above it, so the operators are written out — which is what
 /// `PageBuilder::raw` is for and what its documentation says it is for.
 fn fill(page: &mut PageBuilder, x: f64, y: f64, width: f64, height: f64) {
-    if width <= 0.0 || height <= 0.0 {
+    if width <= 0.0 || height <= 0.0 || !finite(&[x, y, width, height]) {
         return;
     }
     page.raw(format!("{x} {y} {width} {height} re f").as_bytes());
+}
+
+/// Whether every operand is a number a content stream can hold.
+///
+/// A CSS number token past `f64`'s range reads as infinite (`1e400px`), and
+/// arithmetic on one makes `NaN`; `inf` and `NaN` are not PDF numbers (7.3.3),
+/// so geometry built from them is not written. What would have drawn it
+/// draws nothing, as [`local_matrix`]'s singular product does.
+fn finite(operands: &[f64]) -> bool {
+    operands.iter().all(|operand| operand.is_finite())
 }
 
 fn draw_box(
@@ -2316,6 +2333,9 @@ fn draw_shadows(
             );
             let hole_radii =
                 inner.map(|(h, v)| (spread_radius(h, -spread), spread_radius(v, -spread)));
+            if !finite(&[hole.0, hole.1, hole.2, hole.3]) || !finite(&corners(hole_radii)) {
+                continue;
+            }
             let area = rounded_path(padding, inner);
             page.raw(format!("q {area} W n").as_bytes());
             effects.shadow_alpha(page, fragment.anchor, colour);
@@ -2337,6 +2357,9 @@ fn draw_shadows(
                 continue;
             }
             let radii = outer.map(|(h, v)| (spread_radius(h, spread), spread_radius(v, spread)));
+            if !finite(&[shape.0, shape.1, shape.2, shape.3]) || !finite(&corners(radii)) {
+                continue;
+            }
             let (page_width, page_height) = effects.frame.page;
             page.raw(
                 format!(
@@ -2351,6 +2374,12 @@ fn draw_shadows(
             page.raw(b"Q");
         }
     }
+}
+
+/// A box's four corner radii as eight operands, for [`finite`].
+fn corners(radii: [(f64, f64); 4]) -> [f64; 8] {
+    let [a, b, c, d] = radii;
+    [a.0, a.1, b.0, b.1, c.0, c.1, d.0, d.1]
 }
 
 /// One planned background image, clipped to the painting area `area` — a
@@ -2544,6 +2573,9 @@ fn draw_outline(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
     let top = frame.y(fragment.y) + spread + thickness;
     let width = fragment.width * PX_TO_PT + 2.0 * (spread + thickness);
     let height = fragment.height * PX_TO_PT + 2.0 * (spread + thickness);
+    if !finite(&[left, top, width, height, thickness]) {
+        return;
+    }
     if width <= 2.0 * thickness || height <= 2.0 * thickness {
         // An offset negative enough to turn the outline inside out draws the
         // whole rectangle.
