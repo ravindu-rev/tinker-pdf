@@ -3178,6 +3178,40 @@ mod tests {
         );
     }
 
+    /// **`--order stated` prints the order the tree states** (reading-order
+    /// milestone 1's exit): on a tagged page drawn last paragraph first, it is
+    /// `structured_text().plain_text()` — the tree's order, the paragraphs
+    /// first to last — and not the stream's, which `text` prints otherwise;
+    /// and it says on standard error that the order is the tree's.
+    #[test]
+    fn text_prints_the_stated_order_of_a_tagged_page() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        let paragraphs = ["first paragraph", "second paragraph", "third paragraph"];
+        builder.add_page(612.0, 792.0, |page| {
+            for (at, text) in paragraphs.iter().enumerate().rev() {
+                let y = 700.0 - 40.0 * at as f64;
+                page.tagged_keyed(b"P", at as u64 + 1, at as u64, |page| {
+                    page.text(b"F0", 10.0, 72.0, y, text);
+                });
+            }
+        });
+        let doc = Document::open(builder.finish()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let structured = page.structured_text().expect("a tagged page");
+        let (stated, label) = page_text(&page, 0, ReadingOrder::Stated).expect("a stated order");
+        assert_eq!(stated, structured.plain_text());
+        assert_eq!(label.as_deref(), Some("page 1: the structure tree's order"));
+        let order: Vec<&str> = stated.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(order, paragraphs);
+        let (stream, _) = page_text(&page, 0, ReadingOrder::Stream).expect("the stream");
+        let drawn: Vec<&str> = stream.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            drawn,
+            ["third paragraph", "second paragraph", "first paragraph"]
+        );
+    }
+
     /// `--pages` is pages and ranges, 1-based, in the order given; what it
     /// cannot mean is refused rather than guessed at, and it does not combine
     /// with `--page`.
