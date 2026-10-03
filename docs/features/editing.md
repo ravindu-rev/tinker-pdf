@@ -332,24 +332,39 @@ dot, and the paths are never joined to each other. A path written as a
 reference is drawn once however often the list names it, so a small file
 cannot ask for one large array many times over. A **`FreeText`** (12.5.6.6)
 is drawn when its `/DA` names a font the interactive form's `/DR` holds as a
-simple font — Type 1 or TrueType, a byte a glyph — and every character of
-`/Contents` has a byte in it, the rule a field's value is written by. Its box
+simple font — Type 1 or TrueType, a byte a glyph, and not symbolic — and
+every character of `/Contents` is one that font's encoding (9.6.6) has a
+byte for: each is written as the lowest byte the encoding — `/BaseEncoding`
+and `/Differences`, StandardEncoding when the font names none — gives that
+character, and that `/ToUnicode`, where it maps the byte, agrees with, and
+measured by that byte's width. So `é` is 0xE9 in a WinAnsi font and refuses
+the annotation in a StandardEncoding one, which has no `é`, and a straight
+quote is 0xA9 there, where 0x27 is a right quote. Its box
 is `/Rect` less `/RD`, filled with `/C` (12.5.2's "background of the
 annotation's icon", which a free text annotation's box is) and bordered at
 the `/BS` width and dash in the text's colour, since ISO 32000-1 names no
 other; the text is laid out as a multiline field's is — two units in from
 the border, wrapped at the last space that fits (or between characters, for
-a word wider than the box) and at each line break, the first baseline 0.85
+a word wider than the box) and at each line break, the spaces it breaks
+at belonging to neither line, the first baseline 0.85
 of the size below the top and the lines 1.15 apart, aligned by `/Q` and
 clipped to the box — in the `/DA` font, size and colour, a size of zero being
 the largest whole size from twelve down to four at which every line fits. A
 line wholly below the box is not written, nor any after it, and each line
 after the first costs its text and at most one number (`TL` once, then `T*`),
 so that the stream grows with what the box shows rather than with a large
-number repeated once a line.
+number repeated once a line; the lines are laid out one at a time and the
+layout stops where the writing does, so a long `/Contents` in a box
+narrower than a glyph costs the lines the box shows, and one with no room
+inside its border is not laid out at all.
 Only the font, the size and a `g`, `rg` or `k` colour are read from `/DA`;
 the rest of the string is not copied into the appearance, where a `Q` or an
-`ET` of the producer's would unbalance it. Under `/IT /FreeTextCallout`,
+`ET` of the producer's would unbalance it. `/DA` is read with the object
+lexer, as the content stream it is (7.2): the font's name is `#`-decoded to
+find it in `/DR` and written back escaped as the resource key is, a
+delimiter ends a name, and a string that needs any leniency to lex — an
+exponent, an unterminated string, a stray delimiter — is not read, and the
+annotation is given no appearance. Under `/IT /FreeTextCallout`,
 Table 174's `/CL` callout is stroked as the border is, from the point it
 calls out to the box, with `/LE`'s ending at that point. Every
 synthesised appearance carries 12.5.6.2's `/CA` (and ISO 32000-2's `/ca` for
@@ -762,7 +777,7 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
 | Redacting what a **tiling pattern's cell** or a **soft mask's group** draws | not measured: the walk follows `Do`, annotation appearances and Type 3 procedures, and a cell (8.7.3.1) or a mask's group (11.6.5.2) is reached through `scn`, `SCN` or `gs` instead. One whose content shows text or draws an image is **named**, `RedactionWarning::PatternOrMask` with the resource name that selected it, wherever a page, a form or a glyph procedure paints with it (`redact.rs`'s `patterns_and_masks`); one that only paints paths is not, since nothing in it is anything a redaction removes. Until October 2026 neither was read or named. The read of what else draws a form does not follow them either | a cell is painted at every tile of whatever it fills, so cutting one is a form drawn at as many placements as the fill has tiles, which is a design rather than a fix; a mask's group is drawn as alpha, glyph shapes and all. **Not permanent**: measuring both is owed in the ROADMAP's Editing row | 8.7.3, 11.6.5 |
 | Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
 | Following more than 4 096 `Do`s of one content stream | the ones past the bound are written back as they were and never resolved — an image they draw is tested against no rectangle, a form not entered — and `RedactionWarning::TooManyXObjects` counts them (`a_stream_of_more_xobjects_than_the_walk_follows_is_reported`); until October 2026 the bound was there and the warning was not | the walk holds a use per `Do`, and a content stream may be 128 MiB of six-byte `/a Do`s; a page of more than four thousand XObject placements — a map, a tiled scan — has to be told it was not measured whole | ruling 1 |
-| A free text annotation whose `/DA` names no font the form's `/DR` holds, or one it holds as a composite or Type 3 font, or whose `/Contents` has a character above a byte | no appearance is synthesised, and the annotation renders only if it carries its own | the text is written a byte a glyph, as a field's value is (`fill::escape`), and a font that is not there, a font addressed by multi-byte codes or a character no byte names would make a box of wrong text or question marks: this module draws none rather than a wrong one. A composite `/DA` font is what `fill.rs`'s shaped path writes for fields, and a free text annotation does not take it yet. **Not permanent** for a composite font: owed in the ROADMAP's Editing row; a missing font and a character no byte names are | 12.5.6.6, 12.7.3.3 |
+| A free text annotation whose `/DA` names no font the form's `/DR` holds, or one it holds as a composite, Type 3 or symbolic font, or whose `/Contents` has a character that font's encoding gives no byte, or whose `/DA` does not lex cleanly | no appearance is synthesised, and the annotation renders only if it carries its own (`a_free_text_without_a_font_to_write_it_in_is_refused`, `a_free_text_is_written_in_the_bytes_its_fonts_encoding_gives`, `a_default_appearance_is_lexed_as_a_content_stream`) | the text is written a byte a glyph, each the byte the font's encoding draws that character with, and a font that is not there, a font addressed by multi-byte codes, a symbolic font's own glyphs or a character the encoding has no byte for would make a box of wrong text or question marks: this module draws none rather than a wrong one. Until October 2026 a character was written as its Latin-1 byte whatever the encoding, so a StandardEncoding font drew `café` as `cafØ`. A composite `/DA` font is what `fill.rs`'s shaped path writes for fields, and a free text annotation does not take it yet. **Not permanent** for a composite font: owed in the ROADMAP's Editing row; a missing font and a character no byte names are | 12.5.6.6, 12.7.3.3 |
 | A free text annotation's rich text (`/RC`), default style (`/DS`), and the operators of `/DA` other than its `Tf` and its `g`, `rg` or `k` | `/Contents` is drawn as plain text in the `/DA` font, size and colour; the rest is not read | `/RC` is XHTML and `/DS` CSS (12.7.3.4), which this module does not lay out — **not permanent**, owed in the ROADMAP's Editing row; `/DA`'s other operators are the producer's text, and copying them into the appearance could unbalance its `q`/`Q` or `BT`/`ET` | 12.5.6.6 |
 | Appearance synthesis for the subtypes whose appearance no dictionary determines — `Stamp`, `FileAttachment`, `Sound`, `Movie`, `Screen`, `3D`, `RichMedia`, `Popup`, `Widget`, `PrinterMark`, `TrapNet`, `Watermark`, `Redact` and `Projection` (`appearance::UNDETERMINED_SUBTYPES`) | `add_annotation` inserts the dictionary and synthesises no `/AP`, so the annotation renders only if it carries its own (`the_subtypes_no_dictionary_determines_are_declined_by_name`; `every_subtype_of_12_5_6_is_drawn_or_declined_by_name` fails if a subtype is in neither list) | what each would show is not in its dictionary: a stamp's, a file attachment's and a sound's `/Name` names an icon — `Approved`, `PushPin`, `Speaker` — that 12.5.6 gives no outline; a movie, a screen, a 3D annotation and rich media show their medium; a pop-up is the viewer's window for its parent's text; a widget's appearance is its field's, which the form filler builds from the value (`fill.rs`); a printer's mark, a trap network and a watermark exist only as the `/AP` their producer wrote; a redaction's entries say what replaces the content once it is applied and not what the mark looks like before; and a projection adds no entry at all. Inventing a picture is worse than drawing none | 12.5.6 |
 | A line's caption (`/Cap`, `/CP`, `/CO`) | the line is drawn, its caption is not | a caption is text, and a line annotation names no font to draw it in | 12.5.6.7 |

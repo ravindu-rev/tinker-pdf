@@ -33,7 +33,8 @@
 //! - `Ink` (12.5.6.13): each of `/InkList`'s paths, stroked with round caps
 //!   and joins.
 //! - `FreeText` (12.5.6.6), when its `/DA` names a simple font the form's
-//!   `/DR` holds: the box, its border, `/Contents` laid out in it, and the
+//!   `/DR` holds and that font's encoding has a byte for every character of
+//!   `/Contents`: the box, its border, `/Contents` laid out in it, and the
 //!   callout.
 //!
 //! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
@@ -864,58 +865,96 @@ fn ink(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
 /// Only those three are taken. The rest of the string is not replayed into
 /// the appearance: it is the producer's text, and an operator in it — a `Q`,
 /// an `ET` — would unbalance the stream it was copied into.
+///
+/// The string is read with this crate's own lexer (7.2), because it is a
+/// fragment of a content stream: a name is `#`-decoded — `/F#281` is the font
+/// `/DR` holds as `F(1` — and ends at a delimiter, and a number is 7.3.3's.
+/// A string that needs any leniency to lex — an exponent, an unterminated
+/// string, a stray delimiter — is not read at all, since what it names is
+/// then a guess.
 struct DefaultAppearance {
+    /// The font's resource name, decoded.
     font: Vec<u8>,
     size: f64,
     color: [f64; 3],
 }
 
 fn default_appearance(da: &[u8]) -> Option<DefaultAppearance> {
-    let tokens: Vec<&[u8]> = da
-        .split(|b| b.is_ascii_whitespace())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let number = |token: &[u8]| -> Option<f64> {
-        std::str::from_utf8(token)
-            .ok()?
-            .parse::<f64>()
-            .ok()
-            .filter(|v| v.is_finite())
-    };
+    use crate::lexer::{is_delimiter, Lexer, TokenKind};
+
+    /// What an operator is handed: a number, a name, or something else.
+    enum Operand {
+        Number(f64),
+        Name(Vec<u8>),
+        Other,
+    }
+    let mut sink = crate::warn::WarningSink::new();
+    let mut lexer = Lexer::new(da);
+    let mut operands: Vec<Operand> = Vec::new();
     let mut font = None;
     let mut color = [0.0, 0.0, 0.0];
-    for (index, token) in tokens.iter().enumerate() {
-        // The operands of the operator at `index`, the `n` tokens before it.
-        let operands = |n: usize| -> Option<Vec<f64>> {
-            let start = index.checked_sub(n)?;
-            tokens
-                .get(start..index)?
+    loop {
+        let token = lexer.next_token(&mut sink);
+        let operator = match token.kind {
+            TokenKind::Eof => break,
+            TokenKind::Int(v) => {
+                operands.push(Operand::Number(v as f64));
+                continue;
+            }
+            TokenKind::Real(v) => {
+                operands.push(Operand::Number(v));
+                continue;
+            }
+            TokenKind::Name(name) => {
+                operands.push(Operand::Name(name));
+                continue;
+            }
+            TokenKind::Unknown => {
+                let start = usize::try_from(token.start).ok()?;
+                let end = usize::try_from(token.end).ok()?;
+                let bytes = da.get(start..end)?;
+                if bytes.first().is_none_or(|b| is_delimiter(*b)) {
+                    return None;
+                }
+                bytes
+            }
+            _ => {
+                operands.push(Operand::Other);
+                continue;
+            }
+        };
+        // The last `n` operands, as numbers.
+        let numbers = |n: usize| -> Option<Vec<f64>> {
+            let start = operands.len().checked_sub(n)?;
+            operands
+                .get(start..)?
                 .iter()
-                .map(|t| number(t))
+                .map(|operand| match operand {
+                    Operand::Number(v) if v.is_finite() => Some(*v),
+                    _ => None,
+                })
                 .collect()
         };
-        match *token {
+        match operator {
             b"Tf" => {
-                let name = index.checked_sub(2).and_then(|i| tokens.get(i));
-                let size = index.checked_sub(1).and_then(|i| tokens.get(i));
-                if let (Some(name), Some(size)) = (name, size) {
-                    if let (Some(name), Some(size)) = (name.strip_prefix(b"/"), number(size)) {
-                        font = Some((name.to_vec(), size.max(0.0)));
+                if let [.., Operand::Name(name), Operand::Number(size)] = operands.as_slice() {
+                    if size.is_finite() {
+                        font = Some((name.clone(), size.max(0.0)));
                     }
                 }
             }
             b"g" => {
-                if let Some(&[g]) = operands(1).as_deref() {
+                if let Some(&[g]) = numbers(1).as_deref() {
                     color = [g, g, g];
                 }
             }
             b"rg" => {
-                if let Some(&[r, g, b]) = operands(3).as_deref() {
+                if let Some(&[r, g, b]) = numbers(3).as_deref() {
                     color = [r, g, b];
                 }
             }
             b"k" => {
-                if let Some(&[c, m, y, k]) = operands(4).as_deref() {
+                if let Some(&[c, m, y, k]) = numbers(4).as_deref() {
                     color = [
                         (1.0 - c) * (1.0 - k),
                         (1.0 - m) * (1.0 - k),
@@ -925,6 +964,10 @@ fn default_appearance(da: &[u8]) -> Option<DefaultAppearance> {
             }
             _ => {}
         }
+        operands.clear();
+    }
+    if !sink.is_empty() {
+        return None;
     }
     let (font, size) = font?;
     Some(DefaultAppearance {
@@ -955,21 +998,32 @@ fn form_font(doc: &CosDocument, name: &[u8]) -> Option<(Object, crate::font::Fon
     simple.then_some((entry, font))
 }
 
-/// Breaks text into the lines a box `width` wide holds at `size` (12.7.3.3's
-/// multiline layout): at each line break in the text, and otherwise at the
-/// last space that fits, or — for a word longer than the box — between two
-/// characters.
-fn wrap(text: &str, font: &crate::font::Font, size: f64, width: f64) -> Vec<String> {
-    let advance = |c: char| font.width_of(u32::from(c)).0 * size / 1000.0;
-    let mut lines = Vec::new();
+/// Breaks text into the lines a box `width` wide holds (12.7.3.3's multiline
+/// layout), handing each to `each` in order until it returns `false`: at each
+/// line break in the text, and otherwise at the last space that fits, or —
+/// for a word longer than the box — between two characters. `advance` is a
+/// character's width at the size being laid out.
+///
+/// The spaces a line is broken at are not part of either line, so a line set
+/// against the right of the box ends at its last character.
+///
+/// Lines are handed over one at a time rather than collected, so what a
+/// caller that stops early has paid for is the lines it took: a box narrower
+/// than a glyph makes a line of every character, and `/Contents` can be as
+/// long as a string in the file.
+fn wrap(text: &str, advance: impl Fn(char) -> f64, width: f64, mut each: impl FnMut(&str) -> bool) {
+    let mut line = String::new();
     for paragraph in text.split("\r\n").flat_map(|p| p.split(['\r', '\n'])) {
-        let mut line = String::new();
+        line.clear();
         let mut line_width = 0.0;
         for word in paragraph.split(' ') {
-            let word_width: f64 = word.chars().map(advance).sum();
+            let word_width: f64 = word.chars().map(&advance).sum();
             let space = if line.is_empty() { 0.0 } else { advance(' ') };
             if !line.is_empty() && line_width + space + word_width > width {
-                lines.push(std::mem::take(&mut line));
+                if !each(line.trim_end_matches(' ')) {
+                    return;
+                }
+                line.clear();
                 line_width = 0.0;
             } else if !line.is_empty() {
                 line.push(' ');
@@ -978,16 +1032,54 @@ fn wrap(text: &str, font: &crate::font::Font, size: f64, width: f64) -> Vec<Stri
             for c in word.chars() {
                 let w = advance(c);
                 if !line.is_empty() && line_width + w > width && line_width > 0.0 {
-                    lines.push(std::mem::take(&mut line));
+                    if !each(line.trim_end_matches(' ')) {
+                        return;
+                    }
+                    line.clear();
                     line_width = 0.0;
                 }
                 line.push(c);
                 line_width += w;
             }
         }
-        lines.push(line);
+        if !each(line.trim_end_matches(' ')) {
+            return;
+        }
     }
-    lines
+}
+
+/// The byte a simple font draws each character with (9.6.6): the lowest code
+/// whose glyph its encoding — and its `/ToUnicode`, where it has one — says
+/// is that character ([`crate::font::Font::char_drawn_by`]). Empty for a
+/// symbolic font.
+fn codes_of(font: &crate::font::Font) -> std::collections::HashMap<char, u8> {
+    let mut codes = std::collections::HashMap::new();
+    for code in (0..=255u8).rev() {
+        if let Some(c) = font.char_drawn_by(code) {
+            codes.insert(c, code);
+        }
+    }
+    codes
+}
+
+/// Writes `line` as a literal string (7.3.4.2) of the bytes `codes` gives
+/// its characters, and shows it. Every character has one: [`free_text`]
+/// refuses the annotation before anything is drawn otherwise.
+fn shown_string(out: &mut Vec<u8>, line: &str, codes: &std::collections::HashMap<char, u8>) {
+    out.push(b'(');
+    for code in line.chars().filter_map(|c| codes.get(&c)) {
+        match code {
+            b'(' | b')' | b'\\' => {
+                out.push(b'\\');
+                out.push(*code);
+            }
+            // A bare carriage return in a literal string is read back as a
+            // line feed.
+            b'\r' => out.extend_from_slice(b"\\r"),
+            _ => out.push(*code),
+        }
+    }
+    out.extend_from_slice(b") Tj\n");
 }
 
 /// A free text annotation (12.5.6.6): its box — `/Rect` less `/RD` —
@@ -1004,11 +1096,15 @@ fn wrap(text: &str, font: &crate::font::Font, size: f64, width: f64) -> Vec<Stri
 /// line below the top, lines 1.15 apart, clipped to the box; a `/DA` size of
 /// zero takes the largest whole size up to twelve at which every line fits.
 ///
+/// Each character is written as the byte the font's own encoding draws it
+/// with (9.6.6), and measured by that byte's width.
+///
 /// Returns the font resource the text needs, under its `/DA` name. `None`
 /// — no appearance at all — when the `/DA` names no font the form's `/DR`
-/// holds as a simple font, or `/Contents` has a character such a font has
-/// no byte for: a box with question marks in it is a wrong appearance, and
-/// this module would rather draw none.
+/// holds as a simple font, or `/Contents` has a character that font's
+/// encoding gives no byte — a symbolic font gives none — since a box showing
+/// other glyphs, or question marks, is a wrong appearance and this module
+/// would rather draw none.
 fn free_text(
     doc: &CosDocument,
     annotation: &Dict,
@@ -1025,7 +1121,11 @@ fn free_text(
         Some(string) => crate::decode_text_string(&string.bytes),
         None => String::new(),
     };
-    if contents.chars().any(|c| u32::from(c) > 0xFF) {
+    let codes = codes_of(&font);
+    if contents
+        .chars()
+        .any(|c| !matches!(c, '\r' | '\n') && !codes.contains_key(&c))
+    {
         return None;
     }
 
@@ -1071,75 +1171,94 @@ fn free_text(
 
     let inner = inset(boxed, paint.width + 2.0);
     let (inner_w, inner_h) = (inner.x1 - inner.x0, inner.y1 - inner.y0);
-    // Lines fit when the last one's descender — a quarter of the size below
-    // its baseline — is inside the box.
-    let fits = |size: f64| {
-        let lines = wrap(&contents, &font, size, inner_w);
-        let height = size * (0.85 + 1.15 * (lines.len() as f64 - 1.0) + 0.25);
-        (height <= inner_h).then_some(lines)
+    // A line is not empty exactly when it holds a character that is neither
+    // a space nor a line break. With none, or with no room inside the
+    // border, nothing is laid out at all.
+    let has_text = contents.chars().any(|c| !matches!(c, ' ' | '\r' | '\n'));
+    if !has_text || inner_w <= 0.0 || inner_h <= 0.0 {
+        return Some((da.font, resource));
+    }
+    let width_at = |size: f64| {
+        let (codes, font) = (&codes, &font);
+        move |c: char| {
+            codes.get(&c).map_or(0.0, |code| {
+                font.width_of(u32::from(*code)).0 * size / 1000.0
+            })
+        }
     };
-    let (size, lines) = if da.size > 0.0 {
-        (da.size, wrap(&contents, &font, da.size, inner_w))
+    // Lines fit when the last one's descender — a quarter of the size below
+    // its baseline — is inside the box; the count stops at the first line
+    // that is not.
+    let fits = |size: f64| {
+        let (mut count, mut fits) = (0usize, true);
+        wrap(&contents, width_at(size), inner_w, |_| {
+            count += 1;
+            fits = size * (0.85 + 1.15 * (count as f64 - 1.0) + 0.25) <= inner_h;
+            fits
+        });
+        fits
+    };
+    let size = if da.size > 0.0 {
+        da.size
     } else {
         (4..=12u8)
             .rev()
-            .find_map(|s| fits(f64::from(s)).map(|lines| (f64::from(s), lines)))
-            .unwrap_or_else(|| (4.0, wrap(&contents, &font, 4.0, inner_w)))
+            .map(f64::from)
+            .find(|s| fits(*s))
+            .unwrap_or(4.0)
     };
 
-    if lines.iter().any(|line| !line.is_empty()) && inner_w > 0.0 && inner_h > 0.0 {
-        let quadding = doc
-            .resolve_key(annotation, doc.intern(b"Q"))
-            .as_int()
-            .unwrap_or(0);
-        out.extend_from_slice(b"q\n");
-        op(out, &[inner.x0, inner.y0, inner_w, inner_h], b"re");
-        out.extend_from_slice(b"W n\nBT\n/");
-        out.extend_from_slice(&da.font);
-        out.push(b' ');
-        op(out, &[size], b"Tf");
-        op(out, &da.color, b"rg");
-        // The leading is said once, and each line after the first moves by
-        // it (`T*`) and by how far its start is from the last one's — so a
-        // line costs its text and at most one more number, rather than the
-        // whole matrix again.
-        let leading = size * 1.15;
-        op(out, &[leading], b"TL");
-        let mut unwritable = Vec::new();
-        let mut previous: Option<f64> = None;
-        for (index, line) in lines.iter().enumerate() {
-            let y = inner.y1 - size * 0.85 - index as f64 * leading;
-            // A line wholly below the box is clipped away, and so is every
-            // one after it, so none of them is written; and an appearance
-            // longer than any stream this crate decodes is not one its own
-            // reader could draw (`MAX_DECODED_STREAM`).
-            if y + size < inner.y0 || out.len() > crate::limits::MAX_DECODED_STREAM {
-                break;
-            }
-            let line_width: f64 = line
-                .chars()
-                .map(|c| font.width_of(u32::from(c)).0 * size / 1000.0)
-                .sum();
-            let x = match quadding {
-                1 => inner.x0 + (inner_w - line_width) / 2.0,
-                2 => inner.x1 - line_width,
-                _ => inner.x0,
-            };
-            match previous {
-                None => op(out, &[1.0, 0.0, 0.0, 1.0, x, y], b"Tm"),
-                Some(last) if (x - last).abs() < 1e-9 => out.extend_from_slice(b"T*\n"),
-                Some(last) => {
-                    op(out, &[x - last, 0.0], b"Td");
-                    out.extend_from_slice(b"T*\n");
-                }
-            }
-            previous = Some(x);
-            out.push(b'(');
-            crate::fill::escape(out, line, &mut unwritable);
-            out.extend_from_slice(b") Tj\n");
+    let quadding = doc
+        .resolve_key(annotation, doc.intern(b"Q"))
+        .as_int()
+        .unwrap_or(0);
+    out.extend_from_slice(b"q\n");
+    op(out, &[inner.x0, inner.y0, inner_w, inner_h], b"re");
+    out.extend_from_slice(b"W n\nBT\n");
+    // Escaped as the resource key is (7.3.5), so the two still name one
+    // font when the name holds a delimiter.
+    crate::write::write_name(out, &da.font);
+    out.push(b' ');
+    op(out, &[size], b"Tf");
+    op(out, &da.color, b"rg");
+    // The leading is said once, and each line after the first moves by
+    // it (`T*`) and by how far its start is from the last one's — so a
+    // line costs its text and at most one more number, rather than the
+    // whole matrix again.
+    let leading = size * 1.15;
+    op(out, &[leading], b"TL");
+    let advance = width_at(size);
+    let mut index = 0usize;
+    let mut previous: Option<f64> = None;
+    wrap(&contents, advance, inner_w, |line| {
+        let y = inner.y1 - size * 0.85 - index as f64 * leading;
+        // A line wholly below the box is clipped away, and so is every
+        // one after it, so none of them is laid out; and an appearance
+        // longer than any stream this crate decodes is not one its own
+        // reader could draw (`MAX_DECODED_STREAM`).
+        if y + size < inner.y0 || out.len() > crate::limits::MAX_DECODED_STREAM {
+            return false;
         }
-        out.extend_from_slice(b"ET\nQ\n");
-    }
+        let line_width: f64 = line.chars().map(&advance).sum();
+        let x = match quadding {
+            1 => inner.x0 + (inner_w - line_width) / 2.0,
+            2 => inner.x1 - line_width,
+            _ => inner.x0,
+        };
+        match previous {
+            None => op(out, &[1.0, 0.0, 0.0, 1.0, x, y], b"Tm"),
+            Some(last) if (x - last).abs() < 1e-9 => out.extend_from_slice(b"T*\n"),
+            Some(last) => {
+                op(out, &[x - last, 0.0], b"Td");
+                out.extend_from_slice(b"T*\n");
+            }
+        }
+        previous = Some(x);
+        index += 1;
+        shown_string(out, line, &codes);
+        true
+    });
+    out.extend_from_slice(b"ET\nQ\n");
     Some((da.font, resource))
 }
 
@@ -2808,6 +2927,166 @@ mod tests {
         );
     }
 
+    /// The bytes a free text annotation shows its first line with, in the
+    /// form's `/DR` font named `font`.
+    fn shown(form: &CosDocument, font: &str, contents: &str) -> Option<Vec<u8>> {
+        let stream = synthesize(
+            form,
+            &parsed(
+                form,
+                &format!(
+                    "<< /Subtype /FreeText /Rect [10 10 110 60] /BS << /W 0 >> \
+                     /DA (/{font} 10 Tf 0 g) /Contents {contents} >>"
+                ),
+            ),
+        )?;
+        let data = stream.data;
+        let start = data.windows(4).position(|w| w == b"Tm\n(")? + 4;
+        let end = data.windows(5).position(|w| w == b") Tj\n")?;
+        data.get(start..end).map(<[u8]>::to_vec)
+    }
+
+    /// 9.6.6: a simple font's byte draws the glyph its encoding gives it, so
+    /// a character is written as the byte the font's own encoding has for
+    /// it — and, where the font has none, the annotation gets no appearance
+    /// rather than one showing other glyphs. WinAnsi has `é` at 0xE9 where
+    /// StandardEncoding has `Ø` and no `é` at all; StandardEncoding's 0x27
+    /// is a right quote, and its straight one is 0xA9; `/Differences` that
+    /// move `B` and `C` down to 65 and 66 leave nothing drawing `A`; and a
+    /// symbolic font's codes are its own glyphs, not characters.
+    #[test]
+    fn a_free_text_is_written_in_the_bytes_its_fonts_encoding_gives() {
+        let form = form_doc(
+            "/Helv 4 0 R /Std 5 0 R /Dif 6 0 R /Sym 7 0 R /Flag 8 0 R",
+            &[
+                HELVETICA,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+                 /Encoding << /Differences [65 /B /C] >> >>",
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>",
+                "<< /Type /Font /Subtype /TrueType /BaseFont /Arial \
+                 /Encoding /WinAnsiEncoding /FontDescriptor 9 0 R >>",
+                "<< /Type /FontDescriptor /FontName /Arial /Flags 4 >>",
+            ],
+        );
+        assert_eq!(
+            shown(&form, "Helv", "(caf\\351)").as_deref(),
+            Some(&b"caf\xE9"[..])
+        );
+        assert_eq!(shown(&form, "Std", "(caf\\351)"), None, "no é to draw");
+        assert_eq!(
+            shown(&form, "Std", "(it's)").as_deref(),
+            Some(&b"it\xA9s"[..])
+        );
+        assert_eq!(shown(&form, "Dif", "(AB)"), None, "nothing draws A");
+        assert_eq!(shown(&form, "Dif", "(BC)").as_deref(), Some(&b"AB"[..]));
+        assert_eq!(shown(&form, "Sym", "(abc)"), None, "a symbolic face");
+        assert_eq!(shown(&form, "Flag", "(abc)"), None, "a symbolic flag");
+        // 0x90 in PDFDocEncoding is a right quote, above a byte as a
+        // character and in WinAnsi at 0x92.
+        assert_eq!(
+            shown(&form, "Helv", "(it\\220s)").as_deref(),
+            Some(&b"it\x92s"[..])
+        );
+    }
+
+    /// `wrap` hands its lines over one at a time and stops when told to: a
+    /// million characters in a box narrower than any of them is a million
+    /// lines, and a caller that takes three has had three made. The spaces
+    /// a line breaks at belong to neither line.
+    #[test]
+    fn wrapping_stops_when_the_caller_does_and_drops_the_spaces_it_breaks_at() {
+        let lines = |text: &str, width: f64, take: usize| {
+            let mut lines = Vec::new();
+            wrap(
+                text,
+                |c| if c == ' ' { 2.0 } else { 5.0 },
+                width,
+                |line| {
+                    lines.push(line.to_owned());
+                    lines.len() < take
+                },
+            );
+            lines
+        };
+        let long = "M".repeat(1_000_000);
+        assert_eq!(lines(&long, 0.5, 3), ["M", "M", "M"]);
+        let mut count = 0usize;
+        wrap(
+            &long,
+            |_| 5.0,
+            0.5,
+            |_| {
+                count += 1;
+                true
+            },
+        );
+        assert_eq!(count, 1_000_000);
+        assert_eq!(lines("Hello  world", 30.0, 9), ["Hello", "world"]);
+        assert_eq!(lines("Hello   world ", 100.0, 9), ["Hello   world"]);
+        assert_eq!(lines("ab\n\ncd", 100.0, 9), ["ab", "", "cd"]);
+    }
+
+    /// Set against the right of a box too narrow for both words, the first
+    /// line ends at its last letter however many spaces followed it.
+    #[test]
+    fn a_line_set_right_ends_at_its_last_character() {
+        let doc = helvetica_form();
+        let right = |contents: &str| {
+            content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /FreeText /DA (/Helv 10 Tf 0 g) /BS << /W 0 >> \
+                     /Rect [10 10 50 60] /Q 2 /Contents ({contents}) >>"
+                ),
+            )
+            .expect("an appearance")
+        };
+        assert!(right("Hello world").contains("1 0 0 1 25.22 49.5 Tm\n(Hello) Tj\n"));
+        let doubled = right("Hello  world");
+        assert!(
+            doubled.contains("1 0 0 1 25.22 49.5 Tm\n(Hello) Tj\n"),
+            "{doubled}"
+        );
+    }
+
+    /// `/DA` is lexed as the content stream it is (7.2): a name's `#`
+    /// escapes are decoded to find it in `/DR` and written back escaped, a
+    /// delimiter ends a name rather than joining it, and a number 7.3.3 does
+    /// not allow — an exponent — makes the string unreadable.
+    #[test]
+    fn a_default_appearance_is_lexed_as_a_content_stream() {
+        let form = form_doc("/F#281 4 0 R /Helv 4 0 R", &[HELVETICA]);
+        let annotation = |da: &str| {
+            parsed(
+                &form,
+                &format!(
+                    "<< /Subtype /FreeText /Rect [10 10 110 60] /BS << /W 0 >> \
+                     /DA ({da}) /Contents (hi) >>"
+                ),
+            )
+        };
+        let stream = synthesize(&form, &annotation("/F#281 10 Tf 0 g")).expect("an appearance");
+        assert!(
+            text_of(&stream).contains("BT\n/F#281 10 Tf\n"),
+            "{}",
+            text_of(&stream)
+        );
+        let key = stream
+            .dict
+            .get_dict(form.intern(b"Resources"))
+            .and_then(|r| r.get_dict(form.intern(b"Font")))
+            .and_then(|f| f.get_ref(form.intern(b"F(1")));
+        assert_eq!(key, Some(ObjRef { num: 4, gen: 0 }));
+        for unread in [
+            "/F\\(1 10 Tf 0 g",
+            "/Helv 1e1 Tf 0 g",
+            "/Helv 10 Tf 0 g \\)",
+        ] {
+            assert!(synthesize(&form, &annotation(unread)).is_none(), "{unread}");
+        }
+    }
+
     /// One dictionary carrying every geometric entry 12.5.6 reads, for the
     /// subtype given: whatever a subtype could draw from, it has.
     fn everything(subtype: &str) -> String {
@@ -2934,13 +3213,17 @@ mod tests {
             proptest::collection::vec(number, 0..24),
             0usize..10,
             any::<bool>(),
+            // A `/DA` of arbitrary bytes, in place of the well-formed one
+            // when the flag says so: the string is lexed (7.2), and
+            // whatever it holds must lex to an answer or to none.
+            proptest::option::of(proptest::collection::vec(any::<u8>(), 0..40)),
         );
         let mut runner = TestRunner::new(Config {
             cases: 768,
             failure_persistence: None,
             ..Config::default()
         });
-        let result = runner.run(&strategy, |(which, values, take, form)| {
+        let result = runner.run(&strategy, |(which, values, take, form, raw_da)| {
             let doc = &docs[usize::from(form)];
             let name = |n: &[u8]| Object::Name(doc.intern(n));
             let real = |i: usize| Object::Real(values.get(i).copied().unwrap_or(1.0));
@@ -2989,10 +3272,12 @@ mod tests {
             dict.insert(doc.intern(b"IT"), name(b"FreeTextCallout"));
             dict.insert(doc.intern(b"Q"), Object::Int(take as i64 - 3));
             let size = values.get(12).copied().unwrap_or(10.0);
-            let da = format!("/Helv {size:?} Tf {size:?} {size:?} 0 rg");
+            let da = raw_da.unwrap_or_else(|| {
+                format!("/Helv {size:?} Tf {size:?} {size:?} 0 rg").into_bytes()
+            });
             dict.insert(
                 doc.intern(b"DA"),
-                Object::String(crate::object::PdfString::literal(da.into_bytes())),
+                Object::String(crate::object::PdfString::literal(da)),
             );
             dict.insert(
                 doc.intern(b"Contents"),

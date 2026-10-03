@@ -515,6 +515,39 @@ impl Font {
         base_char(self.base_encoding, byte)
     }
 
+    /// The character a simple font's code draws, for a writer choosing the
+    /// byte to show a character with: the character its encoding (9.6.6)
+    /// gives the code, when `/ToUnicode` — where it maps the code at all —
+    /// says the same.
+    ///
+    /// `None` for a code the two disagree on, since which of them a reader
+    /// draws by depends on the font program; for a composite or Type 3 font,
+    /// whose codes are not one byte through an encoding; and for every code
+    /// of a symbolic font — the descriptor's flag, or the standard `Symbol`
+    /// and `ZapfDingbats` — whose codes name the program's own glyphs
+    /// (9.6.6.4) rather than characters an encoding table here knows.
+    pub(crate) fn char_drawn_by(&self, code: u8) -> Option<char> {
+        if !matches!(self.kind, FontKind::Type1 | FontKind::TrueType) || self.symbolic {
+            return None;
+        }
+        if matches!(
+            Standard14::from_base_font(&self.base_font),
+            Some(Standard14::Symbol | Standard14::ZapfDingbats)
+        ) {
+            return None;
+        }
+        let c = self.char_of(u32::from(code))?;
+        let mapped = self
+            .to_unicode
+            .as_ref()
+            .and_then(|cmap| cmap.to_unicode_string(u32::from(code)))
+            .filter(|text| !text.is_empty());
+        match mapped {
+            Some(text) if text.chars().ne(std::iter::once(c)) => None,
+            _ => Some(c),
+        }
+    }
+
     /// The text a code stands for.
     ///
     /// `/ToUnicode` wins where it exists, because it is the producer's own
