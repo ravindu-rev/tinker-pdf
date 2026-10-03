@@ -334,10 +334,11 @@ fn a_root_with_no_size_takes_the_viewport_it_was_given() {
 /// refused list without a warning fails here rather than passing a test about
 /// the ones that are left.
 ///
-/// **`<clipPath>` left this list at milestone 4** and the fixture still holds
-/// one, which is the point: it is now reached by reference like a `<defs>`
-/// child and draws nothing where it stands, so an element that produced a
-/// warning here again would mean the walk had started rendering it.
+/// **`<clipPath>` left this list at milestone 4, and `<marker>` after the
+/// milestones**, and the fixture still holds one of each, which is the point:
+/// both are reached by reference like a `<defs>` child and draw nothing where
+/// they stand, so an element that produced a warning here again would mean
+/// the walk had started rendering it.
 #[test]
 fn every_named_non_goal_is_a_warning_that_says_which() {
     let scene = scene(NON_GOALS, Some((100.0, 100.0)));
@@ -348,7 +349,6 @@ fn every_named_non_goal_is_a_warning_that_says_which() {
         Warning::ForeignObjectUnsupported,
         Warning::AnimationIgnored,
         Warning::ScriptIgnored,
-        Warning::MarkerUnsupported,
         Warning::ElementUnknown("nonsuch".to_owned()),
     ];
     for warning in &expected {

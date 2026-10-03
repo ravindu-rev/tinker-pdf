@@ -1047,4 +1047,25 @@ fn the_six_svg_spine_items_draw_rather_than_placehold() {
     }
     println!("  {drawn} SVG spine items drew");
     assert_eq!(drawn, 6);
+
+    // §11.6's markers, the one SVG refusal this book carried a count of —
+    // thirty-two, every one on a path that also fills. They are drawn now, so
+    // the only marker warning left is a reference naming nothing, and this
+    // book has none of those.
+    let unresolved = doc
+        .archive()
+        .expect("a book carries a report")
+        .warnings()
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning,
+                ArchiveWarning::Svg {
+                    warning: tinker_pdf_svg::Warning::MarkerUnresolved,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(unresolved, 0, "every marker reference names a <marker>");
 }

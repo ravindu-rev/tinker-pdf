@@ -384,6 +384,13 @@ pub struct Style {
     pub stop_opacity: f64,
     /// §14.3's `clip-path`, as the bare fragment name it referenced.
     pub clip_path: Option<String>,
+    /// §11.6.2's `marker-start`, `marker-mid` and `marker-end`, in that order,
+    /// as the bare fragment names they referenced.
+    ///
+    /// **Inherited**, which §11.6.2's property table says and which is the
+    /// reason a `<g marker-end="url(#arrow)">` puts an arrowhead on every
+    /// line inside it.
+    pub markers: [Option<String>; 3],
     /// `font-family`, in the author's order, generics left in.
     pub families: Vec<String>,
     /// `font-size`, in user units, already resolved through `em` and `%`.
@@ -430,6 +437,7 @@ impl Default for Style {
             },
             stop_opacity: 1.0,
             clip_path: None,
+            markers: [None, None, None],
             // §10.10's initial `font-family` is the user agent's, and CSS 2.1
             // §15.7 makes the initial `font-size` `medium`. The first is the
             // caller's to decide and is named rather than guessed: an empty
@@ -446,7 +454,7 @@ impl Default for Style {
 
 /// The properties this build reads, so a presentation attribute that is not one
 /// is left alone rather than read as a property nobody consumes.
-pub const PROPERTIES: [&str; 23] = [
+pub const PROPERTIES: [&str; 27] = [
     "fill",
     "fill-rule",
     "fill-opacity",
@@ -470,6 +478,10 @@ pub const PROPERTIES: [&str; 23] = [
     "font-weight",
     "font-style",
     "text-anchor",
+    "marker",
+    "marker-start",
+    "marker-mid",
+    "marker-end",
 ];
 
 /// What resolving one declaration did.
@@ -585,6 +597,32 @@ impl Style {
                 },
                 None => false,
             },
+            // §11.6.2: `none` or a reference, and `marker` sets all three —
+            // the shorthand is a property of its own in §11.6.2's table, so it
+            // is read wherever the longhands are.
+            "marker" | "marker-start" | "marker-mid" | "marker-end" => {
+                let read = match significant.first() {
+                    Some(ComponentValue::Token(Token::Ident(word)))
+                        if significant.len() == 1 && word.eq_ignore_ascii_case("none") =>
+                    {
+                        Some(None)
+                    }
+                    Some(value) if significant.len() == 1 => reference(value).map(Some),
+                    _ => None,
+                };
+                match read {
+                    Some(value) => {
+                        match name {
+                            "marker-start" => self.markers[0] = value,
+                            "marker-mid" => self.markers[1] = value,
+                            "marker-end" => self.markers[2] = value,
+                            _ => self.markers = [value.clone(), value.clone(), value],
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            }
             "color" => match colour(values) {
                 // §11.2 makes `color`'s own `inherit` the only way to reach a
                 // parent's, and this build implements no CSS-wide keyword —

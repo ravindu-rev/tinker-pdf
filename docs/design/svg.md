@@ -62,9 +62,9 @@ A picture that quietly drops one of these looks finished.
 - **`<pattern>` as a paint** (§13.3). A tiling paint server is a form XObject
   and a `/Pattern` colour space, and it has no corpus behind it (ruling 3).
   `Warning::PatternUnsupported`.
-- **`<marker>`** (§11.6). Arrowheads on a path's vertices. Thirty-two of them
-  are in the fetched corpus, all on paths that also fill, so the drawing is
-  there and the decorations are not. `Warning::MarkerUnsupported`.
+- ~~**`<marker>`** (§11.6)~~ — **drawn since the milestones**; see *As built*.
+  Arrowheads on a path's vertices, thirty-two of them in the fetched corpus,
+  all on paths that also fill.
 - **`<image>` inside an SVG that the facade cannot resolve.** The crate carries
   the `href` unresolved — it has no container, no filesystem and no network,
   which is what makes it a leaf. Whether the reference resolves is the
@@ -254,6 +254,21 @@ milestone 4: `clip-path` does not inherit, and the container was not a shape,
 so the clip went nowhere and `clip_path_does_not_inherit` asserted only the
 half that held. The writer's own suite had recorded the symptom as a reader
 limit (`a_clipped_image_is_clipped_in_page_space`); it asserts the clip now.
+
+**After the milestones: §11.6's markers**, the one refusal with a corpus
+count. A marker is expanded in the leaf crate, at every vertex — so the
+consumer sees paths and groups and nothing marker-shaped, which is the
+display-list rule again. Two decisions are worth having in writing. A vertex
+is where a **command** ends (`path::parse_commands` reports the boundaries),
+because path.rs cuts an arc into quarter-turn cubics and a `marker-mid` at
+every cubic would decorate the inside of every arc. And a closed subpath's
+first vertex arrives along its closing segment, which is SVG 2's
+direction rule — SVG 1.1 is silent, and every renderer reads it this way. A
+marker's style is resolved down its own ancestry (§11.6.2), the user agent's
+`overflow: hidden` clips it to its viewport, and a marker that reaches itself
+is `Refusal::TooManyUses`, the `<use>` bomb in another spelling. The counted
+injection found one hole: the bisector's wrap is two rules, one per turning
+direction, and the first fixture turned one way.
 
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is

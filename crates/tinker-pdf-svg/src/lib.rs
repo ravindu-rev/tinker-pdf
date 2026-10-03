@@ -40,6 +40,7 @@
 
 pub mod document;
 pub mod gradient;
+pub mod marker;
 pub mod path;
 pub mod scene;
 pub mod shape;
@@ -133,7 +134,8 @@ pub enum Refusal {
     TooManyNodes,
     /// Past [`Limits::max_segments`].
     TooManySegments,
-    /// Past [`Limits::max_uses`], or a `<use>` that reaches itself.
+    /// Past [`Limits::max_uses`], or a `<use>` — or a `<marker>` — that
+    /// reaches itself.
     TooManyUses,
     /// Selector matching crossed `tinker-pdf-css`'s own budget.
     ///
@@ -168,15 +170,15 @@ pub enum Warning {
     ClipPathUnsupported,
     /// `<pattern>` used as a paint.
     PatternUnsupported,
-    /// `<marker>`, and the three properties that name one.
+    /// A `marker-start`, `marker-mid` or `marker-end` naming no `<marker>`.
     ///
-    /// §11.6's vertex decorations: an arrowhead is a whole second rendering of
-    /// a referenced subtree at every vertex, rotated to the path's tangent
-    /// there. Named rather than folded into [`Warning::ElementUnknown`],
-    /// because a `<marker>` is SVG this build declines rather than a
-    /// vocabulary it does not read — and thirty-two of them are in the fetched
-    /// corpus, every one on a path that also fills.
-    MarkerUnsupported,
+    /// §11.6.2 makes a reference to nothing an error; the path is drawn
+    /// without the decoration, which is ruling 2's answer. A `<marker>` itself
+    /// is **drawn** since it left the refusal list — at every vertex §11.6.2
+    /// names, turned by `orient`, scaled by `markerUnits` and clipped to its
+    /// own viewport — so this is the reference that went nowhere and not the
+    /// element.
+    MarkerUnresolved,
     /// `<foreignObject>`, whose content is a different document language.
     ForeignObjectUnsupported,
     /// SMIL — `<animate>`, `<set>`, `<animateTransform>` and relatives. A

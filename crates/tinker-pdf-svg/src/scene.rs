@@ -30,10 +30,13 @@ use tinker_pdf_css::{Budget as CssBudget, Limits as CssLimits};
 use crate::document::Child;
 use crate::document::{self, Node, Tree};
 use crate::gradient;
+use crate::marker::{self, Orient};
+use crate::path::{self, Outline, Segment};
 use crate::shape::{self, Shape};
 use crate::style::{self, PaintSpec, Sheet, Style};
 use crate::transform::{self, IDENTITY};
 use crate::{Limits, Paint, Refusal, Scene, Stroke, TextStyle, Warning};
+use tinker_pdf_math as math;
 
 /// The default viewport, in user units, for a document that states no size.
 ///
@@ -420,10 +423,10 @@ impl Walk<'_> {
                 self.warn(Warning::PatternUnsupported);
                 Ok(())
             }
-            "marker" => {
-                self.warn(Warning::MarkerUnsupported);
-                Ok(())
-            }
+            // §11.6.2: a `<marker>` is drawn at the vertices of whatever
+            // references it and never where it stands — `<defs>`'s rule, and
+            // the reason `<clipPath>` is beside it.
+            "marker" => Ok(()),
             "foreignObject" => {
                 self.warn(Warning::ForeignObjectUnsupported);
                 Ok(())
@@ -514,20 +517,310 @@ impl Walk<'_> {
                 opacity: style.stroke_opacity.clamp(0.0, 1.0),
             }))
         };
-        // §14.5's opacity is the shape's own and applies to its rendering as a
-        // whole: exact as an alpha where it paints once, and a group of one
-        // where a fill and a stroke would otherwise darken each other.
-        self.emit(
-            crate::Node::Path {
-                outline: outline.transformed(matrix),
-                fill,
-                rule: style.fill_rule,
-                fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
-                stroke,
-                clip,
-            },
-            style.opacity,
-        )
+        let markers = self.markers(node, style, matrix, &outline, frame)?;
+        let shape = crate::Node::Path {
+            outline: outline.transformed(matrix),
+            fill,
+            rule: style.fill_rule,
+            fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
+            stroke,
+            clip: clip.clone(),
+        };
+        if markers.is_empty() {
+            // §14.5's opacity is the shape's own and applies to its rendering
+            // as a whole: exact as an alpha where it paints once, and a group
+            // of one where a fill and a stroke would otherwise darken each
+            // other.
+            return self.emit(shape, style.opacity);
+        }
+        // §11.6.2: markers are painted after the shape's fill and stroke, and
+        // they are part of the **element's** rendering — so its clip and its
+        // opacity are theirs too. The marker nodes were charged when the walk
+        // pushed them; the shape and any wrapper are charged here.
+        self.charge()?;
+        let mut nodes = vec![shape];
+        match clip {
+            Some(clip) => {
+                self.charge()?;
+                nodes.push(crate::Node::Group {
+                    nodes: markers,
+                    opacity: 1.0,
+                    clip: Some(clip),
+                });
+            }
+            None => nodes.extend(markers),
+        }
+        if style.opacity >= 1.0 {
+            self.scene.nodes.extend(nodes);
+            return Ok(());
+        }
+        if style.opacity <= 0.0 {
+            return Ok(());
+        }
+        self.push(crate::Node::Group {
+            nodes,
+            opacity: style.opacity,
+            clip: None,
+        })
+    }
+
+    /// §11.6's markers on one shape, as the nodes they draw.
+    ///
+    /// `outline` is the shape **in its own user space**, which is where its
+    /// vertices and their directions are, and where `markerUnits` measures a
+    /// stroke width.
+    fn markers(
+        &mut self,
+        node: &Node,
+        style: &Style,
+        matrix: [f64; 6],
+        outline: &Outline,
+        frame: &Frame,
+    ) -> Result<Vec<crate::Node>, Refusal> {
+        // SVG 1.1 §11.6.2: markers apply to `<path>`, `<line>`, `<polyline>`
+        // and `<polygon>`. SVG 2 adds the other basic shapes; 1.1 is what
+        // this crate reads, and a rectangle with an arrowhead is not a shape
+        // any producer in the corpus draws.
+        if !matches!(node.name.as_str(), "path" | "line" | "polyline" | "polygon")
+            || style.markers.iter().all(Option::is_none)
+        {
+            return Ok(Vec::new());
+        }
+        // A path's arc is several cubics, and a vertex is where a *command*
+        // ends — so the data is read again for its boundaries, against a
+        // budget of what the first reading already spent.
+        let ends = match node.attr("d") {
+            Some(data) if node.name == "path" => {
+                let mut budget = outline.segments.len();
+                path::parse_commands(data, &mut budget)
+                    .ok()
+                    .map(|(_, ends)| ends)
+            }
+            _ => None,
+        };
+        let vertices = marker::vertices(outline, ends.as_deref());
+        let Some(last) = vertices.len().checked_sub(1) else {
+            return Ok(Vec::new());
+        };
+        let mut chosen: [Option<Marker>; 3] = [None, None, None];
+        for (slot, name) in style.markers.iter().enumerate() {
+            let Some(name) = name else {
+                continue;
+            };
+            let target = self.tree.by_id(name).filter(|at| {
+                self.tree.nodes[*at].is_svg() && self.tree.nodes[*at].name == "marker"
+            });
+            match target {
+                Some(at) => chosen[slot] = self.marker_of(at, frame)?,
+                // §11.6.2 makes a reference to nothing an error, and ruling 2
+                // draws the path without the decoration rather than losing it.
+                None => self.warn(Warning::MarkerUnresolved),
+            }
+        }
+        self.collect(|walk| {
+            for (index, vertex) in vertices.iter().enumerate() {
+                let slots: &[usize] = match (index == 0, index == last) {
+                    (true, true) => &[0, 2],
+                    (true, false) => &[0],
+                    (false, true) => &[2],
+                    (false, false) => &[1],
+                };
+                for slot in slots {
+                    if let Some(marker) = &chosen[*slot] {
+                        walk.marker_instance(
+                            marker,
+                            vertex,
+                            index == 0,
+                            style,
+                            matrix,
+                            frame.depth,
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// One `<marker>`'s own attributes, and the style its content starts
+    /// from — or `None` for a marker whose rendering is disabled.
+    fn marker_of(&mut self, at: usize, frame: &Frame) -> Result<Option<Marker>, Refusal> {
+        let tree = self.tree;
+        let Some(element) = tree.nodes.get(at) else {
+            return Ok(None);
+        };
+        let width = self.length_of(element, "markerWidth", Some(frame.viewport.0), 3.0);
+        let height = self.length_of(element, "markerHeight", Some(frame.viewport.1), 3.0);
+        // §11.6.2: a zero `markerWidth` or `markerHeight` disables the
+        // marker, and a negative one is an error that does the same.
+        if !(width > 0.0 && height > 0.0) {
+            return Ok(None);
+        }
+        let view = match self.view_box_of(element, width, height) {
+            Ok(view) => view,
+            Err(Disabled) => return Ok(None),
+        };
+        let reference = [
+            self.length_of(element, "refX", Some(width), 0.0),
+            self.length_of(element, "refY", Some(height), 0.0),
+        ];
+        let orient = match marker::orient(element.attr("orient")) {
+            Some(orient) => orient,
+            None => {
+                self.warn(Warning::ValueUnreadable {
+                    attribute: "orient".to_owned(),
+                });
+                Orient::Angle(0.0)
+            }
+        };
+        let stroke_units = !matches!(
+            element.attr("markerUnits").map(str::trim),
+            Some("userSpaceOnUse")
+        );
+        // The user agent style sheet's `marker { overflow: hidden }`: the
+        // content is clipped to the marker's viewport unless the file says
+        // otherwise, in the attribute or in `style=""`.
+        let visible = |value: &str| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "visible" | "auto"
+            )
+        };
+        let overflows = element.attr("overflow").is_some_and(visible)
+            || element.style.as_deref().is_some_and(|text| {
+                text.split(';').any(|piece| {
+                    piece.split_once(':').is_some_and(|(name, value)| {
+                        name.trim().eq_ignore_ascii_case("overflow") && visible(value)
+                    })
+                })
+            });
+        // The viewport a percentage inside the marker resolves against: the
+        // view box's own size where there is one, the marker's otherwise.
+        let viewport = match element.attr("viewBox").and_then(transform::numbers) {
+            Some(numbers) if numbers.len() == 4 && numbers[2] > 0.0 && numbers[3] > 0.0 => {
+                (numbers[2], numbers[3])
+            }
+            _ => (width, height),
+        };
+        let style = self.style_of(at)?;
+        Ok(Some(Marker {
+            at,
+            size: (width, height),
+            view,
+            reference,
+            orient,
+            stroke_units,
+            clipped: !overflows,
+            viewport,
+            style,
+        }))
+    }
+
+    /// §11.6.2's *"properties inherit into the 'marker' element from its
+    /// ancestors; properties do not inherit from the element referencing the
+    /// 'marker' element"* — so a marker's style is resolved down its own
+    /// ancestry, from the root, and not from the shape that drew it.
+    fn style_of(&mut self, at: usize) -> Result<Style, Refusal> {
+        let mut chain = vec![at];
+        let mut cursor = at;
+        while let Some(parent) = self.tree.nodes.get(cursor).and_then(|node| node.parent) {
+            // The tree's own depth was capped when it was read; this is the
+            // same bound, so a malformed parent chain cannot loop.
+            if chain.len() > self.limits.max_depth {
+                return Err(Refusal::TooDeep);
+            }
+            chain.push(parent);
+            cursor = parent;
+        }
+        let mut style = Style::default();
+        for index in chain.iter().rev() {
+            let resolved = style::resolve(self.tree, *index, &self.sheet, &style, &mut self.css)
+                .map_err(|_| Refusal::TooMuchStyle)?;
+            for name in resolved.unreadable {
+                self.warn(Warning::ValueUnreadable { attribute: name });
+            }
+            style = resolved.style;
+        }
+        Ok(style)
+    }
+
+    /// One marker at one vertex: §11.6.2's transform, the viewport clip, and
+    /// the marker's content walked under both.
+    fn marker_instance(
+        &mut self,
+        marker: &Marker,
+        vertex: &marker::Vertex,
+        first: bool,
+        style: &Style,
+        matrix: [f64; 6],
+        depth: usize,
+    ) -> Result<(), Refusal> {
+        // A marker that draws a path carrying the same marker is the `<use>`
+        // bomb in another spelling, and is refused by the same rule.
+        if self.expanding.contains(&marker.at) {
+            return Err(Refusal::TooManyUses);
+        }
+        let angle = marker::angle(vertex, marker.orient, first);
+        let (sin, cos) = (math::sin(angle), math::cos(angle));
+        let scale = if marker.stroke_units {
+            style.stroke_width
+        } else {
+            1.0
+        };
+        // From the vertex outward: the path's own space, the vertex, the
+        // turn, the stroke-width scale, and then the reference point — which
+        // §11.6.2 states *after* the view box, so it is taken through it.
+        let placed = transform::concat(
+            [cos, sin, -sin, cos, 0.0, 0.0],
+            transform::concat([1.0, 0.0, 0.0, 1.0, vertex.at[0], vertex.at[1]], matrix),
+        );
+        let placed = transform::concat([scale, 0.0, 0.0, scale, 0.0, 0.0], placed);
+        let reference = transform::apply(marker.view, marker.reference);
+        let viewport =
+            transform::concat([1.0, 0.0, 0.0, 1.0, -reference[0], -reference[1]], placed);
+        let content = transform::concat(marker.view, viewport);
+        let inner = Frame {
+            matrix: content,
+            viewport: marker.viewport,
+            style: marker.style.clone(),
+            // Where the marker is being *drawn*, which is under the shape that
+            // referenced it: `Frame::depth`'s reason, for a marker inside a
+            // marker inside a marker.
+            depth: depth + 1,
+        };
+        self.expanding.push(marker.at);
+        let drawn = self.collect(|walk| {
+            walk.group(&marker.style, content, |walk| {
+                walk.children(marker.at, &inner)
+            })
+        });
+        self.expanding.pop();
+        let nodes = drawn?;
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        if !marker.clipped {
+            self.scene.nodes.extend(nodes);
+            return Ok(());
+        }
+        let (width, height) = marker.size;
+        let rectangle = Outline {
+            segments: vec![
+                Segment::Move([0.0, 0.0]),
+                Segment::Line([width, 0.0]),
+                Segment::Line([width, height]),
+                Segment::Line([0.0, height]),
+                Segment::Close,
+            ],
+        };
+        self.push(crate::Node::Group {
+            nodes,
+            opacity: 1.0,
+            clip: Some(crate::Clip {
+                outline: rectangle.transformed(viewport),
+                rule: crate::FillRule::NonZero,
+            }),
+        })
     }
 
     /// §13.2's `<paint>`, with a `url(#name)` resolved against the document.
@@ -972,6 +1265,29 @@ impl Walk<'_> {
 
 /// §7.7's "rendering of the element is disabled".
 struct Disabled;
+
+/// A `<marker>`, read once per shape that uses it.
+struct Marker {
+    /// The element.
+    at: usize,
+    /// `markerWidth` and `markerHeight`: the viewport, in the space the
+    /// stroke-width scale makes.
+    size: (f64, f64),
+    /// The view box's mapping into that viewport.
+    view: [f64; 6],
+    /// `refX` and `refY`, in the view box's coordinates.
+    reference: [f64; 2],
+    orient: Orient,
+    /// `markerUnits="strokeWidth"`, the initial value.
+    stroke_units: bool,
+    /// Whether the content is clipped to the viewport, which the user agent
+    /// style sheet's `overflow: hidden` makes the default.
+    clipped: bool,
+    /// What a percentage inside the marker is a fraction of.
+    viewport: (f64, f64),
+    /// The style its content starts from: its own ancestry's.
+    style: Style,
+}
 
 /// Folds a group's opacity into its one node, where that is the same picture.
 ///

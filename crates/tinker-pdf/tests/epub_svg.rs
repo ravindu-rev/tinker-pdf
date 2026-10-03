@@ -32,6 +32,7 @@
 //! | a translucent group is drawn inline, each node at full alpha | 1 |
 //! | a group's form is painted under the page mapping | 1 |
 //! | a group's clip is not written | 1 |
+//! | the leaf crate draws no marker instance | 1 |
 //! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
 //!
 //! The form row fired **zero** the first time: its fixture's shapes covered
@@ -473,6 +474,41 @@ fn a_groups_clip_path_reaches_the_page() {
     );
 }
 
+// ---- §11.6's markers ----------------------------------------------------------
+
+/// **A marker reaches the page**: an arrowhead drawn past the end of a line.
+///
+/// The arrow is ten by ten in marker units with its reference at its back
+/// edge's middle, and `markerUnits` is the initial `strokeWidth`, so on a line
+/// four wide it is forty long — from x = 100, where the line ends, to 140. The
+/// page is white there unless the marker was drawn, because the line itself
+/// stops at 100.
+#[test]
+fn a_marker_is_drawn_at_the_end_of_its_line() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs>
+                <marker id="arrow" markerWidth="10" markerHeight="10" refX="0" refY="5"
+                        orient="auto">
+                  <path d="M0 0 L10 5 L0 10 z" fill="#000000"/>
+                </marker>
+              </defs>
+              <line x1="20" y1="100" x2="100" y2="100" stroke="#000000" stroke-width="4"
+                    marker-end="url(#arrow)"/>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.3, 0.5)[0] < 0x40, "the line is drawn");
+    assert!(
+        rgb_at(&doc, 0.6, 0.5)[0] < 0x40,
+        "and the arrowhead past its end: {:?}",
+        rgb_at(&doc, 0.6, 0.5)
+    );
+    assert!(
+        rgb_at(&doc, 0.75, 0.5)[0] > 0xC0,
+        "and nothing past the arrow's tip"
+    );
+}
+
 // ---- what travels out ------------------------------------------------------------
 
 /// Every subsystem the leaf crate declines reaches the caller as an
@@ -482,7 +518,7 @@ fn a_groups_clip_path_reaches_the_page() {
 fn every_refusal_travels_out_named_with_its_item() {
     let doc = open(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-             <filter id="f"/><mask id="m"/><pattern id="p"/><marker id="k"/>
+             <filter id="f"/><mask id="m"/><pattern id="p"/>
              <foreignObject width="1" height="1"/><animate/><script/>
              <rect width="10" height="10" fill="#000"/>
            </svg>"##,
@@ -501,7 +537,6 @@ fn every_refusal_travels_out_named_with_its_item() {
         tinker_pdf_svg::Warning::FilterUnsupported,
         tinker_pdf_svg::Warning::MaskUnsupported,
         tinker_pdf_svg::Warning::PatternUnsupported,
-        tinker_pdf_svg::Warning::MarkerUnsupported,
         tinker_pdf_svg::Warning::ForeignObjectUnsupported,
         tinker_pdf_svg::Warning::AnimationIgnored,
         tinker_pdf_svg::Warning::ScriptIgnored,

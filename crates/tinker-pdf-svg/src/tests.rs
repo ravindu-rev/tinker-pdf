@@ -420,6 +420,12 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
                 scene.size.0.is_finite() && scene.size.1.is_finite(),
                 "{name}: a scene's size is not numbers"
             );
+            let mut numbers = Vec::new();
+            sweep_nodes(&scene.nodes, &mut numbers);
+            assert!(
+                numbers.iter().all(|n| n.is_finite()),
+                "{name}: a node carries something that is not a number"
+            );
             assert!(
                 scene.warnings.len() <= limits.max_warnings,
                 "{name}: past the warning cap"
@@ -444,6 +450,90 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
         "only {seen} seeds were read from {}",
         dir.display()
     );
+}
+
+/// Every number a list of nodes carries, at every depth — the fuzz target's
+/// own sweep, so a seed proves on `cargo test` what the target asserts.
+fn sweep_nodes(nodes: &[crate::Node], out: &mut Vec<f64>) {
+    let outline = |outline: &path::Outline, out: &mut Vec<f64>| {
+        for segment in &outline.segments {
+            match *segment {
+                Segment::Move(p) | Segment::Line(p) => out.extend(p),
+                Segment::Cubic(a, b, c) => out.extend([a, b, c].concat()),
+                Segment::Close => {}
+            }
+        }
+    };
+    let paint = |paint: &crate::Paint, out: &mut Vec<f64>| match paint {
+        crate::Paint::Linear {
+            from, to, matrix, ..
+        } => {
+            out.extend(from);
+            out.extend(to);
+            out.extend(matrix);
+        }
+        crate::Paint::Radial {
+            centre,
+            radius,
+            focus,
+            matrix,
+            ..
+        } => {
+            out.extend(centre);
+            out.push(*radius);
+            out.extend(focus);
+            out.extend(matrix);
+        }
+        _ => {}
+    };
+    for node in nodes {
+        match node {
+            crate::Node::Path {
+                outline: shape,
+                fill,
+                fill_opacity,
+                stroke,
+                clip,
+                ..
+            } => {
+                outline(shape, out);
+                paint(fill, out);
+                out.push(*fill_opacity);
+                if let Some(clip) = clip {
+                    outline(&clip.outline, out);
+                }
+                if let Some(stroke) = stroke {
+                    paint(&stroke.paint, out);
+                    out.extend([stroke.width, stroke.opacity, stroke.dash_offset]);
+                }
+            }
+            crate::Node::Text {
+                anchor,
+                matrix,
+                font,
+                ..
+            } => {
+                out.extend(anchor.unwrap_or_default());
+                out.extend(matrix);
+                out.push(font.size);
+            }
+            crate::Node::Image { rect, matrix, .. } => {
+                out.extend(rect);
+                out.extend(matrix);
+            }
+            crate::Node::Group {
+                nodes,
+                opacity,
+                clip,
+            } => {
+                out.push(*opacity);
+                if let Some(clip) = clip {
+                    outline(&clip.outline, out);
+                }
+                sweep_nodes(nodes, out);
+            }
+        }
+    }
 }
 
 /// `1e999` is a number a person can type and `f64` cannot hold, and it must
