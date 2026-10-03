@@ -197,6 +197,35 @@ fn a_markdown_document_opens_with_its_words_and_its_title() {
     assert!(warnings(&document).is_empty(), "{:?}", warnings(&document));
 }
 
+/// **The title is the first heading's text as the page shows it**: a link's
+/// text and an image's description, and none of the brackets the link pass
+/// took back out of the heading. The heading's inlines are a tree whose arena
+/// still holds the `[` and `![` text nodes the bracket pass unlinked when it
+/// made the link, so reading the arena in push order titled `# [foo](bar) baz`
+/// "[foo baz".
+#[test]
+fn the_title_is_the_first_headings_text_with_its_links_and_images_resolved() {
+    for (source, title) in [
+        ("# [foo](bar) baz\n", "foo baz"),
+        ("# ![alt](x.png) t\n", "alt t"),
+        ("# [x][r]\n\n[r]: /u\n", "x"),
+        ("# *a* [**b** `c`](u) d\n", "a b c d"),
+        // Brackets that made no link are the heading's text.
+        (
+            "# [not a link] and ![nor this\n",
+            "[not a link] and ![nor this",
+        ),
+    ] {
+        let document = Document::open_markdown(source.as_bytes().to_vec(), &OpenOptions::default())
+            .expect("opens");
+        assert_eq!(
+            document.metadata().title.as_deref(),
+            Some(title),
+            "{source:?}"
+        );
+    }
+}
+
 /// **A Markdown document is the XHTML it translates to, pixel for pixel**:
 /// `from_markdown` against `from_html` handed the same reader's HTML in an
 /// XHTML document. One cascade, one layout, one painter — the translation is

@@ -3051,12 +3051,27 @@ fn first_heading_text(tree: &Tree<Block>) -> String {
         if matches!(node.kind.kind, BlockKind::Heading(_)) {
             let mut text = String::new();
             if let Some(inlines) = &node.kind.inlines {
-                for inline in &inlines.nodes {
+                // The tree from its root and not the arena in push order: the
+                // bracket pass leaves the `[` and `![` text nodes of every
+                // link and image it made in the arena, unlinked, so only a
+                // walk reads what the heading shows.
+                let mut walk = vec![0usize];
+                while let Some(at) = walk.pop() {
+                    let Some(inline) = inlines.nodes.get(at) else {
+                        continue;
+                    };
                     match &inline.kind {
                         Inline::Text(t) | Inline::Code(t) => text.push_str(t),
                         Inline::SoftBreak | Inline::LineBreak => text.push(' '),
                         _ => {}
                     }
+                    let mut children = Vec::new();
+                    let mut child = inline.first;
+                    while let Some(c) = child {
+                        children.push(c);
+                        child = inlines.nodes.get(c).and_then(|n| n.next);
+                    }
+                    walk.extend(children.into_iter().rev());
                 }
             }
             return text.split_whitespace().collect::<Vec<_>>().join(" ");
