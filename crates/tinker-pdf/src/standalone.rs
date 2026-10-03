@@ -117,7 +117,11 @@ pub enum TranslationDefect {
     /// rest of the document. Counted per tag or block.
     RawHtmlAsText,
     /// A Markdown block quote or list item that would have opened past
-    /// [`crate::markdown::MAX_MARKDOWN_NESTING`], read as text instead.
+    /// [`crate::markdown::MAX_MARKDOWN_NESTING`], read as text instead; or an
+    /// emphasis, strong emphasis or link that would have nested its element
+    /// past the 202 elements that cap bounds a document to, set without the
+    /// element and with its text, so that the XML reader is never stopped by
+    /// depth and nothing after the nest is lost.
     NestingTooDeep,
     /// A Markdown reference link read as the text it is written as, because
     /// the document's references had already copied

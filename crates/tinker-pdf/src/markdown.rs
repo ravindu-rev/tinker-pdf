@@ -35,6 +35,12 @@
 //!   this repository (see the entity sets' section of `THIRDPARTY.md`).
 //! - **Container nesting stops at [`MAX_MARKDOWN_NESTING`]**: a block quote or
 //!   list item that would open past it is read as text and counted.
+//! - **On the document path, inline nesting stops at the depth that cap
+//!   promises** (`MAX_XHTML_DEPTH`, 202 elements): an emphasis, strong
+//!   emphasis or link that would nest deeper is set without its element, its
+//!   text kept, and counted, so the XML reader is never stopped by depth and
+//!   nothing after a deep nest is lost. [`to_html`] nests as deep as
+//!   CommonMark says.
 
 use crate::standalone::TranslationDefect;
 
@@ -51,10 +57,11 @@ use crate::standalone::TranslationDefect;
 /// lines would otherwise be a trillion steps. The number is the XML reader's
 /// own ceiling arriving early: a document element and `<body>` are two levels,
 /// a list is two more per level (`<ul>` and `<li>`), so 100 containers is at
-/// most 202 elements before any inline — inside `tinker_pdf_xml`'s 256, which
-/// is what the document path hands the result to. A container that would open
-/// past it is read as the paragraph text it then is, and counted as
-/// [`TranslationDefect::NestingTooDeep`].
+/// most 202 elements — inside `tinker_pdf_xml`'s 256, which is what the
+/// document path hands the result to. That bound is enforced on the inlines as
+/// well, which nest as deep as their delimiters go: see `MAX_XHTML_DEPTH`. A
+/// container that would open past this cap is read as the paragraph text it
+/// then is, and counted as [`TranslationDefect::NestingTooDeep`].
 pub const MAX_MARKDOWN_NESTING: usize = 100;
 
 /// The floor of how many bytes of destination and title a document's
@@ -2602,10 +2609,32 @@ fn cr(out: &mut String) {
     }
 }
 
+/// The deepest an element of [`to_xhtml`]'s document may nest.
+///
+/// Not a cap of its own but the bound [`MAX_MARKDOWN_NESTING`]'s argument
+/// promises, enforced: the XHTML wrapper's two elements and two for each
+/// container. Blocks cannot reach it — the nesting cap holds them to 99
+/// containers, one element each, under a leaf of at most two — so it binds
+/// inlines, which CommonMark nests as deep as their delimiters go: three
+/// hundred `*` around a word are three hundred `<em>`, and past
+/// `tinker_pdf_xml`'s 256 the reader stops and every block after the nest is
+/// lost. An emphasis, strong emphasis or link that would nest its element past
+/// this is set without the element, its text kept, and counted as
+/// [`TranslationDefect::NestingTooDeep`]. The margin under 256 is the layout's
+/// own `MAX_BOX_DEPTH`, also 256, which a box tree reaches a few levels deeper
+/// than its elements through anonymous boxes.
+const MAX_XHTML_DEPTH: usize = 2 * MAX_MARKDOWN_NESTING + 2;
+
 struct Renderer<'a> {
     out: String,
     raw: RawHtml,
     defects: &'a mut Defects,
+    /// Elements open around what is being written, the document's wrapper
+    /// included.
+    depth: usize,
+    /// The most `depth` may reach: [`MAX_XHTML_DEPTH`] on the document path,
+    /// and unbounded for [`to_html`], which is CommonMark's output exactly.
+    ceiling: usize,
 }
 
 impl Renderer<'_> {
@@ -2638,10 +2667,14 @@ impl Renderer<'_> {
             if entering {
                 match &block.kind {
                     BlockKind::Document => {}
+                    // A container is one element. The nesting cap holds blocks
+                    // far under `ceiling` (see `MAX_XHTML_DEPTH`), so only the
+                    // depth is kept here and inlines are what it binds.
                     BlockKind::BlockQuote => {
                         cr(&mut self.out);
                         self.out.push_str("<blockquote>");
                         cr(&mut self.out);
+                        self.depth += 1;
                     }
                     BlockKind::List(data) => {
                         cr(&mut self.out);
@@ -2653,12 +2686,17 @@ impl Renderer<'_> {
                             ListKind::Ordered(_) => self.out.push_str("<ol>"),
                         }
                         cr(&mut self.out);
+                        self.depth += 1;
                     }
-                    BlockKind::Item(_) => self.out.push_str("<li>"),
+                    BlockKind::Item(_) => {
+                        self.out.push_str("<li>");
+                        self.depth += 1;
+                    }
                     BlockKind::Paragraph => {
                         if !tight {
                             cr(&mut self.out);
                             self.out.push_str("<p>");
+                            self.depth += 1;
                         }
                         if let Some(inlines) = &block.inlines {
                             self.inlines(inlines);
@@ -2666,15 +2704,18 @@ impl Renderer<'_> {
                         if !tight {
                             self.out.push_str("</p>");
                             cr(&mut self.out);
+                            self.depth = self.depth.saturating_sub(1);
                         }
                         continue;
                     }
                     BlockKind::Heading(level) => {
                         cr(&mut self.out);
                         self.out.push_str(&format!("<h{level}>"));
+                        self.depth += 1;
                         if let Some(inlines) = &block.inlines {
                             self.inlines(inlines);
                         }
+                        self.depth = self.depth.saturating_sub(1);
                         self.out.push_str(&format!("</h{level}>"));
                         cr(&mut self.out);
                         continue;
@@ -2731,6 +2772,7 @@ impl Renderer<'_> {
                         cr(&mut self.out);
                         self.out.push_str("</blockquote>");
                         cr(&mut self.out);
+                        self.depth = self.depth.saturating_sub(1);
                     }
                     BlockKind::List(data) => {
                         cr(&mut self.out);
@@ -2739,10 +2781,12 @@ impl Renderer<'_> {
                             ListKind::Ordered(_) => "</ol>",
                         });
                         cr(&mut self.out);
+                        self.depth = self.depth.saturating_sub(1);
                     }
                     BlockKind::Item(_) => {
                         self.out.push_str("</li>");
                         cr(&mut self.out);
+                        self.depth = self.depth.saturating_sub(1);
                     }
                     _ => {}
                 }
@@ -2754,6 +2798,10 @@ impl Renderer<'_> {
         // `images` counts the images the walk is inside: an image's
         // description is its `alt` text, so nothing inside one is a tag.
         let mut images = 0usize;
+        // Whether each emphasis, strong emphasis and link the walk is inside
+        // wrote its element: one inside an image writes none, and one past
+        // `ceiling` is set without it.
+        let mut opened: Vec<bool> = Vec::new();
         let mut stack: Vec<(usize, bool)> = Vec::new();
         let mut child = tree.nodes[0].first;
         let mut roots = Vec::new();
@@ -2792,20 +2840,34 @@ impl Renderer<'_> {
                             self.raw_html(raw);
                         }
                     }
-                    Inline::Emph if images == 0 => self.out.push_str("<em>"),
-                    Inline::Strong if images == 0 => self.out.push_str("<strong>"),
-                    Inline::Emph | Inline::Strong => {}
-                    Inline::Link { destination, title } => {
-                        if images == 0 {
-                            self.out.push_str("<a href=\"");
-                            self.esc(destination);
-                            self.out.push('"');
-                            if !title.is_empty() {
-                                self.out.push_str(" title=\"");
-                                self.esc(title);
-                                self.out.push('"');
+                    Inline::Emph | Inline::Strong | Inline::Link { .. } => {
+                        // Room for this element and a leaf inside it — a
+                        // `<code>`, an `<img />` or a `<br />` — which is what
+                        // lets a leaf never ask.
+                        let room = self.depth + 2 <= self.ceiling;
+                        if images == 0 && !room {
+                            self.defects.note(TranslationDefect::NestingTooDeep);
+                        }
+                        let write = images == 0 && room;
+                        opened.push(write);
+                        if write {
+                            self.depth += 1;
+                            match &node.kind {
+                                Inline::Emph => self.out.push_str("<em>"),
+                                Inline::Strong => self.out.push_str("<strong>"),
+                                Inline::Link { destination, title } => {
+                                    self.out.push_str("<a href=\"");
+                                    self.esc(destination);
+                                    self.out.push('"');
+                                    if !title.is_empty() {
+                                        self.out.push_str(" title=\"");
+                                        self.esc(title);
+                                        self.out.push('"');
+                                    }
+                                    self.out.push('>');
+                                }
+                                _ => {}
                             }
-                            self.out.push('>');
                         }
                     }
                     Inline::Image { destination, .. } => {
@@ -2834,9 +2896,18 @@ impl Renderer<'_> {
                 }
             } else {
                 match &node.kind {
-                    Inline::Emph if images == 0 => self.out.push_str("</em>"),
-                    Inline::Strong if images == 0 => self.out.push_str("</strong>"),
-                    Inline::Link { .. } if images == 0 => self.out.push_str("</a>"),
+                    Inline::Emph | Inline::Strong | Inline::Link { .. } => {
+                        // Closed in the order they opened, so the last entry
+                        // is this node's.
+                        if opened.pop() == Some(true) {
+                            self.depth = self.depth.saturating_sub(1);
+                            self.out.push_str(match node.kind {
+                                Inline::Emph => "</em>",
+                                Inline::Strong => "</strong>",
+                                _ => "</a>",
+                            });
+                        }
+                    }
                     Inline::Image { title, .. } => {
                         images -= 1;
                         if images == 0 {
@@ -2932,6 +3003,8 @@ pub fn to_html(text: &str) -> String {
         out: String::new(),
         raw: RawHtml::Pass,
         defects: &mut defects,
+        depth: 0,
+        ceiling: usize::MAX,
     };
     renderer.blocks(&parser.tree);
     renderer.out
@@ -2951,6 +3024,9 @@ pub fn to_xhtml(text: &str) -> (String, Vec<(TranslationDefect, usize)>) {
         out: String::new(),
         raw: RawHtml::Text,
         defects: &mut defects,
+        // `<html>` and `<body>`, written around the body below.
+        depth: 2,
+        ceiling: MAX_XHTML_DEPTH,
     };
     renderer.blocks(&parser.tree);
     let body = std::mem::take(&mut renderer.out);

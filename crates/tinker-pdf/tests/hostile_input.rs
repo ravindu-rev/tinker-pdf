@@ -858,9 +858,12 @@ fn mutated_standalone_documents_never_panic() {
 /// closer, a line of a hundred thousand `>`, a paragraph of definitions, links
 /// after a run of `[` — each written out at a size where a quadratic would be
 /// minutes, and a real document mutated. Over both, the XHTML the translation
-/// hands the reader must be **well-formed XML** wherever the depth allows,
-/// because raw HTML is escaped and nothing else is passed through: a
-/// `Truncated` that is not the depth cap is a defect here.
+/// hands the reader must be **well-formed XML**, every time: raw HTML is
+/// escaped, nothing else is passed through, and an inline that would nest past
+/// the reader's depth cap is set without its element, so a `Truncated` of any
+/// kind is a defect here. (Until the lane's review this accepted the depth cap
+/// "by design", which is how three hundred nested `<em>` losing every block
+/// after them went unflagged.)
 /// `fuzz/fuzz_targets/markdown.rs` is the deep version.
 #[test]
 fn markdown_never_panics_hangs_or_hands_the_reader_bad_xml() {
@@ -871,6 +874,10 @@ fn markdown_never_panics_hangs_or_hands_the_reader_bad_xml() {
     let n = 20_000;
     let mut shapes: Vec<(&str, String)> = vec![
         ("stars", "*a ".repeat(n)),
+        (
+            "nested emphasis",
+            "*a ".repeat(n / 40) + "x" + &" a*".repeat(n / 40) + "\n\nafter\n",
+        ),
         ("underscores", "_".repeat(n)),
         (
             "alternating",
@@ -926,24 +933,11 @@ fn markdown_never_panics_hangs_or_hands_the_reader_bad_xml() {
         let _ = to_html(text);
         let (xhtml, _) = to_xhtml(text);
         let dom = markup(xhtml.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT);
-        if !dom.defects.is_empty() {
-            // The only way the translation's XHTML may stop is the XML
-            // reader's depth cap, which deep emphasis reaches by design.
-            let deep = dom.nodes.iter().any(|node| {
-                let mut depth = 0;
-                let mut at = node.parent;
-                while let Some(p) = at {
-                    depth += 1;
-                    at = dom.nodes.get(p).and_then(|n| n.parent);
-                }
-                depth + 2 >= tinker_pdf_xml::limits::MAX_XML_DEPTH
-            });
-            assert!(
-                deep,
-                "{name}: the XHTML did not read as XML: {:?}",
-                dom.defects
-            );
-        }
+        assert!(
+            dom.defects.is_empty(),
+            "{name}: the XHTML did not read as XML: {:?}",
+            dom.defects
+        );
     };
     for (name, text) in &shapes {
         let _guard = Guard(name);

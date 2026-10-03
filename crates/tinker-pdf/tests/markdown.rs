@@ -323,3 +323,63 @@ fn a_container_past_the_nesting_cap_is_read_as_text_and_counted() {
     );
     assert!(text(&document).contains("deep"));
 }
+
+/// **Inline nesting is held under the depth the XML reader takes, so nothing
+/// after it is lost.** CommonMark nests emphasis as deep as its delimiters
+/// go, and three hundred `<em>` around one word is three hundred elements: the
+/// XML reader stops at 256, and every block after the nest went with it, with
+/// `Markup(Truncated)` and no translation defect naming why. The document path
+/// now sets an inline that would nest past the bound without its element — its
+/// text kept — and counts it as `NestingTooDeep`; `to_html`, held to the
+/// specification, still nests all three hundred. The second case is the same
+/// nest inside containers at `MAX_MARKDOWN_NESTING`, the deepest blocks can go.
+#[test]
+fn inline_nesting_past_what_the_reader_takes_keeps_the_rest_of_the_document() {
+    let nest = format!("{}x{}", "*a ".repeat(300), " a*".repeat(300));
+    let quotes = ">".repeat(MAX_MARKDOWN_NESTING - 1);
+    // Lists nested to the cap, each a list and an item, the nest in the last.
+    let levels = (MAX_MARKDOWN_NESTING - 1) / 2;
+    let lists: String = (0..levels)
+        .map(|i| format!("{}- x\n", "  ".repeat(i)))
+        .collect();
+    for source in [
+        format!("{nest}\n\nafter the nest\n"),
+        format!("{quotes} {nest}\n\nafter the nest\n"),
+        format!("{lists}{}- {nest}\n\nafter the nest\n", "  ".repeat(levels)),
+    ] {
+        assert_eq!(to_html(&source).matches("<em>").count(), 300);
+        let document =
+            Document::open_markdown(source.into_bytes(), &OpenOptions::default()).expect("opens");
+        let words = text(&document);
+        assert!(words.contains("after the nest"), "{words:?}");
+        assert!(words.contains("a a x a a"), "the nest's own text is kept");
+        let found = warnings(&document);
+        assert!(
+            found.iter().any(|w| matches!(
+                w,
+                ArchiveWarning::Translation {
+                    defect: TranslationDefect::NestingTooDeep,
+                    ..
+                }
+            )),
+            "{found:?}"
+        );
+        // Ninety-nine quotes' margins leave lines too narrow for a word, which
+        // the layout says (`LineOverflowed`) and is not a stop. A stop is the
+        // reader truncating or the chapter becoming a placeholder.
+        assert!(
+            !found.iter().any(|w| matches!(
+                w,
+                ArchiveWarning::Markup { .. } | ArchiveWarning::SpinePage { .. }
+            )),
+            "the reader or the layout stopped: {found:?}"
+        );
+    }
+    // The bound is on depth and not on count: three hundred emphases side by
+    // side, and as many quotes each holding one, keep every element.
+    for source in ["*a* ".repeat(300), "> *a*\n\n".repeat(300)] {
+        let (xhtml, defects) = tinker_pdf::markdown::to_xhtml(&source);
+        assert_eq!(xhtml.matches("<em>").count(), 300);
+        assert_eq!(defects, []);
+    }
+}

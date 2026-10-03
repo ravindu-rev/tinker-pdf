@@ -16,12 +16,11 @@
 //! the bracket stack's watermark, every slice of a line taken at a byte
 //! offset — and three properties beyond that:
 //!
-//! - **The document path's XHTML is well-formed XML** wherever the depth
-//!   allows. Raw HTML is escaped and XML 1.0's forbidden characters are
-//!   replaced, so the only way the reader may stop is
-//!   `tinker_pdf_xml::limits::MAX_XML_DEPTH`, which deep emphasis reaches by
-//!   design. A `Truncated` anywhere else is a tag or a character the
-//!   translation let through.
+//! - **The document path's XHTML is well-formed XML**, always. Raw HTML is
+//!   escaped, XML 1.0's forbidden characters are replaced, and an inline that
+//!   would nest past `tinker_pdf_xml::limits::MAX_XML_DEPTH` is set without
+//!   its element, so the reader never stops: a `Truncated` is a tag, a
+//!   character or a depth the translation let through.
 //! - **Rendering is deterministic**, ruling 4 over the reader.
 //! - **The output is bounded by the input**: no construct may expand a byte
 //!   into more than a fixed amount of HTML, so a megabyte cannot ask for a
@@ -59,16 +58,9 @@ fuzz_target!(|data: &[u8]| {
 
     let (xhtml, _) = to_xhtml(&text);
     let dom = markup(xhtml.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT);
-    if !dom.defects.is_empty() {
-        let deep = dom.nodes.iter().any(|node| {
-            let mut depth = 0;
-            let mut at = node.parent;
-            while let Some(parent) = at {
-                depth += 1;
-                at = dom.nodes.get(parent).and_then(|n| n.parent);
-            }
-            depth + 2 >= tinker_pdf_xml::limits::MAX_XML_DEPTH
-        });
-        assert!(deep, "the translation's XHTML is not XML: {:?}", dom.defects);
-    }
+    assert!(
+        dom.defects.is_empty(),
+        "the translation's XHTML is not XML: {:?}",
+        dom.defects
+    );
 });
