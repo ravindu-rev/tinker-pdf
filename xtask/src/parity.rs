@@ -6,9 +6,9 @@
 //! pinned, run through the facade, the wheel, the npm package, the NuGet
 //! package and the bindings over the C ABI, must produce **byte-identical**
 //! output. Two of them write a document and print `WROTE sha256=` of its
-//! bytes; the third, `read-surface`, writes down everything the read surface
-//! says about two documents in a text whose every byte is specified
-//! (`crates/tinker-pdf/examples/write_parity.rs`) and prints `READ sha256=` of
+//! bytes; `read-surface` and `signatures` write down everything the read
+//! surface says about documents in a text whose every byte is specified
+//! (`crates/tinker-pdf/examples/write_parity.rs`) and print `READ sha256=` of
 //! that. Surfaces disagreeing means one of them added something — or, on the
 //! read side, dropped or reordered something.
 //!
@@ -60,9 +60,11 @@ use std::process::Command;
 /// The two write hashes were recorded August 2026 on windows/x86_64, and are
 /// target-independent by ruling 4: the writer's output is fixed-point and
 /// integer throughout, and the one input that would otherwise vary —
-/// encryption entropy — is not used by either script. The read hash was
-/// recorded October 2026 on linux/x86_64; its text spells every number by its
-/// IEEE bits, so it is as target-independent as the reads under it.
+/// encryption entropy — is not used by either script. The two read hashes
+/// were recorded October 2026 on linux/x86_64; their text spells every number
+/// by its IEEE bits or as an integer, so they are as target-independent as the
+/// reads under them. `signatures` judges validity only at the instant it
+/// names, never at "now", so it does not move with the calendar.
 const EXPECTED: &[(&str, &str)] = &[
     (
         "fill-and-save",
@@ -75,6 +77,10 @@ const EXPECTED: &[(&str, &str)] = &[
     (
         "read-surface",
         "be7deb042f7d68d6695e54988cdbfabf3d7240c03281b29534b4b108068bef9f",
+    ),
+    (
+        "signatures",
+        "e2f5e33cb3c9826ad27076f065ed2baf4f8a665f1eb90041e1c906f1868135ef",
     ),
 ];
 
@@ -534,9 +540,17 @@ GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
     /// than a silent pass.
     #[test]
     fn the_recorded_answer_names_both_scripts_once() {
-        assert_eq!(EXPECTED.len(), 3);
+        assert_eq!(EXPECTED.len(), 4);
         let names: Vec<&str> = EXPECTED.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, ["fill-and-save", "build-a-document", "read-surface"]);
+        assert_eq!(
+            names,
+            [
+                "fill-and-save",
+                "build-a-document",
+                "read-surface",
+                "signatures"
+            ]
+        );
         for (name, hash) in EXPECTED {
             assert_eq!(hash.len(), 64, "{name}: a SHA-256 is 64 hex characters");
             assert!(

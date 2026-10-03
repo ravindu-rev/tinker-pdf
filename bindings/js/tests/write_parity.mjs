@@ -49,7 +49,8 @@ const require = createRequire(pathToFileURL(path.join(process.cwd(), 'package.js
 const entry = pathToFileURL(require.resolve('tinker-pdf-js')).href;
 const module_ = await import(entry);
 const init = module_.default;
-const { PdfDocument, PdfBuilder, PdfWriteOptions, PdfOutlineEntry, PdfView } = module_;
+const { PdfDocument, PdfBuilder, PdfWriteOptions, PdfOutlineEntry, PdfView, PdfTrustAnchors } =
+  module_;
 
 const wasmUrl = new URL('tinker_pdf_js_bg.wasm', entry);
 await init({ module_or_path: readFileSync(fileURLToPath(wasmUrl)) });
@@ -343,6 +344,99 @@ function readSurface(outlineFixture) {
   return lines.map((line) => `${line}\n`).join('');
 }
 
+const SIGNED = [
+  ['ecdsa-p256', 'ecdsa-p256-root'],
+  ['pkcs7-sha1', 'pkcs7-sha1-root'],
+  ['document-timestamp', null],
+];
+
+// Script four: every signature and both verdicts, in the contract's text.
+function signaturesDump(support) {
+  const lines = [];
+  for (const [label, root] of SIGNED) {
+    const document_ = new PdfDocument(readFileSync(path.join(support, `${label}.pdf`)));
+    const anchors = new PdfTrustAnchors();
+    if (root !== null) anchors.add(readFileSync(path.join(support, `${root}.der`)));
+    lines.push(`document ${label}`);
+    document_.signatures().forEach((signature, index) => {
+      const flat = signature.spans;
+      const spans = [];
+      for (let i = 0; i < flat.length; i += 2) spans.push(`${flat[i]}:${flat[i + 1] - flat[i]}`);
+      lines.push(
+        `signature ${index} ${text(signature.field)} ${text(signature.subFilterName)} ` +
+          `${text(signature.reason)} ${text(signature.location)} ${text(signature.name)} ` +
+          `${signature.coverage} ${signature.coversWholeFile ? 1 : 0} ` +
+          `${signature.isUsageRights ? 1 : 0} ${signature.certificationLevel ?? 0} ` +
+          `${spans.length === 0 ? '-' : spans.join(',')}`,
+      );
+    });
+    for (const at of [undefined, 0]) {
+      document_.verifySignatures(anchors, at).forEach((verdict, index) => {
+        const validity = verdict.signerValidity;
+        const weaknesses = verdict.weaknesses;
+        lines.push(
+          `verdict ${at === undefined ? '-' : at} ${index} ${verdict.cms} ` +
+            `${verdict.documentDigest} ${verdict.signature} ${verdict.chain} ` +
+            `${text(verdict.signerSubject)} ${text(verdict.signerIssuer)} ` +
+            `${validity === undefined ? '- -' : `${validity[0]} ${validity[1]}`} ` +
+            `${weaknesses.length === 0 ? '-' : weaknesses.join(',')}`,
+        );
+      });
+    }
+    anchors.free();
+    document_.free();
+  }
+  return lines.map((line) => `${line}\n`).join('');
+}
+
+// What the C ABI cannot carry and a JavaScript object can: each arm's payload.
+// Not part of the compared text, because only the facade-direct surfaces have
+// it; asserted here against what the fixture is known to be.
+function signaturePayloadsCross(support) {
+  const check = (condition, message) => {
+    if (!condition) throw new Error(message);
+  };
+  const document_ = new PdfDocument(readFileSync(path.join(support, 'ecdsa-p256.pdf')));
+  const anchors = new PdfTrustAnchors();
+  anchors.add(readFileSync(path.join(support, 'ecdsa-p256-root.der')));
+  let refused = false;
+  try {
+    anchors.add(encoder.encode('not a certificate'));
+  } catch {
+    refused = true;
+  }
+  check(refused, 'bytes that are not a certificate must be refused');
+  check(anchors.length === 1, 'a refused anchor is not kept');
+
+  const [signature] = document_.signatures();
+  check(signature.anchor === 'field' && signature.anchorName === undefined, 'anchor');
+  check(signature.subFilter === 'adbe.pkcs7.detached', `subFilter ${signature.subFilter}`);
+  check(signature.contents[0] === 0x30, 'the stored /Contents is DER');
+
+  const [verdict] = document_.verifySignatures(anchors);
+  check(verdict.cmsSigners === 1, `cmsSigners ${verdict.cmsSigners}`);
+  check(
+    verdict.chainSubject.endsWith('CN=Tinker PDF ECDSA P256 Test Root'),
+    `chainSubject ${verdict.chainSubject}`,
+  );
+  check(verdict.isTrusted(), 'the anchored ECDSA signature is trusted');
+
+  const [judged] = document_.verifySignatures(anchors, 0);
+  const details = judged.weaknessDetails.filter(
+    (_, i) => judged.weaknesses[i] === 'outside-validity',
+  );
+  check(details.length > 0 && details.every((d) => d.length > 0), 'outside-validity names a subject');
+
+  const none = new PdfTrustAnchors();
+  const [untrusted] = document_.verifySignatures(none);
+  check(untrusted.chain === 'no-anchors' && untrusted.chainSubject === undefined, 'no anchors');
+  check(!untrusted.isTrusted(), 'nothing trusted, nothing trusted');
+  none.free();
+  anchors.free();
+  document_.free();
+  console.log('JS-PARITY: signature payloads cross');
+}
+
 function report(script, bytes) {
   const document_ = new PdfDocument(bytes);
   const defects = document_.validate();
@@ -363,6 +457,12 @@ const outlineFixture = readFileSync(path.join(path.dirname(fixturePath), 'outlin
 const dumped = encoder.encode(readSurface(outlineFixture));
 if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(dumped));
 console.log(`READ sha256=${sha256(dumped)} surface=js script=read-surface bytes=${dumped.length}`);
+
+const support = path.join(path.dirname(path.resolve(fixturePath)), '..', 'crates/tinker-pdf/tests/signature_support');
+const signed = encoder.encode(signaturesDump(support));
+if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(signed));
+console.log(`READ sha256=${sha256(signed)} surface=js script=signatures bytes=${signed.length}`);
+signaturePayloadsCross(support);
 transactionRollsBackOnAThrow(fixture);
 
 // A consumed handle refuses rather than producing a second document, which is

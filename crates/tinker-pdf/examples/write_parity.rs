@@ -73,6 +73,38 @@
 //!        | launch <b|-> | other <b>
 //! ```
 //!
+//! A fourth reads signatures, and is the read surface's other half:
+//!
+//! - **signatures** opens three documents the signature tests commit under
+//!   `crates/tinker-pdf/tests/signature_support/` -- an ECDSA P-256 signature,
+//!   an `adbe.pkcs7.sha1` one and an RFC 3161 document timestamp -- and for
+//!   each writes down every signature as read, then every verdict twice: with
+//!   the document's own root as the one trust anchor (none for the timestamp,
+//!   which is what reaches `no-anchors`), judged at no instant, and judged at
+//!   the epoch, where every certificate is outside its validity. It prints
+//!   `READ sha256=` of that text.
+//!
+//! Only what the C ABI carries is written down, so every surface can produce
+//! it; the payloads a Python or JavaScript object also carries are theirs to
+//! show and not this script's to compare.
+//!
+//! ```text
+//! document <name>
+//! signature <index> <field s|-> <subfilter as written s|-> <reason s|-> <location s|->
+//!           <name s|-> <whole-file|revision|suspicious> <covers whole file 0|1>
+//!           <usage rights 0|1> <certification level, 0 for none> <start:length,...|->
+//! verdict <judged at|-> <index> <read|absent|unreadable> <matches|differs|not-checked>
+//!         <verified|failed|not-checked> <chain> <subject s|-> <issuer s|->
+//!         <not-before not-after|- -> <weakness,...|->
+//!
+//! chain    = anchored-to | self-signed | incomplete | broken | no-anchors
+//!          | no-signer-certificate
+//! weakness = sha1-digest | sha1-signature | short-rsa-key | covers-only-a-revision
+//!          | coverage-suspicious | outside-validity
+//! ```
+//!
+//! (each record is one line; the breaks above are for reading).
+//!
 //! An attachment's hash is of its decoded bytes, `-` when it names no stream
 //! or the stream does not read. The warnings are read last on purpose:
 //! reading a page can tolerate more, so the order of the reads is part of the
@@ -438,6 +470,123 @@ fn read_surface(outline_fixture: &[u8]) -> String {
     text
 }
 
+/// The documents script four reads, and the root each is anchored to.
+const SIGNED: [(&str, Option<&str>); 3] = [
+    ("ecdsa-p256", Some("ecdsa-p256-root")),
+    ("pkcs7-sha1", Some("pkcs7-sha1-root")),
+    ("document-timestamp", None),
+];
+
+/// Script four: every signature and both verdicts, in the contract's text.
+fn signatures(support: &std::path::Path) -> String {
+    use tinker_pdf::Weakness;
+    use tinker_pdf::{Chain, CmsState, Coverage, DocumentDigest, SignatureCheck, TrustAnchors};
+
+    let mut lines = Vec::new();
+    for (name, root) in SIGNED {
+        let bytes = std::fs::read(support.join(format!("{name}.pdf")))
+            .unwrap_or_else(|e| panic!("reading {name}.pdf: {e}"));
+        let document = Document::open(bytes).expect("the signed fixture opens");
+        let mut anchors = TrustAnchors::new();
+        if let Some(root) = root {
+            let der = std::fs::read(support.join(format!("{root}.der")))
+                .unwrap_or_else(|e| panic!("reading {root}.der: {e}"));
+            anchors
+                .add(der)
+                .expect("the fixture's root is a certificate");
+        }
+        lines.push(format!("document {name}"));
+        for (index, signature) in document.signatures().iter().enumerate() {
+            let spans: Vec<String> = signature
+                .spans
+                .iter()
+                .map(|span| format!("{}:{}", span.start, span.end - span.start))
+                .collect();
+            lines.push(format!(
+                "signature {index} {} {} {} {} {} {} {} {} {} {}",
+                dump::text(signature.field.as_deref()),
+                dump::text(signature.sub_filter_name.as_deref()),
+                dump::text(signature.reason.as_deref()),
+                dump::text(signature.location.as_deref()),
+                dump::text(signature.name.as_deref()),
+                match signature.coverage {
+                    Coverage::WholeFile => "whole-file",
+                    Coverage::Revision { .. } => "revision",
+                    Coverage::Suspicious(_) => "suspicious",
+                },
+                u8::from(signature.covers_whole_file()),
+                u8::from(signature.is_usage_rights()),
+                signature.certification.map_or(0, |c| c.level()),
+                if spans.is_empty() {
+                    "-".to_string()
+                } else {
+                    spans.join(",")
+                }
+            ));
+        }
+        for at in [None, Some(0i64)] {
+            for (index, verdict) in document.verify_signatures(&anchors, at).iter().enumerate() {
+                let weaknesses: Vec<&str> = verdict
+                    .weaknesses
+                    .iter()
+                    .map(|weakness| match weakness {
+                        Weakness::Sha1Digest => "sha1-digest",
+                        Weakness::Sha1Signature => "sha1-signature",
+                        Weakness::ShortRsaKey { .. } => "short-rsa-key",
+                        Weakness::CoversOnlyARevision => "covers-only-a-revision",
+                        Weakness::CoverageSuspicious => "coverage-suspicious",
+                        Weakness::OutsideValidity { .. } => "outside-validity",
+                    })
+                    .collect();
+                lines.push(format!(
+                    "verdict {} {index} {} {} {} {} {} {} {} {}",
+                    at.map_or_else(|| "-".to_string(), |at| at.to_string()),
+                    match verdict.cms {
+                        CmsState::Read { .. } => "read",
+                        CmsState::Absent => "absent",
+                        CmsState::Unreadable(_) => "unreadable",
+                    },
+                    match verdict.document_digest {
+                        DocumentDigest::Matches => "matches",
+                        DocumentDigest::Differs => "differs",
+                        DocumentDigest::NotChecked(_) => "not-checked",
+                    },
+                    match verdict.signature {
+                        SignatureCheck::Verified => "verified",
+                        SignatureCheck::Failed => "failed",
+                        SignatureCheck::NotChecked(_) => "not-checked",
+                    },
+                    match verdict.chain {
+                        Chain::AnchoredTo { .. } => "anchored-to",
+                        Chain::SelfSigned { .. } => "self-signed",
+                        Chain::Incomplete { .. } => "incomplete",
+                        Chain::Broken { .. } => "broken",
+                        Chain::NoAnchors => "no-anchors",
+                        Chain::NoSignerCertificate => "no-signer-certificate",
+                    },
+                    dump::text(verdict.signer.as_ref().map(|s| s.subject.as_str())),
+                    dump::text(verdict.signer.as_ref().map(|s| s.issuer.as_str())),
+                    verdict.signer.as_ref().map_or_else(
+                        || "- -".to_string(),
+                        |s| format!("{} {}", s.validity.0, s.validity.1)
+                    ),
+                    if weaknesses.is_empty() {
+                        "-".to_string()
+                    } else {
+                        weaknesses.join(",")
+                    }
+                ));
+            }
+        }
+    }
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
 /// Validates, then prints the line `cargo xtask bindings-parity` reads.
 ///
 /// The validation is not decoration and not optional. A surface that printed a
@@ -484,6 +633,23 @@ fn main() {
         "READ sha256={} surface=facade script=read-surface bytes={}",
         sha256_hex(dumped.as_bytes()),
         dumped.len()
+    );
+
+    // The signed fixtures live with the signature tests that adjudicate them,
+    // one directory over from `testdata/`.
+    let support = fixture
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|root| root.join("crates/tinker-pdf/tests/signature_support"))
+        .unwrap_or_else(|| PathBuf::from("crates/tinker-pdf/tests/signature_support"));
+    let signed = signatures(&support);
+    if std::env::var_os("TINKER_PARITY_DUMP").is_some() {
+        print!("{signed}");
+    }
+    println!(
+        "READ sha256={} surface=facade script=signatures bytes={}",
+        sha256_hex(signed.as_bytes()),
+        signed.len()
     );
     println!("FACADE-PARITY: RAN");
 }

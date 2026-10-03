@@ -234,14 +234,31 @@ the C ABI, which would add a second error translation for nothing).
 `tinker_pdf.Document(bytes)`, `page_count`, `page_text(i)`, `render(i,
 dpi=)` returning a bitmap whose `data` is a buffer (`memoryview` into numpy
 or Pillow, zero-copy), `set_fonts(bytes)`. `render` and `page_text` release
-the GIL, so a thread pool over pages is actually parallel. One wheel per
+the GIL, so a thread pool over pages is actually parallel. The read surface
+is `metadata` (a `Metadata` whose absent entries are `None`), `pdf_version`,
+`page_labels()`, `outline()` (nested `OutlineItem`s, each with a
+`Destination` whose `kind` is "explicit", "named" or "uri"), `links(page)`,
+`attachments()` (each with `data()`), `xmp_metadata()` and `warnings()`.
+Signatures are `signatures()` and `verify_signatures(TrustAnchors, at=None)`:
+every enum the facade answers with is its arm's name, and every arm's payload
+— the revision a coverage ends at, the defect that makes it suspicious, why a
+check was not made, the subject a chain names, a short key's bits — a sibling
+attribute, which the C ABI cannot carry (a C enum has no payload) and a Python
+object can. A `Signature` also carries `/Contents`, `/M`, `/ContactInfo`,
+`/Filter`, `/FieldMDP` and its lenient-read warnings, which the C ABI still
+owes. One wheel per
 platform, not per interpreter: `abi3-py39`, and the release workflow
 asserts the `abi3` tag is in the filename.
 
 **JavaScript / wasm** (`bindings/js`, wasm-bindgen directly over the
 facade). `PdfDocument`, `pageCount`, `isEncrypted`, `authenticate`,
 `mayPrint`, `pageWidth` / `pageHeight`, `pageText(i)`, `setFonts`,
-`renderPage(i, scale)`;
+`renderPage(i, scale)`; the read surface as `metadata`, `pdfVersion`,
+`pageLabels()`, `outline()`, `links(page)`, `attachments()`,
+`xmpMetadata()` and `warnings()`, with `PdfView` the one class both
+directions share (`linkToPageView`, `setPageTargetView`); and signatures as
+`signatures()` and `verifySignatures(PdfTrustAnchors, at)`, payloads and all,
+as in Python;
 `bitmap.data()` copies, `bitmap.viewUnsafeUntilNextAllocation()` aliases
 wasm linear memory and silently becomes zero-length when a later allocation
 grows the memory — observed, not hypothesised: `node_smoke.mjs` renders,
@@ -294,6 +311,13 @@ fill-and-save    59f1efce6e4e5bfa8915fdee31e43f629e6373512de8040bf8e6404b7fe78af
 build-a-document 1dbb7ace2a5787016efa257ab8c3efdb6ceae1b339f8597266ad47c5828dac62
 ```
 
+That is the write-side analogue of the read side's 1 190 inked pixels, and it
+is the evidence for ruling 11: four surfaces disagreeing would mean one of them
+added something. The image both scripts draw is computed from a formula rather
+than read from a file, so the four languages produce the same 64 bytes with no
+fixture between them — a parity suite whose surfaces read the same *file*
+proves only that they can read a file.
+
 **And read parity is text identity.** A third script, *read-surface*, opens
 two documents — `testdata/outline-3level.pdf` with five bytes in front of its
 header, which the reader tolerates and reports, and a two-page document each
@@ -312,17 +336,19 @@ facade, the wheel and the npm package printed
 
 ```text
 read-surface     be7deb042f7d68d6695e54988cdbfabf3d7240c03281b29534b4b108068bef9f
+signatures       e2f5e33cb3c9826ad27076f065ed2baf4f8a665f1eb90041e1c906f1868135ef
 ```
 
-and the .NET leg is written to print it too (its build is unverified here: no
-.NET SDK on the machine that wrote it).
-
-That is the write-side analogue of the read side's 1 190 inked pixels, and it
-is the evidence for ruling 11: four surfaces disagreeing would mean one of them
-added something. The image both scripts draw is computed from a formula rather
-than read from a file, so the four languages produce the same 64 bytes with no
-fixture between them — a parity suite whose surfaces read the same *file*
-proves only that they can read a file.
+and the .NET leg is written to print both too (its build is unverified here:
+no .NET SDK on the machine that wrote it). *signatures* is the fourth script:
+it opens three documents the signature tests commit — an ECDSA P-256
+signature, an `adbe.pkcs7.sha1` one and an RFC 3161 document timestamp —
+and writes down every signature as read and every verdict twice, anchored to
+the document's own root (or to nothing, for the timestamp, which is what
+reaches `no-anchors`), judged at no instant and at the epoch. Only what the C
+ABI carries goes into the text, so every surface can produce it; the payloads
+Python and JavaScript carry besides are asserted in their own scripts against
+what the fixtures are known to be.
 
 `cargo xtask bindings-parity` is the gate, and it is built around two different
 failures. A **mismatch** is the one everybody thinks of. An **absent line** —
@@ -608,9 +634,8 @@ packaging commands.
 | The graphics-writing surface added in September 2026: `Target::Named` and both `add_named_destination`s; `DocumentBuilder::add_layer`, `PageBuilder::optional` and `DocumentEditor::set_layer_visible`; `add_separation_color_space`, `add_device_n_color_space`, `set_fill_tint` / `set_stroke_tint` and `ImageColorSpace::Tint`; `DocumentEditor`'s `stamp`, `add_resource`, `add_form` and `import_page_as_form`; `Page::images` | not projected | owed rather than refused: each takes or returns a shape of its own — a `LayerId` handle, a `Function::Calculator` program, `DeviceNAttributes`, a `StampPlacement` and a form reference, a `PageImage` with its samples, masks and placements — and `optional` takes a closure, so it needs a closure-free pair on the page handle as `tagged` does. Ruling 11 makes each a debt the day it reached the facade | [ROADMAP.md](../ROADMAP.md) |
 | Signing: `save_signed`, `Signer` | no `tpdf_*` entry point takes a callback | a signer is a host callback, and callbacks across the C ABI are an explicit non-goal of the write design, which owns them | [ROADMAP.md](../ROADMAP.md) (design/bindings-write.md) |
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
-| A signature's `/Contents` blob, `/M`, `/ContactInfo`, `/Filter`, its lenient-read warnings, and `Signature::modifications` | not projected | owed rather than refused: each is a shape of its own — raw bytes, a date, a list of changed objects — rather than another string or enum, and none is named by the milestone | [signatures](../design/signatures.md) |
+| A signature's `/Contents` blob, `/M`, `/ContactInfo`, `/Filter` and its lenient-read warnings on the C ABI (Python and JavaScript carry them), and `Signature::modifications` everywhere | not projected | owed rather than refused: each is a shape of its own — raw bytes, a date, a list of changed objects — rather than another string or enum, and none is named by the milestone | [signatures](../design/signatures.md) |
 | The signature and public-key surface added in October 2026: `DocumentEditor::save_timestamped` with `Timestamper` and `TimestampRequest`; `add_validation_data` with `ValidationData`; `Document::security_store` with `SecurityStore` and `SecurityStoreWarning`; `PublicKeyEncryption::seal` and `DocumentEditor::save_sealed`; `Verdict::timestamps` with `TimestampVerdict`; `Signature::validation_key` | not projected | owed rather than refused. `Timestamper` is a host callback, which the write design keeps off the C ABI as it keeps `Signer`, and `seal` takes an `EntropySource`, which is another; the rest take or return shapes of their own — lists of DER blobs, a store of object references, a per-token verdict with its own enums. Ruling 11 makes each a debt the day it reached the facade | [ROADMAP.md](../ROADMAP.md) |
-| Signatures in Python and JavaScript | not projected | those bindings sit on the facade directly rather than on the C ABI, so each is its own transcription and neither has been written | [ROADMAP.md](../ROADMAP.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge | — |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
@@ -703,6 +728,17 @@ packaging commands.
   **1** (the warnings equality); a Python warning offset off by one, and the
   JavaScript link rectangle's first two numbers swapped, each fail
   `bindings-parity` on their surface's `read-surface` hash.
+- **Signatures in Python and JavaScript** are held by the *signatures*
+  script's hash, equal to the facade's, and by an assertion leg in each
+  script for what only those two carry: an anchor that is not a certificate
+  refused and not kept, the anchor's and recognised subfilter's names, DER in
+  `/Contents`, one `SignerInfo`, the anchor subject the chain names, an
+  `outside-validity` weakness naming a subject when judged at the epoch, and
+  `no-anchors` with no subject and no trust when nothing is trusted. Counted
+  injections, October 2026: Python's chain dropping the anchor's subject
+  fails its assertion leg; Python's whole-file coverage named `revision`, and
+  JavaScript's `sha1-digest` renamed, each fail `bindings-parity` on their
+  surface's *signatures* hash.
 - `cargo xtask bindings-parity` compares all four against the recorded answer
   in `xtask/src/parity.rs`. Its counted injections, run August 2026: a wrong
   recorded hash is reported by **all four** surfaces with both the written and

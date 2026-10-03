@@ -442,6 +442,126 @@ Console.WriteLine(
     $"DOTNET-SMOKE: READ sha256={Sha256(dumpedBytes)} surface=dotnet script=read-surface " +
     $"bytes={dumpedBytes.Length}");
 
+// Script four: signatures. Every signature as read, then every verdict twice —
+// judged at no instant and at the epoch — in the contract's text.
+static string CoverageName(Coverage coverage) => coverage switch
+{
+    Coverage.WholeFile => "whole-file",
+    Coverage.Revision => "revision",
+    _ => "suspicious",
+};
+
+static string WeaknessName(Weakness weakness) => weakness switch
+{
+    Weakness.Sha1Digest => "sha1-digest",
+    Weakness.Sha1Signature => "sha1-signature",
+    Weakness.ShortRsaKey => "short-rsa-key",
+    Weakness.CoversOnlyARevision => "covers-only-a-revision",
+    Weakness.CoverageSuspicious => "coverage-suspicious",
+    _ => "outside-validity",
+};
+
+static string ChainName(Chain chain) => chain switch
+{
+    Chain.AnchoredTo => "anchored-to",
+    Chain.SelfSigned => "self-signed",
+    Chain.Incomplete => "incomplete",
+    Chain.Broken => "broken",
+    Chain.NoAnchors => "no-anchors",
+    _ => "no-signer-certificate",
+};
+
+static void SignaturesDump(string support, string name, string? root, List<string> lines)
+{
+    using var document = Document.Open(File.ReadAllBytes(Path.Combine(support, name + ".pdf")));
+    using var anchors = new TrustAnchors();
+    if (root is not null)
+    {
+        anchors.Add(File.ReadAllBytes(Path.Combine(support, root + ".der")));
+    }
+    lines.Add("document " + name);
+    using (var signatures = document.ReadSignatures())
+    {
+        for (uint index = 0; index < signatures.Count; index++)
+        {
+            var spans = new List<string>();
+            for (uint span = 0; span < signatures.SpanCount(index); span++)
+            {
+                var (start, length) = signatures.Span(index, span);
+                spans.Add(start + ":" + length);
+            }
+            lines.Add("signature " + index + " " + TextToken(signatures.FieldName(index)) + " "
+                + TextToken(signatures.SubFilter(index)) + " "
+                + TextToken(signatures.Reason(index)) + " "
+                + TextToken(signatures.Location(index)) + " "
+                + TextToken(signatures.SignerName(index)) + " "
+                + CoverageName(signatures.CoverageOf(index)) + " "
+                + (signatures.CoversWholeFile(index) ? "1" : "0") + " "
+                + (signatures.IsUsageRights(index) ? "1" : "0") + " "
+                + signatures.CertificationLevel(index) + " "
+                + (spans.Count == 0 ? "-" : string.Join(",", spans)));
+        }
+    }
+    foreach (var at in new long?[] { null, 0 })
+    {
+        using var verdicts = document.VerifySignatures(anchors, at);
+        for (uint index = 0; index < verdicts.Count; index++)
+        {
+            var cms = verdicts.CmsStateOf(index) switch
+            {
+                CmsState.Read => "read",
+                CmsState.Absent => "absent",
+                _ => "unreadable",
+            };
+            var digest = verdicts.DocumentDigestOf(index) switch
+            {
+                DocumentDigest.Matches => "matches",
+                DocumentDigest.Differs => "differs",
+                _ => "not-checked",
+            };
+            var check = verdicts.SignatureCheckOf(index) switch
+            {
+                SignatureCheck.Verified => "verified",
+                SignatureCheck.Failed => "failed",
+                _ => "not-checked",
+            };
+            var validity = verdicts.SignerValidity(index);
+            var weaknesses = new List<string>();
+            for (uint w = 0; w < verdicts.WeaknessCount(index); w++)
+            {
+                weaknesses.Add(WeaknessName(verdicts.WeaknessAt(index, w)));
+            }
+            lines.Add("verdict " + (at is null ? "-" : at.Value.ToString()) + " " + index + " "
+                + cms + " " + digest + " " + check + " " + ChainName(verdicts.ChainOf(index)) + " "
+                + TextToken(verdicts.SignerSubject(index)) + " "
+                + TextToken(verdicts.SignerIssuer(index)) + " "
+                + (validity is null ? "- -" : validity.Value.NotBefore + " " + validity.Value.NotAfter)
+                + " " + (weaknesses.Count == 0 ? "-" : string.Join(",", weaknesses)));
+        }
+    }
+}
+
+var support = Path.Combine(
+    Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(args[2]))!)!,
+    "crates", "tinker-pdf", "tests", "signature_support");
+var signedLines = new List<string>();
+SignaturesDump(support, "ecdsa-p256", "ecdsa-p256-root", signedLines);
+SignaturesDump(support, "pkcs7-sha1", "pkcs7-sha1-root", signedLines);
+SignaturesDump(support, "document-timestamp", null, signedLines);
+var signed = new System.Text.StringBuilder();
+foreach (var line in signedLines)
+{
+    signed.Append(line).Append('\n');
+}
+var signedBytes = System.Text.Encoding.UTF8.GetBytes(signed.ToString());
+if (Environment.GetEnvironmentVariable("TINKER_PARITY_DUMP") is not null)
+{
+    Console.Write(signed.ToString());
+}
+Console.WriteLine(
+    $"DOTNET-SMOKE: READ sha256={Sha256(signedBytes)} surface=dotnet script=signatures " +
+    $"bytes={signedBytes.Length}");
+
 // The callback-taking transaction, which is checkpoint, `try`, restore and
 // nothing else. Asserted the only way that cannot be faked: save before, save
 // after, compare hashes. And the exception must still escape — a rollback that

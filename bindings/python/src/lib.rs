@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 mod read;
+mod signatures;
 
 /// Everything a binding may not invent, gathered where it can be seen.
 ///
@@ -246,6 +247,27 @@ impl PyDocument {
         self.inner
             .xmp_metadata()
             .map(|packet| PyBytes::new(py, &packet))
+    }
+
+    /// The document's digital signatures (12.8), read and checked against
+    /// the file — not verified; that is `verify_signatures`.
+    fn signatures(&self) -> Vec<signatures::PySignature> {
+        signatures::signatures(&self.inner)
+    }
+
+    /// What every signature turns out to prove, in `signatures()`'s order.
+    ///
+    /// `anchors` is required: an empty `TrustAnchors` is how a caller says it
+    /// trusts nothing. `at` is the instant to judge certificate validity at,
+    /// in seconds since the Unix epoch; `None` judges nothing, because
+    /// "expired" is a claim about a moment the caller has to name.
+    #[pyo3(signature = (anchors, at = None))]
+    fn verify_signatures(
+        &self,
+        anchors: &signatures::PyTrustAnchors,
+        at: Option<i64>,
+    ) -> Vec<signatures::PyVerdict> {
+        signatures::verify(&self.inner, anchors, at)
     }
 
     /// Everything the engine has tolerated so far, in order (ruling 10).
@@ -1126,5 +1148,6 @@ fn module_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPageBuilder>()?;
     module.add_class::<PyOutlineEntry>()?;
     read::register(module)?;
+    signatures::register(module)?;
     Ok(())
 }

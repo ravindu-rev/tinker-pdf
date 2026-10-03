@@ -25,6 +25,8 @@ pub use read::{
     PdfAction, PdfAttachment, PdfDestination, PdfLink, PdfMetadata, PdfOutlineItem, PdfView,
     PdfWarning,
 };
+mod signatures;
+pub use signatures::{PdfSignature, PdfTrustAnchors, PdfVerdict};
 
 /// An open PDF document.
 #[wasm_bindgen]

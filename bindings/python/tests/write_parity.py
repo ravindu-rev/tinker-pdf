@@ -273,6 +273,85 @@ def read_surface(outline_fixture: bytes) -> str:
     return "".join(line + "\n" for line in lines)
 
 
+SIGNED = [
+    ("ecdsa-p256", "ecdsa-p256-root"),
+    ("pkcs7-sha1", "pkcs7-sha1-root"),
+    ("document-timestamp", None),
+]
+
+
+def signatures_dump(support: pathlib.Path) -> str:
+    """Script four: every signature and both verdicts, in the contract's text."""
+    lines = []
+    for name, root in SIGNED:
+        document = tinker_pdf.Document((support / f"{name}.pdf").read_bytes())
+        anchors = tinker_pdf.TrustAnchors()
+        if root is not None:
+            anchors.add((support / f"{root}.der").read_bytes())
+        lines.append(f"document {name}")
+        for index, signature in enumerate(document.signatures()):
+            spans = ",".join(f"{start}:{end - start}" for start, end in signature.spans) or "-"
+            lines.append(
+                f"signature {index} {_text(signature.field)} {_text(signature.sub_filter_name)} "
+                f"{_text(signature.reason)} {_text(signature.location)} {_text(signature.name)} "
+                f"{signature.coverage} {int(signature.covers_whole_file)} "
+                f"{int(signature.is_usage_rights)} {signature.certification_level or 0} {spans}"
+            )
+        for at in (None, 0):
+            for index, verdict in enumerate(document.verify_signatures(anchors, at)):
+                signer = verdict.signer
+                validity = "- -" if signer is None else f"{signer.validity[0]} {signer.validity[1]}"
+                weaknesses = ",".join(kind for kind, _ in verdict.weaknesses) or "-"
+                lines.append(
+                    f"verdict {'-' if at is None else at} {index} {verdict.cms} "
+                    f"{verdict.document_digest} {verdict.signature} {verdict.chain} "
+                    f"{_text(None if signer is None else signer.subject)} "
+                    f"{_text(None if signer is None else signer.issuer)} {validity} {weaknesses}"
+                )
+    return "".join(line + "\n" for line in lines)
+
+
+def signature_payloads_cross(support: pathlib.Path) -> None:
+    """What the C ABI cannot carry and a Python object can: each arm's payload.
+
+    Not part of the compared text, because only the facade-direct surfaces
+    have it; asserted here instead, against what the fixture is known to be.
+    """
+    document = tinker_pdf.Document((support / "ecdsa-p256.pdf").read_bytes())
+    anchors = tinker_pdf.TrustAnchors()
+    anchors.add((support / "ecdsa-p256-root.der").read_bytes())
+    try:
+        anchors.add(b"not a certificate")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bytes that are not a certificate must be refused")
+    assert len(anchors) == 1, "a refused anchor is not kept"
+
+    [signature] = document.signatures()
+    assert signature.anchor == "field" and signature.anchor_name is None
+    assert signature.sub_filter == "adbe.pkcs7.detached", signature.sub_filter
+    assert signature.contents[:1] == b"\x30", "the stored /Contents is DER"
+    assert signature.coverage_revision is None and signature.coverage_defect is None
+
+    [verdict] = document.verify_signatures(anchors)
+    assert verdict.cms_signers == 1, verdict.cms_signers
+    assert verdict.chain_subject.endswith("CN=Tinker PDF ECDSA P256 Test Root"), verdict.chain_subject
+    assert verdict.document_digest_reason is None and verdict.signature_reason is None
+    assert verdict.is_trusted()
+
+    [judged] = document.verify_signatures(anchors, 0)
+    subjects = [detail for kind, detail in judged.weaknesses if kind == "outside-validity"]
+    assert subjects and all(isinstance(subject, str) and subject for subject in subjects), (
+        judged.weaknesses
+    )
+
+    [untrusted] = document.verify_signatures(tinker_pdf.TrustAnchors())
+    assert untrusted.chain == "no-anchors" and untrusted.chain_subject is None
+    assert not untrusted.is_trusted()
+    print("PYTHON-PARITY: signature payloads cross")
+
+
 def report(script: str, data: bytes) -> None:
     """Validate, then print the line `cargo xtask bindings-parity` reads."""
     defects = tinker_pdf.Document(data).validate()
@@ -296,6 +375,18 @@ def main(fixture_path: str) -> None:
         f"READ sha256={hashlib.sha256(dumped).hexdigest()} "
         f"surface=python script=read-surface bytes={len(dumped)}"
     )
+
+    support = pathlib.Path(fixture_path).resolve().parent.parent / (
+        "crates/tinker-pdf/tests/signature_support"
+    )
+    signed = signatures_dump(support).encode("utf-8")
+    if os.environ.get("TINKER_PARITY_DUMP"):
+        sys.stdout.write(signed.decode("utf-8"))
+    print(
+        f"READ sha256={hashlib.sha256(signed).hexdigest()} "
+        f"surface=python script=signatures bytes={len(signed)}"
+    )
+    signature_payloads_cross(support)
     transaction_rolls_back_on_an_exception(fixture)
 
     # A consumed handle refuses rather than producing a second document, which
