@@ -434,6 +434,16 @@ the document's own `/Widths` array already says. That is twelve of the standard
 14; Symbol and ZapfDingbats are the other two and are declined rather than
 approximated.
 
+They stay declined because **no face carries their glyphs and metrics under a
+licence `deny.toml` admits**. The gate allows OFL-1.1 and the permissive
+licences, and the faces built to stand in for these two — URW's Standard
+Symbols PS and D050000L, from the base-35 set Ghostscript ships — are
+AGPL-3.0 with a font exception. Liberation, the OFL
+family that answers the other twelve, has neither repertoire. A text face is
+not a fallback either: it puts letters where the document meant arrows and
+check marks. A host holding a face it may use supplies it through
+`FontProvider`, which answers before the bundled set does.
+
 ```toml
 tinker-pdf = { version = "0.0.1", features = ["bundled-fonts"] }
 ```
@@ -765,7 +775,7 @@ could show was right.
 | A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
 | A **CID-keyed** CFF under `add_cid_font` whose charset is not one-to-one | `add_cid_font` returns false | 9.7.4.2 reads a CID through the charset, which answers with the first glyph claiming it, so a glyph whose CID another also claims is one no code reaches. A one-to-one charset is accepted and each glyph written as its CID (October 2026) | this page |
-| Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | Liberation has no equivalent, and a text face drawn for a symbolic font puts letters where the document meant arrows | this page |
+| Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | No face with their repertoire and metrics is under a licence `deny.toml` admits — URW's base-35 stand-ins are AGPL-3.0 with a font exception — and a text face drawn for a symbolic font puts letters where the document meant arrows. A host's `FontProvider` may supply one | this page |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
 | A predefined CMap name outside Adobe's registry | `WarningKind::PredefinedCMapUnknown` | A guessed codespace mis-splits the string, so glyphs *and* advances go wrong silently | [rulings](../rulings.md) ruling 10 |
 | Registry CID tables in a `cmap-predefined`-off build | `WarningKind::PredefinedCMapApproximate`, `CMap::is_approximate` | Codespaces still ship (4.6 KB) so strings split right; the CIDs are admitted guesses | this page |
