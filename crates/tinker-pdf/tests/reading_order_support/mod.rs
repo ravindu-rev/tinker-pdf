@@ -305,6 +305,21 @@ pub fn furniture_truth(doc: &Document, index: u32) -> BTreeSet<Key> {
         .collect()
 }
 
+/// The characters page `index`'s structure tree claims for `Note` elements
+/// (14.8.4.6, after the role map): the truth a footnote score is held to.
+pub fn note_keys(doc: &Document, index: u32) -> BTreeSet<Key> {
+    let (Some(tree), Some(page)) = (doc.structure(), doc.page(index)) else {
+        return BTreeSet::new();
+    };
+    tree.text_for_page(index, &page.text())
+        .nodes
+        .iter()
+        .filter(|n| n.standard_type == "Note")
+        .flat_map(|n| n.chars.iter())
+        .map(key)
+        .collect()
+}
+
 /// How the blocks an inference gave some roles compare with a set of
 /// characters known to have them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

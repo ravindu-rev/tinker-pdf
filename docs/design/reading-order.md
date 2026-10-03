@@ -433,3 +433,37 @@ recall per corpus over the artifacts each producer drew in the margin bands
 — by position, because the device seam carries a property list's `/MCID` and
 14.9's entries but not an artifact's `/Type`, so `/Pagination` cannot be told
 from `/Layout` by name — and **the corpus figure is owed**.
+
+**Milestone 5 (3 October 2026): footnotes.** In the page's last band, the
+run of blocks at the foot of each column — and below the columns, across the
+page — whose every line is set at most `FOOTNOTE_SIZE_RATIO` (0.9) of the
+body's median size is a run of notes when a horizontal rule at least
+`SEPARATOR_SHARE` (a third) of the column wide stands between it and the body
+above, or when it opens with a raised glyph. A glyph is raised when its origin
+stands `RAISE_EMS` (a fifth) of its line's size above the line's baseline,
+which the text device's `TextChar::origin` keeps — `Glyph::baseline` joins a
+raised glyph to its line, and the risen origin is where the ink is — and the
+rules come from the same one interpretation the tables read. A run is cut into
+one note at every line that opens with a raised marker; each note's marker is
+its leading raised glyphs, or a short numeral or note symbol on its baseline.
+Notes are read after the body, before the running feet, in the order of their
+reference marks — the raised glyph with the same text in the body, by its
+place in the order read — and in the order they stand where no mark was
+found. They leave the body before the margin bands are judged, so a note in
+the foot band is a note and not an unplaced margin block. The design's
+`Capture { structure: true }` recorder is not needed: the tee carries both.
+
+Measured, first-party (`crates/tinker-pdf/tests/reading_order.rs`): a page of
+body text with two raised reference marks and two notes under a separator
+rule, drawn note 2, body, note 1 and tagged body then `/Note`s, reads every
+pair the tree's way (the stream 0.9407); against the producer's `/Note`
+elements, two of two blocks called footnotes were notes and 102 of 102 note
+characters were found, where the stream finds none; a rule over notes marked
+on the baseline, and raised markers without a rule, each make two notes, and
+neither makes none; note 2 set above note 1 still reads after it, and with no
+marks in the body the notes read in the order they stand; two notes drawn as
+one block of the text device's are cut at their markers; and **a rise of zero
+everywhere changes nothing** — the same page with nothing raised and no rule
+calls nothing a footnote and reads its foot where the columns put it. The
+census scores footnote precision against `/Note` per corpus; **that figure is
+owed**.

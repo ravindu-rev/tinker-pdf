@@ -31,7 +31,8 @@
 //! veraPDF's fixtures the design expects to be zero. And **running-head
 //! precision**: of the blocks called a running head, foot or page number, how
 //! many the producer drew as an artifact in a margin band — recall printed
-//! beside it, and neither yet held, for the reason below.
+//! beside it, and neither yet held, for the reason below. **Footnote
+//! precision** likewise, against the producer's `/Note` elements.
 //!
 //! **No corpus figure has been measured yet.** The fetched corpora were not
 //! reachable where this was written, so the floors table below is empty and
@@ -52,7 +53,7 @@ mod reading_order_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use reading_order_support::{furniture_truth, role_score, Agreement, RoleScore, Scored};
+use reading_order_support::{furniture_truth, note_keys, role_score, Agreement, RoleScore, Scored};
 use tinker_pdf::{Document, Role};
 
 /// Printed once when the census read the corpora. CI greps it.
@@ -158,6 +159,11 @@ struct Totals {
     furniture: RoleScore,
     /// The pages that had any.
     furnished: usize,
+    /// Footnotes against the producer's `/Note` elements, over the pages
+    /// whose tree has any.
+    notes: RoleScore,
+    /// The pages that had any.
+    noted: usize,
 }
 
 /// Scores one tagged file into `totals`.
@@ -184,6 +190,14 @@ fn score(doc: &Document, totals: &mut Totals) {
         totals.inferred = totals.inferred.plus(scored.inferred_agreement());
         totals.moved += scored.inferred.moved();
         file_crossings += scored.crossings();
+        let notes = note_keys(doc, index);
+        if !notes.is_empty() {
+            totals.noted += 1;
+            totals.notes =
+                totals
+                    .notes
+                    .plus(role_score(&scored.inferred, &[Role::Footnote], &notes));
+        }
         let truth = furniture_truth(doc, index);
         if !truth.is_empty() {
             totals.furnished += 1;
@@ -291,6 +305,15 @@ fn the_inference_is_scored_against_every_tagged_files_own_order() {
             t.furniture.found,
             t.furniture.truth,
             t.furnished
+        );
+        println!(
+            "{:<14} footnotes: {} of {} blocks called were /Note; {} of {} /Note characters found, over {} pages",
+            "",
+            t.notes.correct,
+            t.notes.called,
+            t.notes.found,
+            t.notes.truth,
+            t.noted
         );
     }
 

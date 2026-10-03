@@ -1016,6 +1016,259 @@ fn every_way_of_asking_gives_the_same_order() {
     }
 }
 
+// ---- footnotes ------------------------------------------------------------------
+
+/// How a footnote fixture marks and separates its notes.
+#[derive(Clone, Copy)]
+struct Notes {
+    /// A half-point rule a third of the measure wide over the notes.
+    rule: bool,
+    /// Note markers raised with `Ts`; otherwise set on the baseline.
+    raised: bool,
+    /// The body's reference marks raised with `Ts`; otherwise none at all.
+    references: bool,
+    /// Note 2 set above note 1 on the page, the reverse of its marks.
+    swapped: bool,
+    /// The notes drawn one after the other after the body, so the text
+    /// device makes one block of both.
+    together: bool,
+}
+
+/// A page of body text with two reference marks and two footnotes, tagged in
+/// reading order — every body line a `/P`, every note a `/Note` after the
+/// body, in mark order — and drawn note 2 first, then the body, then note 1.
+fn footnoted(notes: Notes) -> Document {
+    let rows = 20usize;
+    let mut body: Vec<String> = Vec::new();
+    for row in 0..rows {
+        let y = 720.0 - row as f64 * 12.0;
+        let text = prose(row, 70);
+        let mark = match row {
+            3 => Some("1"),
+            12 => Some("2"),
+            _ => None,
+        };
+        body.push(match (mark, notes.references) {
+            (Some(m), true) => format!(
+                "BT /F1 10 Tf 72 {y} Td ({text}) Tj /F1 6 Tf 4 Ts ({m}) Tj 0 Ts /F1 10 Tf ( more) Tj ET\n"
+            ),
+            _ => format!("BT /F1 10 Tf 72 {y} Td ({text}) Tj ET\n"),
+        });
+    }
+    let note = |mark: &str, y: f64, first: &str, second: &str| -> String {
+        let opener = if notes.raised {
+            format!("/F1 5 Tf 3 Ts ({mark}) Tj 0 Ts /F1 8 Tf ( {first}) Tj")
+        } else {
+            format!("/F1 8 Tf ({mark} {first}) Tj")
+        };
+        format!(
+            "BT 72 {y} Td {opener} ET BT /F1 8 Tf 72 {} Td ({second}) Tj ET\n",
+            y - 10.0
+        )
+    };
+    let (y1, y2) = if notes.swapped {
+        (82.0, 105.0)
+    } else {
+        (105.0, 82.0)
+    };
+    let note1 = note(
+        "1",
+        y1,
+        "The first note, at the foot",
+        "of the page it annotates.",
+    );
+    let note2 = note(
+        "2",
+        y2,
+        "The second note, after it.",
+        "And its second line.",
+    );
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        let key = rows as u64;
+        if !notes.together {
+            page.tagged_keyed(b"Note", key + 2, key + 1, |p| p.raw(note2.as_bytes()));
+        }
+        for (row, line) in body.iter().enumerate() {
+            page.tagged_keyed(b"P", row as u64 + 1, row as u64, |p| p.raw(line.as_bytes()));
+        }
+        if notes.rule {
+            page.raw(b"0.5 w 72 120 m 222 120 l S\n");
+        }
+        page.tagged_keyed(b"Note", key + 1, key, |p| p.raw(note1.as_bytes()));
+        if notes.together {
+            page.tagged_keyed(b"Note", key + 2, key + 1, |p| p.raw(note2.as_bytes()));
+        }
+    });
+    open(builder.finish())
+}
+
+const ALL: Notes = Notes {
+    rule: true,
+    raised: true,
+    references: true,
+    swapped: false,
+    together: false,
+};
+
+/// **Footnotes are read after the body, in the order of their marks.** Two
+/// notes under a separator rule, each opening with a raised marker, set at
+/// eight points under ten-point body text with two raised reference marks;
+/// drawn note 2, body, note 1, and tagged body then the notes. With the tree
+/// hidden the inference reads every pair the tree's way, where the stream
+/// does not; it calls exactly the two notes footnotes — precision and recall
+/// one against the producer's `/Note` elements, where the stream calls none.
+#[test]
+fn footnotes_are_read_after_the_body_in_mark_order() {
+    let doc = footnoted(ALL);
+    let scored = Scored::read(&doc, 0).expect("tagged");
+    let (stream, inferred) = (scored.stream_agreement(), scored.inferred_agreement());
+    println!(
+        "footnotes: stream {:.4} inferred {:.4}",
+        stream.score(),
+        inferred.score()
+    );
+    assert!(!stream.at_least(1, 1), "the stream already reads it right");
+    assert!(inferred.at_least(1, 1), "inferred {}", inferred.score());
+    let truth = reading_order_support::note_keys(&doc, 0);
+    let score = reading_order_support::role_score(&scored.inferred, &[Role::Footnote], &truth);
+    println!("{score:?}");
+    assert_eq!((score.called, score.correct), (2, 2));
+    assert!(score.recall_at_least(1, 1));
+    let notes: Vec<String> = scored
+        .inferred
+        .blocks
+        .iter()
+        .filter(|b| b.role == Role::Footnote)
+        .map(|b| {
+            b.lines
+                .iter()
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    assert!(notes[0].starts_with("1 The first note"), "{notes:?}");
+    assert!(notes[1].starts_with("2 The second note"), "{notes:?}");
+}
+
+/// **Either sign is enough, and neither is not.** A rule over notes with
+/// markers on the baseline: footnotes. Raised markers and no rule:
+/// footnotes. Small text at the foot with neither: body, where it stands.
+#[test]
+fn a_rule_or_a_raised_marker_makes_a_note_and_neither_does_not() {
+    for (notes, expect) in [
+        (
+            Notes {
+                raised: false,
+                ..ALL
+            },
+            2usize,
+        ),
+        (Notes { rule: false, ..ALL }, 2),
+        (
+            Notes {
+                rule: false,
+                raised: false,
+                ..ALL
+            },
+            0,
+        ),
+    ] {
+        let doc = footnoted(notes);
+        let order = doc.inferred_order(0, &hidden()).expect("a page");
+        let found = order
+            .blocks
+            .iter()
+            .filter(|b| b.role == Role::Footnote)
+            .count();
+        assert_eq!(found, expect, "rule {} raised {}", notes.rule, notes.raised);
+    }
+}
+
+/// **Mark order, not position order**: note 2 set above note 1 on the page
+/// still reads after it, because the body marks 1 first; with no reference
+/// marks in the body to go by, the notes read in the order they stand.
+#[test]
+fn notes_follow_their_marks_and_else_their_places() {
+    let doc = footnoted(Notes {
+        swapped: true,
+        ..ALL
+    });
+    let order = doc.inferred_order(0, &hidden()).expect("a page");
+    let notes: Vec<&str> = order
+        .blocks
+        .iter()
+        .filter(|b| b.role == Role::Footnote)
+        .filter_map(|b| b.lines.first().map(|l| l.text.as_str()))
+        .collect();
+    assert!(
+        notes[0].starts_with('1') && notes[1].starts_with('2'),
+        "{notes:?}"
+    );
+
+    let doc = footnoted(Notes {
+        swapped: true,
+        references: false,
+        ..ALL
+    });
+    let order = doc.inferred_order(0, &hidden()).expect("a page");
+    let notes: Vec<&str> = order
+        .blocks
+        .iter()
+        .filter(|b| b.role == Role::Footnote)
+        .filter_map(|b| b.lines.first().map(|l| l.text.as_str()))
+        .collect();
+    assert!(
+        notes[0].starts_with('2') && notes[1].starts_with('1'),
+        "{notes:?}"
+    );
+}
+
+/// **Notes set one after the other are cut at their markers.** Drawn
+/// together after the body, the two notes are one block of the text
+/// device's; each line opening with a raised marker starts a note of its own.
+#[test]
+fn notes_set_together_are_cut_at_their_markers() {
+    let doc = footnoted(Notes {
+        together: true,
+        ..ALL
+    });
+    let order = doc.inferred_order(0, &hidden()).expect("a page");
+    let notes: Vec<Vec<&str>> = order
+        .blocks
+        .iter()
+        .filter(|b| b.role == Role::Footnote)
+        .map(|b| b.lines.iter().map(|l| l.text.as_str()).collect())
+        .collect();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert_eq!(notes[0].len(), 2);
+    assert_eq!(notes[1].len(), 2);
+}
+
+/// **A rise of zero everywhere changes nothing**: the same page with no
+/// glyph raised and no rule drawn calls nothing a footnote, and reads its
+/// foot where the columns put it — the monotone property `Glyph::baseline`'s
+/// documentation states, asserted on the inference that reads it.
+#[test]
+fn a_rise_of_zero_everywhere_changes_nothing() {
+    let flat = footnoted(Notes {
+        rule: false,
+        raised: false,
+        references: false,
+        swapped: false,
+        together: false,
+    });
+    let order = flat.inferred_order(0, &hidden()).expect("a page");
+    assert!(order.blocks.iter().all(|b| b.role != Role::Footnote));
+    // Read top to bottom: the notes at the foot, in the order they stand.
+    let text = order.plain_text();
+    let first = text.find("1 The first note").expect("note 1");
+    let second = text.find("2 The second note").expect("note 2");
+    assert!(first < second);
+    assert!(text.find("alpha").expect("body") < first);
+}
 // ---- one column: the set where nothing may move ------------------------------
 
 /// **One column drawn top to bottom moves nothing**, whatever is in it: a

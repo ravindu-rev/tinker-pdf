@@ -11,10 +11,12 @@
 //! [`crate::Page::text_in`] names the three, and [`ReadingOrder::Inferred`] is
 //! the one this module adds: columns found from the whitespace between lines,
 //! blocks ordered top to bottom inside a column, a block that crosses a column
-//! boundary placed before the columns under it; and running heads, running
-//! feet and page numbers found by their recurring on the pages around this
-//! one, set aside first and last with their roles. Design:
-//! `docs/design/reading-order.md`.
+//! boundary placed before the columns under it; running heads, running feet
+//! and page numbers found by their recurring on the pages around this one,
+//! set aside first and last with their roles; and footnotes — small text at
+//! the foot of a column, under a separator rule or opening with a raised
+//! marker — read after the body in the order of their reference marks.
+//! Design: `docs/design/reading-order.md`.
 //!
 //! # The label is a type
 //!
@@ -48,6 +50,7 @@ use tinker_pdf_cos::CosDocument;
 
 use crate::observe::Observed;
 use crate::structure::StructuredText;
+use crate::tables::TableRule;
 use crate::{Document, Page};
 
 /// The narrowest vertical whitespace gap that can separate two columns, in
@@ -132,6 +135,20 @@ pub const RUNNING_WINDOW: u32 = 16;
 /// Two, because a recto and a verso head each recur on every other page, and
 /// one recurrence is a coincidence as often as a convention.
 pub const RUNNING_REPEATS: usize = 2;
+
+/// The largest a footnote's text may be, as a share of the body's median line
+/// size (the design's 0.9): a note is set smaller than what it annotates.
+pub const FOOTNOTE_SIZE_RATIO: f64 = 0.9;
+
+/// How far above its line's baseline a glyph must stand to be raised — a
+/// reference mark, or the marker that opens a note — as a share of the line's
+/// size. A superscript is raised a third of an em or so; a fifth keeps an
+/// accent's jitter out.
+pub const RAISE_EMS: f64 = 0.2;
+
+/// The shortest a footnote separator may be, as a share of the width of the
+/// column whose notes it heads (the design's third).
+pub const SEPARATOR_SHARE: f64 = 1.0 / 3.0;
 
 /// Which order a caller asks [`crate::Page::text_in`] for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -469,7 +486,7 @@ fn infer_page(page: &Page, options: &InferenceOptions, margins: &mut MarginCache
     let observed = Observed::read(page, options.hide_structure);
     let frame = page.crop_box();
     let neighbours = margins.around(page.index());
-    let mut order = infer(&observed.text, frame, &neighbours);
+    let mut order = infer(&observed.text, frame, &neighbours, &observed.rules);
     if tagged {
         order.warnings.insert(0, InferenceWarning::TreePresent);
     }
@@ -659,6 +676,7 @@ fn infer(
     page: &TextPage,
     frame: (f64, f64, f64, f64),
     neighbours: &[(i64, &Margins)],
+    rules: &[TableRule],
 ) -> InferredOrder {
     let flat = flatten(page);
     let mut warnings = Vec::new();
@@ -772,14 +790,20 @@ fn infer(
         }
     }
 
-    let mut drafts = order_body(placed, count, em);
+    let drafts = order_body(placed, count, em);
+
+    // Footnotes leave the body before anything else is decided about it, so
+    // a note in the foot band is a note and not an unplaced margin block.
+    let (mut drafts, notes) = footnotes(drafts, &flat, rules, em);
 
     // With nothing to compare, a block lying wholly in a margin band is
     // neither body nor furniture by any evidence there is.
     if compared < RUNNING_REPEATS {
         let mut unplaced = 0usize;
         for draft in &mut drafts {
-            if draft.pieces.iter().all(|p| bands.holds(p.bounds).is_some()) {
+            if draft.role == Role::Body
+                && draft.pieces.iter().all(|p| bands.holds(p.bounds).is_some())
+            {
                 draft.role = Role::Unplaced;
                 unplaced += 1;
             }
@@ -830,7 +854,12 @@ fn infer(
     for foot in &mut feet {
         foot.section = last;
     }
-    let mut drafts: Vec<Draft> = heads.into_iter().chain(drafts).chain(feet).collect();
+    let mut drafts: Vec<Draft> = heads
+        .into_iter()
+        .chain(drafts)
+        .chain(notes)
+        .chain(feet)
+        .collect();
 
     // Lines nothing here orders, last and in stream order.
     let mut unplaced: Vec<Piece> = angled
@@ -1096,6 +1125,257 @@ fn rect_quad(x0: f64, y0: f64, x1: f64, y1: f64) -> Quad {
         ur: (x1, y1),
         ll: (x0, y0),
         lr: (x1, y0),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Footnotes
+// ---------------------------------------------------------------------------
+
+/// The baseline of a piece: the median of its characters' origins.
+fn baseline(piece: &Piece, flat: &[&TextChar]) -> f64 {
+    let mut ys: Vec<f64> = piece
+        .chars
+        .iter()
+        .filter_map(|at| flat.get(*at))
+        .map(|c| c.origin.1)
+        .filter(|y| y.is_finite())
+        .collect();
+    ys.sort_by(f64::total_cmp);
+    ys.get(ys.len() / 2).copied().unwrap_or(piece.bounds.1)
+}
+
+/// Whether the character at `at` stands [`RAISE_EMS`] of its line's size or
+/// more above the line's baseline.
+fn raised(at: usize, base: f64, size: f64, flat: &[&TextChar]) -> bool {
+    flat.get(at).is_some_and(|c| {
+        c.origin.1 - base >= RAISE_EMS * size.max(1e-9) && !c.text.trim().is_empty()
+    })
+}
+
+/// The raised marks of a piece, in its order: runs of raised glyphs, each
+/// with the place of its first character.
+fn raised_marks(piece: &Piece, flat: &[&TextChar]) -> Vec<(String, usize)> {
+    let base = baseline(piece, flat);
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut open = false;
+    for at in &piece.chars {
+        if raised(*at, base, piece.size, flat) {
+            let text = flat.get(*at).map_or("", |c| c.text.as_str());
+            match (open, out.last_mut()) {
+                (true, Some((mark, _))) => mark.push_str(text),
+                _ => out.push((text.to_owned(), *at)),
+            }
+            open = true;
+        } else {
+            open = false;
+        }
+    }
+    out
+}
+
+/// Whether the first glyph of `piece` that is not a space is raised: a note
+/// opening with its marker.
+fn opens_raised(piece: &Piece, flat: &[&TextChar]) -> bool {
+    let base = baseline(piece, flat);
+    piece
+        .chars
+        .iter()
+        .find(|at| flat.get(**at).is_some_and(|c| !c.text.trim().is_empty()))
+        .is_some_and(|at| raised(*at, base, piece.size, flat))
+}
+
+/// The marker a note opens with: its leading raised glyphs, or a short
+/// leading numeral or symbol set on the baseline; `None` for neither.
+fn opening_mark(piece: &Piece, flat: &[&TextChar]) -> Option<String> {
+    let base = baseline(piece, flat);
+    let mut chars = piece
+        .chars
+        .iter()
+        .filter(|at| flat.get(**at).is_some_and(|c| !c.text.trim().is_empty()));
+    let first = *chars.next()?;
+    if raised(first, base, piece.size, flat) {
+        let mut mark: String = flat.get(first).map(|c| c.text.clone()).unwrap_or_default();
+        for at in piece.chars.iter().skip_while(|a| **a != first).skip(1) {
+            if !raised(*at, base, piece.size, flat) {
+                break;
+            }
+            mark.push_str(flat.get(*at).map_or("", |c| c.text.as_str()));
+        }
+        return Some(mark);
+    }
+    // A marker on the baseline: up to three digits or note symbols, then a
+    // space.
+    let text: String = piece
+        .chars
+        .iter()
+        .filter_map(|at| flat.get(*at))
+        .map(|c| c.text.as_str())
+        .collect();
+    let head: String = text
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || "*\u{2020}\u{2021}\u{a7}\u{b6}".contains(*c))
+        .collect();
+    let rest = text.trim_start().get(head.len()..).unwrap_or("");
+    (!head.is_empty()
+        && head.chars().count() <= 3
+        && rest.starts_with(|c: char| c.is_whitespace() || c == '.'))
+    .then_some(head)
+}
+
+/// Takes the footnotes out of `drafts`: in the page's last band, the run of
+/// blocks at the foot of each column — and below every column, across the
+/// page — set at most [`FOOTNOTE_SIZE_RATIO`] of the body's size, under a
+/// horizontal rule at least [`SEPARATOR_SHARE`] of the column wide or opening
+/// with a raised marker. A run is cut into one note per marker. The notes come
+/// back in the order of their reference marks — the raised glyph with the
+/// same text in the body — and in position order where none was found.
+fn footnotes(
+    drafts: Vec<Draft>,
+    flat: &[&TextChar],
+    rules: &[TableRule],
+    em: f64,
+) -> (Vec<Draft>, Vec<Draft>) {
+    let limit = FOOTNOTE_SIZE_RATIO * em;
+    let small = |d: &Draft| {
+        d.role == Role::Body
+            && !d.pieces.is_empty()
+            && d.pieces
+                .iter()
+                .all(|p| p.size > 0.0 && p.size <= limit + 1e-9)
+    };
+    let last_section = drafts
+        .iter()
+        .filter(|d| d.role == Role::Body)
+        .map(|d| d.section)
+        .max()
+        .unwrap_or(0);
+    // The groups of the last band, by column (`None` for what crosses the
+    // columns), each as the indices of its drafts in order.
+    let mut groups: BTreeMap<Option<usize>, Vec<usize>> = BTreeMap::new();
+    for (at, draft) in drafts.iter().enumerate() {
+        if draft.section == last_section && draft.role == Role::Body {
+            groups.entry(draft.column).or_default().push(at);
+        }
+    }
+    let any_body = drafts.iter().any(|d| d.role == Role::Body && !small(d));
+    let mut taken: Vec<usize> = Vec::new();
+    if any_body {
+        for members in groups.values() {
+            let trailing: Vec<usize> = members
+                .iter()
+                .rev()
+                .take_while(|at| drafts.get(**at).is_some_and(small))
+                .copied()
+                .collect();
+            let Some(&top_at) = trailing.last() else {
+                continue;
+            };
+            let Some(top) = drafts.get(top_at) else {
+                continue;
+            };
+            let candidates_top = top
+                .pieces
+                .iter()
+                .map(|p| p.bounds.3)
+                .fold(f64::NEG_INFINITY, f64::max);
+            // What stands above the run: the column's last block that is not
+            // small, or nothing.
+            let above = members
+                .iter()
+                .rev()
+                .skip(trailing.len())
+                .find_map(|at| drafts.get(*at))
+                .map(|d| {
+                    d.pieces
+                        .iter()
+                        .map(|p| p.bounds.1)
+                        .fold(f64::INFINITY, f64::min)
+                });
+            let (left, right) = members
+                .iter()
+                .filter_map(|at| drafts.get(*at))
+                .flat_map(|d| d.pieces.iter())
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| {
+                    (a.min(p.bounds.0), b.max(p.bounds.2))
+                });
+            let width = (right - left).max(0.0);
+            let separated = rules.iter().any(|r| {
+                r.horizontal
+                    && r.at >= candidates_top
+                    && above.is_none_or(|bottom| r.at <= bottom)
+                    && r.to - r.from >= SEPARATOR_SHARE * width
+                    && r.from < right
+                    && r.to > left
+            });
+            let marked = top.pieces.first().is_some_and(|p| opens_raised(p, flat));
+            if separated || marked {
+                taken.extend(trailing);
+            }
+        }
+    }
+    if taken.is_empty() {
+        return (drafts, Vec::new());
+    }
+    taken.sort_unstable();
+    // The notes, cut at every piece that opens with a raised marker.
+    let mut body = Vec::with_capacity(drafts.len());
+    let mut notes: Vec<(Option<String>, Draft)> = Vec::new();
+    for (at, draft) in drafts.into_iter().enumerate() {
+        if taken.binary_search(&at).is_err() {
+            body.push(draft);
+            continue;
+        }
+        let section = draft.section;
+        let mut current: Option<(Option<String>, Vec<Piece>)> = None;
+        for piece in draft.pieces {
+            let opens = opens_raised(&piece, flat);
+            if opens || current.is_none() {
+                if let Some((mark, pieces)) = current.take() {
+                    notes.push((mark, note(pieces, section)));
+                }
+                current = Some((opening_mark(&piece, flat), vec![piece]));
+            } else if let Some((_, pieces)) = current.as_mut() {
+                pieces.push(piece);
+            }
+        }
+        if let Some((mark, pieces)) = current {
+            notes.push((mark, note(pieces, section)));
+        }
+    }
+    // Reference marks in the body, by their place in the order read.
+    let mut marks: BTreeMap<String, usize> = BTreeMap::new();
+    let mut place = 0usize;
+    for draft in &body {
+        for piece in &draft.pieces {
+            for (mark, _) in raised_marks(piece, flat) {
+                marks.entry(mark).or_insert(place);
+                place += 1;
+            }
+        }
+    }
+    let mut keyed: Vec<(usize, usize, Draft)> = notes
+        .into_iter()
+        .enumerate()
+        .map(|(at, (mark, draft))| {
+            let key = mark
+                .and_then(|m| marks.get(&m).copied())
+                .unwrap_or(usize::MAX);
+            (key, at, draft)
+        })
+        .collect();
+    keyed.sort_by_key(|(key, at, _)| (*key, *at));
+    (body, keyed.into_iter().map(|(_, _, d)| d).collect())
+}
+
+/// A footnote block.
+fn note(pieces: Vec<Piece>, section: usize) -> Draft {
+    Draft {
+        role: Role::Footnote,
+        section,
+        column: None,
+        pieces,
     }
 }
 
