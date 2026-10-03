@@ -627,10 +627,18 @@ pub const STAGED: &[StagedRule] = &[
                   membership rule reads the properties it describes. What is \
                   not checked is the second hop - `pdfaProperty:valueType` \
                   naming a type, and that type being either one XMP defines or \
-                  one `pdfaSchema:valueType` describes. It needs a list of the \
-                  value type names each cited XMP revision defines, which is a \
-                  table this build does not have; four Isartor fixtures turn \
-                  on it",
+                  one `pdfaSchema:valueType` describes. The names are not what \
+                  is missing: both revisions this build transcribes its \
+                  predefined property tables from print them (January 2004's \
+                  \"Property Value Types\" from p. 62, September 2005's from \
+                  p. 73), and the transcription is work not yet done. What no \
+                  source in hand states is how a declared type string is \
+                  matched against that list - the array forms and their \
+                  letter case, the Choice forms, a structure type's prefix - \
+                  which veraPDF's published rule 6.7.8-9 leaves to an \
+                  `isValueTypeDefined` it does not define, and a matcher \
+                  guessed too strict reports conforming files. Four Isartor \
+                  fixtures turn on it",
     },
     StagedRule {
         clause: "6.1.6",
