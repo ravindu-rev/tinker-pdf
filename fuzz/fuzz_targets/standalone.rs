@@ -114,7 +114,9 @@ fuzz_target!(|data: &[u8]| {
         // hundred bytes, and the seconds a decoder spends on fifty million
         // pixels are `jpeg`'s and `render_page`'s to measure, not this route's.
         // What else is drawn is held to at most 256 pixels a side, for the
-        // same reason: a page at its own size can be 65 535 points across.
+        // same reason: a page at its own size can be 65 535 points across,
+        // past Annex C.2's 14 400, which the comic path does not clamp
+        // (named in docs/features/cbz.md's refusals as owed).
         if !matches!(kind, Some(Standalone::Image(_))) {
             let (width, height) = page.size();
             let side = width.max(height).max(1.0);
