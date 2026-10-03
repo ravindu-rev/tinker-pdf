@@ -300,6 +300,29 @@ module TinkerPdf
            'char **out_field)'
     extern 'void tpdf_form_data_free(void *handle)'
     extern 'int tpdf_editor_apply_form_data(void *editor, const void *handle, void **out_report)'
+
+    extern 'int tpdf_builder_new_with_version(uint32_t major, uint32_t minor, void **out)'
+    extern 'int tpdf_builder_clear_image_resources(void *builder)'
+    extern 'int tpdf_builder_add_named_font(void *builder, const uint8_t *resource, size_t resource_len, ' \
+           'const uint8_t *base_font, size_t base_font_len, uint32_t first_code, const void *names, ' \
+           'size_t name_count, const uint16_t *widths, size_t width_count)'
+    extern 'int tpdf_ext_gstate_init(void *out)'
+    extern 'int tpdf_builder_add_ext_gstate(void *builder, const uint8_t *resource, size_t resource_len, ' \
+           'const void *state)'
+    extern 'int tpdf_builder_add_form(void *builder, const uint8_t *resource, size_t resource_len, double x0, ' \
+           'double y0, double x1, double y1, const double *matrix, const void *group, const uint8_t *content, ' \
+           'size_t content_len)'
+    extern 'int tpdf_builder_add_tiling_pattern(void *builder, const uint8_t *resource, size_t resource_len, ' \
+           'double x0, double y0, double x1, double y1, double x_step, double y_step, const double *matrix, ' \
+           'int tiling_type, const uint8_t *content, size_t content_len)'
+    extern 'int tpdf_page_builder_set_bleed_box(void *page, double x0, double y0, double x1, double y1)'
+    extern 'int tpdf_page_builder_encoded_text(void *page, const uint8_t *font, size_t font_len, double size, ' \
+           'double x, double y, double character_spacing, double word_spacing, const uint8_t *codes, ' \
+           'size_t codes_len, const char *characters)'
+    extern 'int tpdf_page_builder_set_ext_gstate(void *page, const uint8_t *resource, size_t resource_len)'
+    extern 'int tpdf_page_builder_form(void *page, const uint8_t *resource, size_t resource_len)'
+    extern 'int tpdf_page_builder_set_fill_pattern(void *page, const uint8_t *resource, size_t resource_len)'
+    extern 'int tpdf_page_builder_set_stroke_pattern(void *page, const uint8_t *resource, size_t resource_len)'
   end
 
   # The TPDF_SCRIPT_* policy bits and TPDF_ENTROPY_LEN, transcribed.
@@ -1410,6 +1433,120 @@ module TinkerPdf
     # Raises when nothing was written; returns the widgets it could not draw.
     def apply_form_data(data)
       Editor.skipped(Raw.handle { |out| Native.tpdf_editor_apply_form_data(@pointer, data.pointer, out) })
+    end
+  end
+
+  # 11.3.5's blend modes, transcribed from TpdfBlendMode.
+  module BlendMode
+    NORMAL = 0
+    MULTIPLY = 1
+    SCREEN = 2
+    OVERLAY = 3
+    DARKEN = 4
+    LIGHTEN = 5
+    COLOR_DODGE = 6
+    COLOR_BURN = 7
+    HARD_LIGHT = 8
+    SOFT_LIGHT = 9
+    DIFFERENCE = 10
+    EXCLUSION = 11
+    HUE = 12
+    SATURATION = 13
+    COLOR = 14
+    LUMINOSITY = 15
+  end
+
+  # Which /SMask a graphics state writes, transcribed from TpdfSoftMask.
+  module SoftMask
+    ABSENT = 0
+    NONE = 1
+    GROUP = 2
+  end
+
+  # TpdfMaskKind, transcribed.
+  module MaskKind
+    ALPHA = 0
+    LUMINOSITY = 1
+  end
+
+  # TpdfDeviceSpace, transcribed.
+  module DeviceSpace
+    GRAY = 0
+    RGB = 1
+    CMYK = 2
+  end
+
+  # TpdfTilingType, transcribed; counted from zero.
+  module TilingType
+    CONSTANT_SPACING = 0
+    NO_DISTORTION = 1
+    FASTER_TILING = 2
+  end
+
+  # The builder's graphics resources.
+  class Builder
+    def self.with_version(major, minor)
+      builder = allocate
+      builder.instance_variable_set(:@pointer,
+                                    Raw.handle { |out| Native.tpdf_builder_new_with_version(major, minor, out) })
+      builder
+    end
+
+    def clear_image_resources = Raw.check(Native.tpdf_builder_clear_image_resources(@pointer))
+
+    def add_named_font(resource, base_font, first_code, names, widths)
+      array, _kept = FormData.strings(names)
+      Raw.check(Native.tpdf_builder_add_named_font(@pointer, resource, resource.bytesize, base_font,
+                                                   base_font.bytesize, first_code, array, names.size,
+                                                   widths.pack('S*'), widths.size))
+    end
+
+    # TpdfExtGState, from tpdf_ext_gstate_init: fill_alpha f64 @0,
+    # stroke_alpha @8, has_blend_mode i32 @16, blend_mode @20, soft_mask @24,
+    # mask_kind @28, mask_form pointer @32, its length @40, backdrop pointer
+    # @48, its length @56; 64 bytes. A nil keyword keeps the initialised value.
+    def add_ext_gstate(resource, fill_alpha: nil, stroke_alpha: nil, blend_mode: nil,
+                       soft_mask: SoftMask::ABSENT, mask_kind: MaskKind::ALPHA, mask_form: nil, backdrop: nil)
+      out = Raw.slot(64)
+      Raw.check(Native.tpdf_ext_gstate_init(out))
+      fill, stroke, has_blend, blend, = out[0, 32].unpack('ddll')
+      backdrop_bytes = backdrop&.pack('d*')
+      raw = [fill_alpha || fill, stroke_alpha || stroke, blend_mode.nil? ? has_blend : 1, blend_mode || blend,
+             soft_mask, mask_kind, Raw.address(mask_form), mask_form&.bytesize || 0,
+             Raw.address(backdrop_bytes), backdrop&.size || 0].pack('ddllllQQQQ')
+      Raw.check(Native.tpdf_builder_add_ext_gstate(@pointer, resource, resource.bytesize, raw))
+    end
+
+    # bbox [x0, y0, x1, y1]; matrix six numbers or nil; group [space,
+    # isolated, knockout] or nil, packed as TpdfTransparencyGroup's three
+    # 32-bit integers.
+    def add_form(resource, bbox, content, matrix: nil, group: nil)
+      raw_group = group && [group[0], group[1] ? 1 : 0, group[2] ? 1 : 0].pack('l3')
+      Raw.check(Native.tpdf_builder_add_form(@pointer, resource, resource.bytesize, *bbox, matrix&.pack('d6'),
+                                             raw_group, content, content.bytesize))
+    end
+
+    def add_tiling_pattern(resource, bbox, x_step, y_step, tiling_type, content, matrix: nil)
+      Raw.check(Native.tpdf_builder_add_tiling_pattern(@pointer, resource, resource.bytesize, *bbox, x_step, y_step,
+                                                       matrix&.pack('d6'), tiling_type, content, content.bytesize))
+    end
+  end
+
+  # The page's graphics calls.
+  class PageBuilder
+    def set_bleed_box(x0, y0, x1, y1) = Raw.check(Native.tpdf_page_builder_set_bleed_box(@pointer, x0, y0, x1, y1))
+
+    def encoded_text(font, size, x, y, spacing, codes, characters)
+      Raw.check(Native.tpdf_page_builder_encoded_text(@pointer, font, font.bytesize, size, x, y, *spacing, codes,
+                                                      codes.bytesize, Raw.cstr(characters)))
+    end
+
+    def set_ext_gstate(name) = Raw.check(Native.tpdf_page_builder_set_ext_gstate(@pointer, name, name.bytesize))
+    def form(name) = Raw.check(Native.tpdf_page_builder_form(@pointer, name, name.bytesize))
+    def set_fill_pattern(name) = Raw.check(Native.tpdf_page_builder_set_fill_pattern(@pointer, name, name.bytesize))
+
+    def set_stroke_pattern(name)
+      Raw.check(Native.tpdf_page_builder_set_stroke_pattern(@pointer, name, name.bytesize))
     end
   end
 

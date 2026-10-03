@@ -782,6 +782,54 @@ func formDataText(formed []byte, lines []string, formDataDir string) string {
 	return out.String()
 }
 
+// graphics builds a document with every graphics resource the builder
+// registers, each one used.
+func graphics() []byte {
+	builder, err := tp.NewBuilderWithVersion(2, 0)
+	must(err)
+	defer builder.Close()
+	must(builder.AddBaseFont([]byte("F1"), []byte("Helvetica")))
+	must(builder.AddNamedFont([]byte("F2"), []byte("Helvetica"), 128, []string{"Euro", "uni0141"}, []uint16{556, 611}))
+	must(builder.AddForm([]byte("Fm0"), 0, 0, 100, 100, &tp.Matrix{1, 0, 0, 1, 10, 10},
+		&tp.TransparencyGroup{ColorSpace: tp.DeviceGray, Isolated: true}, []byte("0.5 g 0 0 100 100 re f")))
+	must(builder.AddForm([]byte("Fm1"), 0, 0, 50, 50, nil, nil, []byte("0 0 1 rg 10 10 30 30 re f")))
+	fill, stroke, multiply := 0.5, 0.25, tp.BlendMultiply
+	must(builder.AddExtGState([]byte("GS0"), tp.ExtGState{
+		FillAlpha: &fill, StrokeAlpha: &stroke, BlendMode: &multiply,
+		SoftMask: tp.SoftMaskGroup, MaskKind: tp.MaskLuminosity, MaskForm: []byte("Fm0"), Backdrop: []float64{0.5},
+	}))
+	must(builder.AddExtGState([]byte("GS1"), tp.ExtGState{SoftMask: tp.SoftMaskNone}))
+	must(builder.AddTilingPattern([]byte("P0"), 0, 0, 5, 5, 8, 8, &tp.Matrix{2, 0, 0, 2, 0, 0},
+		tp.TilingNoDistortion, []byte("1 0 0 rg 0 0 5 5 re f")))
+	must(builder.AddImage([]byte("Im1"), tp.ImageGray8, 2, 2, []byte{0, 85, 170, 255}))
+
+	page, err := builder.BeginPage(200, 200)
+	must(err)
+	must(page.SetBleedBox(5, 5, 195, 195))
+	must(page.EncodedText([]byte("F2"), 12, 20, 170, 0.5, 1.5, []byte{128, 129}, "€Ł"))
+	must(page.Raw([]byte("q")))
+	must(page.SetExtGState([]byte("GS0")))
+	must(page.Form([]byte("Fm1")))
+	must(page.SetFillPattern([]byte("P0")))
+	must(page.Raw([]byte("60 60 40 40 re f")))
+	must(page.SetStrokePattern([]byte("P0")))
+	must(page.Raw([]byte("4 w 110 110 40 40 re S")))
+	must(page.SetExtGState([]byte("GS1")))
+	must(page.Raw([]byte("Q")))
+	must(page.Image([]byte("Im1"), 150, 20, 20, 20))
+	must(builder.PushPage(page))
+	page.Close()
+	must(builder.ClearImageResources())
+	page, err = builder.BeginPage(200, 200)
+	must(err)
+	must(page.Form([]byte("Fm0")))
+	must(builder.PushPage(page))
+	page.Close()
+	bytes, err := builder.Finish()
+	must(err)
+	return bytes
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: parity <form-fields.pdf>")
@@ -810,5 +858,6 @@ func main() {
 	formed, lines := forms(fixture, formDataDir)
 	report("forms", formed)
 	reportRead("form-data", formDataText(formed, lines, formDataDir))
+	report("graphics", graphics())
 	fmt.Println("GO-PARITY: RAN")
 }

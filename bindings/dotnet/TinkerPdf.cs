@@ -1863,7 +1863,7 @@ internal static class Buffers
 /// A page begun and never pushed is simply disposed, and the document is
 /// byte-for-byte what it would have been.
 /// </remarks>
-public sealed class PageBuilder : IDisposable
+public sealed partial class PageBuilder : IDisposable
 {
     private readonly PageBuilderHandle _handle;
 
@@ -2066,7 +2066,7 @@ public sealed class OutlineEntry : IDisposable
 }
 
 /// <summary>Assembles a document from pages, fonts and images.</summary>
-public sealed class DocumentBuilder : IDisposable
+public sealed partial class DocumentBuilder : IDisposable
 {
     private readonly BuilderHandle _handle;
 

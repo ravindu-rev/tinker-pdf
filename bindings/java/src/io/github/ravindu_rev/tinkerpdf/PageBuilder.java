@@ -66,6 +66,49 @@ public final class PageBuilder implements AutoCloseable {
         }
     }
 
+    /** This page's /BleedBox (14.11.2). */
+    public void setBleedBox(double x0, double y0, double x1, double y1) {
+        Native.check(Native.tpdf_page_builder_set_bleed_box, pointer, x0, y0, x1, y1);
+    }
+
+    /** Codes the caller chose, with a character and a word spacing; characters are what they stand for. */
+    public void encodedText(String font, double size, double x, double y, double characterSpacing,
+            double wordSpacing, byte[] codes, String characters) {
+        byte[] f = font.getBytes(StandardCharsets.UTF_8);
+        try (Arena arena = Arena.ofConfined()) {
+            Native.check(Native.tpdf_page_builder_encoded_text, pointer, Native.bytes(arena, f), (long) f.length,
+                    size, x, y, characterSpacing, wordSpacing, Native.bytes(arena, codes), (long) codes.length,
+                    Native.cString(arena, characters));
+        }
+    }
+
+    private void named(java.lang.invoke.MethodHandle handle, String resource) {
+        byte[] r = resource.getBytes(StandardCharsets.UTF_8);
+        try (Arena arena = Arena.ofConfined()) {
+            Native.check(handle, pointer, Native.bytes(arena, r), (long) r.length);
+        }
+    }
+
+    /** Applies a registered graphics state ({@code gs}). */
+    public void setExtGState(String resource) {
+        named(Native.tpdf_page_builder_set_ext_gstate, resource);
+    }
+
+    /** Draws a registered form XObject ({@code Do}). */
+    public void form(String resource) {
+        named(Native.tpdf_page_builder_form, resource);
+    }
+
+    /** Sets the non-stroking colour to a registered tiling pattern. */
+    public void setFillPattern(String resource) {
+        named(Native.tpdf_page_builder_set_fill_pattern, resource);
+    }
+
+    /** Sets the stroking colour to a registered tiling pattern. */
+    public void setStrokePattern(String resource) {
+        named(Native.tpdf_page_builder_set_stroke_pattern, resource);
+    }
+
     @Override
     public void close() {
         if (pointer != null) {

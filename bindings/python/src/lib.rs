@@ -13,6 +13,7 @@ use pyo3::types::PyBytes;
 
 mod docops;
 mod forms;
+mod graphics;
 mod read;
 mod signatures;
 
@@ -448,6 +449,17 @@ pub struct PyEditor {
 /// difference between a debuggable failure and a `False` nobody checked.
 fn refused(call: &str, detail: &str) -> PyErr {
     PyValueError::new_err(format!("{call} refused: {detail}"))
+}
+
+/// A page call that named a resource nothing is registered under.
+fn unregistered(call: &str, resource: &[u8]) -> PyErr {
+    refused(
+        call,
+        &format!(
+            "nothing of that kind is registered as {:?}",
+            String::from_utf8_lossy(resource)
+        ),
+    )
 }
 
 impl PyEditor {
@@ -1259,6 +1271,70 @@ impl PyPageBuilder {
         Ok(())
     }
 
+    /// Sets this page's `/BleedBox` (14.11.2).
+    fn set_bleed_box(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) -> PyResult<()> {
+        self.get()?.set_bleed_box(x0, y0, x1, y1);
+        Ok(())
+    }
+
+    /// Writes text in codes the caller chose, with `spacing` as
+    /// `(character, word)` (9.3.2, 9.3.3). `codes` are written and not
+    /// interpreted; `characters`, what they stand for, are recorded and not
+    /// written, so an embedded program is still subset to what was drawn.
+    #[allow(clippy::too_many_arguments)]
+    fn encoded_text(
+        &mut self,
+        font: &[u8],
+        size: f64,
+        x: f64,
+        y: f64,
+        spacing: (f64, f64),
+        codes: &[u8],
+        characters: &str,
+    ) -> PyResult<()> {
+        self.get()?
+            .encoded_text(font, size, x, y, spacing, codes, characters);
+        Ok(())
+    }
+
+    /// Applies a registered graphics state (`gs`); raises when none is
+    /// registered under the name.
+    fn set_ext_gstate(&mut self, resource: &[u8]) -> PyResult<()> {
+        if self.get()?.set_ext_gstate(resource) {
+            Ok(())
+        } else {
+            Err(unregistered("set_ext_gstate", resource))
+        }
+    }
+
+    /// Draws a registered form XObject (`Do`); raises when none is
+    /// registered under the name.
+    fn form(&mut self, resource: &[u8]) -> PyResult<()> {
+        if self.get()?.form(resource) {
+            Ok(())
+        } else {
+            Err(unregistered("form", resource))
+        }
+    }
+
+    /// Sets the non-stroking colour to a registered tiling pattern.
+    fn set_fill_pattern(&mut self, resource: &[u8]) -> PyResult<()> {
+        if self.get()?.set_fill_pattern(resource) {
+            Ok(())
+        } else {
+            Err(unregistered("set_fill_pattern", resource))
+        }
+    }
+
+    /// Sets the stroking colour to a registered tiling pattern.
+    fn set_stroke_pattern(&mut self, resource: &[u8]) -> PyResult<()> {
+        if self.get()?.set_stroke_pattern(resource) {
+            Ok(())
+        } else {
+            Err(unregistered("set_stroke_pattern", resource))
+        }
+    }
+
     /// Adds a link annotation over a rectangle (12.5.6.5).
     ///
     /// A page link is positioned as `view` says, with the same keywords
@@ -1337,9 +1413,146 @@ impl PyBuilder {
         }
     }
 
+    /// Starts a document whose header declares PDF `major.minor` (7.5.2);
+    /// `DocumentBuilder()` declares the writer's default.
+    #[staticmethod]
+    fn with_version(major: u8, minor: u8) -> PyBuilder {
+        PyBuilder {
+            inner: Some(tinker_pdf::DocumentBuilder::with_version(major, minor)),
+        }
+    }
+
     /// Registers one of the standard 14 fonts under a resource name (9.6.2.2).
     fn add_base_font(&mut self, resource: &[u8], base_font: &[u8]) -> PyResult<()> {
         self.get()?.add_base_font(resource, base_font);
+        Ok(())
+    }
+
+    /// Registers one of the standard 14 under an `/Encoding` the caller wrote
+    /// (9.6.6.1): glyph `names` for the codes from `first_code`, and their
+    /// `widths` in thousandths of an em. Raises, registering nothing, when
+    /// the lists differ in length, either is empty, or the codes run past 255.
+    fn add_named_font(
+        &mut self,
+        resource: &[u8],
+        base_font: &[u8],
+        first_code: u8,
+        names: Vec<String>,
+        widths: Vec<u16>,
+    ) -> PyResult<()> {
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        if self
+            .get()?
+            .add_named_font(resource, base_font, first_code, &borrowed, &widths)
+        {
+            Ok(())
+        } else {
+            Err(refused(
+                "add_named_font",
+                &format!(
+                    "{} names and {} widths from code {first_code}",
+                    names.len(),
+                    widths.len()
+                ),
+            ))
+        }
+    }
+
+    /// Registers a graphics state (Table 58). Every argument left `None`
+    /// writes no entry. `soft_mask` is `"none"` for `/SMask /None`, or
+    /// `"alpha"` / `"luminosity"` for a mask over `mask_form`, a form
+    /// registered with a transparency group, with `backdrop` its `/BC`.
+    #[pyo3(signature = (
+        resource, fill_alpha = None, stroke_alpha = None, blend_mode = None, soft_mask = None,
+        mask_form = None, backdrop = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_ext_gstate(
+        &mut self,
+        resource: &[u8],
+        fill_alpha: Option<f64>,
+        stroke_alpha: Option<f64>,
+        blend_mode: Option<&str>,
+        soft_mask: Option<&str>,
+        mask_form: Option<Vec<u8>>,
+        backdrop: Option<Vec<f64>>,
+    ) -> PyResult<()> {
+        let state = tinker_pdf::ExtGState {
+            fill_alpha,
+            stroke_alpha,
+            blend_mode: blend_mode.map(graphics::blend_mode).transpose()?,
+            soft_mask: graphics::soft_mask(soft_mask, mask_form.as_deref(), backdrop.as_deref())?,
+        };
+        if self.get()?.add_ext_gstate(resource, &state) {
+            Ok(())
+        } else {
+            Err(refused("add_ext_gstate", &format!("{state:?}")))
+        }
+    }
+
+    /// Registers a form XObject (8.10): `bbox` as `(x0, y0, x1, y1)`,
+    /// `matrix` six numbers or `None` for the identity, `group` a
+    /// `(color_space, isolated, knockout)` transparency group or `None`.
+    #[pyo3(signature = (resource, bbox, content, matrix = None, group = None))]
+    fn add_form(
+        &mut self,
+        resource: &[u8],
+        bbox: (f64, f64, f64, f64),
+        content: &[u8],
+        matrix: Option<[f64; 6]>,
+        group: Option<(String, bool, bool)>,
+    ) -> PyResult<()> {
+        let form = tinker_pdf::FormXObject {
+            bbox: [bbox.0, bbox.1, bbox.2, bbox.3],
+            matrix,
+            group: group.map(graphics::group).transpose()?,
+            content,
+        };
+        if self.get()?.add_form(resource, &form) {
+            Ok(())
+        } else {
+            Err(refused(
+                "add_form",
+                &format!("bbox {bbox:?}, matrix {matrix:?}"),
+            ))
+        }
+    }
+
+    /// Registers a coloured tiling pattern (8.7.3): `tiling_type` is
+    /// `"constant-spacing"`, `"no-distortion"` or `"faster-tiling"`.
+    #[pyo3(signature = (resource, bbox, x_step, y_step, tiling_type, content, matrix = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_tiling_pattern(
+        &mut self,
+        resource: &[u8],
+        bbox: (f64, f64, f64, f64),
+        x_step: f64,
+        y_step: f64,
+        tiling_type: &str,
+        content: &[u8],
+        matrix: Option<[f64; 6]>,
+    ) -> PyResult<()> {
+        let pattern = tinker_pdf::TilingPattern {
+            bbox: [bbox.0, bbox.1, bbox.2, bbox.3],
+            x_step,
+            y_step,
+            matrix,
+            tiling_type: graphics::tiling_type(tiling_type)?,
+            content,
+        };
+        if self.get()?.add_tiling_pattern(resource, &pattern) {
+            Ok(())
+        } else {
+            Err(refused(
+                "add_tiling_pattern",
+                &format!("bbox {bbox:?}, steps {x_step} {y_step}, matrix {matrix:?}"),
+            ))
+        }
+    }
+
+    /// Stops later pages from inheriting the images registered so far.
+    fn clear_image_resources(&mut self) -> PyResult<()> {
+        self.get()?.clear_image_resources();
         Ok(())
     }
 

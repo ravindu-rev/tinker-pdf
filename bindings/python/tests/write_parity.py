@@ -525,6 +525,42 @@ def form_data_text(formed: bytes, lines: list, form_data_dir: pathlib.Path) -> s
     return "".join(line + "\n" for line in lines)
 
 
+def graphics() -> bytes:
+    """The builder's graphics resources, every one of them used."""
+    builder = tinker_pdf.DocumentBuilder.with_version(2, 0)
+    builder.add_base_font(b"F1", b"Helvetica")
+    builder.add_named_font(b"F2", b"Helvetica", 128, ["Euro", "uni0141"], [556, 611])
+    builder.add_form(b"Fm0", (0.0, 0.0, 100.0, 100.0), b"0.5 g 0 0 100 100 re f",
+                     matrix=[1.0, 0.0, 0.0, 1.0, 10.0, 10.0], group=("gray", True, False))
+    builder.add_form(b"Fm1", (0.0, 0.0, 50.0, 50.0), b"0 0 1 rg 10 10 30 30 re f")
+    builder.add_ext_gstate(b"GS0", fill_alpha=0.5, stroke_alpha=0.25, blend_mode="multiply",
+                           soft_mask="luminosity", mask_form=b"Fm0", backdrop=[0.5])
+    builder.add_ext_gstate(b"GS1", soft_mask="none")
+    builder.add_tiling_pattern(b"P0", (0.0, 0.0, 5.0, 5.0), 8.0, 8.0, "no-distortion",
+                               b"1 0 0 rg 0 0 5 5 re f", matrix=[2.0, 0.0, 0.0, 2.0, 0.0, 0.0])
+    builder.add_image(b"Im1", bytes([0, 85, 170, 255]), "gray8", width=2, height=2)
+
+    page = builder.begin_page(200.0, 200.0)
+    page.set_bleed_box(5.0, 5.0, 195.0, 195.0)
+    page.encoded_text(b"F2", 12.0, 20.0, 170.0, (0.5, 1.5), bytes([128, 129]), "\u20ac\u0141")
+    page.raw(b"q")
+    page.set_ext_gstate(b"GS0")
+    page.form(b"Fm1")
+    page.set_fill_pattern(b"P0")
+    page.raw(b"60 60 40 40 re f")
+    page.set_stroke_pattern(b"P0")
+    page.raw(b"4 w 110 110 40 40 re S")
+    page.set_ext_gstate(b"GS1")
+    page.raw(b"Q")
+    page.image(b"Im1", 150.0, 20.0, 20.0, 20.0)
+    builder.push_page(page)
+    builder.clear_image_resources()
+    page = builder.begin_page(200.0, 200.0)
+    page.form(b"Fm0")
+    builder.push_page(page)
+    return builder.finish()
+
+
 def report(script: str, data: bytes) -> None:
     """Validate, then print the line `cargo xtask bindings-parity` reads."""
     defects = tinker_pdf.Document(data).validate()
@@ -584,6 +620,7 @@ def main(fixture_path: str) -> None:
         f"READ sha256={hashlib.sha256(said).hexdigest()} "
         f"surface=python script=form-data bytes={len(said)}"
     )
+    report("graphics", graphics())
     transaction_rolls_back_on_an_exception(fixture)
 
     # A consumed handle refuses rather than producing a second document, which

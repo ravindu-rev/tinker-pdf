@@ -17,9 +17,9 @@
 use std::mem::{offset_of, size_of};
 
 use tinker_pdf_ffi::{
-    TpdfDate, TpdfDestination, TpdfDestinationRead, TpdfEmbeddedFile, TpdfEncryption, TpdfImage,
-    TpdfPageLabelRange, TpdfRadioButton, TpdfSanitise, TpdfSourceVtable, TpdfTarget,
-    TpdfWriteOptions,
+    TpdfDate, TpdfDestination, TpdfDestinationRead, TpdfEmbeddedFile, TpdfEncryption,
+    TpdfExtGState, TpdfImage, TpdfPageLabelRange, TpdfRadioButton, TpdfSanitise, TpdfSourceVtable,
+    TpdfTarget, TpdfTransparencyGroup, TpdfWriteOptions,
 };
 
 #[test]
@@ -148,4 +148,27 @@ fn a_radio_button_is_its_export_value_its_page_and_four_doubles() {
     assert_eq!(offset_of!(TpdfRadioButton, y0), 24);
     assert_eq!(offset_of!(TpdfRadioButton, x1), 32);
     assert_eq!(offset_of!(TpdfRadioButton, y1), 40);
+}
+
+#[test]
+fn a_graphics_state_is_two_alphas_four_ints_and_two_slices() {
+    assert_eq!(size_of::<TpdfExtGState>(), 64);
+    assert_eq!(offset_of!(TpdfExtGState, fill_alpha), 0);
+    assert_eq!(offset_of!(TpdfExtGState, stroke_alpha), 8);
+    assert_eq!(offset_of!(TpdfExtGState, has_blend_mode), 16);
+    assert_eq!(offset_of!(TpdfExtGState, blend_mode), 20);
+    assert_eq!(offset_of!(TpdfExtGState, soft_mask), 24);
+    assert_eq!(offset_of!(TpdfExtGState, mask_kind), 28);
+    assert_eq!(offset_of!(TpdfExtGState, mask_form), 32);
+    assert_eq!(offset_of!(TpdfExtGState, mask_form_len), 40);
+    assert_eq!(offset_of!(TpdfExtGState, backdrop), 48);
+    assert_eq!(offset_of!(TpdfExtGState, backdrop_len), 56);
+}
+
+#[test]
+fn a_transparency_group_is_three_ints() {
+    assert_eq!(size_of::<TpdfTransparencyGroup>(), 12);
+    assert_eq!(offset_of!(TpdfTransparencyGroup, color_space), 0);
+    assert_eq!(offset_of!(TpdfTransparencyGroup, isolated), 4);
+    assert_eq!(offset_of!(TpdfTransparencyGroup, knockout), 8);
 }

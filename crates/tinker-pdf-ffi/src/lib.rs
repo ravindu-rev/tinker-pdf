@@ -18,9 +18,11 @@
 
 mod docops;
 mod forms;
+mod graphics;
 mod read;
 pub use docops::*;
 pub use forms::*;
+pub use graphics::*;
 pub use read::*;
 
 use std::cell::RefCell;

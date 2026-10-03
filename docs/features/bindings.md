@@ -41,13 +41,14 @@ in one handle is the same data race it would be in Rust, and no C ABI can
 stop it. One handle per thread, or the caller's own lock; freeing stays safe
 from any thread.
 
-**One hundred and ninety-five functions**, counted from the committed
+**Two hundred and eight functions**, counted from the committed
 header, October 2026 — eighteen open and render, two streaming, five
 validating, fifty-five writing, thirteen running form scripts
 (`tpdf_editor_recalculate` and the ten calls of its report,
 `tpdf_editor_formatted_value`, `_keystroke` and `_validate`), thirty reading
 signatures, thirty-four on the read surface, sixteen document operations
-and twenty-two on the forms surface.
+twenty-two on the forms surface and thirteen of the builder's graphics
+resources.
 The fifty-five are the write surface below and the five are the strict
 validator it leans on
 (`tpdf_document_validate`, `tpdf_defects_count`, `tpdf_defect_rule`,
@@ -222,6 +223,40 @@ values)`, `add_field`, `source`, `warnings` as `(kind, what, field)`,
 is a signing target, and signing is a host callback this surface does not
 take (below).
 
+**The builder's graphics resources: thirteen functions** in
+`src/graphics.rs`, each one `DocumentBuilder` or `PageBuilder` call.
+`tpdf_builder_new_with_version` declares a version (each part a `u32` no
+wider than a byte, so a hand-written binding has no narrow integer to
+pass), `tpdf_builder_clear_image_resources` stops later pages inheriting the
+images registered so far, and `tpdf_builder_add_named_font` takes glyph
+names and widths from a first code, which `tpdf_page_builder_encoded_text`
+then draws by code with a character and a word spacing.
+`tpdf_builder_add_ext_gstate` takes a `TpdfExtGState` — both alphas as
+**NaN for absent**, the blend mode behind a presence flag, and the `/SMask`
+as a `TpdfSoftMask` whose `Absent` and `None` are different answers (no
+entry inherits the mask in force; `/None` turns it off) with the group
+mask's form name and backdrop beside it — that `tpdf_ext_gstate_init` fills
+as `ExtGState::default()`, because a zeroed struct is two alphas of 0.
+`tpdf_builder_add_form` and `tpdf_builder_add_tiling_pattern` take the box,
+an optional `/Matrix` as six doubles or null, a nullable
+`TpdfTransparencyGroup` and a `TpdfTilingType` respectively, and the
+content stream; `tpdf_page_builder_set_ext_gstate`, `_form`,
+`_set_fill_pattern` and `_set_stroke_pattern` invoke them, and
+`_set_bleed_box` sets the page's box. Where the facade answers `false` —
+an alpha out of range, a mask over a form that is not a group, a degenerate
+box, a zero step, a name nothing is registered under — the call is
+`EditRefused` naming it, and the document is what it would have been
+without it. Python has `DocumentBuilder.with_version`, `add_named_font`,
+`add_ext_gstate(resource, fill_alpha=, stroke_alpha=, blend_mode=,
+soft_mask=, mask_form=, backdrop=)`, `add_form(resource, bbox, content,
+matrix=, group=)`, `add_tiling_pattern` and `clear_image_resources`, and
+`PageBuilder.set_bleed_box`, `encoded_text`, `set_ext_gstate`, `form`,
+`set_fill_pattern` and `set_stroke_pattern`, every enum by its arm's name;
+JavaScript the same in camelCase with a `PdfExtGState` built by setters;
+.NET, Go, Ruby and Java the same over the C ABI. Shadings and shading
+patterns are not here: a `Shading` carries a `Function`, which is recursive
+and has a PostScript calculator arm, and is a sub-surface of its own.
+
 **The write surface: fifty-five functions, and the shape they had to be
 given.** The facade has exported `DocumentEditor` and `DocumentBuilder` since
 gap 26, so what stood between the read surface and this one was never
@@ -392,8 +427,8 @@ handle closed by its owner's `Close`/`close` (safe twice), and every string
 and byte array handed back a copy that outlives its handle. None decides a
 default: a save takes the options `tpdf_write_options_init` filled in, a
 view the engine's own `tpdf_destination_init_fit`, and an encrypted save the
-caller's 48 bytes of entropy. Go and Java call **all 195 functions**; Ruby
-calls 194. Each has the parity program (below) and a smoke program that
+caller's 48 bytes of entropy. Go and Java call **all 208 functions**; Ruby
+calls 207. Each has the parity program (below) and a smoke program that
 renders blank-then-inked and then calls, once each, every declaration the
 parity program does not reach — authentication against the two encrypted
 fixtures, the editor's page operations, fields, checkpoint and restore, the
@@ -438,7 +473,7 @@ available, so it has never been compiled. It is a SwiftPM package whose
 `CTinkerPdf` module imports the committed header through a shim (not a
 copy, which would be a second transcription to drift), a `TinkerPdf` target
 covering the core — open, text, render, validate, authenticate, the form
-fill and save, the builder, 49 of the 195 functions — and a `Smoke`
+fill and save, the builder, 49 of the 208 functions — and a `Smoke`
 executable written to the same blank-then-inked pattern. It has no parity
 program, is not in `bindings-parity` and has no CI job; the read surface,
 document operations, signatures and streaming are owed, and so is the first
@@ -576,8 +611,21 @@ forms            84b2daef81a1d6342fec8052971b25ea6ab82a366cd3afcd068c490806f1bc3
 form-data        f81ce8279205bd2ce3058b3d2f5e0fd4347ef4e00300e367d1a54c873ad2aa51
 ```
 
+*graphics* builds a two-page document declaring PDF 2.0 with every one of
+the builder's graphics resources used: a standard font under a named
+encoding drawn by code with both spacings, an isolated grey transparency
+group with a matrix and a plain form, a graphics state with both alphas, a
+blend mode and a luminosity soft mask over the group with a backdrop and a
+second that only turns the mask off, a tiling pattern with a matrix filling
+and stroking, a bleed box, and an image the second page no longer names
+once the list is cleared.
+
+```text
+graphics         8bf69d84af79241a94e6770e315ce79dfa9cf1d6f85052af122444c3b94dac5f
+```
+
 On linux/x86_64, October 2026, the facade, the wheel, the npm package and the
-Go, Ruby and Java bindings printed all eleven recorded hashes; the .NET leg
+Go, Ruby and Java bindings printed all twelve recorded hashes; the .NET leg
 prints them too and was not run.
 
 `cargo xtask bindings-parity` is the gate, and it is built around two different
@@ -858,7 +906,7 @@ the Ruby binding's `extern` lines are worked transcriptions of it, the Java
 binding's downcalls were generated from it, Go compiles against it and Swift
 imports it as a module. What a transcription cannot see from the header is a
 struct's padding, so `tests/layout.rs` pins the size and every field offset of
-the twelve structs a binding packs by hand.
+the fourteen structs a binding packs by hand.
 
 Each of the first three bindings' READMEs ([js](../../bindings/js/README.md),
 [python](../../bindings/python/README.md),
@@ -873,7 +921,7 @@ packaged.
 | --- | --- | --- | --- |
 | `ImageData::Compressed` | `TpdfImageKind` has `Jpeg`, `Rgb8` and `Gray8` and no fourth arm | it carries a `CompressedImage` whose colour space holds a palette slice and whose filter holds its own parameters, so projecting it is a sub-surface rather than a struct. It exists for the CBZ synthesiser, which must not decode 200 pages at open — an engine-internal path with no host at the other end. A host holding already-compressed bytes has `Jpeg`, which is the same idea for the one codec hosts actually hold bytes in | [creation](creation.md) |
 | `PageBuilder::tagged` | not projected; a page is drawn untagged through the C ABI | it nests *within* one page and takes a closure whose scope is the structure element's extent, so the closure-free spelling is an `open_tag`/`close_tag` pair on the page handle — a separate question with a separate answer, and neither parity script tags anything. `begin_page`/`push_page` compose with it, which is asserted, so nothing here has to be undone to add it | [tagged-pdf](tagged-pdf.md) |
-| The rest of `PageBuilder` — `encoded_text`, `glyphs`, `form`, `shading`, `set_fill_pattern`, `set_stroke_pattern`, `set_ext_gstate`, `set_bleed_box` — and `DocumentBuilder`'s `add_named_font`, `add_cid_font`, `glyph_run`, `add_ext_gstate`, `add_form`, `add_shading`, `add_tiling_pattern`, `clear_image_resources` | not projected | owed rather than refused: each takes an argument type of its own (`ExtGState`, `Shading`, `TilingPattern`, `Glyph`) that would need its own flat `#[repr(C)]` spelling, and none is named by the write milestones. `tpdf_page_builder_raw` is the escape hatch that keeps them reachable in the meantime | [ROADMAP.md](../ROADMAP.md) |
+| The rest of `PageBuilder` — `glyphs`, `shading` — and `DocumentBuilder`'s `add_cid_font`, `glyph_run`, `add_shading`, `add_shading_pattern` | not projected (the graphics states, forms, tiling patterns, named fonts, encoded text, bleed box, version and `clear_image_resources` **are**, since October 2026) | owed rather than refused: `glyphs` and `glyph_run` draw `Glyph`s through a composite font, which `add_cid_font` registers from a font program, and `add_shading` takes a `Shading` built on a `Function` — recursive, with a PostScript calculator arm — a sub-surface of its own. `tpdf_page_builder_raw` is the escape hatch that keeps them reachable in the meantime | [ROADMAP.md](../ROADMAP.md) |
 | `DocumentEditor`'s `import_page`, `keep_pages`, `flatten_annotations`, `add_annotation`, `reset_form`, `set_field_values`, `set_calculated_values` | not projected (`recalculate` **is** projected, as `tpdf_editor_recalculate`, and this row listed it by mistake) | the same: owed, each with a shape of its own — a second document, a slice of indices, a `Dict`, a `Recalculation` — and none named by the milestones | [ROADMAP.md](../ROADMAP.md) |
 | The graphics-writing surface added in September 2026: `Target::Named` and both `add_named_destination`s; `DocumentBuilder::add_layer`, `PageBuilder::optional` and `DocumentEditor::set_layer_visible`; `add_separation_color_space`, `add_device_n_color_space`, `set_fill_tint` / `set_stroke_tint` and `ImageColorSpace::Tint`; `DocumentEditor`'s `stamp`, `add_resource`, `add_form` and `import_page_as_form`; `Page::images` | not projected | owed rather than refused: each takes or returns a shape of its own — a `LayerId` handle, a `Function::Calculator` program, `DeviceNAttributes`, a `StampPlacement` and a form reference, a `PageImage` with its samples, masks and placements — and `optional` takes a closure, so it needs a closure-free pair on the page handle as `tagged` does. Ruling 11 makes each a debt the day it reached the facade | [ROADMAP.md](../ROADMAP.md) |
 | Signing: `save_signed`, `Signer` | no `tpdf_*` entry point takes a callback | a signer is a host callback, and callbacks across the C ABI are an explicit non-goal of the write design, which owns them | [ROADMAP.md](../ROADMAP.md) (design/bindings-write.md) |
@@ -883,8 +931,8 @@ packaged.
 | CommonJS build | none; ESM only | two builds of the engine can diverge | — |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
-| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 194 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
-| Swift beyond its core | 49 of 195 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
+| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 207 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
+| Swift beyond its core | 49 of 208 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
 | Published packages | `pip install` / `npm install` / `dotnet add package` do not work yet, and Go, Ruby, Java and Swift have no package at all | the facade is unstable until 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
 
 ## Verified
@@ -1021,6 +1069,26 @@ packaged.
   editable crossing as each other (the list box refused, so no line at all),
   Python's `tree-cut` spelled `value-unreadable` (*form-data*) and
   JavaScript's `maxLen` dropped (*forms*): **8 of 8 caught**.
+- **The builder's graphics resources are pinned by byte equality with the
+  facade** (`src/graphics/tests.rs`): a document using every one of the
+  thirteen calls builds the same bytes through the C ABI and through
+  `DocumentBuilder`, declares 2.0 and passes the strict validator; an
+  initialised `TpdfExtGState` registers exactly `ExtGState::default()`; each
+  refusal (a version part past a byte, names and widths that disagree, a
+  first code past 255, an alpha past one, a mask over a form with no group, a
+  degenerate box, a zero step, four page calls naming nothing) writes
+  nothing, so the finished document equals the facade's built from the
+  calls that were taken; null on every entry point and a spent builder are
+  refused; the five enums' numbers and both structs' layouts are pinned.
+  Counted injections, October 2026: the stroking alpha crossing as the fill
+  alpha fires **1** (the byte equality); the initialised fill alpha written
+  as 0 fires **2** (the default equality and the byte equality);
+  no-distortion tiling as constant spacing fires **1**; and five defects in
+  the bindings' own code, each failing `bindings-parity` on that surface's
+  *graphics* hash alone — Go's matrix crossing reversed, Ruby's isolated and
+  knockout flags crossing as each other, Java's character and word spacing
+  crossing as each other, Python's `no-distortion` spelled as faster tiling,
+  JavaScript's stroking alpha dropped: **5 of 5 caught**.
 - **Signatures in Python and JavaScript** are held by the *signatures*
   script's hash, equal to the facade's, and by an assertion leg in each
   script for what only those two carry: an anchor that is not a certificate
@@ -1042,11 +1110,11 @@ packaged.
   interpreter and a missing `node_modules` reports both by name with the
   command that would fix each, exits 0 without them, and exits non-zero under
   `--require-all`.
-- **Go, Ruby and Java** are held by the parity programs — all eleven hashes,
+- **Go, Ruby and Java** are held by the parity programs — all twelve hashes,
   equal to the facade's, on linux/x86_64 with Go 1.24, Ruby 3.3 (Fiddle 1.1)
   and OpenJDK 21, October 2026 — and by smoke programs that render
   blank-then-inked and then call every declaration the parity programs do
-  not: Go and Java all 195 functions, Ruby 194. Counted injections, each one
+  not: Go and Java all 208 functions, Ruby 207. Counted injections, each one
   defect in a binding's own code and never in its script, each failing
   `bindings-parity` on that surface and no other — **12 of 12 caught**: Go's
   null view number crossing as 0 rather than NaN (*read-surface*), an
@@ -1063,7 +1131,7 @@ packaged.
   a rewrite (*fill-and-save*). The first run of the campaign caught 7 of 9:
   the digest/check swap and garbage collection were invisible to every
   script, which is what the altered signed document and the two save scripts
-  were added for. `crates/tinker-pdf-ffi/tests/layout.rs` pins the twelve
+  were added for. `crates/tinker-pdf-ffi/tests/layout.rs` pins the fourteen
   hand-packed structs; counted injections: `TpdfDate`'s hour declared before
   its day, `TpdfWriteOptions`' compression before its object streams, and
   `TpdfPageLabelRange` aligned to 16 each fail **1** test. The Swift package

@@ -108,6 +108,34 @@ public final class TinkerPdf {
     /** One button of a radio group: its export value, page and rectangle. */
     public record RadioButton(String exportValue, int page, double x0, double y0, double x1, double y1) {}
 
+    /** {@code TpdfBlendMode}: 11.3.5's sixteen. */
+    public enum BlendMode {
+        NORMAL, MULTIPLY, SCREEN, OVERLAY, DARKEN, LIGHTEN, COLOR_DODGE, COLOR_BURN, HARD_LIGHT, SOFT_LIGHT,
+        DIFFERENCE, EXCLUSION, HUE, SATURATION, COLOR, LUMINOSITY
+    }
+
+    /** {@code TpdfSoftMask}: which /SMask a graphics state writes. */
+    public enum SoftMask { ABSENT, NONE, GROUP }
+
+    /** {@code TpdfMaskKind}. */
+    public enum MaskKind { ALPHA, LUMINOSITY }
+
+    /** {@code TpdfDeviceSpace}. */
+    public enum DeviceSpace { GRAY, RGB, CMYK }
+
+    /** {@code TpdfTilingType}, counted from zero. */
+    public enum TilingType { CONSTANT_SPACING, NO_DISTORTION, FASTER_TILING }
+
+    /**
+     * A graphics state's overrides (Table 58); a null field writes no entry.
+     * {@code maskForm} and {@code backdrop} belong to a {@code GROUP} mask.
+     */
+    public record ExtGState(Double fillAlpha, Double strokeAlpha, BlendMode blendMode, SoftMask softMask,
+            MaskKind maskKind, String maskForm, double[] backdrop) {}
+
+    /** A form's /Group (11.6.6). */
+    public record TransparencyGroup(DeviceSpace colorSpace, boolean isolated, boolean knockout) {}
+
     /** One form-data warning: the key or element (null unless NOT_READ) and the field. */
     public record FormDataWarning(FormDataWarningKind kind, String what, String field) {}
 

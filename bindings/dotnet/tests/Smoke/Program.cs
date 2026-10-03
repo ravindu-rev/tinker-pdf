@@ -878,6 +878,48 @@ Console.WriteLine(
     $"DOTNET-SMOKE: READ sha256={Sha256(saidBytes)} surface=dotnet script=form-data " +
     $"bytes={saidBytes.Length}");
 
+// Script seven: graphics. The builder's graphics resources, every one used.
+byte[] graphicsBytes;
+using (var graphicsBuilder = DocumentBuilder.WithVersion(2, 0))
+{
+    graphicsBuilder.AddBaseFont("F1"u8.ToArray(), "Helvetica"u8.ToArray());
+    graphicsBuilder.AddNamedFont("F2"u8.ToArray(), "Helvetica"u8.ToArray(), 128,
+        new[] { "Euro", "uni0141" }, new ushort[] { 556, 611 });
+    graphicsBuilder.AddForm("Fm0"u8.ToArray(), 0, 0, 100, 100, new double[] { 1, 0, 0, 1, 10, 10 },
+        new TransparencyGroup(DeviceSpace.Gray, true, false), "0.5 g 0 0 100 100 re f"u8.ToArray());
+    graphicsBuilder.AddForm("Fm1"u8.ToArray(), 0, 0, 50, 50, null, null, "0 0 1 rg 10 10 30 30 re f"u8.ToArray());
+    graphicsBuilder.AddExtGState("GS0"u8.ToArray(), new ExtGState(0.5, 0.25, BlendMode.Multiply,
+        SoftMask.Group, MaskKind.Luminosity, "Fm0"u8.ToArray(), new[] { 0.5 }));
+    graphicsBuilder.AddExtGState("GS1"u8.ToArray(), new ExtGState(SoftMask: SoftMask.None));
+    graphicsBuilder.AddTilingPattern("P0"u8.ToArray(), 0, 0, 5, 5, 8, 8, new double[] { 2, 0, 0, 2, 0, 0 },
+        TilingType.NoDistortion, "1 0 0 rg 0 0 5 5 re f"u8.ToArray());
+    graphicsBuilder.AddImage("Im1"u8.ToArray(), new byte[] { 0, 85, 170, 255 }, ImageKind.Gray8, 2, 2);
+    using (var page = graphicsBuilder.BeginPage(200.0, 200.0))
+    {
+        page.SetBleedBox(5, 5, 195, 195);
+        page.EncodedText("F2"u8.ToArray(), 12, 20, 170, 0.5, 1.5, new byte[] { 128, 129 }, "\u20ac\u0141");
+        page.Raw_("q"u8.ToArray());
+        page.SetExtGState("GS0"u8.ToArray());
+        page.Form("Fm1"u8.ToArray());
+        page.SetFillPattern("P0"u8.ToArray());
+        page.Raw_("60 60 40 40 re f"u8.ToArray());
+        page.SetStrokePattern("P0"u8.ToArray());
+        page.Raw_("4 w 110 110 40 40 re S"u8.ToArray());
+        page.SetExtGState("GS1"u8.ToArray());
+        page.Raw_("Q"u8.ToArray());
+        page.Image("Im1"u8.ToArray(), 150, 20, 20, 20);
+        graphicsBuilder.PushPage(page);
+    }
+    graphicsBuilder.ClearImageResources();
+    using (var page = graphicsBuilder.BeginPage(200.0, 200.0))
+    {
+        page.Form("Fm0"u8.ToArray());
+        graphicsBuilder.PushPage(page);
+    }
+    graphicsBytes = graphicsBuilder.Finish();
+}
+Report("graphics", graphicsBytes);
+
 // The callback-taking transaction, which is checkpoint, `try`, restore and
 // nothing else. Asserted the only way that cannot be faked: save before, save
 // after, compare hashes. And the exception must still escape — a rollback that

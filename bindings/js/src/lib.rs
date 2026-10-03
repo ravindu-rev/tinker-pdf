@@ -31,6 +31,8 @@ mod docops;
 pub use docops::{PdfPageLabelRange, PdfSanitiseReport};
 mod forms;
 pub use forms::{PdfFormData, PdfRadioButton};
+mod graphics;
+pub use graphics::PdfExtGState;
 
 /// An open PDF document.
 #[wasm_bindgen]

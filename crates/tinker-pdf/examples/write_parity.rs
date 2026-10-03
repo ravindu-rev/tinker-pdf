@@ -195,6 +195,20 @@
 //! read-xfdf <refused|accepted>
 //! ```
 //!
+//! And one for the builder's graphics resources:
+//!
+//! - **graphics** builds a two-page document declaring PDF 2.0 with a
+//!   standard font under a named encoding (`/Euro` and `/uni0141` at codes
+//!   128 and 129), a form that is an isolated grey transparency group with a
+//!   matrix and a plain one, a graphics state with both alphas, a blend mode
+//!   and a luminosity soft mask over the group with a backdrop, a second that
+//!   only turns the mask off, a tiling pattern with a matrix, and an image.
+//!   Page one sets a bleed box, draws the two codes with a character and a
+//!   word spacing, applies the first state, draws the plain form, fills and
+//!   strokes with the pattern, applies the second state and draws the image;
+//!   the image list is then cleared, so page two -- which draws the group
+//!   form -- does not name it.
+//!
 //! An attachment's hash is of its decoded bytes, `-` when it names no stream
 //! or the stream does not read. The warnings are read last on purpose:
 //! reading a page can tolerate more, so the order of the reads is part of the
@@ -978,6 +992,110 @@ fn form_data_text(
     text
 }
 
+/// The image both graphics documents draw: two by two, grey.
+const GRAPHICS_IMAGE: [u8; 4] = [0, 85, 170, 255];
+
+/// Script: the builder's graphics resources, every one of them used.
+fn graphics() -> Vec<u8> {
+    use tinker_pdf::{
+        BlendMode, DeviceSpace, ExtGState, FormXObject, MaskKind, StateMask, TilingPattern,
+        TilingType, TransparencyGroup,
+    };
+
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    assert!(builder.add_named_font(b"F2", b"Helvetica", 128, &["Euro", "uni0141"], &[556, 611]));
+    assert!(builder.add_form(
+        b"Fm0",
+        &FormXObject {
+            bbox: [0.0, 0.0, 100.0, 100.0],
+            matrix: Some([1.0, 0.0, 0.0, 1.0, 10.0, 10.0]),
+            group: Some(TransparencyGroup {
+                color_space: DeviceSpace::Gray,
+                isolated: true,
+                knockout: false,
+            }),
+            content: b"0.5 g 0 0 100 100 re f",
+        }
+    ));
+    assert!(builder.add_form(
+        b"Fm1",
+        &FormXObject {
+            bbox: [0.0, 0.0, 50.0, 50.0],
+            matrix: None,
+            group: None,
+            content: b"0 0 1 rg 10 10 30 30 re f",
+        }
+    ));
+    assert!(builder.add_ext_gstate(
+        b"GS0",
+        &ExtGState {
+            fill_alpha: Some(0.5),
+            stroke_alpha: Some(0.25),
+            blend_mode: Some(BlendMode::Multiply),
+            soft_mask: Some(StateMask::Group {
+                kind: MaskKind::Luminosity,
+                form: b"Fm0",
+                backdrop: Some(&[0.5]),
+            }),
+        }
+    ));
+    assert!(builder.add_ext_gstate(
+        b"GS1",
+        &ExtGState {
+            soft_mask: Some(StateMask::None),
+            ..ExtGState::default()
+        }
+    ));
+    assert!(builder.add_tiling_pattern(
+        b"P0",
+        &TilingPattern {
+            bbox: [0.0, 0.0, 5.0, 5.0],
+            x_step: 8.0,
+            y_step: 8.0,
+            matrix: Some([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]),
+            tiling_type: TilingType::NoDistortion,
+            content: b"1 0 0 rg 0 0 5 5 re f",
+        }
+    ));
+    assert!(builder.add_image(
+        b"Im1",
+        &ImageData::Gray8 {
+            width: 2,
+            height: 2,
+            data: &GRAPHICS_IMAGE,
+        }
+    ));
+
+    let mut page = builder.begin_page(200.0, 200.0);
+    page.set_bleed_box(5.0, 5.0, 195.0, 195.0);
+    page.encoded_text(
+        b"F2",
+        12.0,
+        20.0,
+        170.0,
+        (0.5, 1.5),
+        &[128, 129],
+        "\u{20ac}\u{141}",
+    );
+    page.raw(b"q");
+    assert!(page.set_ext_gstate(b"GS0"));
+    assert!(page.form(b"Fm1"));
+    assert!(page.set_fill_pattern(b"P0"));
+    page.raw(b"60 60 40 40 re f");
+    assert!(page.set_stroke_pattern(b"P0"));
+    page.raw(b"4 w 110 110 40 40 re S");
+    assert!(page.set_ext_gstate(b"GS1"));
+    page.raw(b"Q");
+    page.image(b"Im1", 150.0, 20.0, 20.0, 20.0);
+    builder.push_page(page);
+    builder.clear_image_resources();
+    let mut page = builder.begin_page(200.0, 200.0);
+    assert!(page.form(b"Fm0"));
+    builder.push_page(page);
+    builder.finish()
+}
+
 /// The creation date document-ops writes twice: on the attachment and in
 /// `/Info`.
 fn created() -> Date {
@@ -1220,5 +1338,6 @@ fn main() {
         sha256_hex(said.as_bytes()),
         said.len()
     );
+    report("graphics", &graphics());
     println!("FACADE-PARITY: RAN");
 }

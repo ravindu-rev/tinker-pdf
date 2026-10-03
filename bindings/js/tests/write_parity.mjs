@@ -59,6 +59,7 @@ const {
   PdfPageLabelRange,
   PdfRadioButton,
   PdfFormData,
+  PdfExtGState,
 } = module_;
 
 const wasmUrl = new URL('tinker_pdf_js_bg.wasm', entry);
@@ -677,6 +678,54 @@ function formDataText(formed, lines, formDataDir) {
   return lines.map((line) => `${line}\n`).join('');
 }
 
+// The builder's graphics resources, every one of them used.
+function graphics() {
+  const builder = PdfBuilder.withVersion(2, 0);
+  builder.addBaseFont(name('F1'), name('Helvetica'));
+  builder.addNamedFont(name('F2'), name('Helvetica'), 128, ['Euro', 'uni0141'], new Uint16Array([556, 611]));
+  builder.addForm(name('Fm0'), 0, 0, 100, 100, name('0.5 g 0 0 100 100 re f'),
+    new Float64Array([1, 0, 0, 1, 10, 10]), 'gray', true, false);
+  builder.addForm(name('Fm1'), 0, 0, 50, 50, name('0 0 1 rg 10 10 30 30 re f'), undefined, undefined, false, false);
+  const masked = new PdfExtGState();
+  masked.setFillAlpha(0.5);
+  masked.setStrokeAlpha(0.25);
+  masked.setBlendMode('multiply');
+  masked.setSoftMaskGroup('luminosity', name('Fm0'), new Float64Array([0.5]));
+  builder.addExtGState(name('GS0'), masked);
+  masked.free();
+  const off = new PdfExtGState();
+  off.setSoftMaskNone();
+  builder.addExtGState(name('GS1'), off);
+  off.free();
+  builder.addTilingPattern(name('P0'), 0, 0, 5, 5, 8, 8, 'no-distortion', name('1 0 0 rg 0 0 5 5 re f'),
+    new Float64Array([2, 0, 0, 2, 0, 0]));
+  builder.addImage(name('Im1'), new Uint8Array([0, 85, 170, 255]), 'gray8', 2, 2);
+
+  let page = builder.beginPage(200, 200);
+  page.setBleedBox(5, 5, 195, 195);
+  page.encodedText(name('F2'), 12, 20, 170, 0.5, 1.5, new Uint8Array([128, 129]), '€Ł');
+  page.raw(name('q'));
+  page.setExtGState(name('GS0'));
+  page.form(name('Fm1'));
+  page.setFillPattern(name('P0'));
+  page.raw(name('60 60 40 40 re f'));
+  page.setStrokePattern(name('P0'));
+  page.raw(name('4 w 110 110 40 40 re S'));
+  page.setExtGState(name('GS1'));
+  page.raw(name('Q'));
+  page.image(name('Im1'), 150, 20, 20, 20);
+  builder.pushPage(page);
+  page.free();
+  builder.clearImageResources();
+  page = builder.beginPage(200, 200);
+  page.form(name('Fm0'));
+  builder.pushPage(page);
+  page.free();
+  const bytes = builder.finish();
+  builder.free();
+  return bytes;
+}
+
 function report(script, bytes) {
   const document_ = new PdfDocument(bytes);
   const defects = document_.validate();
@@ -720,6 +769,7 @@ report('forms', formed);
 const said = encoder.encode(formDataText(formed, formLines, formDataDir));
 if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(said));
 console.log(`READ sha256=${sha256(said)} surface=js script=form-data bytes=${said.length}`);
+report('graphics', graphics());
 transactionRollsBackOnAThrow(fixture);
 
 // A consumed handle refuses rather than producing a second document, which is

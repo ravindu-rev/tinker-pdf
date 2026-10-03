@@ -611,6 +611,47 @@ public final class WriteParity {
         return out.toString();
     }
 
+    /** The builder's graphics resources, every one of them used. */
+    static byte[] graphics() {
+        try (Builder builder = Builder.withVersion(2, 0)) {
+            builder.addBaseFont("F1", "Helvetica");
+            builder.addNamedFont("F2", "Helvetica", 128, List.of("Euro", "uni0141"), new short[] {556, 611});
+            builder.addForm("Fm0", 0, 0, 100, 100, new double[] {1, 0, 0, 1, 10, 10},
+                    new TinkerPdf.TransparencyGroup(TinkerPdf.DeviceSpace.GRAY, true, false),
+                    utf8("0.5 g 0 0 100 100 re f"));
+            builder.addForm("Fm1", 0, 0, 50, 50, null, null, utf8("0 0 1 rg 10 10 30 30 re f"));
+            builder.addExtGState("GS0", new TinkerPdf.ExtGState(0.5, 0.25, TinkerPdf.BlendMode.MULTIPLY,
+                    TinkerPdf.SoftMask.GROUP, TinkerPdf.MaskKind.LUMINOSITY, "Fm0", new double[] {0.5}));
+            builder.addExtGState("GS1", new TinkerPdf.ExtGState(null, null, null, TinkerPdf.SoftMask.NONE, null,
+                    null, null));
+            builder.addTilingPattern("P0", 0, 0, 5, 5, 8, 8, new double[] {2, 0, 0, 2, 0, 0},
+                    TinkerPdf.TilingType.NO_DISTORTION, utf8("1 0 0 rg 0 0 5 5 re f"));
+            builder.addImage("Im1", TinkerPdf.ImageKind.GRAY8, 2, 2, new byte[] {0, 85, (byte) 170, (byte) 255});
+            try (PageBuilder page = builder.beginPage(200, 200)) {
+                page.setBleedBox(5, 5, 195, 195);
+                page.encodedText("F2", 12, 20, 170, 0.5, 1.5, new byte[] {(byte) 128, (byte) 129},
+                        "\u20ac\u0141");
+                page.raw(utf8("q"));
+                page.setExtGState("GS0");
+                page.form("Fm1");
+                page.setFillPattern("P0");
+                page.raw(utf8("60 60 40 40 re f"));
+                page.setStrokePattern("P0");
+                page.raw(utf8("4 w 110 110 40 40 re S"));
+                page.setExtGState("GS1");
+                page.raw(utf8("Q"));
+                page.image("Im1", 150, 20, 20, 20);
+                builder.pushPage(page);
+            }
+            builder.clearImageResources();
+            try (PageBuilder page = builder.beginPage(200, 200)) {
+                page.form("Fm0");
+                builder.pushPage(page);
+            }
+            return builder.finish();
+        }
+    }
+
     public static void main(String[] args) throws IOException {
         if (args.length != 1) {
             System.err.println("usage: WriteParity <form-fields.pdf>");
@@ -637,6 +678,7 @@ public final class WriteParity {
         Formed formed = forms(fixture, formDataDir);
         report("forms", formed.saved());
         reportRead("form-data", formDataText(formed.saved(), formed.lines(), formDataDir));
+        report("graphics", graphics());
         System.out.println("JAVA-PARITY: RAN");
     }
 }

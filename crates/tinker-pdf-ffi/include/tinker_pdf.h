@@ -478,6 +478,83 @@ typedef enum TpdfFormDataWarningKind {
   TPDF_FORM_DATA_WARNING_KIND_UNNAMED = 3,
 } TpdfFormDataWarningKind;
 
+// 11.3.5's sixteen blend modes, in Tables 136 and 137's order.
+typedef enum TpdfBlendMode {
+  // `/Normal`.
+  TPDF_BLEND_MODE_NORMAL = 0,
+  // `/Multiply`.
+  TPDF_BLEND_MODE_MULTIPLY = 1,
+  // `/Screen`.
+  TPDF_BLEND_MODE_SCREEN = 2,
+  // `/Overlay`.
+  TPDF_BLEND_MODE_OVERLAY = 3,
+  // `/Darken`.
+  TPDF_BLEND_MODE_DARKEN = 4,
+  // `/Lighten`.
+  TPDF_BLEND_MODE_LIGHTEN = 5,
+  // `/ColorDodge`.
+  TPDF_BLEND_MODE_COLOR_DODGE = 6,
+  // `/ColorBurn`.
+  TPDF_BLEND_MODE_COLOR_BURN = 7,
+  // `/HardLight`.
+  TPDF_BLEND_MODE_HARD_LIGHT = 8,
+  // `/SoftLight`.
+  TPDF_BLEND_MODE_SOFT_LIGHT = 9,
+  // `/Difference`.
+  TPDF_BLEND_MODE_DIFFERENCE = 10,
+  // `/Exclusion`.
+  TPDF_BLEND_MODE_EXCLUSION = 11,
+  // `/Hue`.
+  TPDF_BLEND_MODE_HUE = 12,
+  // `/Saturation`.
+  TPDF_BLEND_MODE_SATURATION = 13,
+  // `/Color`.
+  TPDF_BLEND_MODE_COLOR = 14,
+  // `/Luminosity`.
+  TPDF_BLEND_MODE_LUMINOSITY = 15,
+} TpdfBlendMode;
+
+// Which `/SMask` a graphics state writes (11.6.5.2), if any.
+typedef enum TpdfSoftMask {
+  // No `/SMask` entry: the mask in force is inherited.
+  TPDF_SOFT_MASK_ABSENT = 0,
+  // `/SMask /None`: the mask in force is turned off. Not the same as
+  // absent.
+  TPDF_SOFT_MASK_NONE = 1,
+  // A mask built from a transparency-group form: `mask_kind`,
+  // `mask_form` and `backdrop` say which.
+  TPDF_SOFT_MASK_GROUP = 2,
+} TpdfSoftMask;
+
+// What a soft mask derives its alpha from (11.6.5.2).
+typedef enum TpdfMaskKind {
+  // `/S /Alpha`.
+  TPDF_MASK_KIND_ALPHA = 0,
+  // `/S /Luminosity`.
+  TPDF_MASK_KIND_LUMINOSITY = 1,
+} TpdfMaskKind;
+
+// A device colour space (8.6.4).
+typedef enum TpdfDeviceSpace {
+  // `/DeviceGray`.
+  TPDF_DEVICE_SPACE_GRAY = 0,
+  // `/DeviceRGB`.
+  TPDF_DEVICE_SPACE_RGB = 1,
+  // `/DeviceCMYK`.
+  TPDF_DEVICE_SPACE_CMYK = 2,
+} TpdfDeviceSpace;
+
+// `/TilingType` (Table 75). Counted from zero, as every enum on this
+// boundary is: `ConstantSpacing` writes `/TilingType 1`.
+typedef enum TpdfTilingType {
+  // 1: constant spacing.
+  TPDF_TILING_TYPE_CONSTANT_SPACING = 0,
+  // 2: no distortion.
+  TPDF_TILING_TYPE_NO_DISTORTION = 1,
+  // 3: constant spacing and faster tiling.
+  TPDF_TILING_TYPE_FASTER_TILING = 2,
+} TpdfTilingType;
+
 // Which `Destination` arm an outline entry or a link names (12.3.2).
 //
 // Ruling 6 is why three arms cross rather than a page number: a named
@@ -887,6 +964,44 @@ typedef struct TpdfRadioButton {
   // See `x0`.
   double y1;
 } TpdfRadioButton;
+
+// Graphics state parameters, for [`tpdf_builder_add_ext_gstate`] (Table
+// 58). Start from [`tpdf_ext_gstate_init`], which is every override absent.
+typedef struct TpdfExtGState {
+  // `/ca`, the non-stroking alpha; NaN writes none.
+  double fill_alpha;
+  // `/CA`, the stroking alpha; NaN writes none.
+  double stroke_alpha;
+  // Non-zero writes `/BM blend_mode`.
+  int32_t has_blend_mode;
+  // `/BM`, when `has_blend_mode` says so.
+  enum TpdfBlendMode blend_mode;
+  // Which `/SMask`, if any.
+  enum TpdfSoftMask soft_mask;
+  // `/S` of a [`TpdfSoftMask::Group`] mask.
+  enum TpdfMaskKind mask_kind;
+  // `/G` of a group mask: the resource name of a form registered with a
+  // transparency group. Ignored for the other two arms.
+  const uint8_t *mask_form;
+  // Its length.
+  size_t mask_form_len;
+  // `/BC` of a group mask, in the mask group's own colour space; null
+  // writes none.
+  const double *backdrop;
+  // How many components `backdrop` has.
+  size_t backdrop_len;
+} TpdfExtGState;
+
+// A form's `/Group` (11.6.6): a transparency group, for
+// [`tpdf_builder_add_form`].
+typedef struct TpdfTransparencyGroup {
+  // `/CS`.
+  enum TpdfDeviceSpace color_space;
+  // `/I`, non-zero for isolated.
+  int32_t isolated;
+  // `/K`, non-zero for knockout.
+  int32_t knockout;
+} TpdfTransparencyGroup;
 
 // A destination as read, which is `Destination` in C.
 //
@@ -2879,6 +2994,205 @@ void tpdf_form_data_free(struct TpdfFormData *handle);
 enum TpdfStatus tpdf_editor_apply_form_data(struct TpdfEditor *editor,
                                             const struct TpdfFormData *handle,
                                             struct TpdfFillReport **out_report);
+
+// Starts a document whose header declares PDF `major.minor` (7.5.2) --
+// `DocumentBuilder::with_version`. [`crate::tpdf_builder_new`] declares the
+// writer's default, 1.7. Each part wider than a byte is
+// [`TpdfStatus::BadArgument`]; the two are 32-bit so a hand-written binding
+// has no narrow integer to pass.
+//
+// # Safety
+//
+// `out` must be a valid pointer to write a handle to.
+enum TpdfStatus tpdf_builder_new_with_version(uint32_t major,
+                                              uint32_t minor,
+                                              struct TpdfBuilder **out);
+
+// Stops later pages from inheriting the images registered so far --
+// `DocumentBuilder::clear_image_resources`. Nothing already written is
+// touched.
+//
+// # Safety
+//
+// `builder` must be a live handle.
+enum TpdfStatus tpdf_builder_clear_image_resources(struct TpdfBuilder *builder);
+
+// Registers one of the standard 14 under an `/Encoding` the caller wrote
+// (9.6.6.1) -- `DocumentBuilder::add_named_font`: `names` are `name_count`
+// glyph names, one per code from `first_code`, and `widths` their
+// `width_count` widths in thousandths of an em.
+//
+// Refused, [`TpdfStatus::EditRefused`] with nothing registered, when the two
+// counts differ, either is zero, or the last code would be past 255;
+// `first_code` past 255 is [`TpdfStatus::BadArgument`].
+//
+// # Safety
+//
+// `builder` must be a live handle, the byte pointers valid for their
+// lengths, `names` valid for `name_count` null-terminated UTF-8 strings and
+// `widths` for `width_count` values.
+enum TpdfStatus tpdf_builder_add_named_font(struct TpdfBuilder *builder,
+                                            const uint8_t *resource,
+                                            size_t resource_len,
+                                            const uint8_t *base_font,
+                                            size_t base_font_len,
+                                            uint32_t first_code,
+                                            const char *const *names,
+                                            size_t name_count,
+                                            const uint16_t *widths,
+                                            size_t width_count);
+
+// Fills `out` with every override absent -- `ExtGState::default()`: NaN for
+// both alphas, no blend mode, no `/SMask`. A zeroed struct is not this: it
+// is two alphas of 0.
+//
+// # Safety
+//
+// `out` must be a valid pointer.
+enum TpdfStatus tpdf_ext_gstate_init(struct TpdfExtGState *out);
+
+// Registers a graphics state under a resource name (Table 58) --
+// `DocumentBuilder::add_ext_gstate`.
+//
+// Refused, [`TpdfStatus::EditRefused`] with nothing registered, for an
+// alpha outside 11.6.4.4's range, a non-finite backdrop component, or a
+// group mask naming a form that is not registered or carries no `/Group`.
+//
+// # Safety
+//
+// `builder` must be a live handle, `resource` valid for `resource_len`
+// bytes, and `state` a valid pointer whose `mask_form` and `backdrop` are
+// valid for their lengths (or, for `backdrop`, null).
+enum TpdfStatus tpdf_builder_add_ext_gstate(struct TpdfBuilder *builder,
+                                            const uint8_t *resource,
+                                            size_t resource_len,
+                                            const struct TpdfExtGState *state);
+
+// Registers a form XObject under a resource name (8.10) --
+// `DocumentBuilder::add_form`. Its `/Resources` are the document's at this
+// moment. `matrix` is six doubles or null for the identity; `group` is the
+// transparency group or null for none.
+//
+// Refused, [`TpdfStatus::EditRefused`] with nothing registered, for a
+// degenerate `/BBox` or a non-finite `/Matrix`.
+//
+// # Safety
+//
+// `builder` must be a live handle, `resource` and `content` valid for their
+// lengths, `matrix` null or valid for six doubles, and `group` null or valid.
+enum TpdfStatus tpdf_builder_add_form(struct TpdfBuilder *builder,
+                                      const uint8_t *resource,
+                                      size_t resource_len,
+                                      double x0,
+                                      double y0,
+                                      double x1,
+                                      double y1,
+                                      const double *matrix,
+                                      const struct TpdfTransparencyGroup *group,
+                                      const uint8_t *content,
+                                      size_t content_len);
+
+// Registers a coloured tiling pattern under a resource name (8.7.3) --
+// `DocumentBuilder::add_tiling_pattern`. The cell's `/Resources` are the
+// document's at this moment; `matrix` is six doubles or null.
+//
+// Refused, [`TpdfStatus::EditRefused`] with nothing registered, for a
+// degenerate `/BBox`, a zero or non-finite step, or a non-finite `/Matrix`.
+//
+// # Safety
+//
+// `builder` must be a live handle, `resource` and `content` valid for their
+// lengths, and `matrix` null or valid for six doubles.
+enum TpdfStatus tpdf_builder_add_tiling_pattern(struct TpdfBuilder *builder,
+                                                const uint8_t *resource,
+                                                size_t resource_len,
+                                                double x0,
+                                                double y0,
+                                                double x1,
+                                                double y1,
+                                                double x_step,
+                                                double y_step,
+                                                const double *matrix,
+                                                enum TpdfTilingType tiling_type,
+                                                const uint8_t *content,
+                                                size_t content_len);
+
+// Sets `/BleedBox` (14.11.2) -- `PageBuilder::set_bleed_box`.
+//
+// # Safety
+//
+// `page` must be a live handle.
+enum TpdfStatus tpdf_page_builder_set_bleed_box(struct TpdfPageBuilder *page,
+                                                double x0,
+                                                double y0,
+                                                double x1,
+                                                double y1);
+
+// Writes text the caller has already encoded, with a character and a word
+// spacing (9.3.2, 9.3.3) -- `PageBuilder::encoded_text`. `codes` are
+// written and not interpreted; `characters`, which they stand for, are
+// recorded and not written, so an embedded program is still subset to
+// what the page drew.
+//
+// # Safety
+//
+// `page` must be a live handle, `font` and `codes` valid for their lengths
+// and `characters` null-terminated UTF-8.
+enum TpdfStatus tpdf_page_builder_encoded_text(struct TpdfPageBuilder *page,
+                                               const uint8_t *font,
+                                               size_t font_len,
+                                               double size,
+                                               double x,
+                                               double y,
+                                               double character_spacing,
+                                               double word_spacing,
+                                               const uint8_t *codes,
+                                               size_t codes_len,
+                                               const char *characters);
+
+// Applies a registered graphics state -- `gs`, `PageBuilder::set_ext_gstate`.
+// [`TpdfStatus::EditRefused`], writing nothing, when none is registered
+// under the name.
+//
+// # Safety
+//
+// `page` must be a live handle and `resource` valid for `resource_len`.
+enum TpdfStatus tpdf_page_builder_set_ext_gstate(struct TpdfPageBuilder *page,
+                                                 const uint8_t *resource,
+                                                 size_t resource_len);
+
+// Draws a registered form XObject -- `Do`, `PageBuilder::form`.
+// [`TpdfStatus::EditRefused`], writing nothing, when none is registered
+// under the name.
+//
+// # Safety
+//
+// `page` must be a live handle and `resource` valid for `resource_len`.
+enum TpdfStatus tpdf_page_builder_form(struct TpdfPageBuilder *page,
+                                       const uint8_t *resource,
+                                       size_t resource_len);
+
+// Sets the non-stroking colour to a registered tiling pattern -- `cs` and
+// `scn`, `PageBuilder::set_fill_pattern`. [`TpdfStatus::EditRefused`],
+// writing nothing, when none is registered under the name.
+//
+// # Safety
+//
+// `page` must be a live handle and `resource` valid for `resource_len`.
+enum TpdfStatus tpdf_page_builder_set_fill_pattern(struct TpdfPageBuilder *page,
+                                                   const uint8_t *resource,
+                                                   size_t resource_len);
+
+// Sets the stroking colour to a registered tiling pattern -- `CS` and
+// `SCN`, `PageBuilder::set_stroke_pattern`. [`TpdfStatus::EditRefused`],
+// writing nothing, when none is registered under the name.
+//
+// # Safety
+//
+// `page` must be a live handle and `resource` valid for `resource_len`.
+enum TpdfStatus tpdf_page_builder_set_stroke_pattern(struct TpdfPageBuilder *page,
+                                                     const uint8_t *resource,
+                                                     size_t resource_len);
 
 // One `/Info` text entry (14.3.3), decoded.
 //

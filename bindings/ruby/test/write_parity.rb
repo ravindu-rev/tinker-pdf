@@ -464,6 +464,47 @@ def form_data_text(formed, lines, form_data_dir)
   lines.map { |line| "#{line}\n" }.join
 end
 
+# The builder's graphics resources, every one of them used.
+def graphics
+  builder = TinkerPdf::Builder.with_version(2, 0)
+  builder.add_base_font('F1', 'Helvetica')
+  builder.add_named_font('F2', 'Helvetica', 128, %w[Euro uni0141], [556, 611])
+  builder.add_form('Fm0', [0.0, 0.0, 100.0, 100.0], '0.5 g 0 0 100 100 re f',
+                   matrix: [1.0, 0.0, 0.0, 1.0, 10.0, 10.0], group: [TinkerPdf::DeviceSpace::GRAY, true, false])
+  builder.add_form('Fm1', [0.0, 0.0, 50.0, 50.0], '0 0 1 rg 10 10 30 30 re f')
+  builder.add_ext_gstate('GS0', fill_alpha: 0.5, stroke_alpha: 0.25, blend_mode: TinkerPdf::BlendMode::MULTIPLY,
+                                soft_mask: TinkerPdf::SoftMask::GROUP, mask_kind: TinkerPdf::MaskKind::LUMINOSITY,
+                                mask_form: 'Fm0', backdrop: [0.5])
+  builder.add_ext_gstate('GS1', soft_mask: TinkerPdf::SoftMask::NONE)
+  builder.add_tiling_pattern('P0', [0.0, 0.0, 5.0, 5.0], 8.0, 8.0, TinkerPdf::TilingType::NO_DISTORTION,
+                             '1 0 0 rg 0 0 5 5 re f', matrix: [2.0, 0.0, 0.0, 2.0, 0.0, 0.0])
+  builder.add_image('Im1', TinkerPdf::ImageKind::GRAY8, 2, 2, [0, 85, 170, 255].pack('C*'))
+
+  page = builder.begin_page(200.0, 200.0)
+  page.set_bleed_box(5.0, 5.0, 195.0, 195.0)
+  page.encoded_text('F2', 12.0, 20.0, 170.0, [0.5, 1.5], [128, 129].pack('C*'), "€Ł")
+  page.raw('q')
+  page.set_ext_gstate('GS0')
+  page.form('Fm1')
+  page.set_fill_pattern('P0')
+  page.raw('60 60 40 40 re f')
+  page.set_stroke_pattern('P0')
+  page.raw('4 w 110 110 40 40 re S')
+  page.set_ext_gstate('GS1')
+  page.raw('Q')
+  page.image('Im1', 150.0, 20.0, 20.0, 20.0)
+  builder.push_page(page)
+  page.close
+  builder.clear_image_resources
+  page = builder.begin_page(200.0, 200.0)
+  page.form('Fm0')
+  builder.push_page(page)
+  page.close
+  bytes = builder.finish
+  builder.close
+  bytes
+end
+
 if ARGV.size != 1
   warn 'usage: write_parity.rb <form-fields.pdf>'
   exit 2
@@ -488,4 +529,5 @@ form_data_dir = File.join(File.dirname(support), 'form_data')
 formed, form_lines = forms(fixture, form_data_dir)
 report('forms', formed)
 report_read('form-data', form_data_text(formed, form_lines, form_data_dir))
+report('graphics', graphics)
 puts 'RUBY-PARITY: RAN'
