@@ -1700,3 +1700,288 @@ fn an_empty_alt_describes_nothing_under_part_one_and_an_empty_actual_text_stands
     grammar_of("2", &[(20, "Figure", 11, vec![], "/Alt ()")]).clean();
     grammar_of("2", &[(20, "Formula", 11, vec![], "")]).clean();
 }
+
+// ---- 7.18: annotations against the structure ---------------------------------
+
+/// The baseline with one annotation, object 30, on the page: `annotation` its
+/// dictionary's entries after the subtype, `tabs` the page's own entries
+/// (normally `/Tabs /S`), and, when `enclosing` names a structure type, an
+/// element 20 of that type under the `Document` whose one kid is an `/OBJR`
+/// to the annotation, with `element` in its dictionary. Objects 31 and up are
+/// the test's own.
+fn annotated(
+    part: &str,
+    subtype: &str,
+    annotation: &str,
+    tabs: &str,
+    enclosing: Option<(&str, &str)>,
+) -> Ua {
+    let mut fixture = Ua::new(part);
+    fixture.page = format!("/Annots [30 0 R] {tabs}");
+    fixture.extra.push((
+        30,
+        format!("<< /Type /Annot /Subtype /{subtype} /Rect [10 10 50 50] {annotation} >>")
+            .into_bytes(),
+    ));
+    if let Some((structure_type, element)) = enclosing {
+        fixture = fixture
+            .element(
+                11,
+                "<< /Type /StructElem /S /Document /P 10 0 R /K [13 0 R 20 0 R] >>",
+            )
+            .element(
+                20,
+                &format!(
+                    "<< /Type /StructElem /S /{structure_type} /P 11 0 R /Pg 3 0 R \
+                     /K [<< /Type /OBJR /Obj 30 0 R >>] {element} >>"
+                ),
+            );
+    }
+    fixture
+}
+
+/// UA-1 7.18.1-1 and 7.18.1-2: "An annotation, excluding annotations of
+/// subtype Widget, PrinterMark or Link, shall be nested within an Annot tag",
+/// with `/Contents` or the enclosing element's `/Alt`. The twins: the
+/// annotation tagged and described either way, hidden, and off the page
+/// (7.18.1-t02-pass-c, -d).
+#[test]
+fn an_annotation_sits_in_an_annot_element_and_says_what_it_is() {
+    let tagged = Some(("Annot", ""));
+    annotated("1", "Text", "/Contents (A note)", "/Tabs /S", tagged).clean();
+    annotated(
+        "1",
+        "Text",
+        "",
+        "/Tabs /S",
+        Some(("Annot", "/Alt (A note)")),
+    )
+    .clean();
+    assert_eq!(
+        annotated("1", "Text", "/Contents (A note)", "/Tabs /S", None).one_finding(),
+        (
+            "7.18.1".to_string(),
+            FindingKind::AnnotationNotEnclosed {
+                subtype: "Text".to_string(),
+                expected: "Annot".to_string(),
+                enclosing: None,
+            }
+        )
+    );
+    assert_eq!(
+        annotated(
+            "1",
+            "Text",
+            "/Contents (A note)",
+            "/Tabs /S",
+            Some(("Span", ""))
+        )
+        .one_finding(),
+        (
+            "7.18.1".to_string(),
+            FindingKind::AnnotationNotEnclosed {
+                subtype: "Text".to_string(),
+                expected: "Annot".to_string(),
+                enclosing: Some("Span".to_string()),
+            }
+        )
+    );
+    assert_eq!(
+        annotated("1", "Text", "", "/Tabs /S", tagged).one_finding(),
+        (
+            "7.18.1".to_string(),
+            FindingKind::AnnotationDescriptionMissing {
+                subtype: "Text".to_string(),
+            }
+        )
+    );
+    // Hidden, and off the page: neither tagged nor described, and silent.
+    annotated("1", "Text", "/F 2", "/Tabs /S", None).clean();
+    let mut off_page = annotated("1", "Text", "", "/Tabs /S", None);
+    off_page.extra = vec![(
+        30,
+        b"<< /Type /Annot /Subtype /Text /Rect [300 300 400 400] >>".to_vec(),
+    )];
+    off_page.clean();
+    // A subtype Table 169 does not define is not judged (the FREETEXT pass
+    // fixtures), and a popup is its parent's window, staged by name.
+    annotated("1", "FREETEXT", "", "/Tabs /S", None).clean();
+    annotated("1", "Popup", "", "/Tabs /S", None).clean();
+    // Part 2 states its annotation rules under 8.9, staged.
+    annotated("2", "Text", "", "/Tabs /S", None).clean();
+}
+
+/// UA-1 7.18.3-1: "Every page on which there is an annotation shall contain
+/// in its page dictionary the key Tabs, and its value shall be S."
+#[test]
+fn a_page_with_annotations_tabs_in_structure_order() {
+    let tagged = Some(("Annot", ""));
+    for (tabs, found) in [("", None), ("/Tabs /R", Some("R")), ("/Tabs /C", Some("C"))] {
+        assert_eq!(
+            annotated("1", "Text", "/Contents (A note)", tabs, tagged).one_finding(),
+            (
+                "7.18.3".to_string(),
+                FindingKind::TabOrderNotStructure {
+                    found: found.map(str::to_string),
+                }
+            ),
+            "{tabs:?}"
+        );
+    }
+}
+
+/// UA-1 7.18.4-1 and 7.18.1-3: a widget in a `Form` element, and its field's
+/// `/TU` or the enclosing `/Alt`. The field's, not the widget's: a field
+/// carrying `/TU` passes (7.18.1-t03-pass-e) and a field without one whose
+/// widget carries it fails (-fail-d).
+#[test]
+fn a_widget_sits_in_a_form_and_its_field_has_a_tooltip() {
+    let form = Some(("Form", ""));
+    annotated("1", "Widget", "/T (f) /FT /Tx /TU (Name)", "/Tabs /S", form).clean();
+    annotated(
+        "1",
+        "Widget",
+        "/T (f) /FT /Tx",
+        "/Tabs /S",
+        Some(("Form", "/Alt (Name)")),
+    )
+    .clean();
+    assert_eq!(
+        annotated("1", "Widget", "/T (f) /FT /Tx", "/Tabs /S", form).one_finding(),
+        (
+            "7.18.1".to_string(),
+            FindingKind::AnnotationDescriptionMissing {
+                subtype: "Widget".to_string(),
+            }
+        )
+    );
+    let kid_of = |field: &str| {
+        let mut fixture = annotated("1", "Widget", "/Parent 31 0 R /TU (Name)", "/Tabs /S", form);
+        fixture.extra.push((
+            31,
+            format!("<< /T (f) /FT /Tx /Kids [30 0 R] {field} >>").into_bytes(),
+        ));
+        fixture
+    };
+    kid_of("/TU (Name)").clean();
+    assert_eq!(
+        kid_of("").one_finding().1,
+        FindingKind::AnnotationDescriptionMissing {
+            subtype: "Widget".to_string(),
+        }
+    );
+    assert_eq!(
+        annotated(
+            "1",
+            "Widget",
+            "/T (f) /FT /Tx /TU (Name)",
+            "/Tabs /S",
+            Some(("Div", ""))
+        )
+        .one_finding(),
+        (
+            "7.18.4".to_string(),
+            FindingKind::AnnotationNotEnclosed {
+                subtype: "Widget".to_string(),
+                expected: "Form".to_string(),
+                enclosing: Some("Div".to_string()),
+            }
+        )
+    );
+}
+
+/// UA-1 7.18.5-1 and 7.18.5-2: a link in a `Link` element, with `/Contents`
+/// — the enclosing `/Alt` satisfies 7.18.1-2 and does not stand in for this.
+#[test]
+fn a_link_sits_in_a_link_element_and_carries_contents() {
+    annotated(
+        "1",
+        "Link",
+        "/Contents (Home)",
+        "/Tabs /S",
+        Some(("Link", "")),
+    )
+    .clean();
+    assert_eq!(
+        annotated("1", "Link", "", "/Tabs /S", Some(("Link", "/Alt (Home)"))).one_finding(),
+        ("7.18.5".to_string(), FindingKind::LinkContentsMissing)
+    );
+    assert_eq!(
+        annotated(
+            "1",
+            "Link",
+            "/Contents (Home)",
+            "/Tabs /S",
+            Some(("Span", ""))
+        )
+        .one_finding(),
+        (
+            "7.18.5".to_string(),
+            FindingKind::AnnotationNotEnclosed {
+                subtype: "Link".to_string(),
+                expected: "Link".to_string(),
+                enclosing: Some("Span".to_string()),
+            }
+        )
+    );
+}
+
+/// UA-1 7.18.2-1, "Annotations of subtype TrapNet shall not be permitted",
+/// and 7.18.8-1, a printer's mark an artifact and in no structure element —
+/// both unless hidden or off the page.
+#[test]
+fn no_trap_network_and_a_printers_mark_is_no_structure() {
+    assert_eq!(
+        annotated(
+            "1",
+            "TrapNet",
+            "/Contents (traps)",
+            "/Tabs /S",
+            Some(("Annot", ""))
+        )
+        .one_finding(),
+        (
+            "7.18.2".to_string(),
+            FindingKind::AnnotationForbidden {
+                subtype: "TrapNet".to_string(),
+            }
+        )
+    );
+    annotated("1", "TrapNet", "/F 2", "/Tabs /S", None).clean();
+
+    annotated("1", "PrinterMark", "/Contents (marks)", "/Tabs /S", None).clean();
+    assert_eq!(
+        annotated(
+            "1",
+            "PrinterMark",
+            "/Contents (marks)",
+            "/Tabs /S",
+            Some(("Annot", ""))
+        )
+        .one_finding(),
+        ("7.18.8".to_string(), FindingKind::PrinterMarkInStructure)
+    );
+}
+
+/// With no structure tree at all, nothing encloses anything, and the missing
+/// tree is the one finding: each annotation reported unenclosed beside it
+/// would be the same defect again. The tree-free rules still run — a page
+/// with an annotation and no `/Tabs /S` is reported either way.
+#[test]
+fn with_no_tree_an_annotation_is_not_reported_unenclosed_as_well() {
+    let mut untagged = annotated("1", "Text", "/Contents (A note)", "/Tabs /S", None);
+    untagged.tagged = false;
+    assert_eq!(
+        untagged.one_finding(),
+        ("7.1".to_string(), FindingKind::StructureTreeMissing)
+    );
+    untagged.page = "/Annots [30 0 R]".to_string();
+    let kinds: Vec<FindingKind> = untagged.findings().into_iter().map(|f| f.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            FindingKind::StructureTreeMissing,
+            FindingKind::TabOrderNotStructure { found: None },
+        ]
+    );
+}

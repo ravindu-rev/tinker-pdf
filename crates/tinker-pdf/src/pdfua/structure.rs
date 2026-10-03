@@ -47,8 +47,14 @@ pub(super) fn rules(
             clauses::STRUCTURE_HIERARCHY,
             FindingKind::StructureTreeMissing,
         ));
+        if part == UaPart::One {
+            super::annotations::rules(&document.inner, None, out);
+        }
         return;
     };
+    if part == UaPart::One {
+        super::annotations::rules(&document.inner, Some(&tree), out);
+    }
     if !tree.marked {
         out.push(UaRaw::file(clauses::MARKED, FindingKind::NotMarkedAsTagged));
     }

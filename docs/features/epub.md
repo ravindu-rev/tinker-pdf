@@ -427,10 +427,15 @@ with the XML leaf's event reader:
 **The PDF/UA census runs over this output** (`pdfua.rs`,
 `this_engines_own_epub_output_is_censused_and_what_remains_is_named`): the
 same `Document::validate_pdfua` the corpus census applies to other producers'
-files, over a book this path converted. Two still fire and are named there:
+files, over a book this path converted. Seven still fire and are named there:
 `PdfUaIdentifierMissing`, because the output claims no PDF/UA conformance and
-should not, and `FontNotEmbedded`, because a book with no `@font-face` is set
-in the unembedded standard 14.
+should not, with `MetadataMissing` and `DisplayDocTitleNotSet` beside it;
+`FontNotEmbedded`, because a book with no `@font-face` is set in the
+unembedded standard 14; and, since the PDF/UA annotation rules (October
+2026), `TabOrderNotStructure`, `AnnotationDescriptionMissing` and
+`LinkContentsMissing` — a link annotation, inside its `Link` element, with no
+`/Contents` and no `/Alt`, on a page with no `/Tabs /S`, which is the tagged
+writer's to close.
 
 **What is not done yet**, each named rather than absent:
 

@@ -1931,6 +1931,42 @@ pub enum FindingKind {
         id: String,
     },
 
+    /// An annotation not in the structure element its kind belongs in — an
+    /// `Annot`, a `Form` for a widget, a `Link` for a link (ISO 14289-1
+    /// 7.18.1, 7.18.4, 7.18.5).
+    AnnotationNotEnclosed {
+        /// The annotation's `/Subtype`.
+        subtype: String,
+        /// The standard type it belongs in.
+        expected: String,
+        /// The standard type of the element it is in, or `None` for none.
+        enclosing: Option<String>,
+    },
+    /// A visible annotation with neither `/Contents` nor an `/Alt` on its
+    /// element — for a widget, neither its field's `/TU` nor the `/Alt`
+    /// (ISO 14289-1 7.18.1).
+    AnnotationDescriptionMissing {
+        /// The annotation's `/Subtype`.
+        subtype: String,
+    },
+    /// A visible annotation of a subtype the claimed part forbids: `TrapNet`
+    /// (ISO 14289-1 7.18.2).
+    AnnotationForbidden {
+        /// The annotation's `/Subtype`.
+        subtype: String,
+    },
+    /// A page with annotations whose `/Tabs` is not `/S` (ISO 14289-1
+    /// 7.18.3).
+    TabOrderNotStructure {
+        /// The `/Tabs` value, or `None` for none.
+        found: Option<String>,
+    },
+    /// A visible link annotation with no `/Contents` (ISO 14289-1 7.18.5).
+    LinkContentsMissing,
+    /// A visible `PrinterMark` annotation inside the structure tree, which
+    /// makes it content rather than the artifact it is (ISO 14289-1 7.18.8).
+    PrinterMarkInStructure,
+
     // ---- PDF/X (ISO 15930), behind `Document::validate_pdfx` -------------
     //
     // The same decision PDF/UA took: where ISO 15930 asks what ISO 19005

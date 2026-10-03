@@ -482,6 +482,14 @@ fn a_book_that_says_what_it_is() -> Vec<u8> {
 ///   and for `/ViewerPreferences /DisplayDocTitle true`, and the writer, which
 ///   claims no PDF/UA conformance, writes neither outside the archival
 ///   profile. Both are the same ledger milestone as the claim itself.
+/// - `TabOrderNotStructure`, `AnnotationDescriptionMissing` and
+///   `LinkContentsMissing`, since milestone 4's part 1 half of the PDF/UA
+///   design (October 2026): the book's one link is an annotation inside a
+///   `Link` element, as 7.18.5-1 asks, and the writer gives the page no
+///   `/Tabs /S` (7.18.3-1), the annotation no `/Contents` and its element no
+///   `/Alt` (7.18.1-2, 7.18.5-2). All three are the tagged writer's to close
+///   — it knows the page carries a link and what the link's text says —
+///   and none is this validator's.
 #[test]
 fn this_engines_own_epub_output_is_censused_and_what_remains_is_named() {
     let doc = Document::open(a_book_that_says_what_it_is()).expect("a book");
@@ -491,15 +499,20 @@ fn this_engines_own_epub_output_is_censused_and_what_remains_is_named() {
             "PdfUaIdentifierMissing",
             "MetadataMissing",
             "DisplayDocTitleNotSet",
+            "TabOrderNotStructure",
+            "AnnotationDescriptionMissing",
+            "LinkContentsMissing",
             "FontNotEmbedded"
         ]
     );
 }
 
 /// **The census over a document built with the tagging API**, with what
-/// remains named — the same four, for the same reasons: the builder writes no
+/// remains named — the same seven, for the same reasons: the builder writes no
 /// packet (so no `pdfuaid` claim and no metadata stream) and no viewer
-/// preferences, and this document is set in an unembedded standard font.
+/// preferences, this document is set in an unembedded standard font, and its
+/// link, inside its `Link` element as 7.18.5-1 asks, has no `/Contents`, no
+/// `/Alt` on the element and no `/Tabs /S` on its page.
 /// Everything the tagging API decides — a tree, `/Marked`, described figures,
 /// heading order, a language — trips nothing.
 #[test]
@@ -536,6 +549,9 @@ fn a_tagged_document_builder_document_is_censused_and_what_remains_is_named() {
             "PdfUaIdentifierMissing",
             "MetadataMissing",
             "DisplayDocTitleNotSet",
+            "TabOrderNotStructure",
+            "AnnotationDescriptionMissing",
+            "LinkContentsMissing",
             "FontNotEmbedded"
         ]
     );

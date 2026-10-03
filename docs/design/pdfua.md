@@ -494,3 +494,25 @@ model [table-reconstruction.md](table-reconstruction.md) shares would come in.
 `PDFUA_STAGED` went from seventeen entries to fourteen, and 7.2's narrowed.
 **Owed by the nightly census**: 7.2's, 7.4's, 7.7's and 7.9's `-fail-` files
 caught, and false alarms still zero over the 195 conforming files.
+
+**Milestone 4's part 1 half landed in October 2026; part 2's (8.9, 8.10,
+8.14) did not, and the corpus exit is owed.** `pdfua/annotations.rs` reads
+each page's `/Annots` against the element whose `/OBJR` kid names the
+annotation — not through `/StructParent` and the `/ParentTree`, as veraPDF
+does; the two agree on a well-formed file, and where an `/OBJR` has no
+`/StructParent` back to it this reading finds an enclosing element veraPDF
+does not, which errs towards silence. Every rule is veraPDF's statement of a
+7.18 rule with its own exemptions, and the corpus readings this document
+records above: hidden or off the crop box is exempt, a widget's `/TU` is its
+field's, an undefined subtype is not judged. With no tree at all the
+enclosing rules do not run, since the missing tree is already the finding.
+Staged: a `Form` element without a `Role` holding one widget (7.18.4-2 —
+the structure reader does not read `PrintField` attributes), a media clip's
+`/CT` and `/Alt` (7.18.6.2 — it sits behind a `Screen` annotation's rendition
+action), and a `Popup`'s own tagging, which the published condition does not
+exempt and this build does not judge until the census says whether
+veraPDF's does. **This engine's own output is reported by three of the new
+rules**: its link annotations carry no `/Contents`, their `Link` elements no
+`/Alt`, and their pages no `/Tabs /S` — `pdfua.rs` names all three as the
+tagged writer's to close. **Owed**: 7.18's 23 `-fail-` files caught, and
+false alarms still zero.

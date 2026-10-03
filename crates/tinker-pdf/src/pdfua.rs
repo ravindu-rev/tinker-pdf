@@ -53,6 +53,7 @@ use tinker_pdf_xml::{Event, Name, Source};
 use crate::pdfa::{Clause, ConformanceFinding, FindingKind, Machinery, RuleGroup};
 use crate::Document;
 
+mod annotations;
 mod fonts;
 mod structure;
 mod syntax;
@@ -121,6 +122,42 @@ pub(crate) mod clauses {
     /// them. Part 2 states its grammar per type under 8.2.5, staged.
     pub(crate) const STRUCTURE_GRAMMAR: UaClauses = UaClauses {
         one: Some("7.2"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.18.1: annotations in `Annot` elements, described.
+    pub(crate) const ANNOTATION_TAGGING: UaClauses = UaClauses {
+        one: Some("7.18.1"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.18.2: no `TrapNet` annotation.
+    pub(crate) const TRAPNET: UaClauses = UaClauses {
+        one: Some("7.18.2"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.18.3: `/Tabs /S` on a page with annotations.
+    pub(crate) const TAB_ORDER: UaClauses = UaClauses {
+        one: Some("7.18.3"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.18.4: a widget in a `Form` element.
+    pub(crate) const WIDGET_FORM: UaClauses = UaClauses {
+        one: Some("7.18.4"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.18.5: a link in a `Link` element, with `/Contents`.
+    pub(crate) const LINKS: UaClauses = UaClauses {
+        one: Some("7.18.5"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.18.8: a printer's mark in no structure element.
+    pub(crate) const PRINTER_MARK: UaClauses = UaClauses {
+        one: Some("7.18.8"),
         two: None,
     };
 
@@ -525,12 +562,16 @@ pub const STAGED: &[UaGap] = &[
     UaGap {
         part: UaPart::One,
         clause: "7.18",
-        rule: "annotations inside the structure tree: nested in Annot, Link \
-               and Form elements, described by /Contents or /Alt, /Tabs /S on \
-               their pages, no TrapNet, PrinterMark an artifact, a media \
-               clip's /CT and /Alt",
-        because: "the join between Page::annotations() and the tree's /OBJR \
-                  kids is not built (milestone 4)",
+        rule: "a Form element without a Role attribute holding one widget \
+               /OBJR and nothing else (7.18.4-2), a media clip's /CT and /Alt \
+               (7.18.6.2), and a Popup annotation's own tagging and \
+               description",
+        because: "the rest of 7.18 is judged; a Form's PrintField attributes \
+                  are not read by the structure reader, a media clip sits \
+                  behind a Screen annotation's rendition action, which nothing \
+                  here follows, and whether a popup - its parent's window - \
+                  wants an Annot of its own the published conditions do not \
+                  say in a way the corpus has been seen to settle",
     },
     UaGap {
         part: UaPart::One,

@@ -61,6 +61,16 @@ number differs.
   RFC 3066 language tag and never empty (7.2, 8.4.4), every structure type
   resolving to a standard one and no standard type remapped (UA-1 7.1), and
   every structure element carrying its `/P` (7.1, 8.2.1).
+- **Annotations** (UA-1 7.18), each page's `/Annots` against the tree's
+  `/OBJR` kids: an annotation in an `Annot` element, a widget in a `Form`, a
+  link in a `Link` (7.18.1, 7.18.4, 7.18.5); `/Contents` or the element's
+  `/Alt` — for a widget, its *field's* `/TU` or the `/Alt` (7.18.1); a link's
+  own `/Contents` (7.18.5); `/Tabs /S` on every page with an annotation
+  (7.18.3); no `TrapNet` (7.18.2); a `PrinterMark` in no element (7.18.8).
+  A hidden annotation, one whose `/Rect` misses the crop box, and a subtype
+  ISO 32000-1 Table 169 does not define (the corpus's upper-case `FREETEXT`)
+  are held to none of these; a `Popup`, a `Form` element's `Role`, and a
+  media clip's `/CT` and `/Alt` are staged by name.
 - **Fonts**: **the PDF/A font group, run for a PDF/UA claim** and
   re-numbered kind by kind, over the fonts a page draws with at a visible
   rendering mode — embedding (UA-1 7.21.4.1, UA-2 8.4.5.5.1), a Type 2
@@ -142,19 +152,23 @@ honours `TINKER_CORPUS_REQUIRED`.
 
 The census figure in the roadmap — 29 of 239 caught, 210 abstained, 0 false
 alarms over 195 conforming — was measured on 16 September 2026 by the census
-*before* the validator existed. The rules here, the nine moved in and the
-twenty-four milestone 2 adds, were written where the corpus was not
+*before* the validator existed. The rules here — the nine moved in, the
+twenty-four milestone 2 adds, milestone 3's grammar and milestone 4's
+annotation rules — were written where the corpus was not
 reachable, so the census has not been run through the facade: the first
 nightly run owes the caught figure, and — the number that decides whether a
-milestone 2 rule stays — the false-alarm count over the 195 conforming
+rule stays — the false-alarm count over the 195 conforming
 files, which the census asserts is zero. Each rule's reading is held only to
 the fixture and the twin built here, which are this project's reading of the
 clause in both directions.
 
-This engine's own output carries four findings, each named in `pdfua.rs`
+This engine's own output carries seven findings, each named in `pdfua.rs`
 with its reason: no `pdfuaid` claim, no metadata stream, no
-`/DisplayDocTitle`, and the unembedded standard 14 — all four the writer's to
-close when it claims PDF/UA (design/pdfua.md milestone 7).
+`/DisplayDocTitle`, and the unembedded standard 14 — the writer's to close
+when it claims PDF/UA (design/pdfua.md milestone 7) — and, since the
+annotation rules, a link annotation with no `/Contents` and no `/Alt` on its
+`Link` element, on a page with no `/Tabs /S` — the tagged writer's to close,
+since it knows both the link's text and that the page carries one.
 
 ## Refused by name
 
