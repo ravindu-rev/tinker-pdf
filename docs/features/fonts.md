@@ -613,7 +613,7 @@ the fixture behind it, and the scripts divide in five:
 | Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions — and both again through `bidi::order_units`, the entry point text extraction puts a drawn line back into reading order with (ruling 14). This says the levels and the visual order are right; it says nothing about the glyphs |
 | Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, all six reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
 | Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **301 are reproduced and 32 are not**. Seven of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall, and its `TRIAGE` says of each remaining failure whether the glyph *set*, their *order* or only a *position* is wrong |
-| Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them. What that produces is deterministic and plausible; nothing in this repository says it is right |
+| Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them, and a search of both corpora's upstreams and of HarfBuzz's suite on 3 October 2026 found none that ruling 13 admits (below). What that produces is deterministic and plausible; nothing in this repository says it is right |
 
 Three things milestone 5 **closed**, and the largest of them was not on the
 list of what was wrong:
@@ -771,6 +771,24 @@ features of a joining Brahmic script**, which would need the four joining masks
 on a run that computes syllables instead. Neither has a fixture in either
 vendored corpus, so implementing either would be adding behavior nothing here
 could show was right.
+
+**Searched for once, on 3 October 2026, and nothing found is admissible.**
+Unicode's text-rendering-tests at `26cfb96` — the commit vendored here, and
+its head that day — has no shaping section beyond the seventeen already
+vendored (`SHARAN`, `SHBALI`, `SHKNDA`, `SHLANA`); every other section tests a
+font format (`AVAR`, `CFF`, `GVAR`, `MORX` and the like). HarfBuzz's suite at
+`3c4d303` has in-house cases in eighteen of the scripts this page lists as
+unverified — one of them Syriac, none Sundanese, N'Ko, Thaana, Mandaic,
+Hanifi Rohingya or Tagalog — and none of them can be a fixture here, for two
+reasons that each suffice. Their expected glyphs and positions are
+**recorded by running `hb-shape`** (`test/shape/record-test.sh`), so adopting
+them would make another shaper's output the expected answer, which ruling 13
+forbids by name; text-rendering-tests and aots are admissible because a person
+wrote their expectations. And the faces carry no licence to vendor under: of
+the ones those cases use, two state an open licence in their `name` table, and
+several are macOS system faces the HarfBuzz repository does not contain
+either. HarfBuzz's own `aots` and `text-rendering-tests` directories are the
+two corpora already vendored here. So every name stays on the list.
 
 ## Refused by name
 
