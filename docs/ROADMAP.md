@@ -54,7 +54,7 @@ what a reader of PDFs is entitled to expect.
 | Fidelity | arithmetic fixtures, metamorphic relations, committed fingerprints | tier 1's differential pairs and reviewed goldens; ruling 13's amendment of 5 September 2026 on dated outside measurements |
 | Capability coverage | tiers 2 to 5 of this file | each row's exit criterion |
 | Footprint | 2.03 MB of wasm, 1.40 MB gzipped, gated at 2.5 MB in `release.yml` | already ratcheted |
-| Surface | 123 C functions; four bindings, none projecting the whole facade; nine CLI subcommands, every one read-only | tier 3's bindings row; tier 5's CLI and bindings rows |
+| Surface | 123 C functions; four bindings, none projecting the whole facade; ten CLI subcommands, every one read-only | tier 3's bindings row; tier 5's CLI and bindings rows |
 | Maturity | version 0.0.1, nothing published, one release run watched | tier 3's packages row |
 
 ## Tier 0 — measure what is not measured
@@ -620,7 +620,6 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| `tpdf images`: CLI lane | **the library half landed**: `Page::images()` returns a `PageImage` per image the page draws, carrying its samples before any colour conversion, the space they are in (`ImageSpace`), `/Decode`, its masks, every placement and its reference, from the same sample decoders the renderer calls (`crates/tinker-pdf/tests/page_images.rs`). What is left is the subcommand, which is the CLI row's | `tpdf images` writes each image's samples and space out, a wrapper over `Page::images()` with no logic of its own (ruling 11) | S |
 | A CJK fallback face | none bundled or fetched; the 202 predefined CMaps extract CJK text, and nothing draws it without a host face | an OFL face behind `bundled-fonts` — `deny.toml` already admits OFL-1.1 — kept out of the wasm default so the 2.5 MB gate holds | M |
 | Hinting | outlines are unhinted by design | decision: an autohinter is L and a fidelity question ruling 13 cannot adjudicate; stem darkening is S and measurable as stem width at small pixel sizes; revisit with a corpus of small-text scans | decision |
 
@@ -660,7 +659,7 @@ of it. The numbering is pinned by T.88's Figures 8 to 11 instead.
 
 | Item | Today | Exit criterion | Size |
 | --- | --- | --- | --- |
-| A user-facing CLI | nine subcommands, all read-only; the write half of the library is unreachable from it | merge, split, rotate, images, fonts, encrypt, decrypt, sign, attach, stamp, sanitise — each a wrapper over the facade with no logic of its own (ruling 11). **And every one of them that rewrites a document takes the font policy**: `tinker_pdf::write::SaveOptions::fonts` exists and has nowhere on the CLI to attach until this row does, since all nine present subcommands are read-only. That is the surviving half of the closed "Font subsetting on rewrite" row, recorded here rather than left as a twelfth subcommand invented inside a size-S font row, and `docs/features/editing.md` carries it as a named refusal meanwhile. The default follows the facade's: subset | M |
+| A user-facing CLI | ten subcommands, all read-only — `fonts` and `images` among them, so the two reading commands this row named are in; the write half of the library is unreachable from it | merge, split, rotate, encrypt, decrypt, sign, attach, stamp, sanitise — each a wrapper over the facade with no logic of its own (ruling 11). **And every one of them that rewrites a document takes the font policy**: `tinker_pdf::write::SaveOptions::fonts` exists and has nowhere on the CLI to attach until this row does, since all ten present subcommands are read-only. That is the surviving half of the closed "Font subsetting on rewrite" row, recorded here rather than left as a twelfth subcommand invented inside a size-S font row, and `docs/features/editing.md` carries it as a named refusal meanwhile. The default follows the facade's: subset | M |
 | Java, Swift, Go and Ruby bindings | none | each over the C ABI in the .NET pattern, with the smoke and parity scripts; which first is a decision | M each |
 
 ## Named non-goals

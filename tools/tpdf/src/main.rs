@@ -8,6 +8,8 @@
 //! Argument parsing is hand-rolled along with everything else. It is a
 //! sub-command plus flags, which needs no library.
 
+mod images;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::ExitCode;
@@ -31,6 +33,7 @@ usage:
                                     [--jobs N] [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
   tpdf fonts   <file.pdf> [--out DIR] [--password P]
+  tpdf images  <file.pdf> [--out DIR] [--page N | --pages LIST] [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
   tpdf check   <file.pdf>... [--strict] [--pdfa]
@@ -116,6 +119,17 @@ at with, which is why it prints the cross-reference kind alongside each
 object — an object the table says lives in an object stream and an object
 found by the repair scanner read the same afterwards, and the difference
 is usually the bug.
+
+`images` lists every image each page draws — once however often it is drawn,
+with how many times — and its geometry, depth, component count, the codec
+that produced its samples and the colour space they are in. `--out DIR`
+writes each image's samples to `<stem>-pNNNN-NNN.raw` exactly as the engine
+decoded them: before any colour conversion, `/Decode` not applied, rows from
+the top padded to a byte. A soft mask's samples go beside them as
+`-smask.raw`, a stencil mask's as `-mask.raw`, and an ICC-based image's
+profile as `.icc`. Nothing is converted to a picture format, because that
+would mean evaluating the colour space; the listing says how to read the
+bytes instead.
 ";
 
 fn main() -> ExitCode {
@@ -139,6 +153,7 @@ fn main() -> ExitCode {
         "render" => run(&options, render),
         "fields" => run(&options, fields),
         "fonts" => run(&options, fonts),
+        "images" => run(&options, images::images),
         "outline" => run(&options, outline),
         "objects" => run(&options, objects),
         "check" => check(&options),

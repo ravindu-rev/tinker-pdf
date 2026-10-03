@@ -113,6 +113,15 @@ listed as a clean one. What is not walked: images inside a tiling pattern's cell
 soft-mask group or an annotation appearance, which are not drawings of the
 page's own content.
 
+`tpdf images <file> [--out DIR]` is the same list from the command line, a
+wrapper with no logic of its own (ruling 11): a line per image with its
+geometry, depth, component count, codec, space, masks and how many times it
+is drawn, and with `--out` the samples written exactly as `PageImage` holds
+them — `<stem>-pNNNN-NNN.raw`, with `-smask.raw` and `-mask.raw` beside it for
+a soft or stencil mask and `.icc` for an ICC-based image's profile. It
+converts nothing to a picture format: that would evaluate the colour space,
+and the listing says how to read the bytes instead.
+
 **The text device.** Glyphs become `TextChar`s with a device-space `Quad`
 each (9.4.4), grouped into `TextLine`s by baseline continuation and
 `TextBlock`s by vertical proximity. An `ET` is *not* a line break — a
@@ -495,6 +504,13 @@ mask read as the renderer reads it; a JPEG held to the decoder's own output; fif
 dictionaries and three hostile inline images listed without a panic; and a
 deterministic mutation sweep. `hostile_input.rs` and the `render_page` fuzz
 target call `images()` on every page they reach.
+
+`tpdf images` is held the same way in `tools/tpdf/src/images.rs`: a document
+built from known arrays — RGB drawn twice, grey, a one-bit indexed image with
+a soft mask, a one-component ICC-based image — is listed and written out, and
+each file is the array the builder was handed: the indices rather than their
+colours, the soft mask's opacity beside its image, the profile beside the
+ICC-based samples, and nothing else in the directory.
 
 Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),

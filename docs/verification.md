@@ -1551,7 +1551,8 @@ fix was to sharpen the injection rather than to shrug at the number.
 ## Tools
 
 - **`tpdf`** (`tools/tpdf`): debug CLI over the facade — `info`, `text`,
-  `render`, `fields`, `outline`, `objects`, `check`, `probe`. `check --strict`
+  `render`, `fields`, `fonts`, `images`, `outline`, `objects`, `check`,
+  `probe`. `check --strict`
   runs the validator and exits by its verdict; `probe` is what the corpus
   runner spawns, and its record carries the strict pass. `render` writes
   `<stem>-NNNN.png` through `Bitmap::to_png` — PNG always, with no flag for
