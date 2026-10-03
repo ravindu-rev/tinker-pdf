@@ -153,6 +153,9 @@ pub struct ComputedStyle {
     pub counter_increment: Vec<CounterChange>,
     /// `counter-set`, §4.4.
     pub counter_set: Vec<CounterChange>,
+    /// `quotes`, `css-content-3` §3.2. Read by [`crate::counter`], which
+    /// resolves the quote keywords where it resolves `counter()`.
+    pub quotes: Quotes,
     /// `visibility`
     pub visibility: Visibility,
     /// `text-decoration`
@@ -292,6 +295,7 @@ impl ComputedStyle {
             counter_reset: Vec::new(),
             counter_increment: Vec::new(),
             counter_set: Vec::new(),
+            quotes: Quotes::Auto,
             visibility: Visibility::Visible,
             text_decoration: TextDecoration::None,
             text_transform: TextTransform::None,
@@ -391,6 +395,7 @@ impl ComputedStyle {
         style.text_transform = parent.text_transform;
         style.list_style_type = parent.list_style_type;
         style.list_style_position = parent.list_style_position;
+        style.quotes = parent.quotes.clone();
         style.visibility = parent.visibility;
         style.orphans = parent.orphans;
         style.widows = parent.widows;
@@ -472,6 +477,7 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::CounterReset(value) => style.counter_reset = value.clone(),
         Property::CounterIncrement(value) => style.counter_increment = value.clone(),
         Property::CounterSet(value) => style.counter_set = value.clone(),
+        Property::Quotes(value) => style.quotes = value.clone(),
         Property::Visibility(value) => style.visibility = *value,
         Property::Display(value) => style.display = *value,
         Property::Float(value) => style.float = *value,
@@ -947,7 +953,7 @@ pub fn cascade_from<E: Element>(
 
     // `css-lists-3` §4.5, over the finished styles. See [`crate::counter`]
     // for why it is a walk of its own.
-    crate::counter::resolve(elements, &styles, &mut generated, budget)?;
+    crate::counter::resolve(elements, &styles, &mut generated, &mut report, budget)?;
 
     Ok(StyleTree {
         styles,
@@ -1799,6 +1805,7 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::CounterReset => into.counter_reset = from.counter_reset.clone(),
         Longhand::CounterIncrement => into.counter_increment = from.counter_increment.clone(),
         Longhand::CounterSet => into.counter_set = from.counter_set.clone(),
+        Longhand::Quotes => into.quotes = from.quotes.clone(),
         Longhand::Visibility => into.visibility = from.visibility,
         Longhand::Display => into.display = from.display,
         Longhand::Float => into.float = from.float,

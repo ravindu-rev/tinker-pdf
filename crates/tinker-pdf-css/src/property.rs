@@ -982,6 +982,22 @@ pub enum ListStylePosition {
     Inside,
 }
 
+/// `quotes`, `css-content-3` §3.2: the marks `open-quote` and `close-quote`
+/// produce, a pair per nesting level.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Quotes {
+    /// `auto`, the initial value: *"appropriate quote marks for the content
+    /// language of the element"*. **Not resolved here**: the marks are a table
+    /// per language this build does not vendor, and guessing English marks
+    /// would be wrong in every other language. A quote keyword under `auto`
+    /// produces nothing and is counted against `quotes`.
+    Auto,
+    /// `none`: the keywords produce no marks, and still move the depth.
+    None,
+    /// `[<string> <string>]+`: open and close, outermost first. Never empty.
+    Pairs(Vec<(String, String)>),
+}
+
 /// One counter a `counter-reset`, `counter-increment` or `counter-set` names,
 /// and the integer it gives it (`css-lists-3` §4.2 to §4.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1170,6 +1186,8 @@ pub enum Property {
     CounterIncrement(Vec<CounterChange>),
     /// `counter-set`, §4.4. Empty for `none`.
     CounterSet(Vec<CounterChange>),
+    /// `quotes`, `css-content-3` §3.2.
+    Quotes(Quotes),
     /// `visibility`
     Visibility(Visibility),
     /// `display`
@@ -1304,6 +1322,7 @@ impl Property {
             Property::CounterReset(_) => "counter-reset",
             Property::CounterIncrement(_) => "counter-increment",
             Property::CounterSet(_) => "counter-set",
+            Property::Quotes(_) => "quotes",
             Property::Visibility(_) => "visibility",
             Property::Display(_) => "display",
             Property::Float(_) => "float",
@@ -1414,6 +1433,10 @@ impl Property {
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
             | Property::ListStylePosition(_)
+            // `css-content-3` §3.2: *inherited: yes*, which is how a book's one
+            // `q { quotes: … }` or `:root { quotes: … }` reaches the generated
+            // boxes that read it.
+            | Property::Quotes(_)
             | Property::Visibility(_)
             | Property::Orphans(_)
             | Property::Widows(_)
@@ -1681,7 +1704,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "overflow-x",
     "overflow-y",
     "page",
-    "quotes",
     "resize",
     "speak",
     "src",
@@ -1997,6 +2019,10 @@ pub enum ContentItem {
         /// The `<counter-style>` it is drawn in.
         style: ListStyleType,
     },
+    /// `open-quote`, `close-quote`, `no-open-quote`, `no-close-quote`
+    /// (`css-content-3` §3.3): a mark from `quotes` at the current nesting
+    /// depth, and the depth moved.
+    Quote(QuoteKeyword),
     /// `counters(name, separator, style)`: every counter of that name in
     /// scope, outermost first, joined by the separator — the `1.2.3` of a
     /// nested list.
@@ -2008,6 +2034,19 @@ pub enum ContentItem {
         /// The `<counter-style>` each value is drawn in.
         style: ListStyleType,
     },
+}
+
+/// The four quote keywords of `css-content-3` §3.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuoteKeyword {
+    /// `open-quote`: the open mark at this depth, then one level deeper.
+    Open,
+    /// `close-quote`: one level out, then that level's close mark.
+    Close,
+    /// `no-open-quote`: one level deeper and no mark.
+    NoOpen,
+    /// `no-close-quote`: one level out and no mark.
+    NoClose,
 }
 
 /// What this build reads inside `content`, and what it refuses.
@@ -2022,10 +2061,6 @@ pub enum ContentItem {
 ///   format (see [`list_style_type_named`]). The two functions themselves are
 ///   read, and resolved over `css-lists-3` §4.5's counter tree by
 ///   `crate::counter`.
-/// * `open-quote` / `close-quote` / `no-open-quote` / `no-close-quote` -- these
-///   read the `quotes` property, which is still in [`UNSUPPORTED_PROPERTIES`]
-///   and which pandoc writes. Guessing `"` would be wrong in every language
-///   that does not use it.
 ///
 /// The five §7.1 defaulting keywords are refused here too, and for a reason
 /// worth stating: `content` has no `ComputedStyle` field, so there is nothing
@@ -2054,6 +2089,18 @@ fn parse_content(values: &[ComponentValue], significant: &[&ComponentValue]) -> 
         match value {
             ComponentValue::Token(Token::Str(text)) => {
                 items.push(ContentItem::Text(text.clone()));
+            }
+            ComponentValue::Token(Token::Ident(word)) => {
+                let keyword = match word.to_ascii_lowercase().as_str() {
+                    "open-quote" => QuoteKeyword::Open,
+                    "close-quote" => QuoteKeyword::Close,
+                    "no-open-quote" => QuoteKeyword::NoOpen,
+                    "no-close-quote" => QuoteKeyword::NoClose,
+                    // `none` and `normal` only stand alone; any other word is
+                    // not `content`'s grammar at all.
+                    _ => return Parsed::Invalid,
+                };
+                items.push(ContentItem::Quote(keyword));
             }
             ComponentValue::Function { name, arguments }
                 if name.eq_ignore_ascii_case("counter")
@@ -2607,6 +2654,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "page-break-before",
     "page-break-inside",
     "position",
+    "quotes",
     "right",
     "row-gap",
     "table-layout",
@@ -2922,6 +2970,40 @@ fn implemented(
             .map_or(Implemented::Malformed, |outcome| {
                 outcome.map(Property::CounterIncrement)
             }),
+        // `css-content-3` §3.2: `auto | none | match-parent | [<string>
+        // <string>]+`. `match-parent` is inside the grammar and refused by
+        // value; an odd number of strings is outside it.
+        "quotes" => match significant {
+            [ComponentValue::Token(Token::Ident(word))] => {
+                match word.to_ascii_lowercase().as_str() {
+                    "auto" => Implemented::Known(vec![Property::Quotes(Quotes::Auto)]),
+                    "none" => Implemented::Known(vec![Property::Quotes(Quotes::None)]),
+                    "match-parent" => Implemented::BadValue,
+                    _ => Implemented::Malformed,
+                }
+            }
+            _ => {
+                let mut strings = Vec::new();
+                for value in significant {
+                    match value {
+                        ComponentValue::Token(Token::Str(text)) => strings.push(text.clone()),
+                        _ => return Some(Implemented::Malformed),
+                    }
+                }
+                if strings.is_empty() || strings.len() % 2 != 0 {
+                    Implemented::Malformed
+                } else {
+                    let pairs = strings
+                        .chunks(2)
+                        .filter_map(|pair| match pair {
+                            [open, close] => Some((open.clone(), close.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    Implemented::Known(vec![Property::Quotes(Quotes::Pairs(pairs))])
+                }
+            }
+        },
         "counter-set" => counter_list(significant, 0, false)
             .map_or(Implemented::Malformed, |outcome| {
                 outcome.map(Property::CounterSet)

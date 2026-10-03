@@ -248,6 +248,10 @@ fn the_paragraph_is_not_styled_by_its_own_pseudo_element_rule() {
 /// `<counter-style>` this build does not format: a Greek list numbered in
 /// Latin digits would be a plausible wrong page.
 /// [`counter_and_counters_number_the_generated_boxes`] is their positive half.
+///
+/// **The four quote keywords left it the same day** with `quotes`, and what is
+/// left of them is counted against `quotes` rather than `content`:
+/// [`a_quote_keyword_under_quotes_auto_is_a_gap_in_quotes`].
 #[test]
 fn the_refused_content_families_are_named() {
     use tinker_pdf::ArchiveWarning;
@@ -256,10 +260,6 @@ fn the_refused_content_families_are_named() {
         "url(a.png)",
         "counter(chapter, lower-greek)",
         "counters(section, \".\", armenian)",
-        "open-quote",
-        "close-quote",
-        "no-open-quote",
-        "no-close-quote",
     ] {
         let source = format!("p::before {{ content: {value} }}");
         let doc = Document::open(book(&source, "<p>body</p>")).expect("a book");
@@ -281,9 +281,30 @@ fn the_refused_content_families_are_named() {
         assert_eq!(text, "body", "{value} put something on the page");
         refused += 1;
     }
+    assert_eq!(refused, 3, "an image, and two counters by their style");
+}
+
+/// **`quotes: auto` is the one value of `quotes` this build does not
+/// resolve**, and a quote keyword that meets it is counted against `quotes`
+/// and draws nothing — the marks are a per-language table this build does not
+/// carry, and English marks in a French book are a plausible wrong page.
+#[test]
+fn a_quote_keyword_under_quotes_auto_is_a_gap_in_quotes() {
+    use tinker_pdf::ArchiveWarning;
+    let doc = Document::open(book("p { margin: 0 }", "<p><q>body</q></p>")).expect("a book");
+    let warnings = doc.archive().expect("a report").warnings().to_vec();
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            ArchiveWarning::UnimplementedProperty { property, elements: 2 } if *property == "quotes"
+        )),
+        "a `<q>`'s two marks under `auto` were not counted against `quotes`: {warnings:?}"
+    );
+    assert_eq!(text_of("p { margin: 0 }", "<p><q>body</q></p>"), "body");
+    // A book that says which marks it wants gets them.
     assert_eq!(
-        refused, 7,
-        "three families, seven spellings, two of them counters by style"
+        text_of("q { quotes: \"\u{ab}\" \"\u{bb}\" }", "<p><q>body</q></p>"),
+        "\u{ab}body\u{bb}"
     );
 }
 

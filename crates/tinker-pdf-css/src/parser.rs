@@ -206,7 +206,7 @@ impl Report {
         }
     }
 
-    fn note_unsupported(&mut self, property: &'static str) {
+    pub(crate) fn note_unsupported(&mut self, property: &'static str) {
         if let Some(slot) = self.unsupported.iter_mut().find(|(p, _)| *p == property) {
             slot.1 += 1;
         } else {

@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence eighty-eight unit variants, one per name this build implements as a
+//! Hence eighty-nine unit variants, one per name this build implements as a
 //! longhand. The seventeen shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! Eighty-eight variants across four consumers is not hand-written code, and a
+//! Eighty-nine variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -79,6 +79,8 @@ pub enum Longhand {
     CounterIncrement,
     /// `counter-set`
     CounterSet,
+    /// `quotes`
+    Quotes,
     /// `visibility`
     Visibility,
     /// `display`
@@ -245,6 +247,7 @@ impl Longhand {
         Longhand::CounterReset,
         Longhand::CounterIncrement,
         Longhand::CounterSet,
+        Longhand::Quotes,
         Longhand::Visibility,
         Longhand::Display,
         Longhand::Float,
@@ -339,6 +342,7 @@ impl Longhand {
             Longhand::CounterReset => "counter-reset",
             Longhand::CounterIncrement => "counter-increment",
             Longhand::CounterSet => "counter-set",
+            Longhand::Quotes => "quotes",
             Longhand::Visibility => "visibility",
             Longhand::Display => "display",
             Longhand::Float => "float",
@@ -436,6 +440,7 @@ impl Longhand {
             | Longhand::WhiteSpace
             | Longhand::ListStyleType
             | Longhand::ListStylePosition
+            | Longhand::Quotes
             | Longhand::Visibility
             | Longhand::Orphans
             | Longhand::Widows
@@ -516,7 +521,7 @@ impl Longhand {
     /// The longhand a name refers to, or `None` when this build does not
     /// implement that name as one.
     ///
-    /// Linear over eighty-eight entries, which a declaration pays once and
+    /// Linear over eighty-nine entries, which a declaration pays once and
     /// only when it carries a defaulting keyword.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Longhand> {
@@ -552,6 +557,7 @@ impl Property {
             Property::CounterReset(..) => Longhand::CounterReset,
             Property::CounterIncrement(..) => Longhand::CounterIncrement,
             Property::CounterSet(..) => Longhand::CounterSet,
+            Property::Quotes(..) => Longhand::Quotes,
             Property::Visibility(..) => Longhand::Visibility,
             Property::Display(..) => Longhand::Display,
             Property::Float(..) => Longhand::Float,

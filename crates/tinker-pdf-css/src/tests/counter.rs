@@ -257,3 +257,102 @@ fn each_predefined_style_falls_back_to_decimal_outside_its_range() {
     assert_eq!(marker_text(ListStyleType::Square, 4), "\u{25aa}");
     assert_eq!(marker_text(ListStyleType::None, 4), "");
 }
+
+// ---- quotes ------------------------------------------------------------------------
+
+/// `quotes`' grammar: pairs of strings, `none`, `auto`, and `match-parent`
+/// refused by value.
+#[test]
+fn quotes_reads_pairs_none_and_auto() {
+    use crate::property::Quotes;
+    assert_eq!(
+        declared("q { quotes: \"<\" \">\" \"(\" \")\" }"),
+        [Declaration::Known(Property::Quotes(Quotes::Pairs(vec![
+            ("<".to_owned(), ">".to_owned()),
+            ("(".to_owned(), ")".to_owned()),
+        ])))]
+    );
+    assert_eq!(
+        declared("q { quotes: none }"),
+        [Declaration::Known(Property::Quotes(Quotes::None))]
+    );
+    assert_eq!(
+        declared("q { quotes: auto }"),
+        [Declaration::Known(Property::Quotes(Quotes::Auto))]
+    );
+    assert_eq!(
+        declared("q { quotes: match-parent }"),
+        [Declaration::Unsupported {
+            property: "quotes",
+            value: "match-parent".to_owned(),
+        }]
+    );
+    for value in ["\"<\"", "\"<\" \">\" \"(\"", "\"<\" 3", "bold"] {
+        assert!(
+            declared(&format!("q {{ quotes: {value} }}")).is_empty(),
+            "quotes: {value} is not CSS"
+        );
+    }
+}
+
+/// **The quote depth is the document's**: an open mark is the pair at the
+/// current depth, the last pair past the list; a close lowers it first; a
+/// close at zero produces nothing and does not go negative; `no-open-quote`
+/// moves the depth without a mark; and under `auto` nothing is drawn and each
+/// box that asked is counted against `quotes`.
+#[test]
+fn quote_keywords_walk_one_depth_across_the_document() {
+    // 0 body; 1 p (close at zero), 2 q, 3 q inside 2, 4 q inside 3, 5 p
+    // (no-open-quote), 6 q after it, 7 em (auto).
+    let nodes = tree(&[
+        ("body", None),
+        ("p", Some(0)),
+        ("q", Some(0)),
+        ("q", Some(2)),
+        ("q", Some(3)),
+        ("p", Some(0)),
+        ("q", Some(0)),
+        ("em", Some(0)),
+    ]);
+    let mut nodes = nodes;
+    nodes[5].classes.push("n".into());
+    let styles = styled(
+        "body { quotes: \"[\" \"]\" \"(\" \")\" } \
+         p::before { content: close-quote \"|\" } \
+         q::before { content: open-quote } q::after { content: close-quote } \
+         .n::after { content: no-open-quote } \
+         em { quotes: auto } em::before { content: open-quote \"x\" }",
+        &nodes,
+    );
+    let text = |at: usize, which: PseudoElement| {
+        styles
+            .pseudo(at, which)
+            .map(|b| b.text.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(text(1, PseudoElement::Before), "|", "a close at depth zero");
+    assert_eq!(text(2, PseudoElement::Before), "[");
+    assert_eq!(text(3, PseudoElement::Before), "(");
+    assert_eq!(
+        text(4, PseudoElement::Before),
+        "(",
+        "past the list, the last pair"
+    );
+    assert_eq!(text(4, PseudoElement::After), ")");
+    assert_eq!(text(3, PseudoElement::After), ")");
+    assert_eq!(text(2, PseudoElement::After), "]");
+    // The second p's ::after opened a level with no mark, so the next q is at
+    // depth one.
+    assert_eq!(text(6, PseudoElement::Before), "(");
+    assert_eq!(text(7, PseudoElement::Before), "x", "auto draws no mark");
+    assert_eq!(
+        styles
+            .report
+            .unsupported
+            .iter()
+            .find(|(name, _)| *name == "quotes")
+            .map(|(_, count)| *count),
+        Some(1),
+        "one box met `auto`"
+    );
+}

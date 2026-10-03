@@ -209,15 +209,15 @@ a picture reaching paper in this area is measured in pixels.
 |---|---|---|---|
 | 1 | **The replaced box.** `Content::Replaced`, `Intrinsic`, `ReplacedFragment`, §10.3.2/§10.6.2/§10.4, the `<img>` facade, `ArchiveWarning::ImageNotDrawn` | **Done, this commit.** The fixed-layout book's six pages are more than one colour; a reflowable `<img>` is a replaced box at the size its own header states; an `<img>` that does not reach the page is named by one of four defects; the blank-page pin deleted | M |
 | 2 | **The `background-*` image family.** `background-image`, `background-repeat`, `background-position`, `background-size` | A tiling `/Pattern` from the same `ImageData` path a replaced box takes; `UnimplementedProperty` stops naming the four; a reftest pair where the only difference is the background | M |
-| 3 | **`list-style-*`, `counter-reset`, `counter-increment`, `counters()`** | A scoped counter tree; `content: counter()` generates the marker's text; an ordered list numbers from its own `start`; `quotes` and the four quote keywords with it | M. **Counters done, 3 October 2026** (`tinker_pdf_css::counter`); `list-style-image` and `reversed()` left |
+| 3 | **`list-style-*`, `counter-reset`, `counter-increment`, `counters()`** | A scoped counter tree; `content: counter()` generates the marker's text; an ordered list numbers from its own `start`; `quotes` and the four quote keywords with it | M. **Counters and quotes done, 3 October 2026** (`tinker_pdf_css::counter`); `list-style-image`, `reversed()` and `quotes: auto`'s per-language marks left |
 | 4 | **`transform` and `opacity`** | A `cm` composed at paint from the transform list; group opacity as an `/ExtGState`; the two names leave `UNSUPPORTED_PROPERTIES` | M |
 | 5 | **`overflow`, `clip-path`, `border-radius`, `box-shadow`, `text-shadow`** | Each a clip or an ink the painter writes; the geometry asserted arithmetically, never against a recorded bitmap | L |
 | 6 | **`writing-mode`, `direction`, `unicode-bidi` below the run** | Bidi whose unit is the visual line rather than the `TextRun`; a right-to-left line of two styled spans is one reordered line; the reading-order pin in `epub_shaped.rs` flipped to an assertion | L |
 | 7 | **`DocumentBuilder::from_html`** | The cascade, the layout engine and the painter reachable without an OCF container; held by the EPUB reftests, so the two callers cannot drift | M |
 
 Milestones 2 to 6 are scheduled by the fetched corpus's `UnimplementedProperty`
-counts, highest first — ruling 3, and not by interest. Sixty-two names are
-known and unimplemented against the 109 in `IMPLEMENTED_NAMES`; each landing deletes
+counts, highest first — ruling 3, and not by interest. Sixty-one names are
+known and unimplemented against the 110 in `IMPLEMENTED_NAMES`; each landing deletes
 its names from that table.
 
 ## Risks

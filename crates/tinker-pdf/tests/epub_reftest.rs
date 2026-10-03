@@ -568,6 +568,35 @@ fn nested_lists_number_through_the_counter_tree() {
     same("counters()", counted, written, broken);
 }
 
+// ---- quotes ---------------------------------------------------------------------
+
+/// **A `<q>` is its text between the marks `quotes` names, one pair per level
+/// of nesting** (`css-content-3` §3.2 and §3.3, HTML §15.3.6's
+/// `q::before { content: open-quote }`).
+///
+/// The marks are generated boxes, so the reference writes them as spans of
+/// their own: a run per box on both sides. The inner `<q>` takes the second
+/// pair and the outer one's close mark comes after the inner one's, which is
+/// the depth counted across the whole document rather than per element.
+#[test]
+fn a_q_element_is_its_text_between_the_marks_quotes_names() {
+    let style = "p { font-size: 20px; line-height: 30px } \
+                 q { quotes: \"\u{201c}\" \"\u{201d}\" \"\u{2018}\" \"\u{2019}\" }";
+    let quoted = lay(style, "<p><q>he said <q>no</q> twice</q></p>");
+    let written = lay(
+        style,
+        "<p><span>\u{201c}</span>he said <span>\u{2018}</span>no<span>\u{2019}</span> \
+         twice<span>\u{201d}</span></p>",
+    );
+    // One pair for every level is the reading a per-element depth would give:
+    // the inner `<q>` would open with the outer mark.
+    let broken = lay(
+        "p { font-size: 20px; line-height: 30px } q { quotes: \"\u{201c}\" \"\u{201d}\" }",
+        "<p><q>he said <q>no</q> twice</q></p>",
+    );
+    same("q", quoted, written, broken);
+}
+
 // ---- fragmentation ------------------------------------------------------------
 
 /// Where every line landed **and on which page**, at a page box short enough

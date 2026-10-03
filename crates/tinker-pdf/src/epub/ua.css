@@ -17,10 +17,12 @@
  * exactly that case: HTML sets `table { display: table }`, this build has no
  * table box, and a sheet that stayed silent about it would set every table in
  * the corpus as inline text with nothing anywhere saying so. Everything else
- * §15 declares that this build has no consumer for -- `quotes`,
- * `unicode-bidi` -- is **not** here, because neither changes which boxes
- * exist and charging them would bury the one that does; `counter-reset`
- * arrived with `css-lists-3`'s counters and is below.
+ * §15 declares that this build has no consumer for -- `unicode-bidi` -- is
+ * **not** here, because it does not change which boxes exist and charging it
+ * would bury the one that does; `counter-reset` and the `<q>` rules arrived
+ * with `css-lists-3`'s counters and `css-content-3`'s quotes and are below,
+ * and HTML's per-language `quotes` table is not, for the reason the `q` rule
+ * gives.
  * `tests/epub_reading.rs`'s census assertions pin what is charged.
  *
  * **`[hidden]` is here and `[hidden=until-found]` is not.** HTML §15.3.1
@@ -223,6 +225,19 @@ mark {
 }
 
 /* ---- §15.3.3's list markers -------------------------------------------- */
+
+/* §15.3.6's quotes, as generated content. The marks themselves are HTML's
+ * per-language `:lang()` table, which this sheet does not carry, so `quotes`
+ * stays at `auto` unless a book says otherwise, and a `<q>` under `auto` is
+ * counted against `quotes` rather than given English marks in every language
+ * (`tinker_pdf_css::counter`). */
+q::before {
+  content: open-quote;
+}
+
+q::after {
+  content: close-quote;
+}
 
 /* §15.3.8: every list starts its own `list-item` count. `<ol start>`,
  * `<li value>` and `<ol reversed>` are presentational hints the element

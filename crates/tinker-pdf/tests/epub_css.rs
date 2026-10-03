@@ -268,7 +268,10 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // §10.4's clamp is now applied rather than reported.
             "overflow",
             "overflow-x",
-            "quotes",
+            // **`quotes` used to be here and left on 3 October 2026** with
+            // `css-content-3`'s quote keywords: pandoc's `q { quotes: "“" "”"
+            // "‘" "’" }`, four times, is read now — and still reaches no
+            // element, since no committed book has a `<q>`.
             // **`text-align` and `vertical-align` used to be here and tier 4
             // removed them both, in one edit, without touching either
             // property.** Both were value gaps and both were the *same* value

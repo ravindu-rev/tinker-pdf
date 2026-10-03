@@ -260,6 +260,9 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         counter_reset: _,
         counter_increment: _,
         counter_set: _,
+        // `css-content-3`'s `quotes`, the same walk's: the marks arrive as
+        // `::before`/`::after` text.
+        quotes: _,
         visibility,
         text_decoration,
         text_transform,

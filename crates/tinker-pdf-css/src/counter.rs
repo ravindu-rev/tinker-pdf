@@ -43,7 +43,8 @@
 use std::collections::BTreeMap;
 
 use crate::cascade::{ComputedStyle, Generated};
-use crate::property::{ContentItem, Display, ListStyleType};
+use crate::parser::Report;
+use crate::property::{ContentItem, Display, ListStyleType, QuoteKeyword, Quotes};
 use crate::{Budget, Element, Refusal};
 
 /// The counter `display: list-item` increments without being asked,
@@ -59,6 +60,13 @@ struct Scope {
     /// Every instance pushed, in order, so that closing an element pops what it
     /// owns without searching.
     log: Vec<(String, Option<usize>)>,
+    /// `css-content-3` §3.3's quote depth: how many `open-quote`s and
+    /// `no-open-quote`s have been met in tree order, less the closes. One
+    /// number for the whole document, which is what makes a `<q>` inside a
+    /// `<q>` take the second pair.
+    quote_depth: usize,
+    /// Whether a quote keyword met `quotes: auto` in the box being resolved.
+    auto_quoted: bool,
 }
 
 impl Scope {
@@ -164,10 +172,58 @@ impl Scope {
         Ok(())
     }
 
+    /// One quote keyword: the mark it produces, and the depth moved.
+    ///
+    /// `css-content-3` §3.3: an open mark is the pair at the current depth —
+    /// the last pair where the depth is past the list — and then the depth
+    /// rises; a close lowers it first and then takes that level's close mark,
+    /// and a close at depth zero produces nothing and stays at zero. Under
+    /// `auto` the depth still moves, so the marks a later `quotes` declares
+    /// sit at the depth the document says.
+    fn quote(&mut self, keyword: QuoteKeyword, quotes: &Quotes) -> String {
+        let pick = |depth: usize, open: bool| -> String {
+            match quotes {
+                Quotes::Pairs(pairs) => pairs
+                    .get(depth)
+                    .or(pairs.last())
+                    .map(|(o, c)| if open { o.clone() } else { c.clone() })
+                    .unwrap_or_default(),
+                Quotes::None | Quotes::Auto => String::new(),
+            }
+        };
+        let marks = matches!(keyword, QuoteKeyword::Open | QuoteKeyword::Close);
+        if marks && *quotes == Quotes::Auto {
+            self.auto_quoted = true;
+        }
+        match keyword {
+            QuoteKeyword::Open => {
+                let mark = pick(self.quote_depth, true);
+                self.quote_depth = self.quote_depth.saturating_add(1);
+                mark
+            }
+            QuoteKeyword::NoOpen => {
+                self.quote_depth = self.quote_depth.saturating_add(1);
+                String::new()
+            }
+            QuoteKeyword::Close => match self.quote_depth.checked_sub(1) {
+                Some(depth) => {
+                    self.quote_depth = depth;
+                    pick(depth, false)
+                }
+                None => String::new(),
+            },
+            QuoteKeyword::NoClose => {
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+                String::new()
+            }
+        }
+    }
+
     /// A `content` value's items, as text.
     fn text<E: Element>(
         &mut self,
         items: &[ContentItem],
+        quotes: &Quotes,
         element: &E,
         owner: Option<usize>,
         budget: &mut Budget,
@@ -183,6 +239,7 @@ impl Scope {
                     let value = *self.innermost(name, owner, budget)?;
                     text.push_str(&represent(value, *style));
                 }
+                ContentItem::Quote(keyword) => text.push_str(&self.quote(*keyword, quotes)),
                 ContentItem::Counters {
                     name,
                     separator,
@@ -211,6 +268,7 @@ pub(crate) fn resolve<E: Element>(
     elements: &[E],
     styles: &[ComputedStyle],
     generated: &mut [Generated],
+    report: &mut Report,
     budget: &mut Budget,
 ) -> Result<(), Refusal> {
     let mut scope = Scope::default();
@@ -223,7 +281,7 @@ pub(crate) fn resolve<E: Element>(
                 break;
             }
             open.pop();
-            finish(elements, generated, &mut scope, top, boxed, budget)?;
+            finish(elements, generated, &mut scope, top, boxed, report, budget)?;
         }
         let Some(style) = styles.get(at) else {
             continue;
@@ -249,14 +307,29 @@ pub(crate) fn resolve<E: Element>(
         if let Some(before) = slot.before.as_mut() {
             if before.style.display != Display::None {
                 scope.apply(&before.style, Some(at), false, budget)?;
-                before.text = scope.text(&before.content, &elements[at], Some(at), budget)?;
+                before.text = scope.text(
+                    &before.content,
+                    &before.style.quotes,
+                    &elements[at],
+                    Some(at),
+                    budget,
+                )?;
+                note_auto(&mut scope, report);
             }
         }
     }
     while let Some((top, boxed)) = open.pop() {
-        finish(elements, generated, &mut scope, top, boxed, budget)?;
+        finish(elements, generated, &mut scope, top, boxed, report, budget)?;
     }
     Ok(())
+}
+
+/// A box whose quote keywords met `quotes: auto` is a gap in `quotes`, counted
+/// once per box — `UnimplementedProperty`'s by-element count.
+fn note_auto(scope: &mut Scope, report: &mut Report) {
+    if std::mem::take(&mut scope.auto_quoted) {
+        report.note_unsupported("quotes");
+    }
 }
 
 /// An element's subtree has ended: its `::after`, then its scope.
@@ -266,13 +339,21 @@ fn finish<E: Element>(
     scope: &mut Scope,
     at: usize,
     boxed: bool,
+    report: &mut Report,
     budget: &mut Budget,
 ) -> Result<(), Refusal> {
     if boxed {
         if let Some(after) = generated.get_mut(at).and_then(|slot| slot.after.as_mut()) {
             if after.style.display != Display::None {
                 scope.apply(&after.style, Some(at), false, budget)?;
-                after.text = scope.text(&after.content, &elements[at], Some(at), budget)?;
+                after.text = scope.text(
+                    &after.content,
+                    &after.style.quotes,
+                    &elements[at],
+                    Some(at),
+                    budget,
+                )?;
+                note_auto(scope, report);
             }
         }
     }

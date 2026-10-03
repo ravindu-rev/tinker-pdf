@@ -2643,7 +2643,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
             cost.layout_work,
             cost.pages,
         ],
-        [8, 5, 8_314, 277, 583, 1_240, 326, 3_845, 0, 7],
+        [8, 5, 8_344, 279, 585, 1_240, 326, 3_845, 0, 7],
         "the book did not cost what this hash was taken over"
     );
 
