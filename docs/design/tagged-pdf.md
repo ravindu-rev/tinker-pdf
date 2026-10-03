@@ -272,6 +272,9 @@ writes, family by family:
   qualified by its content document's path so identifiers stay unique across
   chapters. A `headers` id naming no cell is dropped rather than written as a
   reference into nothing.
+- **The EPUB's role map.** Every element name whose standard type is not its
+  own spelling is registered with `map_role` before a chapter's pages are
+  drawn and written as itself; `sub` stopped being the non-standard `/Sub`.
 
 ## Dependencies
 

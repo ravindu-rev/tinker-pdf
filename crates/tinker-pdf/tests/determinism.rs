@@ -1772,6 +1772,12 @@ fn epub_book() -> Vec<u8> {
 /// `/Subtype /Link`, since the bare name also counts the seven `/S /Link`
 /// elements that hold them and their marked content — and no raster hash
 /// moved.
+///
+/// And a **fifth**, when the EPUB path began writing an element's XHTML name
+/// where its standard type would lose it (`/S /section`, `/S /em`), with a
+/// `/RoleMap` saying what each is: `e0f94b04…` became `bcc9bb59…` and
+/// `df84fe61…` became `3b288a03…`. Measured as the third was: with only the
+/// role registration disabled, the hashes are the fourth move's exactly.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
     // 9600, 3600 and 3230 pixels.
@@ -2704,7 +2710,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "e0f94b0480426251b1f77dcb88b7291272ff48f9745941ebc3fd800cc3a38012",
+        "bcc9bb59d4898bcf5ff43fab0578945473a5c3ac80325a0fb220f63e7be82868",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2790,12 +2796,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "e0f94b0480426251b1f77dcb88b7291272ff48f9745941ebc3fd800cc3a38012",
+        "bcc9bb59d4898bcf5ff43fab0578945473a5c3ac80325a0fb220f63e7be82868",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "df84fe61f851aba97ed2fda7210d475a573066044504c6bf002c92a8f922d752",
+        "3b288a033d40d0fd80d010901c4a79dbd8c45c68e3f79ffd5974e21678f19f9d",
         "the book at 600 x 800 is not the bytes it was"
     );
 

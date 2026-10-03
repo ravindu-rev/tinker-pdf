@@ -343,9 +343,17 @@ the page.
 
 XHTML names become ISO 32000 Table 333's standard types — `p` to `/P`, `h1` to
 `/H1`, `ul` to `/L`, `li` to `/LI`, `table`/`tr`/`th`/`td` to `/Table`/`/TR`/
-`/TH`/`/TD`, `section` and `article` to `/Sect`, anything else block-level to
-`/Div` and anything else to `/Span`. A list marker is an `/Artifact` (§14.8.2.2)
-and stays out of the tree, which is what keeps text conservation an equality.
+`/TH`/`/TD`, `section` and `article` to `/Sect`, `sub` and `sup` to `/Span`,
+MathML's `math` to `/Formula`, anything else block-level to `/Div` and
+anything else to `/Span`. **The name is kept where the type would lose it**:
+an element whose standard type is not its own spelling is written as itself
+— `/S /em`, `/S /section` — with a `/RoleMap` entry (14.7.3) saying what it
+is, so `<em>` and `<strong>` are two names a reader can tell apart and two
+`/Span`s to a reader that knows only the standard set
+(`every_element_keeps_its_name_and_says_what_it_is`). `<sub>` used to be
+written `/Sub`, which is not one of ISO 32000-1's types and had no role map
+to explain it. A list marker is an `/Artifact` (§14.8.2.2) and stays out of
+the tree, which is what keeps text conservation an equality.
 
 **Verified against the source and not against this engine.** Reading our own
 output back through our own reader proves the two halves agree, not that either
@@ -407,7 +415,6 @@ with the XML leaf's event reader:
 | Not done | Why |
 | --- | --- |
 | A PDF/UA conformance claim | a structure tree is necessary for it and nowhere near sufficient |
-| A `/RoleMap` | not needed: every tag emitted is already a standard type. The cost is that the XHTML name is not recoverable — `<em>` and `<strong>` are both `/Span` |
 | An empty table cell | the tree is built from the runs a page draws, so a `<td>` with nothing in it draws nothing and is not in the tree, and the cells after it in its row read one column early. `Tag::keep_empty` is the writer's answer; the EPUB path has no run to hang it on |
 
 ## Refused by name

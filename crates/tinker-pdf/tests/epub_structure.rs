@@ -32,16 +32,13 @@
 //! and what it says is compared with what the tree carries —
 //! [`every_img_alt_is_a_figure_alt`], [`every_language_declaration_is_a_lang`],
 //! [`every_a_href_is_a_link_holding_its_annotation`],
-//! [`every_table_attribute_is_carried_from_the_source`].
+//! [`every_table_attribute_is_carried_from_the_source`],
+//! [`every_element_keeps_its_name_and_says_what_it_is`].
 //!
 //! # What is not done yet, each named rather than absent
 //!
 //! - **No PDF/UA conformance claim.** A structure tree is necessary for it and
 //!   nowhere near sufficient.
-//! - **No `/RoleMap`**, and it is not needed: every tag written is one of
-//!   Table 333's standard types, so there is nothing non-standard to declare.
-//!   The cost is that the XHTML name is not recoverable — `<em>` and
-//!   `<strong>` are both `/Span`.
 //!
 //! Cross-page structure elements **are** written — an element's kids carry
 //! their own `/Pg` where they are not on its default page, which is 14.7.2
@@ -998,4 +995,70 @@ fn every_table_attribute_is_carried_from_the_source() {
         }
     }
     assert_eq!(cells, 10, "every cell was compared");
+}
+
+/// **Every element keeps its XHTML name and says what it is**: written as the
+/// name the source gives it, and role-mapped (14.7.3) to a standard type —
+/// so `<em>` and `<strong>` are no longer two indistinguishable `/Span`s.
+///
+/// Read off the source: every element with text of its own is found in the
+/// tree by that text, its `raw_type` is the source's element name (or that
+/// name's standard spelling, for `p`, `h1`, `table` and the rest that are
+/// their own standard type), and its `standard_type` is one of ISO
+/// 32000-1's. And the reader walked a role map with no loop in it.
+#[test]
+fn every_element_keeps_its_name_and_says_what_it_is() {
+    let body = concat!(
+        r#"<section><h2>Heading words</h2>"#,
+        r#"<p>Plain <em>emphasised</em> and <strong>strong</strong> and "#,
+        r#"H<sub>two</sub>O and <code>code</code> and <abbr>abbreviated</abbr>.</p>"#,
+        r#"<ol><li>first item</li></ol><dl><dt>term word</dt><dd>its definition</dd></dl>"#,
+        r#"<aside>aside words</aside><blockquote>quoted words</blockquote>"#,
+        r#"<figure><figcaption>caption words</figcaption></figure></section>"#,
+    );
+    let xhtml = chapter(r#"lang="en""#, body);
+    let bytes = book_of("en", &xhtml, &[]);
+    let doc = Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    let texts = tree_languages(&doc);
+
+    let source = source_elements(&xhtml);
+    let mut compared = 0;
+    for element in &source {
+        let own = squeezed(&element.text);
+        if own.is_empty() || matches!(element.name.as_str(), "title" | "style") {
+            continue;
+        }
+        let (_, _, written) = texts
+            .iter()
+            .find(|(text, _, _)| squeezed(text) == own)
+            .unwrap_or_else(|| panic!("no element draws {own:?}"));
+        assert!(
+            written.raw_type == element.name
+                || written.raw_type.eq_ignore_ascii_case(&element.name),
+            "<{}> was written /{}",
+            element.name,
+            written.raw_type
+        );
+        assert!(
+            tinker_pdf_cos::STANDARD_STRUCTURE_TYPES.contains(&written.standard_type.as_str()),
+            "<{}> reads as /{}, which is not a standard type",
+            element.name,
+            written.standard_type
+        );
+        compared += 1;
+    }
+    assert_eq!(compared, 13, "every element with text was compared");
+
+    // The two the old mapping made one.
+    let kind = |name: &str| {
+        tree.elements()
+            .into_iter()
+            .find(|e| e.raw_type == name)
+            .map(|e| e.standard_type.clone())
+    };
+    assert_eq!(kind("em"), Some("Span".to_string()));
+    assert_eq!(kind("strong"), Some("Span".to_string()));
+    assert_eq!(kind("sub"), Some("Span".to_string()), "a subscript is text");
 }

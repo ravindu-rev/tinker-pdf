@@ -47,6 +47,9 @@ pub(crate) struct Tagging<'a> {
     pub path: &'a str,
     /// Every table cell carrying an `id`, by that id. See [`table_cells`].
     pub cells: &'a BTreeMap<String, usize>,
+    /// The element names written as themselves and role-mapped. See
+    /// [`register_roles`].
+    pub roles: &'a BTreeSet<String>,
 }
 
 /// Every `<th>` and `<td>` of a content document carrying an `id`, by that
@@ -161,6 +164,8 @@ impl Tagging<'_> {
         // inline element is.
         let kind = if self.links.contains(&element) {
             "Link"
+        } else if self.roles.contains(name) {
+            name
         } else {
             structure_type(name)
         };
@@ -583,15 +588,40 @@ pub(crate) fn figure_orders(dom: &Dom, pages: &[LayoutPage]) -> Figures {
     }
 }
 
-/// ISO 32000 Table 333's standard structure type for an XHTML element.
+/// Registers a `/RoleMap` entry (14.7.3) for every element name of a content
+/// document whose standard type is not its own spelling, and returns the
+/// names it registered — the ones [`Tagging::tag`] then writes as
+/// themselves.
 ///
-/// **Every arm returns a standard type, which is why no `/RoleMap` is
-/// written.** 14.7.3's role map exists to say what a non-standard tag means;
-/// a producer that only ever emits standard tags has nothing to declare, and
-/// a role map mapping `/P` to `/P` is the loop the reader counts as a warning.
-/// The cost is that the XHTML element name is not recoverable from the PDF —
-/// `<em>` and `<strong>` are both `/Span` — which is named in the refusal
-/// table rather than hidden.
+/// **The XHTML name is kept and its meaning stated**, rather than the name
+/// thrown away: `<em>` is written `/S /em` and `<strong>` `/S /strong`, both
+/// mapped to `/Span`, so a reader that knows only the standard set reads two
+/// spans and one that wants the book's own vocabulary has it. A name that is
+/// its standard type's spelling (`p`, `table`, `h1`) is written as the
+/// standard type, since mapping `/p` to `/P` would say nothing a reader does
+/// not already know. A name `DocumentBuilder::map_role` refuses — one that is
+/// itself a standard type, which an element outside the XHTML namespace can
+/// be — is written as its standard type too.
+pub(crate) fn register_roles(builder: &mut DocumentBuilder, dom: &Dom) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for node in &dom.nodes {
+        if out.contains(&node.name) {
+            continue;
+        }
+        let standard = structure_type(&node.name);
+        if node.name.is_empty() || node.name.eq_ignore_ascii_case(standard) {
+            continue;
+        }
+        if builder.map_role(node.name.as_bytes(), standard.as_bytes()) {
+            out.insert(node.name.clone());
+        }
+    }
+    out
+}
+
+/// ISO 32000 Table 333's standard structure type for an XHTML element — the
+/// type its own name is role-mapped to where the two differ
+/// ([`register_roles`]).
 pub(crate) fn structure_type(name: &str) -> &'static str {
     match name {
         "p" => "P",
@@ -613,7 +643,13 @@ pub(crate) fn structure_type(name: &str) -> &'static str {
         "caption" | "figcaption" => "Caption",
         "blockquote" => "BlockQuote",
         "code" | "kbd" | "samp" | "var" | "pre" => "Code",
-        "sub" => "Sub",
+        // A subscript is text: `/Span`. It used to be `/Sub`, which is not
+        // one of ISO 32000-1's types (`STANDARD_STRUCTURE_TYPES`) and was
+        // written with no role map to say what it meant — a non-standard type
+        // in a document claiming `/Marked true`.
+        "sub" | "sup" => "Span",
+        // MathML's element, outside the XHTML namespace: 14.8.4.5's formula.
+        "math" => "Formula",
         // A picture is a `/Figure` (14.8.4.5) and carries the description;
         // `<figure>` is the grouping around it and its caption, and as a
         // `/Figure` of its own it would be a figure with no `/Alt` wrapped
